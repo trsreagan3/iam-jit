@@ -28,6 +28,21 @@ claim-bootstrap:
 test:
 	$(PYTEST) tests -q --ignore=tests/integration --ignore=tests/e2e
 
+# Round-by-round convergence snapshot. Run after every adversarial-loop
+# closure or when verifying that recent commits haven't regressed.
+.PHONY: round-stats
+round-stats:
+	$(PY) scripts/round-stats.py
+
+# Overall corpus histogram — bucket counts per risk-score band.
+.PHONY: histogram
+histogram:
+	$(PY) scripts/corpus-histogram.py
+
+# Both side-by-side
+.PHONY: convergence
+convergence: histogram round-stats
+
 # Run JUST the data-driven calibration corpus (fast, no LLM).
 # Use this in the inner loop when iterating on src/iam_jit/review.py
 # — it's faster than the full suite and surfaces calibration shifts
