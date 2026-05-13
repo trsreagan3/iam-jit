@@ -21,7 +21,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: iam-jit/iam-risk-score-action@v1
+      - uses: trsreagan3/iam-risk-score-action@v1
         with:
           policy-file: 'infrastructure/iam/*.json'
           threshold: 5
@@ -54,7 +54,7 @@ jobs:
 ### Required-reviewers based on score
 
 ```yaml
-- uses: iam-jit/iam-risk-score-action@v1
+- uses: trsreagan3/iam-risk-score-action@v1
   id: score
   with:
     policy-file: 'iam/*.json'
@@ -74,7 +74,7 @@ jobs:
 ### Block merge on high risk
 
 ```yaml
-- uses: iam-jit/iam-risk-score-action@v1
+- uses: trsreagan3/iam-risk-score-action@v1
   with:
     policy-file: 'iam/*.json'
     threshold: 7  # only block on high
@@ -87,7 +87,7 @@ pass" → merge button greys out.
 ### Auto-approve trivial changes
 
 ```yaml
-- uses: iam-jit/iam-risk-score-action@v1
+- uses: trsreagan3/iam-risk-score-action@v1
   id: score
   with:
     policy-file: 'iam/*.json'
@@ -119,7 +119,7 @@ Free tier: 100 PR scans/month. Paid tiers for higher usage.
 - Admin-curated context (your org's sensitive services)
 - Grant duration amplification
 
-Full calibration: see [docs/USE-CASES.md](https://github.com/iam-jit/iam-jit/blob/main/docs/USE-CASES.md).
+Full calibration: see [docs/USE-CASES.md](https://github.com/trsreagan3/iam-jit/blob/main/docs/USE-CASES.md).
 
 ## Self-hosting
 

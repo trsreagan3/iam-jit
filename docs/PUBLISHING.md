@@ -60,7 +60,7 @@ The action lives at `github-action/action.yml`. To publish:
 
 ### Steps
 
-- [ ] Move the action to its own repo: `github.com/iam-jit/iam-risk-score-action`. Reason: GitHub Marketplace requires the action at the repo root. The action repo will be tiny — just `action.yml` + `README.md` + a `LICENSE` file.
+- [ ] Move the action to its own repo: `github.com/trsreagan3/iam-risk-score-action`. Reason: GitHub Marketplace requires the action at the repo root. The action repo will be tiny — just `action.yml` + `README.md` + a `LICENSE` file.
 - [ ] In the new repo, the `action.yml` should reference the published PyPI package: `pip install iam-risk-score>=0.1.0` (no `git+https://` fallback).
 - [ ] Tag a release `v0.1.0` AND a `v1` floating tag. Marketplace conventions: users reference `@v1`, you push patches via the floating tag.
 - [ ] Submit for Marketplace review at github.com/marketplace/new. Requires `branding` block (already in action.yml).
@@ -69,20 +69,20 @@ The action lives at `github-action/action.yml`. To publish:
 ### Test the action against a real repo before submitting
 
 - [ ] Create a test repo with a sample IAM policy
-- [ ] Add a workflow that uses `iam-jit/iam-risk-score-action@v1` (or your fork during testing)
+- [ ] Add a workflow that uses `trsreagan3/iam-risk-score-action@v1` (or your fork during testing)
 - [ ] Verify it scores correctly + sets outputs + posts the PR comment
 - [ ] Take a screenshot for the marketplace listing
 
-## 3. Hosted API (api.iam-jit.dev)
+## 3. Hosted API (api.iam-risk-score.com)
 
 ### Infrastructure
 
 - [ ] **Production AWS account.** Use a clean account (not omise-experimental). Single-purpose: iam-jit production.
-- [ ] **Domain.** Register `iam-jit.dev` (or similar). Set up Route 53.
-- [ ] **ACM cert** for `api.iam-jit.dev` (and `iam-jit.dev` for the landing site).
+- [ ] **Domain.** Register `iam-risk-score.com` (or similar). Set up Route 53.
+- [ ] **ACM cert** for `api.iam-risk-score.com` (and `iam-risk-score.com` for the landing site).
 - [ ] **Deploy iam-jit SAM stack** with `LLMBackend=bedrock`, `BedrockModelId=us.anthropic.claude-opus-4-7`, `AlbCertificateArn=<the ACM cert>`.
 - [ ] **CloudFront** in front of the ALB for caching same-fingerprint requests + HTTPS termination + global edge points. The score for the same policy is deterministic — cache on `policy_fingerprint`.
-- [ ] **Route 53 alias** from `api.iam-jit.dev` → CloudFront distribution.
+- [ ] **Route 53 alias** from `api.iam-risk-score.com` → CloudFront distribution.
 - [ ] **Status page** — UptimeRobot or BetterStack monitoring `/healthz`. Free tier is fine for v1.
 
 ### Application config
@@ -90,6 +90,25 @@ The action lives at `github-action/action.yml`. To publish:
 - [ ] Set `IAM_JIT_SCORE_API_KEY` to a server-issued secret. The score endpoint will require Bearer auth.
 - [ ] Set `IAM_JIT_SCORE_RATE_PER_MINUTE` per tier (the API will need to read tier from the API key — see "Billing" below).
 - [ ] Set `IAM_JIT_LLM=bedrock` and confirm Opus 4.7 invocation works (see `docs/BEDROCK-TEST-PLAN.md` for the verification flow).
+- [ ] Set `IAM_JIT_LLM_MAX_OUTPUT_TOKENS=256` (default 512) — caps Bedrock output per call. Output tokens are the runaway cost line ($15/1M for Opus 4.7 vs $3/1M input); halving the cap roughly halves Bedrock spend with negligible narrative quality impact.
+
+### Cost guardrails (do BEFORE opening the public free tier)
+
+The score endpoint is a public anonymous API. The two cost spirals are
+(a) repeated identical scoring requests from CI re-runs, and (b)
+Bedrock LLM invocations from abuse traffic.
+
+- [ ] **CloudFront in front of the ALB / Function URL.** The score for a given policy is deterministic — the response is safe to cache on `policy_fingerprint`. A 1-day TTL eliminates 70–85% of LLM calls for typical CI re-run patterns. Detailed config:
+  - Cache key: method + path + a hash of the request body (the `policy_fingerprint` header isn't sent by clients, so cache-on-body is the only option for `POST /api/v1/score`)
+  - Origin protocol policy: HTTPS-only
+  - Set `Cache-Control: public, max-age=86400` on the response from the Lambda for cacheable scores
+- [ ] **CloudWatch alarm on Bedrock invocation count.** Bedrock has no built-in per-account budget cap. Add a CloudWatch metric alarm on `AWS/Bedrock` `Invocations` > X per day, action: SNS notification + (optionally) disable the LLM backend via env var update. Without this you have no guardrail against a free-tier abuser running the LLM cost line up.
+- [ ] **Per-API-key rate limiting at the ALB / WAF layer.** The in-Lambda limiter is process-local and resets on cold-start, so it's defense-in-depth only. The real cap must be at the edge:
+  - **CloudFront + WAF** — `RateBasedStatement` with a per-source-IP threshold (the canonical AWS approach for a public free tier)
+  - **OR API Gateway** in front of Lambda — built-in usage plans with per-API-key throttling
+  - The in-Lambda `_RateLimiter` in `routes/score.py` is a backstop, NOT the primary control
+- [ ] **Body size cap is already enforced** by `IAM_JIT_MAX_BODY_BYTES` middleware (default 256 KiB) in `app.py`. No action needed.
+- [ ] **Set a billing alarm** on the AWS account (Billing → Budgets → "Forecasted spend > $50/mo" or similar). Catches everything else.
 
 ### Billing (Stripe)
 
@@ -107,7 +126,7 @@ code changes.
 ## 4. Documentation site
 
 - [ ] Pick a static site generator (MkDocs Material is the fastest setup)
-- [ ] Configure to serve at `docs.iam-jit.dev` (CNAME → Cloudflare Pages or GitHub Pages)
+- [ ] Configure to serve at `docs.iam-risk-score.com` (CNAME → Cloudflare Pages or GitHub Pages)
 - [ ] Convert the markdown docs to the site nav structure:
   - Getting started (3-step quickstart)
   - API reference (the score endpoint with full schema)

@@ -59,7 +59,7 @@ from typing import Annotated, Any
 from fastapi import APIRouter, Header, HTTPException, Request, status
 from pydantic import BaseModel, Field
 
-from .. import review
+from .. import audit, prompt_injection, review
 
 
 router = APIRouter(prefix="/api/v1", tags=["score"])
@@ -242,6 +242,86 @@ def _client_ip(request: Request) -> str:
     return request.client.host if request.client else "unknown"
 
 
+def _iter_string_values(obj: Any, path: str = "") -> Any:
+    """Yield (path, string-value) pairs from any nested dict/list.
+
+    Used to scan the policy's free-text fields (Sid, condition values,
+    nested descriptions, etc.) individually — the scanner is anchored to
+    line-starts, so scanning the JSON dump as a single blob can miss
+    detection patterns hidden inside string values."""
+    if isinstance(obj, str):
+        yield path or "$", obj
+    elif isinstance(obj, dict):
+        for k, v in obj.items():
+            yield from _iter_string_values(v, f"{path}.{k}" if path else k)
+    elif isinstance(obj, list):
+        for i, v in enumerate(obj):
+            yield from _iter_string_values(v, f"{path}[{i}]")
+
+
+def _scan_for_injection(
+    *,
+    ip: str,
+    fingerprint: str,
+    policy: dict[str, Any],
+    description: str | None,
+) -> HTTPException | None:
+    """Run the prompt-injection scanner over every string field reachable
+    in the submission. Each string in the policy is scanned individually
+    (the scanner has line-start-anchored patterns; scanning a JSON blob
+    as one string can hide an injection inside a field value).
+
+    Public/anonymous endpoint, so a positive detection cannot trigger a
+    user-level ban (no user identity). Behavior:
+
+      - Audit-log every detection with the source IP + policy
+        fingerprint + JSON path of the offending field
+      - Return a 400 with a generic detail so the abuser doesn't learn
+        which field tripped the scanner
+    """
+    candidates: list[tuple[str, str]] = []
+    if description:
+        candidates.append(("description", description))
+    for path, value in _iter_string_values(policy, path="policy"):
+        candidates.append((path, value))
+
+    for field_path, value in candidates:
+        if not value:
+            continue
+        verdict = prompt_injection.detect(value)
+        if not verdict.detected:
+            continue
+        try:
+            audit.emit(
+                actor=f"ip:{ip}",
+                kind="security.prompt_injection",
+                summary=(
+                    f"prompt-injection in score/{field_path} "
+                    f"({verdict.confidence}) from {ip}"
+                ),
+                details={
+                    "field": field_path,
+                    "policy_fingerprint": fingerprint,
+                    "source_ip": ip,
+                    "reasons": verdict.reasons,
+                    "snippets": verdict.snippets,
+                    "confidence": verdict.confidence,
+                },
+            )
+        except Exception:
+            # Audit must never block the security control.
+            pass
+        return HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=(
+                "Submitted content contains patterns that look like "
+                "prompt-injection attempts. If this is a legitimate "
+                "request please rephrase any free-text fields."
+            ),
+        )
+    return None
+
+
 # ---- The endpoint ----------------------------------------------------
 
 
@@ -296,6 +376,17 @@ def score_policy(
             detail="policy must include 'Statement' key (AWS IAM policy shape)",
         )
 
+    fingerprint = _policy_fingerprint(payload.policy)
+
+    injection_block = _scan_for_injection(
+        ip=ip,
+        fingerprint=fingerprint,
+        policy=payload.policy,
+        description=payload.description,
+    )
+    if injection_block is not None:
+        raise injection_block
+
     # Build the minimum request shape the scorer expects. Strip
     # description if None so the scorer doesn't see "None" as text.
     request_shape: dict[str, Any] = {
@@ -334,5 +425,5 @@ def score_policy(
         suggestions=list(analysis.suggestions),
         llm_narrative=analysis.llm_narrative,
         analyzer=analysis.analyzer,
-        policy_fingerprint=_policy_fingerprint(payload.policy),
+        policy_fingerprint=fingerprint,
     )

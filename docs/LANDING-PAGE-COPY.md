@@ -1,6 +1,6 @@
 # Landing page copy — iam-risk-score
 
-Draft copy for the public landing site at iam-jit.dev. Designed
+Draft copy for the public landing site at iam-risk-score.com. Designed
 to load fast and convert technical decision-makers (eng leaders,
 DevSecOps, AI platform teams).
 
@@ -60,7 +60,7 @@ Suggestions to reduce risk:
 > required — it's just JSON over HTTPS.
 
 ```bash
-curl -X POST https://api.iam-jit.dev/api/v1/score \
+curl -X POST https://api.iam-risk-score.com/api/v1/score \
   -H "Content-Type: application/json" \
   -d '{"policy": {"Version": "2012-10-17", "Statement": [...]}}'
 ```
@@ -158,7 +158,7 @@ A panel targeting the DevSecOps buyer.
 
 ```yaml
 # .github/workflows/iam-review.yml
-- uses: iam-jit/iam-risk-score-action@v1
+- uses: trsreagan3/iam-risk-score-action@v1
   with:
     policy-file: 'terraform/**/iam-*.tf'
     threshold: 5

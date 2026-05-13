@@ -3,12 +3,29 @@ requires = ["setuptools>=68", "wheel"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "iam-jit"
-version = "0.0.1"
-description = "Self-hosted, GitOps-driven, time-bound, least-privilege AWS IAM role provisioning."
+name = "iam-risk-score"
+version = "0.1.0"
+description = "Score AWS IAM policies for risk before granting access. Deterministic + LLM-narrative scoring as an API, CLI, and GitHub Action."
 readme = "README.md"
 license = { text = "Apache-2.0" }
 requires-python = ">=3.10"
+keywords = ["iam", "aws", "security", "risk-scoring", "policy", "ai-agents", "ci-cd", "devsecops"]
+authors = [{ name = "trsreagan3", email = "trsreagan3@gmail.com" }]
+classifiers = [
+  "Development Status :: 4 - Beta",
+  "Intended Audience :: Developers",
+  "Intended Audience :: System Administrators",
+  "License :: OSI Approved :: Apache Software License",
+  "Operating System :: OS Independent",
+  "Programming Language :: Python :: 3",
+  "Programming Language :: Python :: 3.10",
+  "Programming Language :: Python :: 3.11",
+  "Programming Language :: Python :: 3.12",
+  "Programming Language :: Python :: 3.13",
+  "Topic :: Security",
+  "Topic :: Software Development :: Quality Assurance",
+  "Topic :: System :: Systems Administration :: Authentication/Directory",
+]
 dependencies = [
   "click>=8.1",
   "ruamel.yaml>=0.18",
@@ -23,6 +40,12 @@ dependencies = [
   "mangum>=0.17",
   "python-multipart>=0.0.9",
 ]
+
+[project.urls]
+Homepage = "https://iam-risk-score.com"
+Documentation = "https://github.com/trsreagan3/iam-jit#readme"
+Source = "https://github.com/trsreagan3/iam-jit"
+Issues = "https://github.com/trsreagan3/iam-jit/issues"
 
 [project.optional-dependencies]
 llm = ["anthropic>=0.34"]

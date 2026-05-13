@@ -15,11 +15,11 @@ requests/month per IP.
 
 ## The three distribution channels (all shipped)
 
-1. **Hosted API** — `https://api.iam-jit.dev/api/v1/score`
+1. **Hosted API** — `https://api.iam-risk-score.com/api/v1/score`
    (or self-hosted equivalent). Free tier + paid tiers.
 2. **CLI** — `pip install iam-risk-score`. Works offline OR
    against any API URL. Drop-in for pre-commit hooks.
-3. **GitHub Action** — `iam-jit/iam-risk-score-action@v1`. Score
+3. **GitHub Action** — `trsreagan3/iam-risk-score-action@v1`. Score
    IAM policies on every PR. Gate merges or post comments.
 
 Each channel ships TODAY; the launch is making them visible.
@@ -70,21 +70,21 @@ Notes on pricing:
 - [ ] Web dashboard for paying customers — TODO (post-launch)
 
 ### Hosting infrastructure
-- [ ] Production deploy of the scoring API at api.iam-jit.dev
+- [ ] Production deploy of the scoring API at api.iam-risk-score.com
 - [ ] CloudFront in front of the ALB for caching same-fingerprint
       requests (deduplicates CI traffic hammering on PR retries)
 - [ ] Per-API-key rate limiting (currently per-IP only)
 - [ ] Stripe webhook → API key issuance flow
-- [ ] Status page (status.iam-jit.dev) — UptimeRobot is fine for v1
+- [ ] Status page (status.iam-risk-score.com) — UptimeRobot is fine for v1
 
 ### Marketing surface
-- [ ] Landing page at iam-jit.dev
+- [ ] Landing page at iam-risk-score.com
   - Hero: "Score AWS IAM policies before you grant access"
   - Three integration paths (API / CLI / GitHub Action)
   - One-line code samples for each
   - Free tier signup CTA
 - [ ] Pricing page
-- [ ] Docs site (host the markdown docs as docs.iam-jit.dev)
+- [ ] Docs site (host the markdown docs as docs.iam-risk-score.com)
 - [ ] Blog: "The IAM policy scorer for AI agents" (technical post
       explaining the deterministic+LLM hybrid model)
 - [ ] Demo video (90s): Claude agent requests access, gets

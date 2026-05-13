@@ -44,7 +44,7 @@ Action into their CI but sets the action to "comment only, do
 not block":
 
 ```yaml
-- uses: iam-jit/iam-risk-score-action@v1
+- uses: trsreagan3/iam-risk-score-action@v1
   with:
     policy-file: 'iam/*.json'
     threshold: 11  # impossible to exceed — comments only, never fails
@@ -87,7 +87,7 @@ curl -X PATCH .../api/v1/admin/auto-approve/settings \
 Or for the scoring-API-only path:
 
 ```yaml
-- uses: iam-jit/iam-risk-score-action@v1
+- uses: trsreagan3/iam-risk-score-action@v1
   with:
     policy-file: 'iam/*.json'
     threshold: 2  # only score-1 passes

@@ -31,6 +31,29 @@ _ALLOWED_LEVELS = ("read", "list", "write", "tagging", "permissions-management")
 
 _DESCRIPTION_MAX_CHARS = 4000
 
+
+def _max_output_tokens(default: int) -> int:
+    """Output-token cap for LLM calls.
+
+    Production levers — by precedence:
+      - `IAM_JIT_LLM_MAX_OUTPUT_TOKENS`: hard cap for ALL backends and
+        call sites (refine + chat). Lets the operator throttle Bedrock
+        / Anthropic spend without a code change. Common values: 256
+        (tight; narrative-only), 512 (default), 1024 (legacy).
+
+    Bedrock Opus 4.7 charges $15 / 1M output tokens, vs $3 / 1M input.
+    Output tokens are the runaway cost line at scale, so capping here
+    is the single most cost-effective lever in the stack. Lowering
+    `_DEFAULT_MAX_OUTPUT_TOKENS` (or this env var) by 2x roughly halves
+    Bedrock spend for the score endpoint."""
+    raw = os.environ.get("IAM_JIT_LLM_MAX_OUTPUT_TOKENS")
+    if not raw:
+        return default
+    try:
+        return max(64, int(raw))
+    except ValueError:
+        return default
+
 # System prompt — applied verbatim by every LLM backend so prompt-injection
 # resistance is consistent across providers.
 SYSTEM_PROMPT = (
@@ -239,7 +262,7 @@ class AnthropicBackend:
             client = anthropic.Anthropic()
             resp = client.messages.create(
                 model=self.model,
-                max_tokens=512,
+                max_tokens=_max_output_tokens(512),
                 system=SYSTEM_PROMPT,
                 messages=[
                     {
@@ -260,7 +283,7 @@ class AnthropicBackend:
             client = anthropic.Anthropic()
             resp = client.messages.create(
                 model=self.model,
-                max_tokens=1024,
+                max_tokens=_max_output_tokens(1024),
                 system=system_prompt,
                 messages=[{"role": m["role"], "content": m["content"]} for m in messages],
             )
@@ -316,7 +339,7 @@ class BedrockBackend:
                 # `temperature` is deprecated on Opus 4.7+ and rejected
                 # with ValidationException. Omit it — the default is
                 # fine for our usage (narrative + suggestion generation).
-                inferenceConfig={"maxTokens": 512},
+                inferenceConfig={"maxTokens": _max_output_tokens(512)},
             )
         except Exception:
             return list(initial_services), list(initial_actions)
@@ -336,7 +359,7 @@ class BedrockBackend:
                     {"role": m["role"], "content": [{"text": m["content"]}]}
                     for m in messages
                 ],
-                inferenceConfig={"maxTokens": 1024},
+                inferenceConfig={"maxTokens": _max_output_tokens(1024)},
             )
         except Exception:
             return ""

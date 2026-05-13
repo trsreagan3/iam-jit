@@ -83,7 +83,7 @@ runs:
       shell: bash
       run: |
         pip install --quiet 'iam-risk-score>=0.1.0' || \
-          pip install --quiet 'git+https://github.com/iam-jit/iam-jit.git@main'
+          pip install --quiet 'git+https://github.com/trsreagan3/iam-jit.git@main'
 
     - name: Score policies
       id: score
@@ -179,7 +179,7 @@ runs:
           **Verdict:** ${verdict} (threshold: ${threshold})
 
           See the run logs for full risk factors and suggestions.
-          [What does this score mean?](https://github.com/iam-jit/iam-jit/blob/main/docs/USE-CASES.md)
+          [What does this score mean?](https://github.com/trsreagan3/iam-jit/blob/main/docs/USE-CASES.md)
           `;
 
           await github.rest.issues.createComment({
