@@ -1186,6 +1186,34 @@ def _norm_grammar_str(s: object) -> str:
     if any(c in _LATIN_HOMOGLYPHS for c in s):
         s = "".join(_LATIN_HOMOGLYPHS.get(c, c) for c in s)
     return s.strip().strip("   ")
+
+
+# Valid AWS regions as of 2026-05. Used for ARN-region typo detection
+# (research §7.5 INVALID_ARN_REGION). Update annually when AWS
+# launches new regions. Covers commercial + GovCloud + China.
+_VALID_AWS_REGIONS = frozenset({
+    # Commercial regions
+    "us-east-1", "us-east-2", "us-west-1", "us-west-2",
+    "ca-central-1", "ca-west-1",
+    "sa-east-1",
+    "eu-north-1", "eu-west-1", "eu-west-2", "eu-west-3",
+    "eu-central-1", "eu-central-2", "eu-south-1", "eu-south-2",
+    "ap-east-1", "ap-east-2",
+    "ap-south-1", "ap-south-2",
+    "ap-northeast-1", "ap-northeast-2", "ap-northeast-3",
+    "ap-southeast-1", "ap-southeast-2", "ap-southeast-3",
+    "ap-southeast-4", "ap-southeast-5", "ap-southeast-7",
+    "me-south-1", "me-central-1",
+    "af-south-1",
+    "il-central-1",
+    "mx-central-1",
+    # GovCloud
+    "us-gov-east-1", "us-gov-west-1",
+    # China
+    "cn-north-1", "cn-northwest-1",
+})
+
+
 _PRIVATE_IPV4_PREFIXES = (
     "10.",
     "172.16.", "172.17.", "172.18.", "172.19.",
@@ -1996,6 +2024,43 @@ def _deterministic(
                 "before submission. Each `Action`/`Resource` must be "
                 "a string or list of strings."
             )
+
+    # Invalid AWS region in Resource ARN → defect signal. A typo'd
+    # region segment (`us-easst-1`) makes the ARN match nothing — but
+    # the SHAPE is otherwise valid, so the scorer treats the policy
+    # as scoped. The defect is itself worth flagging at floor 4. AWS
+    # Access Analyzer raises INVALID_ARN_REGION on this class.
+    # Research §7.5, round 9 WB agent-809.
+    if isinstance(statements, list):
+        for stmt in statements:
+            if not isinstance(stmt, dict):
+                continue
+            for r_key in ("Resource", "NotResource"):
+                rv = stmt.get(r_key)
+                rs = rv if isinstance(rv, list) else ([rv] if rv else [])
+                for r in rs:
+                    if not isinstance(r, str) or not r.startswith("arn:"):
+                        continue
+                    parts = r.split(":", 5)
+                    if len(parts) < 6:
+                        continue
+                    region = parts[3]
+                    if not region or "*" in region:
+                        continue  # empty (S3) or wildcard — ok
+                    if region not in _VALID_AWS_REGIONS:
+                        score = max(score, 4)
+                        factors.append(
+                            f"Resource `{r}` has region `{region}` "
+                            "which is not a valid AWS region. The "
+                            "policy applies to no real resource — "
+                            "likely a typo; the role's intended grant "
+                            "is broken. AWS Access Analyzer raises "
+                            "INVALID_ARN_REGION on this class."
+                        )
+                        break
+                else:
+                    continue
+                break
 
     # Missing-Action on Allow statement → defect signal. When a
     # Statement has Effect=Allow + Resource present + Action key
