@@ -91,6 +91,56 @@ sam-build: sync-lambda-data
 	  --build-dir .aws-sam/build \
 	  --use-container
 
+# One-shot MVP deploy with the three required parameters auto-derived
+# from the current AWS account + a freshly-generated bootstrap setup
+# key. Override defaults via env: STACK_NAME, REGION, MVP_EMAIL.
+#
+# What this produces:
+#   - The full iam-jit Lambda + DynamoDB tables
+#   - Function URL (public, with the in-Lambda rate limit only)
+#   - `/api/v1/score` endpoint reachable immediately
+#   - NO Bedrock LLM, NO CloudFront/WAF, NO custom domain — those are
+#     production-grade tiers documented in docs/GETTING-STARTED.md
+#
+# Estimated cost: ~$6-10/mo idle. The actual launch path layers
+# `EnableEdgeProtection=true` + `LLMBackend=bedrock` on top via
+# subsequent `sam deploy` parameter updates (no rebuild needed).
+#
+# Idempotent: re-running rotates the bootstrap setup key and updates
+# the stack. The setup key is persisted to ~/.iam-jit/bootstrap-setup-key
+# (mode 600) so the operator can claim the admin afterward without
+# having to read it from shell history.
+deploy-mvp: sam-build
+	@if [ -z "$$AWS_PROFILE" ]; then echo "Set AWS_PROFILE first (e.g. iam-jit)"; exit 1; fi
+	@if [ -z "$$MVP_EMAIL" ]; then echo "Set MVP_EMAIL=your@email.com (the first-admin address)"; exit 1; fi
+	@mkdir -p ~/.iam-jit && chmod 700 ~/.iam-jit
+	@umask 077; openssl rand -hex 32 > ~/.iam-jit/bootstrap-setup-key
+	@echo "Generated bootstrap setup key (saved to ~/.iam-jit/bootstrap-setup-key)"
+	@account_id=$$(aws sts get-caller-identity --query Account --output text); \
+	bucket="iam-jit-state-$$account_id"; \
+	stack="$${STACK_NAME:-iam-jit-mvp}"; \
+	region="$${REGION:-us-east-1}"; \
+	boot_key=$$(cat ~/.iam-jit/bootstrap-setup-key); \
+	echo "Deploying stack '$$stack' in region '$$region' for account $$account_id..."; \
+	SAM_CLI_TELEMETRY=0 sam deploy \
+	  --template-file .aws-sam/build/template.yaml \
+	  --stack-name "$$stack" \
+	  --region "$$region" \
+	  --capabilities CAPABILITY_IAM CAPABILITY_NAMED_IAM \
+	  --resolve-s3 \
+	  --no-confirm-changeset \
+	  --no-fail-on-empty-changeset \
+	  --parameter-overrides \
+	    "StateBucketName=$$bucket" \
+	    "AdminBootstrapEmail=$$MVP_EMAIL" \
+	    "BootstrapSetupKey=$$boot_key" \
+	    "AllowPublicNetworkExposure=true" \
+	    "AllowedSourceCidrs=0.0.0.0/0" \
+	    "CorsAllowedOrigins=https://iam-risk-score.com,http://localhost:4321"
+	@echo ""
+	@echo "✓ Deployed. Get the API URL with:"
+	@echo "  aws cloudformation describe-stacks --stack-name $${STACK_NAME:-iam-jit-mvp} --query 'Stacks[0].Outputs' --output table"
+
 recordings:
 	$(PY) recordings/run_all.py
 

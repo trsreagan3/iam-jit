@@ -9,6 +9,8 @@ Two products from one repo. Pick the one that fits your need.
 
 Both products share the same deterministic scoring engine, so the same calibration that protects your provisioning workflow also protects your CI pipelines and AI-agent runtimes. Open source under Apache 2.0.
 
+**Want to deploy the stack?** Jump to **[docs/GETTING-STARTED.md](docs/GETTING-STARTED.md)** for a 5-minute MVP deploy (~$6/mo), then layered production-hardening tiers. The doc clearly labels which components are MVP-essential vs production-grade additions, so a fresh user can be live in 5 minutes without committing to the full launch infra.
+
 ---
 
 ## `iam-risk-score` — the scoring API (launch product)

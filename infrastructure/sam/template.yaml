@@ -22,8 +22,10 @@ Parameters:
   StateBucketName:
     Type: String
     Description: |
-      S3 bucket name for storing request YAML files (the source of truth
-      for queue / provisioning / expiry state). Must be globally unique.
+      **[MVP — REQUIRED]** S3 bucket name for storing request YAML files
+      (the source of truth for queue / provisioning / expiry state).
+      Must be globally unique. Convention: `iam-jit-state-<account-id>`.
+      No default — every deploy must set this.
 
   ProvisionerRoleArns:
     Type: CommaDelimitedList
@@ -202,8 +204,9 @@ Parameters:
     Default: "false"
     AllowedValues: ["true", "false"]
     Description: |
-      EXPLICIT OPT-IN to deploy a Function URL that is reachable from
-      the public internet without an additional auth layer.
+      **[PUBLIC TIER — set true to allow public traffic]** EXPLICIT
+      OPT-IN to deploy a Function URL that is reachable from the
+      public internet without an additional auth layer.
 
       Scope: this parameter governs the **Function URL** specifically.
       It does NOT govern the optional ALB
@@ -224,30 +227,33 @@ Parameters:
     Type: CommaDelimitedList
     Default: ""
     Description: |
+      **[PUBLIC TIER — required when AllowPublicNetworkExposure=true]**
       Specific origins allowed for browser CORS. Wildcard `*` is REJECTED.
-      Required when AllowPublicNetworkExposure=true. Empty (default) sends
-      no CORS headers, blocking all browsers other than same-origin —
-      the right default for most deployments.
+      Empty (default) sends no CORS headers, blocking all browsers
+      other than same-origin — the right default for most deployments.
 
   AdminBootstrapEmail:
     Type: String
     Default: ""
     Description: |
-      Optional. Email of the initial admin user. Pre-populates the users
-      table with this address as an admin so post-deploy bootstrap doesn't
-      require an out-of-band write. Set this to YOUR email — not a shared
-      address — and rotate to additional admins after first sign-in.
+      **[MVP — REQUIRED when UserConfigSource=dynamodb (the default)]**
+      Email of the initial admin user. Pre-populates the users table
+      with this address as an admin so post-deploy bootstrap doesn't
+      require an out-of-band write. Set this to YOUR email — not a
+      shared address — and rotate to additional admins after first
+      sign-in. CFN Rules will refuse the deploy if empty and
+      UserConfigSource=dynamodb.
 
   BootstrapSetupKey:
     Type: String
     Default: ""
     NoEcho: true
     Description: |
-      One-time secret you generate locally (`openssl rand -hex 32`) and
-      pass at `sam deploy` time. After deploy, visit the
-      `BootstrapClaimUrl` output, enter the AdminBootstrapEmail above
-      and this key into the form, and you're signed in as the first
-      admin.
+      **[MVP — STRONGLY RECOMMENDED]** One-time secret you generate
+      locally (`openssl rand -hex 32`) and pass at `sam deploy` time.
+      After deploy, visit the `BootstrapClaimUrl` output, enter the
+      AdminBootstrapEmail above and this key into the form, and you're
+      signed in as the first admin.
 
       The key is stored as a Lambda env var (readable only via
       `lambda:GetFunctionConfiguration` on the iam-jit function — a
@@ -264,12 +270,13 @@ Parameters:
     Type: CommaDelimitedList
     Default: ""
     Description: |
-      Comma-separated CIDR blocks allowed to reach the iam-jit
-      Function URL. When set, every request whose source IP isn't in
-      one of these networks is refused with 403 at the application
-      layer. Empty (default) disables the runtime allowlist — STRONGLY
-      RECOMMENDED to set this to your corporate VPN egress, your
-      office WAN, or your VPC's NAT gateway IPs.
+      **[PUBLIC TIER — required when AllowPublicNetworkExposure=true]**
+      Comma-separated CIDR blocks allowed to reach the iam-jit Function
+      URL. When set, every request whose source IP isn't in one of
+      these networks is refused with 403 at the application layer.
+      Use `0.0.0.0/0` as an explicit "yes, public to all" acknowledgement
+      (matches the documented public-launch shape); narrower CIDRs for
+      private/VPN-fronted deploys.
 
       Examples:
         10.0.0.0/8                      (RFC1918 private)
