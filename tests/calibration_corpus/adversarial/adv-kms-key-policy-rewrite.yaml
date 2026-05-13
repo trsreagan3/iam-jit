@@ -1,0 +1,17 @@
+name: adv-kms-key-policy-rewrite
+description: "PutKeyPolicy on Resource:* \u2014 completely rewrites a KMS key's policy. Attacker can grant themselves Decrypt\
+  \ on the key while appearing to be a legitimate key-rotation operation."
+policy:
+  Version: '2012-10-17'
+  Statement:
+  - Effect: Allow
+    Action: kms:PutKeyPolicy
+    Resource: '*'
+request:
+  spec:
+    access_type: read-write
+    duration:
+      duration_hours: 1
+expected:
+  score_min: 7
+  must_auto_approve: false

@@ -1,0 +1,17 @@
+name: adv-cfn-update-stack-add-backdoor
+description: cloudformation:UpdateStack on a specific prod stack. Caller can add new resources (e.g. an IAM role with admin
+  policy) via a template change. The 'change set' UI hides the diff in long deploys.
+policy:
+  Version: '2012-10-17'
+  Statement:
+  - Effect: Allow
+    Action: cloudformation:UpdateStack
+    Resource: arn:aws:cloudformation:us-east-1:111111111111:stack/prod-api/*
+request:
+  spec:
+    access_type: read-write
+    duration:
+      duration_hours: 1
+expected:
+  score_min: 5
+  must_auto_approve: false

@@ -1,0 +1,17 @@
+name: adv-iam-create-service-linked-role
+description: "iam:CreateServiceLinkedRole on Resource:* \u2014 creates a role with attached AWS-managed policy. Some service-linked\
+  \ roles have surprisingly broad permissions; attacker can use this as a backdoor when direct CreateRole is denied."
+policy:
+  Version: '2012-10-17'
+  Statement:
+  - Effect: Allow
+    Action: iam:CreateServiceLinkedRole
+    Resource: '*'
+request:
+  spec:
+    access_type: read-write
+    duration:
+      duration_hours: 1
+expected:
+  score_min: 6
+  must_auto_approve: false

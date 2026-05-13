@@ -1,0 +1,17 @@
+name: adv-rds-modify-backup-retention-zero
+description: "rds:ModifyDBInstance can set BackupRetentionPeriod=0 \u2014 disables backups silently. Single-instance scope\
+  \ is still permanent data loss when combined with DeleteDBInstance."
+policy:
+  Version: '2012-10-17'
+  Statement:
+  - Effect: Allow
+    Action: rds:ModifyDBInstance
+    Resource: '*'
+request:
+  spec:
+    access_type: read-write
+    duration:
+      duration_hours: 1
+expected:
+  score_min: 5
+  must_auto_approve: false

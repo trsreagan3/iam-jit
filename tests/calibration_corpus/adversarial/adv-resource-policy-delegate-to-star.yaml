@@ -1,0 +1,17 @@
+name: adv-resource-policy-delegate-to-star
+description: "lambda:AddPermission with Principal=* \u2014 adds a resource policy that lets any AWS account invoke the Lambda.\
+  \ Distributed-attack-surface expansion in one call."
+policy:
+  Version: '2012-10-17'
+  Statement:
+  - Effect: Allow
+    Action: lambda:AddPermission
+    Resource: '*'
+request:
+  spec:
+    access_type: read-write
+    duration:
+      duration_hours: 1
+expected:
+  score_min: 5
+  must_auto_approve: false

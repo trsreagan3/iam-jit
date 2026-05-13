@@ -162,6 +162,13 @@ _HIGH_IMPACT_MUTATION_ACTIONS = frozenset(
         # CodePipeline / CodeBuild — production deploy triggers
         "codepipeline:StartPipelineExecution",
         "codebuild:StartBuild",
+        # Container image poisoning — push to a repo prod pulls from
+        # = next task restart runs attacker code with the task role.
+        "ecr:PutImage",
+        "ecr:BatchDeleteImage",
+        # S3 replication = ongoing exfiltration. Single API call sets up
+        # auto-copy of every new object to an attacker-chosen destination.
+        "s3:PutBucketReplication",
     }
 )
 
@@ -192,8 +199,12 @@ _CATASTROPHIC_ACTIONS = frozenset(
         # explicit "policy modified" audit, just a version bump.
         "iam:CreatePolicyVersion",
         "iam:SetDefaultPolicyVersion",
-        # KMS — schedule deletion of any key locks data forever
+        # KMS — schedule deletion of any key locks data forever, or
+        # rewriting the key policy lets the attacker grant themselves
+        # Decrypt permanently (and quietly — no separate "policy
+        # changed" audit since key policy IS the resource policy).
         "kms:ScheduleKeyDeletion",
+        "kms:PutKeyPolicy",
     }
 )
 

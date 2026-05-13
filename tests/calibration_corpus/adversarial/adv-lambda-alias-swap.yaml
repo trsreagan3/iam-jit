@@ -1,0 +1,17 @@
+name: adv-lambda-alias-swap
+description: "Lambda:UpdateAlias on Resource:* \u2014 swap which version any production Lambda alias points at. Caller can\
+  \ route traffic to attacker-controlled function versions."
+policy:
+  Version: '2012-10-17'
+  Statement:
+  - Effect: Allow
+    Action: lambda:UpdateAlias
+    Resource: '*'
+request:
+  spec:
+    access_type: read-write
+    duration:
+      duration_hours: 1
+expected:
+  score_min: 5
+  must_auto_approve: false

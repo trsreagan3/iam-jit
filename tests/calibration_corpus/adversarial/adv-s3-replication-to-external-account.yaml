@@ -1,0 +1,17 @@
+name: adv-s3-replication-to-external-account
+description: s3:PutBucketReplication can configure replication to a bucket in ANOTHER account (the destination ARN is in the
+  config body, not the policy resource). Single API call = ongoing exfiltration of every new object.
+policy:
+  Version: '2012-10-17'
+  Statement:
+  - Effect: Allow
+    Action: s3:PutBucketReplication
+    Resource: arn:aws:s3:::prod-data
+request:
+  spec:
+    access_type: read-write
+    duration:
+      duration_hours: 1
+expected:
+  score_min: 5
+  must_auto_approve: false

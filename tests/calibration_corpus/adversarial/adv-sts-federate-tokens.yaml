@@ -1,0 +1,18 @@
+name: adv-sts-federate-tokens
+description: "sts:GetFederationToken / sts:GetSessionToken \u2014 attacker mints short-lived session credentials. Useful for\
+  \ evading audit logs that key on the long-lived IAM principal."
+policy:
+  Version: '2012-10-17'
+  Statement:
+  - Effect: Allow
+    Action:
+    - sts:GetFederationToken
+    - sts:GetSessionToken
+    Resource: '*'
+request:
+  spec:
+    access_type: read-write
+    duration:
+      duration_hours: 1
+expected:
+  score_min: 4

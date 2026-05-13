@@ -1,0 +1,166 @@
+name: adv-massive-statement-array
+description: Bury one dangerous statement at the end of 50 safe ones. Test the scorer's resilience to long policy arrays.
+policy:
+  Version: '2012-10-17'
+  Statement:
+  - Effect: Allow
+    Action: s3:GetObject
+    Resource: arn:aws:s3:::pub-0/file
+  - Effect: Allow
+    Action: s3:GetObject
+    Resource: arn:aws:s3:::pub-1/file
+  - Effect: Allow
+    Action: s3:GetObject
+    Resource: arn:aws:s3:::pub-2/file
+  - Effect: Allow
+    Action: s3:GetObject
+    Resource: arn:aws:s3:::pub-3/file
+  - Effect: Allow
+    Action: s3:GetObject
+    Resource: arn:aws:s3:::pub-4/file
+  - Effect: Allow
+    Action: s3:GetObject
+    Resource: arn:aws:s3:::pub-5/file
+  - Effect: Allow
+    Action: s3:GetObject
+    Resource: arn:aws:s3:::pub-6/file
+  - Effect: Allow
+    Action: s3:GetObject
+    Resource: arn:aws:s3:::pub-7/file
+  - Effect: Allow
+    Action: s3:GetObject
+    Resource: arn:aws:s3:::pub-8/file
+  - Effect: Allow
+    Action: s3:GetObject
+    Resource: arn:aws:s3:::pub-9/file
+  - Effect: Allow
+    Action: s3:GetObject
+    Resource: arn:aws:s3:::pub-10/file
+  - Effect: Allow
+    Action: s3:GetObject
+    Resource: arn:aws:s3:::pub-11/file
+  - Effect: Allow
+    Action: s3:GetObject
+    Resource: arn:aws:s3:::pub-12/file
+  - Effect: Allow
+    Action: s3:GetObject
+    Resource: arn:aws:s3:::pub-13/file
+  - Effect: Allow
+    Action: s3:GetObject
+    Resource: arn:aws:s3:::pub-14/file
+  - Effect: Allow
+    Action: s3:GetObject
+    Resource: arn:aws:s3:::pub-15/file
+  - Effect: Allow
+    Action: s3:GetObject
+    Resource: arn:aws:s3:::pub-16/file
+  - Effect: Allow
+    Action: s3:GetObject
+    Resource: arn:aws:s3:::pub-17/file
+  - Effect: Allow
+    Action: s3:GetObject
+    Resource: arn:aws:s3:::pub-18/file
+  - Effect: Allow
+    Action: s3:GetObject
+    Resource: arn:aws:s3:::pub-19/file
+  - Effect: Allow
+    Action: s3:GetObject
+    Resource: arn:aws:s3:::pub-20/file
+  - Effect: Allow
+    Action: s3:GetObject
+    Resource: arn:aws:s3:::pub-21/file
+  - Effect: Allow
+    Action: s3:GetObject
+    Resource: arn:aws:s3:::pub-22/file
+  - Effect: Allow
+    Action: s3:GetObject
+    Resource: arn:aws:s3:::pub-23/file
+  - Effect: Allow
+    Action: s3:GetObject
+    Resource: arn:aws:s3:::pub-24/file
+  - Effect: Allow
+    Action: s3:GetObject
+    Resource: arn:aws:s3:::pub-25/file
+  - Effect: Allow
+    Action: s3:GetObject
+    Resource: arn:aws:s3:::pub-26/file
+  - Effect: Allow
+    Action: s3:GetObject
+    Resource: arn:aws:s3:::pub-27/file
+  - Effect: Allow
+    Action: s3:GetObject
+    Resource: arn:aws:s3:::pub-28/file
+  - Effect: Allow
+    Action: s3:GetObject
+    Resource: arn:aws:s3:::pub-29/file
+  - Effect: Allow
+    Action: s3:GetObject
+    Resource: arn:aws:s3:::pub-30/file
+  - Effect: Allow
+    Action: s3:GetObject
+    Resource: arn:aws:s3:::pub-31/file
+  - Effect: Allow
+    Action: s3:GetObject
+    Resource: arn:aws:s3:::pub-32/file
+  - Effect: Allow
+    Action: s3:GetObject
+    Resource: arn:aws:s3:::pub-33/file
+  - Effect: Allow
+    Action: s3:GetObject
+    Resource: arn:aws:s3:::pub-34/file
+  - Effect: Allow
+    Action: s3:GetObject
+    Resource: arn:aws:s3:::pub-35/file
+  - Effect: Allow
+    Action: s3:GetObject
+    Resource: arn:aws:s3:::pub-36/file
+  - Effect: Allow
+    Action: s3:GetObject
+    Resource: arn:aws:s3:::pub-37/file
+  - Effect: Allow
+    Action: s3:GetObject
+    Resource: arn:aws:s3:::pub-38/file
+  - Effect: Allow
+    Action: s3:GetObject
+    Resource: arn:aws:s3:::pub-39/file
+  - Effect: Allow
+    Action: s3:GetObject
+    Resource: arn:aws:s3:::pub-40/file
+  - Effect: Allow
+    Action: s3:GetObject
+    Resource: arn:aws:s3:::pub-41/file
+  - Effect: Allow
+    Action: s3:GetObject
+    Resource: arn:aws:s3:::pub-42/file
+  - Effect: Allow
+    Action: s3:GetObject
+    Resource: arn:aws:s3:::pub-43/file
+  - Effect: Allow
+    Action: s3:GetObject
+    Resource: arn:aws:s3:::pub-44/file
+  - Effect: Allow
+    Action: s3:GetObject
+    Resource: arn:aws:s3:::pub-45/file
+  - Effect: Allow
+    Action: s3:GetObject
+    Resource: arn:aws:s3:::pub-46/file
+  - Effect: Allow
+    Action: s3:GetObject
+    Resource: arn:aws:s3:::pub-47/file
+  - Effect: Allow
+    Action: s3:GetObject
+    Resource: arn:aws:s3:::pub-48/file
+  - Effect: Allow
+    Action: s3:GetObject
+    Resource: arn:aws:s3:::pub-49/file
+  - Effect: Allow
+    Action: iam:*
+    Resource: '*'
+request:
+  spec:
+    access_type: read-write
+    duration:
+      duration_hours: 1
+expected:
+  score_min: 9
+  must_auto_approve: false

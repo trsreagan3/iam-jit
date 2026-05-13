@@ -1,0 +1,19 @@
+name: adv-deceptive-arn-typo-acts-as-wildcard
+description: "Resource ARN with a syntax error \u2014 AWS interprets it as a literal-string match against resource ARNs (so\
+  \ it grants nothing if no real resource ARN matches), but it could confuse tools that do loose-matching. The deterministic\
+  \ scorer treats malformed ARNs as narrow because it can't infer intent. Documented as a known gap \u2014 adding ARN-format\
+  \ validation is a separate feature. score_min: 1 reflects current behavior. If you upgrade the scorer to parse ARN syntax,\
+  \ raise this floor."
+policy:
+  Version: '2012-10-17'
+  Statement:
+  - Effect: Allow
+    Action: s3:GetObject
+    Resource: arn:aws:s3:::*malformed
+request:
+  spec:
+    access_type: read-write
+    duration:
+      duration_hours: 1
+expected:
+  score_min: 1

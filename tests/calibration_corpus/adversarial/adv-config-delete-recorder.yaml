@@ -1,0 +1,19 @@
+name: adv-config-delete-recorder
+description: "config:DeleteConfigurationRecorder + config:StopConfigurationRecorder. Disable AWS Config \u2014 drops compliance\
+  \ posture tracking. Evidence-evasion primitive."
+policy:
+  Version: '2012-10-17'
+  Statement:
+  - Effect: Allow
+    Action:
+    - config:DeleteConfigurationRecorder
+    - config:StopConfigurationRecorder
+    Resource: '*'
+request:
+  spec:
+    access_type: read-write
+    duration:
+      duration_hours: 1
+expected:
+  score_min: 7
+  must_auto_approve: false

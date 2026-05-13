@@ -1,0 +1,19 @@
+name: adv-lambda-layer-poison
+description: "PublishLayerVersion + AddLayerVersionPermission \u2014 attacker publishes a poisoned Lambda layer and grants\
+  \ invoke-time load permission. Next Lambda restart pulls attacker code."
+policy:
+  Version: '2012-10-17'
+  Statement:
+  - Effect: Allow
+    Action:
+    - lambda:PublishLayerVersion
+    - lambda:AddLayerVersionPermission
+    Resource: '*'
+request:
+  spec:
+    access_type: read-write
+    duration:
+      duration_hours: 1
+expected:
+  score_min: 5
+  must_auto_approve: false

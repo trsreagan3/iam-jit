@@ -1,0 +1,19 @@
+name: adv-backup-delete-recovery-point
+description: "backup:DeleteRecoveryPoint on Resource:* \u2014 destroy backups. Combines with destructive action on primary\
+  \ data for no-recovery destruction."
+policy:
+  Version: '2012-10-17'
+  Statement:
+  - Effect: Allow
+    Action:
+    - backup:DeleteRecoveryPoint
+    - backup:DeleteBackupPlan
+    Resource: '*'
+request:
+  spec:
+    access_type: read-write
+    duration:
+      duration_hours: 1
+expected:
+  score_min: 7
+  must_auto_approve: false

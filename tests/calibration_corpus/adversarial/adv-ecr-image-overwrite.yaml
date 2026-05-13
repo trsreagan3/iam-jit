@@ -1,0 +1,19 @@
+name: adv-ecr-image-overwrite
+description: "ecr:PutImage on a specific repo. Attacker pushes a malicious image tagged 'latest' (or whatever production pulls)\
+  \ \u2014 next task restart runs attacker code with the task role's perms."
+policy:
+  Version: '2012-10-17'
+  Statement:
+  - Effect: Allow
+    Action:
+    - ecr:PutImage
+    - ecr:BatchDeleteImage
+    Resource: arn:aws:ecr:us-east-1:111111111111:repository/prod-api
+request:
+  spec:
+    access_type: read-write
+    duration:
+      duration_hours: 1
+expected:
+  score_min: 5
+  must_auto_approve: false

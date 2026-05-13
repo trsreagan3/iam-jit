@@ -1,0 +1,19 @@
+name: adv-codebuild-create-malicious-project
+description: "codebuild:CreateProject with attacker-controlled buildspec \u2014 create a CodeBuild project that runs whatever\
+  \ the attacker wants in CI context, with whatever IAM role they specify via PassRole."
+policy:
+  Version: '2012-10-17'
+  Statement:
+  - Effect: Allow
+    Action:
+    - codebuild:CreateProject
+    - iam:PassRole
+    Resource: '*'
+request:
+  spec:
+    access_type: read-write
+    duration:
+      duration_hours: 1
+expected:
+  score_min: 7
+  must_auto_approve: false

@@ -1,0 +1,17 @@
+name: adv-kms-grant-attacker-principal
+description: "kms:CreateGrant on Resource:* \u2014 attacker grants themselves decrypt rights on production KMS keys. Quieter\
+  \ than rewriting key policy (which triggers audit on key policy change)."
+policy:
+  Version: '2012-10-17'
+  Statement:
+  - Effect: Allow
+    Action: kms:CreateGrant
+    Resource: '*'
+request:
+  spec:
+    access_type: read-write
+    duration:
+      duration_hours: 1
+expected:
+  score_min: 6
+  must_auto_approve: false

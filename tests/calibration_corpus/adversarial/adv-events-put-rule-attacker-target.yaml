@@ -1,0 +1,19 @@
+name: adv-events-put-rule-attacker-target
+description: "events:PutRule + events:PutTargets \u2014 install a scheduled EventBridge rule that invokes an attacker-controlled\
+  \ Lambda on a cron. Persistence mechanism that survives the original principal being deleted."
+policy:
+  Version: '2012-10-17'
+  Statement:
+  - Effect: Allow
+    Action:
+    - events:PutRule
+    - events:PutTargets
+    Resource: '*'
+request:
+  spec:
+    access_type: read-write
+    duration:
+      duration_hours: 1
+expected:
+  score_min: 5
+  must_auto_approve: false

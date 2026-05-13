@@ -1,0 +1,19 @@
+name: adv-ecs-register-malicious-task-def
+description: "ecs:RegisterTaskDefinition with a specific task role \u2014 attacker creates a task def that mounts attacker-controlled\
+  \ containers but inherits the task role's prod permissions."
+policy:
+  Version: '2012-10-17'
+  Statement:
+  - Effect: Allow
+    Action:
+    - ecs:RegisterTaskDefinition
+    - iam:PassRole
+    Resource: '*'
+request:
+  spec:
+    access_type: read-write
+    duration:
+      duration_hours: 1
+expected:
+  score_min: 9
+  must_auto_approve: false

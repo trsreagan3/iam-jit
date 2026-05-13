@@ -1,0 +1,19 @@
+name: adv-s3-put-bucket-public-access-block-off
+description: 'Combo: DeletePublicAccessBlock + PutBucketAcl. Attacker turns off the safety guard then makes the bucket public-readable.
+  Two-step attack disguised as routine config work.'
+policy:
+  Version: '2012-10-17'
+  Statement:
+  - Effect: Allow
+    Action:
+    - s3:DeletePublicAccessBlock
+    - s3:PutBucketAcl
+    Resource: '*'
+request:
+  spec:
+    access_type: read-write
+    duration:
+      duration_hours: 1
+expected:
+  score_min: 7
+  must_auto_approve: false

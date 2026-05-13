@@ -1,0 +1,21 @@
+name: adv-iam-passrole-narrow-but-target-is-admin
+description: "PassRole scoped to 'lambda-exec' role \u2014 sounds narrow but if lambda-exec has AdminAccess via a managed-policy\
+  \ attachment, passing it to Lambda gives the Lambda full admin. Common real-world misconfiguration."
+policy:
+  Version: '2012-10-17'
+  Statement:
+  - Effect: Allow
+    Action:
+    - iam:PassRole
+    - lambda:CreateFunction
+    Resource:
+    - arn:aws:iam::111111111111:role/lambda-exec
+    - '*'
+request:
+  spec:
+    access_type: read-write
+    duration:
+      duration_hours: 1
+expected:
+  score_min: 7
+  must_auto_approve: false

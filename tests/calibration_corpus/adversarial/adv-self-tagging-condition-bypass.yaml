@@ -1,0 +1,23 @@
+name: adv-self-tagging-condition-bypass
+description: Allow ec2:* if instance tag Owner=team-a, BUT ALSO grant ec2:CreateTags on Resource:*. Attacker tags ANY instance
+  Owner=team-a then has full access. Self-defeating condition.
+policy:
+  Version: '2012-10-17'
+  Statement:
+  - Effect: Allow
+    Action: ec2:*
+    Resource: '*'
+    Condition:
+      StringEquals:
+        ec2:ResourceTag/Owner: team-a
+  - Effect: Allow
+    Action: ec2:CreateTags
+    Resource: '*'
+request:
+  spec:
+    access_type: read-write
+    duration:
+      duration_hours: 1
+expected:
+  score_min: 7
+  must_auto_approve: false

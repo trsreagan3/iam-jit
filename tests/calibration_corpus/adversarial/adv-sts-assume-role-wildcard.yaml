@@ -1,0 +1,17 @@
+name: adv-sts-assume-role-wildcard
+description: "sts:AssumeRole on Resource:* \u2014 attacker can assume any role in any account (subject to trust policy). Combined\
+  \ with trust-policy-rewrite primitives, this is unconstrained lateral movement."
+policy:
+  Version: '2012-10-17'
+  Statement:
+  - Effect: Allow
+    Action: sts:AssumeRole
+    Resource: '*'
+request:
+  spec:
+    access_type: read-write
+    duration:
+      duration_hours: 1
+expected:
+  score_min: 5
+  must_auto_approve: false
