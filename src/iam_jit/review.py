@@ -954,6 +954,13 @@ _CATASTROPHIC_ACTIONS = frozenset(
         # silently disabling audit. Round 8 agent-505.
         "cloudtrail:PutResourcePolicy",
         "cloudtrail:DeleteResourcePolicy",
+        # Aurora DSQL admin connect (GA 2024) — superuser-equivalent
+        # on the postgres-compatible cluster. Sibling of rds-db:connect
+        # to an admin role. Round 9 BB agent-718.
+        "dsql:DbConnectAdmin",
+        "rds-db:connect",  # admin-role variants depending on grant
+        # SageMaker pre-signed-domain-url — see code-exec primitives;
+        # narrow Resource still grants in-browser code execution.
         # IAM Identity Center — group-membership creation grants the
         # caller (or any user they specify) admin over every account
         # the source group is permissioned in. Sibling of the existing
@@ -1380,6 +1387,10 @@ def _condition_is_vacuous(condition: object) -> tuple[bool, str]:
             # enforce HTTPS. A "false" value INVERTS that — only
             # cleartext (HTTP) requests pass. Often a typo / cargo-cult
             # mistake. Round 7 agent-303, agent-429.
+            #
+            # Also covers `aws:MultiFactorAuthPresent: "false"` (round 7
+            # WB agent-405) — only callers WITHOUT MFA may use the
+            # grant. Same inversion class.
             if op_lc == "bool" or op == "BoolIfExists":
                 if "securetransport" in key_lc:
                     for v in vals_str:
@@ -1389,6 +1400,55 @@ def _condition_is_vacuous(condition: object) -> tuple[bool, str]:
                                 "\"false\"` means HTTPS is REJECTED, only "
                                 "cleartext HTTP requests pass. Almost "
                                 "certainly the opposite of intent."
+                            )
+                if "multifactorauthpresent" in key_lc:
+                    for v in vals_str:
+                        if v.lower() == "false":
+                            return True, (
+                                f"`Condition.{op}.aws:MultiFactorAuthPresent: "
+                                "\"false\"` grants access ONLY to callers "
+                                "WITHOUT MFA. Inverted from the typical "
+                                "intent of requiring MFA."
+                            )
+
+            # Pattern 8b: StringNotEquals on identity-narrowing key
+            # inverts scoping — `StringNotEquals: aws:PrincipalAccount:
+            # "111111111111"` reads like scope-in but is scope-OUT-of-
+            # self (every account except the listed one). Round 7
+            # WB agent-421.
+            _IDENTITY_NARROWING_KEYS = (
+                "principalaccount", "principalarn", "principalorgid",
+                "sourceaccount", "sourcearn", "sourcevpc", "sourcevpce",
+            )
+            if op_lc.startswith("stringnotequals"):
+                if any(key_lc.endswith(k) for k in _IDENTITY_NARROWING_KEYS):
+                    return True, (
+                        f"`Condition.{op}.{key}` uses StringNotEquals "
+                        "on an identity-narrowing key. The condition "
+                        "grants access to EVERY value EXCEPT the listed "
+                        "one — the opposite of typical scope-in intent. "
+                        "Author probably meant `StringEquals` (scope-in)."
+                    )
+
+            # Pattern 10b: DateGreaterThan with past date is a tautology.
+            # `aws:CurrentTime > 2020-01-01` is satisfied for every
+            # request from 2020 onward — i.e., every request the policy
+            # will ever see. Round 7 WB agent-406.
+            if op_lc.startswith("dategreaterthan"):
+                import re as _re
+                for v in vals_str:
+                    # Match the year prefix of an ISO-8601 datetime.
+                    m = _re.match(r"(\d{4})-", str(v))
+                    if m:
+                        year = int(m.group(1))
+                        # Anything before 2025 is effectively-always-true
+                        # for any policy reviewed today.
+                        if year < 2024:
+                            return True, (
+                                f"`Condition.{op}.{key}: {v}` is a past "
+                                "date — the condition is always true "
+                                "from this point forward. Tautology, "
+                                "no actual time-window scoping."
                             )
 
             # Pattern 9: NumericLessThan with absurdly large value
