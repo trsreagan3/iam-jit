@@ -1,0 +1,23 @@
+name: ssm-startsession-fleet-shell
+description: |
+  ssm:StartSession on Resource:* — open an interactive shell on every
+  EC2/SSM-managed instance. Equivalent to SSH-as-root across the fleet.
+
+  Scored 6.
+
+policy:
+  Version: "2012-10-17"
+  Statement:
+    - Effect: Allow
+      Action: "ssm:StartSession"
+      Resource: "*"
+
+request:
+  spec:
+    access_type: read-write
+    duration:
+      duration_hours: 1
+
+expected:
+  score_min: 8
+  must_auto_approve: false

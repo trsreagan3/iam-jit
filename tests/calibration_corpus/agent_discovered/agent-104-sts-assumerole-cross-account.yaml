@@ -1,0 +1,26 @@
+name: sts-assumerole-cross-account-wildcard
+description: |
+  sts:AssumeRole on `arn:aws:iam::*:role/*` — assume ANY role in ANY
+  AWS account that trusts this principal. Even without the trust policy
+  permitting it, this submitted permission combined with a misconfigured
+  trust policy in another account = cross-account pivot.
+
+  More commonly: same-account role-chaining to bypass session-name
+  conditions / SCP scoping. Scored 1.
+
+policy:
+  Version: "2012-10-17"
+  Statement:
+    - Effect: Allow
+      Action: "sts:AssumeRole"
+      Resource: "arn:aws:iam::*:role/*"
+
+request:
+  spec:
+    access_type: read-write
+    duration:
+      duration_hours: 1
+
+expected:
+  score_min: 6
+  must_auto_approve: false

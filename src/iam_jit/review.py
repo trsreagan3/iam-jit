@@ -175,6 +175,15 @@ _SECRET_BEARING_READS = frozenset(
         # app put there
         "dynamodb:GetRecords",
         "sqs:ReceiveMessage",
+        # DynamoDB bulk-read primitives. `Scan` returns every item in a
+        # table; `Query` returns every item matching a partition key.
+        # On a wildcard-table ARN (or `*`), these are mass exfiltration.
+        # Round 5 agent-144.
+        "dynamodb:Scan",
+        "dynamodb:Query",
+        "dynamodb:BatchGetItem",
+        "dynamodb:ExecuteStatement",
+        "dynamodb:PartiQLSelect",
         # S3 GetObject on broad resource (bucket-name wildcard like
         # `prod-*` or service-wide `arn:aws:s3:::*`) is data-exfil tier.
         # On a NARROW bucket-name (specific bucket) it's just routine
@@ -207,6 +216,16 @@ _CROSS_ACCOUNT_EXFIL_ACTIONS = frozenset(
         "logs:PutDestinationPolicy",
         # Lambda function URL — make a function publicly invokable
         "lambda:CreateFunctionUrlConfig",
+        # Lambda resource-policy grants — `AddPermission` grants
+        # cross-account `lambda:InvokeFunction` on the named function.
+        # Combined with `Resource: *` it's "grant any account the right
+        # to invoke any Lambda in this account." Round 5 agent-131.
+        "lambda:AddPermission",
+        # ECR image push — once an attacker controls an image tag that
+        # production pulls (`:latest`, `:prod`, etc.), every subsequent
+        # task restart runs attacker code under the task role. Supply-
+        # chain compromise via single API call. Round 5 agent-139.
+        "ecr:PutImage",
         # SES — send mail as the org's verified domain (phishing-as-org)
         "ses:SendEmail",
         "ses:SendRawEmail",
@@ -417,11 +436,21 @@ _CATASTROPHIC_ACTIONS = frozenset(
         # Account governance — irreversible
         "account:CloseAccount",
         "organizations:LeaveOrganization",
+        # Closes any member account in the org — total data loss after
+        # the 90-day grace window. Round 5 finding agent-117.
+        "organizations:CloseAccount",
         # Audit / evidence destruction
         "cloudtrail:DeleteTrail",
         "cloudtrail:StopLogging",
         "cloudtrail:UpdateTrail",
         "cloudtrail:PutEventSelectors",
+        # Defense-disabling (round 5): turning off the security service
+        # IS the attack — once disabled, every subsequent action goes
+        # un-detected. Same impact class as cloudtrail:StopLogging.
+        "guardduty:DeleteDetector",
+        "securityhub:DisableSecurityHub",
+        "config:StopConfigurationRecorder",
+        "config:DeleteConfigurationRecorder",
         # IAM total-compromise primitives — even a narrowly-resourced
         # AttachRolePolicy can swing in AdministratorAccess if the
         # attacker picks an admin-ish managed policy ARN.
@@ -429,6 +458,11 @@ _CATASTROPHIC_ACTIONS = frozenset(
         "iam:PutRolePolicy",
         "iam:UpdateAssumeRolePolicy",
         "iam:CreateAccessKey",
+        # Round 5: UpdateAccessKey can REACTIVATE a previously-disabled
+        # key — useful for persisting after a credential rotation that
+        # only disables (rather than deletes) old keys. Same risk class
+        # as CreateAccessKey for the credential-theft scenario.
+        "iam:UpdateAccessKey",
         # Policy-version swap: silently change a managed policy by
         # creating a new version + setting it as default. Leaves no
         # explicit "policy modified" audit, just a version bump.
@@ -585,6 +619,17 @@ _CATASTROPHIC_ACTIONS = frozenset(
         "iam:CreateInstanceProfile",
         "iam:AddRoleToInstanceProfile",
         "iam:RemoveRoleFromInstanceProfile",
+        # EC2-side of the instance-profile attack: swapping the profile
+        # on a RUNNING instance changes its metadata-service credentials
+        # to the new role's. Direct privesc from "SSH access to instance"
+        # to "any role I can pass." Round 5 findings agent-126.
+        "ec2:AssociateIamInstanceProfile",
+        "ec2:ReplaceIamInstanceProfileAssociation",
+        # EC2 userData injection — set the boot script of any instance to
+        # attacker-controlled shell. On next boot/reboot/scale-up the
+        # instance runs the script as root with the instance's role.
+        # Round 5 agent-125.
+        "ec2:ModifyInstanceAttribute",
         # Cognito user-pool admin — admin-create-user + admin-set-
         # password = impersonation of any user. Catastrophic for any
         # app that uses Cognito as IdP.
@@ -901,7 +946,23 @@ def _deterministic(
     # `iam:attachrolepolicy` slips past `_HIGH_IMPACT_MUTATION_ACTIONS`
     # while `iam:AttachRolePolicy` is caught. (Discovered round 2.)
     effective_high_impact_lc = frozenset(a.lower() for a in effective_high_impact)
-    if not policy or not isinstance(policy.get("Statement"), list):
+    if not policy:
+        return 1, ["No statements in policy"], []
+    # AWS IAM policy grammar officially allows `Statement` to be either a
+    # list of statement objects OR a single statement object (a bare dict).
+    # The single-dict form is widely used in service-linked-role docs and
+    # is accepted by AWS as a complete admin policy. Without this
+    # normalization, the scorer treats `Statement: {dict}` as "no
+    # statements" and silently scores 1 — a complete bypass for any
+    # policy submitted in that grammar form. See:
+    #   https://docs.aws.amazon.com/IAM/latest/UserGuide/reference_policies_grammar.html
+    # ("Statement: A list of statements is encouraged, but a single
+    #  statement is allowed.")
+    # Round 5 finding agent-96.
+    statements = policy.get("Statement")
+    if isinstance(statements, dict):
+        policy = {**policy, "Statement": [statements]}
+    elif not isinstance(statements, list):
         return 1, ["No statements in policy"], []
 
     score = 1
@@ -990,8 +1051,25 @@ def _deterministic(
         # enough that the residual surface is small. For now, any use
         # of NotAction with a wildcard resource floors the score at 9
         # (admin-minus-set is admin for practical purposes).
+        not_action_key_present = "NotAction" in stmt
         not_actions = _as_list(stmt.get("NotAction"))
         not_resources = _as_list(stmt.get("NotResource"))
+        # Empty `NotAction: []` with the key present means "exclude
+        # nothing from the action set" — semantically equivalent to
+        # `Action: "*"`. Combined with broad Resource this is full admin.
+        # Round 5 finding agent-109.
+        if not_action_key_present and not not_actions:
+            resources_for_empty = resources or ["*"]
+            on_broad = any(r == "*" or r.endswith(":*") for r in resources_for_empty)
+            score = max(score, 10 if on_broad else 9)
+            factors.append(
+                "`NotAction: []` (empty exclusion list) grants every "
+                "action — semantically equivalent to `Action: \"*\"`."
+            )
+            suggestions.append(
+                "Remove `NotAction` and use an explicit `Action` list "
+                "of the specific operations the role actually needs."
+            )
         if not_actions:
             # NotAction is "every action EXCEPT this list" — almost
             # always far broader than the author intended. With wildcard
@@ -1611,12 +1689,32 @@ def _deterministic(
         """Module-level mirror of the local helper used inside the
         per-statement loop. Strict wildcard: literal `*`, service-wide,
         bucket-name wildcard, IAM trailing wildcard — but NOT
-        bucket/* (single-bucket scope)."""
-        return _is_broad_resource(r) and not (
-            r.startswith("arn:") and r.endswith("/*")
-            and r.count("/") == 1
-            and "*" not in r.split(":", 5)[5].split("/", 1)[0]
-        )
+        bucket/* (single-bucket scope).
+
+        The single-bucket exception only applies when the surrounding
+        ARN segments are FULLY narrow (no `*` in account or region).
+        `arn:aws:dynamodb:*:*:table/*` looks like trailing `/*` but the
+        wildcard account+region makes it cross-account broad — NOT a
+        single-bucket case. Round 5 finding agent-144.
+        """
+        if not _is_broad_resource(r):
+            return False
+        if not (r.startswith("arn:") and r.endswith("/*") and r.count("/") == 1):
+            return True  # strict broad
+        parts = r.split(":", 5)
+        if len(parts) < 6:
+            return True
+        # Account or region wildcard → cross-account / cross-region broad,
+        # NOT the legitimate "single-bucket sub-path" case.
+        if "*" in parts[3] or "*" in parts[4]:
+            return True
+        # Resource-name segment must be literal (no `*`) for the
+        # narrow-single-bucket exception to apply.
+        resource_spec = parts[5]
+        bucket_part = resource_spec.split("/", 1)[0]
+        if "*" in bucket_part:
+            return True
+        return False  # genuinely narrow single-bucket sub-path
 
     all_actions: list[tuple[str, bool, bool]] = []
     for stmt in policy["Statement"]:
@@ -1669,7 +1767,13 @@ def _deterministic(
         _canonical_action(a) in _CODE_EXECUTION_PRIMITIVES_LC and strict
         for a, _i, strict in all_actions
     ):
-        score = max(score, 7)
+        # Round 5: bumped from 7 → 8. A code-execution primitive on
+        # `Resource: *` means "deploy attacker-controlled code under
+        # every existing role of matching resources in the account."
+        # That blast radius (typically dozens of Lambda roles, every
+        # CloudFormation stack role, every Glue job role) is solidly
+        # 8-tier, not 7. Agent findings 124, 127.
+        score = max(score, 8)
         which_examples = sorted([
             a for a, _i, _s in all_actions
             if _canonical_action(a) in _CODE_EXECUTION_PRIMITIVES_LC

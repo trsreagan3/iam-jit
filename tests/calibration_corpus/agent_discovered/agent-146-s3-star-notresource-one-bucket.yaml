@@ -1,0 +1,27 @@
+name: s3-star-notresource-narrow-exclusion
+description: |
+  s3:* with NotResource = ["arn:aws:s3:::canary-bucket"]. Read, write,
+  and delete EVERY S3 object in EVERY bucket except a single canary
+  bucket. Effectively full S3 admin.
+
+  Scored 7 (the s3:* signal). The NotResource exclusion of a single
+  bucket should not reduce risk below the 8-9 floor for broad cross-
+  account data access.
+
+policy:
+  Version: "2012-10-17"
+  Statement:
+    - Effect: Allow
+      Action: "s3:*"
+      NotResource:
+        - "arn:aws:s3:::canary-bucket"
+
+request:
+  spec:
+    access_type: read-write
+    duration:
+      duration_hours: 1
+
+expected:
+  score_min: 8
+  must_auto_approve: false

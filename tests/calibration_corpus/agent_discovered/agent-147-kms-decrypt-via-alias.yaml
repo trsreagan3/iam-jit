@@ -1,0 +1,24 @@
+name: kms-decrypt-via-alias-wildcard
+description: |
+  kms:Decrypt on `arn:aws:kms:*:*:alias/*` — KMS aliases are pointers
+  to keys; granting Decrypt on `alias/*` covers every aliased key across
+  any account/region. Equivalent to broad decrypt.
+
+  Scored 1 ("scoped" by literal Resource string).
+
+policy:
+  Version: "2012-10-17"
+  Statement:
+    - Effect: Allow
+      Action: "kms:Decrypt"
+      Resource: "arn:aws:kms:*:*:alias/*"
+
+request:
+  spec:
+    access_type: read-write
+    duration:
+      duration_hours: 1
+
+expected:
+  score_min: 6
+  must_auto_approve: false

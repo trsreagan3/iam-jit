@@ -1,0 +1,25 @@
+name: bedrock-invokemodel-data-exfil
+description: |
+  bedrock:InvokeModel on Resource:* — invoke any Bedrock foundation
+  model. Combined with prompt-injection or RAG-poisoning this is a
+  pathway for data exfiltration through LLM responses. Custom fine-tuned
+  models may also embed sensitive training data.
+
+  Scored 4. Newer service likely not in sensitive-service set.
+
+policy:
+  Version: "2012-10-17"
+  Statement:
+    - Effect: Allow
+      Action: "bedrock:InvokeModel"
+      Resource: "*"
+
+request:
+  spec:
+    access_type: read-write
+    duration:
+      duration_hours: 1
+
+expected:
+  score_min: 6
+  must_auto_approve: false

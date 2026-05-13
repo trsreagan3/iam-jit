@@ -1,0 +1,26 @@
+name: case-insensitive-iam-attachuserpolicy
+description: |
+  IAM:AttachUserPolicy (uppercase service) on Resource:*. AWS IAM
+  evaluates this exactly the same as `iam:AttachUserPolicy` — full
+  IAM privilege escalation via attaching AdministratorAccess to any
+  user.
+
+  Scorer scores 4 because uppercase `IAM:` is not in the sensitive
+  service set / catastrophic-action set (which are lowercased).
+
+policy:
+  Version: "2012-10-17"
+  Statement:
+    - Effect: Allow
+      Action: "IAM:AttachUserPolicy"
+      Resource: "*"
+
+request:
+  spec:
+    access_type: read-write
+    duration:
+      duration_hours: 1
+
+expected:
+  score_min: 8
+  must_auto_approve: false

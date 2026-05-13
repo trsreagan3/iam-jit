@@ -1,0 +1,26 @@
+name: iam-updateassumerolepolicy-trust-takeover
+description: |
+  iam:UpdateAssumeRolePolicy on Resource:* — modify the trust policy
+  of any IAM role. Make any role trust the attacker's identity, then
+  AssumeRole into it. Direct privesc to any role in the account
+  (including service-linked roles for AWS Organizations management
+  account etc.).
+
+  Scored 6. Should be 8.
+
+policy:
+  Version: "2012-10-17"
+  Statement:
+    - Effect: Allow
+      Action: "iam:UpdateAssumeRolePolicy"
+      Resource: "*"
+
+request:
+  spec:
+    access_type: read-write
+    duration:
+      duration_hours: 1
+
+expected:
+  score_min: 8
+  must_auto_approve: false

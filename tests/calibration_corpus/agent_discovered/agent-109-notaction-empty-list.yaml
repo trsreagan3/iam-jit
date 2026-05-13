@@ -1,0 +1,24 @@
+name: notaction-empty-list-bypass
+description: |
+  NotAction = [] (empty list) with Resource:* — empty NotAction means
+  "all actions except nothing" = allow everything. Same as Action:"*".
+
+  The scorer outputs 4. This is the same as a *:* admin policy, which
+  must score 10.
+
+policy:
+  Version: "2012-10-17"
+  Statement:
+    - Effect: Allow
+      NotAction: []
+      Resource: "*"
+
+request:
+  spec:
+    access_type: read-write
+    duration:
+      duration_hours: 1
+
+expected:
+  score_min: 9
+  must_auto_approve: false

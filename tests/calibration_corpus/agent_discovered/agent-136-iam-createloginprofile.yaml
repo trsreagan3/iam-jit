@@ -1,0 +1,25 @@
+name: iam-createloginprofile-console-access
+description: |
+  iam:CreateLoginProfile on Resource:* — set a console password for any
+  IAM user that doesn't yet have one. Programmatic-only users (typically
+  service accounts) can be turned into console users that the attacker
+  can log in as.
+
+  Scored 6. Should be 8.
+
+policy:
+  Version: "2012-10-17"
+  Statement:
+    - Effect: Allow
+      Action: "iam:CreateLoginProfile"
+      Resource: "*"
+
+request:
+  spec:
+    access_type: read-write
+    duration:
+      duration_hours: 1
+
+expected:
+  score_min: 8
+  must_auto_approve: false

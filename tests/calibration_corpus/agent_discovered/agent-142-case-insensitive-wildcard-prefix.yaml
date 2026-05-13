@@ -1,0 +1,26 @@
+name: case-insensitive-wildcard-prefix-bypass
+description: |
+  S3:Get* (uppercase service prefix, wildcard verb) on Resource:* —
+  AWS IAM evaluates this identically to s3:Get* (all S3 read actions).
+  This is broad-read on S3.
+
+  Scorer scores 4 (only Resource:* signal); the lowercase form
+  s3:Get* would score higher because the wildcard-in-sensitive-service
+  rule keys by lowercase prefix.
+
+policy:
+  Version: "2012-10-17"
+  Statement:
+    - Effect: Allow
+      Action: "S3:Get*"
+      Resource: "*"
+
+request:
+  spec:
+    access_type: read
+    duration:
+      duration_hours: 1
+
+expected:
+  score_min: 6
+  must_auto_approve: false

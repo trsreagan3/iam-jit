@@ -1,0 +1,27 @@
+name: iam-attachuserpolicy-cross-account-wildcard
+description: |
+  iam:AttachUserPolicy on `arn:aws:iam::*:user/*` — attach ANY managed
+  policy (including AdministratorAccess) to ANY user in ANY account.
+  Direct privilege escalation: attach AdministratorAccess to yourself
+  or to a compromised low-priv user.
+
+  The scorer sees a non-"*" Resource string and scores 1 ("scoped").
+  The wildcard account ID + wildcard user name make this fully unscoped
+  in practice.
+
+policy:
+  Version: "2012-10-17"
+  Statement:
+    - Effect: Allow
+      Action: "iam:AttachUserPolicy"
+      Resource: "arn:aws:iam::*:user/*"
+
+request:
+  spec:
+    access_type: read-write
+    duration:
+      duration_hours: 1
+
+expected:
+  score_min: 9
+  must_auto_approve: false

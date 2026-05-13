@@ -1,0 +1,25 @@
+name: lambda-updatefunctioncode-code-injection
+description: |
+  lambda:UpdateFunctionCode on Resource:* — overwrite the source code
+  of any Lambda function. If any Lambda has a privileged execution role,
+  this is a privilege-escalation pathway: replace the function's code
+  with attacker code, invoke, and exfiltrate creds from the role.
+
+  Scored 6. Should be 8 (catastrophic code-exec + cross-resource).
+
+policy:
+  Version: "2012-10-17"
+  Statement:
+    - Effect: Allow
+      Action: "lambda:UpdateFunctionCode"
+      Resource: "*"
+
+request:
+  spec:
+    access_type: read-write
+    duration:
+      duration_hours: 1
+
+expected:
+  score_min: 8
+  must_auto_approve: false

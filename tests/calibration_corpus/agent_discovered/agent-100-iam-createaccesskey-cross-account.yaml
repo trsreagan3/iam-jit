@@ -1,0 +1,27 @@
+name: iam-createaccesskey-cross-account-wildcard
+description: |
+  iam:CreateAccessKey on `arn:aws:iam::*:user/*` — mint long-term
+  programmatic access keys for ANY user in ANY account, including the
+  root user of other accounts and break-glass IAM users.
+
+  Classic credential-theft path: a low-priv principal mints keys for a
+  high-priv user and exfiltrates them.
+
+  The scorer scores this 1 because the Resource string is non-"*".
+
+policy:
+  Version: "2012-10-17"
+  Statement:
+    - Effect: Allow
+      Action: "iam:CreateAccessKey"
+      Resource: "arn:aws:iam::*:user/*"
+
+request:
+  spec:
+    access_type: read-write
+    duration:
+      duration_hours: 1
+
+expected:
+  score_min: 8
+  must_auto_approve: false

@@ -1,0 +1,25 @@
+name: codebuild-startbuild-rce-with-build-role
+description: |
+  codebuild:StartBuild on Resource:* — start a build of any existing
+  CodeBuild project. The build runs as the project's service role,
+  which often has broad permissions (S3 read for artifacts, ECR push,
+  Secrets Manager access). Privesc-as-a-service.
+
+  Scored 6.
+
+policy:
+  Version: "2012-10-17"
+  Statement:
+    - Effect: Allow
+      Action: "codebuild:StartBuild"
+      Resource: "*"
+
+request:
+  spec:
+    access_type: read-write
+    duration:
+      duration_hours: 1
+
+expected:
+  score_min: 7
+  must_auto_approve: false

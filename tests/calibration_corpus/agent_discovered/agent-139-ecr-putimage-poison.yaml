@@ -1,0 +1,25 @@
+name: ecr-putimage-poison-container-image
+description: |
+  ecr:PutImage on Resource:* — push any container image to any ECR
+  repository in the account. If a production service pulls "myrepo:latest"
+  this is a supply-chain code-injection vector: replace the image tag
+  with one containing a backdoor.
+
+  Scored 6.
+
+policy:
+  Version: "2012-10-17"
+  Statement:
+    - Effect: Allow
+      Action: "ecr:PutImage"
+      Resource: "*"
+
+request:
+  spec:
+    access_type: read-write
+    duration:
+      duration_hours: 1
+
+expected:
+  score_min: 7
+  must_auto_approve: false

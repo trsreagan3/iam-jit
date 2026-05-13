@@ -1,0 +1,29 @@
+name: resources-typo-key-bypass
+description: |
+  Policy with `Resources: "*"` (typo - extra 's'). AWS IAM ignores
+  unknown keys, so this policy effectively has Resource= (missing).
+  In AWS, missing Resource on Allow + Action:"*" results in a parse
+  error / policy rejection — but if the scorer accepts it and emits
+  score 10, calibration is fine.
+
+  Note: the scorer ALSO scores this 10 (passes), but it's worth
+  noting that the analyzer accepts a malformed policy that AWS would
+  reject. The real bug is if a malformed-but-AWS-accepted policy
+  bypassed the scorer. See agent-142 for the inverse: 'Actions' typo.
+
+policy:
+  Version: "2012-10-17"
+  Statement:
+    - Effect: Allow
+      Action: "*"
+      Resources: "*"
+
+request:
+  spec:
+    access_type: read-write
+    duration:
+      duration_hours: 1
+
+expected:
+  score_min: 10
+  must_auto_approve: false

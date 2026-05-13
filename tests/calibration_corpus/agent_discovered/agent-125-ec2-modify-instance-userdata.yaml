@@ -1,0 +1,26 @@
+name: ec2-modifyinstanceattribute-userdata-injection
+description: |
+  ec2:ModifyInstanceAttribute on Resource:* — set the UserData of any
+  EC2 instance to attacker-controlled shell script. On next boot the
+  instance runs the script as root. Combined with ec2:RebootInstances
+  or waiting for natural ASG cycles this is RCE-as-root on any EC2
+  instance in the account.
+
+  Scored 6.
+
+policy:
+  Version: "2012-10-17"
+  Statement:
+    - Effect: Allow
+      Action: "ec2:ModifyInstanceAttribute"
+      Resource: "*"
+
+request:
+  spec:
+    access_type: read-write
+    duration:
+      duration_hours: 1
+
+expected:
+  score_min: 8
+  must_auto_approve: false

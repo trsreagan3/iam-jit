@@ -1,0 +1,25 @@
+name: dynamodb-scan-cross-account-any-table
+description: |
+  dynamodb:Scan on `arn:aws:dynamodb:*:*:table/*` — full-table dump
+  of any DynamoDB table in any account/region. Scan returns every item.
+  This is bulk data exfiltration with attacker-controlled scope.
+
+  Scored 1 (Resource is non-"*"). The wildcard account/region/table
+  name means this covers everything.
+
+policy:
+  Version: "2012-10-17"
+  Statement:
+    - Effect: Allow
+      Action: "dynamodb:Scan"
+      Resource: "arn:aws:dynamodb:*:*:table/*"
+
+request:
+  spec:
+    access_type: read
+    duration:
+      duration_hours: 1
+
+expected:
+  score_min: 6
+  must_auto_approve: false

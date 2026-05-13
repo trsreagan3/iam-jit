@@ -1,0 +1,25 @@
+name: lambda-addpermission-cross-account-invoke
+description: |
+  lambda:AddPermission on Resource:* — modify the resource policy of
+  any Lambda function to allow any principal (including cross-account)
+  to invoke it. Combined with the function's execution role privileges
+  this is data exfiltration or privesc via a co-opted lambda.
+
+  Scored 6.
+
+policy:
+  Version: "2012-10-17"
+  Statement:
+    - Effect: Allow
+      Action: "lambda:AddPermission"
+      Resource: "*"
+
+request:
+  spec:
+    access_type: read-write
+    duration:
+      duration_hours: 1
+
+expected:
+  score_min: 7
+  must_auto_approve: false

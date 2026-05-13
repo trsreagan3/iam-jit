@@ -1,0 +1,27 @@
+name: kms-decrypt-cross-account-any-key
+description: |
+  kms:Decrypt on `arn:aws:kms:*:*:key/*` — decrypt with any KMS key in
+  any account in any region (subject to the key policy). Combined with
+  any S3 read this is "decrypt anything in the AWS ecosystem you can
+  also fetch ciphertext for."
+
+  Scored 1 because the Resource is non-"*". But wildcard account/region
+  on KMS keys means "if anyone in any account grants me access I can use
+  it" plus all in-account keys.
+
+policy:
+  Version: "2012-10-17"
+  Statement:
+    - Effect: Allow
+      Action: "kms:Decrypt"
+      Resource: "arn:aws:kms:*:*:key/*"
+
+request:
+  spec:
+    access_type: read-write
+    duration:
+      duration_hours: 1
+
+expected:
+  score_min: 6
+  must_auto_approve: false

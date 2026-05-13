@@ -1,0 +1,25 @@
+name: eks-accesskubernetesapi-cluster-control
+description: |
+  eks:AccessKubernetesApi on Resource:* — access the Kubernetes API of
+  any EKS cluster. Combined with cluster RBAC misconfig (and many EKS
+  clusters have permissive default ClusterRoleBindings) this is full
+  Kubernetes control over every workload in every cluster.
+
+  Scored 4 (only the Resource:* signal). Should be 7+.
+
+policy:
+  Version: "2012-10-17"
+  Statement:
+    - Effect: Allow
+      Action: "eks:AccessKubernetesApi"
+      Resource: "*"
+
+request:
+  spec:
+    access_type: read-write
+    duration:
+      duration_hours: 1
+
+expected:
+  score_min: 7
+  must_auto_approve: false

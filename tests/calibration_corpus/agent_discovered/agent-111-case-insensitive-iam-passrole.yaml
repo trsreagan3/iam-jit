@@ -1,0 +1,28 @@
+name: case-insensitive-iam-passrole-bypass
+description: |
+  IAM:PassRole (uppercase service prefix) on Resource: "*". AWS IAM
+  treats Action service prefixes case-insensitively — uppercase, mixed
+  case, and lowercase forms are all equivalent to lowercase canonical.
+
+  The scorer scores `iam:PassRole` differently from `IAM:PassRole`
+  (`Iam:PassRole`, etc.), losing the catastrophic-action match because
+  the service-alias / sensitive-service set is keyed by lowercase.
+
+  `iam:PassRole` on *:* scores high; `IAM:PASSROLE` scores 4.
+
+policy:
+  Version: "2012-10-17"
+  Statement:
+    - Effect: Allow
+      Action: "IAM:PASSROLE"
+      Resource: "*"
+
+request:
+  spec:
+    access_type: read-write
+    duration:
+      duration_hours: 1
+
+expected:
+  score_min: 8
+  must_auto_approve: false

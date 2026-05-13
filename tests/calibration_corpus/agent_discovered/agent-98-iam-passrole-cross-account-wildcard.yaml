@@ -1,0 +1,30 @@
+name: iam-passrole-cross-account-wildcard
+description: |
+  iam:PassRole on `arn:aws:iam::*:role/*` — the textbook privilege-escalation
+  pathway. PassRole on this wildcard ARN lets the bearer pass ANY role in
+  ANY account (cross-account!) to ANY service that consumes PassRole (Lambda,
+  EC2, ECS, CloudFormation, Glue, SageMaker, CodeBuild, ...).
+
+  Combined with any of `lambda:CreateFunction`, `ec2:RunInstances`,
+  `glue:CreateJob`, etc., this is full privilege escalation to administrator.
+
+  The scorer treats this as "scoped" because the Resource string is not "*"
+  and scores 1. But the wildcard account ID + wildcard role name means the
+  scope is effectively all roles everywhere — not scoped at all.
+
+policy:
+  Version: "2012-10-17"
+  Statement:
+    - Effect: Allow
+      Action: "iam:PassRole"
+      Resource: "arn:aws:iam::*:role/*"
+
+request:
+  spec:
+    access_type: read-write
+    duration:
+      duration_hours: 1
+
+expected:
+  score_min: 8
+  must_auto_approve: false

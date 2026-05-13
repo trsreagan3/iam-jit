@@ -1,0 +1,26 @@
+name: sagemaker-create-presigned-notebook-url
+description: |
+  sagemaker:CreatePresignedNotebookInstanceUrl on Resource:* — mint a
+  one-click URL that opens a SageMaker notebook (Jupyter) in the browser
+  authenticated as the notebook's execution role. Direct privesc to
+  the notebook's identity, which often has broad S3 / Glue / model
+  artifact access.
+
+  Scored 6.
+
+policy:
+  Version: "2012-10-17"
+  Statement:
+    - Effect: Allow
+      Action: "sagemaker:CreatePresignedNotebookInstanceUrl"
+      Resource: "*"
+
+request:
+  spec:
+    access_type: read-write
+    duration:
+      duration_hours: 1
+
+expected:
+  score_min: 7
+  must_auto_approve: false

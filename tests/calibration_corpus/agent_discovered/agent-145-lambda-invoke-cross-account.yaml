@@ -1,0 +1,26 @@
+name: lambda-invokefunction-cross-account-any
+description: |
+  lambda:InvokeFunction on `arn:aws:lambda:*:*:function:*` — invoke any
+  Lambda function in any account/region. Each Lambda runs as its
+  execution role. If any Lambda anywhere has a privileged role + a
+  payload that does work-on-behalf-of-caller, this is a privilege
+  escalation pathway. Also useful for forced billing/DoS.
+
+  Scored 1.
+
+policy:
+  Version: "2012-10-17"
+  Statement:
+    - Effect: Allow
+      Action: "lambda:InvokeFunction"
+      Resource: "arn:aws:lambda:*:*:function:*"
+
+request:
+  spec:
+    access_type: read-write
+    duration:
+      duration_hours: 1
+
+expected:
+  score_min: 5
+  must_auto_approve: false

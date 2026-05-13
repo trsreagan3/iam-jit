@@ -1,0 +1,26 @@
+name: cloudformation-createstack-arbitrary-infra
+description: |
+  cloudformation:CreateStack on Resource:* — create arbitrary AWS
+  infrastructure via a CloudFormation template. Combined with the
+  CloudFormation role's privileges (often AdministratorAccess for the
+  CFN service role) this is a privilege-escalation pathway: deploy a
+  stack that creates an admin IAM user and exfiltrates the credentials.
+
+  Scored 6. Should be 8+.
+
+policy:
+  Version: "2012-10-17"
+  Statement:
+    - Effect: Allow
+      Action: "cloudformation:CreateStack"
+      Resource: "*"
+
+request:
+  spec:
+    access_type: read-write
+    duration:
+      duration_hours: 1
+
+expected:
+  score_min: 8
+  must_auto_approve: false

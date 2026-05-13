@@ -1,0 +1,24 @@
+name: iam-deactivatemfa-cross-account
+description: |
+  iam:DeactivateMFADevice on `arn:aws:iam::*:user/*` — turn off MFA on
+  any IAM user in any account, including break-glass / admin users.
+  Often a stepping stone before credential theft.
+
+  Scored 1 because the resource string is non-"*".
+
+policy:
+  Version: "2012-10-17"
+  Statement:
+    - Effect: Allow
+      Action: "iam:DeactivateMFADevice"
+      Resource: "arn:aws:iam::*:user/*"
+
+request:
+  spec:
+    access_type: read-write
+    duration:
+      duration_hours: 1
+
+expected:
+  score_min: 7
+  must_auto_approve: false

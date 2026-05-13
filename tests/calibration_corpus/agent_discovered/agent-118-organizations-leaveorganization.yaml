@@ -1,0 +1,25 @@
+name: organizations-leaveorganization-severs-scp
+description: |
+  organizations:LeaveOrganization on Resource:* — sever the member
+  account from the AWS Organization. SCPs no longer apply, central
+  audit/logging breaks, billing is detached. Once disconnected this
+  is hard to reverse and used as a step in advanced compromise.
+
+  Scored 6. Should be 8+.
+
+policy:
+  Version: "2012-10-17"
+  Statement:
+    - Effect: Allow
+      Action: "organizations:LeaveOrganization"
+      Resource: "*"
+
+request:
+  spec:
+    access_type: read-write
+    duration:
+      duration_hours: 1
+
+expected:
+  score_min: 8
+  must_auto_approve: false

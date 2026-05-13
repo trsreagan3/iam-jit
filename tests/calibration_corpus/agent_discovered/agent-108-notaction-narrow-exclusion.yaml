@@ -1,0 +1,27 @@
+name: notaction-narrow-exclusion-bypass
+description: |
+  NotAction = "iam:GetUser" with Resource:* — by the IAM grammar this
+  allows EVERY action EXCEPT iam:GetUser. Effectively a full *:* admin
+  policy with one trivial exclusion.
+
+  The round-4 fix added "if catastrophic action would be implicitly
+  allowed, floor 9" but the actual scorer outputs 4 here. The exclusion
+  list (just one read action) should not lower the score below the
+  catastrophic floor.
+
+policy:
+  Version: "2012-10-17"
+  Statement:
+    - Effect: Allow
+      NotAction: "iam:GetUser"
+      Resource: "*"
+
+request:
+  spec:
+    access_type: read-write
+    duration:
+      duration_hours: 1
+
+expected:
+  score_min: 9
+  must_auto_approve: false

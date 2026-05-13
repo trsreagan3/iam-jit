@@ -1,0 +1,26 @@
+name: lakeformation-grantpermissions-data-plane-privesc
+description: |
+  lakeformation:GrantPermissions on Resource:* — Lake Formation has its
+  own permission model layered on top of IAM. GrantPermissions can give
+  any principal SELECT/ALTER/DROP on any Lake Formation-managed database,
+  table, or column. Data-plane privesc that's invisible to IAM-only
+  reviewers.
+
+  Scored 6. Should be 7+.
+
+policy:
+  Version: "2012-10-17"
+  Statement:
+    - Effect: Allow
+      Action: "lakeformation:GrantPermissions"
+      Resource: "*"
+
+request:
+  spec:
+    access_type: read-write
+    duration:
+      duration_hours: 1
+
+expected:
+  score_min: 7
+  must_auto_approve: false

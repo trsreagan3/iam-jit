@@ -1,0 +1,25 @@
+name: iam-deleteuserpolicy-cross-account
+description: |
+  iam:DeleteUserPolicy on `arn:aws:iam::*:user/*` — delete inline IAM
+  policies (including explicit-deny boundary policies) on any user. This
+  is privilege escalation: if a user was restricted by an inline deny
+  policy, removing that policy unlocks broader access.
+
+  Scored 1 because the resource string is non-"*".
+
+policy:
+  Version: "2012-10-17"
+  Statement:
+    - Effect: Allow
+      Action: "iam:DeleteUserPolicy"
+      Resource: "arn:aws:iam::*:user/*"
+
+request:
+  spec:
+    access_type: read-write
+    duration:
+      duration_hours: 1
+
+expected:
+  score_min: 7
+  must_auto_approve: false

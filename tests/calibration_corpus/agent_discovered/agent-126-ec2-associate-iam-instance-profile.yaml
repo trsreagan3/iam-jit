@@ -1,0 +1,26 @@
+name: ec2-replace-iam-instance-profile-privesc
+description: |
+  ec2:ReplaceIamInstanceProfileAssociation on Resource:* — swap the
+  instance profile of any running EC2 instance to a higher-privileged
+  role. The instance metadata service now returns the new role's
+  credentials. Direct privesc from "I can ssh into this instance" to
+  "I have the privileges of any role in the account."
+
+  Scored 6. Should be 8+.
+
+policy:
+  Version: "2012-10-17"
+  Statement:
+    - Effect: Allow
+      Action: "ec2:ReplaceIamInstanceProfileAssociation"
+      Resource: "*"
+
+request:
+  spec:
+    access_type: read-write
+    duration:
+      duration_hours: 1
+
+expected:
+  score_min: 8
+  must_auto_approve: false

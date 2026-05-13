@@ -1,0 +1,23 @@
+name: statement-as-dict-iam-star
+description: |
+  Companion to agent-96: the single-dict Statement form combined with
+  iam:* on Resource:*. AWS treats this as a fully-valid policy granting
+  iam:* (full IAM admin). The scorer emits "No statements in policy"
+  and scores 1 — a complete bypass.
+
+policy:
+  Version: "2012-10-17"
+  Statement:
+    Effect: Allow
+    Action: "iam:*"
+    Resource: "*"
+
+request:
+  spec:
+    access_type: read-write
+    duration:
+      duration_hours: 1
+
+expected:
+  score_min: 9
+  must_auto_approve: false

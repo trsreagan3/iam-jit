@@ -1,0 +1,25 @@
+name: ssm-sendcommand-fleet-rce
+description: |
+  ssm:SendCommand on Resource:* — run arbitrary shell commands on every
+  EC2/SSM-managed instance in the account that has the SSM agent. This
+  is fleet-wide remote code execution. The classic privesc combo when
+  paired with any EC2 instance profile.
+
+  Scored 6. Single-action fleet-RCE is catastrophic.
+
+policy:
+  Version: "2012-10-17"
+  Statement:
+    - Effect: Allow
+      Action: "ssm:SendCommand"
+      Resource: "*"
+
+request:
+  spec:
+    access_type: read-write
+    duration:
+      duration_hours: 1
+
+expected:
+  score_min: 8
+  must_auto_approve: false

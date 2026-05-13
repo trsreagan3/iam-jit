@@ -1,0 +1,27 @@
+name: sso-admin-attach-managed-policy-to-permission-set
+description: |
+  sso-admin:AttachManagedPolicyToPermissionSet on Resource:* — attach
+  AdministratorAccess (or any managed policy) to any IAM Identity Center
+  Permission Set. Permission sets are how IAM Identity Center grants
+  access to AWS accounts; modifying them privileges every user assigned
+  to the set across every assigned account.
+
+  Scored 4 (only Resource:* signal). Should be 8+ — this is org-wide
+  privesc.
+
+policy:
+  Version: "2012-10-17"
+  Statement:
+    - Effect: Allow
+      Action: "sso-admin:AttachManagedPolicyToPermissionSet"
+      Resource: "*"
+
+request:
+  spec:
+    access_type: read-write
+    duration:
+      duration_hours: 1
+
+expected:
+  score_min: 8
+  must_auto_approve: false

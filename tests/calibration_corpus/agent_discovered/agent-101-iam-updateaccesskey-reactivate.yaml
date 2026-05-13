@@ -1,0 +1,25 @@
+name: iam-updateaccesskey-reactivate-revoked-creds
+description: |
+  iam:UpdateAccessKey on `arn:aws:iam::*:user/*` — reactivate access keys
+  that an SOC team revoked (status Inactive -> Active) for any user in any
+  account. Direct persistence/re-entry vector after incident response.
+
+  Scored 1 because the Resource string contains text (non-"*"), but the
+  wildcard account/user names make this fully unscoped.
+
+policy:
+  Version: "2012-10-17"
+  Statement:
+    - Effect: Allow
+      Action: "iam:UpdateAccessKey"
+      Resource: "arn:aws:iam::*:user/*"
+
+request:
+  spec:
+    access_type: read-write
+    duration:
+      duration_hours: 1
+
+expected:
+  score_min: 7
+  must_auto_approve: false

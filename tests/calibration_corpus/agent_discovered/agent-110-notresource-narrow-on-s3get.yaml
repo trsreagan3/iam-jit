@@ -1,0 +1,26 @@
+name: notresource-narrow-on-s3-getobject
+description: |
+  s3:GetObject with NotResource:["arn:aws:s3:::audit-logs/*"] — read
+  every S3 object in every bucket EXCEPT the audit-logs bucket. This is
+  effectively broad-read on all S3 with a single-path exclusion.
+
+  The scorer treats this as "All statements are scoped or limited" and
+  scores 1. NotResource is broad-with-narrow-exclusion, not narrow.
+
+policy:
+  Version: "2012-10-17"
+  Statement:
+    - Effect: Allow
+      Action: "s3:GetObject"
+      NotResource:
+        - "arn:aws:s3:::audit-logs/*"
+
+request:
+  spec:
+    access_type: read
+    duration:
+      duration_hours: 1
+
+expected:
+  score_min: 6
+  must_auto_approve: false

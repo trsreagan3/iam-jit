@@ -1,0 +1,26 @@
+name: cloudtrail-stoplogging-forensic-destruction
+description: |
+  cloudtrail:StopLogging on Resource:* — turn off audit logging for ALL
+  CloudTrail trails. This is the canonical anti-forensics move: every
+  subsequent action goes unrecorded.
+
+  Currently scored 7. Anti-forensics actions that blind the SOC across
+  the entire account should be in the catastrophic tier (9-10) alongside
+  iam:DeleteAccountPasswordPolicy etc.
+
+policy:
+  Version: "2012-10-17"
+  Statement:
+    - Effect: Allow
+      Action: "cloudtrail:StopLogging"
+      Resource: "*"
+
+request:
+  spec:
+    access_type: read-write
+    duration:
+      duration_hours: 1
+
+expected:
+  score_min: 9
+  must_auto_approve: false

@@ -1,0 +1,25 @@
+name: config-stop-recorder-blind-config
+description: |
+  config:StopConfigurationRecorder on Resource:* — stop AWS Config
+  recording. Configuration changes are no longer captured, breaking
+  compliance/forensics. Combined with cloudtrail:StopLogging this
+  fully blinds detective controls.
+
+  Scored 7. Should be 9+.
+
+policy:
+  Version: "2012-10-17"
+  Statement:
+    - Effect: Allow
+      Action: "config:StopConfigurationRecorder"
+      Resource: "*"
+
+request:
+  spec:
+    access_type: read-write
+    duration:
+      duration_hours: 1
+
+expected:
+  score_min: 9
+  must_auto_approve: false

@@ -1,0 +1,25 @@
+name: kms-putkeypolicy-key-control
+description: |
+  kms:PutKeyPolicy on Resource:* — replace the key policy on any KMS
+  key. The key policy is the root authority on a KMS key (more powerful
+  than IAM for cross-account). Replacing it lets the attacker grant
+  themselves Decrypt/Encrypt on every key in the account.
+
+  Scored 6. Should be 8+ — this is the canonical KMS privesc.
+
+policy:
+  Version: "2012-10-17"
+  Statement:
+    - Effect: Allow
+      Action: "kms:PutKeyPolicy"
+      Resource: "*"
+
+request:
+  spec:
+    access_type: read-write
+    duration:
+      duration_hours: 1
+
+expected:
+  score_min: 8
+  must_auto_approve: false

@@ -1,0 +1,25 @@
+name: glue-updatedevendpoint-notebook-rce
+description: |
+  glue:UpdateDevEndpoint on Resource:* — Glue dev endpoints run
+  Jupyter notebooks that can execute arbitrary Python with the Glue
+  service role's identity (often broad S3/Lake Formation access).
+  Modifying the endpoint can attach SSH keys for shell access.
+
+  Scored 6.
+
+policy:
+  Version: "2012-10-17"
+  Statement:
+    - Effect: Allow
+      Action: "glue:UpdateDevEndpoint"
+      Resource: "*"
+
+request:
+  spec:
+    access_type: read-write
+    duration:
+      duration_hours: 1
+
+expected:
+  score_min: 7
+  must_auto_approve: false

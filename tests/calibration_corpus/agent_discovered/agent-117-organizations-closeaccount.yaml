@@ -1,0 +1,24 @@
+name: organizations-closeaccount-destroys-account
+description: |
+  organizations:CloseAccount on Resource:* — close (terminate) member
+  AWS accounts in the organization. This is irreversible after 90 days
+  and incurs total data loss for the closed account.
+
+  Scored 6. Should be 9+ — destroys entire AWS accounts.
+
+policy:
+  Version: "2012-10-17"
+  Statement:
+    - Effect: Allow
+      Action: "organizations:CloseAccount"
+      Resource: "*"
+
+request:
+  spec:
+    access_type: read-write
+    duration:
+      duration_hours: 1
+
+expected:
+  score_min: 9
+  must_auto_approve: false

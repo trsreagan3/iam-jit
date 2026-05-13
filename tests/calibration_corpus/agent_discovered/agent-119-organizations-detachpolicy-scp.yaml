@@ -1,0 +1,25 @@
+name: organizations-detachpolicy-scp-removal
+description: |
+  organizations:DetachPolicy on Resource:* — remove SCPs (Service
+  Control Policies) from accounts/OUs. SCPs are the org-level guardrails
+  that prevent even the root user of a member account from performing
+  certain actions. Removing them disables those guardrails everywhere.
+
+  Scored 6. Should be 8+.
+
+policy:
+  Version: "2012-10-17"
+  Statement:
+    - Effect: Allow
+      Action: "organizations:DetachPolicy"
+      Resource: "*"
+
+request:
+  spec:
+    access_type: read-write
+    duration:
+      duration_hours: 1
+
+expected:
+  score_min: 8
+  must_auto_approve: false
