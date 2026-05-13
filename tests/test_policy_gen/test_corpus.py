@@ -167,6 +167,58 @@ CORPUS: list[CorpusCase] = [
         expected_actions_subset=["sqs:SendMessage"],
         expected_score_max=4,
     ),
+
+    # ---- EC2 ----
+    CorpusCase(
+        name="ec2-describe",
+        description="describe ec2 instances and their statuses",
+        expected_patterns=["ec2-describe"],
+        expected_actions_subset=["ec2:DescribeInstances"],
+        expected_score_max=4,
+    ),
+    CorpusCase(
+        name="ec2-start-stop",
+        description="start ec2 instance for testing",
+        expected_patterns=["ec2-start-stop"],
+        expected_actions_subset=["ec2:StartInstances"],
+        # No instance ID extracted → wildcard ARN → HIGH_IMPACT-broad
+        # floor 8. Refinement hint should suggest naming the specific
+        # instance. The score correctly reflects the actual scope.
+        expected_score_max=8,
+    ),
+
+    # ---- API Gateway / EventBridge / Step Functions ----
+    CorpusCase(
+        name="eventbridge-publish",
+        description="publish event to eventbridge",
+        expected_patterns=["eventbridge-publish"],
+        expected_actions_subset=["events:PutEvents"],
+        expected_score_max=8,  # Broad event-bus = HIGH_IMPACT-broad
+    ),
+    CorpusCase(
+        name="step-functions-execute",
+        description="start state machine execution for order-pipeline",
+        expected_patterns=["step-functions-execute"],
+        expected_actions_subset=["states:StartExecution"],
+        expected_score_max=8,
+    ),
+
+    # ---- CloudFormation ----
+    CorpusCase(
+        name="cloudformation-describe",
+        description="list cloudformation stacks",
+        expected_patterns=["cloudformation-describe"],
+        expected_actions_subset=["cloudformation:ListStacks"],
+        expected_score_max=4,
+    ),
+    CorpusCase(
+        name="cloudformation-deploy",
+        description="deploy cloudformation stack",
+        expected_patterns=["cloudformation-deploy"],
+        expected_actions_subset=["cloudformation:CreateStack", "iam:PassRole"],
+        # CFN is in CODE_EXECUTION_PRIMITIVES + IAM:PassRole → 9
+        expected_score_min=8,
+    ),
 ]
 
 

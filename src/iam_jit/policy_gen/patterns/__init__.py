@@ -116,7 +116,20 @@ def _phrase_matches(phrase: str, desc_lc: str, desc_tokens: list[str]) -> bool:
 # Import service-specific pattern files. Each module exposes a
 # module-level `PATTERNS: list[Pattern]` constant. The order here is
 # stable so audit logs are reproducible.
-from . import s3, lambda_, dynamodb, logs, ssm_secrets, iam_passrole, ecs, rds, kms_misc  # noqa: E402
+from . import (  # noqa: E402
+    api_gateway,
+    cloudformation,
+    dynamodb,
+    ec2,
+    ecs,
+    iam_passrole,
+    kms_misc,
+    lambda_,
+    logs,
+    rds,
+    s3,
+    ssm_secrets,
+)
 
 ALL_PATTERNS: list[Pattern] = (
     s3.PATTERNS
@@ -128,4 +141,7 @@ ALL_PATTERNS: list[Pattern] = (
     + ecs.PATTERNS
     + rds.PATTERNS
     + kms_misc.PATTERNS
+    + api_gateway.PATTERNS
+    + cloudformation.PATTERNS
+    + ec2.PATTERNS
 )
