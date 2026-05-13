@@ -1,0 +1,52 @@
+name: agent-1001-missing-resource-passrole
+description: |
+  ROUND 10 WHITE-BOX — gap 5.
+
+  A statement with `iam:PassRole` and NO `Resource` key (key entirely
+  absent, not `Resource: ""`) currently scores 4 because
+  `wildcard_resource = False` so the iam:PassRole-on-broad rule
+  (line 2654-2662, floor 9) doesn't fire.
+
+  Per AWS, Resource is mandatory in identity-policy statements; AWS
+  itself rejects the policy at attach time. BUT:
+    - Some tools (Terraform `aws_iam_policy_document` with
+      `not_resources = []` left empty) emit policies without
+      Resource at all when the author forgets.
+    - Some validators default missing-Resource to `*` per the AWS
+      simulator's permissive evaluation mode.
+    - Round-6 principle: "Malformed = worst-case" — the scorer's
+      job is to flag risk BEFORE AWS sees it.
+
+  When an Allow statement has Action but no Resource, the most
+  conservative interpretation is Resource:* (worst-case). Currently
+  the scorer treats missing-Resource as "narrow," falling through
+  to the iam:PassRole narrow floor of 4 — auto-approve-eligible
+  with default thresholds.
+
+  This is a TRUST-POLICY ambiguity edge: trust policies legitimately
+  omit Resource. But trust-policy statements also have `Principal`.
+  Detection: identity-policy = has Action but no Principal AND no
+  Resource → treat Resource as implicit `*`.
+
+  Gap: 5 (current=4, expected≥9).
+
+  Fix: in `_deterministic`, when `Resource` is absent AND
+  `NotResource` is absent AND `Principal` is absent (i.e., it's
+  an identity-policy statement), treat Resource as `*` implicitly
+  so the broad-resource rules apply.
+
+policy:
+  Version: "2012-10-17"
+  Statement:
+    - Effect: Allow
+      Action: iam:PassRole
+
+request:
+  spec:
+    access_type: read-write
+    duration:
+      duration_hours: 1
+
+expected:
+  score_min: 7
+  must_auto_approve: false

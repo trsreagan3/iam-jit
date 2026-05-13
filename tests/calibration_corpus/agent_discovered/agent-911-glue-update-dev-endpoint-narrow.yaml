@@ -1,0 +1,47 @@
+name: agent-911-glue-update-dev-endpoint-narrow
+description: |
+  BLACK-BOX Round 10 — `glue:UpdateDevEndpoint` narrow (PublicKey injection).
+
+  Round-6 (agent-133) flagged the broad-resource form as RCE. This is
+  the narrow-resource form — `glue:UpdateDevEndpoint` on a SPECIFIC
+  Glue dev-endpoint ARN.
+
+  `glue:UpdateDevEndpoint` with a `PublicKey` patch op grants SSH access
+  to the dev-endpoint's underlying Apache Spark cluster. The cluster
+  runs with whatever IAM role was passed at creation time — typically
+  a permissive role with S3 read access to the data lake. The attacker
+  adds their public key, SSH's in, and now has RCE inside the data lake
+  perimeter with cluster-role credentials.
+
+  Scored: 3 ("All statements are scoped or limited").
+  Expected: 7 (RCE on a specific Glue dev-endpoint — data-lake compromise).
+  Gap: 4.
+
+  The narrow form is the more dangerous one in practice because it
+  avoids the "broad-permissions" detection radar — a CI/CD service
+  account with permission to update ONE dev-endpoint is widely deployed.
+
+  Source: Rhino Security Labs "AWS IAM Privilege Escalation Methods"
+  method #15 (glue:UpdateDevEndpoint); Pacu module `glue__exec`.
+
+  Proposed fix: add `glue:UpdateDevEndpoint`, `glue:CreateDevEndpoint`,
+  `glue:GetDevEndpoint` to the code-execution-primitive catalog with
+  per-endpoint floor 7 (matches existing iam:PassRole + glue:*
+  composition behavior already in place for broad-resource form).
+
+policy:
+  Version: "2012-10-17"
+  Statement:
+    - Effect: Allow
+      Action: "glue:UpdateDevEndpoint"
+      Resource: "arn:aws:glue:us-east-1:123456789012:devEndpoint/data-lake-spark"
+
+request:
+  spec:
+    access_type: read-write
+    duration:
+      duration_hours: 1
+
+expected:
+  score_min: 7
+  must_auto_approve: false

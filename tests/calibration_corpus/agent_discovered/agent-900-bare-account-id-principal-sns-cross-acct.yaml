@@ -1,0 +1,54 @@
+name: agent-900-bare-account-id-principal-sns-cross-acct
+description: |
+  BLACK-BOX Round 10 — bare-12-digit-account-id Principal (not ARN form) in a
+  resource-based policy. Round-9-BB's HHH recommendation specifically called
+  out the bare-account-id Principal form as needing detection; round-9-BB
+  closed the ARN form but the bare-account-id form is still bypassed.
+
+  AWS resource-based policies accept `Principal.AWS` values in several
+  syntactic forms: full ARN (`arn:aws:iam::999...:root`), root-account ARN
+  shorthand, bare 12-digit account-id (`999999999999`), and `*`. The
+  bare-account-id form is documented and equivalent to
+  `arn:aws:iam::999999999999:root`. The scorer detects the ARN form
+  (round 9 batch 1 cross-account-resource-policy rule) but NOT the bare
+  account-id form, even though it has identical semantic effect.
+
+  Scored: 3 ("All statements are scoped or limited").
+  Expected: 7 (cross-account resource-policy read grant to foreign acct).
+  Gap: 4.
+
+  Pattern: SNS topic resource policy granting `sns:Subscribe` + `sns:Receive`
+  to bare account-id `999999999999`. The Principal value isn't `*`, so the
+  Principal-* detector misses it; it's not an ARN, so the ARN-account-id
+  comparison misses it.
+
+  Source: AWS docs "Specifying a principal" — table of canonical principal
+  syntaxes. Pacu `iam__enum_permissions` enumerates Principal in all forms.
+
+  Proposed fix: extend cross-account resource-policy direction detector
+  (round 9 HHH) to also recognize Principal.AWS values that are exactly
+  12 digits (regex `^[0-9]{12}$`). Compare those digits against the
+  account-id segment of the Resource ARN — if different, treat as
+  cross-account.
+
+policy:
+  Version: "2012-10-17"
+  Statement:
+    - Effect: Allow
+      Principal:
+        AWS: "999999999999"
+      Action:
+        - "sns:Subscribe"
+        - "sns:Receive"
+        - "sns:GetTopicAttributes"
+      Resource: "arn:aws:sns:us-east-1:123456789012:prod-events"
+
+request:
+  spec:
+    access_type: read-write
+    duration:
+      duration_hours: 1
+
+expected:
+  score_min: 7
+  must_auto_approve: false

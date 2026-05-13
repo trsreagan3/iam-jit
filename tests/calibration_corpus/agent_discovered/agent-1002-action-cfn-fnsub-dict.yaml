@@ -1,0 +1,44 @@
+name: agent-1002-action-cfn-fnsub-dict
+description: |
+  ROUND 10 WHITE-BOX — gap 9 (same defect class as agent-1000).
+
+  CloudFormation policies can carry intrinsic-function shapes that
+  resolve at deploy time. A pre-resolution policy may contain:
+
+      "Action": {"Fn::Sub": "iam:PassRole"}
+
+  After CFN deployment, the dict becomes the string `"iam:PassRole"`
+  — full PassRole on Resource:*. But the scorer sees this BEFORE
+  deployment (validation, drift detection, pre-merge review) and
+  `_as_list()` returns `[]` because the value isn't a string.
+
+  Same root cause as agent-1000: dict-shaped Action silently dropped.
+  Worth a separate fixture because CFN/CDK is by far the most common
+  source of dict-shaped intermediate forms in real-world policies.
+
+  Gap: 9 (current=1, expected≥9).
+
+  Fix:
+    1. In `_as_list`, detect intrinsic-function-shaped dicts
+       (`Fn::Sub`, `Fn::Join`, `Fn::GetAtt`, `Ref`, etc.) and
+       either resolve heuristically or flag with floor 5+.
+    2. Generally: any dict-shaped Action/Resource = malformed →
+       floor 5 minimum.
+
+policy:
+  Version: "2012-10-17"
+  Statement:
+    - Effect: Allow
+      Action:
+        Fn::Sub: "iam:PassRole"
+      Resource: "*"
+
+request:
+  spec:
+    access_type: read-write
+    duration:
+      duration_hours: 1
+
+expected:
+  score_min: 5
+  must_auto_approve: false

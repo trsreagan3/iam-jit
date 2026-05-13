@@ -1,0 +1,43 @@
+name: agent-902-bare-account-id-sqs-receive-cross-acct
+description: |
+  BLACK-BOX Round 10 — bare-account-id LIST Principal cross-account on SQS.
+  Worst-case form: mixed account-id list (own + foreign) — scorer drops
+  ALL the way to 1 because no broad-pattern factor fires.
+
+  Scored: 1 (literal: "All statements are scoped or limited").
+  Expected: 7 (cross-account resource-policy read grant — every message
+  destined for prod-q is now drainable by foreign account 999...).
+  Gap: 6 — among the worst of round 10.
+
+  Identical class as agent-900 / agent-901 but the bare-account-id list
+  form pushes the score lower than even the single-string form because
+  multi-statement / multi-value heuristics also miss it.
+
+  Source: AWS SQS Developer Guide "Cross-account permissions" — the
+  bare-account-id list form is the documented examples for x-acct
+  consumer setups.
+
+  Proposed fix: same as 900/901 — bare-account-id detection extended
+  to LIST values, with mixed own/foreign treated as foreign-dominant.
+
+policy:
+  Version: "2012-10-17"
+  Statement:
+    - Effect: Allow
+      Principal:
+        AWS: ["111111111111", "999999999999"]
+      Action:
+        - "sqs:ReceiveMessage"
+        - "sqs:DeleteMessage"
+        - "sqs:GetQueueAttributes"
+      Resource: "arn:aws:sqs:us-east-1:123456789012:prod-q"
+
+request:
+  spec:
+    access_type: read-write
+    duration:
+      duration_hours: 1
+
+expected:
+  score_min: 7
+  must_auto_approve: false

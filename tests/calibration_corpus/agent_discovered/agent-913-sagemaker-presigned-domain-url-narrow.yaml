@@ -1,0 +1,48 @@
+name: agent-913-sagemaker-presigned-domain-url-narrow
+description: |
+  BLACK-BOX Round 10 — `sagemaker:CreatePresignedDomainUrl` narrow.
+
+  SageMaker Studio domains run JupyterLab notebooks under per-user
+  IAM execution-roles. `CreatePresignedDomainUrl` (and the older
+  `CreatePresignedNotebookInstanceUrl`) generates a signed URL that
+  lets anyone with the URL into the user's notebook environment
+  WITHOUT going through normal IAM auth — pure URL == access.
+
+  Combined with `sagemaker:CreateApp` (already partially covered in
+  round-6 agent-134's broad form), an attacker can:
+    1. Provision a Studio app under the target user's identity
+    2. Generate a presigned URL (90-day TTL by default)
+    3. Use the URL anywhere — bypasses MFA, IP allow-lists, conditional
+       access — to run notebook code as the target user's execution
+       role.
+
+  Scored: 3 (both actions narrow on Studio domain ARN — no broad pattern).
+  Expected: 7 (cross-domain RCE primitive on a specific SageMaker
+  Studio user, with the presigned URL as a credential-equivalent).
+  Gap: 4.
+
+  Source: AWS SageMaker Security Best Practices; Trend Micro Cloud One
+  research 2024 "SageMaker Studio as a privilege-escalation path".
+
+  Proposed fix: add `sagemaker:CreatePresignedDomainUrl`,
+  `sagemaker:CreatePresignedNotebookInstanceUrl`, `sagemaker:CreateApp`
+  to the code-execution-primitive catalog. Floor 7 narrow.
+
+policy:
+  Version: "2012-10-17"
+  Statement:
+    - Effect: Allow
+      Action:
+        - "sagemaker:CreatePresignedDomainUrl"
+        - "sagemaker:CreateApp"
+      Resource: "arn:aws:sagemaker:us-east-1:123456789012:app/d-abc/user1/JupyterServer/*"
+
+request:
+  spec:
+    access_type: read-write
+    duration:
+      duration_hours: 1
+
+expected:
+  score_min: 7
+  must_auto_approve: false

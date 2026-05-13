@@ -1,0 +1,46 @@
+name: agent-907-connect-update-contactflow-narrow
+description: |
+  BLACK-BOX Round 10 — `connect:UpdateContactFlow` narrow resource.
+
+  Per round-9-BB KKK recommendation, Amazon Connect actions
+  `connect:UpdateContactFlow`, `connect:AssociateLambdaFunction`,
+  `connect:CreateInstance`, `connect:UpdateUserSecurityProfiles`
+  should be added to the high-impact catalog. Round-9 closed the
+  broad-resource form on `AssociateLambdaFunction` (agent-720); this
+  is the narrow-resource sibling on `UpdateContactFlow`.
+
+  Updating a contact-flow lets the attacker rewire the call-center IVR
+  to dump customer voice/DTMF input to an exfil endpoint. This is the
+  classic PII-exfil-in-the-call-center primitive — SSN, DOB, account
+  numbers spoken by callers are routinely captured this way.
+
+  Scored: 1 (literal: "All statements are scoped or limited").
+  Expected: 7 (sensitive PII-pipeline mutation; narrow-scope but
+  high-blast on the specific contact center).
+  Gap: 6.
+
+  Source: AWS Connect Admin Guide "Contact flow security"; Wiz Cloud
+  Security Forum 2024 on contact-flow tampering. The narrow-resource
+  form is actually MORE dangerous than the broad form because attackers
+  prefer targeted modifications that evade GuardDuty noise filters.
+
+  Proposed fix: extend high-impact action catalog to include
+  `connect:UpdateContactFlow`, `connect:CreateContactFlow`,
+  `connect:UpdateUserSecurityProfile` at floor 7 narrow / 8 broad.
+
+policy:
+  Version: "2012-10-17"
+  Statement:
+    - Effect: Allow
+      Action: "connect:UpdateContactFlow"
+      Resource: "arn:aws:connect:us-east-1:123456789012:instance/abc/contact-flow/main-ivr"
+
+request:
+  spec:
+    access_type: read-write
+    duration:
+      duration_hours: 1
+
+expected:
+  score_min: 7
+  must_auto_approve: false

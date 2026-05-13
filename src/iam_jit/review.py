@@ -149,6 +149,12 @@ _CODE_EXECUTION_PRIMITIVES = frozenset(
         # on a schedule under the canary's IAM role
         "synthetics:CreateCanary",
         "synthetics:UpdateCanary",
+        # ROUND 10 additions — newer-service code-exec primitives
+        # whose narrow-resource form was scoring 3 instead of 7+:
+        # Glue dev endpoints (Jupyter-style RCE), SageMaker presigned
+        # domain URL (in-browser code execution).
+        "glue:UpdateDevEndpoint",
+        "sagemaker:CreatePresignedDomainUrl",
         # ROUND 6 additions:
         # EventBridge Pipes — `CreatePipe` consumes from a source
         # and invokes a target; both can be Lambdas + the pipe runs
@@ -355,6 +361,23 @@ _CROSS_ACCOUNT_EXFIL_ACTIONS = frozenset(
         "verifiedaccess:CreateVerifiedAccessGroup",
         "verifiedaccess:CreateVerifiedAccessEndpoint",
         "verifiedaccess:ModifyVerifiedAccessTrustProvider",
+        # ROUND 10 additions — narrow-resource form of newer-service
+        # catastrophics still slipping past collection wildcards:
+        # - Connect contact flows = IVR routing → exfil customer PII
+        # - API Gateway API keys = compromise the API perimeter
+        # - AppStream image builders = Windows RCE on persistent VM
+        # - Bedrock Guardrails removal = LLM safety strip
+        # - VPC Lattice auth policy delete = service exposure
+        "connect:UpdateContactFlow",
+        "connect:UpdateContactFlowContent",
+        "connect:AssociateLambdaFunction",
+        "apigateway:UpdateApiKey",
+        "appstream2:CreateImageBuilder",
+        "appstream2:UpdateImagePermissions",
+        "bedrock:UpdateGuardrail",
+        "bedrock:DeleteGuardrail",
+        "vpc-lattice:DeleteAuthPolicy",
+        "vpc-lattice:PutAuthPolicy",
         # Direct Connect — bridge VPC to attacker's on-prem
         "directconnect:CreateConnection",
         "directconnect:CreatePrivateVirtualInterface",
@@ -1130,6 +1153,26 @@ def _norm_grammar_str(s: object) -> str:
              .replace("%252A", "*").replace("%252a", "*")
              .replace("%252F", "/").replace("%252f", "/")
         )
+    # HTML-entity decode for the same characters. `iam&#58;PassRole`
+    # ( `&#58;` is the HTML decimal entity for ":") also bypasses
+    # service-prefix lookups. Round 10 BB agent-906.
+    if "&#" in s:
+        s = (
+            s.replace("&#58;", ":").replace("&#x3A;", ":").replace("&#x3a;", ":")
+             .replace("&#42;", "*").replace("&#x2A;", "*").replace("&#x2a;", "*")
+             .replace("&#47;", "/").replace("&#x2F;", "/").replace("&#x2f;", "/")
+        )
+    # Collapse leading / trailing / repeated colons in IAM actions.
+    # `:iam:PassRole`, `iam:PassRole:`, `iam::PassRole` are all
+    # adversarial forms that AWS rejects but downstream tools may
+    # auto-correct, hiding real risk. Round 10 BB agent-903, 904, 905.
+    if "::" in s or s.startswith(":") or s.endswith(":"):
+        # Only normalize when the string LOOKS LIKE an IAM action
+        # (`service:name` shape) — don't mess with ARN strings.
+        if not s.startswith("arn:"):
+            while "::" in s:
+                s = s.replace("::", ":")
+            s = s.strip(":")
     # NFKC compatibility normalization
     s = _unicodedata.normalize("NFKC", s)
     # Cross-script homoglyphs
@@ -1833,6 +1876,105 @@ def _deterministic(
                 )
                 break
 
+    # Malformed Action/Resource field detection. AWS requires Action
+    # and Resource to be string or list-of-strings; some converters
+    # (CDK synth, CFN intrinsic functions, JSON-to-policy tools) emit
+    # other shapes that the scorer's `_as_list` silently drops, hiding
+    # the policy's true risk. Round 10 WB agent-1000 (dict-keys Action),
+    # agent-1002 (Fn::Sub Action), agent-1003 (dict Resource),
+    # agent-1004 (JSON-stringified list Action), agent-1005 (null entry
+    # in list).
+    if isinstance(statements, list):
+        malformed_fields_found = False
+        for stmt in statements:
+            if not isinstance(stmt, dict):
+                continue
+            for field_name in ("Action", "NotAction", "Resource", "NotResource"):
+                v = stmt.get(field_name)
+                if v is None:
+                    continue
+                if isinstance(v, str):
+                    continue
+                if isinstance(v, list):
+                    # Per-element check — list entries should be strings
+                    if any(not isinstance(x, str) for x in v):
+                        malformed_fields_found = True
+                        break
+                    continue
+                # Any other type (dict, int, bool) is malformed.
+                malformed_fields_found = True
+                break
+            # JSON-string smuggling: Action/Resource is a string but the
+            # CONTENT looks like a JSON array (`["iam:...", ...]`).
+            # AWS rejects this — but downstream tools may auto-parse.
+            # Round 10 WB agent-1004.
+            if not malformed_fields_found:
+                for field_name in ("Action", "NotAction", "Resource", "NotResource"):
+                    v = stmt.get(field_name)
+                    if isinstance(v, str) and v.startswith("[") and v.endswith("]") and "," in v:
+                        malformed_fields_found = True
+                        break
+            if malformed_fields_found:
+                break
+        if malformed_fields_found:
+            # Conservative floor: malformed Action/Resource fields are
+            # almost always either generation bugs OR adversarial
+            # smuggling attempts. Floor 5; rule annotated so the
+            # operator can decide whether to escalate.
+            score = max(score, 5)
+            factors.append(
+                "Statement has malformed `Action`/`Resource` field "
+                "(non-string, non-list-of-strings type). AWS would "
+                "reject this at policy-attach but downstream tools "
+                "may auto-correct the shape — the resulting effective "
+                "policy could be far broader than what the author "
+                "intended. Common when CDK synth / CFN Fn::Sub / "
+                "JSON-to-policy converters leave intermediate forms."
+            )
+            suggestions.append(
+                "Validate the policy JSON against the AWS IAM grammar "
+                "before submission. Each `Action`/`Resource` must be "
+                "a string or list of strings."
+            )
+
+    # Missing-Resource on Allow identity-policy statement → implicit
+    # `Resource: *` (worst-case). When a statement has `Action` but
+    # NO `Resource`, NO `NotResource`, and NO `Principal` (it's not
+    # a resource-based / trust policy), AWS rejects at attach time
+    # — but the scorer's job is to score the author's PROBABLE intent
+    # before AWS sees it. Conservatively treat missing-Resource as
+    # `Resource: *` so the broad-resource rules apply.
+    # Round 10 WB agent-1001.
+    if isinstance(statements, list):
+        new_stmts: list[Any] = []
+        any_normalized = False
+        for stmt in statements:
+            if not isinstance(stmt, dict):
+                new_stmts.append(stmt)
+                continue
+            if (
+                "Action" in stmt
+                and "Resource" not in stmt
+                and "NotResource" not in stmt
+                and "Principal" not in stmt
+                and "NotPrincipal" not in stmt
+            ):
+                stmt = {**stmt, "Resource": "*"}
+                any_normalized = True
+            new_stmts.append(stmt)
+        if any_normalized:
+            statements = new_stmts
+            policy = {**policy, "Statement": statements}
+            score = max(score, 5)
+            factors.append(
+                "Statement has `Action` but no `Resource` / "
+                "`NotResource` / `Principal` — AWS requires `Resource` "
+                "in identity-policy statements and rejects at attach "
+                "time, but to flag the author's likely intent the "
+                "scorer treats missing-Resource as implicit `*` (worst "
+                "case)."
+            )
+
     if isinstance(statements, list):
         for stmt in statements:
             if not isinstance(stmt, dict):
@@ -2133,14 +2275,21 @@ def _deterministic(
                 if aws_principals is not None:
                     pvals = aws_principals if isinstance(aws_principals, list) else [aws_principals]
                     # Collect Principal account-ids from literal ARNs
+                    # AND from bare 12-digit account IDs — AWS treats
+                    # `Principal: {AWS: "999999999999"}` as equivalent
+                    # to `arn:aws:iam::999999999999:root`. Round 10 BB
+                    # agent-900, 901, 902.
                     principal_accounts: set[str] = set()
                     for v in pvals:
-                        if not isinstance(v, str) or not v.startswith("arn:"):
+                        if not isinstance(v, str):
                             continue
-                            # bare account IDs are handled by another rule
-                        ap = v.split(":", 5)
-                        if len(ap) >= 5 and "*" not in ap[4] and ap[4]:
-                            principal_accounts.add(ap[4])
+                        if v.startswith("arn:"):
+                            ap = v.split(":", 5)
+                            if len(ap) >= 5 and "*" not in ap[4] and ap[4]:
+                                principal_accounts.add(ap[4])
+                        elif v.isdigit() and len(v) == 12:
+                            # Bare 12-digit account ID
+                            principal_accounts.add(v)
                     if principal_accounts and is_assume_role_action:
                         # Trust-policy backdoor primitive
                         score = max(score, 7)
@@ -3027,6 +3176,27 @@ def _deterministic(
             "code that runs under whatever role the matched resources "
             "use. Even without explicit PassRole, the existing roles "
             "of matched resources become the attack target."
+        )
+    elif any(
+        _canonical_action(a) in _CODE_EXECUTION_PRIMITIVES_LC
+        for a, _i, _s in all_actions
+    ):
+        # Code-execution primitive on NARROW resource — still
+        # warrants human review. The attacker can deploy code into
+        # the named resource and run it under that resource's role.
+        # Floor 6: above default auto-approve, below catastrophic.
+        # Round 10 BB agent-911, 913.
+        score = max(score, 6)
+        which_examples = sorted([
+            a for a, _i, _s in all_actions
+            if _canonical_action(a) in _CODE_EXECUTION_PRIMITIVES_LC
+        ])[:3]
+        factors.append(
+            f"Code-execution primitive on narrow resource: "
+            f"{', '.join(which_examples)}. Even on a single named "
+            "resource, this lets the caller deploy attacker-controlled "
+            "code that runs under the resource's role — review the "
+            "target resource's role privileges before approving."
         )
 
     if has_code_exec and pass_role_any:

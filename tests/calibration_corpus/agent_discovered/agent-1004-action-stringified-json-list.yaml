@@ -1,0 +1,51 @@
+name: agent-1004-action-stringified-json-list
+description: |
+  ROUND 10 WHITE-BOX — gap 5.
+
+  Some IaC tools (Terraform with `jsonencode(...)` mis-applied,
+  Pulumi when output references are double-encoded) emit
+  Action as a JSON-encoded string of a list:
+
+      "Action": "[\"iam:PassRole\",\"iam:CreateRole\"]"
+
+  AWS rejects this at attach time, but the scorer's
+  `_norm_grammar_str` doesn't json-decode. The action gets
+  treated as one giant literal action with brackets and quotes —
+  it has no `:` after normalization (the `:` is JSON syntax,
+  not a service:Action separator after the outer quotes).
+
+  Actually `_norm_grammar_str` doesn't strip JSON, so the action
+  contains the `:` from `"iam:PassRole"` and the action-prefix
+  parser splits at the FIRST colon. The "service" becomes
+  `["iam` (literal bracket+quote+iam) and the rest is the action
+  name. No rule fires; the only signal is "broad cross-resource
+  read/access" if Resource:* — currently scoring 4.
+
+  Gap: 5 (current=4, expected≥9 — the policy intent is clearly
+  iam:PassRole + iam:CreateRole both on `*`, which is full
+  account compromise).
+
+  Fix:
+    1. In `_norm_grammar_str`, detect strings that start with
+       `[` and end with `]` (or `{...}` containing `Action`
+       keys) and attempt to json-decode. If decode succeeds,
+       use the result.
+    2. Failing that: surface a "malformed Action — JSON-encoded
+       string in service:Action slot" factor at floor 7+.
+
+policy:
+  Version: "2012-10-17"
+  Statement:
+    - Effect: Allow
+      Action: '["iam:PassRole","iam:CreateRole"]'
+      Resource: "*"
+
+request:
+  spec:
+    access_type: read-write
+    duration:
+      duration_hours: 1
+
+expected:
+  score_min: 5
+  must_auto_approve: false

@@ -1,0 +1,61 @@
+name: agent-1006-statement-tuple-form
+description: |
+  ROUND 10 WHITE-BOX — gap 9 (catastrophic bypass).
+
+  Some YAML/JSON libraries (Python `tomllib`, certain CDK
+  transforms, manually-constructed policy dicts) produce TUPLES
+  instead of lists for `Statement`. The Python-level check at
+  review.py line 1772:
+
+      elif not isinstance(statements, list):
+          return 1, ["No statements in policy"], []
+
+  rejects tuples and returns score=1. A tuple-form admin policy:
+
+      Statement = ({"Effect": "Allow", "Action": "*", "Resource": "*"},)
+
+  is silently treated as "no statements" — a complete bypass
+  for any policy in tuple form.
+
+  Sibling to round-5 agent-96 (dict-form) and round-9 agent-800
+  (sid-keyed-dict). Statement-shape grammar continues to be the
+  highest-leverage bypass surface.
+
+  Gap: 9 (current=1, expected≥9).
+
+  Fix: replace `isinstance(statements, list)` with
+  `isinstance(statements, (list, tuple))` OR coerce tuples
+  to lists in the Statement-normalization block.
+
+  NOTE: This fixture can't be expressed in YAML directly (YAML
+  has no tuple type). Test via Python harness:
+
+      analyze_policy({
+          "Version": "2012-10-17",
+          "Statement": tuple([{"Effect": "Allow", "Action": "*", "Resource": "*"}])
+      }, {"spec": {"access_type": "read-write"}})
+
+  Expected score: ≥9. Actual: 1.
+
+  This YAML is a placeholder documenting the gap — the actual
+  test requires Python-side harness work. Listed as
+  architectural even though it's not auto-loaded.
+
+policy:
+  Version: "2012-10-17"
+  # YAML representation of a list — actual bypass is when
+  # downstream Python code receives this as a tuple instead.
+  Statement:
+    - Effect: Allow
+      Action: "*"
+      Resource: "*"
+
+request:
+  spec:
+    access_type: read-write
+    duration:
+      duration_hours: 1
+
+expected:
+  score_min: 10
+  must_auto_approve: false

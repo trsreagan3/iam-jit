@@ -1,0 +1,57 @@
+name: agent-1009-principal-aws-nested-dict
+description: |
+  ROUND 10 WHITE-BOX — gap 2 (calibration drift).
+
+  Trust-policy variant where Principal.AWS is itself a nested
+  dict instead of a string or list:
+
+      "Principal": {"AWS": {"Account": "999999999999"}}
+
+  AWS rejects this at attach time (Principal.AWS must be
+  string/list of ARN/account-id). But:
+
+  - The scorer's `_principal_is_public` (line 1407) iterates
+    `principal.values()` — for `{"AWS": {"Account": ...}}`
+    the value is a dict, not a string/list. The `isinstance(v,
+    list)` branch wraps the dict in a list and iterates items;
+    each item is a string ("Account") which doesn't start with
+    "arn:" so no public-detection fires. Correct conservative.
+  - The cross-account-principal detection (line 2131-2194)
+    iterates `pvals = aws_principals if isinstance(... list)
+    else [aws_principals]`. When `aws_principals` is a dict,
+    `pvals = [{"Account": "..."}]` and each `v` fails
+    `isinstance(v, str)`. Loop body skipped. No cross-account
+    factor fires.
+
+  Result: scored 7 (from broad sts:AssumeRole on Resource:*).
+  Expected: ≥7 (already reached). But the cross-account
+  signal (`Account: "999999999999"` is a literal external
+  account ID, just in the wrong shape) is silently lost.
+
+  Gap: 0 score (round-9 work caught the broad-Resource floor),
+  2 factor-quality (the literal account in the wrong slot
+  isn't surfaced).
+
+  Fix: in cross-account-principal detection, also iterate
+  nested-dict values for embedded account-id-shaped strings
+  (12 digits).
+
+policy:
+  Version: "2012-10-17"
+  Statement:
+    - Effect: Allow
+      Action: sts:AssumeRole
+      Resource: "*"
+      Principal:
+        AWS:
+          Account: "999999999999"
+
+request:
+  spec:
+    access_type: read-write
+    duration:
+      duration_hours: 1
+
+expected:
+  score_min: 7
+  must_auto_approve: false

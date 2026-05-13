@@ -1,0 +1,37 @@
+name: agent-905-trailing-colon-iam-passrole
+description: |
+  BLACK-BOX Round 10 — `iam:PassRole:` (trailing colon) action evasion.
+
+  Trailing colon on the action verb. The scorer's split-on-`:` produces
+  service = `iam`, action = `PassRole:` (with trailing colon). The
+  sensitive-service service lookup hits (`iam`), but the action-catalog
+  match misses the `PassRole` privilege-escalation rule because the
+  matcher is exact-string on `PassRole`, not `PassRole:`.
+
+  Scored: 6 (sensitive-service floor only; no PassRole-specific floor).
+  Expected: 9 (PassRole on Resource:* — catastrophic).
+  Gap: 3.
+
+  AWS canonicalization strips trailing separators before matching at
+  runtime — the policy still permits PassRole-as-intended, but the
+  scorer's catalog match drops to nothing-special.
+
+  Proposed fix: strip trailing `:` (and whitespace) from action strings
+  during _norm_grammar_str, before catalog matching.
+
+policy:
+  Version: "2012-10-17"
+  Statement:
+    - Effect: Allow
+      Action: "iam:PassRole:"
+      Resource: "*"
+
+request:
+  spec:
+    access_type: read-write
+    duration:
+      duration_hours: 1
+
+expected:
+  score_min: 9
+  must_auto_approve: false

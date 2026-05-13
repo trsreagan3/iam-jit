@@ -1,0 +1,54 @@
+name: agent-1000-action-dict-shaped-bypass
+description: |
+  ROUND 10 WHITE-BOX — CATASTROPHIC BYPASS (gap 9).
+
+  AWS IAM grammar requires `Action` to be a string or list-of-strings.
+  But the scorer's `_as_list()` helper (review.py line 3293-3314)
+  silently returns `[]` when `Action` is a dict — without flagging
+  the malformedness. The resulting empty action list causes the
+  per-statement loop to fire no rules, scoring 1.
+
+  Adversarial input shape (illegal per AWS but accepted by some
+  JSON-to-policy converters and CloudFormation pre-processors):
+
+      "Action": {"iam:CreateAccessKey": true, "iam:*": true}
+
+  AWS rejects this at policy-attach. But:
+    - The scorer's job is "flag risk BEFORE AWS sees it" (round-6
+      principle for `_effect_is_allow`).
+    - Tools that auto-convert (CDK synth, some Terraform providers)
+      may iterate the dict keys, producing a real Action:* policy.
+    - Policy-generation tools that emit dict-form actions need to
+      be visible to the auditor, not silently passed.
+
+  Per round-6/8 precedent: malformed Statement entries floor at 5
+  (line 1860-1875). Malformed ACTION field should also floor at the
+  worst-case based on what the dict looks like:
+    - Dict keys that LOOK like dangerous actions → floor 9
+    - Dict keys that don't look like actions → floor 5
+
+  Gap: 9 (current=1, expected≥9 since the dict keys are themselves
+  catastrophic action names).
+
+  Fix: in `_as_list`, detect dict-shape and either raise or return
+  the dict KEYS (treating them as the intended action list), OR
+  surface a "malformed Action field" factor at floor 5+.
+
+policy:
+  Version: "2012-10-17"
+  Statement:
+    - Effect: Allow
+      Action:
+        "iam:CreateAccessKey": true
+        "iam:*": true
+      Resource: "*"
+
+request:
+  spec:
+    access_type: read-write
+    duration:
+      duration_hours: 1
+
+expected:
+  score_min: 5
+  must_auto_approve: false

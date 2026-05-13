@@ -1,0 +1,44 @@
+name: agent-906-html-entity-colon-passrole
+description: |
+  BLACK-BOX Round 10 — HTML-entity encoded colon `iam&#58;PassRole`.
+
+  Round-9 batch-2 closed `iam%3APassRole` (URL-encoded colon) and
+  `iam%253APassRole` (double-URL-encoded). HTML-entity encoding
+  (`&#58;` = `:`) is the natural cousin in templating pipelines —
+  CloudFormation/CDK XML templates, Jinja2 templates, and several
+  IaC frameworks that round-trip policies through HTML-escape filters
+  can produce this form.
+
+  Scored: 1 — the scorer sees no recognizable colon, so the action
+  string is one opaque blob `iam&#58;PassRole`. No service-prefix match,
+  no catalog match, no broad-pattern factor fires, score drops to 1.
+  Expected: 6 (action that decodes to iam:PassRole, with Resource:*
+  — non-canonical evasion-signal floor).
+  Gap: 5.
+
+  Source: encoded-bypass family per round-9 III. AWS's own IAM editor
+  has historically accepted some HTML-encoded forms when policies are
+  pasted in via web UI; some Terraform providers HTML-escape policy
+  documents during serialization.
+
+  Proposed fix: extend round-9-batch-2's URL-decode pass in
+  `_norm_grammar_str` to also decode HTML entities (`&#NN;` decimal,
+  `&#xNN;` hex) for the same three characters (colon, asterisk, slash).
+  Flag the decoded form as non-canonical to raise the floor to 6.
+
+policy:
+  Version: "2012-10-17"
+  Statement:
+    - Effect: Allow
+      Action: "iam&#58;PassRole"
+      Resource: "*"
+
+request:
+  spec:
+    access_type: read-write
+    duration:
+      duration_hours: 1
+
+expected:
+  score_min: 6
+  must_auto_approve: false

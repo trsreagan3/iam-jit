@@ -1,0 +1,40 @@
+name: agent-903-iam-double-colon-passrole
+description: |
+  BLACK-BOX Round 10 — `iam::PassRole` (double-colon) action.
+
+  Round-9-BB III recommendation called out "more than one colon in action"
+  as a non-canonical evasion form. Round-9 batch-2 fixed URL-encoded colon
+  (`%3A`) but multi-colon literal forms are still bypassed.
+
+  AWS's action parser is forgiving — `iam::PassRole` IS recognized by IAM
+  itself in some toolchain pipelines (canonicalization step strips the
+  extra colon before matching against the action catalog). The scorer
+  sees `iam::PassRole`, matches it as "touches sensitive service `iam`"
+  but does NOT match the iam:PassRole privilege-escalation rule (which
+  is keyed on canonical `iam:PassRole`).
+
+  Scored: 6.
+  Expected: 9 (iam:PassRole on Resource:* — established catastrophic).
+  Gap: 3.
+
+  Proposed fix: when normalizing action strings, collapse runs of `:`
+  (`re.sub(r":+", ":", action)`) before catalog matching. Round-9 batch-2
+  did this for URL-encoded colon; the literal collapse is the natural
+  sibling.
+
+policy:
+  Version: "2012-10-17"
+  Statement:
+    - Effect: Allow
+      Action: "iam::PassRole"
+      Resource: "*"
+
+request:
+  spec:
+    access_type: read-write
+    duration:
+      duration_hours: 1
+
+expected:
+  score_min: 9
+  must_auto_approve: false

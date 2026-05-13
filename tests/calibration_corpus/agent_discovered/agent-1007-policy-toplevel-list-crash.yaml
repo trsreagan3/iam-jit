@@ -1,0 +1,54 @@
+name: agent-1007-policy-toplevel-list-crash
+description: |
+  ROUND 10 WHITE-BOX — gap UNKNOWN (likely 9 if upstream
+  catches exceptions and scores 1).
+
+  When the entire policy is a top-level LIST (not a dict):
+
+      [{"Effect": "Allow", "Action": "*", "Resource": "*"}]
+
+  `_deterministic()` crashes immediately at line 1743:
+
+      statements = policy.get("Statement")
+      AttributeError: 'list' object has no attribute 'get'
+
+  Some callers wrap `analyze_policy` in a try/except that
+  falls back to score=1 on any exception (defensive coding
+  against malformed input). If so, this is a complete bypass.
+
+  Even without such a caller, raising an uncaught exception
+  is a defect — the function should gracefully handle list-
+  shaped policies. AWS itself rejects them, but the round-6
+  principle ("flag risk before AWS sees it") means the
+  scorer should still surface the malformedness at floor 5+.
+
+  Defect class: round-8 type guard didn't extend to top-
+  level policy shape, only to per-Statement entries.
+
+  Gap: unknown — depends on caller wrapper. Conservative
+  expectation: ≥5 (malformed = worst-case principle).
+
+  Fix: at the top of `_deterministic`, check
+  `isinstance(policy, dict)`; if not, return
+  (5, ["Top-level policy is not a dict — malformed."], []).
+
+  NOTE: YAML representation requires the policy ITSELF be a
+  list, which the corpus loader may not accept. Documented
+  here as a gap; covered by the Python probe.
+
+policy:
+  Version: "2012-10-17"
+  Statement:
+    - Effect: Allow
+      Action: "*"
+      Resource: "*"
+
+request:
+  spec:
+    access_type: read-write
+    duration:
+      duration_hours: 1
+
+expected:
+  score_min: 10
+  must_auto_approve: false

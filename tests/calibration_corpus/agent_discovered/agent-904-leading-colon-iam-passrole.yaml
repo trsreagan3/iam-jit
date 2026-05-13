@@ -1,0 +1,42 @@
+name: agent-904-leading-colon-iam-passrole
+description: |
+  BLACK-BOX Round 10 — `:iam:PassRole` (leading colon) action evasion.
+
+  A leading colon before the service prefix shifts the `service:action`
+  split: the parser sees service = `""` (empty) and action = `iam:PassRole`,
+  so the service-name lookup misses every "sensitive service" filter and
+  the iam:PassRole catalog match also misses (it's not in the action
+  position the matcher expects).
+
+  Scored: 4 (with factor "Resource: `*` for `` (broad...)" — note the empty
+  service-name in the factor text, evidence the split-on-first-colon path
+  did fire but with empty service).
+  Expected: 9.
+  Gap: 5.
+
+  Some IAM toolchains and AWS itself's action canonicalizer strip leading
+  separator characters before matching — a policy with `:iam:PassRole`
+  may still evaluate as `iam:PassRole` at runtime while bypassing the
+  scorer. Pure evasion-signal.
+
+  Proposed fix: strip leading `:` (and other separator characters) from
+  action strings during `_norm_grammar_str`. The presence of a leading
+  colon should additionally raise a "non-canonical action format" floor
+  at 6+ regardless of the resolved verb (per round-9 III pattern).
+
+policy:
+  Version: "2012-10-17"
+  Statement:
+    - Effect: Allow
+      Action: ":iam:PassRole"
+      Resource: "*"
+
+request:
+  spec:
+    access_type: read-write
+    duration:
+      duration_hours: 1
+
+expected:
+  score_min: 9
+  must_auto_approve: false

@@ -1,0 +1,55 @@
+name: agent-1010-condition-list-form
+description: |
+  ROUND 10 WHITE-BOX — gap 0 (calibration pin, no bypass).
+
+  AWS officially specifies `Condition` as a dict (map of operator
+  → {key → value}). Some IaC tools produce list-form variants:
+
+      "Condition": [{"StringLike": {"aws:SourceArn": "*"}}]
+
+  `_condition_is_vacuous` (line 1151) checks
+  `isinstance(condition, dict)` and returns `(False, "")` for
+  non-dicts. So list-form Conditions are silently treated as
+  "no condition" by the vacuity detector.
+
+  But this is a SAFE failure mode: the per-statement rules
+  evaluate the statement WITHOUT crediting the (broken)
+  Condition. The vacuous-condition floor of 5/7 doesn't fire,
+  but neither does the false-confidence "condition is
+  protective" suppression.
+
+  In the test case (iam:PassRole + Resource:* + list-Condition),
+  the policy scores 9 (PassRole-on-broad floor). Expected ≥ 9.
+
+  Gap: 0 score. Factor-quality only: an operator reading the
+  policy might think the Condition is doing work; the scorer
+  silently doesn't evaluate it.
+
+  Fix (optional): in `_condition_is_vacuous`, when condition
+  is a list, flag at floor 5 with "malformed Condition shape —
+  list instead of dict; AWS will reject."
+
+  Round-stoppable: yes (one-line check). Below "needs to fix
+  for convergence" — included as a calibration pin so any
+  future refactor doesn't accidentally LOWER the score by
+  starting to credit list-form Conditions.
+
+policy:
+  Version: "2012-10-17"
+  Statement:
+    - Effect: Allow
+      Action: iam:PassRole
+      Resource: "*"
+      Condition:
+        - StringLike:
+            aws:SourceArn: "*"
+
+request:
+  spec:
+    access_type: read-write
+    duration:
+      duration_hours: 1
+
+expected:
+  score_min: 9
+  must_auto_approve: false

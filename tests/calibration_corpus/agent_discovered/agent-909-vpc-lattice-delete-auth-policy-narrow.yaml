@@ -1,0 +1,45 @@
+name: agent-909-vpc-lattice-delete-auth-policy-narrow
+description: |
+  BLACK-BOX Round 10 — `vpc-lattice:DeleteAuthPolicy` narrow resource.
+
+  Round-9 (agent-726) confirmed `vpc-lattice:PutAuthPolicy Resource:*`
+  scores 8 (PASS). This is the narrow-resource sibling on `Delete`. Same
+  class as agent-908 — the broad form is covered, narrow specific-service
+  form falls through.
+
+  VPC Lattice is AWS's service-mesh-of-services authz layer. The auth
+  policy on a Lattice service is the only thing standing between any
+  caller and the service. Deleting the auth policy makes the Lattice
+  service authenticate everything by IAM identity only — and if no
+  IAM policy ALSO restricts, the service is effectively public on
+  the mesh.
+
+  Scored: 3 ("All statements are scoped or limited").
+  Expected: 7 (service-mesh authz removal on a specific production
+  service — opens that service to any mesh-resident principal).
+  Gap: 4.
+
+  Source: AWS VPC Lattice User Guide "Auth policies"; recent BlackHat
+  USA 2025 talk on service-mesh authorization bypasses.
+
+  Proposed fix: extend vpc-lattice handling from broad-resource floor
+  to also narrow on the authz-affecting verbs:
+  `PutAuthPolicy`, `DeleteAuthPolicy`, `UpdateServiceNetwork` (auth-type),
+  `CreateAuthPolicy`. Floor 7 narrow.
+
+policy:
+  Version: "2012-10-17"
+  Statement:
+    - Effect: Allow
+      Action: "vpc-lattice:DeleteAuthPolicy"
+      Resource: "arn:aws:vpc-lattice:us-east-1:123456789012:service/svc-prod-payments"
+
+request:
+  spec:
+    access_type: read-write
+    duration:
+      duration_hours: 1
+
+expected:
+  score_min: 7
+  must_auto_approve: false

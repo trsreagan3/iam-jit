@@ -1,0 +1,42 @@
+name: agent-912-appstream-create-image-builder-narrow
+description: |
+  BLACK-BOX Round 10 — `appstream2:CreateImageBuilder` narrow.
+
+  AppStream 2.0 image-builders are EC2 instances under the hood. Granting
+  `appstream2:CreateImageBuilder` (with iam:PassRole already in place for
+  the image-builder service role) creates a Windows instance that runs
+  under whatever role the policy permits to pass. Attacker logs into the
+  image-builder via the AppStream console, gets a desktop shell, and
+  uses the instance role for further AWS lateral movement.
+
+  Scored: 1 ("All statements are scoped or limited") — both the narrow
+  and broad-resource forms score low (4 broad / 1 narrow).
+  Expected: 7 (RCE primitive via AppStream image-builder).
+  Gap: 6.
+
+  Source: AppStream 2.0 Admin Guide "Image builders"; appstream is a
+  known but rarely-audited code-execution primitive — Pacu has a
+  `appstream__image_builder_rce` module.
+
+  Proposed fix: add `appstream2:CreateImageBuilder`,
+  `appstream2:UpdateImageBuilder` to the code-execution-primitive
+  catalog. Pairs with iam:PassRole for the composition rule.
+
+policy:
+  Version: "2012-10-17"
+  Statement:
+    - Effect: Allow
+      Action:
+        - "appstream2:CreateImageBuilder"
+        - "appstream2:StartImageBuilder"
+      Resource: "arn:aws:appstream:us-east-1:123456789012:image-builder/prod-builder"
+
+request:
+  spec:
+    access_type: read-write
+    duration:
+      duration_hours: 1
+
+expected:
+  score_min: 7
+  must_auto_approve: false

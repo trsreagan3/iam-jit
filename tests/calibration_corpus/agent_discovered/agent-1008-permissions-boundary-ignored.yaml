@@ -1,0 +1,51 @@
+name: agent-1008-permissions-boundary-ignored
+description: |
+  ROUND 10 WHITE-BOX — gap 1-2 (FACTOR-QUALITY, not bypass).
+
+  Sibling to round-9 agent-803 (PermissionsBoundary field
+  ignored). The scorer ignores `PermissionsBoundary` keys
+  entirely — they don't lower OR raise the score.
+
+  AWS evaluates permissions boundaries as a HARD CEILING on
+  effective permissions: identity-policy(Action:*) +
+  PermissionsBoundary(ReadOnlyAccess) = read-only effective
+  rights. The scorer over-scores this at 10, treating the
+  identity policy's Action:* as full admin.
+
+  But the boundary CAN be removed (iam:DeleteRolePermissions-
+  Boundary catastrophic), so the high score isn't WRONG —
+  it's correctly reflecting "this role has admin if the
+  boundary is ever lifted." Conservative.
+
+  The gap is calibration-quality: the score is right, but
+  the FACTORS list doesn't surface "PermissionsBoundary
+  attached: <arn>" — an operator reading the explanation
+  has no way to know the policy may be safe-when-bounded.
+
+  Gap: 0 score, 2 factor-quality (the boundary's existence
+  is important context that should be visible).
+
+  Round-stoppable: yes — a single "if 'PermissionsBoundary'
+  in policy: factors.append(...)" line closes it.
+
+  Architectural classification: FACTOR-QUALITY (not score-
+  affecting). Listed for completeness; below the "rewrite
+  for convergence" threshold.
+
+policy:
+  Version: "2012-10-17"
+  PermissionsBoundary: "arn:aws:iam::aws:policy/ReadOnlyAccess"
+  Statement:
+    - Effect: Allow
+      Action: "*"
+      Resource: "*"
+
+request:
+  spec:
+    access_type: read-write
+    duration:
+      duration_hours: 1
+
+expected:
+  score_min: 9
+  must_auto_approve: false

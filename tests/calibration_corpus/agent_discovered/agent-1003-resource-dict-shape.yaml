@@ -1,0 +1,44 @@
+name: agent-1003-resource-dict-shape
+description: |
+  ROUND 10 WHITE-BOX — gap 5-7 (depending on action context).
+
+  Sibling to agent-1000/1002 but on the Resource side. `_as_list()`
+  silently returns `[]` for dict-shaped Resource, so:
+
+      "Resource": {"Arn": "arn:aws:s3:::sensitive-bucket", "Path": "/"}
+
+  produces an empty resources list. `wildcard_resource = False`,
+  `broad_blast_resource = False`. The statement falls through every
+  rule unless the action ITSELF is on the catastrophic list.
+
+  Currently `iam:PassRole` with dict-Resource scores 4 (narrow-
+  PassRole floor) — not the iam:PassRole-on-broad-resource floor 9.
+
+  Defect class: same as agent-1000. Worth its own fixture because
+  it surfaces the Resource-side asymmetry of `_as_list` behavior.
+
+  Gap: 5 (current=4 for narrow-floor action, expected≥7 if any
+  malformed-shape factor fires at all).
+
+  Fix: same as agent-1000 — in `_as_list`, detect dict shape and
+  either fall back to its keys/values, or surface a malformed-
+  Resource factor at floor 5+.
+
+policy:
+  Version: "2012-10-17"
+  Statement:
+    - Effect: Allow
+      Action: iam:PassRole
+      Resource:
+        Arn: "arn:aws:iam::123456789012:role/admin"
+        Path: "/"
+
+request:
+  spec:
+    access_type: read-write
+    duration:
+      duration_hours: 1
+
+expected:
+  score_min: 5
+  must_auto_approve: false

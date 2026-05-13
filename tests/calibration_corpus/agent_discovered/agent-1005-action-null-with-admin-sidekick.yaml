@@ -1,0 +1,42 @@
+name: agent-1005-action-null-with-admin-sidekick
+description: |
+  ROUND 10 WHITE-BOX — gap 1-2 (calibration drift, low impact).
+
+  Action list with embedded null/None — `_as_list` filters out
+  the None and processes the rest. Verified: when None is paired
+  with iam:PassRole, the policy is correctly scored 9 (PassRole
+  rule fires on the valid entry).
+
+  This is a NEGATIVE finding — round-10 confirmation that mixed-
+  validity action lists don't bypass. Worth documenting for the
+  convergence record.
+
+  However: the malformedness signal IS lost. Round-8 logic
+  (line 1860-1875) only floors at 5 when a STATEMENT is
+  non-dict. A statement with `Action: [None, "iam:PassRole"]`
+  has a valid Action LIST but with a null INSIDE — same defect
+  class as round-8's non-dict statements, but at a different
+  granularity.
+
+  Gap: 0 score-wise (already scored 9 via PassRole rule), but
+  the malformedness signal is silently dropped. Calibration-
+  quality, not a security bypass.
+
+policy:
+  Version: "2012-10-17"
+  Statement:
+    - Effect: Allow
+      Action:
+        - null
+        - iam:PassRole
+      Resource: "*"
+
+request:
+  spec:
+    access_type: read-write
+    duration:
+      duration_hours: 1
+
+expected:
+  score_min: 9
+  must_auto_approve: false

@@ -1,0 +1,49 @@
+name: agent-908-bedrock-update-guardrail-narrow
+description: |
+  BLACK-BOX Round 10 — `bedrock:UpdateGuardrail` narrow resource.
+
+  Round-9 (agent-727) confirmed `bedrock:DeleteGuardrail Resource:*` scores
+  8 (PASS). The broad form is covered via Bedrock sensitive-service residue.
+  This fixture probes the narrow-resource form on `UpdateGuardrail` —
+  arguably MORE attractive to attackers because it's a targeted weakening
+  (loosen one production guardrail, leave the others intact, evade audit
+  diff review).
+
+  An attacker who can update a single guardrail can:
+  - Lower content-filtering thresholds (jailbreak the LLM)
+  - Remove word-block lists (let the model emit competitor secrets / IP)
+  - Disable PII redaction (extract PII through model)
+  - Inject malicious denied-topic exceptions
+
+  Scored: 3 ("All statements are scoped or limited").
+  Expected: 7 (LLM safety bypass on a specific production guardrail —
+  catastrophic for any deployment relying on Bedrock content-policy).
+  Gap: 4.
+
+  Source: Bedrock Security Best Practices Guide (2025) and the
+  OWASP LLM Top-10 "LLM05: Improper Output Handling" — guardrail
+  manipulation is the standard policy-bypass primitive.
+
+  Proposed fix: extend Bedrock-Guardrails handling (round-7 `bedrock`
+  sensitive-service treatment) from broad-only to also narrow on the
+  specific Guardrail mutation verbs: `UpdateGuardrail`, `DeleteGuardrail`,
+  `UpdateGuardrailVersion`, `CreateGuardrailVersion`. Floor 7 narrow.
+
+policy:
+  Version: "2012-10-17"
+  Statement:
+    - Effect: Allow
+      Action:
+        - "bedrock:UpdateGuardrail"
+        - "bedrock:CreateGuardrailVersion"
+      Resource: "arn:aws:bedrock:us-east-1:123456789012:guardrail/prod-content-filter"
+
+request:
+  spec:
+    access_type: read-write
+    duration:
+      duration_hours: 1
+
+expected:
+  score_min: 7
+  must_auto_approve: false

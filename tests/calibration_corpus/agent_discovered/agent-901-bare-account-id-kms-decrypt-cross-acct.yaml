@@ -1,0 +1,42 @@
+name: agent-901-bare-account-id-kms-decrypt-cross-acct
+description: |
+  BLACK-BOX Round 10 — bare-account-id-LIST Principal form on KMS key
+  policy. Same gap class as agent-900 but on KMS (higher impact — cross-
+  account Decrypt unlocks every encrypted artifact protected by this key).
+
+  KMS key resource policy granting `kms:Decrypt` to bare-account-id LIST
+  `["999999999999"]`. The Principal value is a list of bare account IDs,
+  not ARNs. Identical AWS-runtime semantics to `arn:aws:iam::999...:root`
+  but bypasses the round-9 ARN-form detector.
+
+  Scored: 3.
+  Expected: 7 (cross-account resource-policy read grant to foreign acct
+  on a key whose Decrypt access leaks every encrypted blob it protects).
+  Gap: 4.
+
+  Source: AWS KMS Developer Guide "Key policies that allow access to AWS
+  accounts" — bare-account-id Principal form is documented and supported.
+
+  Proposed fix: extend the bare-account-id detection (agent-900) to also
+  recognize LIST values containing only 12-digit strings.
+
+policy:
+  Version: "2012-10-17"
+  Statement:
+    - Effect: Allow
+      Principal:
+        AWS: ["999999999999"]
+      Action:
+        - "kms:Decrypt"
+        - "kms:DescribeKey"
+      Resource: "arn:aws:kms:us-east-1:123456789012:key/abcd-1234"
+
+request:
+  spec:
+    access_type: read-write
+    duration:
+      duration_hours: 1
+
+expected:
+  score_min: 7
+  must_auto_approve: false

@@ -1,0 +1,46 @@
+name: agent-910-apigateway-update-api-key-narrow
+description: |
+  BLACK-BOX Round 10 — `apigateway:UpdateApiKey` on a specific API key.
+
+  API Gateway API keys gate every metered/usage-plan REST endpoint. The
+  `UpdateApiKey` action can change the key's "enabled" status and (with
+  patch ops on "name"/"description"/"customerId") attach/detach the key
+  from usage plans. A modified-but-still-valid API key can be exfiltrated
+  to an attacker; once they have it, they consume the victim's quota and
+  call every API the key permits.
+
+  Scored: 1 ("All statements are scoped or limited").
+  Expected: 7 (API key compromise primitive on a specific named key).
+  Gap: 6.
+
+  More dangerous still — `apigateway:UpdateApiKey` is paired in the
+  same service prefix with `apigateway:GetApiKey` (which returns the
+  secret VALUE of the key in plaintext). The attack chain is:
+    UpdateApiKey (enable + retag) → GetApiKey (now reads value) →
+    use key against the API.
+
+  Source: AWS API Gateway Developer Guide "API keys"; HackerOne report
+  "API key leak through UpdateApiKey patch operations" (2024).
+
+  Proposed fix: add `apigateway:UpdateApiKey`, `apigateway:GetApiKey`,
+  `apigateway:ImportApiKeys` to the high-impact action catalog. Floor 7
+  narrow, 8 broad.
+
+policy:
+  Version: "2012-10-17"
+  Statement:
+    - Effect: Allow
+      Action:
+        - "apigateway:UpdateApiKey"
+        - "apigateway:GetApiKey"
+      Resource: "arn:aws:apigateway:us-east-1::/apikeys/abc123def456"
+
+request:
+  spec:
+    access_type: read-write
+    duration:
+      duration_hours: 1
+
+expected:
+  score_min: 7
+  must_auto_approve: false
