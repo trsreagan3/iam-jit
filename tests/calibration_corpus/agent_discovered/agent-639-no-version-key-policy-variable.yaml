@@ -1,0 +1,45 @@
+name: agent-639-no-version-key-policy-variable
+description: |
+  WHITE-BOX round 8: companion to agent-613. Policy with NO `Version`
+  key at all — AWS defaults to `2008-10-17` which does NOT support
+  policy variables. The `${aws:username}` in the Resource is treated
+  literally by AWS, so the policy grants nothing in production —
+  EXCEPT the moment someone "fixes" the policy by adding
+  `Version: "2012-10-17"`, the variable activates and the scope
+  changes.
+
+  The scorer doesn't read Version. It doesn't warn about ${...}
+  in resources WHEN Version is missing.
+
+  Different from agent-613 (Version explicitly `2008-10-17`) — this
+  is "Version key omitted entirely" which is even more common in
+  hand-written policies.
+
+  Source-code rule exploited: same as agent-613 — Version is never
+  read.
+
+  Research-doc pattern: §10.10 (Missing Version defaults to 2008).
+
+  Real risk: 4 — defect-class.
+
+  Det score: 1.
+
+  Proposed fix: same as agent-613 — when Version is missing OR not
+  `2012-10-17`, flag any policy-variable use in Resources as
+  defect-class warning.
+
+policy:
+  Statement:
+    - Effect: Allow
+      Action: "s3:GetObject"
+      Resource: "arn:aws:s3:::company-${aws:username}/*"
+
+request:
+  spec:
+    access_type: read-only
+    duration:
+      duration_hours: 1
+
+expected:
+  score_min: 4
+  must_auto_approve: false

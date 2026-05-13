@@ -1,0 +1,31 @@
+name: research-11-14-requestedregion-stringequals-wildcard
+description: |
+  Reference: IAM-BYPASS-RESEARCH.md §11.14 (Sysdig)
+
+  "aws:RequestedRegion":"us-east-*" is a StringLike match. With
+  StringEquals, the wildcard is literal and never matches, effectively
+  granting nothing (or, if in a Deny, blocking nothing).
+
+  Expected behavior: condition typo — high risk if used in Deny.
+
+  Source: https://www.sysdig.com/blog/iam-security-misconfiguration
+policy:
+  Version: "2012-10-17"
+  Statement:
+    - Effect: Allow
+      Action: "*"
+      Resource: "*"
+    - Effect: Deny
+      Action: ec2:*
+      Resource: "*"
+      Condition:
+        StringEquals:
+          "aws:RequestedRegion": "us-east-*"
+request:
+  spec:
+    access_type: read-write
+    duration:
+      duration_hours: 1
+expected:
+  score_min: 8
+  must_auto_approve: false

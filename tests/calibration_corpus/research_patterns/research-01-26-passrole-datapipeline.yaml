@@ -1,0 +1,27 @@
+name: research-01-26-passrole-datapipeline
+description: |
+  Reference: IAM-BYPASS-RESEARCH.md §1.26 (Rhino #22)
+
+  Execute arbitrary shell commands as pipeline role.
+
+  Expected behavior: privilege escalation primitive — high risk.
+
+  Source: Rhino #22
+policy:
+  Version: "2012-10-17"
+  Statement:
+    - Effect: Allow
+      Action:
+        - iam:PassRole
+        - datapipeline:CreatePipeline
+        - datapipeline:PutPipelineDefinition
+        - datapipeline:ActivatePipeline
+      Resource: "*"
+request:
+  spec:
+    access_type: read-write
+    duration:
+      duration_hours: 1
+expected:
+  score_min: 8
+  must_auto_approve: false

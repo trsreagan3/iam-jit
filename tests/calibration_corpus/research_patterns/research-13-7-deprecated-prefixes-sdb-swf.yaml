@@ -1,0 +1,28 @@
+name: research-13-7-deprecated-prefixes-sdb-swf
+description: |
+  Reference: IAM-BYPASS-RESEARCH.md §13.7
+
+  sdb: (SimpleDB), swf: (Simple Workflow), mechanicalturk: — old
+  policies sometimes carry deprecated action names that scorers don't
+  recognize but AWS may still honor.
+
+  Expected behavior: deprecated-action grant — moderate risk.
+
+  Source: AWS service docs
+policy:
+  Version: "2012-10-17"
+  Statement:
+    - Effect: Allow
+      Action:
+        - sdb:*
+        - swf:*
+        - mechanicalturk:*
+      Resource: "*"
+request:
+  spec:
+    access_type: read-write
+    duration:
+      duration_hours: 1
+expected:
+  score_min: 4
+  must_auto_approve: false

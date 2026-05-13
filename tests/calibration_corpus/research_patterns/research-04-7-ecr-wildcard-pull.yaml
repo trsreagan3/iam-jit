@@ -1,0 +1,27 @@
+name: research-04-7-ecr-wildcard-pull
+description: |
+  Reference: IAM-BYPASS-RESEARCH.md §4.7 (HackingTheCloud)
+
+  ECR repository policy with wildcard ecr:GetAuthorizationToken /
+  ecr:BatchGetImage. Image pull / poisoning from any principal.
+
+  Expected behavior: container supply-chain risk — high risk.
+
+  Source: https://hackingthe.cloud/aws/exploitation/Misconfigured_Resource-Based_Policies/
+policy:
+  Version: "2012-10-17"
+  Statement:
+    - Effect: Allow
+      Principal: "*"
+      Action:
+        - ecr:GetAuthorizationToken
+        - ecr:BatchGetImage
+      Resource: arn:aws:ecr:us-east-1:111122223333:repository/example
+request:
+  spec:
+    access_type: read-only
+    duration:
+      duration_hours: 1
+expected:
+  score_min: 7
+  must_auto_approve: false

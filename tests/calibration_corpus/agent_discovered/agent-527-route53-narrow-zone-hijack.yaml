@@ -1,0 +1,41 @@
+name: agent-527-route53-narrow-zone-hijack
+description: |
+  BLACK-BOX Round 8. Research §6.2 (Resource Exposure analog) + DNS-hijack
+  primitive class.
+
+  `route53:ChangeResourceRecordSets` on a SPECIFIC hosted-zone ARN is the textbook DNS
+  hijack: rewrite the A record for `api.example.com` to attacker IP, harvest traffic
+  including OAuth flows and S3 redirect tokens. Even on a single zone, this is the highest
+  blast-radius single-call attack short of trust-policy backdoor.
+
+  Det score: 5.
+  Real risk: 7 — full DNS-level MITM for every customer of any domain in that zone.
+
+  Scorer gap: `route53:ChangeResourceRecordSets` is in `_HIGH_IMPACT_MUTATION_ACTIONS`
+  (which floors on Resource:*, scoring 8) but on a NARROW zone ARN the floor is 5 — the
+  semantic that DNS rewrites are catastrophic regardless of which specific zone slips
+  past.
+
+  Proposed fix: when `route53:ChangeResourceRecordSets` (or
+  `route53domains:TransferDomain`, `route53domains:UpdateDomainNameservers`) targets a
+  narrow zone ARN, floor at 7 — the per-zone narrowing doesn't reduce the blast because
+  one zone = one production domain = full traffic MITM.
+
+  Research-doc pattern: §6.2 (resource exposure analog) + DNS hijack TTP (T1071, T1583).
+
+policy:
+  Version: "2012-10-17"
+  Statement:
+    - Effect: Allow
+      Action: "route53:ChangeResourceRecordSets"
+      Resource: "arn:aws:route53:::hostedzone/Z1ABCDEF12345"
+
+request:
+  spec:
+    access_type: read-write
+    duration:
+      duration_hours: 1
+
+expected:
+  score_min: 7
+  must_auto_approve: false

@@ -1,0 +1,23 @@
+name: research-07-5-aa-pass-role-with-star-in-resource
+description: |
+  Reference: IAM-BYPASS-RESEARCH.md §7.5 (AWS IAM Access Analyzer validation checks)
+
+  PASS_ROLE_WITH_STAR_IN_RESOURCE — iam:PassRole with Resource:*.
+
+  Expected behavior: dangerous PassRole — high risk.
+
+  Source: https://docs.aws.amazon.com/IAM/latest/UserGuide/access-analyzer-reference-policy-checks.html
+policy:
+  Version: "2012-10-17"
+  Statement:
+    - Effect: Allow
+      Action: iam:PassRole
+      Resource: "*"
+request:
+  spec:
+    access_type: read-write
+    duration:
+      duration_hours: 1
+expected:
+  score_min: 7
+  must_auto_approve: false

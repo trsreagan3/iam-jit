@@ -1,0 +1,56 @@
+name: agent-641-passrole-narrow-list-admin-buried
+description: |
+  WHITE-BOX round 8: `iam:PassRole` to a LIST of role ARNs where
+  ONE of them is an admin-ish role buried among several service-
+  facing roles. Each resource is a literal ARN (no wildcard), so
+  the strict-wildcard predicate (line 2070) returns False. The
+  PassRole-narrow floor at line 2237 fires at 4 → auto-approves.
+
+  But ONE of the ARN'd roles is `admin` — passing the admin role
+  to a service principal escalates the caller to admin. The scorer
+  doesn't classify role NAMES — it just sees "this is a specific
+  ARN list."
+
+  No tool can know-from-policy-alone which role is admin without
+  reading that role's identity policy. BUT — common naming
+  conventions ("admin", "Administrator", "PowerUser", "root",
+  "FullAccess") provide a signal.
+
+  Source-code rule exploited: PassRole-narrow floor (line 2237)
+  doesn't inspect role-name segments of the listed ARNs.
+
+  Research-doc pattern: §1.3 (PassRole + RunInstances — every
+  PassRole grant is an escalation candidate), §1.39 (Pacu enum
+  privesc modules — admin-named roles are the obvious targets).
+
+  Real risk: 6 — moderate signal; the admin-named role is a
+  plausible escalation target.
+
+  Det score: 4.
+
+  Proposed fix: in the PassRole-narrow handler, additionally
+  scan the role-name segment of each ARN for known-admin patterns
+  (`admin`, `administrator`, `power`, `root`, `fulladmin`,
+  `bypass`, etc.) and floor at 6 if any match. Conservative
+  heuristic but better than ignoring.
+
+policy:
+  Version: "2012-10-17"
+  Statement:
+    - Effect: Allow
+      Action: "iam:PassRole"
+      Resource:
+        - "arn:aws:iam::123456789012:role/svc-lambda-prod"
+        - "arn:aws:iam::123456789012:role/svc-glue-etl"
+        - "arn:aws:iam::123456789012:role/admin"
+        - "arn:aws:iam::123456789012:role/svc-ec2-readonly"
+
+request:
+  spec:
+    access_type: read-write
+    duration:
+      duration_hours: 1
+
+expected:
+  score_min: 5
+  must_auto_approve: false

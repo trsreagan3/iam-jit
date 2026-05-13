@@ -1,0 +1,23 @@
+name: research-01-27-codestar-createprojectfromtemplate
+description: |
+  Reference: IAM-BYPASS-RESEARCH.md §1.27 (Rhino CodeStar #23)
+
+  Undocumented API spawns CloudFormation under elevated CodeStar service role.
+
+  Expected behavior: privilege escalation primitive — high risk.
+
+  Source: Rhino CodeStar #23
+policy:
+  Version: "2012-10-17"
+  Statement:
+    - Effect: Allow
+      Action: codestar:CreateProjectFromTemplate
+      Resource: "*"
+request:
+  spec:
+    access_type: read-write
+    duration:
+      duration_hours: 1
+expected:
+  score_min: 7
+  must_auto_approve: false

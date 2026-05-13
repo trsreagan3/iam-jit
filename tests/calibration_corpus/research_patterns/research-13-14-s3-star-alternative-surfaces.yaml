@@ -1,0 +1,31 @@
+name: research-13-14-s3-star-alternative-surfaces
+description: |
+  Reference: IAM-BYPASS-RESEARCH.md §13.14
+
+  s3:* does not include s3-object-lambda:*, s3-outposts:*, s3express:*
+  (S3 Express One Zone). A Deny: s3:* policy leaves all three
+  alternative S3 surfaces accessible.
+
+  Expected behavior: Deny doesn't cover alternative S3 surfaces — high risk.
+
+  Source: AWS S3 docs
+policy:
+  Version: "2012-10-17"
+  Statement:
+    - Effect: Allow
+      Action:
+        - s3-object-lambda:GetObject
+        - s3-outposts:GetObject
+        - s3express:GetObject
+      Resource: "*"
+    - Effect: Deny
+      Action: s3:*
+      Resource: "*"
+request:
+  spec:
+    access_type: read-write
+    duration:
+      duration_hours: 1
+expected:
+  score_min: 8
+  must_auto_approve: false

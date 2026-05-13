@@ -1,0 +1,69 @@
+name: agent-600-trust-policy-cross-account-root
+description: |
+  WHITE-BOX round 8: TRUST POLICY SEMANTIC BYPASS — the highest-leverage
+  finding of the round (gap 6).
+
+  A trust policy attaches to a role and declares "who can assume me." A
+  statement of the shape:
+
+      Principal: {AWS: "arn:aws:iam::999999999999:root"}
+      Action:    sts:AssumeRole
+      (no Resource, no Condition)
+
+  is a CROSS-ACCOUNT backdoor — anyone in the external account 999...
+  can assume this role and gain whatever privileges the role's identity
+  policy grants. This is Rhino #14 / Pacu `iam__backdoor_assume_role`.
+
+  The scorer treats the statement as an identity policy. Its
+  `_principal_is_public` predicate (line 1273) only fires on `*`
+  wildcards (bare or in dict values) or ARNs with wildcard in
+  partition/account/spec. The literal external account `999999999999`
+  is NEITHER public NOR a wildcard — it's a SPECIFIC FOREIGN ACCOUNT.
+  No rule fires. The action `sts:AssumeRole` is in `_HIGH_RISK_ACTIONS`
+  (line 338), but the wildcard-resource gate at line 2247
+  (`elif action.lower() in _HIGH_RISK_ACTIONS_LC and wildcard_resource`)
+  doesn't fire because there's no Resource field at all (trust policies
+  don't have one). Scores 3 ("scoped or limited").
+
+  Source-code rule exploited: ABSENT — there is no trust-policy
+  detection. The shape `Action: sts:AssumeRole + Principal: dict + no
+  Resource` should be recognized as a trust-policy statement and
+  evaluated by whether the principal includes ANY external-account ARN.
+
+  Research-doc pattern: §1.14 (UpdateAssumeRolePolicy / trust-policy
+  backdoor), §10.15 (NotPrincipal warning equally applies to non-
+  wildcard external principals).
+
+  Real risk: 9 — cross-account principal granted assume on a role is
+  the textbook IAM backdoor primitive. Even with a "specific" external
+  ARN, the implication is "this role can now be assumed by ANYONE
+  with credentials in that external account" — including anyone the
+  external account's owner adds, anyone they get phished, etc.
+
+  Det score: 3.
+
+  Proposed fix: in the per-statement loop, after detecting `Principal`
+  is present, additionally check: if `Action` covers
+  `sts:AssumeRole*` AND any value in `Principal.AWS` is an ARN whose
+  account segment is NEITHER the current account NOR a known-trusted
+  list, floor at 8. Without an account-context-aware comparator,
+  conservative default: any cross-account-ARN AssumeRole grant floors
+  at 7.
+
+policy:
+  Version: "2012-10-17"
+  Statement:
+    - Effect: Allow
+      Principal:
+        AWS: "arn:aws:iam::999999999999:root"
+      Action: "sts:AssumeRole"
+
+request:
+  spec:
+    access_type: read-write
+    duration:
+      duration_hours: 1
+
+expected:
+  score_min: 7
+  must_auto_approve: false

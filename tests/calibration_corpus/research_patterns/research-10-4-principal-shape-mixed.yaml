@@ -1,0 +1,36 @@
+name: research-10-4-principal-shape-mixed
+description: |
+  Reference: IAM-BYPASS-RESEARCH.md §10.4 (AWS IAM grammar)
+
+  Principal may be string (only when "*"), {"AWS":"*"}, {"AWS":"arn"},
+  {"AWS":["arn1","arn2"]}, {"Service":"x.amazonaws.com"},
+  {"Service":["a","b"]}, {"Federated":"..."}, {"CanonicalUser":"..."}.
+  Mixed types in a single policy are common.
+  # NB: encoded a mixed Principal with AWS list + Service list +
+  # Federated.
+
+  Expected behavior: parser handles all shapes — moderate risk.
+
+  Source: https://docs.aws.amazon.com/IAM/latest/UserGuide/reference_policies_grammar.html
+policy:
+  Version: "2012-10-17"
+  Statement:
+    - Effect: Allow
+      Principal:
+        AWS:
+          - "arn:aws:iam::111122223333:root"
+          - "arn:aws:iam::444455556666:root"
+        Service:
+          - "lambda.amazonaws.com"
+          - "ec2.amazonaws.com"
+        Federated: "cognito-identity.amazonaws.com"
+      Action: sts:AssumeRole
+      Resource: "*"
+request:
+  spec:
+    access_type: read-write
+    duration:
+      duration_hours: 1
+expected:
+  score_min: 6
+  must_auto_approve: false

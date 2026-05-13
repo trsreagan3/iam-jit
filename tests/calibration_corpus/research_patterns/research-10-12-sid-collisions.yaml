@@ -1,0 +1,33 @@
+name: research-10-12-sid-collisions
+description: |
+  Reference: IAM-BYPASS-RESEARCH.md §10.12 (AWS IAM grammar)
+
+  Sid values must be unique within a policy. Some tools rely on Sid
+  as a primary key for deduplication — collisions can hide policy
+  statements during analysis.
+  # NB: encoded two statements with the same Sid; one harmless, one
+  # admin.
+
+  Expected behavior: parser should preserve both — high risk if
+  dedup hides admin.
+
+  Source: https://docs.aws.amazon.com/IAM/latest/UserGuide/reference_policies_grammar.html
+policy:
+  Version: "2012-10-17"
+  Statement:
+    - Sid: AllowRead
+      Effect: Allow
+      Action: s3:GetObject
+      Resource: "arn:aws:s3:::safe/*"
+    - Sid: AllowRead
+      Effect: Allow
+      Action: "*"
+      Resource: "*"
+request:
+  spec:
+    access_type: read-write
+    duration:
+      duration_hours: 1
+expected:
+  score_min: 9
+  must_auto_approve: false

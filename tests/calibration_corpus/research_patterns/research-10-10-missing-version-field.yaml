@@ -1,0 +1,27 @@
+name: research-10-10-missing-version-field
+description: |
+  Reference: IAM-BYPASS-RESEARCH.md §10.10 (AWS IAM grammar)
+
+  Missing Version field defaults to "2008-10-17" — does not support
+  policy variables like ${aws:username}. A policy scorers parse
+  assuming 2012-10-17 may have inert variables in production.
+
+  Expected behavior: parser should flag inert variables / treat
+  Resource as literal — moderate-to-high risk.
+
+  Source: https://docs.aws.amazon.com/IAM/latest/UserGuide/reference_policies_grammar.html
+policy:
+  Statement:
+    - Effect: Allow
+      Action:
+        - s3:GetObject
+        - s3:PutObject
+      Resource: "arn:aws:s3:::user-${aws:username}/*"
+request:
+  spec:
+    access_type: read-write
+    duration:
+      duration_hours: 1
+expected:
+  score_min: 6
+  must_auto_approve: false

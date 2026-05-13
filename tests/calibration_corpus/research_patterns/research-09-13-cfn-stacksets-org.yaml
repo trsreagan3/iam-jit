@@ -1,0 +1,27 @@
+name: research-09-13-cfn-stacksets-org
+description: |
+  Reference: IAM-BYPASS-RESEARCH.md §9.13 (CloudFormation StackSets)
+
+  cloudformation:CreateStackInstances with org-wide deployment role can
+  fan-out backdoors across the entire org.
+
+  Expected behavior: org-wide backdoor fan-out — critical.
+
+  Source: AWS CloudFormation StackSets docs
+policy:
+  Version: "2012-10-17"
+  Statement:
+    - Effect: Allow
+      Action:
+        - cloudformation:CreateStackInstances
+        - cloudformation:CreateStackSet
+        - iam:PassRole
+      Resource: "*"
+request:
+  spec:
+    access_type: read-write
+    duration:
+      duration_hours: 1
+expected:
+  score_min: 9
+  must_auto_approve: false

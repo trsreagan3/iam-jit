@@ -1,0 +1,50 @@
+name: agent-513-dms-passrole-composition
+description: |
+  BLACK-BOX Round 8. Research §8.10 T1537 (cross-account exfil) + round-7 QQ
+  recommendation (DMS).
+
+  AWS Database Migration Service (`dms:CreateReplicationTask` + `StartReplicationTask`)
+  runs as a service role and pushes data from any source (RDS, MongoDB, S3) to any
+  destination (could be attacker S3 in another region or account). This is CDC-tier
+  data exfil at gigabytes/second.
+
+  Round 7 documented this gap (QQ recommendation, agent-319 calibration pin) but the
+  composition with `iam:PassRole` was NOT pinned with a score-failing fixture. Currently
+  scores 6 vs expected 9.
+
+  Det score: 6.
+  Real risk: 9 — gigabyte-scale exfil-as-a-service.
+
+  Scorer gap: `dms:CreateReplicationTask` is not in `_CODE_EXECUTION_PRIMITIVES` nor in
+  `_CROSS_ACCOUNT_EXFIL_ACTIONS` (per round 7 QQ recommendation — the recommendation was
+  drafted but not implemented). The PassRole composition rule doesn't fire.
+
+  Proposed fix: add `dms:CreateReplicationTask`, `dms:StartReplicationTask`,
+  `dms:CreateEndpoint`, `dms:ModifyEndpoint`, `dms:CreateDataMigration`,
+  `dms:StartDataMigration` to BOTH `_CROSS_ACCOUNT_EXFIL_ACTIONS` and the code-exec
+  composition primitives.
+
+  Research-doc pattern: §8.10 (Exfiltration T1567) + round-7 QQ.
+
+policy:
+  Version: "2012-10-17"
+  Statement:
+    - Effect: Allow
+      Action:
+        - "dms:CreateReplicationTask"
+        - "dms:StartReplicationTask"
+        - "dms:CreateEndpoint"
+      Resource: "*"
+    - Effect: Allow
+      Action: "iam:PassRole"
+      Resource: "arn:aws:iam::123456789012:role/DMSAssumeRole"
+
+request:
+  spec:
+    access_type: read-write
+    duration:
+      duration_hours: 1
+
+expected:
+  score_min: 9
+  must_auto_approve: false

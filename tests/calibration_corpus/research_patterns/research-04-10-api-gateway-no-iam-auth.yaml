@@ -1,0 +1,27 @@
+name: research-04-10-api-gateway-no-iam-auth
+description: |
+  Reference: IAM-BYPASS-RESEARCH.md §4.10 (API Gateway IAM docs)
+
+  API Gateway resource policy allows when AWS_IAM authorizer is OFF.
+  If authorizationType is not AWS_IAM, IAM policy on the principal
+  doesn't apply — the API is effectively public.
+  # NB: encoded as wide apigateway:Invoke grant on resource policy.
+
+  Expected behavior: effectively public API — high risk.
+
+  Source: https://docs.aws.amazon.com/apigateway/latest/developerguide/api-gateway-control-access-using-iam-policies-to-invoke-api.html
+policy:
+  Version: "2012-10-17"
+  Statement:
+    - Effect: Allow
+      Principal: "*"
+      Action: execute-api:Invoke
+      Resource: "*"
+request:
+  spec:
+    access_type: read-write
+    duration:
+      duration_hours: 1
+expected:
+  score_min: 7
+  must_auto_approve: false

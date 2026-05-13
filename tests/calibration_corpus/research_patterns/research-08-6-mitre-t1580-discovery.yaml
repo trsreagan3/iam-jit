@@ -1,0 +1,30 @@
+name: research-08-6-mitre-t1580-discovery
+description: |
+  Reference: IAM-BYPASS-RESEARCH.md §8.6 (MITRE T1580, T1087.004, T1526)
+
+  Discovery: ec2:Describe*, iam:List*, iam:Get*, s3:ListAllMyBuckets,
+  iam:ListUsers, iam:ListRoles, organizations:ListAccounts,
+  aws ec2 describe-regions, service spend enumeration.
+
+  Expected behavior: discovery / recon — moderate risk.
+
+  Source: https://attack.mitre.org/matrices/enterprise/cloud/
+policy:
+  Version: "2012-10-17"
+  Statement:
+    - Effect: Allow
+      Action:
+        - ec2:Describe*
+        - iam:List*
+        - iam:Get*
+        - s3:ListAllMyBuckets
+        - organizations:ListAccounts
+      Resource: "*"
+request:
+  spec:
+    access_type: read-only
+    duration:
+      duration_hours: 1
+expected:
+  score_min: 4
+  must_auto_approve: false

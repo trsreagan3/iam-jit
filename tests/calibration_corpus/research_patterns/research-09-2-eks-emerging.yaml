@@ -1,0 +1,31 @@
+name: research-09-2-eks-emerging
+description: |
+  Reference: IAM-BYPASS-RESEARCH.md §9.2 (AWS EKS access entries docs)
+
+  eks:AccessKubernetesApi — required to use the EKS console proxy;
+  combined with cluster-admin RBAC = cluster admin.
+  eks:CreateAccessEntry + eks:AssociateAccessPolicy — modern path to
+  grant Kubernetes admin without ConfigMap edit.
+  eks:UpdateClusterConfig — disable public-endpoint restrictions.
+
+  Expected behavior: EKS cluster takeover — critical.
+
+  Source: https://docs.aws.amazon.com/eks/latest/userguide/access-entries.html
+policy:
+  Version: "2012-10-17"
+  Statement:
+    - Effect: Allow
+      Action:
+        - eks:AccessKubernetesApi
+        - eks:CreateAccessEntry
+        - eks:AssociateAccessPolicy
+        - eks:UpdateClusterConfig
+      Resource: "*"
+request:
+  spec:
+    access_type: read-write
+    duration:
+      duration_hours: 1
+expected:
+  score_min: 9
+  must_auto_approve: false

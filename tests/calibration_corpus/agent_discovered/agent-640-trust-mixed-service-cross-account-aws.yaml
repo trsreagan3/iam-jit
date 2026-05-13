@@ -1,0 +1,53 @@
+name: agent-640-trust-mixed-service-cross-account-aws
+description: |
+  WHITE-BOX round 8: trust policy with BOTH `Service` and `AWS`
+  principals. The scorer's Service-principal-without-Condition rule
+  (line 1773) fires AT ALL — but it ONLY reports the Service half.
+  The cross-account AWS root in the SAME Principal dict is NOT
+  reported because `_principal_is_public` returns False (it's not
+  a wildcard).
+
+  Scoring: 6 (Service-without-Condition floor). The cross-account
+  AWS root deserves an ADDITIONAL flag and SHOULD floor higher
+  (per agent-600 — cross-account-AWS in trust policy is 7+).
+
+  Both flags should fire simultaneously, and the higher of the two
+  should win. Currently only one fires.
+
+  Source-code rule exploited: the per-statement Principal handling
+  (line 1701) checks `_principal_is_public` once and the
+  Service-without-Condition rule once, but they don't iterate over
+  the multiple principal keys (AWS + Service + Federated) and
+  surface ALL findings.
+
+  Research-doc pattern: §10.14 (Mixed-array Principal with both
+  AWS and Service entries — both lines apply).
+
+  Real risk: 8 — combined Service-trust + cross-account-AWS-root.
+
+  Det score: 6.
+
+  Proposed fix: in the per-statement Principal handling, iterate
+  over each principal-type key (AWS, Service, Federated,
+  CanonicalUser) and apply per-type checks. Don't short-circuit
+  on the first type detected.
+
+policy:
+  Version: "2012-10-17"
+  Statement:
+    - Effect: Allow
+      Principal:
+        AWS:
+          - "arn:aws:iam::999999999999:root"
+        Service: "lambda.amazonaws.com"
+      Action: "sts:AssumeRole"
+
+request:
+  spec:
+    access_type: read-write
+    duration:
+      duration_hours: 1
+
+expected:
+  score_min: 7
+  must_auto_approve: false

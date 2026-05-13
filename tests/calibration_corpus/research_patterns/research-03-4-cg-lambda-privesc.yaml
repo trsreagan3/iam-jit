@@ -1,0 +1,26 @@
+name: research-03-4-cg-lambda-privesc
+description: |
+  Reference: IAM-BYPASS-RESEARCH.md §3.4 (CloudGoat lambda_privesc)
+
+  lambda:UpdateFunctionCode or lambda:CreateFunction + iam:PassRole chain.
+
+  Expected behavior: privilege escalation primitive — high risk.
+
+  Source: https://github.com/RhinoSecurityLabs/cloudgoat
+policy:
+  Version: "2012-10-17"
+  Statement:
+    - Effect: Allow
+      Action:
+        - lambda:UpdateFunctionCode
+        - lambda:CreateFunction
+        - iam:PassRole
+      Resource: "*"
+request:
+  spec:
+    access_type: read-write
+    duration:
+      duration_hours: 1
+expected:
+  score_min: 8
+  must_auto_approve: false

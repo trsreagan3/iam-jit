@@ -1,0 +1,27 @@
+name: research-04-9-efs-wide-clientmount
+description: |
+  Reference: IAM-BYPASS-RESEARCH.md §4.9 (HackingTheCloud)
+
+  EFS file-system policy with wide elasticfilesystem:ClientMount.
+  Cross-VPC mount.
+
+  Expected behavior: cross-VPC filesystem access — high risk.
+
+  Source: https://hackingthe.cloud/aws/exploitation/Misconfigured_Resource-Based_Policies/
+policy:
+  Version: "2012-10-17"
+  Statement:
+    - Effect: Allow
+      Principal: "*"
+      Action:
+        - elasticfilesystem:ClientMount
+        - elasticfilesystem:ClientRootAccess
+      Resource: "*"
+request:
+  spec:
+    access_type: read-write
+    duration:
+      duration_hours: 1
+expected:
+  score_min: 7
+  must_auto_approve: false

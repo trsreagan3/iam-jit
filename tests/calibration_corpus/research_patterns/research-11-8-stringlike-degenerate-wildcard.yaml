@@ -1,0 +1,26 @@
+name: research-11-8-stringlike-degenerate-wildcard
+description: |
+  Reference: IAM-BYPASS-RESEARCH.md §11.8 (Sysdig)
+
+  "StringLike":{"s3:prefix":"*"} — degenerate wildcard, no scoping.
+
+  Expected behavior: condition matches anything — no scoping.
+
+  Source: https://www.sysdig.com/blog/iam-security-misconfiguration
+policy:
+  Version: "2012-10-17"
+  Statement:
+    - Effect: Allow
+      Action: s3:ListBucket
+      Resource: "*"
+      Condition:
+        StringLike:
+          "s3:prefix": "*"
+request:
+  spec:
+    access_type: read-only
+    duration:
+      duration_hours: 1
+expected:
+  score_min: 5
+  must_auto_approve: false

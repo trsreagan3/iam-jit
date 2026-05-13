@@ -1,0 +1,35 @@
+name: research-11-11-tag-based-self-defeating
+description: |
+  Reference: IAM-BYPASS-RESEARCH.md §11.11 (Stratus / Sysdig)
+
+  If the principal can iam:TagUser / iam:TagRole on self (or the
+  resource has *:TagResource), the principal can rewrite their own
+  tag to satisfy the condition. "Tag-based access control without
+  locking tag-modify permissions is self-defeating."
+
+  Expected behavior: tag-based bypass — high risk.
+
+  Source: https://www.sysdig.com/blog/iam-security-misconfiguration
+policy:
+  Version: "2012-10-17"
+  Statement:
+    - Effect: Allow
+      Action:
+        - iam:TagUser
+        - iam:TagRole
+        - ec2:CreateTags
+      Resource: "*"
+    - Effect: Allow
+      Action: "*"
+      Resource: "*"
+      Condition:
+        StringEquals:
+          "aws:PrincipalTag/Role": "admin"
+request:
+  spec:
+    access_type: read-write
+    duration:
+      duration_hours: 1
+expected:
+  score_min: 9
+  must_auto_approve: false

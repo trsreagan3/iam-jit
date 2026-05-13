@@ -1,0 +1,39 @@
+name: agent-638-action-as-integer
+description: |
+  WHITE-BOX round 8: `Action: 42` (or any non-str/non-list type).
+  `_as_list` (line 2868) only handles str and list — integer returns
+  `[]`. The per-action loop iterates over `[]`. Final score: 1
+  (no rule fires).
+
+  The author's intent is unclear, but AWS will reject. The scorer
+  silently rates safe — same "malformed = worst-case" gap.
+
+  Source-code rule exploited: `_as_list` (line 2868) — non-handled
+  types silently drop to empty list.
+
+  Research-doc pattern: §10.2 (Action shape).
+
+  Real risk: 5 — defect class.
+
+  Det score: 1.
+
+  Proposed fix: in `_as_list`, non-str/non-list values should return
+  a sentinel like `["__malformed__"]` and trigger a malformed-policy
+  factor.
+
+policy:
+  Version: "2012-10-17"
+  Statement:
+    - Effect: Allow
+      Action: 42
+      Resource: "*"
+
+request:
+  spec:
+    access_type: read-write
+    duration:
+      duration_hours: 1
+
+expected:
+  score_min: 5
+  must_auto_approve: false

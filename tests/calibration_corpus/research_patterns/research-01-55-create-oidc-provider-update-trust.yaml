@@ -1,0 +1,26 @@
+name: research-01-55-create-oidc-provider-update-trust
+description: |
+  Reference: IAM-BYPASS-RESEARCH.md §1.55 (HackingTheCloud persistence)
+
+  Add a rogue OIDC IdP, then update a role's trust policy to trust it;
+  assume the role via JWT minted from attacker IdP.
+
+  Expected behavior: persistence primitive — high risk.
+
+  Source: https://hackingthe.cloud/aws/post_exploitation/iam_persistence/
+policy:
+  Version: "2012-10-17"
+  Statement:
+    - Effect: Allow
+      Action:
+        - iam:CreateOpenIDConnectProvider
+        - iam:UpdateAssumeRolePolicy
+      Resource: "*"
+request:
+  spec:
+    access_type: read-write
+    duration:
+      duration_hours: 1
+expected:
+  score_min: 8
+  must_auto_approve: false

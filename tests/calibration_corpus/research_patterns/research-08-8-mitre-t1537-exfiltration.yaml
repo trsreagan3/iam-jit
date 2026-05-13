@@ -1,0 +1,29 @@
+name: research-08-8-mitre-t1537-exfiltration
+description: |
+  Reference: IAM-BYPASS-RESEARCH.md §8.8 (MITRE T1537, T1567)
+
+  Transfer Data to Cloud Account — share AMI / EBS snapshot / RDS
+  snapshot to attacker account. S3 to attacker-controlled S3-compatible
+  endpoint (SCARLETEEL pattern).
+
+  Expected behavior: exfiltration — high risk.
+
+  Source: https://attack.mitre.org/matrices/enterprise/cloud/
+policy:
+  Version: "2012-10-17"
+  Statement:
+    - Effect: Allow
+      Action:
+        - ec2:ModifyImageAttribute
+        - ec2:ModifySnapshotAttribute
+        - rds:ModifyDBSnapshotAttribute
+        - s3:PutObject
+      Resource: "*"
+request:
+  spec:
+    access_type: read-write
+    duration:
+      duration_hours: 1
+expected:
+  score_min: 7
+  must_auto_approve: false

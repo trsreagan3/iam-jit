@@ -1,0 +1,58 @@
+name: agent-625-resource-as-dict
+description: |
+  WHITE-BOX round 8: `Resource: {Service: "*"}` (dict instead of
+  str/list) is non-standard but accepted by some parsers. The
+  scorer's `_as_list` (line 2868) returns `[]` for non-str / non-list
+  values. So `Resource` becomes empty → `wildcard_resource = False`,
+  `broad_blast_resource = False`.
+
+  HOWEVER — the policy still contains `Action: "*"`. The early-return
+  at line 2082 (`if "*" in actions: return 10, [...]`) fires
+  REGARDLESS of resource. So this case scores 10 correctly.
+
+  But the more subtle bypass: `Action: ["iam:CreateAccessKey"]`
+  (specific catastrophic action) with `Resource: {...}`. Then
+  `wildcard_resource = False`, and the catastrophic action floor
+  (line 2412) still fires unconditionally → score 9. So that's
+  fine.
+
+  THE GAP: shape `Action: "iam:PassRole"` + `Resource: {dict}`. Now
+  wildcard_resource is False (default narrow), but there's NO
+  literal resource to scope against either. The narrow-PassRole
+  floor at line 2237 fires at 4. The actual semantic is "what does
+  AWS do with a dict-Resource?" — AWS rejects, but the scorer says
+  4 (auto-approves). Conservative fix: flag malformed Resource.
+
+  Source-code rule exploited: `_as_list` (line 2868) silently drops
+  non-string/list Resource values.
+
+  Research-doc pattern: §10.3 (Resource string-vs-list ambiguity)
+  + §10.11 (malformed = worst-case principle should extend to
+  Resource).
+
+  Real risk: 5 — malformed defect class.
+
+  Det score: 4.
+
+  Proposed fix: in `_as_list` (line 2851), if the value is a dict
+  or other unhandled type, return a sentinel like `["__malformed__"]`
+  that the rest of the scorer treats as broad. Or flag at the
+  policy-shape level.
+
+policy:
+  Version: "2012-10-17"
+  Statement:
+    - Effect: Allow
+      Action: "iam:PassRole"
+      Resource:
+        Service: "*"
+
+request:
+  spec:
+    access_type: read-write
+    duration:
+      duration_hours: 1
+
+expected:
+  score_min: 5
+  must_auto_approve: false

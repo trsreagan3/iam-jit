@@ -1,0 +1,43 @@
+name: agent-509-bedrock-agent-create-update
+description: |
+  BLACK-BOX Round 8. Research Sec 9.3 (Bedrock) + Sec 13 (service aliasing) + Sec 3.15
+  (CloudGoat bedrock_agent_hijacking).
+
+  `bedrock-agent` is the control-plane prefix for Bedrock Agent definitions (separate from
+  `bedrock` and `bedrock-agentcore` and `bedrock-agent-runtime`). `CreateAgent` /
+  `UpdateAgent` lets the attacker install a backdoor agent whose action group calls a
+  Lambda they control — RCE-as-agent's-execution-role on every invocation.
+
+  Det score: 4.
+  Real risk: 8 — supply-chain backdoor of corporate-facing AI agents.
+
+  Scorer gap: `bedrock-agent` is not in `_SENSITIVE_SERVICES`, and `bedrock-agent:CreateAgent`
+  / `UpdateAgent` are not in `_HIGH_IMPACT_MUTATION_ACTIONS` or the code-exec composition
+  set. Round 7 added `bedrock-agentcore` siblings but missed `bedrock-agent` proper.
+
+  Proposed fix: add `bedrock-agent` to `_SENSITIVE_SERVICES`. Add `bedrock-agent:CreateAgent`,
+  `UpdateAgent`, `CreateAgentActionGroup`, `UpdateAgentActionGroup`,
+  `AssociateAgentKnowledgeBase`, `PrepareAgent` to `_HIGH_IMPACT_MUTATION_ACTIONS`. Add
+  `bedrock-agent:CreateAgent` + `iam:PassRole` to the code-execution composition rule.
+
+  Research-doc pattern: §9.3 + §3.15 (CloudGoat agent hijacking scenario).
+
+policy:
+  Version: "2012-10-17"
+  Statement:
+    - Effect: Allow
+      Action:
+        - "bedrock-agent:CreateAgent"
+        - "bedrock-agent:UpdateAgent"
+        - "bedrock-agent:CreateAgentActionGroup"
+      Resource: "*"
+
+request:
+  spec:
+    access_type: read-write
+    duration:
+      duration_hours: 1
+
+expected:
+  score_min: 8
+  must_auto_approve: false

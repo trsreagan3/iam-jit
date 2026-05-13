@@ -1,0 +1,26 @@
+name: research-04-3-sns-wildcard-subscribe
+description: |
+  Reference: IAM-BYPASS-RESEARCH.md §4.3 (HackingTheCloud)
+
+  SNS topic policy with wildcard sns:Subscribe. Any AWS principal
+  subscribes to attacker-controlled HTTPS endpoint and exfiltrates
+  messages.
+
+  Expected behavior: data exfil channel — high risk.
+
+  Source: https://hackingthe.cloud/aws/exploitation/Misconfigured_Resource-Based_Policies/
+policy:
+  Version: "2012-10-17"
+  Statement:
+    - Effect: Allow
+      Principal: "*"
+      Action: sns:Subscribe
+      Resource: arn:aws:sns:us-east-1:111122223333:example-topic
+request:
+  spec:
+    access_type: read-write
+    duration:
+      duration_hours: 1
+expected:
+  score_min: 7
+  must_auto_approve: false

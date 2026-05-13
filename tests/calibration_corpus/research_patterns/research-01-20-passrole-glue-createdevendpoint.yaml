@@ -1,0 +1,26 @@
+name: research-01-20-passrole-glue-createdevendpoint
+description: |
+  Reference: IAM-BYPASS-RESEARCH.md §1.20 (Rhino #19)
+
+  Create a Glue development endpoint with a privileged role; SSH in
+  and read role creds.
+
+  Expected behavior: privilege escalation primitive — high risk.
+
+  Source: Rhino #19
+policy:
+  Version: "2012-10-17"
+  Statement:
+    - Effect: Allow
+      Action:
+        - iam:PassRole
+        - glue:CreateDevEndpoint
+      Resource: "*"
+request:
+  spec:
+    access_type: read-write
+    duration:
+      duration_hours: 1
+expected:
+  score_min: 8
+  must_auto_approve: false

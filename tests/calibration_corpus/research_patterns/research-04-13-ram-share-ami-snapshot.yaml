@@ -1,0 +1,27 @@
+name: research-04-13-ram-share-ami-snapshot
+description: |
+  Reference: IAM-BYPASS-RESEARCH.md §4.13 (Stratus Red Team)
+
+  Resources made public via ec2:ModifyImageAttribute (AMI),
+  ec2:ModifySnapshotAttribute (EBS), rds:ModifyDBSnapshotAttribute (RDS).
+
+  Expected behavior: cross-account exfil via snapshot/AMI sharing — high risk.
+
+  Source: https://stratus-red-team.cloud/attack-techniques/AWS/
+policy:
+  Version: "2012-10-17"
+  Statement:
+    - Effect: Allow
+      Action:
+        - ec2:ModifyImageAttribute
+        - ec2:ModifySnapshotAttribute
+        - rds:ModifyDBSnapshotAttribute
+      Resource: "*"
+request:
+  spec:
+    access_type: read-write
+    duration:
+      duration_hours: 1
+expected:
+  score_min: 7
+  must_auto_approve: false

@@ -1,0 +1,51 @@
+name: agent-620-sso-admin-delete-account-assignment
+description: |
+  WHITE-BOX round 8: SIBLING-ACTION pair gap in
+  `_CATASTROPHIC_ACTIONS`. `sso-admin:CreateAccountAssignment` IS
+  catastrophic (line 658). The DELETE half
+  `sso-admin:DeleteAccountAssignment` is NOT. With `Resource: *`,
+  this lets an attacker REMOVE legitimate admin assignments — a
+  defense-evasion / availability-impact primitive equal to
+  `cloudtrail:StopLogging` (already catastrophic).
+
+  Scoring path: the sso-admin service IS in `_SENSITIVE_SERVICES`
+  (line 56). Sensitive-on-broad-resource rule (line 2120) sees
+  service in {"iam", "organizations"} as 9 vs other sensitive
+  as 8. `sso-admin` is "other sensitive" → score 8. Just below
+  the 9 a catastrophic action gets.
+
+  Source-code rule exploited: `_CATASTROPHIC_ACTIONS` (line 608)
+  omits delete/detach SSO-admin halves.
+
+  Research-doc pattern: §9.1 (SSO admin actions enumeration —
+  Create and Detach should be paired in any catastrophic list),
+  §8.4 (Defense Evasion T1562 — disabling protections == removing
+  admin assignments).
+
+  Real risk: 9 — same tier as the Create half.
+
+  Det score: 8.
+
+  Proposed fix: add to `_CATASTROPHIC_ACTIONS`:
+  `sso-admin:DeleteAccountAssignment`,
+  `sso-admin:DeletePermissionSet`,
+  `sso-admin:DetachManagedPolicyFromPermissionSet`,
+  `sso-admin:DetachCustomerManagedPolicyReferenceFromPermissionSet`,
+  `sso-admin:DeleteInlinePolicyFromPermissionSet`.
+
+policy:
+  Version: "2012-10-17"
+  Statement:
+    - Effect: Allow
+      Action: "sso-admin:DeleteAccountAssignment"
+      Resource: "*"
+
+request:
+  spec:
+    access_type: read-write
+    duration:
+      duration_hours: 1
+
+expected:
+  score_min: 9
+  must_auto_approve: false

@@ -1,0 +1,33 @@
+name: research-06-6-cloudsplaining-compute-service-assumption
+description: |
+  Reference: IAM-BYPASS-RESEARCH.md §6.6 (CloudSplaining Compute Service Assumption)
+
+  Roles assumable by ec2.amazonaws.com, ecs-tasks.amazonaws.com,
+  eks.amazonaws.com, lambda.amazonaws.com are extra-risky when those
+  compute fronts the internet.
+  # NB: encoded as a role trust policy listing all four service
+  # principals.
+
+  Expected behavior: broad compute service trust — moderate risk.
+
+  Source: https://github.com/salesforce/cloudsplaining/blob/master/docs/index.md
+policy:
+  Version: "2012-10-17"
+  Statement:
+    - Effect: Allow
+      Principal:
+        Service:
+          - ec2.amazonaws.com
+          - ecs-tasks.amazonaws.com
+          - eks.amazonaws.com
+          - lambda.amazonaws.com
+      Action: sts:AssumeRole
+      Resource: "*"
+request:
+  spec:
+    access_type: read-write
+    duration:
+      duration_hours: 1
+expected:
+  score_min: 5
+  must_auto_approve: false

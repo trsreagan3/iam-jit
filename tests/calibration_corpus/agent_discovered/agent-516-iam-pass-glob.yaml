@@ -1,0 +1,42 @@
+name: agent-516-iam-pass-glob
+description: |
+  BLACK-BOX Round 8. Research Sec 12.5 (NotAction wildcard expansion) + Sec 10.6 (action
+  case / glob).
+
+  `iam:Pass*` glob matches `iam:PassRole` (the only current `iam:Pass*` action). The
+  scorer's glob-resolution catalog recognizes `iam:Create*`, `iam:Update*`, `iam:Add*`
+  etc. as expanding to catastrophic actions, but `iam:Pass*` lands one tier low — the
+  scorer treats it as "wildcard in sensitive service action" (factor 7) instead of the
+  PassRole-on-Resource-* catastrophic floor (9 if combined with code-exec).
+
+  Det score: 7.
+  Real risk: 8 — equivalent to `iam:PassRole` on `Resource:*`, which is recognized as a
+  privilege escalation primitive.
+
+  Scorer gap: glob resolution doesn't include `iam:PassRole` in the `iam:Pass*` expansion
+  set OR doesn't apply the PassRole-on-* catastrophic semantic when the action is
+  expressed as a glob.
+
+  Proposed fix: extend the glob-resolution catalog to include `iam:PassRole` in
+  `iam:Pass*`. When that resolution fires, apply the same composition-rule semantics as
+  the literal `iam:PassRole` string (specifically, code-execution-primitive + glob-resolved
+  iam:PassRole → composition floor 9).
+
+  Research-doc pattern: §10.6 + §12.5 (glob-resolution semantics).
+
+policy:
+  Version: "2012-10-17"
+  Statement:
+    - Effect: Allow
+      Action: "iam:Pass*"
+      Resource: "*"
+
+request:
+  spec:
+    access_type: read-write
+    duration:
+      duration_hours: 1
+
+expected:
+  score_min: 8
+  must_auto_approve: false

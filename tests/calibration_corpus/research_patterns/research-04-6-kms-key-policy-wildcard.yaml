@@ -1,0 +1,28 @@
+name: research-04-6-kms-key-policy-wildcard
+description: |
+  Reference: IAM-BYPASS-RESEARCH.md §4.6 (AWS KMS best practices)
+
+  KMS key policy Principal:"*" (or wide AWS account principal).
+  kms:Decrypt + kms:GenerateDataKey exposes all data encrypted under
+  that key.
+
+  Expected behavior: ciphertext exposure across account — critical.
+
+  Source: https://docs.aws.amazon.com/kms/latest/developerguide/iam-policies-best-practices.html
+policy:
+  Version: "2012-10-17"
+  Statement:
+    - Effect: Allow
+      Principal: "*"
+      Action:
+        - kms:Decrypt
+        - kms:GenerateDataKey
+      Resource: "*"
+request:
+  spec:
+    access_type: read-write
+    duration:
+      duration_hours: 1
+expected:
+  score_min: 9
+  must_auto_approve: false

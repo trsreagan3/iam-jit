@@ -1,0 +1,27 @@
+name: research-04-5-lambda-addpermission-no-sourcearn
+description: |
+  Reference: IAM-BYPASS-RESEARCH.md §4.5 (AWS Lambda permission docs)
+
+  Lambda function policy with wildcard via lambda:AddPermission (no
+  aws:SourceArn). Per AWS docs: "If you add a permission without
+  providing the source ARN, any AWS account that creates a mapping to
+  your function ARN can send events to invoke your Lambda function."
+
+  Expected behavior: cross-account Lambda invocation — high risk.
+
+  Source: https://docs.aws.amazon.com/lambda/latest/dg/permissions-function-cross-account.html
+policy:
+  Version: "2012-10-17"
+  Statement:
+    - Effect: Allow
+      Principal: "*"
+      Action: lambda:InvokeFunction
+      Resource: arn:aws:lambda:us-east-1:111122223333:function:example
+request:
+  spec:
+    access_type: read-write
+    duration:
+      duration_hours: 1
+expected:
+  score_min: 7
+  must_auto_approve: false

@@ -1,0 +1,30 @@
+name: research-07-3-aa-unused-access
+description: |
+  Reference: IAM-BYPASS-RESEARCH.md §7.3 (AWS IAM Access Analyzer)
+
+  Unused Access Findings: Unused role, Unused IAM user access key,
+  Unused password, Unused permission (action-level / service-level).
+  # NB: abstract finding type, encoded the simplest concrete form —
+  # a broad unused grant.
+
+  Expected behavior: unused over-broad permission — moderate risk.
+
+  Source: https://docs.aws.amazon.com/IAM/latest/UserGuide/access-analyzer-findings.html
+policy:
+  Version: "2012-10-17"
+  Statement:
+    - Effect: Allow
+      Action:
+        - ec2:*
+        - rds:*
+        - dynamodb:*
+        - kinesis:*
+      Resource: "*"
+request:
+  spec:
+    access_type: read-write
+    duration:
+      duration_hours: 1
+expected:
+  score_min: 6
+  must_auto_approve: false

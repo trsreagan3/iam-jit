@@ -1,0 +1,28 @@
+name: research-13-11-ec2-instance-connect-prefix
+description: |
+  Reference: IAM-BYPASS-RESEARCH.md §13.11 (Stratus Red Team)
+
+  ec2-instance-connect:SendSSHPublicKey and
+  ec2-instance-connect:SendSerialConsoleSSHPublicKey — separate prefix
+  from ec2:. Stratus's lateral-movement primitive: push attacker SSH
+  key to any instance.
+
+  Expected behavior: lateral movement to EC2 — high risk.
+
+  Source: https://stratus-red-team.cloud/attack-techniques/AWS/
+policy:
+  Version: "2012-10-17"
+  Statement:
+    - Effect: Allow
+      Action:
+        - ec2-instance-connect:SendSSHPublicKey
+        - ec2-instance-connect:SendSerialConsoleSSHPublicKey
+      Resource: "*"
+request:
+  spec:
+    access_type: read-write
+    duration:
+      duration_hours: 1
+expected:
+  score_min: 7
+  must_auto_approve: false

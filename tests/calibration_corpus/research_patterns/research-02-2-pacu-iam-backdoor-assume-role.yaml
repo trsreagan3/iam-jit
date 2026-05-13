@@ -1,0 +1,23 @@
+name: research-02-2-pacu-iam-backdoor-assume-role
+description: |
+  Reference: IAM-BYPASS-RESEARCH.md §2.2 (Pacu iam__backdoor_assume_role)
+
+  iam:UpdateAssumeRolePolicyDocument to add attacker account to role trust.
+
+  Expected behavior: persistence — high risk.
+
+  Source: https://github.com/RhinoSecurityLabs/pacu/wiki/Module-Details
+policy:
+  Version: "2012-10-17"
+  Statement:
+    - Effect: Allow
+      Action: iam:UpdateAssumeRolePolicy
+      Resource: "*"
+request:
+  spec:
+    access_type: read-write
+    duration:
+      duration_hours: 1
+expected:
+  score_min: 8
+  must_auto_approve: false

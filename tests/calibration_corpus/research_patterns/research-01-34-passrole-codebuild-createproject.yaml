@@ -1,0 +1,27 @@
+name: research-01-34-passrole-codebuild-createproject
+description: |
+  Reference: IAM-BYPASS-RESEARCH.md §1.34 (PMapper codebuild_edges)
+
+  Define a CodeBuild project with a privileged service role; the
+  buildspec runs attacker code.
+
+  Expected behavior: privilege escalation primitive — high risk.
+
+  Source: https://raw.githubusercontent.com/nccgroup/PMapper/master/principalmapper/graphing/codebuild_edges.py
+policy:
+  Version: "2012-10-17"
+  Statement:
+    - Effect: Allow
+      Action:
+        - iam:PassRole
+        - codebuild:CreateProject
+        - codebuild:StartBuild
+      Resource: "*"
+request:
+  spec:
+    access_type: read-write
+    duration:
+      duration_hours: 1
+expected:
+  score_min: 8
+  must_auto_approve: false

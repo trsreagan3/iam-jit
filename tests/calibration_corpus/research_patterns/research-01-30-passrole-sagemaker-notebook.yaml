@@ -1,0 +1,27 @@
+name: research-01-30-passrole-sagemaker-notebook
+description: |
+  Reference: IAM-BYPASS-RESEARCH.md §1.30 (Rhino #27)
+
+  Launch a SageMaker notebook with a privileged role; open a pre-signed
+  URL into the notebook and grab role STS creds from its metadata.
+
+  Expected behavior: privilege escalation primitive — high risk.
+
+  Source: https://raw.githubusercontent.com/nccgroup/PMapper/master/principalmapper/graphing/sagemaker_edges.py
+policy:
+  Version: "2012-10-17"
+  Statement:
+    - Effect: Allow
+      Action:
+        - iam:PassRole
+        - sagemaker:CreateNotebookInstance
+        - sagemaker:CreatePresignedNotebookInstanceUrl
+      Resource: "*"
+request:
+  spec:
+    access_type: read-write
+    duration:
+      duration_hours: 1
+expected:
+  score_min: 8
+  must_auto_approve: false

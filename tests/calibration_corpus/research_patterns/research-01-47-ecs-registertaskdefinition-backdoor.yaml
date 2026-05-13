@@ -1,0 +1,25 @@
+name: research-01-47-ecs-registertaskdefinition-backdoor
+description: |
+  Reference: IAM-BYPASS-RESEARCH.md §1.47 (Pacu ecs__backdoor_task_def)
+
+  Replace a task definition with one that exfils the task role's STS creds.
+
+  Expected behavior: privilege escalation + persistence — high risk.
+
+  Source: Pacu ecs__backdoor_task_def
+policy:
+  Version: "2012-10-17"
+  Statement:
+    - Effect: Allow
+      Action:
+        - ecs:RegisterTaskDefinition
+        - ecs:UpdateService
+      Resource: "*"
+request:
+  spec:
+    access_type: read-write
+    duration:
+      duration_hours: 1
+expected:
+  score_min: 7
+  must_auto_approve: false

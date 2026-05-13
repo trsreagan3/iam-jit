@@ -1,0 +1,25 @@
+name: research-02-4-pacu-s3-download-bucket
+description: |
+  Reference: IAM-BYPASS-RESEARCH.md §2.4 (Pacu s3__download_bucket)
+
+  s3:ListBucket, s3:GetObject.
+
+  Expected behavior: data exfil — depends on scope; wide grant high.
+
+  Source: https://github.com/RhinoSecurityLabs/pacu/wiki/Module-Details
+policy:
+  Version: "2012-10-17"
+  Statement:
+    - Effect: Allow
+      Action:
+        - s3:ListBucket
+        - s3:GetObject
+      Resource: "*"
+request:
+  spec:
+    access_type: read-only
+    duration:
+      duration_hours: 1
+expected:
+  score_min: 6
+  must_auto_approve: false

@@ -1,0 +1,28 @@
+name: research-11-12-sourcevpce-bypass
+description: |
+  Reference: IAM-BYPASS-RESEARCH.md §11.12 (Sysdig)
+
+  aws:SourceVpce / aws:SourceVpc only populate when traffic actually
+  traverses a VPC endpoint. Cross-region or non-endpoint paths return
+  absent — see 11.4.
+
+  Expected behavior: condition silently bypassed — high risk.
+
+  Source: https://www.sysdig.com/blog/iam-security-misconfiguration
+policy:
+  Version: "2012-10-17"
+  Statement:
+    - Effect: Allow
+      Action: "*"
+      Resource: "*"
+      Condition:
+        StringEquals:
+          "aws:SourceVpce": "vpce-12345"
+request:
+  spec:
+    access_type: read-write
+    duration:
+      duration_hours: 1
+expected:
+  score_min: 6
+  must_auto_approve: false

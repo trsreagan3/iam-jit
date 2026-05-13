@@ -1,0 +1,28 @@
+name: research-09-9-organizations-scp-bypass
+description: |
+  Reference: IAM-BYPASS-RESEARCH.md §9.9 (Organizations / SCP)
+
+  organizations:LeaveOrganization — member account "escapes" the SCP
+  guardrail. organizations:DetachPolicy / organizations:UpdatePolicy —
+  modify SCPs at the management account.
+
+  Expected behavior: SCP escape — critical.
+
+  Source: AWS Organizations docs
+policy:
+  Version: "2012-10-17"
+  Statement:
+    - Effect: Allow
+      Action:
+        - organizations:LeaveOrganization
+        - organizations:DetachPolicy
+        - organizations:UpdatePolicy
+      Resource: "*"
+request:
+  spec:
+    access_type: read-write
+    duration:
+      duration_hours: 1
+expected:
+  score_min: 9
+  must_auto_approve: false

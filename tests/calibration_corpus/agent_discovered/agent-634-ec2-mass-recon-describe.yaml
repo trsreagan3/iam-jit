@@ -1,0 +1,61 @@
+name: agent-634-ec2-mass-recon-describe
+description: |
+  WHITE-BOX round 8: EC2 mass recon — `ec2:DescribeImages` +
+  `ec2:DescribeInstances` + `ec2:DescribeSnapshots` on `*` — scores
+  1 because the metadata-listing filter at line 2358 skips
+  the broad-cross-resource rule when EVERY action starts with
+  Describe or List.
+
+  This is the docstring's intent (line 2347):
+      "Skip the 'broad cross-resource' rule entirely when EVERY
+       action is a metadata-listing pattern."
+
+  BUT — `ec2:DescribeSnapshots` + `ec2:DescribeImages` are the
+  RECON HALF of cross-account EBS exfiltration (see Section 1.51
+  of the research doc and `ebs:GetSnapshotBlock` in catastrophic).
+  Combined with the eventual goal of shared snapshots, these
+  reveal which snapshots exist account-wide — including from
+  ALL regions, ALL VPCs.
+
+  The metadata-listing filter is correct for the COMMON case (a
+  pure read-only AWS managed policy), but on the per-statement-
+  level + EC2 specifically, the recon-half deserves at least
+  score 3.
+
+  Source-code rule exploited: `_is_metadata_listing` (line 2352)
+  is a per-action filter without service-awareness.
+
+  Research-doc pattern: §8.6 (T1580 Cloud Infrastructure Discovery,
+  §1.39 (Pacu enum*` modules), §13.10 (`iam:*` reach).
+
+  Real risk: 3 — mass recon is a precondition to exfil but not
+  catastrophic on its own. Should be flagged for human review when
+  combined with cross-account-exfil-class actions in OTHER
+  statements.
+
+  Det score: 1.
+
+  Proposed fix: when service is in {ec2, iam, organizations,
+  rds, kms} AND all-metadata-listing filter would fire, still
+  emit a low-severity factor "broad recon on sensitive service"
+  (no score change unless combined with exfil actions).
+
+policy:
+  Version: "2012-10-17"
+  Statement:
+    - Effect: Allow
+      Action:
+        - "ec2:DescribeImages"
+        - "ec2:DescribeInstances"
+        - "ec2:DescribeSnapshots"
+      Resource: "*"
+
+request:
+  spec:
+    access_type: read-only
+    duration:
+      duration_hours: 1
+
+expected:
+  score_min: 3
+  must_auto_approve: true

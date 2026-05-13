@@ -1,0 +1,50 @@
+name: agent-607-kms-key-wildcard-resource
+description: |
+  WHITE-BOX round 8: `_is_broad_resource` line 1419 includes KMS only
+  as `("alias",)` — `key/*` is NOT in the collection types.
+
+  An attacker writing `kms:Decrypt` on `arn:aws:kms:us-east-1:12345:
+  key/*` reaches EVERY KEY (key IDs, not aliases) in the account.
+  KMS aliases are display names; key IDs (UUIDs) are the real
+  resource. AWS evaluates `key/*` as "every key in this region."
+
+  After agent-606 fixes the strict-wild_top single-bucket logic,
+  `key/*` would also be picked up. But independently, the
+  collection_types for KMS should include `"key"`.
+
+  Source-code rule exploited: `_is_broad_resource` (line 1419) and
+  `_is_strict_wildcard` (line 2032) — both whitelist KMS collection
+  types and BOTH only include `alias`. `key` is the actual resource
+  type for KMS.
+
+  Research-doc pattern: §13.4 (KMS aliases vs key IDs — important
+  distinction).
+
+  Real risk: 7 — kms:Decrypt on every key = read everything KMS-
+  encrypted in the account.
+
+  Det score: 6 (the high-risk-action + sensitive-service rule
+  catches kms:Decrypt on `Resource: *`, but `key/*` shape doesn't
+  count as `*` since it's an ARN — falls into the lower-floor
+  sensitive-on-broad path).
+
+  Proposed fix: extend KMS collection_types to ("alias", "key") in
+  both `_is_broad_resource` (line 1419) and `_is_strict_wildcard`
+  (line 2032).
+
+policy:
+  Version: "2012-10-17"
+  Statement:
+    - Effect: Allow
+      Action: "kms:Decrypt"
+      Resource: "arn:aws:kms:us-east-1:123456789012:key/*"
+
+request:
+  spec:
+    access_type: read-write
+    duration:
+      duration_hours: 1
+
+expected:
+  score_min: 7
+  must_auto_approve: false

@@ -1,0 +1,23 @@
+name: research-01-38-ssm-startsession
+description: |
+  Reference: IAM-BYPASS-RESEARCH.md §1.38 (PMapper ssm_edges)
+
+  Open interactive Session Manager session on a privileged EC2 instance.
+
+  Expected behavior: privilege escalation primitive — high risk.
+
+  Source: PMapper ssm_edges
+policy:
+  Version: "2012-10-17"
+  Statement:
+    - Effect: Allow
+      Action: ssm:StartSession
+      Resource: "*"
+request:
+  spec:
+    access_type: read-write
+    duration:
+      duration_hours: 1
+expected:
+  score_min: 8
+  must_auto_approve: false

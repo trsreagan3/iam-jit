@@ -1,0 +1,28 @@
+name: research-01-5-ec2-associateiaminstanceprofile
+description: |
+  Reference: IAM-BYPASS-RESEARCH.md §1.5 (PMapper ec2_edges)
+
+  Launch a plain EC2 first, then associate a privileged instance profile
+  after the fact, sidestepping policies that scope RunInstances by
+  instance-profile ARN.
+
+  Expected behavior: privilege escalation primitive — high risk.
+
+  Source: https://raw.githubusercontent.com/nccgroup/PMapper/master/principalmapper/graphing/ec2_edges.py
+policy:
+  Version: "2012-10-17"
+  Statement:
+    - Effect: Allow
+      Action:
+        - iam:PassRole
+        - ec2:RunInstances
+        - ec2:AssociateIamInstanceProfile
+      Resource: "*"
+request:
+  spec:
+    access_type: read-write
+    duration:
+      duration_hours: 1
+expected:
+  score_min: 8
+  must_auto_approve: false

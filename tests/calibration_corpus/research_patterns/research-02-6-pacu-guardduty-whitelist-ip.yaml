@@ -1,0 +1,23 @@
+name: research-02-6-pacu-guardduty-whitelist-ip
+description: |
+  Reference: IAM-BYPASS-RESEARCH.md §2.6 (Pacu guardduty__whitelist_ip)
+
+  guardduty:CreateThreatIntelSet to mark attacker IPs as trusted.
+
+  Expected behavior: defense evasion — high risk.
+
+  Source: https://github.com/RhinoSecurityLabs/pacu/wiki/Module-Details
+policy:
+  Version: "2012-10-17"
+  Statement:
+    - Effect: Allow
+      Action: guardduty:CreateThreatIntelSet
+      Resource: "*"
+request:
+  spec:
+    access_type: read-write
+    duration:
+      duration_hours: 1
+expected:
+  score_min: 7
+  must_auto_approve: false

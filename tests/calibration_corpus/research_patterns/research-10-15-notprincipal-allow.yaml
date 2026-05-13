@@ -1,0 +1,28 @@
+name: research-10-15-notprincipal-allow
+description: |
+  Reference: IAM-BYPASS-RESEARCH.md §10.15 (AWS IAM grammar)
+
+  NotPrincipal is rarely valid (only with Deny). Allow + NotPrincipal
+  is silently accepted but the documentation warns it grants "all
+  entities including those outside the account" — many tools don't
+  flag this.
+
+  Expected behavior: globally permissive grant — critical.
+
+  Source: https://docs.aws.amazon.com/IAM/latest/UserGuide/reference_policies_elements_notprincipal.html
+policy:
+  Version: "2012-10-17"
+  Statement:
+    - Effect: Allow
+      NotPrincipal:
+        AWS: "arn:aws:iam::111122223333:root"
+      Action: s3:GetObject
+      Resource: "arn:aws:s3:::example/*"
+request:
+  spec:
+    access_type: read-only
+    duration:
+      duration_hours: 1
+expected:
+  score_min: 9
+  must_auto_approve: false

@@ -1,0 +1,27 @@
+name: research-01-44-passrole-ec2-createlaunchtemplate
+description: |
+  Reference: IAM-BYPASS-RESEARCH.md §1.44 (HackingTheCloud path 17)
+
+  Same shape as 1.43 but via launch templates (modern EC2).
+
+  Expected behavior: privilege escalation primitive — high risk.
+
+  Source: https://hackingthe.cloud/aws/exploitation/iam_privilege_escalation/
+policy:
+  Version: "2012-10-17"
+  Statement:
+    - Effect: Allow
+      Action:
+        - iam:PassRole
+        - ec2:CreateLaunchTemplate
+        - autoscaling:CreateAutoScalingGroup
+        - autoscaling:UpdateAutoScalingGroup
+      Resource: "*"
+request:
+  spec:
+    access_type: read-write
+    duration:
+      duration_hours: 1
+expected:
+  score_min: 8
+  must_auto_approve: false

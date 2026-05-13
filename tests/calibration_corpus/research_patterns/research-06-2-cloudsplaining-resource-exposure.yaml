@@ -1,0 +1,40 @@
+name: research-06-2-cloudsplaining-resource-exposure
+description: |
+  Reference: IAM-BYPASS-RESEARCH.md §6.2 (CloudSplaining Resource Exposure)
+
+  Modifying resource-based policies: ecr:DeleteRepositoryPolicy,
+  ecr:SetRepositoryPolicy, s3:DeleteBucketPolicy, s3:PutBucketPolicy,
+  s3:DeleteAccessPointPolicy, s3:PutAccessPointPolicy,
+  s3:BypassGovernanceRetention, kms:PutKeyPolicy, lambda:AddPermission,
+  secretsmanager:PutResourcePolicy, sns:AddPermission, sqs:AddPermission,
+  glacier:SetVaultAccessPolicy, iam:UpdateAssumeRolePolicy.
+
+  Expected behavior: ability to expose any resource publicly — critical.
+
+  Source: https://github.com/salesforce/cloudsplaining/blob/master/docs/index.md
+policy:
+  Version: "2012-10-17"
+  Statement:
+    - Effect: Allow
+      Action:
+        - ecr:SetRepositoryPolicy
+        - s3:PutBucketPolicy
+        - s3:DeleteBucketPolicy
+        - s3:PutAccessPointPolicy
+        - s3:BypassGovernanceRetention
+        - kms:PutKeyPolicy
+        - lambda:AddPermission
+        - secretsmanager:PutResourcePolicy
+        - sns:AddPermission
+        - sqs:AddPermission
+        - glacier:SetVaultAccessPolicy
+        - iam:UpdateAssumeRolePolicy
+      Resource: "*"
+request:
+  spec:
+    access_type: read-write
+    duration:
+      duration_hours: 1
+expected:
+  score_min: 9
+  must_auto_approve: false

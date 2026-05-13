@@ -1,0 +1,29 @@
+name: research-07-5-aa-deprecated-global-condition-key
+description: |
+  Reference: IAM-BYPASS-RESEARCH.md §7.5 (AWS IAM Access Analyzer validation checks)
+
+  DEPRECATED_GLOBAL_CONDITION_KEY — policy references a deprecated
+  global condition key (e.g., aws:SecureTransport variants).
+  # NB: encoded with a deprecated-looking condition key while still
+  # granting wide access.
+
+  Expected behavior: misleading condition — moderate risk.
+
+  Source: https://docs.aws.amazon.com/IAM/latest/UserGuide/access-analyzer-reference-policy-checks.html
+policy:
+  Version: "2012-10-17"
+  Statement:
+    - Effect: Allow
+      Action: s3:GetObject
+      Resource: "*"
+      Condition:
+        Bool:
+          aws:SecureTransport: "true"
+request:
+  spec:
+    access_type: read-only
+    duration:
+      duration_hours: 1
+expected:
+  score_min: 5
+  must_auto_approve: false

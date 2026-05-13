@@ -1,0 +1,25 @@
+name: research-10-13-whitespace-action
+description: |
+  Reference: IAM-BYPASS-RESEARCH.md §10.13 (AWS IAM grammar)
+
+  AWS strips whitespace from actions; tools comparing strings may not,
+  missing "s3:GetObject " (trailing space).
+
+  Expected behavior: parser should normalize whitespace — risk is the
+  same as no-space version.
+
+  Source: https://docs.aws.amazon.com/IAM/latest/UserGuide/reference_policies_grammar.html
+policy:
+  Version: "2012-10-17"
+  Statement:
+    - Effect: Allow
+      Action: "s3:GetObject "
+      Resource: "*"
+request:
+  spec:
+    access_type: read-only
+    duration:
+      duration_hours: 1
+expected:
+  score_min: 6
+  must_auto_approve: false

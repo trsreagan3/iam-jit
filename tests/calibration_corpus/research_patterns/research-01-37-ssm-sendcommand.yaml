@@ -1,0 +1,25 @@
+name: research-01-37-ssm-sendcommand
+description: |
+  Reference: IAM-BYPASS-RESEARCH.md §1.37 (PMapper ssm_edges; Pacu)
+
+  Execute commands as root/SYSTEM on any EC2 instance running the SSM
+  agent; steal the instance-profile creds. ssm:SendCommand on Resource:*
+  is fleet-wide RCE.
+
+  Expected behavior: fleet-wide RCE — critical.
+
+  Source: https://raw.githubusercontent.com/nccgroup/PMapper/master/principalmapper/graphing/ssm_edges.py
+policy:
+  Version: "2012-10-17"
+  Statement:
+    - Effect: Allow
+      Action: ssm:SendCommand
+      Resource: "*"
+request:
+  spec:
+    access_type: read-write
+    duration:
+      duration_hours: 1
+expected:
+  score_min: 9
+  must_auto_approve: false

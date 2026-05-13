@@ -1,0 +1,26 @@
+name: research-09-12-codedeploy-appspec
+description: |
+  Reference: IAM-BYPASS-RESEARCH.md §9.12 (CodeDeploy)
+
+  codedeploy:CreateDeployment with attacker-controlled appspec and a
+  deployment that runs lifecycle hooks under the deployment role.
+
+  Expected behavior: privilege escalation via CodeDeploy — high risk.
+
+  Source: AWS CodeDeploy docs
+policy:
+  Version: "2012-10-17"
+  Statement:
+    - Effect: Allow
+      Action:
+        - codedeploy:CreateDeployment
+        - iam:PassRole
+      Resource: "*"
+request:
+  spec:
+    access_type: read-write
+    duration:
+      duration_hours: 1
+expected:
+  score_min: 7
+  must_auto_approve: false

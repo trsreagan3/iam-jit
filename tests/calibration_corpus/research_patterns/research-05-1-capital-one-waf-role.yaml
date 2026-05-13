@@ -1,0 +1,28 @@
+name: research-05-1-capital-one-waf-role
+description: |
+  Reference: IAM-BYPASS-RESEARCH.md §5.1 (Capital One 2019)
+
+  WAF instance role had s3:List* Resource:* and s3:GetObject Resource:*
+  — far beyond what a WAF needs. SSRF on the WAF EC2 → IMDSv1 → role
+  STS creds → s3:ListAllMyBuckets + s3:GetObject on 700+ buckets.
+
+  Expected behavior: account-wide S3 read on a service role — critical.
+
+  Source: https://krebsonsecurity.com/2019/08/what-we-can-learn-from-the-capital-one-hack/
+policy:
+  Version: "2012-10-17"
+  Statement:
+    - Effect: Allow
+      Action:
+        - s3:ListAllMyBuckets
+        - s3:List*
+        - s3:GetObject
+      Resource: "*"
+request:
+  spec:
+    access_type: read-only
+    duration:
+      duration_hours: 1
+expected:
+  score_min: 8
+  must_auto_approve: false

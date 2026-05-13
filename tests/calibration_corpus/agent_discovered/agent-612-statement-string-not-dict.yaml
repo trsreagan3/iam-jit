@@ -1,0 +1,50 @@
+name: agent-612-statement-string-not-dict
+description: |
+  WHITE-BOX round 8: `Statement: "Allow all"` (bare string instead
+  of dict/list) silently scores 1.
+
+  Line 1591:
+      statements = policy.get("Statement")
+      if isinstance(statements, dict):
+          policy = {**policy, "Statement": [statements]}
+      elif not isinstance(statements, list):
+          return 1, ["No statements in policy"], []
+
+  A string falls through both branches → return 1. The user gets
+  "No statements in policy" — but the policy CLEARLY has intent
+  (the string says "Allow all"). The scorer should flag malformed
+  policies, not silently rate them safe.
+
+  More importantly: the operator might be using a malformed-policy
+  validator (admins frequently do this with `aws iam validate-policy
+  policy-document` then trust the result). If iam-jit says risk=1,
+  that's the green light.
+
+  Source-code rule exploited: line 1594-1595 — `elif not
+  isinstance(statements, list): return 1`.
+
+  Research-doc pattern: §10.1 (Statement may be {} or [{}] — extends
+  to malformed shapes).
+
+  Real risk: 5 — malformed policy is undefined; conservative score
+  should flag for review.
+
+  Det score: 1.
+
+  Proposed fix: change the fallback to `return 9, ["Statement field
+  is malformed; cannot evaluate — treating as worst-case"], []`.
+  Same posture as missing-Effect implicit Allow.
+
+policy:
+  Version: "2012-10-17"
+  Statement: "Allow all"
+
+request:
+  spec:
+    access_type: read-write
+    duration:
+      duration_hours: 1
+
+expected:
+  score_min: 5
+  must_auto_approve: false

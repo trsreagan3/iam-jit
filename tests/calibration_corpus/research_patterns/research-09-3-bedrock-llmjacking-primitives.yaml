@@ -1,0 +1,36 @@
+name: research-09-3-bedrock-llmjacking-primitives
+description: |
+  Reference: IAM-BYPASS-RESEARCH.md §9.3 (AWS Bedrock)
+
+  bedrock:InvokeModel, bedrock:InvokeModelWithResponseStream,
+  bedrock:CreateFoundationModelAgreement,
+  bedrock:PutUseCaseForModelAccess,
+  bedrock:PutFoundationModelEntitlement — LLMjacking primitives.
+  bedrock-agentcore:CreateCodeInterpreter,
+  bedrock-agentcore:InvokeCodeInterpreter — generic Python RCE under
+  passed role.
+
+  Expected behavior: LLMjacking + agent RCE — critical.
+
+  Source: https://docs.aws.amazon.com/bedrock/latest/userguide/security_iam_id-based-policy-examples.html
+policy:
+  Version: "2012-10-17"
+  Statement:
+    - Effect: Allow
+      Action:
+        - bedrock:InvokeModel
+        - bedrock:InvokeModelWithResponseStream
+        - bedrock:CreateFoundationModelAgreement
+        - bedrock:PutUseCaseForModelAccess
+        - bedrock:PutFoundationModelEntitlement
+        - bedrock-agentcore:CreateCodeInterpreter
+        - bedrock-agentcore:InvokeCodeInterpreter
+      Resource: "*"
+request:
+  spec:
+    access_type: read-write
+    duration:
+      duration_hours: 1
+expected:
+  score_min: 9
+  must_auto_approve: false

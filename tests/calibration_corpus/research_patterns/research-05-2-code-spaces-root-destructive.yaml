@@ -1,0 +1,32 @@
+name: research-05-2-code-spaces-root-destructive
+description: |
+  Reference: IAM-BYPASS-RESEARCH.md §5.2 (Code Spaces 2014)
+
+  Root used as operational identity; no MFA on console; no Deny SCPs;
+  S3 backup buckets accessible from the same identity as primary.
+  Attacker deleted EC2 instances, EBS volumes, AMIs, and offsite S3
+  backups in ~12h.
+
+  Expected behavior: catastrophic infrastructure destruction grant — critical.
+
+  Source: https://blogs.manageengine.com/it-security/passwordmanagerpro/2014/08/20/code-spaces-aws-security-breach-a-sad-reminder-of-the-importance-of-cloud-environment-password-management.html
+policy:
+  Version: "2012-10-17"
+  Statement:
+    - Effect: Allow
+      Action:
+        - ec2:TerminateInstances
+        - ec2:DeleteVolume
+        - ec2:DeregisterImage
+        - ec2:DeleteSnapshot
+        - s3:DeleteBucket
+        - s3:DeleteObject
+      Resource: "*"
+request:
+  spec:
+    access_type: read-write
+    duration:
+      duration_hours: 1
+expected:
+  score_min: 9
+  must_auto_approve: false

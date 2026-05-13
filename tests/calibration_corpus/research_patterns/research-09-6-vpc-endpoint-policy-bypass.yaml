@@ -1,0 +1,27 @@
+name: research-09-6-vpc-endpoint-policy-bypass
+description: |
+  Reference: IAM-BYPASS-RESEARCH.md §9.6 (VPC Endpoint Policy)
+
+  Default VPC endpoint policy is Action:* Resource:* Principal:* —
+  every IAM-restricted call going through the endpoint is unrestricted
+  by the endpoint. Tightening the endpoint policy is often the only
+  practical way to scope s3:* in a VPC.
+
+  Expected behavior: endpoint policy bypass — high risk.
+
+  Source: AWS VPC endpoint docs
+policy:
+  Version: "2012-10-17"
+  Statement:
+    - Effect: Allow
+      Principal: "*"
+      Action: "*"
+      Resource: "*"
+request:
+  spec:
+    access_type: read-write
+    duration:
+      duration_hours: 1
+expected:
+  score_min: 8
+  must_auto_approve: false

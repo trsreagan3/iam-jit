@@ -1,0 +1,27 @@
+name: research-13-2-rds-data-api
+description: |
+  Reference: IAM-BYPASS-RESEARCH.md §13.2
+
+  rds-data:ExecuteStatement, rds-data:BatchExecuteStatement — runs SQL
+  against Aurora Serverless without DB credentials, only IAM. Scorers
+  focused on rds:* miss it.
+
+  Expected behavior: direct SQL execution — high risk.
+
+  Source: AWS RDS Data API docs
+policy:
+  Version: "2012-10-17"
+  Statement:
+    - Effect: Allow
+      Action:
+        - rds-data:ExecuteStatement
+        - rds-data:BatchExecuteStatement
+      Resource: "*"
+request:
+  spec:
+    access_type: read-write
+    duration:
+      duration_hours: 1
+expected:
+  score_min: 7
+  must_auto_approve: false

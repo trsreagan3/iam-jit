@@ -1,0 +1,46 @@
+name: agent-511-identitystore-group-membership
+description: |
+  BLACK-BOX Round 8. Research Sec 1.52 (IAM Identity Center privesc primitives) +
+  CloudQuery blog (sso-admin / identitystore privesc).
+
+  `identitystore:CreateGroupMembership` adds the attacker to ANY group in the org's
+  Identity Store. Combined with the SSO permission-set assignment (already a known
+  primitive in `_CATASTROPHIC_ACTIONS`), adding self to a privileged group is full
+  org-wide privilege escalation in one API call.
+
+  Sibling pair: `sso-admin:AttachManagedPolicyToPermissionSet` IS catastrophic (score 9
+  per agent-179 prior round); `identitystore:CreateGroupMembership` /
+  `identitystore:CreateUser` are NOT catastrophic — they score 6 / 8.
+
+  Det score: 6.
+  Real risk: 9 — full Identity Center group injection = org-wide admin.
+
+  Scorer gap: `identitystore:` action prefix is in `_SENSITIVE_SERVICES` (round 7) but the
+  individual identity-mutation actions are not in `_CATASTROPHIC_ACTIONS`.
+
+  Proposed fix: add `identitystore:CreateGroupMembership`,
+  `identitystore:DeleteGroupMembership`, `identitystore:CreateUser`,
+  `identitystore:UpdateUser`, `identitystore:CreateGroup`, `identitystore:UpdateGroup` to
+  `_CATASTROPHIC_ACTIONS` — sibling treatment to `sso-admin:*` admin actions.
+
+  Research-doc pattern: §1.52 — Identity Center privesc primitives.
+
+policy:
+  Version: "2012-10-17"
+  Statement:
+    - Effect: Allow
+      Action:
+        - "identitystore:CreateGroupMembership"
+        - "identitystore:CreateUser"
+        - "identitystore:CreateGroup"
+      Resource: "*"
+
+request:
+  spec:
+    access_type: read-write
+    duration:
+      duration_hours: 1
+
+expected:
+  score_min: 9
+  must_auto_approve: false

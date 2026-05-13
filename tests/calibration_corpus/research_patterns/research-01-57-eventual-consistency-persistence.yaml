@@ -1,0 +1,29 @@
+name: research-01-57-eventual-consistency-persistence
+description: |
+  Reference: IAM-BYPASS-RESEARCH.md §1.57 (HackingTheCloud)
+
+  Use STS sessions issued before role/policy deletion — they remain
+  valid for the session duration (default 1h, can be 12h). Attacker
+  stockpiles long-lived sessions in advance of detection.
+  # NB: abstract pattern, encoded the simplest concrete form — broad
+  # sts:GetSessionToken/AssumeRole grant with extended duration.
+
+  Expected behavior: persistence primitive — high risk.
+
+  Source: https://hackingthe.cloud/aws/post_exploitation/iam_persistence_eventual_consistency/
+policy:
+  Version: "2012-10-17"
+  Statement:
+    - Effect: Allow
+      Action:
+        - sts:AssumeRole
+        - sts:GetSessionToken
+      Resource: "*"
+request:
+  spec:
+    access_type: read-write
+    duration:
+      duration_hours: 12
+expected:
+  score_min: 6
+  must_auto_approve: false

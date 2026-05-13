@@ -1,0 +1,37 @@
+name: research-06-1-cloudsplaining-data-exfiltration
+description: |
+  Reference: IAM-BYPASS-RESEARCH.md §6.1 (Salesforce CloudSplaining)
+
+  Data Exfiltration category: s3:GetObject, ssm:GetParameter,
+  ssm:GetParameters, ssm:GetParametersByPath,
+  secretsmanager:GetSecretValue, dynamodb:Scan, dynamodb:Query,
+  dynamodb:GetItem, rds:DownloadDBLogFilePortion,
+  redshift:GetClusterCredentials.
+
+  Expected behavior: broad data-exfil grant — high risk.
+
+  Source: https://github.com/salesforce/cloudsplaining/blob/master/docs/index.md
+policy:
+  Version: "2012-10-17"
+  Statement:
+    - Effect: Allow
+      Action:
+        - s3:GetObject
+        - ssm:GetParameter
+        - ssm:GetParameters
+        - ssm:GetParametersByPath
+        - secretsmanager:GetSecretValue
+        - dynamodb:Scan
+        - dynamodb:Query
+        - dynamodb:GetItem
+        - rds:DownloadDBLogFilePortion
+        - redshift:GetClusterCredentials
+      Resource: "*"
+request:
+  spec:
+    access_type: read-only
+    duration:
+      duration_hours: 1
+expected:
+  score_min: 8
+  must_auto_approve: false

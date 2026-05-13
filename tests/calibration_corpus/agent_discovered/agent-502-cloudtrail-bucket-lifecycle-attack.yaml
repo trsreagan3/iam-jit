@@ -1,0 +1,46 @@
+name: agent-502-cloudtrail-bucket-lifecycle-attack
+description: |
+  BLACK-BOX Round 8. Research Sec 8.4 (T1562.008 disable/modify cloud logs).
+
+  An attacker with `s3:PutBucketLifecycleConfiguration` on the CloudTrail log bucket can
+  install a lifecycle rule that expires every object after 1 day. CloudTrail keeps writing
+  but S3 deletes the logs silently — every trace of activity vanishes within hours.
+
+  The bucket name `aws-cloudtrail-logs-*` is the AWS-default-generated prefix for trails
+  created via the console; widely deployed. Scoping the policy to one such bucket is
+  narrow on its face but the consequence is "all evidence destroyed."
+
+  Det score: 1 ("All statements are scoped or limited").
+  Real risk: 7 — evidence destruction via S3 lifecycle, same blast as
+  `cloudtrail:StopLogging` but silent.
+
+  Scorer gap: `s3:PutBucketLifecycleConfiguration` is a generic Write action on the S3
+  service. The scorer doesn't recognize the CloudTrail-bucket attack semantic — a narrow
+  resource that LOOKS scoped (one bucket) but whose CONTENT is the audit trail.
+
+  Proposed fix:
+    (a) Add `s3:PutBucketLifecycleConfiguration` and `s3:PutLifecycleConfiguration` to
+        `_HIGH_IMPACT_MUTATION_ACTIONS` (lifecycle is a quiet content-destroyer regardless of
+        bucket).
+    (b) Add a narrative-only check: if the Resource bucket name matches
+        `aws-cloudtrail-logs-*` / `cloudtrail-*` / `*-audit-*`, surface "CloudTrail bucket
+        target" tag in the risk factors.
+
+  Research-doc pattern: §8.4 (T1562.008) — `s3:PutLifecycleConfiguration to expire trail bucket`.
+
+policy:
+  Version: "2012-10-17"
+  Statement:
+    - Effect: Allow
+      Action: "s3:PutBucketLifecycleConfiguration"
+      Resource: "arn:aws:s3:::aws-cloudtrail-logs-123456789012-prod"
+
+request:
+  spec:
+    access_type: read-write
+    duration:
+      duration_hours: 1
+
+expected:
+  score_min: 7
+  must_auto_approve: false

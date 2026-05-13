@@ -1,0 +1,27 @@
+name: research-04-1-s3-bucket-policy-public-put
+description: |
+  Reference: IAM-BYPASS-RESEARCH.md §4.1 (HackingTheCloud / Datadog Security Labs)
+
+  S3 bucket policy with Principal:"*" granting s3:PutObject. Anyone can
+  overwrite objects — supply-chain attack (Twilio JS-SDK overwrite case
+  is the canonical example). Encoded here as the literal resource-based
+  policy with Principal:"*".
+
+  Expected behavior: public write to S3 — critical supply-chain risk.
+
+  Source: https://hackingthe.cloud/aws/exploitation/Misconfigured_Resource-Based_Policies/
+policy:
+  Version: "2012-10-17"
+  Statement:
+    - Effect: Allow
+      Principal: "*"
+      Action: s3:PutObject
+      Resource: arn:aws:s3:::example-bucket/*
+request:
+  spec:
+    access_type: read-write
+    duration:
+      duration_hours: 1
+expected:
+  score_min: 9
+  must_auto_approve: false

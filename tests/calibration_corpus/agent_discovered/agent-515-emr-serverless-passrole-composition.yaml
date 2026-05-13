@@ -1,0 +1,43 @@
+name: agent-515-emr-serverless-passrole-composition
+description: |
+  BLACK-BOX Round 8. Research §1.22 (Glue PassRole — sibling) + §9.x EMR Serverless.
+
+  `emr-serverless:CreateApplication` + `StartJobRun` runs arbitrary Spark / Hive jobs
+  under a passed execution role. The job code can call any AWS API the execution role
+  permits. Modern serverless variant of Glue (which is already in code-exec composition).
+
+  Det score: 6.
+  Real risk: 9 — RCE-as-execution-role at Spark scale.
+
+  Scorer gap: `emr-serverless:` actions are not in `_CODE_EXECUTION_PRIMITIVES`. The
+  parent service `emr-containers:` may be partially covered; `emr-serverless` is the
+  newer 2022+ surface.
+
+  Proposed fix: add `emr-serverless:CreateApplication`, `emr-serverless:StartJobRun`,
+  `emr-serverless:UpdateApplication`, `emr-containers:StartJobRun`,
+  `emr-containers:CreateManagedEndpoint`, `emr-containers:CreateVirtualCluster` to
+  `_CODE_EXECUTION_PRIMITIVES`.
+
+  Research-doc pattern: §1.22 (Glue siblings) — same shape applied to EMR Serverless.
+
+policy:
+  Version: "2012-10-17"
+  Statement:
+    - Effect: Allow
+      Action:
+        - "emr-serverless:CreateApplication"
+        - "emr-serverless:StartJobRun"
+      Resource: "*"
+    - Effect: Allow
+      Action: "iam:PassRole"
+      Resource: "arn:aws:iam::123456789012:role/EMRServerlessJobRole"
+
+request:
+  spec:
+    access_type: read-write
+    duration:
+      duration_hours: 1
+
+expected:
+  score_min: 9
+  must_auto_approve: false

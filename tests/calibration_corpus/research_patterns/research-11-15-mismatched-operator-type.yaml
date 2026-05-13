@@ -1,0 +1,31 @@
+name: research-11-15-mismatched-operator-type
+description: |
+  Reference: IAM-BYPASS-RESEARCH.md §11.15 (Sysdig)
+
+  "IpAddress":{"aws:username":"alice"} — using IpAddress on a string
+  key. AWS may evaluate as never-matched, which inverts intent if used
+  in a Deny.
+
+  Expected behavior: type-mismatched condition — Deny never blocks — high risk.
+
+  Source: https://www.sysdig.com/blog/iam-security-misconfiguration
+policy:
+  Version: "2012-10-17"
+  Statement:
+    - Effect: Allow
+      Action: "*"
+      Resource: "*"
+    - Effect: Deny
+      Action: iam:*
+      Resource: "*"
+      Condition:
+        IpAddress:
+          "aws:username": "alice"
+request:
+  spec:
+    access_type: read-write
+    duration:
+      duration_hours: 1
+expected:
+  score_min: 8
+  must_auto_approve: false

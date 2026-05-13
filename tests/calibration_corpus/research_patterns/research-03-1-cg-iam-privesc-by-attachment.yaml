@@ -1,0 +1,28 @@
+name: research-03-1-cg-iam-privesc-by-attachment
+description: |
+  Reference: IAM-BYPASS-RESEARCH.md §3.1 (CloudGoat iam_privesc_by_attachment)
+
+  Principal has iam:AddRoleToInstanceProfile + ec2:AssociateIamInstanceProfile
+  but not iam:PassRole directly — attaches an existing high-privilege
+  instance profile to an existing EC2 instance they control. Tests scorers
+  that only flag iam:PassRole.
+
+  Expected behavior: hidden privilege escalation (no PassRole) — high risk.
+
+  Source: https://github.com/RhinoSecurityLabs/cloudgoat
+policy:
+  Version: "2012-10-17"
+  Statement:
+    - Effect: Allow
+      Action:
+        - iam:AddRoleToInstanceProfile
+        - ec2:AssociateIamInstanceProfile
+      Resource: "*"
+request:
+  spec:
+    access_type: read-write
+    duration:
+      duration_hours: 1
+expected:
+  score_min: 7
+  must_auto_approve: false

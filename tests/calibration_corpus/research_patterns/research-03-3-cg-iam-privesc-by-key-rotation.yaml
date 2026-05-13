@@ -1,0 +1,28 @@
+name: research-03-3-cg-iam-privesc-by-key-rotation
+description: |
+  Reference: IAM-BYPASS-RESEARCH.md §3.3 (CloudGoat iam_privesc_by_key_rotation)
+
+  A role intended to rotate other users' credentials. Weak rotation logic
+  lets the rotator extract creds and assume the admin role.
+
+  Expected behavior: privilege escalation via key rotation — high risk.
+
+  Source: https://github.com/RhinoSecurityLabs/cloudgoat
+policy:
+  Version: "2012-10-17"
+  Statement:
+    - Effect: Allow
+      Action:
+        - iam:CreateAccessKey
+        - iam:DeleteAccessKey
+        - iam:ListAccessKeys
+        - iam:UpdateAccessKey
+      Resource: "*"
+request:
+  spec:
+    access_type: read-write
+    duration:
+      duration_hours: 1
+expected:
+  score_min: 8
+  must_auto_approve: false

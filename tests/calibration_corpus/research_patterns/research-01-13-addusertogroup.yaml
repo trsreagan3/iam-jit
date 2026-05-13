@@ -1,0 +1,23 @@
+name: research-01-13-addusertogroup
+description: |
+  Reference: IAM-BYPASS-RESEARCH.md §1.13 (Rhino #13)
+
+  Add self to a privileged existing group.
+
+  Expected behavior: privilege escalation primitive — high risk.
+
+  Source: Rhino #13
+policy:
+  Version: "2012-10-17"
+  Statement:
+    - Effect: Allow
+      Action: iam:AddUserToGroup
+      Resource: "*"
+request:
+  spec:
+    access_type: read-write
+    duration:
+      duration_hours: 1
+expected:
+  score_min: 8
+  must_auto_approve: false

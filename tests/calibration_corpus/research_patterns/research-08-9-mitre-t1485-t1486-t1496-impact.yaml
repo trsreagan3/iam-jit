@@ -1,0 +1,30 @@
+name: research-08-9-mitre-t1485-t1486-t1496-impact
+description: |
+  Reference: IAM-BYPASS-RESEARCH.md §8.9 (MITRE T1485, T1486, T1496)
+
+  Impact tactics: S3 batch delete / kms:ScheduleKeyDeletion
+  (ransomware-by-key-deletion); S3 ransomware via SSE-C attacker-held
+  key; Resource Hijacking via cryptominers, Bedrock LLM abuse.
+
+  Expected behavior: destructive / cost-abuse impact — critical.
+
+  Source: https://attack.mitre.org/matrices/enterprise/cloud/
+policy:
+  Version: "2012-10-17"
+  Statement:
+    - Effect: Allow
+      Action:
+        - s3:DeleteObject
+        - s3:DeleteBucket
+        - kms:ScheduleKeyDeletion
+        - bedrock:InvokeModel
+        - ec2:RunInstances
+      Resource: "*"
+request:
+  spec:
+    access_type: read-write
+    duration:
+      duration_hours: 1
+expected:
+  score_min: 9
+  must_auto_approve: false

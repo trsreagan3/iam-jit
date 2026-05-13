@@ -1,0 +1,60 @@
+name: agent-613-version-2008-policy-variable-literal
+description: |
+  WHITE-BOX round 8: Version `2008-10-17` does NOT support policy
+  variables — they're TREATED AS LITERAL STRINGS by AWS. A policy
+  like:
+
+      Version: "2008-10-17"
+      Statement:
+        - Effect: Allow
+          Action: s3:GetObject
+          Resource: "arn:aws:s3:::company-${aws:username}/*"
+
+  is evaluated by AWS as a Resource string CONTAINING the literal
+  characters `${aws:username}` — which matches no bucket. So this
+  specific shape evaluates to "no resources matched, deny."
+
+  But the inverse problem is more dangerous: a policy AUTHOR who
+  thinks `${aws:username}` will be substituted writes Version
+  `2008-10-17` (often copy-pasted from old docs) and then writes
+  a NARROW resource scope expecting per-user isolation. AWS treats
+  the variable as literal — so the policy GRANTS NOTHING. The
+  author may then notice nothing works and switch the Resource to
+  `*` (or remove the variable entirely with broader ARN). Either
+  way, "the variable looks like scoping but isn't" is a defect
+  class.
+
+  The scorer doesn't check the Version field at all. It doesn't
+  warn about variables-in-2008-policy.
+
+  Source-code rule exploited: line 1577 (the `policy.get("Statement")`
+  block) — Version is never read.
+
+  Research-doc pattern: §10.10 (Missing Version defaults to 2008-
+  10-17 — no policy variables).
+
+  Real risk: 4 — defect-class warning. The policy may not function
+  as intended; the scorer should flag for review.
+
+  Det score: 1.
+
+  Proposed fix: if `policy.get("Version") != "2012-10-17"` AND any
+  Resource string contains `${...}`, flag at floor 4 (defect-class
+  warning).
+
+policy:
+  Version: "2008-10-17"
+  Statement:
+    - Effect: Allow
+      Action: "s3:GetObject"
+      Resource: "arn:aws:s3:::company-${aws:username}/*"
+
+request:
+  spec:
+    access_type: read-only
+    duration:
+      duration_hours: 1
+
+expected:
+  score_min: 4
+  must_auto_approve: false

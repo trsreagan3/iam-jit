@@ -1,0 +1,39 @@
+name: agent-518-omics-create-workflow
+description: |
+  BLACK-BOX Round 8. Research Sec 9 (newer-service surface).
+
+  AWS HealthOmics (`omics:CreateWorkflow` + `omics:StartRun`) is a 2023+ genomics
+  workflow service. Workflows run arbitrary containerized code under an execution role
+  similar to Glue/SageMaker. Misconfigured policies in this service haven't been audited
+  by most scoring tools because the service is new.
+
+  Det score: 6.
+  Real risk: 7 — RCE-as-workflow-role; same shape as Glue.
+
+  Scorer gap: `omics:` is not in `_SENSITIVE_SERVICES` and the actions are not in any
+  high-impact set. Round 7 added several 2023-2024 services but missed this one.
+
+  Proposed fix: add `omics:CreateWorkflow`, `omics:StartRun`, `omics:UpdateWorkflow` to
+  `_CODE_EXECUTION_PRIMITIVES`. Consider adding `omics` to `_SENSITIVE_SERVICES` (genomics
+  data is regulated PHI).
+
+  Research-doc pattern: §9 (newer-service surface).
+
+policy:
+  Version: "2012-10-17"
+  Statement:
+    - Effect: Allow
+      Action:
+        - "omics:CreateWorkflow"
+        - "omics:StartRun"
+      Resource: "*"
+
+request:
+  spec:
+    access_type: read-write
+    duration:
+      duration_hours: 1
+
+expected:
+  score_min: 7
+  must_auto_approve: false

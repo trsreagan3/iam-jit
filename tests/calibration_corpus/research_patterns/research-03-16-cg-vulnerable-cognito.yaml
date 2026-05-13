@@ -1,0 +1,27 @@
+name: research-03-16-cg-vulnerable-cognito
+description: |
+  Reference: IAM-BYPASS-RESEARCH.md §3.16 (CloudGoat vulnerable_cognito)
+
+  Cognito user pool / identity pool misconfigurations that allow
+  signup-without-validation and elevated identity-pool role.
+
+  Expected behavior: identity pool abuse — moderate risk.
+
+  Source: https://github.com/RhinoSecurityLabs/cloudgoat
+policy:
+  Version: "2012-10-17"
+  Statement:
+    - Effect: Allow
+      Action:
+        - cognito-idp:SignUp
+        - cognito-identity:GetCredentialsForIdentity
+        - cognito-identity:GetId
+      Resource: "*"
+request:
+  spec:
+    access_type: read-write
+    duration:
+      duration_hours: 1
+expected:
+  score_min: 6
+  must_auto_approve: false

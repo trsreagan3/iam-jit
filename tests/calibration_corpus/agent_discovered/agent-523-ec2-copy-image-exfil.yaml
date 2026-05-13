@@ -1,0 +1,47 @@
+name: agent-523-ec2-copy-image-exfil
+description: |
+  BLACK-BOX Round 8. Research §4.13 (RAM share / shared snapshot / shared AMI) + §8.8
+  T1537 (Transfer Data to Cloud Account) + round 7 QQ recommendation.
+
+  `ec2:CopyImage` / `ec2:CopySnapshot` create AMI/EBS-snapshot copies in any region. The
+  attacker copies a snapshot of a privileged instance's volume to a region where
+  CloudTrail logging is disabled, then either shares it cross-account or downloads via
+  EBS direct API. Exfil at full disk speed.
+
+  Round 7 QQ explicitly called out this gap: "ec2:CreateImage, ec2:CopyImage,
+  ec2:CopySnapshot, ec2:CreateInstanceExportTask, ec2:CreateRestoreImageTask — CREATE side
+  of AMI/snapshot exfil chain — round 6 added the Modify side but not the Create side."
+  Documented but not pinned with a score-failing fixture in round 7 — score is 6 vs
+  expected 7.
+
+  Det score: 6.
+  Real risk: 7 — silent cross-region AMI/snapshot copy.
+
+  Scorer gap: round-6 added `ec2:ModifySnapshotAttribute` (and round-7 docs flagged the
+  Create side), but `ec2:CopyImage` / `ec2:CopySnapshot` / `ec2:CreateInstanceExportTask`
+  are not in `_CROSS_ACCOUNT_EXFIL_ACTIONS`.
+
+  Proposed fix: implement round-7 QQ recommendation — add the listed Create-side EC2
+  exfil actions.
+
+  Research-doc pattern: §4.13 + §8.8 T1537.
+
+policy:
+  Version: "2012-10-17"
+  Statement:
+    - Effect: Allow
+      Action:
+        - "ec2:CopyImage"
+        - "ec2:CopySnapshot"
+        - "ec2:CreateInstanceExportTask"
+      Resource: "*"
+
+request:
+  spec:
+    access_type: read-write
+    duration:
+      duration_hours: 1
+
+expected:
+  score_min: 7
+  must_auto_approve: false

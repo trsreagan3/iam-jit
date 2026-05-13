@@ -1,0 +1,26 @@
+name: research-01-28-codestar-createproject-passrole
+description: |
+  Reference: IAM-BYPASS-RESEARCH.md §1.28 (Rhino CodeStar #24)
+
+  Pass high-privilege role into a new CodeStar project for resource
+  deployment.
+
+  Expected behavior: privilege escalation primitive — high risk.
+
+  Source: Rhino CodeStar #24
+policy:
+  Version: "2012-10-17"
+  Statement:
+    - Effect: Allow
+      Action:
+        - codestar:CreateProject
+        - iam:PassRole
+      Resource: "*"
+request:
+  spec:
+    access_type: read-write
+    duration:
+      duration_hours: 1
+expected:
+  score_min: 7
+  must_auto_approve: false

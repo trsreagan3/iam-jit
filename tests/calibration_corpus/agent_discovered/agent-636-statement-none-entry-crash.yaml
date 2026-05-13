@@ -1,0 +1,52 @@
+name: agent-636-statement-none-entry-crash
+description: |
+  WHITE-BOX round 8: `Statement: [null]` (a list containing a single
+  None entry) CAUSES THE SCORER TO CRASH with
+  `AttributeError: 'NoneType' object has no attribute 'get'` at
+  line 1706 (`if not _effect_is_allow(stmt): continue` →
+  `stmt.get("Effect")`).
+
+  In a service, this crash translates to a 500 error (the analyzer
+  is wrapped in try/except in some paths, returning 1 = safe).
+  Worse: in CI / local-dev paths that don't wrap, the crash bubbles
+  to the user. EVEN WORSE: in a callsite that DOES catch the
+  exception and FALLS BACK TO A DEFAULT SCORE OF 1 (a "be safe,
+  don't crash the deploy" pattern in many tools), the malformed
+  policy gets a score-1 bypass.
+
+  AWS rejects null-statement at policy-attach time. The scorer
+  should reject too — flagging "malformed statement (null entry)
+  in Statement list" at floor 5.
+
+  Source-code rule exploited: `_deterministic` (line 1700) iterates
+  `policy["Statement"]` without per-element type validation. The
+  per-statement helpers (`_effect_is_allow`, `_as_list`, etc.) all
+  assume `stmt` is a dict.
+
+  Research-doc pattern: §10 (parser-grammar — malformed list entry
+  is a defect class).
+
+  Real risk: 5 — defect / DoS class. Crash on user-supplied input
+  is a vulnerability category itself.
+
+  Det score: CRASHES (returns "1" if a try/except wraps the call,
+  effectively).
+
+  Proposed fix: in `_deterministic`'s statement-list handling
+  (around line 1700), filter `policy["Statement"]` to dict entries
+  only and flag if any non-dict entries were dropped.
+
+policy:
+  Version: "2012-10-17"
+  Statement:
+    - null
+
+request:
+  spec:
+    access_type: read-write
+    duration:
+      duration_hours: 1
+
+expected:
+  score_min: 5
+  must_auto_approve: false

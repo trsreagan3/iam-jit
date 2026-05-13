@@ -1,0 +1,27 @@
+name: research-01-51-passrole-bedrock-agentcore-codeinterpreter
+description: |
+  Reference: IAM-BYPASS-RESEARCH.md §1.51 (HackingTheCloud path 18)
+
+  Pass a privileged role to a Bedrock AgentCore code-interpreter;
+  execute arbitrary Python under that role.
+
+  Expected behavior: privilege escalation primitive — high risk.
+
+  Source: HackingTheCloud path 18; CloudGoat agentcore_identity_confusion
+policy:
+  Version: "2012-10-17"
+  Statement:
+    - Effect: Allow
+      Action:
+        - iam:PassRole
+        - bedrock-agentcore:CreateCodeInterpreter
+        - bedrock-agentcore:InvokeCodeInterpreter
+      Resource: "*"
+request:
+  spec:
+    access_type: read-write
+    duration:
+      duration_hours: 1
+expected:
+  score_min: 8
+  must_auto_approve: false

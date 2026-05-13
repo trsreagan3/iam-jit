@@ -1,0 +1,27 @@
+name: research-03-13-cg-glue-privesc
+description: |
+  Reference: IAM-BYPASS-RESEARCH.md §3.13 (CloudGoat glue_privesc)
+
+  SQL injection in CSV ingestion → credential leak → Glue job reverse shell.
+
+  Expected behavior: privilege escalation via Glue — high risk.
+
+  Source: https://github.com/RhinoSecurityLabs/cloudgoat
+policy:
+  Version: "2012-10-17"
+  Statement:
+    - Effect: Allow
+      Action:
+        - glue:CreateJob
+        - glue:UpdateJob
+        - glue:StartJobRun
+        - iam:PassRole
+      Resource: "*"
+request:
+  spec:
+    access_type: read-write
+    duration:
+      duration_hours: 1
+expected:
+  score_min: 8
+  must_auto_approve: false

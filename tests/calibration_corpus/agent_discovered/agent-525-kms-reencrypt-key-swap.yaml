@@ -1,0 +1,42 @@
+name: agent-525-kms-reencrypt-key-swap
+description: |
+  BLACK-BOX Round 8. Research §4.6 (KMS cross-key) + Sec 8.10 T1486 (Data Encrypted for
+  Impact).
+
+  `kms:ReEncryptFrom` + `kms:ReEncryptTo` lets the attacker re-encrypt ciphertext from
+  the victim's key to an attacker-controlled key (potentially in another account). After
+  re-encryption, only the attacker holds the decrypt key — this is the cloud-native
+  ransomware primitive ("encrypt customer data with attacker key, demand ransom").
+
+  Det score: 6.
+  Real risk: 7 — KMS-based ransomware / data-loss tier.
+
+  Scorer gap: `kms:ReEncryptFrom` / `kms:ReEncryptTo` are not in
+  `_HIGH_IMPACT_MUTATION_ACTIONS` nor in `_CROSS_ACCOUNT_EXFIL_ACTIONS`. They score as
+  generic Writes on the `kms` service (which is sensitive, so floor 6 fires) but the
+  ransomware semantic doesn't.
+
+  Proposed fix: add `kms:ReEncryptFrom`, `kms:ReEncryptTo`, `kms:ImportKeyMaterial`,
+  `kms:DeleteImportedKeyMaterial` to `_HIGH_IMPACT_MUTATION_ACTIONS`. Note that
+  `kms:ScheduleKeyDeletion` is already catastrophic.
+
+  Research-doc pattern: §4.6 + §8.10 T1486 (KMS ransomware via key control).
+
+policy:
+  Version: "2012-10-17"
+  Statement:
+    - Effect: Allow
+      Action:
+        - "kms:ReEncryptFrom"
+        - "kms:ReEncryptTo"
+      Resource: "*"
+
+request:
+  spec:
+    access_type: read-write
+    duration:
+      duration_hours: 1
+
+expected:
+  score_min: 7
+  must_auto_approve: false

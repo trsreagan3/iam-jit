@@ -1,0 +1,28 @@
+name: research-10-6-action-case-insensitive
+description: |
+  Reference: IAM-BYPASS-RESEARCH.md §10.6 (AWS IAM grammar)
+
+  Action names: case-insensitive at evaluation (s3:getobject ==
+  s3:GetObject). ARN service prefixes: case-sensitive.
+
+  Expected behavior: parser should match lower-case actions as
+  equivalent — risk is the same as case-correct version.
+
+  Source: https://docs.aws.amazon.com/IAM/latest/UserGuide/reference_policies_grammar.html
+policy:
+  Version: "2012-10-17"
+  Statement:
+    - Effect: Allow
+      Action:
+        - s3:getobject
+        - s3:putobject
+        - iam:passrole
+      Resource: "*"
+request:
+  spec:
+    access_type: read-write
+    duration:
+      duration_hours: 1
+expected:
+  score_min: 7
+  must_auto_approve: false

@@ -1,0 +1,59 @@
+name: agent-521-stringnotequals-inverted-deny
+description: |
+  BLACK-BOX Round 8. Research Sec 11 (condition operator semantics) + Sec 12.3 (NotPrincipal
+  anti-pattern, analogous).
+
+  A `Deny` statement with `StringNotEquals` is structurally the same trap as `NotPrincipal`:
+  it denies for everyone EXCEPT the listed value. Combined with a separate `Allow`,
+  the attacker (one role) is exempted from the safeguard while every legitimate principal
+  is also exempted from the Deny (because they match no value the Deny listed) — wait,
+  actually the Deny fires for everyone whose `aws:userid` does NOT equal `AIDAEXAMPLE`,
+  which is virtually everyone. So this Deny BLOCKS legitimate users but ALLOWS the
+  attacker (whose `aws:userid` is `AIDAEXAMPLE`).
+
+  Net effect: only the attacker's role can call `iam:DeleteUser` / `iam:DeleteRole`
+  catastrophic actions. The "safeguard" is inverted into a whitelist.
+
+  Det score: 8 (catastrophic floor fires from the Allow).
+  Real risk: 9 — explicit inversion of intent into an attacker-only allow.
+
+  Scorer gap: round 7 catches `StringNotEquals` inverted-scope on identity-narrowing keys
+  via the NN recommendation (catastrophic-residue enumeration), but the COMBINATION of
+  Allow + Deny with `StringNotEquals` carving out an attacker exemption is a separate
+  pattern that scores 8 instead of 9.
+
+  Proposed fix: when a `Deny` statement uses `StringNotEquals` / `StringNotLike` /
+  `ArnNotEquals` on an identity-narrowing key (`aws:userid`, `aws:PrincipalArn`,
+  `aws:username`) AND the same policy contains a paired `Allow` for the same actions,
+  treat the Deny as INVERTED → it grants the attacker (the named exception) immunity →
+  floor 9.
+
+  Research-doc pattern: §11 (StringNotEquals inversion) + §12.3 (NotPrincipal-class
+  anti-pattern).
+
+policy:
+  Version: "2012-10-17"
+  Statement:
+    - Effect: Deny
+      Action:
+        - "iam:DeleteUser"
+        - "iam:DeleteRole"
+      Resource: "*"
+      Condition:
+        StringNotEquals:
+          "aws:userid": "AIDAEXAMPLEATTACKER"
+    - Effect: Allow
+      Action:
+        - "iam:DeleteUser"
+        - "iam:DeleteRole"
+      Resource: "*"
+
+request:
+  spec:
+    access_type: read-write
+    duration:
+      duration_hours: 1
+
+expected:
+  score_min: 9
+  must_auto_approve: false

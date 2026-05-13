@@ -1,0 +1,32 @@
+name: research-01-52-sso-admin-permission-set
+description: |
+  Reference: IAM-BYPASS-RESEARCH.md §1.52 (CloudQuery: AWS Identity Center privesc)
+
+  Modify or assign permission sets across an entire AWS Organization;
+  or add a target user to an admin group. Single-account IAM scopers
+  often miss the org-wide blast radius. sso-admin: prefix +
+  identitystore:CreateGroupMembership = admin-grade combination.
+
+  Expected behavior: org-wide privilege escalation — critical.
+
+  Source: https://www.cloudquery.io/blog/aws-priv-esc-identity-center
+policy:
+  Version: "2012-10-17"
+  Statement:
+    - Effect: Allow
+      Action:
+        - sso-admin:AttachManagedPolicyToPermissionSet
+        - sso-admin:AttachCustomerManagedPolicyReferenceToPermissionSet
+        - sso-admin:PutInlinePolicyToPermissionSet
+        - sso-admin:CreateAccountAssignment
+        - sso-admin:DetachManagedPolicyFromPermissionSet
+        - identitystore:CreateGroupMembership
+      Resource: "*"
+request:
+  spec:
+    access_type: read-write
+    duration:
+      duration_hours: 1
+expected:
+  score_min: 9
+  must_auto_approve: false

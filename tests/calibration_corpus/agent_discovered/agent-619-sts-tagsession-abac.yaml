@@ -1,0 +1,52 @@
+name: agent-619-sts-tagsession-abac
+description: |
+  WHITE-BOX round 8: `sts:TagSession` (and `sts:SetSourceIdentity`)
+  let the caller attach attribute tags to their STS session. In any
+  ABAC-secured environment (where IAM policies key off
+  `${aws:PrincipalTag/...}`), `sts:TagSession` on `*` lets the caller
+  rewrite the very tags the policy keys on — defeating ABAC.
+
+  The scorer routes via the `sts` service being in
+  `_SENSITIVE_SERVICES` (line 56), so the sensitive-on-broad rule at
+  line 2260 floors at 6. But the action is closer to the catastrophic
+  tier — it's the runtime half of the tag-controllable-resource
+  primitive that `iam:TagRole`/`iam:TagUser` cover from the
+  static-IAM side.
+
+  Combined with policies using `${aws:PrincipalTag/...}` in the
+  Resource (which the scorer already flags as gap, line 1784), this
+  enables full ABAC bypass.
+
+  Source-code rule exploited: `_HIGH_RISK_ACTIONS` /
+  `_CATASTROPHIC_ACTIONS` omit `sts:TagSession`. The companion
+  `iam:TagRole` IS in catastrophic (line 763); the session-tag side
+  is missing.
+
+  Research-doc pattern: §11.11 (Tag-based conditions
+  — sts:TagSession is the runtime self-tag mechanism).
+
+  Real risk: 7 — ABAC bypass primitive when combined with any tag-
+  based access control in the account.
+
+  Det score: 6.
+
+  Proposed fix: add `sts:TagSession`, `sts:SetSourceIdentity` to
+  `_HIGH_RISK_ACTIONS` (floor 7 on broad). Or to `_CATASTROPHIC_
+  ACTIONS` if your environment uses ABAC widely.
+
+policy:
+  Version: "2012-10-17"
+  Statement:
+    - Effect: Allow
+      Action: "sts:TagSession"
+      Resource: "*"
+
+request:
+  spec:
+    access_type: read-write
+    duration:
+      duration_hours: 1
+
+expected:
+  score_min: 7
+  must_auto_approve: false

@@ -1,0 +1,44 @@
+name: agent-500-principal-arn-stringlike-any-role
+description: |
+  BLACK-BOX Round 8. Research Sec 11.10 + Sec 4.6 (KMS cross-account ciphertext exposure).
+
+  Resource-based KMS key policy that allows `kms:Decrypt` on a narrow key ARN, but the
+  `Condition.StringLike.aws:PrincipalArn` is `arn:aws:iam::*:role/*` — matching ANY IAM
+  role in ANY AWS account. Combined with the narrow Resource it looks scoped, but the
+  condition is effectively "anyone with any role anywhere can decrypt." Same gap class as
+  round-7 ArnLike vacuous detector but in `StringLike` operator on `aws:PrincipalArn`.
+
+  Det score: 1 ("All statements are scoped or limited").
+  Real risk: 7 — any AWS principal in any account can decrypt the data this key protects.
+
+  Scorer gap: the round-7 ArnLike `*:*` vacuous condition detector doesn't generalize to
+  `StringLike` on `aws:PrincipalArn` with `arn:aws:iam::*:*` or `arn:aws:iam::*:role/*`
+  patterns. The narrow Resource ARN dominates the scoring.
+
+  Proposed fix: when Condition operator is one of `StringLike` / `StringEquals` and the key
+  is one of `aws:PrincipalArn` / `aws:SourceArn` / `aws:SourceOwner`, parse the VALUE as an
+  ARN. If the account-id segment is `*` or the resource-id segment ends in `*` (or both),
+  treat as vacuous-principal — floor at 7.
+
+  Research-doc pattern: §11.10 (policy-variable / ARN-pattern injection) extended to
+  Condition principal-narrowing keys.
+
+policy:
+  Version: "2012-10-17"
+  Statement:
+    - Effect: Allow
+      Action: "kms:Decrypt"
+      Resource: "arn:aws:kms:us-east-1:123456789012:key/abcd-1234-ef-5678"
+      Condition:
+        StringLike:
+          "aws:PrincipalArn": "arn:aws:iam::*:role/*"
+
+request:
+  spec:
+    access_type: read-write
+    duration:
+      duration_hours: 1
+
+expected:
+  score_min: 7
+  must_auto_approve: false

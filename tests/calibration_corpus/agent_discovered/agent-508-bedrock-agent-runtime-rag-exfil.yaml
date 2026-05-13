@@ -1,0 +1,45 @@
+name: agent-508-bedrock-agent-runtime-rag-exfil
+description: |
+  BLACK-BOX Round 8. Research Sec 9.3 (Bedrock newer-service) + Sec 5.7 (LLMjacking general).
+
+  `bedrock-agent-runtime` is the runtime invocation API for Bedrock Agents and Knowledge
+  Bases (RAG). `InvokeAgent` + `Retrieve` lets the caller query every knowledge base
+  attached to every agent in the account — the corporate-document RAG exfil pattern.
+
+  This is the SIBLING of `bedrock-agentcore` (which is in `_SENSITIVE_SERVICES`) but lives
+  in a separate prefix `bedrock-agent-runtime`. Service-aliasing miss per round 7 Sec 13.
+
+  Det score: 4 (broad-cross-resource-read only).
+  Real risk: 7 — corporate knowledge-base exfil at scale.
+
+  Scorer gap: `bedrock-agent-runtime` is not in `_SENSITIVE_SERVICES` (round-7 added
+  `qbusiness`, `datazone`, `appsync` etc. but missed this Bedrock sibling). The actions
+  `bedrock-agent-runtime:InvokeAgent` and `bedrock-agent-runtime:Retrieve` are not in
+  `_HIGH_RISK_ACTIONS`.
+
+  Proposed fix: add `bedrock-agent` and `bedrock-agent-runtime` to `_SENSITIVE_SERVICES`,
+  and/or add `bedrock-agent-runtime:InvokeAgent`, `bedrock-agent-runtime:Retrieve`,
+  `bedrock-agent-runtime:RetrieveAndGenerate` to `_HIGH_RISK_ACTIONS`. Same alias pattern
+  also applies to `bedrock-runtime` (agent-509).
+
+  Research-doc pattern: §9.3 (Bedrock newer-service surface) + §13 (service aliasing).
+
+policy:
+  Version: "2012-10-17"
+  Statement:
+    - Effect: Allow
+      Action:
+        - "bedrock-agent-runtime:InvokeAgent"
+        - "bedrock-agent-runtime:Retrieve"
+        - "bedrock-agent-runtime:RetrieveAndGenerate"
+      Resource: "*"
+
+request:
+  spec:
+    access_type: read-only
+    duration:
+      duration_hours: 1
+
+expected:
+  score_min: 7
+  must_auto_approve: false

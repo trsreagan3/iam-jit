@@ -1,0 +1,24 @@
+name: research-01-21-glue-updatedevendpoint-ssh
+description: |
+  Reference: IAM-BYPASS-RESEARCH.md §1.21 (Rhino #20)
+
+  Replace authorized SSH key on an existing Glue dev endpoint; SSH in
+  as the endpoint's role.
+
+  Expected behavior: privilege escalation primitive — high risk.
+
+  Source: Rhino #20
+policy:
+  Version: "2012-10-17"
+  Statement:
+    - Effect: Allow
+      Action: glue:UpdateDevEndpoint
+      Resource: "*"
+request:
+  spec:
+    access_type: read-write
+    duration:
+      duration_hours: 1
+expected:
+  score_min: 8
+  must_auto_approve: false

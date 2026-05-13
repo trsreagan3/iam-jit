@@ -1,0 +1,29 @@
+name: research-08-1-mitre-t1078-cloud-accounts
+description: |
+  Reference: IAM-BYPASS-RESEARCH.md §8.1 (MITRE T1078.004)
+
+  Valid Accounts: Cloud Accounts — stolen AKIA / SSO tokens.
+  # NB: abstract initial access; encoded as wide access an attacker
+  # might wield with stolen creds.
+
+  Expected behavior: initial access via stolen creds — depends on
+  identity scope.
+
+  Source: https://attack.mitre.org/techniques/T1078/004/
+policy:
+  Version: "2012-10-17"
+  Statement:
+    - Effect: Allow
+      Action:
+        - sts:GetCallerIdentity
+        - iam:ListUsers
+        - iam:ListRoles
+      Resource: "*"
+request:
+  spec:
+    access_type: read-only
+    duration:
+      duration_hours: 1
+expected:
+  score_min: 3
+  must_auto_approve: false

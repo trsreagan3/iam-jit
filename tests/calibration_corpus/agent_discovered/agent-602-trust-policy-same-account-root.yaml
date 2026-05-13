@@ -1,0 +1,48 @@
+name: agent-602-trust-policy-same-account-root
+description: |
+  WHITE-BOX round 8: SAME-ACCOUNT root delegation. `Principal:
+  {AWS: "arn:aws:iam::123456789012:root"}` on `sts:AssumeRole` looks
+  innocuous (same account), but `:root` means "any IAM principal in
+  this account WITH iam:AssumeRole on this role" — every user, every
+  role, every short-lived federation token. If the role has admin-
+  ish permissions and ANY caller in the account can ask to be it,
+  the role is effectively unowned.
+
+  Defense-in-depth principle (Wiz, NCC): trust policies should name
+  specific role/user ARNs, NEVER `:root`. AWS itself flags this in
+  Access Analyzer. Score should reflect "this trust opens the role
+  to every principal in the account" — at least floor 5 (human review).
+
+  Source-code rule exploited: same as agent-600 — no trust-policy
+  predicate, so `:root` form scores 3.
+
+  Research-doc pattern: §1.14, Section 9.9 (Organizations / Roles-
+  Anywhere — `:root` is the OS-tier equivalent of "anyone with valid
+  org creds").
+
+  Real risk: 6 — same-account `:root` delegation. Less severe than
+  cross-account but still a defense-in-depth red flag.
+
+  Det score: 3.
+
+  Proposed fix: in trust-policy detection, treat ANY `:root` value in
+  Principal.AWS as "broadly-scoped" and floor at 5 (no Condition) or
+  6 (no Condition AND no `sts:ExternalId` requirement).
+
+policy:
+  Version: "2012-10-17"
+  Statement:
+    - Effect: Allow
+      Principal:
+        AWS: "arn:aws:iam::123456789012:root"
+      Action: "sts:AssumeRole"
+
+request:
+  spec:
+    access_type: read-write
+    duration:
+      duration_hours: 1
+
+expected:
+  score_min: 5
+  must_auto_approve: false

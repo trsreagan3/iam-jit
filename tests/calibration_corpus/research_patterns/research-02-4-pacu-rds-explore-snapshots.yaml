@@ -1,0 +1,28 @@
+name: research-02-4-pacu-rds-explore-snapshots
+description: |
+  Reference: IAM-BYPASS-RESEARCH.md §2.4 (Pacu rds__explore_snapshots)
+
+  rds:CreateDBSnapshot, rds:RestoreDBInstanceFromDBSnapshot,
+  rds:ModifyDBInstance — clone DB to attacker-controlled instance
+  and read.
+
+  Expected behavior: data exfil from DB — high risk.
+
+  Source: https://github.com/RhinoSecurityLabs/pacu/wiki/Module-Details
+policy:
+  Version: "2012-10-17"
+  Statement:
+    - Effect: Allow
+      Action:
+        - rds:CreateDBSnapshot
+        - rds:RestoreDBInstanceFromDBSnapshot
+        - rds:ModifyDBInstance
+      Resource: "*"
+request:
+  spec:
+    access_type: read-write
+    duration:
+      duration_hours: 1
+expected:
+  score_min: 7
+  must_auto_approve: false

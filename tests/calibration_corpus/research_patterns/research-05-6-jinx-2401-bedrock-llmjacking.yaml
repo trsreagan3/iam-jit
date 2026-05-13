@@ -1,0 +1,34 @@
+name: research-05-6-jinx-2401-bedrock-llmjacking
+description: |
+  Reference: IAM-BYPASS-RESEARCH.md §5.6 (Wiz JINX-2401, 2024-2025)
+
+  Compromised AKIA → bedrock:InvokeModel against victim account →
+  resold model access. Persistence via iam:CreateUser, iam:CreatePolicy,
+  iam:CreateAccessKey, iam:CreateLoginProfile to set up
+  PutUseCaseForModelAccess and CreateFoundationModelAgreement workflows.
+
+  Expected behavior: persistence + cost-abuse LLM hijack — critical.
+
+  Source: https://www.wiz.io/blog/jinx-2401-llm-hijacking-aws
+policy:
+  Version: "2012-10-17"
+  Statement:
+    - Effect: Allow
+      Action:
+        - bedrock:InvokeModel
+        - bedrock:InvokeModelWithResponseStream
+        - iam:CreateUser
+        - iam:CreatePolicy
+        - iam:CreateAccessKey
+        - iam:CreateLoginProfile
+        - bedrock:PutUseCaseForModelAccess
+        - bedrock:CreateFoundationModelAgreement
+      Resource: "*"
+request:
+  spec:
+    access_type: read-write
+    duration:
+      duration_hours: 1
+expected:
+  score_min: 9
+  must_auto_approve: false

@@ -1,0 +1,49 @@
+name: agent-618-lambda-invokefunctionurl-public
+description: |
+  WHITE-BOX round 8: `lambda:InvokeFunctionUrl` is the data-plane
+  for Lambda Function URLs (public HTTPS endpoints). With `Resource:
+  *` this means "invoke any Function URL in the account" — every
+  HTTPS endpoint, including those the function-owner intended to
+  be IAM-only. The action's IAM access level is `Write` (per AWS
+  reference), so the existing state-changing-on-broad rule fires
+  at floor 6.
+
+  But the real risk is more nuanced: combined with a SECOND statement
+  that grants `lambda:CreateFunctionUrlConfig` (already in cross-
+  account-exfil), an attacker can MAKE a function publicly invokable
+  AND then invoke it — multi-step persistence + cross-account-invoke
+  primitive.
+
+  Source-code rule exploited: `_HIGH_RISK_ACTIONS` /
+  `_CROSS_ACCOUNT_EXFIL_ACTIONS` are missing
+  `lambda:InvokeFunctionUrl`.
+
+  Research-doc pattern: §9.5 (Lambda + EventBridge persistence —
+  function-url public-invoke companion).
+
+  Real risk: 7 — combined with the existing
+  `lambda:CreateFunctionUrlConfig` (in cross-account-exfil), this
+  is the "invoke side" of public-Lambda persistence.
+
+  Det score: 6.
+
+  Proposed fix: add `lambda:InvokeFunctionUrl` to
+  `_HIGH_RISK_ACTIONS` so the existing wildcard-resource gate (line
+  2247) floors at 7.
+
+policy:
+  Version: "2012-10-17"
+  Statement:
+    - Effect: Allow
+      Action: "lambda:InvokeFunctionUrl"
+      Resource: "*"
+
+request:
+  spec:
+    access_type: read-write
+    duration:
+      duration_hours: 1
+
+expected:
+  score_min: 7
+  must_auto_approve: false

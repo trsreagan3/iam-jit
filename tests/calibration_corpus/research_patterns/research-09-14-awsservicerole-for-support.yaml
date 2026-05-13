@@ -1,0 +1,29 @@
+name: research-09-14-awsservicerole-for-support
+description: |
+  Reference: IAM-BYPASS-RESEARCH.md §9.14 (JupiterOne)
+
+  AWSServiceRoleForSupport — AWS managed service-linked role that can
+  s3:GetObject on any unencrypted S3 object in the account if AWS
+  Support requests it; customers cannot delete it.
+  # NB: encoded as a trust policy for support.amazonaws.com with wide
+  # S3 read.
+
+  Expected behavior: AWS-Support read access — moderate (built-in) risk.
+
+  Source: https://www.jupiterone.com/blog/understanding-suspicious-updates-to-aws-managed-policies
+policy:
+  Version: "2012-10-17"
+  Statement:
+    - Effect: Allow
+      Principal:
+        Service: support.amazonaws.com
+      Action: sts:AssumeRole
+      Resource: "*"
+request:
+  spec:
+    access_type: read-only
+    duration:
+      duration_hours: 1
+expected:
+  score_min: 4
+  must_auto_approve: false

@@ -1,0 +1,29 @@
+name: research-13-1-sso-prefix-alias
+description: |
+  Reference: IAM-BYPASS-RESEARCH.md §13.1 (CloudQuery)
+
+  SSO sso-admin vs sso prefixes. The CLI is "aws sso-admin" but the IAM
+  action prefix is sso: (e.g., sso:AttachManagedPolicyToPermissionSet).
+  Identity Store uses identitystore:. A scorer that filters on action
+  prefix sso-admin: will miss everything.
+
+  Expected behavior: aliasing miss — high risk for org-wide privesc.
+
+  Source: https://www.cloudquery.io/blog/aws-priv-esc-identity-center
+policy:
+  Version: "2012-10-17"
+  Statement:
+    - Effect: Allow
+      Action:
+        - sso:AttachManagedPolicyToPermissionSet
+        - sso:PutInlinePolicyToPermissionSet
+        - sso:CreateAccountAssignment
+      Resource: "*"
+request:
+  spec:
+    access_type: read-write
+    duration:
+      duration_hours: 1
+expected:
+  score_min: 9
+  must_auto_approve: false

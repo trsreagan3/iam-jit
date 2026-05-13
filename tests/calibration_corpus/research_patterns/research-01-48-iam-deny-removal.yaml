@@ -1,0 +1,28 @@
+name: research-01-48-iam-deny-removal
+description: |
+  Reference: IAM-BYPASS-RESEARCH.md §1.48 (HackingTheCloud paths 11, 13-15)
+
+  Remove a policy that contains explicit Deny statements. Effective
+  permissions increase.
+
+  Expected behavior: privilege escalation primitive — high risk.
+
+  Source: https://hackingthe.cloud/aws/exploitation/iam_privilege_escalation/
+policy:
+  Version: "2012-10-17"
+  Statement:
+    - Effect: Allow
+      Action:
+        - iam:DeleteRolePolicy
+        - iam:DetachRolePolicy
+        - iam:DeleteUserPolicy
+        - iam:DetachUserPolicy
+      Resource: "*"
+request:
+  spec:
+    access_type: read-write
+    duration:
+      duration_hours: 1
+expected:
+  score_min: 7
+  must_auto_approve: false

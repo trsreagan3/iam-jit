@@ -1,0 +1,27 @@
+name: research-11-7-bool-string-vs-bool
+description: |
+  Reference: IAM-BYPASS-RESEARCH.md §11.7 (Sysdig)
+
+  Bool: "true" vs Bool: true (string vs bool). AWS evaluates both,
+  but tooling that does strict type comparison may misparse.
+
+  Expected behavior: parser handles both — moderate risk.
+
+  Source: https://www.sysdig.com/blog/iam-security-misconfiguration
+policy:
+  Version: "2012-10-17"
+  Statement:
+    - Effect: Allow
+      Action: s3:GetObject
+      Resource: "*"
+      Condition:
+        Bool:
+          aws:MultiFactorAuthPresent: true
+request:
+  spec:
+    access_type: read-only
+    duration:
+      duration_hours: 1
+expected:
+  score_min: 4
+  must_auto_approve: false

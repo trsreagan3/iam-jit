@@ -1,0 +1,44 @@
+name: agent-529-appflow-create-flow
+description: |
+  BLACK-BOX Round 8. Research §8.10 T1567 (Exfiltration Over Web Service) + round 7 QQ
+  (events:CreateApiDestination — same shape).
+
+  `appflow:CreateFlow` + `UpdateFlow` + `StartFlow` defines and runs data flows between
+  SaaS sources (Salesforce, ServiceNow, Slack, etc.) and AWS destinations — OR vice
+  versa. An attacker creates a flow to push S3 / RDS data to an attacker-controlled
+  Salesforce / Slack workspace, achieving outbound exfil that doesn't traverse the
+  VPC's egress controls.
+
+  Det score: 8 (broad-resource-touch on a non-sensitive service fires — borderline).
+  Real risk: 7 — calibration pin. Currently score 8 vs expected 7, no score-failing gap,
+  but the SEMANTIC of "AppFlow as outbound exfil channel" should be surfaced explicitly.
+
+  Scorer gap: NONE on score (current floor catches it). NARRATIVE gap — risk factors
+  describe AppFlow as a generic Write, not as the outbound exfil channel it is.
+
+  Proposed fix: add `appflow:CreateFlow`, `appflow:UpdateFlow`, `appflow:StartFlow` to
+  `_CROSS_ACCOUNT_EXFIL_ACTIONS` / `_PERSISTENT_EXFIL_PRIMITIVES` (round 1 class). Surface
+  "AppFlow outbound exfil" as a named primitive in the risk-factor narrative.
+
+  Research-doc pattern: §8.10 T1567 + round 7 QQ recommendation (events:CreateConnection
+  / CreateApiDestination siblings).
+
+policy:
+  Version: "2012-10-17"
+  Statement:
+    - Effect: Allow
+      Action:
+        - "appflow:CreateFlow"
+        - "appflow:UpdateFlow"
+        - "appflow:StartFlow"
+      Resource: "*"
+
+request:
+  spec:
+    access_type: read-write
+    duration:
+      duration_hours: 1
+
+expected:
+  score_min: 7
+  must_auto_approve: false

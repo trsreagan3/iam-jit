@@ -1,0 +1,45 @@
+name: agent-603-trust-policy-federated-cognito-no-condition
+description: |
+  WHITE-BOX round 8: federated trust without Condition. Trust policy
+  granting `sts:AssumeRoleWithWebIdentity` to `Federated:
+  ["cognito-identity.amazonaws.com"]` with NO Condition. Any
+  Cognito-issued web identity token can assume the role.
+
+  Source-code rule exploited: `_principal_is_public` (line 1273) only
+  detects wildcard ARNs; Federated principals that aren't wildcards
+  aren't recognized. The Service-principal-without-Condition check at
+  line 1761 fires for `Principal.Service`, NOT `Principal.Federated`.
+  So scores 3.
+
+  Research-doc pattern: §11.3 (`StringLike` vs `StringEquals` on sub —
+  the Federated case is even worse with NO Condition at all), §1.55
+  (Web identity assume).
+
+  Real risk: 7 — every Cognito identity pool token (which can be
+  unauthenticated guests) can assume this role.
+
+  Det score: 3.
+
+  Proposed fix: when `Principal.Federated` is present with no
+  Condition, apply a parallel rule to the existing Service-principal
+  rule (line 1761) — floor at 6 (no Condition) or 5 (Condition
+  present, vacuity TBD).
+
+policy:
+  Version: "2012-10-17"
+  Statement:
+    - Effect: Allow
+      Principal:
+        Federated:
+          - cognito-identity.amazonaws.com
+      Action: "sts:AssumeRoleWithWebIdentity"
+
+request:
+  spec:
+    access_type: read-write
+    duration:
+      duration_hours: 1
+
+expected:
+  score_min: 6
+  must_auto_approve: false

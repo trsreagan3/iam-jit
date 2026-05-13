@@ -1,0 +1,27 @@
+name: research-07-2-aa-internal-access
+description: |
+  Reference: IAM-BYPASS-RESEARCH.md §7.2 (AWS IAM Access Analyzer)
+
+  Internal Access Findings: access paths within the org/account between
+  IAM principals and resources. Useful for blast-radius enumeration.
+  # NB: encoded as a wide internal-access grant.
+
+  Expected behavior: internal blast-radius indicator — moderate risk.
+
+  Source: https://docs.aws.amazon.com/IAM/latest/UserGuide/access-analyzer-findings.html
+policy:
+  Version: "2012-10-17"
+  Statement:
+    - Effect: Allow
+      Action:
+        - s3:GetObject
+        - dynamodb:GetItem
+      Resource: "*"
+request:
+  spec:
+    access_type: read-only
+    duration:
+      duration_hours: 1
+expected:
+  score_min: 4
+  must_auto_approve: false

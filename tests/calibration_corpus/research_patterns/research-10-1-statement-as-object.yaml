@@ -1,0 +1,27 @@
+name: research-10-1-statement-as-object
+description: |
+  Reference: IAM-BYPASS-RESEARCH.md §10.1 (AWS IAM grammar)
+
+  Statement may be {} or [{}]. Both forms are valid. Scorers that assume
+  policy["Statement"] is always a list miss single-object policies (and
+  vice-versa).
+  # NB: encoded as a single Statement object (not a list).
+
+  Expected behavior: parser should handle both shapes; if scorer
+  skips, the admin grant goes undetected — critical.
+
+  Source: https://docs.aws.amazon.com/IAM/latest/UserGuide/reference_policies_grammar.html
+policy:
+  Version: "2012-10-17"
+  Statement:
+    Effect: Allow
+    Action: "*"
+    Resource: "*"
+request:
+  spec:
+    access_type: read-write
+    duration:
+      duration_hours: 1
+expected:
+  score_min: 10
+  must_auto_approve: false

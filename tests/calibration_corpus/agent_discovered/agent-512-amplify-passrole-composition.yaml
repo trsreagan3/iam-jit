@@ -1,0 +1,47 @@
+name: agent-512-amplify-passrole-composition
+description: |
+  BLACK-BOX Round 8. Research Sec 9.11 (App Runner / AppConfig / similar) +
+  composition rule §1.15 (PassRole + code-exec).
+
+  `amplify:CreateApp` / `amplify:UpdateApp` deploys an Amplify (web hosting) application
+  that runs server-side rendering / API routes under a passed IAM role. The build hooks
+  execute attacker-supplied code at deploy time. Combined with `iam:PassRole`, this is
+  RCE-as-the-passed-role.
+
+  Det score: 6.
+  Real risk: 9 — RCE-as-role via Amplify build hooks (same shape as Code* services).
+
+  Scorer gap: `amplify:CreateApp` / `UpdateApp` are not in `_CODE_EXECUTION_PRIMITIVES`,
+  so the round-5 code-exec composition rule with `iam:PassRole` doesn't fire. The PassRole
+  narrow scoring (4) plus the Resource-* on amplify (6) is the max.
+
+  Proposed fix: add `amplify:CreateApp`, `amplify:UpdateApp`, `amplify:CreateBranch`,
+  `amplify:UpdateBranch`, `amplify:CreateDeployment`, `amplify:CreateBackendEnvironment`
+  to `_CODE_EXECUTION_PRIMITIVES`. They follow the same shape as
+  `apprunner:CreateService` (already in the set per round 6).
+
+  Research-doc pattern: §1.15 (PassRole + code-exec composition class) + §9.11 (App Runner
+  / Amplify newer-service surface).
+
+policy:
+  Version: "2012-10-17"
+  Statement:
+    - Effect: Allow
+      Action:
+        - "amplify:CreateApp"
+        - "amplify:UpdateApp"
+        - "amplify:CreateDeployment"
+      Resource: "*"
+    - Effect: Allow
+      Action: "iam:PassRole"
+      Resource: "arn:aws:iam::123456789012:role/AmplifyServiceRole"
+
+request:
+  spec:
+    access_type: read-write
+    duration:
+      duration_hours: 1
+
+expected:
+  score_min: 9
+  must_auto_approve: false

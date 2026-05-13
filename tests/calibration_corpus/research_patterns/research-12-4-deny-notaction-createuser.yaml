@@ -1,0 +1,27 @@
+name: research-12-4-deny-notaction-createuser
+description: |
+  Reference: IAM-BYPASS-RESEARCH.md §12.4 (Binadox)
+
+  Deny + NotAction:["iam:CreateUser"] — correct shape for narrow-Deny:
+  deny everything except CreateUser. But tools that flag NotAction in
+  any Effect produce false positives — scoring needs Effect awareness.
+
+  Expected behavior: legitimate Deny — low risk; scorer should NOT
+  flag this as Allow-style NotAction.
+
+  Source: https://docs.aws.amazon.com/IAM/latest/UserGuide/reference_policies_elements_notaction.html
+policy:
+  Version: "2012-10-17"
+  Statement:
+    - Effect: Deny
+      NotAction:
+        - "iam:CreateUser"
+      Resource: "*"
+request:
+  spec:
+    access_type: read-write
+    duration:
+      duration_hours: 1
+expected:
+  score_min: 2
+  must_auto_approve: false

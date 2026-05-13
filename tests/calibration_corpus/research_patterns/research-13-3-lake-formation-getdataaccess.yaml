@@ -1,0 +1,28 @@
+name: research-13-3-lake-formation-getdataaccess
+description: |
+  Reference: IAM-BYPASS-RESEARCH.md §13.3
+
+  lakeformation:GrantPermissions, lakeformation:GetDataAccess — Lake
+  Formation can issue temporary creds for S3 read on registered
+  locations. A principal with only lakeformation:GetDataAccess and no
+  s3:* can still read S3 data via Lake Formation's STS issuance.
+
+  Expected behavior: hidden S3 read — high risk.
+
+  Source: AWS Lake Formation docs
+policy:
+  Version: "2012-10-17"
+  Statement:
+    - Effect: Allow
+      Action:
+        - lakeformation:GrantPermissions
+        - lakeformation:GetDataAccess
+      Resource: "*"
+request:
+  spec:
+    access_type: read-write
+    duration:
+      duration_hours: 1
+expected:
+  score_min: 7
+  must_auto_approve: false

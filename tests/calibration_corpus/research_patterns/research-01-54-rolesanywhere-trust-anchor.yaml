@@ -1,0 +1,28 @@
+name: research-01-54-rolesanywhere-trust-anchor
+description: |
+  Reference: IAM-BYPASS-RESEARCH.md §1.54 (Palo Alto Unit 42; Stratus Red Team)
+
+  Register an attacker CA as a trust anchor and create a profile that
+  maps the CA to existing privileged roles; mint X.509-derived STS creds
+  indefinitely from outside AWS. Any IAM policy granting
+  rolesanywhere:Create* should be high-risk.
+
+  Expected behavior: persistent external access — critical.
+
+  Source: https://unit42.paloaltonetworks.com/aws-roles-anywhere/
+policy:
+  Version: "2012-10-17"
+  Statement:
+    - Effect: Allow
+      Action:
+        - rolesanywhere:CreateTrustAnchor
+        - rolesanywhere:CreateProfile
+      Resource: "*"
+request:
+  spec:
+    access_type: read-write
+    duration:
+      duration_hours: 1
+expected:
+  score_min: 9
+  must_auto_approve: false

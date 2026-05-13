@@ -1,0 +1,28 @@
+name: research-03-12-cg-rce-web-app
+description: |
+  Reference: IAM-BYPASS-RESEARCH.md §3.12 (CloudGoat rce_web_app)
+
+  Web RCE on EC2 → RDS access, OR S3-stored SSH keys → direct shell.
+  # NB: abstract scenario; encoded as the IAM-policy lever — wide RDS
+  # + S3 read.
+
+  Expected behavior: data access pathway — high risk.
+
+  Source: https://github.com/RhinoSecurityLabs/cloudgoat
+policy:
+  Version: "2012-10-17"
+  Statement:
+    - Effect: Allow
+      Action:
+        - rds:DescribeDBInstances
+        - rds:DescribeDBSnapshots
+        - s3:GetObject
+      Resource: "*"
+request:
+  spec:
+    access_type: read-only
+    duration:
+      duration_hours: 1
+expected:
+  score_min: 6
+  must_auto_approve: false

@@ -1,0 +1,59 @@
+name: agent-628-sns-topic-bare-wildcard
+description: |
+  WHITE-BOX round 8: `sns:Publish` on `arn:aws:sns:us-east-1:12345:*`
+  publishes to EVERY SNS topic in the account/region. This is mass
+  notification / phishing / spam primitive — but more importantly,
+  SNS topics often subscribe Lambdas or email addresses, so a
+  Publish-to-any-topic primitive can trigger arbitrary subscribers
+  with attacker-controlled message bodies.
+
+  The current scorer routes via state-changing-on-broad (line 2322)
+  → score 6. Below the auto-approve threshold of 5.
+
+  Looking at `_is_strict_wildcard` (line 1998): for SNS, the bucket-
+  part check has bucket_part = "" (after `partition(":", 5)` and
+  resource_spec is just `*`). Wait — let me re-check the ARN:
+  `arn:aws:sns:us-east-1:12345:*` — split on `:` 5 times produces
+  `[arn, aws, sns, us-east-1, 12345, *]`. So resource_spec is `*`.
+  Line 2035 `if resource_spec == "*": return True`. So this IS strict
+  broad. And `wildcard_resource = True`.
+
+  Tracing further: `sns:Publish` — IAM-classified as Write. The
+  state-changing-on-broad rule (line 2322) fires → floor 6. Below
+  the high-impact-mutation tier.
+
+  The deeper bug: `sns:Publish` is a high-impact action when
+  Resource is broad (mass-notification → mass-phishing). It should
+  be in `_HIGH_IMPACT_MUTATION_ACTIONS` so the floor-on-broad is 8.
+
+  Source-code rule exploited: `_HIGH_IMPACT_MUTATION_ACTIONS` (line
+  392) omits `sns:Publish`.
+
+  Research-doc pattern: §1.69 (SNS persistence — PutSubscription
+  + Publish for fan-out attacks).
+
+  Real risk: 7 — single-call mass-notification across every topic
+  in the account.
+
+  Det score: 6.
+
+  Proposed fix: add `sns:Publish` to `_HIGH_IMPACT_MUTATION_ACTIONS`.
+  Also consider `sns:Subscribe` (different action: subscribes a
+  caller-controlled endpoint to receive every message).
+
+policy:
+  Version: "2012-10-17"
+  Statement:
+    - Effect: Allow
+      Action: "sns:Publish"
+      Resource: "arn:aws:sns:us-east-1:123456789012:*"
+
+request:
+  spec:
+    access_type: read-write
+    duration:
+      duration_hours: 1
+
+expected:
+  score_min: 7
+  must_auto_approve: false

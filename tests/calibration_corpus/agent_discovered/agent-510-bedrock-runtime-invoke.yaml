@@ -1,0 +1,43 @@
+name: agent-510-bedrock-runtime-invoke
+description: |
+  BLACK-BOX Round 8. Research Sec 5.7 (LLMjacking) + Sec 8.9 T1496.A007.
+
+  `bedrock-runtime:InvokeModel` is the actual model-invocation API (the `bedrock` prefix
+  is the control plane). The LLMjacking pattern (Sec 5.6/5.7) uses `bedrock:InvokeModel`
+  but newer SDKs increasingly use the `bedrock-runtime:` prefix. Scorer must recognize
+  both as equivalent.
+
+  Det score: 4 (broad-cross-resource-read only).
+  Real risk: 7 — direct cost-burning model-access primitive; same blast radius as
+  `bedrock:InvokeModel` (currently 8).
+
+  Scorer gap: `bedrock-runtime` is a separate service prefix. Round 6/7 surfaced `bedrock`
+  itself as sensitive, but the `-runtime` alias slips past.
+
+  Proposed fix: add `bedrock-runtime` to `_SENSITIVE_SERVICES` (or alias to `bedrock` in
+  `_SERVICE_ALIASES`). Add `bedrock-runtime:InvokeModel`,
+  `bedrock-runtime:InvokeModelWithResponseStream`, `bedrock-runtime:Converse`,
+  `bedrock-runtime:ConverseStream`, `bedrock-runtime:ApplyGuardrail` to the
+  `_HIGH_RISK_ACTIONS` set (data-bearing read with cost-impact).
+
+  Research-doc pattern: §5.7 + §9.3 + §13 (service aliasing).
+
+policy:
+  Version: "2012-10-17"
+  Statement:
+    - Effect: Allow
+      Action:
+        - "bedrock-runtime:InvokeModel"
+        - "bedrock-runtime:InvokeModelWithResponseStream"
+        - "bedrock-runtime:Converse"
+      Resource: "*"
+
+request:
+  spec:
+    access_type: read-write
+    duration:
+      duration_hours: 1
+
+expected:
+  score_min: 7
+  must_auto_approve: false

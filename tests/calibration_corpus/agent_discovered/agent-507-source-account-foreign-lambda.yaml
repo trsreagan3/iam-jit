@@ -1,0 +1,42 @@
+name: agent-507-source-account-foreign-lambda
+description: |
+  BLACK-BOX Round 8. Research Sec 4.5 (Lambda cross-account no-source-ARN) + Sec 11.4.
+
+  Lambda function policy that allows `lambda:InvokeFunction` on a narrow function ARN
+  (owned by account 123456789012) with `aws:SourceAccount = 999999999999`. The function
+  is granted invocation by a foreign account's service principals.
+
+  AWS Lambda docs explicitly call this out: "If you add a permission without providing the
+  source ARN, any AWS account that creates a mapping to your function ARN can send events
+  to invoke your Lambda function." When `SourceAccount` is set to a SPECIFIC foreign
+  account, it scopes — but the scorer should recognize the cross-account direction.
+
+  Det score: 3.
+  Real risk: 7 — foreign account invokes the function, function runs under its (possibly
+  privileged) execution role.
+
+  Scorer gap: identical to agent-506 but on `aws:SourceAccount`. Same cross-account
+  detection fix applies.
+
+  Research-doc pattern: §4.5 (Lambda cross-account permission without SourceArn-equivalent
+  scoping) + §11.4.
+
+policy:
+  Version: "2012-10-17"
+  Statement:
+    - Effect: Allow
+      Action: "lambda:InvokeFunction"
+      Resource: "arn:aws:lambda:us-east-1:123456789012:function:prod-handler"
+      Condition:
+        StringEquals:
+          "aws:SourceAccount": "999999999999"
+
+request:
+  spec:
+    access_type: read-write
+    duration:
+      duration_hours: 1
+
+expected:
+  score_min: 7
+  must_auto_approve: false

@@ -1,0 +1,59 @@
+name: agent-623-trust-policy-no-resource-passrole-equivalent
+description: |
+  WHITE-BOX round 8: a trust policy attaches TO a role and its
+  `sts:AssumeRole` statement implicitly references THAT role (no
+  Resource field needed — the role IS the resource). The scorer
+  treats the statement as identity-policy form and scores it as
+  "no Resource → no broad-resource check fires."
+
+  Concretely: this policy uses `Action: sts:AssumeRoleWithSAML` AND
+  has a wildcard SAML provider — meaning ANY SAML provider can mint
+  tokens that assume this role. The `_principal_is_public` predicate
+  catches the wildcard saml-provider/* form (line 1316), so this
+  scores 9. GOOD.
+
+  BUT — the round-7 fix in `_principal_is_public` (line 1316)
+  requires the spec to START with `saml-provider/` or
+  `oidc-provider/`. If the spec is `arn:aws:iam::123:role/*` (a
+  WILDCARD ROLE-NAME path in Principal — not a real Principal, but
+  the scorer's predicate uses ARN-spec-with-wildcard logic), then
+  the check at line 1316 doesn't fire because the spec doesn't
+  start with `saml-provider/` or `oidc-provider/`.
+
+  This shape is unusual (Principal.AWS is normally not a role-name
+  wildcard pattern — usually a specific user/role ARN), but it's
+  ACCEPTED by AWS. The scorer should detect `*` in the spec of any
+  AWS principal as broad.
+
+  Source-code rule exploited: `_principal_is_public` (line 1316) —
+  only saml-provider/oidc-provider specs with wildcards are public.
+
+  Research-doc pattern: §10.4 (Principal forms), §10.7 (trailing `*`
+  glob — extends to Principal ARNs).
+
+  Real risk: 8 — broadly-matching AWS principal ARN.
+
+  Det score: 3.
+
+  Proposed fix: in `_principal_is_public` (line 1316), also treat
+  ANY `*` in the spec portion of `Principal.AWS` ARNs as broad —
+  not just SAML/OIDC. The spec being wildcarded means the principal
+  is not specifically named.
+
+policy:
+  Version: "2012-10-17"
+  Statement:
+    - Effect: Allow
+      Principal:
+        AWS: "arn:aws:iam::999999999999:role/*"
+      Action: "sts:AssumeRole"
+
+request:
+  spec:
+    access_type: read-write
+    duration:
+      duration_hours: 1
+
+expected:
+  score_min: 7
+  must_auto_approve: false

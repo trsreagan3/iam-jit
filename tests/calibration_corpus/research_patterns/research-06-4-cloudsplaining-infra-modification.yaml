@@ -1,0 +1,28 @@
+name: research-06-4-cloudsplaining-infra-modification
+description: |
+  Reference: IAM-BYPASS-RESEARCH.md §6.4 (CloudSplaining Infrastructure Modification)
+
+  Broad Action:* / Service:* like ec2:*, s3:*, rds:* on Resource:* —
+  also s3:DeleteBucket, ec2:TerminateInstances, rds:DeleteDBInstance,
+  kms:ScheduleKeyDeletion.
+
+  Expected behavior: destructive infra control — critical.
+
+  Source: https://github.com/salesforce/cloudsplaining/blob/master/docs/index.md
+policy:
+  Version: "2012-10-17"
+  Statement:
+    - Effect: Allow
+      Action:
+        - ec2:*
+        - s3:*
+        - rds:*
+      Resource: "*"
+request:
+  spec:
+    access_type: read-write
+    duration:
+      duration_hours: 1
+expected:
+  score_min: 9
+  must_auto_approve: false

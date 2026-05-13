@@ -1,0 +1,62 @@
+name: agent-604-trust-google-aud-stringequals-wildcard
+description: |
+  WHITE-BOX round 8: federated trust with `StringEquals` on `:aud`
+  with a literal `*`. `StringEquals` does NOT expand `*` — it's a
+  literal comparison. So `accounts.google.com:aud: "*"` NEVER matches
+  any real aud claim (which are project IDs, not `*`).
+
+  But wait — that means the Condition NEVER matches, so AWS REJECTS
+  the AssumeRoleWithWebIdentity. So is this dangerous? YES: the
+  scorer's `_condition_is_vacuous` Pattern 6 (line 1121) only fires
+  on `StringLike`/`StringLike*` with `*` on `:sub`/`:aud`. With
+  `StringEquals`, the condition VALUE is a literal `*` — and the
+  pattern doesn't fire. The vacuous-condition floor at 5 doesn't
+  apply.
+
+  The risk is also higher than "condition never matches" because:
+    1. Author intent was `StringLike` (the natural OIDC pattern).
+    2. AWS evaluation order: if the principal-list is broad AND the
+       condition fails, the assume is denied. But the policy
+       remains attached to the role — the moment ANYONE switches
+       `StringEquals` → `StringLike` (a one-character edit), the
+       wildcard becomes effective.
+  Score should reflect "this condition is malformed and one edit
+  from being open."
+
+  Source-code rule exploited: `_condition_is_vacuous` Pattern 6
+  (line 1121) — Pattern 6 only matches `op.startswith("StringLike")`,
+  missing `StringEquals` with a `*` literal value.
+
+  Research-doc pattern: §11.3, §11.14 (RequestedRegion wildcard
+  typo — same defect class).
+
+  Real risk: 7 — federated trust with deliberately or accidentally
+  broken sub/aud scope.
+
+  Det score: 3.
+
+  Proposed fix: extend Pattern 6 to ALSO match `StringEquals`/
+  `StringEqualsIfExists` with a literal `*` value — under
+  `StringEquals` semantics the value `*` is never the intended
+  scope.
+
+policy:
+  Version: "2012-10-17"
+  Statement:
+    - Effect: Allow
+      Principal:
+        Federated: "accounts.google.com"
+      Action: "sts:AssumeRoleWithWebIdentity"
+      Condition:
+        StringEquals:
+          "accounts.google.com:aud": "*"
+
+request:
+  spec:
+    access_type: read-write
+    duration:
+      duration_hours: 1
+
+expected:
+  score_min: 5
+  must_auto_approve: false

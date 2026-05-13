@@ -1,0 +1,27 @@
+name: research-01-12-putuserpolicy-inline
+description: |
+  Reference: IAM-BYPASS-RESEARCH.md §1.12 (Rhino #10, #11, #12)
+
+  Define an arbitrary inline policy (e.g., Action:* Resource:*) on self,
+  attacker's group, or assumable role. These are the most direct paths.
+
+  Expected behavior: direct privilege escalation primitive — critical.
+
+  Source: Rhino #10-12
+policy:
+  Version: "2012-10-17"
+  Statement:
+    - Effect: Allow
+      Action:
+        - iam:PutUserPolicy
+        - iam:PutGroupPolicy
+        - iam:PutRolePolicy
+      Resource: "*"
+request:
+  spec:
+    access_type: read-write
+    duration:
+      duration_hours: 1
+expected:
+  score_min: 9
+  must_auto_approve: false

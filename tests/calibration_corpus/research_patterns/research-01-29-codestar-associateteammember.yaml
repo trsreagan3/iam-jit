@@ -1,0 +1,26 @@
+name: research-01-29-codestar-associateteammember
+description: |
+  Reference: IAM-BYPASS-RESEARCH.md §1.29 (Rhino CodeStar #25)
+
+  Add self as project Owner; CodeStar auto-attaches IAM policies that
+  grant project-wide permissions.
+
+  Expected behavior: privilege escalation primitive — high risk.
+
+  Source: Rhino CodeStar #25
+policy:
+  Version: "2012-10-17"
+  Statement:
+    - Effect: Allow
+      Action:
+        - codestar:CreateProject
+        - codestar:AssociateTeamMember
+      Resource: "*"
+request:
+  spec:
+    access_type: read-write
+    duration:
+      duration_hours: 1
+expected:
+  score_min: 7
+  must_auto_approve: false

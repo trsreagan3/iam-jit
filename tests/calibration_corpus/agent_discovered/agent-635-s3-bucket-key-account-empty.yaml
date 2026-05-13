@@ -1,0 +1,52 @@
+name: agent-635-s3-bucket-key-account-empty
+description: |
+  WHITE-BOX round 8: S3 bucket ARN with EMPTY account segment.
+  `arn:aws:s3:::my-bucket/secret-key` (note four colons in a row,
+  account == "") is the canonical S3 ARN form (S3 ARNs don't include
+  account or region). So this specific ARN is NORMAL for S3.
+
+  BUT for any OTHER service ARN, empty account = "any account" (or
+  malformed). This fixture uses the empty-account S3 form
+  intentionally to exercise the broad-resource predicate's
+  handling.
+
+  More interesting probe: `arn:aws::s3:::my-bucket` (empty PARTITION
+  segment) — accepted by some parsers. The `_is_broad_resource`
+  check on parts[1] (line 1397: `"*" in parts[1]`) doesn't match
+  empty string (no `*`). So empty-partition silently passes.
+
+  This is the same defect class as agent-622 (empty account); the
+  fix needs to apply to all three identifying segments
+  (partition, region, account).
+
+  Source-code rule exploited: `_is_broad_resource` (line 1397) and
+  `_is_strict_wildcard` (line 2014) — empty-segment forms slip past.
+
+  Research-doc pattern: §10 (parser-grammar bypass), §13.12 (ARN
+  partition variants — empty partition is a partition-mismatch
+  defect).
+
+  Real risk: 4 — defect class.
+
+  Det score: 1 (S3 narrow read on a single object).
+
+  Proposed fix: treat empty segments (partition/region/account)
+  as defect-class warnings. For S3 specifically, empty account/
+  region is the canonical form, but empty PARTITION never is.
+
+policy:
+  Version: "2012-10-17"
+  Statement:
+    - Effect: Allow
+      Action: "s3:GetObject"
+      Resource: "arn:aws::s3:::my-bucket/secret-key"
+
+request:
+  spec:
+    access_type: read-only
+    duration:
+      duration_hours: 1
+
+expected:
+  score_min: 3
+  must_auto_approve: true

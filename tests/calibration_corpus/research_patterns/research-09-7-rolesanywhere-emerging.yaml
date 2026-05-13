@@ -1,0 +1,29 @@
+name: research-09-7-rolesanywhere-emerging
+description: |
+  Reference: IAM-BYPASS-RESEARCH.md §9.7 (IAM Roles Anywhere)
+
+  rolesanywhere:CreateTrustAnchor, rolesanywhere:CreateProfile,
+  rolesanywhere:UpdateTrustAnchor, rolesanywhere:UpdateProfile —
+  section 1.54 above.
+
+  Expected behavior: external persistent access — critical.
+
+  Source: https://stratus-red-team.cloud/attack-techniques/AWS/aws.persistence.rolesanywhere-create-trust-anchor/
+policy:
+  Version: "2012-10-17"
+  Statement:
+    - Effect: Allow
+      Action:
+        - rolesanywhere:CreateTrustAnchor
+        - rolesanywhere:CreateProfile
+        - rolesanywhere:UpdateTrustAnchor
+        - rolesanywhere:UpdateProfile
+      Resource: "*"
+request:
+  spec:
+    access_type: read-write
+    duration:
+      duration_hours: 1
+expected:
+  score_min: 9
+  must_auto_approve: false

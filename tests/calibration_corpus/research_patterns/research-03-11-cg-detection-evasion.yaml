@@ -1,0 +1,25 @@
+name: research-03-11-cg-detection-evasion
+description: |
+  Reference: IAM-BYPASS-RESEARCH.md §3.11 (CloudGoat detection_evasion)
+
+  Read secrets from Secrets Manager without triggering GuardDuty or
+  CloudTrail alarms — usually by using assumed-role sessions and avoiding
+  LookupEvents-known IPs.
+
+  Expected behavior: data exfil — high risk.
+
+  Source: https://github.com/RhinoSecurityLabs/cloudgoat
+policy:
+  Version: "2012-10-17"
+  Statement:
+    - Effect: Allow
+      Action: secretsmanager:GetSecretValue
+      Resource: "*"
+request:
+  spec:
+    access_type: read-only
+    duration:
+      duration_hours: 1
+expected:
+  score_min: 7
+  must_auto_approve: false

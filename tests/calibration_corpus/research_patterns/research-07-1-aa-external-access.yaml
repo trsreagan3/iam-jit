@@ -1,0 +1,30 @@
+name: research-07-1-aa-external-access
+description: |
+  Reference: IAM-BYPASS-RESEARCH.md §7.1 (AWS IAM Access Analyzer)
+
+  External Access Finding: resource-based policy grants access to a
+  principal outside the zone of trust (organization or account).
+  # NB: encoded as a representative resource-policy grant to an external
+  # account principal.
+
+  Expected behavior: external access exposure — high risk.
+
+  Source: https://docs.aws.amazon.com/IAM/latest/UserGuide/access-analyzer-findings.html
+policy:
+  Version: "2012-10-17"
+  Statement:
+    - Effect: Allow
+      Principal:
+        AWS: "arn:aws:iam::999988887777:root"
+      Action:
+        - s3:GetObject
+        - s3:PutObject
+      Resource: arn:aws:s3:::example-bucket/*
+request:
+  spec:
+    access_type: read-write
+    duration:
+      duration_hours: 1
+expected:
+  score_min: 7
+  must_auto_approve: false

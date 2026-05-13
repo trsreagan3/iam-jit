@@ -1,0 +1,48 @@
+name: agent-605-trust-service-wildcard-suffix
+description: |
+  WHITE-BOX round 8: `Principal.Service` with a wildcard
+  (`*.amazonaws.com`) — accepted by AWS as "every AWS service
+  principal" — bypasses `_principal_is_public` because the value
+  isn't the bare `*` string and isn't an ARN.
+
+  The existing Service-principal-without-Condition rule (line 1761)
+  DOES fire, scoring 6. But 6 is below catastrophic — and the
+  semantic is "every AWS service can assume this role." That's
+  catastrophic-tier blast, not "needs human review."
+
+  Source-code rule exploited: `_principal_is_public` (line 1273) —
+  the service-principal wildcard `*.amazonaws.com` isn't a bare `*`,
+  isn't a wildcard ARN. The Service-principal-without-Condition rule
+  fires at 6 but doesn't recognize the wildcard.
+
+  Research-doc pattern: §13.6 (service-principal partition variants
+  — extends to wildcards), §6 (CloudSplaining checks include "wildcard
+  in Service principal").
+
+  Real risk: 9 — wildcard service principal is closer to `Principal:
+  "*"` than to a specific service. Every AWS service (lambda, ec2,
+  ecs, etc.) can assume.
+
+  Det score: 6.
+
+  Proposed fix: in `_principal_is_public`, also treat any Service
+  value that contains `*` (e.g., `*.amazonaws.com`, `*-internal.*`)
+  as public.
+
+policy:
+  Version: "2012-10-17"
+  Statement:
+    - Effect: Allow
+      Principal:
+        Service: "*.amazonaws.com"
+      Action: "sts:AssumeRole"
+
+request:
+  spec:
+    access_type: read-write
+    duration:
+      duration_hours: 1
+
+expected:
+  score_min: 8
+  must_auto_approve: false

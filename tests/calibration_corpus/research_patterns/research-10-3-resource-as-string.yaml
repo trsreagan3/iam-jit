@@ -1,0 +1,23 @@
+name: research-10-3-resource-as-string
+description: |
+  Reference: IAM-BYPASS-RESEARCH.md §10.3 (AWS IAM grammar)
+
+  Resource may be string or [string]. Same ambiguity.
+
+  Expected behavior: parser handles both — wide grant remains critical.
+
+  Source: https://docs.aws.amazon.com/IAM/latest/UserGuide/reference_policies_grammar.html
+policy:
+  Version: "2012-10-17"
+  Statement:
+    - Effect: Allow
+      Action: s3:*
+      Resource: "*"
+request:
+  spec:
+    access_type: read-write
+    duration:
+      duration_hours: 1
+expected:
+  score_min: 8
+  must_auto_approve: false

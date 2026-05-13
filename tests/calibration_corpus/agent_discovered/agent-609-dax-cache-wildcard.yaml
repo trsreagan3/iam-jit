@@ -1,0 +1,36 @@
+name: agent-609-dax-cache-wildcard
+description: |
+  WHITE-BOX round 8: DAX (DynamoDB Accelerator) reads can bypass
+  table-level scopes — DAX caches read items in-memory, and any
+  principal with `dax:GetItem` on the cache cluster can read items
+  cached from any table. `arn:aws:dax:us-east-1:12345:cache/*` is
+  every cache cluster in the account.
+
+  Same `_is_broad_resource`/`_is_strict_wild_top` gap as agent-606
+  and agent-608 — `cache/*` isn't recognized as broad.
+
+  Real risk: 6 — DAX-cached items often include sensitive fields
+  (user records, session tokens) that the application's DynamoDB
+  IAM scope was meant to restrict.
+
+  Det score: 1.
+
+  Proposed fix: same as agent-606/608 (restrict single-bucket
+  exemption to S3 only).
+
+policy:
+  Version: "2012-10-17"
+  Statement:
+    - Effect: Allow
+      Action: "dax:GetItem"
+      Resource: "arn:aws:dax:us-east-1:123456789012:cache/*"
+
+request:
+  spec:
+    access_type: read-write
+    duration:
+      duration_hours: 1
+
+expected:
+  score_min: 5
+  must_auto_approve: false

@@ -1,0 +1,24 @@
+name: research-01-7-createloginprofile-other-user
+description: |
+  Reference: IAM-BYPASS-RESEARCH.md §1.7 (Rhino #5)
+
+  Set a console password for users who don't already have one; log in
+  as them.
+
+  Expected behavior: privilege escalation primitive — high risk.
+
+  Source: Rhino #5; PMapper iam_edges
+policy:
+  Version: "2012-10-17"
+  Statement:
+    - Effect: Allow
+      Action: iam:CreateLoginProfile
+      Resource: "*"
+request:
+  spec:
+    access_type: read-write
+    duration:
+      duration_hours: 1
+expected:
+  score_min: 8
+  must_auto_approve: false

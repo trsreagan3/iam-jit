@@ -1,0 +1,29 @@
+name: research-13-10-iam-star-does-not-cover-sts
+description: |
+  Reference: IAM-BYPASS-RESEARCH.md §13.10
+
+  iam:* does NOT cover sts:* or access-analyzer:* or
+  iam-roles-anywhere:*. A "lock-down IAM" policy with Deny iam:*
+  leaves STS open.
+
+  Expected behavior: Deny doesn't cover STS — high risk; STS surface
+  remains accessible.
+
+  Source: AWS IAM docs
+policy:
+  Version: "2012-10-17"
+  Statement:
+    - Effect: Allow
+      Action: "*"
+      Resource: "*"
+    - Effect: Deny
+      Action: iam:*
+      Resource: "*"
+request:
+  spec:
+    access_type: read-write
+    duration:
+      duration_hours: 1
+expected:
+  score_min: 8
+  must_auto_approve: false

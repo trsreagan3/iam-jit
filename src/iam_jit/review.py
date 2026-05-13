@@ -1883,6 +1883,44 @@ def _deterministic(
                             "condition to scope to your own resources."
                         )
 
+            # Trust-policy semantic detection: a statement with
+            # Principal + sts:AssumeRole-class action is a TRUST POLICY
+            # (attached to a role, declaring who can assume it).
+            # Any literal-ARN principal that isn't a wildcard is still
+            # a cross-account-trust grant when the named account isn't
+            # the deployer's. We can't compare accounts without context,
+            # so floor at 7 when the Principal.AWS has any literal ARN
+            # (not just wildcards). Round 8 WB agent-600, 601, 623.
+            actions_in_stmt = _as_list(stmt.get("Action"))
+            is_assume_role_action = any(
+                _canonical_action(a).startswith("sts:assumerole")
+                or _action_covers_any(a, frozenset(["sts:assumerole"]))
+                for a in actions_in_stmt
+            )
+            if is_assume_role_action and isinstance(principal, dict):
+                aws_principals = principal.get("AWS")
+                if aws_principals is not None and not _principal_is_public(principal):
+                    pvals = aws_principals if isinstance(aws_principals, list) else [aws_principals]
+                    has_literal_arn = any(
+                        isinstance(v, str) and v.startswith("arn:") and "*" not in v.split(":", 5)[4]
+                        for v in pvals if isinstance(v, str)
+                    )
+                    if has_literal_arn:
+                        score = max(score, 7)
+                        factors.append(
+                            "Trust-policy statement with literal account-ARN "
+                            "Principal on `sts:AssumeRole` — grants role-assume "
+                            "to a specific external account. Without context "
+                            "the scorer can't verify the account is trusted; "
+                            "flagged for human review (Rhino #14 / Pacu "
+                            "iam__backdoor_assume_role)."
+                        )
+                        suggestions.append(
+                            "Verify the trusted account ID matches an "
+                            "approved partner. Add a `aws:PrincipalOrgID` "
+                            "condition if the trust should be org-bounded."
+                        )
+
         # Policy-variable injection in Resource — `${aws:PrincipalTag/...}`,
         # `${aws:RequestTag/...}`, `${aws:ResourceTag/...}` expand at
         # evaluation time to a tag value the principal may control. An

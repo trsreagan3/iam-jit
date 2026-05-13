@@ -1,0 +1,28 @@
+name: research-12-5-notaction-wildcard-vs-literal
+description: |
+  Reference: IAM-BYPASS-RESEARCH.md §12.5 (AWS NotAction docs)
+
+  "NotAction":["iam:PassRole","iam:GetRole"] is not the same as
+  "NotAction":"iam:Pass*" — wildcards in NotAction are literal until
+  evaluated; ensure scorer expansion handles both.
+
+  Expected behavior: explicit-list NotAction (which leaves many iam:*
+  actions allowed) — high risk.
+
+  Source: https://docs.aws.amazon.com/IAM/latest/UserGuide/reference_policies_elements_notaction.html
+policy:
+  Version: "2012-10-17"
+  Statement:
+    - Effect: Allow
+      NotAction:
+        - iam:PassRole
+        - iam:GetRole
+      Resource: "*"
+request:
+  spec:
+    access_type: read-write
+    duration:
+      duration_hours: 1
+expected:
+  score_min: 9
+  must_auto_approve: false

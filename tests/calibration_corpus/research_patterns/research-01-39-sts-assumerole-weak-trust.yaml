@@ -1,0 +1,25 @@
+name: research-01-39-sts-assumerole-weak-trust
+description: |
+  Reference: IAM-BYPASS-RESEARCH.md §1.39 (PMapper sts_edges)
+
+  Any role whose trust policy lists wildcard or wide principals (entire
+  account "AWS":"arn:aws:iam::ACCT:root") can be assumed laterally.
+  Encoded here as the identity policy granting wide sts:AssumeRole.
+
+  Expected behavior: lateral-movement primitive — high risk.
+
+  Source: https://raw.githubusercontent.com/nccgroup/PMapper/master/principalmapper/graphing/sts_edges.py
+policy:
+  Version: "2012-10-17"
+  Statement:
+    - Effect: Allow
+      Action: sts:AssumeRole
+      Resource: "*"
+request:
+  spec:
+    access_type: read-write
+    duration:
+      duration_hours: 1
+expected:
+  score_min: 7
+  must_auto_approve: false

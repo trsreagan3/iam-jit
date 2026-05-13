@@ -1,0 +1,42 @@
+name: agent-526-codeartifact-external-connection
+description: |
+  BLACK-BOX Round 8. Research §3.14 / §3.15 supply chain + §6.2 Resource Exposure.
+
+  `codeartifact:AssociateExternalConnection` links an internal package repo to an
+  EXTERNAL upstream (npmjs, pypi.org, etc.). Combined with
+  `codeartifact:PutPackageOriginConfiguration` (which controls publish/upstream resolution
+  semantics), an attacker can configure the repo to silently shadow internal packages with
+  attacker-controlled versions from a typosquat external repo. Classic dependency-confusion
+  supply-chain attack at the artifact-repo level.
+
+  Det score: 6.
+  Real risk: 7 — supply-chain backdoor on every CI build that uses CodeArtifact.
+
+  Scorer gap: `codeartifact:` is not in `_HIGH_IMPACT_MUTATION_ACTIONS`; the
+  external-connection and origin-config actions aren't recognized.
+
+  Proposed fix: add `codeartifact:AssociateExternalConnection`,
+  `codeartifact:DisassociateExternalConnection`, `codeartifact:PutPackageOriginConfiguration`
+  to `_HIGH_IMPACT_MUTATION_ACTIONS`. Same supply-chain tier as `imagebuilder:Create*`
+  (already in the set).
+
+  Research-doc pattern: §6.2 (Resource Exposure) + §3.14 / §3.15 (supply chain).
+
+policy:
+  Version: "2012-10-17"
+  Statement:
+    - Effect: Allow
+      Action:
+        - "codeartifact:AssociateExternalConnection"
+        - "codeartifact:PutPackageOriginConfiguration"
+      Resource: "*"
+
+request:
+  spec:
+    access_type: read-write
+    duration:
+      duration_hours: 1
+
+expected:
+  score_min: 7
+  must_auto_approve: false

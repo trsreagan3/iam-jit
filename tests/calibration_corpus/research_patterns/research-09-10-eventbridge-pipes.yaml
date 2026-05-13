@@ -1,0 +1,27 @@
+name: research-09-10-eventbridge-pipes
+description: |
+  Reference: IAM-BYPASS-RESEARCH.md §9.10 (EventBridge Pipes)
+
+  pipes:CreatePipe + iam:PassRole — modern, less-watched alternative
+  to Lambda + Step Functions for chaining privileged role to event
+  source.
+
+  Expected behavior: privilege escalation via Pipes — high risk.
+
+  Source: AWS EventBridge Pipes docs
+policy:
+  Version: "2012-10-17"
+  Statement:
+    - Effect: Allow
+      Action:
+        - pipes:CreatePipe
+        - iam:PassRole
+      Resource: "*"
+request:
+  spec:
+    access_type: read-write
+    duration:
+      duration_hours: 1
+expected:
+  score_min: 8
+  must_auto_approve: false

@@ -1,0 +1,26 @@
+name: research-03-15-cg-bedrock-agent-hijacking
+description: |
+  Reference: IAM-BYPASS-RESEARCH.md §3.15 (CloudGoat bedrock_agent_hijacking / agentcore_identity_confusion)
+
+  bedrock:InvokeAgent + lambda:UpdateFunctionCode chain — agent's Lambda
+  handler is replaced to redirect S3 flag.
+
+  Expected behavior: agent backdoor — high risk.
+
+  Source: https://github.com/RhinoSecurityLabs/cloudgoat
+policy:
+  Version: "2012-10-17"
+  Statement:
+    - Effect: Allow
+      Action:
+        - bedrock:InvokeAgent
+        - lambda:UpdateFunctionCode
+      Resource: "*"
+request:
+  spec:
+    access_type: read-write
+    duration:
+      duration_hours: 1
+expected:
+  score_min: 7
+  must_auto_approve: false

@@ -1,0 +1,41 @@
+name: agent-501-principal-arn-stringlike-any-root
+description: |
+  BLACK-BOX Round 8. Research Sec 11.10 + Sec 4.12 (cross-account root principal).
+
+  Sibling of agent-500. Resource-policy condition: `StringLike aws:PrincipalArn
+  arn:aws:iam::*:root` — matches the root principal of every AWS account in the world.
+  Combined with a narrow S3 bucket Resource, the scorer treats as scoped.
+
+  This is the canonical "shared S3 bucket open to any AWS account root" pattern that hits
+  Datadog Security Atlas / Wiz / Prowler as a high-severity finding.
+
+  Det score: 1.
+  Real risk: 7 — every AWS-account root in the world can GetObject from this bucket.
+
+  Scorer gap: same as agent-500 — Condition value pattern detection doesn't recognize
+  ARN-shaped principal narrowing keys with `*` in the account-id segment, even though
+  `arn:aws:iam::*:root` literally means "the root of any account."
+
+  Research-doc pattern: §11.10 + §4.12 (root-account-principal without external ID).
+
+policy:
+  Version: "2012-10-17"
+  Statement:
+    - Effect: Allow
+      Action:
+        - "s3:GetObject"
+        - "s3:ListBucket"
+      Resource: "arn:aws:s3:::sensitive-data-bucket/*"
+      Condition:
+        StringLike:
+          "aws:PrincipalArn": "arn:aws:iam::*:root"
+
+request:
+  spec:
+    access_type: read-only
+    duration:
+      duration_hours: 1
+
+expected:
+  score_min: 7
+  must_auto_approve: false

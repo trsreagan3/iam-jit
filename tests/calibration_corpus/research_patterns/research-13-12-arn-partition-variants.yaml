@@ -1,0 +1,28 @@
+name: research-13-12-arn-partition-variants
+description: |
+  Reference: IAM-BYPASS-RESEARCH.md §13.12
+
+  arn:aws-cn:* (China), arn:aws-us-gov:* (GovCloud), arn:aws-iso:* (C2S).
+  Policies written with only aws: partition may not work, or may be
+  bypassed in non-commercial partitions.
+
+  Expected behavior: partition mismatch — moderate risk.
+
+  Source: AWS ARN docs
+policy:
+  Version: "2012-10-17"
+  Statement:
+    - Effect: Allow
+      Action: s3:*
+      Resource:
+        - "arn:aws:s3:::*"
+        - "arn:aws-cn:s3:::*"
+        - "arn:aws-us-gov:s3:::*"
+request:
+  spec:
+    access_type: read-write
+    duration:
+      duration_hours: 1
+expected:
+  score_min: 7
+  must_auto_approve: false

@@ -1,0 +1,28 @@
+name: research-13-9-cognito-three-prefixes
+description: |
+  Reference: IAM-BYPASS-RESEARCH.md §13.9
+
+  cognito-idp vs cognito-identity vs cognito-sync — three distinct
+  prefixes for the same Cognito family. Privesc via
+  cognito-idp:AdminCreateUser + cognito-identity:GetCredentialsForIdentity.
+
+  Expected behavior: cross-prefix Cognito privesc — high risk.
+
+  Source: AWS Cognito docs
+policy:
+  Version: "2012-10-17"
+  Statement:
+    - Effect: Allow
+      Action:
+        - cognito-idp:AdminCreateUser
+        - cognito-identity:GetCredentialsForIdentity
+        - cognito-sync:UpdateRecords
+      Resource: "*"
+request:
+  spec:
+    access_type: read-write
+    duration:
+      duration_hours: 1
+expected:
+  score_min: 7
+  must_auto_approve: false

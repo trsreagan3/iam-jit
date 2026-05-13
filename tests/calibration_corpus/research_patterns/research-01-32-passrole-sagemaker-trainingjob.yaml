@@ -1,0 +1,26 @@
+name: research-01-32-passrole-sagemaker-trainingjob
+description: |
+  Reference: IAM-BYPASS-RESEARCH.md §1.32 (PMapper sagemaker_edges)
+
+  Submit a training job whose entrypoint runs attacker code under the
+  privileged role.
+
+  Expected behavior: privilege escalation primitive — high risk.
+
+  Source: PMapper sagemaker_edges
+policy:
+  Version: "2012-10-17"
+  Statement:
+    - Effect: Allow
+      Action:
+        - iam:PassRole
+        - sagemaker:CreateTrainingJob
+      Resource: "*"
+request:
+  spec:
+    access_type: read-write
+    duration:
+      duration_hours: 1
+expected:
+  score_min: 8
+  must_auto_approve: false

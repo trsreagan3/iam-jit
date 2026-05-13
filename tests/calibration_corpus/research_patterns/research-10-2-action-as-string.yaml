@@ -1,0 +1,24 @@
+name: research-10-2-action-as-string
+description: |
+  Reference: IAM-BYPASS-RESEARCH.md §10.2 (AWS IAM grammar)
+
+  Action / NotAction may be string or [string]. Same shape ambiguity.
+  # NB: encoded as a single Action string instead of list.
+
+  Expected behavior: parser handles both — wide grant still critical.
+
+  Source: https://docs.aws.amazon.com/IAM/latest/UserGuide/reference_policies_grammar.html
+policy:
+  Version: "2012-10-17"
+  Statement:
+    - Effect: Allow
+      Action: "*"
+      Resource: "*"
+request:
+  spec:
+    access_type: read-write
+    duration:
+      duration_hours: 1
+expected:
+  score_min: 10
+  must_auto_approve: false

@@ -1,0 +1,29 @@
+name: research-03-5-cg-vulnerable-lambda
+description: |
+  Reference: IAM-BYPASS-RESEARCH.md §3.5 (CloudGoat vulnerable_lambda)
+
+  A Lambda function that applies policies based on user-controlled
+  input — confused-deputy via business logic.
+  # NB: abstract pattern, encoded the simplest concrete form — Lambda
+  # role that can attach policies.
+
+  Expected behavior: confused-deputy privilege escalation — high risk.
+
+  Source: https://github.com/RhinoSecurityLabs/cloudgoat
+policy:
+  Version: "2012-10-17"
+  Statement:
+    - Effect: Allow
+      Action:
+        - iam:AttachUserPolicy
+        - iam:AttachRolePolicy
+        - iam:PutUserPolicy
+      Resource: "*"
+request:
+  spec:
+    access_type: read-write
+    duration:
+      duration_hours: 1
+expected:
+  score_min: 8
+  must_auto_approve: false

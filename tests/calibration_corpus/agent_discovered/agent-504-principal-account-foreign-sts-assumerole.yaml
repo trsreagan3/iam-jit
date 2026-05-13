@@ -1,0 +1,45 @@
+name: agent-504-principal-account-foreign-sts-assumerole
+description: |
+  BLACK-BOX Round 8. Research Sec 4.11 / Sec 1.40 (cross-account weak trust policy).
+
+  Trust policy grants `sts:AssumeRole` on a narrow privileged role ARN. The
+  `Condition.StringEquals.aws:PrincipalAccount` is `999999999999` — an EXTERNAL account
+  (different from the role's owning account 123456789012). Combined with no MFA, no
+  ExternalID, this is the classic "third-party account assumes my privileged role" trust.
+
+  The scorer should detect that the Resource ARN account-id (`123456789012`) differs from
+  the `aws:PrincipalAccount` condition value (`999999999999`) and either:
+    (a) infer "cross-account grant" → floor at 8
+    (b) at minimum flag at 7 ("principal-account condition references a different account
+        than the resource owner — verify intent")
+
+  Det score: 3 ("All statements are scoped or limited").
+  Real risk: 8 — full role takeover by external account.
+
+  Scorer gap: foreign-account principal narrowing on `sts:AssumeRole` looks scoped because
+  the Resource is a specific role ARN. But the condition POINTS to a foreign account —
+  the entire purpose of the policy is to permit cross-account assumption. Without
+  ExternalID/MFA/SAML aud constraints, that's full-takeover.
+
+  Research-doc pattern: §4.11 (Principal:* equivalent via account-bound condition)
+  + §4.12 (`Principal.AWS: arn:aws:iam::ACCOUNT:root` and no MFA / no external ID).
+
+policy:
+  Version: "2012-10-17"
+  Statement:
+    - Effect: Allow
+      Action: "sts:AssumeRole"
+      Resource: "arn:aws:iam::123456789012:role/PrivilegedRole"
+      Condition:
+        StringEquals:
+          "aws:PrincipalAccount": "999999999999"
+
+request:
+  spec:
+    access_type: read-write
+    duration:
+      duration_hours: 1
+
+expected:
+  score_min: 7
+  must_auto_approve: false

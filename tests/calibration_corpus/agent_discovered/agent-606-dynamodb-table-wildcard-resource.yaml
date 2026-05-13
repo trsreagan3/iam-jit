@@ -1,0 +1,66 @@
+name: agent-606-dynamodb-table-wildcard-resource
+description: |
+  WHITE-BOX round 8: `_is_broad_resource` MISSES `dynamodb:table/*`.
+
+  Looking at `_is_broad_resource` line 1419:
+      collection_types = {
+          "iam":    ("role", "user", "group", "policy", "instance-profile"),
+          "kms":    ("alias",),
+          "secretsmanager": ("secret",),
+          "ec2":    ("instance", "vpc", "subnet", "security-group"),
+          "logs":   (),
+      }
+  DynamoDB is absent. So `arn:aws:dynamodb:us-east-1:12345:table/*`
+  doesn't match the collection-wildcard branch. The fallback checks
+  `if "/" not in resource_spec:` (false — there IS a slash). Then
+  the bucket-name path checks `bucket_part` (`table`) for wildcards
+  — no `*` there. The final `if resource_spec.endswith("/*") and
+  resource_spec.count("/") <= 1` branch DOES match for `table/*`
+  with one slash — wait, count is 1 (just one slash). Let me
+  re-read... yes the final branch fires: `resource_spec.endswith("/*")
+  and resource_spec.count("/") <= 1` → True for `table/*`. So
+  THIS specific shape IS detected.
+
+  HOWEVER, `_is_strict_wild_top` (line 2489) uses a different path —
+  the single-bucket exemption logic. For `arn:aws:dynamodb:us-east-1:
+  12345:table/*`: it has exactly one `/`, ends in `/*`, parts[3]
+  (region) is `us-east-1` (no `*`), parts[4] (account) is `12345`
+  (no `*`), `bucket_part` (`table`) has no `*` → returns False
+  (NOT strict broad). So it's treated as a NARROW single-bucket
+  resource — and the rule "broad cross-resource read/access" doesn't
+  fire.
+
+  This is intentional for S3 (`bucket/*` is one bucket), but for
+  DynamoDB `table/*` means EVERY TABLE in this account/region.
+  Different semantics.
+
+  Real risk: 7 — `dynamodb:Scan` on every table in the account is
+  mass exfiltration tier.
+
+  Det score: 1.
+
+  Proposed fix: `_is_strict_wild_top`'s single-bucket exemption
+  (line 2503: `r.startswith("arn:") and r.endswith("/*") and
+  r.count("/") == 1`) should be RESTRICTED to services where
+  `service/name` is a single-resource pattern (S3 only, really).
+  For other services (dynamodb, kms, secretsmanager, sns, sqs,
+  kinesis, etc.) the `collection/*` form means "every resource of
+  that collection type." Add an allow-list of services where the
+  single-bucket exception applies (s3 only).
+
+policy:
+  Version: "2012-10-17"
+  Statement:
+    - Effect: Allow
+      Action: "dynamodb:Scan"
+      Resource: "arn:aws:dynamodb:us-east-1:123456789012:table/*"
+
+request:
+  spec:
+    access_type: read-write
+    duration:
+      duration_hours: 1
+
+expected:
+  score_min: 6
+  must_auto_approve: false

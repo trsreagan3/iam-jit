@@ -1,0 +1,24 @@
+name: research-01-18-lambda-updatefunctioncode
+description: |
+  Reference: IAM-BYPASS-RESEARCH.md §1.18 (Rhino #18)
+
+  Replace code of an existing Lambda that already has a privileged
+  execution role. No PassRole needed.
+
+  Expected behavior: privilege escalation primitive — high risk.
+
+  Source: Rhino #18; PMapper lambda_edges
+policy:
+  Version: "2012-10-17"
+  Statement:
+    - Effect: Allow
+      Action: lambda:UpdateFunctionCode
+      Resource: "*"
+request:
+  spec:
+    access_type: read-write
+    duration:
+      duration_hours: 1
+expected:
+  score_min: 8
+  must_auto_approve: false

@@ -1,0 +1,43 @@
+name: agent-528-iot-policy-attach
+description: |
+  BLACK-BOX Round 8. Research §6.3 (Privilege Escalation analog) + Sec 9 (IoT surface).
+
+  `iot:CreatePolicy` + `iot:AttachPolicy` + `iot:CreateThing` lets the attacker create a
+  Thing certificate and attach a wide IoT policy granting MQTT publish/subscribe on every
+  topic. The Thing can then impersonate any device, publish poisoned data, or read every
+  message in the account's IoT topic tree.
+
+  Det score: 6.
+  Real risk: 7 — fleet-wide IoT impersonation / data exfil.
+
+  Scorer gap: IoT Core actions are not in any high-impact set. `iot:CreatePolicy` /
+  `iot:AttachPolicy` are Permissions Management on a non-sensitive service. Cognito
+  parallel (`cognito-idp:AdminCreateUser`) was added round 1; the IoT analog wasn't.
+
+  Proposed fix: add `iot:CreatePolicy`, `iot:AttachPolicy`, `iot:CreatePolicyVersion`,
+  `iot:SetDefaultPolicyVersion`, `iot:AddThingToThingGroup` to
+  `_HIGH_IMPACT_MUTATION_ACTIONS`. Note `iot:CreatePolicyVersion` /
+  `iot:SetDefaultPolicyVersion` are direct analogs of `iam:CreatePolicyVersion` /
+  `iam:SetDefaultPolicyVersion` (catastrophic).
+
+  Research-doc pattern: §6.3 + §9 (IoT Core admin surface).
+
+policy:
+  Version: "2012-10-17"
+  Statement:
+    - Effect: Allow
+      Action:
+        - "iot:CreatePolicy"
+        - "iot:AttachPolicy"
+        - "iot:CreateThing"
+      Resource: "*"
+
+request:
+  spec:
+    access_type: read-write
+    duration:
+      duration_hours: 1
+
+expected:
+  score_min: 7
+  must_auto_approve: false

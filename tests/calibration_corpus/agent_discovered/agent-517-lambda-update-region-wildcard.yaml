@@ -1,0 +1,36 @@
+name: agent-517-lambda-update-region-wildcard
+description: |
+  BLACK-BOX Round 8. Research §1.18 (lambda:UpdateFunctionCode) + §10.x (resource patterns).
+
+  `lambda:UpdateFunctionCode` on a Lambda ARN with a wildcard REGION segment:
+  `arn:aws:lambda:*:123456789012:function:prod`. This matches the `prod` function in every
+  region the account uses. The scorer scores it 8 (close), but expected is 7+; this is a
+  calibration-pin to ensure the regional wildcard is recognized as broader-than-narrow.
+
+  Det score: 8 (already promotes due to high-impact-mutation handling).
+  Real risk: 7 — region wildcard means every prod-named function in every region.
+
+  Scorer gap: minor — round 7 added partition wildcard detection but region wildcards on
+  Lambda ARNs aren't surfaced as a separate factor. Currently the high-impact-mutation
+  semantics correctly fire (lambda:UpdateFunctionCode is in the set), so score is
+  appropriately 8. CALIBRATION PIN — no score gap, but the risk-factor narrative should
+  surface "region wildcard in Resource ARN" as an explicit factor.
+
+  Research-doc pattern: §10.x (resource patterns with wildcards in ARN segments).
+
+policy:
+  Version: "2012-10-17"
+  Statement:
+    - Effect: Allow
+      Action: "lambda:UpdateFunctionCode"
+      Resource: "arn:aws:lambda:*:123456789012:function:prod"
+
+request:
+  spec:
+    access_type: read-write
+    duration:
+      duration_hours: 1
+
+expected:
+  score_min: 7
+  must_auto_approve: false

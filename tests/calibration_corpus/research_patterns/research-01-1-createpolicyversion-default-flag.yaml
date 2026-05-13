@@ -1,0 +1,26 @@
+name: research-01-1-createpolicyversion-default-flag
+description: |
+  Reference: IAM-BYPASS-RESEARCH.md §1.1 (Rhino Security Labs privesc #1)
+
+  Create a new version of an attached managed policy with --set-as-default.
+  The --set-as-default flag is implicit in CreatePolicyVersion and does NOT
+  require the separate iam:SetDefaultPolicyVersion permission. The new
+  version can grant Action:* on Resource:*.
+
+  Expected behavior: privilege escalation primitive — high risk.
+
+  Source: https://rhinosecuritylabs.com/aws/aws-privilege-escalation-methods-mitigation/
+policy:
+  Version: "2012-10-17"
+  Statement:
+    - Effect: Allow
+      Action: iam:CreatePolicyVersion
+      Resource: "*"
+request:
+  spec:
+    access_type: read-write
+    duration:
+      duration_hours: 1
+expected:
+  score_min: 8
+  must_auto_approve: false

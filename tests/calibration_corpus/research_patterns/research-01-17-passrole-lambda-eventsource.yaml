@@ -1,0 +1,27 @@
+name: research-01-17-passrole-lambda-eventsource
+description: |
+  Reference: IAM-BYPASS-RESEARCH.md §1.17 (Rhino #17)
+
+  Trigger the malicious Lambda via DynamoDB Streams event-source —
+  no direct InvokeFunction needed.
+
+  Expected behavior: privilege escalation primitive — high risk.
+
+  Source: Rhino #17
+policy:
+  Version: "2012-10-17"
+  Statement:
+    - Effect: Allow
+      Action:
+        - iam:PassRole
+        - lambda:CreateFunction
+        - lambda:CreateEventSourceMapping
+      Resource: "*"
+request:
+  spec:
+    access_type: read-write
+    duration:
+      duration_hours: 1
+expected:
+  score_min: 8
+  must_auto_approve: false

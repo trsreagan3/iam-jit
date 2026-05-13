@@ -1,0 +1,28 @@
+name: research-10-14-mixed-principal-aws-service
+description: |
+  Reference: IAM-BYPASS-RESEARCH.md §10.14 (AWS IAM grammar)
+
+  Mixed-array Principal with both AWS and Service entries —
+  {"Principal":{"AWS":"arn:...","Service":"lambda.amazonaws.com"}} —
+  both lines apply. Tools sometimes parse only one.
+
+  Expected behavior: parser should handle both — moderate risk.
+
+  Source: https://docs.aws.amazon.com/IAM/latest/UserGuide/reference_policies_grammar.html
+policy:
+  Version: "2012-10-17"
+  Statement:
+    - Effect: Allow
+      Principal:
+        AWS: "arn:aws:iam::999988887777:root"
+        Service: "lambda.amazonaws.com"
+      Action: sts:AssumeRole
+      Resource: "*"
+request:
+  spec:
+    access_type: read-write
+    duration:
+      duration_hours: 1
+expected:
+  score_min: 6
+  must_auto_approve: false

@@ -1,0 +1,42 @@
+name: agent-637-statement-string-entry-crash
+description: |
+  WHITE-BOX round 8: companion to agent-636.
+  `Statement: ["malformed", {real-dict}]` — list contains a STRING
+  entry alongside a real Allow statement. The string entry crashes
+  the per-statement loop (line 1706 calls `.get()` on a str).
+
+  The crash happens BEFORE the real Allow statement is evaluated.
+  If the framework catches the exception and falls back to score
+  1, the attacker just smuggled `Action: "*"` past detection by
+  prepending a malformed string entry.
+
+  Source-code rule exploited: same as agent-636 — per-element type
+  guard missing.
+
+  Research-doc pattern: §10.1 (Statement shape).
+
+  Real risk: 9 if the framework swallows the exception (smuggled
+  admin); 5 otherwise (defect class).
+
+  Det score: CRASHES.
+
+  Proposed fix: same as agent-636 — filter non-dict entries before
+  iteration; surface a malformed-statement factor.
+
+policy:
+  Version: "2012-10-17"
+  Statement:
+    - "free-form-comment"
+    - Effect: Allow
+      Action: "*"
+      Resource: "*"
+
+request:
+  spec:
+    access_type: read-write
+    duration:
+      duration_hours: 1
+
+expected:
+  score_min: 9
+  must_auto_approve: false

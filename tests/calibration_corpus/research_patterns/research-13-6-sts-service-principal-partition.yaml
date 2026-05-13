@@ -1,0 +1,29 @@
+name: research-13-6-sts-service-principal-partition
+description: |
+  Reference: IAM-BYPASS-RESEARCH.md §13.6
+
+  "Service":"ec2.amazonaws.com" vs "Service":"ec2.amazon.com.cn"
+  (China) vs "Service":"ec2.amazonaws.com.cn". Cross-region partition
+  mismatches.
+
+  Expected behavior: partition typo — moderate risk.
+
+  Source: AWS STS docs
+policy:
+  Version: "2012-10-17"
+  Statement:
+    - Effect: Allow
+      Principal:
+        Service:
+          - "ec2.amazonaws.com"
+          - "ec2.amazonaws.com.cn"
+      Action: sts:AssumeRole
+      Resource: "*"
+request:
+  spec:
+    access_type: read-write
+    duration:
+      duration_hours: 1
+expected:
+  score_min: 5
+  must_auto_approve: false

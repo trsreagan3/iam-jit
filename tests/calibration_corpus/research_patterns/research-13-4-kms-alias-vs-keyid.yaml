@@ -1,0 +1,26 @@
+name: research-13-4-kms-alias-vs-keyid
+description: |
+  Reference: IAM-BYPASS-RESEARCH.md §13.4 (KMS alias-authorization)
+
+  Policies referencing alias/foo may not enforce on key/uuid access
+  (KMS resolves alias at evaluation, but Resource-element matching is
+  literal).
+
+  Expected behavior: alias-only policy doesn't restrict key-id access
+  — high risk if alias-only is mistaken for narrow scoping.
+
+  Source: https://docs.aws.amazon.com/kms/latest/developerguide/alias-authorization.html
+policy:
+  Version: "2012-10-17"
+  Statement:
+    - Effect: Allow
+      Action: kms:Decrypt
+      Resource: "arn:aws:kms:us-east-1:111122223333:alias/my-app"
+request:
+  spec:
+    access_type: read-only
+    duration:
+      duration_hours: 1
+expected:
+  score_min: 5
+  must_auto_approve: false

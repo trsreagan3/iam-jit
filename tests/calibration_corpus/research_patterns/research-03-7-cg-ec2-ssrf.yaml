@@ -1,0 +1,27 @@
+name: research-03-7-cg-ec2-ssrf
+description: |
+  Reference: IAM-BYPASS-RESEARCH.md §3.7 (CloudGoat ec2_ssrf)
+
+  Lambda env var with hardcoded creds → EC2 SSRF web app → IMDS →
+  privileged S3.
+  # NB: encoded as the wide S3 read grant the privileged role has.
+
+  Expected behavior: data exfil pathway — high risk.
+
+  Source: https://github.com/RhinoSecurityLabs/cloudgoat
+policy:
+  Version: "2012-10-17"
+  Statement:
+    - Effect: Allow
+      Action:
+        - s3:GetObject
+        - lambda:GetFunction
+      Resource: "*"
+request:
+  spec:
+    access_type: read-only
+    duration:
+      duration_hours: 1
+expected:
+  score_min: 6
+  must_auto_approve: false

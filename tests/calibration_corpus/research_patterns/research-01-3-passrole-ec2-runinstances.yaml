@@ -1,0 +1,27 @@
+name: research-01-3-passrole-ec2-runinstances
+description: |
+  Reference: IAM-BYPASS-RESEARCH.md §1.3 (Rhino Security Labs privesc #3)
+
+  Launch an EC2 instance with an existing privileged instance profile
+  and read role credentials from IMDS, or smuggle commands via user-data.
+  iam:PassRole without iam:PassedToService condition + any ec2:Run*.
+
+  Expected behavior: classic privilege escalation primitive — high risk.
+
+  Source: https://rhinosecuritylabs.com/aws/aws-privilege-escalation-methods-mitigation/
+policy:
+  Version: "2012-10-17"
+  Statement:
+    - Effect: Allow
+      Action:
+        - iam:PassRole
+        - ec2:RunInstances
+      Resource: "*"
+request:
+  spec:
+    access_type: read-write
+    duration:
+      duration_hours: 1
+expected:
+  score_min: 8
+  must_auto_approve: false

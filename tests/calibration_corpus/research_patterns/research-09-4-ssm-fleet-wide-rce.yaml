@@ -1,0 +1,36 @@
+name: research-09-4-ssm-fleet-wide-rce
+description: |
+  Reference: IAM-BYPASS-RESEARCH.md §9.4 (SSM)
+
+  ssm:SendCommand — RCE on every managed instance; combine with
+  ec2:DescribeInstances for fan-out. ssm:StartSession — interactive
+  shell. ssm:GetParameter / GetParameters / GetParametersByPath —
+  read SecureString. ssm:CreateAssociation — persistent recurring
+  command execution. ssm:UpdateDocument + ssm:PutDefaultDocumentVersion
+  — backdoor an SSM document the org uses.
+
+  Expected behavior: fleet-wide RCE + persistence — critical.
+
+  Source: PMapper ssm_edges
+policy:
+  Version: "2012-10-17"
+  Statement:
+    - Effect: Allow
+      Action:
+        - ssm:SendCommand
+        - ssm:StartSession
+        - ssm:GetParameter
+        - ssm:GetParameters
+        - ssm:GetParametersByPath
+        - ssm:CreateAssociation
+        - ssm:UpdateDocument
+        - ssm:PutDefaultDocumentVersion
+      Resource: "*"
+request:
+  spec:
+    access_type: read-write
+    duration:
+      duration_hours: 1
+expected:
+  score_min: 9
+  must_auto_approve: false

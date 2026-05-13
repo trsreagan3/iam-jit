@@ -1,0 +1,23 @@
+name: research-02-7-pacu-ebs-enum-snapshots-unauth
+description: |
+  Reference: IAM-BYPASS-RESEARCH.md §2.7 (Pacu ebs__enum_snapshots_unauth)
+
+  Enumerate public/shared EBS snapshots by keyword/account.
+
+  Expected behavior: cross-account recon — moderate risk.
+
+  Source: https://github.com/RhinoSecurityLabs/pacu/wiki/Module-Details
+policy:
+  Version: "2012-10-17"
+  Statement:
+    - Effect: Allow
+      Action: ec2:DescribeSnapshots
+      Resource: "*"
+request:
+  spec:
+    access_type: read-only
+    duration:
+      duration_hours: 1
+expected:
+  score_min: 3
+  must_auto_approve: false

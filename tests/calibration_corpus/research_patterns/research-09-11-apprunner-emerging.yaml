@@ -1,0 +1,25 @@
+name: research-09-11-apprunner-emerging
+description: |
+  Reference: IAM-BYPASS-RESEARCH.md §9.11 (App Runner / AppConfig)
+
+  apprunner:CreateService + iam:PassRole — section 1.59.
+
+  Expected behavior: privilege escalation via App Runner — high risk.
+
+  Source: Pathfinding.cloud (Appsecco)
+policy:
+  Version: "2012-10-17"
+  Statement:
+    - Effect: Allow
+      Action:
+        - apprunner:CreateService
+        - iam:PassRole
+      Resource: "*"
+request:
+  spec:
+    access_type: read-write
+    duration:
+      duration_hours: 1
+expected:
+  score_min: 8
+  must_auto_approve: false

@@ -1,0 +1,28 @@
+name: research-01-15-passrole-lambda-create-invoke
+description: |
+  Reference: IAM-BYPASS-RESEARCH.md §1.15 (Rhino #15)
+
+  Create a Lambda with a privileged execution role; invoke it to run
+  arbitrary code that calls AWS APIs with that role's permissions or
+  exfils its temporary creds. Canonical PassRole-to-Lambda chain.
+
+  Expected behavior: privilege escalation primitive — high risk.
+
+  Source: https://raw.githubusercontent.com/nccgroup/PMapper/master/principalmapper/graphing/lambda_edges.py
+policy:
+  Version: "2012-10-17"
+  Statement:
+    - Effect: Allow
+      Action:
+        - iam:PassRole
+        - lambda:CreateFunction
+        - lambda:InvokeFunction
+      Resource: "*"
+request:
+  spec:
+    access_type: read-write
+    duration:
+      duration_hours: 1
+expected:
+  score_min: 8
+  must_auto_approve: false

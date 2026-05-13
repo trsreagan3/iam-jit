@@ -1,0 +1,24 @@
+name: research-01-31-sagemaker-presigned-url-existing
+description: |
+  Reference: IAM-BYPASS-RESEARCH.md §1.31 (Rhino #28)
+
+  Generate pre-signed URL into an existing privileged notebook; no
+  creation perms needed.
+
+  Expected behavior: privilege escalation primitive — high risk.
+
+  Source: Rhino #28
+policy:
+  Version: "2012-10-17"
+  Statement:
+    - Effect: Allow
+      Action: sagemaker:CreatePresignedNotebookInstanceUrl
+      Resource: "*"
+request:
+  spec:
+    access_type: read-write
+    duration:
+      duration_hours: 1
+expected:
+  score_min: 7
+  must_auto_approve: false

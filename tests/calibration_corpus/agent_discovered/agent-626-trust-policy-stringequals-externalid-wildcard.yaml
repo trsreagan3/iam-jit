@@ -1,0 +1,56 @@
+name: agent-626-trust-policy-stringequals-externalid-wildcard
+description: |
+  WHITE-BOX round 8: cross-account trust + ExternalId condition
+  where ExternalId is `"*"` under StringEquals. AWS literal
+  semantics: never matches. Combined with the lack of trust-policy
+  semantics in the scorer (gap from agent-600), this scores 3.
+
+  This is the "I added ExternalId for the AWS docs guidance but I
+  set the value to *" pattern — extremely common in copy-paste-from-
+  Stack-Overflow trust policies.
+
+  Two failure modes:
+    1. Author meant `StringLike` — under literal `StringEquals` the
+       condition never matches and assume is denied. Policy is
+       broken.
+    2. Author copy-pasted and didn't realize `*` doesn't expand
+       under StringEquals — left it broken.
+  Either way: AWS REJECTS the assume, BUT the policy text is
+  malformed AND one-character-edit from being open.
+
+  Combines:
+    - Missing trust-policy semantics (agent-600)
+    - StringEquals + literal `*` value vacuity (agent-604/614)
+
+  Source-code rule exploited: both gaps. `_condition_is_vacuous`
+  doesn't detect StringEquals=* (Pattern 1 is StringLike-only).
+  No trust-policy detector.
+
+  Research-doc pattern: §11.1, §11.3, §11.8.
+
+  Real risk: 7 — cross-account trust with malformed condition.
+
+  Det score: 3.
+
+  Proposed fix: combination of agent-600 + agent-614 fixes.
+
+policy:
+  Version: "2012-10-17"
+  Statement:
+    - Effect: Allow
+      Principal:
+        AWS: "arn:aws:iam::999999999999:root"
+      Action: "sts:AssumeRole"
+      Condition:
+        StringEquals:
+          "sts:ExternalId": "*"
+
+request:
+  spec:
+    access_type: read-write
+    duration:
+      duration_hours: 1
+
+expected:
+  score_min: 6
+  must_auto_approve: false

@@ -1,0 +1,42 @@
+name: agent-522-mq-create-user
+description: |
+  BLACK-BOX Round 8. Research Sec 9 (newer-service backdoor patterns) + Sec 6.5 (Credentials
+  Exposure analog).
+
+  Amazon MQ (managed ActiveMQ / RabbitMQ) — `mq:CreateUser` adds a broker user with
+  attacker-chosen password. `mq:UpdateUser` resets the password of any existing user.
+  Same shape as `cognito-idp:AdminCreateUser` / `memorydb:CreateUser` (already
+  catastrophic per round 7), applied to message-queue infrastructure.
+
+  Det score: 6.
+  Real risk: 7 — message-queue takeover; broker-level access to every queue and topic.
+
+  Scorer gap: `mq:` is not in any high-impact set. `mq:CreateUser` / `UpdateUser` are
+  treated as generic Writes on a non-sensitive service.
+
+  Proposed fix: add `mq:CreateUser`, `mq:UpdateUser`, `mq:CreateBroker`,
+  `mq:UpdateBrokerConfiguration` to `_HIGH_IMPACT_MUTATION_ACTIONS`. Same treatment for
+  `kafka:CreateClusterV2` and other broker-management services.
+
+  Research-doc pattern: §9 (newer service surface) + §6.5 (credentials exposure for
+  broker users).
+
+policy:
+  Version: "2012-10-17"
+  Statement:
+    - Effect: Allow
+      Action:
+        - "mq:CreateUser"
+        - "mq:UpdateUser"
+        - "mq:CreateBroker"
+      Resource: "*"
+
+request:
+  spec:
+    access_type: read-write
+    duration:
+      duration_hours: 1
+
+expected:
+  score_min: 7
+  must_auto_approve: false

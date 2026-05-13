@@ -1,0 +1,32 @@
+name: research-06-3-cloudsplaining-privilege-escalation
+description: |
+  Reference: IAM-BYPASS-RESEARCH.md §6.3 (CloudSplaining Privilege Escalation)
+
+  Sourced from Rhino paths (Section 1). The full set CloudSplaining ships.
+  # NB: encoded as the most common Rhino primitives bundled together.
+
+  Expected behavior: privilege escalation — critical.
+
+  Source: https://github.com/salesforce/cloudsplaining/blob/master/docs/index.md
+policy:
+  Version: "2012-10-17"
+  Statement:
+    - Effect: Allow
+      Action:
+        - iam:CreatePolicyVersion
+        - iam:SetDefaultPolicyVersion
+        - iam:AttachUserPolicy
+        - iam:AttachRolePolicy
+        - iam:PutUserPolicy
+        - iam:PutRolePolicy
+        - iam:UpdateAssumeRolePolicy
+        - iam:PassRole
+      Resource: "*"
+request:
+  spec:
+    access_type: read-write
+    duration:
+      duration_hours: 1
+expected:
+  score_min: 9
+  must_auto_approve: false

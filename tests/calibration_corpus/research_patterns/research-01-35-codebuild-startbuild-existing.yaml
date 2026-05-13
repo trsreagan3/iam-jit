@@ -1,0 +1,24 @@
+name: research-01-35-codebuild-startbuild-existing
+description: |
+  Reference: IAM-BYPASS-RESEARCH.md §1.35 (PMapper codebuild_edges)
+
+  Trigger an existing project that has a privileged role; combine with
+  codebuild:UpdateProject if buildspec change is needed.
+
+  Expected behavior: privilege escalation primitive — high risk.
+
+  Source: PMapper codebuild_edges
+policy:
+  Version: "2012-10-17"
+  Statement:
+    - Effect: Allow
+      Action: codebuild:StartBuild
+      Resource: "*"
+request:
+  spec:
+    access_type: read-write
+    duration:
+      duration_hours: 1
+expected:
+  score_min: 7
+  must_auto_approve: false

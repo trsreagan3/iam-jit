@@ -1,0 +1,30 @@
+name: research-03-8-cg-ecs-takeover
+description: |
+  Reference: IAM-BYPASS-RESEARCH.md §3.8 (CloudGoat ecs_takeover / ecs_efs_attack / ecs_privesc_evade_protection)
+
+  Web RCE in container → IMDS → task role → tag-based policy manipulation
+  → admin EC2 → EFS mount.
+  # NB: encoded the tag-based pivot — ec2:CreateTags + iam:TagRole used
+  # as the lever.
+
+  Expected behavior: tag-based privilege escalation chain — high risk.
+
+  Source: https://github.com/RhinoSecurityLabs/cloudgoat
+policy:
+  Version: "2012-10-17"
+  Statement:
+    - Effect: Allow
+      Action:
+        - ec2:CreateTags
+        - iam:TagRole
+        - iam:TagUser
+        - elasticfilesystem:ClientMount
+      Resource: "*"
+request:
+  spec:
+    access_type: read-write
+    duration:
+      duration_hours: 1
+expected:
+  score_min: 7
+  must_auto_approve: false

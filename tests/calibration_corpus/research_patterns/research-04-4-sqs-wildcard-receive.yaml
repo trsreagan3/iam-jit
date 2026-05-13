@@ -1,0 +1,27 @@
+name: research-04-4-sqs-wildcard-receive
+description: |
+  Reference: IAM-BYPASS-RESEARCH.md §4.4 (HackingTheCloud)
+
+  SQS queue policy with wildcard sqs:ReceiveMessage or sqs:SendMessage.
+  Read/inject queue contents.
+
+  Expected behavior: data exfil + injection — high risk.
+
+  Source: https://hackingthe.cloud/aws/exploitation/Misconfigured_Resource-Based_Policies/
+policy:
+  Version: "2012-10-17"
+  Statement:
+    - Effect: Allow
+      Principal: "*"
+      Action:
+        - sqs:ReceiveMessage
+        - sqs:SendMessage
+      Resource: arn:aws:sqs:us-east-1:111122223333:example-queue
+request:
+  spec:
+    access_type: read-write
+    duration:
+      duration_hours: 1
+expected:
+  score_min: 7
+  must_auto_approve: false

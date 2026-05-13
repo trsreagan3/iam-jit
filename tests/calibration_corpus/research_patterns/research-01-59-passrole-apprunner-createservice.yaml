@@ -1,0 +1,27 @@
+name: research-01-59-passrole-apprunner-createservice
+description: |
+  Reference: IAM-BYPASS-RESEARCH.md §1.59 (Pathfinding.cloud / Appsecco)
+
+  Pass a privileged role to an App Runner service that runs
+  attacker-supplied container/code.
+
+  Expected behavior: privilege escalation primitive — high risk.
+
+  Source: Pathfinding.cloud (Bollina Bhagavan / Appsecco research)
+policy:
+  Version: "2012-10-17"
+  Statement:
+    - Effect: Allow
+      Action:
+        - iam:PassRole
+        - apprunner:CreateService
+        - apprunner:UpdateService
+      Resource: "*"
+request:
+  spec:
+    access_type: read-write
+    duration:
+      duration_hours: 1
+expected:
+  score_min: 8
+  must_auto_approve: false

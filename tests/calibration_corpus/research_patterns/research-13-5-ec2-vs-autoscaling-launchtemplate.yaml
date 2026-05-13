@@ -1,0 +1,28 @@
+name: research-13-5-ec2-vs-autoscaling-launchtemplate
+description: |
+  Reference: IAM-BYPASS-RESEARCH.md §13.5
+
+  A launch template lives in ec2: (ec2:CreateLaunchTemplate), but Auto
+  Scaling consumes them via autoscaling:*. PassRole evaluation happens
+  at launch-template creation.
+
+  Expected behavior: PassRole at template creation — high risk.
+
+  Source: AWS EC2 docs
+policy:
+  Version: "2012-10-17"
+  Statement:
+    - Effect: Allow
+      Action:
+        - ec2:CreateLaunchTemplate
+        - ec2:CreateLaunchTemplateVersion
+        - iam:PassRole
+      Resource: "*"
+request:
+  spec:
+    access_type: read-write
+    duration:
+      duration_hours: 1
+expected:
+  score_min: 8
+  must_auto_approve: false

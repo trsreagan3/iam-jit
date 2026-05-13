@@ -1,0 +1,45 @@
+name: agent-506-principal-account-foreign-kms
+description: |
+  BLACK-BOX Round 8. Research Sec 4.6 (KMS cross-account) + Sec 11.4 (PrincipalAccount).
+
+  KMS key policy that allows `kms:Decrypt` on a narrow key ARN, with
+  `aws:PrincipalAccount = 999999999999` (foreign account). The owning account is
+  123456789012. This is the cross-account ciphertext-exposure pattern that AWS
+  documentation explicitly warns against.
+
+  Det score: 3.
+  Real risk: 7 — any principal in foreign account decrypts every value protected by this key.
+
+  Scorer gap: same as agent-504 — the condition value is a STRUCTURALLY valid account ID,
+  the scorer doesn't compare against the Resource ARN's account segment to detect
+  cross-account intent. With the narrow Resource, scoring falls to 3.
+
+  Proposed fix: when `aws:PrincipalAccount` / `aws:SourceAccount` condition VALUE is an
+  account ID that DIFFERS from the account-ID segment of the Resource ARN, surface a
+  "cross-account grant" risk factor and floor at 7 (read) / 8 (write) depending on action
+  IAM-access-level.
+
+  Research-doc pattern: §4.6 (KMS cross-account ciphertext exposure) + §11.4
+  (PrincipalAccount narrowing semantics).
+
+policy:
+  Version: "2012-10-17"
+  Statement:
+    - Effect: Allow
+      Action:
+        - "kms:Decrypt"
+        - "kms:GenerateDataKey"
+      Resource: "arn:aws:kms:us-east-1:123456789012:key/0bdc-1234-abcd-5678"
+      Condition:
+        StringEquals:
+          "aws:PrincipalAccount": "999999999999"
+
+request:
+  spec:
+    access_type: read-only
+    duration:
+      duration_hours: 1
+
+expected:
+  score_min: 7
+  must_auto_approve: false

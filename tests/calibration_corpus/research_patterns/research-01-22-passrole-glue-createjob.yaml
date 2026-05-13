@@ -1,0 +1,27 @@
+name: research-01-22-passrole-glue-createjob
+description: |
+  Reference: IAM-BYPASS-RESEARCH.md §1.22 (HackingTheCloud paths 26-27)
+
+  Configure a Glue job to use a privileged role; run a job script that
+  exfiltrates the role's STS creds.
+
+  Expected behavior: privilege escalation primitive — high risk.
+
+  Source: https://hackingthe.cloud/aws/exploitation/iam_privilege_escalation/
+policy:
+  Version: "2012-10-17"
+  Statement:
+    - Effect: Allow
+      Action:
+        - iam:PassRole
+        - glue:CreateJob
+        - glue:UpdateJob
+      Resource: "*"
+request:
+  spec:
+    access_type: read-write
+    duration:
+      duration_hours: 1
+expected:
+  score_min: 8
+  must_auto_approve: false

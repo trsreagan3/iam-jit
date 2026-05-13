@@ -1,0 +1,25 @@
+name: research-01-11-attachrolepolicy
+description: |
+  Reference: IAM-BYPASS-RESEARCH.md §1.11 (Rhino #9)
+
+  Attach an admin policy to a role the attacker can already assume.
+
+  Expected behavior: direct privilege escalation primitive — critical.
+
+  Source: Rhino #9
+policy:
+  Version: "2012-10-17"
+  Statement:
+    - Effect: Allow
+      Action:
+        - iam:AttachRolePolicy
+        - sts:AssumeRole
+      Resource: "*"
+request:
+  spec:
+    access_type: read-write
+    duration:
+      duration_hours: 1
+expected:
+  score_min: 9
+  must_auto_approve: false

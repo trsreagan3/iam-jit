@@ -1,0 +1,49 @@
+name: agent-622-empty-account-arn-resource
+description: |
+  WHITE-BOX round 8: ARN with EMPTY account segment.
+
+  `arn:aws:iam:::role/admin` (note the four colons in a row,
+  account==""). AWS resource-policy evaluation rules treat empty
+  account segment as "any account" in some contexts (the resource
+  is global / partition-wide in others). The behavior is
+  underspecified across services; `iam:PassRole` with this ARN is
+  almost certainly NOT what the author intended.
+
+  The scorer's `_is_broad_resource` (line 1397) checks
+  `parts[4] == "*"` (literal `*`) but NOT `parts[4] == ""` (empty).
+  Empty falls through and is treated as narrow.
+
+  Source-code rule exploited: `_is_broad_resource` (line 1397) and
+  `_is_strict_wildcard` (line 2014) only check for literal `*` in
+  the account segment, missing the empty-account form.
+
+  Research-doc pattern: §10 (parser-grammar bypass), §13.12 (ARN
+  partition variants — extends to empty segments).
+
+  Real risk: 6 — defect-class. Empty-account ARN behavior is
+  undefined; some AWS evaluators treat it as wildcard. The scorer
+  should treat it as broad.
+
+  Det score: 4.
+
+  Proposed fix: in both `_is_broad_resource` (line 1397) and
+  `_is_strict_wildcard` (line 2014), change `parts[4] == "*"` to
+  `parts[4] in ("*", "")`. Same for partition (parts[1]) and
+  region (parts[3]).
+
+policy:
+  Version: "2012-10-17"
+  Statement:
+    - Effect: Allow
+      Action: "iam:PassRole"
+      Resource: "arn:aws:iam:::role/admin"
+
+request:
+  spec:
+    access_type: read-write
+    duration:
+      duration_hours: 1
+
+expected:
+  score_min: 6
+  must_auto_approve: false

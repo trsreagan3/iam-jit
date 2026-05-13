@@ -1,0 +1,29 @@
+name: research-01-53-eks-access-entries
+description: |
+  Reference: IAM-BYPASS-RESEARCH.md §1.53 (AWS docs: access entries)
+
+  Map an attacker-controlled IAM principal to the Kubernetes cluster-admin
+  access policy on an EKS cluster, bypassing the legacy aws-auth ConfigMap.
+  eks:CreateAccessEntry + eks:AssociateAccessPolicy is a single-shot
+  cluster takeover combo.
+
+  Expected behavior: cluster takeover — critical.
+
+  Source: https://docs.aws.amazon.com/eks/latest/userguide/access-entries.html
+policy:
+  Version: "2012-10-17"
+  Statement:
+    - Effect: Allow
+      Action:
+        - eks:CreateAccessEntry
+        - eks:AssociateAccessPolicy
+        - eks:AccessKubernetesApi
+      Resource: "*"
+request:
+  spec:
+    access_type: read-write
+    duration:
+      duration_hours: 1
+expected:
+  score_min: 9
+  must_auto_approve: false

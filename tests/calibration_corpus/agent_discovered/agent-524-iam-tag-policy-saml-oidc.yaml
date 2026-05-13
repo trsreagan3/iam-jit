@@ -1,0 +1,48 @@
+name: agent-524-iam-tag-policy-saml-oidc
+description: |
+  BLACK-BOX Round 8. Research §11.11 (Tag-based ABAC self-rewrite).
+
+  `iam:TagPolicy`, `iam:TagOpenIDConnectProvider`, `iam:TagSAMLProvider` on `Resource:*`
+  lets the attacker mutate the tags on managed policies and federation providers. If any
+  ABAC policy in the account uses `aws:ResourceTag/foo` to authorize SSO/Federation
+  changes, the attacker can rewrite the tag to satisfy any such condition.
+
+  Sibling pair: `iam:TagUser` / `iam:TagRole` (already catastrophic per round 2/round 7
+  testing — they fire the iam-tag floor at 9), but `iam:TagPolicy` /
+  `iam:TagOpenIDConnectProvider` / `iam:TagSAMLProvider` score 6 — missing siblings.
+
+  Det score: 6.
+  Real risk: 7 — ABAC-condition bypass on federation infrastructure (sibling of TagRole
+  exploitation).
+
+  Scorer gap: not all `iam:Tag*` variants are in `_CATASTROPHIC_ACTIONS`. The glob
+  `iam:Tag*` (agent's round-2 test) DOES catch all of these, but explicit listing of just
+  these three tag-variants does not.
+
+  Proposed fix: ensure `iam:TagPolicy`, `iam:UntagPolicy`,
+  `iam:TagOpenIDConnectProvider`, `iam:UntagOpenIDConnectProvider`,
+  `iam:TagSAMLProvider`, `iam:UntagSAMLProvider`, `iam:TagInstanceProfile`,
+  `iam:UntagInstanceProfile`, `iam:TagServerCertificate` are all in
+  `_CATASTROPHIC_ACTIONS` (or in the iam-tagging high-floor set).
+
+  Research-doc pattern: §11.11 — Tag-based ABAC self-rewrite.
+
+policy:
+  Version: "2012-10-17"
+  Statement:
+    - Effect: Allow
+      Action:
+        - "iam:TagPolicy"
+        - "iam:TagOpenIDConnectProvider"
+        - "iam:TagSAMLProvider"
+      Resource: "*"
+
+request:
+  spec:
+    access_type: read-write
+    duration:
+      duration_hours: 1
+
+expected:
+  score_min: 7
+  must_auto_approve: false

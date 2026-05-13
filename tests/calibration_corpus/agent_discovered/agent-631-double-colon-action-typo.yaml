@@ -1,0 +1,49 @@
+name: agent-631-double-colon-action-typo
+description: |
+  WHITE-BOX round 8: `Action: "iam::PassRole"` (DOUBLE colon — typo).
+
+  AWS evaluation: this is an INVALID action format and AWS rejects.
+  The scorer's `_canonical_action` (line 1346) does:
+      svc, _, name = action.partition(":")
+  partitioning on first colon gives svc=`iam`, name=`:PassRole`.
+  So `_canonical_action` returns `iam::passrole`. The catastrophic
+  set (line 898) is keyed on `iam:passrole` (single colon). No
+  match. The action is treated as "specific action in sensitive
+  service" → score 6 via line 2260.
+
+  This is BENIGN if AWS rejects, but the scorer still SHOULD flag
+  malformed action strings. The pattern "malformed = worst case"
+  applies. Otherwise an authoring tool might emit double-colon
+  variants and the scorer silently approves them.
+
+  Source-code rule exploited: `_canonical_action` (line 1346) is
+  tolerant of double-colon, returning a string with leading `:` in
+  the name portion that doesn't match any catalog entry.
+
+  Research-doc pattern: §10.13 (Whitespace in action names — same
+  malformation class), §13 (action-naming edge cases).
+
+  Real risk: 5 — malformed defect class.
+
+  Det score: 6.
+
+  Proposed fix: in `_canonical_action`, if the result contains `::`
+  (or any structural malformation: multiple colons, leading `:`,
+  trailing `:`), treat it as malformed and FLAG / FLOOR at 5.
+
+policy:
+  Version: "2012-10-17"
+  Statement:
+    - Effect: Allow
+      Action: "iam::PassRole"
+      Resource: "*"
+
+request:
+  spec:
+    access_type: read-write
+    duration:
+      duration_hours: 1
+
+expected:
+  score_min: 5
+  must_auto_approve: false

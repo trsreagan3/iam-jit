@@ -1,0 +1,30 @@
+name: research-01-58-ecs-undocumented-protocol
+description: |
+  Reference: IAM-BYPASS-RESEARCH.md §1.58 (Aviatrix research, 2024)
+
+  ECS uses an undocumented protocol allowing a co-resident container/task
+  to acquire IAM permissions beyond what was assigned, enabling
+  cross-task privilege escalation on the same instance.
+  # NB: abstract pattern, encoded the simplest concrete form — wide
+  # ecs:* on task / container endpoints.
+
+  Expected behavior: cross-task privilege escalation — high risk.
+
+  Source: https://aviatrix.ai/threat-research-center/amazon-ecs-2024-privilege-escalation-iam-hijacking/
+policy:
+  Version: "2012-10-17"
+  Statement:
+    - Effect: Allow
+      Action:
+        - ecs:DescribeTasks
+        - ecs:DescribeContainerInstances
+        - ecs:ExecuteCommand
+      Resource: "*"
+request:
+  spec:
+    access_type: read-write
+    duration:
+      duration_hours: 1
+expected:
+  score_min: 7
+  must_auto_approve: false

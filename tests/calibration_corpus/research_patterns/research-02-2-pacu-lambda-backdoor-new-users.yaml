@@ -1,0 +1,28 @@
+name: research-02-2-pacu-lambda-backdoor-new-users
+description: |
+  Reference: IAM-BYPASS-RESEARCH.md §2.2 (Pacu lambda__backdoor_new_users)
+
+  Creates a Lambda + EventBridge rule that creates access keys whenever
+  a new IAM user is created. Canonical "trigger on iam:CreateUser"
+  persistence pattern.
+
+  Expected behavior: deep persistence primitive — critical.
+
+  Source: https://github.com/RhinoSecurityLabs/pacu/wiki/Module-Details
+policy:
+  Version: "2012-10-17"
+  Statement:
+    - Effect: Allow
+      Action:
+        - lambda:CreateFunction
+        - events:PutRule
+        - iam:CreateAccessKey
+      Resource: "*"
+request:
+  spec:
+    access_type: read-write
+    duration:
+      duration_hours: 1
+expected:
+  score_min: 9
+  must_auto_approve: false

@@ -1,0 +1,25 @@
+name: research-01-9-attachuserpolicy-admin
+description: |
+  Reference: IAM-BYPASS-RESEARCH.md §1.9 (Rhino #7)
+
+  Attach arn:aws:iam::aws:policy/AdministratorAccess (or PowerUserAccess)
+  to attacker's own user. Any policy granting iam:AttachUserPolicy without
+  ARN condition is a direct path to admin.
+
+  Expected behavior: direct privilege escalation to admin — critical.
+
+  Source: https://rhinosecuritylabs.com/aws/aws-privilege-escalation-methods-mitigation/
+policy:
+  Version: "2012-10-17"
+  Statement:
+    - Effect: Allow
+      Action: iam:AttachUserPolicy
+      Resource: "*"
+request:
+  spec:
+    access_type: read-write
+    duration:
+      duration_hours: 1
+expected:
+  score_min: 9
+  must_auto_approve: false

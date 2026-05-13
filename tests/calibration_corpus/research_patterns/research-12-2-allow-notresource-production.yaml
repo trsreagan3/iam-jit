@@ -1,0 +1,27 @@
+name: research-12-2-allow-notresource-production
+description: |
+  Reference: IAM-BYPASS-RESEARCH.md §12.2 (Binadox)
+
+  Allow + NotResource:["arn:aws:s3:::production/*"] — allows the
+  listed action on every other resource in AWS. The escape hatch is
+  that the principal can use the policy to grant themselves access to
+  the protected resource by creating a new policy.
+
+  Expected behavior: near-unscoped grant — high risk.
+
+  Source: https://www.binadox.com/blog/binadox-article-policy-with-effect-allow-and-not-action/
+policy:
+  Version: "2012-10-17"
+  Statement:
+    - Effect: Allow
+      Action: "*"
+      NotResource:
+        - "arn:aws:s3:::production/*"
+request:
+  spec:
+    access_type: read-write
+    duration:
+      duration_hours: 1
+expected:
+  score_min: 9
+  must_auto_approve: false

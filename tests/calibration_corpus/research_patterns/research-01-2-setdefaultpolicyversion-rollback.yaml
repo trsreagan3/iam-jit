@@ -1,0 +1,24 @@
+name: research-01-2-setdefaultpolicyversion-rollback
+description: |
+  Reference: IAM-BYPASS-RESEARCH.md §1.2 (Rhino Security Labs privesc #2)
+
+  Switch the default version of a managed policy to an older version that
+  has wider permissions. Basis of CloudGoat's iam_privesc_by_rollback.
+
+  Expected behavior: privilege escalation primitive — high risk.
+
+  Source: https://github.com/RhinoSecurityLabs/cloudgoat
+policy:
+  Version: "2012-10-17"
+  Statement:
+    - Effect: Allow
+      Action: iam:SetDefaultPolicyVersion
+      Resource: "*"
+request:
+  spec:
+    access_type: read-write
+    duration:
+      duration_hours: 1
+expected:
+  score_min: 8
+  must_auto_approve: false

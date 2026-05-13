@@ -1,0 +1,33 @@
+name: research-05-7-llmjacking-bedrock-entitlement
+description: |
+  Reference: IAM-BYPASS-RESEARCH.md §5.7 (CSO Online LLMjacking, 2024-2026)
+
+  Attackers enable Bedrock model access programmatically:
+  bedrock:PutUseCaseForModelAccess,
+  bedrock:PutFoundationModelEntitlement,
+  bedrock:CreateFoundationModelAgreement,
+  bedrock:ListFoundationModelAgreementOffers, then InvokeModel*.
+
+  Expected behavior: cost-abuse LLM hijack — critical.
+
+  Source: https://www.csoonline.com/article/3535433/llmjacking-how-attackers-use-stolen-aws-credentials-to-enable-llms-and-rack-up-costs-for-victims.html
+policy:
+  Version: "2012-10-17"
+  Statement:
+    - Effect: Allow
+      Action:
+        - bedrock:PutUseCaseForModelAccess
+        - bedrock:PutFoundationModelEntitlement
+        - bedrock:CreateFoundationModelAgreement
+        - bedrock:ListFoundationModelAgreementOffers
+        - bedrock:InvokeModel
+        - bedrock:InvokeModelWithResponseStream
+      Resource: "*"
+request:
+  spec:
+    access_type: read-write
+    duration:
+      duration_hours: 1
+expected:
+  score_min: 8
+  must_auto_approve: false

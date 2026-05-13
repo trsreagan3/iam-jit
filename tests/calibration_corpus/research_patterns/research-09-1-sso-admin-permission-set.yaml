@@ -1,0 +1,41 @@
+name: research-09-1-sso-admin-permission-set
+description: |
+  Reference: IAM-BYPASS-RESEARCH.md §9.1 (CloudQuery: Identity Center)
+
+  Actions to scrutinize: sso-admin:AttachManagedPolicyToPermissionSet,
+  sso-admin:AttachCustomerManagedPolicyReferenceToPermissionSet,
+  sso-admin:PutInlinePolicyToPermissionSet,
+  sso-admin:DetachManagedPolicyFromPermissionSet,
+  sso-admin:DetachCustomerManagedPolicyReferenceFromPermissionSet,
+  sso-admin:CreateAccountAssignment, sso-admin:DeleteAccountAssignment,
+  sso-admin:UpdatePermissionSet, identitystore:CreateGroupMembership,
+  identitystore:CreateUser. CLI prefix is sso-admin but the policy
+  prefix is sso: — aliasing miss.
+
+  Expected behavior: org-wide privilege escalation — critical.
+
+  Source: https://www.cloudquery.io/blog/aws-priv-esc-identity-center
+policy:
+  Version: "2012-10-17"
+  Statement:
+    - Effect: Allow
+      Action:
+        - sso-admin:AttachManagedPolicyToPermissionSet
+        - sso-admin:AttachCustomerManagedPolicyReferenceToPermissionSet
+        - sso-admin:PutInlinePolicyToPermissionSet
+        - sso-admin:DetachManagedPolicyFromPermissionSet
+        - sso-admin:DetachCustomerManagedPolicyReferenceFromPermissionSet
+        - sso-admin:CreateAccountAssignment
+        - sso-admin:DeleteAccountAssignment
+        - sso-admin:UpdatePermissionSet
+        - identitystore:CreateGroupMembership
+        - identitystore:CreateUser
+      Resource: "*"
+request:
+  spec:
+    access_type: read-write
+    duration:
+      duration_hours: 1
+expected:
+  score_min: 9
+  must_auto_approve: false

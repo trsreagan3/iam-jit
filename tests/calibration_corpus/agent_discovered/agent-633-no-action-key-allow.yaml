@@ -1,0 +1,51 @@
+name: agent-633-no-action-key-allow
+description: |
+  WHITE-BOX round 8: Statement with Allow + Resource:* but NO
+  Action key. Malformed policy — AWS rejects at policy-attach time.
+  The scorer:
+    - `_as_list(stmt.get("Action"))` returns `[]` (line 2860: None
+      returns []).
+    - The per-action loop (line 2090) doesn't iterate.
+    - But — does the rest of the per-statement code still fire?
+      Looking at line 2347: `if wildcard_resource and all(":" in
+      a for a in actions): ...` — `all` of empty is True, but
+      `services_in_stmt` would be empty set. Goes through but
+      doesn't trip any rule.
+    - Catastrophic floor (line 2412): iterates over empty actions,
+      no fire.
+    - End: no factors → score 1.
+
+  Scorer silently rates malformed-but-allow at 1. Same "malformed =
+  worst-case" gap as agent-611/612 — the policy's intent is
+  ambiguous (no Action means nothing was granted by AWS, but the
+  shape suggests author tried).
+
+  Source-code rule exploited: the per-statement loop assumes
+  actions[] non-empty when Allow + Resource present. Empty actions
+  isn't recognized as a defect.
+
+  Research-doc pattern: §10.1 (Statement shape ambiguity).
+
+  Real risk: 5 — malformed defect.
+
+  Det score: 1.
+
+  Proposed fix: if a Statement has Effect=Allow + Resource present
+  + Action key MISSING (or empty), surface a malformed-statement
+  factor at floor 5.
+
+policy:
+  Version: "2012-10-17"
+  Statement:
+    - Effect: Allow
+      Resource: "*"
+
+request:
+  spec:
+    access_type: read-write
+    duration:
+      duration_hours: 1
+
+expected:
+  score_min: 5
+  must_auto_approve: false

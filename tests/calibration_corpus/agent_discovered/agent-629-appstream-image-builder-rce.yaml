@@ -1,0 +1,48 @@
+name: agent-629-appstream-image-builder-rce
+description: |
+  WHITE-BOX round 8: `appstream:CreateImageBuilder` provisions a
+  Windows EC2 instance that the caller can RDP into to construct
+  AppStream images. The image builder uses a passed IAM role — same
+  attack surface as `sagemaker:CreateNotebookInstance` (already in
+  `_CODE_EXECUTION_PRIMITIVES`, line 102).
+
+  Currently `appstream:CreateImageBuilder` is NOT in
+  `_CODE_EXECUTION_PRIMITIVES`. On `Resource: *` it scores 6 (state-
+  changing-on-broad), not the 8 it deserves as a code-exec primitive.
+
+  Combined with `iam:PassRole` it should hit the catastrophic-9
+  composition rule, but the code-exec gate doesn't fire because
+  the action isn't recognized as code-exec.
+
+  Source-code rule exploited: `_CODE_EXECUTION_PRIMITIVES` (line
+  82) omits AppStream actions.
+
+  Research-doc pattern: §1.30 (SageMaker notebook URL — AppStream
+  ImageBuilder is the desktop-shell equivalent), §1.34 (PassRole
+  + AppStream ImageBuilder).
+
+  Real risk: 7 — interactive Windows RDP shell running with the
+  passed role's credentials.
+
+  Det score: 6.
+
+  Proposed fix: add to `_CODE_EXECUTION_PRIMITIVES`:
+  `appstream:CreateImageBuilder`, `appstream:CreateFleet`,
+  `appstream:CreateStreamingURL`.
+
+policy:
+  Version: "2012-10-17"
+  Statement:
+    - Effect: Allow
+      Action: "appstream:CreateImageBuilder"
+      Resource: "*"
+
+request:
+  spec:
+    access_type: read-write
+    duration:
+      duration_hours: 1
+
+expected:
+  score_min: 7
+  must_auto_approve: false

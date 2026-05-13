@@ -1,0 +1,26 @@
+name: research-01-14-updateassumerolepolicy
+description: |
+  Reference: IAM-BYPASS-RESEARCH.md §1.14 (Rhino #14)
+
+  Rewrite a role's trust policy so the attacker (or attacker's external
+  account) can assume it. Classic backdoor primitive.
+
+  Expected behavior: privilege escalation + persistence — critical.
+
+  Source: https://github.com/RhinoSecurityLabs/pacu/wiki/Module-Details
+policy:
+  Version: "2012-10-17"
+  Statement:
+    - Effect: Allow
+      Action:
+        - iam:UpdateAssumeRolePolicy
+        - sts:AssumeRole
+      Resource: "*"
+request:
+  spec:
+    access_type: read-write
+    duration:
+      duration_hours: 1
+expected:
+  score_min: 9
+  must_auto_approve: false

@@ -1,0 +1,46 @@
+name: agent-503-principal-org-id-foreign
+description: |
+  BLACK-BOX Round 8. Research Sec 11.16 (PrincipalOrgID).
+
+  Resource-policy condition that requires `aws:PrincipalOrgID` to equal an arbitrary org
+  identifier — but the scorer cannot verify whether the org ID matches the policy owner's
+  organization. An attacker-supplied or copy-pasted-from-a-blog org ID like
+  `o-attackerorg` lets any principal in that foreign org read the bucket.
+
+  The round-6 vacuous-condition catalog catches `aws:PrincipalOrgID` empty-string and `*`,
+  but a structurally-valid-but-foreign org ID slips past — the scorer marks it as scoped
+  because the syntax is intact.
+
+  Det score: 1.
+  Real risk: 6 — any principal in the foreign org can read sensitive prefixes.
+
+  Scorer gap: foreign-org-ID detection needs cross-reference to the deploying account's
+  known org. Without that knowledge, the scorer should at least surface "unverified
+  PrincipalOrgID — manual review required" at floor 6 when the condition appears on a
+  data-bearing read action.
+
+  Suggested fix: when `aws:PrincipalOrgID` is the sole narrowing condition for a
+  data-bearing action and the policy is being scored without account context, flag at
+  floor 6 ("PrincipalOrgID condition not validated against expected org — review manually").
+
+  Research-doc pattern: §11.16 (PrincipalOrgID on resource policy).
+
+policy:
+  Version: "2012-10-17"
+  Statement:
+    - Effect: Allow
+      Action: "s3:GetObject"
+      Resource: "arn:aws:s3:::company-pii-bucket/*"
+      Condition:
+        StringEquals:
+          "aws:PrincipalOrgID": "o-attackerorg"
+
+request:
+  spec:
+    access_type: read-only
+    duration:
+      duration_hours: 1
+
+expected:
+  score_min: 6
+  must_auto_approve: false

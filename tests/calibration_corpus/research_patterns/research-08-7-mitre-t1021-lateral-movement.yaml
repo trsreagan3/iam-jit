@@ -1,0 +1,28 @@
+name: research-08-7-mitre-t1021-lateral-movement
+description: |
+  Reference: IAM-BYPASS-RESEARCH.md §8.7 (MITRE T1021.007)
+
+  Cloud Services lateral movement: ssm:StartSession,
+  eks:AccessKubernetesApi, EC2 Instance Connect, EC2 Serial Console.
+
+  Expected behavior: lateral movement — high risk.
+
+  Source: https://attack.mitre.org/matrices/enterprise/cloud/
+policy:
+  Version: "2012-10-17"
+  Statement:
+    - Effect: Allow
+      Action:
+        - ssm:StartSession
+        - eks:AccessKubernetesApi
+        - ec2-instance-connect:SendSSHPublicKey
+        - ec2-instance-connect:SendSerialConsoleSSHPublicKey
+      Resource: "*"
+request:
+  spec:
+    access_type: read-write
+    duration:
+      duration_hours: 1
+expected:
+  score_min: 7
+  must_auto_approve: false

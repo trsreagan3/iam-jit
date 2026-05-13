@@ -1,0 +1,25 @@
+name: research-01-41-sts-getfederationtoken
+description: |
+  Reference: IAM-BYPASS-RESEARCH.md §1.41 (Stratus Red Team)
+
+  Generate temporary credentials that survive deletion of the original
+  access key (persistence). Token can also be down-scoped to evade
+  detections.
+
+  Expected behavior: persistence primitive — high risk.
+
+  Source: https://stratus-red-team.cloud/attack-techniques/AWS/
+policy:
+  Version: "2012-10-17"
+  Statement:
+    - Effect: Allow
+      Action: sts:GetFederationToken
+      Resource: "*"
+request:
+  spec:
+    access_type: read-write
+    duration:
+      duration_hours: 1
+expected:
+  score_min: 7
+  must_auto_approve: false

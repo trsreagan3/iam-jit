@@ -1,0 +1,38 @@
+name: agent-519-iotsitewise-access-policy
+description: |
+  BLACK-BOX Round 8. Research Sec 9 + Sec 6.2 (resource-policy modification).
+
+  `iotsitewise:CreateAccessPolicy` / `UpdateAccessPolicy` lets the attacker grant any
+  IAM Identity Center user portal-level access to industrial-OT data (sensor readings,
+  PLC values, operations dashboards). Resource-exposure tier (CloudSplaining §6.2).
+
+  Det score: 6.
+  Real risk: 7 — operational technology data exposure / industrial spying.
+
+  Scorer gap: `iotsitewise:` is not in `_SENSITIVE_SERVICES`; the access-policy actions are
+  not in `_HIGH_IMPACT_MUTATION_ACTIONS`.
+
+  Proposed fix: add `iotsitewise:CreateAccessPolicy`, `iotsitewise:UpdateAccessPolicy`,
+  `iotsitewise:DeleteAccessPolicy` to `_HIGH_IMPACT_MUTATION_ACTIONS`. Same treatment for
+  `iottwinmaker` (digital twin) and `iotanalytics` (data lake on IoT).
+
+  Research-doc pattern: §6.2 (Resource Exposure) + §9 (industrial-IoT surface).
+
+policy:
+  Version: "2012-10-17"
+  Statement:
+    - Effect: Allow
+      Action:
+        - "iotsitewise:CreateAccessPolicy"
+        - "iotsitewise:UpdateAccessPolicy"
+      Resource: "*"
+
+request:
+  spec:
+    access_type: read-write
+    duration:
+      duration_hours: 1
+
+expected:
+  score_min: 7
+  must_auto_approve: false

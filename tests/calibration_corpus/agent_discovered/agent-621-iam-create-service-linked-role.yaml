@@ -1,0 +1,62 @@
+name: agent-621-iam-create-service-linked-role
+description: |
+  WHITE-BOX round 8: `iam:CreateServiceLinkedRole` lets the caller
+  create a service-linked role for ANY AWS service. The SLR gets a
+  service-managed trust policy AND a service-managed IAM policy
+  attached automatically by AWS. Many SLRs come with significant
+  permissions (e.g., `AWSServiceRoleForSupport` can access encrypted
+  S3 objects in some cases).
+
+  Critically, SLRs are a way to install AWS-managed grants without
+  the explicit `iam:AttachRolePolicy` or `iam:PutRolePolicy` calls
+  that the scorer's catastrophic list catches. It's a "create a
+  pre-approved AWS-policy-set principal" primitive.
+
+  Scoring: iam is in `_SENSITIVE_SERVICES`, sensitive-on-broad rule
+  at line 2120 routes through service in {"iam"} branch → score 9.
+
+  Wait — let me re-check. Probe 94 returned 6. Re-checking: looking
+  at line 2120: `if service in effective_sensitive: score = max(
+  score, 9 if service in {"iam", "organizations"} else 8)`. This
+  only applies on `action.endswith(":*")`, i.e., wildcard actions
+  like `iam:*`. For specific action `iam:CreateServiceLinkedRole`,
+  the route is different: line 2247 wildcard_resource +
+  high-risk-actions (it's not in there), or line 2258 sensitive +
+  broad → 6.
+
+  So `iam:CreateServiceLinkedRole` on `*` scores 6 — below
+  catastrophic. Should be at least 8 (escalation primitive that
+  avoids explicit policy-attach audit).
+
+  Source-code rule exploited: `_HIGH_IMPACT_MUTATION_ACTIONS` (line
+  392) and `_CATASTROPHIC_ACTIONS` both omit
+  `iam:CreateServiceLinkedRole`.
+
+  Research-doc pattern: §1.13 (`AddUserToGroup` / Group-membership
+  privesc — SLR is the service-equivalent), §9.14 (AWSServiceRoleFor
+  Support — SLR risk class).
+
+  Real risk: 7 — single-call grant of an AWS-managed permission set
+  to a fresh principal. Audit-evasion vs explicit AttachRolePolicy.
+
+  Det score: 6.
+
+  Proposed fix: add `iam:CreateServiceLinkedRole` to
+  `_HIGH_IMPACT_MUTATION_ACTIONS` (floor 8 on broad).
+
+policy:
+  Version: "2012-10-17"
+  Statement:
+    - Effect: Allow
+      Action: "iam:CreateServiceLinkedRole"
+      Resource: "*"
+
+request:
+  spec:
+    access_type: read-write
+    duration:
+      duration_hours: 1
+
+expected:
+  score_min: 7
+  must_auto_approve: false

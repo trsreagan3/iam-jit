@@ -1,0 +1,29 @@
+name: research-09-8-verified-access
+description: |
+  Reference: IAM-BYPASS-RESEARCH.md §9.8 (AWS Verified Access)
+
+  verifiedaccess:CreateVerifiedAccessGroup,
+  verifiedaccess:CreateVerifiedAccessEndpoint,
+  verifiedaccess:ModifyVerifiedAccessTrustProvider — modify trust
+  providers / endpoints to expose internal services.
+
+  Expected behavior: trust-provider bypass — high risk.
+
+  Source: AWS Verified Access docs
+policy:
+  Version: "2012-10-17"
+  Statement:
+    - Effect: Allow
+      Action:
+        - verifiedaccess:CreateVerifiedAccessGroup
+        - verifiedaccess:CreateVerifiedAccessEndpoint
+        - verifiedaccess:ModifyVerifiedAccessTrustProvider
+      Resource: "*"
+request:
+  spec:
+    access_type: read-write
+    duration:
+      duration_hours: 1
+expected:
+  score_min: 7
+  must_auto_approve: false

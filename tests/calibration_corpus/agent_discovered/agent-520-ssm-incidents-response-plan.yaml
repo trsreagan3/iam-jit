@@ -1,0 +1,40 @@
+name: agent-520-ssm-incidents-response-plan
+description: |
+  BLACK-BOX Round 8. Research Sec 9.4 (newer SSM surface).
+
+  `ssm-incidents:CreateResponsePlan` / `UpdateResponsePlan` defines automated incident
+  response — including arbitrary SSM Automation documents that run as a service role.
+  An attacker uses this to install persistent automation that triggers on any alarm and
+  runs attacker-controlled code with elevated privileges.
+
+  Det score: 6.
+  Real risk: 7 — persistent privileged automation.
+
+  Scorer gap: `ssm-incidents:` is a separate prefix from `ssm:` and is not in
+  `_SENSITIVE_SERVICES`. Round 7 mentioned this surface but didn't add the per-action
+  rules.
+
+  Proposed fix: add `ssm-incidents` to `_SENSITIVE_SERVICES`, OR add
+  `ssm-incidents:CreateResponsePlan`, `ssm-incidents:UpdateResponsePlan`,
+  `ssm-incidents:CreateReplicationSet` to `_HIGH_IMPACT_MUTATION_ACTIONS`.
+
+  Research-doc pattern: §9.4 (SSM newer surface — ssm-incidents:*).
+
+policy:
+  Version: "2012-10-17"
+  Statement:
+    - Effect: Allow
+      Action:
+        - "ssm-incidents:CreateResponsePlan"
+        - "ssm-incidents:UpdateResponsePlan"
+      Resource: "*"
+
+request:
+  spec:
+    access_type: read-write
+    duration:
+      duration_hours: 1
+
+expected:
+  score_min: 7
+  must_auto_approve: false

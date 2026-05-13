@@ -1,0 +1,29 @@
+name: research-11-10-policy-variable-injection
+description: |
+  Reference: IAM-BYPASS-RESEARCH.md §11.10 (AWS variables blog)
+
+  "Resource":"arn:aws:s3:::company-${aws:username}/*" — if an attacker
+  creates a user named * or .. or with path traversal characters, they
+  can shape the resource ARN. Username rules permit =,.@_-+ — and *
+  is not allowed in usernames, but + IS, allowing crafted matches.
+
+  Expected behavior: variable injection — high risk.
+
+  Source: https://aws.amazon.com/blogs/aws/variables-in-aws-access-control-policies/
+policy:
+  Version: "2012-10-17"
+  Statement:
+    - Effect: Allow
+      Action:
+        - s3:GetObject
+        - s3:PutObject
+        - s3:DeleteObject
+      Resource: "arn:aws:s3:::company-${aws:username}/*"
+request:
+  spec:
+    access_type: read-write
+    duration:
+      duration_hours: 1
+expected:
+  score_min: 6
+  must_auto_approve: false

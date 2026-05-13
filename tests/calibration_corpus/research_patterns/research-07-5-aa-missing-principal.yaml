@@ -1,0 +1,27 @@
+name: research-07-5-aa-missing-principal
+description: |
+  Reference: IAM-BYPASS-RESEARCH.md §7.5 (AWS IAM Access Analyzer validation checks)
+
+  MISSING_PRINCIPAL / INVALID_PRINCIPAL_FORMAT — resource-based policy
+  missing or malformed Principal element.
+  # NB: encoded as a resource-policy statement with no Principal entry.
+
+  Expected behavior: malformed resource policy — moderate risk; some
+  evaluators may treat missing Principal as deny, but tooling miss is
+  the issue.
+
+  Source: https://docs.aws.amazon.com/IAM/latest/UserGuide/access-analyzer-reference-policy-checks.html
+policy:
+  Version: "2012-10-17"
+  Statement:
+    - Effect: Allow
+      Action: s3:GetObject
+      Resource: arn:aws:s3:::example/*
+request:
+  spec:
+    access_type: read-only
+    duration:
+      duration_hours: 1
+expected:
+  score_min: 4
+  must_auto_approve: false

@@ -1,0 +1,27 @@
+name: research-07-4-aa-custom-policy-check
+description: |
+  Reference: IAM-BYPASS-RESEARCH.md §7.4 (AWS IAM Access Analyzer)
+
+  ValidatePolicy (syntactic), CheckAccessNotGranted, CheckNoNewAccess,
+  CheckNoPublicAccess. Programmatic gates for CI/CD.
+  # NB: abstract category, encoded the simplest concrete form — a
+  # policy that fails CheckNoPublicAccess (Principal:*).
+
+  Expected behavior: fails CheckNoPublicAccess — high risk.
+
+  Source: https://docs.aws.amazon.com/IAM/latest/UserGuide/access-analyzer-findings.html
+policy:
+  Version: "2012-10-17"
+  Statement:
+    - Effect: Allow
+      Principal: "*"
+      Action: s3:GetObject
+      Resource: arn:aws:s3:::public-bucket/*
+request:
+  spec:
+    access_type: read-only
+    duration:
+      duration_hours: 1
+expected:
+  score_min: 8
+  must_auto_approve: false

@@ -1,0 +1,44 @@
+name: agent-627-s3express-bypass
+description: |
+  WHITE-BOX round 8: `s3express:*` (S3 Express One Zone) is a SEPARATE
+  IAM service prefix from `s3:`. A "Deny s3:*" guardrail does NOT block
+  `s3express:*`, and `s3-outposts:*` similarly.
+
+  The scorer's `_SERVICE_ALIASES` (line 911) maps `s3-object-lambda`
+  and `s3-outposts` to `s3`. But `s3express` is NOT in the alias map,
+  even though it's the same data plane (one-zone S3 with lower
+  latency).
+
+  `s3express:PutObject` on `*` scores 4 (broad-cross-resource read/
+  access, since s3express is NOT in _SENSITIVE_SERVICES and the
+  action's IAM level is Write but scoring drops to 4 because the
+  service-set is non-sensitive). Below the auto-approve threshold.
+
+  Source-code rule exploited: `_SERVICE_ALIASES` (line 911) omits
+  `s3express` → `s3`.
+
+  Research-doc pattern: §13.14 (s3:* does not include s3-object-
+  lambda, s3-outposts, s3express).
+
+  Real risk: 6 — S3-tier data plane that bypasses s3-level controls.
+
+  Det score: 4.
+
+  Proposed fix: add `"s3express": "s3"` to `_SERVICE_ALIASES`.
+
+policy:
+  Version: "2012-10-17"
+  Statement:
+    - Effect: Allow
+      Action: "s3express:PutObject"
+      Resource: "*"
+
+request:
+  spec:
+    access_type: read-write
+    duration:
+      duration_hours: 1
+
+expected:
+  score_min: 5
+  must_auto_approve: false

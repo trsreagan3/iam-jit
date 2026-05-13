@@ -1,0 +1,25 @@
+name: research-01-56-create-saml-provider
+description: |
+  Reference: IAM-BYPASS-RESEARCH.md §1.56 (HackingTheCloud persistence)
+
+  SAML version of 1.55.
+
+  Expected behavior: persistence primitive — high risk.
+
+  Source: HackingTheCloud persistence
+policy:
+  Version: "2012-10-17"
+  Statement:
+    - Effect: Allow
+      Action:
+        - iam:CreateSAMLProvider
+        - iam:UpdateAssumeRolePolicy
+      Resource: "*"
+request:
+  spec:
+    access_type: read-write
+    duration:
+      duration_hours: 1
+expected:
+  score_min: 8
+  must_auto_approve: false

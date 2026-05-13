@@ -1,0 +1,25 @@
+name: research-01-19-lambda-updatefunctionconfig-layer
+description: |
+  Reference: IAM-BYPASS-RESEARCH.md §1.19 (Rhino "Malicious Layer" extension)
+
+  Attach a malicious Lambda Layer (or env vars / runtime override) to an
+  existing function with a privileged role. Library shadowing executes
+  attacker code on next invoke.
+
+  Expected behavior: privilege escalation primitive — high risk.
+
+  Source: Rhino "Malicious Layer" extension
+policy:
+  Version: "2012-10-17"
+  Statement:
+    - Effect: Allow
+      Action: lambda:UpdateFunctionConfiguration
+      Resource: "*"
+request:
+  spec:
+    access_type: read-write
+    duration:
+      duration_hours: 1
+expected:
+  score_min: 7
+  must_auto_approve: false

@@ -1,0 +1,28 @@
+name: research-01-40-sts-assumerole-saml-webidentity
+description: |
+  Reference: IAM-BYPASS-RESEARCH.md §1.40 (Multiple advisories)
+
+  Federated trust policy with permissive StringLike / missing audience
+  condition. Anyone with a fork or branch can claim the JWT.
+  # NB: abstract pattern, encoded the simplest concrete form — wide
+  # sts:AssumeRoleWithSAML and sts:AssumeRoleWithWebIdentity grants.
+
+  Expected behavior: federated trust abuse — high risk.
+
+  Source: AWS guidance on OIDC for GitHub Actions
+policy:
+  Version: "2012-10-17"
+  Statement:
+    - Effect: Allow
+      Action:
+        - sts:AssumeRoleWithSAML
+        - sts:AssumeRoleWithWebIdentity
+      Resource: "*"
+request:
+  spec:
+    access_type: read-write
+    duration:
+      duration_hours: 1
+expected:
+  score_min: 7
+  must_auto_approve: false

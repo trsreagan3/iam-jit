@@ -1,0 +1,40 @@
+name: research-08-4-mitre-t1562-disable-logs
+description: |
+  Reference: IAM-BYPASS-RESEARCH.md §8.4 (MITRE T1562.008)
+
+  Disable or Modify Cloud Logs — cloudtrail:StopLogging,
+  cloudtrail:DeleteTrail, cloudtrail:PutEventSelectors (event-selector
+  blinding), s3:PutLifecycleConfiguration to expire trail bucket,
+  wafv2:DisassociateWebACL, guardduty:DeleteDetector,
+  guardduty:UpdateDetector (disable), config:DeleteConfigRule,
+  config:DeleteDeliveryChannel, ec2:DeleteFlowLogs,
+  route53:DeleteQueryLoggingConfig.
+
+  Expected behavior: defense evasion — critical.
+
+  Source: https://attack.mitre.org/matrices/enterprise/cloud/
+policy:
+  Version: "2012-10-17"
+  Statement:
+    - Effect: Allow
+      Action:
+        - cloudtrail:StopLogging
+        - cloudtrail:DeleteTrail
+        - cloudtrail:PutEventSelectors
+        - s3:PutLifecycleConfiguration
+        - wafv2:DisassociateWebACL
+        - guardduty:DeleteDetector
+        - guardduty:UpdateDetector
+        - config:DeleteConfigRule
+        - config:DeleteDeliveryChannel
+        - ec2:DeleteFlowLogs
+        - route53:DeleteQueryLoggingConfig
+      Resource: "*"
+request:
+  spec:
+    access_type: read-write
+    duration:
+      duration_hours: 1
+expected:
+  score_min: 9
+  must_auto_approve: false

@@ -1,0 +1,37 @@
+name: agent-608-kinesis-stream-wildcard
+description: |
+  WHITE-BOX round 8: kinesis stream wildcards undetected. `kinesis:
+  GetRecords` on `arn:aws:kinesis:us-east-1:12345:stream/*` reads
+  records from EVERY stream in the account. The `_is_broad_resource`
+  collection_types map doesn't include kinesis at all (line 1419),
+  and `_is_strict_wild_top`'s single-bucket exemption (line 2503)
+  treats `stream/*` as narrow because count("/")==1 and bucket_part
+  ("stream") has no `*`. The literal-`*` check in the path-after-
+  slash branch fails too — `*` is the entire tail but the broad-
+  resource path returns false.
+
+  Real risk: 7 — production data streams typically contain user
+  events, payment messages, IoT telemetry. Mass exfil.
+
+  Det score: 1.
+
+  Proposed fix: extend the service allow-list for single-bucket
+  exemption (see agent-606 — restrict the `bucket/*` narrow logic
+  to S3 only).
+
+policy:
+  Version: "2012-10-17"
+  Statement:
+    - Effect: Allow
+      Action: "kinesis:GetRecords"
+      Resource: "arn:aws:kinesis:us-east-1:123456789012:stream/*"
+
+request:
+  spec:
+    access_type: read-write
+    duration:
+      duration_hours: 1
+
+expected:
+  score_min: 6
+  must_auto_approve: false

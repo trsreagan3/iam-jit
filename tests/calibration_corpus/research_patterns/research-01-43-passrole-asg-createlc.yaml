@@ -1,0 +1,27 @@
+name: research-01-43-passrole-asg-createlc
+description: |
+  Reference: IAM-BYPASS-RESEARCH.md §1.43 (PMapper autoscaling_edges)
+
+  Create a launch config that passes a privileged role, spin up ASG
+  to materialize EC2s with it.
+
+  Expected behavior: privilege escalation primitive — high risk.
+
+  Source: PMapper autoscaling_edges
+policy:
+  Version: "2012-10-17"
+  Statement:
+    - Effect: Allow
+      Action:
+        - iam:PassRole
+        - autoscaling:CreateLaunchConfiguration
+        - autoscaling:CreateAutoScalingGroup
+      Resource: "*"
+request:
+  spec:
+    access_type: read-write
+    duration:
+      duration_hours: 1
+expected:
+  score_min: 8
+  must_auto_approve: false

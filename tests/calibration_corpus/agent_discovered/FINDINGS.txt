@@ -2021,3 +2021,612 @@ correctly catches (no gap; do NOT add YAMLs for these):
   ecs:DescribeTasks, rds:DownloadDBLogFile*): line 2429, scores 7.
   PASS.
 
+
+## Round 8 — Black-box
+
+Black-box after round 7 closed ~120 architectural bypasses (Cyrillic/
+Greek/Hangul homoglyphs in Effect, Cf/Mn category strip for all
+invisibles, Principal ARN with wildcard partition/account/saml,
+broad-resource partition/region wildcards, ArnLike vacuous detection,
+Bool inverted SecureTransport, Numeric type-mismatched, DateLessThan
+far-future, policy-var in Condition VALUE, newer-service action
+additions for Q Business / DataZone / B2BI / MemoryDB / AppSync /
+Cognito IDP / Account API / Macie / CloudTrail EventDataStore / RDS
+endpoint / Verified Access).
+
+Total YAMLs: 30 (agent-500 through agent-529).
+
+Result split:
+  - gap >= 4 (true bypass — high severity): 7 YAMLs (500, 501, 502,
+    503, 504, 505, 521).
+  - gap = 3 (clear bypass): 7 YAMLs (508, 509, 510, 511, 512, 513,
+    514, 515 — code-exec composition siblings, bedrock subprefixes,
+    identitystore).
+  - gap = 1-2 (concerning but borderline): 12 YAMLs (516, 518, 519,
+    520, 522, 523, 524, 525, 526, 527, 528).
+  - gap = 0 (calibration-pin, current behavior matches expected):
+    3 YAMLs (506, 517, 529).
+
+Breakdown by attack class:
+
+  - Condition-value cross-account leakage (NEW class — Sec 11.4/11.10
+    extended): 4 YAMLs (504 PrincipalAccount foreign on sts:AssumeRole
+    gap 5, 506 PrincipalAccount foreign on KMS gap 0 [calibration],
+    507 SourceAccount foreign on Lambda gap 4, 503 PrincipalOrgID
+    foreign gap 5). The scorer's narrow-Resource heuristic dominates
+    even when the Condition VALUE points to a foreign account ID —
+    the cross-account direction is invisible.
+
+  - Wildcard-PrincipalArn in Condition (NEW — Sec 11.10 extended):
+    2 YAMLs (500 arn:aws:iam::*:role/* gap 6, 501 arn:aws:iam::*:root
+    gap 6). These are the SAME class as round-7's ArnLike *:* fix but
+    expressed via `StringLike aws:PrincipalArn` operator. Round-7
+    vacuous-condition catalog doesn't cover.
+
+  - CloudTrail-bucket attack patterns (Sec 8.4 T1562.008): 2 YAMLs
+    (502 s3:PutBucketLifecycleConfiguration on cloudtrail-logs-*
+    bucket gap 6, 505 cloudtrail:PutResourcePolicy narrow gap 5).
+    The narrow Resource (one bucket / one event-data-store)
+    suppresses the catastrophic-floor handling.
+
+  - Composition-rule siblings (Sec 1.x code-exec + PassRole): 4
+    YAMLs (512 amplify gap 3, 513 dms gap 3, 514 codepipeline gap 3,
+    515 emr-serverless gap 3). All four services should be in
+    `_CODE_EXECUTION_PRIMITIVES` per round-7 NN pattern but slipped
+    through.
+
+  - Service-aliasing — bedrock subprefixes (Sec 13.x): 3 YAMLs (508
+    bedrock-agent-runtime gap 3, 509 bedrock-agent control plane
+    gap 4, 510 bedrock-runtime gap 3). Round-7 added `bedrock`
+    proper as sensitive but missed `-agent`, `-agent-runtime`,
+    `-runtime` siblings.
+
+  - Identity Center sibling miss (Sec 1.52): 1 YAML (511
+    identitystore:CreateGroupMembership gap 3). `sso-admin:` admin
+    actions are catastrophic (round 2); `identitystore:` admin
+    actions on the same blast surface are not.
+
+  - StringNotEquals inverted Deny (Sec 11): 1 YAML (521 gap 1).
+    Borderline — current score 8, expected 9, the "inverted deny
+    + paired allow" semantic isn't surfaced as catastrophic.
+
+  - Newer-service catastrophic/high-impact additions: 7 YAMLs
+    (516 iam:Pass* glob gap 1, 518 omics gap 1, 519 iotsitewise
+    gap 1, 520 ssm-incidents gap 1, 522 mq gap 1, 525 kms:ReEncrypt
+    gap 1, 528 iot:CreatePolicy gap 1) — all gap 1; small additions
+    to existing high-impact sets.
+
+  - Cross-account exfil siblings (Sec 4.13 / 8.8 T1537): 1 YAML
+    (523 ec2:CopyImage gap 1). Round-7 QQ recommendation documented
+    but didn't implement the EC2 Create-side exfil additions.
+
+  - DNS hijack primitive: 1 YAML (527 route53:ChangeResourceRecordSets
+    narrow zone gap 2). High-impact-mutation handles Resource:* but
+    narrow zone ARN escapes — DNS rewrite on ONE zone is still full
+    MITM.
+
+  - Supply-chain / IAM tagging siblings: 2 YAMLs (524 iam:TagPolicy/
+    TagSAML/TagOIDC gap 1, 526 codeartifact:AssociateExternalConnection
+    gap 1).
+
+  - Calibration pins (gap 0): 3 YAMLs (506, 517, 529).
+
+# Top 5 worst bypasses (gap-≥4, ordered by gap):
+
+# 1. agent-500-principal-arn-stringlike-any-role
+#    Scored 1 vs expected 7 (gap 6). `StringLike aws:PrincipalArn
+#    arn:aws:iam::*:role/*` on a narrow KMS key — condition matches
+#    any IAM role in any AWS account. Round-7 ArnLike *:* vacuity
+#    catalog doesn't extend to StringLike on PrincipalArn. The narrow
+#    Resource ARN dominates scoring. Sec 11.10.
+
+# 2. agent-501-principal-arn-stringlike-any-root
+#    Scored 1 vs expected 7 (gap 6). Same class as agent-500 — value
+#    `arn:aws:iam::*:root` literally matches the root principal of
+#    every AWS account in the world. Sec 11.10 + 4.12.
+
+# 3. agent-502-cloudtrail-bucket-lifecycle-attack
+#    Scored 1 vs expected 7 (gap 6). `s3:PutBucketLifecycleConfiguration`
+#    on `aws-cloudtrail-logs-*` bucket — installing a 1-day lifecycle
+#    silently deletes every audit log. The narrow Resource (one bucket)
+#    looks scoped but the consequence is total evidence destruction.
+#    Sec 8.4 T1562.008.
+
+# 4. agent-503-principal-org-id-foreign
+#    Scored 1 vs expected 6 (gap 5). `aws:PrincipalOrgID = o-attackerorg`
+#    — structurally valid org ID, scorer can't verify it matches the
+#    deploying account's org. Should flag for manual review at
+#    floor 6 minimum. Sec 11.16.
+
+# 5. agent-504-principal-account-foreign-sts-assumerole
+#    Scored 3 vs expected 7 (gap 4). Trust policy on a privileged role
+#    with `aws:PrincipalAccount = 999999999999` (a different account
+#    than the resource owner). Cross-account assumption with no
+#    ExternalID / MFA / SAML aud. Same class as agent-300/agent-301
+#    federated principal but expressed via PrincipalAccount condition.
+#    Sec 4.11 + 11.4.
+
+# (Also notable: agent-505 CloudTrail PutResourcePolicy narrow gap 5,
+# agent-506 KMS PrincipalAccount-foreign gap 4, agent-509
+# bedrock-agent control-plane gap 4.)
+
+
+# Cross-cutting architectural recommendations (continuing letter
+# naming TT...):
+
+# TT. Cross-account direction detector. Sibling of round-7 KK
+#     (federated principal shape). When a Condition VALUE is an
+#     account ID (`aws:PrincipalAccount` / `aws:SourceAccount` /
+#     `aws:ResourceAccount`) that DIFFERS from the Resource ARN
+#     account-id segment, surface "cross-account grant" as a
+#     primary risk factor and floor at 7 (read) / 8 (write). For
+#     `sts:AssumeRole` trust policies, floor at 8 unless MFA /
+#     ExternalID / SAML aud condition is also present. Closes
+#     agents 504 (gap 5), 506 (gap 4), 507 (gap 4).
+
+# UU. Wildcard-PrincipalArn condition detector. The round-7 ArnLike
+#     *:* fix (NN) catches ArnLike operator; extend to
+#     `StringLike aws:PrincipalArn` / `StringEquals aws:PrincipalArn`
+#     / `StringLike aws:SourceArn`. Detect:
+#       - account-id segment is `*`
+#       - resource-id segment ends in `*` (e.g. `role/*`, `user/*`,
+#         `:root`)
+#       - partition segment is `*`
+#     All three → vacuous principal → floor 7.
+#     Closes agents 500 (gap 6), 501 (gap 6).
+
+# VV. PrincipalOrgID validation. Without account context the scorer
+#     can't verify the org-ID, but should surface "PrincipalOrgID
+#     unverified — manual review" at floor 6 for data-bearing reads
+#     on broad resources, AND treat `aws:PrincipalOrgID` empty-string
+#     / `*` / `o-*` (wildcard org ID) as vacuous. Closes agent 503
+#     (gap 5) borderline.
+
+# WW. CloudTrail-bucket-target detector. When a Resource ARN matches
+#     `aws-cloudtrail-logs-*` / `cloudtrail-*` / org-trail prefix,
+#     and the Action is any of `s3:PutBucketLifecycleConfiguration`,
+#     `s3:PutLifecycleConfiguration`, `s3:DeleteBucketPolicy`,
+#     `s3:PutBucketPolicy`, `s3:DeleteObject`, surface "CloudTrail
+#     bucket target — log destruction primitive" and floor at 7.
+#     Closes agent 502 (gap 6).
+#     Also: add `s3:PutBucketLifecycleConfiguration` and
+#     `s3:PutLifecycleConfiguration` to
+#     `_HIGH_IMPACT_MUTATION_ACTIONS` independent of bucket name —
+#     lifecycle on ANY bucket is content-destructive at scale.
+
+# XX. CloudTrail PutResourcePolicy on narrow ARN. Sibling of XX —
+#     `cloudtrail:PutResourcePolicy` already in `_CATASTROPHIC_ACTIONS`
+#     per round-7 OO but the narrow-Resource handling doesn't floor.
+#     Audit `_CATASTROPHIC_ACTIONS` enforcement on narrow Resource
+#     ARNs — should fire regardless of Resource specificity for any
+#     "Put/Delete-ResourcePolicy" action.
+
+# YY. Code-execution-primitives audit (round-5 NN extension):
+#     - `amplify:CreateApp`, `amplify:UpdateApp`, `amplify:CreateBranch`,
+#       `amplify:CreateDeployment`, `amplify:CreateBackendEnvironment`
+#     - `codepipeline:CreatePipeline`, `codepipeline:UpdatePipeline`,
+#       `codepipeline:StartPipelineExecution`,
+#       `codepipeline:PutActionRevision`
+#     - `dms:CreateReplicationTask`, `dms:StartReplicationTask`,
+#       `dms:CreateEndpoint`, `dms:ModifyEndpoint`,
+#       `dms:StartDataMigration`
+#     - `emr-serverless:CreateApplication`,
+#       `emr-serverless:StartJobRun`, `emr-serverless:UpdateApplication`,
+#       `emr-containers:StartJobRun`, `emr-containers:CreateManagedEndpoint`
+#     - `omics:CreateWorkflow`, `omics:StartRun`
+#     - `bedrock-agent:CreateAgent`, `bedrock-agent:UpdateAgent`,
+#       `bedrock-agent:CreateAgentActionGroup`,
+#       `bedrock-agent:AssociateAgentKnowledgeBase`,
+#       `bedrock-agent:PrepareAgent`
+#     Each forms a `+iam:PassRole` composition that should floor 9.
+#     Closes agents 512, 513, 514, 515, 518, 509.
+
+# ZZ. Bedrock service-prefix alias expansion. Round-7 added
+#     `bedrock` and `bedrock-agentcore` to `_SENSITIVE_SERVICES`;
+#     also add:
+#     - `bedrock-runtime` (runtime InvokeModel surface)
+#     - `bedrock-agent` (control-plane Agent definitions)
+#     - `bedrock-agent-runtime` (Agent invocation + RAG retrieval)
+#     Add the per-action high-risk-read members:
+#     - `bedrock-runtime:InvokeModel`,
+#       `bedrock-runtime:InvokeModelWithResponseStream`,
+#       `bedrock-runtime:Converse`,
+#       `bedrock-runtime:ConverseStream`
+#     - `bedrock-agent-runtime:InvokeAgent`,
+#       `bedrock-agent-runtime:Retrieve`,
+#       `bedrock-agent-runtime:RetrieveAndGenerate`
+#     Closes agents 508, 509, 510.
+
+# AAA. Identity Center identitystore-prefix catastrophics. Round-2
+#      added `sso-admin:Attach*ToPermissionSet` etc. as catastrophic;
+#      mirror to:
+#      - `identitystore:CreateGroupMembership`,
+#        `identitystore:DeleteGroupMembership`,
+#        `identitystore:UpdateGroupMembership`
+#      - `identitystore:CreateUser`, `identitystore:UpdateUser`,
+#        `identitystore:DeleteUser`
+#      - `identitystore:CreateGroup`, `identitystore:UpdateGroup`,
+#        `identitystore:DeleteGroup`
+#      Org-wide IdP modification is admin-equivalent.
+#      Closes agent 511 (gap 3).
+
+# BBB. StringNotEquals inverted-Deny + paired-Allow detector. When
+#      a Deny statement uses `StringNotEquals` / `StringNotLike` /
+#      `ArnNotEquals` on an identity-narrowing key (`aws:userid`,
+#      `aws:PrincipalArn`, `aws:username`) AND the same policy
+#      contains an Allow for the same actions, treat the Deny as
+#      INVERTED into a whitelist for the named exception → floor 9.
+#      Sibling of round-7 LL but Allow+Deny-paired detection.
+#      Closes agent 521 (gap 1, narrative).
+
+# CCC. Newer-service _HIGH_IMPACT_MUTATION_ACTIONS additions:
+#      - `omics:CreateWorkflow`, `omics:StartRun`
+#      - `iotsitewise:CreateAccessPolicy`,
+#        `iotsitewise:UpdateAccessPolicy`,
+#        `iotsitewise:DeleteAccessPolicy`
+#      - `ssm-incidents:CreateResponsePlan`,
+#        `ssm-incidents:UpdateResponsePlan`,
+#        `ssm-incidents:CreateReplicationSet`
+#      - `mq:CreateUser`, `mq:UpdateUser`, `mq:CreateBroker`,
+#        `mq:UpdateBrokerConfiguration`
+#      - `kms:ReEncryptFrom`, `kms:ReEncryptTo`,
+#        `kms:ImportKeyMaterial`, `kms:DeleteImportedKeyMaterial`
+#      - `iot:CreatePolicy`, `iot:AttachPolicy`,
+#        `iot:CreatePolicyVersion`, `iot:SetDefaultPolicyVersion`
+#      - `codeartifact:AssociateExternalConnection`,
+#        `codeartifact:DisassociateExternalConnection`,
+#        `codeartifact:PutPackageOriginConfiguration`
+#      Closes agents 518, 519, 520, 522, 525, 526, 528.
+
+# DDD. `iam:Pass*` glob → composition-rule semantics. The glob
+#      `iam:Pass*` matches `iam:PassRole`. When this glob appears
+#      AND the same policy has a code-execution-primitive, the
+#      composition floor should still fire (9). Currently the
+#      glob-resolution catalog catches `iam:Pass*` as
+#      "wildcard-in-sensitive-service" (factor 7) but doesn't apply
+#      the composition rule. Closes agent 516.
+
+# EEE. Cross-account-exfil EC2 Create-side (round-7 QQ already
+#      documented):
+#      - `ec2:CreateImage`, `ec2:CopyImage`, `ec2:CopySnapshot`,
+#        `ec2:CreateInstanceExportTask`,
+#        `ec2:CreateRestoreImageTask`,
+#        `ec2:CreateStoreImageTask`
+#      Closes agent 523.
+
+# FFF. Route53 narrow-zone DNS-hijack semantic.
+#      `route53:ChangeResourceRecordSets` on a narrow zone ARN
+#      should floor at 7 — DNS-level MITM on a single production
+#      zone is still full traffic hijack. Current high-impact-
+#      mutation handling only floors on Resource:*. Sibling treatment:
+#      `route53domains:TransferDomain`,
+#      `route53domains:UpdateDomainNameservers`. Closes agent 527.
+
+# GGG. IAM Tag-action sibling audit. Round-2 caught `iam:TagUser` /
+#      `iam:TagRole` as catastrophic; round-7 confirmed `iam:Tag*`
+#      glob fires. Audit explicit listings of the tag siblings:
+#      - `iam:TagPolicy`, `iam:UntagPolicy`
+#      - `iam:TagOpenIDConnectProvider`,
+#        `iam:UntagOpenIDConnectProvider`
+#      - `iam:TagSAMLProvider`, `iam:UntagSAMLProvider`
+#      - `iam:TagInstanceProfile`, `iam:UntagInstanceProfile`
+#      - `iam:TagServerCertificate`, `iam:UntagServerCertificate`
+#      All should be in `_CATASTROPHIC_ACTIONS` (or the iam-tagging
+#      high-floor set). Closes agent 524.
+
+
+# Honest negatives — patterns I tried from the research compendium
+# that the scorer ALREADY catches correctly (no gap; do NOT add
+# YAMLs):
+#
+# - 3a/3b/3e/3f. `iam:Update*`, `iam:Add*`, `iam:*Login*`,
+#   `iam:Put*Policy` glob: round-4 catastrophic-residue enumeration
+#   fires, scores 9. PASS.
+#
+# - 5a. lambda:CreateFunction + iam:AttachRolePolicy narrow: scores
+#   9 via the catastrophic `iam:AttachRolePolicy` floor. PASS
+#   (composition not surfaced as a named pattern but score is right).
+#
+# - H1/H2. iam:DeleteRolePermissionsBoundary /
+#   iam:PutRolePermissionsBoundary on Resource:* — catastrophic
+#   floor fires at 9. PASS.
+#
+# - AC11. lambda:UpdateFunctionCode regional-wildcard + PassRole
+#   composition: scores 9. PASS. (Calibration pin agent-517.)
+#
+# - AC22. iam:UpdateSAMLProvider on narrow ARN — catastrophic floor
+#   fires at 9. PASS.
+#
+# - AC30. organizations:CreatePolicy + AttachPolicy: scores 9. PASS.
+#
+# - AC17. accessanalyzer:DeleteAnalyzer on Resource:*: scores 8.
+#   PASS.
+#
+# - AC29. route53:ChangeResourceRecordSets on Resource:*: scores 8.
+#   PASS.
+#
+# - T2/T3. inspector2:Disable*, detective:DeleteGraph: catastrophic
+#   floors fire at 9 / 8. PASS.
+#
+# - V1 reconfirmed: identitystore:CreateGroupMembership scores 6 —
+#   PASS the test BUT a clear gap (pinned as agent-511).
+#
+# - 7b. Wiz JINX-2401 chain (iam:CreateUser + CreatePolicy +
+#   CreateAccessKey + CreateLoginProfile + bedrock:InvokeModel):
+#   scores 9. PASS at the standard catastrophic-IAM floor; the
+#   "10" expectation reflects the multi-stage chain narrative but
+#   isn't a score gap.
+#
+# - 4a. kms:CallerAccount foreign + kms:Decrypt on Resource:*:
+#   scores 7 (correct — broad-on-sensitive). PASS.
+#
+# - C1. aws:PrincipalAccount foreign + secretsmanager:GetSecretValue
+#   narrow with `prod-*` resource ID: scores 7 — the resource glob
+#   triggers broad-secret-bearing-read floor independent of
+#   PrincipalAccount semantics. PASS at the round-7 floor.
+#
+# - 1a/1b. Top-level PermissionsBoundary key / session-policy shape
+#   with `Action:* Resource:*`: scores 10 catastrophic regardless
+#   of out-of-band keys. PASS.
+#
+# - sts:AssumeRole on arn:aws:iam::*:role/* (recon + assume
+#   composition): caught by round-1 strict-wildcard collection +
+#   round-7 composition fix, scores 9. PASS.
+#
+# - 8a. CloudTrail bucket + PutBucketPolicy/DeleteBucketPolicy on
+#   `aws-cloudtrail-logs-*`: scores 9 — DeleteBucketPolicy /
+#   PutBucketPolicy already catastrophic. PASS.  (The 502 fixture
+#   uses *Lifecycle*Configuration specifically, which is the
+#   gap.)
+
+
+## Round 8 — White-box
+
+White-box probe after round 7 closed the Cyrillic/Greek/Hangul Effect
+homoglyphs, broad-resource partition/region wildcards, ArnLike *:*
+vacuity, Bool inverted SecureTransport, Numeric type-mismatched
+operator, DateLessThan far-future, policy-var-in-Condition-value, and
+extensive newer-service action additions. Rounds 6+7 also fixed
+Effect-as-list / Effect-empty-string defenses (lines 1366-1380).
+
+Reading review.py end-to-end, three architectural gaps stand out:
+
+1.  **Trust-policy semantics are absent.** The per-statement loop
+    has no notion of "this is a trust policy" — a statement whose
+    Action is `sts:AssumeRole*` and whose Principal is set is treated
+    as an identity-policy statement. `_principal_is_public` only
+    fires on bare `*` or wildcard-ARN partition/account, so cross-
+    account ARN principals (`arn:aws:iam::999...:root`,
+    `arn:aws:iam::999...:user/attacker`, etc.) score 3 ("scoped or
+    limited; no broad patterns"). This is the BIGGEST round-8 gap by
+    severity — it makes the scorer blind to the textbook Pacu
+    `iam__backdoor_assume_role` primitive.
+    Fixtures: agent-600 (cross-account root, gap 4), agent-601
+    (cross-account user, gap 4), agent-602 (same-account root, gap
+    2), agent-623 (wildcard role path, gap 4), agent-626 (root +
+    broken ExternalId, gap 3), agent-640 (Service + cross-account
+    AWS root mixed, gap 1).
+
+2.  **`_is_strict_wild_top`'s single-bucket exemption is service-
+    agnostic.** Line 2503: `r.startswith("arn:") and r.endswith("/*")
+    and r.count("/") == 1` makes ANY `service/*` shape look
+    narrow ("the one bucket case"). This is correct for S3, where
+    `arn:aws:s3:::bucket/*` IS a single bucket. For DynamoDB,
+    Kinesis, DAX, OpenSearch, etc., `service/*` means "every resource
+    of that collection type" — full account-wide blast.
+    Fixtures: agent-606 (dynamodb table/*, gap 5), agent-608
+    (kinesis stream/*, gap 5), agent-609 (dax cache/*, gap 4),
+    agent-607 (kms key/*, gap 1 — partial).
+
+3.  **Trust-policy + federated-principal handling is asymmetric.**
+    The Service-principal-without-Condition rule (line 1761) fires
+    for Service-typed principals but not for Federated-typed; the
+    `_condition_is_vacuous` Pattern 6 fires on `StringLike :sub :aud`
+    but not `StringEquals` with literal `*`.
+    Fixtures: agent-603 (Cognito Federated no-condition, gap 3),
+    agent-604 (Google :aud StringEquals=*, gap 2), agent-605
+    (Service wildcard suffix `*.amazonaws.com`, gap 2).
+
+4.  **Crash-class bugs on malformed Statement lists.** `_deterministic`
+    (line 1700) iterates `policy["Statement"]` without per-element
+    type validation. `Statement: [null]` or `Statement: ["string"]`
+    cause `AttributeError: 'NoneType'/'str' object has no attribute
+    'get'` to bubble up. In any callsite that wraps `analyze_policy`
+    in a try/except + falls back to score 1 (a common defensive
+    pattern), this is a SCORE-1 BYPASS for a deliberately malformed
+    policy that includes an Allow * Action elsewhere in the list.
+    Fixtures: agent-636 (Statement [null] crash), agent-637 (string
+    entry crashes before reaching Allow *, gap 4-9 depending on
+    framework wrapping).
+
+5.  **No catalog awareness of "data-bearing read" outside the
+    `_SECRET_BEARING_READS` set.** `cloudformation:GetTemplate*`
+    (templates often hold inline secrets), `cognito-identity:
+    GetCredentialsForIdentity` (mints creds), `identitystore:
+    CreateUser`/`CreateGroupMembership` (org-wide IdP write),
+    `sts:TagSession` (ABAC bypass primitive), `iam:CreateService
+    LinkedRole` (mints managed-policy principals) all score 4-6
+    — below catastrophic. The catalog is missing roughly a dozen
+    high-blast actions whose `_SENSITIVE_SERVICES` route caps the
+    floor at 6.
+    Fixtures: agent-615 (gap 2), agent-616 (gap 2), agent-617
+    (gap 2), agent-619 (gap 1), agent-621 (gap 1).
+
+
+Total YAMLs: 36 (agent-600 through agent-641; 610/611/624 omitted
+because rounds 6/7 already implemented the fix; verified during
+probe).
+
+Result split:
+  - gap >= 4 (true bypass — high severity): 11 YAMLs (600, 601,
+    603, 606, 608, 609, 612, 623, 633, 638, 626).
+  - gap = 2-3 (clear bypass): 10 YAMLs (602, 604, 605, 613, 615,
+    616, 617, 622, 626, 634, 635).
+  - gap = 1 (concerning, smaller): 12 YAMLs (607, 614, 618, 619,
+    620, 621, 625, 627, 628, 629, 640, 641).
+  - calibration / overlap / crash: 4 YAMLs (630 decoy-Deny
+    narrative-only no score gap, 631 double-colon currently OK,
+    636/637 crash class).
+
+Breakdown by attack class:
+
+  - Trust-policy semantics (THIS IS THE BIG ONE): 8 YAMLs (600,
+    601, 602, 603, 604, 623, 626, 640) — all variations on
+    "Principal is set, Action is sts:AssumeRole*, scorer ignores
+    the trust-policy form." Cumulative gap across these fixtures
+    is 21 score-points — by far the largest single architectural
+    gap in this round.
+
+  - Service-agnostic `_is_strict_wild_top` exemption (the
+    `service/*` narrow-vs-broad confusion): 3 YAMLs (606, 608,
+    609) — gap 14 cumulative.
+
+  - Malformed Effect/Statement/Action defects: 5 YAMLs (612, 633,
+    636, 637, 638). The "malformed = worst-case" principle from
+    line 1101 is applied to MISSING Effect but not to malformed
+    Statement, empty Action, or non-string Action.
+
+  - Action catalog additions (sensitive-but-not-catastrophic):
+    7 YAMLs (615, 616, 617, 618, 619, 620, 621).
+
+  - Resource-shape edge cases: 6 YAMLs (607 KMS key/*, 622 empty
+    account ARN, 625 Resource-as-dict, 627 s3express, 628 sns
+    topic /*, 635 empty partition).
+
+  - Condition vacuity extensions: 2 YAMLs (614 StringEquals
+    literal `*`, 632 vacuous-condition on narrow PassRole — should
+    elevate the floor).
+
+  - Version/2008-grammar awareness: 2 YAMLs (613 Version 2008
+    explicitly, 639 Version omitted).
+
+  - PassRole narrow-with-admin-arn heuristic: 1 YAML (641).
+
+  - SCP / wildcard NotAction sibling: 1 YAML (634 EC2 mass recon
+    — metadata-listing skip too aggressive).
+
+  - Defense-evasion sibling (sso-admin Delete/Detach not
+    catastrophic): 1 YAML (620).
+
+
+# Top 5 architectural gaps (proposed fixes, 1-2 sentences each):
+
+# HHH. Trust-policy detector. When a statement has Principal set
+#      AND Action covers `sts:AssumeRole*`, evaluate principal-by-
+#      principal: any AWS-ARN value with a foreign account ID (or
+#      `:root` in own account) → floor 7; Service with `*` in name
+#      → floor 8; Federated without Condition → floor 6; condition
+#      vacuity is per-condition (already detected) but the floor
+#      should add — not max — when the trust-policy shape is
+#      recognized. Closes agents 600-605, 623, 626, 640 (gap
+#      cumulative ~21).
+
+# III. Service-aware single-bucket exemption. Limit the
+#      `arn:...:bucket/*` narrow-treatment in `_is_strict_wild_top`
+#      (line 2503) to services where that shape ACTUALLY means "one
+#      bucket": currently only S3. For dynamodb, kinesis, dax,
+#      opensearch, sns, sqs, glue, codebuild, etc., `service/*` is
+#      a COLLECTION wildcard. Add an allow-list of single-bucket-
+#      semantic services (just `s3` for now) and treat all others
+#      as strict broad. Closes agents 606, 608, 609 (gap ~14).
+
+# JJJ. Malformed-shape worst-case rule extension. Apply the
+#      existing "malformed = worst-case" principle (line 1101
+#      docstring) consistently across Statement-list per-element
+#      validation (skip non-dict entries + flag), `_as_list` non-
+#      str/non-list values (return malformed-sentinel), and Effect/
+#      Action/Resource type-handling failures. Closes agents 612,
+#      633, 636, 637, 638 (gap ~22 cumulative). The crash class
+#      (636/637) is the most urgent — a callsite wrapping
+#      analyze_policy in try/except + score-1 fallback turns these
+#      into TOTAL bypasses.
+
+# KKK. Sensitive-service-narrow-write catalog. Expand
+#      `_HIGH_IMPACT_MUTATION_ACTIONS` with the post-round-7 finds:
+#      `cloudformation:GetTemplate`, `cloudformation:GetTemplate
+#      Summary`, `cloudformation:GetStackPolicy` (to `_SECRET_BEARING_
+#      READS`), `cognito-identity:GetCredentialsForIdentity`,
+#      `cognito-identity:GetOpenIdTokenForDeveloperIdentity`,
+#      `identitystore:CreateUser`, `identitystore:CreateGroupMembership`,
+#      `identitystore:CreateGroup` (to `_CATASTROPHIC_ACTIONS`),
+#      `sts:TagSession`, `sts:SetSourceIdentity` (to `_HIGH_RISK_
+#      ACTIONS`), `iam:CreateServiceLinkedRole`,
+#      `lambda:InvokeFunctionUrl`, `sns:Publish`,
+#      `appstream:CreateImageBuilder`/`CreateFleet`/`CreateStreamingURL`,
+#      `sso-admin:Delete*` and `sso-admin:Detach*`. Closes agents
+#      615-621, 628, 629 (gap ~12 cumulative).
+
+# LLL. ARN-segment empty-detection + Version-aware variable-
+#      interpolation warnings. Treat empty partition/region/account
+#      segments (parts[1/3/4] in ("", "*")) consistently in
+#      `_is_broad_resource` and `_is_strict_wild_top`. When `Version`
+#      is missing or `2008-10-17`, flag any Resource containing
+#      `${aws:...}` as defect-class (the variables don't expand).
+#      Closes agents 622, 635, 613, 639.
+
+
+# Honest negatives — round-8 attempts the scorer CORRECTLY catches:
+#
+# - **Sid 'AllowEverything' on Effect=Deny**: scored 1 (correct —
+#   Deny statement, no Allow → no risk). The `Sid` field has no
+#   semantic impact on scoring; "reassuring Sid" + Action:* still
+#   scores 10 from the Action handling (line 2082). PASS.
+#   Sid is metadata-only; the scorer correctly ignores it. No fix
+#   needed.
+#
+# - **Top-level Condition outside Statement**: scored 9 (Allow
+#   catastrophic still fires). The stray top-level Condition is
+#   ignored by AWS too. PASS.
+#
+# - **Effect Deny + Allow catastrophic, Deny on vacuous condition**:
+#   scored 9 (the Allow catastrophic is caught). The "decoy Deny"
+#   gap is narrative — the scorer DOESN'T surface "this Deny will
+#   never fire" but the score is right because the Allow alone is
+#   catastrophic-floor-9. PASS on score; narrative gap documented
+#   as agent-630.
+#
+# - **Action `*:Decrypt` (wildcard service)**: scored 9 (round-7
+#   wildcard-service handling at line 2105). PASS.
+#
+# - **NotAction `iam:Delete*` on broad resource**: scored 9 — the
+#   admin-minus-set rule fires. PASS.
+#
+# - **Effect 'aLLOw' (mixed case)**: scored 10 — `_norm_grammar_str`
+#   + `.lower()` handles. PASS.
+#
+# - **NotAction `iam:*` on narrow IAM resource**: scored 9 — the
+#   catastrophic-residue enumeration (line 1890) catches the
+#   non-excluded catastrophic actions. PASS.
+#
+# - **PassRole + StringEquals aws:RequestedRegion='us-east-*'
+#   on Resource:* (broken condition, PassRole broad)**: scored 9
+#   — PassRole-broad floor 9 fires regardless of broken condition.
+#   PASS at the action floor. (The condition-vacuity narrative
+#   gap is documented as agent-614 / agent-632 for the narrow
+#   variants.)
+#
+# - **bedrock:InvokeModel on cross-account ARN**: scored 8 (cross-
+#   account-exfil tier from round 6). PASS.
+#
+# - **NotPrincipal empty `{AWS: []}` on Allow**: scored 9 by line
+#   1711. PASS.
+#
+# - **iam:PassRole + RAM CreateResourceShare composition**: scored
+#   9 (RAM is in cross-account-exfil already). PASS.
+#
+# - **PassRole + ExternalId condition (legitimate use)**: PASS —
+#   the scorer doesn't false-flag this benign pattern.
+#
+# - **`iam:*Network*` infix wildcard**: scored 8 (sensitive-service
+#   wildcard action). PASS. (No catastrophic-residue match for
+#   this specific glob.)
+#
+# - **Federated principal arn:aws:iam::*:saml-provider/foo**:
+#   scored 9 by line 1316 (round-7 fix). PASS.
+#
+# - **Effect ['Allow'] list-of-one + Effect '' empty string +
+#   Effect ['Allow','Deny'] list**: all handled by lines 1366-1380
+#   (round-8 fix already in tree). PASS. (My initial YAMLs for
+#   these — agent-610/611/624 — deleted after verification showed
+#   the fixes were merged.)
+

@@ -1,0 +1,25 @@
+name: research-02-6-pacu-cloudtrail-download-events
+description: |
+  Reference: IAM-BYPASS-RESEARCH.md §2.6 (Pacu cloudtrail__download_event_history)
+
+  Read logs to learn what is monitored.
+
+  Expected behavior: defensive recon — moderate risk.
+
+  Source: https://github.com/RhinoSecurityLabs/pacu/wiki/Module-Details
+policy:
+  Version: "2012-10-17"
+  Statement:
+    - Effect: Allow
+      Action:
+        - cloudtrail:LookupEvents
+        - cloudtrail:GetTrail
+      Resource: "*"
+request:
+  spec:
+    access_type: read-only
+    duration:
+      duration_hours: 1
+expected:
+  score_min: 4
+  must_auto_approve: false

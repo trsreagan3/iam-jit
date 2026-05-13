@@ -1,0 +1,32 @@
+name: research-11-2-sourceip-private-cidr
+description: |
+  Reference: IAM-BYPASS-RESEARCH.md §11.2 (Sysdig)
+
+  aws:SourceIp with private CIDR. AWS rejects requests evaluated via
+  SDK from inside VPC private IPs against aws:SourceIp — the public
+  IP is what AWS sees. Tools that flag 10.0.0.0/8 in aws:SourceIp as
+  "internal-only" miss that the condition never matches, effectively
+  granting *.
+
+  Expected behavior: condition never matches — Allow never applies, OR
+  Deny never applies. Depends on Effect. Here Allow + private CIDR
+  means Allow rarely matches — but if used to gate Deny, attacker wins.
+
+  Source: https://www.sysdig.com/blog/iam-security-misconfiguration
+policy:
+  Version: "2012-10-17"
+  Statement:
+    - Effect: Allow
+      Action: "*"
+      Resource: "*"
+      Condition:
+        IpAddress:
+          aws:SourceIp: "10.0.0.0/8"
+request:
+  spec:
+    access_type: read-write
+    duration:
+      duration_hours: 1
+expected:
+  score_min: 6
+  must_auto_approve: false

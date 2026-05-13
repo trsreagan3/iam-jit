@@ -1,0 +1,41 @@
+name: agent-505-cloudtrail-putresourcepolicy-narrow
+description: |
+  BLACK-BOX Round 8. Research Sec 8.4 (T1562.008) + round-7 OO recommendation (CloudTrail
+  Lake siblings).
+
+  `cloudtrail:PutResourcePolicy` on a narrow Event Data Store ARN lets the attacker rewrite
+  the resource-based policy that controls who can query the CloudTrail Lake. They open it to
+  their own account or `Principal:*` and silently read every API call ever made.
+
+  Round 7 added `cloudtrail:PutResourcePolicy` to `_CATASTROPHIC_ACTIONS` per the OO
+  recommendation, but the score-on-narrow-resource is still 3, not 8 — suggesting either
+  the addition didn't land or the narrow Resource ARN suppresses the catastrophic floor.
+
+  Det score: 3.
+  Real risk: 8.
+
+  Scorer gap: catastrophic-action floor doesn't fire for `cloudtrail:PutResourcePolicy`
+  even on a narrow ARN. Compare with `cloudtrail:DeleteResourcePolicy` (catastrophic
+  floor fires at 9 in agent-505-pair tests).
+
+  Proposed fix: ensure `cloudtrail:PutResourcePolicy` is in `_CATASTROPHIC_ACTIONS`. If
+  already present, fix the narrow-Resource-ARN catastrophic-floor handling for the action.
+
+  Research-doc pattern: §8.4 — defense-evasion via resource-policy on the audit trail.
+
+policy:
+  Version: "2012-10-17"
+  Statement:
+    - Effect: Allow
+      Action: "cloudtrail:PutResourcePolicy"
+      Resource: "arn:aws:cloudtrail:us-east-1:123456789012:eventdatastore/abc123"
+
+request:
+  spec:
+    access_type: read-write
+    duration:
+      duration_hours: 1
+
+expected:
+  score_min: 8
+  must_auto_approve: false

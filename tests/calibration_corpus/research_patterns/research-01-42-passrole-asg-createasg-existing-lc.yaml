@@ -1,0 +1,24 @@
+name: research-01-42-passrole-asg-createasg-existing-lc
+description: |
+  Reference: IAM-BYPASS-RESEARCH.md §1.42 (PMapper autoscaling_edges)
+
+  Spawn instances using an existing launch configuration that already
+  binds a privileged instance profile.
+
+  Expected behavior: privilege escalation primitive — high risk.
+
+  Source: https://raw.githubusercontent.com/nccgroup/PMapper/master/principalmapper/graphing/autoscaling_edges.py
+policy:
+  Version: "2012-10-17"
+  Statement:
+    - Effect: Allow
+      Action: autoscaling:CreateAutoScalingGroup
+      Resource: "*"
+request:
+  spec:
+    access_type: read-write
+    duration:
+      duration_hours: 1
+expected:
+  score_min: 7
+  must_auto_approve: false

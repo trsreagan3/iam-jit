@@ -1,0 +1,25 @@
+name: research-01-25-cfn-changeset
+description: |
+  Reference: IAM-BYPASS-RESEARCH.md §1.25 (PMapper cloudformation_edges)
+
+  Change-set route to alter infrastructure under an existing stack role.
+
+  Expected behavior: privilege escalation primitive — high risk.
+
+  Source: PMapper cloudformation_edges
+policy:
+  Version: "2012-10-17"
+  Statement:
+    - Effect: Allow
+      Action:
+        - cloudformation:CreateChangeSet
+        - cloudformation:ExecuteChangeSet
+      Resource: "*"
+request:
+  spec:
+    access_type: read-write
+    duration:
+      duration_hours: 1
+expected:
+  score_min: 7
+  must_auto_approve: false

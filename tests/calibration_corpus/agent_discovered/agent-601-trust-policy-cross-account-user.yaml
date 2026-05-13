@@ -1,0 +1,44 @@
+name: agent-601-trust-policy-cross-account-user
+description: |
+  WHITE-BOX round 8: companion to agent-600. Specific cross-account
+  USER (not root) on a trust policy. Same gap (no trust-policy
+  detection), still gap 6.
+
+  `Principal: {AWS: "arn:aws:iam::999999999999:user/attacker"}` on
+  `sts:AssumeRole` — even narrower than `:root` (just one specific
+  user) but the user is in the ATTACKER's account, so the role-owning
+  account is granting persistent-cross-account assume to a foreign
+  user. This is the form Pacu emits for `iam__backdoor_assume_role`.
+
+  Source-code rule exploited: same as agent-600 — no trust-policy
+  semantics at all.
+
+  Research-doc pattern: §1.14, §1.39 (Pacu iam__backdoor_assume_role).
+
+  Real risk: 9 — same as agent-600. The "narrower" target (specific
+  user vs root) does not reduce risk; the foreign account owner can
+  still rename, swap-creds-on, or use AWS console to impersonate that
+  user.
+
+  Det score: 3.
+
+  Proposed fix: same as agent-600 — cross-account-ARN check in trust-
+  policy detection.
+
+policy:
+  Version: "2012-10-17"
+  Statement:
+    - Effect: Allow
+      Principal:
+        AWS: "arn:aws:iam::999999999999:user/attacker"
+      Action: "sts:AssumeRole"
+
+request:
+  spec:
+    access_type: read-write
+    duration:
+      duration_hours: 1
+
+expected:
+  score_min: 7
+  must_auto_approve: false

@@ -1,0 +1,27 @@
+name: research-05-4-uber-thycotic-admin-creds
+description: |
+  Reference: IAM-BYPASS-RESEARCH.md §5.4 (Uber 2022)
+
+  Hardcoded admin credentials in script on share; excessive blast radius
+  from a single privileged identity (AWS, GSuite, IdP all under one
+  secret manager).
+  # NB: abstract incident, encoded the simplest concrete form — wide
+  # admin-equivalent IAM policy.
+
+  Expected behavior: full admin — critical.
+
+  Source: https://www.infoq.com/news/2022/09/Uber-breach-mfa-fatigue/
+policy:
+  Version: "2012-10-17"
+  Statement:
+    - Effect: Allow
+      Action: "*"
+      Resource: "*"
+request:
+  spec:
+    access_type: read-write
+    duration:
+      duration_hours: 1
+expected:
+  score_min: 10
+  must_auto_approve: false

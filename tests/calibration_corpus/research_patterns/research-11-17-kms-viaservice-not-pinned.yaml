@@ -1,0 +1,26 @@
+name: research-11-17-kms-viaservice-not-pinned
+description: |
+  Reference: IAM-BYPASS-RESEARCH.md §11.17 (Sysdig)
+
+  Allows decrypt only when the call is via a specific AWS service.
+  Missing kms:ViaService lets attackers decrypt via any service.
+
+  Expected behavior: decrypt via any service — high risk.
+
+  Source: https://www.sysdig.com/blog/iam-security-misconfiguration
+policy:
+  Version: "2012-10-17"
+  Statement:
+    - Effect: Allow
+      Action:
+        - kms:Decrypt
+        - kms:GenerateDataKey
+      Resource: "*"
+request:
+  spec:
+    access_type: read-write
+    duration:
+      duration_hours: 1
+expected:
+  score_min: 7
+  must_auto_approve: false

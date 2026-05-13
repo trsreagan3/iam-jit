@@ -1,0 +1,28 @@
+name: research-01-46-passrole-ecs-register-starttask
+description: |
+  Reference: IAM-BYPASS-RESEARCH.md §1.46 (HackingTheCloud path 24)
+
+  Register an attacker-controlled host as an ECS container instance;
+  start a task with the privileged task role.
+
+  Expected behavior: privilege escalation primitive — high risk.
+
+  Source: HackingTheCloud path 24
+policy:
+  Version: "2012-10-17"
+  Statement:
+    - Effect: Allow
+      Action:
+        - iam:PassRole
+        - ecs:RegisterContainerInstance
+        - ecs:StartTask
+        - ecs:DeregisterContainerInstance
+      Resource: "*"
+request:
+  spec:
+    access_type: read-write
+    duration:
+      duration_hours: 1
+expected:
+  score_min: 8
+  must_auto_approve: false

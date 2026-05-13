@@ -1,0 +1,25 @@
+name: research-01-33-passrole-sagemaker-processingjob
+description: |
+  Reference: IAM-BYPASS-RESEARCH.md §1.33 (PMapper sagemaker_edges)
+
+  Same as 1.32 but with processing jobs.
+
+  Expected behavior: privilege escalation primitive — high risk.
+
+  Source: PMapper sagemaker_edges
+policy:
+  Version: "2012-10-17"
+  Statement:
+    - Effect: Allow
+      Action:
+        - iam:PassRole
+        - sagemaker:CreateProcessingJob
+      Resource: "*"
+request:
+  spec:
+    access_type: read-write
+    duration:
+      duration_hours: 1
+expected:
+  score_min: 8
+  must_auto_approve: false

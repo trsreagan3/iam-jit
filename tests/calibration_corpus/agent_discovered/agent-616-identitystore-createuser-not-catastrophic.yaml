@@ -1,0 +1,57 @@
+name: agent-616-identitystore-createuser-not-catastrophic
+description: |
+  WHITE-BOX round 8: `identitystore:CreateUser` and
+  `identitystore:CreateGroupMembership` are NOT in
+  `_CATASTROPHIC_ACTIONS` despite being SSO-tier identity creation.
+  AWS Identity Store is the user/group registry that backs IAM
+  Identity Center; creating a user there is the same blast as
+  `iam:CreateUser` (in catastrophic — line 759).
+
+  `identitystore:CreateGroupMembership` is even worse: adding
+  yourself to an existing group inherits any PermissionSet assigned
+  to that group (which routinely includes AdministratorAccess via
+  AccountAssignment).
+
+  The service `identitystore` IS in `_SENSITIVE_SERVICES` (line
+  56), so the rule at line 2260 fires:
+      service in effective_sensitive and wildcard_resource → score 6.
+  But 6 ≤ default auto-approve threshold of 5 + 1 — borderline and
+  significantly below the catastrophic 9 it deserves.
+
+  Source-code rule exploited: `_CATASTROPHIC_ACTIONS` (line 608)
+  omits `identitystore:CreateUser`,
+  `identitystore:CreateGroupMembership`,
+  `identitystore:CreateGroup`. The IAM equivalents
+  (`iam:CreateUser`, `iam:AddUserToGroup`) ARE in the set.
+
+  Research-doc pattern: §9.1 (sso-admin + identitystore actions
+  enumeration).
+
+  Real risk: 9 — create new principal in the org SSO store and
+  assign them to admin groups; full account compromise.
+
+  Det score: 6.
+
+  Proposed fix: add to `_CATASTROPHIC_ACTIONS`:
+  `identitystore:CreateUser`, `identitystore:CreateGroup`,
+  `identitystore:CreateGroupMembership`, `identitystore:UpdateUser`,
+  `identitystore:UpdateGroup`.
+
+policy:
+  Version: "2012-10-17"
+  Statement:
+    - Effect: Allow
+      Action:
+        - "identitystore:CreateUser"
+        - "identitystore:CreateGroupMembership"
+      Resource: "*"
+
+request:
+  spec:
+    access_type: read-write
+    duration:
+      duration_hours: 1
+
+expected:
+  score_min: 8
+  must_auto_approve: false

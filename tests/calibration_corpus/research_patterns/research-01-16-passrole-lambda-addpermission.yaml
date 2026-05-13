@@ -1,0 +1,28 @@
+name: research-01-16-passrole-lambda-addpermission
+description: |
+  Reference: IAM-BYPASS-RESEARCH.md §1.16 (Rhino #16)
+
+  Create a Lambda with a privileged role, then grant cross-account
+  invoke via lambda:AddPermission. No lambda:InvokeFunction on
+  attacker's side needed.
+
+  Expected behavior: privilege escalation + cross-account exposure — high risk.
+
+  Source: Rhino #16
+policy:
+  Version: "2012-10-17"
+  Statement:
+    - Effect: Allow
+      Action:
+        - iam:PassRole
+        - lambda:CreateFunction
+        - lambda:AddPermission
+      Resource: "*"
+request:
+  spec:
+    access_type: read-write
+    duration:
+      duration_hours: 1
+expected:
+  score_min: 8
+  must_auto_approve: false

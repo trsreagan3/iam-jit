@@ -1,0 +1,24 @@
+name: research-01-10-attachgrouppolicy
+description: |
+  Reference: IAM-BYPASS-RESEARCH.md §1.10 (Rhino #8)
+
+  Attach administrative managed policy to a group the attacker is a
+  member of.
+
+  Expected behavior: direct privilege escalation primitive — critical.
+
+  Source: Rhino #8
+policy:
+  Version: "2012-10-17"
+  Statement:
+    - Effect: Allow
+      Action: iam:AttachGroupPolicy
+      Resource: "*"
+request:
+  spec:
+    access_type: read-write
+    duration:
+      duration_hours: 1
+expected:
+  score_min: 9
+  must_auto_approve: false

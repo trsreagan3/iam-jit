@@ -1,0 +1,33 @@
+name: research-08-2-mitre-t1098-account-manipulation
+description: |
+  Reference: IAM-BYPASS-RESEARCH.md §8.2 (MITRE T1098.001, T1098.003, T1098.004, T1136.003)
+
+  Account Manipulation: iam:CreateAccessKey, iam:CreateLoginProfile
+  on another user; iam:AttachRolePolicy, iam:PutRolePolicy,
+  iam:UpdateAssumeRolePolicy, sso-admin:Attach*ToPermissionSet;
+  iam:CreateUser, iam:CreateRole.
+
+  Expected behavior: persistence via account manipulation — critical.
+
+  Source: https://attack.mitre.org/matrices/enterprise/cloud/
+policy:
+  Version: "2012-10-17"
+  Statement:
+    - Effect: Allow
+      Action:
+        - iam:CreateAccessKey
+        - iam:CreateLoginProfile
+        - iam:AttachRolePolicy
+        - iam:PutRolePolicy
+        - iam:UpdateAssumeRolePolicy
+        - iam:CreateUser
+        - iam:CreateRole
+      Resource: "*"
+request:
+  spec:
+    access_type: read-write
+    duration:
+      duration_hours: 1
+expected:
+  score_min: 9
+  must_auto_approve: false

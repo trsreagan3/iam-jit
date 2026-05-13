@@ -1,0 +1,59 @@
+name: agent-614-stringequals-literal-wildcard-region
+description: |
+  WHITE-BOX round 8: condition vacuity gap. `StringEquals` does NOT
+  expand `*` — values are literal. So
+  `StringEquals: {aws:RequestedRegion: "us-east-*"}` is the literal
+  region string `us-east-*`, which NEVER matches any real
+  RequestedRegion value. The condition NEVER MATCHES, so the entire
+  `Allow` NEVER FIRES.
+
+  This is a policy-broken pattern: the author meant `StringLike`
+  (where `*` expands) but wrote `StringEquals`. The Allow statement
+  thus grants nothing — UNTIL someone fixes the operator and the
+  scope opens.
+
+  The scorer's `_condition_is_vacuous` Pattern 6 (line 1121) handles
+  `StringLike` with `*` in federated `:sub`/`:aud` keys. Pattern 1
+  (line 1113) handles `StringLike` with bare `*` value. NEITHER
+  fires for `StringEquals` with `*` value.
+
+  Companion to agent-604 (`StringEquals` on `:aud` with `*`). This
+  one is the resource-key analog: any `StringEquals` value whose
+  string contains a `*` is — under AWS's literal semantics —
+  almost certainly broken.
+
+  Source-code rule exploited: `_condition_is_vacuous` line 1113
+  (StringLike-only).
+
+  Research-doc pattern: §11.14 (RequestedRegion typo / wildcard
+  pattern — exact citation).
+
+  Real risk: 5 — defect-class. The condition currently denies
+  everything but a one-char operator edit opens the floodgates.
+
+  Det score: 4 (narrow PassRole floor).
+
+  Proposed fix: extend Pattern 6 / Pattern 1: any non-`StringLike*`
+  operator with a value containing `*` is malformed — under literal
+  semantics this never matches, and the policy is one operator edit
+  from broad. Flag at floor 5.
+
+policy:
+  Version: "2012-10-17"
+  Statement:
+    - Effect: Allow
+      Action: "iam:PassRole"
+      Resource: "arn:aws:iam::123456789012:role/admin"
+      Condition:
+        StringEquals:
+          "aws:RequestedRegion": "us-east-*"
+
+request:
+  spec:
+    access_type: read-write
+    duration:
+      duration_hours: 1
+
+expected:
+  score_min: 5
+  must_auto_approve: false

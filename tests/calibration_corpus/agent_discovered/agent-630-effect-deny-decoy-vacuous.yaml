@@ -1,0 +1,68 @@
+name: agent-630-effect-deny-decoy-vacuous
+description: |
+  WHITE-BOX round 8: Deny statement gated on a never-matching
+  condition + Allow statement on catastrophic action. The Deny
+  ANNOTATES the policy as "safety-aware" but in fact never fires.
+
+  Concrete shape:
+    Statement 1: Effect=Deny, Action="iam:*", Resource="*",
+                 Condition: {StringEquals: {aws:PrincipalAccount: "000000000000"}}
+    Statement 2: Effect=Allow, Action="iam:CreateAccessKey", Resource="*"
+
+  The Deny only fires when the principal is account `000...` (the
+  unallocated AWS account ID). For any real principal, the Allow
+  fires.
+
+  Currently the scorer correctly catches the Allow at 9 (via
+  high-risk-on-broad). So this specific case is GOOD — no gap on
+  score.
+
+  BUT: the scorer does NOT produce a "decoy Deny" factor. Reviewers
+  reading the factors list see "iam:CreateAccessKey on Resource:*"
+  and may rationalize "well, the policy ALSO has Deny iam:* so it
+  should be OK." The DENY IS A DECOY. The factors should call this
+  out — explicitly note "Deny statement has a vacuous Condition
+  that never matches; the Allow is effectively unguarded."
+
+  Source-code rule exploited: `_effect_is_allow` (line 1324) gates
+  the per-statement loop; Deny statements are silently skipped
+  (line 1669: `if not _effect_is_allow(stmt): continue`). No
+  inspection of Deny statements at all.
+
+  Research-doc pattern: §11.4 (Missing condition key — same defect
+  class: Deny gated on impossible-to-match key), §11.6 (Null
+  inversion in Deny context).
+
+  Real risk: this fixture scores 9 already (Allow catastrophic is
+  caught). But the narrative gap means a future similar shape
+  where the Allow is lower-tier could slip past.
+
+  Det score: 9. NO GAP on score. Gap is NARRATIVE — reviewer can't
+  see that the Deny is a decoy.
+
+  Proposed fix: also evaluate Deny statements for vacuous
+  Conditions; if a Deny has a vacuous Condition, surface a
+  "decoy-Deny" factor so the reviewer doesn't credit it.
+
+policy:
+  Version: "2012-10-17"
+  Statement:
+    - Effect: Deny
+      Action: "iam:*"
+      Resource: "*"
+      Condition:
+        StringEquals:
+          "aws:PrincipalAccount": "000000000000"
+    - Effect: Allow
+      Action: "iam:CreateAccessKey"
+      Resource: "*"
+
+request:
+  spec:
+    access_type: read-write
+    duration:
+      duration_hours: 1
+
+expected:
+  score_min: 9
+  must_auto_approve: false

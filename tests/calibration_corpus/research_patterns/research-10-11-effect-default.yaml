@@ -1,0 +1,25 @@
+name: research-10-11-effect-default
+description: |
+  Reference: IAM-BYPASS-RESEARCH.md §10.11 (AWS IAM grammar)
+
+  Effect is required, but a missing Effect in some import paths gets
+  treated as Deny (AWS errors); some custom scorers may treat empty
+  as Allow.
+  # NB: encoded a statement without Effect.
+
+  Expected behavior: parser should reject or treat as Deny.
+
+  Source: https://docs.aws.amazon.com/IAM/latest/UserGuide/reference_policies_grammar.html
+policy:
+  Version: "2012-10-17"
+  Statement:
+    - Action: "*"
+      Resource: "*"
+request:
+  spec:
+    access_type: read-write
+    duration:
+      duration_hours: 1
+expected:
+  score_min: 5
+  must_auto_approve: false

@@ -1,0 +1,28 @@
+name: research-11-13-securetransport-misuse
+description: |
+  Reference: IAM-BYPASS-RESEARCH.md §11.13 (Sysdig)
+
+  aws:SecureTransport only enforces TLS for the first hop. If the
+  principal is inside AWS, this is usually true regardless. Often
+  misused as if it were a network restriction.
+
+  Expected behavior: pseudo-restriction — moderate risk.
+
+  Source: https://www.sysdig.com/blog/iam-security-misconfiguration
+policy:
+  Version: "2012-10-17"
+  Statement:
+    - Effect: Allow
+      Action: "*"
+      Resource: "*"
+      Condition:
+        Bool:
+          aws:SecureTransport: "true"
+request:
+  spec:
+    access_type: read-write
+    duration:
+      duration_hours: 1
+expected:
+  score_min: 7
+  must_auto_approve: false

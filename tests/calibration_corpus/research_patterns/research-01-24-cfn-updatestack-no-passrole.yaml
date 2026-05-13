@@ -1,0 +1,25 @@
+name: research-01-24-cfn-updatestack-no-passrole
+description: |
+  Reference: IAM-BYPASS-RESEARCH.md §1.24 (PMapper cloudformation_edges)
+
+  Update an existing stack — the stack already has a privileged service
+  role attached. New template runs with that role. cloudformation:UpdateStack
+  on stacks with privileged service roles is a hidden privesc primitive.
+
+  Expected behavior: privilege escalation primitive — high risk.
+
+  Source: PMapper cloudformation_edges
+policy:
+  Version: "2012-10-17"
+  Statement:
+    - Effect: Allow
+      Action: cloudformation:UpdateStack
+      Resource: "*"
+request:
+  spec:
+    access_type: read-write
+    duration:
+      duration_hours: 1
+expected:
+  score_min: 7
+  must_auto_approve: false
