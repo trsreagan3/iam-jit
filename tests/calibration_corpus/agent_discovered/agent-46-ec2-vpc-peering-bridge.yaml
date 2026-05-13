@@ -1,0 +1,41 @@
+name: agent-46-ec2-vpc-peering-bridge
+description: |
+  `ec2:CreateVpcPeeringConnection` + `ec2:AcceptVpcPeeringConnection` +
+  `ec2:CreateRoute` lets the attacker bridge the victim VPC to a
+  VPC in an account the attacker controls. Once peered + routed, the
+  attacker has network-level access to every prod EC2/RDS/Redshift/Elasticache
+  instance in private subnets — bypassing every security-group rule that
+  assumed "only internal IPs can reach me."
+
+  Same for `ec2:CreateTransitGatewayPeeringAttachment` +
+  `ec2:AcceptTransitGatewayPeeringAttachment` — same attack at TGW level,
+  larger blast (every VPC connected to the TGW becomes reachable).
+
+  Scorer floors at 6: `ec2:CreateRoute` IS in _HIGH_IMPACT_MUTATION_ACTIONS
+  (floor 5), and the Resource:* state-changing rule floors at 6. But the
+  network-bridging blast is "ongoing reachability to the entire VPC fleet
+  from an external account" — squarely cross-account-exfil tier.
+
+  Real risk: 8 — persistent network-layer cross-account access. The blast
+  survives the grant expiring (the peering / TGW attachment persists until
+  somebody deletes it).
+policy:
+  Version: '2012-10-17'
+  Statement:
+    - Effect: Allow
+      Action:
+        - ec2:CreateVpcPeeringConnection
+        - ec2:AcceptVpcPeeringConnection
+        - ec2:CreateTransitGatewayPeeringAttachment
+        - ec2:AcceptTransitGatewayPeeringAttachment
+        - ec2:CreateRoute
+        - ec2:CreateTransitGatewayRoute
+      Resource: '*'
+request:
+  spec:
+    access_type: read-write
+    duration:
+      duration_hours: 1
+expected:
+  score_min: 8
+  must_auto_approve: false

@@ -1,0 +1,37 @@
+name: agent-49-eks-kubernetes-api-access
+description: |
+  `eks:AccessKubernetesApi` lets the caller hit the Kubernetes API server
+  for any EKS cluster in the account. The actual Kubernetes-side
+  authorization is controlled by `aws-auth` ConfigMap mappings or (newer)
+  EKS Access Entries — but those are out-of-scope of AWS IAM.
+
+  Paired with `eks:CreateAccessEntry` + `eks:AssociateAccessPolicy`, the
+  attacker can grant their own caller-identity an AccessPolicy like
+  `AmazonEKSClusterAdminPolicy`, which is k8s cluster-admin. Result: full
+  control of every workload, every service account, every secret in every
+  EKS cluster in the account.
+
+  Scorer treats both as plain Write actions. Floor 6 only — no awareness
+  that EKS data-plane access entries map to in-cluster cluster-admin.
+
+  Real risk: 8 — single-API-call escalation to k8s cluster-admin, then
+  RCE on every pod via kubectl exec. Equivalent in blast to
+  ecs:ExecuteCommand on Resource:* but for the EKS fleet.
+policy:
+  Version: '2012-10-17'
+  Statement:
+    - Effect: Allow
+      Action:
+        - eks:AccessKubernetesApi
+        - eks:CreateAccessEntry
+        - eks:AssociateAccessPolicy
+        - eks:UpdateAccessEntry
+      Resource: '*'
+request:
+  spec:
+    access_type: read-write
+    duration:
+      duration_hours: 1
+expected:
+  score_min: 8
+  must_auto_approve: false

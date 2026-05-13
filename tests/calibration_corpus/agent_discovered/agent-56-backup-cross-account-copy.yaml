@@ -1,0 +1,37 @@
+name: agent-56-backup-cross-account-copy
+description: |
+  AWS Backup + cross-account vault sharing is a data-exfiltration channel:
+    - `backup:PutBackupVaultAccessPolicy` opens a vault to another account.
+    - `backup:StartCopyJob` copies a recovery point from a source vault to a
+      destination vault — including a destination in a different account
+      the attacker controls (if the destination vault policy allows it).
+    - `backup:StartBackupJob` writes a fresh backup of any AWS resource
+      (EBS volume, RDS instance, DynamoDB table, S3 bucket, EFS, FSx) into
+      a vault.
+
+  Together the attacker can: take a fresh backup of any prod resource,
+  copy it to a vault in their own account, then restore-and-mount in their
+  account. Full data exfiltration with the same blast as
+  rds:ModifyDBSnapshotAttribute (which IS in _CROSS_ACCOUNT_EXFIL_ACTIONS).
+
+  Scorer: 6 (generic Permissions Management / Write + Resource:*).
+
+  Real risk: 8 — same tier as the snapshot-share family.
+policy:
+  Version: '2012-10-17'
+  Statement:
+    - Effect: Allow
+      Action:
+        - backup:PutBackupVaultAccessPolicy
+        - backup:StartCopyJob
+        - backup:StartBackupJob
+        - backup:CreateBackupVault
+      Resource: '*'
+request:
+  spec:
+    access_type: read-write
+    duration:
+      duration_hours: 1
+expected:
+  score_min: 8
+  must_auto_approve: false

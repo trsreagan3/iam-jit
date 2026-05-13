@@ -1,0 +1,39 @@
+name: agent-51-transfer-family-sftp-user
+description: |
+  `transfer:CreateUser` + `transfer:ImportSshPublicKey` on AWS Transfer
+  Family lets the attacker create a new SFTP user (with their SSH public
+  key) bound to an existing Transfer server. The new user maps to an
+  IAM role chosen by the attacker — often a `prod-data-s3-rw` role that
+  the Transfer server already has PassRole permissions for.
+
+  Result: attacker has SFTP+SSH access to the production S3 buckets the
+  Transfer server fronts, with the credentials of the Transfer-Family
+  role. Persists past the JIT grant (the user record + SSH key remain
+  until somebody deletes them).
+
+  Also `transfer:CreateServer` on Resource:* lets the attacker stand up
+  a new Transfer server fronting any S3 bucket of their choosing.
+
+  Scorer: 6 (generic Write + Resource:*).
+
+  Real risk: 8 — persistent attacker SFTP/SSH foothold into S3 via the
+  Transfer Family service. Hard to detect (looks like an ordinary
+  Transfer user; no CloudTrail flag).
+policy:
+  Version: '2012-10-17'
+  Statement:
+    - Effect: Allow
+      Action:
+        - transfer:CreateUser
+        - transfer:UpdateUser
+        - transfer:ImportSshPublicKey
+        - transfer:CreateServer
+      Resource: '*'
+request:
+  spec:
+    access_type: read-write
+    duration:
+      duration_hours: 1
+expected:
+  score_min: 8
+  must_auto_approve: false

@@ -271,3 +271,304 @@ The blind spots above cluster into 8 fixable rule classes:
    - NotAction rule should fire regardless of resource scope when the exclusion set is small (catches agent-28).
 
 8. Stream-read primitive class. dynamodb:GetRecords and similar event-stream reads silently observe every write — closer in semantics to secret read than to metadata. Add to _HIGH_RISK_ACTIONS (catches agent-17). Same treatment for sqs:ReceiveMessage — it's destructive-read (removes the message) on Resource:* (catches agent-16).
+
+
+# ===========================================================
+# ROUND 2 — adversarial agent, 2026-05-13
+# ===========================================================
+# Round 1 closed 30 blind spots; round 2 hunts what slipped through.
+# Severity ordering: highest-impact / largest-gap first.
+#
+# NOTE: The case-insensitive findings (agent-33 / 34 / 36 / 37) were
+# the largest blind spot uncovered in round 2 — a textbook RCE-as-admin
+# policy collapsed to score 1 against the round-1 scorer simply by
+# lower-casing action names. The maintainer applied a case-insensitivity
+# patch to review.py during round 2 (lowercase-mirror sets for every
+# action-membership check). The YAMLs here pin the regression so the
+# patch can't be undone without breaking the tests.
+
+## agent-33-case-insensitive-catastrophic-action
+
+- Policy summary: iam:attachrolepolicy (lower-cased) on arn:aws:iam::*:role/admin-deploy — attach AdministratorAccess to any role.
+- Det score: 1
+- Real risk: 9
+- Why scorer misses it: _CATASTROPHIC_ACTIONS uses exact-string membership against canonical-cased entries (`action in _CATASTROPHIC_ACTIONS`). AWS treats action names case-insensitively, but the scorer's check is case-sensitive. Same gap for _HIGH_IMPACT_MUTATION_ACTIONS, _HIGH_RISK_ACTIONS, _SECRET_BEARING_READS, _CROSS_ACCOUNT_EXFIL_ACTIONS, _CODE_EXECUTION_PRIMITIVES, _DECEPTIVE_WRITE_ACTIONS, the literal-string PassRole composition check, the literal-string sts:AssumeRole composition check, the iam_recon_actions composition set, and the _SENSITIVE_SERVICES service comparison.
+- Suggested scorer fix: Normalize action strings to lowercase at the entry point of `_deterministic` (and the composition pass), OR build lowercase-mirror sets and compare `action.lower() in _SET_LC`. The latter preserves the original casing for display in factors strings. Same fix needs to apply to the literal-string compares for `iam:PassRole`, `sts:AssumeRole`, etc.
+
+## agent-34-case-insensitive-code-exec-passrole
+
+- Policy summary: Lambda:UpdateFunctionCode + Iam:PassRole (mixed casing) — RCE-as-admin via code update.
+- Det score: 1
+- Real risk: 9
+- Why scorer misses it: Same root cause as agent-33. The composition rule checks `action_names & _CODE_EXECUTION_PRIMITIVES` and `"iam:PassRole" in action_names`; both fail on case-tampered actions. The catastrophic-action check, the high-impact-mutation check, and the high-risk-action-on-wildcard check ALL miss too. The scorer falls back to the "all statements scoped, no broad patterns" branch and returns 1 — the most innocuous possible score for the textbook RCE-as-admin attack.
+- Suggested scorer fix: Same as agent-33. Demonstrates that the case-sensitivity gap collapses ALL the round-1 composition defences in a single attack.
+
+## agent-36-case-insensitive-cloudtrail-stop
+
+- Policy summary: cloudtrail:stoplogging + cloudtrail:deletetrail (lower-cased) on Resource:* — disable audit logging.
+- Det score: 4
+- Real risk: 9
+- Why scorer misses it: _CATASTROPHIC_ACTIONS check is case-sensitive (misses both). The destructive-verb prefix matcher uses `startswith(("Delete", "Stop", ...))` — capital-only — so lowercase verbs `stoplogging`/`deletetrail` don't trip the destructive-on-broad rule either. Only the generic "broad cross-resource read/access" flag fires (4).
+- Suggested scorer fix: Same as agent-33 (case-insensitive set membership). ALSO, the destructive-verb prefix matcher should compare against the action name's lowercase prefix (or use a case-insensitive prefix matcher).
+
+## agent-37-case-insensitive-secret-bearing-reads
+
+- Policy summary: LOGS:filterlogevents + ec2:getconsoleoutput etc. (mixed casing) — secret exfil from broad reads.
+- Det score: 4
+- Real risk: 7
+- Why scorer misses it: _SECRET_BEARING_READS check is case-sensitive. Falls back to the generic broad-cross-resource-read flag.
+- Suggested scorer fix: Same as agent-33 (case-insensitive set membership).
+
+## agent-44-cfn-register-type-rce
+
+- Policy summary: cloudformation:RegisterType + ActivateType + SetTypeDefaultVersion + PublishType on Resource:*.
+- Det score: 6
+- Real risk: 9
+- Why scorer misses it: RegisterType registers a CloudFormation extension (custom resource type / hook) whose handler is a Lambda function the caller specifies. Every subsequent CreateStack/UpdateStack/ExecuteChangeSet using that type runs the caller's handler under the DEPLOYING team's CFN service role — persistent supply-chain backdoor across the entire CFN pipeline. Not in any high-risk set; falls through to generic Write-on-broad (6).
+- Suggested scorer fix: Add cloudformation:RegisterType, cloudformation:ActivateType, cloudformation:SetTypeDefaultVersion, cloudformation:PublishType to _CATASTROPHIC_ACTIONS. Same supply-chain tier as ssm:CreateDocument (already catastrophic).
+
+## agent-40-iam-login-profile-mfa-bypass
+
+- Policy summary: iam:UpdateLoginProfile + iam:CreateLoginProfile + iam:ChangePassword on arn:aws:iam::*:user/* — set passwords for every IAM user.
+- Det score: 6
+- Real risk: 9
+- Why scorer misses it: None of these are in _CATASTROPHIC_ACTIONS or _HIGH_IMPACT_MUTATION_ACTIONS. They land at floor 6 from sensitive-service-iam + Resource:*. But the impact is full console-takeover of every IAM user with a console presence — same blast as iam:CreateAccessKey (catastrophic).
+- Suggested scorer fix: Add iam:UpdateLoginProfile, iam:CreateLoginProfile, iam:DeleteLoginProfile, iam:ChangePassword, iam:DeactivateMFADevice, iam:DeleteVirtualMFADevice, iam:ResyncMFADevice to _CATASTROPHIC_ACTIONS. They're the console-takeover equivalent of access-key admin.
+
+## agent-38-iam-oidc-provider-takeover
+
+- Policy summary: iam:CreateOpenIDConnectProvider + UpdateOpenIDConnectProviderThumbprint + AddClientIDToOpenIDConnectProvider on Resource:*.
+- Det score: 6
+- Real risk: 9
+- Why scorer misses it: Federation-IdP takeover primitive. Attacker registers their own OIDC IdP, then any role whose trust policy references it (or with a hijacked thumbprint pointing at attacker JWKS) becomes assumable via attacker-minted tokens. Not in any high-risk set; sensitive-service-iam floor (6) is the only signal.
+- Suggested scorer fix: Add iam:CreateOpenIDConnectProvider, iam:UpdateOpenIDConnectProviderThumbprint, iam:AddClientIDToOpenIDConnectProvider, iam:DeleteOpenIDConnectProvider to _CATASTROPHIC_ACTIONS. Account-takeover tier via federation.
+
+## agent-39-iam-saml-provider-takeover
+
+- Policy summary: iam:CreateSAMLProvider + UpdateSAMLProvider on Resource:*.
+- Det score: 6
+- Real risk: 9
+- Why scorer misses it: SAML analogue of agent-38. Same blast — federated-identity takeover.
+- Suggested scorer fix: Add iam:CreateSAMLProvider, iam:UpdateSAMLProvider, iam:DeleteSAMLProvider to _CATASTROPHIC_ACTIONS.
+
+## agent-61-disable-security-services-narrow
+
+- Policy summary: guardduty:DisassociateFromMasterAccount, guardduty:UpdateDetector, config:PutConfigurationRecorder, access-analyzer:UpdateAnalyzer, inspector2:DisassociateMember on Resource:*. Non-destructive-verb variants — they DISABLE security plane without using a Delete/Stop/Disable prefix.
+- Det score: 6
+- Real risk: 9
+- Why scorer misses it: The destructive-on-broad rule catches Delete*/Stop*/Disable* variants. But Disassociate*, Update* (setting Enable=false), Put* (overwriting a recorder to record nothing) all stealthily disable security without a destructive-verb prefix. Score falls to 6.
+- Suggested scorer fix: Add a class of security-monitoring-disable actions to _CATASTROPHIC_ACTIONS regardless of verb prefix: guardduty:DisassociateFromMasterAccount, guardduty:UpdateDetector, config:PutConfigurationRecorder, config:PutDeliveryChannel, access-analyzer:UpdateAnalyzer, inspector2:Disable, inspector2:DisassociateMember, securityhub:UpdateSecurityHubConfiguration, macie2:UpdateMacieSession.
+
+## agent-43-resource-policy-cross-account-share
+
+- Policy summary: secretsmanager:PutResourcePolicy + kms:CreateGrant + glue:PutResourcePolicy on narrow resource ARNs.
+- Det score: 3
+- Real risk: 8
+- Why scorer misses it: Resource-policy writes on narrow ARNs only fire the narrow-write floor (3). But each one grants cross-account access to the resource in a single API call: secret content exfil, KMS-key decrypt grant, Glue catalog cross-account. Semantically identical to ecr:SetRepositoryPolicy (which IS in _CROSS_ACCOUNT_EXFIL_ACTIONS).
+- Suggested scorer fix: Add to _CROSS_ACCOUNT_EXFIL_ACTIONS: secretsmanager:PutResourcePolicy, kms:CreateGrant, kms:PutKeyPolicy (already in _CATASTROPHIC), glue:PutResourcePolicy, codeartifact:PutDomainPermissionsPolicy, codeartifact:PutRepositoryPermissionsPolicy, events:PutPermission, sns:AddPermission, sqs:AddPermission, sqs:SetQueueAttributes (the queue-policy variant), efs:PutFileSystemPolicy, opensearch:UpdateDomainConfig (access policies).
+
+## agent-60-kms-create-grant-narrow
+
+- Policy summary: kms:CreateGrant + kms:RetireGrant on a single narrow key ARN.
+- Det score: 3
+- Real risk: 8
+- Why scorer misses it: kms:CreateGrant isn't in any high-risk set. It issues a KMS grant (separate authorization channel from key policy) naming any principal as GranteePrincipal — including the attacker's own AWS account. Persistent until explicitly revoked; survives the JIT grant expiring.
+- Suggested scorer fix: Add kms:CreateGrant to _CROSS_ACCOUNT_EXFIL_ACTIONS (floor 8). Equivalent in blast to kms:PutKeyPolicy (catastrophic) via the alternate grant mechanism.
+
+## agent-42-s3-putbucketpolicy-narrow-bucket
+
+- Policy summary: s3:PutBucketPolicy + s3:DeleteBucketPolicy on a narrow bucket ARN (arn:aws:s3:::corporate-pii-data).
+- Det score: 5
+- Real risk: 8
+- Why scorer misses it: s3:PutBucketPolicy IS in _HIGH_IMPACT_MUTATION_ACTIONS so it floors at 5. But the action's effect isn't "modify resource configuration" — it's "rewrite the bucket's authorization model in one call with arbitrary content." A bucket policy of `{Effect:Allow, Principal:*, Action:s3:*}` makes every object in the targeted bucket public. Narrow-bucket-ARN scope doesn't help — the bucket IS the target.
+- Suggested scorer fix: Add s3:PutBucketPolicy and s3:PutBucketAcl to _CROSS_ACCOUNT_EXFIL_ACTIONS (floor 8 regardless of resource scope). They're single-API-call public-exposure primitives.
+
+## agent-58-wildcard-service-in-action
+
+- Policy summary: Action: ['*:Decrypt', '*:GetSecretValue', '*:PassRole'] on Resource:*.
+- Det score: 5
+- Real risk: 8
+- Why scorer misses it: AWS IAM allows wildcards on the LEFT of the colon. `*:Decrypt` matches kms:Decrypt + every other service's Decrypt action. `*:GetSecretValue` matches secretsmanager:GetSecretValue. `*:PassRole` matches iam:PassRole. The scorer parses the service as the part-before-colon (which is "*" here), so `service in effective_sensitive` is False — and the destructive-verb prefix matcher doesn't fire because "Decrypt" isn't a destructive verb. Falls into the generic action-name-wildcard branch (5).
+- Suggested scorer fix: When the left-half is "*" or contains "*", treat it as a service-wildcard equivalent to "*:Operation" — apply the service-wildcard rules to every service that has the matched operation. Cheapest fix: if `action.startswith("*:")`, score it as if it were applied to every sensitive service simultaneously (floor 8).
+
+## agent-59-wildcard-glob-broad-action
+
+- Policy summary: Action: '*:Create*' on Resource:* — match every Create* action in every AWS service.
+- Det score: 5
+- Real risk: 9
+- Why scorer misses it: Same as agent-58 but with a glob on both sides. `*:Create*` matches iam:CreateAccessKey + iam:CreateRole + iam:CreatePolicy + organizations:CreateAccount + sso-admin:CreatePermissionSet + every other catastrophic Create-prefixed action. The generic wildcard branch scores 5.
+- Suggested scorer fix: Same as agent-58. Also: if the action-glob pattern (lowered) would match ANY entry in _CATASTROPHIC_ACTIONS_LC by fnmatch, floor at 9. The matching can be done at scorer init time (pre-expand the catastrophic set against the action universe via policy_sentry, then check glob membership).
+
+## agent-45-eventbridge-api-destination-exfil
+
+- Policy summary: events:CreateApiDestination + events:CreateConnection + events:PutRule + events:PutTargets + scheduler:CreateSchedule on Resource:*.
+- Det score: 6
+- Real risk: 8
+- Why scorer misses it: These set up persistent outbound HTTPS calls to attacker-controlled URLs on cron — exact analogue of logs:PutSubscriptionFilter (which IS in _CROSS_ACCOUNT_EXFIL_ACTIONS). Floor 6 only.
+- Suggested scorer fix: Add events:CreateApiDestination, events:CreateConnection, events:PutTargets (when target is API destination or cross-account ARN — hard to detect), scheduler:CreateSchedule, scheduler:UpdateSchedule to _CROSS_ACCOUNT_EXFIL_ACTIONS.
+
+## agent-46-ec2-vpc-peering-bridge
+
+- Policy summary: ec2:CreateVpcPeeringConnection + AcceptVpcPeeringConnection + CreateTransitGatewayPeeringAttachment + AcceptTransitGatewayPeeringAttachment + CreateRoute on Resource:*.
+- Det score: 6
+- Real risk: 8
+- Why scorer misses it: Bridge to attacker-controlled VPC at the network layer. Once peered + routed, attacker has network access to every private-subnet resource in prod — bypasses all security-group rules that assumed "only internal IPs can reach me." Persistent past the JIT grant.
+- Suggested scorer fix: Add ec2:CreateVpcPeeringConnection, ec2:AcceptVpcPeeringConnection, ec2:CreateTransitGatewayPeeringAttachment, ec2:AcceptTransitGatewayPeeringAttachment, ec2:CreateClientVpnEndpoint, ec2:CreateNetworkInterface (when paired with attaching to running instance) to _CROSS_ACCOUNT_EXFIL_ACTIONS or a new _NETWORK_BRIDGE class.
+
+## agent-47-rds-modify-master-password
+
+- Policy summary: rds:ModifyDBInstance + ModifyDBCluster + RestoreDBInstanceFromDBSnapshot + RestoreDBClusterFromSnapshot on Resource:*.
+- Det score: 6
+- Real risk: 8
+- Why scorer misses it: rds:ModifyDBInstance accepts a MasterUserPassword parameter that overwrites the DB master password in one call. Restore-from-snapshot accepts a fresh master password too — creates a new instance with attacker-known credentials cloned from prod data. Generic Write floor (6) only.
+- Suggested scorer fix: Add rds:ModifyDBInstance, rds:ModifyDBCluster, rds:RestoreDBInstanceFromDBSnapshot, rds:RestoreDBClusterFromSnapshot, rds:RestoreDBInstanceToPointInTime, rds:RestoreDBClusterToPointInTime to _HIGH_IMPACT_MUTATION_ACTIONS (floor 5-6), or better: _CROSS_ACCOUNT_EXFIL_ACTIONS when the action permits cross-account snapshot or restore.
+
+## agent-48-ecs-execute-command-rce
+
+- Policy summary: ecs:ExecuteCommand on Resource:* — interactive shell into every running container.
+- Det score: 6
+- Real risk: 8
+- Why scorer misses it: ECS Exec is the ECS-data-plane RCE primitive — equivalent to ssm:StartSession for EC2 (which IS in _HIGH_IMPACT_MUTATION_ACTIONS). Inside the container, attacker has task-role credentials + in-container secrets. Floor 6 only.
+- Suggested scorer fix: Add ecs:ExecuteCommand to _HIGH_IMPACT_MUTATION_ACTIONS (floor 5) and treat it as a code-execution primitive in the composition rule when paired with iam:PassRole.
+
+## agent-49-eks-kubernetes-api-access
+
+- Policy summary: eks:AccessKubernetesApi + eks:CreateAccessEntry + eks:AssociateAccessPolicy + eks:UpdateAccessEntry on Resource:*.
+- Det score: 6
+- Real risk: 8
+- Why scorer misses it: eks:CreateAccessEntry + AssociateAccessPolicy lets the caller grant k8s cluster-admin (e.g. AmazonEKSClusterAdminPolicy) to any principal. Then eks:AccessKubernetesApi gives them the API endpoint to use it. Single-API-call escalation to k8s cluster-admin → RCE on every pod via kubectl exec. Not in any high-risk set.
+- Suggested scorer fix: Add eks:AccessKubernetesApi, eks:CreateAccessEntry, eks:AssociateAccessPolicy, eks:UpdateAccessEntry to _HIGH_IMPACT_MUTATION_ACTIONS. Better: treat eks:AccessKubernetesApi + eks:Create/AssociateAccessEntry as a composition (analogous to iam-recon + sts:AssumeRole).
+
+## agent-50-codeartifact-supply-chain
+
+- Policy summary: codeartifact:PublishPackageVersion + PutDomainPermissionsPolicy + PutRepositoryPermissionsPolicy on Resource:*.
+- Det score: 6
+- Real risk: 8
+- Why scorer misses it: CodeArtifact is the org's internal package registry (npm/pip/maven/nuget). Publish poisoned package versions → every developer/CI/build pulls attacker code on next install. Cross-account permissions-policy grants persistent attacker publish rights. Same tier as ecr:PutImage (which IS in _HIGH_IMPACT_MUTATION_ACTIONS) and imagebuilder pipeline poisoning (catastrophic).
+- Suggested scorer fix: Add codeartifact:PublishPackageVersion, codeartifact:UpdatePackageVersionsStatus to _HIGH_IMPACT_MUTATION_ACTIONS. Add codeartifact:PutDomainPermissionsPolicy, codeartifact:PutRepositoryPermissionsPolicy to _CROSS_ACCOUNT_EXFIL_ACTIONS.
+
+## agent-51-transfer-family-sftp-user
+
+- Policy summary: transfer:CreateUser + UpdateUser + ImportSshPublicKey + CreateServer on Resource:*.
+- Det score: 6
+- Real risk: 8
+- Why scorer misses it: Transfer Family CreateUser binds an SFTP user (with attacker SSH key) to an existing Transfer server with an existing IAM role. Attacker gets SFTP + SSH access to the S3 buckets the server fronts, with the credentials of the Transfer-Family role. Looks like a routine user record in CloudTrail.
+- Suggested scorer fix: Add transfer:CreateUser, transfer:UpdateUser, transfer:ImportSshPublicKey, transfer:CreateServer, transfer:UpdateServer to _HIGH_IMPACT_MUTATION_ACTIONS. Could also be paired with PassRole composition (transfer:CreateUser passes the assigned role to the SFTP user).
+
+## agent-52-bedrock-agent-rce-rag-poisoning
+
+- Policy summary: bedrock:CreateAgent + CreateAgentActionGroup + CreateKnowledgeBase + StartIngestionJob on Resource:* + iam:PassRole on bedrock-execution-role.
+- Det score: 6
+- Real risk: 8
+- Why scorer misses it: Bedrock IS in _SENSITIVE_SERVICES (good, floor 6). But: (a) bedrock:CreateAgent + CreateAgentActionGroup composes with iam:PassRole the same way Lambda CreateFunction does (Agent action groups invoke arbitrary Lambdas under the Agent's role) — but bedrock actions aren't in _CODE_EXECUTION_PRIMITIVES, so the composition rule misses. (b) bedrock:CreateKnowledgeBase + StartIngestionJob poisons RAG context for every downstream agent query — prompt-injection at scale.
+- Suggested scorer fix: Add bedrock:CreateAgent, bedrock:UpdateAgent, bedrock:CreateAgentActionGroup, bedrock:UpdateAgentActionGroup to _CODE_EXECUTION_PRIMITIVES (so they trigger the composition rule with iam:PassRole). Add bedrock:CreateKnowledgeBase, bedrock:UpdateKnowledgeBase, bedrock:CreateDataSource, bedrock:StartIngestionJob to _HIGH_IMPACT_MUTATION_ACTIONS — RAG poisoning is supply-chain tier for AI workloads.
+
+## agent-53-sagemaker-domain-rce
+
+- Policy summary: sagemaker:CreateDomain + CreateUserProfile + CreateApp + CreatePresignedDomainUrl + CreateSpace on Resource:* + iam:PassRole on sagemaker-execution-role.
+- Det score: 6
+- Real risk: 8
+- Why scorer misses it: The composition rule only covers the legacy SageMaker NotebookInstance actions. The current SageMaker Studio uses Domain + UserProfile + App + PresignedDomainUrl — same blast (interactive Jupyter shell under the execution role) but missed by the composition pass.
+- Suggested scorer fix: Add sagemaker:CreateDomain, sagemaker:CreateUserProfile, sagemaker:CreateApp, sagemaker:CreatePresignedDomainUrl, sagemaker:CreateSpace, sagemaker:CreateImage to _CODE_EXECUTION_PRIMITIVES.
+
+## agent-54-emr-runjobflow-rce-passrole
+
+- Policy summary: elasticmapreduce:RunJobFlow + AddJobFlowSteps on Resource:* + iam:PassRole on EMR_EC2_DefaultRole.
+- Det score: 6
+- Real risk: 8
+- Why scorer misses it: EMR is the original Glue: a managed Spark/Hadoop cluster that runs caller-supplied bootstrap actions and steps. The EMR EC2 role often has broad S3 read for "any bucket the job needs." Composition rule doesn't include EMR.
+- Suggested scorer fix: Add elasticmapreduce:RunJobFlow, elasticmapreduce:AddJobFlowSteps, elasticmapreduce:CreateCluster to _CODE_EXECUTION_PRIMITIVES.
+
+## agent-56-backup-cross-account-copy
+
+- Policy summary: backup:PutBackupVaultAccessPolicy + StartCopyJob + StartBackupJob + CreateBackupVault on Resource:*.
+- Det score: 6
+- Real risk: 8
+- Why scorer misses it: AWS Backup lets you take a fresh backup of any resource into a vault you own, then share the vault cross-account (PutBackupVaultAccessPolicy), then attacker copies + restores in their own account. Full data exfil via the backup plane. Same tier as rds:ModifyDBSnapshotAttribute (in _CROSS_ACCOUNT_EXFIL_ACTIONS).
+- Suggested scorer fix: Add backup:PutBackupVaultAccessPolicy, backup:StartCopyJob (cross-account variant), backup:StartBackupJob to _CROSS_ACCOUNT_EXFIL_ACTIONS.
+
+## agent-57-iam-service-cert-mitm
+
+- Policy summary: iam:UploadServerCertificate + UpdateServerCertificate + UploadSigningCertificate + UpdateSigningCertificate + UploadSSHPublicKey on Resource:*.
+- Det score: 6
+- Real risk: 8
+- Why scorer misses it: These are key-material installation primitives. UploadSSHPublicKey on an IAM user grants attacker's SSH key permanent git-push access to CodeCommit repos as that user. UploadServerCertificate installs a TLS cert + private key in IAM usable by Classic ELB / CloudFront for MITM impersonation. UpdateSigningCertificate updates code-signing identity. Floor 6 only.
+- Suggested scorer fix: Add iam:UploadServerCertificate, iam:UpdateServerCertificate, iam:UploadSigningCertificate, iam:UpdateSigningCertificate, iam:UploadSSHPublicKey to _CATASTROPHIC_ACTIONS or _CROSS_ACCOUNT_EXFIL_ACTIONS. They install authenticated identity material the attacker controls.
+
+## agent-41-iam-password-policy-weaken
+
+- Policy summary: iam:UpdateAccountPasswordPolicy on Resource:* — account-wide password policy rewrite.
+- Det score: 6
+- Real risk: 8
+- Why scorer misses it: Single API call sets MinimumPasswordLength=6, RequireSymbols=false, MaxPasswordAge=0 — every subsequent password reset can use trivial passwords. Persistent past the JIT grant. Common evidence-evasion step in account-takeover playbooks. Floor 6 only (sensitive-service iam + Resource:*).
+- Suggested scorer fix: Add iam:UpdateAccountPasswordPolicy, iam:DeleteAccountPasswordPolicy to _HIGH_IMPACT_MUTATION_ACTIONS (floor at minimum 7).
+
+
+# ===========================================================
+# Round 2 — cross-cutting scorer recommendations
+# ===========================================================
+# The new findings cluster into 6 fixable rule classes:
+#
+# A. Case-insensitive action membership. AWS treats action names case-
+#    insensitively; the scorer must too. Lowercase all sets at module
+#    load and compare `action.lower() in _SET_LC`. Apply to
+#    _CATASTROPHIC_ACTIONS, _HIGH_IMPACT_MUTATION_ACTIONS, _HIGH_RISK_ACTIONS,
+#    _SECRET_BEARING_READS, _CROSS_ACCOUNT_EXFIL_ACTIONS,
+#    _CODE_EXECUTION_PRIMITIVES, _DECEPTIVE_WRITE_ACTIONS, the
+#    `iam:PassRole` literal comparison, the `sts:AssumeRole` literal,
+#    the iam_recon_actions set, and the destructive-verb prefix matcher
+#    (compare action_name.lower() against ("delete","stop",...lowercased)).
+#    Closes agent-33, 34, 36, 37 and prevents this entire class.
+#
+# B. _CATASTROPHIC_ACTIONS additions. Federation IdP takeover, IAM user
+#    console takeover, CFN extension registration, account-wide cert/key
+#    installation. Add: iam:CreateOpenIDConnectProvider, iam:Update-
+#    OpenIDConnectProviderThumbprint, iam:AddClientIDToOpenIDConnectProvider,
+#    iam:CreateSAMLProvider, iam:UpdateSAMLProvider, iam:UpdateLoginProfile,
+#    iam:CreateLoginProfile, iam:ChangePassword, iam:DeactivateMFADevice,
+#    iam:DeleteVirtualMFADevice, iam:ResyncMFADevice, iam:UploadServer-
+#    Certificate, iam:UploadSSHPublicKey, iam:UpdateAccountPasswordPolicy,
+#    cloudformation:RegisterType, cloudformation:ActivateType,
+#    cloudformation:SetTypeDefaultVersion, cloudformation:PublishType.
+#    Closes agent-38, 39, 40, 41, 44, 57.
+#
+# C. _CROSS_ACCOUNT_EXFIL_ACTIONS additions. Resource-policy writes that
+#    cross account, KMS grant issuance, S3 bucket-policy rewrite, network
+#    bridging, backup cross-account copy. Add: secretsmanager:Put-
+#    ResourcePolicy, kms:CreateGrant, glue:PutResourcePolicy,
+#    codeartifact:PutDomainPermissionsPolicy, codeartifact:PutRepository-
+#    PermissionsPolicy, events:PutPermission, events:CreateApiDestination,
+#    s3:PutBucketPolicy (already in HIGH_IMPACT — move to CROSS_ACCOUNT_EXFIL),
+#    s3:PutBucketAcl, ec2:CreateVpcPeeringConnection, ec2:AcceptVpcPeering-
+#    Connection, ec2:CreateTransitGatewayPeeringAttachment, ec2:Accept-
+#    TransitGatewayPeeringAttachment, backup:PutBackupVaultAccessPolicy,
+#    backup:StartCopyJob. Closes agent-42, 43, 45, 46, 56, 60.
+#
+# D. _CODE_EXECUTION_PRIMITIVES additions. New compute primitives missed
+#    by round 1. Add: bedrock:CreateAgent, bedrock:UpdateAgent,
+#    bedrock:CreateAgentActionGroup, sagemaker:CreateDomain, sagemaker:
+#    CreateUserProfile, sagemaker:CreateApp, sagemaker:CreatePresigned-
+#    DomainUrl, sagemaker:CreateSpace, elasticmapreduce:RunJobFlow,
+#    elasticmapreduce:AddJobFlowSteps. Closes agent-52, 53, 54.
+#
+# E. _HIGH_IMPACT_MUTATION_ACTIONS additions. Data-plane RCE / data-plane
+#    takeover. Add: ecs:ExecuteCommand, eks:AccessKubernetesApi,
+#    eks:CreateAccessEntry, eks:AssociateAccessPolicy, eks:UpdateAccessEntry,
+#    transfer:CreateUser, transfer:UpdateUser, transfer:ImportSshPublicKey,
+#    transfer:CreateServer, codeartifact:PublishPackageVersion,
+#    codeartifact:UpdatePackageVersionsStatus, rds:ModifyDBInstance,
+#    rds:ModifyDBCluster, rds:RestoreDBInstanceFromDBSnapshot, rds:Restore-
+#    DBClusterFromSnapshot, bedrock:CreateKnowledgeBase, bedrock:Create-
+#    DataSource, bedrock:StartIngestionJob. Closes agent-47, 48, 49, 50,
+#    51, 52, 53.
+#
+# F. Wildcard-in-service handling. Action strings with `*` on the LEFT
+#    of the colon (`*:Decrypt`, `*:GetSecretValue`, `*:Create*`) are
+#    unbounded service-wildcards in disguise. Cheapest fix: if the
+#    action string starts with "*:" OR contains "*" in the service
+#    portion, treat as floor 8 (or 9 if the right-half wildcard would
+#    match any catastrophic action). Closes agent-58, 59.
+#
+# G. Defense-disablement actions without destructive-verb prefix. Add
+#    `Disassociate*`, `Update*-Detector/Recorder/Analyzer` to a stealth-
+#    disable class with floor 9. Closes agent-61.

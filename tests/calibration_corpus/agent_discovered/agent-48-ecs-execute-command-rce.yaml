@@ -1,0 +1,32 @@
+name: agent-48-ecs-execute-command-rce
+description: |
+  `ecs:ExecuteCommand` (the ECS-Exec data-plane action) provides
+  interactive shell access into every running container in every ECS
+  task/service in the account. It's the ECS equivalent of ssm:StartSession
+  for EC2 (which IS in _HIGH_IMPACT_MUTATION_ACTIONS).
+
+  Inside the container, the attacker has the task role's AWS credentials
+  (via 169.254.170.2 task-metadata endpoint) plus any in-container secrets
+  / DB connection strings / etc. — full RCE-as-task-role across the entire
+  ECS fleet.
+
+  Scorer floors at 6 — generic Write + Resource:*. Doesn't recognize
+  ecs:ExecuteCommand as the ECS data-plane RCE primitive.
+
+  Real risk: 8 — same tier as ssm:StartSession on Resource:*. Single API
+  call, full RCE across all running containers in the account.
+policy:
+  Version: '2012-10-17'
+  Statement:
+    - Effect: Allow
+      Action:
+        - ecs:ExecuteCommand
+      Resource: '*'
+request:
+  spec:
+    access_type: read-write
+    duration:
+      duration_hours: 1
+expected:
+  score_min: 8
+  must_auto_approve: false

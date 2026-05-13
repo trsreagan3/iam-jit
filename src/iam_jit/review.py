@@ -116,6 +116,19 @@ _CODE_EXECUTION_PRIMITIVES = frozenset(
         # Batch: job runs under task role
         "batch:SubmitJob",
         "batch:RegisterJobDefinition",
+        # Bedrock agents — caller-defined action groups call attacker-
+        # controlled Lambdas with whatever the agent decides
+        "bedrock:CreateAgent",
+        "bedrock:UpdateAgent",
+        "bedrock:CreateAgentActionGroup",
+        # SageMaker — newer surface beyond NotebookInstance; Domain +
+        # UserProfile + PresignedDomainUrl chain = interactive shell
+        "sagemaker:CreateDomain",
+        "sagemaker:CreateUserProfile",
+        "sagemaker:CreatePresignedDomainUrl",
+        # EMR / EMR Serverless — Spark/Hadoop job runs under role
+        "elasticmapreduce:RunJobFlow",
+        "elasticmapreduce:AddJobFlowSteps",
     }
 )
 
@@ -177,6 +190,34 @@ _CROSS_ACCOUNT_EXFIL_ACTIONS = frozenset(
         # SES — send mail as the org's verified domain (phishing-as-org)
         "ses:SendEmail",
         "ses:SendRawEmail",
+        # Resource-policy grants on sensitive services — single-call
+        # cross-account access to secrets / keys / catalog data
+        "secretsmanager:PutResourcePolicy",
+        "kms:CreateGrant",
+        "kms:PutKeyPolicy",  # already in _HIGH_IMPACT but also exfil-class
+        "glue:PutResourcePolicy",
+        "codeartifact:PutDomainPermissionsPolicy",
+        "codeartifact:PutRepositoryPermissionsPolicy",
+        # EventBridge — cross-account event delivery + API destination
+        # (cron the attacker's HTTP endpoint with event data)
+        "events:PutPermission",
+        "events:CreateApiDestination",
+        # S3 bucket-level resource policy / ACL = make a bucket public
+        "s3:PutBucketAcl",  # also in _HIGH_IMPACT; also exfil-class
+        # EC2 / TGW peering — bridge two VPCs (theirs + yours)
+        "ec2:CreateVpcPeeringConnection",
+        "ec2:AcceptVpcPeeringConnection",
+        "ec2:CreateTransitGatewayPeeringAttachment",
+        "ec2:AcceptTransitGatewayPeeringAttachment",
+        # AWS Backup vault policy + cross-account copy
+        "backup:PutBackupVaultAccessPolicy",
+        "backup:StartCopyJob",
+        # Scheduler — cron-trigger persistence
+        "scheduler:CreateSchedule",
+        # Lambda function URL config = make function publicly invokable
+        # (also in _HIGH_IMPACT but exfil-tier on the "single-call public
+        # surface" semantics)
+        "lambda:CreateFunctionUrlConfig",
     }
 )
 
@@ -299,6 +340,25 @@ _HIGH_IMPACT_MUTATION_ACTIONS = frozenset(
         # S3 replication = ongoing exfiltration. Single API call sets up
         # auto-copy of every new object to an attacker-chosen destination.
         "s3:PutBucketReplication",
+        # ECS Exec — interactive shell on running tasks; data-plane RCE
+        "ecs:ExecuteCommand",
+        # EKS — Kubernetes API access + access-entry mutations
+        "eks:AccessKubernetesApi",
+        "eks:CreateAccessEntry",
+        "eks:AssociateAccessPolicy",
+        # AWS Transfer — SFTP / FTPS user creation + key import
+        "transfer:CreateUser",
+        "transfer:ImportSshPublicKey",
+        "transfer:CreateServer",
+        # CodeArtifact — package publishing = supply chain
+        "codeartifact:PublishPackageVersion",
+        # RDS — instance config + restore-from-snapshot
+        "rds:ModifyDBInstance",
+        "rds:RestoreDBInstanceFromDBSnapshot",
+        # Bedrock — Knowledge Base seed / ingestion = inject prompt-
+        # injection payloads into production RAG
+        "bedrock:CreateKnowledgeBase",
+        "bedrock:StartIngestionJob",
     }
 )
 
@@ -364,6 +424,75 @@ _CATASTROPHIC_ACTIONS = frozenset(
         "cloudformation:CreateStackInstances",
         "cloudformation:UpdateStackSet",
         "cloudformation:UpdateStackInstances",
+        # CloudFormation custom resource types — attacker registers a
+        # type whose handler is attacker-controlled. Every subsequent
+        # stack that uses the type runs attacker code with whatever
+        # role the stack uses.
+        "cloudformation:RegisterType",
+        "cloudformation:ActivateType",
+        "cloudformation:SetTypeDefaultVersion",
+        # Federation IdP takeover: attacker registers an OIDC or SAML
+        # provider they control, then any role trusting that provider
+        # can be assumed by attacker-issued tokens.
+        "iam:CreateOpenIDConnectProvider",
+        "iam:UpdateOpenIDConnectProviderThumbprint",
+        "iam:AddClientIDToOpenIDConnectProvider",
+        "iam:CreateSAMLProvider",
+        "iam:UpdateSAMLProvider",
+        # IAM user console takeover — set/change another user's
+        # password, deactivate their MFA, etc.
+        "iam:UpdateLoginProfile",
+        "iam:CreateLoginProfile",
+        "iam:ChangePassword",
+        "iam:DeactivateMFADevice",
+        "iam:DeleteVirtualMFADevice",
+        # Account-wide cert / SSH-key installation
+        "iam:UploadServerCertificate",
+        "iam:UploadSSHPublicKey",
+        # Account password-policy weakening (lower min length, disable
+        # reuse prevention, etc.)
+        "iam:UpdateAccountPasswordPolicy",
+        # Defense-disablement without a destructive-verb prefix
+        # (Disassociate / Update can disable detection silently)
+        "guardduty:DisassociateFromMasterAccount",
+        "guardduty:DisassociateMembers",
+        "access-analyzer:UpdateAnalyzer",
+        "access-analyzer:DeleteAnalyzer",
+        "inspector2:Disable",
+        "inspector2:DisassociateMember",
+        # AWS Config PutConfigurationRecorder can replace the recorder
+        # config with a no-op recording scope — silently disable the
+        # service without firing Delete/Stop events.
+        "config:PutConfigurationRecorder",
+        "config:PutDeliveryChannel",
+        # Data-plane RCE / admin-equivalent — flagged in adversarial
+        # round 2. These reach customer data or running workloads
+        # directly; floor at 9 even on narrow resources.
+        "ecs:ExecuteCommand",           # interactive shell on running task
+        "eks:AccessKubernetesApi",       # K8s API = cluster admin
+        "eks:CreateAccessEntry",         # K8s ClusterRoleBinding equivalent
+        "eks:AssociateAccessPolicy",     # AmazonEKSAdminPolicy attach
+        "eks:UpdateAccessEntry",
+        "transfer:CreateUser",           # SFTP backdoor user
+        "transfer:UpdateUser",
+        "transfer:ImportSshPublicKey",
+        "transfer:CreateServer",
+        # RDS — modifying master password / restoring from snapshot is
+        # database-level admin. Master credential reset = take over the
+        # database. Restore-from-snapshot can be used to bring up a
+        # cloned DB the attacker queries unrestricted.
+        "rds:ModifyDBInstance",
+        "rds:ModifyDBCluster",
+        "rds:RestoreDBInstanceFromDBSnapshot",
+        "rds:RestoreDBClusterFromSnapshot",
+        "rds:RestoreDBInstanceToPointInTime",
+        # S3 bucket-policy mutation on any bucket = potential public
+        # exposure or cross-account share. Treated as catastrophic
+        # (always needs human review) even on narrow ARN — the
+        # narrowness doesn't mitigate the "make this bucket public"
+        # primitive.
+        "s3:PutBucketPolicy",
+        "s3:DeleteBucketPolicy",
         # SSM documents — define commands that run on every SSM-managed
         # instance. CreateDocument with attacker-controlled script +
         # ModifyDocumentPermission to share account-wide = persistent RCE.
@@ -864,6 +993,46 @@ def _deterministic(
             # prefixes. Lowercase the service so `IAM:*` matches the
             # same rules as `iam:*` (the canonical set is all-lower).
             service = (action.split(":", 1)[0] if ":" in action else action).lower()
+
+            # Wildcard in the service portion: `*:Create*`, `*:Decrypt`,
+            # `*:GetSecretValue`, etc. Matches that action name across
+            # EVERY service that exposes it — typically dozens of services.
+            # This is account-compromise tier on its own (e.g. `*:Create*`
+            # matches iam:CreateAccessKey + organizations:CreateAccount +
+            # iam:CreateRole + sso-admin:CreatePermissionSet, any one of
+            # which is catastrophic). Floor at 8, or 9 if the action-name
+            # half is itself broad (`*:*`, `*`, or empty).
+            if "*" in service:
+                action_name = action.split(":", 1)[1] if ":" in action else ""
+                # Bare `*` is already handled as full admin elsewhere; we
+                # only hit here for `*:something` shapes.
+                if action_name in ("*", ""):
+                    score = max(score, 10)
+                    factors.append(
+                        f"`{action}` has wildcard in BOTH service AND "
+                        "action — equivalent to full admin"
+                    )
+                else:
+                    # Floor at 9: `*:Create*` matches iam:CreateAccessKey
+                    # + organizations:CreateAccount + iam:CreateRole etc.,
+                    # any one of which is catastrophic on its own.
+                    # `*:Delete*` similarly. The wildcard match is across
+                    # the entire AWS API surface; we can't trust that
+                    # the specific actions matched are safe.
+                    score = max(score, 9)
+                    factors.append(
+                        f"`{action}` has wildcard in the service portion — "
+                        f"matches `{action_name}` across every service that "
+                        "exposes it. Almost certainly matches one or more "
+                        "catastrophic actions (iam:CreateAccessKey, "
+                        "organizations:CreateAccount, etc.)."
+                    )
+                    suggestions.append(
+                        f"Replace `{action}` with explicit service:Action "
+                        "pairs — `*:` in the service portion is almost "
+                        "never the intended meaning."
+                    )
+                continue  # don't run the rest of the action-specific rules
 
             if action.endswith(":*"):
                 if service in effective_sensitive:

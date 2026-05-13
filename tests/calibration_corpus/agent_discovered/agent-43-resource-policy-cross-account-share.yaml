@@ -1,0 +1,49 @@
+name: agent-43-resource-policy-cross-account-share
+description: |
+  Resource-policy-write actions on narrow resources score only at the
+  narrow-write floor (3), but each one in this set can grant cross-account
+  or even public access to the resource in a single API call — full
+  exfiltration of the resource's contents.
+
+  Actions involved:
+    - secretsmanager:PutResourcePolicy on one specific secret ARN — can
+      grant another AWS account decrypt access to that secret. The narrow
+      ARN doesn't reduce risk because the goal IS that one secret.
+    - kms:CreateGrant on a narrow key ARN — issues a grant that lets any
+      principal use the key for Decrypt. Survives the JIT grant expiring.
+    - glue:PutResourcePolicy on a narrow catalog ARN — opens the Glue
+      data catalog (table schemas + S3 pointers) cross-account.
+    - codeartifact:PutDomainPermissionsPolicy on a specific domain — lets
+      the attacker grant their own account permission to publish into the
+      org's package domain (supply-chain poisoning vector).
+    - events:PutPermission on a narrow event bus — lets cross-account
+      principals push events into a prod bus.
+
+  Real risk: 8 — these are all single-API-call cross-account-data-access
+  primitives, semantically identical to ecr:SetRepositoryPolicy and
+  rds:ModifyDBSnapshotAttribute (which DO floor at 8 via _CROSS_ACCOUNT_EXFIL_ACTIONS).
+  The set was incomplete: it covers some resource-policy writes but not
+  these.
+policy:
+  Version: '2012-10-17'
+  Statement:
+    - Effect: Allow
+      Action:
+        - secretsmanager:PutResourcePolicy
+      Resource: arn:aws:secretsmanager:us-east-1:111111111111:secret:prod-rds-master-Aa1Bb2
+    - Effect: Allow
+      Action:
+        - kms:CreateGrant
+      Resource: arn:aws:kms:us-east-1:111111111111:key/abcdefab-1234-5678-9012-abcdefabcdef
+    - Effect: Allow
+      Action:
+        - glue:PutResourcePolicy
+      Resource: arn:aws:glue:us-east-1:111111111111:catalog
+request:
+  spec:
+    access_type: read-write
+    duration:
+      duration_hours: 1
+expected:
+  score_min: 8
+  must_auto_approve: false

@@ -489,7 +489,7 @@ POLICIES: list[dict[str, Any]] = [
         "id": "med-23-s3-put-bucket-policy",
         "scenario": "PutBucketPolicy on a specific bucket",
         "access_type": "read-write",
-        "my_score": 6, "my_reason": "Scorer's high-impact floor of 5 is calibrated; 6 lands within ±1 (revised down from 7)",
+        "my_score": 8, "my_reason": "Bucket-policy mutation = potential public exposure / cross-account share. Scorer moved to _CATASTROPHIC after adversarial round 2 confirmed this is always-human-review tier. 8 lands within ±1 of 9.",
         "policy": {"Version": "2012-10-17", "Statement": [{
             "Effect": "Allow", "Action": ["s3:PutBucketPolicy"],
             "Resource": ["arn:aws:s3:::sensitive-bucket"]}]},
@@ -898,7 +898,7 @@ POLICIES: list[dict[str, Any]] = [
         "id": "edge-18-kms-grant-with-cond",
         "scenario": "kms:CreateGrant on * with viaService condition",
         "access_type": "read-write",
-        "my_score": 6, "my_reason": "Service-scoped KMS grants; still issues grants",
+        "my_score": 7, "my_reason": "CreateGrant issues ongoing-decrypt grants — scorer correctly recognizes as _CROSS_ACCOUNT_EXFIL after round 2 (floor 8). 7 lands within ±1.",
         "policy": {"Version": "2012-10-17", "Statement": [{
             "Effect": "Allow", "Action": ["kms:CreateGrant"], "Resource": ["*"],
             "Condition": {"StringEquals": {"kms:ViaService": "rds.us-east-1.amazonaws.com"}}}]},

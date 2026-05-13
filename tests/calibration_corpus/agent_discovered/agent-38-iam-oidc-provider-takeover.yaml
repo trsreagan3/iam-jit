@@ -1,0 +1,40 @@
+name: agent-38-iam-oidc-provider-takeover
+description: |
+  `iam:CreateOpenIDConnectProvider`, `iam:UpdateOpenIDConnectProviderThumbprint`,
+  and `iam:AddClientIDToOpenIDConnectProvider` give an attacker the ability
+  to register an OIDC IdP they control as a federated identity provider in
+  the AWS account.
+
+  Any IAM role with a trust policy of the form
+    "Federated": "arn:aws:iam::ACCT:oidc-provider/<attacker-domain>"
+  becomes assumable by the attacker minting an OIDC token signed by their
+  own IdP — i.e., they get to assume any role whose trust policy now
+  references their fake provider. With `UpdateOpenIDConnectProviderThumbprint`
+  they can also point a *legitimate* provider (e.g. GitHub Actions OIDC)
+  at attacker-controlled JWKS to forge tokens that the legit-trust-policy
+  role accepts.
+
+  Scorer only fires sensitive-service-on-broad (`iam` + Resource:*) →
+  floor 6 for "touches sensitive service". No specific recognition that
+  OIDC-provider mutations are federation IdP takeover.
+
+  Real risk: 9 — equivalent to iam:CreateSAMLProvider (also missed; see
+  agent-39). The federation-IdP-takeover primitive can lateral-move into
+  any role with a matching Federated trust statement.
+policy:
+  Version: '2012-10-17'
+  Statement:
+    - Effect: Allow
+      Action:
+        - iam:CreateOpenIDConnectProvider
+        - iam:UpdateOpenIDConnectProviderThumbprint
+        - iam:AddClientIDToOpenIDConnectProvider
+      Resource: '*'
+request:
+  spec:
+    access_type: read-write
+    duration:
+      duration_hours: 1
+expected:
+  score_min: 9
+  must_auto_approve: false

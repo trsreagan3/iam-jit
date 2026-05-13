@@ -1,0 +1,42 @@
+name: agent-45-eventbridge-api-destination-exfil
+description: |
+  `events:CreateApiDestination` + `events:CreateConnection` + `events:PutRule`
+  + `events:PutTargets` set up a recurring outbound HTTPS call from the
+  account to an attacker-controlled URL, on a schedule the attacker
+  defines, with arbitrary payload composed from the matched event.
+
+  This is the exfiltration analogue of agent-15 (logs:PutSubscriptionFilter).
+  Different mechanism — events service rather than logs service — but
+  identical blast: a single API call creates a persistent outbound stream.
+
+  Same for `scheduler:CreateSchedule` (the newer EventBridge Scheduler):
+  it fires a target ARN (which can be an API destination, SQS in another
+  account, Lambda function URL, etc.) on cron. Persistence past the JIT
+  grant expiring.
+
+  Scorer treats these as ordinary Write actions, no special handling.
+  Floor 6 only.
+
+  Real risk: 8 — same tier as logs:PutSubscriptionFilter, which IS in
+  _CROSS_ACCOUNT_EXFIL_ACTIONS. The class is "persistent outbound stream
+  created in one API call"; these belong with it.
+policy:
+  Version: '2012-10-17'
+  Statement:
+    - Effect: Allow
+      Action:
+        - events:CreateApiDestination
+        - events:CreateConnection
+        - events:PutRule
+        - events:PutTargets
+        - scheduler:CreateSchedule
+        - scheduler:UpdateSchedule
+      Resource: '*'
+request:
+  spec:
+    access_type: read-write
+    duration:
+      duration_hours: 1
+expected:
+  score_min: 8
+  must_auto_approve: false

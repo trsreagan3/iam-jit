@@ -1,0 +1,40 @@
+name: agent-57-iam-service-cert-mitm
+description: |
+  `iam:UploadServerCertificate` lets the caller upload an X.509 certificate
+  + private key into IAM (the legacy server-cert store). It's then
+  attachable to legacy ELB Classic listeners, CloudFront distributions
+  using server-cert-from-IAM, and a handful of other services.
+
+  `iam:UpdateSigningCertificate` updates an existing IAM signing
+  certificate. `iam:UploadSSHPublicKey` uploads an SSH public key to an
+  IAM user — used by AWS CodeCommit for git push authentication. Pair
+  with read on the user list and the attacker installs their own SSH key
+  on every CodeCommit-using engineer's IAM user, getting permanent git
+  push access to every CodeCommit repo.
+
+  Scorer floors at 6 (sensitive-service iam + Resource:*). No special
+  recognition of the cert-upload / SSH-key-upload attack surface.
+
+  Real risk: 8 — these are key-material installation primitives. Each
+  one persistently grants the attacker authenticated access (TLS server
+  identity, code-signing identity, or git-push identity) using key
+  material they control.
+policy:
+  Version: '2012-10-17'
+  Statement:
+    - Effect: Allow
+      Action:
+        - iam:UploadServerCertificate
+        - iam:UpdateServerCertificate
+        - iam:UploadSigningCertificate
+        - iam:UpdateSigningCertificate
+        - iam:UploadSSHPublicKey
+      Resource: '*'
+request:
+  spec:
+    access_type: read-write
+    duration:
+      duration_hours: 1
+expected:
+  score_min: 8
+  must_auto_approve: false

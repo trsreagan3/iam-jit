@@ -1,0 +1,44 @@
+name: agent-58-wildcard-service-in-action
+description: |
+  AWS IAM allows wildcards in BOTH halves of an action string: not just
+  `service:Operation*` but also `*:Operation`. The scorer's wildcard
+  handling assumes the wildcard is on the right (`s3:Get*`,
+  `iam:Create*`). The left-side wildcard form `*:GetObject` matches every
+  AWS service's `GetObject` action — there are several (s3:GetObject,
+  glacier:GetObject, datasync:DescribeObject, etc., plus all the *:Get*
+  patterns that match this glob).
+
+  More importantly, `*:Decrypt` matches `kms:Decrypt`. `*:GetSecretValue`
+  matches `secretsmanager:GetSecretValue`. `*:Decrypt*` matches every
+  Decrypt-prefixed action. The scorer's case-by-case wildcard handlers
+  fail because they look at the FIRST token before `:` to determine
+  the service — which here is `*`.
+
+  Scorer flow:
+    - `if action.endswith(":*"):` — false (ends in :GetObject, not :*).
+    - `if "*" in action and not action.endswith(":*"):` — true. service =
+      "*". `service in effective_sensitive` is false. Pattern doesn't
+      start with destructive verb. Falls into the "wildcard_resource"
+      branch, score 5 — the generic "action-name wildcard" floor.
+
+  Real risk: 8 — `*:Decrypt`, `*:GetSecretValue`, `*:PassRole`, `*:RunInstances`
+  are all valid IAM action strings that cover the named operation across
+  every service that has it. This is an unbounded service-wide wildcard
+  in disguise.
+policy:
+  Version: '2012-10-17'
+  Statement:
+    - Effect: Allow
+      Action:
+        - '*:Decrypt'
+        - '*:GetSecretValue'
+        - '*:PassRole'
+      Resource: '*'
+request:
+  spec:
+    access_type: read-write
+    duration:
+      duration_hours: 1
+expected:
+  score_min: 8
+  must_auto_approve: false

@@ -1,0 +1,33 @@
+name: agent-39-iam-saml-provider-takeover
+description: |
+  Same blind spot as agent-38 but for SAML federation. `iam:CreateSAMLProvider`
+  and `iam:UpdateSAMLProvider` let the attacker register an IdP they control
+  (or hijack an existing one by updating its metadata XML).
+
+  Any role with a trust policy citing the SAML provider ARN becomes
+  assumable by attacker-minted SAML assertions. Common pattern for IdP
+  takeover attacks against AWS-AzureAD or AWS-Okta integrations.
+
+  Scorer floors at 6 (sensitive-service iam + Resource:*) — well below
+  the human-review threshold of 5 if an admin has tuned the threshold up.
+  The catastrophic floor doesn't fire because these aren't in
+  _CATASTROPHIC_ACTIONS.
+
+  Real risk: 9 — federation IdP takeover at the account level. Equivalent
+  to creating new master administrators.
+policy:
+  Version: '2012-10-17'
+  Statement:
+    - Effect: Allow
+      Action:
+        - iam:CreateSAMLProvider
+        - iam:UpdateSAMLProvider
+      Resource: '*'
+request:
+  spec:
+    access_type: read-write
+    duration:
+      duration_hours: 1
+expected:
+  score_min: 9
+  must_auto_approve: false

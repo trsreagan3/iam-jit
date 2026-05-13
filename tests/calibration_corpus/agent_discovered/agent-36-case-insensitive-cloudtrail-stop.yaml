@@ -1,0 +1,35 @@
+name: agent-36-case-insensitive-cloudtrail-stop
+description: |
+  Evidence destruction via case-tampered CloudTrail actions. The
+  catastrophic-action set contains `cloudtrail:StopLogging` and
+  `cloudtrail:DeleteTrail` in canonical casing; the lowercase variants
+  `cloudtrail:stoplogging` and `cloudtrail:deletetrail` are
+  behaviourally identical in AWS but fail the case-sensitive set check.
+
+  Result: a policy granting the attacker the right to disable audit
+  logging account-wide scores 4 (just the cross-resource-read flag,
+  because policy_sentry returns level=Write for these and the destructive-
+  verb prefix matcher uses `startswith(("Delete", "Stop"...))` —
+  capital-only, so lowercase verbs miss the destructive-on-broad check
+  too).
+
+  Real risk: 9 — silencing CloudTrail makes the rest of the attack
+  invisible. The blast radius is "every subsequent action by the attacker
+  is unloggable."
+policy:
+  Version: '2012-10-17'
+  Statement:
+    - Effect: Allow
+      Action:
+        - cloudtrail:stoplogging
+        - cloudtrail:deletetrail
+        - cloudtrail:puteventselectors
+      Resource: '*'
+request:
+  spec:
+    access_type: read-write
+    duration:
+      duration_hours: 1
+expected:
+  score_min: 9
+  must_auto_approve: false

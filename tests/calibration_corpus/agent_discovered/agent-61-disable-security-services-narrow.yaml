@@ -1,0 +1,46 @@
+name: agent-61-disable-security-services-narrow
+description: |
+  Disabling the org's security-monitoring posture is evidence-destruction
+  tier — same severity class as cloudtrail:StopLogging (which IS in
+  _CATASTROPHIC_ACTIONS). But the analogous "disable my detection plane"
+  actions for other services aren't catastrophic:
+    - guardduty:DeleteDetector / DisassociateFromMasterAccount
+    - securityhub:DisableSecurityHub
+    - config:DeleteConfigurationRecorder / StopConfigurationRecorder /
+      DeleteDeliveryChannel
+    - access-analyzer:DeleteAnalyzer
+    - macie2:DisableMacie
+    - detective:DeleteGraph / DisassociateMembership
+    - inspector2:Disable
+
+  The destructive-verb-on-broad rule catches some of these (Delete* /
+  Disable* / Stop* + Resource:*) and floors at 8. But the prefix matcher
+  is incomplete: `Disassociate*`, `Deactivate*`, `Update*` (setting
+  Enable=false), `Put*` (overwriting a configuration recorder to record
+  nothing) all stealthily disable security plane without using a
+  destructive-verb prefix. Floor falls to 6 (sensitive-service or generic
+  state-changing on broad).
+
+  Real risk: 9 — disabling security monitoring is the precondition for
+  every subsequent stealth attack. Same class as evidence destruction
+  (cloudtrail:StopLogging IS at 9); should be at 9 regardless of resource
+  scope.
+policy:
+  Version: '2012-10-17'
+  Statement:
+    - Effect: Allow
+      Action:
+        - guardduty:DisassociateFromMasterAccount
+        - guardduty:UpdateDetector
+        - config:PutConfigurationRecorder
+        - access-analyzer:UpdateAnalyzer
+        - inspector2:DisassociateMember
+      Resource: '*'
+request:
+  spec:
+    access_type: read-write
+    duration:
+      duration_hours: 1
+expected:
+  score_min: 9
+  must_auto_approve: false

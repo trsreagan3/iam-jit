@@ -1,0 +1,35 @@
+name: agent-40-iam-login-profile-mfa-bypass
+description: |
+  Console-takeover primitive: `iam:UpdateLoginProfile` and `iam:CreateLoginProfile`
+  on every IAM user lets the attacker set a console password for any user in
+  the account (and create a new login profile for users without one). Paired
+  with `iam:DeactivateMFADevice` / `iam:DeleteVirtualMFADevice` / `iam:ResyncMFADevice`,
+  the attacker can also strip MFA from every user.
+
+  Scorer floors at 6 for sensitive-service-on-broad (`iam` + Resource:*).
+  None of these actions are in _CATASTROPHIC_ACTIONS. The destructive-verb
+  prefix matcher does catch `Deactivate`/`Delete` MFA variants and floors at 8
+  on the destructive-on-broad rule — but `iam:UpdateLoginProfile` and
+  `iam:CreateLoginProfile` (the password-set primitive) score only 6.
+
+  Real risk: 9 — full account-takeover of every IAM user with a console
+  presence, plus MFA bypass on every user. Equivalent in impact to
+  iam:CreateAccessKey (which IS catastrophic), but for the human-console
+  attack path.
+policy:
+  Version: '2012-10-17'
+  Statement:
+    - Effect: Allow
+      Action:
+        - iam:UpdateLoginProfile
+        - iam:CreateLoginProfile
+        - iam:ChangePassword
+      Resource: arn:aws:iam::*:user/*
+request:
+  spec:
+    access_type: read-write
+    duration:
+      duration_hours: 1
+expected:
+  score_min: 9
+  must_auto_approve: false

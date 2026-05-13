@@ -1,0 +1,38 @@
+name: agent-60-kms-create-grant-narrow
+description: |
+  `kms:CreateGrant` on a narrow key ARN issues a KMS grant (a side-channel
+  authorization, separate from the key policy) authorizing a principal of
+  the caller's choice (specified by the GranteePrincipal parameter to the
+  API call) to perform operations like Decrypt + GenerateDataKey on the
+  key.
+
+  The narrow Resource ARN is the targeted master key — that's the whole
+  point. The attack: issue a grant naming the attacker's own AWS account
+  as GranteePrincipal. The attacker can now Decrypt every ciphertext
+  encrypted under that key, from their own account, even after the JIT
+  grant expires. Grants are persistent until explicitly revoked.
+
+  Scorer: 3 (just the narrow-write floor). kms:CreateGrant isn't in
+  _HIGH_IMPACT_MUTATION_ACTIONS, _CATASTROPHIC_ACTIONS, or
+  _CROSS_ACCOUNT_EXFIL_ACTIONS. It's also not specifically gated by the
+  sensitive-service-on-broad rule because the resource is narrow.
+
+  Real risk: 8 — single-call cross-account access to a KMS master key.
+  Equivalent in blast to kms:PutKeyPolicy (catastrophic) but via the
+  alternate grant mechanism. Persists past the JIT grant.
+policy:
+  Version: '2012-10-17'
+  Statement:
+    - Effect: Allow
+      Action:
+        - kms:CreateGrant
+        - kms:RetireGrant
+      Resource: arn:aws:kms:us-east-1:111111111111:key/abcdefab-1234-5678-9012-abcdefabcdef
+request:
+  spec:
+    access_type: read-write
+    duration:
+      duration_hours: 1
+expected:
+  score_min: 8
+  must_auto_approve: false

@@ -1,0 +1,48 @@
+name: agent-53-sagemaker-domain-rce
+description: |
+  Today's SageMaker Studio uses the newer Domain + UserProfile model
+  rather than the older NotebookInstance API. The composition rule in
+  _CODE_EXECUTION_PRIMITIVES only contains the legacy NotebookInstance
+  actions:
+    sagemaker:CreateNotebookInstance
+    sagemaker:CreatePresignedNotebookInstanceUrl
+    sagemaker:CreateProcessingJob
+    sagemaker:CreateTrainingJob
+  The corresponding newer actions miss:
+    sagemaker:CreateDomain
+    sagemaker:CreateUserProfile
+    sagemaker:CreateApp
+    sagemaker:CreatePresignedDomainUrl
+    sagemaker:CreateSpace
+
+  Same blast as the notebook version: interactive Jupyter shell under the
+  SageMaker-execution-role's privileges, via a presigned-URL session.
+  Combined with iam:PassRole on a SageMaker execution role, the composition
+  is RCE-as-role just like agent-06.
+
+  Real risk: 8 — should be in the code-execution-via-role composition
+  set, same tier as the notebook actions. Without it, the policy scores
+  only 6.
+policy:
+  Version: '2012-10-17'
+  Statement:
+    - Effect: Allow
+      Action:
+        - sagemaker:CreateDomain
+        - sagemaker:CreateUserProfile
+        - sagemaker:CreateApp
+        - sagemaker:CreatePresignedDomainUrl
+        - sagemaker:CreateSpace
+      Resource: '*'
+    - Effect: Allow
+      Action:
+        - iam:PassRole
+      Resource: arn:aws:iam::*:role/sagemaker-execution-role
+request:
+  spec:
+    access_type: read-write
+    duration:
+      duration_hours: 1
+expected:
+  score_min: 8
+  must_auto_approve: false

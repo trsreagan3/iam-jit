@@ -1,0 +1,37 @@
+name: agent-54-emr-runjobflow-rce-passrole
+description: |
+  EMR (Elastic MapReduce, service name `elasticmapreduce`) lets the
+  caller run a Spark/Hadoop/Presto cluster. `RunJobFlow` accepts arbitrary
+  bootstrap actions, steps (job code), and applications. The cluster nodes
+  boot with an EC2 instance profile (the EMR_EC2_DefaultRole, typically)
+  whose creds are reachable from inside the job code via 169.254.169.254.
+
+  Composition: `elasticmapreduce:RunJobFlow` + `elasticmapreduce:AddJobFlowSteps`
+  + `iam:PassRole` on the EMR EC2 role = RCE-as-role. Same pattern as
+  ec2:RunInstances + PassRole (agent-08) and Glue (agent-05). But
+  elasticmapreduce isn't in _CODE_EXECUTION_PRIMITIVES, so the composition
+  rule doesn't fire.
+
+  Real risk: 8 — RCE-as-EMR-EC2-role. The default EMR EC2 role often has
+  broad S3 read access for "any bucket the job needs" and frequently
+  contains write access to a results bucket. Plenty of escalation surface.
+policy:
+  Version: '2012-10-17'
+  Statement:
+    - Effect: Allow
+      Action:
+        - elasticmapreduce:RunJobFlow
+        - elasticmapreduce:AddJobFlowSteps
+      Resource: '*'
+    - Effect: Allow
+      Action:
+        - iam:PassRole
+      Resource: arn:aws:iam::*:role/EMR_EC2_DefaultRole
+request:
+  spec:
+    access_type: read-write
+    duration:
+      duration_hours: 1
+expected:
+  score_min: 8
+  must_auto_approve: false

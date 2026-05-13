@@ -1,0 +1,35 @@
+name: agent-42-s3-putbucketpolicy-narrow-bucket
+description: |
+  `s3:PutBucketPolicy` is in _HIGH_IMPACT_MUTATION_ACTIONS, which floors
+  the score at 5 on a narrow bucket. But this dramatically under-rates the
+  attack: a single PutBucketPolicy call can install a bucket policy of the
+  form `{"Effect":"Allow","Principal":"*","Action":"s3:*"}`, opening every
+  object in that bucket to the public Internet.
+
+  This is the canonical pattern that causes catastrophic data leaks (the
+  S3-bucket-public class of breach). The action's effect isn't "modify
+  resource configuration" — it's "rewrite the bucket's authorization model
+  in one call, with arbitrary content the caller controls." The narrow-
+  bucket scope ARN doesn't reduce risk because the entire blast (every
+  object in that bucket, plus any future objects, plus any cross-account
+  Principals the attacker writes in) is contained within the one targeted
+  bucket — which is the actual goal of the attack.
+
+  Real risk: 8 — single-call exfil of an entire bucket. Should be a
+  cross-account-exfil-class action: floor 8 regardless of resource scope.
+policy:
+  Version: '2012-10-17'
+  Statement:
+    - Effect: Allow
+      Action:
+        - s3:PutBucketPolicy
+        - s3:DeleteBucketPolicy
+      Resource: arn:aws:s3:::corporate-pii-data
+request:
+  spec:
+    access_type: read-write
+    duration:
+      duration_hours: 1
+expected:
+  score_min: 8
+  must_auto_approve: false

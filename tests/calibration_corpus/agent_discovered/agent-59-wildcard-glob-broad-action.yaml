@@ -1,0 +1,38 @@
+name: agent-59-wildcard-glob-broad-action
+description: |
+  Companion to agent-58. The wildcard-glob form `*:Create*` matches every
+  Create action in every AWS service: iam:CreateRole, iam:CreateUser,
+  iam:CreatePolicy, ec2:CreateVpc, lambda:CreateFunction,
+  cloudformation:CreateStack, kms:CreateKey, sso-admin:CreatePermissionSet,
+  cognito-idp:CreateUserPool, organizations:CreateAccount — including
+  most of the catastrophic-action set.
+
+  The scorer's wildcard handling assumes service is the part-before-colon
+  ("*" here), so `service in effective_sensitive` is False and the
+  destructive-verb prefix check (Delete/Stop/etc.) doesn't match
+  "Create". The wildcard falls into the generic "action-name wildcard"
+  branch and floors at 5.
+
+  Equally broken: `*:Put*` (every state-write), `*:*Role*` (every action
+  whose name contains "Role" — IAM role admin, PassRole, AssumeRole,
+  TagRole, etc.).
+
+  Real risk: 9 — `*:Create*` includes iam:CreateAccessKey
+  (catastrophic), iam:CreateRole (high-impact), organizations:CreateAccount
+  (catastrophic), and every other Create-prefixed action in every service.
+  Account-compromise tier.
+policy:
+  Version: '2012-10-17'
+  Statement:
+    - Effect: Allow
+      Action:
+        - '*:Create*'
+      Resource: '*'
+request:
+  spec:
+    access_type: read-write
+    duration:
+      duration_hours: 1
+expected:
+  score_min: 9
+  must_auto_approve: false

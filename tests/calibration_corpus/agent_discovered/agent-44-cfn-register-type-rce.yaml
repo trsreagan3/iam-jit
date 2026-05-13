@@ -1,0 +1,41 @@
+name: agent-44-cfn-register-type-rce
+description: |
+  `cloudformation:RegisterType` registers a CloudFormation "extension"
+  (custom resource type or hook) whose handler code is supplied by the
+  caller — Lambda function ARNs the caller chose. Every subsequent
+  `CreateStack` / `UpdateStack` / `ExecuteChangeSet` that references the
+  newly-registered type executes the caller's handler code under the
+  privileges of the CFN service role the deploying stack uses.
+
+  Effect: persistent backdoor into the CloudFormation pipeline. Every
+  future deployment by ANY team that uses the registered type runs the
+  attacker's code under that team's deploy role. The attacker doesn't
+  need PassRole — they hijack the role used by other principals.
+
+  Scorer treats this as an ordinary cloudformation Write action.
+  cloudformation:RegisterType and the pair cloudformation:ActivateType,
+  cloudformation:SetTypeDefaultVersion, cloudformation:PublishType are
+  not in _CODE_EXECUTION_PRIMITIVES, _HIGH_IMPACT_MUTATION_ACTIONS, or
+  _CATASTROPHIC_ACTIONS — so on Resource: * it scores only 6.
+
+  Real risk: 9 — persistent supply-chain backdoor into the deploy pipeline.
+  Like agent-22 / agent-23 (ssm:CreateDocument, imagebuilder pipeline
+  poisoning) but for CloudFormation. Account-compromise tier.
+policy:
+  Version: '2012-10-17'
+  Statement:
+    - Effect: Allow
+      Action:
+        - cloudformation:RegisterType
+        - cloudformation:ActivateType
+        - cloudformation:SetTypeDefaultVersion
+        - cloudformation:PublishType
+      Resource: '*'
+request:
+  spec:
+    access_type: read-write
+    duration:
+      duration_hours: 1
+expected:
+  score_min: 9
+  must_auto_approve: false

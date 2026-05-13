@@ -1,0 +1,46 @@
+name: agent-34-case-insensitive-code-exec-passrole
+description: |
+  The code-execution-via-role composition rule scans `all_actions` for
+  membership in `_CODE_EXECUTION_PRIMITIVES` and for the literal string
+  `iam:PassRole`. Both checks are case-sensitive against canonical-cased
+  members.
+
+  AWS treats IAM action names case-insensitively — the request
+  `Lambda:UpdateFunctionCode` + `Iam:PassRole` is functionally identical
+  to the canonical casing. By writing the same actions with mixed casing,
+  the attacker fully bypasses:
+    - the catastrophic-action floor (lambda:UpdateFunctionCode IS in
+      _HIGH_IMPACT_MUTATION_ACTIONS — case-sensitive miss),
+    - the high-risk-action-on-wildcard floor (iam:PassRole rule —
+      case-sensitive miss),
+    - the iam:PassRole narrow-floor-of-4 rule (also case-sensitive),
+    - the code-execution-via-role composition (also case-sensitive),
+    - and the sensitive-service-on-broad-resource floor (the Lambda
+      resource is narrow).
+
+  Score collapses to 1 — the policy looks completely innocuous. This is
+  the most severe blind spot found in round 2: a single capitalisation
+  change reduces a textbook RCE-as-admin policy to "no broad patterns
+  detected."
+
+  Real risk: 9 — composition is `update Lambda code to attacker payload`
+  + `pass the admin role to it on next invoke` = run-anything as admin.
+policy:
+  Version: '2012-10-17'
+  Statement:
+    - Effect: Allow
+      Action:
+        - Lambda:UpdateFunctionCode
+      Resource: arn:aws:lambda:us-east-1:111111111111:function:prod-app
+    - Effect: Allow
+      Action:
+        - Iam:PassRole
+      Resource: arn:aws:iam::*:role/admin-deploy
+request:
+  spec:
+    access_type: read-write
+    duration:
+      duration_hours: 1
+expected:
+  score_min: 9
+  must_auto_approve: false

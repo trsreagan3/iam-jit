@@ -1,0 +1,50 @@
+name: agent-52-bedrock-agent-rce-rag-poisoning
+description: |
+  Bedrock IS in _SENSITIVE_SERVICES (good — floor 6 on broad resource).
+  But two more-specific Bedrock attack patterns aren't caught:
+
+  (a) `bedrock:CreateAgent` + `bedrock:CreateAgentActionGroup` lets the
+      caller register a Bedrock Agent whose action groups invoke
+      arbitrary Lambda functions. The Lambda runs under whatever role
+      the Agent passes to it — so this composes with iam:PassRole the
+      same way agent-03 / agent-04 do, but bedrock:CreateAgent and
+      bedrock:CreateAgentActionGroup are NOT in _CODE_EXECUTION_PRIMITIVES.
+      Composition rule misses → no floor-9 lift.
+
+  (b) `bedrock:CreateKnowledgeBase` + `bedrock:CreateDataSource` +
+      `bedrock:StartIngestionJob` ingests attacker-controlled content
+      into a Bedrock Knowledge Base. Production RAG agents query the KB;
+      ingested content becomes prompt-injection payload for every
+      downstream LLM-tool-call → silent influence over agent behaviour
+      (RAG poisoning at scale). Persistent until the KB is regenerated.
+
+  Real risk: 8 — Bedrock-Agent action group composition with PassRole
+  is RCE-as-role (same tier as Lambda/Glue/SageMaker — already in the
+  composition set). The KB-poisoning angle is supply-chain-for-AI tier.
+  Floor 8 minimum on either pattern.
+policy:
+  Version: '2012-10-17'
+  Statement:
+    - Effect: Allow
+      Action:
+        - bedrock:CreateAgent
+        - bedrock:UpdateAgent
+        - bedrock:CreateAgentActionGroup
+        - bedrock:UpdateAgentActionGroup
+        - bedrock:CreateKnowledgeBase
+        - bedrock:UpdateKnowledgeBase
+        - bedrock:CreateDataSource
+        - bedrock:StartIngestionJob
+      Resource: '*'
+    - Effect: Allow
+      Action:
+        - iam:PassRole
+      Resource: arn:aws:iam::*:role/bedrock-execution-role
+request:
+  spec:
+    access_type: read-write
+    duration:
+      duration_hours: 1
+expected:
+  score_min: 8
+  must_auto_approve: false

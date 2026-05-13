@@ -1,0 +1,41 @@
+name: agent-50-codeartifact-supply-chain
+description: |
+  AWS CodeArtifact is the org's internal package registry (npm/pip/maven/
+  nuget). `codeartifact:PublishPackageVersion` lets the caller publish any
+  version of any package into the org's repositories — including
+  packages whose names match upstream public packages (used for
+  dependency-confusion poisoning) or popular internal packages.
+
+  `codeartifact:PutDomainPermissionsPolicy` /
+  `codeartifact:PutRepositoryPermissionsPolicy` grant cross-account
+  publishing rights — the attacker's own account can later push poisoned
+  versions long after the JIT grant expires.
+
+  Every developer, every CI pipeline, every container build that fetches
+  packages from the org domain will then pull attacker code on the next
+  rebuild. Supply-chain compromise at the org-package-repo level.
+
+  Scorer: 6 (generic Write + Resource:*; broad cross-resource read).
+  CodeArtifact isn't in _SENSITIVE_SERVICES or any high-impact list.
+
+  Real risk: 8 — package-registry supply-chain attack analogue of
+  ecr:PutImage (which IS in _HIGH_IMPACT_MUTATION_ACTIONS) and
+  imagebuilder pipeline poisoning (agent-23, catastrophic).
+policy:
+  Version: '2012-10-17'
+  Statement:
+    - Effect: Allow
+      Action:
+        - codeartifact:PublishPackageVersion
+        - codeartifact:PutDomainPermissionsPolicy
+        - codeartifact:PutRepositoryPermissionsPolicy
+        - codeartifact:UpdatePackageVersionsStatus
+      Resource: '*'
+request:
+  spec:
+    access_type: read-write
+    duration:
+      duration_hours: 1
+expected:
+  score_min: 8
+  must_auto_approve: false
