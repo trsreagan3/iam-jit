@@ -26,5 +26,10 @@ request:
       duration_hours: 1
 
 expected:
-  score_min: 3
-  score_max: 5
+  # Post-2026-05-13 calibration refinement: ListAllMyBuckets on
+  # Resource:* now scores 1 (pure metadata-listing action, no data
+  # exposure). The original bounds (3-5) reflected the broader pre-
+  # refinement scorer. The bug-regression nature of this test (em-dash
+  # unicode in description not crashing the scorer) is unaffected.
+  score_min: 1
+  score_max: 2

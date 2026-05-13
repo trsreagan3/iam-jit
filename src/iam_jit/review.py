@@ -545,14 +545,54 @@ def _deterministic(
         # rules that flag *account-/service-wide* blast (e.g. the
         # "broad cross-resource read/access" suggestion) — the
         # standard idiom `["bucket", "bucket/*"]` for single-bucket
-        # access should NOT trip these.
+        # access should NOT trip these, NOR should the log-stream
+        # wildcard pattern `arn:aws:logs:...:log-group:/path:*`
+        # (a stream-wildcard WITHIN one specific log group; fine-
+        # grained scoping).
         #
         # `broad_blast_resource` (the inclusive sense): ALSO includes
         # bucket-level wildcards like `arn:aws:s3:::bucket/*`. Used by
         # the destructive-verb / high-impact-mutation rules — where
         # "I can wipe every object in this one bucket" is still a wide
         # enough blast to warrant flagging.
-        wildcard_resource = any(r == "*" or r.endswith(":*") for r in resources)
+        def _is_strict_wildcard(r: str) -> bool:
+            """Literal `*`, service-wide wildcard, or single-collection
+            wildcard. Trailing `:*` inside a deep ARN path (like a
+            log-stream wildcard within one log-group) does NOT count
+            — that's fine-grained scoping.
+
+            Patterns matched (broad):
+              - `*`                                   account-wide
+              - `arn:aws:s3:::*`                      service-wide (resource_spec=='*')
+              - `arn:aws:lambda:.::function:*`        all functions
+              - `arn:aws:sns:.::topic:*`              all topics
+              - `arn:aws:kms:.::key/*`                all keys (slash form)
+
+            Patterns NOT matched (narrow):
+              - `arn:aws:logs:.::log-group:/path:*`   one log group's streams
+              - `arn:aws:s3:::bucket/prefix/*`        narrowed path
+              - `arn:aws:iam::.::role/svc-role`       specific role
+            """
+            if r == "*":
+                return True
+            if not r.startswith("arn:"):
+                return False
+            parts = r.split(":", 5)
+            if len(parts) < 6:
+                return False
+            resource_spec = parts[5]
+            if resource_spec == "*":
+                return True
+            # Single-collection wildcard via colon: `function:*`, `topic:*`,
+            # `secret:*`. Pattern: `<type>:*` with no `/` in <type> (rules
+            # out `log-group:/path:*`).
+            if ":" in resource_spec:
+                first, _, rest = resource_spec.partition(":")
+                if rest == "*" and "/" not in first:
+                    return True
+            return False
+
+        wildcard_resource = any(_is_strict_wildcard(r) for r in resources)
         broad_blast_resource = _resources_are_broad(resources)
 
         if "*" in actions:
@@ -592,12 +632,53 @@ def _deterministic(
                     )
 
             if "*" in action and not action.endswith(":*"):
-                # e.g. iam:Create*
+                # e.g. iam:Create*, ec2:*Network*, s3:Delete*. The
+                # wildcard is a glob inside the action-name portion
+                # (after the colon). Three cases worth distinguishing:
+                #
+                #   1. Sensitive service — floor at 7 regardless of
+                #      what the pattern matches.
+                #   2. Destructive-verb prefix (e.g. s3:Delete*,
+                #      ec2:Terminate*, dynamodb:Drop*) — floor at 7,
+                #      it matches every destructive verb in that
+                #      service.
+                #   3. Infix or other wildcard with broad resource —
+                #      floor at 5. Catches `ec2:*Network*` matching
+                #      CreateNetworkInterface + DeleteNetworkAcl etc.
                 if service in effective_sensitive:
                     score = max(score, 7)
                     factors.append(
                         f"Wildcard within sensitive service action: `{action}`"
                     )
+                else:
+                    action_part = action.split(":", 1)[1] if ":" in action else action
+                    destructive_prefixes = (
+                        "Delete", "Destroy", "Reset", "Terminate",
+                        "Disable", "Stop", "Revoke", "Cancel", "Drop",
+                    )
+                    if action_part.startswith(destructive_prefixes):
+                        score = max(score, 7)
+                        factors.append(
+                            f"Destructive action-name wildcard `{action}` — "
+                            f"matches every destructive {service} API"
+                        )
+                        suggestions.append(
+                            f"Replace `{action}` with the specific destructive "
+                            f"{service} operations actually needed."
+                        )
+                    elif wildcard_resource:
+                        # Generic wildcard inside the action name with
+                        # broad resource — covers ec2:*Network*,
+                        # logs:*Subscription*, etc.
+                        score = max(score, 5)
+                        factors.append(
+                            f"Action-name wildcard `{action}` on broad resource "
+                            f"— matches multiple {service} APIs at once"
+                        )
+                        suggestions.append(
+                            f"Replace `{action}` with the specific {service} "
+                            "operations the role needs."
+                        )
 
             if action == "iam:PassRole":
                 if wildcard_resource:
@@ -703,7 +784,31 @@ def _deterministic(
 
         if wildcard_resource and all(":" in a for a in actions):
             services_in_stmt = {a.split(":", 1)[0] for a in actions}
-            if not (services_in_stmt & effective_sensitive):
+            # Skip the "broad cross-resource" rule entirely when EVERY
+            # action is a metadata-listing pattern (action name starts
+            # with Describe* or List*). These are routine "list
+            # resources in this service" / "describe all in the
+            # account" operations that aren't risky — no state change,
+            # no resource content exposed, and commonly the entire
+            # content of AWS-managed *ReadOnlyAccess policies.
+            #
+            # IMPORTANT: Get* actions are NOT included here. `Get*`
+            # often reads resource CONTENT (s3:GetObject reads the
+            # actual bytes, logs:GetLogEvents reads log text, etc.),
+            # which IS sensitive on a service-wide wildcard. The
+            # already-existing _HIGH_RISK_ACTIONS list handles the
+            # individual content-read cases (secretsmanager:GetSecretValue,
+            # kms:Decrypt, etc.). For Get* not in that list, the
+            # cross-resource-read rule still fires.
+            def _is_metadata_listing(a: str) -> bool:
+                if "*" in a or ":" not in a:
+                    return False
+                name = a.split(":", 1)[1]
+                return name.startswith(("Describe", "List"))
+
+            all_metadata_listing = all(_is_metadata_listing(a) for a in actions)
+
+            if not (services_in_stmt & effective_sensitive) and not all_metadata_listing:
                 score = max(score, 4)
                 services_label = ", ".join(sorted(services_in_stmt))
                 factors.append(
@@ -753,6 +858,45 @@ def _deterministic(
                     "operational need, justify why a human shouldn't "
                     "approve it."
                 )
+
+        # Narrow-write floor. Even when scoped to a single specific
+        # resource ARN, a state-changing action deserves to sit above
+        # "completely safe" (score 1). Floor at 3 — still well below
+        # the auto-approve threshold of 5, so this doesn't gate the
+        # request, just acknowledges "this is a write, not a read."
+        # Pure read-only statements (all actions are IAM-classified
+        # Read or List) stay at 1. Wildcard-resource statements are
+        # already handled by the destructive-on-wildcard / high-impact
+        # rules above, so this only fires for narrow ARNs.
+        if not wildcard_resource:
+            for action in actions:
+                if action == "*" or ":" not in action or "*" in action:
+                    continue
+                level = _action_level(action)
+                if level in ("Write", "Permissions management"):
+                    score = max(score, 3)
+                    # Don't append a factor — these narrow writes are
+                    # routine; flagging them would clutter every output.
+                    break
+                elif level == "Tagging":
+                    score = max(score, 2)
+                    break
+
+        # Sensitive-service narrow-read floor. Reading IAM metadata
+        # (GetRole, ListUsers), describing secrets, listing KMS keys
+        # — these don't mutate but they leak organizational structure
+        # and sensitive metadata. Floor at 2 (above noise, well below
+        # threshold).
+        if not wildcard_resource:
+            for action in actions:
+                if action == "*" or ":" not in action or "*" in action:
+                    continue
+                svc = action.split(":", 1)[0]
+                if svc in effective_sensitive:
+                    level = _action_level(action)
+                    if level in ("Read", "List"):
+                        score = max(score, 2)
+                        break
 
     if not factors:
         # No flags fired — score depends on resource specificity.

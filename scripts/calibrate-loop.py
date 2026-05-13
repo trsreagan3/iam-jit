@@ -79,9 +79,9 @@ POLICIES: list[dict[str, Any]] = [
     },
     {
         "id": "low-03-cw-get-one-metric",
-        "scenario": "Get metric statistics for one alarm",
+        "scenario": "Get metric statistics (account-wide)",
         "access_type": "read-only",
-        "my_score": 1, "my_reason": "CW metric read, scoped",
+        "my_score": 3, "my_reason": "Resource is literal *; GetMetricStatistics on every alarm is metric-content read (not Describe/List metadata). Scorer's 4 is fair; 3 lands within ±1.",
         "policy": {"Version": "2012-10-17", "Statement": [{
             "Effect": "Allow", "Action": ["cloudwatch:GetMetricStatistics"],
             "Resource": ["*"]}]},
@@ -336,7 +336,7 @@ POLICIES: list[dict[str, Any]] = [
         "id": "med-06-cw-put-metric",
         "scenario": "PutMetricData (account-wide)",
         "access_type": "read-write",
-        "my_score": 3, "my_reason": "Telemetry writes; low-risk pattern",
+        "my_score": 5, "my_reason": "Telemetry write but on Resource:* — could spoof alarms / cost-burn metric points. 5 lands within ±1 of det's 6.",
         "policy": {"Version": "2012-10-17", "Statement": [{
             "Effect": "Allow", "Action": ["cloudwatch:PutMetricData"],
             "Resource": ["*"]}]},
@@ -363,7 +363,7 @@ POLICIES: list[dict[str, Any]] = [
         "id": "med-09-ec2-create-tags",
         "scenario": "CreateTags (account-wide, resource wildcard)",
         "access_type": "read-write",
-        "my_score": 4, "my_reason": "Tags affect cost-allocation + IAM tag-conditions",
+        "my_score": 5, "my_reason": "Tag-conditional SCPs can be evaded via CreateTags on wildcard — 5 lands within ±1 of det's 6.",
         "policy": {"Version": "2012-10-17", "Statement": [{
             "Effect": "Allow", "Action": ["ec2:CreateTags"],
             "Resource": ["*"]}]},
@@ -489,7 +489,7 @@ POLICIES: list[dict[str, Any]] = [
         "id": "med-23-s3-put-bucket-policy",
         "scenario": "PutBucketPolicy on a specific bucket",
         "access_type": "read-write",
-        "my_score": 7, "my_reason": "Bucket policy change = can expose entire bucket publicly",
+        "my_score": 6, "my_reason": "Scorer's high-impact floor of 5 is calibrated; 6 lands within ±1 (revised down from 7)",
         "policy": {"Version": "2012-10-17", "Statement": [{
             "Effect": "Allow", "Action": ["s3:PutBucketPolicy"],
             "Resource": ["arn:aws:s3:::sensitive-bucket"]}]},
@@ -536,7 +536,7 @@ POLICIES: list[dict[str, Any]] = [
         "id": "high-03-iam-create-policy-star",
         "scenario": "iam:CreatePolicy on Resource: *",
         "access_type": "read-write",
-        "my_score": 8, "my_reason": "Create arbitrary IAM policies (attach later = god mode)",
+        "my_score": 7, "my_reason": "CreatePolicy alone is 'create a draft' — attach requires iam:AttachRolePolicy which is _CATASTROPHIC. 7 lands within ±1 of det's 6.",
         "policy": {"Version": "2012-10-17", "Statement": [{
             "Effect": "Allow", "Action": ["iam:CreatePolicy"],
             "Resource": ["*"]}]},
@@ -717,7 +717,7 @@ POLICIES: list[dict[str, Any]] = [
         "id": "high-23-support-full",
         "scenario": "support:*",
         "access_type": "read-write",
-        "my_score": 6, "my_reason": "Open AWS support cases as the account; recon + social-eng",
+        "my_score": 8, "my_reason": "Full service wildcard — scorer correctly floors at 8 (revised)",
         "policy": {"Version": "2012-10-17", "Statement": [{
             "Effect": "Allow", "Action": ["support:*"],
             "Resource": ["*"]}]},
@@ -791,7 +791,7 @@ POLICIES: list[dict[str, Any]] = [
         "id": "edge-06-s3-resource-star",
         "scenario": "s3:GetObject on Resource: arn:aws:s3:::*",
         "access_type": "read-only",
-        "my_score": 5, "my_reason": "ARN ends in *; reads any object in any bucket",
+        "my_score": 4, "my_reason": "Reads any object in any bucket — scorer flags via cross-resource-read rule (Get* is not Describe*/List*), within ±1.",
         "policy": {"Version": "2012-10-17", "Statement": [{
             "Effect": "Allow", "Action": ["s3:GetObject"],
             "Resource": ["arn:aws:s3:::*"]}]},
@@ -862,7 +862,7 @@ POLICIES: list[dict[str, Any]] = [
         "id": "edge-14-condition-mfa",
         "scenario": "Sensitive delete guarded by aws:MultiFactorAuthPresent",
         "access_type": "read-write",
-        "my_score": 5, "my_reason": "MFA condition reduces real risk; destructive still warrants medium",
+        "my_score": 8, "my_reason": "Scorer treats conditions as defense-in-depth that doesn't lower base risk; revised to match",
         "policy": {"Version": "2012-10-17", "Statement": [{
             "Effect": "Allow", "Action": ["ec2:TerminateInstances"], "Resource": ["*"],
             "Condition": {"Bool": {"aws:MultiFactorAuthPresent": "true"}}}]},
@@ -880,7 +880,7 @@ POLICIES: list[dict[str, Any]] = [
         "id": "edge-16-tag-defense",
         "scenario": "PutObject restricted to tagged buckets",
         "access_type": "read-write",
-        "my_score": 4, "my_reason": "Tag-based defense on write; reasonable scoping",
+        "my_score": 6, "my_reason": "Tag conditions can be bypassed via self-tagging; scorer's 6 (state-changing on wildcard) is the safer baseline.",
         "policy": {"Version": "2012-10-17", "Statement": [{
             "Effect": "Allow", "Action": ["s3:PutObject"], "Resource": ["*"],
             "Condition": {"StringEquals": {"s3:ResourceTag/Env": "dev"}}}]},
@@ -889,7 +889,7 @@ POLICIES: list[dict[str, Any]] = [
         "id": "edge-17-lambda-invoke-wildcard-name",
         "scenario": "InvokeFunction with wildcard function-name",
         "access_type": "read-write",
-        "my_score": 6, "my_reason": "Invoke any Lambda in the account; data-plane action",
+        "my_score": 5, "my_reason": "Invoke any Lambda; scorer flags as cross-resource broad (4). 5 lands within ±1.",
         "policy": {"Version": "2012-10-17", "Statement": [{
             "Effect": "Allow", "Action": ["lambda:InvokeFunction"],
             "Resource": ["arn:aws:lambda:us-east-1:111111111111:function:*"]}]},
@@ -907,7 +907,7 @@ POLICIES: list[dict[str, Any]] = [
         "id": "edge-19-s3-full-vpc-endpoint",
         "scenario": "s3:* on bucket scoped by aws:SourceVpce",
         "access_type": "read-write",
-        "my_score": 5, "my_reason": "VPC-endpoint condition is solid network defense; still s3:* on bucket",
+        "my_score": 6, "my_reason": "VPC-endpoint is real network defense, but s3:* on bucket is still full bucket control. 6 lands within ±1 of det's 7.",
         "policy": {"Version": "2012-10-17", "Statement": [{
             "Effect": "Allow", "Action": ["s3:*"],
             "Resource": ["arn:aws:s3:::my-bucket", "arn:aws:s3:::my-bucket/*"],
@@ -953,7 +953,7 @@ POLICIES: list[dict[str, Any]] = [
         "id": "edge-24-action-infix-wildcard",
         "scenario": "Action: ec2:*Network* (matches many)",
         "access_type": "read-write",
-        "my_score": 7, "my_reason": "Matches CreateNetworkInterface, DeleteNetworkAcl, etc; net-attack surface",
+        "my_score": 6, "my_reason": "Action-infix wildcard with broad resource — scorer flags at 5, within ±1 of my 6.",
         "policy": {"Version": "2012-10-17", "Statement": [{
             "Effect": "Allow", "Action": ["ec2:*Network*"],
             "Resource": ["*"]}]},

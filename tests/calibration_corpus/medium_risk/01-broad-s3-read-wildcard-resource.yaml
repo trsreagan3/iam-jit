@@ -1,9 +1,17 @@
 name: broad-s3-read-wildcard-resource
 description: |
-  Read-only s3:ListAllMyBuckets on Resource:*. Read-only mitigates,
-  but the wildcard resource means scope is everything in the
-  account. Scores in the medium range (around 4) — under the
-  default auto-approve threshold of 5 but flagged.
+  Read-only s3:ListAllMyBuckets on Resource:*. Pre-2026-05-13 this
+  scored ~4 ("broad cross-resource read"). After the calibration
+  refinement that recognizes pure-listing actions (action name starts
+  with Describe* or List*) as routine recon rather than data exposure,
+  this scores 1. Account-bucket enumeration is recon, not data
+  exfiltration — the bucket CONTENTS aren't exposed by this action,
+  only the bucket NAMES. The new floor is correct for read-only
+  metadata listing on wildcard.
+
+  Kept in medium_risk/ as a historical reference: this is the kind
+  of policy that USED to be flagged as medium but is now correctly
+  classified as low after the Describe*/List* suppression rule.
 
 policy:
   Version: "2012-10-17"
@@ -19,6 +27,6 @@ request:
       duration_hours: 1
 
 expected:
-  score_min: 3
-  score_max: 5
-  required_factors_containing: ["broad"]
+  score_min: 1
+  score_max: 2
+  must_auto_approve: true
