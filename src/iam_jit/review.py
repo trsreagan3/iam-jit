@@ -1130,6 +1130,23 @@ def _condition_is_vacuous(condition: object) -> tuple[bool, str]:
                                 "from the identity provider, not a "
                                 "specific repo/branch/principal."
                             )
+                # Pattern 6b: StringLike on aws:PrincipalOrgID with
+                # `o-*` value — looks like org-scoping but matches
+                # every AWS organization. Round 7 agent-426.
+                if key_lc.endswith("principalorgid") or key_lc.endswith("principalorgpaths"):
+                    for v in vals_str:
+                        # AWS org IDs are `o-XXXXXXXX`. Anything that
+                        # starts `o-` followed only by wildcards is
+                        # effectively a match-any-org.
+                        stripped = v.lstrip("o-").lstrip("/")
+                        if v.startswith("o-") and (stripped == "*" or stripped == ""):
+                            return True, (
+                                f"`Condition.{op}.{key}: \"{v}\"` "
+                                "wildcards the org-id segment — "
+                                "matches every AWS organization, not "
+                                "a specific one. Use `StringEquals` "
+                                "with the literal `o-XXXX` instead."
+                            )
 
             # Pattern 2: Null inversion
             if op == "Null":
