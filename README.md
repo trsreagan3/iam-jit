@@ -137,6 +137,89 @@ Three principles:
   │                                                                  at expiry│
 ```
 
+## Agent access: `iam-jit agent-grant` + MCP server
+
+**The fastest way to give an AI agent bounded AWS access for one task.**
+
+When you're running Claude Code, Cursor, Devin, or a custom agent and it
+needs AWS access for a specific job — `iam-jit agent-grant` turns a
+plain-English task description into a minimum-scope IAM policy, scored
+by the same deterministic engine that protects the rest of iam-jit.
+
+```bash
+$ iam-jit agent-grant --task "read S3 logs from the prod-logs bucket" \
+                      --account 123456789012 --region us-east-1
+
+Matched patterns: s3-read
+Confidence: 1/10 (1=high, 10=low)
+Risk score: 1/10                      ◀── safe to auto-approve
+
+Policy:
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Effect": "Allow",
+      "Action": ["s3:GetObject", "s3:ListBucket", ...],
+      "Resource": "arn:aws:s3:::prod-logs"
+    }
+  ]
+}
+```
+
+The deterministic scorer validates every generated policy. The generator
+can propose anything; the scorer rejects what's too broad. An LLM mistake
+(in future LLM-backed generation) cannot bypass the safety floor.
+
+**`--bias allow`** (default) includes more actions when the task is
+ambiguous — best UX. **`--bias deny`** includes only the explicit subset
+— best for fully-autonomous agent loops.
+
+**Iterative refinement** when the result is too broad or too strict:
+
+```bash
+$ iam-jit agent-grant -t "deploy lambda" \
+                      --exclude-action iam:PassRole \
+                      --rationale "code-only deploy"
+```
+
+### MCP server: `iam-jit mcp-server`
+
+iam-jit ships a built-in MCP (Model Context Protocol) server so any
+MCP-aware agent — Claude Code, Claude Desktop, Cursor, custom Claude
+Agent SDK builds — natively requests scoped policies. One-line config:
+
+```json
+// ~/.config/claude/mcp_settings.json
+{
+  "mcpServers": {
+    "iam-jit": { "command": "iam-jit", "args": ["mcp-server"] }
+  }
+}
+```
+
+The agent then has a `generate_iam_policy` tool. The flow:
+
+```
+agent → "I need to query the prod-orders DynamoDB table"
+   ↓
+MCP → generate_iam_policy({ task: "...", account_id: "..." })
+   ↓
+iam-jit → policy + score (2/10) + refinement_hints
+   ↓
+agent → "OK, score is low; request the JIT grant"
+```
+
+**Why this matters beyond convenience:** if the agent (or an MCP server
+the agent uses) is compromised, the blast radius is bounded by the
+*scope of the requested task*, not the developer's full AWS credentials.
+The deterministic scorer + scoped STS credentials together turn "I gave
+my agent admin AWS access" into "I gave my agent ten-minute access to
+one DynamoDB table."
+
+See **[docs/agent-access.md](docs/agent-access.md)** for the full
+pattern library, refinement workflow, and bias semantics.
+
 ## Pairing with local AI tools (the primary use case)
 
 iam-jit is designed first for AI agents running on the requester's machine. Tools like [Claude Code](https://claude.com/claude-code), Cursor, or Continue can read your repos and clusters, derive a precise IAM policy with concrete ARNs, and submit it to iam-jit via the JSON HTTP API or the bundled MCP server. The flow:
