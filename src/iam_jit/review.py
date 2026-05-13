@@ -1948,6 +1948,55 @@ def _deterministic(
                             "`aws:SourceAccount` or `aws:SourceArn` "
                             "condition to scope to your own resources."
                         )
+                # Federated principal handling. Two sub-cases:
+                #   a) ARN-shaped (`arn:aws:iam::<acct>:saml-provider/X`)
+                #      — the provider's account may differ from the
+                #      policy owner's account. We can't verify without
+                #      context, so flag at 7 conservatively. Attacker
+                #      controls a SAML provider in their own account →
+                #      mints tokens → assumes our role.
+                #      Round 7 BB agent-300.
+                #   b) Federated service principal (`cognito-identity.
+                #      amazonaws.com`, `accounts.google.com`, etc.) WITHOUT
+                #      a Condition narrowing aud/sub — anyone with a
+                #      token from that IdP can assume.
+                #      Round 7 BB agent-301.
+                if "Federated" in principal:
+                    federated_vals = principal["Federated"]
+                    if isinstance(federated_vals, str):
+                        federated_vals = [federated_vals]
+                    has_condition = bool(stmt.get("Condition"))
+                    for fv in federated_vals:
+                        if not isinstance(fv, str):
+                            continue
+                        if fv.startswith("arn:"):
+                            # Federated ARN — cross-account SAML/OIDC
+                            # provider possibly attacker-controlled.
+                            score = max(score, 7)
+                            factors.append(
+                                f"`Principal.Federated` is an ARN "
+                                f"(`{fv}`) — without context the scorer "
+                                "can't verify the named SAML/OIDC "
+                                "provider is in the policy owner's "
+                                "account. Cross-account federated "
+                                "providers let third parties mint "
+                                "tokens that assume this role."
+                            )
+                            break
+                        elif not has_condition:
+                            # Federated service principal (cognito, OIDC
+                            # IdP service name) with no aud/sub condition.
+                            score = max(score, 7)
+                            factors.append(
+                                f"`Principal.Federated: \"{fv}\"` with "
+                                "no Condition narrowing `aud`/`sub` — "
+                                "any token issued by that identity "
+                                "provider can assume the role. Typical "
+                                "trust policies need `StringEquals` on "
+                                f"`{fv}:aud` (and `{fv}:sub` for tighter "
+                                "scope)."
+                            )
+                            break
 
             # Trust-policy semantic detection: a statement with
             # Principal + sts:AssumeRole-class action is a TRUST POLICY
