@@ -389,9 +389,11 @@ const tiers: PricingTier[] = [
           <div class="card">
             <h3>2. Score</h3>
             <p>
-              A deterministic scorer applies 30+ calibrated risk rules.
+              A deterministic scorer applies 50+ calibrated risk rules,
+              regression-tested against 1,489 AWS-managed policies and
+              83 hand-crafted attack patterns &mdash; 2,691 tests in CI.
               An optional LLM (Claude Opus or your own Bedrock / Ollama)
-              generates a plain-English narrative for the reviewer.
+              generates a plain-English narrative.
             </p>
             <pre>{apiResponse}</pre>
           </div>
@@ -517,7 +519,12 @@ const tiers: PricingTier[] = [
             Yes. Same input &rarr; same score, every time. The optional
             LLM contributes narrative + suggestions but cannot change
             the numeric score. This is a safety contract &mdash; the
-            LLM cannot hallucinate a request into auto-approval.
+            LLM cannot hallucinate a request into auto-approval. The
+            contract is regression-tested by 1,489 AWS-managed-policy
+            snapshots + 83 adversarial attack patterns (every test
+            runs on every commit; calibration agreement between the
+            scorer and an Opus-4.7-as-judge eval is 100% within &plusmn;1
+            on the 100-policy reference set).
           </dd>
 
           <dt>Can I self-host?</dt>
