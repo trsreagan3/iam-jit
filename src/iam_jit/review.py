@@ -296,6 +296,18 @@ _HIGH_RISK_ACTIONS = frozenset(
         "iam:PassRole",
         "iam:CreateAccessKey",
         "sts:AssumeRole",
+        # Federated-assume variants — semantically equivalent to
+        # sts:AssumeRole but easy to omit. Round 6 finding agent-201
+        # (StringLike `*` on `*:sub` lets any token from the IdP
+        # assume) — federated assume is a high-risk primitive.
+        "sts:AssumeRoleWithSAML",
+        "sts:AssumeRoleWithWebIdentity",
+        # GetFederationToken / GetSessionToken mint short-lived creds
+        # for callers — IAM-policy-bound but transmit the role's
+        # entire permission set to whomever the federated token
+        # reaches. Round 6 agent-175, 240.
+        "sts:GetFederationToken",
+        "sts:GetSessionToken",
     }
 )
 
@@ -765,6 +777,126 @@ def _norm_grammar_str(s: object) -> str:
     return s.strip().strip("   ")
 
 
+# IPv4 prefixes that AWS will never evaluate `aws:SourceIp` against
+# in practice — `aws:SourceIp` reflects the request's PUBLIC IP, so a
+# condition gated on a private RFC1918 / link-local / loopback range
+# either never matches (silently denying) or is the operator's
+# mistaken belief that "internal traffic" carries its VPC IP.
+# Round 6 finding agent-192.
+_PRIVATE_IPV4_PREFIXES = (
+    "10.",
+    "172.16.", "172.17.", "172.18.", "172.19.",
+    "172.20.", "172.21.", "172.22.", "172.23.",
+    "172.24.", "172.25.", "172.26.", "172.27.",
+    "172.28.", "172.29.", "172.30.", "172.31.",
+    "192.168.",
+    "127.",         # loopback
+    "169.254.",     # link-local
+)
+
+
+def _condition_is_vacuous(condition: object) -> tuple[bool, str]:
+    """Heuristic: does the Condition block fail to constrain the grant?
+
+    Returns `(is_vacuous, reason)`. When True, the Condition LOOKS
+    like a scoping signal to a casual reader but in fact imposes no
+    real constraint — either it always matches, never matches, or
+    inverts the operator's likely intent. This is one of the highest-
+    leverage adversarial patterns in IAM policy auditing because
+    operators (and most scoring tools) credit the *presence* of a
+    condition as risk-reducing without checking its semantics.
+
+    Patterns detected:
+      1. `StringLike` with bare `"*"` value — degenerate wildcard.
+      2. `Null` operator with value `"true"` on auth-bearing keys —
+         inverts: "key MUST BE ABSENT" (often misread as "required").
+      3. `IpAddress` / `IpAddressIfExists` with `0.0.0.0/0` — matches
+         every IP.
+      4. `IpAddress` on a private RFC1918 / loopback / link-local
+         range — `aws:SourceIp` reflects the PUBLIC IP, so private
+         CIDRs effectively never match.
+      5. Empty-string condition value — matches absent / unspecified
+         key; almost never the intended scope.
+      6. `StringLike` on `*:sub` / `*:aud` (federated identity claims)
+         with `*` inside the value — overbroad federated-assume.
+
+    Round 6 findings agent-156, 182, 192, 201.
+    """
+    if not isinstance(condition, dict):
+        return False, ""
+
+    for op_raw, kvs in condition.items():
+        op = str(op_raw)
+        op_lc = op.lower()
+        if not isinstance(kvs, dict):
+            continue
+
+        for key_raw, val_raw in kvs.items():
+            key = str(key_raw)
+            key_lc = key.lower()
+            vals = val_raw if isinstance(val_raw, list) else [val_raw]
+            vals_str = [str(v) for v in vals]
+
+            # Pattern 1: StringLike bare wildcard
+            if op.startswith("StringLike") or op_lc == "stringlike":
+                if any(v == "*" for v in vals_str):
+                    return True, (
+                        f"`Condition.{op}.{key}` value is `\"*\"` — "
+                        "degenerate wildcard; the condition imposes "
+                        "no actual constraint."
+                    )
+                # Pattern 6: StringLike on federated-identity claim
+                # (sub/aud) with `*` inside the value.
+                if key_lc.endswith(":sub") or key_lc.endswith(":aud"):
+                    for v in vals_str:
+                        if "*" in v:
+                            return True, (
+                                f"`Condition.{op}.{key}: \"{v}\"` "
+                                "wildcards the federated-identity "
+                                "claim — allows any matching token "
+                                "from the identity provider, not a "
+                                "specific repo/branch/principal."
+                            )
+
+            # Pattern 2: Null inversion
+            if op == "Null":
+                for v in vals_str:
+                    if v.lower() == "true":
+                        return True, (
+                            f"`Condition.Null.{key}: \"true\"` means "
+                            "\"the key MUST BE ABSENT\" — opposite of "
+                            "the typical \"require this key\" intent. "
+                            "Often misread by reviewers."
+                        )
+
+            # Pattern 3 & 4: SourceIp degenerate CIDRs
+            if "sourceip" in key_lc and op_lc.startswith("ipaddress"):
+                for v in vals_str:
+                    if v == "0.0.0.0/0":
+                        return True, (
+                            f"`Condition.{op}.{key}: 0.0.0.0/0` matches "
+                            "every IP address — degenerate."
+                        )
+                    if any(v.startswith(p) for p in _PRIVATE_IPV4_PREFIXES):
+                        return True, (
+                            f"`Condition.{op}.{key}: {v}` uses a "
+                            "private / loopback CIDR — `aws:SourceIp` "
+                            "evaluates against the request's PUBLIC "
+                            "IP, so this never matches in practice "
+                            "(condition is unenforceable)."
+                        )
+
+            # Pattern 5: Empty-string condition value
+            if vals_str and all(v == "" for v in vals_str):
+                return True, (
+                    f"`Condition.{op}.{key}` is empty string — matches "
+                    "absent / unspecified key; almost certainly not "
+                    "the intended scope."
+                )
+
+    return False, ""
+
+
 def _principal_is_public(principal: object) -> bool:
     """True if a resource-based-policy `Principal` field grants to any
     AWS account or anonymous internet caller (`*` wildcard).
@@ -1206,6 +1338,32 @@ def _deterministic(
                         "evaluators treat empty as \"match anyone.\" "
                         "Defect-class signal."
                     )
+
+        # ---- Condition vacuity detection ----
+        # An IAM statement's Condition block is the most common
+        # source of false confidence in policy review — operators
+        # (and most scoring tools) credit the presence of a
+        # condition as risk-reducing without checking whether the
+        # condition can actually match. `_condition_is_vacuous`
+        # detects the highest-leverage failure patterns. When a
+        # vacuous condition is present, floor at 5 (above auto-
+        # approve, below catastrophic) so the policy escalates to
+        # human review where the operator can spot the broken
+        # condition. Round 6 findings agent-156, 182, 192, 201.
+        condition = stmt.get("Condition")
+        if condition:
+            is_vacuous, vac_reason = _condition_is_vacuous(condition)
+            if is_vacuous:
+                score = max(score, 5)
+                factors.append(vac_reason)
+                suggestions.append(
+                    "The condition above does not actually constrain "
+                    "the grant. Rewrite using a key + operator + value "
+                    "that AWS can evaluate against real request "
+                    "attributes (e.g. `StringEquals` on "
+                    "`aws:PrincipalOrgID`, `aws:PrincipalAccount`, "
+                    "`aws:SourceVpce`, or a specific resource tag)."
+                )
 
         # NotAction / NotResource handling. These keys are the inverse
         # form: "grant everything EXCEPT this set." A statement using
