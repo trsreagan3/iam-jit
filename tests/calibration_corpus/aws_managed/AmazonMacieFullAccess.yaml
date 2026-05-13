@@ -1,7 +1,7 @@
 name: aws-managed-AmazonMacieFullAccess
 description: "AWS-managed policy snapshot. ARN: arn:aws:iam::aws:policy/AmazonMacieFullAccess\nAWS description: (none)\nGenerated\
   \ by scripts/fetch-aws-managed-policies.py \u2014 regression-protects the deterministic score against future rule refactors.\
-  \ Current det_score=8; tolerance \xB11 reflects small calibration deltas."
+  \ Current det_score=9; tolerance \xB11 reflects small calibration deltas."
 policy:
   Version: '2012-10-17'
   Statement:
@@ -24,5 +24,5 @@ request:
     duration:
       duration_hours: 1
 expected:
-  score_min: 7
-  score_max: 9
+  score_min: 8
+  score_max: 10

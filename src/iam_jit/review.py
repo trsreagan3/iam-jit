@@ -547,6 +547,56 @@ _HIGH_IMPACT_MUTATION_ACTIONS = frozenset(
         # + sensitive prompt processing). Round 6 agent-163, 191.
         "bedrock:PutUseCaseForModelAccess",
         "bedrock:CreateInferenceProfile",
+        # ROUND 7 additions — newer services (2023-2026 surface):
+        # Amazon Q Business — `CreateApplication` provisions a RAG
+        # app whose knowledge base ingests caller-controlled data;
+        # CreateDataSource adds attacker-controlled corpus. Round 7
+        # agent-307.
+        "qbusiness:CreateApplication",
+        "qbusiness:CreateDataSource",
+        "qbusiness:UpdateDataSource",
+        # Amazon DataZone — `CreateDomain` provisions a data-mesh
+        # domain whose governance rules the caller defines. Round 7
+        # agent-308.
+        "datazone:CreateDomain",
+        "datazone:UpdateDomain",
+        # AWS B2B Data Interchange — `CreateProfile` + Partnership
+        # establishes data-exchange relationships with external
+        # partners; weaponized as ongoing data egress. Round 7
+        # agent-309.
+        "b2bi:CreateProfile",
+        "b2bi:CreatePartnership",
+        # EC2 CreateImage — captures a snapshot of an instance's
+        # disk that can then be shared with attacker accounts via
+        # ec2:ModifyImageAttribute (already in cross-account-exfil).
+        # The capture itself is high-impact even before the share.
+        # Round 7 agent-311.
+        "ec2:CreateImage",
+        # MemoryDB — `CreateUser` provisions a Redis-protocol user
+        # with ACL; takeover primitive for the cluster. Round 7
+        # agent-312.
+        "memorydb:CreateUser",
+        "memorydb:UpdateUser",
+        # AppSync GraphQL API keys — `CreateApiKey` mints an
+        # unauthenticated API key for the GraphQL endpoint. Round 7
+        # agent-313.
+        "appsync:CreateApiKey",
+        "appsync:UpdateApiKey",
+        # Cognito User Pool creation — net-new pool the attacker
+        # controls; can be federated into the org. Round 7 agent-314.
+        "cognito-idp:CreateUserPool",
+        "cognito-idp:CreateIdentityProvider",
+        # RDS DB cluster endpoint — `CreateDBClusterEndpoint` adds
+        # a custom endpoint with attacker-chosen reader/writer
+        # routing; persistent backdoor to the cluster. Round 7
+        # agent-324.
+        "rds:CreateDBClusterEndpoint",
+        "rds:ModifyDBClusterEndpoint",
+        # EC2 Verified Access — `CreateVerifiedAccessEndpoint`
+        # creates an alternative network path that bypasses normal
+        # IAM evaluation. Round 7 agent-325.
+        "ec2:CreateVerifiedAccessEndpoint",
+        "ec2:ModifyVerifiedAccessEndpoint",
     }
 )
 
@@ -817,6 +867,23 @@ _CATASTROPHIC_ACTIONS = frozenset(
         # wide privileges for the service. Privesc primitive at
         # the org level. Round 6 finding agent-244.
         "organizations:RegisterDelegatedAdministrator",
+        # ROUND 7 additions:
+        # Account API — `PutContactInformation` rewrites the AWS
+        # account's primary contact info, enabling account-takeover
+        # via the password-reset flow. Same severity as IAM CreateUser.
+        # Round 7 agent-316.
+        "account:PutContactInformation",
+        "account:PutAlternateContact",
+        # Macie defense-evasion — `DisableMacie` removes the only
+        # data-loss-prevention engine actively scanning S3 buckets.
+        # Tier-equivalent to cloudtrail:StopLogging. Round 7 agent-317.
+        "macie2:DisableMacie",
+        "macie2:DisableOrganizationAdminAccount",
+        # CloudTrail Event Data Stores are the newer (post-2022)
+        # alternative to trails. Deleting one destroys audit history
+        # the same way DeleteTrail does. Round 7 agent-318.
+        "cloudtrail:DeleteEventDataStore",
+        "cloudtrail:UpdateEventDataStore",
     }
 )
 
