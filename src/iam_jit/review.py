@@ -765,6 +765,33 @@ def _norm_grammar_str(s: object) -> str:
     return s.strip().strip("   ")
 
 
+def _principal_is_public(principal: object) -> bool:
+    """True if a resource-based-policy `Principal` field grants to any
+    AWS account or anonymous internet caller (`*` wildcard).
+
+    AWS accepts the wildcard in several syntactic forms:
+      - `Principal: "*"`                    (bare-string short form)
+      - `Principal: {"AWS": "*"}`           (typed-string)
+      - `Principal: {"AWS": ["*"]}`         (typed-list-of-one)
+      - `Principal: {"AWS": ["*", ...]}`    (any list containing `*`)
+    Federated and Service principals can also be `*` though that's
+    rarer (e.g. `Principal: {Federated: "*"}` = any SAML/OIDC IdP).
+
+    Round 6 architectural finding: the scorer previously never read
+    `Principal` at all, so every resource-based-policy bypass passed
+    invisibly. Findings agent-148..157, 180, 181, 208, 210, 211, 234.
+    """
+    if principal == "*":
+        return True
+    if isinstance(principal, dict):
+        for v in principal.values():
+            if v == "*":
+                return True
+            if isinstance(v, list) and "*" in v:
+                return True
+    return False
+
+
 def _effect_is_allow(stmt: dict) -> bool:
     """True if `stmt`'s Effect is Allow (case-insensitive, normalized).
 
@@ -1112,6 +1139,73 @@ def _deterministic(
             continue
         actions = _as_list(stmt.get("Action"))
         resources = _as_list(stmt.get("Resource"))
+
+        # ---- Principal / NotPrincipal handling (resource-based policy
+        # shape detection) ----
+        #
+        # A statement with `Principal` is a resource-based-policy
+        # statement (S3 bucket policy, KMS key policy, Lambda
+        # resource policy, IAM trust policy). The rest of this loop
+        # assumes identity-policy semantics where the principal is
+        # the resource grant's recipient (implied by the role). When
+        # `Principal: "*"` or `NotPrincipal` is present, the statement
+        # grants access to ANYONE, INCLUDING anonymous internet
+        # callers — far more severe than any "narrow Resource" rule
+        # would suggest. Round 6 BB findings agent-148..157, 180,
+        # 181, 208, 210, 211; WB findings agent-201/208/210/211/234.
+        principal = stmt.get("Principal")
+        not_principal_key_present = "NotPrincipal" in stmt
+        if principal is not None or not_principal_key_present:
+            if _principal_is_public(principal):
+                score = max(score, 9)
+                factors.append(
+                    "Statement has `Principal: \"*\"` (or `AWS: \"*\"`) "
+                    "— resource-based-policy grant to ANY principal in "
+                    "any AWS account or anonymous internet caller. "
+                    "Public access regardless of how narrow the "
+                    "Resource is."
+                )
+                suggestions.append(
+                    "Replace `Principal: \"*\"` with an explicit list "
+                    "of trusted account/role ARNs. If anonymous access "
+                    "is intended, the statement needs a tight "
+                    "Condition (e.g. `aws:PrincipalOrgID`) AND an "
+                    "explicit authorization review."
+                )
+            if not_principal_key_present:
+                # `NotPrincipal` on `Allow` grants to everyone EXCEPT
+                # the listed principals — including principals outside
+                # the account. AWS docs explicitly warn against this
+                # construct.
+                score = max(score, 9)
+                factors.append(
+                    "`NotPrincipal` on `Allow` grants access to every "
+                    "principal EXCEPT those listed — INCLUDING "
+                    "principals OUTSIDE the account. AWS documentation "
+                    "explicitly warns against this construct."
+                )
+                suggestions.append(
+                    "Replace `NotPrincipal` with an explicit "
+                    "`Principal` list of the entities meant to be "
+                    "granted access. `NotPrincipal` is almost always "
+                    "wider than the author intended."
+                )
+            # Empty Principal list (`{AWS: []}`) — semantics ambiguous
+            # across IAM evaluators. Flag as a defect signal rather
+            # than a hard bypass. Round 6 agent-181.
+            if isinstance(principal, dict) and not _principal_is_public(principal):
+                non_empty_vals = [
+                    v for v in principal.values()
+                    if v not in ("", [], None)
+                ]
+                if not non_empty_vals and principal:
+                    score = max(score, 4)
+                    factors.append(
+                        "Statement has empty Principal list (e.g. "
+                        "`{AWS: []}`) — ambiguous semantics; some IAM "
+                        "evaluators treat empty as \"match anyone.\" "
+                        "Defect-class signal."
+                    )
 
         # NotAction / NotResource handling. These keys are the inverse
         # form: "grant everything EXCEPT this set." A statement using
