@@ -1,17 +1,562 @@
 ---
+const title = "iam-risk-score — Score AWS IAM policies before you grant access";
+const description =
+  "A deterministic + LLM scoring engine that grades any IAM policy 1-10 in under 100ms. " +
+  "API, CLI, GitHub Action. Free for the first 100 requests/month.";
+const cliSample = `$ iam-risk-score --offline my-policy.json
 
+IAM Policy Risk Score
+
+  Score:     7/10 (high)
+  Threshold: 5 (FAIL)
+  Analyzer:  deterministic
+
+Risk factors:
+  - Destructive action \`s3:DeleteObject\` on Resource: \`*\`
+    (blast radius = every resource in this account)
+  - Resource: \`*\` for s3 (broad cross-resource read/access)
+
+Suggestions to reduce risk:
+  - Scope \`s3:DeleteObject\` to specific resource ARNs
+  - Consider adding \`resource_constraints\` for s3`;
+
+const curlSample = `curl -X POST https://api.iam-risk-score.com/api/v1/score \\
+  -H "Content-Type: application/json" \\
+  -d '{"policy": {"Version": "2012-10-17", "Statement": [...]}}'`;
+
+const apiResponse = `{
+  "score": 7,
+  "tier": "high",
+  "factors": ["Destructive action on wildcard", "..."],
+  "suggestions": ["Scope to specific ARNs", "..."],
+  "llm_narrative": "This policy gives the requester the ability to delete..."
+}`;
+
+const agentSample = `# In your agent runtime
+import iam_risk_score
+
+verdict = iam_risk_score.score(
+    policy=agent_proposed_policy,
+    access_type="read-only",
+)
+
+if verdict.score < 4:
+    grant_role(policy=agent_proposed_policy)
+elif verdict.score < 7:
+    ask_user(policy, verdict.factors, verdict.suggestions)
+else:
+    refuse(verdict.llm_narrative)`;
+
+const ciSample = `# .github/workflows/iam-review.yml
+- uses: trsreagan3/iam-risk-score-action@v1
+  with:
+    policy-file: 'terraform/**/iam-*.tf'
+    threshold: 5
+    comment-on-pr: true`;
+
+interface PricingTier {
+  name: string;
+  price: string;
+  quota: string;
+  features: string;
+  cta: string;
+  featured?: boolean;
+}
+
+const tiers: PricingTier[] = [
+  {
+    name: "Free",
+    price: "$0",
+    quota: "100 req / mo, per IP",
+    features: "Public API, all scoring features, no auth required",
+    cta: "Try the CLI",
+  },
+  {
+    name: "Indie",
+    price: "$19 / mo",
+    quota: "5K req / mo",
+    features: "API key, deterministic scoring",
+    cta: "Start free trial",
+  },
+  {
+    name: "Pro",
+    price: "$99 / mo",
+    quota: "50K req / mo",
+    features: "API key, LLM narrative (Opus 4.7), basic dashboard",
+    cta: "Start free trial",
+    featured: true,
+  },
+  {
+    name: "Team",
+    price: "$499 / mo",
+    quota: "500K req / mo",
+    features: "+ admin context API, Slack notifications, weekly digest",
+    cta: "Start free trial",
+  },
+  {
+    name: "Enterprise",
+    price: "Talk to us",
+    quota: "Unlimited",
+    features: "+ SOC 2 evidence export, dedicated calibration, SLA",
+    cta: "Contact sales",
+  },
+];
 ---
 
 <html lang="en">
-	<head>
-		<meta charset="utf-8" />
-		<link rel="icon" type="image/svg+xml" href="/favicon.svg" />
-		<link rel="icon" href="/favicon.ico" />
-		<meta name="viewport" content="width=device-width" />
-		<meta name="generator" content={Astro.generator} />
-		<title>Astro</title>
-	</head>
-	<body>
-		<h1>Astro</h1>
-	</body>
+  <head>
+    <meta charset="utf-8" />
+    <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
+    <link rel="icon" href="/favicon.ico" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="generator" content={Astro.generator} />
+    <meta name="description" content={description} />
+    <meta property="og:title" content={title} />
+    <meta property="og:description" content={description} />
+    <meta property="og:type" content="website" />
+    <meta property="og:url" content="https://iam-risk-score.com" />
+    <meta name="twitter:card" content="summary_large_image" />
+    <title>{title}</title>
+    <style>
+      :root {
+        --bg: #0d1117;
+        --bg-elev: #161b22;
+        --bg-code: #010409;
+        --fg: #e6edf3;
+        --fg-muted: #8d96a0;
+        --fg-dim: #6e7681;
+        --accent: #58a6ff;
+        --accent-warm: #ffa657;
+        --danger: #f85149;
+        --good: #3fb950;
+        --border: #30363d;
+        --border-soft: #21262d;
+        --mono: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+        --sans: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, system-ui, sans-serif;
+      }
+
+      * { box-sizing: border-box; }
+      html, body {
+        margin: 0; padding: 0;
+        background: var(--bg); color: var(--fg);
+        font-family: var(--sans);
+        line-height: 1.55;
+        -webkit-font-smoothing: antialiased;
+      }
+
+      a { color: var(--accent); text-decoration: none; }
+      a:hover { text-decoration: underline; }
+
+      .container {
+        max-width: 980px;
+        margin: 0 auto;
+        padding: 0 24px;
+      }
+
+      header.site {
+        border-bottom: 1px solid var(--border-soft);
+        padding: 18px 0;
+      }
+      header.site .inner {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        flex-wrap: wrap;
+        gap: 16px;
+      }
+      header.site .brand {
+        font-family: var(--mono);
+        font-weight: 600;
+        font-size: 16px;
+        color: var(--fg);
+      }
+      header.site nav { display: flex; gap: 22px; font-size: 14px; }
+      header.site nav a { color: var(--fg-muted); }
+      header.site nav a:hover { color: var(--fg); }
+
+      section { padding: 64px 0; border-bottom: 1px solid var(--border-soft); }
+      section:last-of-type { border-bottom: none; }
+
+      h1, h2, h3 { line-height: 1.2; margin: 0 0 16px; letter-spacing: -0.01em; }
+      h1 { font-size: clamp(34px, 5vw, 52px); font-weight: 700; }
+      h2 { font-size: clamp(26px, 3.5vw, 32px); font-weight: 700; margin-top: 0; }
+      h3 { font-size: 18px; font-weight: 600; }
+      p  { color: var(--fg-muted); font-size: 17px; max-width: 64ch; }
+      p.lead { color: var(--fg); font-size: 19px; }
+
+      .hero p.sub { font-size: 19px; color: var(--fg-muted); max-width: 60ch; margin-bottom: 28px; }
+      .hero .ctas { display: flex; flex-wrap: wrap; gap: 12px; margin-bottom: 32px; }
+
+      .btn {
+        display: inline-block;
+        padding: 11px 18px;
+        border-radius: 8px;
+        font-size: 15px;
+        font-weight: 500;
+        font-family: var(--sans);
+        text-decoration: none;
+        border: 1px solid var(--border);
+        background: var(--bg-elev);
+        color: var(--fg);
+        cursor: pointer;
+        transition: background 120ms, border-color 120ms;
+      }
+      .btn:hover { background: #1f242d; text-decoration: none; }
+      .btn.primary {
+        background: var(--accent);
+        border-color: var(--accent);
+        color: #0d1117;
+        font-weight: 600;
+      }
+      .btn.primary:hover { background: #79b8ff; }
+
+      pre {
+        background: var(--bg-code);
+        border: 1px solid var(--border);
+        border-radius: 8px;
+        padding: 18px 20px;
+        font-family: var(--mono);
+        font-size: 13.5px;
+        line-height: 1.55;
+        color: var(--fg);
+        overflow-x: auto;
+        margin: 0 0 16px;
+      }
+      code { font-family: var(--mono); font-size: 0.92em; }
+      :not(pre) > code {
+        background: var(--bg-elev);
+        border: 1px solid var(--border-soft);
+        border-radius: 4px;
+        padding: 1px 6px;
+      }
+
+      .pill {
+        display: inline-block;
+        font-family: var(--mono);
+        font-size: 12px;
+        padding: 3px 10px;
+        border-radius: 999px;
+        border: 1px solid var(--border);
+        color: var(--fg-muted);
+        background: var(--bg-elev);
+      }
+
+      .grid-3 {
+        display: grid;
+        grid-template-columns: repeat(3, 1fr);
+        gap: 18px;
+        margin-top: 28px;
+      }
+      @media (max-width: 760px) { .grid-3 { grid-template-columns: 1fr; } }
+      .card {
+        background: var(--bg-elev);
+        border: 1px solid var(--border);
+        border-radius: 10px;
+        padding: 22px;
+      }
+      .card h3 { margin-bottom: 10px; }
+      .card p { font-size: 15px; margin: 0 0 14px; }
+
+      .compare {
+        margin-top: 16px;
+        overflow-x: auto;
+        border: 1px solid var(--border);
+        border-radius: 10px;
+      }
+      table {
+        width: 100%;
+        border-collapse: collapse;
+        font-size: 14.5px;
+        min-width: 640px;
+      }
+      th, td {
+        padding: 13px 16px;
+        text-align: left;
+        border-bottom: 1px solid var(--border-soft);
+      }
+      th { background: var(--bg-elev); font-weight: 600; color: var(--fg); }
+      td { color: var(--fg-muted); }
+      td:first-child { color: var(--fg); }
+      tr:last-child td { border-bottom: none; }
+      .check  { color: var(--good); font-weight: 700; }
+      .x      { color: var(--danger); font-weight: 700; }
+      .partial{ color: var(--accent-warm); font-weight: 600; }
+
+      .panel {
+        background: var(--bg-elev);
+        border: 1px solid var(--border);
+        border-radius: 12px;
+        padding: 32px;
+      }
+      .panel h2 { margin-bottom: 12px; }
+
+      .pricing {
+        display: grid;
+        grid-template-columns: repeat(5, 1fr);
+        gap: 12px;
+        margin-top: 28px;
+      }
+      @media (max-width: 900px) { .pricing { grid-template-columns: 1fr 1fr; } }
+      @media (max-width: 560px) { .pricing { grid-template-columns: 1fr; } }
+      .tier {
+        background: var(--bg-elev);
+        border: 1px solid var(--border);
+        border-radius: 10px;
+        padding: 20px;
+        display: flex;
+        flex-direction: column;
+        gap: 10px;
+      }
+      .tier.featured {
+        border-color: var(--accent);
+        box-shadow: 0 0 0 1px rgba(88, 166, 255, 0.4);
+      }
+      .tier .name { font-weight: 600; font-size: 16px; }
+      .tier .price { font-family: var(--mono); font-size: 22px; color: var(--fg); }
+      .tier .quota { color: var(--fg-muted); font-size: 13.5px; }
+      .tier .features { color: var(--fg-muted); font-size: 13.5px; flex: 1; }
+      .tier .btn { margin-top: 6px; text-align: center; }
+
+      .faq dt { font-weight: 600; margin-top: 22px; color: var(--fg); }
+      .faq dd { margin: 6px 0 0; color: var(--fg-muted); max-width: 70ch; }
+
+      footer.site {
+        padding: 36px 0 64px;
+        font-size: 14px;
+        color: var(--fg-dim);
+      }
+      footer.site .links {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 22px;
+      }
+      footer.site a { color: var(--fg-muted); }
+
+      .note {
+        color: var(--fg-dim);
+        font-size: 13px;
+        font-style: italic;
+        margin-top: 12px;
+      }
+    </style>
+  </head>
+  <body>
+    <header class="site">
+      <div class="container inner">
+        <a href="/" class="brand">iam-risk-score</a>
+        <nav>
+          <a href="#how">How it works</a>
+          <a href="#agents">For agents</a>
+          <a href="#cicd">For CI/CD</a>
+          <a href="#pricing">Pricing</a>
+          <a href="#faq">FAQ</a>
+          <a href="https://github.com/trsreagan3/iam-jit">GitHub</a>
+        </nav>
+      </div>
+    </header>
+
+    <section class="hero">
+      <div class="container">
+        <span class="pill">v0.1.0 · public beta</span>
+        <h1 style="margin-top: 16px;">Score AWS IAM policies before you grant access.</h1>
+        <p class="sub">
+          A deterministic-plus-LLM scoring engine that grades any IAM
+          policy 1&ndash;10 in under 100ms. Drop into your CI pipeline,
+          your agent runtime, or your existing JIT IAM tool. Free for
+          the first 100 requests/month.
+        </p>
+        <div class="ctas">
+          <a class="btn primary" href="#how">Try it now</a>
+          <a class="btn" href="#install"><code>pip install iam-risk-score</code></a>
+        </div>
+        <pre id="install">{cliSample}</pre>
+      </div>
+    </section>
+
+    <section id="how">
+      <div class="container">
+        <h2>How it works</h2>
+        <p class="lead">Three integration shapes, one verdict.</p>
+        <div class="grid-3">
+          <div class="card">
+            <h3>1. Submit</h3>
+            <p>
+              Send any IAM policy via API, CLI, or GitHub Action.
+              No SDK required &mdash; it&rsquo;s just JSON over HTTPS.
+            </p>
+            <pre>{curlSample}</pre>
+          </div>
+          <div class="card">
+            <h3>2. Score</h3>
+            <p>
+              A deterministic scorer applies 30+ calibrated risk rules.
+              An optional LLM (Claude Opus or your own Bedrock / Ollama)
+              generates a plain-English narrative for the reviewer.
+            </p>
+            <pre>{apiResponse}</pre>
+          </div>
+          <div class="card">
+            <h3>3. Act</h3>
+            <p>
+              Auto-approve low-risk grants, route medium-risk to peer
+              review, block destructive policies before they merge.
+              Same score, three integration shapes &mdash; your existing
+              tools decide what to do.
+            </p>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <section>
+      <div class="container">
+        <h2>Why iam-risk-score is different</h2>
+        <div class="compare">
+          <table>
+            <thead>
+              <tr>
+                <th></th>
+                <th>iam-risk-score</th>
+                <th>tfsec / Checkov</th>
+                <th>ConductorOne / Britive</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr><td>Pass/fail rule check</td><td class="check">&#10003;</td><td class="check">&#10003;</td><td class="check">&#10003;</td></tr>
+              <tr><td>Numeric risk score (1&ndash;10)</td><td class="check">&#10003;</td><td class="x">&#10007;</td><td class="partial">partial</td></tr>
+              <tr><td>LLM-narrative explanation</td><td class="check">&#10003;</td><td class="x">&#10007;</td><td class="x">&#10007;</td></tr>
+              <tr><td>Calibrated for AI agents</td><td class="check">&#10003;</td><td class="x">&#10007;</td><td class="x">&#10007;</td></tr>
+              <tr><td>Customizable per-org context</td><td class="check">&#10003;</td><td class="partial">partial</td><td class="partial">partial</td></tr>
+              <tr><td>Free tier</td><td class="check">&#10003;</td><td class="check">&#10003;</td><td class="x">&#10007;</td></tr>
+              <tr><td>Self-hostable</td><td class="check">&#10003;</td><td class="check">&#10003;</td><td class="x">&#10007;</td></tr>
+            </tbody>
+          </table>
+        </div>
+      </div>
+    </section>
+
+    <section id="agents">
+      <div class="container">
+        <div class="panel">
+          <span class="pill">For AI agent platforms</span>
+          <h2 style="margin-top: 12px;">Your agents need access. We need it to be safe.</h2>
+          <p>
+            Every Claude / Cursor / coding-agent integration eventually
+            asks for production access. The question is: how do you tell
+            a safe request (&ldquo;I need to read one S3 object&rdquo;)
+            from a dangerous one (&ldquo;Grant me iam:* to debug&rdquo;)?
+          </p>
+          <p>
+            iam-risk-score answers in under 100ms. The deterministic
+            scorer is designed to evaluate LLM-generated policies &mdash;
+            it catches the patterns rule-based scanners miss
+            (destructive verbs on wildcard, deceptive read-only
+            labeling, chained privilege escalation).
+          </p>
+          <pre>{agentSample}</pre>
+        </div>
+      </div>
+    </section>
+
+    <section id="cicd">
+      <div class="container">
+        <div class="panel">
+          <span class="pill">For DevSecOps</span>
+          <h2 style="margin-top: 12px;">Block destructive IAM PRs before they merge.</h2>
+          <p>
+            Drop the GitHub Action into any repo with IAM IaC. It scores
+            every policy change on every PR, sets required reviewers
+            based on risk, and posts a structured comment.
+          </p>
+          <pre>{ciSample}</pre>
+          <p class="note">
+            Marketplace listing in review. Until then,
+            <a href="https://github.com/trsreagan3/iam-risk-score-action">use the action directly from GitHub</a>.
+          </p>
+        </div>
+      </div>
+    </section>
+
+    <section id="pricing">
+      <div class="container">
+        <h2>Pricing</h2>
+        <p>Free tier is generous enough for any solo dev. Indie &amp;
+          Pro are self-serve via Stripe Checkout. Team &amp; Enterprise
+          have a short kickoff call.</p>
+        <div class="pricing">
+          {tiers.map((t) => (
+            <div class={`tier ${t.featured ? "featured" : ""}`}>
+              <div class="name">{t.name}</div>
+              <div class="price">{t.price}</div>
+              <div class="quota">{t.quota}</div>
+              <div class="features">{t.features}</div>
+              <a class={`btn ${t.featured ? "primary" : ""}`} href="#install">
+                {t.cta}
+              </a>
+            </div>
+          ))}
+        </div>
+      </div>
+    </section>
+
+    <section id="faq">
+      <div class="container">
+        <h2>FAQ</h2>
+        <dl class="faq">
+          <dt>What does the score actually mean?</dt>
+          <dd>
+            1&ndash;3 = low. Specific action, specific resource,
+            read-only. Safe to auto-approve. 4&ndash;5 = medium. Some
+            wildcard component or sensitive service. Worth a human
+            glance. 6&ndash;10 = high. Wildcard resources, destructive
+            verbs, IAM mutations. Always route to a human reviewer.
+          </dd>
+
+          <dt>Is the scoring deterministic?</dt>
+          <dd>
+            Yes. Same input &rarr; same score, every time. The optional
+            LLM contributes narrative + suggestions but cannot change
+            the numeric score. This is a safety contract &mdash; the
+            LLM cannot hallucinate a request into auto-approval.
+          </dd>
+
+          <dt>Can I self-host?</dt>
+          <dd>
+            Yes. The OSS CLI is fully functional in offline mode (no
+            network call needed). For the API, deploy your own iam-jit
+            stack from the source repo on GitHub.
+          </dd>
+
+          <dt>What about my secrets / credentials?</dt>
+          <dd>
+            The API receives the IAM policy JSON only. No credentials
+            are sent. Policies are processed in memory and never
+            persisted on our servers (audit logs record only
+            fingerprints, never the policy content itself).
+          </dd>
+
+          <dt>How do you handle SOC 2 / compliance?</dt>
+          <dd>SOC 2 Type 1 in progress. Enterprise tier includes the audit evidence export.</dd>
+
+          <dt>How is this different from AWS IAM Access Analyzer?</dt>
+          <dd>
+            Access Analyzer detects existing misconfigurations in
+            deployed resources. iam-risk-score scores POLICIES BEFORE
+            THEY DEPLOY &mdash; at PR review time, at agent-request
+            time, at JIT-grant time. Complementary, not competing.
+          </dd>
+        </dl>
+      </div>
+    </section>
+
+    <footer class="site">
+      <div class="container links">
+        <a href="https://github.com/trsreagan3/iam-jit">GitHub</a>
+        <a href="#pricing">Pricing</a>
+        <a href="#faq">FAQ</a>
+        <a href="https://github.com/trsreagan3/iam-jit/issues">Issues</a>
+        <span style="margin-left: auto;">&copy; 2026 iam-risk-score</span>
+      </div>
+    </footer>
+  </body>
 </html>
