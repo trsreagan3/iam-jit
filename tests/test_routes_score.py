@@ -363,3 +363,75 @@ def test_score_injection_blocked_before_rate_limit_decrement(
     # Third (even with a clean payload) is rate-limited
     r = client.post("/api/v1/score", json=_low_risk_payload())
     assert r.status_code == 429, r.text
+
+
+# ---- Free-tier vs authenticated rate-limit behavior -----------------
+
+
+def test_score_authenticated_callers_bypass_rate_limit(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Paid keys are quota-managed at the edge / billing layer, not by
+    the in-Lambda limiter. Configure a tiny limit, set a key, send N+1
+    authenticated requests: all should succeed."""
+    monkeypatch.setenv("IAM_JIT_SCORE_RATE_PER_MINUTE", "2")
+    monkeypatch.setenv("IAM_JIT_SCORE_API_KEY", "paid-tier-key")
+    from iam_jit.routes import score as score_mod
+    score_mod._reset_limiter_for_tests()
+
+    for _ in range(5):  # well over the cap of 2
+        r = client.post(
+            "/api/v1/score",
+            json=_low_risk_payload(),
+            headers={"Authorization": "Bearer paid-tier-key"},
+        )
+        assert r.status_code == 200, r.text
+
+
+def test_score_default_free_tier_rate_is_30(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The documented free-tier rate is 30/min — pin it here so a
+    future tweak that drops the constant doesn't silently widen the
+    free tier and explode the AWS bill at launch traffic."""
+    # Clear the override so we get the default
+    monkeypatch.delenv("IAM_JIT_SCORE_RATE_PER_MINUTE", raising=False)
+    from iam_jit.routes import score as score_mod
+    score_mod._reset_limiter_for_tests()
+    assert score_mod._limiter.cap == 30
+
+
+# ---- Cache-Control + fingerprint headers ----------------------------
+
+
+def test_score_response_carries_cache_headers(client: TestClient) -> None:
+    """The score is deterministic per policy_fingerprint — the
+    response must carry Cache-Control + X-Policy-Fingerprint so a
+    CDN in front of the Function URL can dedupe identical-content
+    requests (the big CI-rerun cost saving)."""
+    r = client.post("/api/v1/score", json=_low_risk_payload())
+    assert r.status_code == 200, r.text
+
+    cache_control = r.headers.get("cache-control", "")
+    assert "public" in cache_control
+    assert "max-age=3600" in cache_control
+    assert "s-maxage=86400" in cache_control
+
+    # Vary on Authorization so paid LLM narratives can't leak into
+    # anonymous cache entries
+    assert "authorization" in r.headers.get("vary", "").lower()
+
+    # Fingerprint is exposed as a header for downstream caches
+    fp = r.headers.get("x-policy-fingerprint", "")
+    assert fp.startswith("sha256:")
+    # And it matches the body's fingerprint field
+    assert r.json()["policy_fingerprint"] == fp
+
+
+def test_score_fingerprint_header_matches_across_calls(client: TestClient) -> None:
+    """Two identical-content requests get the same fingerprint header,
+    so any CDN keyed on that header collapses them to one upstream
+    hit."""
+    r1 = client.post("/api/v1/score", json=_low_risk_payload())
+    r2 = client.post("/api/v1/score", json=_low_risk_payload())
+    assert r1.headers["x-policy-fingerprint"] == r2.headers["x-policy-fingerprint"]

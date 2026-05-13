@@ -73,13 +73,17 @@ def test_secretsmanager_get_on_wildcard_scores_7() -> None:
     assert any("secret" in f.lower() for f in a.risk_factors)
 
 
-def test_service_wildcard_normal_service_scores_7() -> None:
+def test_service_wildcard_normal_service_on_wildcard_resource_scores_high() -> None:
+    """`ec2:*` on `Resource: *` is near-admin within the service — every
+    API on every resource. Recalibrated 2026-05-13 from 7 to 8 so it sits
+    well above the auto-approve threshold (5) and clearly in the
+    human-review tier alongside other near-admin patterns."""
     policy = {
         "Version": "2012-10-17",
         "Statement": [{"Effect": "Allow", "Action": "ec2:*", "Resource": "*"}],
     }
     a = analyze_policy(policy, _request())
-    assert a.risk_score == 7
+    assert a.risk_score == 8
 
 
 def test_service_wildcard_sensitive_service_scores_higher_than_normal() -> None:
@@ -97,7 +101,10 @@ def test_service_wildcard_sensitive_service_scores_higher_than_normal() -> None:
         },
         _request(),
     )
-    assert sensitive.risk_score > normal.risk_score
+    # secretsmanager is in _SENSITIVE_SERVICES → floors at 8; ec2 also
+    # floors at 8 when resource is wildcarded, so sensitive should be
+    # ≥ normal (tie is allowed; sensitive must not be lower).
+    assert sensitive.risk_score >= normal.risk_score
 
 
 def test_specific_resource_read_scores_low() -> None:

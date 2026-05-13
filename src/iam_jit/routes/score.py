@@ -56,7 +56,7 @@ from collections import defaultdict, deque
 from threading import Lock
 from typing import Annotated, Any
 
-from fastapi import APIRouter, Header, HTTPException, Request, status
+from fastapi import APIRouter, Header, HTTPException, Request, Response, status
 from pydantic import BaseModel, Field
 
 from .. import audit, prompt_injection, review
@@ -158,7 +158,15 @@ class ScoreResponse(BaseModel):
 
 class _RateLimiter:
     def __init__(self) -> None:
-        self.cap = int(os.environ.get("IAM_JIT_SCORE_RATE_PER_MINUTE", "60"))
+        # Default 30 req/min is the documented free-tier rate. Tighter than
+        # the original 60/min because the in-Lambda limiter is per-instance
+        # and the real cap is expected to be enforced at the edge
+        # (CloudFront + WAFv2 rate-based rule — see infrastructure/sam/
+        # template.yaml's EnableEdgeProtection toggle and docs/PUBLISHING.md
+        # § "Cost guardrails"). At the edge, paid keys can be exempted via
+        # WAF managed rule statements; this Lambda-side check is defense-
+        # in-depth catching per-instance bursts that slip past the edge.
+        self.cap = int(os.environ.get("IAM_JIT_SCORE_RATE_PER_MINUTE", "30"))
         self.window_seconds = 60
         self._counts: dict[str, deque[float]] = defaultdict(deque)
         self._lock = Lock()
@@ -329,6 +337,7 @@ def _scan_for_injection(
 def score_policy(
     payload: ScoreRequest,
     request: Request,
+    response: Response,
     authorization: Annotated[str | None, Header()] = None,
 ) -> ScoreResponse:
     """Score an IAM policy. The launch feature.
@@ -337,9 +346,13 @@ def score_policy(
     stored on the server; the policy itself is processed in
     memory and discarded after the response is built.
 
-    Quotas are per-source-IP, 60 requests/min by default
-    (configurable via `IAM_JIT_SCORE_RATE_PER_MINUTE`). Returns
-    HTTP 429 with `Retry-After` header when exceeded.
+    Quotas: anonymous callers are rate-limited to 30 req/min per
+    source-IP by default (configurable via
+    `IAM_JIT_SCORE_RATE_PER_MINUTE`). Authenticated callers
+    (`IAM_JIT_SCORE_API_KEY` env set AND matching Authorization
+    header) bypass the in-Lambda limit — their per-tier quota is
+    enforced at the edge / by the billing layer. Returns HTTP 429
+    with `Retry-After` header when exceeded.
 
     If `IAM_JIT_SCORE_API_KEY` env var is set, the same value
     must appear in the `Authorization: Bearer <key>` header.
@@ -348,18 +361,26 @@ def score_policy(
     """
     _require_api_key(authorization)
 
+    # Anonymous callers go through the in-Lambda rate limiter.
+    # Authenticated callers (API key configured AND provided) skip
+    # it — their per-tier quota is enforced at the edge / billing layer.
+    is_authenticated = bool(
+        (os.environ.get("IAM_JIT_SCORE_API_KEY") or "").strip() and authorization
+    )
     ip = _client_ip(request)
-    allowed, retry = _limiter.check(ip)
-    if not allowed:
-        raise HTTPException(
-            status_code=status.HTTP_429_TOO_MANY_REQUESTS,
-            detail=(
-                f"Rate limit exceeded for {ip}. Retry in {retry}s. "
-                "Default is 60 req/min; for higher quotas, "
-                "configure your deployment or use the hosted SaaS."
-            ),
-            headers={"Retry-After": str(retry)},
-        )
+    if not is_authenticated:
+        allowed, retry = _limiter.check(ip)
+        if not allowed:
+            raise HTTPException(
+                status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+                detail=(
+                    f"Rate limit exceeded for {ip}. Retry in {retry}s. "
+                    f"Free-tier limit is {_limiter.cap} req/min per IP. "
+                    "Authenticated callers bypass this limit — "
+                    "see iam-risk-score.com/#pricing."
+                ),
+                headers={"Retry-After": str(retry)},
+            )
 
     # Validate the policy shape lightly. Heavy validation (resource
     # ARNs, action names) is the caller's responsibility — we want
@@ -416,6 +437,18 @@ def score_policy(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail=f"could not score policy: {type(e).__name__}: {e}",
         )
+
+    # The score is deterministic per policy_fingerprint, so the
+    # response is safely cacheable on any CDN keyed by content-hash.
+    # `s-maxage=86400` is the shared-cache TTL (CloudFront / proxies) —
+    # 1 day. `max-age=3600` is the private-cache TTL (browsers, CLI
+    # callers) — 1 hour. `Vary: Authorization` prevents leaking paid-
+    # tier LLM narratives into anonymous cache entries. The X-Policy-
+    # Fingerprint header lets downstream caches and CI tools dedupe
+    # on content-hash without parsing the body.
+    response.headers["Cache-Control"] = "public, max-age=3600, s-maxage=86400"
+    response.headers["Vary"] = "Authorization"
+    response.headers["X-Policy-Fingerprint"] = fingerprint
 
     return ScoreResponse(
         score=analysis.risk_score,

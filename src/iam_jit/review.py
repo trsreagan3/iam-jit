@@ -106,10 +106,13 @@ _HIGH_IMPACT_MUTATION_ACTIONS = frozenset(
         "ec2:RevokeSecurityGroupIngress",
         "ec2:AuthorizeSecurityGroupEgress",
         "ec2:RevokeSecurityGroupEgress",
+        "ec2:ModifySecurityGroupRules",
         "ec2:ModifyVpcEndpoint",
         "ec2:CreateRoute",
         "ec2:DeleteRoute",
         "ec2:ReplaceRoute",
+        # EC2 instance attribute changes — userData edits = arbitrary code exec
+        "ec2:ModifyInstanceAttribute",
         # Load balancers — traffic-shifting
         "elasticloadbalancing:ModifyListener",
         "elasticloadbalancing:DeleteListener",
@@ -120,10 +123,11 @@ _HIGH_IMPACT_MUTATION_ACTIONS = frozenset(
         "iam:PutRolePolicy",
         "iam:DeleteRolePolicy",
         "iam:UpdateAssumeRolePolicy",
-        # S3 — bucket policy / public-access changes
+        # S3 — bucket policy / public-access / object ACL changes
         "s3:PutBucketPolicy",
         "s3:DeleteBucketPolicy",
         "s3:PutBucketAcl",
+        "s3:PutObjectAcl",            # object-level public exposure
         "s3:PutPublicAccessBlock",
         "s3:DeletePublicAccessBlock",
         # KMS — key policy changes
@@ -134,11 +138,94 @@ _HIGH_IMPACT_MUTATION_ACTIONS = frozenset(
         "cloudfront:DeleteDistribution",
         "cloudfront:UpdateDistribution",
         "wafv2:DeleteWebACL",
-        # Lambda — code-execution swap
+        # Lambda — code-execution swap + cross-account invoke grants
         "lambda:UpdateFunctionCode",
         "lambda:DeleteFunction",
+        "lambda:AddPermission",       # grant cross-account/cross-service invoke
+        "lambda:RemovePermission",
+        # Secrets — credential rotation / theft surface
+        "secretsmanager:UpdateSecret",
+        "secretsmanager:PutSecretValue",
+        "secretsmanager:RotateSecret",
+        # SSM — RCE + secret rotation
+        "ssm:SendCommand",            # RCE on EC2 fleet
+        "ssm:StartSession",
+        "ssm:PutParameter",           # secret rotation when SecureString
+        # ECS — code deploy via task definition swap
+        "ecs:UpdateService",
+        "ecs:RegisterTaskDefinition",
+        # CloudFormation — stack mutations = infra rewrites
+        "cloudformation:CreateChangeSet",
+        "cloudformation:ExecuteChangeSet",
+        "cloudformation:UpdateStack",
+        "cloudformation:CreateStack",
+        # CodePipeline / CodeBuild — production deploy triggers
+        "codepipeline:StartPipelineExecution",
+        "codebuild:StartBuild",
     }
 )
+
+
+# Actions whose blast radius is severe enough that they should ALWAYS
+# floor at 9 regardless of resource scope or conditions. These are the
+# "this single API call can compromise the account / destroy evidence /
+# remove governance" surface — auto-approve is never appropriate.
+_CATASTROPHIC_ACTIONS = frozenset(
+    {
+        # Account governance — irreversible
+        "account:CloseAccount",
+        "organizations:LeaveOrganization",
+        # Audit / evidence destruction
+        "cloudtrail:DeleteTrail",
+        "cloudtrail:StopLogging",
+        "cloudtrail:UpdateTrail",
+        "cloudtrail:PutEventSelectors",
+        # IAM total-compromise primitives — even a narrowly-resourced
+        # AttachRolePolicy can swing in AdministratorAccess if the
+        # attacker picks an admin-ish managed policy ARN.
+        "iam:AttachRolePolicy",
+        "iam:PutRolePolicy",
+        "iam:UpdateAssumeRolePolicy",
+        "iam:CreateAccessKey",
+        # KMS — schedule deletion of any key locks data forever
+        "kms:ScheduleKeyDeletion",
+    }
+)
+
+
+def _is_broad_resource(r: str) -> bool:
+    """A resource string is 'broad' if it covers an unbounded set of items.
+
+    Catches:
+      - literal `*` (account-wide)
+      - service-wide wildcards like `arn:aws:s3:::*`
+      - bucket-level wildcards like `arn:aws:s3:::my-bucket/*` — every
+        object in one bucket, which for a destructive action is still
+        a wide blast radius (the whole bucket's contents).
+
+    Path-narrowed wildcards like `arn:aws:s3:::bucket/prefix/*` or
+    `arn:aws:s3:::bucket/team-a/files/*` are NOT broad — they're
+    intentional scoping and shouldn't trip the wildcard rules.
+    """
+    if r == "*":
+        return True
+    if r.endswith(":*"):
+        return True
+    # Look at the resource-spec portion (everything after the ARN-prefix
+    # colons). For `arn:aws:s3:::bucket/*`, the resource_spec is `bucket/*`.
+    resource_spec = r.rsplit(":", 1)[-1] if r.startswith("arn:") else r
+    if resource_spec == "*":
+        return True
+    if resource_spec.endswith("/*") and resource_spec.count("/") <= 1:
+        # bucket/*   → 1 slash → broad
+        # bucket/dir/* → 2 slashes → narrow (intentional path scoping)
+        return True
+    return False
+
+
+def _resources_are_broad(resources: list[str]) -> bool:
+    """True if any resource in the list is broad (see `_is_broad_resource`)."""
+    return any(_is_broad_resource(r) for r in resources)
 
 
 @functools.lru_cache(maxsize=None)
@@ -338,7 +425,75 @@ def _deterministic(
             continue
         actions = _as_list(stmt.get("Action"))
         resources = _as_list(stmt.get("Resource"))
-        wildcard_resource = "*" in resources
+
+        # NotAction / NotResource handling. These keys are the inverse
+        # form: "grant everything EXCEPT this set." A statement using
+        # NotAction on Resource: `*` is effectively `*:*` minus the
+        # explicit exclusions — i.e., near-total account access. AWS
+        # itself flags `NotAction` as a footgun in the docs; we flag it
+        # as a high-risk pattern unless the exclusion set is broad
+        # enough that the residual surface is small. For now, any use
+        # of NotAction with a wildcard resource floors the score at 9
+        # (admin-minus-set is admin for practical purposes).
+        not_actions = _as_list(stmt.get("NotAction"))
+        not_resources = _as_list(stmt.get("NotResource"))
+        if not_actions:
+            resources_for_not = resources or ["*"]
+            if any(r == "*" or r.endswith(":*") for r in resources_for_not):
+                score = max(score, 9)
+                excluded = ", ".join(not_actions[:3])
+                factors.append(
+                    f"`NotAction` with wildcard resource grants everything "
+                    f"EXCEPT [{excluded}]. This is admin-minus-set, "
+                    "treated as full account access for risk purposes."
+                )
+                suggestions.append(
+                    "Replace `NotAction` with an explicit `Action` list of "
+                    "the operations the role actually needs. NotAction is "
+                    "almost always wider than the author intended."
+                )
+        if not_resources:
+            if any(r == "*" or r.endswith(":*") for r in not_resources):
+                # NotResource[*] is mathematically nothing (grants nothing),
+                # so it's not actually a security risk — but it's a likely
+                # mistake. Flag at low severity.
+                score = max(score, 3)
+                factors.append(
+                    "`NotResource` containing `*` grants no access — "
+                    "likely a misconfiguration."
+                )
+            else:
+                # `NotResource: [<some-arns>]` means "every resource EXCEPT
+                # these." With a wildcard action this is broad.
+                if any("*" in a for a in actions):
+                    score = max(score, 8)
+                    factors.append(
+                        f"`NotResource` with wildcard action grants the "
+                        f"action on every resource EXCEPT {not_resources[:2]}. "
+                        "This pattern is almost always broader than intended."
+                    )
+                    suggestions.append(
+                        "Replace `NotResource` with an explicit `Resource` "
+                        "list of the ARNs the role should reach."
+                    )
+
+        # Two senses of "wildcard" — kept distinct because they apply
+        # to different rules:
+        #
+        # `wildcard_resource` (the strict sense): literal `*` or a
+        # service-wide wildcard like `arn:aws:s3:::*`. Used by the
+        # rules that flag *account-/service-wide* blast (e.g. the
+        # "broad cross-resource read/access" suggestion) — the
+        # standard idiom `["bucket", "bucket/*"]` for single-bucket
+        # access should NOT trip these.
+        #
+        # `broad_blast_resource` (the inclusive sense): ALSO includes
+        # bucket-level wildcards like `arn:aws:s3:::bucket/*`. Used by
+        # the destructive-verb / high-impact-mutation rules — where
+        # "I can wipe every object in this one bucket" is still a wide
+        # enough blast to warrant flagging.
+        wildcard_resource = any(r == "*" or r.endswith(":*") for r in resources)
+        broad_blast_resource = _resources_are_broad(resources)
 
         if "*" in actions:
             return (
@@ -362,7 +517,15 @@ def _deterministic(
                         f"Replace `{action}` with the specific `{service}:` operations needed."
                     )
                 else:
-                    score = max(score, 7)
+                    # Service-wildcard on broad resource (e.g. `ec2:*` on
+                    # `Resource: *`) is near-admin within that service —
+                    # every API, every resource. Floor at 8 to ensure it
+                    # routes to human review even for non-sensitive
+                    # services. Service-wildcard with narrow resource
+                    # scoping (e.g. `s3:*` on a single bucket) still
+                    # floors at 7 — the bucket is fully owned by this
+                    # caller, but that's still "every action in s3".
+                    score = max(score, 8 if wildcard_resource else 7)
                     factors.append(f"`{action}` grants every action in `{service}`")
                     suggestions.append(
                         f"Replace `{action}` with explicit `{service}:` actions."
@@ -376,14 +539,32 @@ def _deterministic(
                         f"Wildcard within sensitive service action: `{action}`"
                     )
 
-            if action == "iam:PassRole" and wildcard_resource:
-                score = max(score, 9)
-                factors.append(
-                    "`iam:PassRole` on Resource: `*` is a privilege-escalation path"
-                )
-                suggestions.append(
-                    "Restrict iam:PassRole to specific role ARNs the requester needs to pass."
-                )
+            if action == "iam:PassRole":
+                if wildcard_resource:
+                    score = max(score, 9)
+                    factors.append(
+                        "`iam:PassRole` on Resource: `*` is a privilege-escalation path"
+                    )
+                    suggestions.append(
+                        "Restrict iam:PassRole to specific role ARNs the requester needs to pass."
+                    )
+                else:
+                    # Narrow PassRole still allows attaching ONE specific
+                    # role to a service principal — if that role is more
+                    # privileged than the caller, that's escalation. Always
+                    # warrants a human glance; floor at 4 (medium tier).
+                    score = max(score, 4)
+                    factors.append(
+                        "`iam:PassRole` is an escalation primitive — the "
+                        "target role may have more privileges than the "
+                        "caller. Even narrowly-scoped PassRole should be "
+                        "reviewed against the role's actual policy."
+                    )
+                    suggestions.append(
+                        "Confirm the target role's policy doesn't exceed "
+                        "what the caller already has. Avoid auto-approve "
+                        "even when PassRole is scoped to one role."
+                    )
             elif action in _HIGH_RISK_ACTIONS and wildcard_resource:
                 score = max(score, 7)
                 factors.append(
@@ -408,13 +589,15 @@ def _deterministic(
         # access_type=read-only, and a malicious or sloppy requester
         # marking a destructive request as read-write bypassed all the
         # other checks). For explicit specific actions like
-        # `s3:DeleteObject` + `s3:DeleteBucket` on Resource: `*`, the
-        # broad blast radius (potentially every bucket in the account)
-        # is the risk — not the service-sensitivity classification.
+        # `s3:DeleteObject` + `s3:DeleteBucket` on Resource: `*` — or on
+        # `arn:aws:s3:::bucket/*` (every object in one bucket) — the
+        # broad blast radius is the risk, not the service-sensitivity
+        # classification. Uses `broad_blast_resource` so bucket-level
+        # wildcards fire this rule too.
         for action in actions:
             if action == "*" or ":" not in action:
                 continue
-            if not wildcard_resource:
+            if not broad_blast_resource:
                 continue
             level = _action_level(action)
             # Explicitly destructive shapes regardless of IAM class —
@@ -427,7 +610,12 @@ def _deterministic(
                 "Disable", "Stop", "Revoke", "Cancel",
             )
             if action_name.startswith(destructive_verbs):
-                score = max(score, 7)
+                # Floor at 8: a destructive verb on a broad resource is
+                # always above the "auto-approve at threshold 5" line AND
+                # above "medium" tier. The blast radius — every resource
+                # in scope (literal `*`, service-wide, or one bucket) —
+                # makes this categorically a human-review case.
+                score = max(score, 8)
                 factors.append(
                     f"Destructive action `{action}` on Resource: `*` "
                     f"(blast radius = every resource in this account)"
@@ -484,6 +672,26 @@ def _deterministic(
                     "below medium-risk thresholds — set "
                     "IAM_JIT_AUTO_APPROVE_RISK_BELOW lower than 5 "
                     "to route this through human review."
+                )
+
+        # Catastrophic actions floor at 9 regardless of resource scope.
+        # These are API calls where the blast radius is "the entire
+        # account / its governance / its evidence trail" — auto-approve
+        # is never appropriate even on a single narrowly-resourced ARN.
+        # See `_CATASTROPHIC_ACTIONS`.
+        for action in actions:
+            if action in _CATASTROPHIC_ACTIONS:
+                score = max(score, 9)
+                factors.append(
+                    f"`{action}` is catastrophic in blast radius "
+                    "(account governance / IAM total compromise / "
+                    "evidence destruction). Always route to human review."
+                )
+                suggestions.append(
+                    f"Even with a specific resource ARN, `{action}` "
+                    "should never auto-approve. If this is a legitimate "
+                    "operational need, justify why a human shouldn't "
+                    "approve it."
                 )
 
     if not factors:
