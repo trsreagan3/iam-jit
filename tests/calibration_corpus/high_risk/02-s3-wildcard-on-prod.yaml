@@ -1,0 +1,25 @@
+name: s3-wildcard-on-prod-bucket
+description: |
+  s3:* on a bucket containing "prod" in the ARN. Wildcard service
+  action even when scoped to one prod bucket is medium-to-high
+  risk — the requester can read AND write AND delete everything
+  in that bucket.
+
+policy:
+  Version: "2012-10-17"
+  Statement:
+    - Effect: Allow
+      Action: ["s3:*"]
+      Resource:
+        - "arn:aws:s3:::analytics-prod-east1"
+        - "arn:aws:s3:::analytics-prod-east1/*"
+
+request:
+  spec:
+    access_type: read-write
+    duration:
+      duration_hours: 1
+
+expected:
+  score_min: 6
+  must_auto_approve: false

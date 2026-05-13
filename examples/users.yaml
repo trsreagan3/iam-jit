@@ -1,0 +1,46 @@
+# iam-jit users config — example for UserConfigSource=file
+#
+# Upload this file to the state bucket at the path configured by
+# UserConfigFileKey (default: `users.yaml`). The Lambda re-reads from
+# S3 within ~60 seconds; no redeploy needed.
+#
+# Schema is at schemas/users.schema.json. `iam-jit users export`
+# produces this exact shape.
+
+schema_version: 1
+
+# Optional but recommended — server rejects the file if this doesn't
+# match the deployment's AuthMode parameter, catching the easy mistake
+# of uploading a file built for the wrong mode.
+auth_mode: local
+
+users:
+  # ------- local mode example -------
+  # Format: id: 'email:<email>' for AuthMode=local
+  - id: email:alice@example.com
+    display_name: Alice (security/infra)
+    roles: [admin]
+
+  - id: email:bob@example.com
+    display_name: Bob (security/infra)
+    roles: [approver]
+
+  - id: email:charlie@example.com
+    display_name: Charlie (developer)
+    roles: [requester]
+
+  # Disabled users get 401 but their record is preserved for audit.
+  - id: email:dave@example.com
+    display_name: Dave (left team 2026-08)
+    roles: [requester]
+    enabled: false
+    notes: "Left the team. Keeping for audit trail of past requests."
+
+  # ------- aws_iam mode example (if AuthMode=aws_iam, change the file accordingly) -------
+  # - id: 'iam:arn:aws:iam::111111111111:role/AWSReservedSSO_DevOps_xxx'
+  #   display_name: DevOps SSO Role
+  #   roles: [approver]
+  #
+  # - id: 'iam:arn:aws:iam::111111111111:user/automation'
+  #   display_name: CI automation
+  #   roles: [requester]

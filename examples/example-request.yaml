@@ -1,0 +1,39 @@
+apiVersion: iam-jit.dev/v1alpha1
+kind: RoleRequest
+
+metadata:
+  id: example-debug-eks-logs
+  requester:
+    name: Example Developer
+    email: dev@example.com
+  created_at: 2026-05-07T15:30:00Z
+
+spec:
+  description: |
+    Investigate why pods in the istio-system namespace of the staging EKS
+    cluster are restart-looping. Need to read pod descriptions, logs, and
+    events for one week.
+
+  access_type: read-only
+
+  task_intent:
+    services:
+      - eks
+      - logs
+    actions:
+      - read
+      - list
+
+  accounts:
+    - account_id: "060392206767"
+      alias: omise-development
+      regions: [us-east-1]
+
+  duration:
+    duration_hours: 168
+
+  policy: null
+
+  provisioning:
+    mode: identity_center
+    permission_set_name: iam-jit-debug-eks-logs

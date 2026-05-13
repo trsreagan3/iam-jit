@@ -1,0 +1,51 @@
+# Fully-local "deploy" of iam-jit. Spins up the same LocalStack + Ollama as
+# the test stack, plus the iam-jit FastAPI app on http://localhost:8000.
+#
+# Lets contributors evaluate the tool end-to-end without an AWS account.
+# Same agnosticism principle as the test stack — if this works, our
+# abstractions are clean.
+#
+#   docker compose -f docker-compose.dev.yml up
+#
+# (FastAPI service depends on Phase 1b — placeholder commented out below
+# until that scaffold lands.)
+
+services:
+  localstack:
+    extends:
+      file: docker-compose.test.yml
+      service: localstack
+
+  ollama:
+    extends:
+      file: docker-compose.test.yml
+      service: ollama
+
+  # iam-jit:
+  #   build:
+  #     context: .
+  #     dockerfile: Dockerfile.dev
+  #   container_name: iam-jit-app
+  #   ports:
+  #     - "8000:8000"
+  #   environment:
+  #     IAM_JIT_LLM: ollama
+  #     OLLAMA_HOST: http://ollama:11434
+  #     IAM_JIT_LLM_MODEL: llama3.2:3b
+  #     AWS_ACCESS_KEY_ID: test
+  #     AWS_SECRET_ACCESS_KEY: test
+  #     AWS_DEFAULT_REGION: us-east-1
+  #     AWS_ENDPOINT_URL: http://localstack:4566
+  #     IAM_JIT_REQUEST_STORE: filesystem
+  #     IAM_JIT_REQUEST_DIR: /app/requests
+  #   volumes:
+  #     - ./requests:/app/requests
+  #     - ./library:/app/library
+  #   depends_on:
+  #     localstack:
+  #       condition: service_healthy
+  #     ollama:
+  #       condition: service_healthy
+
+volumes:
+  iam-jit-ollama-models:

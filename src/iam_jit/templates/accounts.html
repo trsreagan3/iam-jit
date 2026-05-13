@@ -1,0 +1,47 @@
+{% extends "base.html" %}
+{% block title %}Accounts — iam-jit{% endblock %}
+{% block content %}
+<section>
+  <div class="row-between">
+    <h1>Destination accounts</h1>
+    <a class="button" href="/accounts/new">+ add account</a>
+  </div>
+  <p class="muted">
+    AWS accounts iam-jit may provision into. Adding an account is a two-step
+    process: deploy the CloudFormation stack in the destination account, then
+    register the resulting role ARNs here. iam-jit cannot perform the deploy
+    itself — that requires admin rights in the destination account.
+  </p>
+
+  {% if accounts %}
+  <table class="data">
+    <thead>
+      <tr>
+        <th>Account ID</th>
+        <th>Alias</th>
+        <th>Mode</th>
+        <th>Discovery</th>
+        <th>Regions</th>
+        <th>Registered</th>
+        <th></th>
+      </tr>
+    </thead>
+    <tbody>
+      {% for a in accounts %}
+      <tr>
+        <td><code>{{ a.account_id }}</code></td>
+        <td>{{ a.alias or "—" }}</td>
+        <td>{{ a.provisioning_mode }}</td>
+        <td>{{ "yes" if a.discovery_role_arn else "no" }}</td>
+        <td>{{ a.regions | join(", ") if a.regions else "—" }}</td>
+        <td><span class="muted small">{{ a.registered_at or "—" }}</span></td>
+        <td><a href="/accounts/{{ a.account_id }}">view</a></td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+  {% else %}
+  <p class="muted">No accounts registered yet. Click <a href="/accounts/new">+ add account</a> to get started.</p>
+  {% endif %}
+</section>
+{% endblock %}

@@ -1,0 +1,16 @@
+# Runtime-only requirements for the iam-jit Lambda. Kept minimal:
+# - pytest, ruff, moto, playwright stay out (dev/test only)
+# - anthropic/policy_sentry pulled in only when LLMBackend / narrowing are used;
+#   include policy_sentry because narrowing is wired into the request review path
+# - boto3 is also in the Lambda runtime image, but pinning a version here
+#   prevents drift between local-tests and prod runtime behavior
+fastapi>=0.115
+mangum>=0.17
+jinja2>=3.1
+itsdangerous>=2.2
+python-multipart>=0.0.9
+jsonschema>=4.21
+ruamel.yaml>=0.18
+boto3>=1.34
+policy_sentry>=0.13
+httpx>=0.27

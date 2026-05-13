@@ -1,0 +1,144 @@
+{% extends "base.html" %}
+{% block title %}New request — iam-jit{% endblock %}
+{% block content %}
+<section class="chat-shell">
+  {% set thread_has_history = conversation and conversation|length > 0 %}
+
+  {% if available_draft %}
+    <div class="flash flash-info">
+      <strong>Resume your last draft?</strong>
+      You have an unfinished chat from
+      <span class="muted small">{{ available_draft.last_updated_at }}</span>
+      with {{ available_draft.turn_count }} turns.
+      <a href="/requests/new/chat?resume={{ available_draft.id }}">Resume it</a>
+      &nbsp;·&nbsp;
+      <a href="/requests/new/chat?resume=none">Start fresh</a>
+    </div>
+  {% endif %}
+
+  {% if resumed_from_draft %}
+    <div class="flash flash-info">
+      <strong>Picking up where you left off.</strong>
+      <span class="muted small">Drafts expire after 4h of inactivity.</span>
+    </div>
+  {% endif %}
+
+  {% if thread_has_history %}
+  <div id="chat-thread" class="chat-thread">
+    {% for msg in conversation %}
+      {% if msg.role == "assistant" %}
+        <div class="chat-msg chat-msg-assistant">{{ msg.content }}</div>
+      {% else %}
+        <div class="chat-msg chat-msg-user">{{ msg.content }}</div>
+      {% endif %}
+    {% endfor %}
+    {% if turn and turn.ask %}
+      <div class="chat-msg chat-msg-assistant">{{ turn.ask }}</div>
+    {% endif %}
+    {% if turn and turn.error and not turn.ask %}
+      <div class="chat-msg chat-msg-system flash flash-warning">{{ turn.error }}</div>
+    {% endif %}
+  </div>
+  {% endif %}
+
+  {% if suggest_paste %}
+    <div class="flash flash-warning">
+      <strong>The model is having trouble.</strong>
+      It returned unparseable output {{ parse_error_count }} times in a row. You can
+      <a href="/requests/new/paste"><strong>switch to paste mode</strong></a> and
+      submit the policy directly, or
+      <form method="post" action="/requests/new/chat" style="display:inline">
+        <input type="hidden" name="conversation" value="{{ conversation_token or '' }}" />
+        <input type="hidden" name="regenerate" value="1" />
+        <button type="submit" class="link-button">try once more</button>
+      </form>.
+    </div>
+  {% elif turn and turn.error == "llm_parse_error" %}
+    <div class="flash flash-warning">
+      <span>The model returned something I couldn't parse.</span>
+      <form method="post" action="/requests/new/chat" style="display:inline">
+        <input type="hidden" name="conversation" value="{{ conversation_token or '' }}" />
+        <input type="hidden" name="regenerate" value="1" />
+        <button type="submit" class="link-button">regenerate</button>
+      </form>
+    </div>
+  {% endif %}
+
+  {% if turn and turn.complete %}
+    <div class="flash flash-info">
+      <strong>I have everything I need.</strong> Review the draft below and submit, or tweak any field.
+    </div>
+    <form method="post" action="/requests/new/paste">
+      <input type="hidden" name="from_intake" value="1" />
+      <label for="description">Description</label>
+      <textarea name="description" id="description" required minlength="10" rows="3">{{ turn.prefill.description or "" }}</textarea>
+
+      <label for="policy">Drafted policy <span class="muted small">(review carefully)</span></label>
+      <textarea name="policy" id="policy" required rows="14" class="mono">{{ turn.prefill.policy or "" }}</textarea>
+
+      <fieldset>
+        <legend>Access type</legend>
+        <label><input type="radio" name="access_type" value="read-only"
+          {% if turn.prefill.access_type != "read-write" %}checked{% endif %} />
+          Read-only
+        </label>
+        <label><input type="radio" name="access_type" value="read-write"
+          {% if turn.prefill.access_type == "read-write" %}checked{% endif %} />
+          Read-write
+        </label>
+      </fieldset>
+
+      <label for="accounts">Account IDs</label>
+      <input type="text" name="accounts" id="accounts" required value="{{ turn.prefill.accounts or "" }}" />
+
+      <label for="duration_hours">Duration (hours)</label>
+      <input type="number" name="duration_hours" id="duration_hours" required min="1" max="8760"
+        value="{{ turn.prefill.duration_hours or 24 }}" />
+
+      {% if ticket_required or turn.prefill.ticket %}
+      <label for="ticket">Ticket URL{% if ticket_required %} <span class="required">(required)</span>{% endif %}</label>
+      <input type="url" name="ticket" id="ticket"
+        value="{{ turn.prefill.ticket or '' }}" {% if ticket_required %}required{% endif %} />
+      {% endif %}
+
+      <fieldset>
+        <legend>Who will assume this role</legend>
+        <p class="muted small">
+          Default: trust policy locks to <strong>your login</strong> —
+          <code>{{ current_user.id if current_user else "your login" }}</code>.
+          Leave blank to use that. Type a different ARN if a CI runner role,
+          instance profile, or another identity will assume the role.
+        </p>
+        <label for="assume_principal_arn">Assumer principal ARN <span class="muted small">(blank = your login)</span></label>
+        <input type="text" name="assume_principal_arn" id="assume_principal_arn"
+          placeholder="leave blank to default to {{ current_user.id if current_user else 'your login' }}"
+          value="{% if turn.prefill.assume_principal_arn and turn.prefill.assume_principal_arn != '__from_login__' %}{{ turn.prefill.assume_principal_arn }}{% endif %}" />
+      </fieldset>
+
+      <button type="submit">Submit for approval</button>
+      <a class="cancel" href="/requests/new">cancel</a>
+    </form>
+  {% else %}
+    <form id="chat-form" method="post" action="/requests/new/chat" class="chat-form">
+      <input type="hidden" name="conversation" value="{{ conversation_token or '' }}" />
+      <textarea
+        id="chat-input"
+        name="message"
+        required
+        rows="3"
+        autofocus
+        placeholder="What can I help you access?"
+      ></textarea>
+      <div class="chat-form-row">
+        <button id="chat-send" type="submit">Send</button>
+        <span id="chat-thinking" class="chat-thinking" hidden>thinking…</span>
+      </div>
+      <p class="chat-fineprint muted small">
+        local model is sometimes slow on first call (cold-start ~30-60s); subsequent calls land in seconds.
+      </p>
+    </form>
+  {% endif %}
+</section>
+
+<script src="/static/chat.js" defer></script>
+{% endblock %}

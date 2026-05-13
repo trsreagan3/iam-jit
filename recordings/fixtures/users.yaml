@@ -1,0 +1,15 @@
+schema_version: 1
+auth_mode: local
+users:
+  - id: email:admin@example.com
+    display_name: Admin Person
+    roles: [admin]
+  - id: email:approver@example.com
+    display_name: Approver Person
+    roles: [approver]
+  - id: email:dev@example.com
+    display_name: Dev Person
+    roles: [requester]
+  - id: email:badactor@example.com
+    display_name: Bad Actor
+    roles: [requester]

@@ -1,0 +1,8 @@
+{% macro risk_badge(score) -%}
+{%- if score is not none -%}
+{%- set color = "low" if score <= 3 else "medium" if score <= 6 else "high" if score <= 8 else "critical" -%}
+<span class="risk risk-{{ color }}" title="Risk score {{ score }}/10">{{ score }}/10</span>
+{%- else -%}
+<span class="risk risk-na" title="No AI configured — risk scoring disabled">—</span>
+{%- endif -%}
+{%- endmacro %}

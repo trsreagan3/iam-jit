@@ -1,0 +1,164 @@
+{% extends "base.html" %}
+{% block title %}Network posture — iam-jit{% endblock %}
+{% block content %}
+<section>
+  <h1>Network posture</h1>
+
+  {% if request.query_params.get('error') %}
+  <div class="flash flash-warning">
+    <strong>{{ request.query_params.get('error').replace('_', ' ') }}</strong>
+  </div>
+  {% endif %}
+
+  {# Security posture banner. Critical issues (e.g. ALB ingress
+     0.0.0.0/0 AND HTTP-only) render as a loud red banner that
+     blocks the visual flow until the admin either fixes the
+     posture or explicitly dismisses the warning for themselves.
+     Per-admin dismissal — other admins still see it; agents on
+     /healthz always see the unfiltered list regardless. #}
+  {% for issue in posture.issues_undismissed %}
+    <div class="flash flash-{{ 'critical' if issue.severity == 'critical' else 'warning' }} posture-banner"
+         data-warning-id="{{ issue.id }}"
+         data-severity="{{ issue.severity }}"
+         style="{% if issue.severity == 'critical' %}border-left: 6px solid #c00; background: #fee; padding: 1rem 1.25rem; margin-bottom: 1.5rem;{% else %}border-left: 6px solid #c80; background: #fff7e6; padding: 1rem 1.25rem; margin-bottom: 1.5rem;{% endif %}">
+      <div style="display: flex; justify-content: space-between; gap: 1rem; align-items: start;">
+        <div style="flex: 1;">
+          <strong style="font-size: 1.05rem;">
+            {% if issue.severity == 'critical' %}⚠️ CRITICAL — {% else %}⚠ {% endif %}{{ issue.title }}
+          </strong>
+          <p style="margin: 0.5rem 0;">{{ issue.detail }}</p>
+          <p style="margin: 0; font-size: 0.9rem; opacity: 0.85;">
+            <strong>Fix:</strong> {{ issue.fix }}
+          </p>
+        </div>
+        <form method="post" action="/admin/network/dismiss-warning" style="margin: 0;">
+          <input type="hidden" name="warning_id" value="{{ issue.id }}" />
+          <button type="submit"
+                  style="background: transparent; border: 1px solid currentColor; padding: 0.25rem 0.65rem; font-size: 0.85rem; cursor: pointer; white-space: nowrap; opacity: 0.7;"
+                  title="Hide this warning for your account only. Other admins still see it. Agents on /healthz still see it.">
+            dismiss for me
+          </button>
+        </form>
+      </div>
+    </div>
+  {% endfor %}
+
+  {% set total_cidrs = (runtime_cidrs|length) + (env_cidrs|length) %}
+
+  {% if not total_cidrs %}
+  <div class="flash flash-warning">
+    <strong>No source-IP allowlist is configured.</strong>
+    The iam-jit Function URL is reachable from any source that can
+    resolve it. Sign-in still requires a valid magic-link, but the
+    login form, magic-link request endpoint, and every JSON API
+    surface are all reachable from the public internet.
+    <strong>This is NOT recommended</strong> — add at least your
+    current network range below.
+  </div>
+  {% else %}
+  <div class="flash flash-info">
+    <strong>Source-IP allowlist active.</strong>
+    Requests are allowed from the following ranges only — every other
+    source IP is refused with HTTP 403 at the iam-jit middleware
+    layer before authentication runs.
+  </div>
+  {% endif %}
+
+  <h2>Runtime allowlist (admin-managed)</h2>
+  <p class="muted">
+    These ranges can be added / removed without redeploying. Changes
+    take effect on the next request. When the runtime list is non-
+    empty, it OVERRIDES the deploy-time env-baked list below.
+  </p>
+
+  {% if runtime_cidrs %}
+  <table class="data">
+    <thead>
+      <tr>
+        <th>CIDR</th>
+        <th>Note</th>
+        <th>Added by</th>
+        <th></th>
+      </tr>
+    </thead>
+    <tbody>
+      {% for c in runtime_cidrs %}
+      <tr>
+        <td><code>{{ c.cidr }}</code></td>
+        <td>{{ c.note or "—" }}</td>
+        <td><span class="muted small">{{ c.added_by }}</span></td>
+        <td>
+          <form method="post"
+                action="/admin/network/cidrs/{{ c.cidr }}/delete"
+                style="display:inline">
+            <button type="submit" class="danger">remove</button>
+          </form>
+        </td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+  {% else %}
+  <p class="muted">No runtime entries. Add one below to start
+    restricting traffic at the application layer.</p>
+  {% endif %}
+
+  <h2>Add a CIDR / IP</h2>
+  <form method="post" action="/admin/network/cidrs">
+    <label for="cidr">CIDR or bare IP</label>
+    <input type="text" name="cidr" id="cidr"
+      placeholder="10.0.0.0/8  or  203.0.113.5"
+      required />
+    <p class="muted small">
+      Bare IPs auto-promote to /32 (or /128 for IPv6). Examples:
+      <code>10.0.0.0/8</code> (RFC1918 private),
+      <code>203.0.113.5</code> (single office IP),
+      <code>2001:db8::/32</code> (IPv6 range).
+    </p>
+
+    <label for="note">Note <span class="muted small">(optional)</span></label>
+    <input type="text" name="note" id="note"
+      placeholder="corp VPN egress / office WAN / CI runner pool"
+      maxlength="200" />
+
+    <button type="submit">add to allowlist</button>
+  </form>
+
+  {% if env_cidrs %}
+  <h2>Deploy-time floor (env-baked)</h2>
+  <p class="muted">
+    These ranges are baked into the SAM
+    <code>AllowedSourceCidrs</code> parameter. They take effect ONLY
+    when the runtime list above is empty. Edit by redeploying the
+    SAM stack with a new parameter value.
+  </p>
+  <table class="data">
+    <thead><tr><th>CIDR</th></tr></thead>
+    <tbody>
+      {% for cidr in env_cidrs %}
+      <tr><td><code>{{ cidr }}</code></td></tr>
+      {% endfor %}
+    </tbody>
+  </table>
+  {% endif %}
+
+  <h2>Forwarded-For trust</h2>
+  <p class="muted">
+    Reading the source IP from the <code>X-Forwarded-For</code> header
+    is {% if trust_xff %}<strong>ON</strong>{% else %}<strong>OFF</strong>{% endif %}
+    (env: <code>IAM_JIT_TRUST_FORWARDED_FOR</code>).
+    {% if trust_xff %}
+    Use this when iam-jit runs behind a trusted proxy (CloudFront, ALB).
+    {% else %}
+    Use this when iam-jit is directly exposed (no proxy in front).
+    {% endif %}
+  </p>
+
+  <h2>Public-exposure opt-in</h2>
+  <p class="muted">
+    The SAM template's <code>AllowPublicNetworkExposure</code>
+    parameter is currently
+    {% if public_exposure_opt_in %}<strong>set to true</strong>{% else %}<strong>unset / false</strong>{% endif %}.
+  </p>
+</section>
+{% endblock %}

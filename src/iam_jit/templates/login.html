@@ -1,0 +1,73 @@
+{% extends "base.html" %}
+{% block title %}Sign in — iam-jit{% endblock %}
+{% block content %}
+<section class="card narrow">
+  <h1>Sign in to iam-jit</h1>
+  {% if auth_mode == "aws_iam" %}
+  <p>This deployment uses AWS IAM auth. Make SigV4-signed requests with your AWS credentials —
+    no separate sign-in is needed for the API. The web UI requires a browser-friendly auth proxy
+    (e.g., CloudFront + Cognito) configured by the deployer; if you're seeing this page, that's
+    not in place yet.</p>
+  {% else %}
+  {# When SES isn't configured AND we have a bootstrap admin email,
+     pre-fill the input. The deployer doesn't need to set up SES
+     just to use iam-jit — clicking "Generate sign-in link"
+     produces a link shown inline (dev mode) or in CloudWatch (prod
+     no-SES mode). Avoids the abandonment risk of new operators
+     thinking they need SES to even sign in. #}
+  {% if bootstrap_admin_email and delivery_channel != "email" %}
+  <div class="flash flash-info" style="margin-bottom: 1rem;">
+    <strong>No SES set up for this deployment.</strong>
+    The bootstrap admin email
+    (<code>{{ bootstrap_admin_email }}</code>) is pre-filled below.
+    Click the button — the sign-in link will appear directly on the
+    next page (no inbox round-trip needed).
+  </div>
+  {% endif %}
+  <p>Enter your work email to get a single-use sign-in link.</p>
+  <form method="post" action="/login">
+    <label for="email">Email</label>
+    <input type="email" name="email" id="email" required autocomplete="email"
+           {% if bootstrap_admin_email and delivery_channel != "email" %}value="{{ bootstrap_admin_email }}"{% endif %}
+           autofocus />
+    <button type="submit">
+      {% if delivery_channel == "email" %}Send link to inbox
+      {% elif delivery_channel == "in_response" %}Show me the link
+      {% else %}Generate sign-in link
+      {% endif %}
+    </button>
+  </form>
+  <p class="muted">Sessions last 24 hours. Sign-in links expire in 15 minutes.</p>
+
+  {# Channel-aware explainer. SES is OPTIONAL — when not configured,
+     the link is delivered via CloudWatch logs (an admin fetches it
+     and shares with you) or directly on the next page (dev mode).
+     Avoid implying SES is required; new deployers seeing "you must
+     set up SES" abandon the tool. #}
+  <details class="muted small" style="margin-top: 1rem;">
+    <summary>How does the link get to me?</summary>
+    {% if delivery_channel == "email" %}
+    <p>This deployment has SES configured. Click the button above
+       and the link will arrive at the email address you typed
+       within ~30 seconds. If you don't see it, check spam.</p>
+    {% elif delivery_channel == "in_response" %}
+    <p>This is a dev deployment. The link is rendered directly on
+       the next page after you click — no email round-trip. Useful
+       for local testing; not suitable for production.</p>
+    {% else %}
+    <p>This deployment doesn't have SES configured. After you click,
+       the link is emitted to the Lambda's CloudWatch log group
+       (<code>/aws/lambda/iam-jit</code>) as a structured
+       <code>MAGIC_LINK</code> log line. Ask your iam-jit admin to
+       run:</p>
+    <pre><code>aws logs filter-log-events \
+  --log-group-name /aws/lambda/iam-jit \
+  --filter-pattern '"MAGIC_LINK"' --max-items 5 \
+  --profile &lt;your-aws-profile&gt;</code></pre>
+    <p>and share the URL with you. SES isn't required to use iam-jit —
+       wire it up later if you want self-service sign-in.</p>
+    {% endif %}
+  </details>
+  {% endif %}
+</section>
+{% endblock %}

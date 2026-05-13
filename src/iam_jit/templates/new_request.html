@@ -1,0 +1,45 @@
+{% extends "base.html" %}
+{% block title %}New request — iam-jit{% endblock %}
+{% block content %}
+<section>
+  <h1>+ New request</h1>
+  <p class="muted">Pick how you want to author this role. Both paths run the same risk review and approval flow.</p>
+
+  <div class="grid2">
+    <a class="card pickable" href="/requests/new/generate">
+      <h2>Generate a new role</h2>
+      {% if ai_enabled %}
+      <p>Describe what you're trying to do in plain English. We'll draft a least-privilege
+        policy you can review before submitting.</p>
+      <p class="badge badge-ai">AI-assisted</p>
+      {% else %}
+      <p class="muted">Disabled in this deployment — no LLM backend is configured. Ask your
+        admin to enable an LLM tier, or use "Paste a role" instead.</p>
+      <p class="badge badge-na">unavailable</p>
+      {% endif %}
+    </a>
+
+    <a class="card pickable" href="/requests/new/paste">
+      <h2>Paste a role</h2>
+      <p>Already have a policy in hand? Paste it. Schema validation, narrowing flags,
+        and (when AI is on) risk review still run.</p>
+      <p class="tip">
+        <strong>Tip:</strong> for the highest-fidelity policies, generate the role locally
+        with a tool like Claude Code that can read your codebase, kubeconfigs, and
+        terraform state — then paste the result here. The hosted iam-jit instance can't
+        see those things by design.
+      </p>
+    </a>
+  </div>
+
+  <p class="disclaimer">
+    <strong>What iam-jit can see:</strong> the policy and description you submit, plus
+    any organization context (account purposes, regions, naming conventions) an admin
+    has provided. <strong>What it cannot see:</strong> your application code, your
+    repositories, kubeconfigs, terraform state, the public internet, or AWS account
+    contents beyond the read-only discovery role (if your admin enabled it). For
+    code-aware policy authoring, run a local agent on your machine and paste the
+    result here.
+  </p>
+</section>
+{% endblock %}

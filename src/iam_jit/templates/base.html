@@ -1,0 +1,66 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>{% block title %}iam-jit{% endblock %}</title>
+  <link rel="stylesheet" href="/static/style.css" />
+</head>
+<body>
+  <header class="topbar">
+    <a href="/" class="brand">iam-jit</a>
+    {% if current_user %}
+    <nav>
+      <a href="/" {% if active == "home" %}class="active"{% endif %}>my requests</a>
+      {% if current_user.is_approver %}
+      <a href="/queue" {% if active == "queue" %}class="active"{% endif %}>queue</a>
+      {% endif %}
+      <a href="/requests/new" {% if active == "new" %}class="active"{% endif %}>+ new request</a>
+      <a href="/tokens" {% if active == "tokens" %}class="active"{% endif %}>api tokens</a>
+      {% if current_user.is_admin %}
+      <a href="/accounts" {% if active == "accounts" %}class="active"{% endif %}>accounts</a>
+      {% endif %}
+    </nav>
+    <div class="user">
+      <span>{{ current_user.display_name or current_user.id }}</span>
+      <span class="roles">{{ current_user.roles | join(", ") }}</span>
+      <a href="/logout">log out</a>
+    </div>
+    {% endif %}
+  </header>
+
+  {% if flash %}
+  <div class="flash flash-{{ flash.kind }}">{{ flash.message }}</div>
+  {% endif %}
+
+  {% if health_issues %}
+  {% for issue in health_issues %}
+  <div class="health-banner {{ issue.severity }}">
+    <strong>{{ issue.message }}</strong>
+    {% if issue.detail %}<span>{{ issue.detail }}</span>{% endif %}
+  </div>
+  {% endfor %}
+  {% endif %}
+
+  <main class="container">
+    {% block content %}{% endblock %}
+  </main>
+
+  <footer class="footer">
+    <span>iam-jit {{ version }}</span>
+    <span>auth: {{ auth_mode }}</span>
+    <span>ai: {{ "on" if ai_enabled else "off" }}</span>
+    <details class="footer-about">
+      <summary>about</summary>
+      <p>
+        iam-jit can see only what you submit (chat messages, pasted policies)
+        plus organization context an admin has provided. It cannot see your
+        application code, repos, kubeconfigs, terraform state, the internet,
+        or AWS account contents beyond a read-only discovery role (if your
+        admin enabled it). For code-aware policy authoring, run a local agent
+        on your machine and paste the result via paste mode.
+      </p>
+    </details>
+  </footer>
+</body>
+</html>

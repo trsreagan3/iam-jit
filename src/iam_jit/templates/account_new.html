@@ -1,0 +1,127 @@
+{% extends "base.html" %}
+{% block title %}Add account — iam-jit{% endblock %}
+{% block content %}
+<section class="card narrow">
+  <h1>Add a destination account</h1>
+  <p class="muted">
+    iam-jit can't bootstrap itself into a new AWS account — that would require
+    pre-existing privileged access there, which is the chicken-and-egg this
+    tool exists to solve. Fill out this form and iam-jit will generate the
+    artifacts you (or an agent acting on your behalf) need to run yourself.
+  </p>
+
+  {% if errors %}
+  <div class="flash flash-error">
+    <strong>Couldn't generate plan:</strong>
+    <ul>{% for e in errors %}<li>{{ e }}</li>{% endfor %}</ul>
+  </div>
+  {% endif %}
+
+  <form method="post" action="/accounts/new">
+    <label for="account_id">AWS account ID (12 digits)</label>
+    <input type="text" name="account_id" id="account_id" required pattern="[0-9]{12}"
+      value="{{ form.account_id or '' }}" />
+
+    <label for="account_alias">Alias <span class="muted small">(optional)</span></label>
+    <input type="text" name="account_alias" id="account_alias"
+      placeholder="e.g. omise-staging" value="{{ form.account_alias or '' }}" />
+
+    <label for="region">Region for the CloudFormation stack</label>
+    <input type="text" name="region" id="region" required
+      placeholder="us-east-1" value="{{ form.region or 'us-east-1' }}" />
+
+    <label for="hub_account_id">Hub account ID <span class="muted small">(where iam-jit's Lambda runs)</span></label>
+    <input type="text" name="hub_account_id" id="hub_account_id" pattern="[0-9]{12}"
+      placeholder="defaults to IAM_JIT_HUB_ACCOUNT_ID env"
+      value="{{ form.hub_account_id or '' }}" />
+
+    <fieldset>
+      <legend>Provisioning mode</legend>
+      <label><input type="radio" name="provisioning_mode" value="classic_iam"
+        {% if form.provisioning_mode != 'identity_center' and form.provisioning_mode != 'both' %}checked{% endif %} />
+        Classic IAM (create roles directly in this account)
+      </label>
+      <label><input type="radio" name="provisioning_mode" value="identity_center"
+        {% if form.provisioning_mode == 'identity_center' %}checked{% endif %} />
+        Identity Center (assign permission sets via SSO)
+      </label>
+      <label><input type="radio" name="provisioning_mode" value="both"
+        {% if form.provisioning_mode == 'both' %}checked{% endif %} />
+        Both
+      </label>
+    </fieldset>
+
+    <fieldset>
+      <legend>Read-only discovery role <span class="muted small">(recommended)</span></legend>
+      <label><input type="checkbox" name="enable_discovery" value="1"
+        {% if form.enable_discovery is not defined or form.enable_discovery %}checked{% endif %} />
+        Create the read-only DiscoveryRole so iam-jit can suggest concrete ARNs
+        during the narrowing flow. Disable this if you don't want iam-jit to
+        read account contents — provisioning still works, just without context.
+      </label>
+    </fieldset>
+
+    <button type="submit">Generate onboarding plan</button>
+    <a class="cancel" href="/accounts">cancel</a>
+  </form>
+</section>
+
+{% if plan %}
+<section>
+  <h2>Onboarding plan for account {{ plan.account_id }}</h2>
+  <p class="disclaimer">
+    Run these commands in any environment that has AWS credentials for the
+    DESTINATION account ({{ plan.account_id }}). iam-jit holds no credentials
+    in that account by design — this output is for you (or an agent on your
+    machine) to execute.
+  </p>
+
+  <h3>Expected outputs after deploy</h3>
+  <dl class="metadata">
+    <dt>Provisioner role ARN</dt><dd><code>{{ plan.expected.provisioner_role_arn }}</code></dd>
+    <dt>Provisioner ExternalId</dt><dd><code>{{ plan.expected.provisioner_external_id }}</code></dd>
+    {% if plan.expected.discovery_role_arn %}
+    <dt>Discovery role ARN</dt><dd><code>{{ plan.expected.discovery_role_arn }}</code></dd>
+    <dt>Discovery ExternalId</dt><dd><code>{{ plan.expected.discovery_external_id }}</code></dd>
+    {% endif %}
+  </dl>
+
+  <h3>1. CLI commands</h3>
+  <pre class="policy mono">{{ plan.artifacts.cli_commands }}</pre>
+
+  <h3>2. CloudFormation template</h3>
+  <details>
+    <summary>show inline (also available via <code>GET /api/v1/accounts/onboarding/preview</code>)</summary>
+    <pre class="policy mono">{{ plan.artifacts.cloudformation_template }}</pre>
+  </details>
+
+  <h3>3. Terraform skeleton (alternative)</h3>
+  <details>
+    <summary>show</summary>
+    <pre class="policy mono">{{ plan.artifacts.terraform_module }}</pre>
+  </details>
+
+  <h3>4. Register the account with iam-jit</h3>
+  <p class="muted">After the stack is <code>CREATE_COMPLETE</code> and the outputs match the expected values above, click below to register. iam-jit does not call AWS to verify — verification happens lazily at first provision.</p>
+  <form method="post" action="/accounts/register">
+    <input type="hidden" name="account_id" value="{{ plan.account_id }}" />
+    <input type="hidden" name="alias" value="{{ plan.account_alias or '' }}" />
+    <input type="hidden" name="region" value="{{ plan.region }}" />
+    <input type="hidden" name="provisioner_role_arn" value="{{ plan.expected.provisioner_role_arn }}" />
+    <input type="hidden" name="provisioner_external_id" value="{{ plan.expected.provisioner_external_id }}" />
+    <input type="hidden" name="discovery_role_arn" value="{{ plan.expected.discovery_role_arn or '' }}" />
+    <input type="hidden" name="discovery_external_id" value="{{ plan.expected.discovery_external_id or '' }}" />
+    <input type="hidden" name="provisioning_mode" value="{{ plan.provisioning_mode }}" />
+    <button type="submit">Register account {{ plan.account_id }}</button>
+  </form>
+
+  <details>
+    <summary>or run the equivalent curl yourself</summary>
+    <pre class="policy mono">{{ plan.after_deploy.register_curl }}</pre>
+  </details>
+
+  <h3>Notes</h3>
+  <p class="muted small">{{ plan.notes }}</p>
+</section>
+{% endif %}
+{% endblock %}

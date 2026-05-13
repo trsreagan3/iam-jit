@@ -1,0 +1,51 @@
+{% extends "base.html" %}
+{% block title %}Bootstrap setup — iam-jit{% endblock %}
+{% block content %}
+<section class="card narrow">
+  <h1>Bootstrap setup</h1>
+
+  <p class="muted">
+    Use this page exactly once, right after deploy, to claim the
+    bootstrap admin account. The secret you enter below is the
+    <code>BootstrapSetupKey</code> you generated locally and passed to
+    <code>sam deploy</code>. iam-jit doesn't store it in CloudFormation
+    outputs or in any URL — only your local terminal / password manager
+    has it.
+  </p>
+
+  {% if error %}
+  <div class="flash flash-error">
+    <strong>{{ error }}</strong>
+  </div>
+  {% endif %}
+
+  <form method="post" action="/setup">
+    <label for="email">Bootstrap admin email</label>
+    <input type="email" name="email" id="email" required
+      placeholder="your-email@your-corp.com" autocomplete="email" />
+    <p class="muted small">
+      Must exactly match the <code>AdminBootstrapEmail</code> parameter
+      from your <code>sam deploy</code>.
+    </p>
+
+    <label for="key">Bootstrap setup key</label>
+    <input type="password" name="key" id="key" required
+      placeholder="paste the BootstrapSetupKey you set at deploy time"
+      autocomplete="off" />
+    <p class="muted small">
+      The 64-character hex string you generated with
+      <code>openssl rand -hex 32</code> and passed via
+      <code>--parameter-overrides BootstrapSetupKey=…</code>.
+    </p>
+
+    <button type="submit">claim admin access</button>
+  </form>
+
+  <p class="muted small">
+    Single-use. After your first successful claim this page returns an
+    error and additional sign-ins must go through <a href="/login">/login</a>.
+    Lost the key? Redeploy with a fresh one — the bootstrap user record
+    is rewritten on each cold-start that finds an empty store.
+  </p>
+</section>
+{% endblock %}

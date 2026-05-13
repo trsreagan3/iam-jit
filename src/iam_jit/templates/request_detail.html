@@ -1,0 +1,294 @@
+{% extends "base.html" %}
+{% from "partials/risk_score.html" import risk_badge %}
+{% block title %}{{ req.metadata.name or req.metadata.id }} — iam-jit{% endblock %}
+{% block content %}
+<section>
+  <div class="row-between">
+    <h1>{{ req.metadata.name or "Request " ~ req.metadata.id }}</h1>
+    <span class="state state-{{ req.status.state }}">{{ req.status.state }}</span>
+  </div>
+  <p class="muted small">id: <code>{{ req.metadata.id }}</code></p>
+
+  <dl class="metadata">
+    <dt>Owner</dt><dd>{{ req.status.owner }}</dd>
+    <dt>Submitted</dt><dd>{{ req.status.submitted_at }}</dd>
+    <dt>Last updated</dt><dd>{{ req.status.last_updated_at }}</dd>
+    <dt>Access type</dt><dd>{{ req.spec.access_type or "—" }}</dd>
+    <dt>Accounts</dt><dd>{% for a in req.spec.accounts %}{{ a.account_id }}{% if not loop.last %}, {% endif %}{% endfor %}</dd>
+    <dt>Duration</dt><dd>
+      {%- if req.spec.duration.duration_hours -%}
+        {{ req.spec.duration.duration_hours }}h
+      {%- elif req.spec.duration.not_after -%}
+        until {{ req.spec.duration.not_after }}
+      {%- else -%}—{%- endif -%}
+    </dd>
+    <dt>Risk</dt><dd>{{ risk_badge(req.status.review.risk_score if req.status.review else None) }}</dd>
+    {% if req.spec.ticket %}
+    <dt>Ticket</dt><dd><a href="{{ req.spec.ticket }}" target="_blank" rel="noopener noreferrer">{{ req.spec.ticket }}</a></dd>
+    {% endif %}
+  </dl>
+
+  <h2>Description</h2>
+  <p class="description">{{ req.spec.description }}</p>
+
+  {% if req.status.provisioned %}
+  {% set p = req.status.provisioned %}
+  <div class="flash flash-success">
+    <strong>Role creation: ✓ successful.</strong>
+    The IAM role <code>{{ p.role_arn }}</code> was created in account
+    <code>{{ p.account_id }}</code> and is now active. The role will
+    auto-deny after <code>{{ p.expires_at }}</code> via the embedded
+    time-condition; iam-jit's expiry sweep will delete it after that.
+  </div>
+
+  <h2>How to assume this role</h2>
+  <dl class="metadata">
+    <dt>Role ARN</dt><dd><code>{{ p.role_arn }}</code></dd>
+    {% if p.assumer_principal_arn %}
+    <dt>Assume from</dt><dd><code>{{ p.assumer_principal_arn }}</code></dd>
+    {% endif %}
+    {% if p.expires_at %}
+    <dt>Expires</dt><dd>{{ p.expires_at }} <span class="muted small">(IAM time-condition denies use after this even if cleanup fails)</span></dd>
+    {% endif %}
+    {% if p.external_id %}
+    <dt>ExternalId</dt><dd><code>{{ p.external_id }}</code></dd>
+    {% endif %}
+  </dl>
+  {% if p.assume_instructions %}
+  <h3>AWS CLI</h3>
+  <pre class="policy mono">{{ p.assume_instructions.cli_assume_role }}</pre>
+  <h3>~/.aws/config profile</h3>
+  <pre class="policy mono">{{ p.assume_instructions.cli_profile_block }}</pre>
+  {% if p.assume_instructions.assumer_grant %}
+  {% set ag = p.assume_instructions.assumer_grant %}
+  <h3>Permission for the assumer to call AssumeRole</h3>
+  <p class="muted small">
+    The trust policy on the new role allows your principal to be assumed,
+    but the principal also needs <code>sts:AssumeRole</code> on its own
+    side. If your principal already has broad <code>sts:AssumeRole *</code>
+    or a matching policy, you can skip this. Otherwise add the policy below.
+  </p>
+  <p class="muted small"><strong>Identity type detected:</strong> {{ ag.applies_to }}</p>
+  {% if ag.cli_command %}
+  <p class="muted small">Run this with credentials for the assumer's account:</p>
+  <pre class="policy mono">{{ ag.cli_command }}</pre>
+  {% endif %}
+  <details>
+    <summary>show the JSON policy</summary>
+    <pre class="policy mono">{{ ag.policy_json }}</pre>
+  </details>
+  <p class="muted small">{{ ag.notes }}</p>
+  {% endif %}
+
+  {% if p.assume_instructions.agent_usage_hints %}
+  <h3>For AI tools / agents</h3>
+  <details>
+    <summary>show usage hints (env vars, named profiles, credentials_process)</summary>
+    <pre class="policy mono">{{ p.assume_instructions.agent_usage_hints }}</pre>
+  </details>
+  {% endif %}
+  {% if p.assume_instructions.console_url %}
+  <p><a class="button" target="_blank" href="{{ p.assume_instructions.console_url }}">Open in AWS Console</a></p>
+  {% endif %}
+  {% if p.assume_instructions.notes %}
+  <p class="muted small">{{ p.assume_instructions.notes }}</p>
+  {% endif %}
+  {% endif %}
+
+  {% if p.aws_cli_replay %}
+  <h3>AWS CLI replay <span class="muted small">(what we executed)</span></h3>
+  <details>
+    <summary>show the equivalent aws-cli commands</summary>
+    <p class="muted small">
+      iam-jit drove these via boto3 against the destination
+      account's ProvisionerRole. Pasted into a shell with the
+      equivalent credentials, they would reproduce the IAM state
+      we created. Useful for auditability and as a manual-replay
+      fallback if a future operation needs to be redone by hand.
+    </p>
+    {% for cmd in p.aws_cli_replay %}
+    <pre class="policy mono">{{ cmd }}</pre>
+    {% endfor %}
+  </details>
+  {% endif %}
+  {% elif req.status.state in ("pending", "needs_changes", "approved") and not assumer_resolved %}
+  <p class="flash flash-warning">
+    <strong>No assumer principal set.</strong>
+    We couldn't infer which AWS identity will assume this role from your login,
+    and you haven't set one explicitly. Edit the request and set
+    <code>spec.assume_by.principal_arn</code> before approval, otherwise the trust
+    policy can't be locked down to a specific principal.
+  </p>
+  {% endif %}
+
+  {% if req.status.review %}
+  <h2>Risk review</h2>
+  <ul class="factors">
+    {% for f in req.status.review.risk_factors %}
+    <li>{{ f }}</li>
+    {% endfor %}
+  </ul>
+  {% if req.status.review.suggestions %}
+  <h3>Suggestions</h3>
+  <ul class="suggestions">
+    {% for s in req.status.review.suggestions %}<li>{{ s }}</li>{% endfor %}
+  </ul>
+  {% endif %}
+  {% if req.status.review.llm_narrative %}
+  <p class="narrative">{{ req.status.review.llm_narrative }}</p>
+  {% endif %}
+  <p class="disclaimer">
+    <strong>Scope of this review:</strong> based only on the policy + description you
+    submitted plus admin-provided organization context (fingerprints below). The model
+    cannot see your application code, internet, or AWS account contents beyond the
+    read-only discovery role.
+  </p>
+  {% if req.status.review.context_fingerprints %}
+  <p class="muted small">
+    <strong>Context fingerprints at review time:</strong>
+    {% for name, fp in req.status.review.context_fingerprints.items() %}
+    <code>{{ name }}={{ fp }}</code>{% if not loop.last %}, {% endif %}
+    {% endfor %}
+    — if these change for the same review, the LLM context was tampered with.
+  </p>
+  {% endif %}
+  {% else %}
+  <p class="muted">Risk review is disabled for this deployment (no LLM backend configured).</p>
+  {% endif %}
+
+  <h2>Policy</h2>
+  <pre class="policy mono">{{ policy_pretty }}</pre>
+
+  {% if managed_refs %}
+  <details class="muted small">
+    <summary>compare against AWS-managed reference policies</summary>
+    <p>
+      AWS ships maintained "read-only" managed policies for most services.
+      Reviewers can use these as a sanity check — does this draft cover
+      roughly the same scope, or is it noticeably broader/narrower?
+    </p>
+    <ul>
+    {% for ref in managed_refs %}
+      <li>
+        <strong>{{ ref.service }}</strong>:
+        <code>{{ ref.managed_arn }}</code>
+        {% if ref.notes %}<br /><span class="muted">{{ ref.notes }}</span>{% endif %}
+      </li>
+    {% endfor %}
+    </ul>
+  </details>
+  {% endif %}
+
+  {% if cli_preview %}
+  <h2>If approved, this is what will happen</h2>
+  {% if cli_preview.blocking_issues %}
+  <div class="flash flash-warning">
+    <strong>Blocking issues — approval will fail until these are fixed:</strong>
+    <ul>
+      {% for issue in cli_preview.blocking_issues %}<li>{{ issue }}</li>{% endfor %}
+    </ul>
+  </div>
+  {% endif %}
+  <p class="muted small">
+    These AWS CLI commands are equivalent to the boto3 calls that will run
+    in the destination account on approval. Not yet executed. Reviewing
+    them before clicking Approve is the recommended audit step.
+  </p>
+  <dl class="metadata">
+    <dt>Will create role</dt><dd><code>{{ cli_preview.role_arn }}</code></dd>
+    <dt>Will expire</dt><dd>{{ cli_preview.expires_at }}</dd>
+    {% if cli_preview.assumer_principal_arn %}
+    <dt>Locked to assumer</dt><dd><code>{{ cli_preview.assumer_principal_arn }}</code></dd>
+    {% endif %}
+    {% if cli_preview.external_id %}
+    <dt>ExternalId</dt><dd><code>{{ cli_preview.external_id }}</code></dd>
+    {% endif %}
+  </dl>
+  <details>
+    <summary>show the AWS CLI commands that would run</summary>
+    {% for cmd in cli_preview.aws_cli_replay %}
+    <pre class="policy mono">{{ cmd }}</pre>
+    {% endfor %}
+  </details>
+  {% endif %}
+
+  <h2>Save for later</h2>
+  <p class="muted">Download this request so you can repeat or adapt it later.
+    The <strong>template</strong> form strips status / history / audit fields —
+    just what you'd resubmit. The <strong>full record</strong> is the entire
+    stored object including the review block.</p>
+  <div class="actions">
+    <a class="button" href="/api/v1/requests/{{ req.metadata.id }}/download?as=yaml&mode=template">template (YAML)</a>
+    <a class="button" href="/api/v1/requests/{{ req.metadata.id }}/download?as=json&mode=template">template (JSON)</a>
+    <a class="button" href="/api/v1/requests/{{ req.metadata.id }}/download?as=yaml&mode=full">full record (YAML)</a>
+    <a class="button" href="/api/v1/requests/{{ req.metadata.id }}/download?as=json&mode=full">full record (JSON)</a>
+  </div>
+
+  {% if req.status.comments %}
+  <h2>Comments ({{ req.status.comments | length }})</h2>
+  <div class="comments">
+    {% for c in req.status.comments %}
+    <article class="comment">
+      <header><strong>{{ c.author }}</strong> · <time>{{ c.posted_at }}</time></header>
+      <p>{{ c.message }}</p>
+    </article>
+    {% endfor %}
+  </div>
+  {% endif %}
+
+  <h2>Actions</h2>
+  <div class="actions">
+    {% if req.status.state == "pending" and current_user.is_approver and current_user.id != req.status.owner %}
+    <form method="post" action="/requests/{{ req.metadata.id }}/approve" class="inline">
+      <input type="text" name="comment" placeholder="optional comment" />
+      <button type="submit" class="primary">Approve</button>
+    </form>
+    <form method="post" action="/requests/{{ req.metadata.id }}/reject" class="inline">
+      <input type="text" name="reason" placeholder="reason (required)" required />
+      <button type="submit">Reject</button>
+    </form>
+    <form method="post" action="/requests/{{ req.metadata.id }}/request-changes" class="inline">
+      <input type="text" name="suggestions" placeholder="comma-separated suggestions" />
+      <button type="submit">Request changes</button>
+    </form>
+    {% endif %}
+
+    {% if req.status.owner == current_user.id and req.status.state in ["pending", "needs_changes", "provisioning_failed"] %}
+    <form method="post" action="/requests/{{ req.metadata.id }}/cancel" class="inline">
+      <button type="submit">Cancel</button>
+    </form>
+    {% endif %}
+
+    {% if req.status.state == "provisioning_failed" and current_user.is_approver %}
+    <form method="post" action="/requests/{{ req.metadata.id }}/retry-provisioning" class="inline">
+      <button type="submit" class="primary">Retry provisioning</button>
+    </form>
+    {% endif %}
+
+    {% if req.status.state == "provisioning_failed" and req.status.provisioning_error %}
+    <div class="flash flash-error">
+      <strong>Provisioning failed.</strong> {{ req.status.provisioning_error }}
+    </div>
+    {% endif %}
+
+    {% if req.status.state in ["pending", "needs_changes", "active"] %}
+    <form method="post" action="/requests/{{ req.metadata.id }}/comments" class="inline">
+      <input type="text" name="message" placeholder="comment" required />
+      <button type="submit">Add comment</button>
+    </form>
+    {% endif %}
+  </div>
+
+  <h2>History</h2>
+  <ol class="history">
+    {% for ev in req.status.history %}
+    <li>
+      <time>{{ ev.at }}</time> — <strong>{{ ev.action }}</strong>
+      {% if ev.by %}by {{ ev.by }}{% endif %}
+      {% if ev.from %}({{ ev.from }} → {{ ev.to }}){% endif %}
+      {% if ev.reason %}— {{ ev.reason }}{% endif %}
+    </li>
+    {% endfor %}
+  </ol>
+</section>
+{% endblock %}

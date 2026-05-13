@@ -1,0 +1,253 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://iam-jit.dev/schemas/request.v1alpha1.json",
+  "title": "RoleRequest",
+  "type": "object",
+  "required": ["apiVersion", "kind", "metadata", "spec"],
+  "additionalProperties": false,
+  "properties": {
+    "apiVersion": { "const": "iam-jit.dev/v1alpha1" },
+    "kind": { "const": "RoleRequest" },
+    "metadata": {
+      "type": "object",
+      "required": ["requester"],
+      "additionalProperties": false,
+      "properties": {
+        "id": { "type": "string", "pattern": "^[a-z0-9][a-z0-9._-]{0,62}[a-z0-9]$" },
+        "name": {
+          "type": "string",
+          "minLength": 3,
+          "maxLength": 80,
+          "description": "Human-readable label for the request. Auto-generated from the description if not provided. Used in lists and detail page headers."
+        },
+        "requester": {
+          "type": "object",
+          "required": ["name", "email"],
+          "additionalProperties": false,
+          "properties": {
+            "name": { "type": "string", "minLength": 1, "maxLength": 200 },
+            "email": { "type": "string", "format": "email", "maxLength": 254 },
+            "principal_arn": { "type": "string", "pattern": "^arn:aws:" }
+          }
+        },
+        "created_at": { "type": "string", "format": "date-time" }
+      }
+    },
+    "spec": {
+      "type": "object",
+      "required": ["accounts", "duration"],
+      "additionalProperties": false,
+      "anyOf": [
+        { "required": ["task_intent"] },
+        { "required": ["policy"], "properties": { "policy": { "type": "object" } } }
+      ],
+      "allOf": [
+        {
+          "if": { "properties": { "access_type": { "const": "read-write" } }, "required": ["access_type"] },
+          "then": { "required": ["description"] }
+        }
+      ],
+      "properties": {
+        "description": {
+          "anyOf": [
+            { "type": "string", "minLength": 0, "maxLength": 4000 },
+            { "type": "null" }
+          ],
+          "description": "Why the access is needed. Required for read-write requests; optional for read-only (the policy itself is self-describing)."
+        },
+        "access_type": {
+          "type": "string",
+          "enum": ["read-only", "read-write"],
+          "description": "Quick coarse-grained mode. read-only restricts actions to read/list. Default: read-only."
+        },
+        "task_intent": {
+          "type": "object",
+          "required": ["services", "actions"],
+          "additionalProperties": false,
+          "properties": {
+            "services": {
+              "type": "array",
+              "minItems": 1,
+              "items": { "type": "string", "pattern": "^[a-z0-9-]+$" }
+            },
+            "actions": {
+              "type": "array",
+              "minItems": 1,
+              "uniqueItems": true,
+              "items": { "enum": ["read", "list", "write", "tagging", "permissions-management"] }
+            }
+          }
+        },
+        "accounts": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "type": "object",
+            "required": ["account_id"],
+            "additionalProperties": false,
+            "properties": {
+              "account_id": { "type": "string", "pattern": "^[0-9]{12}$" },
+              "alias": { "type": "string" },
+              "regions": {
+                "type": "array",
+                "items": { "type": "string", "pattern": "^[a-z]{2}-[a-z]+-[0-9]+$" }
+              }
+            }
+          }
+        },
+        "duration": {
+          "type": "object",
+          "additionalProperties": false,
+          "oneOf": [
+            { "required": ["not_after"] },
+            { "required": ["duration_hours"] }
+          ],
+          "properties": {
+            "not_after": { "type": "string", "format": "date-time" },
+            "duration_hours": { "type": "integer", "minimum": 1, "maximum": 8760 }
+          }
+        },
+        "resource_constraints": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": ["service", "arn_patterns"],
+            "additionalProperties": false,
+            "properties": {
+              "service": { "type": "string", "pattern": "^[a-z0-9-]+$" },
+              "arn_patterns": {
+                "type": "array",
+                "minItems": 1,
+                "items": { "type": "string", "pattern": "^arn:aws[a-z-]*:" }
+              }
+            }
+          }
+        },
+        "policy": {
+          "oneOf": [
+            { "type": "null" },
+            {
+              "type": "object",
+              "required": ["Version", "Statement"],
+              "properties": {
+                "Version": { "type": "string" },
+                "Statement": {
+                  "type": "array",
+                  "minItems": 1,
+                  "items": {
+                    "type": "object",
+                    "required": ["Effect"],
+                    "properties": {
+                      "Effect": { "enum": ["Allow", "Deny"] },
+                      "Sid": { "type": "string" },
+                      "Action": {},
+                      "NotAction": {},
+                      "Resource": {},
+                      "NotResource": {},
+                      "Principal": {},
+                      "NotPrincipal": {},
+                      "Condition": { "type": "object" }
+                    }
+                  }
+                }
+              }
+            }
+          ]
+        },
+        "provisioning": {
+          "type": "object",
+          "required": ["mode"],
+          "additionalProperties": false,
+          "properties": {
+            "mode": { "enum": ["identity_center", "classic_iam"] },
+            "permission_set_name": { "type": "string" },
+            "role_name": { "type": "string" }
+          }
+        },
+        "assume_by": {
+          "type": "object",
+          "additionalProperties": false,
+          "description": "Who will assume the provisioned role. If omitted, the requester's principal is used. Override this when the role will be assumed from a different identity than the one submitting the request (e.g. a CI runner role).",
+          "properties": {
+            "principal_arn": { "type": "string", "pattern": "^arn:aws[a-z-]*:" },
+            "session_name": { "type": "string", "minLength": 1, "maxLength": 64 }
+          }
+        },
+        "ticket": {
+          "type": "string",
+          "format": "uri",
+          "minLength": 8,
+          "maxLength": 2048,
+          "pattern": "^https?://",
+          "description": "URL of the change/incident/access ticket authorizing this request. Format-validated only; iam-jit does not call out to verify the ticket exists. Whether this is required is set per-deployment via IAM_JIT_REQUIRE_TICKET."
+        }
+      }
+    },
+    "status": {
+      "type": "object",
+      "additionalProperties": true,
+      "properties": {
+        "review": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "risk_score": { "type": "integer", "minimum": 1, "maximum": 10 },
+            "risk_factors": { "type": "array", "items": { "type": "string" } },
+            "suggestions": { "type": "array", "items": { "type": "string" } },
+            "deterministic_score": { "type": "integer", "minimum": 1, "maximum": 10 },
+            "llm_narrative": { "type": ["string", "null"] },
+            "analyzed_at": { "type": "string", "format": "date-time" },
+            "analyzer": { "type": "string" },
+            "context_fingerprints": {
+              "type": "object",
+              "additionalProperties": { "type": "string" }
+            }
+          }
+        },
+        "provisioned": {
+          "type": "object",
+          "additionalProperties": false,
+          "description": "Filled in when the request reaches state=active. Carries the actual ARNs and a copy-paste assume snippet for the requester/agent.",
+          "properties": {
+            "role_arn": { "type": "string", "pattern": "^arn:aws[a-z-]*:iam:" },
+            "role_name": { "type": "string" },
+            "account_id": { "type": "string", "pattern": "^[0-9]{12}$" },
+            "external_id": { "type": "string" },
+            "assumer_principal_arn": { "type": "string", "pattern": "^arn:aws[a-z-]*:" },
+            "session_name": { "type": "string" },
+            "expires_at": { "type": "string", "format": "date-time" },
+            "creation_succeeded": { "type": "boolean" },
+            "aws_cli_replay": {
+              "type": "array",
+              "items": { "type": "string" },
+              "description": "AWS CLI commands equivalent to the boto3 calls that were executed. Auditability + manual-replay fallback."
+            },
+            "assume_instructions": {
+              "type": "object",
+              "additionalProperties": false,
+              "properties": {
+                "cli_assume_role": { "type": "string" },
+                "cli_profile_block": { "type": "string" },
+                "agent_usage_hints": { "type": "string" },
+                "console_url": { "type": "string", "format": "uri" },
+                "notes": { "type": "string" },
+                "assumer_grant": {
+                  "type": "object",
+                  "additionalProperties": false,
+                  "properties": {
+                    "policy_json": { "type": "string" },
+                    "cli_command": { "type": ["string", "null"] },
+                    "applies_to": {
+                      "enum": ["user", "role", "sso", "assumed-role", "unknown"]
+                    },
+                    "notes": { "type": "string" }
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+}

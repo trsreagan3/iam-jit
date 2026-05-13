@@ -1,0 +1,109 @@
+{% extends "base.html" %}
+{% block title %}Paste a policy — iam-jit{% endblock %}
+{% block content %}
+<section class="card narrow">
+  <h1>Paste a policy</h1>
+  <p class="tip">
+    <strong>Best results come from local AI tooling.</strong>
+    Run Claude Code (or similar) locally with access to your repos, manifests, and
+    terraform state, ask it to derive the minimal policy your service actually needs
+    with concrete ARNs, and paste the result here.
+    <a target="_blank" href="https://github.com/your-org/iam-roles#pairing-with-local-ai-tools">why</a>
+  </p>
+
+  <p class="disclaimer">
+    <strong>What iam-jit can see:</strong> the policy and description you submit, plus
+    any organization context an admin has provided. <strong>What it cannot see:</strong>
+    your application code, repositories, kubeconfigs, terraform state, the public
+    internet, or AWS contents beyond the read-only discovery role (if your admin
+    enabled it).
+  </p>
+
+  {% if errors %}
+  <div class="flash flash-error">
+    <strong>Couldn't submit:</strong>
+    <ul>
+      {% for e in errors %}<li>{{ e }}</li>{% endfor %}
+    </ul>
+  </div>
+  {% endif %}
+
+  <form method="post" action="/requests/new/paste">
+    <label for="description">
+      Why do you need this?
+      <span class="muted small">(required for read-write; optional for read-only)</span>
+    </label>
+    <textarea name="description" id="description" rows="3">{{ form.description or "" }}</textarea>
+
+    <label for="policy">Policy (JSON or YAML)</label>
+    <textarea name="policy" id="policy" required rows="14" class="mono"
+      placeholder='{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Effect": "Allow",
+      "Action": ["s3:GetObject"],
+      "Resource": "arn:aws:s3:::specific-bucket/specific/path/*"
+    }
+  ]
+}'
+    >{{ form.policy or "" }}</textarea>
+
+    <fieldset>
+      <legend>Access type</legend>
+      <label><input type="radio" name="access_type" value="read-only"
+        {% if form.access_type != "read-write" %}checked{% endif %} />
+        Read-only
+      </label>
+      <label><input type="radio" name="access_type" value="read-write"
+        {% if form.access_type == "read-write" %}checked{% endif %} />
+        Read-write
+      </label>
+    </fieldset>
+
+    <label for="accounts">Account IDs (comma-separated)</label>
+    <input type="text" name="accounts" id="accounts" required
+      placeholder="060392206767" value="{{ form.accounts or "" }}" />
+
+    <label for="duration_hours">Duration (hours)</label>
+    <input type="number" name="duration_hours" id="duration_hours" required min="1" max="8760"
+      value="{{ form.duration_hours or 24 }}" />
+
+    <label for="ticket">
+      Ticket URL
+      {% if ticket_required %}<span class="required">(required)</span>{% else %}<span class="muted small">(optional)</span>{% endif %}
+    </label>
+    <input type="url" name="ticket" id="ticket"
+      placeholder="https://your-tracker.example.com/browse/CHG-1234"
+      value="{{ form.ticket or '' }}"
+      {% if ticket_required %}required{% endif %} />
+    {% if ticket_hint %}
+    <p class="muted small">URL must contain one of: <code>{{ ticket_hint }}</code></p>
+    {% endif %}
+
+    <fieldset>
+      <legend>Who will assume this role</legend>
+      <p class="muted small">
+        Default: the trust policy locks to <strong>your login identity</strong>
+        — <code>{{ current_user.id if current_user else "your login" }}</code>.
+        Leave the box blank to use this default. Type an ARN below if a
+        different identity will assume the role (a CI runner role, an EC2
+        instance profile, a colleague's IAM user, etc.). The role can only
+        be assumed by exactly one principal — change it later by submitting
+        a new request.
+      </p>
+      <label for="assume_principal_arn">Assumer principal ARN <span class="muted small">(blank = your login)</span></label>
+      <input type="text" name="assume_principal_arn" id="assume_principal_arn"
+        placeholder="leave blank to default to {{ current_user.id if current_user else 'your login' }}"
+        value="{{ form.assume_principal_arn or '' }}" />
+      <label for="assume_session_name">Session name <span class="muted small">(optional)</span></label>
+      <input type="text" name="assume_session_name" id="assume_session_name"
+        placeholder="iam-jit-{request-id}" maxlength="64"
+        value="{{ form.assume_session_name or '' }}" />
+    </fieldset>
+
+    <button type="submit">Submit for approval</button>
+    <a class="cancel" href="/requests/new">cancel</a>
+  </form>
+</section>
+{% endblock %}

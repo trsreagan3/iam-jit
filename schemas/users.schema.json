@@ -1,0 +1,58 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://iam-jit.dev/schemas/users.v1.json",
+  "title": "iam-jit users config (file mode)",
+  "description": "Format for the users.yaml file when UserConfigSource=file. The same shape is produced by `iam-jit users export` and consumed by `iam-jit users import`.",
+  "type": "object",
+  "required": ["schema_version", "users"],
+  "additionalProperties": false,
+  "properties": {
+    "schema_version": {
+      "type": "integer",
+      "const": 1,
+      "description": "Schema version. Bumped on breaking changes; readers reject unknown versions."
+    },
+    "auth_mode": {
+      "type": "string",
+      "enum": ["local", "aws_iam"],
+      "description": "Optional. If present, must match the deployment's AuthMode (server rejects on mismatch). Helps catch the case where a file built for one mode is uploaded to a deployment in the other mode."
+    },
+    "users": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["id", "roles"],
+        "additionalProperties": false,
+        "properties": {
+          "id": {
+            "type": "string",
+            "description": "User identifier. Local mode: 'email:<email>'. aws_iam mode: 'iam:<full-arn>'.",
+            "pattern": "^(email:|iam:)"
+          },
+          "roles": {
+            "type": "array",
+            "minItems": 1,
+            "uniqueItems": true,
+            "items": {
+              "type": "string",
+              "enum": ["requester", "approver", "admin"]
+            }
+          },
+          "enabled": {
+            "type": "boolean",
+            "default": true,
+            "description": "Set to false to disable a user without removing them. Disabled users get 401."
+          },
+          "display_name": {
+            "type": "string",
+            "description": "Human-readable name shown in the UI and audit log."
+          },
+          "notes": {
+            "type": "string",
+            "description": "Free-form notes for admin reference (e.g., 'left team 2026-08'). Not surfaced to non-admins."
+          }
+        }
+      }
+    }
+  }
+}

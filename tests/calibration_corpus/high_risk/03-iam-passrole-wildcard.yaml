@@ -1,0 +1,23 @@
+name: iam-passrole-wildcard
+description: |
+  iam:PassRole on Resource:* is a known privilege-escalation path.
+  Anyone who can pass any role to a service can impersonate any
+  role. Must score 9+ and route to human review.
+
+policy:
+  Version: "2012-10-17"
+  Statement:
+    - Effect: Allow
+      Action: ["iam:PassRole"]
+      Resource: ["*"]
+
+request:
+  spec:
+    access_type: read-write
+    duration:
+      duration_hours: 1
+
+expected:
+  score_min: 9
+  required_factors_containing: ["PassRole"]
+  must_auto_approve: false

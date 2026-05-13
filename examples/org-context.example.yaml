@@ -1,0 +1,49 @@
+# iam-jit organization context — example.
+#
+# This file is admin-supplied grounding for the LLM. It's appended to
+# the system prompt at request time and tells the model:
+#
+#   - what proper nouns / company terms NOT to paraphrase
+#   - which environment aliases map to which account IDs
+#   - what your internal services are
+#   - any house rules the model should follow
+#
+# Path: set IAM_JIT_ORG_CONTEXT_FILE=/path/to/this/file on the iam-jit
+# server. The audit module fingerprints this file at boot — any change
+# is detectable in the audit log under kind=context.changed.
+#
+# Format is free-form (YAML / Markdown / plain text — we don't parse,
+# we just hand the raw bytes to the model under a labeled header).
+# Keep under ~12 KB.
+
+company:
+  name: example-corp
+  notes: |
+    "example-corp" is our company name. Treat as a proper noun — never
+    spell-correct or paraphrase. Quote user terminology back verbatim.
+
+environment_aliases:
+  "dev":
+    account_id: "111111111111"
+    region: us-east-1
+  "staging":
+    account_id: "222222222222"
+    region: us-east-1
+  "prod":
+    account_id: "333333333333"
+    region: us-east-1
+    notes: production — additional approval friction
+
+internal_services:
+  "billing-api":
+    description: Customer-facing billing service.
+    typical_aws_services: [dynamodb, sqs, s3, lambda]
+  "config-loader":
+    description: Reads runtime config from S3 at boot.
+    typical_aws_services: [s3, secretsmanager]
+
+house_rules:
+  - "Default duration is 24 hours."
+  - "Read-only is preferred unless write is explicitly requested."
+  - "When a user mentions a DNS record, the AWS service is route53."
+  - "When a user mentions a secret, the AWS service is secretsmanager."

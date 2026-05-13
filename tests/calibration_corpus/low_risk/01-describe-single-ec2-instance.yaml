@@ -1,0 +1,22 @@
+name: describe-single-ec2-instance
+description: |
+  Canonical "one piece of prod info" request: agent asks for
+  ec2:DescribeInstances on ONE instance ARN to look up its public
+  IP. Must score low so auto-approve fires immediately.
+
+policy:
+  Version: "2012-10-17"
+  Statement:
+    - Effect: Allow
+      Action: ["ec2:DescribeInstances"]
+      Resource: ["arn:aws:ec2:us-east-1:123456789012:instance/i-0abcdef1234567890"]
+
+request:
+  spec:
+    access_type: read-only
+    duration:
+      duration_hours: 1
+
+expected:
+  score_max: 3
+  must_auto_approve: true

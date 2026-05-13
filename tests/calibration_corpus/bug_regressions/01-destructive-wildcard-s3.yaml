@@ -1,0 +1,39 @@
+name: destructive-wildcard-s3-bug-regression
+description: |
+  REGRESSION TEST for a 2026-05-11 bug discovery.
+
+  Before the fix: s3:DeleteObject + s3:DeleteBucket on Resource:"*"
+  scored 4 (under the default auto-approve threshold of 5) because:
+    - access_type=read-write skipped the read-only mismatch path
+    - s3 is not in _SENSITIVE_SERVICES
+    - specific actions (no wildcard in action name) skipped the
+      sensitive-wildcard check
+    - the action-level Write check didn't run for non-sensitive
+      services with wildcard resources
+    - the catch-all at the bottom scored these at 4
+
+  Result: destructive permissions on every S3 bucket in the
+  account were auto-approved. Discovered during a live retest;
+  the role was revoked immediately, no data loss.
+
+  Fix: explicit destructive-verb check (Delete/Destroy/Terminate/
+  etc.) on Resource:"*" floors at score 7. See src/iam_jit/
+  review.py for the implementation.
+
+policy:
+  Version: "2012-10-17"
+  Statement:
+    - Effect: Allow
+      Action: ["s3:DeleteObject", "s3:DeleteBucket"]
+      Resource: ["*"]
+
+request:
+  spec:
+    access_type: read-write
+    duration:
+      duration_hours: 1
+
+expected:
+  score_min: 7
+  required_factors_containing: ["Destructive"]
+  must_auto_approve: false

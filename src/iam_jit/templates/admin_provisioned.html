@@ -1,0 +1,51 @@
+{% extends "base.html" %}
+{% block title %}Provisioned grants — iam-jit{% endblock %}
+{% block content %}
+<section>
+  <div class="row-between">
+    <h1>Provisioned grants</h1>
+    <a class="button" href="/admin/rediscover">cross-account rediscover →</a>
+  </div>
+
+  <p class="muted">
+    Every iam-jit-managed grant currently recorded in the local request store.
+    Read directly from the store — no AWS calls. Use the rediscover page to
+    cross-check against AWS-side reality.
+  </p>
+
+  <p>
+    <a href="/admin/provisioned{% if include_revoked %}{% else %}?include_revoked=1{% endif %}">
+      {% if include_revoked %}hide revoked{% else %}show revoked{% endif %}
+    </a>
+  </p>
+
+  {% if rows %}
+  <table class="data">
+    <thead>
+      <tr>
+        <th>Request</th>
+        <th>Owner</th>
+        <th>Account</th>
+        <th>Role</th>
+        <th>Expires at</th>
+        <th>State</th>
+      </tr>
+    </thead>
+    <tbody>
+      {% for r in rows %}
+      <tr>
+        <td><a href="/requests/{{ r.request_id }}"><code>{{ r.request_id }}</code></a></td>
+        <td>{{ r.owner }}</td>
+        <td><code>{{ r.account_id }}</code></td>
+        <td><code>{{ r.role_name }}</code></td>
+        <td><span class="muted small">{{ r.expires_at }}</span></td>
+        <td>{{ r.state }}</td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+  {% else %}
+  <p class="muted">No provisioned grants found.</p>
+  {% endif %}
+</section>
+{% endblock %}

@@ -1,0 +1,91 @@
+{% extends "base.html" %}
+{% block title %}API tokens — iam-jit{% endblock %}
+{% block content %}
+<section>
+  <div class="row-between">
+    <h1>Your API tokens</h1>
+  </div>
+
+  <p>Tokens authenticate agents (Claude Code, Cursor, custom tools) to the iam-jit API.
+    Use as <code>Authorization: Bearer &lt;token&gt;</code> on every request, or drop into
+    your MCP config so the iam-jit tools show up natively in your agent's palette.</p>
+
+  {% if just_minted %}
+  <div class="flash flash-warning">
+    <strong>New token (shown once — copy it now):</strong>
+    <code class="token">{{ just_minted.token }}</code>
+    <p>Stored hash: <code>{{ just_minted.hash }}</code></p>
+  </div>
+  {% endif %}
+
+  <form method="post" action="/tokens" class="inline">
+    <input type="text" name="label" placeholder="label (e.g., 'claude-code laptop')" />
+    <button type="submit" class="primary">+ new token</button>
+  </form>
+
+  <details>
+    <summary>How agents create their own tokens (if you have a session, you can mint via API)</summary>
+    <p>Once you've signed in via the magic link, your browser session can mint a token. An agent driving your browser can use this — or you can copy the token shown above into the agent's config.</p>
+
+    <h3>Mint a new token</h3>
+    <pre class="policy mono">curl -X POST {{ public_url }}/api/v1/tokens \
+  -H 'Authorization: Bearer &lt;your-existing-token&gt;' \
+  -H 'Content-Type: application/json' \
+  -d '{"label": "my-agent"}'</pre>
+
+    <p>Or, when you're already logged in via cookie (e.g. an agent reusing the same browser session), you can include your <code>iam_jit_session</code> cookie:</p>
+    <pre class="policy mono">curl -X POST {{ public_url }}/api/v1/tokens \
+  -H 'Cookie: iam_jit_session=&lt;your-session-cookie&gt;' \
+  -H 'Content-Type: application/json' \
+  -d '{"label": "my-agent"}'</pre>
+
+    <h3>Use the token</h3>
+    <pre class="policy mono">curl {{ public_url }}/api/v1/users/me \
+  -H 'Authorization: Bearer iamjit_...'</pre>
+
+    <h3>List / revoke your tokens</h3>
+    <pre class="policy mono"># list (returns hashes only, never raw values)
+curl {{ public_url }}/api/v1/tokens -H 'Authorization: Bearer iamjit_...'
+
+# revoke
+curl -X DELETE {{ public_url }}/api/v1/tokens/&lt;token_hash&gt; \
+  -H 'Authorization: Bearer iamjit_...'</pre>
+
+    <h3>Submit a request from an agent</h3>
+    <p>The simplest path: <code>POST /api/v1/intake/turn</code> drives the conversational flow; <code>POST /api/v1/requests</code> takes a structured policy directly. Both accept the same bearer token.</p>
+
+    <p class="muted small">Tokens never expire on their own. Revoke them when you're done. There's no rate limit yet — just don't share tokens between agents.</p>
+  </details>
+
+  {% if tokens %}
+  <table class="tokens">
+    <thead>
+      <tr>
+        <th>label</th>
+        <th>hash (prefix)</th>
+        <th>created</th>
+        <th>last used</th>
+        <th></th>
+      </tr>
+    </thead>
+    <tbody>
+      {% for t in tokens %}
+      <tr>
+        <td>{{ t.label or "(no label)" }}</td>
+        <td class="mono">{{ t.token_hash[:12] }}…</td>
+        <td>{{ t.created_at }}</td>
+        <td>{{ t.last_used_at or "never" }}</td>
+        <td>
+          <form method="post" action="/tokens/{{ t.token_hash }}/revoke" class="inline">
+            <button type="submit" class="danger">revoke</button>
+          </form>
+        </td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+  {% else %}
+  <p class="muted">You don't have any tokens yet. Create one above.</p>
+  {% endif %}
+</section>
+{% endblock %}

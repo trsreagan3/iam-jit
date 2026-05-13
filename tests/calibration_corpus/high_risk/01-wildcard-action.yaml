@@ -1,0 +1,22 @@
+name: wildcard-action-full-admin
+description: |
+  Action: "*" is the worst possible policy — full account admin.
+  Must score 10 unconditionally.
+
+policy:
+  Version: "2012-10-17"
+  Statement:
+    - Effect: Allow
+      Action: "*"
+      Resource: "*"
+
+request:
+  spec:
+    access_type: read-write
+    duration:
+      duration_hours: 1
+
+expected:
+  score_min: 10
+  score_max: 10
+  must_auto_approve: false

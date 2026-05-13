@@ -1,0 +1,47 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://iam-jit.dev/schemas/accounts.v1.json",
+  "title": "iam-jit accounts file",
+  "description": "Registry of destination AWS accounts iam-jit may provision into. The accounts file is the file-mode equivalent of the accounts DynamoDB table.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["apiVersion", "kind", "accounts"],
+  "properties": {
+    "apiVersion": { "const": "iam-jit.dev/v1alpha1" },
+    "kind": { "const": "AccountList" },
+    "accounts": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/account" }
+    }
+  },
+  "$defs": {
+    "account": {
+      "type": "object",
+      "required": ["account_id", "provisioner_role_arn", "provisioner_external_id", "provisioning_mode"],
+      "additionalProperties": false,
+      "properties": {
+        "account_id": { "type": "string", "pattern": "^[0-9]{12}$" },
+        "alias": { "type": ["string", "null"] },
+        "regions": {
+          "type": "array",
+          "items": { "type": "string", "pattern": "^[a-z]{2}-[a-z]+-[0-9]+$" }
+        },
+        "provisioner_role_arn": {
+          "type": "string",
+          "pattern": "^arn:aws[a-z-]*:iam::[0-9]{12}:role/.+$"
+        },
+        "provisioner_external_id": { "type": "string", "minLength": 1 },
+        "discovery_role_arn": {
+          "type": ["string", "null"],
+          "pattern": "^arn:aws[a-z-]*:iam::[0-9]{12}:role/.+$"
+        },
+        "discovery_external_id": { "type": ["string", "null"] },
+        "provisioning_mode": { "enum": ["classic_iam", "identity_center", "both"] },
+        "registered_at": { "type": "string", "format": "date-time" },
+        "registered_by": { "type": ["string", "null"] },
+        "notes": { "type": ["string", "null"] },
+        "enabled": { "type": "boolean" }
+      }
+    }
+  }
+}

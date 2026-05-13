@@ -1,0 +1,21 @@
+name: list-one-bucket
+description: |
+  List objects in one specific bucket. Tight scope.
+
+policy:
+  Version: "2012-10-17"
+  Statement:
+    - Effect: Allow
+      Action: ["s3:ListBucket"]
+      Resource:
+        - "arn:aws:s3:::analytics-staging"
+
+request:
+  spec:
+    access_type: read-only
+    duration:
+      duration_hours: 1
+
+expected:
+  score_max: 3
+  must_auto_approve: true

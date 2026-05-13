@@ -1,0 +1,24 @@
+name: route53-change-recordsets
+description: |
+  route53:ChangeResourceRecordSets is high-impact even on a single
+  hosted zone — a wrong DNS change cascades immediately. Should
+  score at least medium (5+) so it routes to human review at the
+  default threshold.
+
+policy:
+  Version: "2012-10-17"
+  Statement:
+    - Effect: Allow
+      Action: ["route53:ChangeResourceRecordSets"]
+      Resource:
+        - "arn:aws:route53:::hostedzone/Z1234567890ABC"
+
+request:
+  spec:
+    access_type: read-write
+    duration:
+      duration_hours: 1
+
+expected:
+  score_min: 5
+  must_auto_approve: false

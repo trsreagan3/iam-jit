@@ -1,0 +1,47 @@
+{% extends "base.html" %}
+{% from "partials/risk_score.html" import risk_badge %}
+{% block title %}All requests — iam-jit{% endblock %}
+{% block content %}
+<section>
+  <div class="row-between">
+    <h1>All requests</h1>
+    <span class="muted">{{ requests | length }} total</span>
+  </div>
+
+  {% if not requests %}
+  <p class="muted">No requests in the store yet.</p>
+  {% else %}
+  <table class="requests">
+    <thead>
+      <tr>
+        <th>name</th>
+        <th>state</th>
+        <th>requester</th>
+        <th>access</th>
+        <th>accounts</th>
+        <th>duration</th>
+        <th>risk</th>
+        <th>submitted</th>
+      </tr>
+    </thead>
+    <tbody>
+      {% for r in requests %}
+      <tr>
+        <td>
+          <a href="/requests/{{ r.id }}"><strong>{{ r.name or r.id }}</strong></a>
+          <div class="muted small">{{ r.id }}</div>
+        </td>
+        <td>{{ r.state }}</td>
+        <td>{{ r.owner }}</td>
+        <td>{{ r.access_type or "—" }}</td>
+        <td>{{ r.accounts | join(", ") }}</td>
+        <td>{{ r.duration_hours and (r.duration_hours ~ "h") or r.not_after or "—" }}</td>
+        <td>{{ risk_badge(r.risk_score) }}</td>
+        <td><span class="muted small">{{ r.submitted_at }}</span></td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+  {% endif %}
+</section>
+{% endblock %}

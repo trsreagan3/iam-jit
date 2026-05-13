@@ -1,0 +1,30 @@
+name: em-dash-in-description-bug-regression
+description: |
+  REGRESSION TEST for a 2026-05-11 bug discovery.
+
+  This case verifies the calibration corpus loader handles
+  unicode-laden descriptions correctly. The underlying iam-jit
+  bug was in provision.py (em-dash in role Description rejected
+  by AWS IAM); this corpus entry just confirms the scorer itself
+  handles the unicode without crashing.
+
+  The policy itself is unremarkable — score should match the
+  low-risk read-only single-bucket pattern.
+
+policy:
+  Version: "2012-10-17"
+  Statement:
+    - Effect: Allow
+      Action: ["s3:ListAllMyBuckets"]
+      Resource: ["*"]
+
+request:
+  spec:
+    description: "Need to inventory S3 — the em-dash here used to break role creation"
+    access_type: read-only
+    duration:
+      duration_hours: 1
+
+expected:
+  score_min: 3
+  score_max: 5

@@ -1,0 +1,264 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: |
+  iam-jit per-destination roles. Deploy this stack in each AWS account where
+  iam-jit will provision time-bound IAM grants. Creates:
+    - ProvisionerRole (always): assumed by the iam-jit Lambda in the hub
+      account to create/destroy grants in this account. Permissions are
+      scoped via tags so the role can only modify resources tagged
+      `managed-by: iam-jit`.
+    - DiscoveryRole (optional): assumed by the iam-jit Lambda for read-only
+      ARN/resource discovery used to suggest concrete ARNs to requesters
+      during the narrowing flow. Disable with `EnableDiscovery: No` if you
+      don't want iam-jit to read account contents.
+
+  Provisioning works regardless of whether discovery is enabled. With
+  discovery off, the narrowing flow falls back to LLM/template suggestions
+  and the human reviewer is the gate as usual.
+
+Parameters:
+  HubAccountId:
+    Type: String
+    AllowedPattern: "^[0-9]{12}$"
+    Description: AWS account ID where the iam-jit Lambda runs.
+
+  HubLambdaRoleName:
+    Type: String
+    Default: iam-jit-lambda-execution
+    Description: |
+      Name (not ARN) of the IAM role the iam-jit Lambda assumes in the hub
+      account. The trust policies on this stack's roles will allow that
+      principal — and only that principal — to assume them.
+
+  ProvisionerRoleName:
+    Type: String
+    Default: iam-jit-provisioner
+    Description: |
+      Name for the role iam-jit assumes to create/destroy grants. Keep the
+      default unless it collides with an existing role.
+
+  DiscoveryRoleName:
+    Type: String
+    Default: iam-jit-discovery
+    Description: |
+      Name for the read-only discovery role. Only created when
+      EnableDiscovery=Yes.
+
+  EnableDiscovery:
+    Type: String
+    Default: "Yes"
+    AllowedValues: ["Yes", "No"]
+    Description: |
+      Set to No to skip creating the read-only discovery role. iam-jit will
+      still provision grants normally; the narrowing flow simply won't have
+      live account context to suggest concrete ARNs from.
+
+  ProvisioningMode:
+    Type: String
+    Default: classic_iam
+    AllowedValues: [classic_iam, identity_center, both]
+    Description: |
+      Which provisioning model the ProvisionerRole supports. classic_iam
+      grants iam:CreateRole/PutRolePolicy/etc. scoped by tag.
+      identity_center grants sso-admin:CreateAccountAssignment scoped by
+      the permission set ARN list below. `both` enables both.
+
+  AllowedPermissionSetArns:
+    Type: CommaDelimitedList
+    Default: "arn:aws:sso:::permissionSet/CONFIGURE-WHEN-USING-IDENTITY-CENTER"
+    Description: |
+      For identity_center mode: comma-separated ARNs of the AWS SSO
+      permission sets iam-jit is allowed to assign. The default is a
+      placeholder ARN; it MUST be replaced when ProvisioningMode is
+      identity_center or both. Leave at the default if ProvisioningMode
+      is classic_iam (the policy isn't created in that case).
+
+Rules:
+  RequirePermissionSetsForIdentityCenter:
+    # CFN Rules cannot use Fn::Join. Use Fn::Contains against the
+    # CommaDelimitedList directly: if the placeholder ARN is one of
+    # the entries AND identity_center mode is selected, refuse.
+    # Operators must replace the placeholder with real permission
+    # set ARNs.
+    RuleCondition: !Or
+      - !Equals [!Ref ProvisioningMode, identity_center]
+      - !Equals [!Ref ProvisioningMode, both]
+    Assertions:
+      - Assert: !Not [!Contains [!Ref AllowedPermissionSetArns, "arn:aws:sso:::permissionSet/CONFIGURE-WHEN-USING-IDENTITY-CENTER"]]
+        AssertDescription: |
+          ProvisioningMode includes identity_center but AllowedPermissionSetArns
+          still contains the placeholder ARN. Replace it with real permission
+          set ARNs (comma-separated).
+
+Conditions:
+  CreateDiscoveryRole: !Equals [!Ref EnableDiscovery, "Yes"]
+  AllowClassicIAM: !Or [!Equals [!Ref ProvisioningMode, classic_iam], !Equals [!Ref ProvisioningMode, both]]
+  AllowIdentityCenter: !Or [!Equals [!Ref ProvisioningMode, identity_center], !Equals [!Ref ProvisioningMode, both]]
+
+Resources:
+  ProvisionerRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Ref ProvisionerRoleName
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              AWS: !Sub "arn:${AWS::Partition}:iam::${HubAccountId}:role/${HubLambdaRoleName}"
+            Action: sts:AssumeRole
+            Condition:
+              StringEquals:
+                # External ID provides defense-in-depth against confused-deputy
+                # if the hub account is ever compromised: the attacker still
+                # needs the agreed external ID to assume this role.
+                sts:ExternalId: !Sub "iam-jit-${AWS::AccountId}"
+      Description: !Sub "Assumed by iam-jit Lambda in account ${HubAccountId} to create/destroy time-bound IAM grants."
+      MaxSessionDuration: 3600
+      Tags:
+        - Key: managed-by
+          Value: iam-jit
+        - Key: purpose
+          Value: provisioner
+
+  ProvisionerClassicIAMPolicy:
+    Type: AWS::IAM::RolePolicy
+    Condition: AllowClassicIAM
+    Properties:
+      RoleName: !Ref ProvisionerRole
+      PolicyName: classic-iam-grants
+      PolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          # Create roles only if they're tagged managed-by=iam-jit at
+          # creation. The TagKeys allowlist below covers the full set
+          # iam-jit emits as of the current `provision._build_tags`:
+          # managed-by, iam-jit-deployment, iam-jit-version, request-id,
+          # requester, expires-at, provisioned-at, access-type, approver.
+          - Sid: CreateOnlyTaggedRoles
+            Effect: Allow
+            Action:
+              - iam:CreateRole
+              - iam:TagRole
+            Resource: !Sub "arn:${AWS::Partition}:iam::${AWS::AccountId}:role/iam-jit/*"
+            Condition:
+              StringEquals:
+                aws:RequestTag/managed-by: iam-jit
+              "ForAllValues:StringEquals":
+                aws:TagKeys:
+                  - managed-by
+                  - iam-jit-deployment
+                  - iam-jit-version
+                  - request-id
+                  - requester
+                  - expires-at
+                  - provisioned-at
+                  - access-type
+                  - approver
+          # Modify only roles already tagged managed-by=iam-jit.
+          # ListRoleTags is needed by the rediscovery + force-delete
+          # admin endpoints to confirm role provenance before any
+          # cleanup.
+          - Sid: ModifyOnlyTaggedRoles
+            Effect: Allow
+            Action:
+              - iam:PutRolePolicy
+              - iam:DeleteRolePolicy
+              - iam:DeleteRole
+              - iam:UpdateAssumeRolePolicy
+              - iam:GetRole
+              - iam:GetRolePolicy
+              - iam:ListRolePolicies
+              - iam:ListAttachedRolePolicies
+              - iam:ListRoleTags
+            Resource: !Sub "arn:${AWS::Partition}:iam::${AWS::AccountId}:role/iam-jit/*"
+            Condition:
+              StringEquals:
+                aws:ResourceTag/managed-by: iam-jit
+          # Read-only listing for status queries + cross-account
+          # rediscovery. ListRoles is unscoped at the resource level
+          # (AWS doesn't allow path-prefix conditions on the API), but
+          # iam-jit always calls it with `--path-prefix /iam-jit/`.
+          - Sid: ReadIAMState
+            Effect: Allow
+            Action:
+              - iam:ListRoles
+              - iam:GetUser
+              - iam:GetRole
+            Resource: "*"
+
+  ProvisionerIdentityCenterPolicy:
+    Type: AWS::IAM::RolePolicy
+    Condition: AllowIdentityCenter
+    Properties:
+      RoleName: !Ref ProvisionerRole
+      PolicyName: identity-center-grants
+      PolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Sid: AssignPermissionSets
+            Effect: Allow
+            Action:
+              - sso:CreateAccountAssignment
+              - sso:DeleteAccountAssignment
+              - sso:DescribeAccountAssignmentCreationStatus
+              - sso:DescribeAccountAssignmentDeletionStatus
+              - sso:ListAccountAssignments
+              - sso:ListPermissionSets
+              - sso:DescribePermissionSet
+              - identitystore:GetUserId
+              - identitystore:DescribeUser
+            Resource: !Ref AllowedPermissionSetArns
+
+  DiscoveryRole:
+    Type: AWS::IAM::Role
+    Condition: CreateDiscoveryRole
+    Properties:
+      RoleName: !Ref DiscoveryRoleName
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              AWS: !Sub "arn:${AWS::Partition}:iam::${HubAccountId}:role/${HubLambdaRoleName}"
+            Action: sts:AssumeRole
+            Condition:
+              StringEquals:
+                sts:ExternalId: !Sub "iam-jit-discovery-${AWS::AccountId}"
+      Description: !Sub "Read-only ARN discovery for iam-jit (account ${HubAccountId})."
+      MaxSessionDuration: 3600
+      ManagedPolicyArns:
+        # AWS-managed read-only is the closest fit; we layer additional
+        # describe permissions for less-common services below.
+        - !Sub "arn:${AWS::Partition}:iam::aws:policy/ReadOnlyAccess"
+      Tags:
+        - Key: managed-by
+          Value: iam-jit
+        - Key: purpose
+          Value: discovery
+
+Outputs:
+  ProvisionerRoleArn:
+    Description: ARN to put in iam-jit's `IAM_JIT_PROVISIONER_ROLE_ARN_<account>` config.
+    Value: !GetAtt ProvisionerRole.Arn
+    Export:
+      Name: !Sub "iam-jit-provisioner-role-arn-${AWS::AccountId}"
+
+  ProvisionerExternalId:
+    Description: External ID iam-jit must include in sts:AssumeRole calls.
+    Value: !Sub "iam-jit-${AWS::AccountId}"
+
+  DiscoveryRoleArn:
+    Condition: CreateDiscoveryRole
+    Description: ARN to put in iam-jit's `IAM_JIT_DISCOVERY_ROLE_ARN_<account>` config (omit if discovery disabled).
+    Value: !GetAtt DiscoveryRole.Arn
+    Export:
+      Name: !Sub "iam-jit-discovery-role-arn-${AWS::AccountId}"
+
+  DiscoveryExternalId:
+    Condition: CreateDiscoveryRole
+    Description: External ID iam-jit must include in sts:AssumeRole calls for the discovery role.
+    Value: !Sub "iam-jit-discovery-${AWS::AccountId}"
+
+  ProvisioningMode:
+    Description: Which provisioning model is enabled in this account.
+    Value: !Ref ProvisioningMode

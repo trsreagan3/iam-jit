@@ -1,0 +1,39 @@
+name: validate
+
+on:
+  pull_request:
+    paths:
+      - "requests/**"
+      - "library/**"
+      - "schemas/**"
+      - "src/**"
+      - "tests/**"
+      - "examples/**"
+      - "pyproject.toml"
+  push:
+    branches: [main]
+
+jobs:
+  schema:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: python -m pip install --upgrade pip
+      - run: pip install -e .[dev]
+      - run: pytest -q
+      - name: Validate request files
+        shell: bash
+        run: |
+          set -euo pipefail
+          shopt -s nullglob
+          requests=(requests/*.yaml requests/*.yml)
+          if [ ${#requests[@]} -eq 0 ]; then
+            echo "No request files to validate."
+            exit 0
+          fi
+          for f in "${requests[@]}"; do
+            iam-jit validate "$f"
+          done

@@ -1,0 +1,116 @@
+{% extends "base.html" %}
+{% block title %}Rediscover — iam-jit{% endblock %}
+{% block content %}
+<section>
+  <h1>Cross-account rediscover</h1>
+  <p class="muted">
+    Sweep every registered destination account, list the iam-jit-managed
+    roles AWS holds, and reconcile against the local request store. Buckets:
+    known (matched), stale (past expires-at), orphans (in AWS only),
+    zombies (in store only).
+  </p>
+
+  <form method="post" action="/admin/rediscover" class="inline">
+    <label for="deployment_filter">Deployment filter (optional)</label>
+    <input type="text" name="deployment_filter" id="deployment_filter"
+      placeholder="default, team-platform, …" value="{{ deployment_filter or '' }}" />
+    <button type="submit">run scan</button>
+  </form>
+
+  {% if report %}
+  <section>
+    <h2>Summary</h2>
+    <p class="muted small">Generated at <code>{{ report.generated_at }}</code></p>
+    <ul class="counts">
+      <li><strong>{{ report.known | length }}</strong> known</li>
+      <li><strong>{{ report.stale | length }}</strong> stale</li>
+      <li><strong>{{ report.orphans | length }}</strong> orphans</li>
+      <li><strong>{{ report.zombies | length }}</strong> zombies</li>
+      <li><strong>{{ report.errors | length }}</strong> errors</li>
+    </ul>
+
+    {% if report.inaccessible_accounts %}
+    <div class="flash flash-warning">
+      <strong>{{ report.inaccessible_accounts | length }} account(s) couldn't be enumerated.</strong>
+      The buckets below are partial — re-run after access is restored.
+      <ul>
+        {% for ia in report.inaccessible_accounts %}
+        <li><code>{{ ia.account_id }}</code>: {{ ia.error }}</li>
+        {% endfor %}
+      </ul>
+    </div>
+    {% endif %}
+
+    {% if report.known %}
+    <h2>Known (in store and AWS)</h2>
+    <table class="data">
+      <thead><tr><th>Request</th><th>Account</th><th>Role</th><th>Expires</th><th>State</th></tr></thead>
+      <tbody>
+        {% for k in report.known %}
+        <tr>
+          <td>{% if k.request_id %}<a href="/requests/{{ k.request_id }}"><code>{{ k.request_id }}</code></a>{% else %}—{% endif %}</td>
+          <td><code>{{ k.account_id or '' }}</code></td>
+          <td><code>{{ k.role_name or k.role_arn or '' }}</code></td>
+          <td><span class="muted small">{{ k.expires_at or '' }}</span></td>
+          <td>{{ k.state or '' }}</td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+    {% endif %}
+
+    {% if report.stale %}
+    <h2>Stale (past expires-at, still in AWS)</h2>
+    <table class="data">
+      <thead><tr><th>Request</th><th>Account</th><th>Role</th><th>Expired</th><th>Note</th></tr></thead>
+      <tbody>
+        {% for s in report.stale %}
+        <tr>
+          <td>{% if s.request_id %}<a href="/requests/{{ s.request_id }}"><code>{{ s.request_id }}</code></a>{% else %}—{% endif %}</td>
+          <td><code>{{ s.account_id }}</code></td>
+          <td><code>{{ s.role_name or s.role_arn }}</code></td>
+          <td><span class="muted small">{{ s.expires_at }}</span></td>
+          <td><span class="muted small">{{ s.note or "" }}</span></td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+    {% endif %}
+
+    {% if report.orphans %}
+    <h2>Orphans (in AWS, not in store)</h2>
+    <table class="data">
+      <thead><tr><th>Account</th><th>Role</th><th>Deployment</th><th>Expires</th></tr></thead>
+      <tbody>
+        {% for o in report.orphans %}
+        <tr>
+          <td><code>{{ o.account_id }}</code></td>
+          <td><code>{{ o.role_name or o.role_arn }}</code></td>
+          <td>{{ o.deployment }}</td>
+          <td><span class="muted small">{{ o.expires_at }}</span></td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+    {% endif %}
+
+    {% if report.zombies %}
+    <h2>Zombies (in store, not in AWS)</h2>
+    <table class="data">
+      <thead><tr><th>Request</th><th>Account</th><th>State</th><th>Note</th></tr></thead>
+      <tbody>
+        {% for z in report.zombies %}
+        <tr>
+          <td><a href="/requests/{{ z.request_id }}"><code>{{ z.request_id }}</code></a></td>
+          <td><code>{{ z.account_id }}</code></td>
+          <td>{{ z.state }}</td>
+          <td><span class="muted small">{{ z.note or "" }}</span></td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+    {% endif %}
+  </section>
+  {% endif %}
+</section>
+{% endblock %}

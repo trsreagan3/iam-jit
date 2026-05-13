@@ -1,0 +1,39 @@
+{% extends "base.html" %}
+{% block title %}Account {{ account.account_id }} — iam-jit{% endblock %}
+{% block content %}
+<section>
+  <div class="row-between">
+    <h1>Account {{ account.account_id }}</h1>
+    <span class="state state-{{ 'active' if account.enabled else 'expired' }}">
+      {{ 'enabled' if account.enabled else 'disabled' }}
+    </span>
+  </div>
+
+  <dl class="metadata">
+    <dt>Alias</dt><dd>{{ account.alias or "—" }}</dd>
+    <dt>Provisioning mode</dt><dd>{{ account.provisioning_mode }}</dd>
+    <dt>Provisioner role</dt><dd><code>{{ account.provisioner_role_arn }}</code></dd>
+    <dt>ExternalId</dt><dd><code>{{ account.provisioner_external_id }}</code></dd>
+    {% if account.discovery_role_arn %}
+    <dt>Discovery role</dt><dd><code>{{ account.discovery_role_arn }}</code></dd>
+    <dt>Discovery ExternalId</dt><dd><code>{{ account.discovery_external_id }}</code></dd>
+    {% else %}
+    <dt>Discovery</dt><dd class="muted">disabled</dd>
+    {% endif %}
+    <dt>Regions</dt><dd>{{ account.regions | join(", ") if account.regions else "—" }}</dd>
+    <dt>Registered</dt><dd>{{ account.registered_at or "—" }} {% if account.registered_by %}<span class="muted small">by {{ account.registered_by }}</span>{% endif %}</dd>
+    {% if account.notes %}<dt>Notes</dt><dd>{{ account.notes }}</dd>{% endif %}
+  </dl>
+
+  <h2>Deregister</h2>
+  <p class="muted">
+    This stops iam-jit from treating this account as a provisioning target. It
+    does NOT delete the IAM roles in the destination account — delete the
+    CloudFormation stack there separately.
+  </p>
+  <form method="post" action="/accounts/{{ account.account_id }}/deregister"
+    onsubmit="return confirm('Deregister account {{ account.account_id }} from iam-jit? The IAM roles in the destination account stay until you delete the CFN stack there.')">
+    <button type="submit" class="danger">Deregister</button>
+  </form>
+</section>
+{% endblock %}

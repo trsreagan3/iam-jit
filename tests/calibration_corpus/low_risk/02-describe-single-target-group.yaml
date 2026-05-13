@@ -1,0 +1,22 @@
+name: describe-single-target-group
+description: |
+  Single read on one ELBv2 target group ARN to introspect routing.
+  Single resource, single action, read-only.
+
+policy:
+  Version: "2012-10-17"
+  Statement:
+    - Effect: Allow
+      Action: ["elasticloadbalancing:DescribeTargetGroups"]
+      Resource:
+        - "arn:aws:elasticloadbalancing:us-east-1:123456789012:targetgroup/api-prod-tg/abc123"
+
+request:
+  spec:
+    access_type: read-only
+    duration:
+      duration_hours: 1
+
+expected:
+  score_max: 3
+  must_auto_approve: true

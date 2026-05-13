@@ -1,0 +1,22 @@
+# cfn-lint configuration for the iam-jit infrastructure templates.
+#
+# Read by `cfn-lint` automatically from the repo root, by both the
+# Makefile (`make deploy-dry-run`) and the structural tests in
+# tests/test_cfn_lint.py. Keep the suppressions narrow and explain
+# WHY each one is here so a future maintainer doesn't broaden them.
+
+ignore_checks:
+  # W1030: "parameter default value doesn't match the AWS::EC2::* type
+  # that the consuming resource property expects."
+  #
+  # The AlbVpcId / AlbSubnetIds parameters are mandatory ONLY when
+  # EnablePublicALB=true. Their empty-string defaults are correct for
+  # the no-ALB case (the consuming resources don't exist), but cfn-lint
+  # doesn't propagate conditions through !Ref to the property's type,
+  # so it flags every default-empty case as "invalid VPC id."
+  #
+  # The runtime AWS create-changeset / create-stack still validates the
+  # real values at deploy time when EnablePublicALB=true and a valid
+  # vpc-* / subnet-* ID is actually required — so we lose nothing by
+  # suppressing W1030 at the linter layer.
+  - W1030

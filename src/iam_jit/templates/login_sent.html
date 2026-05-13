@@ -1,0 +1,16 @@
+{% extends "base.html" %}
+{% block title %}Check your email — iam-jit{% endblock %}
+{% block content %}
+<section class="card narrow">
+  <h1>Check your email</h1>
+  <p>If <strong>{{ email }}</strong> is registered with iam-jit, a sign-in link is on its way.
+    Magic links are single-use and expire in 15 minutes.</p>
+  {% if dev_link %}
+  <div class="dev-banner">
+    <strong>Dev mode:</strong> the link is shown here because <code>IAM_JIT_DEV_INSECURE_SECRET=1</code>.
+    <a href="{{ dev_link }}">Click to sign in</a>.
+  </div>
+  {% endif %}
+  <p><a href="/login">Back</a></p>
+</section>
+{% endblock %}

@@ -1,0 +1,48 @@
+# Tier-2 / Tier-3 testing stack: LocalStack (free community edition) + Ollama.
+# No real AWS account, no real LLM API keys, no network egress required.
+#
+#   docker compose -f docker-compose.test.yml up -d
+#   scripts/pull-test-models.sh             # one-time: pulls smollm2:135m (~270 MB)
+#   pytest -m integration                   # tier 2
+#
+# Tear down: docker compose -f docker-compose.test.yml down -v
+
+services:
+  localstack:
+    # Pin to 3.x — newer 4.x/2026 dev tags require a license token even for
+    # community features. 3.8 is the last unambiguously-community-friendly
+    # tag with the AWS services we need (iam, sts, events, lambda, s3).
+    image: localstack/localstack:3.8
+    container_name: iam-jit-localstack
+    ports:
+      - "4566:4566"
+    environment:
+      SERVICES: iam,sts,events,lambda,s3
+      DEBUG: "0"
+      LS_LOG: warn
+      AWS_DEFAULT_REGION: us-east-1
+      LOCALSTACK_HOST: localhost
+    volumes:
+      - ./.localstack:/var/lib/localstack
+      - /var/run/docker.sock:/var/run/docker.sock
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://localhost:4566/_localstack/health"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+
+  ollama:
+    image: ollama/ollama:latest
+    container_name: iam-jit-ollama
+    ports:
+      - "11434:11434"
+    volumes:
+      - iam-jit-ollama-models:/root/.ollama
+    healthcheck:
+      test: ["CMD-SHELL", "ollama list >/dev/null 2>&1 || exit 1"]
+      interval: 10s
+      timeout: 3s
+      retries: 20
+
+volumes:
+  iam-jit-ollama-models:

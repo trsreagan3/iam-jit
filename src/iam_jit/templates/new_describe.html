@@ -1,0 +1,51 @@
+{% extends "base.html" %}
+{% block title %}Describe a new request — iam-jit{% endblock %}
+{% block content %}
+<section class="card narrow">
+  <h1>Describe what you need</h1>
+  <p class="muted">Free-text description, target accounts, duration. We'll draft the policy.</p>
+
+  {% if errors %}
+  <div class="flash flash-error">
+    <strong>Couldn't submit:</strong>
+    <ul>
+      {% for e in errors %}<li>{{ e }}</li>{% endfor %}
+    </ul>
+  </div>
+  {% endif %}
+
+  <form method="post" action="/requests/new/generate">
+    <label for="description">What are you trying to do?</label>
+    <textarea name="description" id="description" required minlength="10" rows="5"
+      placeholder="e.g., Investigate why pods are restart-looping in the staging EKS cluster. Need to read pod descriptions, logs, and events for one week."
+    >{{ form.description or "" }}</textarea>
+
+    <label for="services">AWS services (comma-separated)</label>
+    <input type="text" name="services" id="services" placeholder="eks, logs"
+      value="{{ form.services or "" }}" />
+
+    <fieldset>
+      <legend>Access type</legend>
+      <label><input type="radio" name="access_type" value="read-only"
+        {% if form.access_type != "read-write" %}checked{% endif %} />
+        Read-only (faster to approve)
+      </label>
+      <label><input type="radio" name="access_type" value="read-write"
+        {% if form.access_type == "read-write" %}checked{% endif %} />
+        Read-write
+      </label>
+    </fieldset>
+
+    <label for="accounts">Account IDs (comma-separated)</label>
+    <input type="text" name="accounts" id="accounts" required
+      placeholder="060392206767" value="{{ form.accounts or "" }}" />
+
+    <label for="duration_hours">Duration (hours)</label>
+    <input type="number" name="duration_hours" id="duration_hours" required min="1" max="8760"
+      value="{{ form.duration_hours or 24 }}" />
+
+    <button type="submit">Draft policy</button>
+    <a class="cancel" href="/requests/new">cancel</a>
+  </form>
+</section>
+{% endblock %}

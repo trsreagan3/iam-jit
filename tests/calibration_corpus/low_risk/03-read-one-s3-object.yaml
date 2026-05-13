@@ -1,0 +1,22 @@
+name: read-one-s3-object
+description: |
+  Read one specific S3 object. Scoped Resource ARN; no wildcard.
+  Should auto-approve at default threshold.
+
+policy:
+  Version: "2012-10-17"
+  Statement:
+    - Effect: Allow
+      Action: ["s3:GetObject"]
+      Resource:
+        - "arn:aws:s3:::config-prod-east1/services/auth/users.json"
+
+request:
+  spec:
+    access_type: read-only
+    duration:
+      duration_hours: 1
+
+expected:
+  score_max: 3
+  must_auto_approve: true
