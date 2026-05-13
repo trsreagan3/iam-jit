@@ -1,0 +1,57 @@
+name: agent-707-pacu-vpc-snapshot-recon
+description: |
+  WHITE-BOX round 9: pure-recon ec2:Describe* actions —
+  specifically `ec2:DescribeSnapshots` and
+  `ec2:DescribeVpcPeeringConnections` / `DescribeVpnConnections` —
+  score 1 (no flags fire) because:
+  1. They're read actions (request access_type=read-only matches),
+  2. They're not in `_HIGH_RISK_ACTIONS` / `_CATASTROPHIC_ACTIONS`,
+  3. The `ec2:Describe*` wildcard catch at agent-634 fires only
+     on the `Describe*` glob, not on specific Describe actions.
+
+  Both Pacu modules (research §2.5 vpc__enum_lateral_movement,
+  §2.7 ebs__enum_snapshots_unauth) treat these as cross-account
+  recon primitives — the snapshots are CROSS-ACCOUNT shared
+  (public or org-shared), so describing them reveals the
+  attack surface; VPC peering describes inter-account network
+  bridges, valuable for lateral-movement chains.
+
+  Source-code rule exploited: `_HIGH_RISK_ACTIONS` /
+  `_CATASTROPHIC_ACTIONS` / `_SECRET_BEARING_READS` action catalog
+  lacks these (the catalog has ec2:GetConsoleOutput /
+  GetConsoleScreenshot — secret-bearing reads — but the Describe
+  variants are pure recon, not secret-content).
+
+  Real risk: 3 (cross-account recon; reveals attack surface but
+  doesn't directly read content). Gap = 2.
+
+  Det score: 1; expected ≥ 3.
+
+  Research-doc pattern: §2.5, §2.7 (Pacu enumeration modules).
+
+  Proposed fix: introduce a `_CROSS_ACCOUNT_RECON_ACTIONS` set
+  containing `ec2:DescribeSnapshots`, `ec2:DescribeImages`,
+  `ec2:DescribeVpcPeeringConnections`,
+  `ec2:DescribeVpnConnections`, `ec2:DescribeNetworkInterfaces`,
+  `rds:DescribeDBSnapshots`, `kms:ListAliases`, etc. On broad
+  resource, floor at 3 (above auto-approve, below high-impact).
+
+policy:
+  Version: "2012-10-17"
+  Statement:
+    - Effect: Allow
+      Action:
+        - ec2:DescribeSnapshots
+        - ec2:DescribeVpcPeeringConnections
+        - ec2:DescribeVpnConnections
+      Resource: "*"
+
+request:
+  spec:
+    access_type: read-only
+    duration:
+      duration_hours: 1
+
+expected:
+  score_min: 3
+  must_auto_approve: false

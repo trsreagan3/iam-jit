@@ -1,0 +1,65 @@
+name: agent-700-statement-keyed-by-sid-admin
+description: |
+  WHITE-BOX round 9: `Statement` as an OBJECT keyed by Sid (instead of
+  a list of statement objects, or a single dict) is silently treated as
+  "no statements" and scored 1 — even though the object's VALUES are
+  full Allow Action:* Resource:* admin statements.
+
+  Source-code rule exploited: `_deterministic` (review.py line 1680-
+  1685) accepts only `list` or single-`dict` forms of Statement:
+
+  ```python
+  statements = policy.get("Statement")
+  if isinstance(statements, dict):
+      statements = [statements]            # single-statement form
+  elif not isinstance(statements, list):
+      return 1, ["No statements in policy"], []
+  ```
+
+  When `Statement` is a dict with multiple Sid-keyed entries (the
+  "object-of-statements" form), the FIRST branch matches and turns
+  the WHOLE container into a single statement — but the container
+  itself has no `Effect`/`Action`/`Resource` keys, so the per-
+  statement loop sees an empty stmt and produces NO factors. Final
+  score = 1.
+
+  AWS itself rejects this grammar form at policy-attach time. The
+  defect is still a worst-case-malformed signal, NOT score 1.
+
+  Research-doc pattern: §10 (grammar — alternative Statement forms).
+  Linked round-5 fix (agent-96) handled `Statement: {bare-dict}` but
+  did NOT handle `Statement: {sid1: {...}, sid2: {...}}`.
+
+  Real risk: 9-10 — the dict VALUES contain Action:* Resource:* admin
+  statements. Gap = 8-9.
+
+  Det score: 1; expected ≥ 7 (the "malformed = worst-case" principle
+  at line 1101 docstring should apply consistently; some downstream
+  tools may auto-correct dict-of-statements into list-of-statements).
+
+  Proposed fix: in the Statement-shape branch (line 1681), if
+  `isinstance(statements, dict)` AND the dict's VALUES are themselves
+  dicts with `Effect` keys, flatten the values into a list. Otherwise
+  preserve the existing single-dict-treats-as-list-of-one behavior.
+
+policy:
+  Version: "2012-10-17"
+  Statement:
+    WildAdmin:
+      Effect: Allow
+      Action: "*"
+      Resource: "*"
+    IamFullAdmin:
+      Effect: Allow
+      Action: "iam:*"
+      Resource: "*"
+
+request:
+  spec:
+    access_type: read-write
+    duration:
+      duration_hours: 1
+
+expected:
+  score_min: 7
+  must_auto_approve: false

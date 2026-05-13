@@ -1,0 +1,58 @@
+name: agent-702-apigateway-apikeys-collection
+description: |
+  WHITE-BOX round 9: API Gateway uses an unusual ARN form where the
+  resource-spec begins with a leading slash (`/apikeys/*`). This
+  isn't caught by `_is_broad_resource` because the `collection_types`
+  map at line 1503 doesn't include the `apigateway` service, and the
+  leading-`/` form puts an EMPTY first-segment into the partition
+  check.
+
+  `apigateway:CreateApiKey` is a Pacu persistence primitive
+  (research §2.3) — minting API keys is account-level persistence.
+  On Resource `arn:aws:apigateway:us-east-1::/apikeys/*` the scorer
+  treats this as narrow → score 1.
+
+  Source-code rule exploited: `_is_broad_resource` (line 1500-1517)
+  `collection_types` map lacks an entry for `apigateway`:
+
+  ```python
+  collection_types = {
+      "iam": (...), "kms": (...), "secretsmanager": (...),
+      "ec2": (...), "logs": (), "dynamodb": (...),
+      "kinesis": (...), "dax": (...), "lambda": (...),
+      # NO: apigateway, apigatewayv2, glue, codebuild,
+      # codedeploy, elasticbeanstalk, ecr, ecs, eks, ...
+  }
+  ```
+
+  Plus the leading-slash form bypasses the "collection / rest" check:
+  `first_segment` becomes empty string `""`, never matches any entry.
+
+  Real risk: 5 (API-key minting is persistence; CreateApiKey can be
+  scoped to one stage but `/*` means all stages). Gap = 4.
+
+  Det score: 1; expected ≥ 5.
+
+  Research-doc pattern: §2.3 Pacu api_gateway__create_api_keys.
+
+  Proposed fix: add API Gateway and ~12 other services with leading-
+  slash resource forms to `collection_types`. Special-case the
+  leading-`/` form: when resource_spec starts with `/`, split off
+  the leading slash before bucket/path partitioning.
+
+policy:
+  Version: "2012-10-17"
+  Statement:
+    - Effect: Allow
+      Action: "apigateway:POST"
+      Resource: "arn:aws:apigateway:us-east-1::/apikeys/*"
+
+request:
+  spec:
+    access_type: read-write
+    duration:
+      duration_hours: 1
+
+expected:
+  score_min: 5
+  must_auto_approve: false

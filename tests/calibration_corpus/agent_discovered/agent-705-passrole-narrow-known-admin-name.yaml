@@ -1,0 +1,55 @@
+name: agent-705-passrole-narrow-known-admin-name
+description: |
+  WHITE-BOX round 9: `iam:PassRole` on a NARROW resource that names
+  a known-admin role pattern (e.g. `OrganizationAccountAccessRole`,
+  `AdministratorAccess`, `*Admin*`, `*Root*`) scores 4 — but the
+  Resource ARN names a role that is, by AWS-Organizations
+  convention, ORG-WIDE ADMIN. PassRole-narrow-to-admin = RCE-as-
+  admin once it's combined with any code-exec primitive.
+
+  This is the dual to round-8 agent-641 (`PassRole + narrow list
+  with admin ARN buried in the list`). agent-641 caught the
+  list-with-admin form; this fixture catches the SINGLE-ARN form
+  where the role-name CONTAINS a known-admin token.
+
+  Source-code rule exploited: review.py PassRole scoring (around
+  line 2770) gates on `inclusive` (broad) resource. A narrow
+  PassRole to a literal admin-ARN doesn't trigger the floor-9 path.
+  The factor surfaced is generic "PassRole grants the calling
+  role the right to bind any role" — but for THIS resource value
+  the role name is explicitly known-admin.
+
+  Real risk: 7 (specific PassRole to known admin = the chain is
+  one composition step from RCE-as-admin; without code-exec the
+  worker can't directly execute, but PassRole on its own is the
+  enabling capability). Gap = 3.
+
+  Det score: 4; expected ≥ 7.
+
+  Research-doc pattern: §2.5 Pacu organizations__assume_role
+  (specifically targets OrganizationAccountAccessRole, the AWS-
+  Organizations default cross-account admin role).
+
+  Proposed fix: introduce a `_KNOWN_ADMIN_ROLE_NAME_PATTERNS`
+  constant — `OrganizationAccountAccessRole`, `*Administrator*`,
+  `*AdminRole*`, `AWSReservedSSO_Admin*`, `*SuperUser*`, etc.
+  When `iam:PassRole` resource matches any pattern, floor at 7
+  regardless of resource scope (the role itself is admin, so
+  narrow doesn't matter).
+
+policy:
+  Version: "2012-10-17"
+  Statement:
+    - Effect: Allow
+      Action: iam:PassRole
+      Resource: "arn:aws:iam::123456789012:role/OrganizationAccountAccessRole"
+
+request:
+  spec:
+    access_type: read-write
+    duration:
+      duration_hours: 1
+
+expected:
+  score_min: 7
+  must_auto_approve: false

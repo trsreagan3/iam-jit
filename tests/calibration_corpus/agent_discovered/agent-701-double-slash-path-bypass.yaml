@@ -1,0 +1,56 @@
+name: agent-701-double-slash-path-bypass
+description: |
+  WHITE-BOX round 9: `arn:aws:s3:::prod-data//*` (double-slash between
+  bucket and path) is treated as NARROW by `_is_broad_resource` —
+  scores 1 — even though the AWS evaluator treats double-slash as a
+  normalized path. The bypass: an attacker who can submit any ARN
+  with `//` separates the broad-resource heuristic from the actual
+  scope.
+
+  Source-code rule exploited: `_is_broad_resource` (review.py line
+  1500-1531). The function's bucket/path split assumes ONE slash
+  between bucket and path:
+
+  ```python
+  bucket_part, _, _path_part = resource_spec.partition("/")
+  if _has_wildcard(bucket_part): return True
+  if resource_spec.endswith("/*") and resource_spec.count("/") <= 1:
+      return True
+  ```
+
+  `prod-data//*` has `count("/") == 2`, so the `<= 1` guard rejects
+  it. The bucket_part `prod-data` has no `*`, so `_has_wildcard`
+  rejects it. Both branches fall through → returns False.
+
+  But the actual semantics (path normalization) make this equivalent
+  to `prod-data/*` — bucket-scope wildcard.
+
+  Real risk: 6 (bucket-level wildcard = high-impact mutation on
+  every object in this bucket). Gap = 5.
+
+  Det score: 1; expected ≥ 5.
+
+  Research-doc pattern: §10.7 (grammar — path-normalization
+  variants) and §10.8 (parser surface vs. evaluator surface).
+
+  Proposed fix: in `_is_broad_resource`, normalize the path segment
+  by collapsing consecutive slashes (or strip leading `/`) before
+  the slash-count check. Equivalent path operations apply at the
+  semantic level even if the strict-grammar level rejects.
+
+policy:
+  Version: "2012-10-17"
+  Statement:
+    - Effect: Allow
+      Action: "s3:DeleteObject"
+      Resource: "arn:aws:s3:::prod-data//*"
+
+request:
+  spec:
+    access_type: read-write
+    duration:
+      duration_hours: 1
+
+expected:
+  score_min: 5
+  must_auto_approve: false

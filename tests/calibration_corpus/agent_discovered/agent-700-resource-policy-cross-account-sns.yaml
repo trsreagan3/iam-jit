@@ -1,0 +1,56 @@
+name: agent-700-resource-policy-cross-account-sns
+description: |
+  BLACK-BOX Round 9 — net-new pattern class: resource-based policies with
+  cross-account Principal.
+
+  SNS topic resource policy granting `sns:Subscribe` + `sns:Receive` to
+  `arn:aws:iam::999999999999:root` (foreign account). The attacker subscribes
+  an HTTPS endpoint to the topic, receives every notification, then potentially
+  publishes confirmation tokens. The Resource is a NARROW topic ARN.
+
+  Det score: 3 ("scoped or limited; no broad patterns").
+  Real risk: 7 — full read of every event published to the topic (PII, order
+  data, audit signals routinely flow through SNS) by an attacker-controlled
+  account.
+
+  Scorer gap: the scorer's resource-policy semantics treat Principal-keyed
+  statements as identity-policy statements. The cross-account direction
+  (Principal account-id segment ≠ Resource account-id segment) is not
+  surfaced. Same gap applies symmetrically to SQS, EFS, EventBridge, StepFn,
+  Glue, OpenSearch, DynamoDB (new resource-policy support), CWLogs
+  destinations, CodeArtifact, IoT, Kinesis, KMS (when cross-acct narrow), and
+  Lambda function policies.
+
+  Source: AWS resource-based policies are the most-common cross-account
+  exfiltration vector after S3 bucket policies — see hackingthe.cloud
+  "Identifying Cross-Account Resource Access". Pacu `iam__enum_permissions`
+  surfaces these.
+
+  Proposed fix: introduce a "resource-policy mode" detector. When a statement
+  has a `Principal` key AND `Principal.AWS` (or other principal sub-keys)
+  contains an ARN whose account-id segment differs from the Resource ARN
+  account-id segment, surface "cross-account resource-policy grant" as a
+  primary risk factor and floor at 7 (read) / 8 (write). Sibling of round-8
+  TT (cross-account Condition direction).
+
+policy:
+  Version: "2012-10-17"
+  Statement:
+    - Effect: Allow
+      Principal:
+        AWS: "arn:aws:iam::999999999999:root"
+      Action:
+        - "sns:Subscribe"
+        - "sns:Receive"
+        - "sns:GetTopicAttributes"
+      Resource: "arn:aws:sns:us-east-1:123456789012:prod-events"
+
+request:
+  spec:
+    access_type: read-write
+    duration:
+      duration_hours: 1
+
+expected:
+  score_min: 7
+  must_auto_approve: false

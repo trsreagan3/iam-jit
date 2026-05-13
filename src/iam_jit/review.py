@@ -1720,12 +1720,31 @@ def _deterministic(
             "Add `\"Version\": \"2012-10-17\"` to the policy header."
         )
 
-    # Cross-script homoglyphs in Resource ARNs are themselves a red
-    # flag — even after `_norm_grammar_str` collapses them, the fact
-    # that an author typed a Cyrillic 'а' instead of Latin 'a' is
-    # suspicious (typo or attempted spoof). Flag at 5 on the
-    # raw (pre-normalization) Resource string.
-    # Research §10.8.
+    # Cross-script homoglyphs in Effect / Resource ARNs are themselves
+    # a red flag — even after `_norm_grammar_str` collapses them, an
+    # author typing Cyrillic 'а' instead of Latin 'a' is suspicious
+    # (typo or attempted spoof). Flag at 5 on the RAW string. The
+    # Effect-specific check catches `Effect: "Аllow"` AND
+    # `Effect: "Dеny"` — even when the latter would correctly evaluate
+    # as Deny post-normalization, the malformedness is itself a
+    # signal that warrants human review. Round 7 agent-400, 425.
+    if isinstance(statements, list):
+        for stmt in statements:
+            if not isinstance(stmt, dict):
+                continue
+            eff_raw = stmt.get("Effect")
+            if isinstance(eff_raw, str) and any(c in _LATIN_HOMOGLYPHS for c in eff_raw):
+                score = max(score, 5)
+                factors.append(
+                    f"Statement `Effect: {eff_raw!r}` contains cross-"
+                    "script homoglyph(s). Even when the value normalizes "
+                    "to Allow / Deny, the malformedness is suspicious — "
+                    "typo or attempted spoof. AWS will accept the "
+                    "policy because it's syntactically valid string-typed; "
+                    "review what the author actually intended."
+                )
+                break
+
     if isinstance(statements, list):
         for stmt in statements:
             if not isinstance(stmt, dict):

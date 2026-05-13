@@ -1,0 +1,77 @@
+name: agent-703-permissions-boundary-field-ignored
+description: |
+  WHITE-BOX round 9 (architectural awareness gap): the scorer
+  treats the policy in ISOLATION and ignores the
+  `PermissionsBoundary` field. AWS evaluates the INTERSECTION of
+  identity-policy ∩ permissions-boundary. A policy with an admin
+  Allow Statement BUT a restrictive PermissionsBoundary attached
+  is materially different from an unbounded admin policy.
+
+  The current scorer:
+  - Score 10 for `{Allow Action:* Resource:*}` alone
+  - Score 10 for `{Allow Action:* Resource:*, PermissionsBoundary: <restrictive>}`
+  Identical, even though the LATTER is mitigated.
+
+  This is a CALIBRATION SIGNAL gap, not a bypass — the scorer is
+  CORRECT to flag admin Allow as 10, but it would be MORE useful
+  if the surfaced factors mentioned "policy includes a
+  PermissionsBoundary field — AWS evaluates intersection; the
+  effective grant is bounded if the boundary is also evaluated by
+  the deployer's IAM."
+
+  Equally important is the INVERSE: a user with an admin identity
+  policy AND a permissions-boundary set to e.g. PowerUserOnly is
+  effectively a PowerUser; the score reflecting "admin" is wrong
+  from the BLAST radius perspective.
+
+  This finding documents the CHOICE — the scorer chose isolation.
+  When auditing an org's role-creation flow, the boundary often
+  IS attached (e.g. SecurityBoundary in many enterprises), and
+  the score-10 false positive drives noise that erodes signal.
+
+  Source-code rule absent: `analyze_policy` (line 1597) takes
+  `policy: dict[str, Any]` and never inspects `policy.get(
+  "PermissionsBoundary")` or `request.get("permissions_boundary")`.
+  The grammar field at IAM identity-policy level is
+  permissions_boundary_arn (on the User/Role being created); some
+  request schemas (like CloudFormation IAM::User) include it as a
+  policy-level field for documentation.
+
+  Real risk: this is calibration awareness — score should add a
+  factor noting the boundary presence (positive signal), not change
+  the underlying score. But for the architectural gap, the scorer
+  is unaware of the boundary semantic ENTIRELY. Gap = N/A (no
+  numeric score change), but a factor-list defect.
+
+  Det score: 10 (unchanged); expected: 10 with a factor mentioning
+  the boundary's presence.
+
+  Research-doc pattern: AWS IAM eval-logic (boundary intersection
+  semantics).
+
+  Proposed fix: when `policy.get("PermissionsBoundary")` (or
+  `request.get("permissions_boundary_arn")`) is set, append a
+  factor: "Identity policy bound by permissions-boundary `<arn>`;
+  the effective grant is the intersection."
+
+policy:
+  Version: "2012-10-17"
+  PermissionsBoundary: "arn:aws:iam::123456789012:policy/SecurityBoundary"
+  Statement:
+    - Effect: Allow
+      Action: "*"
+      Resource: "*"
+
+request:
+  spec:
+    access_type: read-write
+    duration:
+      duration_hours: 1
+
+expected:
+  score_min: 10
+  must_auto_approve: false
+  # NB: This fixture documents an awareness gap, not a bypass. The
+  # score is correctly 10 because the identity policy IS admin. The
+  # gap is the missing FACTOR noting the boundary's presence — a
+  # qualitative signal for human review, not a score change.

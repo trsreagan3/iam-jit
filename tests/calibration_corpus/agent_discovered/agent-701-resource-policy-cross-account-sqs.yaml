@@ -1,0 +1,42 @@
+name: agent-701-resource-policy-cross-account-sqs
+description: |
+  BLACK-BOX Round 9 — net-new resource-policy cross-account class.
+
+  SQS queue resource policy granting `sqs:SendMessage` AND
+  `sqs:ReceiveMessage` + `sqs:DeleteMessage` to a foreign-account root. The
+  attacker can read every queued job (potentially containing user IDs, file
+  paths, credentials in payloads) AND delete messages before legitimate
+  consumers process them — denial-of-service + data exfil compounded.
+
+  Det score: 3 ("scoped or limited").
+  Real risk: 7-8 — queue-takeover. Common attack vector against
+  webhook-receiver queues (Stripe / GitHub callbacks dropped into SQS).
+
+  Scorer gap: same class as agent-700 — Principal-keyed resource-policy
+  statement with cross-account Principal is treated as identity-policy.
+
+  Source: AWS docs "Cross-account access to Amazon SQS queues" /
+  hackingthe.cloud "SQS queue cross-account misconfigurations."
+
+policy:
+  Version: "2012-10-17"
+  Statement:
+    - Effect: Allow
+      Principal:
+        AWS: "arn:aws:iam::999999999999:root"
+      Action:
+        - "sqs:SendMessage"
+        - "sqs:ReceiveMessage"
+        - "sqs:DeleteMessage"
+        - "sqs:GetQueueAttributes"
+      Resource: "arn:aws:sqs:us-east-1:123456789012:prod-orders"
+
+request:
+  spec:
+    access_type: read-write
+    duration:
+      duration_hours: 1
+
+expected:
+  score_min: 7
+  must_auto_approve: false

@@ -1,0 +1,68 @@
+name: agent-704-iam-recon-narrow-assumerole
+description: |
+  WHITE-BOX round 9: the IAM-recon composition rule at review.py
+  line 2853 requires `sts:AssumeRole` on `inclusive` (broad)
+  resource. A statement combining heavy IAM-recon WITH a narrow-ARN
+  AssumeRole still composes to a lateral-movement primitive — the
+  attacker uses recon to find a role that grants admin (e.g.
+  reading the role's attached policies), then assumes the ONE role
+  they were granted. The recon ENABLES the chain to that specific
+  target, even if the AssumeRole itself is narrow.
+
+  Pattern is identical to PMapper's iam_edges + sts_assume edge
+  composition: the recon-narrow-assume combination is what defines
+  the edge weight. The current scorer requires BOTH halves to be
+  on broad resource → score 6.
+
+  Source-code rule exploited: line 2853-2865:
+
+  ```python
+  if has_iam_recon and has_assume_broad:
+      score = max(score, 9)
+  ```
+
+  Reading: only fires when AssumeRole is broad. If the target
+  AssumeRole is `arn:aws:iam::123456789012:role/SomeSpecificRole`,
+  `has_assume_broad` is False → the composition rule is skipped.
+
+  Real risk: 7 (recon + specific-role-assume is still
+  enumeration + privilege-step-up; the recon's job is to find
+  WHICH role to use). Gap = 1-2.
+
+  Det score: 6; expected ≥ 7. (Mid-tier finding — recon-only
+  scores 6 by itself, so most of the score is the recon. The
+  composition adds 1 tier.)
+
+  Research-doc pattern: PMapper iam_edges; Pacu iam__enum*.
+
+  Proposed fix: in the iam-recon composition (line 2853), check
+  ANY sts:AssumeRole in the action set (not just broad-resource).
+  Floor at 7 (not 9) when AssumeRole is narrow — the chain is
+  smaller blast than fully broad, but still a lateral-movement
+  primitive.
+
+policy:
+  Version: "2012-10-17"
+  Statement:
+    - Effect: Allow
+      Action:
+        - iam:ListRoles
+        - iam:GetRole
+        - iam:ListAttachedRolePolicies
+        - iam:ListRolePolicies
+        - iam:GetRolePolicy
+        - iam:ListUsers
+      Resource: "*"
+    - Effect: Allow
+      Action: sts:AssumeRole
+      Resource: "arn:aws:iam::123456789012:role/SomeSpecificRole"
+
+request:
+  spec:
+    access_type: read-write
+    duration:
+      duration_hours: 1
+
+expected:
+  score_min: 7
+  must_auto_approve: false

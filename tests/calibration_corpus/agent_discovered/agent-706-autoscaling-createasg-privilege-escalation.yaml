@@ -1,0 +1,49 @@
+name: agent-706-autoscaling-createasg-privilege-escalation
+description: |
+  WHITE-BOX round 9: `autoscaling:CreateAutoScalingGroup` is a
+  privilege-escalation primitive (PMapper autoscaling_edges) but
+  it's not in `_HIGH_IMPACT_MUTATION_ACTIONS`, `_CODE_EXECUTION_
+  PRIMITIVES`, or `_CATASTROPHIC_ACTIONS`. The attack: bind an
+  EXISTING launch configuration that already references a
+  privileged instance profile, and the new ASG runs instances
+  using that profile.
+
+  Unlike `ec2:RunInstances`, AutoScaling's CreateASG-with-existing-
+  LC doesn't even require iam:PassRole (the LC already has the
+  binding) — the PassRole-composition rule is BYPASSED.
+
+  Source-code rule exploited: action catalog. The action is
+  unknown to the scorer → routed through `_SENSITIVE_SERVICES`
+  (autoscaling is sensitive) → floor 6. Not catastrophic.
+
+  Real risk: 7 (privilege-escalation primitive, but conditional
+  on an existing LC with a privileged profile). Gap = 1.
+
+  Det score: 6; expected ≥ 7.
+
+  Research-doc pattern: §1.42 PMapper autoscaling_edges.
+
+  Proposed fix: add `autoscaling:CreateAutoScalingGroup`,
+  `autoscaling:UpdateAutoScalingGroup`, and
+  `autoscaling:CreateLaunchConfiguration` (also a PassRole-target
+  primitive — though Launch Templates have superseded LCs) to
+  `_HIGH_IMPACT_MUTATION_ACTIONS`. They're code-execution
+  primitives in the PMapper sense; the existing-LC path makes
+  them PassRole-equivalent without the explicit PassRole.
+
+policy:
+  Version: "2012-10-17"
+  Statement:
+    - Effect: Allow
+      Action: autoscaling:CreateAutoScalingGroup
+      Resource: "*"
+
+request:
+  spec:
+    access_type: read-write
+    duration:
+      duration_hours: 1
+
+expected:
+  score_min: 7
+  must_auto_approve: false

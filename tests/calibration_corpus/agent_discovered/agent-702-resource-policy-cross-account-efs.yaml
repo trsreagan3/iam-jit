@@ -1,0 +1,44 @@
+name: agent-702-resource-policy-cross-account-efs
+description: |
+  BLACK-BOX Round 9 — EFS file-system policy cross-account write.
+
+  EFS file system resource policy granting
+  `elasticfilesystem:ClientRootAccess` + `ClientWrite` + `ClientMount` to a
+  foreign account. ClientRootAccess is the EFS equivalent of "no_root_squash"
+  in NFS — the attacker mounts the filesystem with root and reads/writes every
+  file, including PHI / customer files. Cross-account NFS sharing is rare and
+  almost always a misconfiguration.
+
+  Det score: 3 ("scoped or limited").
+  Real risk: 8 — full root-equivalent filesystem access to cross-account
+  attacker.
+
+  Scorer gap: resource-policy cross-account direction not detected.
+  Additionally, `elasticfilesystem:ClientRootAccess` is a privilege-escalation
+  primitive (root inside the EFS) that should be a high-impact action
+  regardless of cross-account.
+
+  Source: AWS docs "Cross-account NFS access for Amazon EFS"; the SANS ISC
+  diary "EFS misconfiguration" (2024).
+
+policy:
+  Version: "2012-10-17"
+  Statement:
+    - Effect: Allow
+      Principal:
+        AWS: "arn:aws:iam::999999999999:root"
+      Action:
+        - "elasticfilesystem:ClientMount"
+        - "elasticfilesystem:ClientWrite"
+        - "elasticfilesystem:ClientRootAccess"
+      Resource: "arn:aws:elasticfilesystem:us-east-1:123456789012:file-system/fs-0abc123"
+
+request:
+  spec:
+    access_type: read-write
+    duration:
+      duration_hours: 1
+
+expected:
+  score_min: 7
+  must_auto_approve: false
