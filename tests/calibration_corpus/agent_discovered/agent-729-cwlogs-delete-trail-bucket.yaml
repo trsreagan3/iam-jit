@@ -1,0 +1,38 @@
+name: agent-729-cwlogs-delete-trail-bucket
+description: |
+  BLACK-BOX Round 9 — Logs DeleteLogGroup on CloudTrail target log group.
+
+  `logs:DeleteLogGroup` on log groups matching the CloudTrail-bound
+  pattern `aws-cloudtrail-logs-*` is full audit destruction. This is
+  the sibling of round-8 agent-502 (s3 lifecycle on cloudtrail bucket)
+  but at the CWLogs sink — when CloudTrail is configured to ship to
+  CloudWatch Logs (as recommended by Security Pillar), deleting the
+  log group erases evidence.
+
+  Det score: 9.
+  Real risk: 9 — already correctly scored. This is a CALIBRATION PIN
+  to confirm round-8 WW (CloudTrail-target detector) covers the
+  CWLogs-sink variant. Currently det=9; the score floor must hold.
+
+  Source: AWS Well-Architected Security pillar SEC-04;
+  T1562.008 (Disable CloudWatch Logging).
+
+policy:
+  Version: "2012-10-17"
+  Statement:
+    - Effect: Allow
+      Action:
+        - "logs:DeleteLogGroup"
+        - "logs:DeleteLogStream"
+        - "logs:PutLogEvents"
+      Resource: "arn:aws:logs:us-east-1:123456789012:log-group:aws-cloudtrail-logs-*"
+
+request:
+  spec:
+    access_type: read-write
+    duration:
+      duration_hours: 1
+
+expected:
+  score_min: 9
+  must_auto_approve: false

@@ -1,0 +1,44 @@
+name: agent-723-greengrass-v2-passrole-fleet-rce
+description: |
+  BLACK-BOX Round 9 — Greengrass v2 fleet RCE composition.
+
+  `greengrass:CreateDeployment` + `greengrass:CreateComponentVersion` +
+  `iam:PassRole` on the Greengrass token-exchange role. The attacker
+  defines a malicious Greengrass component (arbitrary scripts /
+  containers / Docker images), packages it as a deployment, and pushes
+  to every device in the fleet. Devices are typically OT / IoT hardware
+  in factories, hospitals, vehicles — fleet RCE = physical-world impact.
+
+  Det score: 6.
+  Real risk: 8 — fleet RCE on potentially thousands of devices,
+  composition of greengrass-deploy + role-pass.
+
+  Scorer gap: `greengrass:CreateDeployment` not in code-exec primitives
+  catalog. Round-7 added several code-exec siblings (NN); missed
+  greengrass. Same composition shape as glue-job + PassRole (agent-05)
+  but for IoT fleets.
+
+  Source: AWS docs "Greengrass v2 deployments"; CarKit hacker conference
+  talks on fleet-targeted IoT supply-chain attacks.
+
+policy:
+  Version: "2012-10-17"
+  Statement:
+    - Effect: Allow
+      Action:
+        - "greengrass:CreateDeployment"
+        - "greengrass:CreateComponentVersion"
+      Resource: "*"
+    - Effect: Allow
+      Action: "iam:PassRole"
+      Resource: "arn:aws:iam::123456789012:role/GreengrassV2TokenExchangeRole"
+
+request:
+  spec:
+    access_type: read-write
+    duration:
+      duration_hours: 1
+
+expected:
+  score_min: 8
+  must_auto_approve: false

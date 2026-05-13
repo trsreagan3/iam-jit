@@ -1,0 +1,47 @@
+name: agent-728-mismatched-partition-principal
+description: |
+  BLACK-BOX Round 9 — Principal in `aws-cn` partition on a Resource in
+  `aws` partition.
+
+  Resource-policy statement where Principal AWS ARN uses partition
+  `aws-cn` (China) but Resource ARN uses partition `aws` (global
+  commercial). AWS cross-partition trust is NOT possible — partition
+  boundaries are hard. So this statement is either:
+    1. broken (Principal can never satisfy → allow never fires), or
+    2. typo where the author meant the commercial partition.
+
+  Most-common case 2 — the policy author intended foreign-account trust
+  but typo'd the partition. The scorer should treat partition-mismatch
+  Principal as either vacuous-allow (low risk) OR ambiguous (manual
+  review) but should NOT score 9 catastrophic.
+
+  Current scores 9 — false positive. Probably correct as a general
+  "Principal with cross-account ARN is suspicious" but the partition
+  mismatch is a useful clarifying signal.
+
+  Det score: 9 currently.
+  Real risk: 1-2 (allow can never satisfy in evaluation).
+
+  This is a CALIBRATION-PIN candidate but flagged as a discovered
+  pattern: scorer may want to detect "Principal partition ≠ Resource
+  partition" and lower confidence + flag as manual-review rather than
+  catastrophic.
+
+policy:
+  Version: "2012-10-17"
+  Statement:
+    - Effect: Allow
+      Principal:
+        AWS: "arn:aws-cn:iam::999999999999:root"
+      Action: "s3:*"
+      Resource: "arn:aws:s3:::prod-bucket/*"
+
+request:
+  spec:
+    access_type: read-write
+    duration:
+      duration_hours: 1
+
+expected:
+  score_min: 5
+  must_auto_approve: false

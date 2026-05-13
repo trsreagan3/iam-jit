@@ -1,0 +1,43 @@
+name: agent-731-resource-policy-cross-account-iot-mqtt
+description: |
+  BLACK-BOX Round 9 — IoT MQTT cross-account Publish/Subscribe.
+
+  Statement granting `iot:Publish` + `iot:Subscribe` + `iot:Receive` to
+  a foreign-account root on topic ARNs. The attacker subscribes to
+  device-telemetry topics (reading sensor data — could be camera
+  imagery, location, medical signals) AND publishes spoofed commands
+  to actuator topics (issue motor commands, open locks, dispatch
+  emergency signals).
+
+  Det score: 6.
+  Real risk: 7-8 — physical-world MITM via IoT Core MQTT broker.
+
+  Scorer gap: cross-account resource-policy class + `iot:` actions not
+  surfaced as high-impact for cross-acct.
+
+  Source: AWS IoT Core docs "MQTT message broker permissions"; DEF CON
+  IoT Village talks on AWS IoT misconfigurations.
+
+policy:
+  Version: "2012-10-17"
+  Statement:
+    - Effect: Allow
+      Principal:
+        AWS: "arn:aws:iam::999999999999:root"
+      Action:
+        - "iot:Publish"
+        - "iot:Subscribe"
+        - "iot:Receive"
+      Resource:
+        - "arn:aws:iot:us-east-1:123456789012:topic/prod/devices/*"
+        - "arn:aws:iot:us-east-1:123456789012:topicfilter/prod/devices/*"
+
+request:
+  spec:
+    access_type: read-write
+    duration:
+      duration_hours: 1
+
+expected:
+  score_min: 7
+  must_auto_approve: false

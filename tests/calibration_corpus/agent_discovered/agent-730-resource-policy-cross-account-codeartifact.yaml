@@ -1,0 +1,44 @@
+name: agent-730-resource-policy-cross-account-codeartifact
+description: |
+  BLACK-BOX Round 9 — CodeArtifact cross-account package publish (supply
+  chain).
+
+  CodeArtifact repository policy granting `PublishPackageVersion` +
+  `ReadFromRepository` to a foreign account. The attacker publishes
+  malicious versions of internal packages (e.g. an internal Python
+  package `acme_utils`). Any CI/CD pipeline configured to pull from
+  this repository as upstream will fetch the attacker's version on
+  next install — classic dependency-confusion / supply-chain hijack.
+
+  Det score: 5.
+  Real risk: 8 — supply-chain compromise of internal packages.
+
+  Scorer gap: cross-account resource-policy class + CodeArtifact-specific
+  supply-chain semantics not surfaced. Sibling of round-8 agent-526
+  (codeartifact:AssociateExternalConnection — currently gap 1).
+
+  Source: hackingthe.cloud "CodeArtifact dependency confusion"; Wiz
+  "RepoJacking AWS Edition" (2024); Aviv Sasson research on
+  CodeArtifact / GHCR supply-chain.
+
+policy:
+  Version: "2012-10-17"
+  Statement:
+    - Effect: Allow
+      Principal:
+        AWS: "arn:aws:iam::999999999999:root"
+      Action:
+        - "codeartifact:ReadFromRepository"
+        - "codeartifact:PublishPackageVersion"
+        - "codeartifact:PutRepositoryPermissionsPolicy"
+      Resource: "arn:aws:codeartifact:us-east-1:123456789012:repository/prod/internal"
+
+request:
+  spec:
+    access_type: read-write
+    duration:
+      duration_hours: 1
+
+expected:
+  score_min: 7
+  must_auto_approve: false

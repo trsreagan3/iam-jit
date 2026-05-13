@@ -1,0 +1,47 @@
+name: agent-725-iam-recon-assumerole-narrow-svc
+description: |
+  BLACK-BOX Round 9 — IAM recon suite + `sts:AssumeRole` to a narrow but
+  GLOB-EXPANDED role ARN.
+
+  `iam:ListRoles` + `iam:GetRole` + `iam:ListAttachedRolePolicies` (full
+  recon) PLUS `sts:AssumeRole` on `arn:aws:iam::123456789012:role/dev-*`
+  glob. The recon enumerates every role; the AssumeRole glob means any
+  role matching `dev-*` is takeable. Combined: pick the most privileged
+  dev-prefixed role and assume it.
+
+  Round-8 white-box established the IAM-recon+AssumeRole composition rule;
+  but the rule may not fire when the AssumeRole Resource is glob-narrowed
+  (e.g. `dev-*`) rather than `*`. Det score 9 might be correct here per
+  the recon-composition rule — the gap, if any, is calibration-pin.
+
+  Det score: 9 (current).
+  Real risk: 9.
+
+  This YAML is a calibration pin: confirm the recon-composition rule fires
+  on glob-narrowed Resources (current det=9 supports this). If a later
+  scorer change drops to 6 on narrow ARNs, this regresses.
+
+policy:
+  Version: "2012-10-17"
+  Statement:
+    - Effect: Allow
+      Action:
+        - "iam:ListRoles"
+        - "iam:GetRole"
+        - "iam:ListAttachedRolePolicies"
+        - "iam:GetPolicy"
+        - "iam:GetPolicyVersion"
+      Resource: "*"
+    - Effect: Allow
+      Action: "sts:AssumeRole"
+      Resource: "arn:aws:iam::123456789012:role/dev-*"
+
+request:
+  spec:
+    access_type: read-write
+    duration:
+      duration_hours: 1
+
+expected:
+  score_min: 8
+  must_auto_approve: false

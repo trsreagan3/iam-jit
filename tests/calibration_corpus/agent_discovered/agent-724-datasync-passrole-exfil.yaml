@@ -1,0 +1,44 @@
+name: agent-724-datasync-passrole-exfil
+description: |
+  BLACK-BOX Round 9 — DataSync + iam:PassRole exfiltration composition.
+
+  Sibling of 719 + the standard PassRole code-exec composition. DataSync
+  tasks run under a service role; passing that role + creating locations
+  + starting tasks = AWS-managed exfil pipeline pointed wherever the
+  attacker wants (S3-compatible API endpoint).
+
+  Det score: 6.
+  Real risk: 8 — full exfil composition. Same shape as round-5/round-7
+  code-exec compositions (Lambda+PassRole, Glue+PassRole, etc.).
+
+  Scorer gap: DataSync not in `_CODE_EXECUTION_PRIMITIVES` and the
+  composition rule doesn't fire. DataSync is technically not code-exec —
+  it's data-movement — but the composition is equally impactful for
+  exfil.
+
+  Source: AWS docs "Allowing DataSync to assume an IAM role"; black-box
+  discovery.
+
+policy:
+  Version: "2012-10-17"
+  Statement:
+    - Effect: Allow
+      Action:
+        - "datasync:CreateTask"
+        - "datasync:StartTaskExecution"
+        - "datasync:CreateLocationS3"
+        - "datasync:CreateLocationObjectStorage"
+      Resource: "*"
+    - Effect: Allow
+      Action: "iam:PassRole"
+      Resource: "arn:aws:iam::123456789012:role/datasync-svc"
+
+request:
+  spec:
+    access_type: read-write
+    duration:
+      duration_hours: 1
+
+expected:
+  score_min: 8
+  must_auto_approve: false

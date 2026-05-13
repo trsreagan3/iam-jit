@@ -1,0 +1,41 @@
+name: agent-722-networkmanager-pivot
+description: |
+  BLACK-BOX Round 9 — AWS Network Manager cross-network pivot primitive.
+
+  `networkmanager:RegisterTransitGateway` + `CreateConnection` +
+  `UpdateConnection` form a transit-gateway global-network manipulation
+  set. Attacker registers an attacker-controlled TGW into the victim's
+  global network, or modifies existing connections to route traffic
+  through attacker infrastructure (CN/MITM at the global-network layer).
+  Sibling of agent-83 Direct Connect bridging but at the NM control plane.
+
+  Det score: 6.
+  Real risk: 7 — network-pivot at the org-wide global-network level.
+
+  Scorer gap: `networkmanager:` service prefix not in sensitive-services.
+  `networkmanager:` actions span DX, TGW, SD-WAN, Cloud WAN — all of which
+  can rewire wide-area network paths.
+
+  Source: AWS docs "Network Manager registered transit gateways"; the AWS
+  Network Specialty exam guide lists pivot scenarios.
+
+policy:
+  Version: "2012-10-17"
+  Statement:
+    - Effect: Allow
+      Action:
+        - "networkmanager:RegisterTransitGateway"
+        - "networkmanager:CreateConnection"
+        - "networkmanager:UpdateConnection"
+        - "networkmanager:CreateConnectPeer"
+      Resource: "*"
+
+request:
+  spec:
+    access_type: read-write
+    duration:
+      duration_hours: 1
+
+expected:
+  score_min: 7
+  must_auto_approve: false

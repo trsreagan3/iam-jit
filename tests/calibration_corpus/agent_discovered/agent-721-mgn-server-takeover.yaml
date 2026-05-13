@@ -1,0 +1,46 @@
+name: agent-721-mgn-server-takeover
+description: |
+  BLACK-BOX Round 9 — AWS Application Migration Service (MGN) server-
+  takeover primitive.
+
+  `mgn:StartCutover` / `mgn:StartTest` / `mgn:FinalizeCutover` /
+  `mgn:UpdateSourceServerReplicationType` are the actions that flip a
+  replicated on-prem server INTO an EC2 instance under the AWS account.
+  Attacker with these permissions can:
+    1. cut over an MGN-replicated server into the victim VPC (full root
+       on a new EC2 inside the network),
+    2. modify replication settings to redirect data,
+    3. trigger test instances for recon.
+
+  Det score: 6.
+  Real risk: 7 — server-takeover primitive; common during M&A migrations
+  when MGN is briefly enabled.
+
+  Scorer gap: `mgn:` service prefix not in code-exec / sensitive sets.
+  Sibling of EC2 RunInstances but the cutover semantics import a
+  pre-existing OS image — even more dangerous (the attacker may control
+  the source server's contents).
+
+  Source: AWS docs "Application Migration Service: Performing a cutover";
+  Cloud Security Forum talk on M&A IAM hygiene.
+
+policy:
+  Version: "2012-10-17"
+  Statement:
+    - Effect: Allow
+      Action:
+        - "mgn:StartCutover"
+        - "mgn:StartTest"
+        - "mgn:FinalizeCutover"
+        - "mgn:UpdateSourceServerReplicationType"
+      Resource: "*"
+
+request:
+  spec:
+    access_type: read-write
+    duration:
+      duration_hours: 1
+
+expected:
+  score_min: 7
+  must_auto_approve: false

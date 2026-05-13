@@ -1102,10 +1102,13 @@ def _norm_grammar_str(s: object) -> str:
     for hf in _HANGUL_FILLERS:
         if hf in s:
             s = s.replace(hf, "")
-    # Strip Cf (format) + Mn (combining mark) by category
+    # Strip Cf (format), Mn (combining mark), AND Cc (control —
+    # TAB / VT / CR / NUL etc.) by category. Control chars in IAM
+    # grammar strings are exclusively a smuggling vector. Round 9
+    # WB agent-815/816/817.
     s = "".join(
         c for c in s
-        if _unicodedata.category(c) not in ("Cf", "Mn")
+        if _unicodedata.category(c) not in ("Cf", "Mn", "Cc")
     )
     # NFKC compatibility normalization
     s = _unicodedata.normalize("NFKC", s)
@@ -1719,7 +1722,32 @@ def _deterministic(
     # Round 5 finding agent-96.
     statements = policy.get("Statement")
     if isinstance(statements, dict):
-        statements = [statements]
+        # Two distinct dict forms:
+        #   (a) Single-statement form (one Allow/Deny with Effect/
+        #       Action/Resource at the top level).
+        #   (b) Sid-keyed object-of-statements form
+        #       (`{sid1: {Effect/Action/Resource}, sid2: {...}}`) —
+        #       not in the AWS spec but produced by some IaC tools
+        #       and accidentally accepted by some downstream parsers.
+        # Distinguish: if the values are themselves dicts with
+        # Effect / Action / NotAction keys, treat as Sid-keyed and
+        # flatten the values. Otherwise treat as single statement.
+        # Round 9 WB agent-800.
+        looks_like_sid_keyed = (
+            len(statements) >= 1
+            and all(
+                isinstance(v, dict)
+                and any(k in v for k in ("Effect", "Action", "NotAction", "Resource", "NotResource"))
+                for v in statements.values()
+            )
+            and not any(
+                k in statements for k in ("Effect", "Action", "NotAction", "Resource", "NotResource", "Principal", "NotPrincipal", "Condition")
+            )
+        )
+        if looks_like_sid_keyed:
+            statements = list(statements.values())
+        else:
+            statements = [statements]
         policy = {**policy, "Statement": statements}
     elif not isinstance(statements, list):
         return 1, ["No statements in policy"], []
@@ -2057,29 +2085,44 @@ def _deterministic(
                             )
                             break
 
-            # Trust-policy semantic detection: a statement with
-            # Principal + sts:AssumeRole-class action is a TRUST POLICY
-            # (attached to a role, declaring who can assume it).
-            # Any literal-ARN principal that isn't a wildcard is still
-            # a cross-account-trust grant when the named account isn't
-            # the deployer's. We can't compare accounts without context,
-            # so floor at 7 when the Principal.AWS has any literal ARN
-            # (not just wildcards). Round 8 WB agent-600, 601, 623.
+            # Resource-policy cross-account principal detection. Two
+            # sub-cases share the same code path:
+            #
+            # 1. Trust-policy: Principal + sts:AssumeRole-class action.
+            #    Round 8 WB agent-600, 601, 623.
+            # 2. Resource-policy: Principal + ANY action where the
+            #    Resource ARN's account-id differs from the Principal's
+            #    account-id. Cross-account grants on bucket / topic /
+            #    queue / function / table resource policies.
+            #    Round 9 BB agent-700..709 (SNS/SQS/EFS/EventBridge/
+            #    StepFn/Glue/Lambda/DynamoDB/Kinesis/IoT/KMS).
+            #
+            # Both classes share the same risk pattern: a named external
+            # account is granted access. Without deployer-account context
+            # we conservatively flag any cross-account Principal.AWS at
+            # floor 7 for trust policies and floor 7 for resource-policy
+            # cross-account grants.
             actions_in_stmt = _as_list(stmt.get("Action"))
             is_assume_role_action = any(
                 _canonical_action(a).startswith("sts:assumerole")
                 or _action_covers_any(a, frozenset(["sts:assumerole"]))
                 for a in actions_in_stmt
             )
-            if is_assume_role_action and isinstance(principal, dict):
+            if isinstance(principal, dict) and not _principal_is_public(principal):
                 aws_principals = principal.get("AWS")
-                if aws_principals is not None and not _principal_is_public(principal):
+                if aws_principals is not None:
                     pvals = aws_principals if isinstance(aws_principals, list) else [aws_principals]
-                    has_literal_arn = any(
-                        isinstance(v, str) and v.startswith("arn:") and "*" not in v.split(":", 5)[4]
-                        for v in pvals if isinstance(v, str)
-                    )
-                    if has_literal_arn:
+                    # Collect Principal account-ids from literal ARNs
+                    principal_accounts: set[str] = set()
+                    for v in pvals:
+                        if not isinstance(v, str) or not v.startswith("arn:"):
+                            continue
+                            # bare account IDs are handled by another rule
+                        ap = v.split(":", 5)
+                        if len(ap) >= 5 and "*" not in ap[4] and ap[4]:
+                            principal_accounts.add(ap[4])
+                    if principal_accounts and is_assume_role_action:
+                        # Trust-policy backdoor primitive
                         score = max(score, 7)
                         factors.append(
                             "Trust-policy statement with literal account-ARN "
@@ -2094,6 +2137,41 @@ def _deterministic(
                             "approved partner. Add a `aws:PrincipalOrgID` "
                             "condition if the trust should be org-bounded."
                         )
+                    elif principal_accounts:
+                        # Resource-policy cross-account grant. Compare
+                        # principal account against Resource ARN account(s).
+                        # If they differ, it's a cross-account grant.
+                        resource_accounts: set[str] = set()
+                        for r in resources:
+                            if not r.startswith("arn:"):
+                                continue
+                            rp = r.split(":", 5)
+                            if len(rp) >= 5 and rp[4] and "*" not in rp[4]:
+                                resource_accounts.add(rp[4])
+                        # If we know both sides AND they differ, flag.
+                        # If we don't know the resource account (S3 ARNs
+                        # have no account segment), flag because we can't
+                        # verify same-account.
+                        cross_account = (
+                            (resource_accounts and principal_accounts.isdisjoint(resource_accounts))
+                            or not resource_accounts
+                        )
+                        if cross_account:
+                            score = max(score, 7)
+                            factors.append(
+                                "Resource-policy statement with literal "
+                                f"cross-account Principal ARN ({sorted(principal_accounts)[0]}). "
+                                "Grants the listed actions to a SPECIFIC "
+                                "external account on the named resource. "
+                                "Common cross-account exfiltration pattern "
+                                "across SNS/SQS/Lambda/KMS/DynamoDB/etc. "
+                                "resource policies."
+                            )
+                            suggestions.append(
+                                "Verify the external account is trusted. "
+                                "Consider an org-scoped `aws:PrincipalOrgID` "
+                                "condition instead of naming individual accounts."
+                            )
 
         # Policy-variable injection in Resource — `${aws:PrincipalTag/...}`,
         # `${aws:RequestTag/...}`, `${aws:ResourceTag/...}` expand at

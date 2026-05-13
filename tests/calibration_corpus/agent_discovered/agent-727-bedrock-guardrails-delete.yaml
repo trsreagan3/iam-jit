@@ -1,0 +1,41 @@
+name: agent-727-bedrock-guardrails-delete
+description: |
+  BLACK-BOX Round 9 — Bedrock Guardrails delete/update (LLM safety bypass).
+
+  Bedrock Guardrails (GA 2024) are the safety layer that filters PII /
+  topic / content from LLM inputs and outputs. `bedrock:DeleteGuardrail`
+  / `UpdateGuardrail` lets an attacker remove or weaken the safety
+  filters protecting a production LLM endpoint — enabling prompt
+  injection that previously was blocked.
+
+  Det score: 8.
+  Real risk: 8-9 — safety-bypass; sibling of `wafv2:DeleteWebACL`
+  (catastrophic). Especially impactful for healthcare / financial /
+  customer-facing LLM apps where guardrails are the compliance control.
+
+  Scorer gap: `bedrock:*Guardrail*` actions not in
+  `_CATASTROPHIC_ACTIONS` or even high-impact-mutation set. Round-7
+  added `bedrock:` to sensitive services for read; the guardrail
+  control-plane is a control-modification primitive.
+
+  Source: AWS docs "Amazon Bedrock Guardrails" (2024 GA). OWASP LLM Top
+  10 — LLM02 (prompt injection); guardrail removal is the enabling step.
+
+policy:
+  Version: "2012-10-17"
+  Statement:
+    - Effect: Allow
+      Action:
+        - "bedrock:DeleteGuardrail"
+        - "bedrock:UpdateGuardrail"
+      Resource: "*"
+
+request:
+  spec:
+    access_type: read-write
+    duration:
+      duration_hours: 1
+
+expected:
+  score_min: 8
+  must_auto_approve: false

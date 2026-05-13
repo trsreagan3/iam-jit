@@ -2630,3 +2630,534 @@ Breakdown by attack class:
 #   these — agent-610/611/624 — deleted after verification showed
 #   the fixes were merged.)
 
+
+
+## Round 9 — White-box (convergence verification)
+
+Convergence verdict: **NOT fully converged.** Architectural gaps
+remain, though they are now narrower and split between strict
+bypasses, malformed-shape defects, action-catalog completeness,
+factor-quality (rather than score-quality), and false-narrowing
+condition patterns. 15 architectural gap fixtures, 2 awareness-
+gap documents.
+
+New architectural gaps found: YES (15 score-affecting +
+2 factor-quality awareness fixtures).
+
+# Top 5 architectural gaps (by gap size and reach):
+
+1. **`Statement` keyed by Sid (object-of-statements grammar form,
+   not list-of-statements) — silent score-1 bypass for full
+   admin.** Round-5 agent-96 closed the single-`{dict}` form but
+   not the multi-Sid-keyed-`{Sid1: {...}, Sid2: {...}}` form.
+   The single-dict branch at line 1681 wraps the WHOLE container
+   in a list, but the container itself has no Effect/Action keys
+   so all per-statement rules skip it. Final score: 1 for
+   `Statement: {Wild: {Effect:Allow, Action:*, Resource:*}}`.
+   Fixture: agent-800 (gap 6 — and 9 if the deployer
+   auto-normalizes to list).
+
+2. **Cc-category (control-character) action-name bypass.** TAB
+   (U+0009), VT (U+000B), CR (U+000D), and NUL (U+0000) embedded
+   in an action string survive `_norm_grammar_str` because that
+   function strips Cf+Mn but NOT Cc. `Action: "iam:\tPassRole"`
+   scores 6 (sensitive-service floor), missing the PassRole-broad
+   floor of 9. This is the round-7-Cf-strip sibling, one Unicode
+   category over. Fixtures: agent-815 (VT), 816 (CR), 817 (NUL).
+   Gap = 3 each; cumulative 9. Round 7 agent-714 already documents
+   tab black-box; agent-815/816/817 catalog VT/CR/NUL.
+
+3. **PassRole narrow-to-known-admin-role-name.** Round-8 agent-641
+   caught `PassRole + list with admin ARN buried`; this round's
+   agent-805 is the simpler `PassRole + single ARN naming
+   OrganizationAccountAccessRole` form. The role name is known-
+   admin by AWS-Organizations convention, but the scorer sees only
+   "narrow PassRole" → score 4. Real risk: 7. Gap = 3.
+   Proposed fix: known-admin-role-name pattern set
+   (`OrganizationAccountAccessRole`, `*Administrator*`,
+   `AWSReservedSSO_Admin*`, `*SuperUser*`).
+
+4. **Trust-policy detector misses bare 12-digit account-IDs.**
+   `Principal: {AWS: "999988887777"}` is semantically equivalent
+   to `Principal: {AWS: "arn:aws:iam::999988887777:root"}` per
+   AWS docs, but the literal-arn check at line 1970 gates on
+   `v.startswith("arn:")`. Bare account IDs slip past the
+   trust-policy floor 7. Fixture: agent-820 (gap 1, but the
+   bypass class is broader than the size suggests — every
+   cross-account-share resource policy in the world).
+
+5. **Path-normalization shadow: double-slash bucket/path is
+   treated narrow.** `arn:aws:s3:::prod-data//*` scores 3
+   (narrow). AWS's resource-evaluator collapses consecutive
+   slashes in S3 keys; the scorer should too. Fixture: agent-801
+   (gap 2). Small but adversarially exploitable: any submission
+   form that doesn't normalize ARN paths lets an attacker
+   submit `prod-data//*` and pass the scorer while AWS treats
+   it as `prod-data/*`.
+
+# Honorable mentions (gap 1-3, real but smaller):
+
+- **API Gateway leading-slash collection wildcard** (agent-802):
+  `arn:aws:apigateway:us-east-1::/apikeys/*` not recognized as
+  broad because `collection_types` map lacks `apigateway` AND
+  the leading-`/` form makes the partition split off an empty
+  first-segment. Gap = 2.
+
+- **IAM-recon + narrow AssumeRole composition** (agent-804):
+  the recon-broad + AssumeRole-narrow combo is still lateral-
+  movement (recon's job is to FIND which narrow role to target),
+  but the composition rule at line 2853 gates on
+  `has_assume_broad`. Gap = 1.
+
+- **AutoScaling CreateAutoScalingGroup** (agent-806): PMapper
+  autoscaling_edges primitive — bind existing LC with privileged
+  profile. Missing from `_HIGH_IMPACT_MUTATION_ACTIONS`. Gap = 1.
+
+- **Pacu cross-account recon** (agent-807): `ec2:DescribeSnapshots`,
+  `ec2:DescribeVpcPeeringConnections`,
+  `ec2:DescribeVpnConnections` are pure cross-account recon
+  primitives. No `_CROSS_ACCOUNT_RECON_ACTIONS` set exists.
+  Gap = 2.
+
+- **Resource policy missing Principal** (agent-808): AA validation
+  finding MISSING_PRINCIPAL. The scorer doesn't distinguish
+  resource-policy from identity-policy. Gap = 3 (contingent on
+  schema knowing the policy type).
+
+- **Invalid ARN region typo** (agent-809): AA validation finding
+  INVALID_ARN_REGION. No real-region whitelist in
+  `_is_broad_resource`. Gap = 3.
+
+- **GitHub OIDC StringLike `repo:org/*`** (agent-811): Sysdig
+  research class; the federated-floor at 7 fires but the more
+  specific "OIDC sub claim with `*`" isn't detected as the
+  fork-takeover class. Gap = 1.
+
+- **Pacu organizations-enum + AssumeRole** (agent-819): the
+  iam-recon-actions_lc set at line 2839 is IAM-only; doesn't
+  catch `organizations:ListAccounts` + `sts:AssumeRole *`
+  composition (which is the EXACT Pacu org-assume primitive).
+  Gap = 1.
+
+# Awareness-gap documents (score correct, factor-quality
+# lacking):
+
+- **PermissionsBoundary field ignored** (agent-803): scorer
+  doesn't surface that the policy includes a boundary. Score
+  correctly 10 because identity policy IS admin; the qualitative
+  signal for human review is missing. Architectural fix: when
+  `policy.get("PermissionsBoundary")` is set, append a factor
+  noting the boundary's presence and the intersection semantic.
+
+- **`aws:ViaAWSService` false-narrowing condition** (agent-810):
+  scorer correctly fires PassRole-broad floor 9 regardless of
+  condition. The qualitative gap is the MISSING factor — a
+  reviewer seeing the condition assumes it narrows; the scorer's
+  factor list should explain why ViaAWSService is a principal-
+  class assertion, NOT resource scope. Architectural fix:
+  extend `_condition_is_vacuous` with a `false_narrowing` class.
+
+# Honest negatives — patterns I probed that ALREADY pass:
+
+- **Wildcard service `**:**`**: scored 10 (Action:* path). PASS.
+- **Resource as dict** (`{some-key: arn:aws:iam::*:role/admin}`):
+  scored 10 — the dict-typed Resource on Action:* hits the
+  Action:* worst-case path. PASS.
+- **Action array containing a dict entry**: scored 9 — the
+  `_as_list` filter handles non-string entries gracefully. PASS.
+- **Principal CanonicalUser: "*"**: scored 9 — the
+  `_principal_is_public` check (round 7 fix) handles `*` in
+  CanonicalUser. PASS.
+- **Principal AWS: "*"** vs `{AWS: "*"}`: both scored 9. PASS.
+- **Code-execution-primitive alone on Resource:* (no PassRole)**
+  (`lambda:CreateFunction Resource:*`): scored 8 (round-5
+  floor 8 path fires). PASS.
+- **Specific PassRole + RunInstances/RunTask in separate
+  statements**: scored 9 (the PassRole+code-exec composition
+  rule fires across statements). PASS.
+- **Capital One pattern** (`s3:ListAllMyBuckets + s3:List* +
+  s3:GetObject Resource:*`): scored 7 (one tier below
+  expected 8 — secret-bearing-reads catches but s3:* family
+  expected to be higher). gap = 1, smaller than top-5.
+- **Code Spaces destructive chain** (ec2/s3 deletes): scored 8
+  (one tier below expected 9). gap = 1, smaller than top-5.
+- **Lambda + EventBridge persistence**: scored 8 (one tier
+  below expected 9). gap = 1, smaller than top-5.
+- **`StringEquals aws:PrincipalAccount: "*"`** (vacuous-by-`*`):
+  scored 9. PASS — round-8 vacuity catalog catches this.
+- **`aws:CalledVia` chain**: scored 10 (the catastrophic-action
+  Action:* fires regardless). PASS.
+- **Resource ARN with 3 colons (`arn:aws:s3:*`)**: scored 9
+  (Action `s3:*` fires the catastrophic-residue path). PASS.
+- **Malformed ARN with extra colons (`arn:aws:iam::::::*`)**:
+  scored 9 (Action `iam:*` fires catastrophic-residue). PASS.
+
+# Score-zone calibration (auto-approve threshold drift):
+
+Five Capital-One / Code-Spaces / Pacu-persistence patterns
+score 7-8 where I expected 8-9 (research-corpus expectations
+match my expectations). These are calibration drift — the
+floor-tier for "destructive chain" and "persistence chain"
+could each move up by 1 tier without false-positive cost.
+This is gap-1 territory and below the top-5 cutoff; not
+written as fixtures.
+
+Of the 16 still-failing research patterns from the harness:
+- 5 are calibration-drift gap-1 (research-01-42, -02-3, -02-5
+  organizations, -02-6, -05-1, -05-2, -07-1, -09-5, -10-7,
+  -11-3, -13-14): these correspond to my agent-806, 819, 811,
+  and the cluster of gap-1 high-impact-action catalog gaps.
+- 3 are pure-recon defect class (-02-5 vpc, -02-7 ebs):
+  agent-807 documents.
+- 2 are AA-validation-finding class (-07-5 invalid region,
+  -07-5 missing principal): agent-808, 809 document.
+- 1 is question-mark glob in Action (research-10-7): TODO — I
+  did NOT write a fixture; this is a sister to round-6
+  `_has_wildcard` handling that didn't propagate to action
+  catalog lookups. The fix is in `_canonical_action` or
+  `_action_covers_any` to treat `?` the same as `*` for
+  service prefix matching.
+- 1 is deny-NotAction normalization (-12-4): research expects
+  Deny+NotAction:[CreateUser] to score 2 (not 1, the current
+  result); this is a metadata-quality gap, not a security gap,
+  and below the "write a fixture" bar.
+
+# Convergence verdict — full:
+
+The scorer is **substantially converged** on the core
+architectural surface. The remaining gaps are:
+
+- **Grammar-shape completeness** (alternative `Statement`
+  forms, control-char chars in actions, double-slash
+  normalization) — narrow but exploitable.
+- **Catalog completeness** (specific actions: known-admin role
+  names, autoscaling create primitives, organizations
+  enumeration, cross-account recon classes).
+- **Trust-policy precision** (bare account ID, GitHub-OIDC
+  sub-wildcard specifically).
+- **Factor-quality** (PermissionsBoundary surfaced,
+  ViaAWSService explained, condition false-narrowing class).
+
+None of the round-9 gaps are catastrophic-floor bypasses on
+the same scale as round-7's Cyrillic-Effect (gap 8). The
+largest single round-9 gap is agent-800 (Statement-keyed-by-
+Sid, gap 6) — a fundamental grammar-shape miss but with low
+real-world incidence (AWS itself rejects the form). The next
+tier — agent-805/815/816/817 each gap 3 — represents the
+true remaining surface: action-catalog completeness for
+known-admin-role-names and control-character normalization.
+
+The loop has not formally converged because new gaps were
+found, but the slope of gap-finding per round-of-effort is
+clearly diminishing. Round 8 was the last big-bypass round
+(trust-policy: gap 21 cumulative across 8 fixtures). Round
+9's cumulative score-gap across 15 fixtures is ~37 points
+(avg 2.5/fixture vs round 8's 4.7/fixture). One more round
+should reach the asymptote where every remaining gap is
+gap-1 calibration drift.
+
+Total round-9 YAMLs: 17 (agent-800 through agent-820,
+gaps 801-802-804-805-806-807-808-809-811-815-816-817-819-820
+are score-affecting; 803 and 810 are factor-quality
+awareness documents; 812/813/814/818 were drafted but
+deleted because they duplicated existing round-9 black-box
+fixtures or were redundant after broader-collection-types
+testing showed the generic bucket/* fallback already catches
+most service-collection forms).
+
+Breakdown:
+  - gap ≥ 5: 1 fixture (800).
+  - gap = 3-4: 6 fixtures (805, 808, 809, 815, 816, 817).
+  - gap = 1-2: 8 fixtures (801, 802, 804, 806, 807, 811, 819, 820).
+  - factor-quality awareness: 2 fixtures (803, 810).
+
+
+
+## Round 9 — Black-box (net-new patterns)
+
+Black-box probe focused on net-new attack surface NOT covered by the
+research compendium (mid-2025 cutoff): newer services (Aurora DSQL,
+Bedrock Guardrails, VPC Lattice, Greengrass v2, MGN, Network Manager,
+DataSync, Connect), cross-account resource-policy edges, encoding
+bypasses, trust-policy ExternalId vacuity, and cross-statement
+compositions.
+
+Total YAMLs: 32 (agent-700 through agent-731).
+
+Result split (relative to expected score_min):
+  - gap ≥ 5 (severe bypass): 3 fixtures (705 score 1 vs 7, 711 score 1
+    vs 7, 709 score 2 vs 7).
+  - gap = 3-4: 12 fixtures (700, 701, 702, 703, 704, 706, 707, 708,
+    710, 712, 718, 731).
+  - gap = 1-2: 11 fixtures (713, 714, 715, 716, 719, 720, 721, 722,
+    723, 724).
+  - calibration-pin / PASS: 6 fixtures (717, 725, 726, 727, 728, 729,
+    730).
+
+Total gap units: 76.
+
+# TOP 5 WORST GAPS (gap-≥4, ordered by severity):
+
+# 1. agent-705-resource-policy-cross-account-kinesis
+#    Scored 1 vs expected 7 (gap 6). Kinesis stream resource-based
+#    policy (2023 GA) granting `kinesis:GetRecords` to a foreign
+#    account on a narrow stream ARN. Attacker reads every record
+#    streaming through the prod stream. Worst-case score (1) because
+#    Kinesis read-actions aren't in the data-bearing-read catalog.
+
+# 2. agent-711-encoding-bypass-url-encoded-action
+#    Scored 1 vs expected 7 (gap 6). `iam%3APassRole` — URL-encoded
+#    colon. The action-string parser doesn't normalize URL-encoded
+#    bytes; the scorer sees an unknown action and scores 1. Any
+#    toolchain that decodes the policy before applying it (some CDK
+#    transforms, custom Terraform providers) will get the catastrophic
+#    `iam:PassRole` Resource:*. Pure evasion.
+
+# 3. agent-709-resource-policy-cross-account-glue-catalog
+#    Scored 2 vs expected 7 (gap 5). Glue catalog cross-account read.
+#    Same gap class as 700-708 (resource-policy cross-account
+#    direction not detected). Glue catalog grants are the gateway
+#    for cross-account data lakes.
+
+# 4. agent-712-encoding-bypass-double-url-encoded-action
+#    Scored 1 vs expected 6 (gap 5). `iam%253APassRole` — double-
+#    encoded. Single decode produces `iam%3APassRole`; the scorer
+#    sees unknown action and scores 1. Same class as 711.
+
+# 5. agent-700-resource-policy-cross-account-sns (and siblings
+#    701/702/703/704/706/707/708/731)
+#    Scored 3 vs expected 7 (gap 4 each). Same architectural gap:
+#    SNS, SQS, EFS, KMS, DynamoDB (new 2024 RBP), EventBridge,
+#    Lambda, Step Functions, IoT MQTT — all cross-account resource-
+#    policy statements scored as benign narrow-resource statements
+#    because the scorer doesn't differentiate Principal-keyed
+#    statements as resource-policies and doesn't detect cross-
+#    account direction in Principal AWS ARNs.
+
+# Breakdown by attack class:
+
+#  - Resource-policy cross-account class (NEW for round 9): 11
+#    fixtures (700-710 minus 705 + 731). All score 1-3 vs expected
+#    6-7. Single dominant architectural gap. Sibling treatment
+#    needed across all services that support resource-based policies.
+
+#  - Encoding/normalization bypass (extending round-7 Unicode-strip):
+#    4 fixtures (711, 712, 713, 714). URL-encoded colon, double
+#    URL-encoded colon, NBSP in action, TAB in action. All bypass
+#    action-catalog matching. Round-7 closed invisible Cf/Mn in
+#    Effect; ACTION strings need parallel normalization + a
+#    "non-canonical action format" suspicion flag.
+
+#  - Trust-policy ExternalId vacuity (extending round-8 trust-policy
+#    detection): 3 fixtures (715-717). The scorer detects ExternalId
+#    condition EXISTENCE but not VALUE. Vacuous values (`*`,
+#    `""`, short numeric lists) defeat confused-deputy protection.
+
+#  - Newer-service catastrophic actions (post-research-doc cutoff):
+#    5 fixtures (718 dsql, 720 connect lambda, 721 mgn, 722
+#    networkmanager, 726 vpc-lattice — passing — and 727 bedrock
+#    guardrails — passing). Aurora DSQL, Connect, MGN, NetworkManager
+#    are the gaps; vpc-lattice + bedrock-guardrails are now correctly
+#    scored 8 (calibration pin worth recording).
+
+#  - Cross-statement composition siblings (extending round-7 YY):
+#    3 fixtures (719 datasync-only, 723 greengrass+passrole, 724
+#    datasync+passrole). DataSync and Greengrass v2 are missing from
+#    _CODE_EXECUTION_PRIMITIVES / exfil-composition catalogs.
+
+#  - Calibration pins (PASS): 6 fixtures (717, 725, 726, 727, 728,
+#    729, 730).
+
+
+# Cross-cutting architectural recommendations (continuing letter
+# naming HHH...):
+
+# HHH. **Resource-policy cross-account direction detector**
+#      (HIGHEST IMPACT — single change closes 11 fixtures).
+#      When a statement has a `Principal` key with `Principal.AWS`
+#      containing an ARN, and the ARN's account-id segment differs
+#      from the Resource ARN's account-id segment, treat the
+#      statement as a RESOURCE-POLICY CROSS-ACCOUNT GRANT and apply
+#      a separate scoring path:
+#        - read-only actions (Get*, List*, Describe*, Receive,
+#          Subscribe, ESHttpGet, Decrypt, GetRecords, etc.): floor 7
+#        - write actions (Put*, Send, Publish, Update, Delete, Mount
+#          with Write, ClientWrite, ClientRootAccess, PublishPackage):
+#          floor 8
+#        - admin-shape (PutBucketPolicy, PutKeyPolicy, PutAuthPolicy,
+#          CreateGuardrail-on-cross-acct): floor 9 (already mostly
+#          covered)
+#      Also detect Principal: "*" / Principal.AWS: "*" as
+#      public-grant (already covered for some, not all).
+#      Specifically also handle Principal as bare 12-digit account
+#      ID (not in ARN form) — sometimes accepted in resource
+#      policies.
+#      Closes agents 700, 701, 702, 703, 704, 705, 706, 707, 708,
+#      709, 710, 731 (12 fixtures, gap range 3-6).
+
+# III. **Action-string normalization + non-canonical flag**.
+#      Extend the round-7 Unicode-invisible strip to all action
+#      strings, AND treat the following as non-canonical evasion
+#      attempts (floor at 6-8 depending on what the verb-stem looks
+#      like after normalization):
+#        - URL-encoded characters (`%XX` sequences) in action
+#        - Double-URL-encoded (`%25XX`)
+#        - Non-breaking space (U+00A0) inside action
+#        - TAB / CR / LF inside action
+#        - More than one colon in action (e.g. `iam::PassRole`)
+#        - Zero-width joiner / non-joiner (U+200C/U+200D) inside
+#          action
+#      Normalize to canonical `service:Action` form; THEN re-evaluate
+#      against the action catalog. If normalization changed the
+#      string, ALSO floor at 6+ regardless (the author shouldn't
+#      need encoding — its presence is evasion-signal).
+#      Closes agents 711, 712, 713, 714.
+
+# JJJ. **ExternalId VALUE validation in trust policies**. Round-8
+#      added trust-policy cross-account detection (600-602). Extend
+#      to validate the ExternalId VALUE:
+#        - `*` or `*` patterns via StringLike → vacuous
+#        - empty string `""` → vacuous
+#        - lists of < 5 short numeric/alphabetic tokens (entropy
+#          test: shortest token < 8 chars, all-digits or all-lowercase
+#          → likely brute-forceable)
+#        - policy-variable values (`${aws:username}` etc.) in
+#          StringEquals → broken (these don't substitute properly
+#          in trust-policy evaluation per AWS docs)
+#      When any of the above, treat trust-policy as having NO
+#      ExternalId protection → floor 8 (same as cross-acct + no
+#      Condition).
+#      Closes agents 715, 716 (borderline 717).
+
+# KKK. **Newer-service catastrophic/high-impact additions
+#      (post-mid-2025)**:
+#        - **Aurora DSQL**: `dsql:DbConnectAdmin` (treat like
+#          `rds-db:connect` admin → floor 6 narrow / 8 broad);
+#          `dsql:DeleteCluster`, `dsql:UpdateCluster` (high-impact
+#          mutation).
+#        - **Amazon Connect**: `connect:AssociateLambdaFunction`
+#          (code-execution primitive in contact flow → floor 7);
+#          `connect:UpdateContactFlow`, `connect:CreateInstance`,
+#          `connect:UpdateUserSecurityProfiles` (high-impact).
+#        - **MGN**: `mgn:StartCutover`, `mgn:FinalizeCutover`,
+#          `mgn:StartTest`, `mgn:UpdateSourceServerReplicationType`
+#          (server-takeover primitives → floor 7).
+#        - **Network Manager**: `networkmanager:RegisterTransitGateway`,
+#          `networkmanager:CreateConnection`,
+#          `networkmanager:UpdateConnection`,
+#          `networkmanager:CreateConnectPeer` (network-pivot →
+#          floor 7).
+#        - **Bedrock Guardrails**: `bedrock:DeleteGuardrail`,
+#          `bedrock:UpdateGuardrail` (LLM safety bypass — already
+#          scoring 8, PIN).
+#        - **VPC Lattice**: `vpc-lattice:PutAuthPolicy`,
+#          `vpc-lattice:DeleteAuthPolicy` (service-mesh authz
+#          override — already scoring 8, PIN).
+#      Closes agents 718, 720, 721, 722.
+
+# LLL. **DataSync and Greengrass v2 in code-exec/exfil composition
+#      catalog** (extending round-7 NN and round-8 YY):
+#        - `datasync:CreateLocationS3`,
+#          `datasync:CreateLocationObjectStorage`,
+#          `datasync:CreateTask`,
+#          `datasync:StartTaskExecution`
+#          + iam:PassRole → floor 9 (exfil composition)
+#        - `greengrass:CreateDeployment`,
+#          `greengrass:CreateComponentVersion`
+#          + iam:PassRole → floor 9 (fleet RCE)
+#      Standalone (no PassRole): floor 7 because the actions still
+#      do per-call passing implicitly via the assumed service role.
+#      Closes agents 719, 723, 724.
+
+# MMM. **Cross-partition Principal sanity check**. When Principal
+#      AWS ARN's partition (`aws-cn`, `aws-us-gov`, `aws-iso`,
+#      `aws-iso-b`, `aws-iso-c`) differs from Resource ARN's
+#      partition (typically `aws`), the grant is structurally
+#      impossible — AWS partitions don't trust across boundaries.
+#      Treat as "ambiguous — manual review" with a CLARIFYING
+#      factor + floor 5 (not 1, not 9). The scorer currently
+#      treats `aws-cn:iam::999...:root` as a valid cross-account
+#      principal and may over-score.
+#      Loose fix — closes agent 728 (currently over-scoring 9 vs
+#      expected ~5).
+
+
+# Honest negatives — patterns I tested in probe rounds 1-5 that the
+# scorer ALREADY catches correctly (no YAML written):
+#
+# - **lambda:CreateFunction + lambda:AddPermission narrow** (no
+#   PassRole): scored 8. PASS via existing lambda:AddPermission
+#   handling.
+#
+# - **Permission-boundary key at top level + Action:* Resource:**:
+#   scored 10 (round-2/round-8 catastrophic-floor on Action:*).
+#   PASS regardless of the misnamed PermissionsBoundary key.
+#
+# - **Aurora DSQL `dsql:DeleteCluster` Resource:** broad scope:
+#   scored 8 (sensitive-service-style residue). PASS borderline.
+#
+# - **mgn:* Resource:** full broad: scored 8 (likely from `mgn:*`
+#   glob recognition). PASS borderline.
+#
+# - **bedrock:DeleteGuardrail / UpdateGuardrail Resource:** scored
+#   8 — round-7/8 bedrock sensitive-service treatment covers it.
+#   PASS borderline (still net-new info).
+#
+# - **vpc-lattice:PutAuthPolicy Resource:** scored 8. PASS borderline.
+#
+# - **Principal: "*" on s3 / lambda invoke**: scored 9.
+#   PASS via existing Principal:* detection.
+#
+# - **API Gateway resource policy cross-account narrow**: scored 6
+#   (not great but above the catastrophic-need threshold). Borderline
+#   PASS — could be 7 but the resource-glob `/*` triggers some
+#   collection-broad heuristic.
+#
+# - **iam:Pa+ZWJ+ssRole (zero-width joiner)**: scored 9. PASS via
+#   round-7 invisible-Cf strip extended to ACTION strings.
+#
+# - **NBSP+iam:PassRole (leading NBSP) / iam:PassRole+trailing-NBSP**:
+#   scored 9. PASS — leading/trailing whitespace strip works; the
+#   gap (agents 713/714) is whitespace INSIDE the action.
+#
+# - **aws:CalledVia / CalledViaLast = cloudformation.amazonaws.com
+#   on iam:PassRole Resource:**: scored 9. PASS via existing iam:*
+#   wildcard / Resource:* catastrophic floor; CalledVia condition
+#   doesn't suppress.
+#
+# - **Lake Formation cross-account GetDataAccess**: scored 8.
+#   PASS via existing lakeformation handler (round-2/agent-71).
+#
+# - **CWLogs cross-account PutSubscriptionFilter**: scored 8.
+#   PASS via existing logs-subscription handling. (The destination
+#   form, agent-710, is the gap.)
+#
+# - **CloudFormation StackSet CreateStackInstances / CreateStackSet**:
+#   scored 9. PASS via existing cfn-stackset detection (round-2).
+#
+# - **Step Functions resource policy** + sufficiently broad actions:
+#   confirmed gap (708).
+#
+# - **iam:DeleteRolePermissionsBoundary narrow**: scored 9.
+#   PASS via existing iam-catastrophic floor.
+#
+# - **CreateRole with bogus PermissionsBoundary condition value
+#   (boundary = AdministratorAccess)**: scored 9. PASS via
+#   iam:CreateRole catastrophic floor; the condition is essentially
+#   ignored as expected.
+#
+# - **Composition: iam-recon + sts:AssumeRole on dev-* glob**:
+#   scored 9. PASS (round-7 composition rule). Pinned as 725.
+#
+# - **`aws:ViaAWSService = true` on broad iam:PassRole**: scored 9.
+#   The condition is a RESTRICTION (only service calls), but the
+#   scorer correctly doesn't trust it to lower below the iam:PassRole
+#   broad-resource floor. PASS.
+#
+# - **JSON-stringified PrincipalArn condition value (`[\"...\"]`)**:
+#   scored 9. PASS — the bogus literal string doesn't match any
+#   real principal in evaluation; the broad Action s3:* dominates.
+#
+# - **`aws:TokenIssueTime` numeric vacuous-large value**: scored 9.
+#   PASS — Numeric operator handling closes this.
+
