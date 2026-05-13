@@ -165,6 +165,19 @@ _CODE_EXECUTION_PRIMITIVES = frozenset(
         # template that runs caller-controlled code paths under
         # a passed role. Round 6 agent-225.
         "codestar:CreateProject",
+        # ROUND 8 additions — more code-execution + PassRole partners:
+        # Amplify, DMS, CodePipeline, EMR Serverless. Each provisions
+        # a service that runs caller-controlled work under a passed
+        # role. Combined with PassRole this is the code-exec class.
+        # Round 8 BB agent-512, 513, 514, 515.
+        "amplify:CreateApp",
+        "amplify:CreateDomainAssociation",
+        "dms:CreateReplicationTask",
+        "dms:CreateReplicationInstance",
+        "codepipeline:CreatePipeline",
+        "codepipeline:UpdatePipeline",
+        "emr-serverless:CreateApplication",
+        "emr-serverless:StartJobRun",
     }
 )
 
@@ -890,6 +903,14 @@ _CATASTROPHIC_ACTIONS = frozenset(
         # silently disabling audit. Round 8 agent-505.
         "cloudtrail:PutResourcePolicy",
         "cloudtrail:DeleteResourcePolicy",
+        # IAM Identity Center — group-membership creation grants the
+        # caller (or any user they specify) admin over every account
+        # the source group is permissioned in. Sibling of the existing
+        # sso-admin:CreateAccountAssignment but happens at the user
+        # store layer. Round 8 BB agent-511.
+        "identitystore:CreateGroupMembership",
+        "identitystore:CreateUser",
+        "identitystore:CreateGroup",
     }
 )
 
@@ -929,6 +950,16 @@ _SERVICE_ALIASES = {
     # bypasses the `sso-admin:AttachManagedPolicyToPermissionSet`
     # entry in _CATASTROPHIC_ACTIONS.
     "sso": "sso-admin",
+    # Bedrock has split into per-functionality service prefixes since
+    # 2024 (`bedrock`, `bedrock-runtime`, `bedrock-agent`,
+    # `bedrock-agent-runtime`). The catastrophic-action list targets
+    # `bedrock:*` and `bedrock-agentcore:*`; collapse the runtime
+    # variants so InvokeModel under `bedrock-runtime:InvokeModel`
+    # still trips the cross-account-exfil rule for `bedrock:InvokeModel`.
+    # Round 8 BB findings agent-508, 510 (Bedrock subprefix aliasing).
+    "bedrock-runtime": "bedrock",
+    "bedrock-agent": "bedrock",
+    "bedrock-agent-runtime": "bedrock",
 }
 
 
@@ -1455,10 +1486,15 @@ def _is_broad_resource(r: str) -> bool:
         # Known per-service single-collection wildcards
         collection_types = {
             "iam": ("role", "user", "group", "policy", "instance-profile"),
-            "kms": ("alias",),
+            "kms": ("alias", "key"),  # `key/*` round 8 agent-227
             "secretsmanager": ("secret",),
             "ec2": ("instance", "vpc", "subnet", "security-group"),
             "logs": (),  # logs uses `:` not `/` — not handled here
+            # Round 8 BB: data-plane collection wildcards.
+            "dynamodb": ("table",),    # agent-606
+            "kinesis": ("stream",),    # agent-608
+            "dax": ("cache",),         # agent-609
+            "lambda": ("function",),   # agent-419-class
         }
         if first_segment in collection_types.get(service, ()):
             if rest == "*" or (rest.endswith("*") and "/" not in rest):
@@ -1627,13 +1663,49 @@ def _deterministic(
     # Round 5 finding agent-96.
     statements = policy.get("Statement")
     if isinstance(statements, dict):
-        policy = {**policy, "Statement": [statements]}
+        statements = [statements]
+        policy = {**policy, "Statement": statements}
     elif not isinstance(statements, list):
         return 1, ["No statements in policy"], []
 
+    # Per-element type guard. A malformed `Statement: [null]` or
+    # `Statement: ["free-form-comment", {real-dict}]` would crash
+    # downstream `.get()` calls (the per-statement helpers all assume
+    # dict). Worse: a caller that catches the crash and falls back to
+    # score=1 would silently approve a policy that smuggled a real
+    # Allow statement after the malformed entries. Round 8 white-box
+    # findings agent-636, 637.
+    #
+    # Strategy: filter non-dict entries out, then flag the presence of
+    # ANY malformed entries at floor 5 so the malformedness itself is
+    # a risk signal (some adversarial smuggling depends on the caller
+    # silently dropping malformed-looking statements).
     score = 1
     factors: list[str] = []
     suggestions: list[str] = []
+
+    valid_statements = [s for s in statements if isinstance(s, dict)]
+    if len(valid_statements) != len(statements):
+        n_dropped = len(statements) - len(valid_statements)
+        score = max(score, 5)
+        factors.append(
+            f"Policy contains {n_dropped} malformed Statement "
+            "entries (non-dict). The valid statements are still "
+            "scored, but the malformedness itself indicates either "
+            "a generation error or an attempt to smuggle statements "
+            "past validators that drop malformed entries silently."
+        )
+        suggestions.append(
+            "Validate the policy JSON against the AWS IAM grammar "
+            "before submission. AWS will reject this at policy-attach "
+            "time anyway."
+        )
+        # Replace `statements` with the filtered list so the rest of
+        # the function operates on dict-only entries.
+        policy = {**policy, "Statement": valid_statements}
+        statements = valid_statements
+        if not valid_statements:
+            return score, factors, suggestions
 
     spec = request.get("spec") or {}
     has_constraints = bool(spec.get("resource_constraints"))
