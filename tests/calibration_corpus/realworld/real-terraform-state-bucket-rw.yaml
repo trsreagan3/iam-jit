@@ -1,0 +1,30 @@
+name: real-terraform-state-bucket-rw
+description: "Terraform's standard backend role: read/write/list one S3 bucket + DDB lock table. Industry-standard pattern,\
+  \ but DeleteObject on `my-tf-state/*` IS broad-within-bucket \u2014 the role can wipe every state file in one call. Scorer\
+  \ correctly flags this at 8 (human review tier). Real teams using this pattern SHOULD get a 'confirm this' prompt."
+policy:
+  Version: '2012-10-17'
+  Statement:
+  - Effect: Allow
+    Action:
+    - s3:ListBucket
+    Resource: arn:aws:s3:::my-tf-state
+  - Effect: Allow
+    Action:
+    - s3:GetObject
+    - s3:PutObject
+    - s3:DeleteObject
+    Resource: arn:aws:s3:::my-tf-state/*
+  - Effect: Allow
+    Action:
+    - dynamodb:GetItem
+    - dynamodb:PutItem
+    - dynamodb:DeleteItem
+    Resource: arn:aws:dynamodb:us-east-1:111111111111:table/tf-state-lock
+request:
+  spec:
+    access_type: read-write
+    duration:
+      duration_hours: 1
+expected:
+  score_max: 8

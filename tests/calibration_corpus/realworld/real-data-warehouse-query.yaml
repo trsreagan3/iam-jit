@@ -1,0 +1,33 @@
+name: real-data-warehouse-query
+description: 'Analytics role: query Athena, read S3 results, get one Glue table metadata.'
+policy:
+  Version: '2012-10-17'
+  Statement:
+  - Effect: Allow
+    Action:
+    - athena:StartQueryExecution
+    - athena:GetQueryResults
+    - athena:GetQueryExecution
+    Resource: arn:aws:athena:us-east-1:111111111111:workgroup/primary
+  - Effect: Allow
+    Action:
+    - glue:GetTable
+    - glue:GetPartitions
+    Resource:
+    - arn:aws:glue:us-east-1:111111111111:catalog
+    - arn:aws:glue:us-east-1:111111111111:database/analytics
+    - arn:aws:glue:us-east-1:111111111111:table/analytics/events
+  - Effect: Allow
+    Action:
+    - s3:GetObject
+    - s3:ListBucket
+    Resource:
+    - arn:aws:s3:::athena-results
+    - arn:aws:s3:::athena-results/*
+request:
+  spec:
+    access_type: read-write
+    duration:
+      duration_hours: 1
+expected:
+  score_max: 5

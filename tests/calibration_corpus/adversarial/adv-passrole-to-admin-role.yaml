@@ -1,0 +1,17 @@
+name: adv-passrole-to-admin-role
+description: "PassRole scoped to one specific role \u2014 but that role has AdministratorAccess. Looks narrow; is admin. Score\
+  \ \u22654 because PassRole always demands human review regardless of scope."
+policy:
+  Version: '2012-10-17'
+  Statement:
+  - Effect: Allow
+    Action:
+    - iam:PassRole
+    Resource: arn:aws:iam::111111111111:role/AdminRole
+request:
+  spec:
+    access_type: read-write
+    duration:
+      duration_hours: 1
+expected:
+  score_min: 4

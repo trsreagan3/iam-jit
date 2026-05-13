@@ -1,0 +1,18 @@
+name: real-monitoring-poller
+description: Monitoring role that polls CloudWatch metrics across the account.
+policy:
+  Version: '2012-10-17'
+  Statement:
+  - Effect: Allow
+    Action:
+    - cloudwatch:GetMetricData
+    - cloudwatch:ListMetrics
+    - cloudwatch:DescribeAlarms
+    Resource: '*'
+request:
+  spec:
+    access_type: read-only
+    duration:
+      duration_hours: 1
+expected:
+  score_max: 4

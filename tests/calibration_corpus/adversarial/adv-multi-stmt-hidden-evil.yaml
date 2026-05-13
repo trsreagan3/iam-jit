@@ -1,0 +1,20 @@
+name: adv-multi-stmt-hidden-evil
+description: "Two statements: one obviously safe (Get one parameter), one buried (Resource:* DeleteObject). Common pattern\
+  \ in real attacks \u2014 attackers append rather than rewrite."
+policy:
+  Version: '2012-10-17'
+  Statement:
+  - Effect: Allow
+    Action: ssm:GetParameter
+    Resource: arn:aws:ssm:us-east-1:111111111111:parameter/app/version
+  - Effect: Allow
+    Action: s3:DeleteObject
+    Resource: '*'
+request:
+  spec:
+    access_type: read-write
+    duration:
+      duration_hours: 1
+expected:
+  score_min: 7
+  must_auto_approve: false

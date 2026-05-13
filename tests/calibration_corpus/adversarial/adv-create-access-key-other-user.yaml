@@ -1,0 +1,17 @@
+name: adv-create-access-key-other-user
+description: "CreateAccessKey on Resource:* \u2014 mint long-lived programmatic creds for ANY user in the account. Catastrophic."
+policy:
+  Version: '2012-10-17'
+  Statement:
+  - Effect: Allow
+    Action:
+    - iam:CreateAccessKey
+    Resource: '*'
+request:
+  spec:
+    access_type: read-write
+    duration:
+      duration_hours: 1
+expected:
+  score_min: 9
+  must_auto_approve: false

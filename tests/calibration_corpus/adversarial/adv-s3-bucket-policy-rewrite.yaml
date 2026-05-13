@@ -1,0 +1,17 @@
+name: adv-s3-bucket-policy-rewrite
+description: PutBucketPolicy on a single bucket. Sounds narrow but caller can publish-to-internet the whole bucket with one
+  call.
+policy:
+  Version: '2012-10-17'
+  Statement:
+  - Effect: Allow
+    Action: s3:PutBucketPolicy
+    Resource: arn:aws:s3:::prod-data
+request:
+  spec:
+    access_type: read-write
+    duration:
+      duration_hours: 1
+expected:
+  score_min: 5
+  must_auto_approve: false

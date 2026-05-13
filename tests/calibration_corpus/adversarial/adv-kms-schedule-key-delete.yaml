@@ -1,0 +1,16 @@
+name: adv-kms-schedule-key-delete
+description: kms:ScheduleKeyDeletion on Resource:*. Destroy ability to decrypt any data forever. Catastrophic.
+policy:
+  Version: '2012-10-17'
+  Statement:
+  - Effect: Allow
+    Action: kms:ScheduleKeyDeletion
+    Resource: '*'
+request:
+  spec:
+    access_type: read-write
+    duration:
+      duration_hours: 1
+expected:
+  score_min: 9
+  must_auto_approve: false

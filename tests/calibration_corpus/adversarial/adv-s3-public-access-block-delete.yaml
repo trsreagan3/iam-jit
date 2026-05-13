@@ -1,0 +1,16 @@
+name: adv-s3-public-access-block-delete
+description: "Delete a bucket's Public Access Block \u2014 re-enables the possibility of accidental or malicious public exposure."
+policy:
+  Version: '2012-10-17'
+  Statement:
+  - Effect: Allow
+    Action: s3:DeletePublicAccessBlock
+    Resource: '*'
+request:
+  spec:
+    access_type: read-write
+    duration:
+      duration_hours: 1
+expected:
+  score_min: 5
+  must_auto_approve: false

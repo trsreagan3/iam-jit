@@ -187,6 +187,11 @@ _CATASTROPHIC_ACTIONS = frozenset(
         "iam:PutRolePolicy",
         "iam:UpdateAssumeRolePolicy",
         "iam:CreateAccessKey",
+        # Policy-version swap: silently change a managed policy by
+        # creating a new version + setting it as default. Leaves no
+        # explicit "policy modified" audit, just a version bump.
+        "iam:CreatePolicyVersion",
+        "iam:SetDefaultPolicyVersion",
         # KMS — schedule deletion of any key locks data forever
         "kms:ScheduleKeyDeletion",
     }
@@ -198,28 +203,47 @@ def _is_broad_resource(r: str) -> bool:
 
     Catches:
       - literal `*` (account-wide)
-      - service-wide wildcards like `arn:aws:s3:::*`
+      - service-wide wildcards where the entire resource-spec is `*`,
+        like `arn:aws:s3:::*` or `arn:aws:ec2:::*`
       - bucket-level wildcards like `arn:aws:s3:::my-bucket/*` — every
         object in one bucket, which for a destructive action is still
         a wide blast radius (the whole bucket's contents).
 
-    Path-narrowed wildcards like `arn:aws:s3:::bucket/prefix/*` or
-    `arn:aws:s3:::bucket/team-a/files/*` are NOT broad — they're
-    intentional scoping and shouldn't trip the wildcard rules.
+    Does NOT match:
+      - Path-narrowed wildcards like `arn:aws:s3:::bucket/prefix/*`
+        (intentional scoping)
+      - Suffix wildcards inside a deeper ARN path like
+        `arn:aws:logs:us-east-1:account:log-group:/app:*` (the trailing
+        `:*` is a log-stream wildcard WITHIN one specific log group;
+        this is legitimate fine-grained scoping, not account-wide blast)
     """
     if r == "*":
         return True
-    if r.endswith(":*"):
-        return True
-    # Look at the resource-spec portion (everything after the ARN-prefix
-    # colons). For `arn:aws:s3:::bucket/*`, the resource_spec is `bucket/*`.
-    resource_spec = r.rsplit(":", 1)[-1] if r.startswith("arn:") else r
+    # ARN-shaped resources: inspect the resource-spec portion only.
+    # AWS ARN syntax is `arn:partition:service:region:account:resource-spec`
+    # so the resource-spec starts after the 5th colon.
+    if r.startswith("arn:"):
+        parts = r.split(":", 5)
+        if len(parts) < 6:
+            return False  # malformed ARN — treat as narrow
+        resource_spec = parts[5]
+    else:
+        resource_spec = r
+
+    # Service-wide wildcard: the entire resource-spec is just `*`.
     if resource_spec == "*":
         return True
+
+    # Bucket-level wildcard: resource-spec ends in `/*` AND has ≤1
+    # slash (e.g., `bucket/*` → broad-within-bucket; `bucket/dir/*` →
+    # narrow path-prefix). Uses `/` because S3 ARNs use slash as the
+    # path separator. Services that use `:` as a sub-resource separator
+    # (logs, ssm parameters, etc.) intentionally don't trigger this —
+    # `log-group:/app:*` is a stream-wildcard within ONE log group,
+    # which is fine-grained scoping, not broad blast.
     if resource_spec.endswith("/*") and resource_spec.count("/") <= 1:
-        # bucket/*   → 1 slash → broad
-        # bucket/dir/* → 2 slashes → narrow (intentional path scoping)
         return True
+
     return False
 
 

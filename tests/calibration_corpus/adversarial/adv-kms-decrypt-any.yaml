@@ -1,0 +1,16 @@
+name: adv-kms-decrypt-any
+description: "kms:Decrypt with wildcard key \u2014 decrypt anything anywhere. Data confidentiality breach primitive."
+policy:
+  Version: '2012-10-17'
+  Statement:
+  - Effect: Allow
+    Action: kms:Decrypt
+    Resource: '*'
+request:
+  spec:
+    access_type: read-write
+    duration:
+      duration_hours: 1
+expected:
+  score_min: 7
+  must_auto_approve: false

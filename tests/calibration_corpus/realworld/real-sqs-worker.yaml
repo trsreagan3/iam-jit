@@ -1,0 +1,22 @@
+name: real-sqs-worker
+description: Worker reading from one queue + writing results to one DDB table.
+policy:
+  Version: '2012-10-17'
+  Statement:
+  - Effect: Allow
+    Action:
+    - sqs:ReceiveMessage
+    - sqs:DeleteMessage
+    - sqs:GetQueueAttributes
+    Resource: arn:aws:sqs:us-east-1:111111111111:job-queue
+  - Effect: Allow
+    Action:
+    - dynamodb:PutItem
+    Resource: arn:aws:dynamodb:us-east-1:111111111111:table/results
+request:
+  spec:
+    access_type: read-write
+    duration:
+      duration_hours: 1
+expected:
+  score_max: 5

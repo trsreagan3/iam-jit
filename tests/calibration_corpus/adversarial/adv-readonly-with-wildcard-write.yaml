@@ -1,0 +1,17 @@
+name: adv-readonly-with-wildcard-write
+description: "Read-only flag with `s3:*` \u2014 full S3 control disguised as a read. The mismatch alarm must fire."
+policy:
+  Version: '2012-10-17'
+  Statement:
+  - Effect: Allow
+    Action:
+    - s3:*
+    Resource: '*'
+request:
+  spec:
+    access_type: read-only
+    duration:
+      duration_hours: 1
+expected:
+  score_min: 7
+  must_auto_approve: false

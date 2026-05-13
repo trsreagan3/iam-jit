@@ -1,0 +1,16 @@
+name: adv-star-action-star-resource
+description: "Action:* Resource:* \u2014 full admin. Floor at 10."
+policy:
+  Version: '2012-10-17'
+  Statement:
+  - Effect: Allow
+    Action: '*'
+    Resource: '*'
+request:
+  spec:
+    access_type: read-write
+    duration:
+      duration_hours: 1
+expected:
+  score_min: 10
+  must_auto_approve: false

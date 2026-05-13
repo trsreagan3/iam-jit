@@ -1,0 +1,17 @@
+name: adv-action-prefix-delete-wildcard
+description: "Action: s3:Delete* on bucket/* \u2014 matches DeleteObject, DeleteObjectVersion, DeleteBucket, etc. Action wildcard\
+  \ hides destructive intent."
+policy:
+  Version: '2012-10-17'
+  Statement:
+  - Effect: Allow
+    Action: s3:Delete*
+    Resource: arn:aws:s3:::prod-data/*
+request:
+  spec:
+    access_type: read-write
+    duration:
+      duration_hours: 1
+expected:
+  score_min: 5
+  must_auto_approve: false

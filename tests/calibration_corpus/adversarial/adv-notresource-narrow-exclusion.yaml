@@ -1,0 +1,17 @@
+name: adv-notresource-narrow-exclusion
+description: "NotResource excluding one specific log-bucket while granting s3:* \u2014 attacker has full S3 on everything\
+  \ else. Disguises the broad reach behind a fake-exclusion."
+policy:
+  Version: '2012-10-17'
+  Statement:
+  - Effect: Allow
+    Action: s3:*
+    NotResource: arn:aws:s3:::audit-logs/*
+request:
+  spec:
+    access_type: read-write
+    duration:
+      duration_hours: 1
+expected:
+  score_min: 7
+  must_auto_approve: false

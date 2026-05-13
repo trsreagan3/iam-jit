@@ -1,0 +1,15 @@
+name: real-cdn-invalidate
+description: CI step invalidating one CloudFront distribution after a deploy.
+policy:
+  Version: '2012-10-17'
+  Statement:
+  - Effect: Allow
+    Action: cloudfront:CreateInvalidation
+    Resource: arn:aws:cloudfront::111111111111:distribution/ABCD1234
+request:
+  spec:
+    access_type: read-write
+    duration:
+      duration_hours: 1
+expected:
+  score_max: 4

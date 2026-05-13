@@ -1,0 +1,19 @@
+name: adv-create-policy-version-set-default
+description: "CreatePolicyVersion + SetDefaultPolicyVersion on Resource:* \u2014 swap any managed policy for an attacker-controlled\
+  \ version without trace. High-confusion escalation path."
+policy:
+  Version: '2012-10-17'
+  Statement:
+  - Effect: Allow
+    Action:
+    - iam:CreatePolicyVersion
+    - iam:SetDefaultPolicyVersion
+    Resource: '*'
+request:
+  spec:
+    access_type: read-write
+    duration:
+      duration_hours: 1
+expected:
+  score_min: 7
+  must_auto_approve: false

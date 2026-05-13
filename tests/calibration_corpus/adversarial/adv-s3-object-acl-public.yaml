@@ -1,0 +1,16 @@
+name: adv-s3-object-acl-public
+description: PutObjectAcl can change a single object's ACL to public-read. If the object is sensitive, single-call exposure.
+policy:
+  Version: '2012-10-17'
+  Statement:
+  - Effect: Allow
+    Action: s3:PutObjectAcl
+    Resource: arn:aws:s3:::prod-data/*
+request:
+  spec:
+    access_type: read-write
+    duration:
+      duration_hours: 1
+expected:
+  score_min: 5
+  must_auto_approve: false

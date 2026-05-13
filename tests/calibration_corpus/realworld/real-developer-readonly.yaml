@@ -1,0 +1,25 @@
+name: real-developer-readonly
+description: "A developer role with broad read-only access. The AWS-managed ReadOnlyAccess pattern. Should NOT be scored high\
+  \ \u2014 reading is not destructive."
+policy:
+  Version: '2012-10-17'
+  Statement:
+  - Effect: Allow
+    Action:
+    - ec2:Describe*
+    - s3:List*
+    - s3:Get*
+    - rds:Describe*
+    - lambda:List*
+    - lambda:Get*
+    - cloudwatch:Get*
+    - logs:Get*
+    - logs:Describe*
+    Resource: '*'
+request:
+  spec:
+    access_type: read-only
+    duration:
+      duration_hours: 1
+expected:
+  score_max: 7

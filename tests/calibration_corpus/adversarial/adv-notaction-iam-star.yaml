@@ -1,0 +1,17 @@
+name: adv-notaction-iam-star
+description: "NotAction iam:* with Resource:*  \u2014 grants every action EXCEPT IAM. That's near-admin. AWS itself flags\
+  \ NotAction as a footgun."
+policy:
+  Version: '2012-10-17'
+  Statement:
+  - Effect: Allow
+    NotAction: iam:*
+    Resource: '*'
+request:
+  spec:
+    access_type: read-write
+    duration:
+      duration_hours: 1
+expected:
+  score_min: 8
+  must_auto_approve: false

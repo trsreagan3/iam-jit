@@ -1,0 +1,19 @@
+name: real-eks-pod-s3-read
+description: 'EKS IRSA role: read one S3 bucket from a Kubernetes pod. Common pattern for app data.'
+policy:
+  Version: '2012-10-17'
+  Statement:
+  - Effect: Allow
+    Action:
+    - s3:GetObject
+    - s3:ListBucket
+    Resource:
+    - arn:aws:s3:::app-data
+    - arn:aws:s3:::app-data/*
+request:
+  spec:
+    access_type: read-write
+    duration:
+      duration_hours: 1
+expected:
+  score_max: 3

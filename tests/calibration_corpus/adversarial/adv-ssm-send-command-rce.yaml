@@ -1,0 +1,16 @@
+name: adv-ssm-send-command-rce
+description: "ssm:SendCommand to instances. Remote code execution on EC2 fleet \u2014 root shell on every targeted instance."
+policy:
+  Version: '2012-10-17'
+  Statement:
+  - Effect: Allow
+    Action: ssm:SendCommand
+    Resource: '*'
+request:
+  spec:
+    access_type: read-write
+    duration:
+      duration_hours: 1
+expected:
+  score_min: 5
+  must_auto_approve: false

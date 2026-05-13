@@ -1,0 +1,19 @@
+name: adv-bucket-level-delete-wildcard
+description: s3:DeleteObject + s3:DeleteObjectVersion on bucket/*. Versioning history erasure on every object in one bucket.
+  Looks narrow (one bucket) but is broad-within-container.
+policy:
+  Version: '2012-10-17'
+  Statement:
+  - Effect: Allow
+    Action:
+    - s3:DeleteObject
+    - s3:DeleteObjectVersion
+    Resource: arn:aws:s3:::prod-data/*
+request:
+  spec:
+    access_type: read-write
+    duration:
+      duration_hours: 1
+expected:
+  score_min: 7
+  must_auto_approve: false

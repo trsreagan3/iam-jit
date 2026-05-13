@@ -1,0 +1,18 @@
+name: adv-cloudtrail-stop-logging
+description: "Stop CloudTrail logging on Resource:*. Pure cover-tracks primitive \u2014 score must floor at catastrophic (9)."
+policy:
+  Version: '2012-10-17'
+  Statement:
+  - Effect: Allow
+    Action:
+    - cloudtrail:StopLogging
+    - cloudtrail:UpdateTrail
+    Resource: '*'
+request:
+  spec:
+    access_type: read-write
+    duration:
+      duration_hours: 1
+expected:
+  score_min: 9
+  must_auto_approve: false

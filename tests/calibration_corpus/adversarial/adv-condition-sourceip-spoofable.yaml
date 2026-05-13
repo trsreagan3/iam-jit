@@ -1,0 +1,20 @@
+name: adv-condition-sourceip-spoofable
+description: Sensitive action guarded by aws:SourceIp condition. Inside a trusted CIDR, the policy effectively grants the
+  action. A compromised principal inside that CIDR has full access.
+policy:
+  Version: '2012-10-17'
+  Statement:
+  - Effect: Allow
+    Action: iam:PassRole
+    Resource: '*'
+    Condition:
+      IpAddress:
+        aws:SourceIp: 10.0.0.0/8
+request:
+  spec:
+    access_type: read-write
+    duration:
+      duration_hours: 1
+expected:
+  score_min: 6
+  must_auto_approve: false

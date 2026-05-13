@@ -1,0 +1,18 @@
+name: adv-readonly-with-iam-pass
+description: "access_type=read-only with iam:PassRole \u2014 clear mismatch. Read flag with privilege-escalation primitive\
+  \ must score human-review tier."
+policy:
+  Version: '2012-10-17'
+  Statement:
+  - Effect: Allow
+    Action:
+    - iam:PassRole
+    Resource: '*'
+request:
+  spec:
+    access_type: read-only
+    duration:
+      duration_hours: 1
+expected:
+  score_min: 7
+  must_auto_approve: false

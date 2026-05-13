@@ -1,0 +1,20 @@
+name: adv-create-role-and-attach-admin
+description: "Classic escalation: CreateRole + AttachRolePolicy on Resource:*. Attacker builds a new role and slaps AdministratorAccess\
+  \ on it. Score: catastrophic (\u22659)."
+policy:
+  Version: '2012-10-17'
+  Statement:
+  - Effect: Allow
+    Action:
+    - iam:CreateRole
+    - iam:AttachRolePolicy
+    - iam:PutRolePolicy
+    Resource: '*'
+request:
+  spec:
+    access_type: read-write
+    duration:
+      duration_hours: 1
+expected:
+  score_min: 9
+  must_auto_approve: false

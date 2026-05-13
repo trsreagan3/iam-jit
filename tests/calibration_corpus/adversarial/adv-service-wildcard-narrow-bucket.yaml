@@ -1,0 +1,19 @@
+name: adv-service-wildcard-narrow-bucket
+description: "s3:* on bucket + bucket/* \u2014 full S3 control on one bucket. Sounds scoped but caller can DeleteBucket, change\
+  \ ACLs, remove versioning, etc."
+policy:
+  Version: '2012-10-17'
+  Statement:
+  - Effect: Allow
+    Action: s3:*
+    Resource:
+    - arn:aws:s3:::prod-data
+    - arn:aws:s3:::prod-data/*
+request:
+  spec:
+    access_type: read-write
+    duration:
+      duration_hours: 1
+expected:
+  score_min: 6
+  must_auto_approve: false

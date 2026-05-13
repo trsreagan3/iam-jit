@@ -1,0 +1,19 @@
+name: adv-sg-open-prod-to-internet
+description: "AuthorizeSecurityGroupIngress on Resource:* \u2014 caller can add 0.0.0.0/0 ingress to any SG. Single API call\
+  \ = public-facing prod database."
+policy:
+  Version: '2012-10-17'
+  Statement:
+  - Effect: Allow
+    Action:
+    - ec2:AuthorizeSecurityGroupIngress
+    - ec2:ModifySecurityGroupRules
+    Resource: '*'
+request:
+  spec:
+    access_type: read-write
+    duration:
+      duration_hours: 1
+expected:
+  score_min: 5
+  must_auto_approve: false

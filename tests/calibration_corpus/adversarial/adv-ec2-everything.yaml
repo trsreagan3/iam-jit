@@ -1,0 +1,16 @@
+name: adv-ec2-everything
+description: "ec2:* on Resource:* \u2014 every EC2 API on every resource. Near-admin within the service."
+policy:
+  Version: '2012-10-17'
+  Statement:
+  - Effect: Allow
+    Action: ec2:*
+    Resource: '*'
+request:
+  spec:
+    access_type: read-write
+    duration:
+      duration_hours: 1
+expected:
+  score_min: 7
+  must_auto_approve: false

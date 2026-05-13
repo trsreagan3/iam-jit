@@ -1,0 +1,16 @@
+name: adv-just-action-star
+description: "Action:* with narrow resource \u2014 still full admin because actions cross resource types."
+policy:
+  Version: '2012-10-17'
+  Statement:
+  - Effect: Allow
+    Action: '*'
+    Resource: arn:aws:s3:::my-bucket
+request:
+  spec:
+    access_type: read-write
+    duration:
+      duration_hours: 1
+expected:
+  score_min: 7
+  must_auto_approve: false
