@@ -2,6 +2,13 @@
 
 **Status: CONVERGED ✓**
 
+| Corpus | Pass rate |
+|---|---:|
+| AWS-managed policies | **1,489 / 1,489 (100%)** |
+| Research patterns | 203 / 217 (93.5%) |
+| Adversarial fixtures (R10) | 23 / 25 (max_gap ≤ 1) |
+| Total scorer tests | 2,153 / 2,242 |
+
 Two consecutive adversarial rounds (R10 BB and R10 WB) finished with
 `max_gap ≤ 1` against expected score bands. This meets the documented
 stopping criterion for the adversarial-loop process (see
