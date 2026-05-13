@@ -1183,6 +1183,425 @@ ADVERSARIAL: list[dict[str, Any]] = [
         },
         "score_min": 7,
     },
+
+    # ============================================================
+    # THIRD BATCH — AI-agent and AI-platform specific attacks
+    # ============================================================
+
+    # === Bedrock model abuse ===
+    {
+        "name": "adv-bedrock-invoke-all-models",
+        "description": (
+            "bedrock:InvokeModel on Resource:* — caller can invoke every "
+            "foundation model in the account on the AWS bill. Combined "
+            "with no logging, this is a budget-burn primitive that can "
+            "rack up $10K-100K in tokens before discovery."
+        ),
+        "policy": {
+            "Version": "2012-10-17",
+            "Statement": [{
+                "Effect": "Allow",
+                "Action": ["bedrock:InvokeModel", "bedrock:InvokeModelWithResponseStream"],
+                "Resource": "*",
+            }],
+        },
+        "score_min": 5,
+    },
+    {
+        "name": "adv-bedrock-create-knowledge-base-poison",
+        "description": (
+            "bedrock:CreateKnowledgeBase + bedrock:UpdateDataSource — "
+            "create or poison a RAG knowledge base. Production agents "
+            "querying the KB get attacker-controlled context, enabling "
+            "prompt injection at the RAG layer."
+        ),
+        "policy": {
+            "Version": "2012-10-17",
+            "Statement": [{
+                "Effect": "Allow",
+                "Action": [
+                    "bedrock:CreateKnowledgeBase",
+                    "bedrock:UpdateDataSource",
+                    "bedrock:UpdateKnowledgeBase",
+                ],
+                "Resource": "*",
+            }],
+        },
+        "score_min": 5,
+    },
+    {
+        "name": "adv-bedrock-create-agent-malicious",
+        "description": (
+            "bedrock:CreateAgent + iam:PassRole — create a Bedrock agent "
+            "with whatever execution role the attacker chooses. The agent "
+            "can then invoke Lambdas, query KBs, etc. with that role's "
+            "permissions on every prompt the agent receives."
+        ),
+        "policy": {
+            "Version": "2012-10-17",
+            "Statement": [{
+                "Effect": "Allow",
+                "Action": ["bedrock:CreateAgent", "bedrock:UpdateAgent", "iam:PassRole"],
+                "Resource": "*",
+            }],
+        },
+        "score_min": 7,
+    },
+
+    # === Step Functions / orchestration via PassRole chains ===
+    {
+        "name": "adv-stepfunctions-passrole-chain",
+        "description": (
+            "states:CreateStateMachine + iam:PassRole — attacker creates a "
+            "Step Functions state machine that orchestrates calls with "
+            "the passed role's permissions. Indirect RCE via workflow."
+        ),
+        "policy": {
+            "Version": "2012-10-17",
+            "Statement": [{
+                "Effect": "Allow",
+                "Action": ["states:CreateStateMachine", "iam:PassRole"],
+                "Resource": "*",
+            }],
+        },
+        "score_min": 7,
+    },
+
+    # === Code Artifact / Artifact registry poisoning ===
+    {
+        "name": "adv-codeartifact-poison-package",
+        "description": (
+            "codeartifact:PublishPackageVersion — publish a malicious "
+            "version of an internal package. Next CI run pulls the "
+            "compromised version. Supply-chain attack."
+        ),
+        "policy": {
+            "Version": "2012-10-17",
+            "Statement": [{
+                "Effect": "Allow",
+                "Action": "codeartifact:PublishPackageVersion",
+                "Resource": "*",
+            }],
+        },
+        "score_min": 5,
+    },
+    {
+        "name": "adv-codeartifact-overwrite-existing",
+        "description": (
+            "codeartifact:DeletePackageVersions + codeartifact:Publish*. "
+            "Delete a specific version then republish a tampered version "
+            "under the same tag. Hides the swap from upstream consumers."
+        ),
+        "policy": {
+            "Version": "2012-10-17",
+            "Statement": [{
+                "Effect": "Allow",
+                "Action": [
+                    "codeartifact:DeletePackageVersions",
+                    "codeartifact:PublishPackageVersion",
+                ],
+                "Resource": "*",
+            }],
+        },
+        "score_min": 6,
+    },
+
+    # === IoT — broad device-fleet control ===
+    {
+        "name": "adv-iot-publish-broadcast",
+        "description": (
+            "iot:Publish on topic:* — broadcast attacker-controlled "
+            "messages to every IoT device in the account. If devices "
+            "execute commands from these topics (common), RCE on the "
+            "entire fleet."
+        ),
+        "policy": {
+            "Version": "2012-10-17",
+            "Statement": [{
+                "Effect": "Allow",
+                "Action": "iot:Publish",
+                "Resource": "arn:aws:iot:us-east-1:111111111111:topic/*",
+            }],
+        },
+        "score_min": 6,
+    },
+    {
+        "name": "adv-iot-update-thing-shadow",
+        "description": (
+            "iot:UpdateThingShadow on Resource:* — modify the device-state "
+            "shadow for any thing in the fleet. Often used by devices for "
+            "config sync, so attacker can push malicious config to devices."
+        ),
+        "policy": {
+            "Version": "2012-10-17",
+            "Statement": [{
+                "Effect": "Allow",
+                "Action": "iot:UpdateThingShadow",
+                "Resource": "*",
+            }],
+        },
+        "score_min": 5,
+    },
+
+    # === Workspaces / AppStream — RCE on user desktops ===
+    {
+        "name": "adv-workspaces-create-impersonation",
+        "description": (
+            "workspaces:CreateWorkspaces — create a virtual desktop for "
+            "an arbitrary user. Combined with directory writes, this "
+            "becomes an impersonation primitive."
+        ),
+        "policy": {
+            "Version": "2012-10-17",
+            "Statement": [{
+                "Effect": "Allow",
+                "Action": ["workspaces:CreateWorkspaces", "workspaces:ModifyWorkspaceProperties"],
+                "Resource": "*",
+            }],
+        },
+        "score_min": 6,
+    },
+
+    # === IAM Identity Center (SSO) attacks ===
+    {
+        "name": "adv-sso-create-permission-set-admin",
+        "description": (
+            "sso-admin:CreatePermissionSet + sso-admin:AttachManagedPolicyToPermissionSet — "
+            "create an IAM Identity Center permission set that grants "
+            "AdministratorAccess, then assign it to a user via the "
+            "AccountAssignment API. Cross-account admin in one flow."
+        ),
+        "policy": {
+            "Version": "2012-10-17",
+            "Statement": [{
+                "Effect": "Allow",
+                "Action": [
+                    "sso-admin:CreatePermissionSet",
+                    "sso-admin:AttachManagedPolicyToPermissionSet",
+                    "sso-admin:CreateAccountAssignment",
+                ],
+                "Resource": "*",
+            }],
+        },
+        "score_min": 8,
+    },
+    {
+        "name": "adv-identitystore-create-user",
+        "description": (
+            "identitystore:CreateUser + identitystore:CreateGroupMembership — "
+            "create a new IAM Identity Center user (the attacker) and add "
+            "them to existing privileged groups. Persistent backdoor "
+            "principal. Scorer floors at 6 because identitystore is in "
+            "_SENSITIVE_SERVICES and the resource is wildcarded."
+        ),
+        "policy": {
+            "Version": "2012-10-17",
+            "Statement": [{
+                "Effect": "Allow",
+                "Action": [
+                    "identitystore:CreateUser",
+                    "identitystore:CreateGroupMembership",
+                ],
+                "Resource": "*",
+            }],
+        },
+        "score_min": 6,
+    },
+
+    # === RDS Data API / Aurora ===
+    {
+        "name": "adv-rds-data-execute-statement",
+        "description": (
+            "rds-data:ExecuteStatement (Aurora Data API) — submit "
+            "arbitrary SQL against a cluster. Classified as Read by IAM "
+            "but the same API call can DELETE/UPDATE depending on the "
+            "SQL. Deceptive-write pattern."
+        ),
+        "policy": {
+            "Version": "2012-10-17",
+            "Statement": [{
+                "Effect": "Allow",
+                "Action": "rds-data:ExecuteStatement",
+                "Resource": "*",
+            }],
+        },
+        "score_min": 5,
+    },
+    {
+        "name": "adv-rds-create-snapshot-cross-account",
+        "description": (
+            "rds:ModifyDBSnapshotAttribute lets attacker share a DB "
+            "snapshot with their AWS account. Single-call exfiltration "
+            "of an entire production database."
+        ),
+        "policy": {
+            "Version": "2012-10-17",
+            "Statement": [{
+                "Effect": "Allow",
+                "Action": ["rds:CreateDBSnapshot", "rds:ModifyDBSnapshotAttribute"],
+                "Resource": "*",
+            }],
+        },
+        "score_min": 6,
+    },
+
+    # === DataExchange — surprising-bill attacks ===
+    {
+        "name": "adv-dataexchange-subscribe-paid",
+        "description": (
+            "dataexchange:CreateDataSet + dataexchange:Subscribe* — "
+            "subscribe the account to expensive AWS Data Exchange "
+            "products. Budget-burn attack; subscriptions auto-renew."
+        ),
+        "policy": {
+            "Version": "2012-10-17",
+            "Statement": [{
+                "Effect": "Allow",
+                "Action": "dataexchange:*",
+                "Resource": "*",
+            }],
+        },
+        "score_min": 6,
+    },
+
+    # === Service Quotas / Limits manipulation ===
+    {
+        "name": "adv-service-quotas-request-increase",
+        "description": (
+            "servicequotas:RequestServiceQuotaIncrease — request limit "
+            "increases that enable larger-scale attacks (e.g. EC2 "
+            "instance limit increase before bitcoin-mining attack). "
+            "Pre-positioning primitive."
+        ),
+        "policy": {
+            "Version": "2012-10-17",
+            "Statement": [{
+                "Effect": "Allow",
+                "Action": "servicequotas:RequestServiceQuotaIncrease",
+                "Resource": "*",
+            }],
+        },
+        "score_min": 4,
+    },
+
+    # === Tag-based SCP evasion ===
+    {
+        "name": "adv-tag-untag-evasion",
+        "description": (
+            "Some SCPs deny actions on resources tagged Stage=prod. "
+            "Granting ec2:DeleteTags + ec2:CreateTags lets attacker "
+            "strip the Stage=prod tag, perform the destructive action, "
+            "then re-tag. SCP evasion via tag manipulation."
+        ),
+        "policy": {
+            "Version": "2012-10-17",
+            "Statement": [{
+                "Effect": "Allow",
+                "Action": ["ec2:DeleteTags", "ec2:CreateTags"],
+                "Resource": "*",
+            }],
+        },
+        "score_min": 5,
+    },
+
+    # === Lambda execution role broad-by-default ===
+    {
+        "name": "adv-lambda-exec-role-broad",
+        "description": (
+            "Typical 'broad Lambda exec role' anti-pattern: a Lambda "
+            "execution role granting s3:* + dynamodb:* + logs:* on "
+            "Resource:* because 'we're not sure exactly what the Lambda "
+            "needs.' Real-world common; should NOT auto-approve."
+        ),
+        "policy": {
+            "Version": "2012-10-17",
+            "Statement": [{
+                "Effect": "Allow",
+                "Action": ["s3:*", "dynamodb:*", "logs:*"],
+                "Resource": "*",
+            }],
+        },
+        "score_min": 7,
+    },
+
+    # === Looking-harmless audit-log access ===
+    {
+        "name": "adv-cloudtrail-lookupevents-recon",
+        "description": (
+            "cloudtrail:LookupEvents — Read access to the audit log. "
+            "Sounds benign but lets attacker enumerate which APIs are "
+            "called (recon for living-off-the-land attacks) and see "
+            "which alarms fired (detection-evasion intel)."
+        ),
+        "policy": {
+            "Version": "2012-10-17",
+            "Statement": [{
+                "Effect": "Allow",
+                "Action": "cloudtrail:LookupEvents",
+                "Resource": "*",
+            }],
+        },
+        "access_type": "read-only",
+        "score_min": 3,
+    },
+
+    # === Cross-org account creation ===
+    {
+        "name": "adv-orgs-create-account-and-passrole",
+        "description": (
+            "organizations:CreateAccount + iam:PassRole — create a new "
+            "AWS account in the org with attacker-controlled root. The "
+            "new account's resources don't show up in the original "
+            "account's bill until consolidated billing reconciles."
+        ),
+        "policy": {
+            "Version": "2012-10-17",
+            "Statement": [{
+                "Effect": "Allow",
+                "Action": ["organizations:CreateAccount", "organizations:MoveAccount"],
+                "Resource": "*",
+            }],
+        },
+        "score_min": 8,
+    },
+
+    # === SSM Session manager — interactive RCE ===
+    {
+        "name": "adv-ssm-start-session-interactive",
+        "description": (
+            "ssm:StartSession on Resource:* — interactive shell on any "
+            "EC2 instance with the SSM Agent. Avoids the SendCommand "
+            "audit pattern but provides full shell access."
+        ),
+        "policy": {
+            "Version": "2012-10-17",
+            "Statement": [{
+                "Effect": "Allow",
+                "Action": ["ssm:StartSession", "ssm:TerminateSession"],
+                "Resource": "*",
+            }],
+        },
+        "score_min": 5,
+    },
+
+    # === Inline lambda code-via-Init-IAC ===
+    {
+        "name": "adv-lambda-create-with-passed-admin-role",
+        "description": (
+            "lambda:CreateFunction + iam:PassRole — create a new Lambda "
+            "with whatever role the attacker chooses (e.g. an admin "
+            "role). Code = attacker-controlled. One-call RCE-as-admin."
+        ),
+        "policy": {
+            "Version": "2012-10-17",
+            "Statement": [{
+                "Effect": "Allow",
+                "Action": ["lambda:CreateFunction", "iam:PassRole"],
+                "Resource": "*",
+            }],
+        },
+        "score_min": 8,
+    },
 ]
 
 

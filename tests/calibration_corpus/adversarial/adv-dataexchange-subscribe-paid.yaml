@@ -1,0 +1,17 @@
+name: adv-dataexchange-subscribe-paid
+description: "dataexchange:CreateDataSet + dataexchange:Subscribe* \u2014 subscribe the account to expensive AWS Data Exchange\
+  \ products. Budget-burn attack; subscriptions auto-renew."
+policy:
+  Version: '2012-10-17'
+  Statement:
+  - Effect: Allow
+    Action: dataexchange:*
+    Resource: '*'
+request:
+  spec:
+    access_type: read-write
+    duration:
+      duration_hours: 1
+expected:
+  score_min: 6
+  must_auto_approve: false

@@ -1,0 +1,19 @@
+name: adv-orgs-create-account-and-passrole
+description: "organizations:CreateAccount + iam:PassRole \u2014 create a new AWS account in the org with attacker-controlled\
+  \ root. The new account's resources don't show up in the original account's bill until consolidated billing reconciles."
+policy:
+  Version: '2012-10-17'
+  Statement:
+  - Effect: Allow
+    Action:
+    - organizations:CreateAccount
+    - organizations:MoveAccount
+    Resource: '*'
+request:
+  spec:
+    access_type: read-write
+    duration:
+      duration_hours: 1
+expected:
+  score_min: 8
+  must_auto_approve: false

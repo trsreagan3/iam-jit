@@ -1,0 +1,16 @@
+name: adv-service-quotas-request-increase
+description: "servicequotas:RequestServiceQuotaIncrease \u2014 request limit increases that enable larger-scale attacks (e.g.\
+  \ EC2 instance limit increase before bitcoin-mining attack). Pre-positioning primitive."
+policy:
+  Version: '2012-10-17'
+  Statement:
+  - Effect: Allow
+    Action: servicequotas:RequestServiceQuotaIncrease
+    Resource: '*'
+request:
+  spec:
+    access_type: read-write
+    duration:
+      duration_hours: 1
+expected:
+  score_min: 4

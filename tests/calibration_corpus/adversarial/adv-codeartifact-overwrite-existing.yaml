@@ -1,0 +1,19 @@
+name: adv-codeartifact-overwrite-existing
+description: codeartifact:DeletePackageVersions + codeartifact:Publish*. Delete a specific version then republish a tampered
+  version under the same tag. Hides the swap from upstream consumers.
+policy:
+  Version: '2012-10-17'
+  Statement:
+  - Effect: Allow
+    Action:
+    - codeartifact:DeletePackageVersions
+    - codeartifact:PublishPackageVersion
+    Resource: '*'
+request:
+  spec:
+    access_type: read-write
+    duration:
+      duration_hours: 1
+expected:
+  score_min: 6
+  must_auto_approve: false

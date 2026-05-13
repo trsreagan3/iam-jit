@@ -1,0 +1,17 @@
+name: adv-iot-publish-broadcast
+description: "iot:Publish on topic:* \u2014 broadcast attacker-controlled messages to every IoT device in the account. If\
+  \ devices execute commands from these topics (common), RCE on the entire fleet."
+policy:
+  Version: '2012-10-17'
+  Statement:
+  - Effect: Allow
+    Action: iot:Publish
+    Resource: arn:aws:iot:us-east-1:111111111111:topic/*
+request:
+  spec:
+    access_type: read-write
+    duration:
+      duration_hours: 1
+expected:
+  score_min: 6
+  must_auto_approve: false

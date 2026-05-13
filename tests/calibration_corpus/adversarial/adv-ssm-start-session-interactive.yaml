@@ -1,0 +1,19 @@
+name: adv-ssm-start-session-interactive
+description: "ssm:StartSession on Resource:* \u2014 interactive shell on any EC2 instance with the SSM Agent. Avoids the SendCommand\
+  \ audit pattern but provides full shell access."
+policy:
+  Version: '2012-10-17'
+  Statement:
+  - Effect: Allow
+    Action:
+    - ssm:StartSession
+    - ssm:TerminateSession
+    Resource: '*'
+request:
+  spec:
+    access_type: read-write
+    duration:
+      duration_hours: 1
+expected:
+  score_min: 5
+  must_auto_approve: false

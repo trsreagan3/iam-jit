@@ -1,0 +1,20 @@
+name: adv-lambda-exec-role-broad
+description: 'Typical ''broad Lambda exec role'' anti-pattern: a Lambda execution role granting s3:* + dynamodb:* + logs:*
+  on Resource:* because ''we''re not sure exactly what the Lambda needs.'' Real-world common; should NOT auto-approve.'
+policy:
+  Version: '2012-10-17'
+  Statement:
+  - Effect: Allow
+    Action:
+    - s3:*
+    - dynamodb:*
+    - logs:*
+    Resource: '*'
+request:
+  spec:
+    access_type: read-write
+    duration:
+      duration_hours: 1
+expected:
+  score_min: 7
+  must_auto_approve: false

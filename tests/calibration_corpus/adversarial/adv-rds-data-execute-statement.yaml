@@ -1,0 +1,17 @@
+name: adv-rds-data-execute-statement
+description: "rds-data:ExecuteStatement (Aurora Data API) \u2014 submit arbitrary SQL against a cluster. Classified as Read\
+  \ by IAM but the same API call can DELETE/UPDATE depending on the SQL. Deceptive-write pattern."
+policy:
+  Version: '2012-10-17'
+  Statement:
+  - Effect: Allow
+    Action: rds-data:ExecuteStatement
+    Resource: '*'
+request:
+  spec:
+    access_type: read-write
+    duration:
+      duration_hours: 1
+expected:
+  score_min: 5
+  must_auto_approve: false

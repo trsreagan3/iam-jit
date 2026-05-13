@@ -1,0 +1,21 @@
+name: adv-sso-create-permission-set-admin
+description: "sso-admin:CreatePermissionSet + sso-admin:AttachManagedPolicyToPermissionSet \u2014 create an IAM Identity Center\
+  \ permission set that grants AdministratorAccess, then assign it to a user via the AccountAssignment API. Cross-account\
+  \ admin in one flow."
+policy:
+  Version: '2012-10-17'
+  Statement:
+  - Effect: Allow
+    Action:
+    - sso-admin:CreatePermissionSet
+    - sso-admin:AttachManagedPolicyToPermissionSet
+    - sso-admin:CreateAccountAssignment
+    Resource: '*'
+request:
+  spec:
+    access_type: read-write
+    duration:
+      duration_hours: 1
+expected:
+  score_min: 8
+  must_auto_approve: false

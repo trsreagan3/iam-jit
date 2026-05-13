@@ -1,0 +1,19 @@
+name: adv-rds-create-snapshot-cross-account
+description: rds:ModifyDBSnapshotAttribute lets attacker share a DB snapshot with their AWS account. Single-call exfiltration
+  of an entire production database.
+policy:
+  Version: '2012-10-17'
+  Statement:
+  - Effect: Allow
+    Action:
+    - rds:CreateDBSnapshot
+    - rds:ModifyDBSnapshotAttribute
+    Resource: '*'
+request:
+  spec:
+    access_type: read-write
+    duration:
+      duration_hours: 1
+expected:
+  score_min: 6
+  must_auto_approve: false

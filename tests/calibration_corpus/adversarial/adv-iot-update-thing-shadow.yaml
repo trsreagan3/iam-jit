@@ -1,0 +1,17 @@
+name: adv-iot-update-thing-shadow
+description: "iot:UpdateThingShadow on Resource:* \u2014 modify the device-state shadow for any thing in the fleet. Often\
+  \ used by devices for config sync, so attacker can push malicious config to devices."
+policy:
+  Version: '2012-10-17'
+  Statement:
+  - Effect: Allow
+    Action: iot:UpdateThingShadow
+    Resource: '*'
+request:
+  spec:
+    access_type: read-write
+    duration:
+      duration_hours: 1
+expected:
+  score_min: 5
+  must_auto_approve: false

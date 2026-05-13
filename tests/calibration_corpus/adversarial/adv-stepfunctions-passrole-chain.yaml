@@ -1,0 +1,19 @@
+name: adv-stepfunctions-passrole-chain
+description: "states:CreateStateMachine + iam:PassRole \u2014 attacker creates a Step Functions state machine that orchestrates\
+  \ calls with the passed role's permissions. Indirect RCE via workflow."
+policy:
+  Version: '2012-10-17'
+  Statement:
+  - Effect: Allow
+    Action:
+    - states:CreateStateMachine
+    - iam:PassRole
+    Resource: '*'
+request:
+  spec:
+    access_type: read-write
+    duration:
+      duration_hours: 1
+expected:
+  score_min: 7
+  must_auto_approve: false

@@ -1,0 +1,19 @@
+name: adv-bedrock-invoke-all-models
+description: "bedrock:InvokeModel on Resource:* \u2014 caller can invoke every foundation model in the account on the AWS\
+  \ bill. Combined with no logging, this is a budget-burn primitive that can rack up $10K-100K in tokens before discovery."
+policy:
+  Version: '2012-10-17'
+  Statement:
+  - Effect: Allow
+    Action:
+    - bedrock:InvokeModel
+    - bedrock:InvokeModelWithResponseStream
+    Resource: '*'
+request:
+  spec:
+    access_type: read-write
+    duration:
+      duration_hours: 1
+expected:
+  score_min: 5
+  must_auto_approve: false

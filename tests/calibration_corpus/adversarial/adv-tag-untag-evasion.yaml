@@ -1,0 +1,19 @@
+name: adv-tag-untag-evasion
+description: Some SCPs deny actions on resources tagged Stage=prod. Granting ec2:DeleteTags + ec2:CreateTags lets attacker
+  strip the Stage=prod tag, perform the destructive action, then re-tag. SCP evasion via tag manipulation.
+policy:
+  Version: '2012-10-17'
+  Statement:
+  - Effect: Allow
+    Action:
+    - ec2:DeleteTags
+    - ec2:CreateTags
+    Resource: '*'
+request:
+  spec:
+    access_type: read-write
+    duration:
+      duration_hours: 1
+expected:
+  score_min: 5
+  must_auto_approve: false

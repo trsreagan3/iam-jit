@@ -1,0 +1,17 @@
+name: adv-codeartifact-poison-package
+description: "codeartifact:PublishPackageVersion \u2014 publish a malicious version of an internal package. Next CI run pulls\
+  \ the compromised version. Supply-chain attack."
+policy:
+  Version: '2012-10-17'
+  Statement:
+  - Effect: Allow
+    Action: codeartifact:PublishPackageVersion
+    Resource: '*'
+request:
+  spec:
+    access_type: read-write
+    duration:
+      duration_hours: 1
+expected:
+  score_min: 5
+  must_auto_approve: false

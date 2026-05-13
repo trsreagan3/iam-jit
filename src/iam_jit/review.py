@@ -47,7 +47,19 @@ def is_review_enabled() -> bool:
     return not isinstance(get_backend(), NoOpBackend)
 
 _SENSITIVE_SERVICES = frozenset(
-    {"secretsmanager", "kms", "ssm", "iam", "organizations", "sts"}
+    {
+        # Original set: credential/identity surface
+        "secretsmanager", "kms", "ssm", "iam", "organizations", "sts",
+        # IAM Identity Center / SSO — minting cross-account admin
+        # via PermissionSets + AccountAssignment is account-compromise
+        # tier; the actions live under sso-admin and identitystore.
+        "sso-admin", "identitystore",
+        # Bedrock — LLM invocations + knowledge-base poisoning. Cost-
+        # burn primitive (foundation-model tokens are expensive) AND
+        # RAG-prompt-injection vector if the attacker can write to a
+        # knowledge base that production agents query.
+        "bedrock",
+    }
 )
 
 _HIGH_RISK_ACTIONS = frozenset(
@@ -205,6 +217,19 @@ _CATASTROPHIC_ACTIONS = frozenset(
         # changed" audit since key policy IS the resource policy).
         "kms:ScheduleKeyDeletion",
         "kms:PutKeyPolicy",
+        # IAM Identity Center (SSO) — these mint cross-account admin in
+        # one API call. CreatePermissionSet + AttachManagedPolicy*
+        # composes to "grant AdministratorAccess across the org";
+        # CreateAccountAssignment puts a principal on it.
+        "sso-admin:CreatePermissionSet",
+        "sso-admin:AttachManagedPolicyToPermissionSet",
+        "sso-admin:PutInlinePolicyToPermissionSet",
+        "sso-admin:CreateAccountAssignment",
+        # Organizations — creating new accounts or moving them between
+        # OUs evades SCP governance and is irreversible without org-
+        # admin intervention.
+        "organizations:CreateAccount",
+        "organizations:MoveAccount",
     }
 )
 

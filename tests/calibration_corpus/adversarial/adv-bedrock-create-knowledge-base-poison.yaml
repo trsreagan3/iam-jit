@@ -1,0 +1,20 @@
+name: adv-bedrock-create-knowledge-base-poison
+description: "bedrock:CreateKnowledgeBase + bedrock:UpdateDataSource \u2014 create or poison a RAG knowledge base. Production\
+  \ agents querying the KB get attacker-controlled context, enabling prompt injection at the RAG layer."
+policy:
+  Version: '2012-10-17'
+  Statement:
+  - Effect: Allow
+    Action:
+    - bedrock:CreateKnowledgeBase
+    - bedrock:UpdateDataSource
+    - bedrock:UpdateKnowledgeBase
+    Resource: '*'
+request:
+  spec:
+    access_type: read-write
+    duration:
+      duration_hours: 1
+expected:
+  score_min: 5
+  must_auto_approve: false

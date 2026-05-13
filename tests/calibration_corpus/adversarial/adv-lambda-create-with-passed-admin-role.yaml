@@ -1,0 +1,19 @@
+name: adv-lambda-create-with-passed-admin-role
+description: "lambda:CreateFunction + iam:PassRole \u2014 create a new Lambda with whatever role the attacker chooses (e.g.\
+  \ an admin role). Code = attacker-controlled. One-call RCE-as-admin."
+policy:
+  Version: '2012-10-17'
+  Statement:
+  - Effect: Allow
+    Action:
+    - lambda:CreateFunction
+    - iam:PassRole
+    Resource: '*'
+request:
+  spec:
+    access_type: read-write
+    duration:
+      duration_hours: 1
+expected:
+  score_min: 8
+  must_auto_approve: false

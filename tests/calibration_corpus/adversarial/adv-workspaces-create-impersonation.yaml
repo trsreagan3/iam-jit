@@ -1,0 +1,19 @@
+name: adv-workspaces-create-impersonation
+description: "workspaces:CreateWorkspaces \u2014 create a virtual desktop for an arbitrary user. Combined with directory writes,\
+  \ this becomes an impersonation primitive."
+policy:
+  Version: '2012-10-17'
+  Statement:
+  - Effect: Allow
+    Action:
+    - workspaces:CreateWorkspaces
+    - workspaces:ModifyWorkspaceProperties
+    Resource: '*'
+request:
+  spec:
+    access_type: read-write
+    duration:
+      duration_hours: 1
+expected:
+  score_min: 6
+  must_auto_approve: false

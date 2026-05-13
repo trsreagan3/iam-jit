@@ -1,0 +1,16 @@
+name: adv-cloudtrail-lookupevents-recon
+description: "cloudtrail:LookupEvents \u2014 Read access to the audit log. Sounds benign but lets attacker enumerate which\
+  \ APIs are called (recon for living-off-the-land attacks) and see which alarms fired (detection-evasion intel)."
+policy:
+  Version: '2012-10-17'
+  Statement:
+  - Effect: Allow
+    Action: cloudtrail:LookupEvents
+    Resource: '*'
+request:
+  spec:
+    access_type: read-only
+    duration:
+      duration_hours: 1
+expected:
+  score_min: 3

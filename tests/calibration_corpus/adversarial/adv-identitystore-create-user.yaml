@@ -1,0 +1,20 @@
+name: adv-identitystore-create-user
+description: "identitystore:CreateUser + identitystore:CreateGroupMembership \u2014 create a new IAM Identity Center user\
+  \ (the attacker) and add them to existing privileged groups. Persistent backdoor principal. Scorer floors at 6 because identitystore\
+  \ is in _SENSITIVE_SERVICES and the resource is wildcarded."
+policy:
+  Version: '2012-10-17'
+  Statement:
+  - Effect: Allow
+    Action:
+    - identitystore:CreateUser
+    - identitystore:CreateGroupMembership
+    Resource: '*'
+request:
+  spec:
+    access_type: read-write
+    duration:
+      duration_hours: 1
+expected:
+  score_min: 6
+  must_auto_approve: false

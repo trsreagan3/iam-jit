@@ -1,0 +1,20 @@
+name: adv-bedrock-create-agent-malicious
+description: "bedrock:CreateAgent + iam:PassRole \u2014 create a Bedrock agent with whatever execution role the attacker chooses.\
+  \ The agent can then invoke Lambdas, query KBs, etc. with that role's permissions on every prompt the agent receives."
+policy:
+  Version: '2012-10-17'
+  Statement:
+  - Effect: Allow
+    Action:
+    - bedrock:CreateAgent
+    - bedrock:UpdateAgent
+    - iam:PassRole
+    Resource: '*'
+request:
+  spec:
+    access_type: read-write
+    duration:
+      duration_hours: 1
+expected:
+  score_min: 7
+  must_auto_approve: false
