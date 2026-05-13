@@ -319,6 +319,65 @@ Parameters:
       behind a VPN, not for production. Cookies will be sent
       cleartext.
 
+  EnableEdgeProtection:
+    Type: String
+    Default: "false"
+    AllowedValues: ["true", "false"]
+    Description: |
+      When `true`, deploy a CloudFront distribution + WAFv2 WebACL in
+      front of the Lambda Function URL. Provides three things:
+
+        1. **Per-IP rate limiting at the edge** (WAFv2 rate-based rule).
+           The in-Lambda limiter is process-local and resets on cold-
+           start; the real cap must be at the edge. Default 2,000
+           requests per 5-minute sliding window per source IP — well
+           above the documented free tier (100 req/month) so legitimate
+           traffic isn't throttled, but stops scraping / Show-HN-day
+           hammering before requests reach (and pay for) Lambda.
+
+        2. **HTTPS termination at AWS-managed cert** (no ACM cert
+           required for the apex `*.cloudfront.net` URL). For a custom
+           domain, add `CustomDomainName` + `EdgeCertificateArn` in a
+           future revision.
+
+        3. **DDoS protection via AWS Shield Standard** (free, included
+           with CloudFront).
+
+      Cost when enabled: ~$5–15/mo at launch traffic (1 TB egress and
+      10 M requests are free tier; rate-based WAF rules are $1/rule
+      + $0.60/M requests evaluated). The Function URL stays
+      provisioned and reachable for direct testing; CloudFront is an
+      additional surface.
+    # Caveat: WAFv2 WebACLs with Scope=CLOUDFRONT MUST be deployed in
+    # us-east-1 (this is an AWS hard requirement, not a template
+    # limitation). If you're deploying this stack in another region,
+    # the WAF resource creation will fail — set EnableEdgeProtection
+    # back to false and deploy the WebACL via a separate us-east-1
+    # stack, then pass its ARN in.
+
+  CloudFrontPriceClass:
+    Type: String
+    Default: PriceClass_100
+    AllowedValues: [PriceClass_100, PriceClass_200, PriceClass_All]
+    Description: |
+      CloudFront edge-location coverage when EnableEdgeProtection=true.
+      PriceClass_100 = NA + EU only (cheapest). PriceClass_200 adds
+      Asia / Middle East / Africa. PriceClass_All = everywhere.
+      Stick with PriceClass_100 unless you have customers outside
+      NA/EU — the cost difference is meaningful at scale.
+
+  WafRateLimitPer5Min:
+    Type: Number
+    Default: 2000
+    MinValue: 100
+    MaxValue: 20000000
+    Description: |
+      Requests per 5-minute window per source IP before WAFv2 blocks.
+      Default 2,000 = ~6.7 req/sec sustained. Bumps to 429 effective
+      response. Tune by tier: a CI integration making one PR-comment
+      every commit is well under 100 req/5min; a scraping attack will
+      blow past 2,000. Override per deployment.
+
   AlbVpcId:
     Type: String
     Default: ""
@@ -514,6 +573,7 @@ Conditions:
   AuthAwsIam: !Equals [!Ref AuthMode, aws_iam]
   HasCorsOrigins: !Not [!Equals [!Join [",", !Ref CorsAllowedOrigins], ""]]
   UsePublicALB: !Equals [!Ref EnablePublicALB, "true"]
+  EdgeProtectionEnabled: !Equals [!Ref EnableEdgeProtection, "true"]
   # AlbHasCertificate is intentionally a conjunction with UsePublicALB
   HttpOnlyAlbDeploy: !And
     - !Equals [!Ref EnablePublicALB, "true"]
@@ -1235,7 +1295,152 @@ Resources:
         - Type: forward
           TargetGroupArn: !Ref IAMJitAlbTargetGroup
 
+  # ---- Optional edge protection (CloudFront + WAFv2) ----
+  #
+  # When EnableEdgeProtection=true, deploy a CloudFront distribution
+  # in front of the Lambda Function URL with a WAFv2 WebACL attached.
+  # The WebACL has a rate-based rule that blocks per-source-IP traffic
+  # above WafRateLimitPer5Min in a sliding 5-minute window.
+  #
+  # The Function URL stays reachable independently for direct testing
+  # (`curl https://<id>.lambda-url...`) — CloudFront is an ADDITIONAL
+  # public surface, not a replacement. Real callers should use the
+  # CloudFront URL surfaced in the `CloudFrontUrl` Output.
+  #
+  # WAFv2 WebACLs with Scope=CLOUDFRONT must be deployed in us-east-1.
+  # This template assumes the stack itself is in us-east-1 (which is
+  # the documented launch region — see docs/PUBLISHING.md). Deploying
+  # the rest of the stack in another region while wanting edge
+  # protection requires deploying the WebACL via a side-car us-east-1
+  # stack and passing in its ARN; not modeled here.
+
+  ApiWebACL:
+    Type: AWS::WAFv2::WebACL
+    Condition: EdgeProtectionEnabled
+    Properties:
+      Name: !Sub ${AWS::StackName}-rate-limit
+      Description: !Sub "Edge rate-limit WebACL for ${AWS::StackName}. Per-IP rate-based rule blocks sources above WafRateLimitPer5Min in a sliding 5-minute window."
+      Scope: CLOUDFRONT
+      DefaultAction:
+        Allow: {}
+      Rules:
+        - Name: RateLimitPerSourceIP
+          Priority: 1
+          Statement:
+            RateBasedStatement:
+              Limit: !Ref WafRateLimitPer5Min
+              AggregateKeyType: IP
+          Action:
+            Block:
+              CustomResponse:
+                ResponseCode: 429
+          VisibilityConfig:
+            SampledRequestsEnabled: true
+            CloudWatchMetricsEnabled: true
+            MetricName: !Sub ${AWS::StackName}-rate-limit-rule
+      VisibilityConfig:
+        SampledRequestsEnabled: true
+        CloudWatchMetricsEnabled: true
+        MetricName: !Sub ${AWS::StackName}-webacl
+
+  # CloudFront distribution fronting the Lambda Function URL.
+  #
+  # CacheBehavior decisions:
+  #   - POST/PUT/PATCH/DELETE are forwarded but NOT cached. POST-body
+  #     caching keyed on policy_fingerprint requires a CloudFront
+  #     Function (computes the cache key from the request body); v2
+  #     work, not included here.
+  #   - GET/HEAD use AWS-managed "CachingOptimized" policy. Endpoints
+  #     like /healthz and /api/v1/score with the Cache-Control header
+  #     we set in routes/score.py (s-maxage=86400) will be cached by
+  #     CloudFront for 1 day.
+  #   - OriginRequestPolicyId = "AllViewerExceptHostHeader" — forwards
+  #     all viewer headers EXCEPT Host (which CloudFront overrides to
+  #     the origin's hostname so the Function URL accepts the request).
+  ApiCloudFrontDistribution:
+    Type: AWS::CloudFront::Distribution
+    Condition: EdgeProtectionEnabled
+    Properties:
+      DistributionConfig:
+        Enabled: true
+        Comment: !Sub ${AWS::StackName} edge cache + rate limit
+        HttpVersion: http2and3
+        IPV6Enabled: true
+        PriceClass: !Ref CloudFrontPriceClass
+        WebACLId: !GetAtt ApiWebACL.Arn
+        Origins:
+          - Id: lambda-origin
+            # FunctionUrl has the form `https://<id>.lambda-url.<region>.on.aws/`.
+            # !Select [2, !Split ["/", ...]] yields the host portion.
+            DomainName: !Select [2, !Split ["/", !GetAtt IAMJitFunctionUrl.FunctionUrl]]
+            CustomOriginConfig:
+              OriginProtocolPolicy: https-only
+              OriginSSLProtocols: [TLSv1.2]
+              OriginReadTimeout: 30
+              OriginKeepaliveTimeout: 5
+        DefaultCacheBehavior:
+          TargetOriginId: lambda-origin
+          ViewerProtocolPolicy: redirect-to-https
+          AllowedMethods: [GET, HEAD, OPTIONS, POST, PUT, PATCH, DELETE]
+          CachedMethods: [GET, HEAD, OPTIONS]
+          Compress: true
+          # AWS-managed CachePolicy "CachingOptimized" — respects the
+          # Cache-Control header on the response (so /healthz with
+          # max-age=N gets cached for N seconds, /api/v1/score with
+          # s-maxage=86400 cached for 1 day at the edge, etc).
+          CachePolicyId: 658327ea-f89d-4fab-a63d-7e88639e58f6
+          # AWS-managed OriginRequestPolicy "AllViewerExceptHostHeader"
+          # — forwards all viewer headers + query strings + cookies to
+          # the origin, except Host (which CloudFront sets to the
+          # origin domain). Lets the Lambda see real client headers
+          # for things like the prompt-injection scanner's source-IP
+          # audit.
+          OriginRequestPolicyId: b689b0a8-53d0-40ab-baf2-68738e2966ac
+
+  # CloudWatch alarm on WAF blocked-request count. Fires when WAF
+  # blocks > 1000 requests in 5 minutes — likely a scraping attack
+  # or a misconfigured CI hammering the endpoint. Wire to SNS for
+  # ops-on-call notification.
+  WafBlockedRequestsAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Condition: EdgeProtectionEnabled
+    Properties:
+      AlarmName: !Sub ${AWS::StackName}-waf-blocked-requests
+      AlarmDescription: !Sub |
+        WAFv2 blocked > 1000 requests in 5 min — investigate via the
+        ${AWS::StackName}-rate-limit-rule CloudWatch metric in the WAF
+        Sampled Requests dashboard. Likely a scraping attack or
+        runaway CI; if legitimate, increase WafRateLimitPer5Min.
+      MetricName: BlockedRequests
+      Namespace: AWS/WAFV2
+      Statistic: Sum
+      Period: 300
+      EvaluationPeriods: 1
+      Threshold: 1000
+      ComparisonOperator: GreaterThanThreshold
+      TreatMissingData: notBreaching
+      Dimensions:
+        - Name: WebACL
+          Value: !Sub ${AWS::StackName}-rate-limit
+        - Name: Region
+          Value: !Ref AWS::Region
+        - Name: Rule
+          Value: ALL
+
 Outputs:
+  CloudFrontUrl:
+    Condition: EdgeProtectionEnabled
+    Description: |
+      Public CloudFront URL fronting the Lambda Function URL with
+      WAFv2 rate-limiting and AWS Shield Standard DDoS protection.
+      Use this URL for real client traffic when EnableEdgeProtection
+      is on. The underlying Function URL is still reachable for
+      direct testing.
+
+      Allow ~15 min after stack creation for CloudFront to fully
+      deploy to edge locations.
+    Value: !Sub "https://${ApiCloudFrontDistribution.DomainName}"
+
   ApiFunctionUrl:
     Description: |
       Function URL for the iam-jit API. With AuthMode=local and

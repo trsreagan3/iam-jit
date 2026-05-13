@@ -508,32 +508,36 @@ def test_bootstrap_claim_url_ends_in_setup_without_double_slash() -> None:
         )
 
 
-def test_sam_template_no_cloudfront_residue(sam_template: dict[str, Any]) -> None:
-    """The CloudFront path was the prior attempt at solving the SCP
-    block — it doesn't bypass the Omise org SCP because the SCP
-    denies `lambda:InvokeFunctionUrl` broadly, not just
-    `FunctionUrlAuthType=NONE`. The ALB path uses `InvokeFunction`
-    instead. After removing CloudFront support, no residual CF
-    resources / conditions / parameters should remain or future
-    deploys will fail at `aws cloudformation create-changeset` time
-    with an unresolved-reference error."""
-    import json
-    payload = json.dumps(sam_template)
-    forbidden = [
-        "AWS::CloudFront",
-        "EnableCloudFront",
-        "UseCloudFront",
-        "CloudFrontPriceClass",
-        "IAMJitDistribution",
-        "IAMJitOAC",
-        "OriginAccessControl",
-    ]
-    leaked = [needle for needle in forbidden if needle in payload]
-    assert not leaked, (
-        f"CloudFront residue in template: {leaked}. The ALB swap "
-        "intentionally removes all CF resources; leftover references "
-        "will fail to parse."
-    )
+def test_sam_template_cloudfront_resources_are_condition_gated(sam_template: dict[str, Any]) -> None:
+    """CloudFront support was originally removed in favor of ALB because
+    the prior Omise-org SCP denied `lambda:InvokeFunctionUrl` broadly
+    and CloudFront fronting a Function URL still uses that action. As
+    of 2026-05, CloudFront is RE-INTRODUCED as an opt-in
+    `EnableEdgeProtection=true` capability (paired with WAFv2 rate-
+    limiting at the edge — see `infrastructure/sam/template.yaml`'s
+    `ApiCloudFrontDistribution` resource).
+
+    The contract this test pins: any CloudFront-related resource MUST
+    be gated by the `EdgeProtectionEnabled` condition. A deploy with
+    the parameter at its default (`false`) produces NO CloudFront
+    resources, so deployments behind a `lambda:InvokeFunctionUrl`-
+    denying SCP are unaffected. A deploy that opts in gets the full
+    edge stack.
+    """
+    resources = sam_template.get("Resources") or {}
+    cf_resource_types = ("AWS::CloudFront::", "AWS::WAFv2::WebACL")
+    for name, defn in resources.items():
+        rtype = (defn or {}).get("Type") or ""
+        if not any(rtype.startswith(prefix) for prefix in cf_resource_types):
+            continue
+        assert (defn or {}).get("Condition") == "EdgeProtectionEnabled", (
+            f"Resource {name!r} (Type: {rtype}) is CloudFront/WAF-related "
+            f"but is NOT gated by Condition: EdgeProtectionEnabled. "
+            f"Without the condition, default deploys (which target "
+            f"SCP-restricted orgs) will provision CloudFront/WAF "
+            f"resources they can't use. Add `Condition: "
+            f"EdgeProtectionEnabled` to this resource."
+        )
 
 
 def test_sam_dynamodb_tables_have_pitr_enabled(
