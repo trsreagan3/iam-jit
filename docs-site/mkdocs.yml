@@ -57,6 +57,7 @@ nav:
   - CLI reference: cli-reference.md
   - GitHub Action: github-action.md
   - Calibration model: calibration.md
+  - Scoring bands (1-10): scoring-bands.md
   - Action blacklist: blacklist.md
   - Self-hosting:
     - Overview: self-hosting.md
