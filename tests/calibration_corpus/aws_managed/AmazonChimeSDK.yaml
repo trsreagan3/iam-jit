@@ -1,0 +1,48 @@
+name: aws-managed-AmazonChimeSDK
+description: "AWS-managed policy snapshot. ARN: arn:aws:iam::aws:policy/AmazonChimeSDK\nAWS description: (none)\nGenerated\
+  \ by scripts/fetch-aws-managed-policies.py \u2014 regression-protects the deterministic score against future rule refactors.\
+  \ Current det_score=8; tolerance \xB11 reflects small calibration deltas."
+policy:
+  Version: '2012-10-17'
+  Statement:
+  - Effect: Allow
+    Action:
+    - chime:CreateMeeting
+    - chime:CreateMeetingWithAttendees
+    - chime:DeleteMeeting
+    - chime:GetMeeting
+    - chime:ListMeetings
+    - chime:CreateAttendee
+    - chime:BatchCreateAttendee
+    - chime:DeleteAttendee
+    - chime:GetAttendee
+    - chime:ListAttendees
+    - chime:ListAttendeeTags
+    - chime:ListMeetingTags
+    - chime:ListTagsForResource
+    - chime:TagAttendee
+    - chime:TagMeeting
+    - chime:TagResource
+    - chime:UntagAttendee
+    - chime:UntagMeeting
+    - chime:UntagResource
+    - chime:StartMeetingTranscription
+    - chime:StopMeetingTranscription
+    - chime:CreateMediaCapturePipeline
+    - chime:CreateMediaConcatenationPipeline
+    - chime:CreateMediaLiveConnectorPipeline
+    - chime:DeleteMediaCapturePipeline
+    - chime:DeleteMediaPipeline
+    - chime:GetMediaCapturePipeline
+    - chime:GetMediaPipeline
+    - chime:ListMediaCapturePipelines
+    - chime:ListMediaPipelines
+    Resource: '*'
+request:
+  spec:
+    access_type: read-write
+    duration:
+      duration_hours: 1
+expected:
+  score_min: 7
+  score_max: 9

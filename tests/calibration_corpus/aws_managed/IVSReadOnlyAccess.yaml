@@ -1,0 +1,52 @@
+name: aws-managed-IVSReadOnlyAccess
+description: "AWS-managed policy snapshot. ARN: arn:aws:iam::aws:policy/IVSReadOnlyAccess\nAWS description: (none)\nGenerated\
+  \ by scripts/fetch-aws-managed-policies.py \u2014 regression-protects the deterministic score against future rule refactors.\
+  \ Current det_score=4; tolerance \xB11 reflects small calibration deltas."
+policy:
+  Version: '2012-10-17'
+  Statement:
+  - Sid: IVSReadOnlyAccess
+    Effect: Allow
+    Action:
+    - ivs:BatchGetChannel
+    - ivs:GetChannel
+    - ivs:GetComposition
+    - ivs:GetEncoderConfiguration
+    - ivs:GetIngestConfiguration
+    - ivs:GetParticipant
+    - ivs:GetPlaybackKeyPair
+    - ivs:GetPlaybackRestrictionPolicy
+    - ivs:GetPublicKey
+    - ivs:GetRecordingConfiguration
+    - ivs:GetStage
+    - ivs:GetStageSession
+    - ivs:GetStorageConfiguration
+    - ivs:GetStream
+    - ivs:GetStreamSession
+    - ivs:ListChannels
+    - ivs:ListCompositions
+    - ivs:ListEncoderConfigurations
+    - ivs:ListIngestConfigurations
+    - ivs:ListParticipants
+    - ivs:ListParticipantReplicas
+    - ivs:ListParticipantEvents
+    - ivs:ListPlaybackKeyPairs
+    - ivs:ListPlaybackRestrictionPolicies
+    - ivs:ListPublicKeys
+    - ivs:ListRecordingConfigurations
+    - ivs:ListStages
+    - ivs:ListStageSessions
+    - ivs:ListStorageConfigurations
+    - ivs:ListStreamKeys
+    - ivs:ListStreams
+    - ivs:ListStreamSessions
+    - ivs:ListTagsForResource
+    Resource: '*'
+request:
+  spec:
+    access_type: read-write
+    duration:
+      duration_hours: 1
+expected:
+  score_min: 3
+  score_max: 5

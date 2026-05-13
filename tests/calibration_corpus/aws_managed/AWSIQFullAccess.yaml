@@ -1,0 +1,28 @@
+name: aws-managed-AWSIQFullAccess
+description: "AWS-managed policy snapshot. ARN: arn:aws:iam::aws:policy/AWSIQFullAccess\nAWS description: (none)\nGenerated\
+  \ by scripts/fetch-aws-managed-policies.py \u2014 regression-protects the deterministic score against future rule refactors.\
+  \ Current det_score=8; tolerance \xB11 reflects small calibration deltas."
+policy:
+  Version: '2012-10-17'
+  Statement:
+  - Action:
+    - iq:*
+    - iq-permission:*
+    Effect: Allow
+    Resource: '*'
+  - Effect: Allow
+    Action: iam:CreateServiceLinkedRole
+    Resource: '*'
+    Condition:
+      StringEquals:
+        iam:AWSServiceName:
+        - permission.iq.amazonaws.com
+        - contract.iq.amazonaws.com
+request:
+  spec:
+    access_type: read-write
+    duration:
+      duration_hours: 1
+expected:
+  score_min: 7
+  score_max: 9

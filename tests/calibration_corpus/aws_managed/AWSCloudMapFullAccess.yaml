@@ -1,0 +1,32 @@
+name: aws-managed-AWSCloudMapFullAccess
+description: "AWS-managed policy snapshot. ARN: arn:aws:iam::aws:policy/AWSCloudMapFullAccess\nAWS description: (none)\nGenerated\
+  \ by scripts/fetch-aws-managed-policies.py \u2014 regression-protects the deterministic score against future rule refactors.\
+  \ Current det_score=8; tolerance \xB11 reflects small calibration deltas."
+policy:
+  Version: '2012-10-17'
+  Statement:
+  - Effect: Allow
+    Action:
+    - route53:GetHostedZone
+    - route53:ListHostedZonesByName
+    - route53:CreateHostedZone
+    - route53:DeleteHostedZone
+    - route53:ChangeResourceRecordSets
+    - route53:CreateHealthCheck
+    - route53:GetHealthCheck
+    - route53:DeleteHealthCheck
+    - route53:UpdateHealthCheck
+    - ec2:DescribeVpcs
+    - ec2:DescribeRegions
+    - ec2:DescribeInstances
+    - servicediscovery:*
+    Resource:
+    - '*'
+request:
+  spec:
+    access_type: read-write
+    duration:
+      duration_hours: 1
+expected:
+  score_min: 7
+  score_max: 9

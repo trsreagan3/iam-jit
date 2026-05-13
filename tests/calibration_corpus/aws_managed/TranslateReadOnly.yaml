@@ -1,0 +1,29 @@
+name: aws-managed-TranslateReadOnly
+description: "AWS-managed policy snapshot. ARN: arn:aws:iam::aws:policy/TranslateReadOnly\nAWS description: (none)\nGenerated\
+  \ by scripts/fetch-aws-managed-policies.py \u2014 regression-protects the deterministic score against future rule refactors.\
+  \ Current det_score=4; tolerance \xB11 reflects small calibration deltas."
+policy:
+  Version: '2012-10-17'
+  Statement:
+  - Effect: Allow
+    Action:
+    - translate:TranslateText
+    - translate:TranslateDocument
+    - translate:GetTerminology
+    - translate:ListTerminologies
+    - translate:ListTextTranslationJobs
+    - translate:DescribeTextTranslationJob
+    - translate:GetParallelData
+    - translate:ListParallelData
+    - comprehend:DetectDominantLanguage
+    - cloudwatch:GetMetricStatistics
+    - cloudwatch:ListMetrics
+    Resource: '*'
+request:
+  spec:
+    access_type: read-write
+    duration:
+      duration_hours: 1
+expected:
+  score_min: 3
+  score_max: 5

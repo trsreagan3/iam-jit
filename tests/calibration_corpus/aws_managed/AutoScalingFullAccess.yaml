@@ -1,0 +1,47 @@
+name: aws-managed-AutoScalingFullAccess
+description: "AWS-managed policy snapshot. ARN: arn:aws:iam::aws:policy/AutoScalingFullAccess\nAWS description: (none)\nGenerated\
+  \ by scripts/fetch-aws-managed-policies.py \u2014 regression-protects the deterministic score against future rule refactors.\
+  \ Current det_score=8; tolerance \xB11 reflects small calibration deltas."
+policy:
+  Version: '2012-10-17'
+  Statement:
+  - Effect: Allow
+    Action: autoscaling:*
+    Resource: '*'
+  - Effect: Allow
+    Action: cloudwatch:PutMetricAlarm
+    Resource: '*'
+  - Effect: Allow
+    Action:
+    - ec2:DescribeAccountAttributes
+    - ec2:DescribeAvailabilityZones
+    - ec2:DescribeImages
+    - ec2:DescribeInstanceAttribute
+    - ec2:DescribeInstances
+    - ec2:DescribeKeyPairs
+    - ec2:DescribeLaunchTemplateVersions
+    - ec2:DescribePlacementGroups
+    - ec2:DescribeSecurityGroups
+    - ec2:DescribeSpotInstanceRequests
+    - ec2:DescribeSubnets
+    - ec2:DescribeVpcClassicLink
+    Resource: '*'
+  - Effect: Allow
+    Action:
+    - elasticloadbalancing:DescribeLoadBalancers
+    - elasticloadbalancing:DescribeTargetGroups
+    Resource: '*'
+  - Effect: Allow
+    Action: iam:CreateServiceLinkedRole
+    Resource: '*'
+    Condition:
+      StringEquals:
+        iam:AWSServiceName: autoscaling.amazonaws.com
+request:
+  spec:
+    access_type: read-write
+    duration:
+      duration_hours: 1
+expected:
+  score_min: 7
+  score_max: 9

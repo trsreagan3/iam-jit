@@ -1,0 +1,69 @@
+name: aws-managed-AmazonLexReadOnly
+description: "AWS-managed policy snapshot. ARN: arn:aws:iam::aws:policy/AmazonLexReadOnly\nAWS description: (none)\nGenerated\
+  \ by scripts/fetch-aws-managed-policies.py \u2014 regression-protects the deterministic score against future rule refactors.\
+  \ Current det_score=4; tolerance \xB11 reflects small calibration deltas."
+policy:
+  Version: '2012-10-17'
+  Statement:
+  - Sid: AmazonLexReadOnlyStatement1
+    Effect: Allow
+    Action:
+    - lex:GetBot
+    - lex:GetBotAlias
+    - lex:GetBotAliases
+    - lex:GetBots
+    - lex:GetBotChannelAssociation
+    - lex:GetBotChannelAssociations
+    - lex:GetBotVersions
+    - lex:GetBuiltinIntent
+    - lex:GetBuiltinIntents
+    - lex:GetBuiltinSlotTypes
+    - lex:GetIntent
+    - lex:GetIntents
+    - lex:GetIntentVersions
+    - lex:GetSlotType
+    - lex:GetSlotTypes
+    - lex:GetSlotTypeVersions
+    - lex:GetUtterancesView
+    - lex:DescribeBot
+    - lex:DescribeBotAlias
+    - lex:DescribeBotChannel
+    - lex:DescribeBotLocale
+    - lex:DescribeBotRecommendation
+    - lex:DescribeBotReplica
+    - lex:DescribeBotVersion
+    - lex:DescribeExport
+    - lex:DescribeImport
+    - lex:DescribeIntent
+    - lex:DescribeResourcePolicy
+    - lex:DescribeSlot
+    - lex:DescribeSlotType
+    - lex:ListBots
+    - lex:ListBotLocales
+    - lex:ListBotAliases
+    - lex:ListBotAliasReplicas
+    - lex:ListBotChannels
+    - lex:ListBotRecommendations
+    - lex:ListBotReplicas
+    - lex:ListBotVersions
+    - lex:ListBotVersionReplicas
+    - lex:ListBuiltInIntents
+    - lex:ListBuiltInSlotTypes
+    - lex:ListExports
+    - lex:ListImports
+    - lex:ListIntents
+    - lex:ListRecommendedIntents
+    - lex:ListSlots
+    - lex:ListSlotTypes
+    - lex:ListTagsForResource
+    - lex:SearchAssociatedTranscripts
+    - lex:ListCustomVocabularyItems
+    Resource: '*'
+request:
+  spec:
+    access_type: read-write
+    duration:
+      duration_hours: 1
+expected:
+  score_min: 3
+  score_max: 5

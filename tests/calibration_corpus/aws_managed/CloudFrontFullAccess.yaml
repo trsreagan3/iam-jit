@@ -1,0 +1,70 @@
+name: aws-managed-CloudFrontFullAccess
+description: "AWS-managed policy snapshot. ARN: arn:aws:iam::aws:policy/CloudFrontFullAccess\nAWS description: (none)\nGenerated\
+  \ by scripts/fetch-aws-managed-policies.py \u2014 regression-protects the deterministic score against future rule refactors.\
+  \ Current det_score=8; tolerance \xB11 reflects small calibration deltas."
+policy:
+  Version: '2012-10-17'
+  Statement:
+  - Sid: cfflistbuckets
+    Effect: Allow
+    Action:
+    - s3:ListAllMyBuckets
+    Resource: arn:aws:s3:::*
+  - Sid: cffullaccess
+    Effect: Allow
+    Action:
+    - acm:DescribeCertificate
+    - acm:ListCertificates
+    - cloudfront:*
+    - cloudfront-keyvaluestore:*
+    - iam:ListServerCertificates
+    - waf:ListWebACLs
+    - waf:GetWebACL
+    - wafv2:ListWebACLs
+    - wafv2:GetWebACL
+    - wafv2:CreateWebACL
+    - kinesis:ListStreams
+    - ec2:DescribeInstances
+    - elasticloadbalancing:DescribeLoadBalancers
+    - ec2:DescribeInternetGateways
+    - ec2:DescribeIpamPools
+    - ec2:GetIpamPoolCidrs
+    - pricingplanmanager:ListSubscriptions
+    - pricingplanmanager:CreateSubscription
+    Resource: '*'
+  - Sid: cfrequestcertificate
+    Effect: Allow
+    Action:
+    - acm:RequestCertificate
+    Resource: '*'
+    Condition:
+      StringEquals:
+        aws:CalledViaLast: cloudfront.amazonaws.com
+  - Sid: cffdescribestream
+    Effect: Allow
+    Action:
+    - kinesis:DescribeStream
+    Resource: arn:aws:kinesis:*:*:*
+  - Sid: cfflistroles
+    Effect: Allow
+    Action:
+    - iam:ListRoles
+    Resource: arn:aws:iam::*:*
+  - Sid: ppmFullAccess
+    Effect: Allow
+    Action:
+    - pricingplanmanager:AssociateResourcesToSubscription
+    - pricingplanmanager:CancelSubscription
+    - pricingplanmanager:CancelSubscriptionChange
+    - pricingplanmanager:DisassociateResourcesFromSubscription
+    - pricingplanmanager:GetSubscription
+    - pricingplanmanager:UpdateSubscription
+    Resource: arn:aws:pricingplanmanager::*:subscription:*
+request:
+  spec:
+    access_type: read-write
+    duration:
+      duration_hours: 1
+expected:
+  score_min: 7
+  score_max: 9
