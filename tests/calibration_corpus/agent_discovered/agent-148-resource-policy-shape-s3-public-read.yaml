@@ -1,0 +1,34 @@
+name: resource-policy-shape-s3-public-read
+description: |
+  S3 bucket policy shape (`Effect: Allow` + `Principal: "*"` + `s3:GetObject`)
+  on a narrow PII bucket ARN. The scorer treats this like an identity-policy
+  statement reading from a narrow bucket and returns 1, missing that
+  `Principal: "*"` makes the bucket publicly readable to every unauthenticated
+  user on the internet.
+
+  Research: Section 4.2 ("S3 bucket policy `Principal: \"*\"` with
+  `s3:GetObject`") and Section 5.1 (Capital One's missing-bucket-policy-Deny
+  pattern). Datadog Security Labs' "Public S3 bucket policy" entry treats
+  this as the highest-severity bucket finding.
+
+  Why the scorer underrates: identity-policy semantics dominate the scoring
+  path. The presence of `Principal: "*"` on an `Allow` statement signals
+  resource-policy-shape input — but the scorer doesn't flip into
+  "resource-policy mode" and instead scores the narrow Resource ARN as a
+  read on a single bucket. A bucket policy is the bucket's authorization
+  oracle: this single statement makes every object public.
+policy:
+  Version: "2012-10-17"
+  Statement:
+    - Effect: Allow
+      Principal: "*"
+      Action: s3:GetObject
+      Resource: arn:aws:s3:::corporate-pii-data/*
+request:
+  spec:
+    access_type: read-write
+    duration:
+      duration_hours: 1
+expected:
+  score_min: 8
+  must_auto_approve: false

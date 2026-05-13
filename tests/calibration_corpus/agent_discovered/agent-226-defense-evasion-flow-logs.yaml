@@ -1,0 +1,53 @@
+name: agent-226-defense-evasion-flow-logs
+description: |
+  WHITE-BOX: Research Section 8.4. Defense-evasion primitives not yet in
+  _CATASTROPHIC_ACTIONS:
+    - ec2:DeleteFlowLogs (delete VPC flow logs — disable network audit)
+    - route53:DeleteQueryLoggingConfig (delete DNS query logs)
+    - wafv2:DisassociateWebACL (remove WAF protection from any resource)
+    - s3:PutLifecycleConfiguration (set 1-day expiry on trail/audit buckets)
+    - logs:DeleteLogGroup, logs:DeleteLogStream (destroy audit evidence)
+    - logs:DeleteRetentionPolicy (let logs age out under default 0-retention)
+
+  Some have "Delete" prefix and would fire the destructive-on-broad rule,
+  scoring 8. But:
+    - wafv2:DisassociateWebACL has "Disassociate" prefix — IS in the
+      destructive-verb list (line 1514) which would fire floor 8 — IF the
+      resource is broad. Verify.
+    - s3:PutLifecycleConfiguration is just "Put" — no destructive verb.
+      Score 6.
+    - logs:DeleteRetentionPolicy has "Delete" — floor 8 fires.
+
+  The real gap: these are ALL defense-evasion actions that should be
+  CATASTROPHIC (analogous to cloudtrail:DeleteTrail which IS in
+  _CATASTROPHIC). They're destruction-of-audit-evidence primitives
+  for which "scope it narrowly" does not mitigate — destroying ONE
+  audit log is still tampering.
+
+  Real risk: 9 — single-call evidence destruction. Same blast as
+  cloudtrail:DeleteTrail (already catastrophic).
+
+  Suggested fix: add ec2:DeleteFlowLogs, route53:DeleteQueryLoggingConfig,
+  wafv2:DisassociateWebACL, logs:DeleteLogGroup, logs:DeleteRetentionPolicy,
+  s3:PutLifecycleConfiguration (on trail bucket) to _CATASTROPHIC_ACTIONS.
+
+policy:
+  Version: "2012-10-17"
+  Statement:
+    - Effect: Allow
+      Action:
+        - "ec2:DeleteFlowLogs"
+        - "route53:DeleteQueryLoggingConfig"
+        - "logs:DeleteRetentionPolicy"
+        - "wafv2:DisassociateWebACL"
+      Resource: "arn:aws:logs:us-east-1:123456789012:log-group:/aws/cloudtrail"
+
+request:
+  spec:
+    access_type: read-write
+    duration:
+      duration_hours: 1
+
+expected:
+  score_min: 9
+  must_auto_approve: false

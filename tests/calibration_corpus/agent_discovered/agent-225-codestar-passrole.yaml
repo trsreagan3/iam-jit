@@ -1,0 +1,38 @@
+name: agent-225-codestar-passrole
+description: |
+  WHITE-BOX: Research Section 1.27, 1.28, 1.29. CodeStar's
+  CreateProjectFromTemplate provisions IAM resources via CFN under
+  attacker-controlled template — historical Rhino privesc path.
+  codestar:CreateProject + iam:PassRole grants any CodeStar project
+  permissions to the IAM role.
+
+  Code location: review.py — codestar:* is not in any action set.
+
+  Real risk: 8 — RCE-as-passed-role via project initialization.
+
+  Suggested fix: add codestar:CreateProject, codestar:CreateProjectFromTemplate,
+  codestar:AssociateTeamMember to _CODE_EXECUTION_PRIMITIVES. (CodeStar
+  is mostly legacy but still active in older accounts.)
+
+policy:
+  Version: "2012-10-17"
+  Statement:
+    - Effect: Allow
+      Action:
+        - "codestar:CreateProject"
+        - "codestar:CreateProjectFromTemplate"
+        - "codestar:AssociateTeamMember"
+      Resource: "*"
+    - Effect: Allow
+      Action: "iam:PassRole"
+      Resource: "arn:aws:iam::123456789012:role/codestar-admin"
+
+request:
+  spec:
+    access_type: read-write
+    duration:
+      duration_hours: 1
+
+expected:
+  score_min: 9
+  must_auto_approve: false

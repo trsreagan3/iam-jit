@@ -1,0 +1,56 @@
+name: agent-218-notaction-wildcard-leaves-code-exec
+description: |
+  WHITE-BOX: NotAction-wildcard edge case. The narrow-NotAction logic
+  (review.py line 1093-1124) enumerates only _CATASTROPHIC_ACTIONS_LC
+  to decide between floor-9 (catastrophic implicitly allowed) and
+  floor-7 (everything except a few). It does NOT enumerate
+  _CODE_EXECUTION_PRIMITIVES_LC or _HIGH_IMPACT_MUTATION_ACTIONS_LC.
+
+  Attack: NotAction: ["iam:*"] on Resource: a narrow Lambda ARN.
+  The exclusion covers all _CATASTROPHIC_ACTIONS_LC iam:* entries
+  via fnmatch — so catastrophic_not_excluded is empty, scorer
+  drops to floor 7.
+
+  But the residual implicit-allow set still contains
+  lambda:UpdateFunctionCode, lambda:CreateFunctionUrlConfig, AND
+  lambda:AddPermission (all _HIGH_IMPACT and _CODE_EXEC primitives)
+  applied to the narrow Lambda ARN. So the operator has "every
+  action EXCEPT iam:* on this lambda" — which is RCE-as-the-lambda's
+  role via UpdateFunctionCode + a public function URL.
+
+  The composition rule `has_code_exec and pass_role_any` (line 1789)
+  checks action_names — but action_names is built from
+  stmt.get("Action") which is [] when only NotAction is set. So the
+  composition rule never fires; only the per-statement NotAction
+  floor-7 fires.
+
+  Code location: review.py line 1093-1124 — only catastrophic is
+  enumerated in the residual. Line 1742 — action_names misses
+  NotAction residual.
+
+  Real risk: 9 — RCE-as-the-lambda's role via the implicit Allow on
+  the narrow ARN.
+
+  Suggested fix: in the narrow-NotAction residual enumeration, also
+  check _HIGH_IMPACT_MUTATION_ACTIONS_LC and
+  _CODE_EXECUTION_PRIMITIVES_LC. If high-impact-not-excluded is
+  non-empty, floor at 8. If code-exec-not-excluded, floor at 8 (or
+  9 if any PassRole-equivalent is also residual).
+
+policy:
+  Version: "2012-10-17"
+  Statement:
+    - Effect: Allow
+      NotAction:
+        - "iam:*"
+      Resource: "arn:aws:lambda:us-east-1:123456789012:function:prod-billing"
+
+request:
+  spec:
+    access_type: read-write
+    duration:
+      duration_hours: 1
+
+expected:
+  score_min: 8
+  must_auto_approve: false

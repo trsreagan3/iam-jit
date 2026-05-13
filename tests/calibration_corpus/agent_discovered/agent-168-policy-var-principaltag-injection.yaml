@@ -1,0 +1,37 @@
+name: policy-var-principaltag-injection
+description: |
+  Policy-variable injection using `${aws:PrincipalTag/team}` to construct
+  the resource ARN. An attacker with `iam:TagUser` on self (or admin-set
+  tags that the attacker can influence) can shape the ARN to access any
+  bucket — e.g., set `team` tag to `pii` and read `corp-pii-data/*`.
+
+  Research: Section 11.10 ("Policy variable injection (`${aws:username}`)
+  ... `${aws:userid}` is a more stable variable but rarely used in
+  scoping policies.") plus Section 11.11 ("Tag-based conditions
+  (`aws:ResourceTag`, `aws:RequestTag`, `aws:PrincipalTag`) — If the
+  principal can `iam:TagUser` / `iam:TagRole` on self ... they can
+  rewrite their own tag to satisfy the condition."). Self-tag-mutation
+  defeats every PrincipalTag-driven scoping.
+
+  Why the scorer underrates: scored 3. The resource ARN contains `$`
+  which the scorer reads as a narrow per-principal scope; but tag
+  values are NOT a stable identity (unlike `aws:userid`). Tags are
+  mutable by anyone with `iam:TagUser` (granted by default in many
+  ABAC patterns), so the attacker controls what the ARN expands to.
+policy:
+  Version: "2012-10-17"
+  Statement:
+    - Effect: Allow
+      Action:
+        - s3:GetObject
+        - s3:DeleteObject
+        - s3:PutObject
+      Resource: arn:aws:s3:::corp-${aws:PrincipalTag/team}-data/*
+request:
+  spec:
+    access_type: read-write
+    duration:
+      duration_hours: 1
+expected:
+  score_min: 7
+  must_auto_approve: false

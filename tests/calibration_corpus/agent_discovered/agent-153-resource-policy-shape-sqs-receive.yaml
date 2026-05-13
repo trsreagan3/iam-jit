@@ -1,0 +1,30 @@
+name: resource-policy-shape-sqs-receive
+description: |
+  SQS queue policy shape with `Principal: "*"` granting `sqs:ReceiveMessage`
+  + `sqs:SendMessage` on a production event queue. Anyone can drain prod
+  messages (data loss + DoS — receive removes from queue) AND inject
+  fake messages into the consumer pipeline.
+
+  Research: Section 4.4 ("SQS queue policy with wildcard `sqs:ReceiveMessage`
+  or `sqs:SendMessage` — Read/inject queue contents").
+
+  Why the scorer underrates: scored 3 — same as agent-152, narrow-write
+  floor. `Principal: "*"` not consulted.
+policy:
+  Version: "2012-10-17"
+  Statement:
+    - Effect: Allow
+      Principal: "*"
+      Action:
+        - sqs:ReceiveMessage
+        - sqs:SendMessage
+        - sqs:DeleteMessage
+      Resource: arn:aws:sqs:us-east-1:123456789012:prod-order-pipeline
+request:
+  spec:
+    access_type: read-write
+    duration:
+      duration_hours: 1
+expected:
+  score_min: 7
+  must_auto_approve: false

@@ -1,0 +1,50 @@
+name: agent-212-arn-wildcard-partition
+description: |
+  WHITE-BOX: Section 13.12 + research Sec 11 ARN edge cases.
+  `_is_broad_resource` and `_is_strict_wildcard` in review.py both inspect
+  parts[4] (account) and parts[5] (resource-spec) — but NOT parts[1]
+  (partition). An ARN with `*` in the partition segment (`arn:*:s3:::*`)
+  matches resources across `aws`, `aws-cn`, `aws-us-gov`, `aws-iso` —
+  every AWS partition simultaneously.
+
+  Today, _is_broad_resource catches THIS particular policy ONLY because
+  parts[5] is `*` (the resource_spec=='*' branch fires). But change
+  resource_spec to a literal bucket name (`arn:*:s3:::corp-data`) and
+  the partition wildcard ALONE doesn't trip any branch — the scorer
+  treats it as narrow despite covering 4 partitions.
+
+  This YAML tests the second, less-detected form: partition wildcard
+  with literal account + resource. The scorer's helpers never look
+  at parts[1].
+
+  Code location: review.py lines 760-815 (_is_broad_resource) and
+  lines 1219-1265 (_is_strict_wildcard). Both inspect parts[2..5]
+  but skip parts[1].
+
+  Real risk: 7 — `s3:DeleteBucket` across all four AWS partitions
+  with a literal bucket name. Operates on every existing copy in
+  every partition (rare but possible for multi-partition orgs).
+
+  Suggested fix: when parts[1] (partition) contains `*` or `?`,
+  treat the resource as cross-partition broad. Flag.
+
+policy:
+  Version: "2012-10-17"
+  Statement:
+    - Effect: Allow
+      Action:
+        - "s3:GetObject"
+        - "s3:PutObject"
+        - "s3:DeleteObject"
+      Resource:
+        - "arn:*:s3:::corp-data/*"
+
+request:
+  spec:
+    access_type: read-write
+    duration:
+      duration_hours: 1
+
+expected:
+  score_min: 6
+  must_auto_approve: false

@@ -1,0 +1,42 @@
+name: agent-224-bedrock-agentcore-rce
+description: |
+  WHITE-BOX: Research Section 1.51 + 9.3. Bedrock AgentCore exposes a
+  CodeInterpreter primitive — `bedrock-agentcore:CreateCodeInterpreter`
+  + `bedrock-agentcore:InvokeCodeInterpreter` run arbitrary Python in
+  a sandbox under the AgentCore service role. RCE-as-the-AgentCore-role.
+
+  Code location: review.py — `bedrock-agentcore` is a separate service
+  prefix from `bedrock`. The catastrophic / code-exec / sensitive sets
+  list `bedrock:*` but NOT `bedrock-agentcore:*`. Only the generic
+  cross-resource-write floor 6 fires.
+
+  Real risk: 9 — RCE-as-role via the code interpreter, combined with
+  iam:PassRole to attach an admin role.
+
+  Suggested fix: add bedrock-agentcore:CreateCodeInterpreter,
+  bedrock-agentcore:InvokeCodeInterpreter, bedrock-agentcore:CreateAgent
+  to _CODE_EXECUTION_PRIMITIVES. Also add `bedrock-agentcore` to
+  _SENSITIVE_SERVICES.
+
+policy:
+  Version: "2012-10-17"
+  Statement:
+    - Effect: Allow
+      Action:
+        - "bedrock-agentcore:CreateCodeInterpreter"
+        - "bedrock-agentcore:InvokeCodeInterpreter"
+        - "bedrock-agentcore:CreateAgent"
+      Resource: "*"
+    - Effect: Allow
+      Action: "iam:PassRole"
+      Resource: "arn:aws:iam::123456789012:role/bedrock-agentcore-admin"
+
+request:
+  spec:
+    access_type: read-write
+    duration:
+      duration_hours: 1
+
+expected:
+  score_min: 9
+  must_auto_approve: false

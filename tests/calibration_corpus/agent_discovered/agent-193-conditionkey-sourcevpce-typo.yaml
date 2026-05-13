@@ -1,0 +1,35 @@
+name: conditionkey-sourcevpce-typo
+description: |
+  `s3:GetObject` on a narrow PII bucket gated by
+  `Condition.StringEquals.aws:SourceVpce: vpce-non-existent`. The
+  operator probably typo'd the VPC endpoint ID, intending to constrain
+  reads to traffic via a specific VPC endpoint. With a non-existent
+  vpce-id, the condition NEVER matches. AWS evaluator: the Allow
+  doesn't apply. Many tools (and reviewers) see the condition string
+  and assume it's a working VPC-endpoint constraint.
+
+  Research: Section 11.12 ("`aws:SourceVpce` / `aws:SourceVpc` bypass —
+  These keys only populate when traffic actually traverses a VPC
+  endpoint. Cross-region or non-endpoint paths return absent → see 11.4.").
+
+  Why the scorer underrates: scored 1. Same root cause as agent-192 — a
+  Condition block is treated as scoping signal without validation of
+  whether the condition can ever match. Inert conditions on broad/
+  sensitive actions should be flagged.
+policy:
+  Version: "2012-10-17"
+  Statement:
+    - Effect: Allow
+      Action: s3:GetObject
+      Resource: arn:aws:s3:::corporate-pii-data/*
+      Condition:
+        StringEquals:
+          aws:SourceVpce: vpce-non-existent-typo
+request:
+  spec:
+    access_type: read-write
+    duration:
+      duration_hours: 1
+expected:
+  score_min: 4
+  must_auto_approve: false

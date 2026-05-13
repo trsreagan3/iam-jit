@@ -1,0 +1,41 @@
+name: conditionkey-sourceip-private-cidr
+description: |
+  `s3:GetObject` on a narrow PII bucket gated by
+  `Condition.IpAddress.aws:SourceIp: 10.0.0.0/8`. The condition looks
+  like a VPC-private-only network restriction, but AWS sees the PUBLIC
+  IP of the calling principal — not the VPC private IP. Requests from
+  Lambda, EC2 outside VPC, anywhere with a public source IP will fail
+  the condition. Worse: when the principal IS inside a VPC, the SourceIp
+  is still the VPC's NAT public IP, not a 10.x address. So the condition
+  effectively NEVER matches — but operators believe it scopes to internal.
+
+  Research: Section 11.2 ("`aws:SourceIp` with private CIDR — AWS rejects
+  requests evaluated via SDK from inside VPC private IPs against
+  `aws:SourceIp` — the *public* IP is what AWS sees. Tools that flag
+  `10.0.0.0/8` in `aws:SourceIp` as 'internal-only' miss that **the
+  condition never matches**, effectively granting `*`.").
+
+  Why the scorer underrates: scored 1. The scorer sees a Condition
+  block and credits it as scoping. In reality, this Condition is BROKEN —
+  the SourceIp will never be in 10.0.0.0/8 from anywhere AWS evaluates.
+  Two failure modes: (a) operator thinks they have VPC-internal scoping
+  but the policy denies everyone (DoS); (b) if combined with a
+  permit-default, principals can craft alternative paths.
+policy:
+  Version: "2012-10-17"
+  Statement:
+    - Effect: Allow
+      Action:
+        - secretsmanager:GetSecretValue
+      Resource: arn:aws:secretsmanager:us-east-1:123456789012:secret:db-creds-AbCdEf
+      Condition:
+        IpAddress:
+          aws:SourceIp: 10.0.0.0/8
+request:
+  spec:
+    access_type: read-write
+    duration:
+      duration_hours: 1
+expected:
+  score_min: 5
+  must_auto_approve: false

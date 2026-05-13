@@ -1,0 +1,61 @@
+name: agent-213-arn-policy-variable-username
+description: |
+  WHITE-BOX: Section 11.10 (policy variable injection). Resource ARNs
+  containing `${aws:username}` are interpolated by AWS at request time.
+  AWS usernames permit `+,=,.,@,_,-` and the variable substitution can
+  produce surprising ARN shapes when the username contains punctuation.
+
+  More importantly, the SCORER sees the literal string
+  `arn:aws:s3:::company-${aws:username}/*` and applies `_is_broad_resource`
+  which inspects bucket_part = "company-${aws:username}". The bucket_part
+  contains no `*` or `?` so `_has_wildcard` returns False — _is_broad_resource
+  returns False. The scorer treats this as a narrow bucket.
+
+  In reality, at AWS evaluation time the bucket name becomes
+  `company-<actual-username>` — and the GRANTOR may have created a
+  user named `+admin` or `whatever@evil.com` to shape the resulting
+  ARN to a bucket they want to reach. Even WITHOUT username manipulation,
+  the resource matches `company-<my-name>` — that's still ONE bucket
+  per principal, but it's a per-identity variable substitution that
+  the scorer cannot reason about.
+
+  The deeper attack: if the operator can also iam:CreateUser, they
+  create a user `iam-admin-bucket` (allowed by AWS naming rules)
+  whose substituted ARN matches a privileged bucket name. The policy
+  effectively grants s3:* on arbitrary bucket-name patterns chosen
+  by the operator after-the-fact.
+
+  Code location: review.py — no policy-variable detection
+  (`${...}` patterns are treated as literal).
+
+  Real risk: 7 — policy-variable in resource ARN is a known footgun;
+  combined with the iam:* admin clauses to create users, it's
+  arbitrary-bucket access.
+
+  Suggested fix: detect `${` in resource ARNs and surface a factor
+  noting "policy-variable substitution may widen this resource at
+  evaluation time." Score floor 5+ for any policy that uses variable
+  substitution in a resource.
+
+policy:
+  Version: "2012-10-17"
+  Statement:
+    - Effect: Allow
+      Action:
+        - "s3:GetObject"
+        - "s3:PutObject"
+        - "s3:DeleteObject"
+        - "s3:ListBucket"
+      Resource:
+        - "arn:aws:s3:::company-${aws:username}"
+        - "arn:aws:s3:::company-${aws:username}/*"
+
+request:
+  spec:
+    access_type: read-write
+    duration:
+      duration_hours: 1
+
+expected:
+  score_min: 5
+  must_auto_approve: false

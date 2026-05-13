@@ -1,0 +1,51 @@
+name: agent-234-condition-missing-orgid-on-public-principal
+description: |
+  WHITE-BOX: Research Sec 11.16 (missing PrincipalOrgID on
+  Principal:"*"). Common pattern: a resource-policy with Principal:"*"
+  scoped by Condition.StringEquals.aws:PrincipalOrgID:"o-xxx" — only
+  members of the org can use it.
+
+  Without the PrincipalOrgID condition, Principal:"*" is fully public.
+
+  Attack: a bucket policy with Principal:"*" and a Condition that
+  LOOKS like an org-id check but is keyed on the wrong key —
+  aws:RequestTag/OrgID instead of aws:PrincipalOrgID. The scorer
+  has zero condition handling so doesn't notice the mistyped key.
+
+  Resource-policy semantics: this is a public bucket.
+
+  Code location: review.py — no Principal evaluation, no condition
+  evaluation.
+
+  Real risk: 9 — public-read S3 bucket policy disguised as org-scoped.
+
+  Suggested fix: when Principal is "*" / {AWS:"*"}, REQUIRE that one
+  of the conditions uses aws:PrincipalOrgID, aws:PrincipalOrgPaths,
+  aws:PrincipalAccount, or aws:SourceVpce. If no such condition is
+  present, floor at 9.
+
+policy:
+  Version: "2012-10-17"
+  Statement:
+    - Sid: AnyoneInOurOrg
+      Effect: Allow
+      Principal: "*"
+      Action:
+        - "s3:GetObject"
+        - "s3:ListBucket"
+      Resource:
+        - "arn:aws:s3:::company-data"
+        - "arn:aws:s3:::company-data/*"
+      Condition:
+        StringEquals:
+          aws:RequestTag/OrgID: "o-companyorg123"
+
+request:
+  spec:
+    access_type: read-write
+    duration:
+      duration_hours: 1
+
+expected:
+  score_min: 8
+  must_auto_approve: false

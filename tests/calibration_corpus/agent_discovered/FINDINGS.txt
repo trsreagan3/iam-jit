@@ -1028,3 +1028,480 @@ The blind spots above cluster into 8 fixable rule classes:
 #    "the attacker is using a glob" is a signal of intent. Consider
 #    floor-3 for ANY glob-containing action (so even glob-on-narrow
 #    is above auto-approve).
+
+
+# ===========================================================
+# Round 6 — White-box (research-grounded + source access)
+# ===========================================================
+# Full source access to review.py + the 985-line IAM-BYPASS-RESEARCH.md
+# compendium. Hunted architectural gaps that black-box scoring cannot
+# detect (absent rule paths, ignored fields, normalization gaps).
+
+# Totals: 40 YAMLs (agent-200 through agent-247, with 8 mid-range
+# numbers retired during review).
+
+# Breakdown by attack class:
+#   - Condition-key handling (Section 11): 9 YAMLs
+#     (200, 201, 202, 203, 204, 205, 206, 207, 234, 235)
+#   - Principal field handling (Section 4): 4 YAMLs
+#     (208, 209, 210, 211)
+#   - ARN edge cases (partition, variables, multi-segment, region): 4 YAMLs
+#     (212, 213, 215, 242)
+#   - Unicode / normalization / whitespace: 4 YAMLs
+#     (216, 217, 246, 247)
+#   - NotAction residual enumeration: 1 YAML
+#     (218)
+#   - Effect/Deny side channels: 2 YAMLs
+#     (229, 230)
+#   - Missing actions (privesc / persistence / defense-evasion): 12 YAMLs
+#     (220, 221, 222, 223, 224, 225, 226, 238, 239, 240, 241, 244, 245)
+#   - Collection-wildcard precision (kms:key/, lambda:layer/): 2 YAMLs
+#     (227, 228)
+
+
+# Top 5 architectural gaps (with 1-2 sentence fix sketches):
+#
+# W. NO CONDITION HANDLING WHATSOEVER. Searching review.py for
+#    "Condition" returns only comments — the scoring path never reads
+#    stmt.get("Condition"). Every condition in every policy is invisible
+#    to the scorer. Closes 10+ findings here. Research Sec 11 lists 17
+#    distinct condition footguns; the scorer addresses none.
+#    Fix sketch: add a Condition parser that flags vacuous patterns
+#    (StringLike "*", aws:SourceIp 0.0.0.0/0, Null-true on MFA keys,
+#    *IfExists with no matching paired condition, ForAllValues with no
+#    fallback, Bool aws:SecureTransport in identity policies). Also
+#    surface "missing aws:PrincipalOrgID" when Principal is "*".
+#
+# X. NO PRINCIPAL FIELD HANDLING. stmt.get("Principal") and
+#    stmt.get("NotPrincipal") are never read. Resource-based policies
+#    (trust policies, S3 bucket policies, KMS key policies, Lambda
+#    function policies, SNS/SQS, ECR repository policies) all rely on
+#    Principal to scope access. The scorer treats them as identity
+#    policies, missing Principal:"*" / {AWS:"*"} / {Federated:saml-
+#    provider} / {Service:".amazonaws.com" without aws:SourceArn} etc.
+#    Fix sketch: when Principal is present, treat statement as
+#    resource-based. If Principal is "*" / {AWS:"*"} and no Condition
+#    contains aws:PrincipalOrgID / aws:SourceAccount / aws:SourceArn /
+#    sts:ExternalId, floor at 9. Allow+NotPrincipal is always floor 9
+#    (AWS docs explicitly warn).
+#
+# Y. NO UNICODE / NORMALIZATION at intake. `.lower()` is the only
+#    normalization. Zero-width joiners, fullwidth letters, BOMs,
+#    no-break spaces, trailing whitespace all bypass set-membership
+#    lookups. Round 2/4/5 closed `lower()` and `?`/`*` wildcard gaps
+#    but not Unicode confusables.
+#    Fix sketch: at intake, apply
+#    `unicodedata.normalize("NFKC", action).casefold().strip()` and
+#    strip zero-width characters (U+200B-U+200F, U+2060, U+FEFF). Reject
+#    actions matching `[^a-zA-Z0-9*?:-]` after normalization.
+#
+# Z. MISSING ACTIONS IN CRITICAL SETS. Research Sec 1 (60 privesc paths)
+#    + Sec 9 (newer services 2023-2026) name dozens of actions that
+#    are absent from _CATASTROPHIC_ACTIONS, _CODE_EXECUTION_PRIMITIVES,
+#    and _CROSS_ACCOUNT_EXFIL_ACTIONS. Closed here: iam:PutRolePermissionsBoundary
+#    (1.50), pipes:CreatePipe+PassRole (9.10), codedeploy:CreateDeployment
+#    (9.12), ssm:CreateAssociation (9.4), bedrock-agentcore:CreateCodeInterpreter
+#    (1.51), codestar:CreateProject* (1.27-1.29), ec2-instance-connect:*
+#    (13.11), redshift:GetClusterCredentials (6.5), sts:GetFederationToken
+#    (1.41), organizations:RegisterDelegatedAdministrator (round 1 fix
+#    proposal that didn't land), elasticfilesystem:PutFileSystemPolicy
+#    (4.9), defense-evasion (ec2:DeleteFlowLogs, route53:DeleteQueryLoggingConfig,
+#    logs:DeleteRetentionPolicy, wafv2:DisassociateWebACL — Sec 8.4),
+#    ec2:CreateVpnConnection / ec2:CreateClientVpnEndpoint (network bridge
+#    siblings of ec2:CreateVpcPeeringConnection).
+#    Fix sketch: incorporate the action lists named in each YAML.
+#
+# AA. COLLECTION-WILDCARD COVERAGE INCOMPLETE. Round 5 added kms:alias
+#    to the strict-wildcard collection_types map but did NOT add
+#    kms:key. Lambda has NO entry in collection_types — neither
+#    layer/* nor multi-segment function:name:version. IAM
+#    multi-segment paths (role/aws-service-role/* and user/eng/team/*)
+#    aren't recognized either.
+#    Fix sketch: extend collection_types: add "key" to kms, add a
+#    "lambda" entry with ("function", "layer"), and relax the
+#    "no further slashes" constraint in the strict-wildcard tail
+#    check to support multi-segment IAM paths.
+#
+
+# Honest negatives — patterns from research doc that review.py
+# CORRECTLY handles (cite line range):
+#
+# - Statement: single-object form (Sec 10.1). Lines 962-966 normalize
+#   `Statement: {dict}` to `Statement: [{dict}]`. Closes agent-96 (round 5).
+#
+# - Action / NotAction / Resource as string-or-list (Sec 10.2, 10.3).
+#   `_as_list()` at line 2050-2057 handles both forms uniformly.
+#
+# - Case-insensitive action membership (Sec 10.6 & 13). The *_LC mirror
+#   sets at lines 667-672 + 734-735 lower-case the entire set; lookups
+#   use action.lower(). Closes round-2 case-insensitivity gap.
+#
+# - `?` wildcard primitive (Sec 10.7). `_has_wildcard()` at line 703-705
+#   covers both `*` and `?`. Closes round-4 agent-86.
+#
+# - NotResource per-statement promotion (Sec 12.2). Lines 1131-1175
+#   promote wildcard_resource/broad_blast_resource when NotResource
+#   is set with non-wildcard contents. Closes round-3 agent-62/63.
+#
+# - NotResource policy-level composition promotion. Lines 1734-1738
+#   apply the same promotion to the all_actions collection used by
+#   composition rules. Closes round-4 agent-90/94.
+#
+# - Action-name glob matching catastrophic via fnmatch. Lines 1378-1398
+#   fnmatch the glob against _CATASTROPHIC_ACTIONS_LC and floor at 9
+#   if it covers any. Closes round-3 agent-73.
+#
+# - Service alias canonicalization (s3-object-lambda → s3, Sec 13.8).
+#   _SERVICE_ALIASES at line 680-687 + _canonical_action at 725-733
+#   maps the variants. Used by secret-bearing-reads composition.
+#   Partial coverage — alias map only has 2 entries, but mechanism
+#   exists.
+#
+# - Wildcard in service portion of action (`*:Decrypt`). Lines 1302-1332
+#   floor at 9 (or 10 if both halves wildcarded). Closes round-2
+#   agent-58/59.
+#
+# - Code-execution + PassRole composition is glob-aware via
+#   _action_covers_any. Lines 1751-1815 fnmatch the attacker action
+#   against the code-exec set. Closes round-4 agent-88.
+#
+# - IAM recon + sts:AssumeRole composition glob-aware. Lines 1825-1851.
+#   Closes round-4 agent-89.
+#
+# - Narrow-write floor takes max across all actions (no early break).
+#   Lines 1640-1651. Closes round-4 agent-92 determinism bug.
+#
+# - Destructive-verb prefix matcher case-insensitive AND expanded list
+#   (delete/destroy/.../detach/disassociate). Lines 1508-1515 in the
+#   destructive-on-broad rule. Closes round-4 agent-87/91.
+#
+# - NotAction-narrow residual enumeration of catastrophic actions
+#   (line 1093-1124). Identifies which catastrophic actions are
+#   implicitly allowed by the exclusion list and floors at 9 if any.
+#   Closes round-4 agent-95. (Gap remaining: doesn't enumerate
+#   _HIGH_IMPACT or _CODE_EXECUTION primitives in the residual —
+#   see agent-218 above.)
+#
+# - Empty NotAction: [] (key present, list empty) is recognized as
+#   "exclude nothing = grant everything" (line 1061-1072). Floors
+#   at 9-10. Closes round-5 agent-109.
+#
+# - Statement single-object form normalization (line 962-966). Closes
+#   round-5 agent-96.
+
+
+# ===========================================================
+# Round 6 — Black-box (research-grounded), 2026-05-13
+# ===========================================================
+# Black-box round AFTER 5+ rounds of fixes (rounds 1-5 plus the parallel
+# white-box round 6 already documented above). Hunted for blind spots
+# that survived the architectural sweep, grounded entirely in
+# docs/research/IAM-BYPASS-RESEARCH.md (985-line compendium of 197
+# real-world IAM bypass patterns from Rhino, PMapper, Pacu, CloudGoat,
+# HackingTheCloud, MITRE ATT&CK cloud, Stratus Red Team, and real
+# incidents: Capital One, Code Spaces, Imperva, SCARLETEEL, JINX-2401,
+# LLMjacking, ECS 2024).
+
+# Total YAMLs: 45 (agent-148 through agent-193).
+
+# Result split (scored vs my conservative expected score):
+#   - gap >= 3 (true bypass): 32 YAMLs
+#   - gap = 2 (concerning but borderline): 12 YAMLs
+#   - gap = 1 (kept for documentation): 1 YAML
+
+# Breakdown by attack class:
+#   - Resource-based policy shape (Principal:* / NotPrincipal):
+#     6 YAMLs (148, 149, 150, 151, 152, 153) covering S3 GetObject,
+#     Secrets Manager GetSecretValue, ECR pull, KMS Decrypt, SNS
+#     Subscribe, SQS Receive — all `Principal: "*"` patterns the scorer
+#     reads as narrow identity-policy reads. Plus 2 NotPrincipal-Allow
+#     YAMLs (154 generic, 155 sts:AssumeRole Service variant).
+#
+#   - Condition-key bypasses (Section 11): 7 YAMLs.
+#     156 StringLike "*" degenerate scoping; 157 empty PrincipalOrgID;
+#     182 Null operator inversion; 185 IfExists chaining on MFA;
+#     192 SourceIp private CIDR (inert in AWS); 193 SourceVpce typo
+#     (never matches); also overlaps 168 (PrincipalTag injection).
+#
+#   - JSON-grammar / parser bypasses (Section 10): 3 YAMLs.
+#     159 missing Effect; 180 CanonicalUser principal shape;
+#     181 empty Principal list.
+#
+#   - Real-incident patterns (Section 5): 6 YAMLs.
+#     163 + 191 LLMjacking (broad + narrow model); 164 Bedrock cross-
+#     account InvokeModel; 174 Code Spaces evidence destruction via
+#     lifecycle; 177 SCARLETEEL Lambda recon; 178 ECS 2024 undocumented
+#     protocol recon; 188 SCARLETEEL cross-account assume.
+#
+#   - Newer-service surface (Section 9): 9 YAMLs.
+#     161 Lake Formation GetDataAccess; 162 ec2-instance-connect SSH;
+#     165 Bedrock AgentCore + PassRole; 166 EventBridge Pipes + PassRole;
+#     167 CodeDeploy + PassRole; 169 EKS UpdateClusterConfig expose;
+#     170 S3 Object Lambda WriteGetObjectResponse; 173 VPC endpoint
+#     policy rewrite; 184 CloudTrail PutInsightSelectors; 190 IAM
+#     Identity Center sso: prefix; 175/176 STS federation siblings.
+#
+#   - Privilege escalation primitives (Section 1): 5 YAMLs.
+#     160 rds-data Aurora SQL; 168 PrincipalTag policy-var injection;
+#     171 iam:PutRolePermissionsBoundary; 172 RAM cross-account share;
+#     179 API Gateway disable IAM authorizer; 183 sts:AssumeRoleWith-
+#     SAML narrow admin; 186 redshift:GetClusterCredentials.
+#
+#   - Network bridge: 189 ec2:CreateNetworkInterface +
+#     AttachNetworkInterface (sibling primitive to closed VPC peering).
+#
+#   - Secret-bearing reads: 187 rds:DownloadDBLogFilePortion (sibling
+#     to logs:GetLogEvents in the secret-bearing-reads set).
+#
+#   - NotAction refinements: covered indirectly in round 5/6 white-box
+#     work (agent-218 NotAction wildcard residue + agent-95
+#     NotAction-narrow catastrophic). Black-box did not find a new
+#     NotAction class beyond those.
+
+
+# Top 5 worst bypasses (gap-≥3 ordered by gap):
+#
+# 1. agent-148-resource-policy-shape-s3-public-read
+#    Scored 1 vs expected 8 (gap 7). S3 bucket policy
+#    `Effect: Allow + Principal: "*" + s3:GetObject` on a narrow PII
+#    bucket — scorer treats this like an identity-policy narrow read
+#    instead of a public-read bucket policy. Section 4.2 of research,
+#    Capital One pattern (Section 5.1).
+#
+# 2. agent-149-resource-policy-shape-secretsmanager-public
+#    Scored 2 vs expected 9 (gap 7). Same root cause — Principal:* on a
+#    secret resource policy makes the prod-db-credential secret world-
+#    readable, but the scorer scores narrow. Section 4.8.
+#
+# 3. agent-150-resource-policy-shape-ecr-public
+#    Scored 1 vs expected 8 (gap 7). Principal:* on ECR repository
+#    policy publishes container images publicly. Section 4.7.
+#
+# 4. agent-154-notprincipal-allow-everyone
+#    Scored 1 vs expected 8 (gap 7). NotPrincipal on Allow grants the
+#    action to EVERY principal on the internet except the listed one
+#    (AWS docs explicitly warn). Sections 10.15, 12.3.
+#
+# 5. agent-157-conditionkey-empty-orgid
+#    Scored 1 vs expected 7 (gap 6). Principal:* on S3 GetObject
+#    "scoped" by aws:PrincipalOrgID:"" (empty string) — degenerate
+#    condition that doesn't enforce anything, but the scorer credits
+#    the condition string as scoping. Sections 11.16 + 4.2 combined.
+#
+# (Also notable: agent-151 KMS Principal:* gap 5; agent-156 StringLike
+# `*` degenerate gap 5; agent-159 missing-Effect gap 5; agent-178 ECS
+# undocumented-protocol recon gap 4.)
+
+
+# Cross-cutting architectural recommendations (continuing round 5/6
+# letter naming W-AA already used by the parallel white-box round 6):
+#
+# BB. Resource-policy shape detection. The scorer treats every input as
+#     an identity policy. Many real attacks (and many AWS APIs that
+#     iam-jit might be invoked against — bucket policies, KMS key
+#     policies, secret resource policies, ECR repo policies, SNS/SQS
+#     topic policies) are resource-based, where `Principal: "*"` is
+#     the entire authorization story. Detect resource-policy SHAPE
+#     when `stmt.get("Principal")` is present and treat `Principal:"*"`
+#     / `{"AWS":"*"}` / `{"AWS":["*", ...]}` / `{"CanonicalUser":...}`
+#     as broad-grant. Score the SHAPE before scoring the action set.
+#     Closes agents 148-153, 180, 181 (8 YAMLs, gap-5-7 each).
+#
+# CC. NotPrincipal on Allow = always-broad. AWS documentation explicitly
+#     warns NotPrincipal on Allow grants access to "all entities
+#     including those outside the account." Floor at 9 whenever
+#     Effect:Allow + NotPrincipal is observed, regardless of Resource
+#     scope or Action list. Closes agents 154, 155.
+#
+# DD. Condition-vacuity detection. Several conditions LOOK like scoping
+#     but never enforce anything: `StringLike "*"`, `IpAddress "0.0.0.0/0"`,
+#     `IpAddress "10.0.0.0/8"` (private CIDR — AWS sees public IP),
+#     `Null aws:MultiFactorAuthAge: "true"` (inverted intent),
+#     `StringEquals` with empty string, `SourceVpce` with typo'd
+#     non-existent ID. Detect these patterns and flag as "scope-less
+#     condition" — they shouldn't reduce the score. Closes agents 156,
+#     157, 182, 192, 193 (5 YAMLs of pure-condition bypasses).
+#
+# EE. Resource-policy + condition composition. agent-157 specifically
+#     pairs Principal:* (BB) with empty-string PrincipalOrgID (DD).
+#     The fix in BB alone catches most of these; the fix in DD catches
+#     the rest. Both fixes together correctly classify the entire
+#     "Principal:* with broken org/account condition" class.
+#
+# FF. New actions for existing sets:
+#     - _CATASTROPHIC_ACTIONS:
+#         iam:PutRolePermissionsBoundary, iam:PutUserPermissionsBoundary
+#         (agent-171; sibling of iam:DeleteRolePermissionsBoundary already
+#         catastrophic),
+#         cloudtrail:PutInsightSelectors (agent-184; sibling of
+#         cloudtrail:PutEventSelectors already catastrophic),
+#         sso:AttachManagedPolicyToPermissionSet, sso:PutInlinePolicyTo-
+#         PermissionSet, sso:CreateAccountAssignment, sso:UpdatePermissionSet
+#         (agent-190; round 2 added `sso-admin:` variants but missed
+#         the canonical `sso:` IAM-policy prefix).
+#     - _CODE_EXECUTION_PRIMITIVES (for composition with iam:PassRole):
+#         bedrock-agentcore:CreateCodeInterpreter,
+#         bedrock-agentcore:InvokeCodeInterpreter (agent-165),
+#         pipes:CreatePipe, pipes:UpdatePipe (agent-166),
+#         codedeploy:CreateDeployment, codedeploy:CreateApplication
+#         (agent-167).
+#     - _CROSS_ACCOUNT_EXFIL_ACTIONS:
+#         ram:CreateResourceShare, ram:AssociateResourceShare,
+#         ram:UpdateResourceShare (agent-172; generalizes the per-service
+#         share actions already in the set),
+#         ec2:ModifyVpcEndpoint, ec2:CreateVpcEndpoint (agent-173;
+#         endpoint policy rewrite = remove org's enforcement layer),
+#         eks:UpdateClusterConfig (agent-169; expose K8s API).
+#     - _SECRET_BEARING_READS:
+#         rds:DownloadDBLogFilePortion, rds:DescribeDBLogFiles,
+#         rds:DownloadCompleteDBLogFile (agent-187; DB logs contain
+#         plaintext queries with passwords).
+#     - _HIGH_IMPACT_MUTATION_ACTIONS:
+#         apigateway:UpdateRestApiPolicy + PATCH + PUT on REST APIs
+#         (agent-179; disable AWS_IAM authorizer = public API),
+#         s3-object-lambda:WriteGetObjectResponse, PutObject
+#         (agent-170; content-tampering hook on every Object Lambda read),
+#         ec2:CreateNetworkInterface, ec2:AttachNetworkInterface,
+#         ec2:ModifyNetworkInterfaceAttribute (agent-189; NIC-attach
+#         network bridge variant),
+#         redshift:GetClusterCredentials, redshift-serverless:GetCredentials
+#         (agent-186; mints federated DB creds),
+#         sts:GetFederationToken, sts:GetSessionToken on Resource:*
+#         (agent-175; SCP-escape via federation-token issuance —
+#         already in round 5? Black-box still observes gap 2 here, so
+#         either not closed or the path is different than I expected),
+#         sts:AssumeRoleWithSAML, sts:AssumeRoleWithWebIdentity on
+#         role/* (agent-176; federated siblings of sts:AssumeRole
+#         on role/* — strict-wildcard collection check covers AssumeRole
+#         but not the federated variants).
+#
+# GG. Service-alias canonicalization completeness. The round-3 _SERVICE_-
+#     ALIASES map only canonicalizes s3-object-lambda → s3, but the
+#     research compendium identifies many sibling-prefix pairs:
+#     - rds:DownloadDBLogFilePortion (rds: prefix) — not in secret-
+#       bearing-reads despite being functionally equivalent to
+#       logs:GetLogEvents (already in the set).
+#     - rds-data:* (Section 13.2) — the SQL-execution surface for
+#       Aurora, distinct prefix from rds:. agent-160 hits this:
+#       narrow cluster ARN + rds-data:ExecuteStatement = remote SQL,
+#       scored 3 instead of 7.
+#     - sso: vs sso-admin: (Section 13.1) — same actions, two prefixes;
+#       round 2 closed sso-admin: but not the documented IAM-form sso:.
+#     - cognito-idp / cognito-identity / cognito-sync (Section 13.9) —
+#       Round 2 added cognito-idp:Admin*; cognito-identity is in round 3.
+#     - lakeformation:GetDataAccess (Section 13.3) — issues federated
+#       credentials separate from STS; not credit-tracked.
+#     - bedrock / bedrock-agentcore — different prefixes, different
+#       capabilities, both need code-execution-primitive handling.
+#     - ec2-instance-connect:* (Section 13.11) — already added to
+#       _HIGH_IMPACT_MUTATION_ACTIONS in round 5 (agent-238) but
+#       my agent-162 still shows gap 2, suggesting score floor
+#       should be 8 not 7 on Resource:*.
+#
+# HH. Resource recon as secret-bearing. Several "describe" actions on
+#     broad scope are actually credential-leak primitives because they
+#     return downloadable URLs or plaintext code/env. agents-177, 178
+#     hit this: lambda:GetFunction returns a presigned URL to the
+#     function code zip + environment variables; ecs:DescribeTasks
+#     enumerates task ARNs needed for the 2024 cross-task IAM theft.
+#     Should be in _SECRET_BEARING_READS or a new "code-bearing read"
+#     class.
+#
+# II. Missing-Effect / malformed policies. agent-159 scores 1 on a
+#     statement with no Effect (which AWS rejects at policy attach but
+#     the scorer silently skips). Scorer should reject malformed
+#     policies with floor-9 ("malformed grant; AWS would reject —
+#     manual review required") rather than scoring them as innocuous.
+#
+# JJ. Auditing the entire round-2/3 catastrophic add list. agent-171
+#     and agent-184 hit cases where the SIBLING of a catastrophic
+#     action (DeleteRolePermissionsBoundary vs PutRolePermissionsBoundary;
+#     PutEventSelectors vs PutInsightSelectors) is not in the set. For
+#     every catastrophic action with a Put/Delete pair or Insight/Event
+#     pair, audit whether both halves are included. Same audit needed
+#     for the round-5 code-execution composition primitives (pipes:
+#     CreatePipe + UpdatePipe both needed; CreateAgent + UpdateAgent
+#     both needed, etc.).
+
+
+# Honest negatives — patterns I tried from the research compendium
+# that the scorer ALREADY catches correctly (no gap; do NOT add YAMLs
+# for these):
+#
+# - 11.1 aws:SourceIp 0.0.0.0/0 on iam:*: the catastrophic action floor
+#   fires at 9 regardless of (broken) condition — condition is invisible
+#   but action set drives the score correctly. PASS.
+#
+# - 11.7 Bool "true" string vs bool on iam:* catastrophic action:
+#   action floor fires at 9 regardless. PASS.
+#
+# - 11.10 ${aws:username} on `arn:aws:iam::*:user/${aws:username}*`:
+#   scored 9 because iam:CreateAccessKey etc. are catastrophic; the
+#   resource-pattern is detected as collection wildcard. PASS (within
+#   the gap-≥3 threshold; gap=0 here).
+#
+# - 11.10 ${aws:username} suffix-wildcard with iam:PutUserPolicy: 
+#   scored 9 (catastrophic-action floor regardless of resource). PASS.
+#
+# - 12.1 NotAction:["iam:*"] + Resource:"*": scored 9 (round-4 fix
+#   correctly enumerates catastrophic residue). PASS.
+#
+# - 12.5 NotAction:["iam:Pass*","iam:Get*"]: scored 9 (same residue
+#   enumeration). PASS.
+#
+# - 12.4 Deny + NotAction (narrow-Deny correct semantic): scored 1
+#   when it's a real safe pattern. PASS (no false positive).
+#
+# - 13.10 `sts:*` on Resource:* with Deny iam:*: scored 8 (sts is in
+#   sensitive services; partition floor fires correctly). PASS.
+#
+# - 13.13 Action:"*:*": scored 10 (action-wildcard floor). PASS.
+#
+# - 10.4 Principal:{AWS:["arn:*:root"]} list with wildcard: scored 7
+#   (close to correct; would arguably benefit from floor 8 but not
+#   a gap-≥3 bypass).
+#
+# - 9.13 cloudformation:CreateStackInstances on Resource:* scored 9
+#   (round 2 _CATASTROPHIC_ACTIONS add closed it). PASS.
+#
+# - 8.4 cloudtrail:PutEventSelectors scored 9 (round 2 fix). PASS.
+#
+# - 8.4 ec2:DeleteFlowLogs scored 8 (defense-evasion verb-prefix rule
+#   fires correctly). PASS.
+#
+# - 8.4 wafv2:DisassociateWebACL scored 8 (round 2 stealth-disable
+#   rule fires). PASS.
+#
+# - 8.9 kms:ScheduleKeyDeletion scored 9 (catastrophic). PASS.
+#
+# - 1.55 OIDC trust takeover: scored 9 (catastrophic). PASS.
+#
+# - 1.39 sts:AssumeRole on role/*: scored 7 (strict-wildcard collection
+#   check fires). PASS.
+#
+# - 4.5 lambda:AddPermission on broad function ARN: scored 8 (round 2
+#   _CROSS_ACCOUNT_EXFIL add). PASS.
+#
+# - 4.14 LambdaFunctionURL: scored 8 (round 2 _CATASTROPHIC). PASS.
+#
+# - Pacu lambda_backdoor_new_users (events:PutRule + lambda:Create-
+#   Function + lambda:AddPermission + iam:PassRole): scored 9
+#   (composition rule). PASS.
+#
+# - codestar privesc paths (1.27-1.29): scored 9 (round 5 code-exec
+#   primitives + PassRole composition). PASS.
+#
+# - datapipeline privesc (1.26): scored 9. PASS.
+#
+# - states:CreateStateMachine + PassRole: scored 9 (round 5). PASS.
+#
+# - airflow:CreateEnvironment + PassRole: scored 9 (round 5). PASS.
+#
+# - autoscaling launch-template via PassRole: scored 9 (round 1 fix).
+#   PASS.
+#
+# - 11.6 Null operator inversion ON CATASTROPHIC action: scored 9
+#   (action floor dominates; condition invisible but doesn't matter).
+#   PASS. (The condition-shape bypass surfaces only when the action
+#   is non-catastrophic — see agent-182 for the narrow-read case.)
+

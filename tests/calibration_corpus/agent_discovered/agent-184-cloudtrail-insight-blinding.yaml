@@ -1,0 +1,31 @@
+name: cloudtrail-insight-blinding
+description: |
+  `cloudtrail:PutInsightSelectors` on `Resource: *`. Insight selectors
+  control which API-rate anomalies CloudTrail flags as "unusual"; removing
+  / emptying them blinds the management-event anomaly path while leaving
+  the trail itself running (passes basic "trail is active" detections).
+
+  Research: Section 8.4 ("Disable or Modify Cloud Logs ... cloudtrail:
+  PutEventSelectors (event-selector blinding) ... `cloudtrail:Put-
+  EventSelectors`, `cloudtrail:UpdateTrail`, `cloudtrail:UpdateEvent-
+  DataStore`."). MITRE T1562.008.
+
+  Why the scorer underrates: scored 6. `cloudtrail:PutEventSelectors`
+  IS catastrophic in round 5 (selectors are the documented blinding
+  primitive), but `PutInsightSelectors` is the sibling action that
+  controls the OTHER selector set — should be in the same tier.
+policy:
+  Version: "2012-10-17"
+  Statement:
+    - Effect: Allow
+      Action:
+        - cloudtrail:PutInsightSelectors
+      Resource: "*"
+request:
+  spec:
+    access_type: read-write
+    duration:
+      duration_hours: 1
+expected:
+  score_min: 8
+  must_auto_approve: false

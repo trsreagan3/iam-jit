@@ -1,0 +1,38 @@
+name: bedrock-agentcore-codeinterpreter
+description: |
+  `bedrock-agentcore:CreateCodeInterpreter` +
+  `bedrock-agentcore:InvokeCodeInterpreter` with `iam:PassRole` on the
+  agentcore execution role. CodeInterpreter is a generic Python sandbox
+  that runs caller-supplied code under the passed role — identical
+  primitive to `lambda:CreateFunction` + `iam:PassRole`. Bedrock AgentCore
+  identity confusion (Section 1.60) makes this a 2025-class supply-chain
+  vector for AI workloads.
+
+  Research: Section 1.51 ("PassRole + bedrock-agentcore:CreateCode-
+  Interpreter + bedrock-agentcore:InvokeCodeInterpreter") and
+  Section 1.60 ("Bedrock AgentCore identity confusion").
+
+  Why the scorer underrates: scored 6. `bedrock-agentcore:` is a SIBLING
+  prefix to `bedrock:`. The code-execution-via-role composition rule
+  doesn't include agentcore action names. PassRole + RCE = full account
+  compromise as the passed role.
+policy:
+  Version: "2012-10-17"
+  Statement:
+    - Effect: Allow
+      Action:
+        - bedrock-agentcore:CreateCodeInterpreter
+        - bedrock-agentcore:InvokeCodeInterpreter
+        - bedrock-agentcore:UpdateCodeInterpreter
+      Resource: "*"
+    - Effect: Allow
+      Action: iam:PassRole
+      Resource: arn:aws:iam::123456789012:role/agentcore-execution-role
+request:
+  spec:
+    access_type: read-write
+    duration:
+      duration_hours: 1
+expected:
+  score_min: 9
+  must_auto_approve: false

@@ -1,0 +1,35 @@
+name: pipes-passrole-rce
+description: |
+  EventBridge Pipes (`pipes:CreatePipe` + `iam:PassRole` on pipe role).
+  Pipes are a managed event-flow primitive: source → enrichment Lambda →
+  target. The enrichment is caller-supplied. Same composition as
+  `lambda:CreateFunction` + `PassRole` (catastrophic).
+
+  Research: Section 9.10 ("EventBridge Pipes — `pipes:CreatePipe` +
+  `iam:PassRole` — modern, less-watched alternative to Lambda + Step
+  Functions for chaining privileged role to event source.").
+
+  Why the scorer underrates: scored 6. `pipes:CreatePipe` is not in
+  `_CODE_EXECUTION_PRIMITIVES`, so the composition with PassRole doesn't
+  fire. This is the modern attack path — Pipes replaced the old
+  EventBridge + Lambda backdoor flow.
+policy:
+  Version: "2012-10-17"
+  Statement:
+    - Effect: Allow
+      Action:
+        - pipes:CreatePipe
+        - pipes:UpdatePipe
+        - pipes:StartPipe
+      Resource: "*"
+    - Effect: Allow
+      Action: iam:PassRole
+      Resource: arn:aws:iam::123456789012:role/pipes-execution-role
+request:
+  spec:
+    access_type: read-write
+    duration:
+      duration_hours: 1
+expected:
+  score_min: 9
+  must_auto_approve: false

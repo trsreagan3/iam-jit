@@ -1,0 +1,31 @@
+name: sts-federation-token-scp-escape
+description: |
+  `sts:GetFederationToken` + `sts:GetSessionToken` on `Resource: *`.
+  `GetFederationToken` mints a federated session under an IAM USER's
+  permissions — and federation sessions are NOT subject to the same SCP
+  evaluation as the calling identity. Long-known SCP-bypass primitive
+  (Rhino path 1.41, MITRE T1078.004).
+
+  Research: Section 1.41 ("sts:GetFederationToken") and Section 6.5
+  ("Credentials Exposure — `sts:GetFederationToken`, `sts:GetSessionToken`").
+
+  Why the scorer underrates: scored 6. `sts:GetFederationToken` is a
+  credential-issuance primitive that produces a session token outside the
+  SCP boundary — should be `_HIGH_IMPACT_MUTATION_ACTIONS` or even
+  catastrophic when on Resource:*. Treated as generic STS-on-broad.
+policy:
+  Version: "2012-10-17"
+  Statement:
+    - Effect: Allow
+      Action:
+        - sts:GetFederationToken
+        - sts:GetSessionToken
+      Resource: "*"
+request:
+  spec:
+    access_type: read-write
+    duration:
+      duration_hours: 1
+expected:
+  score_min: 8
+  must_auto_approve: false

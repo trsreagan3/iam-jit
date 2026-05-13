@@ -1,0 +1,32 @@
+name: scarleteel-cross-account-assume
+description: |
+  `sts:AssumeRole` on a narrow attacker-controlled cross-account role ARN.
+  The exact SCARLETEEL exit-step: once the attacker pivots through the
+  victim's IMDS / Lambda enum and identifies a role they can assume in
+  THEIR account, they call AssumeRole and continue operations under
+  their own account's compute (better operational security, often
+  bypasses CloudTrail-based detection).
+
+  Research: Section 5.5 ("SCARLETEEL (2023-2024, Sysdig) — ... → cross-
+  account role assumption to attacker accounts.") and MITRE T1078.004.
+
+  Why the scorer underrates: scored 3 (narrow-write floor). The Resource
+  is one specific role ARN — but that ARN is in a DIFFERENT account
+  number than the caller's account, which is the entire attack pattern.
+  Cross-account assume to a non-trusted account number is always
+  suspicious; should at minimum trigger the cross-account-write floor
+  introduced for IAM in earlier rounds.
+policy:
+  Version: "2012-10-17"
+  Statement:
+    - Effect: Allow
+      Action: sts:AssumeRole
+      Resource: arn:aws:iam::999999999999:role/attacker-controlled-role
+request:
+  spec:
+    access_type: read-write
+    duration:
+      duration_hours: 1
+expected:
+  score_min: 6
+  must_auto_approve: false

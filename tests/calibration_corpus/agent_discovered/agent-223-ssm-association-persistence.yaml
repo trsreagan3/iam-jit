@@ -1,0 +1,40 @@
+name: agent-223-ssm-association-persistence
+description: |
+  WHITE-BOX: Research Section 9.4. ssm:CreateAssociation installs a
+  recurring (cron-style) SSM document run on a fleet of managed
+  instances. Persistent RCE — the association survives after the JIT
+  grant expires and continues running on the schedule.
+
+  Code location: review.py — ssm:CreateAssociation is NOT in
+  _CATASTROPHIC_ACTIONS, _HIGH_IMPACT, or _CODE_EXECUTION_PRIMITIVES.
+  Only the sensitive-service-ssm floor 6 fires.
+
+  Compare to ssm:SendCommand (in _CATASTROPHIC, line 614) which is the
+  one-shot version. The recurring version is strictly worse — it's
+  one-shot plus persistence — yet scored lower.
+
+  Real risk: 9 — persistent RCE on managed-instance fleet, survives
+  JIT revocation.
+
+  Suggested fix: add ssm:CreateAssociation, ssm:UpdateAssociation,
+  ssm:UpdateAssociationStatus to _CATASTROPHIC_ACTIONS. Also add
+  ssm-incidents:* surface as flagged by research Sec 9.4.
+
+policy:
+  Version: "2012-10-17"
+  Statement:
+    - Effect: Allow
+      Action:
+        - "ssm:CreateAssociation"
+        - "ssm:UpdateAssociation"
+      Resource: "*"
+
+request:
+  spec:
+    access_type: read-write
+    duration:
+      duration_hours: 1
+
+expected:
+  score_min: 9
+  must_auto_approve: false

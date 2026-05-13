@@ -1,0 +1,33 @@
+name: assumerole-saml-webidentity-wildcard
+description: |
+  `sts:AssumeRoleWithSAML` + `sts:AssumeRoleWithWebIdentity` on
+  `Resource: arn:aws:iam::*:role/*`. The wildcards on account-id and
+  role-name mean any role in any account that trusts SAML or OIDC can be
+  assumed via attacker-controlled federation tokens. Identical lateral-
+  movement primitive to `sts:AssumeRole` on `role/*` (catastrophic in
+  round-3 fix), but via the federated paths.
+
+  Research: Section 1.40 ("sts:AssumeRoleWithSAML /
+  sts:AssumeRoleWithWebIdentity — Weak audience/issuer trust enables
+  cross-tenant assumption.") and the MITRE T1078.004 valid-cloud-accounts
+  technique.
+
+  Why the scorer underrates: scored 6. The strict-wildcard collection
+  check covers `sts:AssumeRole` on `role/*` but not the federated
+  cousins. Same composition with iam-recon yields lateral-movement.
+policy:
+  Version: "2012-10-17"
+  Statement:
+    - Effect: Allow
+      Action:
+        - sts:AssumeRoleWithSAML
+        - sts:AssumeRoleWithWebIdentity
+      Resource: arn:aws:iam::*:role/*
+request:
+  spec:
+    access_type: read-write
+    duration:
+      duration_hours: 1
+expected:
+  score_min: 8
+  must_auto_approve: false

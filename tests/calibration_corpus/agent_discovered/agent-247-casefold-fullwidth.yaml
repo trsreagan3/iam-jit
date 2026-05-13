@@ -1,0 +1,46 @@
+name: agent-247-casefold-fullwidth
+description: |
+  WHITE-BOX: Python `.lower()` is locale-aware but does NOT normalize
+  Unicode equivalence classes. `.casefold()` is more aggressive but
+  still doesn't handle CJK fullwidth letters like 'Ｉ' (U+FF29).
+
+  - `"Ｉ".lower()` → "ｉ" (still fullwidth)
+  - `"Ｉ".casefold()` → "ｉ" (still fullwidth)
+  - `unicodedata.normalize("NFKC", "Ｉ")` → "I" (ASCII)
+
+  Action `Ｉam:CreateAccessKey` (fullwidth I) lowercased is
+  `ｉam:createaccesskey` — NOT equal to `iam:createaccesskey`. The
+  scorer's _CATASTROPHIC_ACTIONS_LC set membership check misses.
+
+  Visually `Ｉam` looks identical to `Iam` in many fonts (especially
+  monospace). An operator reviewing the YAML may not notice.
+
+  Code location: review.py — line 667 etc., uses `.lower()` only.
+  No NFKC normalization step.
+
+  Real risk: 9 — visual-collision bypass of catastrophic action set.
+
+  Suggested fix: at action intake, apply
+  `unicodedata.normalize("NFKC", action).casefold()` before lookup.
+  Closes fullwidth, ligatures (`ﬁ` -> `fi`), and other compatibility
+  decompositions.
+
+policy:
+  Version: "2012-10-17"
+  Statement:
+    - Effect: Allow
+      Action:
+        - "Ｉam:CreateAccessKey"
+        - "ｉam:AttachRolePolicy"
+        - "Ｋｍｓ:ScheduleKeyDeletion"
+      Resource: "*"
+
+request:
+  spec:
+    access_type: read-write
+    duration:
+      duration_hours: 1
+
+expected:
+  score_min: 8
+  must_auto_approve: false

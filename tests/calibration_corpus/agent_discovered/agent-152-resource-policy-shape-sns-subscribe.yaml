@@ -1,0 +1,30 @@
+name: resource-policy-shape-sns-subscribe
+description: |
+  SNS topic policy shape with `Principal: "*"` granting `sns:Subscribe`.
+  Any AWS principal (or attacker with HTTPS endpoint) can subscribe to the
+  topic and receive every event — covert exfil channel via SNS HTTP
+  delivery to attacker-controlled URL.
+
+  Research: Section 4.3 ("SNS topic policy with wildcard `sns:Subscribe` —
+  Any AWS principal subscribes to attacker-controlled HTTPS endpoint and
+  exfiltrates messages").
+
+  Why the scorer underrates: scored 3 — narrow-write floor. Misses the
+  `Principal: "*"` flag entirely.
+policy:
+  Version: "2012-10-17"
+  Statement:
+    - Effect: Allow
+      Principal: "*"
+      Action:
+        - sns:Subscribe
+        - sns:Receive
+      Resource: arn:aws:sns:us-east-1:123456789012:prod-order-events
+request:
+  spec:
+    access_type: read-write
+    duration:
+      duration_hours: 1
+expected:
+  score_min: 7
+  must_auto_approve: false

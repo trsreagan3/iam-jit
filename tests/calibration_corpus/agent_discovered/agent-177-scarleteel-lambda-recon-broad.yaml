@@ -1,0 +1,39 @@
+name: scarleteel-lambda-recon-broad
+description: |
+  Broad Lambda inventory enumeration — `lambda:GetFunction`,
+  `lambda:ListFunctions`, `lambda:GetFunctionConfiguration`,
+  `lambda:GetPolicy` on `Resource: *`. The exact recon profile attackers
+  build before SCARLETEEL-style cross-account lateral movement: dump every
+  function's code (via PresignedUrl in GetFunction.Code.Location), env
+  variables (often contain plaintext credentials), and resource policy
+  (to find cross-account trust paths).
+
+  Research: Section 5.5 ("SCARLETEEL (2023-2024, Sysdig) — JupyterLab in
+  EKS → IMDS → node IAM role → S3 + Lambda enum → cross-account role
+  assumption to attacker accounts.").
+
+  Why the scorer underrates: scored 4 (cross-resource-read flag). Lambda
+  function "code" is downloadable via the `Code.Location` field returned
+  by GetFunction — it's effectively `s3:GetObject` on the entire lambda
+  fleet. Should be in `_SECRET_BEARING_READS` (lambda environment
+  variables routinely contain credentials).
+policy:
+  Version: "2012-10-17"
+  Statement:
+    - Effect: Allow
+      Action:
+        - lambda:GetFunction
+        - lambda:ListFunctions
+        - lambda:GetFunctionConfiguration
+        - lambda:GetPolicy
+        - lambda:ListLayers
+        - lambda:GetEventSourceMapping
+      Resource: "*"
+request:
+  spec:
+    access_type: read-write
+    duration:
+      duration_hours: 1
+expected:
+  score_min: 7
+  must_auto_approve: false

@@ -1,0 +1,38 @@
+name: ram-cross-account-share
+description: |
+  AWS RAM (Resource Access Manager) `ram:CreateResourceShare` +
+  `ram:AssociateResourceShare` on `Resource: *` shares any supported
+  resource (snapshots, AMIs, route tables, subnets, license configs,
+  RDS DB clusters, etc.) to any external AWS account in a single API
+  call. Same blast as RDS snapshot cross-account share or
+  `ec2:ModifySnapshotAttribute` (both already in `_CROSS_ACCOUNT_EXFIL`),
+  but via the more general RAM plane.
+
+  Research: Section 4.13 ("RAM share / shared snapshot / shared AMI —
+  Resources made public via `ec2:ModifyImageAttribute` (AMI),
+  `ec2:ModifySnapshotAttribute` (EBS), `rds:ModifyDBSnapshotAttribute`
+  (RDS). Stratus Red Team `aws.exfiltration.*-share` techniques.").
+
+  Why the scorer underrates: scored 6. RAM is a generic cross-account
+  sharing surface — strictly broader than the individual `ec2:Modify-
+  SnapshotAttribute` actions that ARE in `_CROSS_ACCOUNT_EXFIL`. The
+  RAM-side equivalents (`CreateResourceShare`, `AssociateResourceShare`)
+  should be in the same set.
+policy:
+  Version: "2012-10-17"
+  Statement:
+    - Effect: Allow
+      Action:
+        - ram:CreateResourceShare
+        - ram:AssociateResourceShare
+        - ram:UpdateResourceShare
+        - ram:AssociateResourceSharePermission
+      Resource: "*"
+request:
+  spec:
+    access_type: read-write
+    duration:
+      duration_hours: 1
+expected:
+  score_min: 8
+  must_auto_approve: false

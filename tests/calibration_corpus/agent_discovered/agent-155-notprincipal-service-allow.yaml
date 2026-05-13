@@ -1,0 +1,32 @@
+name: notprincipal-service-allow
+description: |
+  `Effect: Allow` + `NotPrincipal: {Service: ...}` on `sts:AssumeRole`
+  on a narrow role. AWS treats this as "any principal that is not
+  ec2.amazonaws.com can assume" — which includes every external account.
+
+  Research: Section 12.3 ("`Allow` + `NotPrincipal`") and Section 10.15
+  ("`NotPrincipal` ordering — NotPrincipal is rarely valid (only with Deny).
+  Allow + NotPrincipal is silently accepted but the documentation warns it
+  grants `all entities including those outside the account` — many tools
+  don't flag this.").
+
+  Why the scorer underrates: scored 3. NotPrincipal on Allow is silently
+  parsed and the narrow Resource ARN drives the score. The scorer also
+  doesn't separately flag that `sts:AssumeRole` trust-policy material with
+  `NotPrincipal` is an external-access primitive.
+policy:
+  Version: "2012-10-17"
+  Statement:
+    - Effect: Allow
+      NotPrincipal:
+        Service: ec2.amazonaws.com
+      Action: sts:AssumeRole
+      Resource: arn:aws:iam::123456789012:role/cross-acct-admin-role
+request:
+  spec:
+    access_type: read-write
+    duration:
+      duration_hours: 1
+expected:
+  score_min: 7
+  must_auto_approve: false

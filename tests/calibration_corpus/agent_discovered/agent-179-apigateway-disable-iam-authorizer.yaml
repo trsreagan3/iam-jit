@@ -1,0 +1,33 @@
+name: apigateway-disable-iam-authorizer
+description: |
+  `apigateway:PATCH` + `apigateway:UpdateMethod` + `apigateway:PUT` on
+  API Gateway REST API resources. The attacker flips the API's
+  `authorizationType` from `AWS_IAM` to `NONE`, which makes the API
+  public — IAM policies on callers stop applying, the API becomes an
+  unauthenticated public HTTPS endpoint.
+
+  Research: Section 4.10 ("API Gateway resource policy allows when
+  `AWS_IAM` authorizer is OFF — If `authorizationType` is not `AWS_IAM`,
+  IAM policy on the principal doesn't apply — the API is effectively
+  public.").
+
+  Why the scorer underrates: scored 3 (narrow-write floor). The resource
+  ARN is one specific REST API, but the action effect is to disable the
+  entire authorization model for every endpoint behind that API.
+policy:
+  Version: "2012-10-17"
+  Statement:
+    - Effect: Allow
+      Action:
+        - apigateway:PATCH
+        - apigateway:PUT
+        - apigateway:UpdateRestApiPolicy
+      Resource: arn:aws:apigateway:us-east-1::/restapis/*
+request:
+  spec:
+    access_type: read-write
+    duration:
+      duration_hours: 1
+expected:
+  score_min: 7
+  must_auto_approve: false

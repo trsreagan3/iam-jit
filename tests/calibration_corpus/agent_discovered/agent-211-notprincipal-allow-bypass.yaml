@@ -1,0 +1,46 @@
+name: agent-211-notprincipal-allow-bypass
+description: |
+  WHITE-BOX: Section 10.15 + 12.3 (NotPrincipal on Allow). NotPrincipal
+  combined with Effect: Allow grants the resource to EVERY principal
+  in EVERY account EXCEPT the listed ones. AWS docs explicitly warn
+  against this. Scorer has zero NotPrincipal handling.
+
+  Pattern: an S3 bucket policy that uses NotPrincipal to "block known
+  competitors" — but grants everyone ELSE (including arbitrary
+  attackers) full read of the bucket.
+
+  Code location: review.py — no `NotPrincipal` reference anywhere
+  in the scoring path.
+
+  Real risk: 9 — public-read S3 bucket policy disguised as
+  exclusionary.
+
+  Suggested fix: Allow + NotPrincipal is almost always a bug. Floor
+  at 9 regardless of contents — AWS docs say it grants access to
+  "all entities including those outside the account."
+
+policy:
+  Version: "2012-10-17"
+  Statement:
+    - Sid: NotCompetitors
+      Effect: Allow
+      NotPrincipal:
+        AWS:
+          - "arn:aws:iam::555555555555:root"
+          - "arn:aws:iam::666666666666:root"
+      Action:
+        - "s3:GetObject"
+        - "s3:ListBucket"
+      Resource:
+        - "arn:aws:s3:::corp-customer-data"
+        - "arn:aws:s3:::corp-customer-data/*"
+
+request:
+  spec:
+    access_type: read-write
+    duration:
+      duration_hours: 1
+
+expected:
+  score_min: 8
+  must_auto_approve: false

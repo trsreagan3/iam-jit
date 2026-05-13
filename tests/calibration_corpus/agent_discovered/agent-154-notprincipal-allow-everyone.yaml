@@ -1,0 +1,34 @@
+name: notprincipal-allow-everyone
+description: |
+  `Effect: Allow` + `NotPrincipal` — grants the action to every principal in
+  the world EXCEPT the listed one (including principals outside the account).
+  AWS documentation explicitly warns: this construct grants access to "all
+  entities including those outside the account."
+
+  Research: Section 4.11 ("IAM role trust policy with
+  `\"Principal\":{\"AWS\":\"*\"}` — Anyone in any AWS account can
+  `sts:AssumeRole`") and Section 12.3 ("`Allow` + `NotPrincipal` — Grants
+  the resource to everyone except listed principals — including principals
+  **outside the account**. AWS docs explicitly warn against this. Tools
+  commonly miss because `NotPrincipal` is rare.").
+
+  Why the scorer underrates: scored 1 — the scorer doesn't recognize
+  `NotPrincipal` on an `Allow` statement as the anti-pattern it is. There
+  is no Principal at all to flag with `*`, so the resource-broad checks
+  don't fire; the narrow Resource ARN looks like a single-object read.
+policy:
+  Version: "2012-10-17"
+  Statement:
+    - Effect: Allow
+      NotPrincipal:
+        AWS: arn:aws:iam::123456789012:role/known-admin
+      Action: s3:GetObject
+      Resource: arn:aws:s3:::pii-customer-data/*
+request:
+  spec:
+    access_type: read-write
+    duration:
+      duration_hours: 1
+expected:
+  score_min: 8
+  must_auto_approve: false

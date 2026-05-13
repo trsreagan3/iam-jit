@@ -1,0 +1,51 @@
+name: agent-217-action-trailing-whitespace
+description: |
+  WHITE-BOX: Section 10.13 (whitespace in action names). AWS rejects
+  whitespace at evaluation time, but the scorer is the first line of
+  defense — if it scores `iam:CreateAccessKey ` (trailing space) as
+  benign (score 1) because the lowercase form with trailing space is
+  not in _CATASTROPHIC_ACTIONS_LC, then the policy passes the JIT
+  review and the operator finds out at runtime that AWS rejected
+  the request. The auditor's "this was reviewed" trail is misleading.
+
+  More dangerous: leading whitespace. Some YAML/JSON encoders strip
+  trailing whitespace but preserve leading. ` iam:CreateAccessKey`
+  (leading space) bypasses set membership for the same reason.
+
+  Even more devious: U+00A0 NO-BREAK SPACE. Visually identical to a
+  regular space, but not stripped by `.strip()` and not equal to
+  " ". `iam:CreateAccessKey ` ends with no-break space —
+  invisible in any text editor.
+
+  Code location: review.py — no input sanitation step. Lines 992 +
+  similar iterate `_as_list(stmt.get("Action"))` without strip().
+
+  Real risk: 9 — same blast as iam:CreateAccessKey on Resource:*.
+  Whether AWS rejects or accepts the malformed action, the SCORER
+  should not return benign.
+
+  Suggested fix: validate the action against a regex
+  `^[a-zA-Z0-9*?-]+:[a-zA-Z0-9*?_-]+$` at intake; reject any action
+  containing whitespace, control chars, or non-ASCII. Or canonicalize
+  by stripping whitespace+control chars (and Unicode NFKC normalize)
+  before lookup.
+
+policy:
+  Version: "2012-10-17"
+  Statement:
+    - Effect: Allow
+      Action:
+        - "iam:CreateAccessKey "
+        - " iam:AttachRolePolicy"
+        - "iam:PutRolePolicy\t"
+      Resource: "*"
+
+request:
+  spec:
+    access_type: read-write
+    duration:
+      duration_hours: 1
+
+expected:
+  score_min: 8
+  must_auto_approve: false

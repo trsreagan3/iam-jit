@@ -1,0 +1,48 @@
+name: agent-209-principal-federated-saml
+description: |
+  WHITE-BOX: Section 4.11 + 1.40 + 1.56 (federated trust takeover).
+  Scorer has zero Principal handling. A trust-policy Allow with
+  Principal: {Federated: "arn:aws:iam::ACCOUNT:saml-provider/foo"}
+  and no Condition is the textbook misconfigured federation — every
+  user in the SAML IdP can assume the role (no audience or
+  username scoping).
+
+  Combined with iam:AttachRolePolicy on Resource:* downstream, this
+  is "attacker-controlled SAML user assumes the role and attaches
+  AdministratorAccess to any role" — full account takeover.
+
+  Code location: review.py — `Principal` / `Federated` is never read.
+
+  Real risk: 9 — federated open-trust + AttachRolePolicy on Resource:*.
+
+  Suggested fix: when Principal:{Federated:...} appears without a
+  Condition pinning the SAML attribute / OIDC sub, floor at 8 (open
+  federated trust). With Condition StringLike "*" on the sub key,
+  same effect — also floor at 8.
+
+policy:
+  Version: "2012-10-17"
+  Statement:
+    - Sid: OpenFederatedTrust
+      Effect: Allow
+      Principal:
+        Federated: "arn:aws:iam::123456789012:saml-provider/corp-okta"
+      Action:
+        - "sts:AssumeRoleWithSAML"
+      Resource: "*"
+    - Sid: PowerOnceAssumed
+      Effect: Allow
+      Action:
+        - "iam:AttachRolePolicy"
+        - "iam:PutRolePolicy"
+      Resource: "arn:aws:iam::*:role/*"
+
+request:
+  spec:
+    access_type: read-write
+    duration:
+      duration_hours: 1
+
+expected:
+  score_min: 9
+  must_auto_approve: false

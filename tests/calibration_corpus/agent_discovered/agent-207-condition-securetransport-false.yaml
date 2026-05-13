@@ -1,0 +1,52 @@
+name: agent-207-condition-securetransport-false
+description: |
+  WHITE-BOX: Section 11.13 (SecureTransport mis-direction). Operators
+  sometimes write `aws:SecureTransport=false` thinking they're requiring
+  HTTPS. They've inverted it — `false` means the request is NOT over
+  TLS. AWS SDK always uses HTTPS by default, so the condition NEVER
+  matches; for an Allow statement, that means no allow EVER applies
+  — UNLESS the operator combines this with a second, broader Allow
+  statement. The footgun: a wide Allow + an "extra restrictive" SecureTransport
+  Allow is identical to just the wide Allow.
+
+  Conversely, with Effect=Allow and Bool:aws:SecureTransport=true (the
+  CORRECT inversion), the policy allows TLS calls — which is every
+  SDK call. So that "restriction" is also vacuous (everything via SDK
+  uses TLS).
+
+  Scorer has zero Condition handling so doesn't notice EITHER inverted
+  meaning.
+
+  Real risk: 8 — sts:AssumeRole + iam:PassRole on broad ARN with
+  inverted SecureTransport = effectively no condition on a
+  privilege-escalation pair.
+
+  Code location: review.py — no Condition logic.
+
+  Suggested fix: SecureTransport conditions are very rarely meaningful
+  security controls in IAM identity policies (they're meant for
+  resource-based policies enforcing HTTPS on data planes like S3).
+  Surface a factor when SecureTransport is the SOLE condition on a
+  privileged Allow.
+
+policy:
+  Version: "2012-10-17"
+  Statement:
+    - Effect: Allow
+      Action:
+        - "sts:AssumeRole"
+        - "iam:PassRole"
+      Resource: "arn:aws:iam::*:role/*"
+      Condition:
+        Bool:
+          aws:SecureTransport: "true"
+
+request:
+  spec:
+    access_type: read-write
+    duration:
+      duration_hours: 1
+
+expected:
+  score_min: 9
+  must_auto_approve: false

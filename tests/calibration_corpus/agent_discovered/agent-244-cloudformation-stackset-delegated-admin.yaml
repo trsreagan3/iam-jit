@@ -1,0 +1,65 @@
+name: agent-244-cloudformation-stackset-delegated-admin
+description: |
+  WHITE-BOX: Research Sec 9.13. cloudformation:CreateStackSet and
+  cloudformation:UpdateStackSet ARE in _CATASTROPHIC_ACTIONS (round 1).
+  BUT — cloudformation:RegisterDelegatedAdministrator is NOT.
+
+  organizations:RegisterDelegatedAdministrator IS in...wait, let me
+  check. Searching: this is not directly in any set.
+
+  cloudformation:ActivateOrganizationsAccess enables CloudFormation to
+  use the org's accounts. Then DelegatedAdministrator status for the
+  CFN service-principal lets the caller deploy stack-sets into every
+  member account.
+
+  Code location: review.py — `cloudformation:ActivateOrganizationsAccess`
+  and `organizations:RegisterDelegatedAdministrator` are not in any
+  set. `organizations:RegisterDelegatedAdministrator` was listed in
+  FINDINGS round 1's fix proposal (line 88) but verify it made it in.
+
+  Actually re-checking review.py line 491-496, only these
+  organizations actions are in _CATASTROPHIC:
+    organizations:CreateAccount
+    organizations:MoveAccount
+    organizations:AcceptHandshake
+    organizations:InviteAccountToOrganization
+    organizations:AttachPolicy
+    organizations:DetachPolicy
+    organizations:LeaveOrganization
+    organizations:CloseAccount
+
+  Missing: organizations:RegisterDelegatedAdministrator,
+  organizations:DeregisterDelegatedAdministrator,
+  organizations:EnableAWSServiceAccess,
+  organizations:DisableAWSServiceAccess. All from FINDINGS round 1
+  proposal that didn't make it in.
+
+  These actions DELEGATE org-wide admin to another account or another
+  service, enabling org-wide attacks one hop downstream.
+
+  Real risk: 9 — delegated org admin = org-wide blast.
+
+  Suggested fix: add organizations:RegisterDelegatedAdministrator,
+  organizations:DeregisterDelegatedAdministrator,
+  organizations:EnableAWSServiceAccess to _CATASTROPHIC_ACTIONS.
+
+policy:
+  Version: "2012-10-17"
+  Statement:
+    - Effect: Allow
+      Action:
+        - "organizations:RegisterDelegatedAdministrator"
+        - "organizations:DeregisterDelegatedAdministrator"
+        - "organizations:EnableAWSServiceAccess"
+        - "cloudformation:ActivateOrganizationsAccess"
+      Resource: "*"
+
+request:
+  spec:
+    access_type: read-write
+    duration:
+      duration_hours: 1
+
+expected:
+  score_min: 9
+  must_auto_approve: false

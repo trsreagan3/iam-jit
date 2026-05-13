@@ -1,0 +1,45 @@
+name: agent-220-iam-permissions-boundary-removal
+description: |
+  WHITE-BOX: Research Section 1.49 + 1.50. iam:DeleteRolePermissionsBoundary
+  and iam:DeleteUserPermissionsBoundary REMOVE the permissions boundary
+  that limits a role/user — instantly granting any policies attached to
+  the principal full effect (which the boundary was capping). Similarly,
+  iam:PutRolePermissionsBoundary lets the attacker INSTALL a permissive
+  boundary that DOES NOT cap admin policies.
+
+  Neither action is in _CATASTROPHIC_ACTIONS, _HIGH_IMPACT_MUTATION_ACTIONS,
+  or any other set. They fall to the sensitive-service-iam floor 6 only.
+
+  Real risk: 9 — these are the canonical defense-in-depth bypass for
+  IAM-permissions-boundary-protected roles. They turn a boundary-limited
+  role into an unbounded one in one API call.
+
+  Code location: review.py — search for `PermissionsBoundary` returns
+  no matches.
+
+  Suggested fix: add iam:DeleteRolePermissionsBoundary,
+  iam:DeleteUserPermissionsBoundary, iam:PutRolePermissionsBoundary,
+  iam:PutUserPermissionsBoundary to _CATASTROPHIC_ACTIONS. These are
+  defense-bypass primitives equivalent in semantic to
+  organizations:DetachPolicy (already catastrophic).
+
+policy:
+  Version: "2012-10-17"
+  Statement:
+    - Effect: Allow
+      Action:
+        - "iam:DeleteRolePermissionsBoundary"
+        - "iam:DeleteUserPermissionsBoundary"
+        - "iam:PutRolePermissionsBoundary"
+        - "iam:PutUserPermissionsBoundary"
+      Resource: "arn:aws:iam::*:role/*"
+
+request:
+  spec:
+    access_type: read-write
+    duration:
+      duration_hours: 1
+
+expected:
+  score_min: 9
+  must_auto_approve: false

@@ -1,0 +1,40 @@
+name: sso-prefix-permission-set-attach
+description: |
+  `sso:AttachManagedPolicyToPermissionSet` + `sso:CreateAccountAssignment`
+  + `sso:PutInlinePolicyToPermissionSet` on `Resource: *`. The CLI prefix
+  for IAM Identity Center is `aws sso-admin` but the IAM-action prefix
+  is `sso:` (the round-2 catastrophic adds covered `sso-admin:` but
+  silently miss `sso:` — same action, different prefix). Attaching
+  AdministratorAccess to any permission set is identical to
+  `iam:AttachRolePolicy` (catastrophic) but via IAM Identity Center.
+
+  Research: Section 13.1 ("SSO `sso-admin` vs `sso` prefixes — The CLI
+  is `aws sso-admin` but the IAM action prefix is `sso:` (e.g.,
+  `sso:AttachManagedPolicyToPermissionSet`). Identity Store uses
+  `identitystore:`. A scorer that filters on action prefix `sso-admin:`
+  will miss everything.").
+
+  Why the scorer underrates: scored 6. The action set `sso:Attach-
+  ManagedPolicyToPermissionSet` etc. is the IAM-equivalent action name
+  for what is informally `sso-admin:Attach...` — round 2 added
+  `sso-admin:` variants but missed the canonical IAM-policy-form `sso:`
+  variants. AWS accepts both prefixes in policies (with `sso:` being the
+  documented IAM form).
+policy:
+  Version: "2012-10-17"
+  Statement:
+    - Effect: Allow
+      Action:
+        - sso:AttachManagedPolicyToPermissionSet
+        - sso:PutInlinePolicyToPermissionSet
+        - sso:CreateAccountAssignment
+        - sso:UpdatePermissionSet
+      Resource: "*"
+request:
+  spec:
+    access_type: read-write
+    duration:
+      duration_hours: 1
+expected:
+  score_min: 9
+  must_auto_approve: false

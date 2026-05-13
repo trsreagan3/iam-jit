@@ -1,0 +1,45 @@
+name: agent-230-effect-case-deny-bypass
+description: |
+  WHITE-BOX: review.py compares `stmt.get("Effect") != "Allow"` with
+  exact string match. AWS IAM treats Effect values case-INSENSITIVELY
+  ("allow" / "ALLOW" / "Allow" all evaluate as Allow). The scorer's
+  exact-match means `Effect: "allow"` (lowercase) is treated as
+  not-Allow and the statement is SKIPPED.
+
+  Attack: policy with a wide statement labelled `Effect: "allow"`
+  (lowercase). AWS applies it as Allow; scorer ignores it.
+
+  The policy below has:
+    - Statement 1: Effect: "Deny", Action: "iam:DeleteUser" — looks
+      like a safety guard (operator approves "look, we Deny dangerous
+      stuff")
+    - Statement 2: Effect: "allow" (lowercase), Action: "*",
+      Resource: "*" — full admin, but skipped by the scorer
+
+  Code location: review.py lines 990, 1040, 1721. Compare
+  `(stmt.get("Effect") or "").lower() != "allow"` instead.
+
+  Real risk: 10 — full admin via case-confused Effect.
+
+  Suggested fix: normalize Effect to title-case before comparison;
+  reject anything that doesn't normalize to "Allow" or "Deny".
+
+policy:
+  Version: "2012-10-17"
+  Statement:
+    - Effect: Deny
+      Action: "iam:DeleteUser"
+      Resource: "*"
+    - Effect: allow
+      Action: "*"
+      Resource: "*"
+
+request:
+  spec:
+    access_type: read-write
+    duration:
+      duration_hours: 1
+
+expected:
+  score_min: 10
+  must_auto_approve: false

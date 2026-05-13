@@ -1,0 +1,33 @@
+name: ec2-instance-connect-ssh-fleet
+description: |
+  `ec2-instance-connect:SendSSHPublicKey` +
+  `ec2-instance-connect:SendSerialConsoleSSHPublicKey` on `Resource: *`
+  pushes an attacker-controlled SSH public key to every EC2 instance and
+  serial console — instant fleet-wide lateral movement primitive. Each
+  push gives the attacker 60 seconds to SSH in as `ec2-user` /
+  `ubuntu` on every running instance.
+
+  Research: Section 13.11 ("`ec2-instance-connect:SendSSHPublicKey` and
+  `ec2-instance-connect:SendSerialConsoleSSHPublicKey` — Separate prefix
+  from `ec2:`. Stratus Red Team's lateral-movement primitive: push attacker
+  SSH key to any instance."). MITRE T1021.007 Cloud Services lateral movement.
+
+  Why the scorer underrates: scored 6. The `ec2-instance-connect:` prefix is
+  a sibling to `ec2:` and not in any sensitive set. This is the EC2
+  equivalent of `ssm:StartSession`/`ecs:ExecuteCommand` (both catastrophic).
+policy:
+  Version: "2012-10-17"
+  Statement:
+    - Effect: Allow
+      Action:
+        - ec2-instance-connect:SendSSHPublicKey
+        - ec2-instance-connect:SendSerialConsoleSSHPublicKey
+      Resource: "*"
+request:
+  spec:
+    access_type: read-write
+    duration:
+      duration_hours: 1
+expected:
+  score_min: 8
+  must_auto_approve: false

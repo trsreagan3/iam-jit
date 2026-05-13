@@ -1,0 +1,54 @@
+name: agent-200-condition-keys-not-evaluated
+description: |
+  WHITE-BOX: The scorer has ZERO Condition-key handling. Searching review.py
+  for `"Condition"` returns no matches in the scoring path (only in comments
+  referring to it). Every Condition block — restrictive or vacuous — is
+  ignored entirely.
+
+  Attack pattern (Research-doc Sec 11.1 + 11.13): a wide-open Allow with a
+  Condition that LOOKS restrictive but is vacuous in practice. Here:
+    - aws:SourceIp 0.0.0.0/0 (matches every IP — Sec 11.1)
+    - aws:SecureTransport false (true means HTTPS-required; false is no-op
+      vs reads, just blocks HTTP which AWS won't generate from SDKs anyway
+      — Sec 11.13)
+  Combined with iam:* on Resource:*, this is identical to full IAM admin.
+  But because the scorer never inspects Condition, the policy looks fully
+  enforced. (In reality, the operator who APPROVES this is likely fooled
+  too — "oh there's a condition, looks fine.")
+
+  Code location: src/iam_jit/review.py — no Condition logic exists in
+  `_deterministic()` (lines 932-1938) at all.
+
+  Real risk: 9 — vacuous-condition `iam:*` on Resource:* is account
+  takeover. The condition contributes nothing.
+
+  Suggested fix: Add a Condition parser. Build a small set of "vacuous /
+  trivially-defeated" patterns (SourceIp 0.0.0.0/0, SecureTransport false,
+  Null operator on always-present keys, IfExists-only checks). If the
+  Condition is entirely one of these, treat the statement as if Condition
+  were absent.
+
+  Score this at 9 — the scorer SHOULD recognize the policy is full iam:*
+  admin and the condition adds no real restriction.
+
+policy:
+  Version: "2012-10-17"
+  Statement:
+    - Effect: Allow
+      Action: "iam:*"
+      Resource: "*"
+      Condition:
+        IpAddress:
+          aws:SourceIp: "0.0.0.0/0"
+        Bool:
+          aws:SecureTransport: "false"
+
+request:
+  spec:
+    access_type: read-write
+    duration:
+      duration_hours: 1
+
+expected:
+  score_min: 9
+  must_auto_approve: false

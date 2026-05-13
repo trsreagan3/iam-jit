@@ -1,0 +1,45 @@
+name: agent-235-condition-kms-viaservice-missing
+description: |
+  WHITE-BOX: Research Sec 11.17. kms:ViaService is a critical KMS
+  condition: it restricts decrypt operations to calls coming through
+  a specific AWS service (e.g., only s3 can decrypt). Without it, any
+  caller with kms:Decrypt on the key can decrypt ciphertexts encrypted
+  ANYWHERE.
+
+  Attack: KMS key policy grants kms:Decrypt to a wide AWS principal
+  with NO kms:ViaService condition. Anyone with the key ARN can
+  decrypt any ciphertext encrypted under it, regardless of which
+  service produced the ciphertext. This is the "shared secret" key
+  that should have been scoped to S3 only but is decryptable via
+  Lambda, EC2, anywhere.
+
+  Scorer treats kms:Decrypt on a specific key ARN as score 2 (sensitive-
+  service narrow Read floor). Misses the cross-service-decrypt risk.
+
+  Code location: review.py — no condition handling; no rule for
+  "missing kms:ViaService on KMS resource policy."
+
+  Real risk: 6 — overbroad KMS decrypt; cross-service ciphertext exposure.
+
+  Suggested fix: when an Allow on kms:Decrypt / kms:GenerateDataKey
+  doesn't include a kms:ViaService or kms:EncryptionContext condition,
+  flag with "missing service/context restriction on KMS operation."
+
+policy:
+  Version: "2012-10-17"
+  Statement:
+    - Effect: Allow
+      Action:
+        - "kms:Decrypt"
+        - "kms:DescribeKey"
+      Resource: "arn:aws:kms:us-east-1:123456789012:key/abcd1234-1234-1234-1234-123456789012"
+
+request:
+  spec:
+    access_type: read-write
+    duration:
+      duration_hours: 1
+
+expected:
+  score_min: 4
+  must_auto_approve: false

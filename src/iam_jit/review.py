@@ -149,6 +149,22 @@ _CODE_EXECUTION_PRIMITIVES = frozenset(
         # on a schedule under the canary's IAM role
         "synthetics:CreateCanary",
         "synthetics:UpdateCanary",
+        # ROUND 6 additions:
+        # EventBridge Pipes — `CreatePipe` consumes from a source
+        # and invokes a target; both can be Lambdas + the pipe runs
+        # under a passed role. Combined with PassRole this is the
+        # classic "code-exec composition" pattern. Round 6 agent-166, 221.
+        "pipes:CreatePipe",
+        "pipes:UpdatePipe",
+        # CodeDeploy — `CreateDeployment` ships an appspec.yml
+        # whose hook scripts run on the deploy target with the
+        # role's perms. Round 6 agent-167, 222.
+        "codedeploy:CreateDeployment",
+        "codedeploy:CreateApplication",
+        # CodeStar — `CreateProject` provisions a multi-service
+        # template that runs caller-controlled code paths under
+        # a passed role. Round 6 agent-225.
+        "codestar:CreateProject",
     }
 )
 
@@ -184,6 +200,23 @@ _SECRET_BEARING_READS = frozenset(
         "dynamodb:BatchGetItem",
         "dynamodb:ExecuteStatement",
         "dynamodb:PartiQLSelect",
+        # ROUND 6 additions:
+        # Lambda recon — `GetFunction` returns a presigned URL to
+        # the deployment zip. The zip frequently contains hard-
+        # coded secrets, env-var snapshots, and proprietary code.
+        # Single-action exfil if Resource is broad. Round 6
+        # agent-177 (SCARLETEEL reproduction).
+        "lambda:GetFunction",
+        # ECS task description — `DescribeTasks` returns task
+        # metadata including the task role ARN and the IPv4 address
+        # of the task container, enabling cross-task IAM theft
+        # via the 2024 ECS-recon disclosure. Round 6 agent-178.
+        "ecs:DescribeTasks",
+        # RDS DB log file download — log files frequently contain
+        # query strings with embedded credentials, slow-query
+        # secrets, and connection-string leakage. Round 6 agent-187.
+        "rds:DownloadDBLogFilePortion",
+        "rds:DownloadCompleteDBLogFile",
         # S3 GetObject on broad resource (bucket-name wildcard like
         # `prod-*` or service-wide `arn:aws:s3:::*`) is data-exfil tier.
         # On a NARROW bucket-name (specific bucket) it's just routine
@@ -274,6 +307,13 @@ _CROSS_ACCOUNT_EXFIL_ACTIONS = frozenset(
         # exposure
         "ecr-public:PutImage",
         "ecr-public:CreateRepository",
+        # Bedrock InvokeModel on cross-account ARN — when the model
+        # ARN names a foundation model in a different account, the
+        # invocation runs in that account's region/billing context
+        # (LLMjacking cost-abuse + data egress to attacker-controlled
+        # inference endpoint). Round 6 agent-164.
+        "bedrock:InvokeModel",
+        "bedrock:InvokeModelWithResponseStream",
         # Direct Connect — bridge VPC to attacker's on-prem
         "directconnect:CreateConnection",
         "directconnect:CreatePrivateVirtualInterface",
@@ -308,6 +348,13 @@ _HIGH_RISK_ACTIONS = frozenset(
         # reaches. Round 6 agent-175, 240.
         "sts:GetFederationToken",
         "sts:GetSessionToken",
+        # RDS Data API — `rds-data:ExecuteStatement` runs arbitrary
+        # SQL against Aurora Serverless using IAM authentication only
+        # (no DB credentials). Narrow-cluster-ARN scope = full SQL
+        # admin of that DB. Round 6 agent-160.
+        "rds-data:ExecuteStatement",
+        "rds-data:BatchExecuteStatement",
+        "rds-data:ExecuteSql",
     }
 )
 
@@ -435,6 +482,71 @@ _HIGH_IMPACT_MUTATION_ACTIONS = frozenset(
         # injection payloads into production RAG
         "bedrock:CreateKnowledgeBase",
         "bedrock:StartIngestionJob",
+        # ROUND 6 additions:
+        # Lake Formation `GetDataAccess` — bypasses fine-grained
+        # access control by returning temporary creds to read raw
+        # underlying data. Round 6 agent-161.
+        "lakeformation:GetDataAccess",
+        # EC2 Instance Connect — `SendSSHPublicKey` pushes a one-time
+        # public key onto an instance's authorized_keys; combined
+        # with a known IP/port + ec2-instance-connect:OpenTunnel
+        # this is SSH-on-demand to any matching instance. Round 6
+        # agent-162, 238.
+        "ec2-instance-connect:SendSSHPublicKey",
+        # EKS cluster config — `UpdateClusterConfig` can change
+        # endpoint access (private→public) or enable logging
+        # destinations. Round 6 agent-169.
+        "eks:UpdateClusterConfig",
+        # S3 Object Lambda response writing — write side of the
+        # GetObject proxy; rewriting object content modifies what
+        # downstream consumers see. Round 6 agent-170.
+        "s3-object-lambda:WriteGetObjectResponse",
+        # RAM cross-account sharing — `CreateResourceShare` extends
+        # a resource to other accounts in/outside the org. Round 6
+        # agent-172.
+        "ram:CreateResourceShare",
+        "ram:AssociateResourceShare",
+        "ram:UpdateResourceShare",
+        # VPC endpoint policy mutation — `ModifyVpcEndpoint` can
+        # replace the endpoint's resource policy, removing all
+        # access controls on the VPC's path to AWS APIs. Round 6
+        # agent-173.
+        "ec2:ModifyVpcEndpoint",
+        # S3 lifecycle — `PutLifecycleConfiguration` can schedule
+        # automatic deletion (or transition to Glacier) of objects;
+        # weaponized against cloudtrail buckets it's silent log
+        # destruction. Round 6 agent-174.
+        "s3:PutLifecycleConfiguration",
+        # CloudTrail Insight selectors — disabling insight selectors
+        # silently blinds anomaly detection (writes still happen,
+        # alerts don't). Round 6 agent-184.
+        "cloudtrail:PutInsightSelectors",
+        # Redshift temporary credentials — returns DB user creds
+        # for the calling role. With broad scope this is admin-
+        # equivalent for the Redshift cluster. Round 6 agent-186,
+        # 239.
+        "redshift:GetClusterCredentials",
+        # Network bridging primitives — attaching/creating network
+        # interfaces lets the attacker create a route between
+        # otherwise-isolated network paths. Round 6 agent-189.
+        "ec2:CreateNetworkInterface",
+        "ec2:AttachNetworkInterface",
+        # VPN endpoint creation — `CreateVpnConnection` and
+        # `CreateClientVpnEndpoint` build network bridges from
+        # attacker-controlled infrastructure into the VPC. Round 6
+        # agent-245.
+        "ec2:CreateVpnConnection",
+        "ec2:CreateClientVpnEndpoint",
+        # API Gateway authorizer mutation — `apigateway:PATCH` on a
+        # method can switch its authorization type from IAM to
+        # NONE, exposing the API publicly. Round 6 agent-179.
+        "apigateway:PATCH",
+        # Bedrock onboarding + cross-account invoke — `PutUseCase`
+        # opts the account into model access; broad invoke without
+        # model scoping is the LLMjacking attack class (cost abuse
+        # + sensitive prompt processing). Round 6 agent-163, 191.
+        "bedrock:PutUseCaseForModelAccess",
+        "bedrock:CreateInferenceProfile",
     }
 )
 
@@ -665,6 +777,46 @@ _CATASTROPHIC_ACTIONS = frozenset(
         "ebs:GetSnapshotBlock",
         "ebs:ListSnapshotBlocks",
         "ebs:ListChangedBlocks",
+        # ROUND 6 additions:
+        # Permission-boundary mutations remove the only guardrail
+        # preventing a role from escalating to admin. Adding the
+        # boundary requires `iam:PutRolePermissionsBoundary`; removing
+        # it requires `iam:DeleteRolePermissionsBoundary`. Either
+        # primitive single-handedly unlocks every other IAM mutation
+        # the bounded role's policies allowed. Symmetric for users.
+        # Round 6 findings agent-171, 220.
+        "iam:PutRolePermissionsBoundary",
+        "iam:DeleteRolePermissionsBoundary",
+        "iam:PutUserPermissionsBoundary",
+        "iam:DeleteUserPermissionsBoundary",
+        # SSM Associations — `CreateAssociation` schedules a document
+        # to run on every matching instance on a recurring schedule.
+        # Equivalent to "install a cron" RCE primitive. Round 6
+        # agent-223.
+        "ssm:CreateAssociation",
+        "ssm:UpdateAssociation",
+        # Defense-evasion (round-6 agent-226 and adjacent):
+        # disable/remove the recording mechanisms BEFORE the action
+        # happens, so post-incident forensics find nothing. Same tier
+        # as cloudtrail:StopLogging.
+        "ec2:DeleteFlowLogs",
+        "route53:DeleteQueryLoggingConfig",
+        "wafv2:DisassociateWebACL",
+        "logs:DeleteLogGroup",
+        "logs:DeleteRetentionPolicy",
+        # Bedrock AgentCore — `CreateCodeInterpreter` provisions a
+        # sandboxed code-execution environment that runs under a
+        # role. Combined with PassRole this is RCE-as-passed-role,
+        # plus AgentCore Runtime sandboxes can call back to AWS
+        # APIs. Round 6 findings agent-165, 224.
+        "bedrock-agentcore:CreateCodeInterpreter",
+        "bedrock-agentcore:CreateAgentRuntime",
+        "bedrock-agentcore:UpdateAgentRuntime",
+        # Organizations delegated administration — registering a
+        # delegated admin for a service grants that account org-
+        # wide privileges for the service. Privesc primitive at
+        # the org level. Round 6 finding agent-244.
+        "organizations:RegisterDelegatedAdministrator",
     }
 )
 
@@ -696,6 +848,14 @@ _SERVICE_ALIASES = {
     # ECR Public is a separate IAM service but the actions are the same
     # shape; we keep them separate so the catastrophic list can target
     # ecr-public:PutImage specifically (already added in round 2).
+    # IAM Identity Center: the `sso:` prefix is the legacy / display
+    # form for the IAM Identity Center service whose canonical IAM
+    # service-prefix is `sso-admin`. AWS accepts policies using either
+    # prefix and resolves them equivalently. Round 6 finding agent-190
+    # — without this alias `sso:AttachManagedPolicyToPermissionSet`
+    # bypasses the `sso-admin:AttachManagedPolicyToPermissionSet`
+    # entry in _CATASTROPHIC_ACTIONS.
+    "sso": "sso-admin",
 }
 
 
@@ -826,7 +986,15 @@ def _condition_is_vacuous(condition: object) -> tuple[bool, str]:
         return False, ""
 
     for op_raw, kvs in condition.items():
-        op = str(op_raw)
+        # YAML quirk: an unquoted `Null:` key parses to Python None
+        # rather than the string "Null". AWS still treats this as the
+        # `Null` operator (JSON has no other interpretation). Round 6
+        # finding agent-182 surfaced this — the rule was checking
+        # `op == "Null"` but op was None.
+        if op_raw is None:
+            op = "Null"
+        else:
+            op = str(op_raw)
         op_lc = op.lower()
         if not isinstance(kvs, dict):
             continue
@@ -1323,21 +1491,85 @@ def _deterministic(
                     "wider than the author intended."
                 )
             # Empty Principal list (`{AWS: []}`) — semantics ambiguous
-            # across IAM evaluators. Flag as a defect signal rather
-            # than a hard bypass. Round 6 agent-181.
+            # across IAM evaluators. Flag at human-review tier. Round 6
+            # agent-181. (Floor 5 not 4 — 4 falls under the default
+            # auto-approve threshold, hiding the defect signal.)
             if isinstance(principal, dict) and not _principal_is_public(principal):
                 non_empty_vals = [
                     v for v in principal.values()
                     if v not in ("", [], None)
                 ]
                 if not non_empty_vals and principal:
-                    score = max(score, 4)
+                    score = max(score, 5)
                     factors.append(
                         "Statement has empty Principal list (e.g. "
                         "`{AWS: []}`) — ambiguous semantics; some IAM "
                         "evaluators treat empty as \"match anyone.\" "
-                        "Defect-class signal."
+                        "Defect-class signal — escalate for review."
                     )
+                # CanonicalUser principal — legacy S3 ACL identifier
+                # distinct from AWS ARN principals. The presence of
+                # this principal type is a strong "this is a resource-
+                # based bucket policy" signal that the rest of the
+                # rules (assuming identity-policy semantics) won't
+                # catch. Flag at human-review tier. Round 6 agent-180.
+                if "CanonicalUser" in principal:
+                    score = max(score, 5)
+                    factors.append(
+                        "Statement uses `Principal.CanonicalUser` — "
+                        "legacy S3 ACL identifier in a resource-"
+                        "based-policy statement. The CanonicalUser "
+                        "may belong to ANY AWS account and is not "
+                        "validated against principal-arn rules."
+                    )
+                # Service principal trust without Condition. A trust
+                # policy / resource policy granting access to an AWS
+                # service (e.g. `lambda.amazonaws.com`) without any
+                # Condition is overbroad — every Lambda in every
+                # account can assume / invoke. Round 6 agent-210.
+                if "Service" in principal:
+                    service_principals = principal["Service"]
+                    if isinstance(service_principals, str):
+                        service_principals = [service_principals]
+                    has_condition = bool(stmt.get("Condition"))
+                    if service_principals and not has_condition:
+                        score = max(score, 6)
+                        factors.append(
+                            f"`Principal.Service` ({service_principals[0]}) "
+                            "with no Condition — every caller from that "
+                            "service in any account can use this grant. "
+                            "Typical service-trust policies need an "
+                            "`aws:SourceAccount` or `aws:SourceArn` "
+                            "condition to scope to your own resources."
+                        )
+
+        # Policy-variable injection in Resource — `${aws:PrincipalTag/...}`,
+        # `${aws:RequestTag/...}`, `${aws:ResourceTag/...}` expand at
+        # evaluation time to a tag value the principal may control. An
+        # attacker with `iam:TagUser` / `iam:TagRole` on self rewrites
+        # the tag to construct an arbitrary ARN. Stable identity
+        # variables (`${aws:userid}`, `${aws:username}`) are NOT
+        # flagged — they're principal-immutable. Round 6 agent-168.
+        for r in resources:
+            if "${aws:PrincipalTag/" in r or "${aws:RequestTag/" in r or "${aws:ResourceTag/" in r:
+                score = max(score, 7)
+                factors.append(
+                    f"Resource `{r}` interpolates an attacker-"
+                    "controllable tag (`${{aws:PrincipalTag/...}}` or "
+                    "`${{aws:RequestTag/...}}` or `${{aws:ResourceTag/...}}`). "
+                    "If the caller has `iam:TagRole` / `iam:TagUser` "
+                    "on themselves (common in ABAC patterns), they "
+                    "can rewrite the tag to construct any resource "
+                    "ARN — the Resource scope is illusory."
+                )
+                suggestions.append(
+                    "Replace tag-driven Resource variables with "
+                    "either explicit ARN lists or the immutable "
+                    "`${aws:userid}` / `${aws:username}` variables, "
+                    "and revoke `iam:Tag*` permissions on the "
+                    "principal's own ARN."
+                )
+                break
 
         # ---- Condition vacuity detection ----
         # An IAM statement's Condition block is the most common
@@ -1905,20 +2137,35 @@ def _deterministic(
                     f"{services_label} to scope to specific ARNs."
                 )
 
-        # High-impact mutation actions floor the score at 5 even
-        # when the resource is a specific ARN. Single-resource scope
-        # protects against scope creep but not against the action's
-        # blast — a single DNS record change can move all of prod
-        # traffic. See `_HIGH_IMPACT_MUTATION_ACTIONS` for the list.
+        # High-impact mutation actions floor the score by resource scope:
+        #   - narrow resource: floor 5 (still risky, but bounded)
+        #   - broad/wildcard resource: floor 8 (catastrophic-tier blast)
+        # Single-resource scope protects against scope creep but not
+        # against the action's blast. On broad resource the action
+        # mutates many resources in one call — a single DNS-record
+        # primitive on `*` rewrites every record in every zone.
+        # Round 6: previously a flat-5 floor; bumped on broad because
+        # nearly all the round-6 high-impact-on-broad findings (RAM
+        # CreateResourceShare, ec2:ModifyVpcEndpoint, eks:UpdateClusterConfig,
+        # bedrock:PutUseCase, redshift:GetClusterCredentials, etc.)
+        # are 8-tier severity when scoped account-wide.
         for action in actions:
-            if (action.lower() in effective_high_impact_lc
+            if (_canonical_action(action) in effective_high_impact_lc
                     or _action_covers_any(action, effective_high_impact_lc)):
-                score = max(score, 5)
-                factors.append(
-                    f"`{action}` is a high-impact mutation — a single "
-                    "narrowly-scoped change can affect production "
-                    "operations / security posture."
-                )
+                if wildcard_resource:
+                    score = max(score, 8)
+                    factors.append(
+                        f"`{action}` is a high-impact mutation on broad "
+                        "resource — single API call can rewrite every "
+                        "matching resource in the account."
+                    )
+                else:
+                    score = max(score, 5)
+                    factors.append(
+                        f"`{action}` is a high-impact mutation — a single "
+                        "narrowly-scoped change can affect production "
+                        "operations / security posture."
+                    )
                 suggestions.append(
                     "High-impact mutations should not auto-approve "
                     "below medium-risk thresholds — set "
@@ -1932,7 +2179,7 @@ def _deterministic(
         # is never appropriate even on a single narrowly-resourced ARN.
         # See `_CATASTROPHIC_ACTIONS`.
         for action in actions:
-            if (action.lower() in _CATASTROPHIC_ACTIONS_LC
+            if (_canonical_action(action) in _CATASTROPHIC_ACTIONS_LC
                     or _action_covers_any(action, _CATASTROPHIC_ACTIONS_LC)):
                 score = max(score, 9)
                 factors.append(
@@ -2204,7 +2451,7 @@ def _deterministic(
     # Floor at 8 regardless of resource scope (the "configuration"
     # itself is the attack — narrow target ARN doesn't help).
     for action, _inclusive, _strict in all_actions:
-        if (action.lower() in _CROSS_ACCOUNT_EXFIL_ACTIONS_LC
+        if (_canonical_action(action) in _CROSS_ACCOUNT_EXFIL_ACTIONS_LC
                 or _action_covers_any(action, _CROSS_ACCOUNT_EXFIL_ACTIONS_LC)):
             score = max(score, 8)
             factors.append(

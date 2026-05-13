@@ -1,0 +1,35 @@
+name: codedeploy-passrole-appspec-rce
+description: |
+  `codedeploy:CreateDeployment` with attacker-controlled `appspec` and
+  `iam:PassRole` on the CodeDeploy service role. AppSpec lifecycle hooks
+  (`BeforeInstall`, `AfterInstall`, etc.) run arbitrary shell on every
+  target instance under the deployment role's credentials.
+
+  Research: Section 9.12 ("CodeCatalyst / CodeDeploy —
+  `codedeploy:CreateDeployment` with attacker-controlled `appspec` and a
+  deployment that runs lifecycle hooks under the deployment role.").
+
+  Why the scorer underrates: scored 6. `codedeploy:CreateDeployment` is
+  not in `_CODE_EXECUTION_PRIMITIVES` so the PassRole composition rule
+  fails. Same primitive class as `cloudformation:CreateStack` +
+  `iam:PassRole` (catastrophic via composition).
+policy:
+  Version: "2012-10-17"
+  Statement:
+    - Effect: Allow
+      Action:
+        - codedeploy:CreateDeployment
+        - codedeploy:CreateApplication
+        - codedeploy:RegisterApplicationRevision
+      Resource: "*"
+    - Effect: Allow
+      Action: iam:PassRole
+      Resource: arn:aws:iam::123456789012:role/codedeploy-service-role
+request:
+  spec:
+    access_type: read-write
+    duration:
+      duration_hours: 1
+expected:
+  score_min: 9
+  must_auto_approve: false

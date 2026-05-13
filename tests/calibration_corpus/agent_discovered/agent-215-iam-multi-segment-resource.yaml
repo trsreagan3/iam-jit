@@ -1,0 +1,53 @@
+name: agent-215-iam-multi-segment-resource
+description: |
+  WHITE-BOX: IAM resource ARNs use multi-segment paths. The IAM path
+  feature (`iam:CreateUser --path /eng/platform/`) produces ARNs like
+  `arn:aws:iam::123:user/eng/platform/alice`. These ARNs have MULTIPLE
+  slashes — review.py's `_is_strict_wildcard` line 1252 checks
+  `collection in collection_types.get(service, ())` and `tail == "*"
+  or (tail.endswith("*") and "/" not in tail)`.
+
+  For `arn:aws:iam::*:user/eng/platform/*`, collection="user", tail=
+  "eng/platform/*". The `"/" not in tail` check is False (tail contains
+  slashes), so this is NOT detected as a strict wildcard. Even though
+  it covers every user under /eng/platform/ — typically every employee
+  in an entire org-unit.
+
+  Similarly `arn:aws:iam::*:role/aws-service-role/*` covers EVERY
+  service-linked role in the account — assuming/modifying any of
+  them is full-service-takeover.
+
+  Code location: review.py line 1253 — `"/" not in tail` is too
+  restrictive; should be "first segment is wildcardy" rather than
+  "no further slashes."
+
+  Real risk: 8 — iam:PutUserPolicy on every user under /eng/platform/*
+  = attach AdministratorAccess to ANY engineer's user. Catastrophic
+  action floor 9 will fire because iam:PutUserPolicy is in
+  _CATASTROPHIC_ACTIONS — but the resource pattern wouldn't get
+  marked broad on its own.
+
+  Suggested fix: change line 1253 to recognize any iam collection with
+  a `*` ANYWHERE in the tail (multi-segment paths included).
+
+policy:
+  Version: "2012-10-17"
+  Statement:
+    - Effect: Allow
+      Action:
+        - "iam:GetUser"
+        - "iam:ListAccessKeys"
+        - "iam:ListUserPolicies"
+      Resource:
+        - "arn:aws:iam::*:user/eng/platform/*"
+        - "arn:aws:iam::*:role/aws-service-role/*"
+
+request:
+  spec:
+    access_type: read-only
+    duration:
+      duration_hours: 1
+
+expected:
+  score_min: 6
+  must_auto_approve: false

@@ -1,0 +1,41 @@
+name: llmjacking-bedrock-onboarding
+description: |
+  LLMjacking primitives — the exact sequence from JINX-2401 (Wiz, 2024)
+  and the broader 2024-2026 LLMjacking campaign: enable model access
+  programmatically, then invoke. `PutUseCaseForModelAccess` +
+  `PutFoundationModelEntitlement` + `CreateFoundationModelAgreement`
+  bypass the AWS Bedrock console gating that's supposed to require a
+  human acceptance step.
+
+  Research: Section 5.6 ("JINX-2401 LLM hijacking") and Section 5.7
+  ("LLMjacking (general, 2024-2026) — attackers enable Bedrock model
+  access programmatically: `bedrock:PutUseCaseForModelAccess`,
+  `bedrock:PutFoundationModelEntitlement`,
+  `bedrock:CreateFoundationModelAgreement`,
+  `bedrock:ListFoundationModelAgreementOffers`, then `InvokeModel*`.").
+
+  Why the scorer underrates: scored 6. `bedrock` is in sensitive services
+  so the broad-resource floor fires, but these specific actions are the
+  documented credential-cost-hijacking primitives — each one bills the
+  victim's account for the attacker's inference workload (T1496 Resource
+  Hijacking, real-world losses in the $millions per JINX-2401 reporting).
+policy:
+  Version: "2012-10-17"
+  Statement:
+    - Effect: Allow
+      Action:
+        - bedrock:PutUseCaseForModelAccess
+        - bedrock:PutFoundationModelEntitlement
+        - bedrock:CreateFoundationModelAgreement
+        - bedrock:ListFoundationModelAgreementOffers
+        - bedrock:InvokeModel
+        - bedrock:InvokeModelWithResponseStream
+      Resource: "*"
+request:
+  spec:
+    access_type: read-write
+    duration:
+      duration_hours: 1
+expected:
+  score_min: 8
+  must_auto_approve: false

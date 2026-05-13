@@ -1,0 +1,56 @@
+name: agent-201-condition-stringlike-sub-wildcard
+description: |
+  WHITE-BOX: Section 11.3 (OIDC trust-policy bypass). Scorer ignores
+  Condition entirely, so it cannot distinguish a properly-locked-down
+  OIDC trust-policy from a wide-open one.
+
+  The action is sts:AssumeRoleWithWebIdentity — federated assume. The
+  Condition pretends to scope to a specific GitHub org via
+  StringLike on token.actions.githubusercontent.com:sub, but the
+  pattern is `repo:my-org/*:*` — matches ANY repo under my-org
+  including attacker-owned forks, AND any ref/branch/PR. A real
+  scoping policy would use StringEquals to one specific repo+ref.
+
+  In practice this policy lets anyone with a fork or branch in my-org
+  mint a session that assumes the target role. The catastrophic
+  iam:AttachRolePolicy via the assumed role's session would not be
+  caught by this YAML directly, but the wide-open AssumeRole
+  primitive is itself score-7+ tier per the high-risk-on-broad rule
+  — yet because the resource is a narrow role ARN, the scorer drops
+  it to just iam:PassRole-narrow floor (4) territory or worse.
+
+  Code location: src/iam_jit/review.py — no Condition logic. Plus,
+  sts:AssumeRoleWithWebIdentity is not in any action set (only
+  sts:AssumeRole is in _HIGH_RISK_ACTIONS). The variant
+  AssumeRoleWithSAML / WithWebIdentity is missed.
+
+  Real risk: 8 — federated-assume with StringLike `*` in the sub is a
+  textbook GitHub-OIDC misuse (research Sec 11.3 + 1.40); attacker
+  with any branch in the org can assume.
+
+  Suggested fix: (a) Add sts:AssumeRoleWithWebIdentity and
+  sts:AssumeRoleWithSAML to _HIGH_RISK_ACTIONS. (b) Add a Condition
+  evaluator that flags StringLike with trailing `*` on identity-bearing
+  keys (`*:sub`, `*:aud`) as a high-risk pattern.
+
+policy:
+  Version: "2012-10-17"
+  Statement:
+    - Effect: Allow
+      Action:
+        - "sts:AssumeRoleWithWebIdentity"
+        - "sts:AssumeRoleWithSAML"
+      Resource: "arn:aws:iam::123456789012:role/github-oidc-deploy"
+      Condition:
+        StringLike:
+          token.actions.githubusercontent.com:sub: "repo:my-org/*:*"
+
+request:
+  spec:
+    access_type: read-write
+    duration:
+      duration_hours: 1
+
+expected:
+  score_min: 7
+  must_auto_approve: false

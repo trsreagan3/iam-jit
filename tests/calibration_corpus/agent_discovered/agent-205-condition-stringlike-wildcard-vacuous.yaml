@@ -1,0 +1,47 @@
+name: agent-205-condition-stringlike-wildcard-vacuous
+description: |
+  WHITE-BOX: Section 11.8 (StringLike with `*` = vacuous condition).
+  Policy grants kms:Decrypt on Resource:* with a StringLike condition
+  on kms:EncryptionContext that uses a literal `*` value — matches
+  EVERYTHING, equivalent to no condition.
+
+  Scorer has zero Condition handling, so it cannot see that the
+  StringLike "*" makes the condition vacuous. The kms:Decrypt action
+  on Resource:* should fire _HIGH_RISK_ACTIONS_on_broad (floor 7),
+  but the operator may believe the condition restricts to specific
+  encryption contexts.
+
+  Real risk: 8 — kms:Decrypt on every key with no real restriction
+  = decrypt every ciphertext in the account; identical to Resource:*
+  unrestricted.
+
+  Code location: review.py — no Condition logic.
+
+  Suggested fix: when a StringLike / ArnLike condition's VALUE is a
+  bare "*" or a glob like "*.*" with no useful prefix, treat the
+  condition as vacuous (effectively no restriction) and surface a
+  factor stating "vacuous wildcard condition."
+
+policy:
+  Version: "2012-10-17"
+  Statement:
+    - Effect: Allow
+      Action:
+        - "kms:Decrypt"
+        - "kms:GenerateDataKey"
+      Resource: "*"
+      Condition:
+        StringLike:
+          kms:EncryptionContext:purpose: "*"
+        ArnLike:
+          aws:SourceArn: "*"
+
+request:
+  spec:
+    access_type: read-write
+    duration:
+      duration_hours: 1
+
+expected:
+  score_min: 7
+  must_auto_approve: false

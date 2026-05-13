@@ -1,0 +1,37 @@
+name: lakeformation-getdataaccess
+description: |
+  `lakeformation:GetDataAccess` on `Resource: *` issues temporary STS
+  credentials for S3 read on registered Lake Formation locations. A
+  principal with ONLY `lakeformation:GetDataAccess` and no `s3:*` can
+  still read every registered S3 table in the data lake. The scorer
+  treats Lake Formation as a sensitive service (floor 6) but doesn't
+  recognize `GetDataAccess` as a credentials-issuing primitive on par
+  with `sts:GetFederationToken`.
+
+  Research: Section 13.3 ("Lake Formation — `lakeformation:GrantPermissions`,
+  `lakeformation:GetDataAccess` — Lake Formation can issue temporary creds
+  for S3 read on registered locations. A principal with **only**
+  `lakeformation:GetDataAccess` and no `s3:*` can still read S3 data via
+  Lake Formation's STS issuance.") and Section 5.1 (Capital One pattern
+  via alternate credential issuance).
+
+  Why the scorer underrates: scored 6. GetDataAccess is the lake's STS
+  surface — should be treated as a credential-bearing read (floor 7-8),
+  not a generic Lake Formation read.
+policy:
+  Version: "2012-10-17"
+  Statement:
+    - Effect: Allow
+      Action:
+        - lakeformation:GetDataAccess
+        - lakeformation:GetTemporaryGluePartitionCredentials
+        - lakeformation:GetTemporaryGlueTableCredentials
+      Resource: "*"
+request:
+  spec:
+    access_type: read-write
+    duration:
+      duration_hours: 1
+expected:
+  score_min: 8
+  must_auto_approve: false

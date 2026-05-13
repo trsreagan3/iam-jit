@@ -1,0 +1,43 @@
+name: agent-240-sts-get-federation-token
+description: |
+  WHITE-BOX: Research Sec 1.41 + 6.5. sts:GetFederationToken mints
+  temporary credentials with an arbitrary policy chosen at call time.
+  An attacker calls it with a wide policy and gets the matching
+  credentials. Bypass for permissions boundaries (the federation
+  token's effective permissions = intersection of caller's perms AND
+  the call-time policy — but if the caller has wide perms, the
+  federation token can have any subset).
+
+  sts:GetSessionToken is similar — for IAM users with MFA, it issues
+  the MFA-bearing temporary credentials.
+
+  Code location: review.py — neither is in _CATASTROPHIC,
+  _HIGH_IMPACT, or _HIGH_RISK_ACTIONS. `sts:AssumeRole` IS in
+  _HIGH_RISK_ACTIONS, but GetFederationToken/GetSessionToken are
+  not. They fall to sensitive-service-on-broad floor 6.
+
+  Real risk: 8 — temporary-credential exfiltration primitive
+  (especially when caller's role has broad perms).
+
+  Suggested fix: add sts:GetFederationToken, sts:GetSessionToken,
+  sts:AssumeRoot to _HIGH_RISK_ACTIONS. Same blast as sts:AssumeRole.
+
+policy:
+  Version: "2012-10-17"
+  Statement:
+    - Effect: Allow
+      Action:
+        - "sts:GetFederationToken"
+        - "sts:GetSessionToken"
+        - "sts:AssumeRoot"
+      Resource: "*"
+
+request:
+  spec:
+    access_type: read-write
+    duration:
+      duration_hours: 1
+
+expected:
+  score_min: 7
+  must_auto_approve: false

@@ -1,0 +1,45 @@
+name: agent-202-condition-null-mfa-inversion
+description: |
+  WHITE-BOX: Section 11.6 (Null-operator inversion). Hand-written policies
+  often use `"Null":{"aws:MultiFactorAuthAge":"true"}` thinking it requires
+  MFA. Actually it REQUIRES ABSENCE OF MFA — exact inverse.
+
+  Scorer has zero Condition handling so:
+    (a) it never warns that this is the inverse of the intended meaning
+    (b) it treats the iam:* + Resource:* statement as if the condition
+        provided some restriction
+
+  The policy below grants iam:* on Resource:* ONLY when the caller is NOT
+  using MFA — which means anyone who phishes static AKIA keys (no MFA)
+  can use it; the user's own MFA-protected console session canNOT (per
+  the inverted condition).
+
+  Code location: review.py — no Condition logic anywhere.
+
+  Real risk: 10 — iam:* on Resource:* with no real restriction is full
+  admin. The Null-true clause inverts the operator's intent and ENABLES
+  the attack against credential-theft (without MFA).
+
+  Suggested fix: detect Null-operator on MFA / authentication-related
+  keys with value "true" and warn loudly — these are almost always
+  written with the wrong semantics.
+
+policy:
+  Version: "2012-10-17"
+  Statement:
+    - Effect: Allow
+      Action: "iam:*"
+      Resource: "*"
+      Condition:
+        Null:
+          aws:MultiFactorAuthAge: "true"
+
+request:
+  spec:
+    access_type: read-write
+    duration:
+      duration_hours: 1
+
+expected:
+  score_min: 9
+  must_auto_approve: false

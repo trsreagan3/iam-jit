@@ -1,0 +1,36 @@
+name: jsongrammar-canonicaluser-principal
+description: |
+  `Principal: {CanonicalUser: [...]}` on an S3 bucket policy. CanonicalUser
+  is the legacy S3 ACL identifier — distinct from AWS principal arns.
+  Tools that only check `Principal.AWS` for `*` miss CanonicalUser
+  entirely. A bucket policy with a CanonicalUser principal can be made
+  to match arbitrary external principals if the listed canonical IDs
+  belong to someone else's AWS account.
+
+  Research: Section 10.4 ("`Principal` may be `string` (only when value
+  is `\"*\"`), `{\"AWS\":\"*\"}`, ... or `{\"CanonicalUser\":\"...\"}`."),
+  Section 4.1 (S3 bucket policy abuse).
+
+  Why the scorer underrates: scored 1. The scorer's Principal handling
+  only branches on `AWS` and `Service`. CanonicalUser-shape principals
+  fall through to "no Principal recognized" and the statement scores as
+  a narrow read. Even if the listed IDs are internal-only, the SHAPE is a
+  signal of "this is a bucket-policy not an identity-policy" — should
+  trigger the resource-policy floor.
+policy:
+  Version: "2012-10-17"
+  Statement:
+    - Effect: Allow
+      Principal:
+        CanonicalUser:
+          - 79a59df900b949e55d96a1e698fbacedfd6e09d98eacf8f8d5218e7cd47ef2be
+      Action: s3:GetObject
+      Resource: arn:aws:s3:::corporate-pii-data/*
+request:
+  spec:
+    access_type: read-write
+    duration:
+      duration_hours: 1
+expected:
+  score_min: 5
+  must_auto_approve: false

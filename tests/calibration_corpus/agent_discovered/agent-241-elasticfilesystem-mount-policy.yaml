@@ -1,0 +1,40 @@
+name: agent-241-elasticfilesystem-mount-policy
+description: |
+  WHITE-BOX: Research Sec 4.9. EFS file system policy with
+  elasticfilesystem:ClientMount = cross-VPC / cross-account mount.
+  Single-call cross-account data-plane access.
+
+  Code location: review.py — `elasticfilesystem` is not in any
+  action set; `efs:*` actions are not in _CROSS_ACCOUNT_EXFIL.
+  Generic state-changing-on-broad floor 6.
+
+  Note: `efs:PutFileSystemPolicy` is mentioned in FINDINGS.txt round
+  2's suggested fixes (line 264, the cross-account-exfil list) but
+  is NOT actually in _CROSS_ACCOUNT_EXFIL_ACTIONS in review.py.
+  Verify by grep.
+
+  Real risk: 8 — cross-VPC EFS mount = shared filesystem with
+  attacker.
+
+  Suggested fix: add elasticfilesystem:PutFileSystemPolicy,
+  elasticfilesystem:DeleteFileSystemPolicy to _CROSS_ACCOUNT_EXFIL_ACTIONS.
+
+policy:
+  Version: "2012-10-17"
+  Statement:
+    - Effect: Allow
+      Action:
+        - "elasticfilesystem:PutFileSystemPolicy"
+        - "elasticfilesystem:DeleteFileSystemPolicy"
+        - "elasticfilesystem:CreateMountTarget"
+      Resource: "*"
+
+request:
+  spec:
+    access_type: read-write
+    duration:
+      duration_hours: 1
+
+expected:
+  score_min: 7
+  must_auto_approve: false

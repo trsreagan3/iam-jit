@@ -1,0 +1,30 @@
+name: jsongrammar-empty-principal-list
+description: |
+  `Principal: {AWS: []}` — empty Principal list. AWS semantics for empty
+  Principal on Allow are ambiguous: some IAM evaluators treat empty-list
+  as "match nothing" (safe), but others treat it as "Principal not
+  specified" which defaults to "anyone" on a resource policy. Either
+  way, an explicit empty-Principal Allow on a PII bucket is a defect
+  the scorer should flag.
+
+  Research: Section 10.4 ("Principal may be string ... {\"AWS\":[\"arn1\",\"arn2\"]}").
+
+  Why the scorer underrates: scored 1. The scorer's Principal branch
+  expects a non-empty AWS list to perform wildcard detection; an empty
+  list bypasses the check entirely.
+policy:
+  Version: "2012-10-17"
+  Statement:
+    - Effect: Allow
+      Principal:
+        AWS: []
+      Action: s3:GetObject
+      Resource: arn:aws:s3:::pii-data/*
+request:
+  spec:
+    access_type: read-write
+    duration:
+      duration_hours: 1
+expected:
+  score_min: 4
+  must_auto_approve: false

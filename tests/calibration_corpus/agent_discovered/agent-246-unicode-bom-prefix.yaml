@@ -1,0 +1,41 @@
+name: agent-246-unicode-bom-prefix
+description: |
+  WHITE-BOX: Unicode Byte-Order Mark (U+FEFF) at the start of an
+  action name. `﻿iam:CreateAccessKey` lowercased is
+  `﻿iam:createaccesskey` — not equal to `iam:createaccesskey`
+  (no BOM), so set-membership lookup misses.
+
+  Some YAML parsers preserve BOM, some strip. If the user's policy
+  YAML was created in Notepad/Excel/etc., a stray BOM could end up
+  in the action string. The scorer doesn't strip BOMs at intake.
+
+  Same bypass as agent-216 (zero-width joiner) but with a different
+  invisible character — BOM is more likely to appear via clipboard /
+  CSV import workflows.
+
+  Code location: review.py — no Unicode normalization on action
+  strings.
+
+  Real risk: 9 — bypass of catastrophic floor via invisible char.
+
+  Suggested fix: at intake, strip BOM (U+FEFF), zero-width chars
+  (U+200B, U+200C, U+200D, U+2060), and apply NFKC normalization.
+
+policy:
+  Version: "2012-10-17"
+  Statement:
+    - Effect: Allow
+      Action:
+        - "﻿iam:CreateAccessKey"
+        - "﻿iam:AttachRolePolicy"
+      Resource: "*"
+
+request:
+  spec:
+    access_type: read-write
+    duration:
+      duration_hours: 1
+
+expected:
+  score_min: 8
+  must_auto_approve: false

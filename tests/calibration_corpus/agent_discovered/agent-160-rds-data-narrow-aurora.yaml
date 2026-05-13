@@ -1,0 +1,33 @@
+name: rds-data-narrow-aurora
+description: |
+  RDS Data API (`rds-data:*`) on a narrow Aurora Serverless cluster ARN
+  executes arbitrary SQL against the database without ever needing DB
+  credentials — only IAM. Full data exfil + write via IAM alone.
+
+  Research: Section 13.2 ("RDS Data API — `rds-data:ExecuteStatement`,
+  `rds-data:BatchExecuteStatement` — runs SQL against Aurora Serverless
+  without DB credentials, only IAM. Scorers focused on `rds:*` miss it.").
+  Service-prefix aliasing class (already partially closed for s3-object-
+  lambda in round 3, but `rds-data:` was missed).
+
+  Why the scorer underrates: scored 3 (narrow-write floor). `rds-data` is
+  a sibling prefix to `rds:` and not in any sensitive/high-impact set.
+  Even on a narrow cluster ARN this is a remote-SQL-execution primitive
+  — `ExecuteStatement` runs `SELECT * FROM customers`, returning every row.
+policy:
+  Version: "2012-10-17"
+  Statement:
+    - Effect: Allow
+      Action:
+        - rds-data:ExecuteStatement
+        - rds-data:BatchExecuteStatement
+        - rds-data:ExecuteSql
+      Resource: arn:aws:rds:us-east-1:123456789012:cluster:prod-aurora-customers
+request:
+  spec:
+    access_type: read-write
+    duration:
+      duration_hours: 1
+expected:
+  score_min: 7
+  must_auto_approve: false

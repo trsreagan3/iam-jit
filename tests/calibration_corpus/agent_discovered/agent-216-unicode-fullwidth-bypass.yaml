@@ -1,0 +1,58 @@
+name: agent-216-unicode-fullwidth-bypass
+description: |
+  WHITE-BOX: Section 10.6 + 10.8 (Unicode / case-fold edges). Round 5
+  added lowercase normalization, but `.lower()` does NOT normalize
+  Unicode full-width characters. Example: U+FF24 "FULLWIDTH LATIN
+  CAPITAL LETTER D" — `"D".casefold()` returns "ｄ", `"D".lower()`
+  returns "ｄ". Both differ from ASCII "d".
+
+  The action `iam:Ｄeletecode` (using Ｄ = U+FF24) is treated by
+  AWS IAM evaluation as... actually AWS will reject it as malformed
+  in practice. BUT: the scorer is supposed to be the first line of
+  defense. If it doesn't recognize Unicode confusables as either
+  (a) catastrophic match or (b) malformed, then the scorer passes a
+  policy that:
+    (a) AWS will reject — so the operator gets a runtime error
+        rather than a security review
+    (b) Or worse, if any AWS surface IS more permissive on case-
+        folded matches, the policy WILL evaluate to its catastrophic
+        meaning.
+
+  More practical attack: ZERO-WIDTH JOINER (U+200D) embedded in the
+  middle of an action name. `iam:Create‍AccessKey` is rendered
+  identically to `iam:CreateAccessKey` in any UI — but `.lower()`
+  preserves the U+200D. The action_name.lower() is
+  "iam:create‍accesskey" which is NOT in _CATASTROPHIC_ACTIONS_LC.
+  The catastrophic floor doesn't fire.
+
+  The policy below uses zero-width joiners in iam:CreateAccessKey
+  (visually identical, programmatically different):
+    - `iam:Create‍AccessKey` — ZWJ between Create and AccessKey
+    - `iam:Attach‍RolePolicy` — ZWJ between Attach and Role
+
+  Code location: review.py uses `.lower()` (line 667, 1612 etc.) — no
+  Unicode normalization step. A `.casefold()` plus
+  `unicodedata.normalize("NFKC", ...)` would close this.
+
+  Real risk: 9 — visually-disguised catastrophic actions that bypass
+  every set-membership check.
+
+policy:
+  Version: "2012-10-17"
+  Statement:
+    - Effect: Allow
+      Action:
+        - "iam:Create‍AccessKey"
+        - "iam:Attach‍RolePolicy"
+        - "iam:Put‍RolePolicy"
+      Resource: "*"
+
+request:
+  spec:
+    access_type: read-write
+    duration:
+      duration_hours: 1
+
+expected:
+  score_min: 8
+  must_auto_approve: false

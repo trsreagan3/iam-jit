@@ -1,0 +1,39 @@
+name: agent-222-codedeploy-create-deployment
+description: |
+  WHITE-BOX: Research Section 9.12. codedeploy:CreateDeployment with an
+  attacker-controlled appspec runs lifecycle hooks (BeforeInstall,
+  AfterInstall, ApplicationStart, etc.) under the deployment role.
+  Each hook is an arbitrary shell script. RCE-as-deployment-role.
+
+  Code location: review.py — codedeploy:* is not in
+  _CODE_EXECUTION_PRIMITIVES. Composition with iam:PassRole doesn't
+  fire. The action is just generic Write — scoring at high-impact
+  floor 6 at most.
+
+  Real risk: 8 — RCE on every instance the deployment-group targets.
+
+  Suggested fix: add codedeploy:CreateDeployment, codedeploy:CreateApplication,
+  codedeploy:CreateDeploymentConfig to _CODE_EXECUTION_PRIMITIVES.
+
+policy:
+  Version: "2012-10-17"
+  Statement:
+    - Effect: Allow
+      Action:
+        - "codedeploy:CreateDeployment"
+        - "codedeploy:CreateApplication"
+        - "codedeploy:CreateDeploymentGroup"
+      Resource: "*"
+    - Effect: Allow
+      Action: "iam:PassRole"
+      Resource: "arn:aws:iam::123456789012:role/codedeploy-admin"
+
+request:
+  spec:
+    access_type: read-write
+    duration:
+      duration_hours: 1
+
+expected:
+  score_min: 9
+  must_auto_approve: false

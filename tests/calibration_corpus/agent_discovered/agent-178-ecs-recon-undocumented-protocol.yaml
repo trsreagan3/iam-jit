@@ -1,0 +1,37 @@
+name: ecs-recon-undocumented-protocol
+description: |
+  ECS data-plane recon (`ecs:DescribeTasks`, `ecs:ListTasks`,
+  `ecs:DescribeContainerInstances`, `ecs:DescribeServices`) on
+  `Resource: *`. Pre-step for the ECS 2024 undocumented-protocol IAM
+  hijacking (Aviatrix disclosure): the attacker enumerates task ARNs and
+  container instance IPs, then exploits the cross-task isolation gap to
+  exfil task-role credentials from co-located tasks.
+
+  Research: Section 5.8 ("ECS undocumented protocol (2024 disclosure) —
+  ECS task isolation gap allowed cross-task IAM token theft via
+  undocumented agent protocol.") and Section 1.58 ("ECS undocumented
+  protocol abuse (2024)").
+
+  Why the scorer underrates: scored 1. ECS describe actions are
+  IAM-class-Read on a non-sensitive service. But task inventory IS the
+  attack surface — the 2024 disclosure showed every task's role can be
+  stolen given task IDs + container instance access.
+policy:
+  Version: "2012-10-17"
+  Statement:
+    - Effect: Allow
+      Action:
+        - ecs:DescribeTasks
+        - ecs:ListTasks
+        - ecs:DescribeContainerInstances
+        - ecs:DescribeServices
+        - ecs:ListContainerInstances
+      Resource: "*"
+request:
+  spec:
+    access_type: read-write
+    duration:
+      duration_hours: 1
+expected:
+  score_min: 5
+  must_auto_approve: false

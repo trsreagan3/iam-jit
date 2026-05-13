@@ -1,0 +1,33 @@
+name: iam-put-permissions-boundary
+description: |
+  `iam:PutRolePermissionsBoundary` + `iam:PutUserPermissionsBoundary` on
+  any IAM principal. The attacker sets a maximally-permissive (or
+  weak/empty) permissions boundary on any role or user, neutralizing
+  the org's primary defense-in-depth control against runaway privileges.
+  Rhino's path 1.50 — most write-up'd defense-in-depth bypass.
+
+  Research: Section 1.50 ("`iam:PutRolePermissionsBoundary` /
+  `iam:PutUserPermissionsBoundary` — Set or replace the permissions
+  boundary on a role/user."). Often combined with `iam:DeleteRole-
+  PermissionsBoundary` (1.49 — which the scorer scores correctly at 8).
+
+  Why the scorer underrates: scored 6. iam:PutRolePermissionsBoundary is
+  the asymmetric companion to iam:DeleteRolePermissionsBoundary (which
+  IS catastrophic at 8) — Put can do everything Delete can plus replace
+  with a weaker boundary. Should be `_CATASTROPHIC_ACTIONS` tier.
+policy:
+  Version: "2012-10-17"
+  Statement:
+    - Effect: Allow
+      Action:
+        - iam:PutRolePermissionsBoundary
+        - iam:PutUserPermissionsBoundary
+      Resource: "*"
+request:
+  spec:
+    access_type: read-write
+    duration:
+      duration_hours: 1
+expected:
+  score_min: 9
+  must_auto_approve: false

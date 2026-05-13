@@ -1,0 +1,30 @@
+name: bedrock-cross-account-invoke
+description: |
+  `bedrock:InvokeModel` + `bedrock:InvokeModelWithResponseStream` on the
+  cross-account foundation-model ARN form (`arn:aws:bedrock:region::
+  foundation-model/*` — note empty account segment). Bedrock cross-account
+  InvokeModel charges the model OWNER, not the caller — i.e. the victim
+  pays for the attacker's LLM workload.
+
+  Research: Section 9.3 ("Bedrock — Cross-account InvokeModel — model
+  owner pays."). The LLMjacking economics rest on this asymmetry.
+
+  Why the scorer underrates: scored 2. The cross-account ARN form (empty
+  account segment) is read as "narrow" — but Bedrock cross-account is
+  the entire mechanic by which LLMjacking imposes cost on victims.
+policy:
+  Version: "2012-10-17"
+  Statement:
+    - Effect: Allow
+      Action:
+        - bedrock:InvokeModel
+        - bedrock:InvokeModelWithResponseStream
+      Resource: arn:aws:bedrock:us-east-1::foundation-model/*
+request:
+  spec:
+    access_type: read-write
+    duration:
+      duration_hours: 1
+expected:
+  score_min: 6
+  must_auto_approve: false

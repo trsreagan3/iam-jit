@@ -1,0 +1,57 @@
+name: agent-203-condition-ifexists-bypass
+description: |
+  WHITE-BOX: Section 11.5 (IfExists chaining). The `*IfExists` operator
+  family is a special IAM behavior: if the request context key is ABSENT,
+  the condition evaluates true (the operator is permissive about missing
+  keys). For an Allow statement this means cross-service requests (where
+  many keys are not populated) bypass the intended restriction.
+
+  Attack: An Allow on iam:PassRole "scoped" by StringEqualsIfExists on
+  aws:RequestTag/Team. The TAG is only populated when the caller is
+  setting a tag — for most PassRole calls, the key is absent, and
+  IfExists makes the condition pass vacuously. Result: PassRole on
+  Resource:* effectively unrestricted.
+
+  Scorer has zero Condition handling, so the StringEqualsIfExists is
+  invisible. Notably even the Condition-aware scorer would need to
+  understand that IfExists + an OPTIONAL request key = no restriction
+  in the dominant call path.
+
+  Real risk: 9 — iam:PassRole with Resource:* and a vacuous IfExists
+  condition is broad-PassRole; the policy below ALSO has the cross-
+  account wildcard ARN. The scorer fires the broad-PassRole 9 floor
+  on the Resource: * — but does so DESPITE the condition rather than
+  AWARE of it (a false-positive-by-accident). The catastrophic miss
+  here is the architectural one: the scorer would equally fail to
+  flag a less-broad version with a vacuous *IfExists.
+
+  Code location: review.py — no Condition logic.
+
+  Suggested fix: warn loudly when *IfExists operators are used on
+  Allow statements; they almost always indicate either misuse
+  (operator thought it required the key) or a vacuous-restriction
+  bypass.
+
+policy:
+  Version: "2012-10-17"
+  Statement:
+    - Effect: Allow
+      Action:
+        - "iam:PassRole"
+        - "iam:AttachRolePolicy"
+      Resource: "arn:aws:iam::*:role/*"
+      Condition:
+        StringEqualsIfExists:
+          aws:RequestTag/Team: "platform-eng"
+        BoolIfExists:
+          aws:MultiFactorAuthPresent: "true"
+
+request:
+  spec:
+    access_type: read-write
+    duration:
+      duration_hours: 1
+
+expected:
+  score_min: 9
+  must_auto_approve: false

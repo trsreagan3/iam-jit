@@ -1,0 +1,58 @@
+name: agent-227-kms-key-collection-wildcard
+description: |
+  WHITE-BOX: Round 5 added kms:alias/* to the strict-wildcard collection
+  list, but `key/*` (the actual key collection, distinct from aliases)
+  is not in the kms entry of collection_types. Review.py line 1248:
+  `"kms": ("alias",)` — alias only.
+
+  An ARN like `arn:aws:kms:us-east-1:123456789012:key/*` matches every
+  KMS key in the account/region. The _is_broad_resource branch line 793
+  matches it via the slash-with-wildcard-tail check (returns True), so
+  inclusive_broad is correct. But _is_strict_wildcard line 1244-1254
+  checks `collection in collection_types.get(service, ())` — `"key"`
+  is not there, so strict=False.
+
+  Result: the secret-bearing-reads composition rule (line 1859) uses
+  `strict` — so kms:Decrypt on `key/*` doesn't fire the strict-broad
+  branch, only the high-risk-action-on-broad floor 7 fires via the
+  per-statement loop's `wildcard_resource` (which IS True because
+  collection-types.kms includes alias, not key. Wait, no — let me
+  re-check).
+
+  Actually the per-statement loop calls _is_strict_wildcard line 1267
+  which DOES check kms:alias but NOT kms:key. So `arn:aws:kms:...:key/*`
+  is NOT a strict-wildcard. The high-risk-action-on-wildcard rule
+  (line 1463) requires `wildcard_resource` which is strict — so misses.
+  The broad-resource floor 6 (sensitive-service-iam) still fires via
+  effective_sensitive.
+
+  Net: kms:Decrypt on `key/*` floors at 6 not 7. Same severity gap as
+  agent-77 (closed for alias/*), reopened for key/*.
+
+  Real risk: 8 — decrypt every key in the account/region.
+
+  Suggested fix: extend kms collection_types to include `"key"`:
+  `"kms": ("alias", "key")`. Same fix in both _is_broad_resource and
+  _is_strict_wildcard collection_types dicts.
+
+policy:
+  Version: "2012-10-17"
+  Statement:
+    - Effect: Allow
+      Action:
+        - "kms:Decrypt"
+        - "kms:GenerateDataKey"
+        - "kms:ReEncryptFrom"
+        - "kms:ReEncryptTo"
+      Resource:
+        - "arn:aws:kms:us-east-1:123456789012:key/*"
+
+request:
+  spec:
+    access_type: read-write
+    duration:
+      duration_hours: 1
+
+expected:
+  score_min: 7
+  must_auto_approve: false

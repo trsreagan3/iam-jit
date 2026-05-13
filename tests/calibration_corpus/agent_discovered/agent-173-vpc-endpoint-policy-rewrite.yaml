@@ -1,0 +1,36 @@
+name: vpc-endpoint-policy-rewrite
+description: |
+  `ec2:ModifyVpcEndpoint` on `Resource: *` lets the caller rewrite any
+  VPC endpoint's policy. Default VPC-endpoint policy is
+  `Allow * * Principal:*` (Section 9.6); a tightened policy is often the
+  only thing constraining identity-policy grants from being abused inside
+  the VPC. Loosening the endpoint policy back to wildcard removes the
+  enforcement layer without touching any identity policy — silent escape
+  of a VPC's primary egress guard.
+
+  Research: Section 9.6 ("VPC Endpoint Policy bypass — Default VPC
+  endpoint policy is `Action:* Resource:* Principal:*` — every IAM-
+  restricted call going through the endpoint is unrestricted *by the
+  endpoint*. Tightening the endpoint policy is often the only practical
+  way to scope `s3:*` in a VPC.").
+
+  Why the scorer underrates: scored 6. EC2 isn't in sensitive services
+  for VPC-endpoint actions specifically. The scorer doesn't model
+  "endpoint policy rewrite = remove enforcement layer that the org's
+  bigger defense relies on." Should be high-impact-mutation tier.
+policy:
+  Version: "2012-10-17"
+  Statement:
+    - Effect: Allow
+      Action:
+        - ec2:ModifyVpcEndpoint
+        - ec2:CreateVpcEndpoint
+      Resource: "*"
+request:
+  spec:
+    access_type: read-write
+    duration:
+      duration_hours: 1
+expected:
+  score_min: 8
+  must_auto_approve: false

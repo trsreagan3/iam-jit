@@ -1,0 +1,35 @@
+name: ec2-network-interface-attach
+description: |
+  `ec2:CreateNetworkInterface` + `ec2:AttachNetworkInterface` on
+  `Resource: *`. Lets the attacker attach a network interface
+  (in a different subnet, security group, or even cross-VPC if peered)
+  to an existing instance. The interface becomes part of the instance's
+  network stack — attacker now has either (a) lateral movement into
+  the instance's network neighborhood, or (b) packet inspection on
+  instance traffic via the attacker subnet's flow logs.
+
+  Research: Section 9.6 ("VPC Endpoint Policy bypass") cluster + the
+  broader network-bridge class (agent-46 ec2:CreateVpcPeeringConnection
+  closed in round 2 / 3).
+
+  Why the scorer underrates: scored 6. Same primitive class as
+  ec2:CreateVpcPeeringConnection (already in `_CROSS_ACCOUNT_EXFIL`),
+  but the NIC-attach variant is missing — network-bridge primitive
+  via a different code path.
+policy:
+  Version: "2012-10-17"
+  Statement:
+    - Effect: Allow
+      Action:
+        - ec2:CreateNetworkInterface
+        - ec2:AttachNetworkInterface
+        - ec2:ModifyNetworkInterfaceAttribute
+      Resource: "*"
+request:
+  spec:
+    access_type: read-write
+    duration:
+      duration_hours: 1
+expected:
+  score_min: 8
+  must_auto_approve: false

@@ -1,0 +1,45 @@
+name: agent-206-condition-forallvalues-empty
+description: |
+  WHITE-BOX: Section 11.9 (ForAllValues with no values = vacuously true).
+  The ForAllValues:StringLike operator returns TRUE if the request-context
+  multi-valued key is EMPTY/absent. A policy that uses it to "scope" a
+  broad action is effectively unrestricted when the request doesn't
+  populate the key.
+
+  Attack: secretsmanager:GetSecretValue + secretsmanager:DescribeSecret
+  on Resource:* "scoped" by ForAllValues:StringLike on a principal-tag
+  key — most requests don't carry that tag and the condition passes.
+
+  Scorer has zero Condition handling. Plus, secretsmanager:GetSecretValue
+  is in _HIGH_RISK_ACTIONS so floor 7 will fire on Resource:* — but the
+  operator may believe the ForAllValues clause restricts further.
+
+  Real risk: 8 — broad secrets exfil with a fig-leaf condition.
+
+  Code location: review.py — no Condition logic.
+
+  Suggested fix: ForAllValues with no fallback value is a well-known
+  IAM footgun; surface it whenever it appears on an Allow.
+
+policy:
+  Version: "2012-10-17"
+  Statement:
+    - Effect: Allow
+      Action:
+        - "secretsmanager:GetSecretValue"
+        - "secretsmanager:DescribeSecret"
+        - "secretsmanager:ListSecrets"
+      Resource: "*"
+      Condition:
+        ForAllValues:StringLike:
+          aws:PrincipalTag/AllowedSecrets: "prod/*"
+
+request:
+  spec:
+    access_type: read-write
+    duration:
+      duration_hours: 1
+
+expected:
+  score_min: 7
+  must_auto_approve: false

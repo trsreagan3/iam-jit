@@ -1,0 +1,39 @@
+name: agent-221-pipes-create-pipe-passrole
+description: |
+  WHITE-BOX: Research Section 9.10 (EventBridge Pipes). pipes:CreatePipe
+  with iam:PassRole is a modern alternative to Lambda+Step Functions
+  for connecting an event source to a target under a privileged role.
+  Both pipes:CreatePipe and pipes:UpdatePipe accept an IAM role that
+  the pipe runs under — feeding crafted events into a privileged
+  destination.
+
+  Code location: review.py — pipes:* is not in _CODE_EXECUTION_PRIMITIVES.
+  Composition rule (line 1789) doesn't fire.
+
+  Real risk: 9 — RCE-as-passed-role via pipe target invocation.
+
+  Suggested fix: add pipes:CreatePipe, pipes:UpdatePipe, pipes:StartPipe
+  to _CODE_EXECUTION_PRIMITIVES.
+
+policy:
+  Version: "2012-10-17"
+  Statement:
+    - Effect: Allow
+      Action:
+        - "pipes:CreatePipe"
+        - "pipes:UpdatePipe"
+        - "pipes:StartPipe"
+      Resource: "*"
+    - Effect: Allow
+      Action: "iam:PassRole"
+      Resource: "arn:aws:iam::123456789012:role/admin-pipe-role"
+
+request:
+  spec:
+    access_type: read-write
+    duration:
+      duration_hours: 1
+
+expected:
+  score_min: 9
+  must_auto_approve: false

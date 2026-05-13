@@ -1,0 +1,32 @@
+name: missing-effect-implicit-allow
+description: |
+  Statement missing the required `Effect` field. AWS rejects this; some
+  scoring tools default to `Allow`. The policy says `iam:* Resource: *`
+  with no Effect — under AWS this is rejected, but the scorer scores it 1
+  (probably skipping statements with no Effect). This is a "scorer is
+  first line of defense" failure: a malformed policy SHOULD be flagged
+  catastrophic, not passed through as innocuous.
+
+  Research: Section 10.11 ("`Effect` is required, but a missing `Effect`
+  in some import paths gets treated as `Deny` (AWS errors); some custom
+  scorers may treat empty as `Allow`.") and Section 7.5 (Access Analyzer
+  validation checks for malformed policies).
+
+  Why the scorer underrates: scored 1. The scorer's statement filter
+  silently skips Effect-less statements. AWS would reject this policy at
+  attach time — but the scorer should reject it FIRST (the user is asked
+  to review a malformed grant). Either flag malformed-as-catastrophic, or
+  treat missing-Effect as Allow (the more conservative read).
+policy:
+  Version: "2012-10-17"
+  Statement:
+    - Action: iam:*
+      Resource: "*"
+request:
+  spec:
+    access_type: read-write
+    duration:
+      duration_hours: 1
+expected:
+  score_min: 6
+  must_auto_approve: false

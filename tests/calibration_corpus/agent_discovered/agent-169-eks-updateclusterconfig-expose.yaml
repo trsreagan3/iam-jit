@@ -1,0 +1,32 @@
+name: eks-updateclusterconfig-expose
+description: |
+  `eks:UpdateClusterConfig` on `Resource: *` lets the attacker flip the
+  cluster's API endpoint configuration from private-only to
+  publicly-accessible, exposing the Kubernetes API to the internet. From
+  there, any RBAC role in the cluster is reachable from the open internet
+  for the attacker to attempt credential abuse / IDP misconfig.
+
+  Research: Section 9.2 ("EKS — `eks:UpdateClusterConfig` — disable
+  public-endpoint restrictions.").
+
+  Why the scorer underrates: scored 6. EKS is in sensitive services so
+  the broad-service floor fires, but `UpdateClusterConfig` is the
+  specific action that breaks the cluster's network isolation — should
+  be `_HIGH_IMPACT_MUTATION_ACTIONS` tier minimum, and arguably catastrophic
+  because the change is persistent and externally observable (attackers
+  scan for public EKS endpoints).
+policy:
+  Version: "2012-10-17"
+  Statement:
+    - Effect: Allow
+      Action:
+        - eks:UpdateClusterConfig
+      Resource: "*"
+request:
+  spec:
+    access_type: read-write
+    duration:
+      duration_hours: 1
+expected:
+  score_min: 8
+  must_auto_approve: false

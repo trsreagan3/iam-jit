@@ -1,0 +1,36 @@
+name: conditionkey-empty-orgid
+description: |
+  S3 bucket policy shape with `Principal: "*"` allegedly scoped by
+  `Condition.StringEquals.aws:PrincipalOrgID: ""` (empty string). An empty
+  org-id string never matches any real principal — combined with
+  `Principal: "*"`, this either grants nothing (if AWS treats the
+  condition strictly) or grants public-read (if AWS treats empty-string
+  as "any principal whose context has no org-id," i.e. external accounts).
+
+  Research: Section 11.16 ("`aws:PrincipalOrgID` missing on resource policy
+  that uses `Principal:\"*\"` — Common pattern: bucket policy with
+  `Principal:\"*\"` + `Condition.StringEquals.aws:PrincipalOrgID:\"o-xxx\"`.
+  Without the condition, the bucket is public.").
+
+  Why the scorer underrates: scored 1. The scorer sees a condition string
+  and credits it as a scoping signal; doesn't detect that the value is empty
+  (degenerate). Combined with the agent-148 `Principal: "*"` blind spot,
+  this is a public PII bucket scoring 1.
+policy:
+  Version: "2012-10-17"
+  Statement:
+    - Effect: Allow
+      Principal: "*"
+      Action: s3:GetObject
+      Resource: arn:aws:s3:::pii-customer-data/*
+      Condition:
+        StringEquals:
+          aws:PrincipalOrgID: ""
+request:
+  spec:
+    access_type: read-write
+    duration:
+      duration_hours: 1
+expected:
+  score_min: 7
+  must_auto_approve: false

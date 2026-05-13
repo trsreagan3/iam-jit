@@ -1,0 +1,52 @@
+name: agent-204-condition-tag-self-write-abac
+description: |
+  WHITE-BOX: Section 11.11 (Tag-based ABAC self-defeat). Policy uses
+  aws:ResourceTag/Env=prod as a "guard" on broad iam:PutRolePolicy,
+  but ALSO grants iam:TagRole on Resource:* — letting the caller flip
+  the Env tag on any role to "prod" before invoking PutRolePolicy.
+
+  Scorer has zero Condition handling AND no rule that flags "tagging
+  primitive in the same policy as a tag-gated mutation primitive."
+  iam:TagRole IS in _CATASTROPHIC_ACTIONS (round 3, line 589), so the
+  catastrophic floor 9 will likely fire — BUT the policy ALSO uses a
+  NotResource on the TagRole statement to make it look narrower, and
+  the principal of the attack is the COMPOSITION: TagRole + tag-gated
+  mutation = ABAC bypass on broad scope.
+
+  Real risk: 10 — full IAM admin via ABAC self-defeat.
+
+  Code location: review.py — no Condition logic; no rule that pairs
+  TagResource actions with tag-conditional Allows.
+
+  Suggested fix: when a policy contains both an aws:ResourceTag /
+  aws:PrincipalTag conditional AND a *TagResource action (iam:TagRole,
+  iam:TagUser, ec2:CreateTags, etc.), flag as ABAC-self-defeat. Floor
+  10 if the gated action is catastrophic.
+
+policy:
+  Version: "2012-10-17"
+  Statement:
+    - Sid: GatedPutRolePolicy
+      Effect: Allow
+      Action:
+        - "iam:PutRolePolicy"
+        - "iam:AttachRolePolicy"
+      Resource: "arn:aws:iam::*:role/*"
+      Condition:
+        StringEquals:
+          aws:ResourceTag/Env: "prod"
+    - Sid: TagAnyRole
+      Effect: Allow
+      Action:
+        - "iam:TagRole"
+      Resource: "arn:aws:iam::*:role/*"
+
+request:
+  spec:
+    access_type: read-write
+    duration:
+      duration_hours: 1
+
+expected:
+  score_min: 9
+  must_auto_approve: false

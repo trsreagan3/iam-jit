@@ -1,0 +1,38 @@
+name: agent-238-ec2-instance-connect-send-ssh
+description: |
+  WHITE-BOX: Research Sec 13.11. ec2-instance-connect:SendSSHPublicKey
+  is a separate service prefix from ec2:. It pushes an SSH key onto
+  any EC2 instance, valid for 60 seconds — enough for an attacker to
+  SSH in and persist further. Stratus Red Team lateral-movement
+  primitive.
+
+  Code location: review.py — `ec2-instance-connect` is not in any
+  action set, not in _SENSITIVE_SERVICES. Only the generic state-
+  changing-on-broad floor 6 fires.
+
+  Real risk: 8 — interactive SSH into every instance.
+
+  Suggested fix: add ec2-instance-connect:SendSSHPublicKey and
+  ec2-instance-connect:SendSerialConsoleSSHPublicKey to
+  _CATASTROPHIC_ACTIONS (account-wide interactive shell on Resource:*),
+  or _HIGH_IMPACT_MUTATION_ACTIONS at minimum. Same blast as
+  ssm:StartSession (which is catastrophic).
+
+policy:
+  Version: "2012-10-17"
+  Statement:
+    - Effect: Allow
+      Action:
+        - "ec2-instance-connect:SendSSHPublicKey"
+        - "ec2-instance-connect:SendSerialConsoleSSHPublicKey"
+      Resource: "*"
+
+request:
+  spec:
+    access_type: read-write
+    duration:
+      duration_hours: 1
+
+expected:
+  score_min: 8
+  must_auto_approve: false

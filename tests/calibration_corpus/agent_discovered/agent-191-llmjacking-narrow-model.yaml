@@ -1,0 +1,36 @@
+name: llmjacking-narrow-model
+description: |
+  LLMjacking-onboarding sequence (`bedrock:PutUseCaseForModelAccess`,
+  `bedrock:CreateFoundationModelAgreement`, `bedrock:InvokeModel`)
+  scoped to a single foundation-model ARN (`anthropic.claude-3-opus*`).
+  Narrow scope doesn't reduce the attack: cost-hijacking on a single
+  high-cost model is the LLMjacking economics. Real-world JINX-2401
+  losses scaled with the cost per model invocation, not the diversity
+  of models.
+
+  Research: Section 5.7 ("LLMjacking (general, 2024-2026) ... attackers
+  enable Bedrock model access programmatically ... then `InvokeModel*`.")
+  and Section 9.3 ("Bedrock — `bedrock:InvokeModel` ...").
+
+  Why the scorer underrates: scored 3 (narrow-write floor). The narrow
+  Resource ARN makes the policy look scope-bounded, but the model owner
+  pays for invocations regardless of resource scope (the model is the
+  cost-bearing endpoint).
+policy:
+  Version: "2012-10-17"
+  Statement:
+    - Effect: Allow
+      Action:
+        - bedrock:PutUseCaseForModelAccess
+        - bedrock:CreateFoundationModelAgreement
+        - bedrock:InvokeModel
+        - bedrock:InvokeModelWithResponseStream
+      Resource: arn:aws:bedrock:us-east-1::foundation-model/anthropic.claude-3-opus*
+request:
+  spec:
+    access_type: read-write
+    duration:
+      duration_hours: 1
+expected:
+  score_min: 7
+  must_auto_approve: false

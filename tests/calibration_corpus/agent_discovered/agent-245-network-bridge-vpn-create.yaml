@@ -1,0 +1,46 @@
+name: agent-245-network-bridge-vpn-create
+description: |
+  WHITE-BOX: Research Sec 9.6 + agent-83 (round 3 closed directconnect:*
+  but missed VPN variants). The cross-account-exfil set has DirectConnect
+  but does NOT have:
+    - ec2:CreateVpnConnection (Site-to-Site VPN to attacker on-prem)
+    - ec2:CreateClientVpnEndpoint (Client VPN service that the
+      attacker can grant themselves access to)
+    - ec2:CreateNetworkInterface (attach to running instance =
+      cross-VPC tunnel)
+    - ec2:AssociateClientVpnTargetNetwork (route attacker VPN traffic
+      into prod VPCs)
+
+  All four are equivalent in attack-surface to ec2:CreateVpcPeeringConnection
+  (which IS in _CROSS_ACCOUNT_EXFIL) — they create persistent network
+  paths between attacker-controlled networks and prod VPCs.
+
+  Code location: review.py — these specific actions are not in any
+  action set. Only state-changing-on-broad floor 6 fires.
+
+  Real risk: 8 — persistent network bridge.
+
+  Suggested fix: add ec2:CreateVpnConnection, ec2:CreateClientVpnEndpoint,
+  ec2:AssociateClientVpnTargetNetwork, ec2:AuthorizeClientVpnIngress
+  to _CROSS_ACCOUNT_EXFIL_ACTIONS.
+
+policy:
+  Version: "2012-10-17"
+  Statement:
+    - Effect: Allow
+      Action:
+        - "ec2:CreateVpnConnection"
+        - "ec2:CreateClientVpnEndpoint"
+        - "ec2:AssociateClientVpnTargetNetwork"
+        - "ec2:AuthorizeClientVpnIngress"
+      Resource: "*"
+
+request:
+  spec:
+    access_type: read-write
+    duration:
+      duration_hours: 1
+
+expected:
+  score_min: 7
+  must_auto_approve: false

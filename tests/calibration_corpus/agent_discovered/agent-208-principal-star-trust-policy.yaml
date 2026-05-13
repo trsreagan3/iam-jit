@@ -1,0 +1,46 @@
+name: agent-208-principal-star-trust-policy
+description: |
+  WHITE-BOX: Sections 4.11 and 4.12. Scorer has ZERO Principal handling
+  (grep "Principal" in review.py returns only comments unrelated to
+  resource-policy evaluation). A trust policy with Principal: {AWS: "*"}
+  lets any AWS account in the world assume this role — the textbook
+  open-trust footgun.
+
+  Even though this is a TRUST policy (resource-based), iam-jit accepts
+  any policy document and the scorer should detect the catastrophic
+  shape. The actions sts:AssumeRole + sts:TagSession + sts:SetSourceIdentity
+  on Resource:* combined with Principal:* in the trust policy direction
+  is account-takeover-via-assumed-role.
+
+  Code location: review.py — `policy["Statement"]` iteration never reads
+  stmt.get("Principal") or stmt.get("NotPrincipal") (lines 1039-1721).
+
+  Real risk: 10 — open trust policy. Any AWS principal in any account
+  can mint credentials of this role.
+
+  Suggested fix: when a statement contains Principal:* or Principal:
+  {AWS:"*"} or Principal:{Federated:"<anything>"} without a matching
+  Condition that scopes by aws:PrincipalOrgID / sts:ExternalId / etc.,
+  floor at 10 (resource policy granting world-wide trust).
+
+policy:
+  Version: "2012-10-17"
+  Statement:
+    - Effect: Allow
+      Principal:
+        AWS: "*"
+      Action:
+        - "sts:AssumeRole"
+        - "sts:TagSession"
+        - "sts:SetSourceIdentity"
+      Resource: "*"
+
+request:
+  spec:
+    access_type: read-write
+    duration:
+      duration_hours: 1
+
+expected:
+  score_min: 9
+  must_auto_approve: false

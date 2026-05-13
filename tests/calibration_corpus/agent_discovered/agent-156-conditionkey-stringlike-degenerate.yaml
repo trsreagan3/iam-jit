@@ -1,0 +1,31 @@
+name: conditionkey-stringlike-degenerate
+description: |
+  `s3:GetObject` on a narrow prod bucket gated by
+  `Condition.StringLike.s3:prefix: "*"` — degenerate-wildcard condition
+  that always evaluates true. The condition looks like a scoping signal
+  but matches every prefix.
+
+  Research: Section 11.8 ("`StringLike` with `*` — `\"StringLike\":{\"s3:prefix\":\"*\"}`
+  — degenerate wildcard, no scoping.").
+
+  Why the scorer underrates: scored 1. The scorer sees a narrow bucket ARN
+  and a condition (which it credits as risk-reducing) and floors at
+  narrow-read. In reality the condition is vacuous and the grant is the
+  same as no condition at all.
+policy:
+  Version: "2012-10-17"
+  Statement:
+    - Effect: Allow
+      Action: s3:GetObject
+      Resource: arn:aws:s3:::corporate-pii-data/*
+      Condition:
+        StringLike:
+          s3:prefix: "*"
+request:
+  spec:
+    access_type: read-write
+    duration:
+      duration_hours: 1
+expected:
+  score_min: 6
+  must_auto_approve: false

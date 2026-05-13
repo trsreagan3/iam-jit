@@ -1,0 +1,36 @@
+name: s3-object-lambda-write-response
+description: |
+  `s3-object-lambda:WriteGetObjectResponse` on `Resource: *` lets the
+  caller rewrite the body of every `GetObject` response served through
+  any S3 Object Lambda access point in the account. This is a stealth
+  content-tampering primitive: legitimate consumers see attacker-modified
+  content (e.g., poisoned JS bundles, modified config JSON, attacker-
+  injected SSH authorized_keys files).
+
+  Research: Section 13.8 ("`s3:PutObject` vs `s3-object-lambda:PutObject`
+  — Object Lambda has its own action prefix; bypasses scorers that only
+  look at `s3:`.") plus Section 4.1 (S3 supply-chain — Twilio JS-SDK
+  overwrite).
+
+  Why the scorer underrates: scored 6. Round 3 added
+  `s3-object-lambda:GetObject` to secret-bearing-reads, but the WRITE
+  side of Object Lambda (`WriteGetObjectResponse`, `PutObject`) is the
+  more dangerous primitive — it's the content-rewriting hook every
+  consumer of the access point trusts. Should be in
+  `_HIGH_IMPACT_MUTATION_ACTIONS`.
+policy:
+  Version: "2012-10-17"
+  Statement:
+    - Effect: Allow
+      Action:
+        - s3-object-lambda:WriteGetObjectResponse
+        - s3-object-lambda:PutObject
+      Resource: "*"
+request:
+  spec:
+    access_type: read-write
+    duration:
+      duration_hours: 1
+expected:
+  score_min: 8
+  must_auto_approve: false

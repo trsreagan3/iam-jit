@@ -1,0 +1,54 @@
+name: agent-242-arn-region-wildcard-account-narrow
+description: |
+  WHITE-BOX: review.py's `_is_broad_resource` (line 760-815) and
+  `_is_strict_wildcard` (line 1219-1265) check parts[4] (account)
+  for `*` but not parts[3] (region). Round 3's agent-76 closed
+  account-segment wildcard; region-segment wildcard remains unhandled.
+
+  An ARN like `arn:aws:lambda:*:123456789012:function:prod-billing`
+  has account=123456789012 (narrow) but region=`*` (every AWS region).
+  Lambda functions with the same NAME across regions are usually
+  the same function deployed multi-region. An attacker invoking
+  lambda:UpdateFunctionCode with this resource updates all regional
+  copies in a single call.
+
+  More importantly: `arn:aws:iam::123456789012:role/admin-deploy`
+  doesn't have a region (IAM is global), so region wildcard isn't
+  applicable there. But `arn:aws:secretsmanager:*:123456789012:secret:prod/db`
+  matches the secret in every region — broader than the operator
+  may realize.
+
+  Code location: review.py line 1228 only checks parts[4] (account).
+  parts[3] (region) is not inspected.
+
+  Real risk: 6 — multi-region resource access via region wildcard.
+
+  Suggested fix: in _is_broad_resource and _is_strict_wildcard, also
+  check parts[3]. Region wildcard with literal account is "every
+  region in this account" — broader than narrow but narrower than
+  account wildcard. Floor 6.
+
+policy:
+  Version: "2012-10-17"
+  Statement:
+    - Effect: Allow
+      Action:
+        - "lambda:UpdateFunctionCode"
+        - "lambda:InvokeFunction"
+      Resource:
+        - "arn:aws:lambda:*:123456789012:function:prod-billing"
+    - Effect: Allow
+      Action:
+        - "secretsmanager:GetSecretValue"
+      Resource:
+        - "arn:aws:secretsmanager:*:123456789012:secret:prod/db-*"
+
+request:
+  spec:
+    access_type: read-write
+    duration:
+      duration_hours: 1
+
+expected:
+  score_min: 6
+  must_auto_approve: false

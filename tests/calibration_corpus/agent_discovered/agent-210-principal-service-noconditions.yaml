@@ -1,0 +1,53 @@
+name: agent-210-principal-service-noconditions
+description: |
+  WHITE-BOX: Section 4.5 (Lambda resource policy with no SourceArn).
+  When lambda:AddPermission is called with Principal=*.amazonaws.com
+  Service style and no aws:SourceArn / SourceAccount condition, ANY
+  AWS account that creates an event-source mapping can invoke the
+  function. AWS docs: "If you add a permission without providing the
+  source ARN, any AWS account that creates a mapping to your function
+  ARN can send events to invoke your Lambda function."
+
+  This shape — a resource-policy with Principal:{Service:"sns.amazonaws.com"}
+  and Resource specifying the function — is a real lambda:AddPermission
+  body. The scorer reads it as a normal policy. Since lambda:AddPermission
+  is in _HIGH_IMPACT (floor 5) and _CROSS_ACCOUNT_EXFIL (floor 8 via
+  composition pass), the scorer should be flooring at 8. BUT: the
+  scorer doesn't see this as a function resource-policy DEFINITION —
+  it's just looking at the actions, which here is sns:Publish on a
+  resource. The Principal=Service shape with no SourceArn is invisible.
+
+  The policy below uses sns:Publish on a topic with Principal:{Service:
+  "events.amazonaws.com"} — the EventBridge-as-publisher pattern.
+  Combined with the lack of SourceArn condition, ANY EventBridge rule
+  in ANY account can publish to this topic.
+
+  Code location: review.py — no Principal field read; no
+  cross-account-Principal-without-Condition heuristic.
+
+  Real risk: 8 — cross-account writes to an SNS topic. The topic
+  becomes a backdoor message-injection point.
+
+  Suggested fix: when Principal:{Service:...} appears without an
+  aws:SourceArn / aws:SourceAccount / aws:SourceOrgID Condition,
+  flag with "missing source-restriction" factor.
+
+policy:
+  Version: "2012-10-17"
+  Statement:
+    - Sid: AllowEventBridgePublishAnyAccount
+      Effect: Allow
+      Principal:
+        Service: "events.amazonaws.com"
+      Action: "sns:Publish"
+      Resource: "arn:aws:sns:us-east-1:123456789012:prod-alerts"
+
+request:
+  spec:
+    access_type: read-write
+    duration:
+      duration_hours: 1
+
+expected:
+  score_min: 6
+  must_auto_approve: false

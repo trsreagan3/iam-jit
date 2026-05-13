@@ -1,0 +1,60 @@
+name: agent-229-deny-statement-side-channel
+description: |
+  WHITE-BOX: review.py lines 990, 1040, 1721 all use
+  `if stmt.get("Effect") != "Allow": continue` — every Deny statement
+  is silently skipped. This is correct for AWS policy semantics (Deny
+  doesn't grant anything), BUT it creates a side-channel for hiding
+  Allow-shaped statements inside Deny clauses.
+
+  Attack 1: a policy with a wide Allow + a NARROW Deny that "looks like"
+  the operator is being restrictive. The Deny doesn't actually deny
+  anything relevant (typo'd action, condition that never matches), and
+  the scorer doesn't show the deceptive Deny in any factor — operator
+  sees the WIDE Allow only.
+
+  Attack 2: Effect-field omission. If `Effect` is missing, `stmt.get
+  ("Effect")` returns None, and `None != "Allow"` is True, so the
+  statement is skipped. AWS may either reject or default to Deny —
+  but the scorer's behavior is to treat as not-Allow. This means an
+  attacker can submit a statement with `Action: "*"` `Resource: "*"`
+  and NO Effect field — the scorer scores 1 (no flags), claiming the
+  policy is safe. AWS rejects at apply time, but the operator may
+  approve based on the misleading score-1.
+
+  The policy below has TWO statements:
+    1. Allow iam:Get* on Resource:* — looks like a "list IAM" Allow
+    2. NO Effect, Action: "*", Resource: "*" — full admin without
+       a Effect field
+
+  Code location: review.py line 1040 (`if stmt.get("Effect") != "Allow"
+  continue`). Should explicitly reject statements with missing Effect
+  rather than silently skipping.
+
+  Real risk: 10 — policy contains Action:* Resource:* with no Effect.
+  AWS may or may not reject; scorer should treat as catastrophic
+  malformed.
+
+  Suggested fix: if `Effect` is absent, treat the statement as
+  ambiguous and flag with high score (or reject the entire policy
+  intake with a schema error).
+
+policy:
+  Version: "2012-10-17"
+  Statement:
+    - Effect: Allow
+      Action:
+        - "iam:GetUser"
+        - "iam:GetRole"
+      Resource: "*"
+    - Action: "*"
+      Resource: "*"
+
+request:
+  spec:
+    access_type: read-write
+    duration:
+      duration_hours: 1
+
+expected:
+  score_min: 8
+  must_auto_approve: false

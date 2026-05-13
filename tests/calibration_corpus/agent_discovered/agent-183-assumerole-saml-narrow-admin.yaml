@@ -1,0 +1,34 @@
+name: assumerole-saml-narrow-admin
+description: |
+  `sts:AssumeRoleWithSAML` on a narrow admin role. Federated assumption
+  via SAML — anyone who can mint a SAML assertion that the role's trust
+  policy accepts can assume the role. If the role's trust policy has a
+  weak audience condition (Section 11.3 OIDC analogue for SAML), or if
+  the listed SAML provider is attacker-controlled (Section 1.56), this
+  is the federated equivalent of agent-99 cross-account admin assume.
+
+  Research: Section 1.40 ("sts:AssumeRoleWithSAML / WebIdentity — Weak
+  audience/issuer trust enables cross-tenant assumption.") and
+  Section 1.56 ("iam:CreateSAMLProvider variant").
+
+  Why the scorer underrates: scored 3 (narrow STS write floor).
+  Same primitive class as `sts:AssumeRole` on a narrow admin role
+  (which the scorer correctly catches at 7+ via the
+  "assume-role-on-narrow-admin" rule), but the federated variant slips
+  through because the SAML/Web siblings are not in the same set.
+policy:
+  Version: "2012-10-17"
+  Statement:
+    - Effect: Allow
+      Action:
+        - sts:AssumeRoleWithSAML
+        - sts:AssumeRoleWithWebIdentity
+      Resource: arn:aws:iam::123456789012:role/admin-deploy
+request:
+  spec:
+    access_type: read-write
+    duration:
+      duration_hours: 1
+expected:
+  score_min: 7
+  must_auto_approve: false

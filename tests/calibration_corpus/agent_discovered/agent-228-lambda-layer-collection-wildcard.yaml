@@ -1,0 +1,66 @@
+name: agent-228-lambda-layer-collection-wildcard
+description: |
+  WHITE-BOX: Similar to agent-227. The lambda collection types are not
+  in either collection_types map. review.py lines 790-797 (_is_broad_resource)
+  and 1246-1251 (_is_strict_wildcard) include `iam`, `kms`,
+  `secretsmanager`, `ec2`, `logs` — but NOT `lambda`.
+
+  An ARN like `arn:aws:lambda:us-east-1:123456789012:layer:*` matches
+  every Lambda layer. `_is_broad_resource` at line 808: bucket_part
+  is "layer:*"... wait, lambda ARNs use COLON not slash for the
+  collection separator. Let me re-trace.
+
+  `arn:aws:lambda:us-east-1:123456789012:layer:my-layer` — parts[5] =
+  "layer:my-layer". For `layer:*` (wildcard layer name), parts[5] =
+  "layer:*". This matches the colon-separated single-collection
+  wildcard branch line 1237-1240 in _is_strict_wildcard:
+  `if ":" in resource_spec: first, _, rest = ...partition(":"); if
+  rest == "*" and "/" not in first: return True`. Good — strict_wildcard
+  IS True for layer:*.
+
+  But `arn:aws:lambda:us-east-1:123456789012:function:my-fn:*` —
+  parts[5] = "function:my-fn:*". After partition(":") first="function",
+  rest="my-fn:*". `rest=="*"` is False. So this VERSION wildcard
+  (matches every published version of one function) is NOT detected
+  as strict-wildcard.
+
+  Function-version wildcard is "every published version of THIS function"
+  — narrow in one sense (one function), broad in another (every version
+  including future ones). For lambda:UpdateFunctionCode this is "I can
+  update any version" — covers the live alias too.
+
+  Real risk: 6 — modify any version of one function (single function,
+  multi-version broad).
+
+  Actually this YAML tests two cases:
+    (a) `function:my-fn:*` — version-wildcard (not strict per current code)
+    (b) `layer:*` — layer collection wildcard (already strict)
+  The score should reflect lambda:UpdateFunctionCode being in
+  _HIGH_IMPACT (floor 5) at minimum.
+
+  Suggested fix: extend the colon-collection-wildcard check to handle
+  multi-segment colon resource specs — `function:my-fn:*` is "every
+  version of my-fn." For lambda:UpdateFunctionCode this matters
+  because updating "any version" of a function is functionally
+  equivalent to updating the function.
+
+policy:
+  Version: "2012-10-17"
+  Statement:
+    - Effect: Allow
+      Action:
+        - "lambda:UpdateFunctionCode"
+        - "lambda:UpdateFunctionConfiguration"
+      Resource:
+        - "arn:aws:lambda:us-east-1:123456789012:function:prod-billing:*"
+        - "arn:aws:lambda:us-east-1:123456789012:layer:*"
+
+request:
+  spec:
+    access_type: read-write
+    duration:
+      duration_hours: 1
+
+expected:
+  score_min: 7
+  must_auto_approve: false

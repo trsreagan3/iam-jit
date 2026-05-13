@@ -1,0 +1,34 @@
+name: cloudtrail-bucket-lifecycle-evidence-destruction
+description: |
+  `s3:PutLifecycleConfiguration` on the CloudTrail bucket. The lifecycle
+  rule sets `ExpireObjectAfter: 1 day`, which causes S3 to silently
+  delete every CloudTrail log object older than a day — without ever
+  calling `s3:DeleteObject`. CloudTrail keeps writing; the evidence
+  evaporates on a schedule. Bypasses every `cloudtrail:StopLogging` /
+  `s3:DeleteObject` detection.
+
+  Research: Section 8.4 ("Disable or Modify Cloud Logs ... `s3:Put-
+  LifecycleConfiguration` to expire trail bucket.") and the broader
+  MITRE T1562.008 Disable Cloud Logs technique.
+
+  Why the scorer underrates: scored 3 (narrow-write floor). The Resource
+  is one specific bucket — the trail bucket — so it looks like a routine
+  ops grant. The scorer doesn't model that `PutLifecycleConfiguration`
+  on a CloudTrail-named bucket is the classic evidence-destruction-via-
+  side-channel primitive (T1485 Data Destruction).
+policy:
+  Version: "2012-10-17"
+  Statement:
+    - Effect: Allow
+      Action:
+        - s3:PutLifecycleConfiguration
+        - s3:PutBucketLifecycleConfiguration
+      Resource: arn:aws:s3:::company-cloudtrail-logs
+request:
+  spec:
+    access_type: read-write
+    duration:
+      duration_hours: 1
+expected:
+  score_min: 7
+  must_auto_approve: false
