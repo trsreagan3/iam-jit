@@ -1,0 +1,51 @@
+name: agent-300-federated-saml-cross-account-narrow
+description: |
+  BLACK-BOX Round 7. Research Sec 4.11, Sec 10.4, Sec 1.40, Sec 1.56.
+  Resource-based policy (trust policy) where `Principal: {Federated: ...}`
+  references a SAML provider ARN in a DIFFERENT AWS account
+  (999999999999) and grants `sts:AssumeRoleWithSAML` to a privileged
+  role in account 123456789012.
+
+  Attack: the trust policy authorizes any SAML assertion issued by
+  attacker-controlled IdP (`saml-provider/AttackerCorp` lives in the
+  attacker's account 999999999999, not the role's account). Once the
+  attacker controls the SAML metadata in their own account, they mint
+  any assertion they want and assume the role. This is sibling to
+  research 1.56 (`iam:CreateSAMLProvider` + `iam:UpdateAssumeRolePolicy`
+  in-account) — except the SAML provider lives ENTIRELY outside the
+  victim's account, so even an account-scoped IAM scope misses it.
+
+  Det score: 3 ("All statements are scoped or limited").
+  Real risk: 9 — attacker assumes PrivilegedRole at will from outside the
+  account.
+
+  Scorer gap: the Principal-shape detector (round 6) only flags `*` /
+  `AWS:*` / `Federated:*`. A NAMED federated principal pointing to a
+  third-party SAML provider ARN is treated as "scoped" because the
+  ARN looks specific, even though that ARN lives in a cross-account
+  context that the scorer cannot verify.
+
+  Suggested fix: when `Principal.Federated` is a SAML/OIDC provider
+  ARN whose account ID is NOT the policy owner (or unknown), floor at
+  8 unless a strict `SAML:aud`/`oidc:sub` `StringEquals` condition
+  narrows the assertion subject.
+
+policy:
+  Version: "2012-10-17"
+  Statement:
+    - Effect: Allow
+      Principal:
+        Federated: "arn:aws:iam::999999999999:saml-provider/AttackerCorp"
+      Action:
+        - "sts:AssumeRoleWithSAML"
+      Resource: "arn:aws:iam::123456789012:role/PrivilegedRole"
+
+request:
+  spec:
+    access_type: read-write
+    duration:
+      duration_hours: 1
+
+expected:
+  score_min: 7
+  must_auto_approve: false

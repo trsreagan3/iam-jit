@@ -1,0 +1,58 @@
+name: agent-427-numeric-mismatched-string-value
+description: |
+  WHITE-BOX round 7: `_condition_is_vacuous` doesn't detect TYPE
+  MISMATCH between operator and value.
+
+  `Condition: {NumericLessThan: {aws:MultiFactorAuthAge: "not a number"}}`
+  — Numeric operator with a non-numeric value. AWS evaluates this as
+  always-false (the value can't be compared), so the statement never
+  applies. Same as agent-423 (empty list) — malformed condition.
+
+  Same shape: `Bool: {aws:SecureTransport: "yes"}` (not "true" or
+  "false"), `DateLessThan: {aws:CurrentTime: "tomorrow"}` (not ISO-
+  8601), `IpAddress: {aws:SourceIp: "10.0.0.1/33"}` (invalid CIDR).
+
+  Source-code rule exploited: `_condition_is_vacuous` — operator/
+  value type-check is absent.
+
+  Research-doc pattern: §11 — operator/value type-mismatch.
+
+  Real risk: 4 — defect signal; AWS rejects on attach.
+
+  Det score: 9 — actually fires because iam:PassRole on `*` is
+  caught. So this fixture only exposes a NARRATIVE gap (the
+  condition is invisible to the reviewer) not a SCORE gap. Need to
+  use a narrow-resource action to surface the gap. Adjusted policy:
+  s3:GetObject on a narrow bucket with a Numeric/non-numeric
+  condition.
+
+  Adjusted score: 1 (no factor fires).
+
+  Proposed fix: Validate condition value types against operator
+  class:
+    - Numeric* — value must parse as int/float
+    - Date* — value must parse as ISO-8601 / epoch
+    - Bool — value must be "true"/"false" (case-insensitive)
+    - IpAddress — value must parse as CIDR
+  Any mismatch → flag at floor 5 with "operator/value type
+  mismatch" risk factor.
+
+policy:
+  Version: "2012-10-17"
+  Statement:
+    - Effect: Allow
+      Action: "s3:GetObject"
+      Resource: "arn:aws:s3:::sensitive-bucket/path/specific-file.json"
+      Condition:
+        NumericLessThan:
+          aws:MultiFactorAuthAge: "not-a-number"
+
+request:
+  spec:
+    access_type: read-write
+    duration:
+      duration_hours: 1
+
+expected:
+  score_min: 4
+  must_auto_approve: false

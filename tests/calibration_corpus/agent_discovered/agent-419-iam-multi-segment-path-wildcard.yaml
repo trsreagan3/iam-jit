@@ -1,0 +1,52 @@
+name: agent-419-iam-multi-segment-path-wildcard
+description: |
+  WHITE-BOX round 7: `_is_broad_resource` checks for IAM
+  collection-wildcards `role/*` (line 1185 + 1196). The check is
+  `if rest == "*" or (rest.endswith("*") and "/" not in rest)`.
+  This MISSES multi-segment IAM resource paths with `*` in the middle.
+
+  `arn:aws:iam::123456789012:role/aws-service-role/*/some-role` has
+  the resource-spec `role/aws-service-role/*/some-role`. After
+  `partition("/")` first = `role`, rest = `aws-service-role/*/some-role`.
+  `rest != "*"`. `rest.endswith("*")` is False (ends with `some-role`).
+  `"/" in rest` is True. So the rule doesn't fire.
+
+  But the path wildcards every AWS service-role intermediate name —
+  any role under any service-role path. AWS evaluates `*` in any
+  segment of an IAM ARN as a multi-segment wildcard.
+
+  Source-code rule exploited: `_is_broad_resource` (line 1196) +
+  `_is_strict_wildcard` (line 1808) — both predicate on a simple
+  trailing-wildcard or whole-rest equals `*`.
+
+  Research-doc pattern: §13 — multi-segment path wildcards.
+
+  Real risk: 5+ — multi-role-target IAM mutation primitive. With
+  iam:PutRolePolicy as the action, it's catastrophic (PutRolePolicy
+  is in catastrophic set, so floor 9 fires from the action set).
+  But the resource-broad detection misses entirely.
+
+  Det score: 2 (sensitive-service narrow-read floor only).
+
+  Proposed fix: For IAM (and other slash-path services), treat a
+  resource-spec containing `*` ANYWHERE as broad. Simplest rule:
+  if `*` appears in the resource-spec at any position, set broad.
+  This is the same rule already used for bucket-name detection
+  (line 1203 `_has_wildcard(resource_spec)`).
+
+policy:
+  Version: "2012-10-17"
+  Statement:
+    - Effect: Allow
+      Action: "iam:GetRole"
+      Resource: "arn:aws:iam::123456789012:role/aws-service-role/*/foo"
+
+request:
+  spec:
+    access_type: read-write
+    duration:
+      duration_hours: 1
+
+expected:
+  score_min: 4
+  must_auto_approve: false

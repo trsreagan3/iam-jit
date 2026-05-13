@@ -1,0 +1,47 @@
+name: agent-309-b2bi-edi-partnership-exfil
+description: |
+  BLACK-BOX Round 7. Research Sec 9 (newer service: AWS B2B Data
+  Interchange, GA 2023).
+
+  AWS B2B Data Interchange (b2bi) handles EDI document workflows
+  (X12, EDIFACT) with trading partners. With `b2bi:CreateProfile`,
+  `CreatePartnership`, `CreateTransformer`, `StartTransformerJob`,
+  an attacker can:
+  - Create an attacker-controlled "trading partner profile".
+  - Register a partnership routing victim S3 EDI documents to the
+    attacker's AS2/MFT endpoint.
+  - Run a transformer that pulls every X12 invoice from the victim's
+    S3 ingestion bucket and POSTs the JSON to the attacker.
+
+  Det score: 6 (generic Write floor). Real risk: 7-8 — supplier-
+  network exfil channel hidden inside legitimate-looking B2B traffic.
+
+  Scorer gap: `b2bi` not in _SENSITIVE_SERVICES; no awareness of the
+  service's purpose (data routing to external trading partners).
+
+  Suggested fix: add `b2bi:CreatePartnership`,
+  `b2bi:UpdatePartnership`, `b2bi:CreateTransformer`,
+  `b2bi:StartTransformerJob` to _CROSS_ACCOUNT_EXFIL_ACTIONS — the
+  partnership configuration is the exfil-destination primitive.
+
+policy:
+  Version: "2012-10-17"
+  Statement:
+    - Effect: Allow
+      Action:
+        - "b2bi:CreateProfile"
+        - "b2bi:CreatePartnership"
+        - "b2bi:UpdatePartnership"
+        - "b2bi:CreateTransformer"
+        - "b2bi:StartTransformerJob"
+      Resource: "*"
+
+request:
+  spec:
+    access_type: read-write
+    duration:
+      duration_hours: 1
+
+expected:
+  score_min: 7
+  must_auto_approve: false

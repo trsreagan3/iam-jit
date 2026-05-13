@@ -1,0 +1,51 @@
+name: agent-325-verifiedaccess-endpoint-modify
+description: |
+  BLACK-BOX Round 7. Research Sec 9.8 (AWS Verified Access).
+
+  Verified Access is AWS's zero-trust internal-resource broker.
+  Endpoints front internal services with an OIDC-validating policy.
+  With `ec2:CreateVerifiedAccessEndpoint`,
+  `ec2:ModifyVerifiedAccessEndpoint`,
+  `ec2:CreateVerifiedAccessGroup`,
+  `ec2:ModifyVerifiedAccessTrustProvider`, an attacker can:
+  - Create a new VA endpoint pointing at an internal Wiki/Jira/SaaS
+    behind the VPC.
+  - Attach a trust provider that authenticates ANY user (attacker-
+    controlled OIDC IdP).
+  - Expose the internal service via the VA public DNS without
+    touching SGs or NACLs.
+
+  Det score: 6 (generic Write floor). Real risk: 7-8 — perimeter
+  bypass for every VPC-internal service.
+
+  Scorer gap: `ec2:CreateVerifiedAccessEndpoint` and family are not
+  recognized as perimeter-rewrite primitives. Sibling to closed
+  `ec2:CreateVpcPeeringConnection` (round 5 network-bridge rule).
+
+  Suggested fix: add `ec2:CreateVerifiedAccessEndpoint`,
+  `ec2:ModifyVerifiedAccessEndpoint`,
+  `ec2:CreateVerifiedAccessGroup`,
+  `ec2:CreateVerifiedAccessTrustProvider`,
+  `ec2:ModifyVerifiedAccessTrustProvider` to
+  _HIGH_IMPACT_MUTATION_ACTIONS — same class as VPC peering.
+
+policy:
+  Version: "2012-10-17"
+  Statement:
+    - Effect: Allow
+      Action:
+        - "ec2:CreateVerifiedAccessEndpoint"
+        - "ec2:ModifyVerifiedAccessEndpoint"
+        - "ec2:CreateVerifiedAccessGroup"
+        - "ec2:ModifyVerifiedAccessTrustProvider"
+      Resource: "*"
+
+request:
+  spec:
+    access_type: read-write
+    duration:
+      duration_hours: 1
+
+expected:
+  score_min: 7
+  must_auto_approve: false

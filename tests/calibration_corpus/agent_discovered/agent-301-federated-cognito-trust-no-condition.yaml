@@ -1,0 +1,48 @@
+name: agent-301-federated-cognito-trust-no-condition
+description: |
+  BLACK-BOX Round 7. Research Sec 4.11, Sec 1.40 (federated trust
+  with permissive condition or NO condition).
+
+  Trust policy grants `sts:AssumeRoleWithWebIdentity` to ANY Cognito
+  identity (federated principal `cognito-identity.amazonaws.com`) with
+  NO condition narrowing the identity pool ID. The Cognito SDK's
+  `GetCredentialsForIdentity` can mint a token for an unauthenticated
+  identity pool, and without `cognito-identity.amazonaws.com:aud`
+  matching the specific pool ID, the role is effectively assumable by
+  any random Cognito user from any identity pool.
+
+  This is the canonical "vulnerable Cognito" pattern from CloudGoat
+  3.16 — but here it manifests as a trust policy with no
+  StringEquals on `aud`.
+
+  Det score: 3.
+  Real risk: 8 (anyone with AWS account or even unauthenticated Cognito
+  can assume this role with `GetCredentialsForIdentity`).
+
+  Scorer gap: identity-policy-shape scoring; `Principal.Federated` to
+  a known federated service principal (`cognito-identity.amazonaws.com`,
+  `accounts.google.com`, etc.) with NO condition should floor at 8.
+  The current Principal:* detector only fires on literal `*`.
+
+  Suggested fix: when `Principal.Federated` is set AND `Condition`
+  is absent (or doesn't constrain `aud`/`sub`), floor at 8.
+
+policy:
+  Version: "2012-10-17"
+  Statement:
+    - Effect: Allow
+      Principal:
+        Federated: "cognito-identity.amazonaws.com"
+      Action:
+        - "sts:AssumeRoleWithWebIdentity"
+      Resource: "arn:aws:iam::123456789012:role/CognitoAuthenticatedRole"
+
+request:
+  spec:
+    access_type: read-write
+    duration:
+      duration_hours: 1
+
+expected:
+  score_min: 7
+  must_auto_approve: false

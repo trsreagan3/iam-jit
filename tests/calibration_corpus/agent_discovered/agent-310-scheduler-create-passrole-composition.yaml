@@ -1,0 +1,48 @@
+name: agent-310-scheduler-create-passrole-composition
+description: |
+  BLACK-BOX Round 7. Research Sec 9.10 sibling (EventBridge Scheduler
+  is the modern post-2022 successor to EventBridge rules) +
+  composition.
+
+  `scheduler:CreateSchedule` + `iam:PassRole` is RCE-as-role. The
+  scheduler accepts a target ARN (Lambda, ECS, SQS, Step Functions,
+  any of 270+ AWS targets) and an IAM role to assume when invoking
+  it. Attacker creates a schedule that calls `lambda:Invoke` /
+  `ec2:RunInstances` / `iam:AttachRolePolicy` under a privileged
+  role, on a 1-minute cadence. Persistent, scheduled escalation.
+
+  Det score: 9 (the policy actually does trip an existing rule for
+  scheduler + PassRole — verified in probe). HOWEVER, the test
+  ensures continued coverage; the gap is potential since `scheduler`
+  is not in the explicit code-exec set. If a future refactor breaks
+  the floor, this regresses.
+
+  This YAML documents the EXPECTED behavior (floor 9, must_auto_approve
+  false) and pins the code-execution-primitive set to include
+  `scheduler:CreateSchedule` and `scheduler:UpdateSchedule`.
+
+  Suggested fix: explicitly add `scheduler:CreateSchedule`,
+  `scheduler:UpdateSchedule` to _CODE_EXECUTION_PRIMITIVES.
+
+policy:
+  Version: "2012-10-17"
+  Statement:
+    - Effect: Allow
+      Action:
+        - "scheduler:CreateSchedule"
+        - "scheduler:UpdateSchedule"
+        - "scheduler:CreateScheduleGroup"
+      Resource: "*"
+    - Effect: Allow
+      Action: "iam:PassRole"
+      Resource: "arn:aws:iam::*:role/PrivilegedSchedulerRole"
+
+request:
+  spec:
+    access_type: read-write
+    duration:
+      duration_hours: 1
+
+expected:
+  score_min: 9
+  must_auto_approve: false

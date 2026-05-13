@@ -1,0 +1,43 @@
+name: agent-402-wildcard-partition-principal
+description: |
+  WHITE-BOX round 7: same flaw class as agent-401, but the wildcard
+  is in the partition segment instead of the account segment.
+
+  `Principal: {AWS: "arn:*:iam::*:root"}` — the `*` partition matches
+  aws, aws-cn, aws-us-gov... and the `*` account matches every account.
+  This is the broadest possible AWS principal; AWS evaluates as
+  cross-partition cross-account public.
+
+  Source-code rule exploited: `_principal_is_public` (line 1068-1092) —
+  again, no ARN-structure parsing, only literal `*` membership.
+
+  Research-doc pattern: §4 Resource-based policy abuse, §13.3 partition
+  enumeration (aws/aws-cn/aws-us-gov).
+
+  Real risk: 9 — broader than `Principal: "*"` because it activates the
+  China + GovCloud partitions too.
+
+  Det score: 1 — same root cause as agent-401.
+
+  Proposed fix: same as agent-401 — parse ARN principals; flag `*` in
+  ANY segment.
+
+policy:
+  Version: "2012-10-17"
+  Statement:
+    - Effect: Allow
+      Action:
+        - s3:GetObject
+      Resource: "arn:aws:s3:::sensitive-bucket/*"
+      Principal:
+        AWS: "arn:*:iam::*:root"
+
+request:
+  spec:
+    access_type: read-write
+    duration:
+      duration_hours: 1
+
+expected:
+  score_min: 8
+  must_auto_approve: false

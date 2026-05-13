@@ -1,0 +1,53 @@
+name: agent-401-aws-account-wildcard-arn-principal
+description: |
+  WHITE-BOX round 7: `_principal_is_public` (review.py lines 1068-1092)
+  checks only for bare `"*"` in principal values. It does NOT inspect
+  the SHAPE of an ARN principal — specifically, an ARN with `*` in
+  the ACCOUNT segment.
+
+  `Principal: {AWS: ["arn:aws:iam::*:root"]}` grants access to the
+  `root` user of EVERY AWS account in the world. AWS evaluates this
+  as identical to `Principal: "*"` for cross-account access purposes —
+  any account on Earth that creates an IAM user with the matching
+  attribute can authenticate.
+
+  Source-code rule exploited: `_principal_is_public` (line 1068-1092),
+  called at line 1459. The check uses literal `v == "*"` and
+  `"*" in v` (for list) — never parses ARN structure to detect
+  account-segment wildcards.
+
+  Research-doc pattern: §4 Resource-based policy abuse — specifically
+  §4.3 wildcard principal forms including ARN-shaped wildcards.
+
+  Real risk: 9 — public-equivalent S3 bucket policy. Anonymous
+  internet-callable.
+
+  Det score: 1 — no Principal flagging fires; the statement looks
+  scoped because the bucket ARN is narrow.
+
+  Proposed fix: In `_principal_is_public`, when value is an ARN-shaped
+  string, parse with `parts = v.split(":", 5)` and return True if any
+  of (parts[1] partition, parts[3] region, parts[4] account, parts[5]
+  resource-id) is `*`. Same for elements of list-typed AWS principals.
+
+policy:
+  Version: "2012-10-17"
+  Statement:
+    - Effect: Allow
+      Action:
+        - s3:GetObject
+        - s3:PutObject
+      Resource: "arn:aws:s3:::sensitive-prod-bucket/path/specific-key.json"
+      Principal:
+        AWS:
+          - "arn:aws:iam::*:root"
+
+request:
+  spec:
+    access_type: read-write
+    duration:
+      duration_hours: 1
+
+expected:
+  score_min: 8
+  must_auto_approve: false

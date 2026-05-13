@@ -1,0 +1,45 @@
+name: agent-428-hangul-filler-action
+description: |
+  WHITE-BOX round 7: HANGUL FILLER (`U+3164`) is an Lo-category
+  invisible Korean character. It NFKC-decomposes to itself. Not in
+  `_ZERO_WIDTH_CHARS`. Visible width = 0 in most fonts.
+
+  Action `iam<U+3164>:CreateAccessKey` survives all current
+  normalization and fails set-membership lookup against
+  `_CATASTROPHIC_ACTIONS_LC`.
+
+  Source-code rule exploited: `_norm_grammar_str` +
+  `_ZERO_WIDTH_CHARS`. The filler is category Lo (other letter), so
+  even the Cf-strip fix proposed in agent-412/415 wouldn't catch it.
+
+  Research-doc pattern: §13 — homoglyph/invisible-character bypass.
+
+  Real risk: 9.
+
+  Det score: 4.
+
+  Proposed fix: Beyond Cf-strip, ALSO normalize via the Unicode
+  "default ignorable code points" list (DerivedCoreProperties.txt —
+  property `Default_Ignorable_Code_Point`). Python: maintain a
+  precomputed set from `unicodedata.is_default_ignorable_code_point`
+  if available, else hard-code the ~3000 code points. Hangul Filler
+  is `Default_Ignorable_Code_Point`. The same property covers
+  variation selectors, zero-width chars, Tag characters, etc. —
+  one rule closes most of the round-7 normalization gaps.
+
+policy:
+  Version: "2012-10-17"
+  Statement:
+    - Effect: Allow
+      Action: "iamㅤ:CreateAccessKey"
+      Resource: "*"
+
+request:
+  spec:
+    access_type: read-write
+    duration:
+      duration_hours: 1
+
+expected:
+  score_min: 8
+  must_auto_approve: false

@@ -1,0 +1,52 @@
+name: agent-412-rtl-override-iam-create
+description: |
+  WHITE-BOX round 7: `_ZERO_WIDTH_CHARS` (lines 904-911) covers
+  ZWSP / ZWJ / ZWNJ / BOM / Word Joiner / Combining Grapheme Joiner
+  but NOT the RTL Override family.
+
+  RIGHT-TO-LEFT OVERRIDE (`U+202E`) and LEFT-TO-RIGHT OVERRIDE
+  (`U+202D`) are Cf-category formatting controls that affect display
+  but survive `.lower()` and NFKC normalization (NFKC keeps them).
+  An action like `iam<U+202E>:CreateAccessKey` becomes a string that
+  visually renders differently in editors but contains the U+202E
+  byte sequence. Lookup in `_CATASTROPHIC_ACTIONS_LC` fails because
+  the literal action name is now `iam‮:createaccesskey`, not
+  `iam:createaccesskey`.
+
+  Source-code rule exploited: `_norm_grammar_str` (lines 914-937) +
+  `_ZERO_WIDTH_CHARS` (lines 904-911). The constants tuple omits
+  every Cf character besides the 6 listed.
+
+  Research-doc pattern: §13 Service-aliasing & action-naming edge
+  cases — bidirectional control characters in identifiers (the
+  "Trojan Source" attack class adapted to IAM action strings).
+
+  Real risk: 9 — `iam:CreateAccessKey` is catastrophic; this is a
+  homoglyph-style bypass.
+
+  Det score: 4 — only the broad cross-resource-read rule fires
+  because the scorer doesn't recognize the service prefix as `iam`.
+
+  Proposed fix: Replace the hard-coded `_ZERO_WIDTH_CHARS` tuple
+  with a category-based filter: strip any character whose Unicode
+  general category is Cf (Format), Cn (Unassigned), Cc (Control,
+  excepting tab/newline). One-line:
+  `s = "".join(c for c in s if unicodedata.category(c) not in ("Cf", "Cn"))`
+  before NFKC.
+
+policy:
+  Version: "2012-10-17"
+  Statement:
+    - Effect: Allow
+      Action: "iam‮:CreateAccessKey"
+      Resource: "*"
+
+request:
+  spec:
+    access_type: read-write
+    duration:
+      duration_hours: 1
+
+expected:
+  score_min: 8
+  must_auto_approve: false

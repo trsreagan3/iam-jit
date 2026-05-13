@@ -1,0 +1,50 @@
+name: agent-321-resource-policy-cross-acct-root-bucket
+description: |
+  BLACK-BOX Round 7. Research Sec 4.12 (trust with cross-account root
+  no MFA/external-id) — extended to bucket policy.
+
+  Bucket policy grants cross-account root (`arn:aws:iam::999999999999:
+  root`) `s3:GetObject` + `s3:PutObject` on a narrow backup bucket.
+  Any principal in account 999999999999 — including a freshly-created
+  one — can read AND overwrite every object.
+
+  Read = data exfil. Write = supply-chain attack (poison the backup
+  bucket; victim's restore process executes attacker content).
+
+  Det score: 6 (generic Write floor on s3:PutObject from the
+  cross-account principal). Real risk: 8 — explicit grant of two-way
+  data access to an entire foreign account with no external-id or
+  MFA gate.
+
+  Scorer gap: round 6 added Principal:* detection but a NAMED
+  cross-account `:root` principal is intermediate between "narrow"
+  (specific user ARN) and "wildcard" — the scorer treats it as
+  scoped because the ARN looks specific.
+
+  Suggested fix: when Principal.AWS is an account-root ARN
+  (`arn:aws:iam::ACCOUNTID:root`) on a resource-based policy and
+  there's no `aws:PrincipalOrgID`/`aws:ExternalId`/MFA condition,
+  floor at 7 (read) or 8 (write). The "root" suffix means "every
+  IAM principal in that account."
+
+policy:
+  Version: "2012-10-17"
+  Statement:
+    - Effect: Allow
+      Principal:
+        AWS: "arn:aws:iam::999999999999:root"
+      Action:
+        - "s3:GetObject"
+        - "s3:PutObject"
+        - "s3:DeleteObject"
+      Resource: "arn:aws:s3:::company-backups/*"
+
+request:
+  spec:
+    access_type: read-write
+    duration:
+      duration_hours: 1
+
+expected:
+  score_min: 7
+  must_auto_approve: false

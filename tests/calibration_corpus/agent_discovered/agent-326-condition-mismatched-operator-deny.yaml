@@ -1,0 +1,51 @@
+name: agent-326-condition-mismatched-operator-deny
+description: |
+  BLACK-BOX Round 7. Research Sec 11.15 (Mismatched operator type).
+
+  `IpAddress` is for IPv4/IPv6 values. Using it on `aws:username`
+  (a string key) yields an undefined-behavior comparison that AWS
+  evaluates as never-matched. In a `Deny`, never-matching means
+  the Deny NEVER fires → the protective intent fails.
+
+  Pattern:
+    Statement 1: Deny iam:DeleteUser if IpAddress(aws:username)=alice
+      → the Deny intends "don't let alice delete users" but the IpAddress
+      operator against a string never matches → Deny never fires.
+    Statement 2: Allow iam:* on Resource:*
+      → catastrophic grant the inert Deny was supposed to gate.
+
+  Det score: 9 (catastrophic-action floor fires regardless of broken
+  Deny). The SEMANTIC gap is that the scorer should call out the
+  malformed Deny as "broken safeguard — does not enforce intended
+  scope."
+
+  Real risk: 9 (action floor) — but the BROKEN DENY is the noteworthy
+  finding for the human reviewer. Surface it.
+
+  Suggested fix: detect operator/key type mismatch (IpAddress on
+  non-IP keys; Numeric* on non-numeric keys; Date* on non-date keys;
+  Arn* on non-ARN keys). Emit "operator/key type mismatch — condition
+  evaluates false, so Deny never fires" as a risk_factor.
+
+policy:
+  Version: "2012-10-17"
+  Statement:
+    - Effect: Deny
+      Action: "iam:DeleteUser"
+      Resource: "*"
+      Condition:
+        IpAddress:
+          aws:username: "alice"
+    - Effect: Allow
+      Action: "iam:*"
+      Resource: "*"
+
+request:
+  spec:
+    access_type: read-write
+    duration:
+      duration_hours: 1
+
+expected:
+  score_min: 9
+  must_auto_approve: false

@@ -1,0 +1,49 @@
+name: agent-318-cloudtrail-eventdatastore-delete
+description: |
+  BLACK-BOX Round 7. Research Sec 8.4 T1562.008 (Disable/Modify
+  Cloud Logs).
+
+  CloudTrail Lake Event Data Stores are the SQL-queryable cloudtrail
+  store separate from the legacy trails. With:
+  - `cloudtrail:DeleteEventDataStore` — drop the entire store of
+    historical events,
+  - `cloudtrail:DeleteResourcePolicy` — strip the cross-account
+    sharing policy,
+  - `cloudtrail:PutResourcePolicy` — replace it (e.g., remove the
+    audit-account's read access).
+
+  Sibling primitives of `cloudtrail:DeleteTrail` / `StopLogging` /
+  `PutEventSelectors` / `PutInsightSelectors` (already catastrophic
+  in rounds 2 + 6). The Event Data Store equivalents were not added
+  to the catastrophic set.
+
+  Det score: 8 (destructive-verb-prefix). Real risk: 9 — full
+  destruction of audit history is the bedrock evidence-destruction
+  primitive.
+
+  Suggested fix: add `cloudtrail:DeleteEventDataStore`,
+  `cloudtrail:DeleteResourcePolicy`, `cloudtrail:PutResourcePolicy`,
+  `cloudtrail:UpdateEventDataStore`,
+  `cloudtrail:RestoreEventDataStore` (restore-from-trash window
+  evasion) to _CATASTROPHIC_ACTIONS.
+
+policy:
+  Version: "2012-10-17"
+  Statement:
+    - Effect: Allow
+      Action:
+        - "cloudtrail:DeleteEventDataStore"
+        - "cloudtrail:DeleteResourcePolicy"
+        - "cloudtrail:PutResourcePolicy"
+        - "cloudtrail:UpdateEventDataStore"
+      Resource: "*"
+
+request:
+  spec:
+    access_type: read-write
+    duration:
+      duration_hours: 1
+
+expected:
+  score_min: 9
+  must_auto_approve: false

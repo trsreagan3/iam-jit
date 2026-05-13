@@ -1,0 +1,51 @@
+name: agent-317-macie-defense-evasion-disable
+description: |
+  BLACK-BOX Round 7. Research Sec 8.4 T1562.008 (Disable or Modify
+  Cloud Logs / Security Services).
+
+  Amazon Macie (S3 PII / sensitive-data discovery) is one of the
+  org-wide security services that detects S3 exposure during
+  exfiltration attempts. With `macie2:DisableMacie`,
+  `macie2:DisableOrganizationAdminAccount`, `macie2:UpdateMacieSession`
+  an attacker can:
+  - Disable Macie account-wide, blinding all S3 sensitive-data
+    findings.
+  - Disable the org-wide delegated admin account, breaking centralized
+    Macie monitoring across every member account.
+  - Update the session to a less-frequent finding-publishing-frequency
+    (= effective blindness during attack window).
+
+  Sibling of `guardduty:DeleteDetector`, `inspector2:Disable`,
+  `securityhub:Disable*`, `detective:DisableOrganizationAdminAccount`
+  — most of which the scorer already catches (round 2 + 6).
+
+  Det score: 8 (destructive-verb prefix matches "Disable*"). Real
+  risk: 9 — silently blinds the entire S3-data-discovery security
+  service.
+
+  Scorer gap: macie2 actions are caught only by the destructive-verb-
+  prefix rule (floor 8); they should be in _CATASTROPHIC_ACTIONS like
+  their guardduty/securityhub/inspector siblings.
+
+  Suggested fix: add `macie2:DisableMacie`,
+  `macie2:DisableOrganizationAdminAccount` to _CATASTROPHIC_ACTIONS.
+
+policy:
+  Version: "2012-10-17"
+  Statement:
+    - Effect: Allow
+      Action:
+        - "macie2:DisableMacie"
+        - "macie2:DisableOrganizationAdminAccount"
+        - "macie2:UpdateMacieSession"
+      Resource: "*"
+
+request:
+  spec:
+    access_type: read-write
+    duration:
+      duration_hours: 1
+
+expected:
+  score_min: 9
+  must_auto_approve: false

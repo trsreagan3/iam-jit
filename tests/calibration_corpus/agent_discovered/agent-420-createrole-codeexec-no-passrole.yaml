@@ -1,0 +1,68 @@
+name: agent-420-createrole-codeexec-no-passrole
+description: |
+  WHITE-BOX round 7: the code-exec-via-PassRole composition rule
+  (lines 2359-2389) requires `iam:PassRole` to fire. But an attacker
+  who has `iam:CreateRole` + `iam:AttachRolePolicy` can CREATE a new
+  role with the trust policy of their choice — no PassRole needed.
+
+  Pattern: `iam:CreateRole` + `iam:AttachRolePolicy` (both
+  catastrophic — floor 9 fires from action set) + a code-exec
+  primitive on a separate, NARROW resource. The catastrophic rule
+  fires on the iam: actions and scores 9, so this single fixture
+  doesn't bypass the floor. But the COMPOSITION semantic — "I built
+  a fresh admin role then ran code under it without ever calling
+  PassRole" — is missed; the suggestion list says "remove PassRole"
+  which doesn't apply.
+
+  Stronger bypass: when iam:CreateRole + iam:AttachRolePolicy are
+  scoped to ONE narrow role ARN (`arn:...role/my-svc-*`) plus a
+  code-exec primitive scoped to one narrow lambda, neither statement
+  individually trips catastrophic action set if the targets don't
+  match the catastrophic action's expected breadth. iam:CreateRole
+  IS in catastrophic set so it still floors 9 — but the bypass is
+  the SUGGESTIONS, which talk about PassRole and don't tell the
+  reviewer about the CreateRole+code-exec composition path.
+
+  Source-code rule exploited: composition logic at line 2359
+  (`has_code_exec AND pass_role_any`) — gates on iam:PassRole only.
+
+  Research-doc pattern: §1 — Rhino privesc paths like 1.9
+  (AttachUserPolicy → admin via attaching to self).
+
+  Real risk: 9 (already caught by catastrophic floor on CreateRole).
+  Gap is in narrative not score for the basic case. For a SCOPED
+  CreateRole on attacker-owned role ARNs (`role/attacker-*`) the
+  rule scores 9 because CreateRole is catastrophic. PASS-on-score.
+
+  Suggested fix: add a SECOND composition pattern: code-exec
+  primitive + (iam:CreateRole OR iam:UpdateAssumeRolePolicy OR
+  iam:AttachRolePolicy on a role the caller has visibility to).
+  Floor 9 with a distinct narrative ("RCE under a fresh role
+  created by the caller — same blast as PassRole-composition").
+
+  This fixture's score gap is ≤1 vs. the 9 floor, so it serves as a
+  NARRATIVE-quality fixture, not a score-gap fixture. Marked
+  expected score 9 to document the desired floor (which is met) and
+  to track the suggestion-narrative gap.
+
+policy:
+  Version: "2012-10-17"
+  Statement:
+    - Effect: Allow
+      Action:
+        - "iam:CreateRole"
+        - "iam:AttachRolePolicy"
+      Resource: "arn:aws:iam::123456789012:role/attacker-bot-*"
+    - Effect: Allow
+      Action: "lambda:CreateFunction"
+      Resource: "arn:aws:lambda:us-east-1:123456789012:function:my-func"
+
+request:
+  spec:
+    access_type: read-write
+    duration:
+      duration_hours: 1
+
+expected:
+  score_min: 9
+  must_auto_approve: false

@@ -1,0 +1,50 @@
+name: agent-316-account-api-contact-takeover
+description: |
+  BLACK-BOX Round 7. Research Sec 8.4 (defense evasion) + 5.2 (Code
+  Spaces destructive-account scenario).
+
+  The Account Management API (`account:`) is the AWS surface for
+  managing the account's contact info, alternate contacts (Security,
+  Billing, Operations), region opt-in/out, and CloseAccount. With:
+  - `account:PutContactInformation` — overwrite the root account
+    contact email/phone, enabling subsequent password-reset
+    takeover via the recovery flow.
+  - `account:PutAlternateContact` — register attacker as the Security
+    contact (any security alerts go to attacker).
+  - `account:DeleteAlternateContact` — remove the real Security
+    contact so alerts go nowhere.
+  - `account:CloseAccount` — already in catastrophic set (round 2),
+    but the contact-rewrite primitives are not.
+
+  Det score: 8. Real risk: 9 — overwriting root contact info enables
+  email-based account takeover via AWS's recovery flow.
+
+  Scorer gap: `account:PutContactInformation`,
+  `account:PutAlternateContact`, `account:DeleteAlternateContact`
+  are not in _CATASTROPHIC_ACTIONS. `account:CloseAccount` was added
+  but the takeover variant (less obvious but equally fatal) was not.
+
+  Suggested fix: add `account:PutContactInformation`,
+  `account:PutAlternateContact`, `account:DeleteAlternateContact`
+  to _CATASTROPHIC_ACTIONS — these primitives enable irreversible
+  root-account takeover.
+
+policy:
+  Version: "2012-10-17"
+  Statement:
+    - Effect: Allow
+      Action:
+        - "account:PutContactInformation"
+        - "account:PutAlternateContact"
+        - "account:DeleteAlternateContact"
+      Resource: "*"
+
+request:
+  spec:
+    access_type: read-write
+    duration:
+      duration_hours: 1
+
+expected:
+  score_min: 9
+  must_auto_approve: false

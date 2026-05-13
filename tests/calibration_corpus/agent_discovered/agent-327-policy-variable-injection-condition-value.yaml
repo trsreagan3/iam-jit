@@ -1,0 +1,50 @@
+name: agent-327-policy-variable-injection-condition-value
+description: |
+  BLACK-BOX Round 7. Research Sec 11.10 (policy variable injection)
+  extended from Resource into Condition VALUE.
+
+  Round 6 closed `${aws:PrincipalTag/...}` interpolation in Resource
+  ARNs. The same injection works in CONDITION VALUES:
+
+    "Condition": {"StringEquals": {"s3:prefix": "${aws:PrincipalTag/path}"}}
+
+  Author intent: "user can only access objects under their tag-defined
+  prefix." Real semantic: if the attacker has any path to write their
+  own `path` tag (research 11.11 self-tag), they choose the prefix.
+
+  Sibling combo: in this YAML the principal has no explicit tag-write,
+  but the scorer should still surface the injection-in-condition as
+  a high-risk shape: condition values containing `${aws:...}` are
+  attacker-shaped if any tag-write path exists.
+
+  Det score: 7. Real risk: 8.
+
+  Scorer gap: round 6 policy-variable check looks at Resource ARNs
+  only. Condition values are not checked.
+
+  Suggested fix: extend the policy-variable injection detector to
+  scan Condition values. Same risk_factor as Resource-side injection.
+
+policy:
+  Version: "2012-10-17"
+  Statement:
+    - Effect: Allow
+      Action:
+        - "s3:GetObject"
+        - "s3:ListBucket"
+      Resource:
+        - "arn:aws:s3:::tenant-data"
+        - "arn:aws:s3:::tenant-data/*"
+      Condition:
+        StringLike:
+          s3:prefix: "${aws:PrincipalTag/tenant}/*"
+
+request:
+  spec:
+    access_type: read-write
+    duration:
+      duration_hours: 1
+
+expected:
+  score_min: 7
+  must_auto_approve: false

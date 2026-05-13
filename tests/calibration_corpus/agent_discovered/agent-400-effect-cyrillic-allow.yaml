@@ -1,0 +1,51 @@
+name: agent-400-effect-cyrillic-allow
+description: |
+  WHITE-BOX round 7: `_effect_is_allow` (review.py lines 1095-1114) calls
+  `_norm_grammar_str(eff).lower() == "allow"` to detect Allow effects.
+
+  `_norm_grammar_str` runs NFKC normalization but Cyrillic 'А' (U+0410)
+  is its own canonical form — NFKC does NOT map it to Latin 'A'. After
+  lower() the string becomes 'аllow' (with leading Cyrillic а U+0430)
+  which is NOT equal to 'allow'.
+
+  Effect: `Аllow` (Cyrillic-A + 'llow') is therefore treated as a
+  non-Allow effect; the WHOLE STATEMENT IS SKIPPED. Every rule in the
+  per-statement loop and every composition rule reads "Allow" via
+  `_effect_is_allow`, so the catastrophic action+resource is invisible.
+
+  Source-code rule exploited: `_effect_is_allow` (line 1095), called at
+  lines 1388, 1438, 2291.
+
+  Research-doc pattern: §13 Service-aliasing & action-naming edge cases
+  (homoglyph attacks generalize from action names to the Effect field).
+
+  Real risk: 10 — `Action: "*"` + `Resource: "*"` = full admin. To AWS
+  the Cyrillic-A Effect is INVALID (AWS rejects unknown Effect at
+  policy-attach), but the scorer's job is to flag risk BEFORE AWS sees
+  it (a "malformed = worst-case" principle the scorer ALREADY documents
+  for missing Effect in lines 1101-1107 but doesn't apply here).
+
+  Det score: 1.
+
+  Proposed fix: After NFKC normalization, treat any Effect that is NOT
+  exactly "allow" or "deny" (case-insensitive) as a malformed-statement
+  warning at floor 9. Alternatively, decompose to NFKD and strip
+  combining marks then map non-ASCII letters to '?' before comparison —
+  any non-ASCII letter in a 5-character ASCII keyword is a bypass attempt.
+
+policy:
+  Version: "2012-10-17"
+  Statement:
+    - Effect: "Аllow"
+      Action: "*"
+      Resource: "*"
+
+request:
+  spec:
+    access_type: read-write
+    duration:
+      duration_hours: 1
+
+expected:
+  score_min: 9
+  must_auto_approve: false

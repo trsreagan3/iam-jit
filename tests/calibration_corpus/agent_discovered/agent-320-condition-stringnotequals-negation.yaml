@@ -1,0 +1,49 @@
+name: agent-320-condition-stringnotequals-negation
+description: |
+  BLACK-BOX Round 7. Research Sec 11.4 + 12 (NotAction antipatterns —
+  negation antipatterns).
+
+  `StringNotEquals` on `aws:userid` is the condition-key analog of
+  NotPrincipal: it grants the action to EVERY principal EXCEPT the
+  one listed. Author intent is usually "exclude system role X from
+  this rule" but the practical effect is "every other principal
+  in the world is allowed."
+
+  Combined with `iam:*` + `Resource:*`, this is a billion-account
+  admin grant masquerading as a scope.
+
+  Det score: 9 (catastrophic action floor fires). Real risk: 9 —
+  matches. BUT the condition-shape itself should be flagged as a
+  scope-less / inverted-condition pattern (sibling of NotPrincipal).
+
+  Scorer gap: round-6 vacuity catalog catches `StringLike "*"` and
+  `Null true` but not `StringNotEquals` on a single-principal-ID
+  string (which means "everyone else"). A `StringNotEquals` /
+  `StringNotLike` operator with ≤2 values is effectively `Allow
+  to (Universe \ {few})` — a clear footgun.
+
+  Suggested fix: extend condition-vacuity detection: any
+  `StringNotEquals` / `StringNotLike` / `ArnNotEquals` /
+  `ArnNotLike` whose value list has ≤2 entries should be flagged
+  as inverted-scope. Floor at 8 if the action is non-catastrophic;
+  surface a risk_factor when the action IS catastrophic.
+
+policy:
+  Version: "2012-10-17"
+  Statement:
+    - Effect: Allow
+      Action: "secretsmanager:GetSecretValue"
+      Resource: "arn:aws:secretsmanager:*:*:secret:prod-*"
+      Condition:
+        StringNotEquals:
+          aws:userid: "AIDAEXAMPLEUSERID"
+
+request:
+  spec:
+    access_type: read-write
+    duration:
+      duration_hours: 1
+
+expected:
+  score_min: 7
+  must_auto_approve: false

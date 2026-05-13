@@ -1,0 +1,52 @@
+name: agent-315-imagebuilder-pipeline-passrole
+description: |
+  BLACK-BOX Round 7. Research Sec 9 + Sec 1.15-1.22 family
+  (PassRole + code-execution).
+
+  EC2 Image Builder pipelines define AMI build recipes that execute
+  arbitrary build/test components under an InstanceProfile role and
+  store the resulting AMI in the account. With:
+  - `imagebuilder:CreateImagePipeline`,
+  - `imagebuilder:CreateImageRecipe` (or `CreateContainerRecipe`),
+  - `imagebuilder:CreateInfrastructureConfiguration`,
+  - `imagebuilder:StartImagePipelineExecution`,
+  - `iam:PassRole` on the build role,
+
+  the attacker writes attacker-controlled shell into a recipe
+  component and runs it under the build role — RCE-as-role.
+  Pipelines run on a schedule, so this is also persistent.
+
+  Det score: 9 (existing rule fires — `imagebuilder` already in
+  _SENSITIVE_SERVICES from round 5). The YAML pins behavior and
+  documents the composition primitive set membership.
+
+  Scorer gap (preventive): if `imagebuilder` is removed from
+  _SENSITIVE_SERVICES the composition rule should still fire via
+  _CODE_EXECUTION_PRIMITIVES. Add `imagebuilder:Create*Pipeline`,
+  `imagebuilder:StartImagePipelineExecution` explicitly to that
+  set.
+
+policy:
+  Version: "2012-10-17"
+  Statement:
+    - Effect: Allow
+      Action:
+        - "imagebuilder:CreateImagePipeline"
+        - "imagebuilder:CreateImageRecipe"
+        - "imagebuilder:CreateInfrastructureConfiguration"
+        - "imagebuilder:StartImagePipelineExecution"
+        - "imagebuilder:UpdateImagePipeline"
+      Resource: "*"
+    - Effect: Allow
+      Action: "iam:PassRole"
+      Resource: "arn:aws:iam::*:role/ImageBuilderRole"
+
+request:
+  spec:
+    access_type: read-write
+    duration:
+      duration_hours: 1
+
+expected:
+  score_min: 9
+  must_auto_approve: false

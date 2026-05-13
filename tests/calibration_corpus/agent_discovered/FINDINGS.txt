@@ -1505,3 +1505,519 @@ The blind spots above cluster into 8 fixable rule classes:
 #   PASS. (The condition-shape bypass surfaces only when the action
 #   is non-catastrophic — see agent-182 for the narrow-read case.)
 
+
+# ===========================================================
+# Round 7 — Black-box, 2026-05-13
+# ===========================================================
+# Black-box after round 6 closed 57 architectural bypasses (resource-
+# policy shape, condition vacuity, principal/NotPrincipal handling,
+# ~30 catastrophic/exfil action additions, sso alias, high-impact-on-
+# broad floor 8, policy-variable injection).
+#
+# Hunted for the survivors. Categories: more Condition operator
+# semantics (Bool coercion, DateLessThan future, ArnLike mismatch,
+# NumericLessThanIfExists, mismatched-operator-type, StringNotEquals
+# negation, BoolIfExists fragile-MFA, policy-variable-in-condition-
+# value), federated principal shapes beyond literal `*` (third-party
+# SAML provider, Cognito with no condition), tag-condition self-
+# rewrite with narrow self-ARN, newer 2023-2026 services (Q Business,
+# DataZone, B2BI, MemoryDB user/ACL, AppSync GraphQL key, Cognito
+# user pool create, ImageBuilder + PassRole, Verified Access, EC2
+# image-export exfil), missing catastrophic-action siblings (Account
+# contact takeover, CloudTrail Event Data Store delete, Macie
+# disable, secretsmanager Put/Rotate, RDS endpoint backdoor),
+# composition pins (DMS replication, EventBridge Scheduler +
+# PassRole).
+#
+# Total YAMLs: 29 (agent-300 through agent-328).
+#
+# Result split:
+#   - gap >= 4 (true bypass — high severity): 4 YAMLs (300, 301, 302,
+#     303, 327 — including a gap-6 condition-shape miss and 6-point
+#     gap on the new policy-variable-in-condition-value pattern).
+#   - gap = 1-2 (concerning but borderline): 14 YAMLs.
+#   - gap = 0 (calibration-pin, current behavior matches expected): 11 YAMLs.
+#
+# Breakdown by attack class:
+#   - Federated principal shapes (Sec 4.11, 1.40, 1.56): 2 YAMLs
+#     (300 cross-acct SAML, 301 Cognito-no-condition). Both score 3 vs
+#     expected 7 — the round-6 Principal:* detector only fires on
+#     literal `*` and doesn't recognize federated trust to a third-
+#     party IdP or to `cognito-identity.amazonaws.com` with no `aud`
+#     condition.
+#
+#   - Condition operator gaps (Sec 11): 7 YAMLs (302 ArnLike with
+#     *:*, 303 Bool inverted Deny, 304 DateLessThan 2099, 305 Numeric-
+#     LessThanIfExists, 320 StringNotEquals negation, 326 mismatched
+#     operator type, 328 BoolIfExists fragile-MFA, 327 policy-var
+#     injection into Condition value). 302 has gap 6, 303 has gap 5,
+#     327 has gap 6. These are the highest-impact misses of the round.
+#
+#   - Tag-condition self-rewrite (Sec 11.11): 1 YAML (306 narrow self-
+#     ARN `${aws:username}`). Score is 9 (PASS) — the iam:TagUser on
+#     Resource:* floors out anyway; YAML retained as calibration-pin.
+#
+#   - Newer-service surface (Sec 9 + new): 8 YAMLs (307 Q Business
+#     RAG exfil, 308 DataZone GetEnvironmentCredentials, 309 B2BI
+#     partnership exfil, 312 MemoryDB/ElastiCache user ACL, 313 AppSync
+#     GraphQL key, 314 Cognito user pool create, 315 ImageBuilder +
+#     PassRole [PASS], 325 Verified Access endpoint modify, 324 RDS
+#     custom cluster endpoint).
+#
+#   - Catastrophic siblings missing (Sec 8.4 + 6): 3 YAMLs (316
+#     account:PutContactInformation root-takeover, 317 macie2:Disable*
+#     defense-evasion, 318 cloudtrail:DeleteEventDataStore).
+#
+#   - Cross-account exfil siblings (Sec 4.13, 8.8 T1537): 2 YAMLs
+#     (311 ec2:CreateImage/CopyImage/CopySnapshot/Export, 323 events:
+#     CreateApiDestination — last is gap 0 calibration pin).
+#
+#   - High-impact write siblings (Sec 6.5 credential-overwrite class):
+#     2 YAMLs (322 secretsmanager Put/Update/Rotate calibration-pin
+#     score 8 matches expected, 324 rds cluster endpoint).
+#
+#   - Resource-policy + cross-acct root (Sec 4.12): 1 YAML (321) —
+#     scored 8, expected 7, calibration-pin.
+#
+#   - Composition primitives (PassRole): 3 YAMLs (310 scheduler+
+#     PassRole, 315 ImageBuilder+PassRole, 319 DMS+PassRole) — all
+#     score 9, calibration pins to lock in current behavior.
+
+# Top 5 worst bypasses (gap-≥3, ordered by gap):
+#
+# 1. agent-302-condition-arnlike-vacuous-principal
+#    Scored 1 vs expected 7 (gap 6). `ArnLike: aws:PrincipalArn
+#    arn:aws:iam::*:*` — degenerate ARN pattern with wildcard in BOTH
+#    the account-id segment AND the resource-name segment. Matches
+#    every IAM principal in every account. Combined with a NARROW PII
+#    bucket Resource, the scorer scores it as 1 because the narrow
+#    Resource dominates. Round 6 condition-vacuity catalog doesn't
+#    cover ArnLike with *:* segments. Sec 11.4 + 11.10.
+#
+# 2. agent-327-policy-variable-injection-condition-value
+#    Scored 1 vs expected 7 (gap 6). Round-6 policy-variable detector
+#    runs on Resource ARNs only — `${aws:PrincipalTag/tenant}` injected
+#    into a CONDITION VALUE (s3:prefix StringLike) is missed entirely.
+#    Sec 11.10 extended to condition values.
+#
+# 3. agent-303-condition-bool-coerced-string-inverted-deny
+#    Scored 1 vs expected 6 (gap 5). `Deny` + `Bool: {aws:MultiFactor-
+#    AuthPresent: "true"}` is the EXACT inversion of the intended
+#    "require MFA" semantic — the Deny only fires when MFA IS present.
+#    Combined with catastrophic actions (DeleteUser, DeleteRole,
+#    DeleteAccessKey) it's a fully-broken safeguard. Sec 11.6 + 11.7.
+#
+# 4. agent-300-federated-saml-cross-account-narrow
+#    Scored 3 vs expected 7 (gap 4). Trust policy with `Principal:
+#    {Federated: arn:aws:iam::999999999999:saml-provider/AttackerCorp}`
+#    on a privileged role. The SAML provider lives in a foreign
+#    account the attacker controls — they mint any assertion. Sec 4.11
+#    + 1.56.
+#
+# 5. agent-301-federated-cognito-trust-no-condition
+#    Scored 3 vs expected 7 (gap 4). Trust policy with `Principal:
+#    {Federated: cognito-identity.amazonaws.com}` and NO condition
+#    constraining the identity pool / aud. Any Cognito identity from
+#    any pool can assume. Sec 1.40 + 3.16.
+#
+# (Also notable: agent-311 EC2 image-export exfil gap 2; agents 307-
+# 309 / 312-314 / 324-325 gap 1 each — most resolved by adding the
+# service to an existing set.)
+
+
+# Cross-cutting architectural recommendations (continuing letter
+# naming KK...):
+#
+# KK. Federated-principal shape detector. Round 6 catches `Principal:
+#     "*"` and `Principal: {AWS: "*"}` but not `Principal: {Federated:
+#     <known-saml-or-oidc-provider-arn>}` patterns. Detect:
+#     (a) Federated principal pointing to a SAML/OIDC provider ARN
+#         whose account-id segment differs from the policy owner →
+#         cross-account federation; floor 8 unless `SAML:aud` /
+#         `oidc:sub` `StringEquals` (NOT StringLike) is present.
+#     (b) Federated principal = `cognito-identity.amazonaws.com` or
+#         `accounts.google.com` or `graph.facebook.com` etc., with
+#         NO `Condition` constraining `:aud` / `:sub` → floor 8.
+#     Closes agents 300, 301.
+#
+# LL. Condition operator-type validation. Detect operator/key
+#     mismatch (research 11.15):
+#     - `IpAddress` / `NotIpAddress` on non-IP keys → operator never
+#       matches → inverts Deny intent.
+#     - `Numeric*` on non-numeric keys.
+#     - `Date*` on non-date keys.
+#     - `Arn*` on non-ARN keys.
+#     Emit "operator/key-type mismatch: condition is permanently
+#     false; downstream Deny does not fire." Closes agent-326's
+#     semantic gap.
+#
+# MM. Extend policy-variable injection check to Condition values.
+#     Round 6 closed Resource ARN injection (`${aws:PrincipalTag/...}`)
+#     but the same injection in Condition VALUES (`s3:prefix:
+#     "${aws:PrincipalTag/x}/*"`) is missed. Same detector logic;
+#     just walk Condition values too. Closes agent-327 (gap 6).
+#
+# NN. Extend condition-vacuity catalog (round 6 has 6 patterns):
+#     - `ArnLike` / `ArnEquals` with `*:*` segments (closes 302,
+#       gap 6).
+#     - `Bool` with `false` value on a Deny statement that gates a
+#       boolean key whose absence-is-permissive (BoolIfExists chain).
+#     - `Bool: "true"` on `aws:MultiFactorAuthPresent` in a Deny —
+#       inverted-MFA pattern (closes 303, gap 5).
+#     - `DateLessThan` / `DateGreaterThan` with timestamps more than
+#       ~12 months from `now` (closes 304 if expected raised).
+#     - `BoolIfExists` on `aws:MultiFactorAuthPresent` (research 11.5)
+#       in a Deny — fragile against programmatic non-MFA paths.
+#     - `StringNotEquals` / `StringNotLike` / `ArnNotEquals` /
+#       `ArnNotLike` with ≤2 value entries — inverted scope (closes
+#       320 borderline).
+#
+# OO. New _CATASTROPHIC_ACTIONS additions:
+#     - `account:PutContactInformation`, `account:PutAlternateContact`,
+#       `account:DeleteAlternateContact` (agent-316; root-recovery
+#       takeover primitive).
+#     - `cloudtrail:DeleteEventDataStore`,
+#       `cloudtrail:DeleteResourcePolicy`,
+#       `cloudtrail:PutResourcePolicy`,
+#       `cloudtrail:UpdateEventDataStore` (agent-318; CloudTrail Lake
+#       siblings of the trail-delete primitives).
+#     - `macie2:DisableMacie`, `macie2:DisableOrganizationAdminAccount`
+#       (agent-317; sibling of guardduty/securityhub/inspector
+#       disables already catastrophic).
+#
+# PP. New _HIGH_IMPACT_MUTATION_ACTIONS additions:
+#     - `secretsmanager:PutSecretValue`, `secretsmanager:UpdateSecret`,
+#       `secretsmanager:RotateSecret`,
+#       `secretsmanager:ReplicateSecretToRegions` (agent-322; credential
+#       overwrite primitive).
+#     - `memorydb:CreateUser`, `memorydb:UpdateUser`,
+#       `memorydb:CreateACL`, `memorydb:UpdateACL`,
+#       `elasticache:CreateUser`, `elasticache:ModifyUser`,
+#       `elasticache:CreateUserGroup`, `elasticache:ModifyUserGroup`
+#       (agent-312; in-cluster Redis takeover).
+#     - `appsync:CreateApiKey`, `appsync:UpdateApiKey`,
+#       `appsync:CreateGraphqlApi`, `appsync:UpdateGraphqlApi`
+#       (agent-313; backdoor GraphQL API auth).
+#     - `cognito-idp:CreateUserPool`, `CreateUserPoolClient`,
+#       `CreateIdentityProvider`, `UpdateUserPool`,
+#       `UpdateUserPoolClient` (agent-314; sibling of Admin* already
+#       covered).
+#     - `ec2:CreateVerifiedAccessEndpoint`, `ModifyVerifiedAccessEndpoint`,
+#       `CreateVerifiedAccessGroup`, `ModifyVerifiedAccessTrustProvider`
+#       (agent-325; Verified Access perimeter-bypass — sibling of VPC
+#       peering already covered).
+#     - `rds:CreateDBClusterEndpoint`, `ModifyDBClusterEndpoint`,
+#       `ModifyDBSubnetGroup`, `CreateDBInstanceReadReplica` (agent-324;
+#       publicly-accessible endpoint backdoor).
+#
+# QQ. New _CROSS_ACCOUNT_EXFIL_ACTIONS:
+#     - `ec2:CreateImage`, `ec2:CopyImage`, `ec2:CopySnapshot`,
+#       `ec2:CreateInstanceExportTask`, `ec2:CreateRestoreImageTask`
+#       (agent-311; CREATE side of AMI/snapshot exfil chain — round 6
+#       added the Modify side but not the Create side).
+#     - `b2bi:CreatePartnership`, `b2bi:UpdatePartnership`,
+#       `b2bi:CreateTransformer`, `b2bi:StartTransformerJob` (agent-309;
+#       supplier-network outbound channel).
+#     - `dms:CreateReplicationTask`, `dms:StartReplicationTask`,
+#       `dms:CreateEndpoint`, `dms:ModifyEndpoint` (agent-319; CDC
+#       exfil — calibration pin).
+#     - `events:CreateConnection`, `events:CreateApiDestination`,
+#       `events:UpdateApiDestination` (agent-323; outbound HTTPS —
+#       calibration pin).
+#
+# RR. _SENSITIVE_SERVICES additions:
+#     - `qbusiness` (agent-307; corporate knowledge-base RAG exfil).
+#     - `datazone` (agent-308; data-catalog credential issuance via
+#       `datazone:GetEnvironmentCredentials`).
+#     - `appsync` (agent-313; GraphQL API key backdoor).
+#     - `memorydb`, `elasticache` for user/ACL-management surface
+#       (agent-312).
+#
+# SS. Cross-account root principal on resource policy (sibling of
+#     round-6 Principal:* BB rule). When `Principal.AWS` is an
+#     account-root ARN (`arn:aws:iam::<other-id>:root`) with no
+#     `aws:PrincipalOrgID` / `aws:ExternalId` / MFA condition,
+#     floor at 7 (read) or 8 (write). The "root" suffix means
+#     "every IAM principal in that account." Closes agent-321
+#     borderline (currently scored 8, but only because Resource:*
+#     promotion fired on s3:PutObject — narrower variants would
+#     escape).
+
+
+# Honest negatives — patterns I tried from the research compendium
+# that the scorer ALREADY catches correctly (no gap; do NOT add YAMLs):
+#
+# - 11.7 Bool string-coercion on iam:* catastrophic: scored 9
+#   (action floor dominates). PASS.
+#
+# - 11.4 DateLessThan future timestamp on iam:CreateUser: scored 9
+#   (catastrophic action floor dominates). PASS.
+#
+# - 11.10 ${aws:PrincipalTag/AssumableRole} in sts:AssumeRole
+#   Resource: scored 7 (round-6 policy-variable detector fires on
+#   Resource ARN). PASS.
+#
+# - 11.5 NumericLessThanIfExists on MFA + iam:* catastrophic: scored
+#   9 (action floor). PASS.
+#
+# - 11.11 Self-tag with broad iam:TagUser/TagRole on Resource:*:
+#   scored 9 (iam Tagging on Resource:* floor). PASS.
+#
+# - 11.15 IpAddress on string key with iam:* allow: scored 9 (action
+#   floor). PASS.  Note: scorer doesn't surface the BROKEN-DENY
+#   risk_factor — see LL recommendation.
+#
+# - Mixed Resource array with both narrow and `*`: scored 9 (Resource:*
+#   wins in promotion). PASS.
+#
+# - 10.4 Principal: {Federated: "*"}: scored 9 (round-6 wildcard
+#   principal detector). PASS.
+#
+# - 13.6 Service principal `ec2.amazonaws.com` + iam:PassRole on
+#   Resource:*: scored 9 (Principal.Service + no-condition rule).
+#   PASS.
+#
+# - 9.10 `scheduler:CreateSchedule` + iam:PassRole: scored 9
+#   (composition rule fires; calibration-pin only). PASS.
+#
+# - 1.59 `apprunner:CreateService` + iam:PassRole: scored 9. PASS.
+#
+# - 1.51 `bedrock-agentcore:CreateCodeInterpreter` + iam:PassRole:
+#   scored 9 (round-6 composition fix). PASS.
+#
+# - 1.27 `codestar:CreateProject` + iam:PassRole: scored 9. PASS.
+#
+# - 1.40 OIDC trust with `StringLike "repo:org/*"` on token.actions.
+#   githubusercontent.com:sub: scored 5 (gap 2 vs expected 7; same
+#   class as previously-documented `StringLike "*"` round-6 fix —
+#   the wildcard-tail-in-sub-pattern check fires but `repo:org/*`
+#   doesn't match the existing detector pattern. Borderline; could
+#   be added as a follow-up YAML if needed.).
+#
+# - 11.16 `aws:PrincipalOrgID` empty string: closed in round 6.
+#   PASS.
+#
+# - 4.11 `Principal: {AWS: "*"}` literal: closed in round 6. PASS.
+#
+# - `qbusiness:*` (wildcard service): scored 8 (broad service-
+#   wildcard rule fires). The agent-307 YAML uses explicit action
+#   list to expose the per-action gap, which is real (gap 1).
+#
+# - `datazone:*`: scored 8. Same pattern as qbusiness.
+
+
+## Round 7 — White-box
+
+White-box round-7 (post-round-6 hardening) targeted FIVE architectural
+gaps that survived the round-6 condition-vacuity / principal-public /
+NFKC-grammar defenses. Fixtures agent-400 through agent-429.
+
+The score-gap matrix (27 score-failing fixtures, gap ≥ 2 typical,
+gap ≥ 4 common):
+
+### Top 5 architectural gaps
+
+1. **`_norm_grammar_str` is incomplete: only 6 zero-width chars +
+   NFKC.** The Cf/Mn/Lo invisible-character family is huge (RTL
+   override, Mongolian Vowel Separator, Variation Selector-16,
+   Hangul Filler, soft hyphen, ...). NFKC also doesn't collapse
+   Cyrillic homoglyphs that visually equal Latin letters.
+
+   - Fixtures: agent-400 (Cyrillic in Effect, gap 8), agent-412
+     (RTL override), agent-413 (Mongolian VS), agent-414 (Cyrillic
+     homoglyph), agent-415 (variation selector), agent-416 (soft
+     hyphen), agent-425 (Cyrillic Deny), agent-428 (Hangul Filler).
+   - Fix sketch: extend `_norm_grammar_str` to (a) strip every
+     character with Unicode property `Default_Ignorable_Code_Point`
+     (closes Cf/Mn/Lo invisibles in one rule), AND (b) script-
+     mixing check — flag any IAM-grammar string that mixes scripts
+     (Latin + Cyrillic in one token) as malformed at floor 8.
+     Reference: UTS #39 (Unicode Confusables).
+   - SECONDARY: `_effect_is_allow` should treat any Effect that
+     after-normalization is neither "allow" nor "deny" as a defect
+     signal (floor 5, "malformed Effect — manual review"). Honors
+     the documented "malformed = worst-case" principle.
+
+2. **`_principal_is_public` only checks bare `*` membership — no
+   ARN structural parsing.** ARN-shaped principals with `*` in
+   partition/region/account/resource-id segments slip past.
+
+   - Fixtures: agent-401 (account wildcard `arn:aws:iam::*:root`,
+     gap 5), agent-402 (partition wildcard `arn:*:iam::*:root`,
+     gap 7), agent-403 (Federated wildcard `saml-provider/*`,
+     gap 6).
+   - Fix sketch: when a Principal value is an ARN-shaped string,
+     parse `parts = v.split(":", 5)` and return public-equivalent
+     if `*` appears in parts[1] (partition), parts[3] (region — for
+     non-global services), parts[4] (account), OR if parts[5]
+     (resource-id) contains `*`. List-typed principals: any element
+     matching the above triggers.
+   - The CanonicalUser branch on line 1516 is the model — it
+     applies regardless of value content.
+
+3. **`_condition_is_vacuous` covers 6 patterns; ~8 high-leverage
+   patterns missing.** Round 7 adds: Bool inversion
+   (SecureTransport/MFA-present with `false`), Date tautology
+   (CurrentTime < far-future or > past), Numeric near-infinity on
+   MFA-age, ArnLike with `arn:*:*:*:*:*`, `*IfExists` operator
+   (key-absent passes), StringLike prefix-wildcard on identity-
+   narrowing keys (`o-*`), StringNotEquals on identity-narrowing
+   keys (inverted intent), unknown-operator typo, type-mismatched
+   value, empty-list value.
+
+   - Fixtures: agent-404 (Bool SecureTransport false), agent-405
+     (Bool MFA-present false), agent-406 (DateGreaterThan past),
+     agent-407 (DateLessThan far-future), agent-408 (Numeric MFA
+     ≥ 1 day), agent-409 (ArnLike wildcard-all), agent-410
+     (IfExists key absent), agent-421 (StringNotEquals inverts),
+     agent-423 (empty-list value), agent-424 (operator typo),
+     agent-426 (StringLike `o-*`), agent-427 (Numeric/string type
+     mismatch), agent-411 (irrelevant condition key), agent-429
+     (Bool inversion on iam:PassRole narrow).
+   - Fix sketch: refactor `_condition_is_vacuous` into a
+     pattern-table. Each row: operator-class, key-pattern, value-
+     pattern, severity, reason. Patterns:
+       - Bool / BoolIfExists, key in
+         {aws:SecureTransport, aws:MultiFactorAuthPresent,
+          aws:ViaAWSService}, value lower in {"false"} → vacuous.
+       - Date* operators, key == aws:CurrentTime, value parses
+         to past (for GT/GTE) or > today+1y (for LT/LTE) → vacuous.
+       - Numeric* on aws:MultiFactorAuthAge with value > 86400 →
+         essentially-true.
+       - Arn* / String*, value is `*` or matches `arn:*:*:*:*:*`
+         or `arn:*` prefix → vacuous.
+       - Operator ends in `IfExists` → flag (key-absent bypass).
+       - StringNotEquals on identity-narrowing key → flag inverted.
+       - Operator not in known-set → flag malformed.
+       - Value is empty list `[]` or null → flag malformed.
+       - StringLike on identity-narrowing key with prefix-wildcard
+         that captures all identifiers of that class.
+
+4. **`_is_broad_resource` and `_is_strict_wildcard` only flag
+   account-segment wildcard.** Partition + region + multi-segment
+   path wildcards pass invisibly.
+
+   - Fixtures: agent-417 (region wildcard `*:account:secret:name`,
+     gap 3), agent-418 (partition wildcard `arn:*:s3:::bucket`,
+     gap 1), agent-419 (IAM multi-segment path
+     `role/aws-service-role/*/foo`, gap 2).
+   - Fix sketch: in both predicates, additionally treat
+     `parts[1] == "*"` (partition) and `parts[3] == "*"` (region,
+     for non-global services) as broad. For path-based resource
+     IDs (`role/...`, `alias/...`), treat ANY `*` in the resource-
+     spec as broad (already done for S3 bucket names via
+     `_has_wildcard(resource_spec)` on line 1203 — generalize the
+     same to IAM paths).
+
+5. **Composition rules don't include the post-launch instance-
+   profile chain or CreateRole-from-scratch path.** The current
+   composition rule (line 2359) requires explicit `iam:PassRole`.
+   But Rhino path #1.5 (post-launch AssociateIamInstanceProfile)
+   and the iam:CreateRole + iam:AttachRolePolicy "fresh admin
+   role" pattern bypass the PassRole gate.
+
+   - Fixtures: agent-420 (CreateRole + code-exec — score 9
+     anyway via catastrophic floor, but NARRATIVE gap),
+     agent-422 (PassRole + AssociateIamInstanceProfile — score 9
+     via catastrophic, but composition not surfaced).
+   - Fix sketch: add a SECOND composition rule:
+     `has_code_exec AND (has_passrole OR has_create_role OR
+     has_update_assumerole_policy OR has_associate_instance_profile)`
+     → floor 9, narrative names the specific pattern. Update
+     suggestion text to match the variant.
+
+
+### Honest negatives — patterns ALREADY HANDLED by round-6 defenses
+
+The following bypass attempts I tried that the current scorer
+correctly catches (no gap; do NOT add YAMLs for these):
+
+- **NotAction with narrow IAM exclusion**: `NotAction: [iam:Get*,
+  iam:List*]` on a narrow IAM role ARN is correctly caught by the
+  round-4 catastrophic-residue enumeration (line 1658-1671). Scores
+  9. PASS.
+
+- **NotAction wildcard with non-iam exclusion**: `NotAction:
+  [ec2:*, lambda:*]` on Resource: `*`. Correctly scored 9 by the
+  admin-minus-set rule (line 1642). PASS.
+
+- **`Action: "\n iam:CreateAccessKey"`** (leading newline):
+  `_norm_grammar_str` strips the whitespace via `.strip()` (line
+  937). Scores 9 catastrophic. PASS.
+
+- **`StringEquals: {aws:PrincipalAccount: "*"}`**: bare `*`
+  caught by Pattern 1 (line 1010). PASS.
+
+- **`Principal: {Service: "*"}`**: `*` value caught by
+  `_principal_is_public` dict-values check (line 1088). PASS.
+
+- **`Principal: {CanonicalUser: "<long hex>"}`**: caught by
+  explicit CanonicalUser branch (line 1516). PASS at floor 5.
+
+- **`Effect: "Ａｌｌｏｗ"` (fullwidth)**: NFKC collapses
+  fullwidth Roman to ASCII; correctly scores Allow. Combined with
+  `Action: *` scores 10. PASS.
+
+- **Empty `NotAction: []`**: caught by line 1616-1626. Scores 10
+  on broad resource. PASS.
+
+- **`Action: ['\niam:CreateAccessKey']`**: whitespace strip works
+  inside list elements. PASS.
+
+- **Service prefix typo (e.g. lowercase `sso:` vs `sso-admin:`)**:
+  `_SERVICE_ALIASES` (line 844) collapses sso→sso-admin. PASS.
+
+- **Statement: bare dict (not list)**: line 1361-1362 normalizes.
+  PASS.
+
+- **Missing Effect (implicit Allow)**: line 1112-1113 treats None
+  as Allow. PASS at the correct catastrophic floor for `Action: *`.
+
+- **`Condition: {Null: {aws:PrincipalOrgID: "true"}}`** (round-6
+  Null inversion): Pattern 2 catches. PASS.
+
+- **`Bool: {aws:SecureTransport: "true"}` (correct intent)**:
+  scored at face value; no false positive. PASS — the round-7 fix
+  must avoid false-flagging the correctly-intended form.
+
+- **NotPrincipal on Allow**: caught at line 1475-1492, scores 9.
+  PASS.
+
+- **`Principal: {AWS: []}` (empty)**: caught at line 1497-1509,
+  scores 5. PASS.
+
+- **`Principal: {Service: "lambda.amazonaws.com"}` no Condition**:
+  caught at line 1530-1544, scores 6. PASS.
+
+- **Policy-variable injection on attacker tag**
+  (`${aws:PrincipalTag/...}`): caught at line 1553-1572, scores 7.
+  PASS.
+
+- **`Action: "*:*"`**: line 1861, scores 10. PASS.
+
+- **`Action: "*:Create*"`**: line 1874, scores 9. PASS.
+
+- **`iam:Create*` glob**: catastrophic-residue check at line 1934
+  fires, scores 9. PASS.
+
+- **CodeExec + PassRole composition**: line 2359 fires, scores 9.
+  PASS.
+
+- **IAM recon + broad sts:AssumeRole**: line 2391 fires, scores 9.
+  PASS.
+
+- **`Principal: "*"` bare string**: line 1084, scores 9. PASS.
+
+- **`s3:DeleteBucket` on Resource: `*`** (destructive verb):
+  line 2071, scores 8. PASS.
+
+- **Cross-account-exfil action (lambda:AddPermission, etc.)**:
+  line 2453, scores 8. PASS.
+
+- **CodeExec primitive alone on strict-broad** (no PassRole):
+  line 2336, scores 8. PASS.
+
+- **Secret-bearing-read on strict-broad** (lambda:GetFunction,
+  ecs:DescribeTasks, rds:DownloadDBLogFile*): line 2429, scores 7.
+  PASS.
+

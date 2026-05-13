@@ -1,0 +1,60 @@
+name: agent-423-empty-list-condition-value
+description: |
+  WHITE-BOX round 7: `_condition_is_vacuous` Pattern 5 detects
+  empty STRING values (`vals_str and all(v == "" for v in vals_str)`)
+  at line 1058-1063. It does NOT detect empty LIST values.
+
+  `Condition: {StringEquals: {aws:PrincipalOrgID: []}}` is an empty
+  list. AWS evaluates StringEquals against an empty list as "never
+  matches" — so the statement is effectively dead-on-arrival. BUT
+  the scorer should flag this as a malformed condition (operator
+  thought they were scoping; actually they're denying themselves).
+
+  More dangerous: this same pattern with a CATASTROPHIC action and
+  broad resource scores 9 from the action floor, masking the
+  condition defect. A reviewer thinks "the condition is doing
+  something" and approves. They're approving a never-evaluable
+  statement that AWS itself rejects on parse... but the scorer's job
+  is to surface the defect BEFORE the operator publishes.
+
+  Source-code rule exploited: `_condition_is_vacuous` Pattern 5
+  (line 1058). The check `all(v == "" for v in vals_str)` works on
+  the result of `[str(v) for v in vals]` — but vals (the list `[]`)
+  iterates to ZERO elements, so the all() returns True over an empty
+  sequence, AND `vals_str and ...` is False (because empty list is
+  falsy in `vals_str and`). So the check skips. Wait — `vals_str =
+  [str(v) for v in vals]` with `vals = []` is `[]`. `[] and X` is
+  `[]` (falsy). The Pattern 5 check evaluates falsy and skips. So
+  the rule never fires for empty-list — defect-class signal lost.
+
+  Research-doc pattern: §11.
+
+  Real risk: 4 — malformed policy; same class as agent-159 (missing
+  Effect).
+
+  Det score: 1.
+
+  Proposed fix: Add Pattern 7 to `_condition_is_vacuous`: any
+  Condition operator with value `[]` (empty list) or `null` is a
+  defect — AWS rejects at parse but the scorer should flag at
+  human-review tier (floor 5).
+
+policy:
+  Version: "2012-10-17"
+  Statement:
+    - Effect: Allow
+      Action: "s3:GetObject"
+      Resource: "arn:aws:s3:::sensitive-data-bucket/*"
+      Condition:
+        StringEquals:
+          aws:PrincipalOrgID: []
+
+request:
+  spec:
+    access_type: read-write
+    duration:
+      duration_hours: 1
+
+expected:
+  score_min: 4
+  must_auto_approve: false

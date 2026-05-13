@@ -1,0 +1,63 @@
+name: agent-328-condition-boolifexists-mfa-deny-bypass
+description: |
+  BLACK-BOX Round 7. Research Sec 11.5 + 11.7 (BoolIfExists footgun).
+
+  `BoolIfExists: {aws:MultiFactorAuthPresent: "false"}` on a Deny:
+  the standard footgun is the IfExists qualifier. When the request
+  context DOES NOT INCLUDE the MFA key (programmatic call without
+  MFA), IfExists treats the condition as "key absent → True", which
+  satisfies `"false"` → matches → Deny fires. So far so good.
+
+  HOWEVER: in cross-service calls (Lambda → Secrets Manager, EC2 →
+  S3 via instance profile), the `aws:MultiFactorAuthPresent` key IS
+  present but evaluates to `false` because the underlying session
+  was not MFA-authenticated. Now `BoolIfExists("false")` matches →
+  Deny fires → blocks the legitimate cross-service call.
+
+  Worse: many writers use `BoolIfExists("false")` thinking it means
+  "deny when MFA is NOT present" — but combined with a broad Allow
+  elsewhere on the same secret, and a session-policy or
+  permissions-boundary that strips the condition, the Deny
+  conditional evaluation can become inconsistent. This is the source
+  of countless production outages (and resulting policy weakening
+  via removal of the Deny).
+
+  Pattern: Deny secretsmanager:GetSecretValue with BoolIfExists
+  aws:MultiFactorAuthPresent: "false", combined with allow on
+  broad Resource. The Deny doesn't actually protect non-MFA
+  programmatic callers reliably.
+
+  Det score: 7. Real risk: 7-8 — the MFA gate is more fragile than
+  it looks.
+
+  Scorer gap: BoolIfExists is treated as a real condition. It's
+  particularly inert against the cross-service / programmatic-without-
+  MFA case the author thought they were blocking.
+
+  Suggested fix: extend condition-vacuity to flag `BoolIfExists` on
+  `aws:MultiFactorAuthPresent` as a "fragile MFA gate — does not
+  reliably enforce against programmatic callers."
+
+policy:
+  Version: "2012-10-17"
+  Statement:
+    - Effect: Deny
+      Action:
+        - "secretsmanager:GetSecretValue"
+      Resource: "*"
+      Condition:
+        BoolIfExists:
+          aws:MultiFactorAuthPresent: "false"
+    - Effect: Allow
+      Action: "secretsmanager:GetSecretValue"
+      Resource: "*"
+
+request:
+  spec:
+    access_type: read-write
+    duration:
+      duration_hours: 1
+
+expected:
+  score_min: 8
+  must_auto_approve: false

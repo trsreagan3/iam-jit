@@ -1,0 +1,48 @@
+name: agent-304-condition-datelessthan-2099
+description: |
+  BLACK-BOX Round 7. Research Sec 11 (condition operator semantics).
+
+  A `DateLessThan` condition with timestamp `2099-12-31T23:59:59Z`
+  is effectively unbounded — the request must occur before year 2099,
+  which is always true. Yet the condition LOOKS like a JIT time-box
+  ("this access is only valid for a bounded window") and a scorer
+  may credit it as scoping.
+
+  Action: `secretsmanager:GetSecretValue` on a narrow `prod-db-*`
+  pattern resource. Real risk: the secret is permanently accessible
+  to whoever holds the policy — the date-condition adds zero
+  protection.
+
+  Det score: 7. The score already reflects the broad-secret read
+  (so this is gap 0-1 against `score_min: 7`). But the DETAILED risk
+  is "permanent unbounded grant masquerading as time-boxed JIT" — a
+  qualitative attribute the scorer doesn't surface in risk_factors.
+
+  Scorer gap: condition-vacuity should treat `DateLessThan` /
+  `DateGreaterThan` with timestamps more than (say) 12 months in
+  future/past as "unbounded date window" — they don't provide real
+  scope.
+
+  Suggested fix: parse Date* values; if the bound is more than ~12mo
+  outside `now`, treat the condition as vacuous (do not credit it
+  as scoping; surface a risk_factor calling out the unbounded window).
+
+policy:
+  Version: "2012-10-17"
+  Statement:
+    - Effect: Allow
+      Action: "secretsmanager:GetSecretValue"
+      Resource: "arn:aws:secretsmanager:*:*:secret:prod-db-*"
+      Condition:
+        DateLessThan:
+          aws:CurrentTime: "2099-12-31T23:59:59Z"
+
+request:
+  spec:
+    access_type: read-write
+    duration:
+      duration_hours: 1
+
+expected:
+  score_min: 7
+  must_auto_approve: false

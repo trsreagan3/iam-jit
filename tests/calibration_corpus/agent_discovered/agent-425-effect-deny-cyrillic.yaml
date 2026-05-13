@@ -1,0 +1,55 @@
+name: agent-425-effect-deny-cyrillic
+description: |
+  WHITE-BOX round 7: companion to agent-400 — the Cyrillic-Effect
+  bypass works in the OPPOSITE direction too.
+
+  An ATTACKER who knows a Deny rule blocks their target action can
+  write `Effect: "Dеny"` (Cyrillic e U+0435). The scorer would have
+  treated the statement as Deny (which it skips in
+  `_effect_is_allow`), but `_norm_grammar_str` does NOT NFKC-collapse
+  Cyrillic letters. So the comparison sees `Dеny` != "allow" → False
+  branch → the statement is treated as not-Allow → skipped entirely.
+
+  Effect being neither valid Allow nor valid Deny would have AWS
+  reject the policy at parse — but the scorer's job is to flag the
+  defect.
+
+  The SCORE here is 1 (because the statement is silently skipped
+  and there are no other statements). If the attacker pairs this
+  with a separate normal `Allow Action: "*"` statement, the policy
+  scores 10 from the OTHER statement. But the malformed Deny
+  statement (which would have been informative for the reviewer)
+  is invisible.
+
+  Source-code rule exploited: `_effect_is_allow` returns False for
+  Cyrillic-spelled "deny" — same root cause as agent-400 — and the
+  rest of the per-statement loop skips. No "unrecognized Effect"
+  signal surfaces.
+
+  Research-doc pattern: §13.
+
+  Real risk: 5 — malformed-policy defect signal.
+
+  Det score: 1.
+
+  Proposed fix: same as agent-400 — after NFKC, if the Effect is
+  neither "allow" nor "deny" (case-insensitive ASCII), score the
+  policy at floor 5 with a "malformed effect" risk factor. Per the
+  documented "malformed = worst-case" principle.
+
+policy:
+  Version: "2012-10-17"
+  Statement:
+    - Effect: "Dеny"
+      Action: "*"
+      Resource: "*"
+
+request:
+  spec:
+    access_type: read-write
+    duration:
+      duration_hours: 1
+
+expected:
+  score_min: 5
+  must_auto_approve: false

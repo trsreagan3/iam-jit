@@ -1,0 +1,66 @@
+name: agent-411-bool-irrelevant-key
+description: |
+  WHITE-BOX round 7: `_condition_is_vacuous` doesn't detect conditions
+  whose KEY is unrecognized — AWS treats unknown condition keys as
+  always-not-present, so the condition (without IfExists) never
+  matches, blocking nothing... but the policy IS still evaluated as
+  conditioned-on-something the scorer credits.
+
+  Wait — actually if the key doesn't exist AWS evaluates the condition
+  as FALSE (so the statement doesn't apply). That makes this a
+  DENY-of-self pattern. But not all condition operators behave this
+  way — Null operator depends on existence; the *IfExists suffix
+  reverses; some operators with all-wildcard values match anyway.
+
+  More direct: `Condition: {Bool: {bogus:Key: "true"}}` — the key
+  `bogus:Key` doesn't exist in any AWS request context. The Bool
+  operator returns false (no key, no comparison), so the statement is
+  effectively never granted. That's not the bypass — it's the
+  opposite, a noop. BUT the scorer should still flag this as
+  unenforceable / misconfigured at human-review tier instead of
+  scoring 1 (clean).
+
+  The bypass version: combine an enforceable key (StringEquals on
+  aws:PrincipalAccount, real) with an unenforceable second condition
+  key that an operator might think "scopes further" but actually
+  doesn't. The bare-Bool-bogus form here is the canary for the gap.
+
+  Source-code rule exploited: `_condition_is_vacuous` — the rule
+  treats any non-zero Condition block as "the operator thought about
+  scoping." Doesn't validate that condition keys are known AWS keys
+  (or service-namespaced like `s3:RequestObjectTag/...`).
+
+  Research-doc pattern: §11 Condition-key bypass — condition-key
+  typos / nonexistent-keys evaluating non-intuitively.
+
+  Real risk: 4 — defective policy; could be intended scoping that
+  silently does nothing. Same risk class as agent-159 (missing
+  Effect).
+
+  Det score: 1.
+
+  Proposed fix: Maintain a known-condition-keys allow-list (subset
+  of: aws:*, service-prefix:*) and flag any condition key NOT
+  in the allow-list and NOT matching `<service>:<TagKey>/<key>` or
+  similar known shapes. Falling back to "unknown key — manual review
+  required."
+
+policy:
+  Version: "2012-10-17"
+  Statement:
+    - Effect: Allow
+      Action: "s3:GetObject"
+      Resource: "arn:aws:s3:::important-data/path/file.json"
+      Condition:
+        Bool:
+          someservice:NotARealKey: "true"
+
+request:
+  spec:
+    access_type: read-write
+    duration:
+      duration_hours: 1
+
+expected:
+  score_min: 3
+  must_auto_approve: false

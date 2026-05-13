@@ -1,0 +1,61 @@
+name: agent-424-condition-operator-typo
+description: |
+  WHITE-BOX round 7: `_condition_is_vacuous` doesn't validate that
+  the condition OPERATOR name is a known AWS operator.
+
+  `Condition: {StringEqual: {aws:PrincipalOrgID: "o-realorg"}}` —
+  the operator is misspelled (no trailing 's'). AWS rejects this on
+  parse, but until then the scorer sees a "Condition block exists"
+  and trusts the operator's apparent scoping intent.
+
+  Similar shapes: `StringEqualsIgnoreCAse` (case typo), `IPAddress`
+  (wrong case — `IpAddress` is canonical though IAM is case-
+  insensitive on the operator name), `BoolNot` (no such operator),
+  etc.
+
+  Source-code rule exploited: `_condition_is_vacuous` (line 988-998).
+  The function iterates condition operators and matches against
+  hard-coded strings (`StringLike`, `Null`, `IpAddress`). Unknown
+  operators silently pass through.
+
+  Research-doc pattern: §11 — condition-operator typo / unknown-
+  operator AWS-parse-rejection.
+
+  Real risk: 4 — defect signal. AWS would reject the policy on
+  attach, but the scorer is asked BEFORE attachment. Score should
+  reflect "this policy will not work as written; require human
+  review."
+
+  Det score: 9 — actually fires from the broad iam:PassRole rule
+  (Resource: `*` is broad regardless of condition). So this fixture
+  scores correctly... ONLY BECAUSE the action+resource trip the
+  catastrophic floor. If the action were a narrow read, the gap
+  would surface. Test below uses a narrow-read fixture to expose
+  the gap.
+
+  Proposed fix: Maintain a known-operator list (the AWS-documented
+  ~17 operators + their IfExists / IgnoreCase variants). Any
+  Condition block with an unrecognized operator key gets flagged
+  at human-review tier (floor 5). Suggestion: "Condition operator
+  `{op}` is not a recognized AWS IAM operator. AWS will reject this
+  policy at attachment time."
+
+policy:
+  Version: "2012-10-17"
+  Statement:
+    - Effect: Allow
+      Action: "s3:GetObject"
+      Resource: "arn:aws:s3:::sensitive-data/*"
+      Condition:
+        StringEqual:
+          aws:PrincipalOrgID: "o-realorg12345"
+
+request:
+  spec:
+    access_type: read-write
+    duration:
+      duration_hours: 1
+
+expected:
+  score_min: 4
+  must_auto_approve: false

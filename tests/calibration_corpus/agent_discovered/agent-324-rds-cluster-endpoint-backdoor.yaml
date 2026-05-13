@@ -1,0 +1,51 @@
+name: agent-324-rds-cluster-endpoint-backdoor
+description: |
+  BLACK-BOX Round 7. Research Sec 4 (resource-based abuse) +
+  Sec 5.3 (Imperva RDS snapshot exfil class).
+
+  RDS Aurora supports user-defined "custom cluster endpoints" that
+  expose a subset of cluster members. With:
+  - `rds:CreateDBClusterEndpoint` — create a NEW endpoint on a prod
+    Aurora cluster, optionally configured `Publicly Accessible: true`.
+  - `rds:ModifyDBClusterEndpoint` — flip an existing endpoint to
+    publicly accessible.
+  - `rds:ModifyDBSubnetGroup` — re-associate cluster with an
+    attacker-friendly subnet (with attached IGW).
+
+  Attacker reaches the cluster from the public internet, authenticates
+  using credentials from any other vector (env var, leaked AKIA, IAM
+  database auth), and reads prod data without touching `rds:` Read
+  APIs (no CloudTrail data event for SELECTs).
+
+  Det score: 6. Real risk: 8 — silent perimeter-bypass primitive for
+  any RDS Aurora cluster.
+
+  Scorer gap: `rds:CreateDBClusterEndpoint`,
+  `rds:ModifyDBClusterEndpoint`, `rds:ModifyDBSubnetGroup`,
+  `rds:CreateDBInstanceReadReplica`-with-public-flag are not in
+  _HIGH_IMPACT_MUTATION_ACTIONS.
+
+  Suggested fix: add the endpoint/subnet management actions to
+  _HIGH_IMPACT_MUTATION_ACTIONS and surface a "publicly-accessible
+  endpoint creation" risk_factor for any RDS endpoint mutation.
+
+policy:
+  Version: "2012-10-17"
+  Statement:
+    - Effect: Allow
+      Action:
+        - "rds:CreateDBClusterEndpoint"
+        - "rds:ModifyDBClusterEndpoint"
+        - "rds:ModifyDBSubnetGroup"
+        - "rds:CreateDBInstanceReadReplica"
+      Resource: "*"
+
+request:
+  spec:
+    access_type: read-write
+    duration:
+      duration_hours: 1
+
+expected:
+  score_min: 7
+  must_auto_approve: false

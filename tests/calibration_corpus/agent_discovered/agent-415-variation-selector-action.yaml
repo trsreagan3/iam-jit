@@ -1,0 +1,37 @@
+name: agent-415-variation-selector-action
+description: |
+  WHITE-BOX round 7: VARIATION SELECTOR-16 (`U+FE0F`) is a Mn-/Cf-
+  category character used to choose emoji-vs-text presentation. NFKC
+  does NOT remove it; it's not in `_ZERO_WIDTH_CHARS`.
+
+  Action `iam<U+FE0F>:CreateAccessKey` survives normalization and
+  fails the catastrophic-action set lookup.
+
+  Source-code rule exploited: same as agent-412/413 —
+  `_norm_grammar_str` + `_ZERO_WIDTH_CHARS`.
+
+  Research-doc pattern: §13.
+
+  Real risk: 9.
+
+  Det score: 4.
+
+  Proposed fix: same as agent-412 — strip the Cf AND Mn (combining
+  marks, including all variation selectors) categories.
+
+policy:
+  Version: "2012-10-17"
+  Statement:
+    - Effect: Allow
+      Action: "iam️:CreateAccessKey"
+      Resource: "*"
+
+request:
+  spec:
+    access_type: read-write
+    duration:
+      duration_hours: 1
+
+expected:
+  score_min: 8
+  must_auto_approve: false

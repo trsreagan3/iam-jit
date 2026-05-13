@@ -1,0 +1,51 @@
+name: agent-409-arnlike-wildcard-all
+description: |
+  WHITE-BOX round 7: `_condition_is_vacuous` does not detect
+  ArnLike / ArnEquals operators on a fully-wildcard ARN.
+
+  `Condition: {ArnLike: {aws:PrincipalArn: "arn:*:*:*:*:*"}}` matches
+  every possible principal ARN. AWS evaluates this as identical to
+  no-condition. The reviewer scanning the policy sees a condition
+  block and assumes "scoped to specific ARN" — wrong.
+
+  Source-code rule exploited: `_condition_is_vacuous` — only
+  StringLike-bare-`*` is detected (lines 1009-1015). ArnLike and
+  ArnEquals operators with `*`-only or `arn:*:*:*:*:*` values are not
+  pattern-matched.
+
+  Research-doc pattern: §11 Condition-key bypass; §12 NotAction /
+  NotResource — semantically equivalent attack class.
+
+  Real risk: 5+ — depending on the action set. Here the s3:GetObject
+  on the bucket already scores 1; the condition makes the policy look
+  scoped when it isn't.
+
+  Det score: 1.
+
+  Proposed fix: Extend `_condition_is_vacuous`. For Arn* / String*
+  operators on any condition value:
+    - bare `*`,
+    - `arn:*:*:*:*:*`,
+    - ARN with `*` in 4+ of 6 segments,
+  flag as vacuous. Reuse the ARN-parser planned for principal-wildcard
+  detection.
+
+policy:
+  Version: "2012-10-17"
+  Statement:
+    - Effect: Allow
+      Action: "s3:GetObject"
+      Resource: "arn:aws:s3:::sensitive-prod/*"
+      Condition:
+        ArnLike:
+          aws:PrincipalArn: "arn:*:*:*:*:*"
+
+request:
+  spec:
+    access_type: read-write
+    duration:
+      duration_hours: 1
+
+expected:
+  score_min: 4
+  must_auto_approve: false

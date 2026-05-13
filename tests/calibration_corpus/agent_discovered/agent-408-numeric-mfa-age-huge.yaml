@@ -1,0 +1,49 @@
+name: agent-408-numeric-mfa-age-huge
+description: |
+  WHITE-BOX round 7: `_condition_is_vacuous` does not detect
+  essentially-true Numeric conditions on `aws:MultiFactorAuthAge`.
+
+  `Condition: {NumericLessThan: {aws:MultiFactorAuthAge: 999999}}`
+  reads as "MFA-age in seconds is less than ~11 days." For any session
+  that has EVER had MFA, this is always true. The condition is
+  cosmetic and provides no actual MFA-recency requirement.
+
+  This bypass is most damaging on a non-broad-resource statement where
+  the only OTHER risk signal would have been the broken condition.
+  Pair with sts:AssumeRole on a narrow admin-role ARN to score 3 (sts
+  is in sensitive services so narrow-read fires to 2; that's it).
+
+  Source-code rule exploited: `_condition_is_vacuous` (line 958) — no
+  Numeric-tautology detection.
+
+  Research-doc pattern: §11 Condition-key bypass — MFA recency
+  evasion.
+
+  Real risk: 5 — same class as agent-404 (intent-vs-effect mismatch).
+
+  Det score: 3 — narrow-write floor for sts:AssumeRole.
+
+  Proposed fix: For NumericLessThan / NumericLessThanEquals on
+  aws:MultiFactorAuthAge with values > 86400 (1 day), flag as
+  effectively-vacuous. The same applies to NumericGreaterThan on
+  aws:TokenIssueTime with very-old timestamps.
+
+policy:
+  Version: "2012-10-17"
+  Statement:
+    - Effect: Allow
+      Action: "sts:AssumeRole"
+      Resource: "arn:aws:iam::123456789012:role/admin-bot"
+      Condition:
+        NumericLessThan:
+          aws:MultiFactorAuthAge: 999999
+
+request:
+  spec:
+    access_type: read-write
+    duration:
+      duration_hours: 1
+
+expected:
+  score_min: 5
+  must_auto_approve: false

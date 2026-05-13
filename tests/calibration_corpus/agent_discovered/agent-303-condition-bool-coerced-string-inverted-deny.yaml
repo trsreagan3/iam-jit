@@ -1,0 +1,54 @@
+name: agent-303-condition-bool-coerced-string-inverted-deny
+description: |
+  BLACK-BOX Round 7. Research Sec 11.6 (Null inversion) + Sec 11.7
+  (Bool string-vs-bool coercion).
+
+  Deny statement with `Bool: {aws:MultiFactorAuthPresent: "true"}` —
+  the author thinks this means "deny unless MFA is present", but the
+  semantics are actually "deny WHEN MFA IS PRESENT". The Deny only
+  fires when the request DID authenticate with MFA. Sessions that
+  skipped MFA pass through unblocked. Classic Null/Bool inversion
+  footgun.
+
+  Policy: Deny `iam:DeleteUser` when MFA present. Result: only MFA
+  users are blocked; non-MFA sessions can call DeleteUser freely.
+  Combined with an implicit allow elsewhere (not shown here — this
+  could be a deny-list permissions-boundary style policy), the
+  practical effect is "let everyone except MFA users do this
+  catastrophic thing."
+
+  Det score: 1 ("All statements are scoped or limited").
+  Real risk: 7 — the Deny is misconfigured AND the action is
+  catastrophic; the misconfiguration nullifies the only protection.
+
+  Scorer gap: round 6 condition-vacuity detects `Null:true` inversion
+  but not the Bool-on-Deny inversion that selects the WRONG branch.
+  A Deny gated on `Bool: aws:MultiFactorAuthPresent: true` is the
+  exact inversion of "require MFA".
+
+  Suggested fix: when Effect=Deny + Bool condition + key in
+  {aws:MultiFactorAuthPresent, aws:SecureTransport} + value=true, the
+  Deny is inverted. Flag as scope-less Deny.
+
+policy:
+  Version: "2012-10-17"
+  Statement:
+    - Effect: Deny
+      Action:
+        - "iam:DeleteUser"
+        - "iam:DeleteRole"
+        - "iam:DeleteAccessKey"
+      Resource: "*"
+      Condition:
+        Bool:
+          aws:MultiFactorAuthPresent: "true"
+
+request:
+  spec:
+    access_type: read-write
+    duration:
+      duration_hours: 1
+
+expected:
+  score_min: 6
+  must_auto_approve: false

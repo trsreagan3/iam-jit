@@ -1,0 +1,54 @@
+name: agent-314-cognito-idp-create-user-pool
+description: |
+  BLACK-BOX Round 7. Research Sec 1.40 + 3.16 + 2.3 (Pacu
+  `cognito__attack`).
+
+  `cognito-idp:CreateUserPool` + `CreateUserPoolClient` +
+  `CreateIdentityProvider` + `UpdateUserPoolClient` lets an attacker
+  manufacture a parallel authentication surface inside the victim's
+  account:
+  - Create attacker-owned user pool.
+  - Register an external OIDC IdP with `CreateIdentityProvider`.
+  - Update any existing CLIENT to trust the new pool (or create one).
+  - Mint Cognito tokens that exchange for AWS creds via
+    `cognito-identity:GetCredentialsForIdentity`.
+
+  Combined with a permissive identity-pool unauthenticated role
+  (research 3.16, CloudGoat `vulnerable_cognito`) this is full
+  federated-auth bridge.
+
+  Det score: 6. Real risk: 8 — application-level account takeover
+  for every app the user pool fronts, plus federated AWS access via
+  the identity-pool authenticated role.
+
+  Scorer gap: cognito-idp non-Admin create actions (CreateUserPool,
+  CreateUserPoolClient, CreateIdentityProvider) not in
+  _HIGH_IMPACT_MUTATION_ACTIONS. Only the Admin* mutate actions
+  were added in earlier rounds.
+
+  Suggested fix: add `cognito-idp:CreateUserPool`,
+  `CreateUserPoolClient`, `CreateIdentityProvider`,
+  `UpdateUserPoolClient`, `UpdateUserPool` to _HIGH_IMPACT_MUTATION_-
+  ACTIONS.
+
+policy:
+  Version: "2012-10-17"
+  Statement:
+    - Effect: Allow
+      Action:
+        - "cognito-idp:CreateUserPool"
+        - "cognito-idp:CreateUserPoolClient"
+        - "cognito-idp:CreateIdentityProvider"
+        - "cognito-idp:UpdateUserPool"
+        - "cognito-idp:UpdateUserPoolClient"
+      Resource: "*"
+
+request:
+  spec:
+    access_type: read-write
+    duration:
+      duration_hours: 1
+
+expected:
+  score_min: 7
+  must_auto_approve: false

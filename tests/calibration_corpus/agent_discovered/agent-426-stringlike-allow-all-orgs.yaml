@@ -1,0 +1,53 @@
+name: agent-426-stringlike-allow-all-orgs
+description: |
+  WHITE-BOX round 7: `_condition_is_vacuous` Pattern 1 catches
+  StringLike with bare `"*"` (lines 1009-1015). It does NOT catch
+  StringLike with `*` as a PREFIX or SUFFIX value:
+  `"o-*"`, `"*"`, `"012*"` — any value where the `*` wildcard
+  matches every possible identifier of that key class.
+
+  `Condition: {StringLike: {aws:PrincipalOrgID: "o-*"}}` matches
+  every org-id starting with the standard "o-" prefix — which is
+  EVERY AWS organization. Functionally identical to bare-`*`.
+
+  Same class: `aws:PrincipalAccount: "*"` (covered by Pattern 1),
+  `aws:PrincipalAccount: "12345*"` (NOT covered — matches a 4M
+  account range), `aws:SourceArn: "arn:aws:*"` (matches every ARN
+  in the aws partition).
+
+  Source-code rule exploited: Pattern 1 (line 1009) uses strict
+  `v == "*"`. Doesn't recognize semantic-equivalents.
+
+  Research-doc pattern: §11 — wildcard value patterns.
+
+  Real risk: 5+ — degenerate condition gives operator + reviewer
+  false confidence in scoping.
+
+  Det score: 1.
+
+  Proposed fix: Extend Pattern 1: for StringLike on identity-
+  narrowing keys (aws:PrincipalAccount, aws:PrincipalOrgID,
+  aws:SourceArn, aws:SourceAccount, aws:SourceVpc), recognize values
+  that are "type-prefix + wildcard" as semantically `*`. The set is
+  small: `o-*` for org-id, `arn:*` for arn keys, `*` for account-id
+  values that are pure-digits-or-stars.
+
+policy:
+  Version: "2012-10-17"
+  Statement:
+    - Effect: Allow
+      Action: "s3:GetObject"
+      Resource: "arn:aws:s3:::cross-org-shared/path/file.json"
+      Condition:
+        StringLike:
+          aws:PrincipalOrgID: "o-*"
+
+request:
+  spec:
+    access_type: read-write
+    duration:
+      duration_hours: 1
+
+expected:
+  score_min: 5
+  must_auto_approve: false

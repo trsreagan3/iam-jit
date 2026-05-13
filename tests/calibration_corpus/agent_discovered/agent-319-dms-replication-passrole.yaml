@@ -1,0 +1,52 @@
+name: agent-319-dms-replication-passrole
+description: |
+  BLACK-BOX Round 7. Research Sec 1.15-1.22 family (PassRole + data
+  service) + Sec 8.8 T1567 exfiltration over web service.
+
+  AWS Database Migration Service (DMS) is the canonical "copy a
+  production database somewhere else" service. With:
+  - `dms:CreateReplicationInstance` — spawn a DMS instance with a
+    privileged role,
+  - `dms:CreateReplicationTask` — define a CDC task reading from
+    prod RDS,
+  - `dms:StartReplicationTask` — point the target endpoint at
+    attacker-controlled S3 / RDS,
+  - `iam:PassRole` on the DMS service role,
+
+  the attacker streams every row of prod tables to attacker S3 /
+  Kinesis. Det score is already 9 because the rule fires (verified),
+  but `dms:` is not explicitly in _CODE_EXECUTION_PRIMITIVES /
+  _CROSS_ACCOUNT_EXFIL_ACTIONS — the floor may come from a different
+  path that could be lost in future refactors.
+
+  Real risk: 9 (full DB exfil to attacker target endpoint).
+
+  Suggested fix: add `dms:CreateReplicationInstance`,
+  `dms:CreateReplicationTask`, `dms:StartReplicationTask`,
+  `dms:CreateEndpoint`, `dms:ModifyEndpoint` to
+  _CROSS_ACCOUNT_EXFIL_ACTIONS — this is silent CDC-tier exfil.
+
+policy:
+  Version: "2012-10-17"
+  Statement:
+    - Effect: Allow
+      Action:
+        - "dms:CreateReplicationInstance"
+        - "dms:CreateReplicationTask"
+        - "dms:StartReplicationTask"
+        - "dms:CreateEndpoint"
+        - "dms:ModifyEndpoint"
+      Resource: "*"
+    - Effect: Allow
+      Action: "iam:PassRole"
+      Resource: "arn:aws:iam::*:role/DmsServiceRole"
+
+request:
+  spec:
+    access_type: read-write
+    duration:
+      duration_hours: 1
+
+expected:
+  score_min: 9
+  must_auto_approve: false

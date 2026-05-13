@@ -1,0 +1,58 @@
+name: agent-404-bool-inverted-securetransport
+description: |
+  WHITE-BOX round 7: `_condition_is_vacuous` (lines 958-1065) catches
+  6 patterns but does NOT detect intent-inversion in Bool operators.
+
+  `Condition: {Bool: {aws:SecureTransport: "false"}}` reads at a glance
+  like "require secure transport." It actually allows access ONLY when
+  the request is HTTP (plain text). The likely author intent was "true"
+  — a one-character typo inverts the entire purpose. Tools and humans
+  reviewing a long condition list overlook this constantly.
+
+  When the condition appears on a data-read like `s3:GetObject` on a
+  narrow bucket, the scorer scores 1 (it gives full credit to the
+  presence of the condition AND the narrow resource scope). In reality
+  this policy ENABLES plaintext-only exfil and BLOCKS legitimate HTTPS
+  callers — an attacker downstream of a MITM gets the data, a real
+  user does not.
+
+  Source-code rule exploited: `_condition_is_vacuous` (line 958) —
+  has no awareness of which boolean keys have "secure = true" vs
+  "secure = false" semantics. Specifically lacks the Bool-inversion
+  pattern.
+
+  Research-doc pattern: §11 Condition-key bypass — boolean-inversion
+  via aws:SecureTransport, aws:MultiFactorAuthPresent (these all
+  default to "Allow when false" semantics inverted).
+
+  Real risk: 7 — plaintext-only data exfil path, with the secondary
+  effect of denying legitimate HTTPS callers (operational outage).
+
+  Det score: 1.
+
+  Proposed fix: Add a 7th pattern to `_condition_is_vacuous` — for
+  Bool / BoolIfExists operator with the keys aws:SecureTransport,
+  aws:MultiFactorAuthPresent, aws:ViaAWSService, or any other "security
+  posture should be true" key, flag any value that lowercases to
+  "false". Cite the common-mistake registry.
+
+policy:
+  Version: "2012-10-17"
+  Statement:
+    - Effect: Allow
+      Action:
+        - s3:GetObject
+      Resource: "arn:aws:s3:::sensitive-data-bucket/path/specific-file.json"
+      Condition:
+        Bool:
+          aws:SecureTransport: "false"
+
+request:
+  spec:
+    access_type: read-write
+    duration:
+      duration_hours: 1
+
+expected:
+  score_min: 5
+  must_auto_approve: false

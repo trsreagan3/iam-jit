@@ -1,0 +1,50 @@
+name: agent-429-bool-securetransport-false-narrow
+description: |
+  WHITE-BOX round 7: companion to agent-404. The Bool-inversion
+  bypass works WITH iam:PassRole even on a narrow role ARN.
+
+  `Condition: {Bool: {aws:SecureTransport: "false"}}` on
+  `iam:PassRole` for a narrow admin-role ARN. The PassRole-narrow
+  floor at line 2006 lands at 4. But the condition INVERTS — the
+  policy grants PassRole only over HTTP. Two failure modes:
+    1. The author intended "require HTTPS" — wrote false instead of
+       true — the policy is broken (HTTPS callers denied).
+    2. The author intended exactly this — they want to PassRole
+       only when the call is unencrypted, which is a deliberate
+       MITM-friendly grant.
+  Either way: the condition is anti-security-posture and the scorer
+  should flag, not approve at floor 4.
+
+  Source-code rule exploited: `_condition_is_vacuous` — same as
+  agent-404/405.
+
+  Research-doc pattern: §11 — Bool inversion.
+
+  Real risk: 7 — iam:PassRole + unencrypted-only condition is a
+  hard human-review case.
+
+  Det score: 4.
+
+  Proposed fix: Bool-inversion pattern (same as agent-404/405).
+  Apply BEFORE the PassRole-narrow floor fires — escalate to 7
+  when the condition inverts.
+
+policy:
+  Version: "2012-10-17"
+  Statement:
+    - Effect: Allow
+      Action: "iam:PassRole"
+      Resource: "arn:aws:iam::123456789012:role/admin-bot"
+      Condition:
+        Bool:
+          aws:SecureTransport: "false"
+
+request:
+  spec:
+    access_type: read-write
+    duration:
+      duration_hours: 1
+
+expected:
+  score_min: 6
+  must_auto_approve: false

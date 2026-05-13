@@ -1,0 +1,47 @@
+name: agent-311-ec2-create-image-cross-account-exfil
+description: |
+  BLACK-BOX Round 7. Research Sec 4.13 + Sec 8.8 T1537 (data
+  transfer to cloud account via AMI / EBS snapshot share).
+
+  Chain: `ec2:CreateImage` (snapshots a running prod instance into a
+  new AMI containing its root + EBS volumes verbatim — including any
+  mounted secrets, in-memory creds dumped to disk, application state),
+  plus `ec2:CopyImage` / `ec2:CopySnapshot` (clone across regions),
+  plus `ec2:CreateInstanceExportTask` (export VM image to S3 as
+  VMDK/OVA — readable by anyone with bucket access).
+
+  Det score: 6. Real risk: 8.
+
+  Scorer gap: These four EC2 exfil-primitive actions are NOT in
+  _CROSS_ACCOUNT_EXFIL_ACTIONS. `ec2:ModifyImageAttribute` and
+  `ec2:ModifySnapshotAttribute` ARE there (round 6 fix for AMI/snap
+  share). But the CREATE side of the chain — actually building the
+  image to share — is not credit-tracked. An attacker who only has
+  CreateImage + Export can exfil to S3 without needing the modify-
+  attribute step.
+
+  Suggested fix: add `ec2:CreateImage`, `ec2:CopyImage`,
+  `ec2:CopySnapshot`, `ec2:CreateInstanceExportTask`,
+  `ec2:CreateRestoreImageTask` to _CROSS_ACCOUNT_EXFIL_ACTIONS.
+
+policy:
+  Version: "2012-10-17"
+  Statement:
+    - Effect: Allow
+      Action:
+        - "ec2:CreateImage"
+        - "ec2:CopyImage"
+        - "ec2:CopySnapshot"
+        - "ec2:CreateInstanceExportTask"
+        - "ec2:CreateRestoreImageTask"
+      Resource: "*"
+
+request:
+  spec:
+    access_type: read-write
+    duration:
+      duration_hours: 1
+
+expected:
+  score_min: 8
+  must_auto_approve: false

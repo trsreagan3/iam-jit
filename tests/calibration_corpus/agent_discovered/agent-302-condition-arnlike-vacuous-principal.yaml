@@ -1,0 +1,46 @@
+name: agent-302-condition-arnlike-vacuous-principal
+description: |
+  BLACK-BOX Round 7. Research Sec 11.4 + 11.10 + 11.16 (condition
+  vacuity / typo).
+
+  Policy uses `ArnLike` with `aws:PrincipalArn: "arn:aws:iam::*:*"` —
+  a degenerate ARN pattern that matches EVERY IAM principal in every
+  account. The intent looks like "only IAM users/roles can call this"
+  but it scopes nothing — anonymous principals are filtered, but every
+  cross-account principal still matches.
+
+  Combined with `s3:GetObject` on a NARROW PII bucket, the deterministic
+  scorer (1) sees a narrow bucket resource and (2) credits the ArnLike
+  condition as "scoped". Result: score 1.
+
+  Real risk: 7 — every cross-account IAM principal in the world can
+  GetObject from the PII bucket.
+
+  Scorer gap: condition-vacuity check (round 6 closed `StringLike "*"`,
+  `Null true`, `SourceIp 0.0.0.0/0`, etc.) doesn't extend to
+  `ArnLike` / `ArnEquals` with `*:*` segment-wildcards on principal
+  ARNs.
+
+  Suggested fix: extend the vacuity catalog: any `ArnLike` /
+  `ArnEquals` whose value contains `*` in BOTH the account-id segment
+  AND the resource-name segment is degenerate and grants `*`.
+
+policy:
+  Version: "2012-10-17"
+  Statement:
+    - Effect: Allow
+      Action: "s3:GetObject"
+      Resource: "arn:aws:s3:::sensitive-data/*"
+      Condition:
+        ArnLike:
+          aws:PrincipalArn: "arn:aws:iam::*:*"
+
+request:
+  spec:
+    access_type: read-write
+    duration:
+      duration_hours: 1
+
+expected:
+  score_min: 7
+  must_auto_approve: false

@@ -1,0 +1,46 @@
+name: agent-418-wildcard-partition-resource
+description: |
+  WHITE-BOX round 7: `_is_broad_resource` / `_is_strict_wildcard` only
+  check parts[4] (account) for wildcards. The PARTITION segment
+  (parts[1] — aws / aws-cn / aws-us-gov) is never validated.
+
+  `arn:*:s3:::sensitive-bucket/data/*` matches the bucket+path in
+  every AWS partition. Most resources don't exist in multiple
+  partitions, but a sophisticated attacker who controls a Chinese
+  AWS account or a GovCloud account uses this to bridge partitions.
+
+  Source-code rule exploited: `_is_broad_resource` (line 1136),
+  `_is_strict_wildcard` (line 1750). Neither inspects parts[1].
+
+  Research-doc pattern: §13.3 partition enumeration.
+
+  Real risk: 5+ — partition wildcards are uncommon and usually a
+  YAML/template-rendering bug rather than malice. But the operator
+  has lost specificity; risk floor should be at least 4
+  (broad-cross-resource read tier).
+
+  Det score: 1.
+
+  Proposed fix: When parsing an ARN, flag `parts[1] == "*"` as
+  broad. While at it, validate that `parts[1]` is one of the known
+  partition values (`aws`, `aws-cn`, `aws-us-gov`, `aws-iso`,
+  `aws-iso-b`) — an unknown partition value should also be flagged.
+
+policy:
+  Version: "2012-10-17"
+  Statement:
+    - Effect: Allow
+      Action:
+        - "s3:GetObject"
+        - "s3:PutObject"
+      Resource: "arn:*:s3:::sensitive-bucket/data/specific-file.json"
+
+request:
+  spec:
+    access_type: read-write
+    duration:
+      duration_hours: 1
+
+expected:
+  score_min: 4
+  must_auto_approve: false

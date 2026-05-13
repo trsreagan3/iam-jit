@@ -1,0 +1,45 @@
+name: agent-323-eventbridge-api-destination-exfil
+description: |
+  BLACK-BOX Round 7. Research Sec 8.8 T1567 (exfiltration over web
+  service) + Sec 9.10 (EventBridge Pipes / outbound HTTPS).
+
+  `events:CreateConnection` + `events:CreateApiDestination` is the
+  "outbound HTTPS from EventBridge" primitive. Connection holds the
+  attacker's auth credential; ApiDestination is the URL. Combined
+  with an EventBridge rule that targets the api-destination, every
+  matching event is POSTed to attacker.com.
+
+  This is a sibling to research 4.5 (lambda:AddPermission for cross-
+  account exfil) — but Event Destinations are less-watched and run
+  in the EventBridge service principal context, NOT under a
+  customer role.
+
+  Det score: 8 (already partial). Pinning expected behavior. The
+  gap is moderate but the surface deserves explicit naming.
+
+  Suggested fix: add `events:CreateConnection`,
+  `events:UpdateConnection`, `events:CreateApiDestination`,
+  `events:UpdateApiDestination` to _CROSS_ACCOUNT_EXFIL_ACTIONS
+  (outbound-HTTPS class).
+
+policy:
+  Version: "2012-10-17"
+  Statement:
+    - Effect: Allow
+      Action:
+        - "events:CreateConnection"
+        - "events:UpdateConnection"
+        - "events:CreateApiDestination"
+        - "events:UpdateApiDestination"
+        - "events:PutTargets"
+      Resource: "*"
+
+request:
+  spec:
+    access_type: read-write
+    duration:
+      duration_hours: 1
+
+expected:
+  score_min: 8
+  must_auto_approve: false

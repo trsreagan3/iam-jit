@@ -1,0 +1,47 @@
+name: agent-313-appsync-graphql-api-key-takeover
+description: |
+  BLACK-BOX Round 7. Research Sec 9 (newer surfaces) + 4.10
+  (API authorization bypass).
+
+  AppSync GraphQL APIs commonly back mobile apps and act as a single
+  edge into DynamoDB / RDS / OpenSearch / Lambda data resolvers.
+  `appsync:CreateApiKey` + `appsync:UpdateGraphqlApi` lets an
+  attacker:
+  - Mint a new long-lived API key on a production GraphQL API.
+  - Optionally update the API's auth mode away from AWS_IAM to
+    API_KEY (analogous to research 4.10 — disabling AWS_IAM
+    authorization on API Gateway).
+  - Query the entire data graph as an unauthenticated client.
+
+  Det score: 6. Real risk: 8.
+
+  Scorer gap: `appsync:CreateApiKey`, `appsync:UpdateApiKey`,
+  `appsync:CreateGraphqlApi`, `appsync:UpdateGraphqlApi` are not in
+  _CATASTROPHIC_ACTIONS or _CREDENTIALS_EXPOSURE. AppSync key creation
+  is functionally `iam:CreateAccessKey` for a public GraphQL API.
+
+  Suggested fix: add `appsync:CreateApiKey`, `appsync:UpdateApiKey`,
+  `appsync:UpdateGraphqlApi`, `appsync:CreateGraphqlApi` to a new
+  "API-surface backdoor" set with floor 7; treat as siblings of
+  `apigateway:UpdateRestApiPolicy`.
+
+policy:
+  Version: "2012-10-17"
+  Statement:
+    - Effect: Allow
+      Action:
+        - "appsync:CreateApiKey"
+        - "appsync:UpdateApiKey"
+        - "appsync:CreateGraphqlApi"
+        - "appsync:UpdateGraphqlApi"
+      Resource: "*"
+
+request:
+  spec:
+    access_type: read-write
+    duration:
+      duration_hours: 1
+
+expected:
+  score_min: 7
+  must_auto_approve: false

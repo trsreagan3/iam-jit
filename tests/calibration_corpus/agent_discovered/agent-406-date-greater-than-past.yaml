@@ -1,0 +1,56 @@
+name: agent-406-date-greater-than-past
+description: |
+  WHITE-BOX round 7: `_condition_is_vacuous` does not detect
+  always-true Date conditions.
+
+  `Condition: {DateGreaterThan: {aws:CurrentTime: "2020-01-01T00:00:00Z"}}`
+  is satisfied for every request from 2020 onward — i.e., every
+  request the policy will ever see. The condition is purely cosmetic;
+  AWS evaluates it the same as no condition at all.
+
+  Equally vacuous: `DateLessThan: {aws:CurrentTime: "2099-12-31"}`
+  (always true) — and the boundary cases `DateLessThanEquals` /
+  `DateGreaterThanEquals`.
+
+  Source-code rule exploited: `_condition_is_vacuous` (line 958) — no
+  Date-range tautology detection.
+
+  Research-doc pattern: §11 Condition-key bypass via aws:CurrentTime
+  with far-out / past dates.
+
+  Real risk: 5 — condition is a false-positive scoping signal. The
+  policy looks scoped to a time window; it is not. Without a real
+  condition the broad PassRole would have been auto-flagged.
+
+  Det score: 1 — the narrow `arn:aws:iam::*:role/admin-bot` resource
+  trips no rule (account wildcard is broad but PassRole-narrow is
+  floor 4; the time-condition is what should be revealing the gap).
+
+  Wait — re-checking: the resource is `*:role/admin-bot` which has
+  account wildcard `*`, making it broad. The narrow PassRole rule
+  fires only if Resource isn't broad. Let me use a narrower resource.
+
+  Proposed fix: Detect Date* operators with `aws:CurrentTime` key
+  where the comparison value is in the past (for GT/GTE) or far future
+  (for LT/LTE). Specifically: `DateGreaterThan` with date < today, or
+  `DateLessThan` with date > today + 1 year, is degenerate.
+
+policy:
+  Version: "2012-10-17"
+  Statement:
+    - Effect: Allow
+      Action: "s3:GetObject"
+      Resource: "arn:aws:s3:::sensitive-data/*"
+      Condition:
+        DateGreaterThan:
+          aws:CurrentTime: "2020-01-01T00:00:00Z"
+
+request:
+  spec:
+    access_type: read-write
+    duration:
+      duration_hours: 1
+
+expected:
+  score_min: 4
+  must_auto_approve: false

@@ -1,0 +1,49 @@
+name: agent-414-cyrillic-homoglyph-action
+description: |
+  WHITE-BOX round 7: NFKC does NOT collapse Cyrillic letters that
+  visually match Latin letters. Cyrillic 'а' (U+0430) renders
+  identically to Latin 'a' in nearly all fonts but
+  `unicodedata.normalize("NFKC", "а")` returns the SAME Cyrillic 'а'.
+
+  Action `iаm:CreateAccessKey` (Latin i, Cyrillic а, Latin m) passes
+  `_norm_grammar_str` unchanged. Lowercase is `iаm:createaccesskey`.
+  Set membership against `_CATASTROPHIC_ACTIONS_LC` fails — `iam:`
+  is the prefix in the set, `iаm:` is the string.
+
+  Source-code rule exploited: `_norm_grammar_str` is NFKC only;
+  has no defense against mixed-script attacks.
+
+  Research-doc pattern: §13 — homoglyph confusable detection. The
+  Unicode Confusables list (UTS #39) catalogs hundreds of these.
+
+  Real risk: 9 — `iam:CreateAccessKey` is catastrophic; visual-
+  collision in policy YAML the operator cannot distinguish from real
+  iam.
+
+  Det score: 4 — only the broad cross-resource-read rule fires;
+  service prefix is "iаm" (with Cyrillic а) — not in
+  `_SENSITIVE_SERVICES`.
+
+  Proposed fix: After NFKC, do a script-mixing check. If the string
+  contains characters from MORE THAN ONE script (e.g. Latin AND
+  Cyrillic in the same action name) flag as malformed at floor 9.
+  Tool: `unicodedata.name()` lookup or a homoglyph confusables map.
+  Pure-Cyrillic action would still bypass, but mixed-script (the
+  attacker's actual primitive) wouldn't.
+
+policy:
+  Version: "2012-10-17"
+  Statement:
+    - Effect: Allow
+      Action: "iаm:CreateAccessKey"
+      Resource: "*"
+
+request:
+  spec:
+    access_type: read-write
+    duration:
+      duration_hours: 1
+
+expected:
+  score_min: 8
+  must_auto_approve: false

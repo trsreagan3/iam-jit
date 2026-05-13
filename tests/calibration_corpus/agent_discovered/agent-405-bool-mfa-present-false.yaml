@@ -1,0 +1,48 @@
+name: agent-405-bool-mfa-present-false
+description: |
+  WHITE-BOX round 7: same Bool-inversion class as agent-404 but with
+  `aws:MultiFactorAuthPresent`.
+
+  `Condition: {Bool: {aws:MultiFactorAuthPresent: "false"}}` allows
+  access ONLY when MFA is NOT presented. The likely intent — "require
+  MFA" — would write "true". The inverted form is the explicit
+  bypass-MFA path.
+
+  Combined with a sensitive read like `secretsmanager:GetSecretValue`
+  on a narrow secret, the scorer scores 3 (narrow-write floor). The
+  condition is fully ignored — the rule for credit is "presence of a
+  Condition block" not "the condition actually does anything sane."
+
+  Source-code rule exploited: `_condition_is_vacuous` — no Bool-inversion
+  pattern.
+
+  Research-doc pattern: §11 Condition-key bypass — MFA-bypass via
+  Bool false on aws:MultiFactorAuthPresent.
+
+  Real risk: 7 — explicit MFA-bypass posture on sensitive resource.
+
+  Det score: 1 (no factors).
+
+  Proposed fix: same as agent-404 — extend `_condition_is_vacuous` to
+  recognize that Bool false on aws:MultiFactorAuthPresent /
+  aws:SecureTransport / aws:ViaAWSService is anti-security intent.
+
+policy:
+  Version: "2012-10-17"
+  Statement:
+    - Effect: Allow
+      Action: "secretsmanager:GetSecretValue"
+      Resource: "arn:aws:secretsmanager:us-east-1:123456789012:secret:prod-db-cred-ABCDEF"
+      Condition:
+        Bool:
+          aws:MultiFactorAuthPresent: "false"
+
+request:
+  spec:
+    access_type: read-write
+    duration:
+      duration_hours: 1
+
+expected:
+  score_min: 5
+  must_auto_approve: false

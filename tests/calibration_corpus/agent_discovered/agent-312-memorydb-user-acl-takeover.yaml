@@ -1,0 +1,50 @@
+name: agent-312-memorydb-user-acl-takeover
+description: |
+  BLACK-BOX Round 7. Research Sec 9 (newer services 2023-2026).
+
+  MemoryDB for Redis and ElastiCache use Redis ACLs for in-cluster
+  authentication. `memorydb:CreateUser` / `memorydb:UpdateUser` /
+  `memorydb:CreateACL` / `memorydb:UpdateACL` (and elasticache
+  parallels) let an attacker create a Redis user with
+  `~* +@all`-equivalent permissions in any ACL, attach it to the
+  prod cluster, and authenticate directly to Redis with full
+  read-write — no IAM event for the data access, only the ACL
+  modification.
+
+  Det score: 6. Real risk: 7-8 — silent data-store takeover, evading
+  data-access audit (CloudTrail records the ACL change, not the
+  resulting Redis SCAN/GET storm).
+
+  Scorer gap: `memorydb`, `elasticache` for the user/ACL-management
+  surface not in any high-impact set. The destructive surface is
+  about Redis ACL configuration, which the scorer doesn't model.
+
+  Suggested fix: add `memorydb:CreateUser`, `memorydb:UpdateUser`,
+  `memorydb:CreateACL`, `memorydb:UpdateACL`, and the elasticache
+  equivalents to _HIGH_IMPACT_MUTATION_ACTIONS — they grant
+  in-cluster data access.
+
+policy:
+  Version: "2012-10-17"
+  Statement:
+    - Effect: Allow
+      Action:
+        - "memorydb:CreateUser"
+        - "memorydb:UpdateUser"
+        - "memorydb:CreateACL"
+        - "memorydb:UpdateACL"
+        - "elasticache:CreateUser"
+        - "elasticache:ModifyUser"
+        - "elasticache:CreateUserGroup"
+        - "elasticache:ModifyUserGroup"
+      Resource: "*"
+
+request:
+  spec:
+    access_type: read-write
+    duration:
+      duration_hours: 1
+
+expected:
+  score_min: 7
+  must_auto_approve: false

@@ -911,38 +911,76 @@ _ZERO_WIDTH_CHARS = (
 )
 
 
+# Hangul filler chars (Lo category — not in Cf, so the category-strip
+# in `_norm_grammar_str` won't remove them). Round 7 agent-428.
+_HANGUL_FILLERS = ("ㅤ", "ᅠ")
+
+
+# Cross-script homoglyphs. NFKC does NOT merge Cyrillic 'A' (U+0410)
+# with Latin 'A' (U+0041) — they're in different Unicode blocks. An
+# attacker writing `Effect: "Allow"` with the first char Cyrillic
+# bypasses our case-insensitive Effect lookup. Round 7 agent-400
+# (gap 8 — complete admin bypass). Conservative map: only chars
+# that visually match Latin AND could appear in IAM grammar.
+_LATIN_HOMOGLYPHS = {
+    # Cyrillic capital → Latin capital
+    "А": "A", "В": "B", "Е": "E", "К": "K",
+    "М": "M", "Н": "H", "О": "O", "Р": "P",
+    "С": "C", "Т": "T", "У": "Y", "Х": "X",
+    # Cyrillic small → Latin small
+    "а": "a", "в": "b", "е": "e", "к": "k",
+    "м": "m", "н": "h", "о": "o", "р": "p",
+    "с": "c", "т": "t", "у": "y", "х": "x",
+    "і": "i", "ј": "j", "ѕ": "s",
+    # Greek capital → Latin capital
+    "Α": "A", "Β": "B", "Ε": "E", "Ζ": "Z",
+    "Η": "H", "Ι": "I", "Κ": "K", "Μ": "M",
+    "Ν": "N", "Ο": "O", "Ρ": "P", "Τ": "T",
+    "Υ": "Y", "Χ": "X",
+    # Greek small → Latin small
+    "α": "a", "ο": "o", "ν": "v", "ι": "i",
+}
+
 def _norm_grammar_str(s: object) -> str:
     """Normalize an IAM-grammar string for safe comparison.
 
     Steps (idempotent):
-      1. Coerce to str; non-string returns "" (caller decides intent).
-      2. Strip zero-width / BOM / joiner code points that visually
-         disappear but defeat set membership.
-      3. NFKC-normalize so fullwidth Roman letters, ligatures, and
-         compatibility variants collapse to canonical ASCII.
-      4. Strip leading/trailing ASCII whitespace AND the unicode
-         no-break-space class (`\\u00a0`, `\\u2007`, `\\u202f`).
+      1. Coerce to str; non-string returns "".
+      2. Strip Hangul-filler chars (Lo category — would survive the
+         Cf-strip below).
+      3. Strip ALL Unicode `Cf` (format) and `Mn` (combining mark)
+         chars. Covers ZWSP, ZWJ, ZWNJ, BOM, WJ, CGJ, RLO/LRO bidi
+         overrides, and any future additions to those categories.
+      4. NFKC-normalize: fullwidth Roman, ligatures, compatibility
+         variants collapse to canonical ASCII.
+      5. Map Cyrillic / Greek homoglyphs (\u0410 'A' etc.) to ASCII
+         Latin counterparts. NFKC alone doesn't merge these across
+         script blocks. Defeats `Effect: "Allow"` (Cyrillic first
+         char, gap 8 bypass — round 7 agent-400).
+      6. Strip leading/trailing whitespace + no-break-space variants.
 
-    Round 6 findings — agent-216 (fullwidth), agent-217 (whitespace),
-    agent-230 (Effect case), agent-246 (BOM prefix), agent-247
-    (casefold fullwidth). All bypass naive set lookups; this is the
-    one place we centralize defense.
+    Round 6: agent-216 (fullwidth), agent-217 (whitespace), agent-230
+    (Effect case), agent-246 (BOM), agent-247 (casefold). Round 7:
+    agent-400 (Cyrillic, gap 8), agent-412-416 (RTL + Cf), agent-425
+    (Cyrillic Deny), agent-428 (Hangul filler).
     """
     if not isinstance(s, str):
         return ""
-    for zw in _ZERO_WIDTH_CHARS:
-        if zw in s:
-            s = s.replace(zw, "")
+    # Hangul fillers (Lo category — not caught by the Cf strip below)
+    for hf in _HANGUL_FILLERS:
+        if hf in s:
+            s = s.replace(hf, "")
+    # Strip Cf (format) + Mn (combining mark) by category
+    s = "".join(
+        c for c in s
+        if _unicodedata.category(c) not in ("Cf", "Mn")
+    )
+    # NFKC compatibility normalization
     s = _unicodedata.normalize("NFKC", s)
-    return s.strip().strip("   ")
-
-
-# IPv4 prefixes that AWS will never evaluate `aws:SourceIp` against
-# in practice — `aws:SourceIp` reflects the request's PUBLIC IP, so a
-# condition gated on a private RFC1918 / link-local / loopback range
-# either never matches (silently denying) or is the operator's
-# mistaken belief that "internal traffic" carries its VPC IP.
-# Round 6 finding agent-192.
+    # Cross-script homoglyphs
+    if any(c in _LATIN_HOMOGLYPHS for c in s):
+        s = "".join(_LATIN_HOMOGLYPHS.get(c, c) for c in s)
+    return s.strip().strip("   ")
 _PRIVATE_IPV4_PREFIXES = (
     "10.",
     "172.16.", "172.17.", "172.18.", "172.19.",
@@ -1062,6 +1100,107 @@ def _condition_is_vacuous(condition: object) -> tuple[bool, str]:
                     "the intended scope."
                 )
 
+            # Pattern 5b: empty list value (`[]`) — same defect class.
+            if isinstance(val_raw, list) and not val_raw:
+                return True, (
+                    f"`Condition.{op}.{key}: []` is an empty list — "
+                    "matches absent / unspecified key; ambiguous "
+                    "evaluator semantics."
+                )
+
+            # Pattern 7: ArnLike with `*` in identifying segments.
+            # `aws:PrincipalArn arn:aws:iam::*:*` matches every account
+            # and every principal — degenerate. Round 7 agent-302.
+            if op == "ArnLike" or op_lc == "arnlike" or op == "ArnEquals":
+                for v in vals_str:
+                    if v.startswith("arn:"):
+                        parts = v.split(":", 5)
+                        if len(parts) >= 6:
+                            partition, _svc = parts[1], parts[2]
+                            account, spec = parts[4], parts[5]
+                            wildcard_partition = "*" in partition
+                            wildcard_account = "*" in account or account == ""
+                            wildcard_spec = spec == "*" or (
+                                "*" in spec and spec.count("*") >= 1
+                                and len(spec.replace("*", "")) < 3
+                            )
+                            if (wildcard_partition or wildcard_account) and wildcard_spec:
+                                return True, (
+                                    f"`Condition.{op}.{key}: {v}` is "
+                                    "an ARN pattern with wildcards in "
+                                    "the identifying segments — "
+                                    "matches effectively any principal."
+                                )
+
+            # Pattern 8: Bool inverted (`SecureTransport: "false"`). AWS
+            # docs recommend `Bool: aws:SecureTransport: "true"` to
+            # enforce HTTPS. A "false" value INVERTS that — only
+            # cleartext (HTTP) requests pass. Often a typo / cargo-cult
+            # mistake. Round 7 agent-303, agent-429.
+            if op_lc == "bool" or op == "BoolIfExists":
+                if "securetransport" in key_lc:
+                    for v in vals_str:
+                        if v.lower() == "false":
+                            return True, (
+                                f"`Condition.{op}.aws:SecureTransport: "
+                                "\"false\"` means HTTPS is REJECTED, only "
+                                "cleartext HTTP requests pass. Almost "
+                                "certainly the opposite of intent."
+                            )
+
+            # Pattern 9: NumericLessThan with absurdly large value
+            # (`aws:MultiFactorAuthAge: 999999999`) — effectively
+            # always true; the MFA age check imposes no real bound.
+            if op_lc.startswith("numericlessthan") or op_lc.startswith("numericgreaterthan"):
+                for v in vals_str:
+                    try:
+                        n = float(v)
+                        if n >= 1_000_000:  # ~12 days in seconds
+                            return True, (
+                                f"`Condition.{op}.{key}: {v}` is an "
+                                "implausibly-large numeric value; the "
+                                "condition imposes no real constraint."
+                            )
+                    except (TypeError, ValueError):
+                        # Type mismatch (string value passed to a numeric
+                        # operator) — also a defect class. AWS may fail
+                        # the condition at evaluation, but the policy
+                        # text doesn't reflect the author's intent.
+                        return True, (
+                            f"`Condition.{op}.{key}: \"{v}\"` is a "
+                            "non-numeric value passed to a numeric "
+                            "operator. AWS will fail to evaluate; the "
+                            "condition is broken."
+                        )
+
+            # Pattern 10: DateLessThan with far-future date — tautology.
+            # `aws:CurrentTime < 2099-12-31` always matches.
+            if op_lc.startswith("datelessthan"):
+                for v in vals_str:
+                    if any(yr in v for yr in ("2099", "2100", "9999")):
+                        return True, (
+                            f"`Condition.{op}.{key}: {v}` is a far-"
+                            "future date; the condition always matches."
+                        )
+
+            # Pattern 11: policy-variable injection in Condition VALUE
+            # (not just Resource ARN). `s3:prefix: "${aws:PrincipalTag/x}/*"`
+            # — if the principal can write their own tag, they control
+            # what the condition value expands to. Round 7 agent-327.
+            for v in vals_str:
+                if (
+                    "${aws:PrincipalTag/" in v
+                    or "${aws:RequestTag/" in v
+                    or "${aws:ResourceTag/" in v
+                ):
+                    return True, (
+                        f"`Condition.{op}.{key}: \"{v}\"` interpolates "
+                        "an attacker-controllable tag — if the caller "
+                        "has `iam:TagRole`/`TagUser` on themselves, "
+                        "they control what the condition value "
+                        "expands to, defeating the apparent scope."
+                    )
+
     return False, ""
 
 
@@ -1083,12 +1222,35 @@ def _principal_is_public(principal: object) -> bool:
     """
     if principal == "*":
         return True
-    if isinstance(principal, dict):
-        for v in principal.values():
-            if v == "*":
+    if not isinstance(principal, dict):
+        return False
+    for v in principal.values():
+        if v == "*":
+            return True
+        vals = v if isinstance(v, list) else [v]
+        for item in vals:
+            if not isinstance(item, str):
+                continue
+            if item == "*":
                 return True
-            if isinstance(v, list) and "*" in v:
-                return True
+            # ARN-shaped principals: wildcards in account or partition
+            # mean "any account / any partition" — public-equivalent
+            # even though the literal string isn't `*`. Round 7 agent-
+            # 401-403 (`arn:aws:iam::*:root`), agent-300 (Federated
+            # SAML provider with wildcard account).
+            if item.startswith("arn:"):
+                parts = item.split(":", 5)
+                if len(parts) >= 6:
+                    partition, _svc = parts[1], parts[2]
+                    account, spec = parts[4], parts[5]
+                    if "*" in partition or "*" in account:
+                        return True
+                    # SAML/OIDC provider with wildcard provider name
+                    if "*" in spec and (
+                        spec.startswith("saml-provider/")
+                        or spec.startswith("oidc-provider/")
+                    ):
+                        return True
     return False
 
 
@@ -1160,10 +1322,12 @@ def _is_broad_resource(r: str) -> bool:
         if len(parts) < 6:
             return False  # malformed ARN — treat as narrow
         # ARN structure: arn:partition:service:region:account:resource-spec.
-        # If the account segment (parts[4]) is `*`, the ARN refers to the
-        # named resource in EVERY account — cross-account broad. (Found
-        # by adversarial agent round 3.)
-        if parts[4] == "*":
+        # Wildcards in ANY of the identifying segments make the ARN
+        # cross-partition / cross-region / cross-account broad:
+        #   parts[1] partition (round 7 agent-417)
+        #   parts[3] region (round 7 agent-418)
+        #   parts[4] account (round 3 finding)
+        if "*" in parts[1] or "*" in parts[3] or parts[4] == "*":
             return True
         resource_spec = parts[5]
         service = parts[2]

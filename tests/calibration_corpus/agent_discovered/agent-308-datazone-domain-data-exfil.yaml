@@ -1,0 +1,52 @@
+name: agent-308-datazone-domain-data-exfil
+description: |
+  BLACK-BOX Round 7. Research Sec 9 (newer-service surface).
+
+  Amazon DataZone (GA in 2023) is the data-mesh / data-catalog
+  service. `datazone:CreateDomain`, `CreateProject`,
+  `CreateEnvironment`, `CreateDataSource`, `GetEnvironmentCredentials`
+  let an attacker:
+  - create a new DataZone domain in the account,
+  - register the victim's Glue/S3/Redshift assets as DataZone assets,
+  - call `GetEnvironmentCredentials` which mints temporary AWS creds
+    scoped to the environment role.
+
+  This is a parallel surface to Lake Formation (already partially
+  recognized in scorer) — but `datazone:` is a separate prefix.
+
+  Det score: 6 (generic write floor). Real risk: 8 — full data-
+  catalog takeover + AWS credential issuance via
+  `GetEnvironmentCredentials`.
+
+  Scorer gap: `datazone` is missing from _SENSITIVE_SERVICES and the
+  credential-issuance action (`datazone:GetEnvironmentCredentials`)
+  is missing from _HIGH_IMPACT_MUTATION_ACTIONS / credential-exposure
+  sets.
+
+  Suggested fix: add `datazone` to _SENSITIVE_SERVICES. Add
+  `datazone:GetEnvironmentCredentials` to the credential-issuance set
+  alongside `sts:GetFederationToken` / `redshift:GetClusterCredentials`
+  / `lakeformation:GetDataAccess`.
+
+policy:
+  Version: "2012-10-17"
+  Statement:
+    - Effect: Allow
+      Action:
+        - "datazone:CreateDomain"
+        - "datazone:CreateProject"
+        - "datazone:CreateEnvironment"
+        - "datazone:CreateDataSource"
+        - "datazone:GetEnvironmentCredentials"
+        - "datazone:UpdateDomain"
+      Resource: "*"
+
+request:
+  spec:
+    access_type: read-write
+    duration:
+      duration_hours: 1
+
+expected:
+  score_min: 7
+  must_auto_approve: false

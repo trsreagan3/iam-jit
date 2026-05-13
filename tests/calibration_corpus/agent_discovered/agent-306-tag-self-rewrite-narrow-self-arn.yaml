@@ -1,0 +1,56 @@
+name: agent-306-tag-self-rewrite-narrow-self-arn
+description: |
+  BLACK-BOX Round 7. Research Sec 11.11 (tag-based conditions where
+  the principal can rewrite their own tag).
+
+  Two-statement policy:
+  (1) Allow `iam:TagUser` / `iam:UntagUser` on Resource:
+      `arn:aws:iam::*:user/${aws:username}` — looks NARROW (caller
+      can only tag themselves).
+  (2) Allow `secretsmanager:GetSecretValue` on Resource:* gated by
+      `aws:PrincipalTag/team: admin`.
+
+  The "narrow self-tag" is the entire attack. Caller calls TagUser
+  with `team=admin` on themselves, then their next request carries
+  the `aws:PrincipalTag/team=admin` context, satisfying statement (2)
+  and reading every secret.
+
+  Sysdig / Stratus phrasing: "Tag-based access control without locking
+  tag-modify permissions is self-defeating."
+
+  Det score: 9 (iam tag actions + sensitive resource floor fires) —
+  but the SEMANTIC SCORE for this specific bypass class (ABAC self-
+  rewrite) is what we want flagged in risk_factors. Round 5 closed
+  agent-84-iam-tag-abac-bypass (broad TagUser); this YAML probes
+  the narrow self-arn variant.
+
+  Scorer gap: the round-5 ABAC self-rewrite rule must recognize
+  `Resource: arn:aws:iam::*:user/${aws:username}` (and `:role/${aws:
+  PrincipalTag/role-name}`, etc.) as STILL granting self-tag-write,
+  because the policy-variable in the ARN resolves to the principal
+  itself.
+
+policy:
+  Version: "2012-10-17"
+  Statement:
+    - Effect: Allow
+      Action:
+        - "iam:TagUser"
+        - "iam:UntagUser"
+      Resource: "arn:aws:iam::*:user/${aws:username}"
+    - Effect: Allow
+      Action: "secretsmanager:GetSecretValue"
+      Resource: "*"
+      Condition:
+        StringEquals:
+          aws:PrincipalTag/team: "admin"
+
+request:
+  spec:
+    access_type: read-write
+    duration:
+      duration_hours: 1
+
+expected:
+  score_min: 8
+  must_auto_approve: false

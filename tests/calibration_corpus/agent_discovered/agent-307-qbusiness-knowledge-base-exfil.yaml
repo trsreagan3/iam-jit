@@ -1,0 +1,52 @@
+name: agent-307-qbusiness-knowledge-base-exfil
+description: |
+  BLACK-BOX Round 7. Research Sec 9 (newer-service surface 2023-2026)
+  AND Sec 1.51 / Sec 5.6-5.7 (LLMjacking class).
+
+  AWS Q Business is the 2024-launched corporate knowledge-base RAG
+  service. With `qbusiness:CreateApplication`, `CreateRetriever`,
+  `CreateDataSource`, `CreateIndex`, `CreatePlugin`, an attacker can
+  (a) build a Q Business app, (b) point its data source at the
+  victim's S3 / Confluence / Salesforce connectors, (c) issue
+  `qbusiness:Chat` queries that exfiltrate corporate documents via
+  semantic search — bypassing per-document IAM by routing through
+  the Q Business retriever role.
+
+  Det score: 6 (generic Write floor only). Real risk: 8 — full
+  internal-knowledge exfiltration channel with NO direct s3:GetObject
+  in audit logs.
+
+  Scorer gap: `qbusiness` is not in _SENSITIVE_SERVICES, and the
+  create actions are not in any high-impact set. The service is the
+  newest member of a class (Bedrock, AgentCore, Q Apps) that the
+  scorer mostly recognizes but `qbusiness:` slipped through.
+
+  Suggested fix: add `qbusiness` to _SENSITIVE_SERVICES; or add
+  `qbusiness:CreateApplication`, `qbusiness:CreateDataSource`,
+  `qbusiness:CreateRetriever`, `qbusiness:CreatePlugin`,
+  `qbusiness:Chat`, `qbusiness:ChatSync` to a "RAG-exfil" set
+  with floor 7 on broad scope.
+
+policy:
+  Version: "2012-10-17"
+  Statement:
+    - Effect: Allow
+      Action:
+        - "qbusiness:CreateApplication"
+        - "qbusiness:CreateRetriever"
+        - "qbusiness:CreateDataSource"
+        - "qbusiness:CreateIndex"
+        - "qbusiness:CreatePlugin"
+        - "qbusiness:Chat"
+        - "qbusiness:ChatSync"
+      Resource: "*"
+
+request:
+  spec:
+    access_type: read-write
+    duration:
+      duration_hours: 1
+
+expected:
+  score_min: 7
+  must_auto_approve: false

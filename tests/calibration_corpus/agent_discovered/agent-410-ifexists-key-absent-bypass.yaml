@@ -1,0 +1,58 @@
+name: agent-410-ifexists-key-absent-bypass
+description: |
+  WHITE-BOX round 7: `_condition_is_vacuous` doesn't recognize that
+  `*IfExists` operators evaluate to TRUE when the named key is ABSENT
+  from the request context.
+
+  `Condition: {StringEqualsIfExists: {aws:PrincipalOrgID: "o-realorg"}}`
+  appears to scope to a specific org. But the `IfExists` suffix means
+  "if the key exists, compare equals; if it does NOT exist, pass."
+  When the caller is a non-federated principal whose request context
+  doesn't include aws:PrincipalOrgID, the condition is satisfied
+  trivially — and most cross-account callers won't carry that key.
+
+  Combined with sts:AssumeRole on a wildcard role, this is the
+  textbook cross-account-takeover-via-broken-IfExists pattern. The
+  scorer scores 7 (high-risk on broad) — but the right floor is 9
+  because the supposed scoping is illusory; the broad target is fully
+  reachable.
+
+  Source-code rule exploited: `_condition_is_vacuous` — no handling of
+  `*IfExists` operator semantics.
+
+  Research-doc pattern: §11 — IfExists operator chaining; AWS docs
+  explicitly note IfExists operators "test the value of the condition
+  key if the key is present in the request context. If the key is not
+  present, the condition element returns true."
+
+  Real risk: 9 — broad sts:AssumeRole with an illusory scoping
+  condition.
+
+  Det score: 7 — only the broad sts:AssumeRole rule fires; the
+  condition is invisible to the scorer.
+
+  Proposed fix: Add a 7th pattern to `_condition_is_vacuous`: any
+  operator ending in "IfExists" is at least partially vacuous —
+  callers who omit the key bypass the comparison. Flag at floor 5 OR
+  require that the policy include a sibling Null-operator condition
+  ensuring the key MUST be present (Null: false for the same key).
+
+policy:
+  Version: "2012-10-17"
+  Statement:
+    - Effect: Allow
+      Action: "sts:AssumeRole"
+      Resource: "arn:aws:iam::*:role/*"
+      Condition:
+        StringEqualsIfExists:
+          aws:PrincipalOrgID: "o-realorg12345"
+
+request:
+  spec:
+    access_type: read-write
+    duration:
+      duration_hours: 1
+
+expected:
+  score_min: 9
+  must_auto_approve: false

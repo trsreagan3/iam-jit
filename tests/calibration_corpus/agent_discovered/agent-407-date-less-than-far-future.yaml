@@ -1,0 +1,41 @@
+name: agent-407-date-less-than-far-future
+description: |
+  WHITE-BOX round 7: symmetric to agent-406 — `DateLessThan` with a
+  far-future date is always-true.
+
+  `Condition: {DateLessThan: {aws:CurrentTime: "2099-12-31T23:59:59Z"}}`
+  is satisfied for every request the policy will ever evaluate.
+
+  Source-code rule exploited: `_condition_is_vacuous` — same.
+
+  Research-doc pattern: §11.
+
+  Real risk: 5 — scoping illusion.
+
+  Det score: 1.
+
+  Proposed fix: same as agent-406 — add Date-tautology detection.
+
+policy:
+  Version: "2012-10-17"
+  Statement:
+    - Effect: Allow
+      Action:
+        - s3:GetObject
+        - s3:ListBucket
+      Resource:
+        - "arn:aws:s3:::confidential-data/*"
+        - "arn:aws:s3:::confidential-data"
+      Condition:
+        DateLessThan:
+          aws:CurrentTime: "2099-12-31T23:59:59Z"
+
+request:
+  spec:
+    access_type: read-write
+    duration:
+      duration_hours: 1
+
+expected:
+  score_min: 4
+  must_auto_approve: false

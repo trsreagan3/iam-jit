@@ -1,0 +1,53 @@
+name: agent-403-federated-saml-provider-wildcard
+description: |
+  WHITE-BOX round 7: `_principal_is_public` does NOT inspect Federated
+  principals for wildcards in the provider-arn path.
+
+  `Principal: {Federated: "arn:aws:iam::123456789012:saml-provider/*"}`
+  trusts EVERY SAML/OIDC provider in the account. An attacker who can
+  register a new provider (via `iam:CreateSAMLProvider`, which IS in
+  _CATASTROPHIC_ACTIONS) then has a fully-trusted federated identity
+  source — any SAML assertion they sign will be trusted by every role
+  bearing this trust policy.
+
+  Source-code rule exploited: `_principal_is_public` (line 1068-1092) —
+  the function checks `v == "*"` and `"*" in v` for list. A string
+  value `"arn:...saml-provider/*"` is `!= "*"` and the function returns
+  False. The wildcard at the end of the path is not detected.
+
+  Research-doc pattern: §1.55 OIDC trust takeover; §13 IdP federation
+  wildcard pattern.
+
+  Real risk: 9 — federated trust to any provider in the account is
+  equivalent to "anyone the attacker registers as an IdP gets in."
+  Especially severe combined with iam:CreateSAMLProvider /
+  iam:CreateOpenIDConnectProvider (both catastrophic on identity-policy
+  side).
+
+  Det score: 7 — only the high-risk-on-broad sts:AssumeRoleWithSAML
+  rule fires (Resource: *). The Principal is invisible.
+
+  Proposed fix: `_principal_is_public` should also flag any string
+  value containing `*` in a position OTHER than a known specific
+  account/role/user/saml-provider name. Easiest implementation: if the
+  string contains `*` AT ALL, treat as "wildcard principal" because no
+  legitimate AWS principal ARN contains a literal asterisk.
+
+policy:
+  Version: "2012-10-17"
+  Statement:
+    - Effect: Allow
+      Action: "sts:AssumeRoleWithSAML"
+      Resource: "arn:aws:iam::123456789012:role/saml-federated-role"
+      Principal:
+        Federated: "arn:aws:iam::123456789012:saml-provider/*"
+
+request:
+  spec:
+    access_type: read-write
+    duration:
+      duration_hours: 1
+
+expected:
+  score_min: 9
+  must_auto_approve: false

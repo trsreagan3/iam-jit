@@ -1,0 +1,52 @@
+name: agent-421-stringnotequals-account-allow-all-others
+description: |
+  WHITE-BOX round 7: `_condition_is_vacuous` doesn't detect the
+  `StringNotEquals` operator pattern that inverts intent.
+
+  `Condition: {StringNotEquals: {aws:PrincipalAccount: "111111111111"}}`
+  reads at a glance like "only callers from account 111111111111 may
+  access." It actually means "every account EXCEPT 111111111111 may
+  access." Combined with a sensitive read on a narrow resource, this
+  is anti-scoping — the operator added the condition believing it was
+  ScopeIn when it's actually ScopeOut-of-self.
+
+  Source-code rule exploited: `_condition_is_vacuous` — no
+  StringNotEquals pattern. Doesn't check negative-condition semantics
+  the same way the NotPrincipal/NotAction rules do.
+
+  Research-doc pattern: §11 Condition-key bypass — negated-operator
+  inversion. §12 — closely related to the NotAction footgun class.
+
+  Real risk: 5+ — operator-error pattern that the scorer should flag
+  at human-review tier. The aws:PrincipalAccount key is the most
+  common case but StringNotEquals on aws:SourceArn,
+  aws:PrincipalOrgID, aws:SourceVpc are all the same class.
+
+  Det score: 1.
+
+  Proposed fix: Add a "StringNotEquals on identity-narrowing key
+  = inverted-intent" pattern to `_condition_is_vacuous`. The set of
+  identity-narrowing keys is well-known: aws:PrincipalAccount,
+  aws:PrincipalArn, aws:PrincipalOrgID, aws:SourceAccount,
+  aws:SourceArn, aws:SourceVpc, aws:SourceVpce.
+
+policy:
+  Version: "2012-10-17"
+  Statement:
+    - Effect: Allow
+      Action:
+        - "s3:GetObject"
+      Resource: "arn:aws:s3:::sensitive-data/*"
+      Condition:
+        StringNotEquals:
+          aws:PrincipalAccount: "111111111111"
+
+request:
+  spec:
+    access_type: read-write
+    duration:
+      duration_hours: 1
+
+expected:
+  score_min: 5
+  must_auto_approve: false

@@ -1,0 +1,50 @@
+name: agent-305-condition-numericlessthan-ifexists-mfa
+description: |
+  BLACK-BOX Round 7. Research Sec 11.5 (IfExists chaining bypass).
+
+  `NumericLessThanIfExists` on `aws:MultiFactorAuthAge` is the
+  canonical IfExists footgun: if the request DOES NOT carry an MFA
+  age key (i.e., the session was never MFA-authenticated), the
+  condition evaluates **true** by IfExists semantics — granting
+  the action.
+
+  Author intent: "only allow if MFA was performed within last hour."
+  Real semantic: "if MFA was performed, require it < 1h; if MFA was
+  NOT performed, allow anyway." Round 6 fixed `StringEqualsIfExists`
+  for narrow-read; this YAML probes the same fix coverage for
+  `NumericLessThanIfExists` (a less common but identical-class
+  operator).
+
+  Action: `iam:ChangePassword` + `iam:UpdateAccessKey` on Resource:*
+  — catastrophic actions where MFA-gated would be the appropriate
+  safeguard, but the gate is broken.
+
+  Det score: 9 (catastrophic action floor already fires). Gap may be
+  small for this action set, but the SEMANTIC gap remains for any
+  pairing of IfExists + non-catastrophic action. Use a narrow-read
+  variant to surface gap more cleanly:
+
+  This YAML uses the catastrophic variant (score already 9 due to
+  iam action floor); a sibling YAML (306) tests the secret-read
+  variant where the condition is the only "protection".
+
+policy:
+  Version: "2012-10-17"
+  Statement:
+    - Effect: Allow
+      Action:
+        - "secretsmanager:GetSecretValue"
+      Resource: "arn:aws:secretsmanager:*:*:secret:db-creds-*"
+      Condition:
+        NumericLessThanIfExists:
+          aws:MultiFactorAuthAge: 3600
+
+request:
+  spec:
+    access_type: read-write
+    duration:
+      duration_hours: 1
+
+expected:
+  score_min: 7
+  must_auto_approve: false

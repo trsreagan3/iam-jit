@@ -1,0 +1,43 @@
+name: agent-416-soft-hyphen-action
+description: |
+  WHITE-BOX round 7: SOFT HYPHEN (`U+00AD`) is a Cf-category
+  invisible character used for typesetting word-break hints. Not in
+  `_ZERO_WIDTH_CHARS`. NFKC preserves it.
+
+  Action `iam:<U+00AD>CreateAccessKey` survives normalization. The
+  catastrophic-set lookup compares against `iam:createaccesskey`
+  (no soft hyphen) and fails.
+
+  Source-code rule exploited: same as agent-412/413/415.
+
+  Research-doc pattern: §13.
+
+  Real risk: 9.
+
+  Det score: 6 — service-prefix detection at line 1908 still flags
+  `iam` as sensitive service (the soft hyphen comes AFTER the colon,
+  in the action-name portion), so sensitive-service-on-broad fires.
+  But the catastrophic-floor at line 2182 misses; floor 9 should
+  fire from the catastrophic-action set, not just 6 from sensitive-
+  service-broad.
+
+  Gap is smaller here (3) but the architectural defect is the same.
+
+  Proposed fix: same as agent-412 — Cf strip.
+
+policy:
+  Version: "2012-10-17"
+  Statement:
+    - Effect: Allow
+      Action: "iam:­CreateAccessKey"
+      Resource: "*"
+
+request:
+  spec:
+    access_type: read-write
+    duration:
+      duration_hours: 1
+
+expected:
+  score_min: 9
+  must_auto_approve: false

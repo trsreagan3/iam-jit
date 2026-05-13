@@ -1,0 +1,67 @@
+name: agent-422-passrole-associateinstanceprofile
+description: |
+  WHITE-BOX round 7: The code-exec composition rule (line 2322)
+  enumerates `_CODE_EXECUTION_PRIMITIVES` but does NOT include
+  `ec2:AssociateIamInstanceProfile` / `ec2:ReplaceIamInstanceProfile-
+  Association`. These are catastrophic (in `_CATASTROPHIC_ACTIONS`)
+  so they floor at 9 on their own, but the COMPOSITION semantic
+  with `iam:PassRole` is the textbook Rhino #1.5 path (post-launch
+  instance-profile binding) and the suggestion list doesn't surface
+  it.
+
+  Score-gap exists separately: when AssociateIamInstanceProfile is
+  scoped to ONE instance (narrow), and PassRole to ONE role (narrow),
+  each statement floors at 9 (catastrophic-on-narrow) — so the
+  composition is implicitly caught. PASS-on-score.
+
+  HOWEVER, if the attacker uses `ec2:RunInstances` (already in
+  CODE_EXECUTION_PRIMITIVES) with `ec2:AssociateIamInstanceProfile`
+  on a fresh instance they create, the chain is "run a plain
+  instance + later associate a privileged profile." If
+  iam:PassRole is missing from the role's own policy but it's
+  delegated to a service-linked role (or grandfathered through
+  ec2:RunInstances service-linked behavior), the explicit PassRole
+  composition rule doesn't fire.
+
+  This fixture documents the gap. Score is already 9 (CreateRole
+  catastrophic) so this is a NARRATIVE gap not a score gap. Real
+  fix: extend the code-exec composition rule to include
+  ec2:AssociateIamInstanceProfile + ec2:ReplaceIamInstanceProfile-
+  Association as composition primitives.
+
+  Source-code rule exploited: composition list at line 82-169
+  (`_CODE_EXECUTION_PRIMITIVES`).
+
+  Research-doc pattern: §1.5 (Rhino) — post-launch profile
+  association.
+
+  Real risk: 9.
+
+  Det score: 9 (already catastrophic).
+
+  Proposed fix: Add ec2:AssociateIamInstanceProfile,
+  ec2:ReplaceIamInstanceProfileAssociation, and
+  ec2:DisassociateIamInstanceProfile (the rollback symmetric) to
+  `_CODE_EXECUTION_PRIMITIVES`. Update the composition rule's
+  narrative to surface "instance-profile-binding privesc" as a named
+  pattern.
+
+policy:
+  Version: "2012-10-17"
+  Statement:
+    - Effect: Allow
+      Action: "iam:PassRole"
+      Resource: "arn:aws:iam::123456789012:role/admin-role"
+    - Effect: Allow
+      Action: "ec2:AssociateIamInstanceProfile"
+      Resource: "arn:aws:ec2:us-east-1:123456789012:instance/i-abc123"
+
+request:
+  spec:
+    access_type: read-write
+    duration:
+      duration_hours: 1
+
+expected:
+  score_min: 9
+  must_auto_approve: false
