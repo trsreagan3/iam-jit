@@ -722,10 +722,81 @@ def _action_covers_any(action: str, target_set_lc: frozenset[str]) -> bool:
     return any(_fnmatch.fnmatchcase(t, a_lc) for t in target_set_lc)
 
 
+import unicodedata as _unicodedata
+
+
+# Zero-width / non-printing characters that visually disappear but
+# survive `.strip()` and equality comparisons. Used to defeat naive
+# set-membership lookups. Round 6 white-box findings agent-216,
+# agent-246, agent-247.
+_ZERO_WIDTH_CHARS = (
+    "​",  # ZERO WIDTH SPACE
+    "‌",  # ZERO WIDTH NON-JOINER
+    "‍",  # ZERO WIDTH JOINER
+    "⁠",  # WORD JOINER
+    "﻿",  # BYTE ORDER MARK / ZERO WIDTH NO-BREAK SPACE
+    "͏",  # COMBINING GRAPHEME JOINER
+)
+
+
+def _norm_grammar_str(s: object) -> str:
+    """Normalize an IAM-grammar string for safe comparison.
+
+    Steps (idempotent):
+      1. Coerce to str; non-string returns "" (caller decides intent).
+      2. Strip zero-width / BOM / joiner code points that visually
+         disappear but defeat set membership.
+      3. NFKC-normalize so fullwidth Roman letters, ligatures, and
+         compatibility variants collapse to canonical ASCII.
+      4. Strip leading/trailing ASCII whitespace AND the unicode
+         no-break-space class (`\\u00a0`, `\\u2007`, `\\u202f`).
+
+    Round 6 findings — agent-216 (fullwidth), agent-217 (whitespace),
+    agent-230 (Effect case), agent-246 (BOM prefix), agent-247
+    (casefold fullwidth). All bypass naive set lookups; this is the
+    one place we centralize defense.
+    """
+    if not isinstance(s, str):
+        return ""
+    for zw in _ZERO_WIDTH_CHARS:
+        if zw in s:
+            s = s.replace(zw, "")
+    s = _unicodedata.normalize("NFKC", s)
+    return s.strip().strip("   ")
+
+
+def _effect_is_allow(stmt: dict) -> bool:
+    """True if `stmt`'s Effect is Allow (case-insensitive, normalized).
+
+    Treats missing Effect as Allow because:
+      1. AWS itself rejects a missing-Effect statement at policy-attach
+         time, BUT the scorer's job is to flag risk BEFORE AWS sees the
+         policy. A malformed statement may still pass other gates
+         (legacy code paths, import tools, copy-paste from docs).
+      2. Conservative scoring policy: malformed = worst-case.
+      3. The author put a statement here with an Action and a Resource
+         and forgot Effect. The plausible intent is Allow (you don't
+         write a Deny without saying Deny). Score that intent.
+
+    Round 6 finding agent-159 (missing Effect implicit Allow), agent-230
+    (lowercase "allow" exact-match bypass).
+    """
+    eff = stmt.get("Effect")
+    if eff is None:
+        return True
+    return _norm_grammar_str(eff).lower() == "allow"
+
+
 def _canonical_action(action: str) -> str:
     """Return the action lowercased with its service prefix canonicalized
     via _SERVICE_ALIASES. Returns the all-lowercase form so the result
-    can be looked up directly in the *_LC mirror sets."""
+    can be looked up directly in the *_LC mirror sets.
+
+    Normalizes the input via `_norm_grammar_str` first so trailing/
+    leading whitespace, fullwidth letters, BOMs, and zero-width joiners
+    don't sneak past set-membership lookups.
+    """
+    action = _norm_grammar_str(action)
     if ":" not in action:
         return action.lower()
     svc, _, name = action.partition(":")
@@ -987,7 +1058,7 @@ def _deterministic(
     #     but technically can mutate state.
     if is_read_only:
         for stmt in policy["Statement"]:
-            if stmt.get("Effect") != "Allow":
+            if not _effect_is_allow(stmt):
                 continue
             for action in _as_list(stmt.get("Action")):
                 if ":" not in action:
@@ -1037,7 +1108,7 @@ def _deterministic(
                     )
 
     for stmt in policy["Statement"]:
-        if stmt.get("Effect") != "Allow":
+        if not _effect_is_allow(stmt):
             continue
         actions = _as_list(stmt.get("Action"))
         resources = _as_list(stmt.get("Resource"))
@@ -1718,7 +1789,7 @@ def _deterministic(
 
     all_actions: list[tuple[str, bool, bool]] = []
     for stmt in policy["Statement"]:
-        if stmt.get("Effect") != "Allow":
+        if not _effect_is_allow(stmt):
             continue
         resources_in_stmt = _as_list(stmt.get("Resource"))
         not_resources_in_stmt = _as_list(stmt.get("NotResource"))
@@ -2048,12 +2119,26 @@ def _suggest_with_llm(
 
 
 def _as_list(value: object) -> list[str]:
+    """Coerce an IAM string-or-list field to a list of normalized strings.
+
+    AWS IAM accepts both `Action: "s3:GetObject"` and
+    `Action: ["s3:GetObject", "s3:ListBucket"]`. This collapses both
+    to the list form. Each entry is normalized via `_norm_grammar_str`
+    so trailing whitespace, fullwidth Roman, BOMs etc. don't reach the
+    set-membership lookups downstream.
+    """
     if value is None:
         return []
     if isinstance(value, str):
-        return [value]
+        normalized = _norm_grammar_str(value)
+        return [normalized] if normalized else []
     if isinstance(value, list):
-        return [str(v) for v in value]
+        out: list[str] = []
+        for v in value:
+            normalized = _norm_grammar_str(str(v))
+            if normalized:
+                out.append(normalized)
+        return out
     return []
 
 
