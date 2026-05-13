@@ -163,8 +163,12 @@ _CODE_EXECUTION_PRIMITIVES = frozenset(
         "codedeploy:CreateApplication",
         # CodeStar — `CreateProject` provisions a multi-service
         # template that runs caller-controlled code paths under
-        # a passed role. Round 6 agent-225.
+        # a passed role. Round 6 agent-225. The
+        # `CreateProjectFromTemplate` variant (research §1.27)
+        # spawns CloudFormation under an elevated service role —
+        # same risk class.
         "codestar:CreateProject",
+        "codestar:CreateProjectFromTemplate",
         # ROUND 8 additions — more code-execution + PassRole partners:
         # Amplify, DMS, CodePipeline, EMR Serverless. Each provisions
         # a service that runs caller-controlled work under a passed
@@ -327,6 +331,18 @@ _CROSS_ACCOUNT_EXFIL_ACTIONS = frozenset(
         # inference endpoint). Round 6 agent-164.
         "bedrock:InvokeModel",
         "bedrock:InvokeModelWithResponseStream",
+        # Elastic Beanstalk environment / config descriptions — env
+        # vars commonly contain DB passwords, third-party API keys,
+        # OAuth client secrets. CloudGoat `beanstalk_secrets`
+        # scenario. Research §3.10.
+        "elasticbeanstalk:DescribeConfigurationSettings",
+        "elasticbeanstalk:DescribeEnvironments",
+        # Verified Access trust-provider mutation lets the attacker
+        # rewrite who AWS treats as authenticated to internal apps.
+        # Research §9.8.
+        "verifiedaccess:CreateVerifiedAccessGroup",
+        "verifiedaccess:CreateVerifiedAccessEndpoint",
+        "verifiedaccess:ModifyVerifiedAccessTrustProvider",
         # Direct Connect — bridge VPC to attacker's on-prem
         "directconnect:CreateConnection",
         "directconnect:CreatePrivateVirtualInterface",
