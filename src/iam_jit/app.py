@@ -40,6 +40,7 @@ from .routes.score import router as score_router
 from .routes.tokens import router as tokens_router
 from .routes.users import router as users_router
 from .routes.web import router as web_router
+from .routes.webhooks_stripe import router as webhooks_stripe_router
 from .store import FilesystemStore, RequestStore
 from .users_store import FileUserStore, UserStore
 
@@ -315,6 +316,7 @@ def create_app(
     app.include_router(accounts_router)
     app.include_router(admin_router)
     app.include_router(intake_router)
+    app.include_router(webhooks_stripe_router)
     app.include_router(web_router)
 
     # Serve static assets (CSS, JS) for the web UI. Templates reference
