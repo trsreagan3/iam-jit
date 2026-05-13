@@ -2703,13 +2703,17 @@ def _deterministic(
         """Module-level mirror of the local helper used inside the
         per-statement loop. Strict wildcard: literal `*`, service-wide,
         bucket-name wildcard, IAM trailing wildcard — but NOT
-        bucket/* (single-bucket scope).
+        S3 bucket/* (single-bucket scope) where surrounding ARN
+        segments are fully narrow.
 
-        The single-bucket exception only applies when the surrounding
-        ARN segments are FULLY narrow (no `*` in account or region).
-        `arn:aws:dynamodb:*:*:table/*` looks like trailing `/*` but the
-        wildcard account+region makes it cross-account broad — NOT a
-        single-bucket case. Round 5 finding agent-144.
+        The "single-bucket exemption" is service-specific:
+          - S3 `bucket/foo` is genuinely narrow (one bucket's path).
+          - DynamoDB `table/*` is a COLLECTION wildcard (every table
+            in the account/region) — NOT narrow.
+          - Kinesis `stream/*`, DAX `cache/*` same story.
+        Round 8 WB finding agent-606/608/609: the original exemption
+        was service-agnostic and accidentally exempted these non-S3
+        collection wildcards.
         """
         if not _is_broad_resource(r):
             return False
@@ -2722,13 +2726,20 @@ def _deterministic(
         # NOT the legitimate "single-bucket sub-path" case.
         if "*" in parts[3] or "*" in parts[4]:
             return True
+        # The single-bucket exemption only applies to services where
+        # `<collection>/*` means "items inside ONE named container."
+        # S3 is the main case. For other services where `<collection>/*`
+        # is a service-wide wildcard, the exemption doesn't apply.
+        service = parts[2]
+        if service != "s3":
+            return True
         # Resource-name segment must be literal (no `*`) for the
         # narrow-single-bucket exception to apply.
         resource_spec = parts[5]
         bucket_part = resource_spec.split("/", 1)[0]
         if "*" in bucket_part:
             return True
-        return False  # genuinely narrow single-bucket sub-path
+        return False  # genuinely narrow S3 single-bucket sub-path
 
     all_actions: list[tuple[str, bool, bool]] = []
     for stmt in policy["Statement"]:
