@@ -852,3 +852,179 @@ The blind spots above cluster into 8 fixable rule classes:
 #    before rule lookup would prevent the entire alias-bypass class.
 #    Cheapest fix: just add the alias variants to every relevant set.
 #    Closes agent-85.
+
+
+# ===========================================================
+# Round 4 — WHITE-BOX
+# ===========================================================
+# Code-level review with full visibility into review.py / blacklist.py /
+# routes/score.py. Findings here exploit BUGS (off-by-one, case-sensitive
+# checks, missing rule paths) rather than just expanding action sets.
+# Each finding cites the specific code location (file + line).
+
+
+## agent-86-question-mark-wildcard-bypass
+
+- Policy summary: `iam:?ttachRolePolicy`, `iam:?reateAccessKey`, `iam:?utRolePolicy` on Resource: `*`.
+- Det score: 6 (sensitive-service-on-broad floor)
+- Real risk: 9 (catastrophic — AWS evaluates `?` as a single-char wildcard, so these are equivalent to the literal catastrophic forms)
+- Why scorer misses it: review.py treats `?` as a literal character throughout. Every wildcard-detection check uses `"*" in action` (lines 901, 1136, 1144, 1159, 1215, 1481, 1500). `?` is invisible to the scorer.
+  - Action-name-glob rule (line 1215) and catastrophic-fnmatch rule (line 1234) only fire if `*` is present.
+  - Set-membership checks (`action.lower() in <SET>_LC`, lines 920/1291/1317/1436/1456/1663) require a literal match — `?` prevents that.
+  - Service-wildcard rule (line 1159) only checks `"*" in service`.
+- Suggested fix: introduce a single helper `_has_wildcard(s) -> bool: return "*" in s or "?" in s`, use it everywhere a literal-wildcard test currently uses `"*" in"`; for set-membership lookups, when the attacker's action has any wildcard, fnmatch-expand it against the target set instead of checking literal membership.
+
+## agent-87-destructive-verb-case-sensitive
+
+- Policy summary: `s3:deletebucket`, `s3:deleteobject`, `ec2:terminateinstances`, `rds:deletedbinstance`, `dynamodb:deletetable` on Resource: `*`.
+- Det score: 4
+- Real risk: 8
+- Why scorer misses it: AWS IAM is case-insensitive on action names, but the destructive-verb-prefix list at lines 1263-1266 (action-name-glob branch) and 1357-1360 (destructive-on-broad floor) compares `action_name.startswith(("Delete", "Destroy", ...))` with canonical-capitalized prefixes. Lowercase input never matches. Round 2's case-insensitivity sweep updated set-membership lookups (`*_LC`) but did NOT touch these literal `startswith` calls.
+- Suggested fix: lowercase both sides — `action_name.lower().startswith(("delete", "destroy", ...))`. Apply at lines 1267 AND 1361.
+
+## agent-88-code-exec-composition-wildcard
+
+- Policy summary: `lambda:Create*` + `lambda:Update*` + `lambda:InvokeFunction` on Resource: `*`, plus `iam:PassRole` on a narrow admin-role ARN.
+- Det score: 6
+- Real risk: 9 (RCE-as-admin via composition)
+- Why scorer misses it: `has_code_exec = bool(action_names_lc & _CODE_EXECUTION_PRIMITIVES_LC)` (line 1556) is a literal set-intersection. `lambda:Create*` is not in the primitive set; the wildcard doesn't fnmatch-expand. The standalone `code-execution primitive on broad resource` rule (line 1567) has the same issue — uses `_canonical_action(a) in _CODE_EXECUTION_PRIMITIVES_LC`.
+- Suggested fix: add a helper `_action_covers_any(attacker_action, target_set_lc)` that fnmatch-expands attacker's wildcards (`*` or `?`) against the target set, OR checks literal membership when no wildcard. Use it in both composition rules + the standalone code-exec-on-broad floor.
+
+## agent-89-iam-recon-composition-wildcard
+
+- Policy summary: Statement 1: `iam:List*` + `iam:Get*` on Resource: `*`. Statement 2: `sts:AssumeRole` on `arn:aws:iam::*:role/*`.
+- Det score: 7 (sensitive-service-on-broad + cross-resource)
+- Real risk: 9 (lateral movement primitive)
+- Why scorer misses it: `iam_recon_actions_lc` (line 1615) is an exact-name frozenset. `iam:list*` and `iam:get*` are not in it; the wildcards don't fnmatch-expand. Same root cause as agent-88, different composition rule.
+- Suggested fix: same fnmatch-expansion helper applied to the recon composition check at line 1619.
+
+## agent-90-notresource-policy-level-composition
+
+- Policy summary: Statement 1: iam-recon actions on Resource: `*`. Statement 2: `sts:AssumeRole` with `NotResource: ["arn:aws:iam::123456789012:role/already-using"]` (effectively any role except one).
+- Det score: 7
+- Real risk: 9 (same lateral movement as agent-30 but via NotResource)
+- Why scorer misses it: The per-statement loop's `NotResource → wildcard_resource = True` override (lines 1132-1134) does NOT propagate to the policy-level `all_actions` collection (lines 1539-1547). That collection computes `inclusive_broad` / `strict_broad` from `_as_list(stmt.get("Resource"))` only — NotResource is invisible to it. So `has_assume_broad` (line 1620) sees `inclusive=False` and the composition rule fails. Variables overwritten classic of round-3 NotResource fix — fixed it for per-statement but not policy-level.
+- Suggested fix: when collecting `all_actions`, also apply NotResource promotion:
+
+    not_resources_in_stmt = _as_list(stmt.get("NotResource"))
+    if not_resources_in_stmt and not any(
+        r == "*" or r.endswith(":*") for r in not_resources_in_stmt
+    ):
+        inclusive_broad = True
+        strict_broad = True
+
+  Apply at line 1545 (inside the per-statement collection loop).
+
+## agent-91-additional-destructive-verbs
+
+- Policy summary: `ec2:DetachVolume`, `ec2:DetachNetworkInterface`, `ec2:DisassociateIamInstanceProfile`, `ec2:DisassociateAddress`, `autoscaling:SuspendProcesses` on Resource: `*`.
+- Det score: 6 (state-changing-on-broad)
+- Real risk: 7 (account-wide service disruption — detach disks/NICs/instance profiles from every running instance, freeze ASGs)
+- Why scorer misses it: The destructive-verb prefix list (lines 1263-1266 / 1357-1360) is missing `Detach`, `Disassociate`, `Suspend`, `Abort`, `Purge`, `Remove`, `Kill`, `Eject`. AWS uses all of these for genuinely destructive operations.
+- Suggested fix: extend the prefix tuple. Same change applies in both locations (or extract to a module-level constant `_DESTRUCTIVE_VERB_PREFIXES`).
+
+## agent-92-narrow-write-floor-order-dependent
+
+- Policy summary: `[ec2:CreateTags, ec2:CreateVpc]` on a narrow VPC ARN.
+- Det score: 2 (Tagging floor)
+- Expected score: 3 (Write floor — should apply because CreateVpc is in the list)
+- Why scorer misses it: The narrow-write-floor loop at lines 1479-1491 breaks after the FIRST action whose level matches Write/Tagging. Tagging hits first because of action ordering, floors at 2, and breaks before ever evaluating CreateVpc. Reverse the order (`[ec2:CreateVpc, ec2:CreateTags]`) and the score becomes 3. This is an order-dependent off-by-one that violates determinism.
+- Suggested fix: remove the early break OR track the max level across the whole action list:
+
+    level_floor = 0
+    for action in actions:
+        if action == "*" or ":" not in action or "*" in action:
+            continue
+        level = _action_level(action)
+        if level in ("Write", "Permissions management"):
+            level_floor = max(level_floor, 3)
+        elif level == "Tagging":
+            level_floor = max(level_floor, 2)
+    if level_floor:
+        score = max(score, level_floor)
+
+## agent-93-blacklist-question-mark-bypass
+
+- Policy summary: `iam:?reateAccessKey` on Resource: `*` against a deployment with `ban-create-access-key` blacklist rule installed.
+- Blacklist verdict: MISS (real AWS: would grant `iam:CreateAccessKey`).
+- Scorer verdict: 6 (sensitive-service-on-broad floor; missing the catastrophic floor due to agent-86).
+- Real risk: 9.
+- Why blacklist misses it: blacklist.py line 155 uses `fnmatch.fnmatchcase(action_lc, rule.pattern.lower())`. fnmatch is asymmetric: wildcards in the PATTERN are wildcards, but wildcards in the SUBJECT (action) are literal. Rule pattern `iam:CreateAccessKey` has literal `c`; action `iam:?reateAccessKey` has literal `?`; they don't match. AWS, in contrast, treats action's `?` as a wildcard at policy evaluation.
+- Suggested fix: when the action contains glob meta-characters, ALSO check the reverse direction — fnmatch the rule's pattern as subject against the action as pattern. Or normalize via canonical-action expansion first.
+- Note: also tested whitespace bypasses — leading/trailing space, tab — all bypass. AWS rejects whitespace in action names, but blacklist should reject too (don't rely on AWS rejecting).
+
+## agent-94-secret-bearing-notresource-bypass
+
+- Policy summary: `ec2:GetConsoleOutput`, `ec2:GetPasswordData`, `ssm:GetCommandInvocation` with `NotResource: ["arn:aws:ec2:us-east-1:123456789012:instance/i-known-empty"]` (read instance internals on every instance except one).
+- Det score: 6
+- Real risk: 7
+- Why scorer misses it: Same NotResource policy-level oversight as agent-90. The secret-bearing-reads composition (line 1644) requires `strict` from `all_actions` collection. Policy-level `strict_broad` is computed without NotResource override.
+- Suggested fix: same as agent-90 (apply NotResource promotion in the policy-level all_actions collection).
+
+## agent-95-notaction-narrow-allows-catastrophic
+
+- Policy summary: `NotAction: ["sts:AssumeRole"]` on `Resource: arn:aws:iam::123456789012:role/some-app-role` (every IAM API on this role except AssumeRole — includes AttachRolePolicy = full admin attach).
+- Det score: 7 (NotAction-on-narrow floor, hard-coded line 977)
+- Real risk: 9
+- Why scorer misses it: NotAction means the Action key is absent. The per-action loop (lines 1143-1334) iterates `actions = _as_list(stmt.get("Action"))`, which is `[]`. The catastrophic-action floor at line 1455-1468 never fires because there are no actions to check. The hard-coded floor 7 doesn't consider what the implicit-allow set covers.
+- Suggested fix: when NotAction is set, compute the implicit-allow as `(_CATASTROPHIC_ACTIONS_LC | _HIGH_IMPACT_MUTATION_ACTIONS_LC | _CODE_EXECUTION_PRIMITIVES_LC | ...) - not_actions_lc`. If `_CATASTROPHIC_ACTIONS_LC - not_actions_lc` is non-empty, floor at 9 regardless of resource scope (consistent with the catastrophic floor's "narrow doesn't help" semantics).
+
+
+# ===========================================================
+# Round 4 — cross-cutting scorer recommendations
+# ===========================================================
+
+# P. Architectural: wildcard handling. The scorer treats `*` and `?` very
+#    differently — `*` triggers every wildcard rule, `?` is invisible.
+#    AWS IAM treats them equivalently (single-char vs multi-char glob).
+#    A single helper `_has_wildcard()` plus consistent use of fnmatch
+#    when the attacker action has any wildcard would close the entire
+#    class of agent-86-style bypasses. Pattern: never test `"*" in s`;
+#    always test `_has_wildcard(s)`. Always fnmatch-expand against the
+#    target set when wildcards are present; never set-intersect.
+
+# Q. Architectural: NotResource policy-level promotion. The round-3
+#    NotResource fix was applied per-statement (lines 1132-1134) but
+#    not per-policy. The policy-level pass at line 1539-1547 ignores
+#    NotResource. The fix is mechanically simple but easy to miss
+#    again when adding new composition rules — extract a shared helper
+#    `_statement_resource_signal(stmt) -> (resources, inclusive_broad,
+#    strict_broad)` and call it from BOTH the per-statement loop and
+#    the policy-level collection.
+
+# R. Architectural: case-insensitivity. The round-2 sweep covered set-
+#    membership lookups but missed two other patterns: `.startswith(
+#    canonical-prefix)` (destructive verbs, agent-87) and `extra_*` admin
+#    context (case-sensitive, see remarks in scorer trace at
+#    `effective_sensitive`). Rule: anything that compares user-supplied
+#    text against AWS surface should lowercase BOTH sides.
+
+# S. Architectural: rule ordering / break statements. agent-92 — early
+#    `break` after first level match makes the narrow-write floor order-
+#    dependent. As a class: never `break` inside a loop that's
+#    computing a `max(...)` floor. Compute the floor across the entire
+#    list, then apply once.
+
+# T. Architectural: NotAction's implicit-allow set. NotAction grants
+#    everything-except. The current code floors at 7 (narrow) or 9
+#    (broad) without considering WHAT it actually grants. Better:
+#    enumerate the implicit-catastrophic set
+#    (`_CATASTROPHIC_ACTIONS_LC - not_actions_lc`) and run the
+#    catastrophic-floor rule with that set. This makes the scoring
+#    react to the SPECIFIC actions the operator intended to permit
+#    rather than a coarse all-or-nothing 7/9 split.
+
+# U. Hardening idea: AWS rejects whitespace in action names, so
+#    technically agent-87/93 whitespace bypasses are AWS-rejected
+#    in production. BUT scoring should still detect them — the scorer
+#    is the FIRST line of defense, and policies that AWS would reject
+#    shouldn't be scored AT ALL (or should be scored as catastrophic
+#    "malformed" rather than passing through to score 1). Add a strict
+#    action-name validator: `^[a-zA-Z0-9*?]+:[a-zA-Z0-9*?]+$` (no
+#    whitespace, no double colons, no control chars).
+
+# V. Hardening idea: action-name globs in attacker policies are nearly
+#    always a code smell. Beyond the catastrophic-fnmatch rule, just
+#    "the attacker is using a glob" is a signal of intent. Consider
+#    floor-3 for ANY glob-containing action (so even glob-on-narrow
+#    is above auto-approve).

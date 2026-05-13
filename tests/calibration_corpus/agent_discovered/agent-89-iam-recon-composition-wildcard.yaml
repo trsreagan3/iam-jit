@@ -1,0 +1,57 @@
+name: agent-89-iam-recon-composition-wildcard
+description: |
+  Companion to agent-88. The IAM-recon-+-AssumeRole composition rule
+  (round-1 fix) uses a literal exact-name set:
+
+    iam_recon_actions_lc = frozenset(a.lower() for a in {
+        "iam:ListRoles", "iam:GetRole", "iam:ListPolicies",
+        "iam:ListAttachedRolePolicies", "iam:GetRolePolicy",
+    })
+    has_iam_recon = bool(action_names_lc & iam_recon_actions_lc)
+
+  Attacker uses `iam:List*` + `iam:Get*` — definitely a superset of the
+  literal recon set — and the composition rule misses entirely.
+
+  Code location: src/iam_jit/review.py lines 1615-1635.
+
+  Test cases:
+    - Statement 1: Action=[iam:List*, iam:Get*] Resource=* (sensitive
+      service wildcards → score 7 per-statement)
+    - Statement 2: Action=sts:AssumeRole Resource=arn:aws:iam::*:role/*
+      (broad role wildcard → per-statement HIGH_RISK floor 7)
+    - Combined: real risk 9 (textbook lateral movement: enumerate roles
+      via wildcard reads, then assume any of them). Scorer: 7.
+
+  Same fix as agent-88 — fnmatch-expand the attacker's actions against
+  the recon set when they contain `*` or `?`. Sensible expansion of the
+  recon set membership check:
+
+    has_iam_recon = any(
+        _action_covers_any(a, iam_recon_actions_lc)
+        for a in action_names
+    )
+
+  Gap: +2 (7 vs 9). Below the catastrophic threshold but above the
+  default auto-approve floor — still classified "high tier" so this
+  bug doesn't enable auto-approval of the attack. The factor list,
+  however, fails to mention the lateral-movement primitive, which is
+  the practical security signal an approver needs.
+policy:
+  Version: '2012-10-17'
+  Statement:
+    - Effect: Allow
+      Action:
+        - iam:List*
+        - iam:Get*
+      Resource: '*'
+    - Effect: Allow
+      Action: sts:AssumeRole
+      Resource: arn:aws:iam::*:role/*
+request:
+  spec:
+    access_type: read-write
+    duration:
+      duration_hours: 1
+expected:
+  score_min: 9
+  must_auto_approve: false

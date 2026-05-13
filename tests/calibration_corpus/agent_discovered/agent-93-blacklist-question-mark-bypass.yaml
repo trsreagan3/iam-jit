@@ -1,0 +1,72 @@
+name: agent-93-blacklist-question-mark-bypass
+description: |
+  The blacklist module (src/iam_jit/blacklist.py) matches via
+  `fnmatch.fnmatchcase(action_lc, rule.pattern.lower())` where `rule.pattern`
+  is the deployment-configured glob and `action_lc` is the policy's
+  action (lowercased).
+
+  fnmatch is asymmetric: meta-characters in the PATTERN are special
+  (matched as wildcards), but meta-characters in the SUBJECT (action)
+  are LITERALS. If the rule pattern is `iam:CreateAccessKey` (no
+  meta-characters), an attacker action of `iam:?reateAccessKey`
+  (literal `?` in the subject) will NOT match — because the pattern's
+  literal `c` does not match the action's literal `?`.
+
+  AWS IAM, however, evaluates the policy with `?` AS a wildcard against
+  the action namespace. So `iam:?reateAccessKey` in production DOES
+  grant `iam:CreateAccessKey`, but the blacklist's pre-scoring check
+  doesn't reject it.
+
+  Same bypass also works for trailing whitespace, tabs, leading
+  whitespace, or fullwidth Unicode characters in the action — AWS
+  rejects whitespace, so those are less practical, but `?` is a real
+  AWS-policy primitive that bypasses.
+
+  Test cases (with `ban-create-access-key` pattern installed):
+    - `iam:?reateAccessKey` → blacklist MISS (real AWS behavior: HIT)
+    - `iam:CreateAccessKe?` → blacklist MISS (real AWS behavior: HIT)
+    - `iam:CreateAccessKey\t` → blacklist MISS (AWS rejects, but no scoring
+      run either — silent pass)
+    - ` iam:CreateAccessKey` (leading space) → blacklist MISS
+
+  Code location: src/iam_jit/blacklist.py line 152-155.
+
+  Suggested fix: when matching, run fnmatch in BOTH directions:
+
+      pattern_lc = rule.pattern.lower()
+      action_lc = action.lower().strip()
+      if fnmatch.fnmatchcase(action_lc, pattern_lc):
+          # rule pattern matches the action
+          return hit
+      # NEW: also check whether the attacker's action GLOB matches the
+      # rule's literal action. If the rule is "iam:CreateAccessKey" (no
+      # globs) and the action is "iam:?reateAccessKey" (with globs),
+      # check whether the rule's literal is a member of the attacker's
+      # glob expansion:
+      if any(c in action_lc for c in "*?["):
+          if fnmatch.fnmatchcase(pattern_lc, action_lc):
+              return hit
+
+  Also: normalize whitespace in the action before fnmatch
+  (`action.strip()`).
+
+  Note: this YAML scores via `analyze_policy`, which doesn't actually
+  invoke the blacklist (that lives in routes/score.py). The
+  reproducer here is the scoring path: confirms agent-86 + ensures
+  the deployment doesn't accidentally rely on the blacklist to catch
+  these.
+policy:
+  Version: '2012-10-17'
+  Statement:
+    - Effect: Allow
+      Action:
+        - 'iam:?reateAccessKey'
+      Resource: '*'
+request:
+  spec:
+    access_type: read-write
+    duration:
+      duration_hours: 1
+expected:
+  score_min: 9
+  must_auto_approve: false

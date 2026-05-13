@@ -642,6 +642,41 @@ _SERVICE_ALIASES = {
 }
 
 
+# ---------- Wildcard / glob helpers ----------
+#
+# AWS IAM treats `*` AND `?` as wildcard primitives in action and
+# resource patterns. `*` matches any string; `?` matches any single
+# character. The scorer was originally written assuming only `*`
+# matters — round 4 white-box revealed 7 locations where `"*" in s`
+# silently failed against `iam:?reateAccessKey`. These helpers
+# centralize wildcard detection so adding a new wildcard primitive
+# in the future is a single-file change.
+
+import fnmatch as _fnmatch
+
+
+def _has_wildcard(s: str) -> bool:
+    """True if `s` contains an IAM wildcard primitive (`*` or `?`)."""
+    return "*" in s or "?" in s
+
+
+def _action_covers_any(action: str, target_set_lc: frozenset[str]) -> bool:
+    """True if `action` matches at least one entry in `target_set_lc`
+    (which must be lowercased).
+
+    For literal actions (no wildcard), this is a fast exact-match
+    against the set. For wildcard actions, it fnmatches the action
+    pattern against every entry — so `iam:Create*` "covers" the
+    catastrophic action `iam:CreateAccessKey` (any single concrete
+    catastrophic action the glob would match means the rule applies).
+    """
+    a_lc = action.lower()
+    if not _has_wildcard(a_lc):
+        return a_lc in target_set_lc
+    # Wildcard pattern: any target the pattern matches means yes.
+    return any(_fnmatch.fnmatchcase(t, a_lc) for t in target_set_lc)
+
+
 def _canonical_action(action: str) -> str:
     """Return the action lowercased with its service prefix canonicalized
     via _SERVICE_ALIASES. Returns the all-lowercase form so the result
@@ -718,14 +753,15 @@ def _is_broad_resource(r: str) -> bool:
             if rest == "*" or (rest.endswith("*") and "/" not in rest):
                 return True
 
-    # S3-style: bucket-name component (before first `/`) contains `*`.
+    # S3-style: bucket-name component (before first `/`) contains a
+    # wildcard. Uses `_has_wildcard` so `?` (single-char wildcard) is
+    # recognized the same as `*`.
     if "/" not in resource_spec:
-        # No slash: this IS the bucket name. If it has `*`, it's broad.
-        if "*" in resource_spec:
+        if _has_wildcard(resource_spec):
             return True
     else:
         bucket_part, _, _path_part = resource_spec.partition("/")
-        if "*" in bucket_part:
+        if _has_wildcard(bucket_part):
             return True
         # Single-bucket bucket-level wildcard: `bucket/*` (one slash, ends in `/*`)
         if resource_spec.endswith("/*") and resource_spec.count("/") <= 1:
@@ -765,7 +801,7 @@ def _action_level(action: str) -> str | None:
     Returns one of "Read", "List", "Write", "Tagging", "Permissions management",
     or None if the action is wildcarded, malformed, or unknown to policy_sentry.
     """
-    if not action or ":" not in action or "*" in action:
+    if not action or ":" not in action or _has_wildcard(action):
         return None
     service, name = action.split(":", 1)
     return _service_action_levels(service).get(name)
@@ -896,9 +932,12 @@ def _deterministic(
                 if ":" not in action:
                     continue
 
-                # Wildcard handling first.
-                if "*" in action:
-                    if action == "*" or action.endswith(":*") or "*" in action.split(":", 1)[1][:3]:
+                # Wildcard handling first. `_has_wildcard` catches
+                # both `*` and `?` so `iam:?reateAccessKey` doesn't slip
+                # through as a "specific action."
+                if _has_wildcard(action):
+                    action_part = action.split(":", 1)[1] if ":" in action else action
+                    if action == "*" or action.endswith(":*") or _has_wildcard(action_part[:3]):
                         score = max(score, 8)
                         factors.append(
                             f"Request marked read-only but policy includes wildcard `{action}`"
@@ -974,13 +1013,38 @@ def _deterministic(
                     "treated as full account access for risk purposes."
                 )
             else:
-                score = max(score, 7)
-                factors.append(
-                    f"`NotAction` (excluding [{excluded}]) on narrow resource "
-                    "still grants every action in every service except those "
-                    "few — typically hundreds of allowed actions, broader than "
-                    "the author likely intended."
-                )
+                # NotAction with narrow resource: figure out what
+                # catastrophic actions are IMPLICITLY allowed (not in
+                # the exclusion list). If any catastrophic action is
+                # NOT excluded, it's implicitly granted on the narrow
+                # resource — floor at 9 (the catastrophic floor)
+                # rather than 7. Round-4 white-box finding agent-95.
+                not_actions_lc = {a.lower() for a in not_actions}
+                # An exclusion "covers" a catastrophic action if any
+                # not_actions entry would fnmatch-match it.
+                catastrophic_not_excluded = []
+                for cat_lc in _CATASTROPHIC_ACTIONS_LC:
+                    if not any(
+                        _fnmatch.fnmatchcase(cat_lc, na_lc)
+                        for na_lc in not_actions_lc
+                    ):
+                        catastrophic_not_excluded.append(cat_lc)
+                if catastrophic_not_excluded:
+                    score = max(score, 9)
+                    factors.append(
+                        f"`NotAction` (excluding [{excluded}]) implicitly "
+                        f"allows {len(catastrophic_not_excluded)} catastrophic "
+                        f"actions (e.g. `{catastrophic_not_excluded[0]}`) — "
+                        "the exclusion list doesn't cover them."
+                    )
+                else:
+                    score = max(score, 7)
+                    factors.append(
+                        f"`NotAction` (excluding [{excluded}]) on narrow resource "
+                        "still grants every action in every service except those "
+                        "few — typically hundreds of allowed actions, broader than "
+                        "the author likely intended."
+                    )
             suggestions.append(
                 "Replace `NotAction` with an explicit `Action` list of "
                 "the operations the role actually needs. NotAction is "
@@ -1110,14 +1174,15 @@ def _deterministic(
                 if collection in collection_types.get(service, ()):
                     if tail == "*" or (tail.endswith("*") and "/" not in tail):
                         return True
-            # S3 bucket-name wildcards: `prod-*` (no slash, has `*`) or
-            # `prod-*/*` / `*/path/*` (bucket-name component has `*`).
+            # S3 bucket-name wildcards: `prod-*` (no slash, has `*`/`?`) or
+            # `prod-*/*` / `*/path/*` (bucket-name component has `*`/`?`).
+            # Uses `_has_wildcard` so single-char `?` is recognized.
             if "/" not in resource_spec:
-                if "*" in resource_spec:
+                if _has_wildcard(resource_spec):
                     return True
             else:
                 bucket_part = resource_spec.split("/", 1)[0]
-                if "*" in bucket_part:
+                if _has_wildcard(bucket_part):
                     return True
             return False
 
@@ -1156,11 +1221,11 @@ def _deterministic(
             # iam:CreateRole + sso-admin:CreatePermissionSet, any one of
             # which is catastrophic). Floor at 8, or 9 if the action-name
             # half is itself broad (`*:*`, `*`, or empty).
-            if "*" in service:
+            if _has_wildcard(service):
                 action_name = action.split(":", 1)[1] if ":" in action else ""
                 # Bare `*` is already handled as full admin elsewhere; we
                 # only hit here for `*:something` shapes.
-                if action_name in ("*", ""):
+                if action_name in ("*", "") or _has_wildcard(action_name) and len(action_name) <= 2:
                     score = max(score, 10)
                     factors.append(
                         f"`{action}` has wildcard in BOTH service AND "
@@ -1212,7 +1277,7 @@ def _deterministic(
                         f"Replace `{action}` with explicit `{service}:` actions."
                     )
 
-            if "*" in action and not action.endswith(":*"):
+            if _has_wildcard(action) and not action.endswith(":*"):
                 # e.g. iam:Create*, ec2:*Network*, s3:Delete*. The
                 # wildcard is a glob inside the action-name portion
                 # (after the colon). Three cases worth distinguishing:
@@ -1231,7 +1296,7 @@ def _deterministic(
                 # matches `iam:CreateAccessKey`, `iam:CreateOpenIDConnect-
                 # Provider`, etc. — all catastrophic individually. If the
                 # glob is a superset of catastrophic actions, floor at 9.
-                import fnmatch as _fnmatch
+                # (Module-level `_fnmatch` is already imported.)
                 action_lc = action.lower()
                 matches_cat = any(
                     _fnmatch.fnmatchcase(cat_lc, action_lc)
@@ -1259,12 +1324,15 @@ def _deterministic(
                         f"Wildcard within sensitive service action: `{action}`"
                     )
                 else:
-                    action_part = action.split(":", 1)[1] if ":" in action else action
-                    destructive_prefixes = (
-                        "Delete", "Destroy", "Reset", "Terminate",
-                        "Disable", "Stop", "Revoke", "Cancel", "Drop",
+                    action_part = (action.split(":", 1)[1] if ":" in action else action).lower()
+                    destructive_prefixes_lc = (
+                        "delete", "destroy", "reset", "terminate",
+                        "disable", "stop", "revoke", "cancel", "drop",
+                        "remove", "forget", "clear", "empty", "wipe",
+                        "purge", "abort", "kill", "suspend", "detach",
+                        "disassociate",
                     )
-                    if action_part.startswith(destructive_prefixes):
+                    if action_part.startswith(destructive_prefixes_lc):
                         score = max(score, 7)
                         factors.append(
                             f"Destructive action-name wildcard `{action}` — "
@@ -1353,12 +1421,21 @@ def _deterministic(
             # the verb itself describes irreversibility. Floor at 7
             # so they ALWAYS route to human review (above threshold
             # 5 by default; admins can raise threshold up to floor 5).
-            action_name = action.split(":", 1)[1] if ":" in action else action
-            destructive_verbs = (
-                "Delete", "Destroy", "Reset", "Terminate",
-                "Disable", "Stop", "Revoke", "Cancel",
+            # Lowercased so the prefix match is case-insensitive
+            # (AWS IAM is case-insensitive; the round-4 white-box agent
+            # found `s3:deletebucket` bypassing the canonical-case
+            # `"Delete"` prefix). Expanded the verb list with round-4
+            # additions: Remove, Forget, Clear, Empty, Wipe, Purge,
+            # Abort, Kill, Suspend, Detach, Disassociate.
+            action_name = (action.split(":", 1)[1] if ":" in action else action).lower()
+            destructive_verbs_lc = (
+                "delete", "destroy", "reset", "terminate",
+                "disable", "stop", "revoke", "cancel",
+                "drop", "remove", "forget", "clear",
+                "empty", "wipe", "purge", "abort", "kill",
+                "suspend", "detach", "disassociate",
             )
-            if action_name.startswith(destructive_verbs):
+            if action_name.startswith(destructive_verbs_lc):
                 # Floor at 8: a destructive verb on a broad resource is
                 # always above the "auto-approve at threshold 5" line AND
                 # above "medium" tier. The blast radius — every resource
@@ -1433,7 +1510,8 @@ def _deterministic(
         # blast — a single DNS record change can move all of prod
         # traffic. See `_HIGH_IMPACT_MUTATION_ACTIONS` for the list.
         for action in actions:
-            if action.lower() in effective_high_impact_lc:
+            if (action.lower() in effective_high_impact_lc
+                    or _action_covers_any(action, effective_high_impact_lc)):
                 score = max(score, 5)
                 factors.append(
                     f"`{action}` is a high-impact mutation — a single "
@@ -1453,7 +1531,8 @@ def _deterministic(
         # is never appropriate even on a single narrowly-resourced ARN.
         # See `_CATASTROPHIC_ACTIONS`.
         for action in actions:
-            if action.lower() in _CATASTROPHIC_ACTIONS_LC:
+            if (action.lower() in _CATASTROPHIC_ACTIONS_LC
+                    or _action_covers_any(action, _CATASTROPHIC_ACTIONS_LC)):
                 score = max(score, 9)
                 factors.append(
                     f"`{action}` is catastrophic in blast radius "
@@ -1476,19 +1555,22 @@ def _deterministic(
         # Read or List) stay at 1. Wildcard-resource statements are
         # already handled by the destructive-on-wildcard / high-impact
         # rules above, so this only fires for narrow ARNs.
+        # Narrow-write floor — refactored 2026-05-13 (round 4) to NOT
+        # break early. The previous version exited at the first match,
+        # making the resulting score depend on the action list ORDER
+        # (a determinism bug). Now: walk every action, take the max.
         if not wildcard_resource:
+            narrow_floor = 0
             for action in actions:
-                if action == "*" or ":" not in action or "*" in action:
+                if action == "*" or ":" not in action or _has_wildcard(action):
                     continue
                 level = _action_level(action)
                 if level in ("Write", "Permissions management"):
-                    score = max(score, 3)
-                    # Don't append a factor — these narrow writes are
-                    # routine; flagging them would clutter every output.
-                    break
+                    narrow_floor = max(narrow_floor, 3)
                 elif level == "Tagging":
-                    score = max(score, 2)
-                    break
+                    narrow_floor = max(narrow_floor, 2)
+            if narrow_floor:
+                score = max(score, narrow_floor)
 
         # Sensitive-service narrow-read floor. Reading IAM metadata
         # (GetRole, ListUsers), describing secrets, listing KMS keys
@@ -1497,7 +1579,7 @@ def _deterministic(
         # threshold).
         if not wildcard_resource:
             for action in actions:
-                if action == "*" or ":" not in action or "*" in action:
+                if action == "*" or ":" not in action or _has_wildcard(action):
                     continue
                 svc = action.split(":", 1)[0].lower()
                 if svc in effective_sensitive:
@@ -1541,8 +1623,21 @@ def _deterministic(
         if stmt.get("Effect") != "Allow":
             continue
         resources_in_stmt = _as_list(stmt.get("Resource"))
+        not_resources_in_stmt = _as_list(stmt.get("NotResource"))
         inclusive_broad = _resources_are_broad(resources_in_stmt)
         strict_broad = any(_is_strict_wild_top(r) for r in resources_in_stmt)
+        # NotResource promotion (white-box round-4 finding agent-90):
+        # the per-statement loop already promotes wildcard_resource +
+        # broad_blast_resource when NotResource is set; the policy-level
+        # all_actions collection must do the same or the composition
+        # rules below see NotResource statements as "narrow." When
+        # NotResource is set and isn't itself wildcarded, treat the
+        # statement's resource set as broad for the composition rules.
+        if not_resources_in_stmt and not any(
+            r == "*" or r.endswith(":*") for r in not_resources_in_stmt
+        ):
+            inclusive_broad = True
+            strict_broad = True
         for a in _as_list(stmt.get("Action")):
             all_actions.append((a, inclusive_broad, strict_broad))
 
@@ -1551,9 +1646,15 @@ def _deterministic(
     # ---- Composition rule: code-execution-via-role ----
     # If the policy contains an action that creates/executes code AND
     # ALSO contains iam:PassRole, the combination = RCE-as-the-passed-role.
-    # Floor at 8 if PassRole is on a narrow ARN; 9 if on a wildcard.
+    # Floor at 9. Uses `_action_covers_any` (glob-aware) so a wildcard
+    # action like `lambda:Create*` triggers the rule too — round-4
+    # finding agent-88: the previous `set & set` intersection only
+    # caught literal action names.
     action_names_lc = {a.lower() for a in action_names}
-    has_code_exec = bool(action_names_lc & _CODE_EXECUTION_PRIMITIVES_LC)
+    has_code_exec = any(
+        _action_covers_any(a, _CODE_EXECUTION_PRIMITIVES_LC)
+        for a in action_names
+    )
     pass_role_broad = any(
         a.lower() == "iam:passrole" and inclusive for a, inclusive, _ in all_actions
     )
@@ -1589,10 +1690,15 @@ def _deterministic(
         # RCE-as-admin. Floor at 9 regardless of resource scope.
         floor = 9
         score = max(score, floor)
-        # Find which actions matched (preserve their original case for display)
+        # Find which actions matched. Use the glob-aware check so a
+        # wildcard action like `lambda:Create*` is included in the
+        # display (rather than producing an empty list and crashing).
         which = sorted([
-            a for a in action_names if a.lower() in _CODE_EXECUTION_PRIMITIVES_LC
+            a for a in action_names
+            if _action_covers_any(a, _CODE_EXECUTION_PRIMITIVES_LC)
         ])[:3]
+        if not which:
+            which = ["<wildcard>"]
         factors.append(
             f"Code-execution-via-role composition: {which[0]}"
             + (f" (+ {len(which) - 1} more)" if len(which) > 1 else "")
@@ -1615,8 +1721,14 @@ def _deterministic(
     iam_recon_actions_lc = frozenset(a.lower() for a in {
         "iam:ListRoles", "iam:GetRole", "iam:ListPolicies",
         "iam:ListAttachedRolePolicies", "iam:GetRolePolicy",
+        "iam:ListUsers", "iam:GetUser", "iam:ListGroups",
+        "iam:ListAccessKeys", "iam:GetAccountAuthorizationDetails",
     })
-    has_iam_recon = bool(action_names_lc & iam_recon_actions_lc)
+    # Use glob-aware coverage: `iam:List*` or `iam:Get*` should fire
+    # the rule too (they're recon-superset). Round-4 agent-89.
+    has_iam_recon = any(
+        _action_covers_any(a, iam_recon_actions_lc) for a in action_names
+    )
     has_assume_broad = any(
         a.lower() == "sts:assumerole" and inclusive for a, inclusive, _ in all_actions
     )
@@ -1641,7 +1753,12 @@ def _deterministic(
     # (`bucket/*`) DON'T fire this — that's legitimate "read everything
     # in this app's bucket."
     for action, _inclusive, strict in all_actions:
-        if _canonical_action(action) in _SECRET_BEARING_READS_LC and strict:
+        canon = _canonical_action(action)
+        if (
+            (canon in _SECRET_BEARING_READS_LC
+             or _action_covers_any(canon, _SECRET_BEARING_READS_LC))
+            and strict
+        ):
             score = max(score, 7)
             factors.append(
                 f"`{action}` on broad resource reads content that "
@@ -1660,7 +1777,8 @@ def _deterministic(
     # Floor at 8 regardless of resource scope (the "configuration"
     # itself is the attack — narrow target ARN doesn't help).
     for action, _inclusive, _strict in all_actions:
-        if action.lower() in _CROSS_ACCOUNT_EXFIL_ACTIONS_LC:
+        if (action.lower() in _CROSS_ACCOUNT_EXFIL_ACTIONS_LC
+                or _action_covers_any(action, _CROSS_ACCOUNT_EXFIL_ACTIONS_LC)):
             score = max(score, 8)
             factors.append(
                 f"`{action}` sets up ongoing cross-account / persistent "

@@ -1,0 +1,69 @@
+name: agent-95-notaction-narrow-allows-catastrophic
+description: |
+  The NotAction-on-narrow-resource floor (line 977) is fixed at 7.
+  Semantically, NotAction with a small exclusion list grants "every
+  action in every service except the excluded ones" — including all
+  catastrophic actions if those aren't in the exclusion list.
+
+  When the narrow Resource is itself sensitive (e.g. an IAM role ARN),
+  the implicit allowed set includes catastrophic actions on that exact
+  role — e.g. iam:AttachRolePolicy attaching AdministratorAccess to the
+  role. That's catastrophic-tier on the narrow resource, which would
+  normally score 9 via the catastrophic-action floor. But because the
+  Action key is missing (NotAction is used), the per-action loop never
+  runs, and the catastrophic-action floor (line 1455-1468) is never
+  triggered.
+
+  Code location: src/iam_jit/review.py
+    - Line 977: hard-coded floor 7 for NotAction-on-narrow.
+    - Line 1455-1468: catastrophic check iterates `actions = _as_list(
+      stmt.get("Action"))`, which is empty under NotAction.
+
+  Attack:
+    NotAction: ["sts:AssumeRole"]
+    Resource: "arn:aws:iam::123456789012:role/some-app-role"
+
+  Effectively allows every IAM API on this role except AssumeRole —
+  including AttachRolePolicy (admin-policy attach = full escalation).
+  Real risk: 9. Scorer: 7.
+
+  Even more striking: NotAction: ["s3:GetObject"] Resource: a narrow
+  CloudTrail ARN — allows cloudtrail:DeleteTrail (catastrophic) on
+  that trail. Same scoring gap.
+
+  Suggested fix: when NotAction is set, compute the catastrophic /
+  high-impact "implied" coverage:
+
+      not_actions_lc = {a.lower() for a in not_actions}
+      # If any catastrophic action is NOT in the exclusion list AND
+      # the resource is reachable by it, the statement implicitly
+      # grants that catastrophic action.
+      implied_catastrophic = _CATASTROPHIC_ACTIONS_LC - not_actions_lc
+      if implied_catastrophic:
+          # If resource is narrow but is the kind of ARN a catastrophic
+          # action targets, floor at 9. The exact ARN-shape check is
+          # heuristic but the conservative choice (floor regardless of
+          # ARN type) is safe — the operator has stated NotAction
+          # intent, which is a footgun even when narrow.
+          score = max(score, 9)
+
+  Alternatively, run the per-action loop with `not_actions` as a
+  pseudo-Allow-all-minus-exclusions: synthesize the catastrophic /
+  high-impact / code-exec / cross-account-exfil sets minus the
+  exclusion list, and re-run the relevant floors over each remaining
+  action. Heavier but more precise.
+policy:
+  Version: '2012-10-17'
+  Statement:
+    - Effect: Allow
+      NotAction:
+        - sts:AssumeRole
+      Resource: arn:aws:iam::123456789012:role/some-app-role
+request:
+  spec:
+    access_type: read-write
+    duration:
+      duration_hours: 1
+expected:
+  score_min: 9
+  must_auto_approve: false

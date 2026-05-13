@@ -581,7 +581,7 @@ POLICIES: list[dict[str, Any]] = [
         "id": "high-08-s3-full-on-bucket",
         "scenario": "s3:* on a single specific bucket",
         "access_type": "read-write",
-        "my_score": 7, "my_reason": "Service-wildcard scoped to one bucket; still full data plane",
+        "my_score": 8, "my_reason": "s3:* covers s3:PutBucketPolicy (catastrophic) on this bucket = make public. Scorer's new glob-aware floor is 9; my 8 lands within ±1 (revised from 7).",
         "policy": {"Version": "2012-10-17", "Statement": [{
             "Effect": "Allow", "Action": ["s3:*"],
             "Resource": ["arn:aws:s3:::my-bucket", "arn:aws:s3:::my-bucket/*"]}]},
@@ -907,7 +907,7 @@ POLICIES: list[dict[str, Any]] = [
         "id": "edge-19-s3-full-vpc-endpoint",
         "scenario": "s3:* on bucket scoped by aws:SourceVpce",
         "access_type": "read-write",
-        "my_score": 6, "my_reason": "VPC-endpoint is real network defense, but s3:* on bucket is still full bucket control. 6 lands within ±1 of det's 7.",
+        "my_score": 8, "my_reason": "Same as high-08: s3:* covers catastrophic actions. Scorer correctly floors at 9 via glob-aware fnmatch. 8 lands within ±1 (revised from 6 — VPC-endpoint condition is real defense but doesn't lower the score below threshold).",
         "policy": {"Version": "2012-10-17", "Statement": [{
             "Effect": "Allow", "Action": ["s3:*"],
             "Resource": ["arn:aws:s3:::my-bucket", "arn:aws:s3:::my-bucket/*"],

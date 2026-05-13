@@ -1,0 +1,73 @@
+name: agent-90-notresource-policy-level-composition
+description: |
+  The per-statement NotResource handling (round 3 fix) sets
+  `wildcard_resource = broad_blast_resource = True` so the per-statement
+  rules apply as-if Resource: `*` were named. However, the policy-LEVEL
+  composition rule's `all_actions` collection (line 1539-1547) computes
+  `inclusive_broad` and `strict_broad` directly from
+  `_as_list(stmt.get("Resource"))` — without consulting NotResource.
+
+  Code location: src/iam_jit/review.py
+    - Line 1543: `resources_in_stmt = _as_list(stmt.get("Resource"))`
+    - Line 1544: `inclusive_broad = _resources_are_broad(resources_in_stmt)`
+    - Line 1545: `strict_broad = any(_is_strict_wild_top(r) for r in
+      resources_in_stmt)`
+    - The per-statement NotResource override at lines 1132-1134 is NOT
+      reflected in this policy-level pass.
+
+  Attack: split the recon + AssumeRole pattern such that the AssumeRole
+  statement uses NotResource (effectively "every role except this one")
+  instead of Resource. The per-statement rules score the AssumeRole
+  statement at 8 (NotResource promotion + sensitive-on-broad), but the
+  policy-level composition rule
+  (`has_assume_broad = any(... inclusive for a, inclusive, _ in
+  all_actions)`) sees inclusive_broad=False because resources_in_stmt
+  is empty. So the lateral-movement composition floor of 9 doesn't fire.
+
+  Same issue affects:
+    - Code-exec primitive on broad (line 1567) when the code-exec
+      statement uses NotResource. Confirmed only partly — the
+      code-exec-via-PassRole-composition uses `pass_role_any` (any case-
+      insensitive PassRole regardless of resource), so it still fires
+      when PassRole is via NotResource. But the standalone code-exec-on-
+      strict-broad floor (7) doesn't fire when the code-exec statement
+      uses NotResource.
+    - Secret-bearing-reads composition (line 1644) — requires `strict`,
+      which is False under NotResource.
+
+  Real risk: 9 (same lateral movement as agent-30). Scorer: 7.
+
+  Suggested fix: in the policy-level scan, also consider NotResource
+  when computing inclusive_broad / strict_broad:
+
+    not_resources_in_stmt = _as_list(stmt.get("NotResource"))
+    if not_resources_in_stmt and not any(
+        r == "*" or r.endswith(":*") for r in not_resources_in_stmt
+    ):
+        # NotResource expansion = effectively broad
+        inclusive_broad = True
+        strict_broad = True
+
+  Apply once, before the inner `for a in _as_list(stmt.get("Action"))`
+  loop.
+policy:
+  Version: '2012-10-17'
+  Statement:
+    - Effect: Allow
+      Action:
+        - iam:ListRoles
+        - iam:GetRole
+        - iam:ListAttachedRolePolicies
+      Resource: '*'
+    - Effect: Allow
+      Action: sts:AssumeRole
+      NotResource:
+        - arn:aws:iam::123456789012:role/already-using
+request:
+  spec:
+    access_type: read-write
+    duration:
+      duration_hours: 1
+expected:
+  score_min: 9
+  must_auto_approve: false

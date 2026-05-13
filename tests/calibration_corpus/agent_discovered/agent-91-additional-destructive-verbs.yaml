@@ -1,0 +1,65 @@
+name: agent-91-additional-destructive-verbs
+description: |
+  The destructive-verb prefix list at lines 1263-1266 and 1357-1360 is:
+
+    ("Delete", "Destroy", "Reset", "Terminate", "Disable", "Stop",
+     "Revoke", "Cancel", "Drop")
+
+  AWS uses additional destructive-class verb prefixes that are not in
+  this list and therefore don't trigger the destructive-on-broad floor
+  (8) or the destructive-action-wildcard floor (7). Examples:
+
+    - `Detach` — ec2:DetachVolume (removes EBS from running instance,
+      service outage), ec2:DetachNetworkInterface (network outage),
+      iam:DetachRolePolicy (permission removal / DoS).
+    - `Disassociate` — ec2:DisassociateIamInstanceProfile (strips an
+      instance's role), ec2:DisassociateAddress (release Elastic IPs),
+      route53:DisassociateVPCFromHostedZone (DNS isolation).
+    - `Remove` — iam:RemoveUserFromGroup (deauthorize), iam:RemoveRole-
+      FromInstanceProfile (strip instance role), rds:RemoveTagsFrom-
+      Resource, ec2:RemoveTags.
+    - `Suspend` — autoscaling:SuspendProcesses (freeze ASG healing),
+      organizations:DisableAWSServiceAccess (service-linked-role break).
+    - `Abort` — s3:AbortMultipartUpload (cancel uploads — partial wipe).
+    - `Eject` / `Expire` / `Invalidate` / `Purge` — various services.
+
+  Code location: src/iam_jit/review.py
+    - Line 1263-1266 (action-name-glob destructive branch)
+    - Line 1357-1360 (destructive-on-broad-resource floor)
+
+  Test: ec2:DetachVolume + ec2:DetachNetworkInterface + ec2:Disassociate-
+  IamInstanceProfile on Resource: `*` — every running instance can be
+  separated from its disks / NICs / instance profile in one call.
+  Real risk: 7 (account-wide service-disruption tier). Scorer: 6 (only
+  the state-changing-on-broad floor at 6).
+
+  Suggested fix: expand the prefix tuple to:
+
+    destructive_verbs = (
+      "Delete", "Destroy", "Reset", "Terminate", "Disable", "Stop",
+      "Revoke", "Cancel", "Drop", "Detach", "Disassociate", "Remove",
+      "Suspend", "Abort", "Purge", "Kill", "Eject",
+    )
+
+  Apply the case-fix from agent-87 at the same time (lowercase both
+  sides). For tag-mutation verbs like `RemoveTags`, the agent-84 ABAC-
+  bypass concern already adds these to high-impact; that's complementary.
+policy:
+  Version: '2012-10-17'
+  Statement:
+    - Effect: Allow
+      Action:
+        - ec2:DetachVolume
+        - ec2:DetachNetworkInterface
+        - ec2:DisassociateIamInstanceProfile
+        - ec2:DisassociateAddress
+        - autoscaling:SuspendProcesses
+      Resource: '*'
+request:
+  spec:
+    access_type: read-write
+    duration:
+      duration_hours: 1
+expected:
+  score_min: 7
+  must_auto_approve: false

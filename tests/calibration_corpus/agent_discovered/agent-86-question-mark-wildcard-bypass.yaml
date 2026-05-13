@@ -1,0 +1,65 @@
+name: agent-86-question-mark-wildcard-bypass
+description: |
+  AWS IAM treats BOTH `*` and `?` as wildcard meta-characters in action
+  names: `*` matches any number of characters, `?` matches exactly one.
+  An attacker can use `?` to bypass every action-set membership check
+  and every glob-matching rule in the scorer.
+
+  Examples that all hit catastrophic actions in production:
+    - `iam:?ttachRolePolicy` → matches iam:AttachRolePolicy
+    - `iam:?utRolePolicy` → matches iam:PutRolePolicy
+    - `iam:?reateAccessKey` → matches iam:CreateAccessKey
+    - `iam:?reateUser` → matches iam:CreateUser
+    - `kms:?cheduleKeyDeletion` → matches kms:ScheduleKeyDeletion
+
+  Code location: src/iam_jit/review.py
+    - Line 1215: `if "*" in action and not action.endswith(":*"):` — the
+      action-name-glob branch only triggers when `*` is present. `?` is
+      not recognized.
+    - Line 901: read-only mismatch check uses the same `"*" in action`
+      gate, so a read-only request with `iam:?reateAccessKey` slips
+      through too.
+    - Line 1159: service-portion wildcard only checks `"*" in service`,
+      so `?am:CreateAccessKey` (`?am` = `iam`) also bypasses the
+      `*:Action` rule.
+    - Lines 1456, 1436, 1317, 1291: set-membership checks use `action.lower()
+      in <SET>_LC` — an action containing `?` is never in the literal
+      set, so the catastrophic / high-impact / high-risk / PassRole
+      rules all miss.
+
+  Real risk: 9 — `iam:?ttachRolePolicy` on Resource: `*` is identical
+  in effect to `iam:AttachRolePolicy` on Resource: `*` at AWS evaluation
+  time, which is catastrophic.
+
+  Observed scorer output: 6 (sensitive-service-on-broad floor only).
+  Gap: +3 against catastrophic-tier risk; +5 if the resource is narrow
+  (scorer scores 1, real is 6+).
+
+  Suggested fix: in every wildcard-detection check, treat `?` the same
+  as `*`. Concretely:
+    - For glob expansion (catastrophic-fnmatch, destructive-prefix-glob),
+      use `fnmatch.fnmatchcase` directly (already handles `?`).
+    - For set-membership lookups, expand the attacker's action against
+      `_CATASTROPHIC_ACTIONS_LC` / `_HIGH_IMPACT_MUTATION_ACTIONS_LC`
+      via fnmatch when the action contains `*` OR `?`. Currently only
+      the catastrophic-fnmatch branch uses fnmatch, and only when `*`
+      is present.
+    - For the service-wildcard branch (line 1159), change the predicate
+      to `if "*" in service or "?" in service`.
+policy:
+  Version: '2012-10-17'
+  Statement:
+    - Effect: Allow
+      Action:
+        - iam:?ttachRolePolicy
+        - iam:?reateAccessKey
+        - iam:?utRolePolicy
+      Resource: '*'
+request:
+  spec:
+    access_type: read-write
+    duration:
+      duration_hours: 1
+expected:
+  score_min: 9
+  must_auto_approve: false

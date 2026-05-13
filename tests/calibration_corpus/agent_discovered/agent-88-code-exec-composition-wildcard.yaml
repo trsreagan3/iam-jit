@@ -1,0 +1,77 @@
+name: agent-88-code-exec-composition-wildcard
+description: |
+  The code-execution-via-role composition rule (line 1556) checks
+  `has_code_exec = bool(action_names_lc & _CODE_EXECUTION_PRIMITIVES_LC)`
+  — a set intersection between LITERAL action names. If the attacker
+  writes a wildcard form like `lambda:Create*` or `lambda:*Function*`,
+  it never appears in `action_names_lc` as a literal entry that matches
+  any specific code-exec primitive, so the composition rule misses.
+
+  Code location: src/iam_jit/review.py
+    - Line 1555: `action_names_lc = {a.lower() for a in action_names}`
+    - Line 1556: `has_code_exec = bool(action_names_lc & _CODE_EXECUTION_
+      PRIMITIVES_LC)` — set intersection, no fnmatch.
+    - Line 1567: the standalone code-exec-on-strict-broad rule uses
+      `_canonical_action(a) in _CODE_EXECUTION_PRIMITIVES_LC` — same
+      issue (no fnmatch expansion of the attacker's wildcard).
+
+  Test cases:
+    - `lambda:Create*` on Resource: `*` + `iam:PassRole` on narrow admin
+      role → expected 9 (RCE-as-admin), actual 5.
+    - `lambda:*Function*` on `*` + `iam:PassRole` on narrow → actual 5
+      vs expected 9.
+    - `ec2:Run*` on `*` + `iam:PassRole` narrow → matches RunInstances,
+      RunScheduledInstances; same composition; expected 9, actual ~5.
+
+  Same root cause affects the IAM-recon + sts:AssumeRole composition
+  (line 1615-1622): `iam_recon_actions_lc` is an exact set; an attacker
+  using `iam:List*` + `iam:Get*` (which definitely matches ListRoles,
+  GetRole, etc.) does not trigger the composition. Confirmed: that
+  policy scores 7 instead of 9.
+
+  Real risk: 9 — both wildcards are strict supersets of the literal
+  action names that the rule wants to detect.
+
+  Why round 1-3 missed it: the composition rule was ADDED in round 1
+  (agent-03-08 et al.) but only tested with literal action names.
+  Round 3 added the catastrophic-fnmatch rule for action-name globs,
+  but the COMPOSITION rule never got the same fnmatch expansion.
+
+  Suggested fix: in the composition rules, expand the attacker's actions
+  via fnmatch against the primitive sets:
+
+    def _action_covers_any(a: str, target_set_lc: frozenset[str]) -> bool:
+        a_lc = _canonical_action(a)
+        if "*" in a_lc or "?" in a_lc:
+            return any(fnmatch.fnmatchcase(t, a_lc) for t in target_set_lc)
+        return a_lc in target_set_lc
+
+    has_code_exec = any(
+        _action_covers_any(a, _CODE_EXECUTION_PRIMITIVES_LC)
+        for a in action_names
+    )
+
+  Apply to has_code_exec (1556), the standalone code-exec-on-broad rule
+  (1567), iam-recon composition (1619), and the cross-account-exfil
+  scan (1662). Pairing this with the agent-86 fix (recognize `?`) closes
+  both wildcard classes.
+policy:
+  Version: '2012-10-17'
+  Statement:
+    - Effect: Allow
+      Action:
+        - lambda:Create*
+        - lambda:Update*
+        - lambda:InvokeFunction
+      Resource: '*'
+    - Effect: Allow
+      Action: iam:PassRole
+      Resource: arn:aws:iam::123456789012:role/admin-power-role
+request:
+  spec:
+    access_type: read-write
+    duration:
+      duration_hours: 1
+expected:
+  score_min: 9
+  must_auto_approve: false

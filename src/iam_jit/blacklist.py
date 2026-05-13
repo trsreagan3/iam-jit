@@ -137,22 +137,59 @@ def _iter_actions(policy: dict[str, Any]) -> Iterable[str]:
                         yield a
 
 
+def _has_iam_wildcard(s: str) -> bool:
+    """True if `s` contains an IAM wildcard primitive (`*` or `?`).
+
+    IAM treats both `*` (any string) and `?` (any single char) as
+    wildcards in action/resource patterns. Round-4 white-box agent
+    found that submitted-action `iam:?reateAccessKey` slipped past a
+    blacklist rule `iam:CreateAccessKey` because fnmatch is asymmetric:
+    `fnmatchcase(submitted, pattern)` only treats `pattern` as a glob,
+    so a wildcard on the SUBMITTED side bypassed the literal rule.
+    """
+    return "*" in s or "?" in s
+
+
+def _action_matches_rule(action: str, rule_pattern: str) -> bool:
+    """Bidirectional wildcard-aware match between submitted action and
+    blacklist rule pattern.
+
+    The naïve approach (`fnmatch(action, rule)`) only works when the
+    rule contains wildcards. If the attacker SUBMITS a wildcarded
+    action like `iam:?reateAccessKey`, a literal rule
+    `iam:CreateAccessKey` would never match. We fix this by trying
+    both directions: rule-as-pattern AND submitted-action-as-pattern.
+    """
+    a_lc = action.lower()
+    r_lc = rule_pattern.lower()
+    # Direction 1 (the normal case): rule is the pattern.
+    if fnmatch.fnmatchcase(a_lc, r_lc):
+        return True
+    # Direction 2: submitted action contains wildcards, so treat IT as
+    # the pattern. The rule hits if its literal action is COVERED by
+    # the submitted action's glob.
+    if _has_iam_wildcard(a_lc) and not _has_iam_wildcard(r_lc):
+        if fnmatch.fnmatchcase(r_lc, a_lc):
+            return True
+    return False
+
+
 def check_policy(
     policy: dict[str, Any], store: BlacklistStore
 ) -> BlacklistHit | None:
     """Return the first blacklist rule that matches an action in the policy,
     or None if no rule matches.
 
-    Matching is case-insensitive (AWS IAM treats action names case-
-    insensitively at evaluation time, so the blacklist must too).
+    Matching is case-insensitive AND wildcard-aware in both directions
+    (so `iam:?reateAccessKey` is caught by a literal `iam:CreateAccessKey`
+    rule). See `_action_matches_rule`.
     """
     rules = store.list_rules()
     if not rules:
         return None
     for action in _iter_actions(policy):
-        action_lc = action.lower()
         for rule in rules:
-            if fnmatch.fnmatchcase(action_lc, rule.pattern.lower()):
+            if _action_matches_rule(action, rule.pattern):
                 return BlacklistHit(
                     rule_id=rule.rule_id,
                     pattern=rule.pattern,

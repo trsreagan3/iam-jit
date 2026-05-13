@@ -1,0 +1,68 @@
+name: agent-92-narrow-write-floor-order-dependent
+description: |
+  Narrow-write floor loop (lines 1479-1491) is order-dependent: it
+  breaks after the FIRST action whose level matches Write / Permissions
+  management OR Tagging. If a Tagging-level action appears in the action
+  list BEFORE a Write-level action, the loop stops at Tagging (floor 2)
+  and the Write floor (3) never fires.
+
+  Code location: src/iam_jit/review.py
+    for action in actions:
+        if action == "*" or ":" not in action or "*" in action:
+            continue
+        level = _action_level(action)
+        if level in ("Write", "Permissions management"):
+            score = max(score, 3)
+            break
+        elif level == "Tagging":
+            score = max(score, 2)
+            break    # <-- premature break
+
+  Reproducer:
+    - Action: [ec2:CreateTags, ec2:CreateVpc] on a narrow VPC ARN.
+      Tagging level first → loop breaks after CreateTags at score 2.
+      score = 2.
+    - Action: [ec2:CreateVpc, ec2:CreateTags] on same narrow VPC ARN.
+      Write first → loop breaks after CreateVpc at score 3. score = 3.
+
+  Gap: ±1 entirely from action-list ordering, with no security
+  significance to the order. Not exploitable as a bypass (both scores
+  are far below auto-approve threshold) but breaks deterministic-
+  reproducibility for callers who normalize their action lists
+  differently.
+
+  Suggested fix: remove the early break, OR track the max level seen
+  across the whole action list and apply the corresponding floor once
+  at the end:
+
+    level_floor = 0
+    for action in actions:
+        if action == "*" or ":" not in action or "*" in action:
+            continue
+        level = _action_level(action)
+        if level in ("Write", "Permissions management"):
+            level_floor = max(level_floor, 3)
+        elif level == "Tagging":
+            level_floor = max(level_floor, 2)
+    if level_floor:
+        score = max(score, level_floor)
+
+  Sensitive-service narrow-read floor at line 1498-1507 has the same
+  pattern but its possible scores all collapse to 2, so the bug there is
+  null.
+policy:
+  Version: '2012-10-17'
+  Statement:
+    - Effect: Allow
+      Action:
+        - ec2:CreateTags
+        - ec2:CreateVpc
+      Resource: arn:aws:ec2:us-east-1:123456789012:vpc/vpc-deadbeef
+request:
+  spec:
+    access_type: read-write
+    duration:
+      duration_hours: 1
+expected:
+  score_min: 3
+  must_auto_approve: true

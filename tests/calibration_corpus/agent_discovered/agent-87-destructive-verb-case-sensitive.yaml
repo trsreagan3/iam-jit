@@ -1,0 +1,52 @@
+name: agent-87-destructive-verb-case-sensitive
+description: |
+  The destructive-verb prefix check uses `action_name.startswith(("Delete",
+  "Destroy", "Reset", "Terminate", "Disable", "Stop", "Revoke", "Cancel",
+  "Drop"))` — case-sensitive. AWS IAM treats action names case-
+  insensitively, so `s3:deletebucket` on Resource: `*` is identical to
+  `s3:DeleteBucket` on Resource: `*` at AWS evaluation time.
+
+  Code location: src/iam_jit/review.py
+    - Line 1357-1361 (destructive-on-broad rule): `action_name.startswith
+      (destructive_verbs)` where `destructive_verbs` is the canonical-
+      case tuple.
+    - Line 1263-1267 (action-name-wildcard destructive branch): same
+      case-sensitive `startswith` check.
+
+  Test cases (each scores +3 to +4 lower than the canonical-case form):
+    - `s3:deletebucket` on `*` → score 4 (canonical `s3:DeleteBucket` → 8)
+    - `dynamodb:delete*` on `*` → score 5 (canonical `dynamodb:Delete*` → 8)
+    - `ec2:terminateinstances` on `*` → score 4 (canonical → 8)
+    - `cloudtrail:deletetrail` on `*` → score 9 (catastrophic, fine) BUT
+      `cloudtrail:deletechannel` (non-catastrophic) on `*` → 4 vs 8.
+
+  Real risk: 8 (destructive verb on broad resource = wipe-everything tier).
+
+  Why round 1-3 missed it: the round-2 case-insensitivity sweep
+  normalized set-membership lookups (`action.lower() in <SET>_LC`) but
+  the destructive-verb check is a separate `startswith` against literal
+  capitalized prefixes — that path was not touched in round 2.
+
+  Suggested fix: lowercase both sides. Change to:
+    `action_name.lower().startswith(("delete", "destroy", "reset",
+    "terminate", "disable", "stop", "revoke", "cancel", "drop"))`.
+  Apply at lines 1267 AND 1361.
+policy:
+  Version: '2012-10-17'
+  Statement:
+    - Effect: Allow
+      Action:
+        - s3:deletebucket
+        - s3:deleteobject
+        - ec2:terminateinstances
+        - rds:deletedbinstance
+        - dynamodb:deletetable
+      Resource: '*'
+request:
+  spec:
+    access_type: read-write
+    duration:
+      duration_hours: 1
+expected:
+  score_min: 8
+  must_auto_approve: false
