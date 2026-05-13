@@ -45,4 +45,20 @@ PATTERNS: list[Pattern] = [
         wildcard_resources=("*",),
         access_hint="read",
     ),
+    Pattern(
+        name="cloudwatch-metrics-write",
+        phrases=(
+            "publish metric", "put metric", "emit metric", "write metric",
+            "publish custom metric", "send metric", "report metric",
+            "metric data",
+        ),
+        allow_actions=(
+            "cloudwatch:PutMetricData",
+            "cloudwatch:ListMetrics",
+        ),
+        deny_actions=("cloudwatch:PutMetricData",),
+        resource_kinds=(),
+        wildcard_resources=("*",),
+        access_hint="write",
+    ),
 ]

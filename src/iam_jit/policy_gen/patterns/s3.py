@@ -10,8 +10,11 @@ PATTERNS: list[Pattern] = [
         phrases=(
             "read s3", "read from s3", "get s3 object", "download from s3",
             "fetch from s3", "list s3", "list bucket", "list objects",
-            "get object", "read bucket", "read from bucket", "read the",
+            "get object", "read bucket", "read from bucket",
             "s3 read", "from s3", "from bucket",
+            # NB: removed "read the" — it was matching "read the Lambda
+            # function logs" and similar non-S3 descriptions. Policy-gen
+            # adversarial loop round 1 finding.
         ),
         allow_actions=(
             "s3:GetObject",

@@ -33,4 +33,21 @@ PATTERNS: list[Pattern] = [
         wildcard_resources=("arn:aws:iam::*:role/*",),
         access_hint="read",
     ),
+    Pattern(
+        name="iam-list-roles",
+        phrases=(
+            "list iam roles", "list roles", "enumerate roles",
+            "iam role inventory", "find roles", "list iam",
+            "list all roles", "roles tagged",
+        ),
+        allow_actions=(
+            "iam:ListRoles",
+            "iam:GetRole",
+            "iam:ListRoleTags",
+        ),
+        deny_actions=("iam:ListRoles",),
+        resource_kinds=(),
+        wildcard_resources=("arn:aws:iam::*:role/*",),
+        access_hint="read",
+    ),
 ]

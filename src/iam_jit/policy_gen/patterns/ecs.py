@@ -45,4 +45,20 @@ PATTERNS: list[Pattern] = [
         wildcard_resources=("*",),
         access_hint="write",
     ),
+    Pattern(
+        name="ecs-stop-task",
+        phrases=(
+            "stop ecs task", "kill ecs task", "kill the runaway", "kill runaway",
+            "terminate ecs task", "stop task", "ecs stop task",
+        ),
+        allow_actions=(
+            "ecs:StopTask",
+            "ecs:DescribeTasks",
+            "ecs:ListTasks",
+        ),
+        deny_actions=("ecs:StopTask",),
+        resource_kinds=("ecs-service",),
+        wildcard_resources=("*",),
+        access_hint="write",
+    ),
 ]

@@ -48,9 +48,10 @@ _NAME_PATTERNS: list[tuple[re.Pattern[str], int, str]] = [
     # Reverse: "the X function" / "the X lambda function"
     (re.compile(r"\bthe\s+([a-zA-Z][\w-]{1,63})\s+(?:lambda\s+)?function\b"), 1, "lambda-function"),
     # ---- DynamoDB tables ----
-    (re.compile(r"\b(?:dynamodb\s+table|the\s+table|ddb\s+table|table)\s+([a-zA-Z][\w.\-]{2,254})\b"), 1, "dynamodb-table"),
-    # Reverse: "the X table" / "the X dynamodb table"
-    (re.compile(r"\bthe\s+([a-zA-Z][\w.\-]{2,254})\s+(?:dynamodb\s+)?table\b"), 1, "dynamodb-table"),
+    (re.compile(r"\b(?:dynamodb\s+table|the\s+table|ddb\s+table|table)\s+([a-zA-Z][\w.\-]{2,254})\b", re.IGNORECASE), 1, "dynamodb-table"),
+    # Reverse: "the X table" / "the X dynamodb table" (case-insensitive
+    # for the literal "DynamoDB"/"dynamodb" since AWS people mix cases)
+    (re.compile(r"\bthe\s+([a-zA-Z][\w.\-]{2,254})\s+(?:dynamodb\s+)?table\b", re.IGNORECASE), 1, "dynamodb-table"),
     # ---- CloudWatch log groups ----
     (re.compile(r"\blog\s+group\s+(/[\w./\-]+)\b"), 1, "logs-group"),
     # ---- SSM parameters ----
@@ -62,9 +63,11 @@ _NAME_PATTERNS: list[tuple[re.Pattern[str], int, str]] = [
     # Reverse: "with the X role" / "the X role"
     (re.compile(r"\bthe\s+([a-zA-Z][\w+=,.@\-]{2,63})\s+role\b"), 1, "iam-role"),
     # ---- SQS queues ----
-    (re.compile(r"\b(?:sqs\s+)?queue\s+([a-zA-Z][\w\-]{0,79})\b"), 1, "sqs-queue"),
+    # Require a NAME-like token; reject the service acronym SQS itself.
+    # "queue SQS queue" would otherwise capture "SQS" as the queue name.
+    (re.compile(r"\b(?:sqs\s+queue|to\s+queue|from\s+queue|the\s+queue|queue)\s+(?!sqs\b)([a-zA-Z][\w\-]{1,79})\b", re.IGNORECASE), 1, "sqs-queue"),
     # Reverse: "the X queue"
-    (re.compile(r"\bthe\s+([a-zA-Z][\w\-]{2,79})\s+queue\b"), 1, "sqs-queue"),
+    (re.compile(r"\bthe\s+(?!sqs\b)([a-zA-Z][\w\-]{2,79})\s+queue\b", re.IGNORECASE), 1, "sqs-queue"),
     # ---- SNS topics ----
     (re.compile(r"\b(?:sns\s+)?topic\s+([a-zA-Z][\w\-]{0,255})\b"), 1, "sns-topic"),
     # ---- ECS services ----
@@ -77,14 +80,19 @@ _NAME_PATTERNS: list[tuple[re.Pattern[str], int, str]] = [
     # Reverse: "the X cluster"
     (re.compile(r"\bthe\s+([a-z][a-z0-9\-]{2,62})\s+(?:aurora\s+|rds\s+)?cluster\b"), 1, "rds-cluster"),
     # ---- KMS keys / aliases ----
-    # Forward: "kms key X" / "kms alias X"
-    (re.compile(r"\bkms\s+(?:key|alias)\s+([\w/\-]+)\b"), 1, "kms-key"),
-    # Reverse: "the X kms key" / "X kms key" / "the X key" (when "kms" appears nearby)
-    (re.compile(r"\bthe\s+([a-zA-Z][\w\-]{1,127})\s+kms\s+(?:key|alias)\b"), 1, "kms-key"),
-    (re.compile(r"\b([a-zA-Z][\w\-]{1,127})\s+kms\s+(?:key|alias)\b"), 1, "kms-key"),
-    # "decrypt with X key" form — only fires when "decrypt" / "encrypt" is nearby
-    # to avoid false positives on "the prod key" (where "key" is a generic word).
-    (re.compile(r"\b(?:with|using)\s+([\w\-]+)\s+key\b"), 1, "kms-key"),
+    # Forward: "kms key X" / "kms alias X". Reject "kms" as the value
+    # itself (otherwise "the kms key alias/foo" produces a bogus
+    # extraction `key/kms`).
+    (re.compile(r"\bkms\s+(?:key|alias)\s+(?!kms\s)([\w/\-]+)\b", re.IGNORECASE), 1, "kms-key"),
+    # Reverse: "the X kms key" / "X kms key" (reject `kms` again).
+    (re.compile(r"\bthe\s+(?!kms\s)([a-zA-Z][\w\-]{1,127})\s+kms\s+(?:key|alias)\b", re.IGNORECASE), 1, "kms-key"),
+    (re.compile(r"\b(?!kms\s)([a-zA-Z][\w\-]{1,127})\s+kms\s+(?:key|alias)\b", re.IGNORECASE), 1, "kms-key"),
+    # "decrypt with X key" form — only fires after "with"/"using" so
+    # generic "key" in other contexts doesn't trigger.
+    (re.compile(r"\b(?:with|using)\s+(?!kms\s)([\w\-]+)\s+key\b", re.IGNORECASE), 1, "kms-key"),
+    # ---- Step Functions state machines ----
+    (re.compile(r"\b(?:state\s+machine|workflow|step\s+function)\s+([a-zA-Z][\w\-]{1,79})\b", re.IGNORECASE), 1, "states-state-machine"),
+    (re.compile(r"\bthe\s+([a-zA-Z][\w\-]{2,79})\s+state\s+machine\b", re.IGNORECASE), 1, "states-state-machine"),
 ]
 
 # Reserved English words that should NOT be parsed as resource names
@@ -259,5 +267,7 @@ def _construct_arn(
         if name.startswith("alias/"):
             return f"arn:{partition}:kms:{region}:{account}:{name}"
         return f"arn:{partition}:kms:{region}:{account}:key/{name}"
+    if kind == "states-state-machine":
+        return f"arn:{partition}:states:{region}:{account}:stateMachine:{name}"
     # Fallback: just embed the name; let the scorer flag.
     return f"arn:{partition}:{kind}:{region}:{account}:{name}"

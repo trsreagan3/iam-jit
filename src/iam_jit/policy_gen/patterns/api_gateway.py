@@ -50,7 +50,7 @@ PATTERNS: list[Pattern] = [
             "states:GetExecutionHistory",
         ),
         deny_actions=("states:StartExecution",),
-        resource_kinds=(),
+        resource_kinds=("states-state-machine",),
         wildcard_resources=("arn:aws:states:*:*:stateMachine:*",),
         access_hint="read-write",
     ),
