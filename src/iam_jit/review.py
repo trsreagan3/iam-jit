@@ -1937,6 +1937,31 @@ def _deterministic(
                 "a string or list of strings."
             )
 
+    # Missing-Action on Allow statement → defect signal. When a
+    # Statement has Effect=Allow + Resource present + Action key
+    # absent (or empty), AWS rejects at attach time but the scorer
+    # flags BEFORE that. Floor 5. Round 8 WB agent-633.
+    if isinstance(statements, list):
+        for stmt in statements:
+            if not isinstance(stmt, dict):
+                continue
+            if not _effect_is_allow(stmt):
+                continue
+            if (
+                "Action" not in stmt
+                and "NotAction" not in stmt
+                and ("Resource" in stmt or "Principal" in stmt)
+            ):
+                score = max(score, 5)
+                factors.append(
+                    "Statement has `Effect: Allow` and `Resource` (or "
+                    "`Principal`) but NO `Action` / `NotAction`. AWS "
+                    "rejects this as malformed at policy-attach, but "
+                    "the shape signals an author error or stripped-"
+                    "down policy fragment — escalate for review."
+                )
+                break
+
     # Missing-Resource on Allow identity-policy statement → implicit
     # `Resource: *` (worst-case). When a statement has `Action` but
     # NO `Resource`, NO `NotResource`, and NO `Principal` (it's not
@@ -2341,6 +2366,50 @@ def _deterministic(
                                 "Consider an org-scoped `aws:PrincipalOrgID` "
                                 "condition instead of naming individual accounts."
                             )
+
+        # CloudTrail-bucket-targeted attack detection. A narrow bucket
+        # ARN that matches audit-bucket naming patterns combined with
+        # a destructive S3 action (PutLifecycleConfiguration to expire
+        # objects, DeleteBucketPolicy to remove write protection, etc.)
+        # is the silent-audit-disablement primitive. Bucket sounds
+        # narrow but its CONTENT is the audit trail. Round 8 BB agent-502.
+        _AUDIT_BUCKET_NAME_PATTERNS = (
+            "cloudtrail", "audit-log", "audit_log",
+            "aws-cloudtrail-logs", "config-bucket", "guardduty-",
+            "securityhub-",
+        )
+        _AUDIT_TARGET_ACTIONS = frozenset({
+            "s3:putbucketlifecycleconfiguration",
+            "s3:putlifecycleconfiguration",
+            "s3:deletebucketpolicy",
+            "s3:putbucketpolicy",
+            "s3:deletebucket",
+            "s3:putobject",      # write garbage to disrupt trail integrity
+        })
+        for action in actions:
+            canon = _canonical_action(action)
+            if canon not in _AUDIT_TARGET_ACTIONS:
+                continue
+            for r in resources:
+                if not r.startswith("arn:aws:s3:::"):
+                    continue
+                bucket_name = r.split(":::", 1)[1].split("/", 1)[0].lower()
+                if any(pat in bucket_name for pat in _AUDIT_BUCKET_NAME_PATTERNS):
+                    score = max(score, 7)
+                    factors.append(
+                        f"`{action}` on bucket `{bucket_name}` — the "
+                        "bucket name matches an audit-log pattern "
+                        "(cloudtrail/audit/config/securityhub). "
+                        "Modifying lifecycle / policy / objects on an "
+                        "audit bucket is the silent-log-destruction "
+                        "primitive (MITRE ATT&CK T1562.008)."
+                    )
+                    suggestions.append(
+                        "Verify the bucket isn't actually an audit-log "
+                        "destination before approving. If it is, this "
+                        "request requires security-team sign-off."
+                    )
+                    break
 
         # Policy-variable injection in Resource — `${aws:PrincipalTag/...}`,
         # `${aws:RequestTag/...}`, `${aws:ResourceTag/...}` expand at
