@@ -405,6 +405,22 @@ _CATASTROPHIC_ACTIONS = frozenset(
 )
 
 
+# AWS IAM treats action names case-insensitively. The action-set constants
+# above use canonical-case strings (matching the AWS docs); the
+# comparison-time helpers below normalize to lowercase so policies with
+# `iam:attachrolepolicy` are caught by the same rules as
+# `iam:AttachRolePolicy`. Discovered by adversarial agent round 2 —
+# `iam:attachrolepolicy` was bypassing the catastrophic-action check.
+
+_CATASTROPHIC_ACTIONS_LC = frozenset(a.lower() for a in _CATASTROPHIC_ACTIONS)
+_HIGH_IMPACT_MUTATION_ACTIONS_LC = frozenset(a.lower() for a in _HIGH_IMPACT_MUTATION_ACTIONS)
+_HIGH_RISK_ACTIONS_LC = frozenset(a.lower() for a in _HIGH_RISK_ACTIONS)
+_DECEPTIVE_WRITE_ACTIONS_LC = frozenset(a.lower() for a in _DECEPTIVE_WRITE_ACTIONS)
+_SECRET_BEARING_READS_LC = frozenset(a.lower() for a in _SECRET_BEARING_READS)
+_CROSS_ACCOUNT_EXFIL_ACTIONS_LC = frozenset(a.lower() for a in _CROSS_ACCOUNT_EXFIL_ACTIONS)
+_CODE_EXECUTION_PRIMITIVES_LC = frozenset(a.lower() for a in _CODE_EXECUTION_PRIMITIVES)
+
+
 def _is_broad_resource(r: str) -> bool:
     """A resource string is 'broad' if it covers an unbounded set of items.
 
@@ -601,6 +617,11 @@ def _deterministic(
     # services as sensitive) but not REMOVE built-ins.
     effective_sensitive = _SENSITIVE_SERVICES | set(extra_sensitive_services)
     effective_high_impact = _HIGH_IMPACT_MUTATION_ACTIONS | set(extra_high_impact_actions)
+    # Lower-cased mirror for case-insensitive comparison. AWS IAM treats
+    # action names case-insensitively, so the scorer must too — otherwise
+    # `iam:attachrolepolicy` slips past `_HIGH_IMPACT_MUTATION_ACTIONS`
+    # while `iam:AttachRolePolicy` is caught. (Discovered round 2.)
+    effective_high_impact_lc = frozenset(a.lower() for a in effective_high_impact)
     if not policy or not isinstance(policy.get("Statement"), list):
         return 1, ["No statements in policy"], []
 
@@ -653,7 +674,7 @@ def _deterministic(
                     # service we haven't indexed yet).
                     continue
 
-                if action in _DECEPTIVE_WRITE_ACTIONS:
+                if action.lower() in _DECEPTIVE_WRITE_ACTIONS_LC:
                     score = max(score, 6)
                     factors.append(
                         f"`{action}` is IAM-classified as `{level}` despite being commonly used "
@@ -839,7 +860,10 @@ def _deterministic(
         for action in actions:
             if action == "*":
                 continue
-            service = action.split(":", 1)[0] if ":" in action else action
+            # AWS IAM is case-insensitive on action names AND service
+            # prefixes. Lowercase the service so `IAM:*` matches the
+            # same rules as `iam:*` (the canonical set is all-lower).
+            service = (action.split(":", 1)[0] if ":" in action else action).lower()
 
             if action.endswith(":*"):
                 if service in effective_sensitive:
@@ -940,7 +964,7 @@ def _deterministic(
                         "what the caller already has. Avoid auto-approve "
                         "even when PassRole is scoped to one role."
                     )
-            elif action in _HIGH_RISK_ACTIONS and wildcard_resource:
+            elif action.lower() in _HIGH_RISK_ACTIONS_LC and wildcard_resource:
                 score = max(score, 7)
                 factors.append(
                     f"`{action}` on Resource: `*` (broad access to "
@@ -1059,7 +1083,7 @@ def _deterministic(
         # blast — a single DNS record change can move all of prod
         # traffic. See `_HIGH_IMPACT_MUTATION_ACTIONS` for the list.
         for action in actions:
-            if action in effective_high_impact:
+            if action.lower() in effective_high_impact_lc:
                 score = max(score, 5)
                 factors.append(
                     f"`{action}` is a high-impact mutation — a single "
@@ -1079,7 +1103,7 @@ def _deterministic(
         # is never appropriate even on a single narrowly-resourced ARN.
         # See `_CATASTROPHIC_ACTIONS`.
         for action in actions:
-            if action in _CATASTROPHIC_ACTIONS:
+            if action.lower() in _CATASTROPHIC_ACTIONS_LC:
                 score = max(score, 9)
                 factors.append(
                     f"`{action}` is catastrophic in blast radius "
@@ -1125,7 +1149,7 @@ def _deterministic(
             for action in actions:
                 if action == "*" or ":" not in action or "*" in action:
                     continue
-                svc = action.split(":", 1)[0]
+                svc = action.split(":", 1)[0].lower()
                 if svc in effective_sensitive:
                     level = _action_level(action)
                     if level in ("Read", "List"):
@@ -1178,11 +1202,12 @@ def _deterministic(
     # If the policy contains an action that creates/executes code AND
     # ALSO contains iam:PassRole, the combination = RCE-as-the-passed-role.
     # Floor at 8 if PassRole is on a narrow ARN; 9 if on a wildcard.
-    has_code_exec = bool(action_names & _CODE_EXECUTION_PRIMITIVES)
+    action_names_lc = {a.lower() for a in action_names}
+    has_code_exec = bool(action_names_lc & _CODE_EXECUTION_PRIMITIVES_LC)
     pass_role_broad = any(
-        a == "iam:PassRole" and inclusive for a, inclusive, _ in all_actions
+        a.lower() == "iam:passrole" and inclusive for a, inclusive, _ in all_actions
     )
-    pass_role_any = "iam:PassRole" in action_names
+    pass_role_any = "iam:passrole" in action_names_lc
 
     if has_code_exec and pass_role_any:
         # Even with a narrow PassRole resource ARN, the COMBINATION is
@@ -1192,7 +1217,10 @@ def _deterministic(
         # RCE-as-admin. Floor at 9 regardless of resource scope.
         floor = 9
         score = max(score, floor)
-        which = sorted(action_names & _CODE_EXECUTION_PRIMITIVES)[:3]
+        # Find which actions matched (preserve their original case for display)
+        which = sorted([
+            a for a in action_names if a.lower() in _CODE_EXECUTION_PRIMITIVES_LC
+        ])[:3]
         factors.append(
             f"Code-execution-via-role composition: {which[0]}"
             + (f" (+ {len(which) - 1} more)" if len(which) > 1 else "")
@@ -1212,13 +1240,13 @@ def _deterministic(
     # Listing IAM roles is enumeration; sts:AssumeRole on `role/*` is the
     # actual movement. Each statement on its own scores below threshold;
     # the combo is textbook lateral movement.
-    iam_recon_actions = {
+    iam_recon_actions_lc = frozenset(a.lower() for a in {
         "iam:ListRoles", "iam:GetRole", "iam:ListPolicies",
         "iam:ListAttachedRolePolicies", "iam:GetRolePolicy",
-    }
-    has_iam_recon = bool(action_names & iam_recon_actions)
+    })
+    has_iam_recon = bool(action_names_lc & iam_recon_actions_lc)
     has_assume_broad = any(
-        a == "sts:AssumeRole" and inclusive for a, inclusive, _ in all_actions
+        a.lower() == "sts:assumerole" and inclusive for a, inclusive, _ in all_actions
     )
     if has_iam_recon and has_assume_broad:
         # Lateral-movement-to-admin is full compromise; floor at 9.
@@ -1241,7 +1269,7 @@ def _deterministic(
     # (`bucket/*`) DON'T fire this — that's legitimate "read everything
     # in this app's bucket."
     for action, _inclusive, strict in all_actions:
-        if action in _SECRET_BEARING_READS and strict:
+        if action.lower() in _SECRET_BEARING_READS_LC and strict:
             score = max(score, 7)
             factors.append(
                 f"`{action}` on broad resource reads content that "
@@ -1260,7 +1288,7 @@ def _deterministic(
     # Floor at 8 regardless of resource scope (the "configuration"
     # itself is the attack — narrow target ARN doesn't help).
     for action, _inclusive, _strict in all_actions:
-        if action in _CROSS_ACCOUNT_EXFIL_ACTIONS:
+        if action.lower() in _CROSS_ACCOUNT_EXFIL_ACTIONS_LC:
             score = max(score, 8)
             factors.append(
                 f"`{action}` sets up ongoing cross-account / persistent "
