@@ -884,6 +884,12 @@ _CATASTROPHIC_ACTIONS = frozenset(
         # the same way DeleteTrail does. Round 7 agent-318.
         "cloudtrail:DeleteEventDataStore",
         "cloudtrail:UpdateEventDataStore",
+        # CloudTrail PutResourcePolicy — rewrites who can read/write
+        # the trail's data. Can be weaponized to deny CloudTrail
+        # itself the ability to write to its destination bucket,
+        # silently disabling audit. Round 8 agent-505.
+        "cloudtrail:PutResourcePolicy",
+        "cloudtrail:DeleteResourcePolicy",
     }
 )
 
@@ -1357,7 +1363,21 @@ def _effect_is_allow(stmt: dict) -> bool:
     eff = stmt.get("Effect")
     if eff is None:
         return True
-    return _norm_grammar_str(eff).lower() == "allow"
+    # Effect-as-list: some IAM tools emit `Effect: ["Allow"]` even
+    # though the canonical form is a bare string. Round 8 agent-610.
+    if isinstance(eff, list):
+        if not eff:
+            # Empty list — malformed → conservative worst-case.
+            return True
+        eff = eff[0]
+    # Effect-as-non-string (number, bool, dict). Same defect class.
+    if not isinstance(eff, str):
+        return True
+    normalized = _norm_grammar_str(eff).lower()
+    # Effect: "" — empty string, present but malformed. Round 8 agent-611.
+    if not normalized:
+        return True
+    return normalized == "allow"
 
 
 def _canonical_action(action: str) -> str:
