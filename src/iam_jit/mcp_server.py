@@ -1,0 +1,297 @@
+"""MCP (Model Context Protocol) server exposing iam-jit policy generation.
+
+Lets any MCP-aware agent (Claude Code, Cursor, custom Claude SDK
+builds, etc.) natively request scoped AWS IAM policies for specific
+tasks. The agent describes what it needs to do; the server returns a
+generated policy + risk score; the agent (or its orchestrator) decides
+whether to attach the policy to a JIT-issued STS credential.
+
+Architecture:
+  agent → MCP request: { task, context, bias }
+        ↓
+  this server: validates input, calls generate_policy(), runs the
+               output through the deterministic scorer
+        ↓
+  agent ← MCP response: { policy, risk_score, refinement_hints }
+
+The server uses the stdio transport (one MCP server per CLI invocation,
+typically spawned by the agent's MCP-host configuration). Stdio is the
+simplest transport — no auth, no network, perfect for local
+developer-facing agents.
+
+Spec reference: https://modelcontextprotocol.io/specification
+
+Implementation note: this is a MINIMAL JSON-RPC 2.0 over stdio
+implementation. We deliberately avoid pulling in heavy MCP SDK
+dependencies — the protocol surface we need is tiny (one tool, no
+prompts, no resources) and the spec is small. Going dependency-light
+also keeps the iam-jit install footprint usable for environments
+that don't want a full MCP SDK.
+
+Run as:
+  iam-jit mcp-server
+  # OR
+  python -m iam_jit.mcp_server
+
+Usage in Claude Desktop / Code:
+  Add to ~/.config/claude/mcp_settings.json:
+  {
+    "mcpServers": {
+      "iam-jit": {
+        "command": "iam-jit",
+        "args": ["mcp-server"]
+      }
+    }
+  }
+"""
+
+from __future__ import annotations
+
+import json
+import sys
+from typing import Any
+
+from .policy_gen import (
+    BIAS_ALLOW,
+    BIAS_DENY,
+    GenerationContext,
+    GenerationRequest,
+    Refinement,
+    generate_policy,
+)
+
+
+SERVER_NAME = "iam-jit"
+SERVER_VERSION = "0.2.0"
+MCP_PROTOCOL_VERSION = "2024-11-05"
+
+
+# Tool definition the agent will discover via the `tools/list` MCP call.
+# The `inputSchema` follows JSON Schema; MCP hosts (Claude Code/Desktop)
+# use it to validate before invoking the tool.
+TOOLS = [
+    {
+        "name": "generate_iam_policy",
+        "description": (
+            "Generate a minimum-scope AWS IAM policy for a described task. "
+            "The policy is scored by a deterministic risk engine (1-10) "
+            "and includes refinement hints if the output may be too broad "
+            "or too narrow. The agent should review the score and "
+            "refinement_hints before requesting credentials based on this "
+            "policy. Use this when the agent needs temporary scoped AWS "
+            "access (read S3, query DynamoDB, deploy Lambda, etc.) and "
+            "wants to avoid using long-lived admin credentials."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "required": ["task"],
+            "properties": {
+                "task": {
+                    "type": "string",
+                    "description": (
+                        "Plain-English description of the task. Be "
+                        "specific about resources (bucket name, function "
+                        "name, table name) and the operation (read, "
+                        "write, deploy)."
+                    ),
+                },
+                "account_id": {
+                    "type": "string",
+                    "description": "AWS account ID for ARN construction. Wildcards if omitted.",
+                },
+                "region": {
+                    "type": "string",
+                    "description": "AWS region. Wildcards if omitted.",
+                },
+                "partition": {
+                    "type": "string",
+                    "enum": ["aws", "aws-cn", "aws-us-gov"],
+                    "description": "AWS partition. Default: aws.",
+                },
+                "resources": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": (
+                        "Optional list of explicit resource ARNs. Use when "
+                        "the agent has already resolved a resource to its ARN."
+                    ),
+                },
+                "bias": {
+                    "type": "string",
+                    "enum": ["allow", "deny"],
+                    "description": (
+                        "How to resolve ambiguity in the task description. "
+                        "'allow' (default) includes more actions; 'deny' "
+                        "includes only explicit ones."
+                    ),
+                },
+                "exclude_actions": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": (
+                        "Refinement: actions (or service:* globs) to "
+                        "REMOVE from a prior result that was too broad."
+                    ),
+                },
+                "include_actions": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": (
+                        "Refinement: extra service:Action items to ADD "
+                        "to a prior result that was too narrow."
+                    ),
+                },
+                "rationale": {
+                    "type": "string",
+                    "description": (
+                        "Free-text reason for the refinement. Surfaces "
+                        "in audit logs for compliance review."
+                    ),
+                },
+            },
+        },
+    },
+]
+
+
+def _generate_for_mcp(args: dict[str, Any]) -> dict[str, Any]:
+    """Call generate_policy with MCP-flavored args; return MCP-flavored result."""
+    task = args.get("task", "")
+    if not isinstance(task, str) or not task.strip():
+        return {
+            "error": "task is required and must be a non-empty string",
+            "policy": None,
+        }
+    refinement = None
+    if (
+        args.get("exclude_actions")
+        or args.get("include_actions")
+        or args.get("rationale")
+    ):
+        refinement = Refinement(
+            exclude_actions=list(args.get("exclude_actions") or []),
+            include_actions=list(args.get("include_actions") or []),
+            rationale=args.get("rationale", ""),
+        )
+    bias = args.get("bias", "allow")
+    req = GenerationRequest(
+        task_description=task,
+        bias=BIAS_ALLOW if bias == "allow" else BIAS_DENY,
+        context=GenerationContext(
+            account_id=args.get("account_id"),
+            region=args.get("region"),
+            partition=args.get("partition", "aws"),
+            resources=list(args.get("resources") or []),
+        ),
+        refinement=refinement,
+    )
+    result = generate_policy(req)
+    return {
+        "policy": result.policy,
+        "matched_patterns": result.matched_patterns,
+        "confidence": result.confidence,
+        "scored_risk": result.scored_risk,
+        "risk_factors": result.risk_factors,
+        "risk_suggestions": result.risk_suggestions,
+        "suppressed_actions": result.suppressed_actions,
+        "refinement_hints": result.refinement_hints,
+        "unmatched_reason": result.unmatched_reason,
+        "reasons": result.reasons,
+    }
+
+
+def _handle_request(req: dict[str, Any]) -> dict[str, Any] | None:
+    """Handle one JSON-RPC 2.0 request; return the response dict.
+
+    Returns None for notifications (no `id` field) — JSON-RPC says
+    notifications get no response.
+    """
+    method = req.get("method")
+    rid = req.get("id")
+    params = req.get("params") or {}
+
+    if method == "initialize":
+        return _ok(rid, {
+            "protocolVersion": MCP_PROTOCOL_VERSION,
+            "capabilities": {"tools": {}},
+            "serverInfo": {"name": SERVER_NAME, "version": SERVER_VERSION},
+        })
+
+    if method == "tools/list":
+        return _ok(rid, {"tools": TOOLS})
+
+    if method == "tools/call":
+        tool_name = params.get("name")
+        if tool_name != "generate_iam_policy":
+            return _err(rid, -32601, f"unknown tool: {tool_name}")
+        args = params.get("arguments") or {}
+        result_payload = _generate_for_mcp(args)
+        # MCP tool result format: { content: [{type: "text", text: "..."}] }
+        return _ok(rid, {
+            "content": [
+                {
+                    "type": "text",
+                    "text": json.dumps(result_payload, indent=2),
+                }
+            ],
+            # Also include the structured payload for clients that
+            # support the experimental "structuredContent" field.
+            "structuredContent": result_payload,
+        })
+
+    if method in ("notifications/initialized", "notifications/cancelled"):
+        # Notification — no response.
+        return None
+
+    return _err(rid, -32601, f"method not found: {method}")
+
+
+def _ok(rid: object, result: object) -> dict[str, Any]:
+    return {"jsonrpc": "2.0", "id": rid, "result": result}
+
+
+def _err(rid: object, code: int, message: str) -> dict[str, Any]:
+    return {
+        "jsonrpc": "2.0",
+        "id": rid,
+        "error": {"code": code, "message": message},
+    }
+
+
+def main() -> int:
+    """Read JSON-RPC requests from stdin; write responses to stdout.
+
+    One request per line. The MCP stdio transport spec uses
+    line-delimited JSON (no Content-Length headers). Errors during
+    request processing are returned as JSON-RPC error responses, not
+    raised — the MCP host expects the server to stay alive.
+    """
+    for line in sys.stdin:
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            req = json.loads(line)
+        except json.JSONDecodeError as e:
+            # Can't return a structured error because we don't have an id;
+            # write a parse-error response with id=null per JSON-RPC.
+            resp = {
+                "jsonrpc": "2.0",
+                "id": None,
+                "error": {"code": -32700, "message": f"parse error: {e}"},
+            }
+            sys.stdout.write(json.dumps(resp) + "\n")
+            sys.stdout.flush()
+            continue
+        try:
+            resp = _handle_request(req)
+        except Exception as e:  # defensive — never crash the server
+            resp = _err(req.get("id"), -32603, f"internal error: {e}")
+        if resp is not None:
+            sys.stdout.write(json.dumps(resp) + "\n")
+            sys.stdout.flush()
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

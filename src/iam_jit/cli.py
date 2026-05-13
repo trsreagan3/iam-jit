@@ -553,5 +553,33 @@ def agent_grant(
             click.echo(f"  • {r}")
 
 
+@main.command("mcp-server")
+def mcp_server_cmd() -> None:
+    """Run the iam-jit MCP server on stdio.
+
+    Exposes the policy-generation feature to MCP-aware agents
+    (Claude Code, Claude Desktop, Cursor, custom Claude SDK builds).
+    Communicates via JSON-RPC over stdin/stdout — one request per
+    line. Typically launched by the agent's MCP host configuration:
+
+    \b
+    ~/.config/claude/mcp_settings.json:
+    {
+      "mcpServers": {
+        "iam-jit": {
+          "command": "iam-jit",
+          "args": ["mcp-server"]
+        }
+      }
+    }
+
+    The agent then has access to the `generate_iam_policy` tool, which
+    returns a scoped IAM policy + risk score + refinement hints for
+    any task description it submits.
+    """
+    from .mcp_server import main as mcp_main
+    sys.exit(mcp_main())
+
+
 if __name__ == "__main__":
     main()
