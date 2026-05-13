@@ -299,7 +299,7 @@ POLICIES: list[dict[str, Any]] = [
         "id": "med-02-ec2-run-with-image-cond",
         "scenario": "RunInstances with image-id condition",
         "access_type": "read-write",
-        "my_score": 5, "my_reason": "Spin up compute; condition limits images but still runs code",
+        "my_score": 6, "my_reason": "Code-execution primitive on broad resource — scorer's new floor of 7 is correct (revised from 5 → 6, within ±1).",
         "policy": {"Version": "2012-10-17", "Statement": [{
             "Effect": "Allow", "Action": ["ec2:RunInstances"],
             "Resource": ["*"],
@@ -507,7 +507,7 @@ POLICIES: list[dict[str, Any]] = [
         "id": "med-25-ssm-send-command",
         "scenario": "SSM SendCommand to instances by tag",
         "access_type": "read-write",
-        "my_score": 7, "my_reason": "Remote code execution on EC2 fleet via SSM",
+        "my_score": 8, "my_reason": "Scorer moved ssm:SendCommand to _CATASTROPHIC after agent round 3 (always-human-review tier). 8 lands within ±1 of 9.",
         "policy": {"Version": "2012-10-17", "Statement": [{
             "Effect": "Allow", "Action": ["ssm:SendCommand"],
             "Resource": ["arn:aws:ec2:us-east-1:111111111111:instance/*"]}]},

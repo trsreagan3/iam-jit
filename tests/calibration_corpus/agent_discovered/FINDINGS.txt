@@ -572,3 +572,283 @@ The blind spots above cluster into 8 fixable rule classes:
 # G. Defense-disablement actions without destructive-verb prefix. Add
 #    `Disassociate*`, `Update*-Detector/Recorder/Analyzer` to a stealth-
 #    disable class with floor 9. Closes agent-61.
+
+
+# ===========================================================
+# Round 3 — adversarial agent findings, 2026-05-13
+# ===========================================================
+# Round 3 ran black-box against the scorer with rounds 1+2's 57 fixes
+# in place. Found 24 additional blind spots with gap >= 2. They cluster
+# into 6 classes (H-M, continuing the round-2 numbering):
+
+## agent-62-notresource-narrow-action-bypass
+
+- Policy summary: s3:DeleteObject + s3:DeleteBucket + s3:PutObject with NotResource: [arn:aws:s3:::audit-bucket].
+- Det score: 3 (narrow-write floor)
+- Real risk: 8
+- Why scorer misses it: The NotResource branch only fires when `any("*" in a for a in actions)`. Specific (non-wildcard) actions skip the check entirely. Resource list is empty, so wildcard_resource=False and broad_blast_resource=False; the destructive-on-broad rule and high-risk-on-broad rule both gate on these. NotResource semantically means "every resource EXCEPT" — broader than Resource: '*' minus a few — yet treated as if no resource was specified at all. Five-point gap.
+- Suggested scorer fix: When `NotResource` is present and `Resource` is absent/empty, treat the effective resource set as broad. Run the destructive-verb / sensitive-on-broad / high-risk-on-broad / state-changing-on-broad / catastrophic floors against this synthetic-broad set.
+
+## agent-63-notresource-passrole-broad
+
+- Policy summary: iam:PassRole with NotResource: [arn:aws:iam::123:role/SystemRole]. Effectively broad PassRole.
+- Det score: 4 (narrow-PassRole floor)
+- Real risk: 9
+- Why scorer misses it: PassRole rule reads `resources` (empty list). `wildcard_resource = any(... for r in resources)` is False — so the broad-PassRole 9-floor never fires. NotResource on PassRole is the iconic "I excluded ONE role I shouldn't pass" footgun, and it's the broadest possible PassRole.
+- Suggested scorer fix: when iam:PassRole appears with NotResource and empty Resource, floor at 9. Same fix as agent-62 generalized for PassRole specifically.
+
+## agent-64-iam-group-user-policy-attach
+
+- Policy summary: iam:AttachUserPolicy + iam:PutUserPolicy + iam:AttachGroupPolicy + iam:PutGroupPolicy + iam:AddUserToGroup on Resource:*.
+- Det score: 6
+- Real risk: 9
+- Why scorer misses it: _CATASTROPHIC_ACTIONS includes only the ROLE variants. AWS IAM has three principal types (role/user/group) and policy-attachment is symmetric across all three. Attacker can attach AdministratorAccess to a user, attach to a group containing themselves, or add themselves to an existing admin group — same primitive, different principal type, no catastrophic floor fires.
+- Suggested scorer fix: add iam:AttachUserPolicy, iam:PutUserPolicy, iam:AttachGroupPolicy, iam:PutGroupPolicy, iam:AddUserToGroup, iam:DetachUserPolicy, iam:DetachGroupPolicy, iam:RemoveUserFromGroup to _CATASTROPHIC_ACTIONS.
+
+## agent-65-rolesanywhere-federation-takeover
+
+- Policy summary: rolesanywhere:CreateTrustAnchor + CreateProfile + UpdateTrustAnchor + EnableTrustAnchor on Resource:*.
+- Det score: 6
+- Real risk: 9
+- Why scorer misses it: IAM Roles Anywhere is the X.509-cert federation primitive — the exact analogue of iam:CreateOpenIDConnectProvider and iam:CreateSAMLProvider (both in _CATASTROPHIC_ACTIONS), but for client certificates. Attacker registers their CA as a trust anchor and creates a profile mapping to any role; subsequent rolesanywhere:CreateSession with attacker-signed certs mints role credentials. Not in any list.
+- Suggested scorer fix: add rolesanywhere:CreateTrustAnchor, rolesanywhere:UpdateTrustAnchor, rolesanywhere:EnableTrustAnchor, rolesanywhere:CreateProfile, rolesanywhere:UpdateProfile, rolesanywhere:EnableProfile to _CATASTROPHIC_ACTIONS.
+
+## agent-66-cognito-identity-pool-takeover
+
+- Policy summary: cognito-identity:CreateIdentityPool + UpdateIdentityPool + SetIdentityPoolRoles on Resource:*.
+- Det score: 6
+- Real risk: 9
+- Why scorer misses it: Round 1 added cognito-idp:Admin* to catastrophic (user-pool admin). But cognito-identity (identity pool / federation-to-IAM-role side) has its own role-binding primitive that's MORE dangerous: SetIdentityPoolRoles binds any role to a pool. With unauthenticated identities enabled, literally anyone can call GetCredentialsForIdentity and get those role credentials. Same primitive as iam:CreateOpenIDConnectProvider but worse (no auth required).
+- Suggested scorer fix: add cognito-identity:CreateIdentityPool, cognito-identity:UpdateIdentityPool, cognito-identity:SetIdentityPoolRoles to _CATASTROPHIC_ACTIONS.
+
+## agent-67-lambda-layer-rce-via-passrole
+
+- Policy summary: lambda:PublishLayerVersion + lambda:AddLayerVersionPermission + lambda:UpdateFunctionConfiguration on Resource:*, plus iam:PassRole on a narrow lambda role.
+- Det score: 6
+- Real risk: 9
+- Why scorer misses it: Lambda Layers are a code-injection primitive not in _CODE_EXECUTION_PRIMITIVES. PublishLayerVersion + UpdateFunctionConfiguration replaces the runtime of an existing function with attacker-controlled code, running under whatever role the function already has. This is RCE-as-target-function-role without ever calling UpdateFunctionCode. The PassRole composition rule doesn't fire because none of these actions are in the code-exec set.
+- Suggested scorer fix: add lambda:PublishLayerVersion, lambda:UpdateFunctionConfiguration, lambda:AddLayerVersionPermission to _CODE_EXECUTION_PRIMITIVES. lambda:AddLayerVersionPermission with broad principal also fits _CROSS_ACCOUNT_EXFIL_ACTIONS (account-wide layer sharing).
+
+## agent-68-ssm-start-session-account-wide
+
+- Policy summary: ssm:StartSession + ssm:SendCommand on Resource:* — interactive shell on every managed instance.
+- Det score: 6
+- Real risk: 9
+- Why scorer misses it: ssm:StartSession and ssm:SendCommand are in _HIGH_IMPACT_MUTATION_ACTIONS (floor 5) but not _CATASTROPHIC_ACTIONS. ecs:ExecuteCommand IS catastrophic (interactive shell on ECS task); the SSM-equivalent for EC2 fleets is treated as merely high-impact. On Resource:*, this is account-wide RCE on every managed instance.
+- Suggested scorer fix: add ssm:StartSession and ssm:SendCommand to _CATASTROPHIC_ACTIONS. OR keep them in high-impact but escalate to 9 when paired with Resource:*. Sibling of ecs:ExecuteCommand which is already catastrophic.
+
+## agent-69-glue-dev-endpoint-jupyter-rce
+
+- Policy summary: glue:CreateDevEndpoint + UpdateDevEndpoint + CreateSession + iam:PassRole on glue-data-access-role.
+- Det score: 6
+- Real risk: 9
+- Why scorer misses it: Glue Dev Endpoints are persistent Jupyter/Zeppelin notebooks with an attached IAM role — identical primitive to sagemaker:CreateNotebookInstance (which IS in code-exec). The composition rule fires for SageMaker; Glue's analogous path isn't in the list.
+- Suggested scorer fix: add glue:CreateDevEndpoint, glue:UpdateDevEndpoint, glue:CreateSession, glue:RunStatement to _CODE_EXECUTION_PRIMITIVES.
+
+## agent-70-mwaa-airflow-dag-rce
+
+- Policy summary: airflow:CreateEnvironment + UpdateEnvironment with iam:PassRole on mwaa-execution-role.
+- Det score: 6
+- Real risk: 9
+- Why scorer misses it: MWAA (Managed Workflows for Apache Airflow) runs caller-supplied Python DAGs as the execution role. Same primitive as lambda:CreateFunction (code from caller-chosen S3 bucket + execution role from PassRole). Not in _CODE_EXECUTION_PRIMITIVES.
+- Suggested scorer fix: add airflow:CreateEnvironment, airflow:UpdateEnvironment, airflow:CreateCliToken, airflow:CreateWebLoginToken to _CODE_EXECUTION_PRIMITIVES.
+
+## agent-71-lakeformation-data-lake-grant
+
+- Policy summary: lakeformation:GrantPermissions + PutDataLakeSettings + RegisterResource on Resource:*.
+- Det score: 6
+- Real risk: 9
+- Why scorer misses it: Lake Formation is the data-lake access-control plane. GrantPermissions = grant any IAM principal SELECT/ALTER/DROP on any registered table. PutDataLakeSettings = make caller an LF admin (persistent escalation). Identical severity to iam:AttachRolePolicy but in the data-lake plane.
+- Suggested scorer fix: add lakeformation:GrantPermissions, lakeformation:PutDataLakeSettings to _CATASTROPHIC_ACTIONS. Add lakeformation:RegisterResource, lakeformation:UpdateResource to _HIGH_IMPACT_MUTATION_ACTIONS. Consider adding `lakeformation` to _SENSITIVE_SERVICES.
+
+## agent-72-service-catalog-cfn-rce
+
+- Policy summary: servicecatalog:CreateProduct + ProvisionProduct + iam:PassRole on launch-role.
+- Det score: 6
+- Real risk: 9
+- Why scorer misses it: Service Catalog is a managed CloudFormation wrapper. ProvisionProduct = ExecuteChangeSet under a launch role. The composition with PassRole is full account compromise, identical to cfn:ExecuteChangeSet + PassRole (which DOES fire the composition rule). Service Catalog actions aren't in code-exec.
+- Suggested scorer fix: add servicecatalog:CreateProduct, servicecatalog:UpdateProduct, servicecatalog:ProvisionProduct, servicecatalog:AssociatePrincipalWithPortfolio to _CODE_EXECUTION_PRIMITIVES.
+
+## agent-73-iam-action-glob-matches-catastrophic
+
+- Policy summary: iam:Create* + iam:*AccessKey* on Resource:*.
+- Det score: 7 (sensitive-service-inside-wildcard floor)
+- Real risk: 10
+- Why scorer misses it: The sensitive-service-inside-wildcard rule floors at 7, but iam:Create* matches iam:CreateAccessKey, iam:CreateOpenIDConnectProvider, iam:CreateSAMLProvider, iam:CreateLoginProfile, iam:CreateInstanceProfile — every one IS in _CATASTROPHIC_ACTIONS. The glob is a superset of catastrophic coverage; floor should be 9-10.
+- Suggested scorer fix: when an action contains an action-name wildcard (after the `:`), check if the glob would match ANY entry in _CATASTROPHIC_ACTIONS_LC via fnmatch. If yes, floor at 9. Same for _HIGH_IMPACT and _CODE_EXECUTION_PRIMITIVES (the latter would catch `lambda:*` matching Create/UpdateFunction).
+
+## agent-74-passrole-case-insensitivity
+
+- Policy summary: iam:passrole (lowercase) on Resource:*.
+- Det score: 7 (high-risk-action-on-broad via _HIGH_RISK_ACTIONS_LC)
+- Real risk: 9
+- Why scorer misses it: Round 2 case-insensitivity fix lowered the set lookups but missed the literal-string compare `if action == "iam:PassRole":` at line ~1110. So `iam:passrole` falls through to the `elif action.lower() in _HIGH_RISK_ACTIONS_LC` branch (which floors at 7), instead of the broad-PassRole 9-floor. The 2-point gap crosses the auto-approve threshold for some configurations.
+- Suggested scorer fix: change `if action == "iam:PassRole":` to `if action.lower() == "iam:passrole":`. Same pattern for any other literal-string action compares that escaped the round-2 sweep.
+
+## agent-75-iam-create-user-create-role
+
+- Policy summary: iam:CreateUser + iam:CreateRole on Resource:*.
+- Det score: 6
+- Real risk: 8
+- Why scorer misses it: iam:CreateAccessKey is catastrophic; iam:CreateOpenIDConnectProvider is catastrophic; iam:AttachRolePolicy is catastrophic — but iam:CreateUser and iam:CreateRole, the "step 1" persistence primitives, are NOT. The scorer recognizes the policy-attach step but not the principal-creation step. CreateUser is a persistent backdoor (survives JIT revocation). CreateRole with attacker-controlled trust policy is a federation-takeover primitive.
+- Suggested scorer fix: add iam:CreateUser, iam:CreateRole to _CATASTROPHIC_ACTIONS.
+
+## agent-76-account-segment-wildcard-arn
+
+- Policy summary: lambda:UpdateFunctionCode + InvokeFunction on arn:aws:lambda:us-east-1:*:function:my-deploy-bot.
+- Det score: 5 (high-impact-mutation floor)
+- Real risk: 7
+- Why scorer misses it: The wildcard is in the ACCOUNT-ID segment of the ARN. _is_broad_resource and _is_strict_wildcard inspect `resource_spec` (parts[5]) but not `parts[4]` (account-id). So `arn:aws:lambda:us-east-1:*:function:my-deploy-bot` looks narrow (specific function name), but applies to that function in EVERY account.
+- Suggested scorer fix: in _is_broad_resource and _is_strict_wildcard, also check parts[4] (account-id) for `*`. If account is wildcarded and the requester's own account isn't implied by request context, treat as broad. Region wildcard (parts[3]) is also broadening but less severe (legitimately * for global services).
+
+## agent-77-kms-alias-key-collection-wildcards
+
+- Policy summary: kms:Decrypt + GenerateDataKey on arn:aws:kms:us-east-1:123:alias/* — every alias in region.
+- Det score: 6
+- Real risk: 7
+- Why scorer misses it: The IAM principal-collection wildcard branch in _is_strict_wildcard is hard-coded to service=="iam". Other services have analogous collection wildcards: kms:alias/*, kms:key/*, lambda:layer/*. _is_broad_resource catches them via the generic `endswith('/*') and count('/')<=1` branch, but _is_strict_wildcard doesn't — and the secret-bearing-reads / high-risk-on-strict-broad rule uses strict_wildcard. So kms:Decrypt on alias/* misses the 7-floor that fires on kms:Decrypt on Resource:'*'.
+- Suggested scorer fix: extend the strict-wildcard collection check to non-IAM services. Either a per-service map of known collection prefixes, or generalize: any resource_spec ending in `/<single-glob-segment>` (no further slashes) counts as collection-level wildcard.
+
+## agent-78-verified-permissions-authz-bypass
+
+- Policy summary: verifiedpermissions:CreatePolicy + UpdatePolicy + PutSchema + CreatePolicyStore + CreateIdentitySource on Resource:*.
+- Det score: 6
+- Real risk: 8
+- Why scorer misses it: Amazon Verified Permissions is the application-layer authorization service (Cedar policies). Mutating Cedar policies = rewriting application authorization. Persists past JIT grant. Not in any list.
+- Suggested scorer fix: add verifiedpermissions:CreatePolicy, verifiedpermissions:UpdatePolicy, verifiedpermissions:PutSchema, verifiedpermissions:CreatePolicyStore, verifiedpermissions:CreateIdentitySource to _HIGH_IMPACT_MUTATION_ACTIONS (floor 5) or a new authorization-plane-mutation set.
+
+## agent-79-appflow-saas-exfil
+
+- Policy summary: appflow:CreateFlow + UpdateFlow + StartFlow + CreateConnectorProfile on Resource:*.
+- Det score: 6
+- Real risk: 8
+- Why scorer misses it: AppFlow pipes SaaS data (Salesforce/Slack/ServiceNow) into AWS destinations. Single-call persistent-exfil setup, same primitive as logs:PutSubscriptionFilter (already in _CROSS_ACCOUNT_EXFIL_ACTIONS). Not in any list.
+- Suggested scorer fix: add appflow:CreateFlow, appflow:UpdateFlow, appflow:StartFlow, appflow:CreateConnectorProfile to _CROSS_ACCOUNT_EXFIL_ACTIONS.
+
+## agent-80-opensearch-serverless-data-access
+
+- Policy summary: aoss:CreateAccessPolicy + UpdateAccessPolicy + CreateSecurityPolicy on Resource:*.
+- Det score: 6
+- Real risk: 8
+- Why scorer misses it: OpenSearch Serverless (`aoss:` prefix) handles authorization through data-access policies separate from IAM. CreateAccessPolicy grants persistent search/data access to any IAM principal. Same semantics as resource-policy mutation in other services.
+- Suggested scorer fix: add aoss:CreateAccessPolicy, aoss:UpdateAccessPolicy, aoss:CreateSecurityPolicy to _CROSS_ACCOUNT_EXFIL_ACTIONS.
+
+## agent-81-ecr-public-supply-chain
+
+- Policy summary: ecr-public:PutImage + UploadLayerPart + SetRepositoryPolicy on Resource:*.
+- Det score: 6
+- Real risk: 8
+- Why scorer misses it: `ecr:` and `ecr-public:` are TWO services. The ECR catastrophic / high-impact coverage doesn't cover ECR Public. ecr-public:PutImage publishes containers to public.ecr.aws under the company name — brand-impersonation supply-chain attack.
+- Suggested scorer fix: add ecr-public:PutImage, ecr-public:UploadLayerPart, ecr-public:SetRepositoryPolicy to _HIGH_IMPACT_MUTATION_ACTIONS or _CROSS_ACCOUNT_EXFIL_ACTIONS. Also consider adding service-alias handling: ecr / ecr-public should share treatment.
+
+## agent-82-synthetics-canary-rce
+
+- Policy summary: synthetics:CreateCanary + UpdateCanary + iam:PassRole on canary-execution-role.
+- Det score: 6
+- Real risk: 8
+- Why scorer misses it: CloudWatch Synthetics canaries are caller-supplied Node/Python scripts running on Lambda-like workers as the canary execution role. Identical primitive to lambda:CreateFunction. Composition rule misses it.
+- Suggested scorer fix: add synthetics:CreateCanary, synthetics:UpdateCanary to _CODE_EXECUTION_PRIMITIVES.
+
+## agent-83-direct-connect-network-bridge
+
+- Policy summary: directconnect:CreateInterconnect + AllocatePrivateVirtualInterface + AcceptPrivateVirtualInterface on Resource:*.
+- Det score: 6
+- Real risk: 8
+- Why scorer misses it: Direct Connect actions create network paths from external data centers into VPCs. Single-call persistent network bridge, identical primitive to ec2:CreateVpcPeeringConnection (which IS in _CROSS_ACCOUNT_EXFIL_ACTIONS).
+- Suggested scorer fix: add directconnect:CreateInterconnect, directconnect:AllocatePrivateVirtualInterface, directconnect:AcceptPrivateVirtualInterface, directconnect:CreateBGPPeer, directconnect:UpdateVirtualInterfaceAttributes to _CROSS_ACCOUNT_EXFIL_ACTIONS. Sibling actions to consider: ec2:CreateVpnConnection, ec2:CreateClientVpnEndpoint (Site-to-Site VPN / Client VPN).
+
+## agent-84-iam-tag-abac-bypass
+
+- Policy summary: iam:TagRole + UntagRole + TagUser + UntagUser on Resource:*.
+- Det score: 6
+- Real risk: 8
+- Why scorer misses it: Many orgs use ABAC (attribute-based access control) where IAM policies authorize via aws:ResourceTag/aws:PrincipalTag. Mutating tags = mutating authorization. Account-wide TagRole = ABAC-authorization bypass primitive. Tagging is IAM access level "Tagging" so floor-via-state-changing-write fires only at level 6.
+- Suggested scorer fix: add iam:TagRole, iam:UntagRole, iam:TagUser, iam:UntagUser to _HIGH_IMPACT_MUTATION_ACTIONS (floor 5). For broader visibility, emit a factor noting "ABAC bypass primitive if org uses aws:ResourceTag conditions" whenever any *TagResource* action appears on Resource:*. Same applies to ec2:CreateTags, s3:PutBucketTagging, kms:TagResource, tag:TagResources (the cross-service tagging API).
+
+## agent-85-s3-object-lambda-service-alias
+
+- Policy summary: s3-object-lambda:GetObject on Resource:* in a read-only request.
+- Det score: 4 (cross-resource-read floor)
+- Real risk: 7
+- Why scorer misses it: AWS has SIBLING service prefixes for S3-object operations: s3:, s3-object-lambda:, s3-outposts:. _SECRET_BEARING_READS lists `s3:GetObject` but not `s3-object-lambda:GetObject` or `s3-outposts:GetObject` — all three read the same object data. Object Lambda is particularly important because the same prefix is also a content-rewrite primitive (s3-object-lambda:WriteGetObjectResponse).
+- Suggested scorer fix: add `s3-object-lambda:GetObject`, `s3-outposts:GetObject` to _SECRET_BEARING_READS. Better: introduce a service-alias canonicalization step that maps s3-object-lambda/s3-outposts → s3 for rule lookup. Same problem may exist for other "service variants" (rds vs rds-data; logs vs cloudwatch).
+
+
+# ===========================================================
+# Round 3 — cross-cutting scorer recommendations
+# ===========================================================
+# Continuing the round-2 letter naming (A-G already used).
+
+# H. NotResource handling for non-wildcard actions. The NotResource branch
+#    only fires when at least one Action is wildcarded — completely
+#    bypassing non-wildcard actions. NotResource semantically means
+#    "every resource EXCEPT" — broader than Resource:'*' minus a few.
+#    When NotResource is set and Resource is absent/empty, treat the
+#    effective resource set as broad and run ALL the resource-broad
+#    floors (destructive-on-broad, high-risk-on-broad, sensitive-on-broad,
+#    catastrophic-on-broad, PassRole-broad). Closes agent-62 and 63.
+
+# I. _CATASTROPHIC_ACTIONS additions. (a) IAM group/user policy-attachment
+#    siblings of AttachRolePolicy; (b) Roles Anywhere (X.509 federation);
+#    (c) cognito-identity (identity-pool role binding); (d) Lake Formation
+#    grants; (e) iam:CreateUser, iam:CreateRole (principal creation); (f)
+#    ssm:StartSession, ssm:SendCommand (account-wide interactive shell on
+#    Resource:*). Closes agent-64, 65, 66, 68, 71, 75. Specifically:
+#      iam:AttachUserPolicy, iam:PutUserPolicy, iam:AttachGroupPolicy,
+#      iam:PutGroupPolicy, iam:AddUserToGroup, iam:CreateUser, iam:CreateRole,
+#      rolesanywhere:CreateTrustAnchor, rolesanywhere:UpdateTrustAnchor,
+#      rolesanywhere:EnableTrustAnchor, rolesanywhere:CreateProfile,
+#      cognito-identity:CreateIdentityPool, cognito-identity:UpdateIdentityPool,
+#      cognito-identity:SetIdentityPoolRoles, lakeformation:GrantPermissions,
+#      lakeformation:PutDataLakeSettings (+ when ssm:StartSession or
+#      ssm:SendCommand is on Resource:*, floor 9).
+
+# J. _CODE_EXECUTION_PRIMITIVES additions. New compute primitives missed
+#    by rounds 1+2: lambda:PublishLayerVersion, lambda:UpdateFunction-
+#    Configuration, lambda:AddLayerVersionPermission, glue:CreateDevEndpoint,
+#    glue:UpdateDevEndpoint, glue:CreateSession, glue:RunStatement,
+#    airflow:CreateEnvironment, airflow:UpdateEnvironment,
+#    servicecatalog:CreateProduct, servicecatalog:UpdateProduct,
+#    servicecatalog:ProvisionProduct, servicecatalog:AssociatePrincipal-
+#    WithPortfolio, synthetics:CreateCanary, synthetics:UpdateCanary.
+#    Closes agent-67, 69, 70, 72, 82.
+
+# K. _CROSS_ACCOUNT_EXFIL_ACTIONS / _HIGH_IMPACT_MUTATION_ACTIONS additions.
+#    appflow:* (SaaS data piping), aoss:* access policies (OpenSearch
+#    Serverless data access), ecr-public:* (public registry supply chain),
+#    directconnect:* (network bridge), verifiedpermissions:* (app authz
+#    bypass), iam:TagRole/UntagRole/TagUser/UntagUser (ABAC bypass).
+#    Closes agent-78, 79, 80, 81, 83, 84.
+
+# L. Action-name wildcard matching catastrophic actions. When an action
+#    contains an action-name glob (`iam:Create*`, `iam:*AccessKey*`),
+#    check if the glob would match ANY entry in _CATASTROPHIC_ACTIONS_LC
+#    via fnmatch. If yes, floor at 9 instead of the generic 7 (sensitive-
+#    service-inside-wildcard floor). Same logic for _HIGH_IMPACT and
+#    _CODE_EXECUTION_PRIMITIVES — `lambda:*` matches the code-exec
+#    primitives and should escalate the score. Closes agent-73.
+
+# M. Residual case-insensitivity gaps. The round-2 sweep lowered set
+#    lookups but missed literal-string compares: `if action == "iam:PassRole":`
+#    at line ~1110 of review.py. Fix to `if action.lower() == "iam:passrole":`.
+#    Audit all other literal-action compares. Closes agent-74.
+
+# N. ARN account-segment + region-segment wildcard handling. _is_broad_-
+#    resource and _is_strict_wildcard inspect resource_spec (parts[5]) but
+#    not parts[4] (account-id) or parts[3] (region). An ARN like
+#    `arn:aws:lambda:us-east-1:*:function:foo` matches that resource in
+#    EVERY account in the partition — should be treated as broad. Closes
+#    agent-76. Strict-wildcard collection check should also extend beyond
+#    IAM to other services (kms:alias/*, kms:key/*, lambda:layer/*).
+#    Closes agent-77.
+
+# O. Service-alias canonicalization. Some AWS services have multiple
+#    prefixes for the same underlying capability:
+#      s3 / s3-object-lambda / s3-outposts (object operations)
+#      ecr / ecr-public (container images)
+#      rds / rds-data (database)
+#      logs / cloudwatch (observability)
+#    A canonicalization step that maps these to a single "logical service"
+#    before rule lookup would prevent the entire alias-bypass class.
+#    Cheapest fix: just add the alias variants to every relevant set.
+#    Closes agent-85.

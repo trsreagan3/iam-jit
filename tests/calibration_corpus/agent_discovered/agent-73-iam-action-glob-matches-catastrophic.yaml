@@ -1,0 +1,51 @@
+name: agent-73-iam-action-glob-matches-catastrophic
+description: |
+  The action-name wildcard rule for sensitive services floors at 7
+  (`Wildcard within sensitive service action: iam:Create*`). But many
+  glob patterns within IAM actually MATCH catastrophic actions, and
+  those should floor at 9-10 — not 7.
+
+  Examples:
+    - `iam:Create*` matches iam:CreateAccessKey, iam:CreateOpenID-
+      ConnectProvider, iam:CreateSAMLProvider, iam:CreateLoginProfile,
+      iam:CreateInstanceProfile — every one is in _CATASTROPHIC_ACTIONS.
+    - `iam:*AccessKey*` matches iam:CreateAccessKey (catastrophic) and
+      iam:UpdateAccessKey (catastrophic-class).
+    - `iam:Put*` matches iam:PutRolePolicy, iam:PutUserPolicy,
+      iam:PutGroupPolicy — IAM permission-management primitives.
+    - `iam:Update*` matches iam:UpdateAssumeRolePolicy, iam:UpdateLogin-
+      Profile, iam:UpdateOpenIDConnectProviderThumbprint, iam:Update-
+      SAMLProvider, iam:UpdateAccountPasswordPolicy — all catastrophic.
+    - `iam:Attach*` matches iam:AttachRolePolicy + iam:AttachUserPolicy
+      + iam:AttachGroupPolicy.
+
+  In each case, the glob is a superset of catastrophic-action coverage,
+  so the floor should be at least 9.
+
+  Scorer flow: enters the "wildcard within sensitive service" branch and
+  floors at 7. Doesn't try to enumerate which specific actions in the
+  catastrophic set the glob matches.
+
+  Real risk: 9-10 — `iam:Create*` IS, effectively, `iam:CreateAccessKey
+  + iam:CreateOpenIDConnectProvider + ...` all at once.
+
+  Suggested fix: when an action-name wildcard appears in IAM (or any
+  service with catastrophic entries), check whether the glob would
+  match ANY catastrophic action. If yes, floor at 9 instead of 7.
+  Simple fnmatch-style check across _CATASTROPHIC_ACTIONS_LC.
+policy:
+  Version: '2012-10-17'
+  Statement:
+    - Effect: Allow
+      Action:
+        - iam:Create*
+        - iam:*AccessKey*
+      Resource: '*'
+request:
+  spec:
+    access_type: read-write
+    duration:
+      duration_hours: 1
+expected:
+  score_min: 9
+  must_auto_approve: false

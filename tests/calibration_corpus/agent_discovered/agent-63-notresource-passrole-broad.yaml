@@ -1,0 +1,37 @@
+name: agent-63-notresource-passrole-broad
+description: |
+  iam:PassRole with NotResource excluding one role grants PassRole on EVERY
+  OTHER role in the account — effectively `iam:PassRole + Resource: *`.
+  The scorer's PassRole rule reads from the `Resource` list (empty here),
+  so the broad-PassRole floor of 9 never fires. The narrow-PassRole floor
+  of 4 fires by accident because `wildcard_resource = any(... for r in
+  resources)` evaluates to False on an empty list.
+
+  Even worse: composing this with any code-execution primitive (e.g.,
+  lambda:CreateFunction, ec2:RunInstances) means the composition rule
+  fires because `pass_role_broad` (which uses `inclusive` flag from
+  per-statement resources) is False, so the COMBINATION lands at floor 9
+  via composition — but only by coincidence, and only because the
+  composition rule doesn't care about whether the PassRole was actually
+  resource-broad in NotResource form.
+
+  Real risk: 9 — equivalent to PassRole on every admin role minus one.
+
+  Suggested fix: when iam:PassRole appears with NotResource (and Resource
+  is empty), treat it as broad-PassRole. Floor at 9 unconditionally.
+policy:
+  Version: '2012-10-17'
+  Statement:
+    - Effect: Allow
+      Action:
+        - iam:PassRole
+      NotResource:
+        - arn:aws:iam::123456789012:role/SystemRole
+request:
+  spec:
+    access_type: read-write
+    duration:
+      duration_hours: 1
+expected:
+  score_min: 9
+  must_auto_approve: false

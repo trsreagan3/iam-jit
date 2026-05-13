@@ -1,0 +1,50 @@
+name: agent-84-iam-tag-abac-bypass
+description: |
+  Many orgs use attribute-based access control (ABAC) where IAM policies
+  authorize based on resource tags — e.g., a developer's role can manage
+  resources tagged `Team=alpha` via `aws:ResourceTag/Team: ${aws:Principal-
+  Tag/Team}`. Tag mutation = authorization mutation.
+
+  iam:TagRole + iam:UntagRole on broad let the attacker:
+    1. UntagRole an admin role to remove a "ProdOnly" tag that blocks
+       general access via SCP/identity-policy.
+    2. TagRole their own role with `Team=admin` so admin-tag-bound
+       managed policies attach. Compose with iam:AttachRolePolicy.
+    3. Confuse audit/SIEM that filters on role tags.
+
+  General TagResource APIs (ec2:CreateTags, s3:PutBucketTagging,
+  iam:TagRole, kms:TagResource, tag:TagResources) have the same shape.
+  When the org uses ABAC, account-wide TagResource = bypass account
+  authorization.
+
+  Scorer flow: iam:TagRole is Tagging level — narrow-write floor is 2;
+  iam-sensitive + Resource:* → 6; state-changing-on-broad with level=
+  Tagging → 6. Max = 6.
+
+  Real risk: 8 in any org using ABAC. The scorer can't easily know
+  if the org uses ABAC, so should err high.
+
+  Suggested fix: add iam:TagRole, iam:UntagRole, iam:TagUser, iam:Untag-
+  User (the IAM-specific tag mutations) to _HIGH_IMPACT_MUTATION_ACTIONS
+  at least (floor 5). For broader risk visibility, when ANY *TagResource
+  or *Tags* action appears on Resource:*, emit a factor noting "ABAC
+  bypass primitive if any org policy uses aws:ResourceTag conditions"
+  and floor at 6+.
+policy:
+  Version: '2012-10-17'
+  Statement:
+    - Effect: Allow
+      Action:
+        - iam:TagRole
+        - iam:UntagRole
+        - iam:TagUser
+        - iam:UntagUser
+      Resource: '*'
+request:
+  spec:
+    access_type: read-write
+    duration:
+      duration_hours: 1
+expected:
+  score_min: 8
+  must_auto_approve: false

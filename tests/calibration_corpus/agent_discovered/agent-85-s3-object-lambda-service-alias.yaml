@@ -1,0 +1,53 @@
+name: agent-85-s3-object-lambda-service-alias
+description: |
+  S3 has SIBLING service prefixes that all read/write object data:
+    - s3: (canonical service)
+    - s3-object-lambda: (Object Lambda access points; calls a Lambda
+      on each GetObject)
+    - s3-outposts: (S3 on AWS Outposts)
+
+  The _SECRET_BEARING_READS set has `s3:GetObject` and `s3:GetObject-
+  Version`, but the analogous `s3-object-lambda:GetObject` and
+  `s3-outposts:GetObject` (which read the same underlying object data)
+  are not in the set. Similarly `s3-object-lambda:WriteGetObject-
+  Response` lets the caller intercept and modify what GetObject
+  returns to downstream callers — a content-rewrite / content-injection
+  primitive.
+
+  Scorer flow for `s3-object-lambda:GetObject + WriteGetObjectResponse`
+  on Resource: '*':
+    - Not in _SECRET_BEARING_READS_LC → secret-bearing-reads rule misses
+    - s3-object-lambda not in _SENSITIVE_SERVICES → service-sensitive
+      rule misses
+    - GetObject IS Read level → no narrow-write floor
+    - cross-resource-read rule fires → floor 4
+  Max = 4.
+
+  Real risk: 7 — content reads on every object via Object Lambda is
+  identical to s3:GetObject on broad. Plus WriteGetObjectResponse lets
+  attacker forge the bytes returned to legitimate readers.
+
+  Suggested fix: add `s3-object-lambda` and `s3-outposts` as aliases in
+  the relevant sets — either expand each set to include the aliases or
+  introduce a service-alias map that's applied before lookup. Specifically:
+    - s3-object-lambda:GetObject → secret-bearing-reads
+    - s3-object-lambda:WriteGetObjectResponse → high-impact (content
+      forgery)
+    - s3-outposts:GetObject → secret-bearing-reads
+    - s3-outposts:PutBucketPolicy / DeleteBucketPolicy → catastrophic
+      (sibling of s3:PutBucketPolicy)
+policy:
+  Version: '2012-10-17'
+  Statement:
+    - Effect: Allow
+      Action:
+        - s3-object-lambda:GetObject
+      Resource: '*'
+request:
+  spec:
+    access_type: read-only
+    duration:
+      duration_hours: 1
+expected:
+  score_min: 7
+  must_auto_approve: false

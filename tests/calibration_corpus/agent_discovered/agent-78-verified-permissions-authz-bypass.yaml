@@ -1,0 +1,53 @@
+name: agent-78-verified-permissions-authz-bypass
+description: |
+  Amazon Verified Permissions is the application-level authorization
+  service — apps define Cedar policies and call Verified Permissions to
+  authorize each request. Mutating the Cedar policies = bypassing every
+  application-level authz check the app makes.
+
+    - verifiedpermissions:CreatePolicy / UpdatePolicy / PutSchema:
+      rewrite the Cedar rules. Add `permit(principal, action, resource);`
+      → every action allowed.
+    - verifiedpermissions:CreatePolicyStore: provision a new store the
+      attacker controls.
+    - verifiedpermissions:CreateIdentitySource: hook up an attacker-
+      controlled Cognito user pool (or other IdP) as a trusted identity
+      provider for the store, then issue tokens from there.
+
+  This is the application-layer analogue of iam:AttachRolePolicy: a
+  single API call grants the attacker carte blanche in the application.
+  Persists past the JIT grant.
+
+  Scorer flow:
+    - verifiedpermissions not in _SENSITIVE_SERVICES
+    - state-changing-on-broad → 6
+  Max = 6.
+
+  Real risk: 8 — application-level authorization rewrite. Comparable
+  to lakeformation:GrantPermissions (data-lake-level) and iam:Attach-
+  RolePolicy (account-level).
+
+  Suggested fix: add verifiedpermissions:CreatePolicy, verifiedpermis-
+  sions:UpdatePolicy, verifiedpermissions:PutSchema, verifiedpermis-
+  sions:CreatePolicyStore, verifiedpermissions:CreateIdentitySource to
+  _HIGH_IMPACT_MUTATION_ACTIONS at minimum (floor 5), preferably to
+  a new "authorization-plane mutation" set that floors at 8.
+policy:
+  Version: '2012-10-17'
+  Statement:
+    - Effect: Allow
+      Action:
+        - verifiedpermissions:CreatePolicy
+        - verifiedpermissions:UpdatePolicy
+        - verifiedpermissions:PutSchema
+        - verifiedpermissions:CreatePolicyStore
+        - verifiedpermissions:CreateIdentitySource
+      Resource: '*'
+request:
+  spec:
+    access_type: read-write
+    duration:
+      duration_hours: 1
+expected:
+  score_min: 8
+  must_auto_approve: false

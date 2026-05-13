@@ -1,0 +1,58 @@
+name: agent-67-lambda-layer-rce-via-passrole
+description: |
+  AWS Lambda Layers are a code-injection primitive that's not in the
+  _CODE_EXECUTION_PRIMITIVES list. The relevant attack pattern:
+
+    1. lambda:PublishLayerVersion — publish a layer containing attacker
+       code (a Python wrapper that exfiltrates env vars + role creds
+       before invoking the real handler).
+    2. lambda:AddLayerVersionPermission — grant the layer cross-account
+       or account-wide pull access.
+    3. lambda:UpdateFunctionConfiguration — attach the malicious layer
+       to any existing function. The next invocation runs attacker code
+       under that function's role.
+
+  This is functionally identical to lambda:UpdateFunctionCode (which IS
+  in code-exec primitives), but goes through the Layers API which the
+  scorer doesn't recognize. UpdateFunctionConfiguration is also broadly
+  used for "set memory / timeout / env vars" so it doesn't look like a
+  code-deploy primitive — but it IS one when combined with Layers.
+
+  Scorer flow:
+    - PublishLayerVersion: not in any list. Generic Write on broad
+      resource → score 6.
+    - UpdateFunctionConfiguration: not in code-exec primitives.
+      Generic Write on broad resource → score 6.
+    - PassRole: narrow → floor 4.
+  Composition rule doesn't fire because none of these are in
+  _CODE_EXECUTION_PRIMITIVES_LC. Final: 6.
+
+  Real risk: 9 — full RCE chain in three calls, all under the
+  scorer's radar.
+
+  Suggested fix: add lambda:PublishLayerVersion, lambda:UpdateFunction-
+  Configuration, and lambda:AddLayerVersionPermission to
+  _CODE_EXECUTION_PRIMITIVES (so the existing PassRole composition rule
+  fires). Also flag lambda:AddLayerVersionPermission with broad principal
+  as cross-account-exfil tier independently.
+policy:
+  Version: '2012-10-17'
+  Statement:
+    - Effect: Allow
+      Action:
+        - lambda:PublishLayerVersion
+        - lambda:UpdateFunctionConfiguration
+        - lambda:AddLayerVersionPermission
+      Resource: '*'
+    - Effect: Allow
+      Action:
+        - iam:PassRole
+      Resource: arn:aws:iam::123456789012:role/lambda-admin-role
+request:
+  spec:
+    access_type: read-write
+    duration:
+      duration_hours: 1
+expected:
+  score_min: 9
+  must_auto_approve: false

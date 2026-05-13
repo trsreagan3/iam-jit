@@ -129,6 +129,26 @@ _CODE_EXECUTION_PRIMITIVES = frozenset(
         # EMR / EMR Serverless — Spark/Hadoop job runs under role
         "elasticmapreduce:RunJobFlow",
         "elasticmapreduce:AddJobFlowSteps",
+        # ROUND 3 additions:
+        # Lambda Layers — publish + update-function-configuration =
+        # inject attacker code that the function loads on next cold start
+        "lambda:PublishLayerVersion",
+        "lambda:UpdateFunctionConfiguration",
+        # Glue Dev Endpoints — Jupyter-like notebook environment
+        "glue:CreateDevEndpoint",
+        "glue:UpdateDevEndpoint",
+        # MWAA / Airflow — DAG = caller-controlled Python that runs
+        # under the environment role
+        "airflow:CreateEnvironment",
+        "airflow:UpdateEnvironment",
+        # Service Catalog — provisions products (CFN templates) under
+        # a role the launching user picks
+        "servicecatalog:CreateProduct",
+        "servicecatalog:ProvisionProduct",
+        # CloudWatch Synthetics canaries — caller-controlled JS runs
+        # on a schedule under the canary's IAM role
+        "synthetics:CreateCanary",
+        "synthetics:UpdateCanary",
     }
 )
 
@@ -218,6 +238,31 @@ _CROSS_ACCOUNT_EXFIL_ACTIONS = frozenset(
         # (also in _HIGH_IMPACT but exfil-tier on the "single-call public
         # surface" semantics)
         "lambda:CreateFunctionUrlConfig",
+        # ROUND 3 additions:
+        # Verified Permissions — policy store + identity-source = grant
+        # cross-account access to anything that uses the policy store
+        "verifiedpermissions:CreatePolicyStore",
+        "verifiedpermissions:CreateIdentitySource",
+        # AppFlow — moves data between SaaS apps + AWS. Configure a
+        # flow to ship customer data to attacker SaaS.
+        "appflow:CreateFlow",
+        "appflow:UpdateFlow",
+        "appflow:StartFlow",
+        # OpenSearch Serverless data access policies
+        "aoss:CreateAccessPolicy",
+        "aoss:UpdateAccessPolicy",
+        # ECR Public — push images to public registry = supply chain
+        # exposure
+        "ecr-public:PutImage",
+        "ecr-public:CreateRepository",
+        # Direct Connect — bridge VPC to attacker's on-prem
+        "directconnect:CreateConnection",
+        "directconnect:CreatePrivateVirtualInterface",
+        "directconnect:CreateTransitVirtualInterface",
+        "directconnect:CreateInterconnect",
+        "directconnect:AllocatePrivateVirtualInterface",
+        "directconnect:AcceptPrivateVirtualInterface",
+        "directconnect:AcceptTransitVirtualInterface",
     }
 )
 
@@ -493,6 +538,34 @@ _CATASTROPHIC_ACTIONS = frozenset(
         # primitive.
         "s3:PutBucketPolicy",
         "s3:DeleteBucketPolicy",
+        # ROUND 3 additions:
+        # IAM user/group policy-attach (symmetric to AttachRolePolicy
+        # which was already catastrophic; user/group halves were missed)
+        "iam:AttachUserPolicy",
+        "iam:PutUserPolicy",
+        "iam:AttachGroupPolicy",
+        "iam:PutGroupPolicy",
+        "iam:AddUserToGroup",
+        # IAM principal CREATION — attacker creates a fresh principal
+        # (no audit trail of who they are), then attaches admin policy
+        "iam:CreateUser",
+        "iam:CreateRole",
+        # IAM tag-based escalation: TagRole can bypass ABAC if any tag-
+        # conditional policy trusts a tag the caller can write
+        "iam:TagRole",
+        "iam:TagUser",
+        # Roles Anywhere X.509 trust-anchor — federate any X.509 CA;
+        # attacker controls a CA → any role trusting it is theirs
+        "rolesanywhere:CreateTrustAnchor",
+        "rolesanywhere:CreateProfile",
+        # Cognito identity pool role mapping = take over every
+        # federated identity assuming a pool role
+        "cognito-identity:SetIdentityPoolRoles",
+        "cognito-identity:UpdateIdentityPool",
+        # Lake Formation — data-lake-wide permissions grant + global
+        # settings (drops fine-grained access control)
+        "lakeformation:GrantPermissions",
+        "lakeformation:PutDataLakeSettings",
         # SSM documents — define commands that run on every SSM-managed
         # instance. CreateDocument with attacker-controlled script +
         # ModifyDocumentPermission to share account-wide = persistent RCE.
@@ -500,6 +573,11 @@ _CATASTROPHIC_ACTIONS = frozenset(
         "ssm:UpdateDocument",
         "ssm:UpdateDocumentDefaultVersion",
         "ssm:ModifyDocumentPermission",
+        # SSM interactive / command primitives — RCE on EC2 fleet (the
+        # agent-68 finding confirmed these need catastrophic floor not
+        # just high-impact)
+        "ssm:StartSession",
+        "ssm:SendCommand",
         # Instance-profile bind/unbind. The textbook EC2 escalation:
         # CreateInstanceProfile + AddRoleToInstanceProfile (passes any
         # role to a new instance profile). Combined with ec2:RunInstances
@@ -546,6 +624,33 @@ _HIGH_IMPACT_MUTATION_ACTIONS_LC = frozenset(a.lower() for a in _HIGH_IMPACT_MUT
 _HIGH_RISK_ACTIONS_LC = frozenset(a.lower() for a in _HIGH_RISK_ACTIONS)
 _DECEPTIVE_WRITE_ACTIONS_LC = frozenset(a.lower() for a in _DECEPTIVE_WRITE_ACTIONS)
 _SECRET_BEARING_READS_LC = frozenset(a.lower() for a in _SECRET_BEARING_READS)
+
+
+# Service aliases — different AWS service-prefix names that all reach
+# the same underlying resource/data. Treat them equivalently for rule
+# matching. For now we collapse alternative prefixes to a canonical
+# one so the set-based lookups still work (the matching code lowercases
+# the service and looks up in this map before checking the constant
+# sets).
+_SERVICE_ALIASES = {
+    # S3 Object Lambda / S3 on Outposts proxy GetObject through to S3
+    "s3-object-lambda": "s3",
+    "s3-outposts": "s3",
+    # ECR Public is a separate IAM service but the actions are the same
+    # shape; we keep them separate so the catastrophic list can target
+    # ecr-public:PutImage specifically (already added in round 2).
+}
+
+
+def _canonical_action(action: str) -> str:
+    """Return the action lowercased with its service prefix canonicalized
+    via _SERVICE_ALIASES. Returns the all-lowercase form so the result
+    can be looked up directly in the *_LC mirror sets."""
+    if ":" not in action:
+        return action.lower()
+    svc, _, name = action.partition(":")
+    canon_svc = _SERVICE_ALIASES.get(svc.lower(), svc.lower())
+    return f"{canon_svc}:{name.lower()}"
 _CROSS_ACCOUNT_EXFIL_ACTIONS_LC = frozenset(a.lower() for a in _CROSS_ACCOUNT_EXFIL_ACTIONS)
 _CODE_EXECUTION_PRIMITIVES_LC = frozenset(a.lower() for a in _CODE_EXECUTION_PRIMITIVES)
 
@@ -555,24 +660,19 @@ def _is_broad_resource(r: str) -> bool:
 
     Catches:
       - literal `*` (account-wide)
-      - service-wide wildcards where the entire resource-spec is `*`,
-        like `arn:aws:s3:::*` or `arn:aws:ec2:::*`
-      - bucket-level wildcards like `arn:aws:s3:::my-bucket/*` — every
-        object in one bucket
-      - **bucket-name-prefix wildcards** like `arn:aws:s3:::prod-*` or
-        `arn:aws:s3:::*/sensitive-data/*` — the bucket-name component
-        (between `:::` and the first `/`) contains a `*`, so it matches
-        many buckets. (Found by adversarial agent 2026-05-13.)
-      - **IAM trailing-wildcard forms** like
-        `arn:aws:iam::123:role/*` or `arn:aws:iam::123:user/*` — every
-        role / user in the account.
+      - service-wide wildcards where the entire resource-spec is `*`
+      - bucket-level wildcards like `arn:aws:s3:::my-bucket/*`
+      - bucket-NAME-prefix wildcards like `arn:aws:s3:::prod-*`
+      - IAM trailing-wildcard forms (`role/*`, `user/*`)
+      - Non-IAM collection wildcards like `arn:aws:kms:.::alias/*`
+      - ARN account-segment wildcards like `arn:aws:lambda:us-east-1:*:function:foo`
+        (matches the resource in EVERY account in the org — broad)
 
     Does NOT match:
-      - Path-narrowed wildcards like `arn:aws:s3:::specific-bucket/prefix/*`
-        with NO wildcard in the bucket-name component (intentional scoping)
-      - Suffix wildcards inside a deeper ARN path like
-        `arn:aws:logs:us-east-1:account:log-group:/app:*` — fine-grained
-        scoping within ONE log group.
+      - Path-narrowed wildcards (specific bucket + sub-path wildcard
+        with NO wildcard in the bucket-name part)
+      - Suffix wildcards inside a deeper ARN path
+        (`log-group:/app:*` = one log group's streams)
     """
     if r == "*":
         return True
@@ -581,6 +681,12 @@ def _is_broad_resource(r: str) -> bool:
         parts = r.split(":", 5)
         if len(parts) < 6:
             return False  # malformed ARN — treat as narrow
+        # ARN structure: arn:partition:service:region:account:resource-spec.
+        # If the account segment (parts[4]) is `*`, the ARN refers to the
+        # named resource in EVERY account — cross-account broad. (Found
+        # by adversarial agent round 3.)
+        if parts[4] == "*":
+            return True
         resource_spec = parts[5]
         service = parts[2]
     else:
@@ -591,26 +697,34 @@ def _is_broad_resource(r: str) -> bool:
     if resource_spec == "*":
         return True
 
-    # IAM trailing-wildcard forms: `role/*`, `user/*`, `group/*`,
-    # `policy/*` — the principal/policy collection-wide wildcard.
-    if service == "iam":
-        first_segment = resource_spec.split("/", 1)[0]
-        if first_segment in ("role", "user", "group", "policy", "instance-profile"):
-            rest = resource_spec[len(first_segment) + 1:] if "/" in resource_spec else ""
-            # `role/*` or `role/path-*` or `role/dev-*` — all broad
-            if rest == "*" or (rest.endswith("*") and rest.count("/") == 0):
+    # Collection wildcards across services. For IAM, the collection
+    # types are `role`, `user`, `group`, `policy`, `instance-profile`.
+    # For KMS, `alias` (the alias collection — wildcarding it equals
+    # "every key alias"). For Lambda, `function:*` is already handled
+    # by `_is_strict_wildcard` via the `:` separator. Extend the
+    # principal-collection list to include `alias` and other common
+    # service-specific collection types.
+    if "/" in resource_spec:
+        first_segment, _, rest = resource_spec.partition("/")
+        # Known per-service single-collection wildcards
+        collection_types = {
+            "iam": ("role", "user", "group", "policy", "instance-profile"),
+            "kms": ("alias",),
+            "secretsmanager": ("secret",),
+            "ec2": ("instance", "vpc", "subnet", "security-group"),
+            "logs": (),  # logs uses `:` not `/` — not handled here
+        }
+        if first_segment in collection_types.get(service, ()):
+            if rest == "*" or (rest.endswith("*") and "/" not in rest):
                 return True
 
     # S3-style: bucket-name component (before first `/`) contains `*`.
-    # Examples: `prod-*`, `*-staging`, `*` (already handled above),
-    # `prod-*/*`, `*/sensitive-data/*`. Matches every bucket whose name
-    # fits the pattern — broad blast.
     if "/" not in resource_spec:
         # No slash: this IS the bucket name. If it has `*`, it's broad.
         if "*" in resource_spec:
             return True
     else:
-        bucket_part, _, path_part = resource_spec.partition("/")
+        bucket_part, _, _path_part = resource_spec.partition("/")
         if "*" in bucket_part:
             return True
         # Single-bucket bucket-level wildcard: `bucket/*` (one slash, ends in `/*`)
@@ -872,19 +986,31 @@ def _deterministic(
                 "the operations the role actually needs. NotAction is "
                 "almost always wider than the author intended."
             )
+        # NotResource semantically means "every resource EXCEPT these."
+        # By definition this is broader than a positive Resource list —
+        # the only way to make it narrower than `Resource: *` is to
+        # exclude almost everything, which operators essentially never
+        # do. So: when NotResource is set (and isn't itself wildcarded),
+        # treat the statement's resource set as broad for the rest of
+        # the scoring rules below.
         if not_resources:
             if any(r == "*" or r.endswith(":*") for r in not_resources):
-                # NotResource[*] is mathematically nothing (grants nothing),
-                # so it's not actually a security risk — but it's a likely
-                # mistake. Flag at low severity.
+                # NotResource[*] is mathematically nothing (grants nothing).
+                # Flag at low severity — likely misconfiguration.
                 score = max(score, 3)
                 factors.append(
                     "`NotResource` containing `*` grants no access — "
                     "likely a misconfiguration."
                 )
             else:
-                # `NotResource: [<some-arns>]` means "every resource EXCEPT
-                # these." With a wildcard action this is broad.
+                # Promote this statement to broad-resource semantics.
+                # The destructive-on-broad / high-impact / catastrophic
+                # / PassRole / cross-account-exfil rules below all gate
+                # on `wildcard_resource` / `broad_blast_resource`; by
+                # setting those true here, the per-action rules apply
+                # as if Resource: * was named.
+                wildcard_resource = True
+                broad_blast_resource = True
                 if any("*" in a for a in actions):
                     score = max(score, 8)
                     factors.append(
@@ -892,10 +1018,19 @@ def _deterministic(
                         f"action on every resource EXCEPT {not_resources[:2]}. "
                         "This pattern is almost always broader than intended."
                     )
-                    suggestions.append(
-                        "Replace `NotResource` with an explicit `Resource` "
-                        "list of the ARNs the role should reach."
+                else:
+                    score = max(score, 6)
+                    factors.append(
+                        f"`NotResource` excluding {not_resources[:2]} = "
+                        f"effective resource set is 'everything except those' "
+                        f"— broader than a positive Resource list would be. "
+                        "The destructive/high-impact/catastrophic rules now "
+                        "apply as if Resource: * was named."
                     )
+                suggestions.append(
+                    "Replace `NotResource` with an explicit `Resource` "
+                    "list of the ARNs the role should reach."
+                )
 
         # Two senses of "wildcard" — kept distinct because they apply
         # to different rules:
@@ -946,6 +1081,10 @@ def _deterministic(
             parts = r.split(":", 5)
             if len(parts) < 6:
                 return False
+            # Account-segment wildcard: `arn:aws:svc:region:*:resource`
+            # = the same resource in every account in the org. Broad.
+            if parts[4] == "*":
+                return True
             resource_spec = parts[5]
             service = parts[2]
             if resource_spec == "*":
@@ -957,12 +1096,18 @@ def _deterministic(
                 first, _, rest = resource_spec.partition(":")
                 if rest == "*" and "/" not in first:
                     return True
-            # IAM principal-collection wildcards: `role/*`, `user/*`,
-            # `role/team-*`, etc. Pattern: `<collection>/<glob>` where
-            # `<glob>` ends in `*` and has no `/` (single-segment glob).
-            if service == "iam" and "/" in resource_spec:
+            # Per-service collection wildcards via slash: `role/*`,
+            # `alias/*`, `secret/*`. Service-specific because different
+            # services have different collection types.
+            if "/" in resource_spec:
                 collection, _, tail = resource_spec.partition("/")
-                if collection in ("role", "user", "group", "policy", "instance-profile"):
+                collection_types = {
+                    "iam": ("role", "user", "group", "policy", "instance-profile"),
+                    "kms": ("alias",),
+                    "secretsmanager": ("secret",),
+                    "ec2": ("instance", "vpc", "subnet", "security-group"),
+                }
+                if collection in collection_types.get(service, ()):
                     if tail == "*" or (tail.endswith("*") and "/" not in tail):
                         return True
             # S3 bucket-name wildcards: `prod-*` (no slash, has `*`) or
@@ -978,6 +1123,15 @@ def _deterministic(
 
         wildcard_resource = any(_is_strict_wildcard(r) for r in resources)
         broad_blast_resource = _resources_are_broad(resources)
+
+        # NotResource override: when NotResource is set (and isn't itself
+        # wildcarded with `*`), the effective resource set is "everything
+        # except those" — broader than a positive Resource list. The
+        # destructive-on-broad / high-impact / catastrophic / cross-
+        # account-exfil rules should fire as if Resource: * was named.
+        if not_resources and not any(r == "*" or r.endswith(":*") for r in not_resources):
+            wildcard_resource = True
+            broad_blast_resource = True
 
         if "*" in actions:
             return (
@@ -1072,7 +1226,34 @@ def _deterministic(
                 #   3. Infix or other wildcard with broad resource —
                 #      floor at 5. Catches `ec2:*Network*` matching
                 #      CreateNetworkInterface + DeleteNetworkAcl etc.
-                if service in effective_sensitive:
+                # Before service-sensitivity branch: check if this glob
+                # would fnmatch any catastrophic action. `iam:Create*`
+                # matches `iam:CreateAccessKey`, `iam:CreateOpenIDConnect-
+                # Provider`, etc. — all catastrophic individually. If the
+                # glob is a superset of catastrophic actions, floor at 9.
+                import fnmatch as _fnmatch
+                action_lc = action.lower()
+                matches_cat = any(
+                    _fnmatch.fnmatchcase(cat_lc, action_lc)
+                    for cat_lc in _CATASTROPHIC_ACTIONS_LC
+                )
+                if matches_cat:
+                    matched_examples = sorted(
+                        c for c in _CATASTROPHIC_ACTIONS
+                        if _fnmatch.fnmatchcase(c.lower(), action_lc)
+                    )[:3]
+                    score = max(score, 9)
+                    factors.append(
+                        f"Action-name glob `{action}` matches catastrophic "
+                        f"actions including {', '.join(matched_examples)} — "
+                        "the glob is a superset of always-human-review actions."
+                    )
+                    suggestions.append(
+                        f"Replace `{action}` with the specific actions actually "
+                        "needed; the glob silently includes account-compromise "
+                        "primitives."
+                    )
+                elif service in effective_sensitive:
                     score = max(score, 7)
                     factors.append(
                         f"Wildcard within sensitive service action: `{action}`"
@@ -1107,7 +1288,7 @@ def _deterministic(
                             "operations the role needs."
                         )
 
-            if action == "iam:PassRole":
+            if action.lower() == "iam:passrole":
                 if wildcard_resource:
                     score = max(score, 9)
                     factors.append(
@@ -1378,6 +1559,28 @@ def _deterministic(
     )
     pass_role_any = "iam:passrole" in action_names_lc
 
+    # Code-execution-primitive ALONE on broad resource (no PassRole)
+    # still deserves a higher floor than the high-impact-mutation floor
+    # of 5. The action could deploy attacker code to any matching
+    # resource — even without explicit PassRole composition, the role
+    # the resource runs under is at risk. Floor 7 on strict-broad.
+    if any(
+        _canonical_action(a) in _CODE_EXECUTION_PRIMITIVES_LC and strict
+        for a, _i, strict in all_actions
+    ):
+        score = max(score, 7)
+        which_examples = sorted([
+            a for a, _i, _s in all_actions
+            if _canonical_action(a) in _CODE_EXECUTION_PRIMITIVES_LC
+        ])[:3]
+        factors.append(
+            f"Code-execution primitive on broad resource: "
+            f"{', '.join(which_examples)}. Deploys attacker-controlled "
+            "code that runs under whatever role the matched resources "
+            "use. Even without explicit PassRole, the existing roles "
+            "of matched resources become the attack target."
+        )
+
     if has_code_exec and pass_role_any:
         # Even with a narrow PassRole resource ARN, the COMBINATION is
         # full account-compromise tier: the attacker controls the code,
@@ -1438,7 +1641,7 @@ def _deterministic(
     # (`bucket/*`) DON'T fire this — that's legitimate "read everything
     # in this app's bucket."
     for action, _inclusive, strict in all_actions:
-        if action.lower() in _SECRET_BEARING_READS_LC and strict:
+        if _canonical_action(action) in _SECRET_BEARING_READS_LC and strict:
             score = max(score, 7)
             factors.append(
                 f"`{action}` on broad resource reads content that "

@@ -1,0 +1,50 @@
+name: agent-68-ssm-start-session-account-wide
+description: |
+  ssm:StartSession is in _HIGH_IMPACT_MUTATION_ACTIONS — that gives a
+  floor of 5, treating it like other narrow-scope writes. But the action's
+  blast radius scales DRAMATICALLY with resource breadth:
+    - On a specific instance ARN: floor 5 is fine (one box, but still
+      interactive shell — probably should be 6-7).
+    - On Resource: '*': interactive shell on EVERY managed instance in
+      the account. That includes domain controllers, prod databases,
+      key servers, anything with the SSM agent installed.
+
+  Compare to other actions in the catastrophic list:
+    - ecs:ExecuteCommand IS catastrophic (floor 9). That's interactive
+      shell on ECS tasks.
+    - ssm:SendCommand on broad is treated as high-impact only (floor 5).
+      Same primitive (RCE on EC2 fleet) but stays at 5.
+    - ssm:StartSession on broad — same issue.
+
+  Scorer flow:
+    - High-impact mutation floor → 5
+    - sensitive-service (ssm) on broad → 6
+    - state-changing-on-broad → 6
+  Max = 6. No 9.
+
+  Real risk: 9 on broad resource (account-wide interactive shell access).
+  Catastrophic class — same as ecs:ExecuteCommand.
+
+  Suggested fix: when ssm:StartSession or ssm:SendCommand appears with
+  a wildcard/broad resource, floor at 9. Easiest path: add an additional
+  check in the per-action loop that, for these actions, escalates the
+  floor based on resource breadth. OR add ssm:StartSession +
+  ssm:SendCommand to _CATASTROPHIC_ACTIONS (and accept that even narrow
+  scope is treated as catastrophic — which is defensible, since these
+  are interactive shells on production hosts).
+policy:
+  Version: '2012-10-17'
+  Statement:
+    - Effect: Allow
+      Action:
+        - ssm:StartSession
+        - ssm:SendCommand
+      Resource: '*'
+request:
+  spec:
+    access_type: read-write
+    duration:
+      duration_hours: 1
+expected:
+  score_min: 9
+  must_auto_approve: false

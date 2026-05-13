@@ -1,0 +1,48 @@
+name: agent-76-account-segment-wildcard-arn
+description: |
+  ARN with a wildcard in the ACCOUNT-ID segment (`arn:aws:lambda:us-east-1
+  :*:function:my-deploy-bot`) matches the same resource name in EVERY
+  account. This is a cross-account broadening pattern: the resource looks
+  narrow (one specific function name), but applies to every account in
+  the partition that has a function by that name.
+
+  Common attack: name your function something predictable like
+  `my-deploy-bot` or `prod-deployer`, then grant yourself update
+  permissions on `arn:aws:lambda:*:*:function:my-deploy-bot`. If any
+  account in your org has a function by that name, you can modify it.
+
+  Scorer flow:
+    - _is_broad_resource checks resource_spec (the SLOT AFTER the
+      account segment) for wildcards. Account-segment wildcard isn't
+      examined.
+    - For `arn:aws:lambda:us-east-1:*:function:my-deploy-bot`,
+      resource_spec = "function:my-deploy-bot". No `*` in
+      resource_spec, no broad signal. _is_strict_wildcard same.
+    - lambda:UpdateFunctionCode IS in _HIGH_IMPACT_MUTATION_ACTIONS,
+      so floor 5 fires.
+  Max = 5.
+
+  Real risk: 7-8 — cross-account write primitive.
+
+  Suggested fix: in _is_broad_resource and _is_strict_wildcard, also
+  check `parts[4]` (the account-id segment). If it contains `*` and
+  isn't a known fixed account (e.g., the requester's own), treat as
+  broad. Same for region segment `parts[3]` (multi-region wildcards
+  are also broadening but less severe — region is often legitimately
+  `*` for global services).
+policy:
+  Version: '2012-10-17'
+  Statement:
+    - Effect: Allow
+      Action:
+        - lambda:UpdateFunctionCode
+        - lambda:InvokeFunction
+      Resource: arn:aws:lambda:us-east-1:*:function:my-deploy-bot
+request:
+  spec:
+    access_type: read-write
+    duration:
+      duration_hours: 1
+expected:
+  score_min: 7
+  must_auto_approve: false

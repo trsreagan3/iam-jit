@@ -1,0 +1,49 @@
+name: agent-74-passrole-case-insensitivity
+description: |
+  Round 2 added case-insensitive matching for the action SETS
+  (_CATASTROPHIC_ACTIONS_LC, etc.). But the literal-string comparison
+  for iam:PassRole at line ~1110 of review.py is still case-sensitive:
+
+      if action == "iam:PassRole":
+          if wildcard_resource:
+              score = max(score, 9)
+          else:
+              score = max(score, 4)
+      elif action.lower() in _HIGH_RISK_ACTIONS_LC and wildcard_resource:
+          score = max(score, 7)
+
+  So `iam:passrole` or `iam:PASSROLE` skips the 9-floor on
+  wildcard-resource and instead falls into the high-risk-on-broad
+  branch (lower-cased → matches), which floors at 7.
+
+  AWS IAM is case-insensitive: `iam:passrole` is a valid policy
+  statement that grants the same PassRole permission. The 2-point
+  difference (7 vs 9) crosses the auto-approve threshold for some
+  configurations.
+
+  Same case-sensitivity gap exists in the composition rules — though
+  those DO use `.lower()` for the membership check, the literal-string
+  branch for PassRole's per-statement logic doesn't.
+
+  Real risk: 9 — identical to canonical-case iam:PassRole.
+
+  Suggested fix: change `if action == "iam:PassRole":` to
+  `if action.lower() == "iam:passrole":`. Same fix for the
+  sts:AssumeRole comparison in the iam-recon composition rule
+  (already uses .lower() in the iam_recon path but check the iam-
+  recon-then-assume composition where there's a sts:assumerole literal).
+policy:
+  Version: '2012-10-17'
+  Statement:
+    - Effect: Allow
+      Action:
+        - iam:passrole
+      Resource: '*'
+request:
+  spec:
+    access_type: read-write
+    duration:
+      duration_hours: 1
+expected:
+  score_min: 9
+  must_auto_approve: false

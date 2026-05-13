@@ -1,0 +1,61 @@
+name: agent-77-kms-alias-key-collection-wildcards
+description: |
+  The IAM principal-collection wildcard recognition in `_is_strict_wildcard`
+  is hard-coded to the IAM service:
+
+      if service == "iam" and "/" in resource_spec:
+          collection, _, tail = resource_spec.partition("/")
+          if collection in ("role", "user", "group", "policy", "instance-profile"):
+              ...
+
+  But other services have analogous collection-level wildcards that
+  should also be treated as strict wildcards:
+    - `arn:aws:kms:...:key/*`     — every KMS key in region
+    - `arn:aws:kms:...:alias/*`   — every KMS alias in region
+    - `arn:aws:secretsmanager:...:secret:*` — already handled via
+      `<type>:*` colon branch
+    - `arn:aws:lambda:...:function:*` — already handled
+
+  The `key/*` and `alias/*` shapes use a `/` separator (not `:`) so
+  the colon-branch doesn't catch them. The IAM-specific branch
+  doesn't apply (service is "kms"). The bucket-name `*` check
+  doesn't apply either (`key` and `alias` are fixed prefixes with no
+  `*`). The fall-through `endswith('/*') and count('/')<=1` check IN
+  `_is_broad_resource` does catch it for `_resources_are_broad`, but
+  `_is_strict_wildcard` does NOT — which is what gates the
+  KMS-on-broad floor in the secret-bearing-reads composition rule.
+
+  So `kms:Decrypt + GenerateDataKey + Encrypt` on `arn:aws:kms:us-east-1:
+  123:alias/*` (every alias = every key) treats the resource as NOT
+  strict-wild, falling into the sensitive-service-on-Resource:* branch
+  which floors at 6. The "secret-bearing-reads on strict-broad" rule
+  (floor 7 for kms:Decrypt-style content reads) never fires.
+
+  Real risk: 8 — region-wide KMS access to every encrypted resource.
+
+  Suggested fix: extend the strict-wildcard collection check to
+  non-IAM services. Add a `<service>:<collection>` map:
+    kms: {key, alias}
+    secretsmanager: {secret}
+    lambda: {function, layer}
+    ssm: {parameter, document}
+    ...
+  OR more generally: any resource ending in `/<glob-with-star>` where
+  the segment before `/` is a fixed string of known type (no special
+  chars), should count as collection-level wildcard.
+policy:
+  Version: '2012-10-17'
+  Statement:
+    - Effect: Allow
+      Action:
+        - kms:Decrypt
+        - kms:GenerateDataKey
+      Resource: arn:aws:kms:us-east-1:123456789012:alias/*
+request:
+  spec:
+    access_type: read-write
+    duration:
+      duration_hours: 1
+expected:
+  score_min: 7
+  must_auto_approve: false

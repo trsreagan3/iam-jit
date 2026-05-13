@@ -1,0 +1,51 @@
+name: agent-65-rolesanywhere-federation-takeover
+description: |
+  IAM Roles Anywhere is the federation primitive for X.509 client
+  certificates — the certificate-equivalent of the OIDC / SAML provider.
+  The catastrophic-actions list already includes iam:CreateOpenIDConnect-
+  Provider, iam:CreateSAMLProvider, and the *Update* variants, because
+  registering an IdP gives the attacker a path to assume any role that
+  trusts that IdP. Roles Anywhere is the exact same primitive with a
+  different protocol:
+
+    - rolesanywhere:CreateTrustAnchor — register an attacker-controlled
+      private CA / CA bundle. Roles trusting "ANY cert from this anchor"
+      become assumable with attacker-issued certs.
+    - rolesanywhere:CreateProfile — define which role(s) can be assumed
+      via the trust anchor.
+    - rolesanywhere:UpdateTrustAnchor / EnableTrustAnchor — flip a
+      disabled trust anchor back on, or repoint at attacker's CA.
+
+  Combine `CreateTrustAnchor` (point at attacker's CA) +
+  `CreateProfile` (mapping that anchor to any role) and the attacker
+  gets credentials for any role in the account by presenting an
+  attacker-signed client cert to `rolesanywhere:CreateSession`.
+
+  Scorer flow: sensitive-service rule doesn't fire (rolesanywhere isn't
+  in _SENSITIVE_SERVICES). State-changing-on-broad floor 6. No 9.
+
+  Real risk: 9 — identical severity to iam:CreateOpenIDConnectProvider.
+
+  Suggested fix: add rolesanywhere:CreateTrustAnchor, rolesanywhere:Update-
+  TrustAnchor, rolesanywhere:EnableTrustAnchor, rolesanywhere:CreateProfile,
+  rolesanywhere:UpdateProfile, rolesanywhere:EnableProfile to
+  _CATASTROPHIC_ACTIONS. Also consider adding `rolesanywhere` to
+  _SENSITIVE_SERVICES so service-wildcard (`rolesanywhere:*`) floors high.
+policy:
+  Version: '2012-10-17'
+  Statement:
+    - Effect: Allow
+      Action:
+        - rolesanywhere:CreateTrustAnchor
+        - rolesanywhere:CreateProfile
+        - rolesanywhere:UpdateTrustAnchor
+        - rolesanywhere:EnableTrustAnchor
+      Resource: '*'
+request:
+  spec:
+    access_type: read-write
+    duration:
+      duration_hours: 1
+expected:
+  score_min: 9
+  must_auto_approve: false

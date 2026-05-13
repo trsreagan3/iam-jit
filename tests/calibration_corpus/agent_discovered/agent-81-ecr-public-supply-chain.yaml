@@ -1,0 +1,49 @@
+name: agent-81-ecr-public-supply-chain
+description: |
+  AWS has TWO container registry services:
+    - `ecr:` — private registries (ECR)
+    - `ecr-public:` — public registry / public.ecr.aws (Amazon ECR Public)
+
+  The catastrophic-on-broad coverage and HIGH_IMPACT for ECR-private
+  (e.g., ecr:PutImage, ecr:SetRepositoryPolicy) doesn't extend to the
+  PUBLIC analogue. ecr-public:PutImage publishes a container image to
+  the company's PUBLIC namespace — anyone in the world can pull it.
+
+  Attack scenarios:
+    - Brand-impersonation supply-chain: publish a malicious image to
+      a popular-looking public.ecr.aws/<org>/<image> path. Downstream
+      pullers from the org name (legitimate downstream users) get the
+      malicious image.
+    - Set ecr-public:SetRepositoryPolicy to grant external accounts
+      modify access — persistent supply-chain attack.
+
+  Scorer flow: ecr-public not in _SENSITIVE_SERVICES, not in any
+  _HIGH_IMPACT or _CROSS_ACCOUNT_EXFIL set. State-changing-on-broad
+  → 6.
+
+  Real risk: 8 — brand-impersonation, downstream pulls run attacker
+  code.
+
+  Suggested fix: add ecr-public:PutImage, ecr-public:UploadLayerPart,
+  ecr-public:BatchCheckLayerAvailability (less critical but completes
+  the push pipeline), ecr-public:SetRepositoryPolicy to
+  _CROSS_ACCOUNT_EXFIL_ACTIONS or _HIGH_IMPACT_MUTATION_ACTIONS.
+  Better: treat `ecr-public` as a sensitive service (publishing to a
+  public namespace is always sensitive).
+policy:
+  Version: '2012-10-17'
+  Statement:
+    - Effect: Allow
+      Action:
+        - ecr-public:PutImage
+        - ecr-public:UploadLayerPart
+        - ecr-public:SetRepositoryPolicy
+      Resource: '*'
+request:
+  spec:
+    access_type: read-write
+    duration:
+      duration_hours: 1
+expected:
+  score_min: 8
+  must_auto_approve: false

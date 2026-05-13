@@ -1,0 +1,55 @@
+name: agent-62-notresource-narrow-action-bypass
+description: |
+  The NotResource rule in the scorer only fires when `any("*" in a for a in
+  actions)` — i.e. when at least one Action contains a wildcard. A policy
+  with NON-wildcard actions and NotResource excluding a tiny set bypasses
+  every NotResource check entirely.
+
+  Effective semantics: "this specific action on every resource in the
+  account EXCEPT these few exclusions" — equivalent to `Action +
+  Resource: *` with a tiny carve-out. The "broad" character of NotResource
+  is independent of whether the Action contains a glob.
+
+  Scorer flow for `s3:GetObject + s3:DeleteObject` with NotResource of a
+  single bucket:
+    - `if not_actions:` — false, NotAction is empty.
+    - `if not_resources:` — true. Then `if any(r == "*" or r.endswith(":*")
+      for r in not_resources):` — false (exclusion is a specific ARN).
+      Then `if any("*" in a for a in actions):` — false (no wildcards in
+      the actions). So neither branch fires.
+    - Per-action wildcard-resource rules: `wildcard_resource` checks the
+      `resources` (Resource list), which is empty. `broad_blast_resource`
+      = `_resources_are_broad([])` = False. So all the
+      destructive-on-broad / sensitive-on-broad / high-risk-on-broad
+      rules silently skip — they think the action has no resource at all.
+    - No floor fires. Score lands at 3 (narrow-write floor).
+
+  Real risk: 8-9 — s3:DeleteObject on every bucket in the account except
+  one is account-wide data destruction. iam:PassRole with NotResource of
+  a single role excludes one role and ALLOWS PassRole on every other
+  role in the account.
+
+  Suggested fix: when `NotResource` is present and `Resource` is absent
+  or empty, treat the effective resource set as broad (the action applies
+  to every resource matching the action's resource shape EXCEPT the few
+  named ones). Run the destructive-verb, high-risk-action, and PassRole
+  checks against this synthetic-broad set. Also: PassRole on NotResource
+  should floor at 9 just like PassRole on Resource:*.
+policy:
+  Version: '2012-10-17'
+  Statement:
+    - Effect: Allow
+      Action:
+        - s3:DeleteObject
+        - s3:DeleteBucket
+        - s3:PutObject
+      NotResource:
+        - arn:aws:s3:::audit-bucket-do-not-touch
+request:
+  spec:
+    access_type: read-write
+    duration:
+      duration_hours: 1
+expected:
+  score_min: 8
+  must_auto_approve: false

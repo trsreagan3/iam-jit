@@ -1,0 +1,52 @@
+name: agent-72-service-catalog-cfn-rce
+description: |
+  AWS Service Catalog is a managed wrapper around CloudFormation: a
+  Service Catalog "product" is a CFN template, "provisioning" deploys
+  it under a "launch role" defined on the portfolio. This is the same
+  primitive as cloudformation:CreateStack + iam:PassRole (which IS
+  composed and scored as catastrophic), but going through the Service
+  Catalog API path:
+
+    - servicecatalog:CreateProduct / UpdateProduct — define the CFN
+      template attacker wants deployed.
+    - servicecatalog:ProvisionProduct — deploy the product under the
+      launch role. Effectively cfn:ExecuteChangeSet under that role.
+    - servicecatalog:AssociatePrincipalWithPortfolio — grant another
+      principal the right to provision (persistent).
+
+  Combined with iam:PassRole on the launch role, attacker provisions
+  arbitrary AWS resources under the launch role — full account
+  compromise tier.
+
+  Scorer flow: state-changing-on-broad → 6; PassRole narrow → 4. No
+  composition rule because servicecatalog:CreateProduct/ProvisionProduct
+  isn't in _CODE_EXECUTION_PRIMITIVES.
+
+  Real risk: 9 — same as cloudformation:ExecuteChangeSet + PassRole.
+
+  Suggested fix: add servicecatalog:CreateProduct, servicecatalog:Update-
+  Product, servicecatalog:ProvisionProduct, servicecatalog:Associate-
+  PrincipalWithPortfolio to _CODE_EXECUTION_PRIMITIVES so the existing
+  PassRole composition rule fires.
+policy:
+  Version: '2012-10-17'
+  Statement:
+    - Effect: Allow
+      Action:
+        - servicecatalog:CreateProduct
+        - servicecatalog:UpdateProduct
+        - servicecatalog:ProvisionProduct
+        - servicecatalog:AssociatePrincipalWithPortfolio
+      Resource: '*'
+    - Effect: Allow
+      Action:
+        - iam:PassRole
+      Resource: arn:aws:iam::123456789012:role/service-catalog-launch-role
+request:
+  spec:
+    access_type: read-write
+    duration:
+      duration_hours: 1
+expected:
+  score_min: 9
+  must_auto_approve: false

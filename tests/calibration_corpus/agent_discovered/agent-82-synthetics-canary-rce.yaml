@@ -1,0 +1,44 @@
+name: agent-82-synthetics-canary-rce
+description: |
+  CloudWatch Synthetics canaries are caller-supplied Node.js or Python
+  scripts that run on a Lambda-like worker on a schedule. The script
+  runs as the canary's execution role.
+
+  Same code-exec primitive as lambda:CreateFunction (which IS in
+  _CODE_EXECUTION_PRIMITIVES). Combined with iam:PassRole on the canary
+  role, this is RCE-as-that-role.
+
+  Actions:
+    - synthetics:CreateCanary — provision the canary with caller-supplied
+      script and a passed execution role
+    - synthetics:UpdateCanary — replace the script (under the same role)
+    - synthetics:StartCanary — trigger an immediate run
+
+  Scorer flow: synthetics not in code-exec list. State-changing-on-broad
+  → 6. PassRole narrow → 4. No composition rule.
+
+  Real risk: 8 — RCE as canary role (often grants S3/SecretsManager
+  access for canary auth).
+
+  Suggested fix: add synthetics:CreateCanary, synthetics:UpdateCanary
+  to _CODE_EXECUTION_PRIMITIVES.
+policy:
+  Version: '2012-10-17'
+  Statement:
+    - Effect: Allow
+      Action:
+        - synthetics:CreateCanary
+        - synthetics:UpdateCanary
+      Resource: '*'
+    - Effect: Allow
+      Action:
+        - iam:PassRole
+      Resource: arn:aws:iam::123456789012:role/canary-execution-role
+request:
+  spec:
+    access_type: read-write
+    duration:
+      duration_hours: 1
+expected:
+  score_min: 8
+  must_auto_approve: false

@@ -1,0 +1,47 @@
+name: agent-83-direct-connect-network-bridge
+description: |
+  AWS Direct Connect is the dedicated-fiber bridge between AWS and
+  external networks. Specific actions create network paths that bypass
+  any internet-facing security controls:
+
+    - directconnect:CreateInterconnect / AllocatePrivateVirtualInterface:
+      hook up attacker's data center to the company's VPC via a private
+      virtual interface. Establishes a persistent network bridge.
+    - directconnect:AcceptPrivateVirtualInterface: accept a VIF
+      proposal — equivalent of ec2:AcceptVpcPeeringConnection (which
+      IS in _CROSS_ACCOUNT_EXFIL_ACTIONS).
+    - directconnect:UpdateVirtualInterfaceAttributes: re-route an
+      existing VIF.
+
+  Single-call network-bridge primitive. Once the VIF is up, attacker's
+  data center can reach internal VPC resources directly.
+
+  Scorer flow: directconnect not in any list. State-changing-on-broad
+  → 6.
+
+  Real risk: 8 — same tier as ec2:CreateVpcPeeringConnection
+  (already in _CROSS_ACCOUNT_EXFIL_ACTIONS).
+
+  Suggested fix: add directconnect:CreateInterconnect, directconnect:
+  AllocatePrivateVirtualInterface, directconnect:AcceptPrivateVirtual-
+  Interface, directconnect:CreateBGPPeer, directconnect:UpdateVirtual-
+  InterfaceAttributes to _CROSS_ACCOUNT_EXFIL_ACTIONS. Also consider
+  Site-to-Site VPN (ec2:CreateVpnConnection, ec2:CreateCustomerGateway)
+  and Client VPN (ec2:CreateClientVpnEndpoint).
+policy:
+  Version: '2012-10-17'
+  Statement:
+    - Effect: Allow
+      Action:
+        - directconnect:CreateInterconnect
+        - directconnect:AllocatePrivateVirtualInterface
+        - directconnect:AcceptPrivateVirtualInterface
+      Resource: '*'
+request:
+  spec:
+    access_type: read-write
+    duration:
+      duration_hours: 1
+expected:
+  score_min: 8
+  must_auto_approve: false

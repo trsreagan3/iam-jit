@@ -1,0 +1,44 @@
+name: agent-75-iam-create-user-create-role
+description: |
+  Two foundational IAM persistence primitives aren't in _CATASTROPHIC_ACTIONS:
+    - iam:CreateUser — mint a new IAM user. Persists past JIT grant
+      revocation. Combined with iam:CreateAccessKey (catastrophic) or
+      iam:CreateLoginProfile (catastrophic) the new user has API or
+      console access.
+    - iam:CreateRole — mint a new IAM role with an attacker-controlled
+      assume-role policy. The trust policy can permit attacker's
+      external account or attacker-controlled OIDC IdP. Anyone who
+      satisfies the trust policy can sts:AssumeRole into the new role.
+
+  iam:CreateAccessKey is already catastrophic; iam:CreateOpenIDConnect-
+  Provider is catastrophic; iam:AttachRolePolicy is catastrophic — but
+  iam:CreateUser and iam:CreateRole, the COMPOSITION partners for those,
+  are NOT. The scorer recognizes the dangerous "attach to admin"
+  step but not the "create the new principal" step.
+
+  Scorer flow:
+    - iam (sensitive) on Resource:* → floor 6
+    - state-changing-on-broad → 6
+  Max = 6. Real risk: 8 — persistence primitive even alone, full
+  account-takeover when paired with the policy-attach step.
+
+  Suggested fix: add iam:CreateUser, iam:CreateRole to _CATASTROPHIC_-
+  ACTIONS (floor 9). Even on a specific resource ARN (which doesn't
+  really apply to Create* — the ARN is the resource being created,
+  not pre-existing), these warrant human review.
+policy:
+  Version: '2012-10-17'
+  Statement:
+    - Effect: Allow
+      Action:
+        - iam:CreateUser
+        - iam:CreateRole
+      Resource: '*'
+request:
+  spec:
+    access_type: read-write
+    duration:
+      duration_hours: 1
+expected:
+  score_min: 8
+  must_auto_approve: false

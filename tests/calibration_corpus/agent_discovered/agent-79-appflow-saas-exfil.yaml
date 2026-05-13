@@ -1,0 +1,50 @@
+name: agent-79-appflow-saas-exfil
+description: |
+  Amazon AppFlow is the SaaS-to-AWS data transfer service. A single
+  appflow:CreateFlow call sets up persistent data pipelines that pull
+  data from Salesforce / Slack / ServiceNow / etc. and write it
+  anywhere — including attacker-controlled destinations.
+
+  Attack: attacker creates a flow with source = company's Salesforce
+  (authenticated via existing AppFlow ConnectorProfile), destination =
+  an S3 bucket they control (own account, or even cross-account if the
+  destination is permitted). Subsequent appflow:StartFlow triggers the
+  exfiltration.
+
+  Variants:
+    - appflow:CreateFlow / UpdateFlow — define the pipeline
+    - appflow:StartFlow — execute it
+    - appflow:CreateConnectorProfile — set up a new OAuth credential
+      for a SaaS source. Could be attacker-controlled credential to
+      pull data from THEIR Salesforce into the company's data lake
+      (data POISONING, less common but possible).
+
+  This is the single-call persistent-exfil pattern — sibling of
+  logs:PutSubscriptionFilter and s3:PutBucketReplication, both in
+  _CROSS_ACCOUNT_EXFIL_ACTIONS.
+
+  Scorer flow: state-changing-on-broad → 6.
+
+  Real risk: 8 — same tier as logs:PutSubscriptionFilter.
+
+  Suggested fix: add appflow:CreateFlow, appflow:UpdateFlow,
+  appflow:StartFlow, appflow:CreateConnectorProfile to
+  _CROSS_ACCOUNT_EXFIL_ACTIONS.
+policy:
+  Version: '2012-10-17'
+  Statement:
+    - Effect: Allow
+      Action:
+        - appflow:CreateFlow
+        - appflow:UpdateFlow
+        - appflow:StartFlow
+        - appflow:CreateConnectorProfile
+      Resource: '*'
+request:
+  spec:
+    access_type: read-write
+    duration:
+      duration_hours: 1
+expected:
+  score_min: 8
+  must_auto_approve: false

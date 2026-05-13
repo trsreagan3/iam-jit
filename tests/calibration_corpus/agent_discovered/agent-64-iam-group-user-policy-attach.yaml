@@ -1,0 +1,48 @@
+name: agent-64-iam-group-user-policy-attach
+description: |
+  _CATASTROPHIC_ACTIONS contains the role-attachment primitives
+  (`iam:AttachRolePolicy`, `iam:PutRolePolicy`) but NOT the analogous
+  group/user variants. AWS IAM has THREE principal types — role, user,
+  group — and policy-attachment is symmetrical across all three. Missing
+  catastrophic-floor coverage:
+
+    - iam:AttachUserPolicy / iam:PutUserPolicy
+    - iam:AttachGroupPolicy / iam:PutGroupPolicy
+    - iam:AddUserToGroup
+
+  Each is the exact same escalation primitive as AttachRolePolicy:
+  attacker picks any admin-ish managed policy ARN and attaches it to a
+  user (or group containing themselves). AddUserToGroup is the "step 2"
+  primitive — add yourself or your created user to an admin group.
+
+  Scorer flow: sensitive-service-iam rule + state-changing-on-broad
+  rule fire, putting score at 6. But _CATASTROPHIC_ACTIONS_LC check
+  doesn't match any of these. No 9-floor.
+
+  Real risk: 10 — minting admin access via a different principal type
+  than role. Operationally identical to AttachRolePolicy.
+
+  Suggested fix: add iam:AttachUserPolicy, iam:PutUserPolicy,
+  iam:AttachGroupPolicy, iam:PutGroupPolicy, iam:AddUserToGroup to
+  _CATASTROPHIC_ACTIONS. Also iam:DetachUserPolicy / iam:DetachGroupPolicy
+  / iam:RemoveUserFromGroup for symmetric coverage (removing admin
+  protection from a user could be part of cleanup of evidence).
+policy:
+  Version: '2012-10-17'
+  Statement:
+    - Effect: Allow
+      Action:
+        - iam:AttachUserPolicy
+        - iam:PutUserPolicy
+        - iam:AttachGroupPolicy
+        - iam:PutGroupPolicy
+        - iam:AddUserToGroup
+      Resource: '*'
+request:
+  spec:
+    access_type: read-write
+    duration:
+      duration_hours: 1
+expected:
+  score_min: 9
+  must_auto_approve: false

@@ -1,0 +1,44 @@
+name: agent-80-opensearch-serverless-data-access
+description: |
+  OpenSearch Serverless (service prefix `aoss:`) handles authorization via
+  data-access policies that map IAM principals to collection-level
+  permissions. The access policies LIVE IN aoss, separate from IAM —
+  so mutating them grants persistent search/data access independent of
+  the JIT grant.
+
+    - aoss:CreateAccessPolicy / UpdateAccessPolicy — define which IAM
+      principals can read/write/manage which collections. Attacker
+      grants their own role (or `*`) full access to PII-containing
+      collections.
+    - aoss:CreateSecurityPolicy — encryption + network policies. Network
+      policy with VPC-only → public-accessible flip is data-exposure
+      tier.
+
+  Scorer flow: aoss not in _SENSITIVE_SERVICES. State-changing-on-broad
+  → 6.
+
+  Real risk: 8 — persistent data-access grant. Same class as
+  lakeformation:GrantPermissions or secretsmanager:PutResourcePolicy
+  (already in _CROSS_ACCOUNT_EXFIL_ACTIONS).
+
+  Suggested fix: add aoss:CreateAccessPolicy, aoss:UpdateAccessPolicy,
+  aoss:CreateSecurityPolicy to _CROSS_ACCOUNT_EXFIL_ACTIONS (the
+  access-policy actions grant persistent cross-principal access, same
+  semantics as resource-policy mutation in other services).
+policy:
+  Version: '2012-10-17'
+  Statement:
+    - Effect: Allow
+      Action:
+        - aoss:CreateAccessPolicy
+        - aoss:UpdateAccessPolicy
+        - aoss:CreateSecurityPolicy
+      Resource: '*'
+request:
+  spec:
+    access_type: read-write
+    duration:
+      duration_hours: 1
+expected:
+  score_min: 8
+  must_auto_approve: false

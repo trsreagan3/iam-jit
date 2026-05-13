@@ -1,0 +1,45 @@
+name: agent-71-lakeformation-data-lake-grant
+description: |
+  AWS Lake Formation (LF) sits in front of Glue Data Catalog + S3 and
+  enforces fine-grained data-lake access controls. The LF admin actions
+  bypass every downstream check:
+
+    - lakeformation:GrantPermissions — grant ANY principal SELECT / ALTER
+      / DROP on any LF-registered table / column / row. Persists past
+      the JIT grant — the grant is stored in LF, not on the request.
+    - lakeformation:PutDataLakeSettings — make the caller (or any
+      principal they choose) an LF admin. Persistent escalation: the
+      LF admins list is stored account-wide.
+    - lakeformation:RegisterResource — register an S3 location with LF,
+      enabling LF-mediated access (and the GrantPermissions surface) for
+      buckets that previously weren't LF-controlled.
+
+  Scorer flow: lakeformation isn't in _SENSITIVE_SERVICES. State-changing-
+  on-broad → 6. No 9. Real risk: 9 — same severity class as
+  iam:AttachRolePolicy (grant arbitrary identity permanent admin access
+  to data).
+
+  Suggested fix:
+    1. Add lakeformation:GrantPermissions, lakeformation:PutDataLake-
+       Settings to _CATASTROPHIC_ACTIONS.
+    2. Add lakeformation:RegisterResource, lakeformation:UpdateResource
+       to _HIGH_IMPACT_MUTATION_ACTIONS.
+    3. Consider adding `lakeformation` to _SENSITIVE_SERVICES (it's
+       the access-control plane for the data lake).
+policy:
+  Version: '2012-10-17'
+  Statement:
+    - Effect: Allow
+      Action:
+        - lakeformation:GrantPermissions
+        - lakeformation:PutDataLakeSettings
+        - lakeformation:RegisterResource
+      Resource: '*'
+request:
+  spec:
+    access_type: read-write
+    duration:
+      duration_hours: 1
+expected:
+  score_min: 9
+  must_auto_approve: false

@@ -1,0 +1,50 @@
+name: agent-70-mwaa-airflow-dag-rce
+description: |
+  MWAA (Managed Workflows for Apache Airflow) runs caller-supplied Python
+  DAG definitions as the MWAA execution role. The DAG source comes from
+  an S3 bucket the caller specifies in the environment config. This is
+  textbook code-exec-via-role: identical primitive to lambda:CreateFunction
+  or sagemaker:CreateNotebookInstance.
+
+  Relevant actions:
+    - airflow:CreateEnvironment — provision a new Airflow environment
+      pointed at an attacker-chosen DAGs S3 bucket
+    - airflow:UpdateEnvironment — repoint an existing environment at
+      attacker's DAGs bucket (without re-creating the role binding)
+    - airflow:CreateCliToken / CreateWebLoginToken — interactive access
+      to Airflow UI/CLI for triggering DAGs
+
+  Combined with iam:PassRole on the MWAA execution role, this is
+  full RCE. The composition rule misses it.
+
+  Scorer flow:
+    - airflow not in _SENSITIVE_SERVICES
+    - state-changing-on-broad → 6
+    - PassRole narrow → 4
+    - No composition (airflow:CreateEnvironment not in code-exec list)
+  Max = 6.
+
+  Real risk: 9 — full RCE as the MWAA execution role.
+
+  Suggested fix: add airflow:CreateEnvironment, airflow:UpdateEnvironment
+  to _CODE_EXECUTION_PRIMITIVES.
+policy:
+  Version: '2012-10-17'
+  Statement:
+    - Effect: Allow
+      Action:
+        - airflow:CreateEnvironment
+        - airflow:UpdateEnvironment
+      Resource: '*'
+    - Effect: Allow
+      Action:
+        - iam:PassRole
+      Resource: arn:aws:iam::123456789012:role/mwaa-execution-role
+request:
+  spec:
+    access_type: read-write
+    duration:
+      duration_hours: 1
+expected:
+  score_min: 9
+  must_auto_approve: false

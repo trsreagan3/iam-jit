@@ -1,0 +1,49 @@
+name: agent-66-cognito-identity-pool-takeover
+description: |
+  Cognito has TWO services: cognito-idp (user pools — username/password
+  + OAuth) and cognito-identity (identity pools — federation to IAM
+  roles). The catastrophic list covers user-pool admin via
+  `cognito-idp:Admin*`. But the IDENTITY-POOL side has its own
+  role-binding primitives that are functionally equivalent to
+  iam:CreateOpenIDConnectProvider in blast radius:
+
+    - cognito-identity:SetIdentityPoolRoles — binds the "authenticated"
+      and "unauthenticated" roles to an identity pool. Any caller of
+      cognito-identity:GetCredentialsForIdentity on that pool gets
+      credentials for the bound role. Attacker repoints the pool at
+      an admin role they pass — anyone (including UNAUTHENTICATED
+      users, if the pool allows them) gets admin credentials.
+    - cognito-identity:CreateIdentityPool / UpdateIdentityPool — set
+      up a new identity pool with attacker-controlled config, or
+      reopen "unauthenticated identities" on an existing pool.
+
+  This is strictly worse than iam:CreateOpenIDConnectProvider —
+  unauthenticated identity pools let LITERALLY ANYONE call
+  GetCredentialsForIdentity and get the role's creds.
+
+  Scorer flow: sensitive-service (cognito-identity IS sensitive — round
+  1 win) on resource:* fires the level-6 floor. State-changing-on-broad
+  fires the level-6 floor. Max = 6. No 9.
+
+  Real risk: 9 — same as iam:CreateOpenIDConnectProvider.
+
+  Suggested fix: add cognito-identity:SetIdentityPoolRoles,
+  cognito-identity:CreateIdentityPool, cognito-identity:UpdateIdentityPool
+  to _CATASTROPHIC_ACTIONS.
+policy:
+  Version: '2012-10-17'
+  Statement:
+    - Effect: Allow
+      Action:
+        - cognito-identity:CreateIdentityPool
+        - cognito-identity:UpdateIdentityPool
+        - cognito-identity:SetIdentityPoolRoles
+      Resource: '*'
+request:
+  spec:
+    access_type: read-write
+    duration:
+      duration_hours: 1
+expected:
+  score_min: 9
+  must_auto_approve: false
