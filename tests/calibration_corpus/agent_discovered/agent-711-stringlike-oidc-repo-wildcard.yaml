@@ -1,0 +1,60 @@
+name: agent-711-stringlike-oidc-repo-wildcard
+description: |
+  WHITE-BOX round 9: a federated trust policy for GitHub Actions
+  OIDC with `StringLike` `token.actions.githubusercontent.com:sub`
+  = `repo:my-org/*` is a CLASSIC ATTACK SURFACE — anyone with a
+  fork of any repo in `my-org/` (or any branch in any repo) can
+  obtain an OIDC token that satisfies the condition and claim the
+  role. The correct form uses `StringEquals` with the FULL sub
+  claim (`repo:my-org/repo:ref:refs/heads/main`) or includes a
+  `repository_id` claim to pin the specific repository.
+
+  The scorer scores 7 — federated principal + AssumeRoleWithWebIdentity
+  fires the floor — but the StringLike-`org/*` pattern is a
+  KNOWN-DANGEROUS shape (Sysdig 2023 research) and should add an
+  extra tier of severity to surface it specifically.
+
+  Source-code rule exploited: `_condition_is_vacuous` does NOT
+  classify StringLike-with-trailing-`*` on the GitHub OIDC sub
+  claim as vacuous (it's not vacuous; it MATCHES a class of
+  callers). The general factor "federated trust on
+  AssumeRoleWithWebIdentity" floor-7 fires, but the SPECIFIC
+  StringLike-on-sub-with-`*`-suffix isn't surfaced — the
+  reviewer can't see why this is more dangerous than a
+  StringLike-with-NO-`*`.
+
+  Real risk: 8 (full federated takeover; anyone in the GitHub
+  org can claim). Gap = 1.
+
+  Det score: 7; expected ≥ 8.
+
+  Research-doc pattern: §11.3 Sysdig (StringLike-sub-github
+  fork-takeover).
+
+  Proposed fix: in `_condition_is_vacuous` (or a sibling rule),
+  detect `StringLike` on `*:sub` condition keys where the value
+  contains `*`. Floor at 8 specifically for OIDC trust-policy
+  shapes (the federated `Principal` + the StringLike-sub-`*`
+  combination).
+
+policy:
+  Version: "2012-10-17"
+  Statement:
+    - Effect: Allow
+      Principal:
+        Federated: "arn:aws:iam::111122223333:oidc-provider/token.actions.githubusercontent.com"
+      Action: sts:AssumeRoleWithWebIdentity
+      Resource: "*"
+      Condition:
+        StringLike:
+          "token.actions.githubusercontent.com:sub": "repo:my-org/*"
+
+request:
+  spec:
+    access_type: read-write
+    duration:
+      duration_hours: 1
+
+expected:
+  score_min: 8
+  must_auto_approve: false

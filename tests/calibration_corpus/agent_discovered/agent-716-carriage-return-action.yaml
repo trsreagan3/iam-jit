@@ -1,0 +1,38 @@
+name: agent-716-carriage-return-action
+description: |
+  WHITE-BOX round 9: `Action: "iam:\rPassRole"` (carriage return
+  between service and verb) scores 6 — same defect as
+  agent-714 / agent-715. CR (U+000D) is Cc-category. CRLF
+  injection from a copy-paste from a Windows-line-endings file
+  is the most-likely real-world occurrence.
+
+  Confirmed via probe: score 6 (sensitive-service floor only;
+  PassRole-broad floor missed).
+
+  Source-code rule exploited: `_norm_grammar_str` doesn't strip
+  Cc.
+
+  Real risk: 9. Gap = 3.
+
+  Det score: 6; expected ≥ 9.
+
+  Research-doc pattern: §10.8 (Unicode normalization — Cc).
+
+  Proposed fix: strip Cc in `_norm_grammar_str`.
+
+policy:
+  Version: "2012-10-17"
+  Statement:
+    - Effect: Allow
+      Action: "iam:\rPassRole"
+      Resource: "*"
+
+request:
+  spec:
+    access_type: read-write
+    duration:
+      duration_hours: 1
+
+expected:
+  score_min: 9
+  must_auto_approve: false

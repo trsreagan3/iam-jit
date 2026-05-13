@@ -1,0 +1,32 @@
+name: agent-714-encoding-bypass-tab-in-action
+description: |
+  BLACK-BOX Round 9 — TAB (U+0009) between colon and verb in Action.
+
+  Action with a literal tab character: `"iam:\tPassRole"`. Sibling of 713
+  (NBSP) but TAB is even less common in legitimate IAM strings.
+
+  Det score: 6.
+  Real risk: 8 — intentional obfuscation that prevents iam:PassRole
+  catastrophic-floor matching.
+
+  Scorer gap: same as 713 — action-string normalization missing for control
+  characters.
+
+  Source: black-box.
+
+policy:
+  Version: "2012-10-17"
+  Statement:
+    - Effect: Allow
+      Action: "iam:\tPassRole"
+      Resource: "*"
+
+request:
+  spec:
+    access_type: read-write
+    duration:
+      duration_hours: 1
+
+expected:
+  score_min: 7
+  must_auto_approve: false

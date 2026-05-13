@@ -1,0 +1,41 @@
+name: agent-708-resource-policy-cross-account-stepfn
+description: |
+  BLACK-BOX Round 9 — Step Functions state-machine resource policy cross-
+  account StartExecution.
+
+  Step Functions launched resource-based policies in 2024. Granting
+  `states:StartExecution` to a foreign account means the attacker can kick
+  off the production state machine with attacker-supplied input. State
+  machines often orchestrate Lambdas, ECS tasks, and SDK calls under
+  service-role context — the attacker triggers privileged orchestration paths
+  with crafted inputs (often achieving RCE if any step does Lambda invoke or
+  ECS RunTask).
+
+  Det score: 3.
+  Real risk: 7 — workflow-hijack from cross-account.
+
+  Scorer gap: resource-policy cross-account class, and Step Functions
+  execution is a code-execution-trigger primitive (the state machine's
+  service role runs whatever the workflow defines).
+
+  Source: AWS "Step Functions resource-based policies" announcement (Nov
+  2024). Net-new attack surface post-research-doc cutoff.
+
+policy:
+  Version: "2012-10-17"
+  Statement:
+    - Effect: Allow
+      Principal:
+        AWS: "arn:aws:iam::999999999999:root"
+      Action: "states:StartExecution"
+      Resource: "arn:aws:states:us-east-1:123456789012:stateMachine:prod-workflow"
+
+request:
+  spec:
+    access_type: read-write
+    duration:
+      duration_hours: 1
+
+expected:
+  score_min: 7
+  must_auto_approve: false

@@ -1,0 +1,39 @@
+name: agent-716-trust-policy-empty-externalid
+description: |
+  BLACK-BOX Round 9 — Trust policy cross-account with empty-string
+  `sts:ExternalId`.
+
+  Same class as 715. Empty-string ExternalId — `"sts:ExternalId": ""`. This
+  CAN actually be satisfied (the calling party passes empty string), so it's
+  effectively the same as no ExternalId for any attacker willing to set
+  `ExternalId=""`. The check is also commonly a typo from a misconfigured
+  Terraform variable.
+
+  Det score: 7.
+  Real risk: 8 — vacuous protection. Sibling of 715.
+
+  Scorer gap: same — ExternalId value not validated.
+
+  Source: AWS docs (the canonical example of "what NOT to do");
+  HackingThe.Cloud "Bypass External ID".
+
+policy:
+  Version: "2012-10-17"
+  Statement:
+    - Effect: Allow
+      Principal:
+        AWS: "arn:aws:iam::999999999999:root"
+      Action: "sts:AssumeRole"
+      Condition:
+        StringEquals:
+          "sts:ExternalId": ""
+
+request:
+  spec:
+    access_type: read-write
+    duration:
+      duration_hours: 1
+
+expected:
+  score_min: 8
+  must_auto_approve: false

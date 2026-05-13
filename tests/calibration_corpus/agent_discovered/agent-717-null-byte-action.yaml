@@ -1,0 +1,40 @@
+name: agent-717-null-byte-action
+description: |
+  WHITE-BOX round 9: `Action: "iam:PassRole\x00"` (trailing NUL
+  byte) scores 6, not 9 — the catalog lookup misses because the
+  NUL is preserved through `_norm_grammar_str` (Cc category, not
+  stripped). NUL bytes in JSON strings are unusual but legal in
+  RFC 8259 (and survive base64 / hex round trips). Worth catching
+  as a hostile-input signal.
+
+  Confirmed via probe: score 6.
+
+  Source-code rule exploited: `_norm_grammar_str` doesn't strip
+  Cc — NUL is U+0000 (Cc).
+
+  Real risk: 9. Gap = 3.
+
+  Det score: 6; expected ≥ 9.
+
+  Research-doc pattern: §10.8 (Unicode normalization — Cc /
+  hostile input).
+
+  Proposed fix: strip Cc in `_norm_grammar_str` (combined fix
+  for agent-714/715/716/717).
+
+policy:
+  Version: "2012-10-17"
+  Statement:
+    - Effect: Allow
+      Action: "iam:PassRole\x00"
+      Resource: "*"
+
+request:
+  spec:
+    access_type: read-write
+    duration:
+      duration_hours: 1
+
+expected:
+  score_min: 9
+  must_auto_approve: false

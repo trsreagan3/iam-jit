@@ -1,0 +1,42 @@
+name: agent-705-resource-policy-cross-account-kinesis
+description: |
+  BLACK-BOX Round 9 — Kinesis stream resource-policy cross-account read.
+
+  Kinesis Data Streams resource-based policies (2023 GA) granting
+  `kinesis:GetRecords` / `GetShardIterator` to a foreign account. The
+  attacker reads every record streaming through prod-events — clickstream
+  data, application telemetry, often PII or auth tokens that flow through
+  realtime pipelines.
+
+  Det score: 1 ("All statements are scoped or limited").
+  Real risk: 7 — full realtime read of a production data stream by an
+  attacker-controlled account.
+
+  Scorer gap: SAME resource-policy cross-account class. The score-1 result
+  here is notable — even narrower than the 3-floor most resource-policies
+  hit, presumably because `kinesis:GetRecords` isn't surfaced as
+  data-bearing-read in the per-action catalog.
+
+  Source: AWS docs "Resource-based policies for Kinesis Data Streams" (2023).
+
+policy:
+  Version: "2012-10-17"
+  Statement:
+    - Effect: Allow
+      Principal:
+        AWS: "arn:aws:iam::999999999999:root"
+      Action:
+        - "kinesis:GetRecords"
+        - "kinesis:GetShardIterator"
+        - "kinesis:DescribeStream"
+      Resource: "arn:aws:kinesis:us-east-1:123456789012:stream/prod-events"
+
+request:
+  spec:
+    access_type: read-write
+    duration:
+      duration_hours: 1
+
+expected:
+  score_min: 7
+  must_auto_approve: false

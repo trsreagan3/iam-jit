@@ -1,0 +1,45 @@
+name: agent-704-resource-policy-cross-account-dynamodb
+description: |
+  BLACK-BOX Round 9 — DynamoDB resource-based table policy (NEW 2024 feature)
+  cross-account.
+
+  DynamoDB launched table-level resource-based policies in 2024 (re:Invent
+  2024). A table policy granting `dynamodb:GetItem` + `Query` + `Scan` to a
+  foreign-account root means the attacker can read every row in the table.
+  Adding `PutItem` makes them able to insert/update rows.
+
+  Det score: 3.
+  Real risk: 8 — full table read AND write from cross-account principal. This
+  is the NEW exfil vector for DynamoDB; prior to 2024 only identity-based
+  cross-account access was possible.
+
+  Scorer gap: resource-policy cross-account semantics + DynamoDB is also a
+  newer-data-bearing-service in the read-side. The narrow Resource (one
+  table) suppresses the existing broad-data-resource floor.
+
+  Source: AWS docs "Using resource-based policies with DynamoDB" (Nov 2024).
+  This is a 2024-net-new attack surface; not in the research-doc (mid-2025
+  cutoff).
+
+policy:
+  Version: "2012-10-17"
+  Statement:
+    - Effect: Allow
+      Principal:
+        AWS: "arn:aws:iam::999999999999:root"
+      Action:
+        - "dynamodb:GetItem"
+        - "dynamodb:PutItem"
+        - "dynamodb:Query"
+        - "dynamodb:Scan"
+      Resource: "arn:aws:dynamodb:us-east-1:123456789012:table/prod-users"
+
+request:
+  spec:
+    access_type: read-write
+    duration:
+      duration_hours: 1
+
+expected:
+  score_min: 7
+  must_auto_approve: false

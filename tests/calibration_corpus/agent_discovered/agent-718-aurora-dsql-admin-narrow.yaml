@@ -1,0 +1,40 @@
+name: agent-718-aurora-dsql-admin-narrow
+description: |
+  BLACK-BOX Round 9 — Aurora DSQL (Distributed SQL, GA 2024) admin connect
+  on narrow cluster.
+
+  `dsql:DbConnectAdmin` is the equivalent of `rds-db:connect` for the
+  Postgres-compatible admin role in Aurora DSQL. Once connected as admin,
+  the attacker has full superuser inside the database — read/write all
+  schemas, drop tables, exfiltrate data, install extensions if available.
+  The narrow Resource (one cluster) suppresses scoring.
+
+  Det score: 3 ("scoped or limited").
+  Real risk: 7 — full DB admin on one prod cluster.
+
+  Scorer gap: Aurora DSQL service prefix `dsql:` (and its actions
+  `dsql:DbConnect`, `dsql:DbConnectAdmin`, `dsql:CreateCluster`,
+  `dsql:DeleteCluster`, `dsql:UpdateCluster`) not in the sensitive-services
+  catalog. Aurora DSQL launched 2024 (re:Invent) — post-research-doc
+  (mid-2025) but pre-corpus.
+
+  Source: AWS docs "Authentication and authorization for Aurora DSQL" (2024
+  GA). Sibling to `rds-db:connect` admin which is treated as catastrophic;
+  DSQL got the same primitive but with a different service prefix.
+
+policy:
+  Version: "2012-10-17"
+  Statement:
+    - Effect: Allow
+      Action: "dsql:DbConnectAdmin"
+      Resource: "arn:aws:dsql:us-east-1:123456789012:cluster/prod-db"
+
+request:
+  spec:
+    access_type: read-write
+    duration:
+      duration_hours: 1
+
+expected:
+  score_min: 6
+  must_auto_approve: false

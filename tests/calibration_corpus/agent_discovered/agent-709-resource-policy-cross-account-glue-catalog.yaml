@@ -1,0 +1,46 @@
+name: agent-709-resource-policy-cross-account-glue-catalog
+description: |
+  BLACK-BOX Round 9 — Glue Data Catalog resource policy cross-account read.
+
+  Glue catalog policy granting `glue:GetDatabase` + `GetTable` + `GetPartitions`
+  to a foreign account. The Glue catalog stores the schema and S3 location
+  for every Athena/EMR/Redshift Spectrum table — knowing the table layout
+  + bucket URI is a recon win, and if the underlying S3 has cross-account
+  permissions (often the case for "shared data lakes"), full table read
+  follows.
+
+  Det score: 2 ("All statements are scoped or limited").
+  Real risk: 7 — full data-catalog enumeration from cross-account; high
+  recon value plus direct read if S3 buckets follow the catalog's grant
+  pattern.
+
+  Scorer gap: resource-policy cross-account class. Glue catalog grants are
+  often the gateway pattern for Lake-Formation data sharing — the catalog
+  share is itself the access primitive.
+
+  Source: AWS docs "Cross-account access to the AWS Glue Data Catalog";
+  research compendium §3.x (Lake Formation grants) but the catalog-resource-
+  policy form is distinct from `lakeformation:GrantPermissions`.
+
+policy:
+  Version: "2012-10-17"
+  Statement:
+    - Effect: Allow
+      Principal:
+        AWS: "arn:aws:iam::999999999999:root"
+      Action:
+        - "glue:GetDatabase"
+        - "glue:GetTable"
+        - "glue:GetPartitions"
+        - "glue:GetTables"
+      Resource: "arn:aws:glue:us-east-1:123456789012:catalog"
+
+request:
+  spec:
+    access_type: read-write
+    duration:
+      duration_hours: 1
+
+expected:
+  score_min: 7
+  must_auto_approve: false

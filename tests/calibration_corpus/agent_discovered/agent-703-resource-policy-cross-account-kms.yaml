@@ -1,0 +1,42 @@
+name: agent-703-resource-policy-cross-account-kms
+description: |
+  BLACK-BOX Round 9 — KMS key resource-policy cross-account Decrypt.
+
+  KMS key policy granting `kms:Decrypt` + `kms:GenerateDataKey` to a foreign
+  account on a NARROW key ARN. The attacker who controls 999... can decrypt
+  every ciphertext encrypted under this key — most likely backups, secrets,
+  RDS storage encryption, S3 SSE-KMS objects. Single key compromise reveals
+  data at rest across many services.
+
+  Det score: 3.
+  Real risk: 7 — cross-account decrypt of every blob encrypted under this key.
+
+  Scorer gap: same as 700/701 — resource-policy cross-account direction
+  invisible. Note round-8 agent-506 covered the `aws:PrincipalAccount` form
+  via Condition; this is the simpler Principal-keyed shape that the corpus
+  doesn't pin.
+
+  Source: research compendium §4.6 (KMS ciphertext cross-account). The class
+  is documented but the resource-policy-form variant is not pinned.
+
+policy:
+  Version: "2012-10-17"
+  Statement:
+    - Effect: Allow
+      Principal:
+        AWS: "arn:aws:iam::999999999999:root"
+      Action:
+        - "kms:Decrypt"
+        - "kms:DescribeKey"
+        - "kms:GenerateDataKey"
+      Resource: "arn:aws:kms:us-east-1:123456789012:key/prod-data-key"
+
+request:
+  spec:
+    access_type: read-write
+    duration:
+      duration_hours: 1
+
+expected:
+  score_min: 7
+  must_auto_approve: false

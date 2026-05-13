@@ -1,0 +1,61 @@
+name: agent-708-resource-policy-no-principal
+description: |
+  WHITE-BOX round 9: a resource-based policy that LACKS a
+  `Principal` element is malformed (AWS Access Analyzer raises
+  MISSING_PRINCIPAL). Some evaluators silently treat this as
+  Deny; others treat it as Allow-anyone (semantic divergence
+  between AWS service teams' resource-policy evaluators).
+
+  Either way, this is a malformed-defect signal — the scorer
+  should flag at floor 4 (per the existing "malformed = worst-
+  case" principle at line 1101). Currently scores 1.
+
+  Source-code rule absent: the scorer only flags MISSING Principal
+  as anonymous (line 1344 `_principal_is_public` returns True for
+  `*`) when Principal is set. A statement with NO Principal key
+  AND a resource-based action like `s3:GetObject` on
+  `arn:aws:s3:::example/*` is treated as an identity-policy
+  statement (which is fine — identity policies don't have
+  Principal), but if the request schema includes a flag that this
+  is a resource-policy (or the action is unambiguously resource-
+  policy-only like `lambda:InvokeFunction` granted on
+  `Principal: *`), the missing Principal should be flagged.
+
+  Real risk: 4 (malformed policy; semantically ambiguous;
+  Access Analyzer raises validation finding). Gap = 3.
+
+  Det score: 1; expected ≥ 4.
+
+  Research-doc pattern: §7.5 (Access Analyzer validation —
+  MISSING_PRINCIPAL).
+
+  Proposed fix: when the policy is annotated by the request as
+  a resource policy (or when the request type is resource-policy
+  per the request spec), require each Allow statement to have a
+  Principal; flag missing Principal at floor 4.
+
+  Note: this finding is contingent on the scorer knowing whether
+  the policy is identity-based or resource-based — which currently
+  it does NOT distinguish. A resource-policy fixture flag in the
+  request schema would unlock this rule.
+
+policy:
+  Version: "2012-10-17"
+  Statement:
+    - Effect: Allow
+      # NO Principal key — malformed for a resource policy
+      Action: s3:GetObject
+      Resource: "arn:aws:s3:::example/*"
+
+request:
+  spec:
+    access_type: read-only
+    duration:
+      duration_hours: 1
+    # NB: A future schema addition `policy_type: resource-policy`
+    # would make this rule unambiguous. The fixture documents the
+    # architectural gap regardless.
+
+expected:
+  score_min: 4
+  must_auto_approve: false

@@ -1,0 +1,40 @@
+name: agent-706-resource-policy-cross-account-eventbridge
+description: |
+  BLACK-BOX Round 9 — EventBridge event-bus resource-policy cross-account
+  PutEvents.
+
+  EventBridge bus policy granting `events:PutEvents` to a foreign-account
+  root means an attacker can inject arbitrary events into the prod event
+  bus. Most prod buses have rules that trigger Lambda / SNS / SQS / Step
+  Functions on event match — the attacker spoofs the source pattern and
+  triggers downstream automation, including potential code-execution paths.
+
+  Det score: 3.
+  Real risk: 7 — event-injection → trigger downstream actions in the victim
+  account.
+
+  Scorer gap: resource-policy cross-account class. EventBridge bus policies
+  are particularly dangerous because the events feed automation rules; the
+  blast radius depends on what's bound to the bus.
+
+  Source: AWS docs "EventBridge cross-account event delivery"; common Black
+  Hat/Sec talk pattern (CVE-style EventBridge spoofing).
+
+policy:
+  Version: "2012-10-17"
+  Statement:
+    - Effect: Allow
+      Principal:
+        AWS: "arn:aws:iam::999999999999:root"
+      Action: "events:PutEvents"
+      Resource: "arn:aws:events:us-east-1:123456789012:event-bus/default"
+
+request:
+  spec:
+    access_type: read-write
+    duration:
+      duration_hours: 1
+
+expected:
+  score_min: 7
+  must_auto_approve: false

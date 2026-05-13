@@ -1,0 +1,50 @@
+name: agent-717-trust-policy-externalid-list-many
+description: |
+  BLACK-BOX Round 9 — Trust policy ExternalId as a LIST of guessable values.
+
+  `"sts:ExternalId": ["0", "1", ..., "49"]` — fifty short, guessable values
+  in the ExternalId list (StringEquals matches any one). The protection
+  is brute-forceable in microseconds. Real-world variant: numeric tenant
+  IDs that happen to be small integers (e.g., "1", "2", ...).
+
+  Det score: 7. The scorer detects an ExternalId condition exists; it
+  doesn't analyze the LIST entropy or count.
+  Real risk: 7 — brute-forceable; not as bad as truly vacuous but worse
+  than a random secret. Floor at 7.
+
+  Scorer gap: ExternalId-list entropy / value-validity not assessed. AWS
+  recommends a 32+ char random secret; lists of short tokens defeat that.
+
+  Source: AWS docs "How to use an external ID" (recommends 32-char random
+  secret); empirical from real-world misconfigurations.
+
+policy:
+  Version: "2012-10-17"
+  Statement:
+    - Effect: Allow
+      Principal:
+        AWS: "arn:aws:iam::999999999999:root"
+      Action: "sts:AssumeRole"
+      Condition:
+        StringEquals:
+          "sts:ExternalId":
+            - "0"
+            - "1"
+            - "2"
+            - "3"
+            - "4"
+            - "5"
+            - "6"
+            - "7"
+            - "8"
+            - "9"
+
+request:
+  spec:
+    access_type: read-write
+    duration:
+      duration_hours: 1
+
+expected:
+  score_min: 7
+  must_auto_approve: false

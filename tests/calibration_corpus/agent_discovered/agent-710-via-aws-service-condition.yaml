@@ -1,0 +1,73 @@
+name: agent-710-via-aws-service-condition
+description: |
+  WHITE-BOX round 9: the condition key `aws:ViaAWSService` is
+  treated as a NARROWING condition by most operators ("only allow
+  this when called through an AWS service"). It's actually a
+  PRINCIPAL-CLASS check, not a resource scope — and `true` matches
+  ALL service-initiated requests (CloudFormation, CloudFront,
+  Lambda, etc.). For dangerous actions like `iam:PassRole`, this
+  is functionally a wide-open grant; the only narrowing is "the
+  request must be marked as via-service" — which is true for any
+  caller proxying through a service (and many services proxy
+  attacker-controllable input).
+
+  The scorer's vacuity catalog at `_condition_is_vacuous` doesn't
+  classify `Bool[IfExists]:aws:ViaAWSService:true` as vacuous —
+  because it's NOT literally vacuous, it's MIS-CALIBRATED-AS-
+  NARROWING.
+
+  Source-code rule absent: `_condition_is_vacuous` (line 1116-
+  1340) catalogs degenerate operators (StringLike *, Null on auth
+  keys, IpAddress 0.0.0.0/0, etc.) but doesn't catalog the
+  "false-narrowing" patterns where the condition LOOKS like
+  scoping but is actually principal-class assertion.
+
+  Real risk: 7-8 (iam:PassRole on broad resource with a
+  ViaAWSService condition is identical to iam:PassRole on broad
+  resource — the floor 9 should fire regardless. It does — score
+  9. But the FACTOR should explain why ViaAWSService doesn't
+  narrow, so the human reviewer doesn't auto-approve thinking
+  the condition is restrictive). Gap = factor-quality, not
+  score-quality.
+
+  Det score: 9 (the PassRole-broad floor fires); the gap is the
+  MISSING FACTOR: no explanation of why ViaAWSService doesn't
+  narrow. The reviewer reading the policy sees a "condition" and
+  assumes scoping; the scorer's factor list should say "the
+  ViaAWSService condition is principal-class, not resource-scope,
+  and does not narrow the grant."
+
+  Research-doc pattern: §11 (condition-vacuity catalog
+  extensions — false-narrowing class).
+
+  Proposed fix: extend `_condition_is_vacuous` (or add a sibling
+  function `_condition_is_false_narrowing`) to detect
+  `aws:ViaAWSService:true`, `aws:CalledViaFirst:<service>`,
+  `aws:PrincipalIsAWSService:true` — these all look like
+  narrowing but ARE principal-class checks that don't constrain
+  the resource.
+
+policy:
+  Version: "2012-10-17"
+  Statement:
+    - Effect: Allow
+      Action: iam:PassRole
+      Resource: "*"
+      Condition:
+        BoolIfExists:
+          "aws:ViaAWSService": "true"
+
+request:
+  spec:
+    access_type: read-write
+    duration:
+      duration_hours: 1
+
+expected:
+  score_min: 9
+  must_auto_approve: false
+  # NB: This fixture documents a FACTOR-QUALITY gap, not a score
+  # gap. The PassRole-broad floor at 9 correctly fires regardless
+  # of the condition. The architectural gap is the missing
+  # surfaced rationale that would prevent a reviewer from auto-
+  # approving on the basis of the misleading condition.

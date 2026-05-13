@@ -1,0 +1,67 @@
+name: agent-719-pacu-organizations-assume
+description: |
+  WHITE-BOX round 9: the combination of `sts:AssumeRole` and
+  `organizations:ListAccounts` on `Resource: *` should floor at 8
+  because it's the EXACT Pacu organizations__assume_role
+  primitive — enumerate every member account in the org, try the
+  default `OrganizationAccountAccessRole` role-name in each, get
+  cross-account admin in the entire org.
+
+  The current scorer:
+  - has_iam_recon: requires `iam:*` actions — `organizations:*`
+    actions don't qualify
+  - has_assume_broad: True (sts:AssumeRole on broad)
+  - Composition rule doesn't fire because organizations-recon
+    isn't recognized as IAM-recon
+
+  Final score: 7 (assume-broad floor only).
+
+  Source-code rule exploited: review.py line 2839-2849:
+
+  ```python
+  iam_recon_actions_lc = frozenset(a.lower() for a in {
+      "iam:ListRoles", "iam:GetRole", "iam:ListPolicies",
+      "iam:ListAttachedRolePolicies", "iam:GetRolePolicy",
+      "iam:ListUsers", "iam:GetUser", "iam:ListGroups",
+      "iam:ListAccessKeys", "iam:GetAccountAuthorizationDetails",
+  })
+  ```
+
+  Missing: `organizations:ListAccounts`,
+  `organizations:DescribeOrganization`,
+  `organizations:ListAccountsForParent`,
+  `organizations:ListRoots`, `organizations:ListOrganizationalUnits`,
+  `sso-admin:ListInstances`, `sso-admin:ListPermissionSets`,
+  `sso-admin:ListAccountsForProvisionedPermissionSet`.
+
+  Real risk: 8 (org-wide lateral movement; Pacu module exists).
+  Gap = 1.
+
+  Det score: 7; expected ≥ 8.
+
+  Research-doc pattern: §2.5 Pacu organizations__assume_role.
+
+  Proposed fix: extend `iam_recon_actions_lc` with the
+  organizations-enumeration and sso-admin enumeration actions,
+  OR introduce a separate `_ACCOUNT_ENUMERATION_ACTIONS` set
+  with an analogous composition rule (account-enum + broad
+  sts:AssumeRole → floor 8).
+
+policy:
+  Version: "2012-10-17"
+  Statement:
+    - Effect: Allow
+      Action:
+        - sts:AssumeRole
+        - organizations:ListAccounts
+      Resource: "*"
+
+request:
+  spec:
+    access_type: read-write
+    duration:
+      duration_hours: 1
+
+expected:
+  score_min: 8
+  must_auto_approve: false

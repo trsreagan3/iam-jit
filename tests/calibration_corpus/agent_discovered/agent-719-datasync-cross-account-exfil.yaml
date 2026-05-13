@@ -1,0 +1,44 @@
+name: agent-719-datasync-cross-account-exfil
+description: |
+  BLACK-BOX Round 9 — AWS DataSync cross-account data exfiltration.
+
+  DataSync `CreateLocationS3` + `CreateLocationObjectStorage` +
+  `CreateTask` + `StartTaskExecution` is a complete cross-cloud /
+  cross-account data-exfil primitive: configure a source pointing at a
+  prod S3 bucket, configure a destination pointing at the attacker's S3
+  /  Wasabi / R2 / arbitrary S3-compatible endpoint, run the task. Petabyte-
+  scale exfil with AWS-managed transfer infra.
+
+  Det score: 6.
+  Real risk: 8 — destination is attacker-controlled by design; this is the
+  textbook data-exfil tool. Sibling of round-2 macie / Step Functions sets.
+
+  Scorer gap: `datasync:` actions not in any composition or
+  high-impact-action catalog. `datasync:CreateLocationObjectStorage` in
+  particular allows ARBITRARY S3-API endpoint (not AWS-only) — pure
+  exfil-by-design.
+
+  Source: AWS docs "DataSync supports any S3-compatible storage"; AWS
+  Builder's Library "Hybrid storage migration" (warns about cross-account
+  use); discussed in IAM Risk research as net-new.
+
+policy:
+  Version: "2012-10-17"
+  Statement:
+    - Effect: Allow
+      Action:
+        - "datasync:CreateTask"
+        - "datasync:CreateLocationS3"
+        - "datasync:CreateLocationObjectStorage"
+        - "datasync:StartTaskExecution"
+      Resource: "*"
+
+request:
+  spec:
+    access_type: read-write
+    duration:
+      duration_hours: 1
+
+expected:
+  score_min: 7
+  must_auto_approve: false

@@ -1,0 +1,45 @@
+name: agent-715-trust-policy-vacuous-externalid
+description: |
+  BLACK-BOX Round 9 — Trust policy with cross-account AWS Principal AND
+  vacuous `sts:ExternalId` condition.
+
+  Cross-account `sts:AssumeRole` trust policy where the Condition uses
+  `StringLike sts:ExternalId = "*"` — the * matches every string, defeating
+  the entire purpose of ExternalId. Round-8 introduced trust-policy
+  cross-account detection (agents 600-602) — this is the bypass: an
+  ExternalId condition LOOKS like it satisfies confused-deputy protection
+  but the value is universal.
+
+  Det score: 7. The scorer treats the presence of an ExternalId condition
+  as a mitigation regardless of its value.
+  Real risk: 8 — equivalent to NO ExternalId at all; the protection is
+  vacuous. Should floor at 8 (same as agent-600 cross-acct-no-condition).
+
+  Scorer gap: ExternalId condition existence is checked but the VALUE isn't
+  validated. Vacuous values (`*`, `""`, `?*`, `[\"*\"]`, policy variables
+  that can't be substituted in trust-policy evaluation context) should
+  count as no-ExternalId.
+
+  Source: AWS confused-deputy guidance "How to use an external ID";
+  Pacu `iam__backdoor_assume_role` module documentation.
+
+policy:
+  Version: "2012-10-17"
+  Statement:
+    - Effect: Allow
+      Principal:
+        AWS: "arn:aws:iam::999999999999:root"
+      Action: "sts:AssumeRole"
+      Condition:
+        StringLike:
+          "sts:ExternalId": "*"
+
+request:
+  spec:
+    access_type: read-write
+    duration:
+      duration_hours: 1
+
+expected:
+  score_min: 8
+  must_auto_approve: false

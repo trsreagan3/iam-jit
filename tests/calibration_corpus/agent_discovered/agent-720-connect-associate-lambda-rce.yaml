@@ -1,0 +1,43 @@
+name: agent-720-connect-associate-lambda-rce
+description: |
+  BLACK-BOX Round 9 — Amazon Connect `AssociateLambdaFunction` call-flow
+  RCE.
+
+  Amazon Connect contact-flows (the call-routing logic for the call center)
+  can invoke Lambda functions for IVR / data lookup. Granting
+  `connect:AssociateLambdaFunction` lets the caller bind an arbitrary
+  Lambda into the contact flow — code injection into the call path.
+  Combined with `connect:UpdateContactFlow` the attacker can rewire the
+  IVR to dump customer-input to their Lambda (SSN, DOB, PII often spoken
+  by callers).
+
+  Det score: 6.
+  Real risk: 7-8 — code-execution primitive in the call-center pipeline +
+  PII exfil potential.
+
+  Scorer gap: `connect:` service prefix not in sensitive-services /
+  high-impact catalog. `connect:AssociateLambdaFunction` is the specific
+  RCE primitive; `connect:CreateContactFlow`, `connect:UpdateContactFlow`,
+  `connect:CreateInstance`, `connect:UpdateUserSecurityProfiles` are
+  siblings.
+
+  Source: AWS docs "Adding Lambda functions to your Amazon Connect contact
+  flows"; Wiz Cloud Security Forum 2024 talk on contact-flow attack
+  patterns.
+
+policy:
+  Version: "2012-10-17"
+  Statement:
+    - Effect: Allow
+      Action: "connect:AssociateLambdaFunction"
+      Resource: "*"
+
+request:
+  spec:
+    access_type: read-write
+    duration:
+      duration_hours: 1
+
+expected:
+  score_min: 7
+  must_auto_approve: false

@@ -1,0 +1,58 @@
+name: agent-720-bare-account-id-principal
+description: |
+  WHITE-BOX round 9: `Principal: {AWS: "999988887777"}` (bare
+  account ID, no `arn:aws:iam::...:root` prefix) is semantically
+  EQUIVALENT to `Principal: {AWS: "arn:aws:iam::999988887777:root"}`
+  per AWS docs — it grants any principal in that account.
+
+  The scorer's trust-policy detector at review.py line 1970
+  checks `v.startswith("arn:")` to identify literal-arn principals.
+  A bare account-id string `"999988887777"` doesn't start with
+  `arn:`, so the trust-policy floor 7 doesn't fire. The scorer
+  falls through to score 6 (sensitive-service floor only).
+
+  Source-code rule exploited: line 1970-1972:
+
+  ```python
+  has_literal_arn = any(
+      isinstance(v, str) and v.startswith("arn:") and
+      "*" not in v.split(":", 5)[4]
+      for v in pvals if isinstance(v, str)
+  )
+  ```
+
+  Misses bare 12-digit account IDs.
+
+  Real risk: 7 (cross-account access to s3:GetObject /
+  s3:PutObject on the bucket — Capital-One pattern at smaller
+  scale). Gap = 1.
+
+  Det score: 6; expected ≥ 7.
+
+  Research-doc pattern: §7.1 Access Analyzer external-access
+  finding (cross-account principal grant).
+
+  Proposed fix: in line 1970, also detect bare account-id strings:
+  add `(v.isdigit() and len(v) == 12)` as a literal-arn
+  equivalent.
+
+policy:
+  Version: "2012-10-17"
+  Statement:
+    - Effect: Allow
+      Principal:
+        AWS: "999988887777"
+      Action:
+        - s3:GetObject
+        - s3:PutObject
+      Resource: "arn:aws:s3:::example-bucket/*"
+
+request:
+  spec:
+    access_type: read-write
+    duration:
+      duration_hours: 1
+
+expected:
+  score_min: 7
+  must_auto_approve: false

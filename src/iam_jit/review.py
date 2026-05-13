@@ -234,6 +234,18 @@ _SECRET_BEARING_READS = frozenset(
         # secrets, and connection-string leakage. Round 6 agent-187.
         "rds:DownloadDBLogFilePortion",
         "rds:DownloadCompleteDBLogFile",
+        # Kinesis stream reads — every record passing through the
+        # stream is observed. On broad resource (`stream/*`) this is
+        # data-exfil tier across all streams in the account.
+        # Round 8 WB agent-608.
+        "kinesis:GetRecords",
+        "kinesis:GetShardIterator",
+        # DAX cache reads — cluster-local cache reads on broad cache/*.
+        # Round 8 WB agent-609.
+        "dax:GetItem",
+        "dax:Query",
+        "dax:Scan",
+        "dax:BatchGetItem",
         # S3 GetObject on broad resource (bucket-name wildcard like
         # `prod-*` or service-wide `arn:aws:s3:::*`) is data-exfil tier.
         # On a NARROW bucket-name (specific bucket) it's just routine
@@ -1245,29 +1257,57 @@ def _condition_is_vacuous(condition: object) -> tuple[bool, str]:
                     "evaluator semantics."
                 )
 
-            # Pattern 7: ArnLike with `*` in identifying segments.
-            # `aws:PrincipalArn arn:aws:iam::*:*` matches every account
-            # and every principal — degenerate. Round 7 agent-302.
-            if op == "ArnLike" or op_lc == "arnlike" or op == "ArnEquals":
+            # Pattern 7: ArnLike / ArnEquals / StringLike with `*` in
+            # identifying segments. `aws:PrincipalArn arn:aws:iam::*:*`
+            # (round 7 agent-302) and `arn:aws:iam::*:role/*` (round 8
+            # agent-500) and `arn:aws:iam::*:root` (round 8 agent-501)
+            # all match every principal in every account.
+            #
+            # The ArnLike/ArnEquals operator AND the StringLike operator
+            # are both commonly mis-used here — StringLike on an ARN-
+            # shaped value is the more frequent footgun in resource
+            # policies.
+            is_arn_op = (
+                op == "ArnLike" or op_lc == "arnlike"
+                or op == "ArnEquals" or op_lc == "arnequals"
+            )
+            is_arn_key = key_lc.endswith("principalarn") or key_lc.endswith("sourcearn")
+            if is_arn_op or (op.startswith("StringLike") and is_arn_key):
                 for v in vals_str:
-                    if v.startswith("arn:"):
-                        parts = v.split(":", 5)
-                        if len(parts) >= 6:
-                            partition, _svc = parts[1], parts[2]
-                            account, spec = parts[4], parts[5]
-                            wildcard_partition = "*" in partition
-                            wildcard_account = "*" in account or account == ""
-                            wildcard_spec = spec == "*" or (
-                                "*" in spec and spec.count("*") >= 1
-                                and len(spec.replace("*", "")) < 3
-                            )
-                            if (wildcard_partition or wildcard_account) and wildcard_spec:
-                                return True, (
-                                    f"`Condition.{op}.{key}: {v}` is "
-                                    "an ARN pattern with wildcards in "
-                                    "the identifying segments — "
-                                    "matches effectively any principal."
-                                )
+                    if not v.startswith("arn:"):
+                        continue
+                    parts = v.split(":", 5)
+                    if len(parts) < 6:
+                        continue
+                    partition, _svc = parts[1], parts[2]
+                    account, spec = parts[4], parts[5]
+                    wildcard_partition = "*" in partition
+                    wildcard_account = "*" in account or account == ""
+                    # For PrincipalArn/SourceArn, wildcard account alone
+                    # is sufficient — even a literal resource name like
+                    # "role/admin" matches "any account's admin role".
+                    if is_arn_key and wildcard_account:
+                        return True, (
+                            f"`Condition.{op}.{key}: {v}` matches the "
+                            "named principal in EVERY AWS account "
+                            "(account segment wildcarded). The literal "
+                            "resource-name portion doesn't narrow the "
+                            "scope cross-account."
+                        )
+                    # For ArnLike/ArnEquals more generally, require
+                    # wildcard in BOTH segment classes to count as
+                    # vacuous.
+                    wildcard_spec = spec == "*" or (
+                        "*" in spec and spec.count("*") >= 1
+                        and len(spec.replace("*", "")) < 3
+                    )
+                    if (wildcard_partition or wildcard_account) and wildcard_spec:
+                        return True, (
+                            f"`Condition.{op}.{key}: {v}` is "
+                            "an ARN pattern with wildcards in "
+                            "the identifying segments — "
+                            "matches effectively any principal."
+                        )
 
             # Pattern 8: Bool inverted (`SecureTransport: "false"`). AWS
             # docs recommend `Bool: aws:SecureTransport: "true"` to
@@ -2098,7 +2138,19 @@ def _deterministic(
         if condition:
             is_vacuous, vac_reason = _condition_is_vacuous(condition)
             if is_vacuous:
-                score = max(score, 5)
+                # Vacuous condition + high-risk action → floor 7 (the
+                # statement looks scoped but the protective condition
+                # is a no-op, so it's effectively an unconditional
+                # high-risk grant). Plain vacuous-condition on routine
+                # actions stays at floor 5. Round 8 BB agent-500, 501.
+                stmt_actions = _as_list(stmt.get("Action"))
+                touches_high_risk = any(
+                    _canonical_action(a) in _HIGH_RISK_ACTIONS_LC
+                    or _action_covers_any(a, _HIGH_RISK_ACTIONS_LC)
+                    for a in stmt_actions
+                )
+                floor = 7 if touches_high_risk else 5
+                score = max(score, floor)
                 factors.append(vac_reason)
                 suggestions.append(
                     "The condition above does not actually constrain "

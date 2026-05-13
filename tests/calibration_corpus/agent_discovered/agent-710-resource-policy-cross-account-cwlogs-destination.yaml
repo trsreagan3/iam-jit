@@ -1,0 +1,41 @@
+name: agent-710-resource-policy-cross-account-cwlogs-destination
+description: |
+  BLACK-BOX Round 9 — CloudWatch Logs destination resource policy cross-
+  account log subscription.
+
+  CloudWatch Logs "destinations" enable cross-account log subscription
+  streaming. Granting `logs:PutLogEvents` on a destination ARN to a foreign
+  account means the attacker's Logs source can write log events INTO the
+  victim's log destination — which is typically a Kinesis stream
+  ingesting to a SIEM. Attacker can flood the SIEM with crafted log lines
+  (log injection / log-poisoning, evidence-blending) or worse if the
+  destination feeds into a Lambda processor with no input validation.
+
+  Det score: 3.
+  Real risk: 7 — log-injection / SIEM poisoning across accounts. T1565.001
+  Stored Data Manipulation.
+
+  Scorer gap: resource-policy cross-account class + CWLogs destination
+  semantics not surfaced.
+
+  Source: AWS docs "Logs cross-account cross-region subscriptions"; Mitre
+  T1565.001.
+
+policy:
+  Version: "2012-10-17"
+  Statement:
+    - Effect: Allow
+      Principal:
+        AWS: "arn:aws:iam::999999999999:root"
+      Action: "logs:PutLogEvents"
+      Resource: "arn:aws:logs:us-east-1:123456789012:destination:cross-account-dest"
+
+request:
+  spec:
+    access_type: read-write
+    duration:
+      duration_hours: 1
+
+expected:
+  score_min: 6
+  must_auto_approve: false

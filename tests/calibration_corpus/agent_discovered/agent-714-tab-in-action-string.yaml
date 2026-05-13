@@ -1,0 +1,52 @@
+name: agent-714-tab-in-action-string
+description: |
+  WHITE-BOX round 9: `Action: "iam:\tPassRole"` (literal tab
+  between `iam:` and `PassRole`) scores 6 (sensitive-service
+  floor), NOT 9 (the PassRole-broad floor that should fire).
+
+  Source-code rule exploited: `_norm_grammar_str` (line 1064-
+  1103) strips Cf (format) and Mn (combining-mark) Unicode
+  categories but NOT Cc (control) — and TAB (U+0009) is in Cc.
+  So the action string after normalization is still
+  `"iam:\tpassrole"` (with the embedded tab), and the catalog
+  lookup for `iam:passrole` MISSES. The fallback "sensitive
+  service" route (iam IS in `_SENSITIVE_SERVICES`) fires, giving
+  score 6 — but the PassRole-broad floor 9 doesn't fire because
+  the action-equality check at line 2771 (`a.lower() ==
+  "iam:passrole"`) is false (the tab is still there).
+
+  Sister to round-7 agent-412-416 (Cf-category strip) and
+  agent-428 (Hangul filler — Lo category). The Cc category
+  (TAB, VT, FF, CR, LF, etc.) is the next-most-likely bypass
+  surface.
+
+  Real risk: 9 (the action is literally iam:PassRole; the tab
+  is invisible noise). Gap = 3.
+
+  Det score: 6; expected ≥ 9.
+
+  Research-doc pattern: §10.8 (Unicode normalization — control
+  characters).
+
+  Proposed fix: in `_norm_grammar_str`, ALSO strip Cc (control)
+  category characters EXCEPT newline (LF, CR) and tab — or
+  strip all Cc unconditionally since IAM action strings should
+  not contain ANY control characters. The conservative fix:
+  add a Cc strip alongside the existing Cf/Mn strip.
+
+policy:
+  Version: "2012-10-17"
+  Statement:
+    - Effect: Allow
+      Action: "iam:\tPassRole"
+      Resource: "*"
+
+request:
+  spec:
+    access_type: read-write
+    duration:
+      duration_hours: 1
+
+expected:
+  score_min: 9
+  must_auto_approve: false

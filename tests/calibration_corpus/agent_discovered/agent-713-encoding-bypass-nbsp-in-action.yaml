@@ -1,0 +1,41 @@
+name: agent-713-encoding-bypass-nbsp-in-action
+description: |
+  BLACK-BOX Round 9 — NBSP (non-breaking space, U+00A0) between colon and
+  verb in Action.
+
+  Action: `"iam: PassRole"` — visually the colon is followed by what
+  looks like a space. IAM rejects but the scorer reads it as some
+  `iam:<unknown>` action and scores 6 — far below the iam:PassRole
+  Resource:* catastrophic floor (9).
+
+  Det score: 6 ("PassRole is an escalation primitive — even narrowly-scoped
+  should be reviewed"). The non-canonical char prevents the catastrophic-
+  action match.
+
+  Real risk: 8 — this is intentional obfuscation. Any policy where the
+  action contains a non-printable or non-canonical whitespace character
+  should floor at 8 (evasion-attempt signal).
+
+  Scorer gap: action-string normalization doesn't strip non-canonical
+  whitespace (NBSP, TAB, CR, LF) between segments. Round-7 invisible-Cf/Mn
+  strip closed Cf/Mn in Effect but action strings have a separate parser
+  path.
+
+  Source: black-box. Adjacent to round-1/round-7 Unicode-homoglyph class.
+
+policy:
+  Version: "2012-10-17"
+  Statement:
+    - Effect: Allow
+      Action: "iam: PassRole"
+      Resource: "*"
+
+request:
+  spec:
+    access_type: read-write
+    duration:
+      duration_hours: 1
+
+expected:
+  score_min: 7
+  must_auto_approve: false

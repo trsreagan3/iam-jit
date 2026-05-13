@@ -1,0 +1,53 @@
+name: agent-709-invalid-arn-region-typo
+description: |
+  WHITE-BOX round 9: a typo'd region segment in an ARN (e.g.
+  `us-easst-1` — note the doubled `s`) makes the ARN match NO
+  REAL resource, but the AWS Access Analyzer raises INVALID_
+  ARN_REGION as a validation finding. The scorer currently
+  treats the ARN as narrow (because the segment IS literal — no
+  wildcard) and scores 1.
+
+  This is a calibration / validation-quality signal, not a direct
+  bypass: a policy with a typo'd ARN evaluates to "applies to
+  nothing," which functionally narrows the grant. But the typo
+  ITSELF is a defect — the author intended the role to access
+  something, and the policy doesn't reflect that intent. In
+  production, this often appears as "the access works in some
+  environments but not others" — and the operator escalates
+  the broader policy to compensate.
+
+  Source-code rule absent: `_is_broad_resource` validates the
+  shape (account/region wildcards, collection suffixes) but does
+  NOT validate that region segments are real AWS regions.
+
+  Real risk: 4 (validation defect, not direct exposure — but the
+  defect class is one Access Analyzer flags). Gap = 3.
+
+  Det score: 1; expected ≥ 4.
+
+  Research-doc pattern: §7.5 (Access Analyzer validation —
+  INVALID_ARN_REGION).
+
+  Proposed fix: maintain a frozenset of valid AWS regions (~32
+  current + commercial/gov), and when an ARN's region segment
+  is non-empty AND not in that set AND not a wildcard, surface
+  a factor at floor 4 — "ARN region `us-easst-1` is not a valid
+  AWS region; the policy applies to no resources. Likely a
+  typo; the role's intended grant is broken."
+
+policy:
+  Version: "2012-10-17"
+  Statement:
+    - Effect: Allow
+      Action: s3:GetObject
+      Resource: "arn:aws:s3:us-easst-1::example-bucket/*"
+
+request:
+  spec:
+    access_type: read-only
+    duration:
+      duration_hours: 1
+
+expected:
+  score_min: 4
+  must_auto_approve: false

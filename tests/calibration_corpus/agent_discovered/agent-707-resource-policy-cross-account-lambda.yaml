@@ -1,0 +1,39 @@
+name: agent-707-resource-policy-cross-account-lambda
+description: |
+  BLACK-BOX Round 9 — Lambda function policy cross-account InvokeFunction.
+
+  Lambda function resource policy granting `lambda:InvokeFunction` to a
+  foreign-account root. The attacker calls into the function from their own
+  account, potentially bypassing API Gateway authorizers / WAF / IP allow-
+  lists. If the function processes user input or interacts with internal
+  resources, the attacker has a foothold inside the trust boundary.
+
+  Det score: 3.
+  Real risk: 7 — direct invocation of a production Lambda by an
+  attacker-controlled account.
+
+  Scorer gap: same resource-policy cross-account class. Note the existing
+  agent-618 covers function-URL Principal:* AuthType:NONE (scores correctly);
+  this Principal-keyed Lambda resource-policy variant is missed.
+
+  Source: AWS docs "Granting function access to other accounts"; aws.amazon
+  Lambda permissions blog; common Pacu `lambda__find_secrets` recon target.
+
+policy:
+  Version: "2012-10-17"
+  Statement:
+    - Effect: Allow
+      Principal:
+        AWS: "arn:aws:iam::999999999999:root"
+      Action: "lambda:InvokeFunction"
+      Resource: "arn:aws:lambda:us-east-1:123456789012:function:prod-victim"
+
+request:
+  spec:
+    access_type: read-write
+    duration:
+      duration_hours: 1
+
+expected:
+  score_min: 7
+  must_auto_approve: false

@@ -1,0 +1,42 @@
+name: agent-711-encoding-bypass-url-encoded-action
+description: |
+  BLACK-BOX Round 9 — URL-encoded colon in Action string.
+
+  `iam%3APassRole` — the `%3A` is URL-encoding for `:`. Some downstream
+  tooling (CloudFormation transforms, CDK synthesis, third-party policy
+  validators) silently decode URL-encoded action strings before evaluating;
+  AWS IAM itself does NOT decode them (and rejects the policy at attach
+  time). But the scorer should treat any non-canonical action representation
+  as evasion — score 1 ("scoped, no risk") is precisely the worst-case false
+  negative: the policy attaches in toolchains that decode AND scores as
+  benign here.
+
+  Det score: 1.
+  Real risk: 8 — iam:PassRole on Resource:* is a known escalation primitive
+  (see round-3 floor 9); the URL-encoded form should be normalized OR
+  flagged as evasion.
+
+  Scorer gap: action-string parser doesn't normalize URL-encoded segments
+  or surface them as suspicious. Sibling of round-7 invisible-Cf/Mn category
+  strip — that closed Unicode invisibles in Effect; ACTION strings need
+  similar normalization (and explicit flag for non-canonical sequences).
+
+  Source: discovered black-box. Adjacent to OWASP WSTG-INPV-09 (parameter
+  pollution / double encoding).
+
+policy:
+  Version: "2012-10-17"
+  Statement:
+    - Effect: Allow
+      Action: "iam%3APassRole"
+      Resource: "*"
+
+request:
+  spec:
+    access_type: read-write
+    duration:
+      duration_hours: 1
+
+expected:
+  score_min: 7
+  must_auto_approve: false

@@ -1,0 +1,35 @@
+name: agent-712-encoding-bypass-double-url-encoded-action
+description: |
+  BLACK-BOX Round 9 — Double-URL-encoded colon in Action.
+
+  `iam%253APassRole` — `%25` decodes to `%`, so a single URL-decode produces
+  `iam%3APassRole`, which the round-9 sibling agent-711 already discusses. A
+  reviewer who URL-decodes once still sees a benign-looking literal. The
+  scorer here scores 1 (same as 711) — confirming the action-string
+  catalog accepts any non-canonical encoding silently.
+
+  Det score: 1.
+  Real risk: 7 — same as 711.
+
+  Scorer gap: same. Any `%` character in an action string is non-canonical
+  by AWS spec (action format is `service:verb`); the scorer should flag and
+  refuse to auto-approve.
+
+  Source: black-box. OWASP double-decoding evasion class.
+
+policy:
+  Version: "2012-10-17"
+  Statement:
+    - Effect: Allow
+      Action: "iam%253APassRole"
+      Resource: "*"
+
+request:
+  spec:
+    access_type: read-write
+    duration:
+      duration_hours: 1
+
+expected:
+  score_min: 6
+  must_auto_approve: false

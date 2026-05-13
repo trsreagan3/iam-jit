@@ -1,0 +1,53 @@
+name: agent-715-vertical-tab-action
+description: |
+  WHITE-BOX round 9: `Action: "iam:\x0bPassRole"` (vertical tab
+  U+000B between service and verb) scores 6 — same defect as
+  agent-714 (TAB) but the Cc-category bypass is broader: VT
+  (U+000B), FF (U+000C), CR (U+000D), and NEL (U+0085) are all
+  Cc-category control characters not stripped by the current
+  `_norm_grammar_str`.
+
+  Form feed (U+000C) in Effect (`"\x0cAllow"`) DOES score 10 —
+  because the Effect lowercase startswith check happens to
+  tolerate leading whitespace-like chars at some path. But the
+  ACTION path with embedded FF / VT does NOT — these chars
+  embed INSIDE the catalog-lookup string and silently break
+  the match.
+
+  Confirmed via probe: `Action: "iam:\x0bPassRole"` → score 6
+  (sensitive-service floor only; PassRole-broad floor missed).
+
+  Source-code rule exploited: `_norm_grammar_str` (line 1064-
+  1103). The Cf+Mn strip:
+
+  ```python
+  s = "".join(c for c in s if _unicodedata.category(c) not in ("Cf", "Mn"))
+  ```
+
+  Doesn't include Cc.
+
+  Real risk: 9. Gap = 3.
+
+  Det score: 6; expected ≥ 9.
+
+  Research-doc pattern: §10.8 (Unicode normalization — Cc class).
+
+  Proposed fix (combined with agent-714): strip ALL Cc-category
+  characters in `_norm_grammar_str`.
+
+policy:
+  Version: "2012-10-17"
+  Statement:
+    - Effect: Allow
+      Action: "iam:\x0bPassRole"
+      Resource: "*"
+
+request:
+  spec:
+    access_type: read-write
+    duration:
+      duration_hours: 1
+
+expected:
+  score_min: 9
+  must_auto_approve: false
