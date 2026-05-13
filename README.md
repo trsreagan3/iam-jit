@@ -1,8 +1,96 @@
-# iam-jit
+# iam-jit / iam-risk-score
+
+Two products from one repo. Pick the one that fits your need.
+
+| Product | What it is | Who it's for | Install |
+|---|---|---|---|
+| **[iam-risk-score](#iam-risk-score--the-scoring-api-launch-product)** | A 1–10 risk score for any AWS IAM policy in <100ms. API + CLI + GitHub Action. | CI pipelines, AI agents requesting AWS access, any tool that wants a verdict before granting permissions. | `pip install iam-risk-score` · [GitHub Action](https://github.com/trsreagan3/iam-risk-score-action) · [hosted API](https://iam-risk-score.com) |
+| **[iam-jit](#iam-jit--the-full-provisioner-upsell-saas)** | The full JIT-IAM provisioner. Time-bound, least-privilege role provisioning into AWS with approval workflow, audit trail, and automatic revocation. | Teams that want to *grant* access, not just score it. AI agents that need actual AWS roles, not advice about them. | Deploy this repo's SAM stack into your AWS account. |
+
+Both products share the same deterministic scoring engine, so the same calibration that protects your provisioning workflow also protects your CI pipelines and AI-agent runtimes. Open source under Apache 2.0.
+
+---
+
+## `iam-risk-score` — the scoring API (launch product)
+
+> **Score AWS IAM policies before you grant access.**
+> A deterministic-plus-LLM scoring engine that grades any IAM
+> policy 1–10 in under 100ms. Free for the first 100 requests/month.
+
+### How it works in 30 seconds
+
+```bash
+$ pip install iam-risk-score
+$ iam-risk-score --offline my-policy.json
+
+IAM Policy Risk Score
+  Score:     7/10 (high)
+  Threshold: 5 (FAIL)
+  Analyzer:  deterministic
+
+Risk factors:
+  - Destructive action `s3:DeleteObject` on Resource: `*`
+    (blast radius = every resource in this account)
+  - Resource: `*` for s3 (broad cross-resource read/access)
+
+Suggestions to reduce risk:
+  - Scope `s3:DeleteObject` to specific resource ARNs
+```
+
+### Three integration paths
+
+**CLI** — `pip install iam-risk-score`. Works offline (no network call) or against any API URL. Designed for pre-commit hooks, CI gates, and ad-hoc terminal use.
+
+**HTTP API** — `POST https://api.iam-risk-score.com/api/v1/score`. Anonymous + free up to 100 requests/month per IP; paid tiers add an LLM narrative. Stateless, idempotent, JSON in / JSON out.
+
+```bash
+curl -X POST https://api.iam-risk-score.com/api/v1/score \
+  -H "Content-Type: application/json" \
+  -d '{"policy": {"Version": "2012-10-17", "Statement": [...]}}'
+```
+
+**GitHub Action** — `uses: trsreagan3/iam-risk-score-action@v1`. Score every policy change on every PR; gate merges by configurable threshold; post a structured PR comment. See [the action repo](https://github.com/trsreagan3/iam-risk-score-action).
+
+```yaml
+# .github/workflows/iam-review.yml
+- uses: trsreagan3/iam-risk-score-action@v1
+  with:
+    policy-file: 'infrastructure/iam/*.json'
+    threshold: 5
+    comment-on-pr: true
+```
+
+### Free vs paid — the deterministic safety contract
+
+The 1–10 numeric score is **fully deterministic** in every tier. Same input → same score, every time. The deterministic engine runs ~30 calibrated rules covering service sensitivity, action breadth, resource scope, destructive verbs, access-type mismatch, PassRole escalation, NotAction/NotResource tricks, and grant-duration amplification.
+
+| Tier | Price | Quota | What you get |
+|---|---|---|---|
+| Free | $0 | 100 req/mo by IP | 1–10 score, factors, suggestions. Deterministic-only. Public API. |
+| Indie | $19/mo | 5K req/mo | + per-API-key auth, no rate-limit on per-key |
+| Pro | $99/mo | 50K req/mo | + **LLM narrative** (Claude Opus 4.7) — a plain-English explanation of the score for human reviewers |
+| Team | $499/mo | 500K req/mo | + admin context API, Slack notifications, weekly digest |
+| Enterprise | $2K+/mo | unlimited | + SOC 2 evidence export, dedicated calibration, SLA |
+
+**Why this split is honest:** the LLM cannot lower the deterministic score. By explicit safety contract — verified by the `test_score_matches_calibration_corpus` regression test — the optional LLM only contributes narrative + extra suggestions. **A fully-compromised LLM cannot hallucinate a request into auto-approval.** That means the free tier is safety-equivalent to the paid tier; you only pay for the explanation, never the verdict.
+
+### Regression-protected calibration
+
+The scoring engine is gated by **2,600+ test cases**, including:
+
+- **1,489 AWS-managed-policy snapshots** — every `arn:aws:iam::aws:policy/*` policy AWS publishes, scored and pinned with ±1 tolerance. Refactors that significantly shift verdicts on `AdministratorAccess` or `ReadOnlyAccess` fail CI immediately.
+- **35 adversarial attack patterns** — privilege-escalation kits, mislabel attacks, NotAction footguns, evidence-destruction (CloudTrail tampering), RCE primitives (UpdateFunctionCode, SendCommand), condition-key bypasses, multi-statement hidden-rule attacks.
+- **10 real-world custom-policy snapshots** — CI/CD Lambda update, Terraform state-bucket access, EKS pod S3 reader, ECS task execution. These pin "the scorer doesn't false-alarm on legitimate work."
+
+Want to add a calibration case? Drop a YAML file into `tests/calibration_corpus/<tier>/`. No Python change required.
+
+---
+
+## `iam-jit` — the full provisioner (upsell SaaS)
 
 > Working name. Naming is open — see DESIGN.md.
 
-A self-hosted, **AI-native, agent-first** system for provisioning **time-bound, least-privilege IAM roles** in AWS. Open source under Apache 2.0.
+A self-hosted, **AI-native, agent-first** system for provisioning **time-bound, least-privilege IAM roles** in AWS.
 
 **Built for the agent era.** iam-jit treats AI agents (Claude Code, Cursor, custom internal tooling, autonomous workflows) as primary users — not an afterthought. An agent on a developer's laptop, in CI, or running unattended in a Kubernetes Job can request just-in-time AWS access by describing the task in natural language; iam-jit gathers the missing details through a conversation, drafts a least-privilege policy, runs it through risk review, queues it for human (or — soon — automated) approval, provisions a time-bound role into the destination account, and gives the agent back a copy-paste-ready assume-role snippet. When the timer runs out, the role goes away automatically.
 
