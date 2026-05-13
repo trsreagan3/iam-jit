@@ -43,6 +43,25 @@ i.e. how many of round-N's findings are now caught by the engine.
 A non-zero gap-≥3 count for older rounds means a few edge-case
 calibration disagreements remain pinned as documented soft-targets.)
 
+### Research-pattern coverage (post-convergence)
+
+After convergence-batch maintenance closures (commits `bb0232c`,
+`7d9c732`, `7728f4e`, `0b461ae`):
+
+```
+Total enumerated:  217 patterns (197 numbered + 20 sub-cases)
+Closed:            203  (93.5%)
+gap-1 calibration:  11
+gap-2 calibration:   2
+gap-3+ remaining:    1
+```
+
+The single gap-3 remaining is `research-07-5-aa-missing-principal`
+— a resource-based-policy statement with no Principal field, which
+is indistinguishable from a regular identity-policy statement
+without external context. Skipped to avoid false positives on
+legitimate identity policies.
+
 ### Architectural surface closed
 
 The scorer now handles all of:
@@ -161,7 +180,9 @@ customer-side knob; the floor is the unchangeable safety contract.
 ## Single-line claim for the landing page
 
 > Adversarially calibrated to ±1 against Opus-4.7 on 1,500+ AWS-
-> managed policies and 217 documented attack patterns across 10
-> rounds of black-box and white-box testing.
+> managed policies and 217 documented attack patterns. 203/217
+> (93.5%) closure, 10 rounds of black-box and white-box testing,
+> last two rounds at max_gap ≤ 1. Public corpus, public methodology,
+> public commit history.
 
 This number updates after every quarterly pass.
