@@ -112,16 +112,36 @@ Bedrock LLM invocations from abuse traffic.
 
 ### Billing (Stripe)
 
-- [ ] Set up Stripe account
-- [ ] Create products + prices for Free / Indie / Pro / Team / Enterprise tiers
-- [ ] Stripe Checkout for the self-serve tiers (Indie/Pro/Team)
-- [ ] Stripe webhook → API key issuance: when a Checkout session completes, create an API key in the iam-jit users table associated with the customer's email + tier
-- [ ] Stripe Customer Portal for self-service plan changes / card updates
-- [ ] Cancellation flow: when a subscription cancels, mark the API key as inactive
+**The webhook handler is already implemented** at
+`src/iam_jit/stripe_webhook.py` + `src/iam_jit/routes/webhooks_stripe.py`,
+with 23 unit tests. The remaining work is operational:
 
-This is the biggest chunk of pre-launch infra work. Budget 2-3
-days of focused effort. Most of it is Stripe glue, not iam-jit
-code changes.
+- [ ] Set up Stripe account (https://dashboard.stripe.com/register)
+- [ ] Create products + prices for Indie ($19/mo) / Pro ($99/mo) / Team ($499/mo). Note the price IDs — they look like `price_1AbCdE...`.
+- [ ] Configure Stripe Checkout for each tier (no extra integration code; the iam-jit checkout button on the landing site links straight to Checkout)
+- [ ] In your Stripe dashboard → Developers → Webhooks → Add endpoint:
+  - URL: `https://api.iam-risk-score.com/api/v1/webhooks/stripe`
+  - Events: `checkout.session.completed`, `customer.subscription.deleted`
+  - Copy the signing secret (`whsec_...`)
+- [ ] Set three env vars on the SAM-deployed Lambda (via `sam deploy --parameter-overrides` or the AWS console):
+  ```
+  STRIPE_WEBHOOK_SECRET=whsec_...
+  STRIPE_PRICE_ID_TO_TIER={"price_1AbCdE_indie":"indie","price_1Xyz_pro":"pro","price_1Jkl_team":"team"}
+  STRIPE_KEY_DELIVERY_FROM_EMAIL=billing@iam-risk-score.com    # optional, SES-verified sender
+  ```
+- [ ] (Optional but recommended) Add `metadata.iam_jit_user_id` to each Stripe Checkout session config — it's the customer's email. The subscription-cancelled webhook uses this metadata key to find the right tokens to revoke.
+- [ ] Stripe Customer Portal for self-service plan changes / card updates — pure Stripe-dashboard setup, no iam-jit code involved.
+- [ ] Test the full loop in Stripe TEST mode before flipping to live:
+  - Use Stripe's webhook test from the dashboard (sends a synthetic `checkout.session.completed`)
+  - Confirm the webhook returns 200 and the iam-jit api_tokens table has a new row
+  - Confirm the SES email arrives if `STRIPE_KEY_DELIVERY_FROM_EMAIL` is set
+  - Then do a real Checkout with a test card (`4242 4242 4242 4242`); confirm same loop end-to-end
+
+**Webhook response security note**: the raw API key is never included
+in the webhook response body. Stripe logs response bodies in the
+dashboard UI; the iam-jit handler returns only `{tier, token_hash,
+issued_for}` so the key can't leak via that path. Delivery is via SES
+email (or manual lookup from DynamoDB if SES is off).
 
 ## 4. Documentation site
 
