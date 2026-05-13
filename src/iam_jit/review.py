@@ -2427,6 +2427,55 @@ def _deterministic(
                                 "condition instead of naming individual accounts."
                             )
 
+        # Cross-account direction revealed by Condition. When a
+        # Condition narrows on `aws:PrincipalAccount` / `aws:SourceAccount`
+        # to a SPECIFIC account ID, that account is the principal/source
+        # the policy grants access to. If the Resource ARN's account
+        # differs, the condition is REVEALING a cross-account grant —
+        # not narrowing it to same-account. Round 8 BB agent-503, 504, 507.
+        condition_obj = stmt.get("Condition")
+        if isinstance(condition_obj, dict):
+            condition_accounts: set[str] = set()
+            for op_raw, kvs in condition_obj.items():
+                op = str(op_raw) if op_raw is not None else "Null"
+                op_lc = op.lower()
+                if not op_lc.startswith("stringequals") and op_lc != "arnequals":
+                    continue
+                if not isinstance(kvs, dict):
+                    continue
+                for k, v in kvs.items():
+                    k_lc = str(k).lower()
+                    if k_lc.endswith("principalaccount") or k_lc.endswith("sourceaccount"):
+                        vs = v if isinstance(v, list) else [v]
+                        for vv in vs:
+                            if isinstance(vv, str) and vv.isdigit() and len(vv) == 12:
+                                condition_accounts.add(vv)
+            if condition_accounts:
+                # Compare against Resource ARNs' account-id segments.
+                resource_accounts: set[str] = set()
+                for r in resources:
+                    if not isinstance(r, str) or not r.startswith("arn:"):
+                        continue
+                    rp = r.split(":", 5)
+                    if len(rp) >= 5 and rp[4] and "*" not in rp[4]:
+                        resource_accounts.add(rp[4])
+                # Cross-account if accounts are known and don't overlap
+                if resource_accounts and condition_accounts.isdisjoint(resource_accounts):
+                    score = max(score, 7)
+                    factors.append(
+                        f"Condition narrows on `aws:PrincipalAccount`/"
+                        f"`aws:SourceAccount` to {sorted(condition_accounts)[0]} "
+                        f"but the Resource ARN is in account "
+                        f"{sorted(resource_accounts)[0]}. The condition is "
+                        "REVEALING a cross-account grant (a specific external "
+                        "account can use this), not narrowing to same-account."
+                    )
+                    suggestions.append(
+                        "Verify the external account is trusted. Consider "
+                        "an `aws:PrincipalOrgID` condition if org-scoped is "
+                        "the intent."
+                    )
+
         # CloudTrail-bucket-targeted attack detection. A narrow bucket
         # ARN that matches audit-bucket naming patterns combined with
         # a destructive S3 action (PutLifecycleConfiguration to expire
