@@ -1,0 +1,36 @@
+name: agent-29-ec2-multi-wildcard-multi-region
+description: |
+  `arn:aws:secretsmanager:*:*:secret:*` — every secret in every
+  region in every account-shape the partition supports. The
+  `_is_strict_wildcard` helper checks for resource_spec=='*' or for
+  `<type>:*` where <type> contains no `/`. The shape here has
+  `secret:*` as the resource_spec — type 'secret', rest '*' — which
+  DOES qualify as strict wildcard. So this case fires (the
+  high-risk-action rule pushes to 7). But the SAME helper with the
+  bucket-name form `arn:aws:s3:::*` works too via resource_spec=='*'.
+  Where it FAILS is on `arn:aws:s3:::bucket-*` or partition tricks.
+  Captured here is the partition-trick variant: `arn:aws-cn:s3:::*`
+  is a service-wide wildcard for the China partition. Scorer's
+  read-only s3 case gets 4. Same shape on a key, secret, etc.:
+  scorer correctly flags via the wildcard pattern.
+  Real risk for `arn:aws-cn:s3:::*` with `s3:GetObject` + read-only:
+  6 — service-wide wildcard, just in a different partition. Today
+  the scorer ranks it 4.
+policy:
+  Version: '2012-10-17'
+  Statement:
+    - Effect: Allow
+      Action:
+        - s3:GetObject
+        - s3:ListBucket
+      Resource:
+        - arn:aws-cn:s3:::*
+        - arn:aws-us-gov:s3:::*
+request:
+  spec:
+    access_type: read-only
+    duration:
+      duration_hours: 1
+expected:
+  score_min: 6
+  must_auto_approve: false

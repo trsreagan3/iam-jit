@@ -1,0 +1,30 @@
+name: agent-28-notaction-narrow-resource
+description: |
+  NotAction with a NARROW (non-wildcard) resource. The scorer's
+  NotAction rule only fires when the resource set contains `*` or
+  `:*` — but `NotAction: [iam:*, kms:*]` on
+  `Resource: arn:aws:s3:::data/*` still grants "every action in every
+  service EXCEPT iam and kms" on those S3 objects. That includes
+  s3:DeleteObject, s3:PutObjectAcl, sts:AssumeRole if S3 supported
+  it, etc. — the broadness is in the action set, not the resource.
+  Scorer says 1/10 (no factors fire).
+  Real risk: 7 — admin-minus-set on a specific bucket is still very
+  broad: every S3 action, every lambda action, every ec2 action,
+  every cognito action, etc., minus exactly the listed exclusions.
+policy:
+  Version: '2012-10-17'
+  Statement:
+    - Effect: Allow
+      NotAction:
+        - iam:*
+        - kms:*
+        - organizations:*
+      Resource: arn:aws:s3:::company-data/*
+request:
+  spec:
+    access_type: read-write
+    duration:
+      duration_hours: 1
+expected:
+  score_min: 7
+  must_auto_approve: false

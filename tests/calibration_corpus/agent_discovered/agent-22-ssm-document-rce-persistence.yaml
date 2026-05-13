@@ -1,0 +1,29 @@
+name: agent-22-ssm-document-rce-persistence
+description: |
+  ssm:CreateDocument + UpdateDocumentDefaultVersion +
+  ModifyDocumentPermission — create a malicious SSM document that
+  runs attacker commands, set it as the default version, and share
+  it cross-account via ModifyDocumentPermission. Any future
+  StartAutomationExecution / SendCommand that targets the document
+  name (including legitimate operator runs) now runs the attacker's
+  payload. Persistent RCE primitive. Scorer says 6 (SSM is in
+  sensitive services, but only fires the cross-resource floor).
+  Real risk: 8 — persistent RCE waiting in named SSM doc.
+policy:
+  Version: '2012-10-17'
+  Statement:
+    - Effect: Allow
+      Action:
+        - ssm:CreateDocument
+        - ssm:UpdateDocument
+        - ssm:UpdateDocumentDefaultVersion
+        - ssm:ModifyDocumentPermission
+      Resource: '*'
+request:
+  spec:
+    access_type: read-write
+    duration:
+      duration_hours: 1
+expected:
+  score_min: 8
+  must_auto_approve: false

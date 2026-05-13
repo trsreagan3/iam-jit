@@ -1,0 +1,28 @@
+name: agent-31-orgs-accept-handshake
+description: |
+  organizations:AcceptHandshake — accept an invitation to join
+  another AWS Organization. If the attacker has org-admin in
+  account A and gets the victim account B to AcceptHandshake on a
+  handshake from A, B is now under A's SCPs and management. This
+  is a full-account governance takeover. Scorer says 6 (sensitive-
+  service touched on Resource:*). Not catastrophic-tier per current
+  list but functionally an irreversible-without-org-admin event.
+  Real risk: 9 — irreversible governance pivot; should be in
+  `_CATASTROPHIC_ACTIONS` alongside organizations:LeaveOrganization.
+policy:
+  Version: '2012-10-17'
+  Statement:
+    - Effect: Allow
+      Action:
+        - organizations:AcceptHandshake
+        - organizations:InviteAccountToOrganization
+        - organizations:RegisterDelegatedAdministrator
+      Resource: '*'
+request:
+  spec:
+    access_type: read-write
+    duration:
+      duration_hours: 1
+expected:
+  score_min: 9
+  must_auto_approve: false

@@ -1,0 +1,27 @@
+name: agent-15-logs-put-subscription-filter-exfil
+description: |
+  logs:PutSubscriptionFilter / PutDestination / PutDestinationPolicy
+  set up an outbound stream of EVERY log line to an attacker-chosen
+  Kinesis stream or Lambda (possibly cross-account). Once installed,
+  it's persistent — survives the original grant expiring. The
+  attacker sees every log line in real time, harvesting secrets and
+  request data as they appear. Scorer says 6 (state-changing on
+  Resource:*).
+  Real risk: 8 — persistent real-time log exfil, account-wide.
+policy:
+  Version: '2012-10-17'
+  Statement:
+    - Effect: Allow
+      Action:
+        - logs:PutSubscriptionFilter
+        - logs:PutDestination
+        - logs:PutDestinationPolicy
+      Resource: '*'
+request:
+  spec:
+    access_type: read-write
+    duration:
+      duration_hours: 1
+expected:
+  score_min: 8
+  must_auto_approve: false

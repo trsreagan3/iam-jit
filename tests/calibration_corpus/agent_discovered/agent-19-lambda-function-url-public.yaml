@@ -1,0 +1,26 @@
+name: agent-19-lambda-function-url-public
+description: |
+  lambda:CreateFunctionUrlConfig + UpdateFunctionUrlConfig — attach a
+  public-internet URL to any Lambda function. If the function's role
+  has any real privileges, that URL is an unauthenticated RCE
+  endpoint (auth_type=NONE allows internet calls to invoke the
+  function). Persistent — survives the original grant expiring.
+  Scorer says 6 (state-changing on Resource:*).
+  Real risk: 8 — persistent unauthenticated public RCE endpoint.
+policy:
+  Version: '2012-10-17'
+  Statement:
+    - Effect: Allow
+      Action:
+        - lambda:CreateFunctionUrlConfig
+        - lambda:UpdateFunctionUrlConfig
+        - lambda:AddPermission
+      Resource: '*'
+request:
+  spec:
+    access_type: read-write
+    duration:
+      duration_hours: 1
+expected:
+  score_min: 8
+  must_auto_approve: false

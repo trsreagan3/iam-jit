@@ -1,0 +1,37 @@
+name: agent-02-s3-bucket-name-prefix-wildcard
+description: |
+  S3 `arn:aws:s3:::prod-*` — bucket-NAME-prefix wildcard. Matches every
+  bucket whose name starts with `prod-`. Current helpers see "ends with
+  `*` but no slash" — `resource_spec.endswith('/*')` is False, the
+  service-wide `resource_spec == '*'` check is False, so the resource is
+  treated as narrow. The companion `arn:aws:s3:::prod-*/*` (objects
+  inside any prod-named bucket) is similarly treated as narrow because
+  `/` appears in the resource spec but `count('/') > 1` would still
+  reject it as "narrow path-prefix" — but here count('/') == 1 with
+  `prod-*` as a wildcard PREFIX in the bucket-name; the helper's check
+  `resource_spec.endswith('/*') and resource_spec.count('/') <= 1`
+  DOES trip... actually let me recheck — `prod-*/*` has count==1 and
+  ends in `/*`, so it WOULD be broad. The blind spot is the bucket-
+  level form `arn:aws:s3:::prod-*` ALONE (no /*). That one slips
+  through entirely (no `/` at all, no `*` resource_spec). Scorer says
+  1/10 for `s3:GetObject` + `s3:ListBucket` on every prod-prefixed
+  bucket.
+  Real risk: 7 — bucket-name-prefix wildcard is a deliberate
+  enumeration primitive and gives read of every matching bucket.
+policy:
+  Version: '2012-10-17'
+  Statement:
+    - Effect: Allow
+      Action:
+        - s3:GetObject
+        - s3:ListBucket
+      Resource:
+        - arn:aws:s3:::prod-*
+request:
+  spec:
+    access_type: read-only
+    duration:
+      duration_hours: 1
+expected:
+  score_min: 7
+  must_auto_approve: false

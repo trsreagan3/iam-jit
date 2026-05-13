@@ -59,6 +59,124 @@ _SENSITIVE_SERVICES = frozenset(
         # RAG-prompt-injection vector if the attacker can write to a
         # knowledge base that production agents query.
         "bedrock",
+        # 2026-05-13 expansions (adversarial agent findings):
+        # - ebs: EBS direct-snapshot access reads raw disk blocks
+        # - acm-pca: private CA = mint any certificate
+        # - cognito-idp / cognito-identity: user-pool admin = impersonate
+        # - imagebuilder: AMI poisoning supply-chain primitive
+        # - sagemaker: ML notebook RCE + IAM PassRole composition
+        # - glue: ETL job RCE via job code substitution
+        # - ses: send-as-prod-domain = phishing-as-the-org
+        "ebs", "acm-pca", "cognito-idp", "cognito-identity",
+        "imagebuilder", "sagemaker", "glue", "ses",
+    }
+)
+
+
+# Actions that *create or execute code* and which, when paired with
+# `iam:PassRole`, compose into "run arbitrary code as that role" —
+# the textbook IAM privilege-escalation primitive. The scorer floors
+# the COMBINATION at 8-9 (see the composition-rule pass below). Each
+# action ALONE doesn't deserve the score; it's the pairing with
+# PassRole that converts "create resource" into "RCE-as-role."
+_CODE_EXECUTION_PRIMITIVES = frozenset(
+    {
+        # Lambda: code is uploaded by the caller; runs as the function's role
+        "lambda:CreateFunction",
+        "lambda:UpdateFunctionCode",
+        "lambda:CreateFunctionUrlConfig",  # also opens public surface
+        # EC2 + ECS: instance starts with a passed instance profile; the
+        # instance metadata service exposes the role's credentials
+        "ec2:RunInstances",
+        "ecs:RunTask",
+        "ecs:CreateService",
+        # CodeBuild / CodePipeline: buildspec is caller-controlled
+        "codebuild:CreateProject",
+        "codebuild:StartBuild",
+        # Glue / Athena: ETL job code is caller-controlled
+        "glue:CreateJob",
+        "glue:UpdateJob",
+        "glue:StartJobRun",
+        # SageMaker: notebook = Jupyter shell with the role's perms
+        "sagemaker:CreateNotebookInstance",
+        "sagemaker:CreatePresignedNotebookInstanceUrl",
+        "sagemaker:CreateProcessingJob",
+        "sagemaker:CreateTrainingJob",
+        # Step Functions: state machine orchestrates calls under the role
+        "states:CreateStateMachine",
+        "states:UpdateStateMachine",
+        # CloudFormation: template provisions arbitrary resources under role
+        "cloudformation:CreateStack",
+        "cloudformation:UpdateStack",
+        "cloudformation:CreateChangeSet",
+        "cloudformation:ExecuteChangeSet",
+        # App Runner: containerized service runs under instance role
+        "apprunner:CreateService",
+        "apprunner:UpdateService",
+        # Batch: job runs under task role
+        "batch:SubmitJob",
+        "batch:RegisterJobDefinition",
+    }
+)
+
+
+# Read actions whose response body commonly contains secrets / sensitive
+# content. On a broad resource, these are exfiltration primitives even
+# though they're IAM-classified as Read or List. Floor at 7 on broad
+# resource (same as _HIGH_RISK_ACTIONS on broad).
+_SECRET_BEARING_READS = frozenset(
+    {
+        # EC2 instance internals — boot logs and userData scripts often
+        # contain bootstrap secrets, API keys, DB passwords
+        "ec2:GetConsoleOutput",
+        "ec2:GetConsoleScreenshot",
+        "ec2:GetLaunchTemplateData",
+        "ec2:GetPasswordData",  # Windows Administrator password decrypt
+        # SSM — command invocation output frequently contains secrets
+        "ssm:GetCommandInvocation",
+        "ssm:GetParameterHistory",  # leaks previous secret values
+        # CloudWatch Logs — application logs frequently leak secrets
+        "logs:GetLogEvents",
+        "logs:FilterLogEvents",
+        # DynamoDB Streams + SQS — message bodies contain whatever the
+        # app put there
+        "dynamodb:GetRecords",
+        "sqs:ReceiveMessage",
+        # S3 GetObject on broad resource (bucket-name wildcard like
+        # `prod-*` or service-wide `arn:aws:s3:::*`) is data-exfil tier.
+        # On a NARROW bucket-name (specific bucket) it's just routine
+        # reading — _is_broad_resource gates this rule.
+        "s3:GetObject",
+        "s3:GetObjectVersion",
+    }
+)
+
+
+# Actions that, in a single API call, set up ONGOING data exfiltration
+# OR cross-account access to data. Different from _HIGH_IMPACT_MUTATION
+# in that the BLAST is "everything that flows through this resource
+# from now on" — a single configuration change causes long-lived
+# unauthorized access. Floor at 8.
+_CROSS_ACCOUNT_EXFIL_ACTIONS = frozenset(
+    {
+        # RDS / EBS / EC2 — share a snapshot with attacker account =
+        # ongoing exfil of every byte of stored data
+        "rds:ModifyDBSnapshotAttribute",
+        "ec2:ModifySnapshotAttribute",
+        "ec2:ModifyImageAttribute",
+        # ECR — change repository policy to allow attacker account
+        # pulling images
+        "ecr:SetRepositoryPolicy",
+        # CloudWatch Logs subscription filter — every new log line
+        # ships to attacker-controlled destination
+        "logs:PutSubscriptionFilter",
+        "logs:PutDestination",
+        "logs:PutDestinationPolicy",
+        # Lambda function URL — make a function publicly invokable
+        "lambda:CreateFunctionUrlConfig",
+        # SES — send mail as the org's verified domain (phishing-as-org)
+        "ses:SendEmail",
+        "ses:SendRawEmail",
     }
 )
 
@@ -227,9 +345,62 @@ _CATASTROPHIC_ACTIONS = frozenset(
         "sso-admin:CreateAccountAssignment",
         # Organizations — creating new accounts or moving them between
         # OUs evades SCP governance and is irreversible without org-
-        # admin intervention.
+        # admin intervention. AcceptHandshake / InviteAccountToOrganization
+        # let the attacker pull arbitrary accounts INTO the organization
+        # (then exfil them out / drop SCPs on them). AttachPolicy /
+        # DetachPolicy directly manipulate SCP enforcement.
         "organizations:CreateAccount",
         "organizations:MoveAccount",
+        "organizations:AcceptHandshake",
+        "organizations:InviteAccountToOrganization",
+        "organizations:AttachPolicy",
+        "organizations:DetachPolicy",
+        # CloudFormation StackSets — org-wide blast radius in one
+        # call. CreateStackSet defines the template; CreateStackInstances
+        # deploys it to every member account. UpdateStackSet propagates
+        # changes everywhere. Much larger blast than CreateStack (single-
+        # account).
+        "cloudformation:CreateStackSet",
+        "cloudformation:CreateStackInstances",
+        "cloudformation:UpdateStackSet",
+        "cloudformation:UpdateStackInstances",
+        # SSM documents — define commands that run on every SSM-managed
+        # instance. CreateDocument with attacker-controlled script +
+        # ModifyDocumentPermission to share account-wide = persistent RCE.
+        "ssm:CreateDocument",
+        "ssm:UpdateDocument",
+        "ssm:UpdateDocumentDefaultVersion",
+        "ssm:ModifyDocumentPermission",
+        # Instance-profile bind/unbind. The textbook EC2 escalation:
+        # CreateInstanceProfile + AddRoleToInstanceProfile (passes any
+        # role to a new instance profile). Combined with ec2:RunInstances
+        # the box boots with admin creds reachable via metadata service.
+        "iam:CreateInstanceProfile",
+        "iam:AddRoleToInstanceProfile",
+        "iam:RemoveRoleFromInstanceProfile",
+        # Cognito user-pool admin — admin-create-user + admin-set-
+        # password = impersonation of any user. Catastrophic for any
+        # app that uses Cognito as IdP.
+        "cognito-idp:AdminCreateUser",
+        "cognito-idp:AdminSetUserPassword",
+        "cognito-idp:AdminUpdateUserAttributes",
+        "cognito-idp:AdminAddUserToGroup",
+        "cognito-idp:AdminConfirmSignUp",
+        # EC2 Image Builder — recipe = AMI build script. Poisoning here
+        # is supply-chain attack on every instance booted from those AMIs.
+        "imagebuilder:CreateComponent",
+        "imagebuilder:CreateImageRecipe",
+        "imagebuilder:CreateImagePipeline",
+        "imagebuilder:UpdateImagePipeline",
+        # Private CA — IssueCertificate mints a cert that any TLS peer
+        # in the org will trust. Cross-service impersonation primitive.
+        "acm-pca:IssueCertificate",
+        # EBS direct snapshot access — reads raw disk blocks. Entire
+        # database contents readable without going through any DB
+        # access controls.
+        "ebs:GetSnapshotBlock",
+        "ebs:ListSnapshotBlocks",
+        "ebs:ListChangedBlocks",
     }
 )
 
@@ -242,43 +413,64 @@ def _is_broad_resource(r: str) -> bool:
       - service-wide wildcards where the entire resource-spec is `*`,
         like `arn:aws:s3:::*` or `arn:aws:ec2:::*`
       - bucket-level wildcards like `arn:aws:s3:::my-bucket/*` — every
-        object in one bucket, which for a destructive action is still
-        a wide blast radius (the whole bucket's contents).
+        object in one bucket
+      - **bucket-name-prefix wildcards** like `arn:aws:s3:::prod-*` or
+        `arn:aws:s3:::*/sensitive-data/*` — the bucket-name component
+        (between `:::` and the first `/`) contains a `*`, so it matches
+        many buckets. (Found by adversarial agent 2026-05-13.)
+      - **IAM trailing-wildcard forms** like
+        `arn:aws:iam::123:role/*` or `arn:aws:iam::123:user/*` — every
+        role / user in the account.
 
     Does NOT match:
-      - Path-narrowed wildcards like `arn:aws:s3:::bucket/prefix/*`
-        (intentional scoping)
+      - Path-narrowed wildcards like `arn:aws:s3:::specific-bucket/prefix/*`
+        with NO wildcard in the bucket-name component (intentional scoping)
       - Suffix wildcards inside a deeper ARN path like
-        `arn:aws:logs:us-east-1:account:log-group:/app:*` (the trailing
-        `:*` is a log-stream wildcard WITHIN one specific log group;
-        this is legitimate fine-grained scoping, not account-wide blast)
+        `arn:aws:logs:us-east-1:account:log-group:/app:*` — fine-grained
+        scoping within ONE log group.
     """
     if r == "*":
         return True
     # ARN-shaped resources: inspect the resource-spec portion only.
-    # AWS ARN syntax is `arn:partition:service:region:account:resource-spec`
-    # so the resource-spec starts after the 5th colon.
     if r.startswith("arn:"):
         parts = r.split(":", 5)
         if len(parts) < 6:
             return False  # malformed ARN — treat as narrow
         resource_spec = parts[5]
+        service = parts[2]
     else:
         resource_spec = r
+        service = ""
 
     # Service-wide wildcard: the entire resource-spec is just `*`.
     if resource_spec == "*":
         return True
 
-    # Bucket-level wildcard: resource-spec ends in `/*` AND has ≤1
-    # slash (e.g., `bucket/*` → broad-within-bucket; `bucket/dir/*` →
-    # narrow path-prefix). Uses `/` because S3 ARNs use slash as the
-    # path separator. Services that use `:` as a sub-resource separator
-    # (logs, ssm parameters, etc.) intentionally don't trigger this —
-    # `log-group:/app:*` is a stream-wildcard within ONE log group,
-    # which is fine-grained scoping, not broad blast.
-    if resource_spec.endswith("/*") and resource_spec.count("/") <= 1:
-        return True
+    # IAM trailing-wildcard forms: `role/*`, `user/*`, `group/*`,
+    # `policy/*` — the principal/policy collection-wide wildcard.
+    if service == "iam":
+        first_segment = resource_spec.split("/", 1)[0]
+        if first_segment in ("role", "user", "group", "policy", "instance-profile"):
+            rest = resource_spec[len(first_segment) + 1:] if "/" in resource_spec else ""
+            # `role/*` or `role/path-*` or `role/dev-*` — all broad
+            if rest == "*" or (rest.endswith("*") and rest.count("/") == 0):
+                return True
+
+    # S3-style: bucket-name component (before first `/`) contains `*`.
+    # Examples: `prod-*`, `*-staging`, `*` (already handled above),
+    # `prod-*/*`, `*/sensitive-data/*`. Matches every bucket whose name
+    # fits the pattern — broad blast.
+    if "/" not in resource_spec:
+        # No slash: this IS the bucket name. If it has `*`, it's broad.
+        if "*" in resource_spec:
+            return True
+    else:
+        bucket_part, _, path_part = resource_spec.partition("/")
+        if "*" in bucket_part:
+            return True
+        # Single-bucket bucket-level wildcard: `bucket/*` (one slash, ends in `/*`)
+        if resource_spec.endswith("/*") and resource_spec.count("/") <= 1:
+            return True
 
     return False
 
@@ -498,20 +690,38 @@ def _deterministic(
         not_actions = _as_list(stmt.get("NotAction"))
         not_resources = _as_list(stmt.get("NotResource"))
         if not_actions:
+            # NotAction is "every action EXCEPT this list" — almost
+            # always far broader than the author intended. With wildcard
+            # resource, it's admin-minus-set (floor 9). With narrow
+            # resource, it's still "every service in the account except
+            # the excluded ones" on that resource — which for a typical
+            # exclusion list of 1-5 services is hundreds of allowed
+            # actions. Floor at 7 even on narrow resources; 9 on broad.
+            # The exclusion-list cardinality is the wrong defense — AWS
+            # has 400+ services, so excluding 3-5 still leaves 395+.
             resources_for_not = resources or ["*"]
-            if any(r == "*" or r.endswith(":*") for r in resources_for_not):
+            on_broad = any(r == "*" or r.endswith(":*") for r in resources_for_not)
+            excluded = ", ".join(not_actions[:3])
+            if on_broad:
                 score = max(score, 9)
-                excluded = ", ".join(not_actions[:3])
                 factors.append(
                     f"`NotAction` with wildcard resource grants everything "
                     f"EXCEPT [{excluded}]. This is admin-minus-set, "
                     "treated as full account access for risk purposes."
                 )
-                suggestions.append(
-                    "Replace `NotAction` with an explicit `Action` list of "
-                    "the operations the role actually needs. NotAction is "
-                    "almost always wider than the author intended."
+            else:
+                score = max(score, 7)
+                factors.append(
+                    f"`NotAction` (excluding [{excluded}]) on narrow resource "
+                    "still grants every action in every service except those "
+                    "few — typically hundreds of allowed actions, broader than "
+                    "the author likely intended."
                 )
+            suggestions.append(
+                "Replace `NotAction` with an explicit `Action` list of "
+                "the operations the role actually needs. NotAction is "
+                "almost always wider than the author intended."
+            )
         if not_resources:
             if any(r == "*" or r.endswith(":*") for r in not_resources):
                 # NotResource[*] is mathematically nothing (grants nothing),
@@ -556,21 +766,27 @@ def _deterministic(
         # "I can wipe every object in this one bucket" is still a wide
         # enough blast to warrant flagging.
         def _is_strict_wildcard(r: str) -> bool:
-            """Literal `*`, service-wide wildcard, or single-collection
-            wildcard. Trailing `:*` inside a deep ARN path (like a
-            log-stream wildcard within one log-group) does NOT count
-            — that's fine-grained scoping.
+            """Literal `*`, service-wide wildcard, single-collection
+            wildcard via colon (`function:*`, `topic:*`), or IAM-style
+            trailing wildcard (`role/*`, `user/*`). Also S3 bucket-name
+            wildcards (`prod-*`, `*-staging`).
+
+            Trailing `:*` inside a DEEP ARN path (like a log-stream
+            wildcard within one log-group) does NOT count — that's
+            fine-grained scoping.
 
             Patterns matched (broad):
               - `*`                                   account-wide
-              - `arn:aws:s3:::*`                      service-wide (resource_spec=='*')
+              - `arn:aws:s3:::*`                      service-wide
+              - `arn:aws:s3:::prod-*`                 bucket-name-prefix wildcard
+              - `arn:aws:s3:::prod-*/*`               objects in matching buckets
               - `arn:aws:lambda:.::function:*`        all functions
-              - `arn:aws:sns:.::topic:*`              all topics
-              - `arn:aws:kms:.::key/*`                all keys (slash form)
+              - `arn:aws:iam::.::role/*`              all roles
+              - `arn:aws:iam::.::role/team-*`         role-name-prefix
 
             Patterns NOT matched (narrow):
               - `arn:aws:logs:.::log-group:/path:*`   one log group's streams
-              - `arn:aws:s3:::bucket/prefix/*`        narrowed path
+              - `arn:aws:s3:::specific-bucket/prefix/*`   narrowed path
               - `arn:aws:iam::.::role/svc-role`       specific role
             """
             if r == "*":
@@ -581,6 +797,7 @@ def _deterministic(
             if len(parts) < 6:
                 return False
             resource_spec = parts[5]
+            service = parts[2]
             if resource_spec == "*":
                 return True
             # Single-collection wildcard via colon: `function:*`, `topic:*`,
@@ -589,6 +806,23 @@ def _deterministic(
             if ":" in resource_spec:
                 first, _, rest = resource_spec.partition(":")
                 if rest == "*" and "/" not in first:
+                    return True
+            # IAM principal-collection wildcards: `role/*`, `user/*`,
+            # `role/team-*`, etc. Pattern: `<collection>/<glob>` where
+            # `<glob>` ends in `*` and has no `/` (single-segment glob).
+            if service == "iam" and "/" in resource_spec:
+                collection, _, tail = resource_spec.partition("/")
+                if collection in ("role", "user", "group", "policy", "instance-profile"):
+                    if tail == "*" or (tail.endswith("*") and "/" not in tail):
+                        return True
+            # S3 bucket-name wildcards: `prod-*` (no slash, has `*`) or
+            # `prod-*/*` / `*/path/*` (bucket-name component has `*`).
+            if "/" not in resource_spec:
+                if "*" in resource_spec:
+                    return True
+            else:
+                bucket_part = resource_spec.split("/", 1)[0]
+                if "*" in bucket_part:
                     return True
             return False
 
@@ -897,6 +1131,149 @@ def _deterministic(
                     if level in ("Read", "List"):
                         score = max(score, 2)
                         break
+
+    # ============================================================
+    # POLICY-LEVEL COMPOSITION RULES (cross-statement)
+    # ============================================================
+    # The per-statement loop above scores each statement in isolation.
+    # Some attack patterns require composing actions across statements:
+    # "I can create code" + "I can pass an admin role to it" = RCE-as-admin,
+    # even when each statement on its own is medium-risk.
+    #
+    # Walk the whole policy once collecting (action, has_broad_resource)
+    # signal, then check composition patterns.
+
+    # For each action, track both senses of "broad":
+    #   - inclusive_broad: bucket-level wildcards count. Used by the
+    #     destructive-on-broad rule and the composition rules where
+    #     bucket-level scope is still wide blast.
+    #   - strict_broad: only account-wide / service-wide / bucket-NAME
+    #     wildcards count. Used by the secret-bearing-read rule and
+    #     cross-account-exfil rule, where single-bucket wildcards are
+    #     legitimate (the EKS-pod-reads-one-bucket pattern).
+    def _is_strict_wild_top(r: str) -> bool:
+        """Module-level mirror of the local helper used inside the
+        per-statement loop. Strict wildcard: literal `*`, service-wide,
+        bucket-name wildcard, IAM trailing wildcard — but NOT
+        bucket/* (single-bucket scope)."""
+        return _is_broad_resource(r) and not (
+            r.startswith("arn:") and r.endswith("/*")
+            and r.count("/") == 1
+            and "*" not in r.split(":", 5)[5].split("/", 1)[0]
+        )
+
+    all_actions: list[tuple[str, bool, bool]] = []
+    for stmt in policy["Statement"]:
+        if stmt.get("Effect") != "Allow":
+            continue
+        resources_in_stmt = _as_list(stmt.get("Resource"))
+        inclusive_broad = _resources_are_broad(resources_in_stmt)
+        strict_broad = any(_is_strict_wild_top(r) for r in resources_in_stmt)
+        for a in _as_list(stmt.get("Action")):
+            all_actions.append((a, inclusive_broad, strict_broad))
+
+    action_names = {a for a, _, _ in all_actions}
+
+    # ---- Composition rule: code-execution-via-role ----
+    # If the policy contains an action that creates/executes code AND
+    # ALSO contains iam:PassRole, the combination = RCE-as-the-passed-role.
+    # Floor at 8 if PassRole is on a narrow ARN; 9 if on a wildcard.
+    has_code_exec = bool(action_names & _CODE_EXECUTION_PRIMITIVES)
+    pass_role_broad = any(
+        a == "iam:PassRole" and inclusive for a, inclusive, _ in all_actions
+    )
+    pass_role_any = "iam:PassRole" in action_names
+
+    if has_code_exec and pass_role_any:
+        # Even with a narrow PassRole resource ARN, the COMBINATION is
+        # full account-compromise tier: the attacker controls the code,
+        # AND has the right to bind a role to it. The narrow ARN doesn't
+        # mitigate — if it points at an admin-ish role, the result is
+        # RCE-as-admin. Floor at 9 regardless of resource scope.
+        floor = 9
+        score = max(score, floor)
+        which = sorted(action_names & _CODE_EXECUTION_PRIMITIVES)[:3]
+        factors.append(
+            f"Code-execution-via-role composition: {which[0]}"
+            + (f" (+ {len(which) - 1} more)" if len(which) > 1 else "")
+            + " combined with iam:PassRole = RCE as the passed role. "
+            "Single-statement scoring underweights this; the composition "
+            "is full account-compromise tier."
+        )
+        suggestions.append(
+            "Remove iam:PassRole OR remove the code-execution action; "
+            "they should not appear in the same role's permissions. If "
+            "both are needed, scope iam:PassRole to a role with strictly "
+            "less privilege than the caller, and audit the code-execution "
+            "resource ARN is one specific function/instance/job."
+        )
+
+    # ---- Composition rule: IAM recon + sts:AssumeRole on broad role ----
+    # Listing IAM roles is enumeration; sts:AssumeRole on `role/*` is the
+    # actual movement. Each statement on its own scores below threshold;
+    # the combo is textbook lateral movement.
+    iam_recon_actions = {
+        "iam:ListRoles", "iam:GetRole", "iam:ListPolicies",
+        "iam:ListAttachedRolePolicies", "iam:GetRolePolicy",
+    }
+    has_iam_recon = bool(action_names & iam_recon_actions)
+    has_assume_broad = any(
+        a == "sts:AssumeRole" and inclusive for a, inclusive, _ in all_actions
+    )
+    if has_iam_recon and has_assume_broad:
+        # Lateral-movement-to-admin is full compromise; floor at 9.
+        score = max(score, 9)
+        factors.append(
+            "IAM-recon + broad sts:AssumeRole composition — enumerate "
+            "roles then assume any of them. Textbook lateral-movement "
+            "primitive; the per-statement view misses it."
+        )
+        suggestions.append(
+            "Scope sts:AssumeRole to specific role ARNs the caller has "
+            "a documented need to assume; remove the broad iam: read "
+            "permissions if not strictly required."
+        )
+
+    # ---- Secret-bearing-reads on broad resource ----
+    # Get* actions that read content commonly containing secrets — when
+    # on a *strictly* broad resource (account/service-wide or bucket-
+    # NAME wildcard), they're exfil primitives. Single-bucket reads
+    # (`bucket/*`) DON'T fire this — that's legitimate "read everything
+    # in this app's bucket."
+    for action, _inclusive, strict in all_actions:
+        if action in _SECRET_BEARING_READS and strict:
+            score = max(score, 7)
+            factors.append(
+                f"`{action}` on broad resource reads content that "
+                "frequently contains secrets / sensitive data (boot "
+                "logs, command output, log streams, message bodies)."
+            )
+            suggestions.append(
+                f"Scope `{action}` to specific resource ARNs the caller "
+                "needs to inspect."
+            )
+            break
+
+    # ---- Cross-account exfil / persistent-exfil primitives ----
+    # Setting up replication, log subscriptions, snapshot sharing, etc.
+    # is a single API call that creates ONGOING unauthorized access.
+    # Floor at 8 regardless of resource scope (the "configuration"
+    # itself is the attack — narrow target ARN doesn't help).
+    for action, _inclusive, _strict in all_actions:
+        if action in _CROSS_ACCOUNT_EXFIL_ACTIONS:
+            score = max(score, 8)
+            factors.append(
+                f"`{action}` sets up ongoing cross-account / persistent "
+                "exfiltration in a single call. The blast is 'everything "
+                "that flows through this resource from now on,' not just "
+                "what exists today."
+            )
+            suggestions.append(
+                f"Confirm `{action}` is part of a documented operational "
+                "flow (DR replication, log shipping to your own SIEM, "
+                "etc.) and that the destination is your own account."
+            )
+            break
 
     if not factors:
         # No flags fired — score depends on resource specificity.

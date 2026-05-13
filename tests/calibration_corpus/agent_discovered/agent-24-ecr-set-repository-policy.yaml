@@ -1,0 +1,26 @@
+name: agent-24-ecr-set-repository-policy
+description: |
+  ecr:SetRepositoryPolicy + PutRegistryPolicy — open the ECR
+  repository to attacker-controlled accounts for read or PUSH. Push
+  access = "I can replace your production container image"; pull
+  access = "I can read your binaries, find vulns, harvest secrets
+  baked into layers." Pairs with ecs:UpdateService to silently swap
+  prod containers. Scorer says 6 (Permissions management on
+  Resource:*).
+  Real risk: 8 — supply-chain image hijack of production registry.
+policy:
+  Version: '2012-10-17'
+  Statement:
+    - Effect: Allow
+      Action:
+        - ecr:SetRepositoryPolicy
+        - ecr:PutRegistryPolicy
+      Resource: '*'
+request:
+  spec:
+    access_type: read-write
+    duration:
+      duration_hours: 1
+expected:
+  score_min: 8
+  must_auto_approve: false

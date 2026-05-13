@@ -1,0 +1,28 @@
+name: agent-10-ebs-direct-snapshot-read
+description: |
+  The `ebs` service (EBS direct API) lets you read raw disk blocks
+  out of any snapshot — bypassing the OS, the filesystem, encryption-
+  at-rest defenses, and any application-level access control. With
+  ListSnapshotBlocks + GetSnapshotBlock on Resource:* an attacker can
+  reconstruct EVERY EBS snapshot's contents (full database files,
+  encrypted at rest but still readable through this API because EBS
+  decrypts for the API caller if they have permission). Scorer
+  treats `ebs` as a non-sensitive service with plain reads — 4/10.
+  Real risk: 8 — raw disk content exfil of every snapshot.
+policy:
+  Version: '2012-10-17'
+  Statement:
+    - Effect: Allow
+      Action:
+        - ebs:ListChangedBlocks
+        - ebs:ListSnapshotBlocks
+        - ebs:GetSnapshotBlock
+      Resource: '*'
+request:
+  spec:
+    access_type: read-only
+    duration:
+      duration_hours: 1
+expected:
+  score_min: 8
+  must_auto_approve: false

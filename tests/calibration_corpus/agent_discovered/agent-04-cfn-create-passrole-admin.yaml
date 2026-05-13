@@ -1,0 +1,31 @@
+name: agent-04-cfn-create-passrole-admin
+description: |
+  CloudFormation CreateStack + iam:PassRole admin role = arbitrary
+  infrastructure created under the admin role's privileges. CFN will
+  use the passed role to provision EVERY resource in the template,
+  which means the attacker can mint IAM users, attach
+  AdministratorAccess, create access keys, etc. — all in one stack
+  deployment. Scorer flags PassRole-narrow (4) and CFN's high-impact
+  mutation (5) but doesn't compose them: result is 5/10.
+  Real risk: 9 — CFN-as-admin is a one-shot full account takeover.
+policy:
+  Version: '2012-10-17'
+  Statement:
+    - Effect: Allow
+      Action:
+        - cloudformation:CreateStack
+        - cloudformation:UpdateStack
+        - cloudformation:CreateChangeSet
+        - cloudformation:ExecuteChangeSet
+      Resource: arn:aws:cloudformation:us-east-1:111111111111:stack/innocent-name/*
+    - Effect: Allow
+      Action: iam:PassRole
+      Resource: arn:aws:iam::111111111111:role/CloudFormationAdminRole
+request:
+  spec:
+    access_type: read-write
+    duration:
+      duration_hours: 1
+expected:
+  score_min: 9
+  must_auto_approve: false

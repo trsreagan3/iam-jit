@@ -1,0 +1,32 @@
+name: agent-03-lambda-create-passrole-admin
+description: |
+  The textbook IAM privilege-escalation #1 — Lambda CreateFunction +
+  iam:PassRole on a narrow admin-role ARN. The attacker creates a
+  Lambda that runs arbitrary code under an admin role, invokes it,
+  and the function executes as that role. Each piece in isolation
+  is medium risk: PassRole on a narrow ARN floors at 4, Lambda
+  CreateFunction is IAM-class Write so gets the narrow-write floor
+  (3). The COMBINATION — "I can create code AND pass an admin role
+  to it" — is full account compromise. Scorer never composes the
+  two: result is 5/10 (the narrow PassRole's "review" floor).
+  Real risk: 9 — RCE as admin is account-compromise tier.
+policy:
+  Version: '2012-10-17'
+  Statement:
+    - Effect: Allow
+      Action:
+        - lambda:CreateFunction
+        - lambda:InvokeFunction
+        - lambda:UpdateFunctionCode
+      Resource: arn:aws:lambda:us-east-1:111111111111:function:helper-*
+    - Effect: Allow
+      Action: iam:PassRole
+      Resource: arn:aws:iam::111111111111:role/AdministratorRole
+request:
+  spec:
+    access_type: read-write
+    duration:
+      duration_hours: 1
+expected:
+  score_min: 9
+  must_auto_approve: false

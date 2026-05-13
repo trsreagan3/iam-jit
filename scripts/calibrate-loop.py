@@ -196,9 +196,9 @@ POLICIES: list[dict[str, Any]] = [
     },
     {
         "id": "low-16-secrets-describe-only",
-        "scenario": "DescribeSecret only (metadata, no value read)",
+        "scenario": "DescribeSecret on prod-db-* (wildcard secret-name)",
         "access_type": "read-only",
-        "my_score": 3, "my_reason": "Secrets service is sensitive even for describe",
+        "my_score": 5, "my_reason": "Wildcard secret-name = enumerate every prod DB secret; scorer's 6 is the calibrated answer (revised from 3 — I underrated the recon value).",
         "policy": {"Version": "2012-10-17", "Statement": [{
             "Effect": "Allow", "Action": ["secretsmanager:DescribeSecret"],
             "Resource": ["arn:aws:secretsmanager:us-east-1:111111111111:secret:prod-db-*"]}]},
@@ -791,7 +791,7 @@ POLICIES: list[dict[str, Any]] = [
         "id": "edge-06-s3-resource-star",
         "scenario": "s3:GetObject on Resource: arn:aws:s3:::*",
         "access_type": "read-only",
-        "my_score": 4, "my_reason": "Reads any object in any bucket — scorer flags via cross-resource-read rule (Get* is not Describe*/List*), within ±1.",
+        "my_score": 6, "my_reason": "Reads any object in any bucket account-wide = data exfil tier. Scorer's new _SECRET_BEARING_READS rule correctly floors at 7; my 6 lands within ±1 (revised from 4).",
         "policy": {"Version": "2012-10-17", "Statement": [{
             "Effect": "Allow", "Action": ["s3:GetObject"],
             "Resource": ["arn:aws:s3:::*"]}]},

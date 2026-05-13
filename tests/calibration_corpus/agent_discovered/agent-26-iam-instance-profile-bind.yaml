@@ -1,0 +1,29 @@
+name: agent-26-iam-instance-profile-bind
+description: |
+  iam:CreateInstanceProfile + AddRoleToInstanceProfile is the
+  missing step in the EC2-priv-esc chain that the existing
+  `iam:PassRole` floor doesn't recognize as priv-esc on its own.
+  Together with ec2:RunInstances (which is just a "Write on
+  Resource:*" — score 6), the attacker binds an admin role into a
+  new profile and boots an instance with it. AddRoleToInstanceProfile
+  is IAM-class Permissions Management — sensitive — and scorer
+  fires at 6. But this is a precursor to admin-RCE, not just a
+  metadata change.
+  Real risk: 8 — instance-profile escalation primitive.
+policy:
+  Version: '2012-10-17'
+  Statement:
+    - Effect: Allow
+      Action:
+        - iam:CreateInstanceProfile
+        - iam:AddRoleToInstanceProfile
+        - iam:RemoveRoleFromInstanceProfile
+      Resource: '*'
+request:
+  spec:
+    access_type: read-write
+    duration:
+      duration_hours: 1
+expected:
+  score_min: 8
+  must_auto_approve: false

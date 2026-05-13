@@ -1,0 +1,28 @@
+name: agent-23-imagebuilder-recipe-persistent
+description: |
+  EC2 Image Builder lets you compose AMI recipes from "components"
+  — small scripts that run during image bake. Inserting a malicious
+  component into a recipe taints every future AMI built from it,
+  giving the attacker code execution on every instance launched
+  from the golden image. Image Builder isn't in
+  `_SENSITIVE_SERVICES` — scorer says 6.
+  Real risk: 8 — supply-chain persistence in the golden image
+  pipeline, hits production fleet on next image rotation.
+policy:
+  Version: '2012-10-17'
+  Statement:
+    - Effect: Allow
+      Action:
+        - imagebuilder:CreateComponent
+        - imagebuilder:CreateImageRecipe
+        - imagebuilder:CreateImagePipeline
+        - imagebuilder:UpdateImagePipeline
+      Resource: '*'
+request:
+  spec:
+    access_type: read-write
+    duration:
+      duration_hours: 1
+expected:
+  score_min: 8
+  must_auto_approve: false

@@ -1,0 +1,30 @@
+name: agent-07-codebuild-create-rce
+description: |
+  CodeBuild CreateProject + StartBuild = run an attacker-supplied
+  buildspec.yml under the project's service role. Equivalent to
+  RCE-as-role. CodeBuild StartBuild IS in
+  `_HIGH_IMPACT_MUTATION_ACTIONS` (floors at 5), but CreateProject
+  is not. The COMBINATION of CreateProject + StartBuild + PassRole
+  is full code exec under a chosen role. Currently scores 6
+  (state-changing on Resource:*).
+  Real risk: 8 — RCE under passed role, persistent build trigger.
+policy:
+  Version: '2012-10-17'
+  Statement:
+    - Effect: Allow
+      Action:
+        - codebuild:CreateProject
+        - codebuild:UpdateProject
+        - codebuild:StartBuild
+      Resource: '*'
+    - Effect: Allow
+      Action: iam:PassRole
+      Resource: arn:aws:iam::111111111111:role/CodeBuildServiceRole
+request:
+  spec:
+    access_type: read-write
+    duration:
+      duration_hours: 1
+expected:
+  score_min: 8
+  must_auto_approve: false

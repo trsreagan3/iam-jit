@@ -1,0 +1,27 @@
+name: agent-21-ses-phish-from-prod-domain
+description: |
+  ses:SendEmail / SendRawEmail / SendBulkTemplatedEmail on Resource:*
+  — send email FROM any verified prod domain (e.g.,
+  noreply@bigco.com). That's authoritative phishing: SPF, DKIM, and
+  DMARC all pass. Customer support, billing, and password-reset
+  workflows can be impersonated. Scorer says 6. Not catastrophic-tier
+  but distinctly more dangerous than "generic write on resource:*".
+  Real risk: 8 — brand-authentic phishing at scale.
+policy:
+  Version: '2012-10-17'
+  Statement:
+    - Effect: Allow
+      Action:
+        - ses:SendEmail
+        - ses:SendRawEmail
+        - ses:SendBulkTemplatedEmail
+        - ses:SendBulkEmail
+      Resource: '*'
+request:
+  spec:
+    access_type: read-write
+    duration:
+      duration_hours: 1
+expected:
+  score_min: 8
+  must_auto_approve: false

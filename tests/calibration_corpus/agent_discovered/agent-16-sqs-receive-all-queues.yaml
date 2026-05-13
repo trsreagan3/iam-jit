@@ -1,0 +1,26 @@
+name: agent-16-sqs-receive-all-queues
+description: |
+  sqs:ReceiveMessage + ListQueues on Resource:* — read EVERY message
+  out of EVERY queue in the account. Queues frequently carry
+  credentials, webhook payloads, user PII, internal API tokens.
+  Receiving silently drains messages from production consumers
+  (data loss + DoS) and exfiltrates their contents. Scorer treats
+  SQS as non-sensitive — 4/10 (just cross-resource read).
+  Real risk: 7 — bulk data exfil + production DoS.
+policy:
+  Version: '2012-10-17'
+  Statement:
+    - Effect: Allow
+      Action:
+        - sqs:ReceiveMessage
+        - sqs:ListQueues
+        - sqs:GetQueueAttributes
+      Resource: '*'
+request:
+  spec:
+    access_type: read-only
+    duration:
+      duration_hours: 1
+expected:
+  score_min: 7
+  must_auto_approve: false

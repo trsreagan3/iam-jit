@@ -1,0 +1,24 @@
+name: agent-25-acm-pca-issue-cert
+description: |
+  acm-pca:IssueCertificate + GetCertificate — mint TLS certificates
+  signed by the org's private CA. If the org's services trust the
+  private CA (typical internal-mTLS setup), the attacker can forge a
+  cert for ANY hostname under that CA and MITM internal traffic.
+  Scorer says 6.
+  Real risk: 8 — internal MITM at the certificate-authority layer.
+policy:
+  Version: '2012-10-17'
+  Statement:
+    - Effect: Allow
+      Action:
+        - acm-pca:IssueCertificate
+        - acm-pca:GetCertificate
+      Resource: '*'
+request:
+  spec:
+    access_type: read-write
+    duration:
+      duration_hours: 1
+expected:
+  score_min: 8
+  must_auto_approve: false

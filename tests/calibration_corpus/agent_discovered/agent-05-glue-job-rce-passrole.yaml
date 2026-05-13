@@ -1,0 +1,28 @@
+name: agent-05-glue-job-rce-passrole
+description: |
+  Glue CreateJob runs arbitrary Python/Scala under the job's IAM
+  role. With iam:PassRole on a privileged role, the attacker has
+  RCE-as-role. Glue isn't in `_SENSITIVE_SERVICES`, so the only
+  flags fired are "Write on Resource:*" (6) and a narrow PassRole
+  floor (4). Combined real risk is account-compromise tier.
+  Real risk: 8 — RCE under arbitrary passed role.
+policy:
+  Version: '2012-10-17'
+  Statement:
+    - Effect: Allow
+      Action:
+        - glue:CreateJob
+        - glue:UpdateJob
+        - glue:StartJobRun
+      Resource: '*'
+    - Effect: Allow
+      Action: iam:PassRole
+      Resource: arn:aws:iam::111111111111:role/GlueExecutionRole-prod
+request:
+  spec:
+    access_type: read-write
+    duration:
+      duration_hours: 1
+expected:
+  score_min: 8
+  must_auto_approve: false

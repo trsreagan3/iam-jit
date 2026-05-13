@@ -1,0 +1,27 @@
+name: agent-32-s3-bucket-name-prefix-objects
+description: |
+  S3 `arn:aws:s3:::prod-*/*` — every object in every bucket whose
+  name starts with `prod-`. `_is_broad_resource` correctly returns
+  True (ends with `/*`, only one slash) — but `_is_strict_wildcard`
+  returns False (resource_spec is `prod-*/*`, not `*`, not
+  `<type>:*`). That means `wildcard_resource = False` so the
+  cross-resource flag and the high-risk-action-on-wildcard flag
+  never fire. For `s3:GetObject` (Read), no rule fires that uses
+  `broad_blast_resource` either (those check destructive verbs or
+  Write/PermissionsManagement, not Read). Result: score 1/10 for
+  reading every prod bucket's contents.
+  Real risk: 7 — read of every prod bucket = silent data exfil.
+policy:
+  Version: '2012-10-17'
+  Statement:
+    - Effect: Allow
+      Action: s3:GetObject
+      Resource: arn:aws:s3:::prod-*/*
+request:
+  spec:
+    access_type: read-only
+    duration:
+      duration_hours: 1
+expected:
+  score_min: 7
+  must_auto_approve: false

@@ -1,0 +1,40 @@
+name: agent-30-iam-recon-then-assume
+description: |
+  Two-statement composition: Statement 1 enumerates every IAM role
+  + their inline/attached policies (recon to find the admin-y one);
+  Statement 2 has sts:AssumeRole on a wildcard role ARN
+  (`arn:aws:iam::*:role/*`). Each statement on its own scores
+  modestly: read-only on IAM scores ~6 (sensitive-service reads,
+  cross-resource), and the AssumeRole-on-wildcard statement is
+  IAM-class Write so it triggers the read-only-mismatch path at 8.
+  The COMPOSITION is the entire attack chain: enumerate admin
+  roles, then assume the admin one. The scorer doesn't recognize
+  the two statements as ONE attack — only flags whichever floors
+  highest.
+  Real risk: 9 — but more importantly this should produce a
+  composition-flag factor, which today the scorer does not emit.
+  With read-write access_type chosen by attacker, the read-only
+  mismatch path does NOT fire, so each statement is scored on its
+  own merits and the highest wins.
+policy:
+  Version: '2012-10-17'
+  Statement:
+    - Effect: Allow
+      Action:
+        - iam:ListRoles
+        - iam:GetRole
+        - iam:GetRolePolicy
+        - iam:ListAttachedRolePolicies
+        - iam:ListRolePolicies
+      Resource: '*'
+    - Effect: Allow
+      Action: sts:AssumeRole
+      Resource: arn:aws:iam::*:role/*
+request:
+  spec:
+    access_type: read-write
+    duration:
+      duration_hours: 1
+expected:
+  score_min: 9
+  must_auto_approve: false

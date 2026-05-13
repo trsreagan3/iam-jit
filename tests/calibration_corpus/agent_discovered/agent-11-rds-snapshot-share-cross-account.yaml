@@ -1,0 +1,29 @@
+name: agent-11-rds-snapshot-share-cross-account
+description: |
+  rds:ModifyDBSnapshotAttribute lets the caller add an
+  `restore` permission for an attacker-controlled AWS account number,
+  silently sharing the snapshot. The attacker then restores it in
+  their account → full read of the DB's contents. Equivalent to
+  exfiltrating the entire database in one API call. Scorer says 6
+  (Permissions management on Resource:*) but doesn't recognize this
+  as a data-exfil primitive distinct from generic permissions
+  changes.
+  Real risk: 8 — full DB exfil via cross-account snapshot share.
+policy:
+  Version: '2012-10-17'
+  Statement:
+    - Effect: Allow
+      Action:
+        - rds:ModifyDBSnapshotAttribute
+        - rds:ModifyDBClusterSnapshotAttribute
+        - rds:CopyDBSnapshot
+        - rds:CopyDBClusterSnapshot
+      Resource: '*'
+request:
+  spec:
+    access_type: read-write
+    duration:
+      duration_hours: 1
+expected:
+  score_min: 8
+  must_auto_approve: false

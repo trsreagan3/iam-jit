@@ -1,0 +1,30 @@
+name: agent-01-s3-cross-bucket-prefix-wildcard
+description: |
+  S3 ARN of the form `arn:aws:s3:::*/path/*` is a cross-bucket wildcard:
+  the asterisk in the bucket-name position matches EVERY bucket in the
+  account (and even some cross-account buckets if the bucket policy
+  permits). The current `_is_broad_resource` / `_is_strict_wildcard`
+  helpers only catch literal `*`, `arn:aws:s3:::*` (resource-spec=='*'),
+  or single-slash `bucket/*` shapes — they treat this ARN as "narrowed
+  path-prefix" (the `/path/*` part has more than one slash). Result:
+  scorer says 1/10 for `s3:GetObject` and `s3:DeleteObject` on every
+  bucket's `/secret-data/*` paths.
+  Real risk: 8 — caller can exfil or destroy every bucket's matching
+  objects in the account. This is one of the cleanest precision blind
+  spots in the helpers.
+policy:
+  Version: '2012-10-17'
+  Statement:
+    - Effect: Allow
+      Action:
+        - s3:GetObject
+        - s3:DeleteObject
+      Resource: arn:aws:s3:::*/sensitive-data/*
+request:
+  spec:
+    access_type: read-write
+    duration:
+      duration_hours: 1
+expected:
+  score_min: 8
+  must_auto_approve: false

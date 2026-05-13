@@ -1,0 +1,29 @@
+name: agent-27-cfn-stackset-org-wide
+description: |
+  cloudformation:CreateStackSet + CreateStackInstances — deploys a
+  CloudFormation template ACROSS the AWS Organization, to every
+  member account simultaneously. With a malicious template + the
+  StackSet admin role's privileges, this is a one-call full-org
+  takeover. Scorer says 6 (state-changing on Resource:*). Single
+  CFN-CreateStack is in `_HIGH_IMPACT_MUTATION_ACTIONS` and floors
+  at 5; StackSet variants aren't there but the blast radius is
+  org-wide, not single-account.
+  Real risk: 9 — org-wide infra mutation in one API call.
+policy:
+  Version: '2012-10-17'
+  Statement:
+    - Effect: Allow
+      Action:
+        - cloudformation:CreateStackSet
+        - cloudformation:CreateStackInstances
+        - cloudformation:UpdateStackSet
+        - cloudformation:UpdateStackInstances
+      Resource: '*'
+request:
+  spec:
+    access_type: read-write
+    duration:
+      duration_hours: 1
+expected:
+  score_min: 9
+  must_auto_approve: false

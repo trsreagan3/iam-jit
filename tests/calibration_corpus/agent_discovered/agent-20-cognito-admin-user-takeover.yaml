@@ -1,0 +1,28 @@
+name: agent-20-cognito-admin-user-takeover
+description: |
+  cognito-idp:AdminCreateUser + AdminSetUserPassword +
+  AdminUpdateUserAttributes + AdminAddUserToGroup on Resource:* —
+  attacker creates a new user in any user pool, sets their password,
+  promotes them to an admin group. Result: full app-level admin
+  takeover for any application backed by Cognito. Often the prod
+  app DOES auth via Cognito. Scorer says 6.
+  Real risk: 8 — application-level account takeover, persistence.
+policy:
+  Version: '2012-10-17'
+  Statement:
+    - Effect: Allow
+      Action:
+        - cognito-idp:AdminCreateUser
+        - cognito-idp:AdminSetUserPassword
+        - cognito-idp:AdminUpdateUserAttributes
+        - cognito-idp:AdminAddUserToGroup
+        - cognito-idp:AdminConfirmSignUp
+      Resource: '*'
+request:
+  spec:
+    access_type: read-write
+    duration:
+      duration_hours: 1
+expected:
+  score_min: 8
+  must_auto_approve: false

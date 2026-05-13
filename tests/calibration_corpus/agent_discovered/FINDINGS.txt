@@ -1,0 +1,273 @@
+# Agent-discovered scorer blind spots
+
+Each finding below is a real attack policy the deterministic scorer
+ranks ≥2 below a thoughtful security reviewer's estimate. The
+corresponding YAML files in this directory pin the gap as test
+failures; closing them requires changes in src/iam_jit/review.py.
+
+Severity ordering: highest-impact / largest-gap first.
+
+## agent-01-s3-cross-bucket-prefix-wildcard
+
+- Policy summary: s3:GetObject,DeleteObject on arn:aws:s3:::*/sensitive-data/* — cross-bucket wildcard hitting every bucket's /sensitive-data/* path.
+- Det score: 3 (just narrow-write floor)
+- Real risk: 8
+- Why scorer misses it: _is_broad_resource requires resource_spec.count('/') <= 1 to trip the bucket-level wildcard branch. Cross-bucket patterns with deeper paths (`*/path/*`, 2+ slashes) escape the check entirely and look "narrow."
+- Suggested scorer fix: Treat an ARN as broad if the bucket-name portion (between `:::` and the first `/`) contains `*`, regardless of trailing slash count. Same fix applies to all S3 ARNs.
+
+## agent-02-s3-bucket-name-prefix-wildcard
+
+- Policy summary: s3:GetObject,ListBucket on arn:aws:s3:::prod-* — bucket-NAME-prefix wildcard matching every prod--named bucket.
+- Det score: 1
+- Real risk: 7
+- Why scorer misses it: _is_broad_resource only catches bucket-level wildcards of the form `bucket/*` (one slash, ends in `/*`). A bucket-name wildcard with no slash (`prod-*`) doesn't end in `/*`, so neither _is_broad_resource nor _is_strict_wildcard fires.
+- Suggested scorer fix: For S3 ARNs, detect `*` anywhere in the bucket-name component (the segment after `:::` up to the first `/`). Same as agent-01.
+
+## agent-32-s3-bucket-name-prefix-objects
+
+- Policy summary: s3:GetObject on arn:aws:s3:::prod-*/* — every object in every prod-* bucket.
+- Det score: 1
+- Real risk: 7
+- Why scorer misses it: _is_broad_resource returns True (good!) but _is_strict_wildcard returns False because the resource_spec is `prod-*/*` not `*` or `<type>:*`. The cross-resource-read flag and high-risk-action-on-wildcard flag both gate on wildcard_resource (strict). For Read actions, broad_blast_resource is never consulted (those rules only check destructive verbs and Write/Permissions/Tagging).
+- Suggested scorer fix: Extend the strict-wildcard predicate to recognize bucket-name-prefix patterns. OR consult broad_blast_resource for the cross-resource-read rule when the action is a high-risk content read.
+
+## agent-28-notaction-narrow-resource
+
+- Policy summary: NotAction: [iam:*, kms:*, organizations:*] on Resource: arn:aws:s3:::company-data/* — admin-minus-set within one S3 path.
+- Det score: 1
+- Real risk: 7
+- Why scorer misses it: The NotAction rule only fires when the resource set contains `*` or ends in `:*` (lines 502-503). A narrow Resource ARN escapes the check, even though the action set is "every action in every service minus a tiny exclusion list." Effectively the same as `s3:*` (and arguably broader, because it includes services like cognito/ses/lambda).
+- Suggested scorer fix: Remove the resource-wildcard gate. NotAction itself is the footgun — flag it whenever the exclusion list is small enough that the residual is still wide. A reasonable rule: NotAction with ≤10 exclusions and an admin-y excluded set is always ≥7.
+
+## agent-03-lambda-create-passrole-admin
+
+- Policy summary: lambda:CreateFunction + InvokeFunction + UpdateFunctionCode on a narrow lambda ARN, plus iam:PassRole on a narrow admin-role ARN.
+- Det score: 5
+- Real risk: 9
+- Why scorer misses it: The scorer fires the PassRole-narrow floor (4) and the Lambda high-impact-mutation floor (5), then takes max. It never composes "I can create code" + "I can pass a role to it" = "RCE as that role."
+- Suggested scorer fix: Add a "code-execution-via-role" composition check: if any statement contains an action from {lambda:CreateFunction, lambda:UpdateFunctionCode, ec2:RunInstances, ecs:RunTask, codebuild:StartBuild, glue:StartJobRun, sagemaker:CreateNotebookInstance, states:CreateStateMachine, cloudformation:CreateStack/UpdateStack, apprunner:CreateService, batch:SubmitJob} AND any statement contains iam:PassRole (any resource), floor at 8 (or 9 if the PassRole resource is a wildcard).
+
+## agent-04-cfn-create-passrole-admin
+
+- Policy summary: CloudFormation Create/Update/ChangeSet on a narrow stack ARN, plus iam:PassRole on a narrow admin role.
+- Det score: 5
+- Real risk: 9
+- Why scorer misses it: Same as agent-03 — no composition recognition. CFN provisions every resource in the template under the passed role, which is full account compromise in one API call.
+- Suggested scorer fix: Same composition rule as agent-03.
+
+## agent-08-ec2-runinstances-passrole-admin
+
+- Policy summary: ec2:RunInstances + CreateLaunchTemplate + CreateTags on Resource:* with iam:PassRole on a narrow admin instance role.
+- Det score: 6
+- Real risk: 9
+- Why scorer misses it: EC2 RunInstances is just a generic Write action on a non-sensitive service — no special handling for "boot an instance with an admin instance profile then harvest creds via 169.254.169.254."
+- Suggested scorer fix: Same composition rule as agent-03. ec2:RunInstances is the most classic instance-profile escalation primitive.
+
+## agent-27-cfn-stackset-org-wide
+
+- Policy summary: cloudformation:CreateStackSet + CreateStackInstances + UpdateStackSet on Resource:* — deploys arbitrary infrastructure to every member account in the org.
+- Det score: 6
+- Real risk: 9
+- Why scorer misses it: StackSet variants aren't in _HIGH_IMPACT_MUTATION_ACTIONS (only single-stack CFN actions are). StackSets have org-wide blast radius — much larger than CreateStack.
+- Suggested scorer fix: Add cloudformation:CreateStackSet, CreateStackInstances, UpdateStackSet, UpdateStackInstances to _CATASTROPHIC_ACTIONS (org-wide blast).
+
+## agent-30-iam-recon-then-assume
+
+- Policy summary: Statement 1 = iam:Get/ListRole* on Resource:*. Statement 2 = sts:AssumeRole on arn:aws:iam::*:role/*.
+- Det score: 6
+- Real risk: 9
+- Why scorer misses it: Two issues — (a) sts:AssumeRole on arn:aws:iam::*:role/* doesn't trip _is_strict_wildcard because resource_spec is `role/*` (not `<type>:*`). So the HIGH_RISK_ACTIONS-on-wildcard 7-floor never fires. (b) No composition recognition: "enumerate roles + assume any of them" is the textbook lateral movement, but each statement scores on its own.
+- Suggested scorer fix: (a) Treat `role/*` and `user/*` resource_specs (IAM-ARN trailing-wildcard forms) as strict wildcards in _is_strict_wildcard. (b) Add composition rule: iam-read-broad + sts:AssumeRole-on-wildcard-role = lateral-movement primitive, floor 8+.
+
+## agent-31-orgs-accept-handshake
+
+- Policy summary: organizations:AcceptHandshake, InviteAccountToOrganization, RegisterDelegatedAdministrator on Resource:*.
+- Det score: 6
+- Real risk: 9
+- Why scorer misses it: AcceptHandshake is irreversible (account becomes member of another org) but isn't in _CATASTROPHIC_ACTIONS. Only organizations:LeaveOrganization and organizations:CreateAccount/MoveAccount are.
+- Suggested scorer fix: Add organizations:AcceptHandshake, organizations:InviteAccountToOrganization, organizations:RegisterDelegatedAdministrator, organizations:DeregisterDelegatedAdministrator, organizations:EnableAWSServiceAccess, organizations:DisableAWSServiceAccess to _CATASTROPHIC_ACTIONS.
+
+## agent-09-ec2-getconsoleoutput-secret-leak
+
+- Policy summary: ec2:GetConsoleOutput, GetConsoleScreenshot, GetLaunchTemplateData, DescribeInstanceAttribute on Resource:* — read-only.
+- Det score: 4
+- Real risk: 7
+- Why scorer misses it: All four are IAM-class Read on a non-sensitive service. The scorer only flags the broad-cross-resource-read flag (4). In practice these read boot logs and user-data scripts which routinely contain cleartext secrets (AWS keys, DB passwords, API tokens) printed by cloud-init.
+- Suggested scorer fix: Add a new class _SECRET_BEARING_READS for IAM-Read actions that read content commonly containing secrets: ec2:GetConsoleOutput, ec2:GetConsoleScreenshot, ec2:GetLaunchTemplateData, ec2:GetPasswordData, ssm:GetCommandInvocation, ssm:GetParameterHistory, logs:GetLogEvents, logs:FilterLogEvents. Floor at 7 on Resource:*.
+
+## agent-10-ebs-direct-snapshot-read
+
+- Policy summary: ebs:ListChangedBlocks, ListSnapshotBlocks, GetSnapshotBlock on Resource:* — read-only.
+- Det score: 4
+- Real risk: 8
+- Why scorer misses it: `ebs` (EBS direct API) is not in _SENSITIVE_SERVICES. GetSnapshotBlock reads RAW DISK BYTES out of any snapshot — bypasses the OS, filesystem, encryption-at-rest. Treated as plain reads.
+- Suggested scorer fix: Add `ebs` to _SENSITIVE_SERVICES. OR add ebs:GetSnapshotBlock to _HIGH_RISK_ACTIONS (same tier as secretsmanager:GetSecretValue).
+
+## agent-14-logs-filter-events-secret-exfil
+
+- Policy summary: logs:FilterLogEvents, GetLogEvents, GetLogRecord, StartQuery on Resource:* — read-only.
+- Det score: 4
+- Real risk: 7
+- Why scorer misses it: CloudWatch Logs not in sensitive services. App logs commonly leak secrets (stack traces with conn strings, debug-level auth headers, lambda envvar dumps, API-key-bearing request bodies).
+- Suggested scorer fix: Same as agent-09 — add the logs reads to _SECRET_BEARING_READS.
+
+## agent-15-logs-put-subscription-filter-exfil
+
+- Policy summary: logs:PutSubscriptionFilter, PutDestination, PutDestinationPolicy on Resource:*.
+- Det score: 6
+- Real risk: 8
+- Why scorer misses it: These look like generic Write actions but they install a PERSISTENT outbound stream of every log line to an attacker-controlled Kinesis/Lambda. Survives the grant expiring.
+- Suggested scorer fix: Add these to _HIGH_IMPACT_MUTATION_ACTIONS with "persistence + exfil" semantics; floor at 7 on any resource scope.
+
+## agent-16-sqs-receive-all-queues
+
+- Policy summary: sqs:ReceiveMessage, ListQueues, GetQueueAttributes on Resource:* — read-only.
+- Det score: 4
+- Real risk: 7
+- Why scorer misses it: SQS not in sensitive services; ReceiveMessage is IAM-class Read. But receiving DRAINS messages from prod consumers (data loss + DoS) AND queues frequently carry credentials, webhooks, PII.
+- Suggested scorer fix: sqs:ReceiveMessage on Resource:* should floor at 7. Either add SQS to sensitive services or add sqs:ReceiveMessage to a new "destructive-read" list (read that also mutates state by removing the message).
+
+## agent-17-dynamodb-stream-exfil
+
+- Policy summary: dynamodb:GetRecords, GetShardIterator, DescribeStream, ListStreams on Resource:* — read-only.
+- Det score: 4
+- Real risk: 7
+- Why scorer misses it: DynamoDB not in sensitive services; stream reads are IAM-class Read. But this is a silent CDC tap into every table — every write captured in real time. Persistent until stream closes (24-hour window per shard).
+- Suggested scorer fix: Add dynamodb:GetRecords (and similar stream-read actions across kinesis, dynamodbstreams, kafka) to _HIGH_RISK_ACTIONS. The semantic is "I can silently observe every write to this datastore."
+
+## agent-05-glue-job-rce-passrole
+
+- Policy summary: glue:CreateJob, UpdateJob, StartJobRun on Resource:* + iam:PassRole on a narrow Glue role.
+- Det score: 6
+- Real risk: 8
+- Why scorer misses it: Glue runs arbitrary Python/Scala under the job's IAM role. Same composition gap as agent-03.
+- Suggested scorer fix: Add glue:CreateJob, glue:UpdateJob, glue:StartJobRun to the code-execution-via-role composition rule.
+
+## agent-06-sagemaker-notebook-rce
+
+- Policy summary: sagemaker:CreateNotebookInstance, CreatePresignedNotebookInstanceUrl, UpdateNotebookInstance on Resource:* + iam:PassRole.
+- Det score: 6
+- Real risk: 8
+- Why scorer misses it: SageMaker not in sensitive services. Notebook instances give interactive Jupyter shells under the notebook role's privileges — RCE-as-role through a presigned URL.
+- Suggested scorer fix: Add SageMaker notebook actions to the code-execution composition rule. Optionally add `sagemaker` to _SENSITIVE_SERVICES.
+
+## agent-07-codebuild-create-rce
+
+- Policy summary: codebuild:CreateProject, UpdateProject, StartBuild on Resource:* + iam:PassRole.
+- Det score: 6
+- Real risk: 8
+- Why scorer misses it: codebuild:StartBuild IS in _HIGH_IMPACT_MUTATION_ACTIONS (floors at 5) but the composition with CreateProject + PassRole is RCE-as-role; same composition gap.
+- Suggested scorer fix: Same as agent-03 — add codebuild project/build actions to the composition rule.
+
+## agent-11-rds-snapshot-share-cross-account
+
+- Policy summary: rds:ModifyDBSnapshotAttribute, ModifyDBClusterSnapshotAttribute, CopyDBSnapshot, CopyDBClusterSnapshot on Resource:*.
+- Det score: 6
+- Real risk: 8
+- Why scorer misses it: ModifyDBSnapshotAttribute adds a `restore` grant for any AWS account number — full DB exfil via cross-account snapshot share. The scorer treats it as generic Permissions Management.
+- Suggested scorer fix: Add rds:ModifyDBSnapshotAttribute, rds:ModifyDBClusterSnapshotAttribute, rds:CopyDBSnapshot, rds:CopyDBClusterSnapshot to a new "cross-account data exfil" list, floor 8.
+
+## agent-12-ec2-modify-snapshot-share
+
+- Policy summary: ec2:ModifySnapshotAttribute, ModifyImageAttribute on Resource:*.
+- Det score: 6
+- Real risk: 8
+- Why scorer misses it: Same as agent-11 but for EBS/AMI. Share snapshot with attacker account, they mount and read.
+- Suggested scorer fix: Same exfil-action list as agent-11; add ec2:ModifySnapshotAttribute, ec2:ModifyImageAttribute.
+
+## agent-19-lambda-function-url-public
+
+- Policy summary: lambda:CreateFunctionUrlConfig, UpdateFunctionUrlConfig, AddPermission on Resource:*.
+- Det score: 6
+- Real risk: 8
+- Why scorer misses it: lambda:AddPermission IS in _HIGH_IMPACT_MUTATION_ACTIONS (floor 5) but CreateFunctionUrlConfig is not — it's the persistent unauthenticated public RCE primitive (auth_type=NONE).
+- Suggested scorer fix: Add lambda:CreateFunctionUrlConfig, lambda:UpdateFunctionUrlConfig to _HIGH_IMPACT_MUTATION_ACTIONS; floor 7 on Resource:*.
+
+## agent-20-cognito-admin-user-takeover
+
+- Policy summary: cognito-idp:AdminCreateUser, AdminSetUserPassword, AdminUpdateUserAttributes, AdminAddUserToGroup, AdminConfirmSignUp on Resource:*.
+- Det score: 6
+- Real risk: 8
+- Why scorer misses it: Cognito-idp not in sensitive services. The Admin* actions perform application-level account takeover for any app backed by Cognito (create user, set their password, promote to admin group).
+- Suggested scorer fix: Add cognito-idp:Admin* actions (or `cognito-idp` as a service) to _HIGH_IMPACT_MUTATION_ACTIONS. The pattern of needing-admin-in-the-action-name is a useful signal.
+
+## agent-21-ses-phish-from-prod-domain
+
+- Policy summary: ses:SendEmail, SendRawEmail, SendBulkTemplatedEmail, SendBulkEmail on Resource:*.
+- Det score: 6
+- Real risk: 8
+- Why scorer misses it: SES not in sensitive services. SendEmail on a verified prod domain produces SPF/DKIM/DMARC-passing email from noreply@bigco.com — authoritative phishing.
+- Suggested scorer fix: Add ses:SendEmail and bulk variants to _HIGH_IMPACT_MUTATION_ACTIONS with a phishing-via-verified-identity semantic.
+
+## agent-22-ssm-document-rce-persistence
+
+- Policy summary: ssm:CreateDocument, UpdateDocument, UpdateDocumentDefaultVersion, ModifyDocumentPermission on Resource:*.
+- Det score: 6
+- Real risk: 8
+- Why scorer misses it: SSM is in sensitive services so the broad-resource-touch floor fires at 6, but these specific actions install PERSISTENT malicious automation that runs whenever an operator triggers the named document. Plus cross-account sharing.
+- Suggested scorer fix: Add ssm:CreateDocument, ssm:UpdateDocument, ssm:UpdateDocumentDefaultVersion, ssm:ModifyDocumentPermission to _HIGH_IMPACT_MUTATION_ACTIONS.
+
+## agent-23-imagebuilder-recipe-persistent
+
+- Policy summary: imagebuilder:CreateComponent, CreateImageRecipe, CreateImagePipeline, UpdateImagePipeline on Resource:*.
+- Det score: 6
+- Real risk: 8
+- Why scorer misses it: Image Builder not in sensitive services. A malicious component baked into the recipe taints every future AMI — supply-chain persistence in the golden image pipeline.
+- Suggested scorer fix: Add imagebuilder Create/Update actions to _HIGH_IMPACT_MUTATION_ACTIONS; this is supply-chain tier.
+
+## agent-24-ecr-set-repository-policy
+
+- Policy summary: ecr:SetRepositoryPolicy, PutRegistryPolicy on Resource:*.
+- Det score: 6
+- Real risk: 8
+- Why scorer misses it: ECR repo policy lets the attacker open the registry to other accounts (push or pull). Push = supply-chain image hijack; pull = read prod binaries.
+- Suggested scorer fix: Add ecr:SetRepositoryPolicy, ecr:PutRegistryPolicy to _HIGH_IMPACT_MUTATION_ACTIONS. Also pair with ecr:PutImage (which IS there) for the full attack.
+
+## agent-25-acm-pca-issue-cert
+
+- Policy summary: acm-pca:IssueCertificate, GetCertificate on Resource:*.
+- Det score: 6
+- Real risk: 8
+- Why scorer misses it: ACM Private CA not in sensitive services. Issuing a cert under the org's private CA enables MITM of any internal service that trusts the CA.
+- Suggested scorer fix: Add acm-pca:IssueCertificate to _HIGH_RISK_ACTIONS. Optionally add `acm-pca` to _SENSITIVE_SERVICES.
+
+## agent-26-iam-instance-profile-bind
+
+- Policy summary: iam:CreateInstanceProfile, AddRoleToInstanceProfile, RemoveRoleFromInstanceProfile on Resource:*.
+- Det score: 6
+- Real risk: 8
+- Why scorer misses it: AddRoleToInstanceProfile is the missing step in the EC2 priv-esc chain. Floor fires at 6 (sensitive-service Resource:*) but should be higher — this is a direct precursor to admin-RCE.
+- Suggested scorer fix: Add iam:AddRoleToInstanceProfile, iam:CreateInstanceProfile to _HIGH_IMPACT_MUTATION_ACTIONS; pair with ec2:RunInstances in the composition rule.
+
+## agent-29-ec2-multi-wildcard-multi-region
+
+- Policy summary: s3:GetObject, ListBucket on arn:aws-cn:s3:::* and arn:aws-us-gov:s3:::*.
+- Det score: 4
+- Real risk: 6
+- Why scorer misses it: _is_broad_resource handles resource_spec == `*` correctly so this case partly fires (cross-resource-read flag). But the scorer treats it the same as any read-only-on-S3, missing that BOTH government and China partitions are listed (operator probably never deploys to either, so this is dead code unless the attacker has accounts there — which is a red flag). More importantly, partition-prefixed wildcards demonstrate the helper doesn't inspect partition; a future attacker could use this for govcloud accounts.
+- Suggested scorer fix: Recognize non-aws partitions in ARNs as a signal (especially aws-cn and aws-us-gov in a non-govcloud account). The strict-wildcard checks should still apply to all partitions.
+
+---
+
+## Cross-cutting scorer recommendations
+
+The blind spots above cluster into 8 fixable rule classes:
+
+1. Composition rule for code-execution-via-role. Many findings (agent-03, 04, 05, 06, 07, 08) share the pattern "compute-resource creation + iam:PassRole = RCE as the passed role." A single composition rule across the policy (not per-statement) closes this whole class. Trigger actions: lambda:CreateFunction, lambda:UpdateFunctionCode, lambda:CreateFunctionUrlConfig, ec2:RunInstances, ecs:RunTask, ecs:StartTask, codebuild:CreateProject, codebuild:StartBuild, glue:CreateJob, glue:StartJobRun, sagemaker:CreateNotebookInstance, sagemaker:CreatePresignedNotebookInstanceUrl, states:CreateStateMachine, cloudformation:CreateStack, cloudformation:UpdateStack, cloudformation:CreateStackSet, apprunner:CreateService, batch:SubmitJob.
+
+2. Sensitive-service additions. Add `ebs` (raw disk reads), `acm-pca` (cert authority), `cognito-idp` (app-level admin), `imagebuilder` (golden-image supply chain), `sagemaker` (RCE), `glue` (RCE) to _SENSITIVE_SERVICES. Each gets the floor-6-on-broad-resource treatment automatically.
+
+3. _CATASTROPHIC_ACTIONS additions. Add organizations:AcceptHandshake, InviteAccountToOrganization, RegisterDelegatedAdministrator, EnableAWSServiceAccess, cloudformation:CreateStackSet, CreateStackInstances, UpdateStackSet.
+
+4. New action class: _SECRET_BEARING_READS. IAM-class-Read actions that in practice read secret-bearing content. Floor at 7 on Resource:*. Members: ec2:GetConsoleOutput, ec2:GetConsoleScreenshot, ec2:GetLaunchTemplateData, ec2:GetPasswordData, ssm:GetCommandInvocation, ssm:GetParameterHistory, logs:GetLogEvents, logs:FilterLogEvents, logs:GetLogRecord, logs:StartQuery.
+
+5. New action class: _CROSS_ACCOUNT_EXFIL_ACTIONS. Permissions-Management actions that add cross-account share grants to data-bearing resources. Floor 8. Members: rds:ModifyDBSnapshotAttribute, rds:ModifyDBClusterSnapshotAttribute, rds:CopyDBSnapshot, rds:CopyDBClusterSnapshot, ec2:ModifySnapshotAttribute, ec2:ModifyImageAttribute, ecr:SetRepositoryPolicy, ecr:PutRegistryPolicy, elasticfilesystem:PutFileSystemPolicy, backup:PutBackupVaultAccessPolicy.
+
+6. New action class: _PERSISTENT_EXFIL_PRIMITIVES. Actions that install ongoing outbound data streams. Floor 8. Members: logs:PutSubscriptionFilter, logs:PutDestination, logs:PutDestinationPolicy, lambda:CreateFunctionUrlConfig, lambda:UpdateFunctionUrlConfig, events:PutPermission.
+
+7. Precision-helper fixes (S3 / IAM ARNs).
+   - _is_broad_resource and _is_strict_wildcard should treat any S3 ARN with `*` in the bucket-name component as broad/strict, regardless of trailing slashes (catches agent-01, agent-02, agent-32).
+   - _is_strict_wildcard should additionally recognize IAM trailing-wildcard forms like arn:aws:iam::*:role/* and arn:aws:iam::*:user/* (catches agent-30 part (a)).
+   - NotAction rule should fire regardless of resource scope when the exclusion set is small (catches agent-28).
+
+8. Stream-read primitive class. dynamodb:GetRecords and similar event-stream reads silently observe every write — closer in semantics to secret read than to metadata. Add to _HIGH_RISK_ACTIONS (catches agent-17). Same treatment for sqs:ReceiveMessage — it's destructive-read (removes the message) on Resource:* (catches agent-16).

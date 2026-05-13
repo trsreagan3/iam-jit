@@ -1,0 +1,30 @@
+name: agent-06-sagemaker-notebook-rce
+description: |
+  SageMaker CreateNotebookInstance + CreatePresignedNotebookInstanceUrl
+  = interactive Jupyter shell running under the notebook's IAM role,
+  reachable via a presigned URL. With a privileged notebook role this
+  is account compromise: the attacker runs `aws sts get-caller-
+  identity` in the notebook, then any AWS API. SageMaker is not in
+  `_SENSITIVE_SERVICES`, so the scorer flags it only as "Write on
+  Resource:*" (6).
+  Real risk: 8 — interactive cred shell with arbitrary code.
+policy:
+  Version: '2012-10-17'
+  Statement:
+    - Effect: Allow
+      Action:
+        - sagemaker:CreateNotebookInstance
+        - sagemaker:CreatePresignedNotebookInstanceUrl
+        - sagemaker:UpdateNotebookInstance
+      Resource: '*'
+    - Effect: Allow
+      Action: iam:PassRole
+      Resource: arn:aws:iam::111111111111:role/SageMakerExecutionRole
+request:
+  spec:
+    access_type: read-write
+    duration:
+      duration_hours: 1
+expected:
+  score_min: 8
+  must_auto_approve: false
