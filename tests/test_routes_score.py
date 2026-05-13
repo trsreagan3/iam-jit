@@ -435,3 +435,106 @@ def test_score_fingerprint_header_matches_across_calls(client: TestClient) -> No
     r1 = client.post("/api/v1/score", json=_low_risk_payload())
     r2 = client.post("/api/v1/score", json=_low_risk_payload())
     assert r1.headers["x-policy-fingerprint"] == r2.headers["x-policy-fingerprint"]
+
+
+# ---- Blacklist integration on /api/v1/score -------------------------
+
+
+def test_blacklist_anonymous_caller_gets_generic_400(client: TestClient) -> None:
+    """The oracle-attack defense: anonymous callers should NOT learn
+    which specific rule / action triggered the blacklist."""
+    from iam_jit import blacklist as bl
+    from iam_jit.routes import score as score_mod
+
+    store = bl.InMemoryBlacklistStore()
+    store.put_rule(bl.BlacklistRule(
+        rule_id="ban-test-create-access-key",
+        pattern="iam:CreateAccessKey",
+        reason="Test deployment never wants long-lived programmatic creds via JIT.",
+        added_by="test", added_at=1234567890,
+    ))
+    score_mod.set_blacklist_store(store)
+    try:
+        payload = _low_risk_payload()
+        payload["policy"]["Statement"][0]["Action"] = ["iam:CreateAccessKey"]
+        r = client.post("/api/v1/score", json=payload)
+        assert r.status_code == 400, r.text
+        detail = r.json()["detail"].lower()
+        # Must NOT leak specifics
+        assert "createaccesskey" not in detail
+        assert "ban-test-create-access-key" not in detail
+        assert "long-lived" not in detail
+        # Must mention "blacklisted" or "refuses" generically
+        assert "refuse" in detail or "blacklist" in detail
+    finally:
+        score_mod.set_blacklist_store(bl.InMemoryBlacklistStore())
+
+
+def test_blacklist_authenticated_caller_gets_specific_detail(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Authenticated callers have passed access control; give them
+    actionable detail so they can fix their policy."""
+    monkeypatch.setenv("IAM_JIT_SCORE_API_KEY", "paid-key")
+    from iam_jit import blacklist as bl
+    from iam_jit.routes import score as score_mod
+
+    store = bl.InMemoryBlacklistStore()
+    store.put_rule(bl.BlacklistRule(
+        rule_id="ban-test-attach-role",
+        pattern="iam:AttachRolePolicy",
+        reason="Attaching policies is escalation; manual review only.",
+        added_by="test", added_at=1234567890,
+    ))
+    score_mod.set_blacklist_store(store)
+    try:
+        payload = _low_risk_payload()
+        payload["policy"]["Statement"][0]["Action"] = ["iam:AttachRolePolicy"]
+        r = client.post(
+            "/api/v1/score", json=payload,
+            headers={"Authorization": "Bearer paid-key"},
+        )
+        assert r.status_code == 400, r.text
+        detail = r.json()["detail"]
+        # Authenticated callers DO get specifics
+        assert "iam:AttachRolePolicy" in detail
+        assert "ban-test-attach-role" in detail
+        assert "escalation" in detail.lower()
+    finally:
+        score_mod.set_blacklist_store(bl.InMemoryBlacklistStore())
+
+
+def test_blacklist_no_rules_means_no_effect(client: TestClient) -> None:
+    """Default empty blacklist must not affect any request — proves
+    the feature is opt-in for deployments that don't configure rules."""
+    from iam_jit import blacklist as bl
+    from iam_jit.routes import score as score_mod
+    score_mod.set_blacklist_store(bl.InMemoryBlacklistStore())  # empty
+    # Even an extreme action goes through (high score, but processed)
+    payload = _low_risk_payload()
+    payload["policy"]["Statement"][0]["Action"] = ["iam:AttachRolePolicy"]
+    r = client.post("/api/v1/score", json=payload)
+    assert r.status_code == 200, r.text
+
+
+def test_blacklist_glob_pattern_matches_family(client: TestClient) -> None:
+    """A `iam:*AccessKey*` glob blocks Create, Delete, Update access-
+    key actions in one rule."""
+    from iam_jit import blacklist as bl
+    from iam_jit.routes import score as score_mod
+
+    store = bl.InMemoryBlacklistStore()
+    store.put_rule(bl.BlacklistRule(
+        rule_id="ban-access-keys", pattern="iam:*AccessKey*",
+        reason="No JIT for long-lived credentials.",
+        added_by="test", added_at=1234567890,
+    ))
+    score_mod.set_blacklist_store(store)
+    try:
+        for action in ("iam:CreateAccessKey", "iam:DeleteAccessKey", "iam:UpdateAccessKey"):
+            payload = _low_risk_payload()
+            payload["policy"]["Statement"][0]["Action"] = [action]
+            r = client.post("/api/v1/score", json=payload)
+            assert r.status_code == 400, f"action {action} should be blocked: {r.text}"
+    finally:
+        score_mod.set_blacklist_store(bl.InMemoryBlacklistStore())

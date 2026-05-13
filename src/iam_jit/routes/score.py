@@ -59,7 +59,8 @@ from typing import Annotated, Any
 from fastapi import APIRouter, Header, HTTPException, Request, Response, status
 from pydantic import BaseModel, Field
 
-from .. import audit, prompt_injection, review
+from .. import audit, blacklist, prompt_injection, review
+from ..blacklist import BlacklistStore, InMemoryBlacklistStore
 
 
 router = APIRouter(prefix="/api/v1", tags=["score"])
@@ -188,6 +189,25 @@ class _RateLimiter:
 
 
 _limiter = _RateLimiter()
+
+
+# Module-level blacklist store. Production code injects a real store
+# (e.g. SettingsBlacklistStore) via `set_blacklist_store_for_tests` or
+# at app startup; the default in-memory store is empty (no rules) so
+# deployments without explicit blacklist config behave identically to
+# the pre-blacklist scorer.
+_blacklist_store: BlacklistStore = InMemoryBlacklistStore()
+
+
+def set_blacklist_store(store: BlacklistStore) -> None:
+    """Wire in a different blacklist store. Called at app startup;
+    also useful in tests to install rules for a specific assertion."""
+    global _blacklist_store
+    _blacklist_store = store
+
+
+def get_blacklist_store() -> BlacklistStore:
+    return _blacklist_store
 
 
 def _reset_limiter_for_tests() -> None:
@@ -407,6 +427,58 @@ def score_policy(
     )
     if injection_block is not None:
         raise injection_block
+
+    # Blacklist check — deployment-configured hard-deny rules. The
+    # detail surfaced to the caller depends on whether they're
+    # authenticated:
+    #   - Authenticated callers (paid-tier key) get the specific
+    #     rule_id + matched action + reason. They've already passed
+    #     access control; we want them to fix their policy.
+    #   - Anonymous callers get a generic 400. This defeats oracle-
+    #     bisection of the blacklist content (the attacker can probe
+    #     but gets no signal about which probe is "warmer").
+    # Audit-log fires on every hit regardless of caller — operator can
+    # investigate suspicious-pattern hits.
+    hit = blacklist.check_policy(payload.policy, _blacklist_store)
+    if hit is not None:
+        try:
+            audit.emit(
+                actor=f"ip:{ip}",
+                kind="security.blacklist_hit",
+                summary=(
+                    f"blacklist rule {hit.rule_id} fired on "
+                    f"action `{hit.matched_action}` from {ip}"
+                ),
+                details={
+                    "rule_id": hit.rule_id,
+                    "pattern": hit.pattern,
+                    "matched_action": hit.matched_action,
+                    "reason": hit.reason,
+                    "source_ip": ip,
+                    "policy_fingerprint": fingerprint,
+                    "authenticated": is_authenticated,
+                },
+            )
+        except Exception:
+            pass
+        if is_authenticated:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=(
+                    f"Action `{hit.matched_action}` is blacklisted by "
+                    f"deployment rule `{hit.rule_id}`: {hit.reason}"
+                ),
+            )
+        else:
+            # Generic message — no signal about which rule fired.
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=(
+                    "The submitted policy contains an action this "
+                    "deployment refuses to process. Contact your "
+                    "deployment administrator for the specific rule."
+                ),
+            )
 
     # Build the minimum request shape the scorer expects. Strip
     # description if None so the scorer doesn't see "None" as text.
