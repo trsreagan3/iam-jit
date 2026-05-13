@@ -1668,6 +1668,13 @@ def _deterministic(
     elif not isinstance(statements, list):
         return 1, ["No statements in policy"], []
 
+    # Missing `Version` key. AWS uses legacy semantics in its absence,
+    # which makes policy variables (`${aws:username}` etc.) inert — a
+    # narrowing condition operators thought they had silently doesn't
+    # apply. AWS Access Analyzer flags this as a validation finding.
+    # Research §7.5.
+    missing_version = "Version" not in policy
+
     # Per-element type guard. A malformed `Statement: [null]` or
     # `Statement: ["free-form-comment", {real-dict}]` would crash
     # downstream `.get()` calls (the per-statement helpers all assume
@@ -1683,6 +1690,49 @@ def _deterministic(
     score = 1
     factors: list[str] = []
     suggestions: list[str] = []
+
+    if missing_version:
+        score = max(score, 6)
+        factors.append(
+            "Policy lacks `Version` field. AWS uses legacy semantics "
+            "in its absence — policy variables like `${aws:username}` "
+            "are NOT expanded, so any narrowing conditions that rely "
+            "on them silently fail to apply. AWS Access Analyzer flags "
+            "this as a validation finding."
+        )
+        suggestions.append(
+            "Add `\"Version\": \"2012-10-17\"` to the policy header."
+        )
+
+    # Cross-script homoglyphs in Resource ARNs are themselves a red
+    # flag — even after `_norm_grammar_str` collapses them, the fact
+    # that an author typed a Cyrillic 'а' instead of Latin 'a' is
+    # suspicious (typo or attempted spoof). Flag at 5 on the
+    # raw (pre-normalization) Resource string.
+    # Research §10.8.
+    if isinstance(statements, list):
+        for stmt in statements:
+            if not isinstance(stmt, dict):
+                continue
+            for r in (stmt.get("Resource"), stmt.get("NotResource")):
+                rs = r if isinstance(r, list) else [r]
+                for rv in rs:
+                    if not isinstance(rv, str):
+                        continue
+                    if any(c in _LATIN_HOMOGLYPHS for c in rv):
+                        score = max(score, 5)
+                        factors.append(
+                            f"Resource `{rv!r}` contains cross-script "
+                            "homoglyph(s) — Cyrillic / Greek characters "
+                            "that visually match Latin ASCII. Almost "
+                            "certainly a typo or attempted spoof. "
+                            "Verify the resource name is what the "
+                            "author intended."
+                        )
+                        break
+                else:
+                    continue
+                break
 
     valid_statements = [s for s in statements if isinstance(s, dict)]
     if len(valid_statements) != len(statements):
