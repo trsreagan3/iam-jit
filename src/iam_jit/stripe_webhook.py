@@ -338,30 +338,44 @@ class ProcessedEventsStore(Protocol):
     redeliveries mint duplicate API tokens; the customer ends up with
     N valid tokens for one paid subscription. Audit finding
     STRIPE-NO-IDEMPOTENCY (round 1 WB).
+
+    `claim()` is an ATOMIC check-and-set. It returns True exactly
+    once per event_id (the winner of the race) and False for every
+    subsequent caller. Splitting into separate has_processed() and
+    mark_processed() introduces a TOCTOU race under concurrent
+    redelivery — round-2 WB+BB audit (STRIPE-IDEMPOTENCY-TOCTOU).
     """
 
-    def has_processed(self, event_id: str) -> bool: ...
-    def mark_processed(self, event_id: str, result_summary: str = "") -> None: ...
+    def claim(self, event_id: str) -> bool: ...
 
 
 class InMemoryProcessedEventsStore:
-    """Process-local idempotency cache.
+    """Process-local idempotency cache with atomic claim.
 
     Sufficient for single-instance deployments. Multi-Lambda
     deployments should use a DynamoDB-backed implementation with
     `PutItem(ConditionExpression='attribute_not_exists(event_id)')`
-    as the atomic claim, plus a TTL of 30 days (Stripe retries for up
-    to 3 days; 30 is a generous safety margin).
+    as the atomic primitive, plus a TTL of 30 days (Stripe retries
+    for up to 3 days; 30 is a generous safety margin).
+
+    `claim()` uses `dict.setdefault` with a PER-CALL unique sentinel
+    object. `dict.setdefault` is atomic in CPython under the GIL: it
+    inserts the per-call sentinel only if the key is absent, returning
+    whichever object is now in the dict. If the returned object is
+    THIS caller's sentinel, this caller won the race (no other caller
+    had inserted yet); if anything else, another caller already won.
+    No explicit lock needed.
     """
 
     def __init__(self) -> None:
-        self._seen: dict[str, str] = {}
+        self._seen: dict[str, object] = {}
 
-    def has_processed(self, event_id: str) -> bool:
-        return event_id in self._seen
-
-    def mark_processed(self, event_id: str, result_summary: str = "") -> None:
-        self._seen[event_id] = result_summary
+    def claim(self, event_id: str) -> bool:
+        """Atomic claim. Returns True if this caller is the first/winner,
+        False if another caller has already claimed this event_id."""
+        my_marker = object()
+        stored = self._seen.setdefault(event_id, my_marker)
+        return stored is my_marker
 
 
 def dispatch_event(
@@ -388,11 +402,18 @@ def dispatch_event(
 
     # Idempotency short-circuit. The store is optional — callers that
     # explicitly opt out (e.g. unit tests verifying handler semantics
-    # in isolation) pass None and get the legacy non-idempotent path.
+    # in isolation) pass None and get the non-idempotent path.
+    #
+    # Uses ATOMIC claim() not separate has_processed()/mark_processed()
+    # to avoid the TOCTOU race that round-2 audit caught. claim()
+    # returns True for the first caller (which proceeds to handle the
+    # event) and False for every subsequent caller (which short-
+    # circuits).
     if processed_events_store is not None and event_id:
-        if processed_events_store.has_processed(event_id):
+        is_winner = processed_events_store.claim(event_id)
+        if not is_winner:
             logger.info(
-                "Stripe event %s (%s) already processed — short-circuiting",
+                "Stripe event %s (%s) already claimed — short-circuiting",
                 event_id, event_type,
             )
             return {
@@ -417,23 +438,11 @@ def dispatch_event(
         # gets added later, a redelivery should run normally.
         return {"handled": False, "event_type": event_type}
 
+    # Atomic claim() above already reserved this event_id in the store.
+    # No follow-up mark_processed call needed — the claim IS the
+    # reservation. This closes the round-1 TOCTOU race (round-2 finding
+    # STRIPE-IDEMPOTENCY-TOCTOU) by making the check-and-set atomic.
     result = handler()
-
-    # Record successful processing so a redelivery is a no-op.
-    if processed_events_store is not None and event_id:
-        try:
-            processed_events_store.mark_processed(
-                event_id,
-                result_summary=f"{event_type}:handled",
-            )
-        except Exception as e:
-            # The handler already succeeded; logging failure to mark
-            # processed is non-fatal but worth surfacing because the
-            # next redelivery would re-run.
-            logger.warning(
-                "Stripe event %s handled but mark_processed failed: %s",
-                event_id, e,
-            )
 
     return {"handled": True, "event_type": event_type, "result": _serialize(result)}
 
