@@ -417,18 +417,15 @@ def test_resource_miss_ecs_service_without_the() -> None:
     #   "publish a metric to cloudwatch" → cloudwatch-metrics-write
     # Each removed entry now has a positive case pinning the new
     # behavior in test_corpus.py or below.
-    # AWS Config — no config pattern exists.
-    "describe AWS Config rules for compliance audit",
-    "list config rules",
-    # Other services with NO pattern at all yet — listed here so the
-    # adversarial doc can quantify the coverage gap. These are NOT
-    # bugs in the existing patterns; they're the coverage gap.
-    "describe Glue jobs in production",
+    # NB: removed entries now covered by new pattern modules:
+    #   AWS Config       → patterns/ses_efs.py:config-describe
+    #   Glue             → patterns/data_services.py:glue-describe
+    #   CloudFront       → patterns/networking.py:cloudfront-describe
+    #   Athena           → patterns/data_services.py:athena-query
+    #   EFS              → patterns/ses_efs.py:efs-describe
+    #   Route 53         → patterns/networking.py:route53-describe
+    # Still uncovered:
     "list available SageMaker endpoints",
-    "list CloudFront distributions",
-    "view Athena query history",
-    "list EFS file systems and mount targets",
-    "describe Route 53 hosted zones for example.com",
     "create a new SES email identity",
     "create a CodePipeline release pipeline",
     # DynamoDB describe — covered separately in

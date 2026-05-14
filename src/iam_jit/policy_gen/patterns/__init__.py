@@ -119,6 +119,7 @@ def _phrase_matches(phrase: str, desc_lc: str, desc_tokens: list[str]) -> bool:
 from . import (  # noqa: E402
     api_gateway,
     cloudformation,
+    data_services,
     dynamodb,
     ec2,
     ecs,
@@ -126,8 +127,10 @@ from . import (  # noqa: E402
     kms_misc,
     lambda_,
     logs,
+    networking,
     rds,
     s3,
+    ses_efs,
     ssm_secrets,
 )
 
@@ -144,4 +147,7 @@ ALL_PATTERNS: list[Pattern] = (
     + api_gateway.PATTERNS
     + cloudformation.PATTERNS
     + ec2.PATTERNS
+    + data_services.PATTERNS
+    + networking.PATTERNS
+    + ses_efs.PATTERNS
 )
