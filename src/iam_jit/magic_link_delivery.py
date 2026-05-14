@@ -79,13 +79,9 @@ def decide() -> DeliveryDecision:
     if os.environ.get("IAM_JIT_SES_SENDER", "").strip():
         return DeliveryDecision(channel="email", show_in_response=False)
 
-    dev_insecure = os.environ.get("IAM_JIT_DEV_INSECURE_SECRET") == "1"
-    in_lambda = bool(os.environ.get("AWS_LAMBDA_FUNCTION_NAME"))
-    allow_dev_in_lambda = (
-        os.environ.get("IAM_JIT_ALLOW_DEV_INSECURE_IN_LAMBDA", "").lower()
-        in {"1", "true", "yes"}
-    )
-    if dev_insecure and (not in_lambda or allow_dev_in_lambda):
+    from .auth import is_dev_insecure_active
+
+    if is_dev_insecure_active():
         return DeliveryDecision(
             channel="in_response", show_in_response=True
         )

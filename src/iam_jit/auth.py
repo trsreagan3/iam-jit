@@ -175,3 +175,31 @@ def normalize_iam_id(arn: str) -> str:
             role_name = parts[1]
             return f"iam:arn:aws:iam::{account}:role/{role_name}"
     return f"iam:{arn}"
+
+
+def is_dev_insecure_active() -> bool:
+    """Single source of truth for the `IAM_JIT_DEV_INSECURE_SECRET=1`
+    flag. DEV-INSECURE-SECRET-MULTI-EFFECT-FOOTGUN (round 3 WB MED)
+    closure: refuse to honor the flag in Lambda environments unless
+    the operator explicitly opts in with
+    `IAM_JIT_ALLOW_DEV_INSECURE_IN_LAMBDA=1`. Closes the CSRF, Secure-
+    cookie, and magic-link-delivery legs of the footgun in one
+    helper rather than relying on every call site to remember the
+    Lambda gate.
+
+    Returns True ONLY when:
+      - `IAM_JIT_DEV_INSECURE_SECRET=1`, AND
+      - NOT in Lambda (`AWS_LAMBDA_FUNCTION_NAME` unset), OR explicit
+        `IAM_JIT_ALLOW_DEV_INSECURE_IN_LAMBDA=1`.
+    """
+    import os
+
+    if os.environ.get("IAM_JIT_DEV_INSECURE_SECRET") != "1":
+        return False
+    in_lambda = bool(os.environ.get("AWS_LAMBDA_FUNCTION_NAME"))
+    if not in_lambda:
+        return True
+    return (
+        os.environ.get("IAM_JIT_ALLOW_DEV_INSECURE_IN_LAMBDA", "").lower()
+        in {"1", "true", "yes"}
+    )

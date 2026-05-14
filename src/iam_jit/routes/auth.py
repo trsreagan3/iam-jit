@@ -249,7 +249,7 @@ def magic_link_callback(token: str) -> Response:
         key="iam_jit_session",
         value=cookie_value,
         httponly=True,
-        secure=os.environ.get("IAM_JIT_DEV_INSECURE_SECRET") != "1",
+        secure=not auth_mod.is_dev_insecure_active(),
         samesite="strict",
         path="/",
         max_age=24 * 60 * 60,

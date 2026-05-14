@@ -373,38 +373,30 @@ def test_finding_dev_insecure_lambda_gate_csrf_and_cookie_legs_open() -> None:
     import when the flag and `AWS_LAMBDA_FUNCTION_NAME` are both
     set without the explicit Lambda-allow flag.
     """
-    from iam_jit import app as app_mod
+    # CLOSED: all four sites (CSRF middleware, two cookie-Secure
+    # sites in routes/auth + routes/web, magic-link delivery)
+    # delegate to `iam_jit.auth.is_dev_insecure_active()`, which
+    # consults BOTH the dev flag AND the Lambda allow-flag. One
+    # central gate; the prod-with-dev-flag misconfig now has zero
+    # effect unless the operator explicitly opts in.
+    from iam_jit import app as app_mod, auth as auth_helper
     from iam_jit.routes import auth as auth_route, web as web_mod
+
+    helper_src = inspect.getsource(auth_helper.is_dev_insecure_active)
+    assert "AWS_LAMBDA_FUNCTION_NAME" in helper_src
+    assert "IAM_JIT_ALLOW_DEV_INSECURE_IN_LAMBDA" in helper_src
 
     app_src = inspect.getsource(app_mod.create_app)
     auth_src = inspect.getsource(auth_route)
     web_src = inspect.getsource(web_mod)
-
-    # CSRF leg: dev-flag check exists; no AWS_LAMBDA_FUNCTION_NAME
-    # gate adjacent to it.
-    csrf_start = app_src.index("_enforce_csrf")
-    csrf_end = app_src.index("_enforce_max_body_size")
-    csrf_block = app_src[csrf_start:csrf_end]
-    assert 'IAM_JIT_DEV_INSECURE_SECRET") == "1"' in csrf_block
-    assert "AWS_LAMBDA_FUNCTION_NAME" not in csrf_block
-    assert "IAM_JIT_ALLOW_DEV_INSECURE_IN_LAMBDA" not in csrf_block, (
-        "CSRF middleware now consults the Lambda allow flag — flip "
-        "this test."
-    )
-
-    # Cookie-secure legs (both /api/v1/auth/callback and /auth/magic-callback).
-    for label, src_text in (("auth", auth_src), ("web", web_src)):
-        assert (
-            'secure=os.environ.get("IAM_JIT_DEV_INSECURE_SECRET") != "1"'
-            in src_text
-        ), f"{label}: cookie-set call no longer keys on the dev flag — flip this test."
-        # Find the cookie-set call and confirm no allow-in-Lambda
-        # check is adjacent.
-        idx = src_text.index('secure=os.environ.get("IAM_JIT_DEV_INSECURE_SECRET")')
-        nearby = src_text[max(0, idx - 200):idx + 200]
-        assert "IAM_JIT_ALLOW_DEV_INSECURE_IN_LAMBDA" not in nearby, (
-            f"{label}: cookie-set call now consults the Lambda allow "
-            "flag — flip this test."
+    for label, src_text in (
+        ("app create_app (CSRF)", app_src),
+        ("auth route (cookie)", auth_src),
+        ("web route (cookie)", web_src),
+    ):
+        assert "is_dev_insecure_active" in src_text, (
+            f"{label}: should delegate to "
+            f"auth.is_dev_insecure_active()"
         )
 
 

@@ -222,10 +222,14 @@ def create_app(
 
         # Dev / test mode bypass. Tests use TestClient which doesn't
         # send Origin/Referer headers; production uses real browsers
-        # that always set them on form POSTs per spec. The existing
-        # IAM_JIT_DEV_INSECURE_SECRET=1 flag is the project's
-        # documented "don't enforce production security rules" gate.
-        if os.environ.get("IAM_JIT_DEV_INSECURE_SECRET") == "1":
+        # that always set them on form POSTs per spec.
+        # `auth.is_dev_insecure_active()` returns True only when the
+        # dev flag is set AND we're not in Lambda (or operator
+        # opted in). Closes the CSRF leg of DEV-INSECURE-SECRET-
+        # MULTI-EFFECT-FOOTGUN.
+        from .auth import is_dev_insecure_active
+
+        if is_dev_insecure_active():
             return await call_next(request)
 
         # Safe methods don't change state — no CSRF risk.

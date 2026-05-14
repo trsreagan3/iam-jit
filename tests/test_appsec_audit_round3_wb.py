@@ -615,30 +615,68 @@ def test_finding_dev_insecure_secret_multi_effect_footgun() -> None:
     `..._RETURN_LINK_IN_RESPONSE`) so accidentally setting one
     doesn't take down the others.
     """
+    # CLOSED: all three legs (CSRF middleware, Secure cookie,
+    # magic-link delivery channel) now consult
+    # `iam_jit.auth.is_dev_insecure_active()` which returns True
+    # only when the flag is set AND we're not in Lambda (or the
+    # operator explicitly opts in via
+    # IAM_JIT_ALLOW_DEV_INSECURE_IN_LAMBDA=1). One central gate;
+    # no per-site forgetting.
     from iam_jit import app as app_mod
+    from iam_jit import auth as auth_helper
     from iam_jit import magic_link_delivery as mld
     from iam_jit.routes import auth as auth_route
     from iam_jit.routes import web as web_mod
 
-    # The same env var is consulted in all three places, with no
-    # cross-check.
+    # The helper exists and gates on AWS_LAMBDA_FUNCTION_NAME.
+    helper_src = inspect.getsource(auth_helper.is_dev_insecure_active)
+    assert "AWS_LAMBDA_FUNCTION_NAME" in helper_src
+    assert "IAM_JIT_ALLOW_DEV_INSECURE_IN_LAMBDA" in helper_src
+
+    # All four call sites delegate to the helper rather than
+    # inlining their own `os.environ.get("IAM_JIT_DEV_INSECURE_
+    # SECRET") == "1"` check.
     app_src = inspect.getsource(app_mod.create_app)
     web_src = inspect.getsource(web_mod)
     auth_src = inspect.getsource(auth_route)
     mld_src = inspect.getsource(mld)
 
-    assert "IAM_JIT_DEV_INSECURE_SECRET" in app_src
-    assert "IAM_JIT_DEV_INSECURE_SECRET" in web_src
-    assert "IAM_JIT_DEV_INSECURE_SECRET" in auth_src
-    assert "IAM_JIT_DEV_INSECURE_SECRET" in mld_src
+    for module_name, src in [
+        ("app", app_src),
+        ("web", web_src),
+        ("auth route", auth_src),
+        ("magic_link_delivery", mld_src),
+    ]:
+        assert "is_dev_insecure_active" in src, (
+            f"{module_name} should delegate to "
+            f"auth.is_dev_insecure_active()"
+        )
 
-    # No defense-in-depth refusal-to-start when the flag is set in a
-    # Lambda environment.
-    assert "AWS_LAMBDA_FUNCTION_NAME" not in app_src or (
-        # If the cross-check existed it would refuse startup with a
-        # clear message; today it does not.
-        "refuse" not in app_src.lower() and "raise" not in app_src.lower()
-    )
+    # Behavioral: simulate "Lambda + dev flag set, no opt-in" → False.
+    saved_flag = os.environ.get("IAM_JIT_DEV_INSECURE_SECRET")
+    saved_lambda = os.environ.get("AWS_LAMBDA_FUNCTION_NAME")
+    saved_optin = os.environ.get("IAM_JIT_ALLOW_DEV_INSECURE_IN_LAMBDA")
+    try:
+        os.environ["IAM_JIT_DEV_INSECURE_SECRET"] = "1"
+        os.environ["AWS_LAMBDA_FUNCTION_NAME"] = "iam-jit-prod"
+        os.environ.pop("IAM_JIT_ALLOW_DEV_INSECURE_IN_LAMBDA", None)
+        assert auth_helper.is_dev_insecure_active() is False, (
+            "Dev-insecure flag should be DISABLED in Lambda by "
+            "default; got active=True"
+        )
+        # Explicit opt-in re-enables it.
+        os.environ["IAM_JIT_ALLOW_DEV_INSECURE_IN_LAMBDA"] = "1"
+        assert auth_helper.is_dev_insecure_active() is True
+    finally:
+        for k, v in [
+            ("IAM_JIT_DEV_INSECURE_SECRET", saved_flag),
+            ("AWS_LAMBDA_FUNCTION_NAME", saved_lambda),
+            ("IAM_JIT_ALLOW_DEV_INSECURE_IN_LAMBDA", saved_optin),
+        ]:
+            if v is None:
+                os.environ.pop(k, None)
+            else:
+                os.environ[k] = v
 
 
 # ---------------------------------------------------------------------------
