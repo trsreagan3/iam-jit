@@ -112,6 +112,23 @@ The scoring engine is gated by **2,600+ test cases**, including:
 
 Want to add a calibration case? Drop a YAML file into `tests/calibration_corpus/<tier>/`. No Python change required.
 
+### Try it on your own deployment
+
+Score one of your existing AWS IAM role policies in 60 seconds (offline, no API key needed):
+
+```bash
+pip install iam-risk-score
+
+# Pull one of your roles' inline policies
+aws iam get-role-policy --role-name MyRole --policy-name MyPolicy \
+  --query 'PolicyDocument' --output json > my-policy.json
+
+# Score it
+iam-risk-score my-policy.json --offline
+```
+
+You'll get a 1-10 score plus the specific factors driving it. If you're surprised by the result, that's the point — the scorer catches the patterns that linters miss (privilege-escalation chains, wildcard blast radius, persistent-action gotchas). We've used this on iam-jit's own SAM-deployed role and it caught two things we want to tighten before v2.
+
 ---
 
 ## `iam-jit` — the full provisioner (upsell SaaS)
