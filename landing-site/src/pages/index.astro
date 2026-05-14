@@ -357,7 +357,7 @@ const tiers: PricingTier[] = [
 
     <section class="hero">
       <div class="container">
-        <span class="pill">v0.1.0 · public beta</span>
+        <span class="pill">v0.1.0 · adversarially calibrated</span>
         <h1 style="margin-top: 16px;">Score AWS IAM policies before you grant access.</h1>
         <p class="sub">
           A deterministic-plus-LLM scoring engine that grades any IAM
@@ -365,6 +365,27 @@ const tiers: PricingTier[] = [
           your agent runtime, or your existing JIT IAM tool. Free for
           the first 100 requests/month.
         </p>
+        <div class="convergence" style="margin: 24px 0 28px; padding: 18px 20px; background: rgba(56, 189, 248, 0.06); border: 1px solid rgba(56, 189, 248, 0.25); border-radius: 8px;">
+          <div style="font-size: 13px; color: var(--fg-muted); text-transform: uppercase; letter-spacing: 0.06em; margin-bottom: 10px;">Calibration as of May 2026</div>
+          <div style="display: grid; grid-template-columns: repeat(3, 1fr); gap: 18px;">
+            <div>
+              <div style="font-size: 24px; font-weight: 600;">1,489 / 1,489</div>
+              <div style="font-size: 13px; color: var(--fg-muted);">AWS-managed policies pass within ±1 of the deterministic-engine target band</div>
+            </div>
+            <div>
+              <div style="font-size: 24px; font-weight: 600;">203 / 217</div>
+              <div style="font-size: 13px; color: var(--fg-muted);">Documented attack patterns from the open IAM security literature, regression-pinned</div>
+            </div>
+            <div>
+              <div style="font-size: 24px; font-weight: 600;">10 rounds</div>
+              <div style="font-size: 13px; color: var(--fg-muted);">Black-box + white-box adversarial testing &mdash; latest round closed with max_gap = 0</div>
+            </div>
+          </div>
+          <div style="margin-top: 12px; font-size: 13px; color: var(--fg-muted);">
+            Open corpus, open methodology, open commit history. No competitor publishes a comparable metric.
+            <a href="https://github.com/trsreagan3/iam-jit/blob/main/docs/CONVERGENCE-REPORT-2026-05.md" style="color: var(--accent);">See the convergence report.</a>
+          </div>
+        </div>
         <div class="ctas">
           <a class="btn primary" href="#how">Try it now</a>
           <a class="btn" href="#install"><code>pip install iam-risk-score</code></a>
@@ -389,9 +410,10 @@ const tiers: PricingTier[] = [
           <div class="card">
             <h3>2. Score</h3>
             <p>
-              A deterministic scorer applies 50+ calibrated risk rules,
+              A deterministic scorer applies 200+ calibrated risk rules,
               regression-tested against 1,489 AWS-managed policies and
-              83 hand-crafted attack patterns &mdash; 2,691 tests in CI.
+              217 documented attack patterns &mdash; 3,392 tests in CI,
+              adversarially probed for 10 rounds.
               An optional LLM (Claude Opus or your own Bedrock / Ollama)
               generates a plain-English narrative.
             </p>
