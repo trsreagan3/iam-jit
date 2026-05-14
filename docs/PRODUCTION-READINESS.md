@@ -74,6 +74,20 @@ owned" box is green for your specific environment.
         public via `AllowPublicNetworkExposure=true` with a
         non-empty CORS allowlist.
 
+  - [ ] **`IAM_JIT_TRUSTED_PROXY_CIDRS` set when running behind a
+        reverse proxy** (CloudFront, ALB with X-Forwarded-For
+        rewriting, etc.). Required for `X-Forwarded-For`-based
+        rate-limiting and `X-Forwarded-Host`-based magic-link
+        URL construction to take effect; without it, those
+        signals are ignored (correct default — direct Function URL
+        exposure cannot trust forwarded headers).
+
+  - [ ] **`IAM_JIT_ALLOWED_PUBLIC_HOSTS` set if magic-links
+        should use a public hostname different from the Function
+        URL.** Required for the X-Forwarded-Host path in
+        `public_url.base_for` to honor the proxied host —
+        without an allowlist, XFH is ignored even when trusted.
+
 ### Transport security
 
   - [ ] **HTTPS for any non-sandbox deploy.** Pass
@@ -87,6 +101,28 @@ owned" box is green for your specific environment.
         auto-generated ALB hostname against any cert.
 
 ### Identity + auth
+
+  - [ ] **Magic-link delivery channel configured.** Either
+        `SesSenderAddress` set to a verified SES address (prod
+        default) or `IAM_JIT_ALLOW_LOG_CHANNEL=1` (small-team
+        CloudWatch out-of-band delivery — the log line emits only
+        the link's sha256 fingerprint, not the URL). Without
+        either, the magic-link route returns a uniform 503 so the
+        misconfiguration is loud at launch instead of silently
+        leaking tokens via logs.
+
+  - [ ] **Multi-instance replay protection (`MagicLinkNoncesTable`)
+        in place.** Provisioned automatically by the SAM template.
+        If you deploy without it, set
+        `IAM_JIT_ALLOW_INSECURE_NONCES=1` AND cap the Lambda's
+        reserved concurrency to 1 — otherwise a captured
+        magic-link can be replayed against a cold-started second
+        instance during its 15-minute TTL.
+
+  - [ ] **Cross-instance bans store (`BansTable`) in place.**
+        Provisioned by the SAM template. Without it the bans
+        store is per-instance, so a banned user routed to a
+        different Lambda is silently unbanned.
 
   - [ ] **MagicLinkSecret** is a real 32-byte hex value (the
         template accepts an empty default but session cookies
