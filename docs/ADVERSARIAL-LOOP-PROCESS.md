@@ -162,6 +162,49 @@ After agents land:
 6. **Push every batch.** Visibility of the discipline matters as
    much as the discipline itself.
 
+## Lesson from rounds 1-3 (May 2026 application-security cycle)
+
+Three rounds of BB+WB on the SaaS plumbing (not the scorer)
+converged on one recurring theme:
+
+> **"Fix where named. Miss the siblings."**
+
+The auditor surfaces a finding tied to a specific
+`file:line`. Closures that only patch that location keep working
+copies of the same bug at sibling call sites. Examples from the
+cycle:
+
+- Round 1 closed XFF-leftmost in `routes/score._client_ip`. Round
+  3 found the exact same bug in `routes/web._login_client_id` —
+  unrelated route, identical shape.
+- Round 2 closed Stripe `has_processed`/`mark_processed` TOCTOU
+  with atomic `claim()`. Round 3 found the new claim-then-process
+  ordering let a handler crash permanently strand the customer's
+  event_id.
+- Round 1 closed CSRF on web HTML routes via Origin/Referer
+  middleware. Round 3 found cookie-only token-mint (POST /tokens)
+  still accepted cross-origin Origin/Referer because the route
+  bypasses the CSRF middleware path.
+
+**Implications for new closures:**
+
+1. **When you close a finding, grep for the failure shape.** Not
+   the exact code — the shape. Pattern: "anywhere we read XFF →
+   does it gate on trusted-proxy CIDRs?" "Anywhere we mint tokens
+   → does it check the cap?" "Anywhere we set a session cookie
+   → is SameSite=Strict?"
+
+2. **Prefer one shared helper to N inlined copies.** The
+   `iam_jit.trusted_proxy` module exists because rounds 1+2
+   produced four slightly-different XFF parsers, one of which
+   silently failed on multi-line env vars. The shared helper +
+   single test suite makes "fix once, fix everywhere" mechanical.
+
+3. **The audit doc IS load-bearing.** The auditor agent's job is
+   to find shape-classes. Each round's finding list is the
+   canonical inventory of which-shape-bug-where. Treat it as a
+   regression-prevention surface, not a one-off list.
+
 ## The convergence criterion
 
 The loop has converged for a round when:
