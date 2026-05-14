@@ -417,7 +417,42 @@ def create_app(
     #     baseline. Skipped for plain HTTP so dev mode still works.
     @app.middleware("http")
     async def _security_headers(request, call_next):
-        response = await call_next(request)
+        # BB6-01 closure: even when call_next raises (e.g.
+        # RecursionError on deeply-nested JSON), the response we
+        # return MUST carry the security-headers baseline. Without
+        # this, an uncaught exception in pydantic/JSON validation
+        # produced a 500 text/plain "Internal Server Error" with
+        # NO CSP / X-Frame-Options / X-Content-Type-Options. The
+        # round-1 invariant "security headers on every response"
+        # regressed on every uncaught-exception path.
+        from fastapi.responses import JSONResponse
+
+        try:
+            response = await call_next(request)
+        except RecursionError:
+            import logging as _logging
+
+            _logging.getLogger("iam_jit").warning(
+                "uncaught RecursionError on %s — likely deep-nesting JSON; "
+                "returning 400",
+                request.url.path,
+            )
+            response = JSONResponse(
+                {"detail": "request body nesting is too deep"},
+                status_code=400,
+            )
+        except Exception:
+            import logging as _logging
+
+            _logging.getLogger("iam_jit").exception(
+                "uncaught exception on %s — returning 500 with security headers",
+                request.url.path,
+            )
+            response = JSONResponse(
+                {"detail": "internal server error"},
+                status_code=500,
+            )
+
         response.headers.setdefault("X-Frame-Options", "DENY")
         response.headers.setdefault("X-Content-Type-Options", "nosniff")
         response.headers.setdefault("Referrer-Policy", "same-origin")

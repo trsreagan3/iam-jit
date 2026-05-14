@@ -239,35 +239,26 @@ def test_bb6_01_deep_json_nesting_triggers_uncaught_500(app):
         assert r.text == "Internal Server Error"
         assert r.headers.get("content-security-policy") is None  # !
     """
+    # CLOSED: security-headers middleware now catches uncaught
+    # RecursionError + other exceptions, returns a clean
+    # 400 / 500 JSON response with the full security-headers
+    # baseline applied. No more "Internal Server Error"
+    # text/plain leak; no more middleware-bypassed responses.
     c = TestClient(app, raise_server_exceptions=False)
 
-    # Anonymous can trigger on /api/v1/score.
     payload = "[" * 1500 + "1" + "]" * 1500
     r = c.post(
         "/api/v1/score",
         content=payload,
         headers={"Content-Type": "application/json"},
     )
-    # Currently BROKEN: 500 text/plain, no security headers.
-    assert r.status_code == 500, (
-        f"BB6-01 fix landed — deep JSON nesting no longer 500s. "
-        f"Flip assertion. status={r.status_code} body={r.text[:200]!r}"
-    )
-    assert r.text == "Internal Server Error", (
-        f"BB6-01 mutated — 500 body shape changed. body={r.text!r}"
-    )
-    # The security-headers middleware does NOT cover this path.
-    assert r.headers.get("content-security-policy") is None, (
-        f"BB6-01 partial fix — CSP now applied to 500 path; finish "
-        f"the JSON parse-depth fix. CSP={r.headers.get('content-security-policy')!r}"
-    )
-    assert r.headers.get("x-frame-options") is None, (
-        f"BB6-01 partial fix — X-Frame-Options now applied; finish "
-        f"the JSON depth fix. XFO={r.headers.get('x-frame-options')!r}"
-    )
-    assert r.headers.get("x-content-type-options") is None, (
-        f"BB6-01 partial fix — X-Content-Type-Options now applied."
-    )
+    # Deep nesting now returns 400 with a clean detail message.
+    assert r.status_code == 400
+    assert "too deep" in r.text.lower()
+    # Security-headers chain restored on the error path.
+    assert r.headers.get("content-security-policy")
+    assert r.headers.get("x-frame-options") == "DENY"
+    assert r.headers.get("x-content-type-options") == "nosniff"
 
     # Also reproduces on /api/v1/auth/magic-link and authd routes.
     for path in ("/api/v1/auth/magic-link", "/api/v1/requests/preview"):
@@ -280,10 +271,13 @@ def test_bb6_01_deep_json_nesting_triggers_uncaught_500(app):
             content=payload,
             headers={"Content-Type": "application/json"},
         )
-        assert r.status_code == 500, (
-            f"BB6-01 partial — {path} no longer 500s on deep JSON. "
-            f"status={r.status_code}"
+        # CLOSED: sibling routes also return 400 + security
+        # headers thanks to the middleware-level catch.
+        assert r.status_code == 400, (
+            f"BB6-01 sibling {path} should also return 400; "
+            f"got {r.status_code}"
         )
+        assert r.headers.get("x-content-type-options") == "nosniff"
 
 
 # ---------------------------------------------------------------------
