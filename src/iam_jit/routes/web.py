@@ -79,8 +79,16 @@ def _ctx(
     }
 
 
-def _render(request: Request, name: str, **ctx_kwargs: Any) -> Response:
-    return templates.TemplateResponse(request, name, _ctx(**ctx_kwargs))
+def _render(
+    request: Request,
+    name: str,
+    *,
+    status_code: int = 200,
+    **ctx_kwargs: Any,
+) -> Response:
+    return templates.TemplateResponse(
+        request, name, _ctx(**ctx_kwargs), status_code=status_code
+    )
 
 
 def _try_current_user(request: Request) -> Any | None:
@@ -190,20 +198,64 @@ def _normalize_login_email(raw: str) -> str | None:
 def _login_client_id(request: Request) -> str:
     """Identify the calling client for /login rate limiting.
 
-    The /login endpoint is unauthenticated, so we can't key off
-    user.id. Falling back to client IP. When iam-jit runs behind
-    CloudFront / ALB, the original IP is in `X-Forwarded-For`; in dev
-    `request.client.host` is the actual peer. We take the FIRST IP in
-    XFF (closest to the original caller) to defeat trivial spoofing
-    via `X-Forwarded-For: 1.1.1.1` from outside the trusted proxy.
+    LOGIN-WEB-XFF-LEFTMOST-RATE-LIMIT-BYPASS closure: this used to
+    take the leftmost XFF token, letting any external caller rotate
+    a fake leading IP per request to defeat the limiter (same shape
+    as round-2 SCORE-XFF-LEFTMOST-TRUSTED at the score endpoint).
+    Now: only trust XFF when the immediate peer is in
+    `IAM_JIT_TRUSTED_PROXY_CIDRS`, and walk right-to-left to skip
+    proxy hops. Otherwise key on the peer.host directly.
     """
-    xff = request.headers.get("x-forwarded-for") or ""
-    if xff:
-        first = xff.split(",")[0].strip()
-        if first:
-            return f"ip:{first}"
-    if request.client and request.client.host:
-        return f"ip:{request.client.host}"
+    peer = request.client.host if request.client else None
+
+    trusted_cidrs_raw = (
+        os.environ.get("IAM_JIT_TRUSTED_PROXY_CIDRS") or ""
+    ).strip()
+    if trusted_cidrs_raw and peer:
+        import ipaddress as _ipaddress
+
+        try:
+            peer_addr = _ipaddress.ip_address(peer)
+        except ValueError:
+            peer_addr = None
+        trusted_nets: list = []
+        for tok in trusted_cidrs_raw.replace(",", " ").split():
+            tok = tok.strip()
+            if not tok:
+                continue
+            try:
+                trusted_nets.append(_ipaddress.ip_network(tok, strict=False))
+            except ValueError:
+                continue
+        peer_trusted = (
+            peer_addr is not None
+            and any(
+                isinstance(peer_addr, _ipaddress.IPv4Address)
+                == isinstance(n.network_address, _ipaddress.IPv4Address)
+                and peer_addr in n
+                for n in trusted_nets
+            )
+        )
+        if peer_trusted:
+            xff = request.headers.get("x-forwarded-for") or ""
+            if xff:
+                tokens = [t.strip() for t in xff.split(",") if t.strip()]
+                for candidate in reversed(tokens):
+                    try:
+                        cand_addr = _ipaddress.ip_address(candidate)
+                    except ValueError:
+                        return f"ip:{peer}"
+                    if any(
+                        isinstance(cand_addr, _ipaddress.IPv4Address)
+                        == isinstance(n.network_address, _ipaddress.IPv4Address)
+                        and cand_addr in n
+                        for n in trusted_nets
+                    ):
+                        continue
+                    return f"ip:{candidate}"
+
+    if peer:
+        return f"ip:{peer}"
     return "ip:unknown"
 
 
@@ -219,6 +271,36 @@ def login_submit(
         return _render(
             request, "login.html", active="login", user=None,
             extra={"delivery_channel": _delivery.decide().channel},
+        )
+
+    # LOGIN-WEB-MAGIC-LINK-NO-MULTI-INSTANCE-GUARD closure: mirror
+    # the JSON API path's guard at the HTML form route. Without it,
+    # the in-memory nonce store can't enforce single-use across
+    # Lambda instances and an attacker can replay a captured link
+    # against a cold-started instance.
+    _in_lambda = bool(os.environ.get("AWS_LAMBDA_FUNCTION_NAME"))
+    _has_ddb_nonces = bool(
+        (os.environ.get("IAM_JIT_MAGIC_LINK_NONCES_TABLE") or "").strip()
+    )
+    _allow_insecure = (
+        os.environ.get("IAM_JIT_ALLOW_INSECURE_NONCES", "").lower()
+        in {"1", "true", "yes"}
+    )
+    if _in_lambda and not _has_ddb_nonces and not _allow_insecure:
+        return _render(
+            request,
+            "login.html",
+            active="login",
+            user=None,
+            extra={
+                "error": (
+                    "multi-instance magic-link replay protection is "
+                    "not configured. Operator: set "
+                    "IAM_JIT_MAGIC_LINK_NONCES_TABLE or "
+                    "IAM_JIT_ALLOW_INSECURE_NONCES=1."
+                ),
+            },
+            status_code=503,
         )
 
     # Per-IP rate limit. Defends against email enumeration (each /login
