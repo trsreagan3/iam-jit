@@ -203,32 +203,39 @@ def test_checkout_completed_issues_token(
     assert records[0].token_hash == result.token_hash
 
 
-def test_checkout_completed_skips_unknown_price(
+def test_checkout_completed_unknown_price_raises_pre_write_error(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    """Round-6 closure: handler raises HandlerPreWriteError on
+    unknown price so dispatch releases the claim and a future
+    config update lets Stripe's retry succeed. Without this, a
+    customer whose price wasn't pre-mapped is permanently locked
+    out."""
     monkeypatch.setenv("STRIPE_PRICE_ID_TO_TIER", '{"price_indie": "indie"}')
     store = InMemoryAPITokenStore()
     event = _checkout_event(price_id="price_unknown_xyz")
-    result = stripe_webhook.handle_checkout_session_completed(
-        event, tokens_store=store,
-    )
-    assert result is None
+    with pytest.raises(stripe_webhook.HandlerPreWriteError):
+        stripe_webhook.handle_checkout_session_completed(
+            event, tokens_store=store,
+        )
     assert store.list_all() == []
 
 
-def test_checkout_completed_skips_missing_email(
+def test_checkout_completed_missing_email_raises_pre_write_error(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    """Round-6 closure: missing email is a pre-write soft-fail.
+    Releasing the claim lets the retry succeed once the customer
+    corrects the email via the Stripe Customer Portal."""
     monkeypatch.setenv("STRIPE_PRICE_ID_TO_TIER", '{"price_indie_test": "indie"}')
     store = InMemoryAPITokenStore()
     event = _checkout_event()
-    # Strip the email
     event["data"]["object"]["customer_email"] = None
     event["data"]["object"]["customer_details"] = {}
-    result = stripe_webhook.handle_checkout_session_completed(
-        event, tokens_store=store,
-    )
-    assert result is None
+    with pytest.raises(stripe_webhook.HandlerPreWriteError):
+        stripe_webhook.handle_checkout_session_completed(
+            event, tokens_store=store,
+        )
     assert store.list_all() == []
 
 

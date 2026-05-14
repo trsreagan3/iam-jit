@@ -166,13 +166,9 @@ class DynamoDBLLMBudgetStore:
             # successfully consumed one unit.
             return True
         except Exception as e:
-            if "ConditionalCheckFailedException" in str(e) or (
-                hasattr(e, "response")
-                and getattr(e, "response", {})
-                .get("Error", {})
-                .get("Code")
-                == "ConditionalCheckFailedException"
-            ):
+            from .ddb_utils import is_conditional_check_failed
+
+            if is_conditional_check_failed(e):
                 return False
             raise
 

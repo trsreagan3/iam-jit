@@ -1013,8 +1013,17 @@ def test_bb2_19_stripe_unsigned_event_does_not_poison_idempotency(monkeypatch, t
         },
     )
     assert r2.status_code == 200
-    # Not duplicate on first valid call
-    assert not r2.json().get("duplicate")
+    # Honest-negative: a real signed event lands and is processed.
+    # Whether it's `handled: true / false` or `rejected: true`
+    # depends on the event content (the test event has no
+    # price/email). The IMPORTANT property is it's not flagged as
+    # `duplicate` — proving the attacker didn't poison the
+    # idempotency store with the same event_id.
+    body = r2.json()
+    assert not body.get("duplicate"), (
+        "real event after attacker probe should NOT be treated as "
+        f"duplicate; got {body}"
+    )
 
 
 # ---------------------------------------------------------------------

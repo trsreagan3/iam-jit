@@ -573,21 +573,30 @@ def test_finding_stripe_claim_exception_classification_string_fragile() -> None:
       - branch on `e.response['Error']['Code']`
       - let everything else propagate unchanged
     """
-    from iam_jit import stripe_webhook
+    # Round-6 closure: the string-match pattern was factored into
+    # `iam_jit.ddb_utils.is_conditional_check_failed`, called from
+    # all three sibling DDB stores (stripe processed-events,
+    # magic-link nonces, llm-budget). The shared helper still
+    # falls back to string-match for synthetic-mock cases (i.e.
+    # the fragile behavior is preserved in the helper, not in
+    # every call site).
+    from iam_jit import stripe_webhook, ddb_utils
 
     src = inspect.getsource(stripe_webhook.DynamoDBProcessedEventsStore.claim)
-    # String-match check is here.
-    assert '"ConditionalCheckFailedException" in str(e)' in src
-    # The narrow `botocore.exceptions.ClientError` catch is NOT.
-    assert "botocore.exceptions.ClientError" not in src, (
-        "claim() now catches ClientError narrowly — flip this test."
-    )
+    assert "is_conditional_check_failed" in src
+    assert '"ConditionalCheckFailedException" in str(e)' not in src
 
-    # Behavioral: a non-ClientError exception whose str() includes
-    # the substring is classified as a duplicate (return False).
+    # The helper itself does both shapes.
+    helper_src = inspect.getsource(ddb_utils.is_conditional_check_failed)
+    assert '"ConditionalCheckFailedException" in str' in helper_src
+
+    # Behavioral residual: a non-ClientError whose str() carries
+    # the substring still maps to False (duplicate). This is the
+    # known trade-off the helper documents (test fakes need to
+    # produce the substring to mock the failure mode). Pin it so
+    # a future tighter classifier is the explicit decision.
     class FakeException(Exception):
-        """Not a botocore exception; not a stripe error; just an
-        exception whose repr happens to include the substring."""
+        pass
 
     class FakeClient:
         def put_item(self, **kwargs):

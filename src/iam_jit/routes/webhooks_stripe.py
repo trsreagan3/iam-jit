@@ -137,9 +137,28 @@ async def stripe_webhook_endpoint(
         request.app.state, "processed_events_store", None,
     )
 
-    return stripe_webhook.dispatch_event(
-        event,
-        tokens_store=tokens_store,
-        mailer=mailer,
-        processed_events_store=processed_events_store,
-    )
+    try:
+        return stripe_webhook.dispatch_event(
+            event,
+            tokens_store=tokens_store,
+            mailer=mailer,
+            processed_events_store=processed_events_store,
+        )
+    except stripe_webhook.HandlerPreWriteError as e:
+        # Pre-write soft-fail (missing email, unmapped price, etc.).
+        # dispatch_event already released the claim. Return 200 so
+        # Stripe DOESN'T immediately retry, but flag the rejection
+        # so the operator's dashboard surfaces the lockout case.
+        # When the underlying data is corrected (customer adds
+        # email, operator maps price), a redelivery via the Stripe
+        # dashboard will succeed.
+        logger.warning(
+            "Stripe handler pre-write failure on event %s: %s",
+            event.get("id"), e,
+        )
+        return {
+            "handled": False,
+            "rejected": True,
+            "reason": "pre_write_handler_failure",
+            "event_id": event.get("id", ""),
+        }

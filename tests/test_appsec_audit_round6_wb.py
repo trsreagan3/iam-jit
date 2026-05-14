@@ -103,54 +103,38 @@ def test_finding_handler_pre_write_error_closure_partial_return_none_paths() -> 
     `raise HandlerPreWriteError(...)`. Add admin endpoint
     POST /api/v1/admin/stripe/release-claim/{event_id}.
     """
+    # CLOSED: missing-email AND missing-tier paths now raise
+    # HandlerPreWriteError, which dispatch_event releases the
+    # claim on. Stripe retry can re-attempt once the operator
+    # corrects the event payload (e.g., customer adds email via
+    # Stripe Customer Portal, or operator adds the missing
+    # price→tier mapping).
     from iam_jit import stripe_webhook
     from iam_jit.stripe_webhook import (
+        HandlerPreWriteError,
         InMemoryProcessedEventsStore,
         dispatch_event,
     )
     from iam_jit.api_tokens_store import InMemoryAPITokenStore
 
-    # Inspect: the missing-email path still returns None.
     handler_src = inspect.getsource(
         stripe_webhook.handle_checkout_session_completed
     )
-    # The bug-shape: return None immediately after no-email-detected.
     assert "if not email:" in handler_src
-    email_block_start = handler_src.index("if not email:")
-    email_block = handler_src[email_block_start:email_block_start + 400]
-    assert "return None" in email_block, (
-        "missing-email path no longer returns None — flip this test."
-    )
-    assert "HandlerPreWriteError" not in email_block, (
-        "missing-email path now raises HandlerPreWriteError — flip "
-        "this test."
-    )
-
-    # Same for the missing-tier path.
     assert "if not tier:" in handler_src
-    tier_block_start = handler_src.index("if not tier:")
-    tier_block = handler_src[tier_block_start:tier_block_start + 400]
-    assert "return None" in tier_block, (
-        "missing-tier path no longer returns None — flip this test."
-    )
-    assert "HandlerPreWriteError" not in tier_block, (
-        "missing-tier path now raises HandlerPreWriteError — flip "
-        "this test."
-    )
+    # Both pre-write branches now raise HandlerPreWriteError.
+    assert handler_src.count("raise HandlerPreWriteError") >= 3
 
-    # Behavioral: dispatch a checkout event with NO customer email.
-    # Handler returns None. Dispatch reports handled=True. Claim is
-    # retained. Stripe retry (a fresh dispatch_event call with the
-    # SAME event_id) short-circuits as "duplicate" — paid customer
-    # is locked out.
+    # Behavioral check: a checkout event with no email now raises
+    # HandlerPreWriteError; dispatch releases the claim; retry
+    # (after operator/customer correction) can succeed.
     tokens = InMemoryAPITokenStore()
     processed = InMemoryProcessedEventsStore()
-    event = {
-        "id": "evt_no_email_lockout",
+    event_no_email = {
+        "id": "evt_no_email",
         "type": "checkout.session.completed",
         "data": {
             "object": {
-                # No customer_email; no customer_details.email.
                 "line_items": {"data": [{"price": {"id": "price_pro"}}]},
             }
         },
@@ -158,23 +142,27 @@ def test_finding_handler_pre_write_error_closure_partial_return_none_paths() -> 
     saved = os.environ.get("STRIPE_PRICE_ID_TO_TIER")
     try:
         os.environ["STRIPE_PRICE_ID_TO_TIER"] = '{"price_pro":"pro"}'
-        # First call: handler returns None; dispatch reports handled.
-        result1 = dispatch_event(
-            event, tokens_store=tokens, processed_events_store=processed,
+        with pytest.raises(HandlerPreWriteError):
+            dispatch_event(
+                event_no_email,
+                tokens_store=tokens,
+                processed_events_store=processed,
+            )
+        # Now the corrected retry (with email present) succeeds.
+        event_corrected = dict(event_no_email)
+        event_corrected["data"] = {
+            "object": {
+                "customer_email": "paid@example.com",
+                "line_items": {"data": [{"price": {"id": "price_pro"}}]},
+            }
+        }
+        result = dispatch_event(
+            event_corrected,
+            tokens_store=tokens,
+            processed_events_store=processed,
         )
-        # No token was minted.
-        assert tokens.list_for_user("paid@example.com") == []
-        # But dispatch claims success — and the claim is RETAINED.
-        # The retry short-circuits as duplicate.
-        result2 = dispatch_event(
-            event, tokens_store=tokens, processed_events_store=processed,
-        )
-        assert result2.get("duplicate") is True, (
-            "second delivery now mints (claim was released on the "
-            "first failure) — flip this test."
-        )
-        # Final state: zero tokens for an attempted-paying customer.
-        assert tokens.list_for_user("paid@example.com") == []
+        assert result.get("handled") is True
+        assert len(tokens.list_for_user("paid@example.com")) == 1
     finally:
         if saved is None:
             os.environ.pop("STRIPE_PRICE_ID_TO_TIER", None)
@@ -219,17 +207,18 @@ def test_finding_llm_budget_ddb_claim_exception_classification_string_fragile() 
     from iam_jit import llm_budget
 
     src = inspect.getsource(llm_budget.DynamoDBLLMBudgetStore.consume_or_reject)
-    # The string-match-first pattern is here.
-    assert '"ConditionalCheckFailedException" in str(e)' in src
-    # And the narrow ClientError catch is NOT.
-    assert "botocore.exceptions.ClientError" not in src, (
-        "llm_budget now uses the narrow catch — flip this test."
-    )
+    # CLOSED: the inline string-match pattern was factored out
+    # into `iam_jit.ddb_utils.is_conditional_check_failed`, called
+    # from all three sibling DDB stores (stripe events, magic-link
+    # nonces, llm-budget). The fragile-by-design fallback lives
+    # in ONE place so future tightening is mechanical.
+    assert "is_conditional_check_failed" in src
+    assert '"ConditionalCheckFailedException" in str(e)' not in src
 
-    # Behavioral: a non-ClientError exception whose str() includes
-    # the substring is classified as a duplicate (returns False).
+    # The shared helper still treats a synthetic mock as a
+    # conditional-check failure (pin the documented trade-off).
     class FakeException(Exception):
-        """Not a ClientError; happens to mention the substring."""
+        pass
 
     class FakeClient:
         def update_item(self, **kwargs):
@@ -241,10 +230,7 @@ def test_finding_llm_budget_ddb_claim_exception_classification_string_fragile() 
         "fake-table", client=FakeClient()
     )
     result = store.consume_or_reject("alice@example.com", "pro")
-    assert result is False, (
-        "stub exception correctly propagates — string-match is gone; "
-        "flip this test."
-    )
+    assert result is False
 
 
 # ---------------------------------------------------------------------------

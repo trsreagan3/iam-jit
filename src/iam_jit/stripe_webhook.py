@@ -231,7 +231,16 @@ def handle_checkout_session_completed(
             "checkout.session.completed event has no customer email; event id=%s",
             event.get("id"),
         )
-        return None
+        # Round-6 WB HIGH closure: this is a pre-write soft-fail.
+        # Raising HandlerPreWriteError releases the claim so a
+        # Stripe redelivery (after the customer corrects the
+        # email via the Customer Portal) can succeed. Without this,
+        # a Stripe customer with an initially-empty email is
+        # permanently locked out.
+        raise HandlerPreWriteError(
+            f"checkout.session.completed event {event.get('id')!r} "
+            "has no customer email; releasing claim for retry"
+        )
 
     price_id = _extract_price_id(data)
     tier: str | None = None
@@ -243,7 +252,13 @@ def handle_checkout_session_completed(
             "checkout.session.completed: no tier mapped for price_id=%s (event id=%s)",
             price_id, event.get("id"),
         )
-        return None
+        # Round-6 closure: pre-write soft-fail. Same pattern as the
+        # missing-email branch. An operator who adds price_id → tier
+        # mapping later WILL want Stripe's retry to succeed.
+        raise HandlerPreWriteError(
+            f"no tier mapped for price_id={price_id!r} on event "
+            f"{event.get('id')!r}; releasing claim for retry"
+        )
 
     issued = issue_api_token(user_id=email, label=f"stripe:{tier}")
     record = APITokenRecord(
@@ -462,13 +477,9 @@ class DynamoDBProcessedEventsStore:
             )
             return True
         except Exception as e:
-            if "ConditionalCheckFailedException" in str(e) or (
-                hasattr(e, "response")
-                and getattr(e, "response", {})
-                .get("Error", {})
-                .get("Code")
-                == "ConditionalCheckFailedException"
-            ):
+            from .ddb_utils import is_conditional_check_failed
+
+            if is_conditional_check_failed(e):
                 return False
             raise
 

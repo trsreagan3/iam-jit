@@ -104,17 +104,12 @@ class DynamoDBMagicLinkNonceStore:
                 ConditionExpression="attribute_not_exists(token_hash)",
             )
         except Exception as e:
-            # boto3 raises ClientError with Code='ConditionalCheckFailedException'
-            # when the conditional check fails — meaning another instance
-            # already consumed this token. We detect it by string match
-            # to avoid hard-importing botocore here.
-            if "ConditionalCheckFailedException" in str(e) or (
-                hasattr(e, "response")
-                and getattr(e, "response", {})
-                .get("Error", {})
-                .get("Code")
-                == "ConditionalCheckFailedException"
-            ):
+            # Conditional check failed → another instance already
+            # consumed this token. Centralized detector handles both
+            # the structured-response and string-match shapes.
+            from .ddb_utils import is_conditional_check_failed
+
+            if is_conditional_check_failed(e):
                 raise TokenAlreadyUsed(
                     "magic-link token has already been used; request a new one"
                 )
