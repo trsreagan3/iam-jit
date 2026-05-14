@@ -27,7 +27,7 @@ from typing import Annotated, Any
 def _now_iso_z() -> str:
     return _dt.datetime.now(_dt.UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
 
-from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
+from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response, status
 
 from .. import assume as assume_mod, audit as audit_mod, bans as bans_mod, lifecycle, narrow, prompt_injection, provision as provision_mod, review, schema
 from ..lifecycle import IllegalTransition, NotAuthorized
@@ -1035,7 +1035,7 @@ def assume_instructions(
     }
 
 
-@router.get("/{request_id}/download")
+@router.get("/{request_id}/download", response_class=Response)
 def download_request(
     request_id: str,
     user: Annotated[User, Depends(current_user)],

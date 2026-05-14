@@ -200,7 +200,7 @@ def _link_for(token: str, *, request: Request | None = None) -> str:
     return f"{base}/api/v1/auth/callback?token={token}"
 
 
-@router.get("/callback")
+@router.get("/callback", response_class=Response)
 def magic_link_callback(token: str) -> Response:
     if (os.environ.get("IAM_JIT_AUTH_MODE") or "local").lower() != "local":
         raise HTTPException(status_code=400, detail="magic-link auth is only available in local mode")
@@ -240,7 +240,24 @@ def magic_link_callback(token: str) -> Response:
     return response
 
 
-@router.post("/logout")
-def logout(response: Response) -> dict[str, str]:
-    response.delete_cookie("iam_jit_session", path="/")
-    return {"status": "logged out"}
+@router.post("/logout", response_class=Response)
+def logout(request: Request) -> Response:
+    from fastapi.responses import JSONResponse
+    from .. import session_revocation as _sr
+
+    # BB3-01 closure: server-side revocation. Clear the cookie in
+    # the caller's browser AND add the cookie hash to the revocation
+    # list so any other client that saved the same value can't
+    # continue to use it until the cookie's natural TTL expires.
+    cookie = request.cookies.get("iam_jit_session")
+    if cookie:
+        try:
+            _sr.get_default_store().revoke(cookie, ttl_seconds=24 * 60 * 60)
+        except Exception:
+            import logging
+            logging.getLogger("iam_jit.session_revocation").exception(
+                "failed to revoke session on logout"
+            )
+    resp = JSONResponse(content={"status": "logged out"})
+    resp.delete_cookie("iam_jit_session", path="/")
+    return resp

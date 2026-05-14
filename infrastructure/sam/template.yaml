@@ -726,6 +726,13 @@ Globals:
         # closure. Without this, a banned user simply re-trips on
         # the next Lambda instance.
         IAM_JIT_BANS_TABLE: !Ref BansTable
+        # Server-side session revocation — BB3-01 closure. Without
+        # this, /logout only clears the caller's browser cookie;
+        # an exfiltrated copy keeps working until the cookie's
+        # 24h TTL expires. The table has TTL on `expires_at` so
+        # revoked entries auto-evict at the cookie's natural
+        # expiry.
+        IAM_JIT_SESSION_REVOCATION_TABLE: !Ref SessionRevocationTable
         # Floor params — surface them to the runtime so the admin
         # PATCH validator can refuse loosen-below-floor attempts and
         # the GET endpoint can show "locked by deploy" indicators.
@@ -959,6 +966,26 @@ Resources:
         - Key: managed-by
           Value: iam-jit
 
+  SessionRevocationTable:
+    Type: AWS::DynamoDB::Table
+    DeletionPolicy: Delete
+    UpdateReplacePolicy: Delete
+    Properties:
+      TableName: !Sub "iam-jit-session-revocation-${AWS::StackName}"
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - AttributeName: cookie_hash
+          AttributeType: S
+      KeySchema:
+        - AttributeName: cookie_hash
+          KeyType: HASH
+      TimeToLiveSpecification:
+        AttributeName: expires_at
+        Enabled: true
+      Tags:
+        - Key: managed-by
+          Value: iam-jit
+
   RequestsTable:
     Type: AWS::DynamoDB::Table
     DeletionPolicy: Retain
@@ -1054,6 +1081,7 @@ Resources:
                   - !GetAtt AccountsTable.Arn
                   - !GetAtt MagicLinkNoncesTable.Arn
                   - !GetAtt BansTable.Arn
+                  - !GetAtt SessionRevocationTable.Arn
               - !If
                   - AuthLocal
                   - Effect: Allow

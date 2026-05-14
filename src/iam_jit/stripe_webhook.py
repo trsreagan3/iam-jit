@@ -344,9 +344,16 @@ class ProcessedEventsStore(Protocol):
     subsequent caller. Splitting into separate has_processed() and
     mark_processed() introduces a TOCTOU race under concurrent
     redelivery — round-2 WB+BB audit (STRIPE-IDEMPOTENCY-TOCTOU).
+
+    `release()` un-claims a previously-claimed event_id. Used as
+    the rollback half of "claim → run handler → on failure,
+    release" so a handler crash doesn't permanently block Stripe's
+    retries — STRIPE-CLAIM-BEFORE-PROCESS (round 3 WB).
     """
 
     def claim(self, event_id: str) -> bool: ...
+
+    def release(self, event_id: str) -> None: ...
 
 
 class InMemoryProcessedEventsStore:
@@ -376,6 +383,13 @@ class InMemoryProcessedEventsStore:
         my_marker = object()
         stored = self._seen.setdefault(event_id, my_marker)
         return stored is my_marker
+
+    def release(self, event_id: str) -> None:
+        """Un-claim an event_id so a subsequent retry can run the
+        handler. Called by `dispatch_event` when the handler raises
+        — closes STRIPE-CLAIM-BEFORE-PROCESS. Best-effort: missing
+        key is fine (already released)."""
+        self._seen.pop(event_id, None)
 
 
 def dispatch_event(
@@ -439,10 +453,29 @@ def dispatch_event(
         return {"handled": False, "event_type": event_type}
 
     # Atomic claim() above already reserved this event_id in the store.
-    # No follow-up mark_processed call needed — the claim IS the
-    # reservation. This closes the round-1 TOCTOU race (round-2 finding
-    # STRIPE-IDEMPOTENCY-TOCTOU) by making the check-and-set atomic.
-    result = handler()
+    # The claim is RELEASED on handler crash so Stripe's retry can
+    # actually run — STRIPE-CLAIM-BEFORE-PROCESS (round-3 WB) closure.
+    # Without the release, a transient handler failure (DDB throttle,
+    # SES error, Lambda timeout) leaves the event permanently claimed
+    # and the customer's paid subscription never produces a token.
+    try:
+        result = handler()
+    except Exception:
+        if processed_events_store is not None and event_id:
+            try:
+                processed_events_store.release(event_id)
+                logger.warning(
+                    "Stripe handler failed; released claim on event %s so "
+                    "the retry can re-attempt",
+                    event_id,
+                )
+            except Exception:
+                logger.exception(
+                    "failed to release claim on event %s after handler crash; "
+                    "Stripe retries will short-circuit as duplicate",
+                    event_id,
+                )
+        raise
 
     return {"handled": True, "event_type": event_type, "result": _serialize(result)}
 

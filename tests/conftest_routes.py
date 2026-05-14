@@ -58,6 +58,7 @@ def _reset_global_singletons() -> None:
         intake_drafts as _drafts,
         magic_link_nonces as _nonces,
         rate_limit as _rl,
+        session_revocation as _sr,
         settings_store as _settings,
     )
 
@@ -67,6 +68,7 @@ def _reset_global_singletons() -> None:
     _nonces.reset_default_store_for_tests()
     _cidrs.reset_default_store_for_tests()
     _settings.reset_default_store_for_tests()
+    _sr.reset_default_store_for_tests()
     # The /api/v1/score endpoint has its own per-IP limiter.
     from iam_jit.routes import score as _score_route
     _score_route._reset_limiter_for_tests()

@@ -427,7 +427,6 @@ def _scan_for_injection(
 def score_policy(
     payload: ScoreRequest,
     request: Request,
-    response: Response,
     authorization: Annotated[str | None, Header()] = None,
 ) -> ScoreResponse:
     """Score an IAM policy. The launch feature.
@@ -588,11 +587,9 @@ def score_policy(
     # tier LLM narratives into anonymous cache entries. The X-Policy-
     # Fingerprint header lets downstream caches and CI tools dedupe
     # on content-hash without parsing the body.
-    response.headers["Cache-Control"] = "public, max-age=3600, s-maxage=86400"
-    response.headers["Vary"] = "Authorization"
-    response.headers["X-Policy-Fingerprint"] = fingerprint
+    from fastapi.responses import JSONResponse
 
-    return ScoreResponse(
+    body = ScoreResponse(
         score=analysis.risk_score,
         tier=_tier_for(analysis.risk_score),
         would_auto_approve_at_threshold_5=analysis.risk_score < 5,
@@ -601,4 +598,12 @@ def score_policy(
         llm_narrative=analysis.llm_narrative,
         analyzer=analysis.analyzer,
         policy_fingerprint=fingerprint,
+    )
+    return JSONResponse(
+        content=body.model_dump(),
+        headers={
+            "Cache-Control": "public, max-age=3600, s-maxage=86400",
+            "Vary": "Authorization",
+            "X-Policy-Fingerprint": fingerprint,
+        },
     )

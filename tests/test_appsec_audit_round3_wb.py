@@ -150,25 +150,24 @@ def test_finding_stripe_claim_before_process_loses_event_on_handler_crash() -> N
     # token issuance is the persisted claim.
     tokens.put = real_put  # type: ignore[attr-defined,method-assign]
 
-    # Second delivery (Stripe retry). Claim has been committed; the
-    # retry short-circuits as duplicate. No token is minted even
-    # though the original side-effect never completed.
+    # CLOSED: dispatch_event releases the claim on handler failure
+    # so the retry can actually run. The customer paid + the retry
+    # mints the token. No more permanent loss on transient crash.
     result = dispatch_event(
         event,
         tokens_store=tokens,
         processed_events_store=processed,
     )
-    assert result.get("duplicate") is True, (
-        "Expected the retry to be reported as duplicate (proving the "
-        "claim persisted past the handler crash). Got: " + repr(result)
+    assert result.get("duplicate") is not True, (
+        "Expected the retry to run normally (not short-circuit as "
+        "duplicate) now that the claim is released on handler crash. "
+        "Got: " + repr(result)
     )
     minted = tokens.list_for_user("paid@example.com")
-    assert len(minted) == 0, (
-        "Expected ZERO tokens minted because the original handler "
-        "crashed AND the retry was no-op'd by the persisted claim. "
-        f"Got {len(minted)} tokens. If this is now 1, a fix has "
-        "landed (claim-after-success or idempotent side-effects) — "
-        "flip the test."
+    assert len(minted) == 1, (
+        "Expected exactly one token minted on the retry (claim was "
+        "released after the first attempt's crash). "
+        f"Got {len(minted)} tokens. "
     )
 
 

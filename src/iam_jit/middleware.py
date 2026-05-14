@@ -145,6 +145,40 @@ def _identify_user(request: Request, user_store: UserStore) -> User:
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="session expired or invalid",
         )
+    # BB3-01 closure: check the server-side revocation list. A
+    # cookie value that was logged out / explicitly revoked is no
+    # longer accepted, even if its signature is still valid.
+    try:
+        from . import session_revocation as _sr
+
+        if _sr.get_default_store().is_revoked(cookie):
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail="session has been revoked",
+            )
+    except HTTPException:
+        raise
+    except Exception:
+        # Fail closed on revocation-store outage (same posture as
+        # the BAN-CHECK-FAIL-OPEN closure). Override with
+        # IAM_JIT_SESSION_REVOCATION_FAIL_OPEN=1 if availability
+        # outranks revocation enforcement for the deployment.
+        import logging as _logging
+        import os as _os
+
+        _logging.getLogger("iam_jit.session_revocation").exception(
+            "session-revocation check failed for user_id=%s", user_id
+        )
+        if (
+            _os.environ.get("IAM_JIT_SESSION_REVOCATION_FAIL_OPEN") or ""
+        ).lower() not in {"1", "true", "yes"}:
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail=(
+                    "session revocation check is temporarily "
+                    "unavailable; please retry."
+                ),
+            )
     try:
         user = user_store.get(user_id)
     except UserNotFound:

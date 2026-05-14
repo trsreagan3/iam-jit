@@ -615,7 +615,22 @@ def magic_callback(token: str, return_to: str = "/") -> Response:
 
 
 @router.get("/logout")
-def logout() -> Response:
+def logout(request: Request) -> Response:
+    # BB3-01 closure: server-side revocation. Same posture as the
+    # JSON /api/v1/auth/logout route — the cookie hash goes into
+    # the revocation list so a saved-elsewhere copy can't outlive
+    # the user's logout.
+    cookie = request.cookies.get("iam_jit_session")
+    if cookie:
+        try:
+            from .. import session_revocation as _sr
+
+            _sr.get_default_store().revoke(cookie, ttl_seconds=24 * 60 * 60)
+        except Exception:
+            import logging
+            logging.getLogger("iam_jit.session_revocation").exception(
+                "failed to revoke session on /logout"
+            )
     response = RedirectResponse(url="/login", status_code=303)
     response.delete_cookie("iam_jit_session", path="/")
     return response

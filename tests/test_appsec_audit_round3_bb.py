@@ -197,26 +197,27 @@ def test_bb3_01_logout_does_not_invalidate_cookie_server_side(app):
     assert "Max-Age=0" in set_cookie
 
     # Attacker (saved the cookie value before the user clicked
-    # sign-out) opens a fresh client (no cookies from the user's
-    # logout-clear), pastes the cookie in, and probes /users/me.
+    # BB3-01 CLOSED: server-side revocation list. The saved-elsewhere
+    # cookie copy is rejected with 401 after logout, not honored.
     attacker = TestClient(app, raise_server_exceptions=False)
     attacker.cookies.set("iam_jit_session", cookie_value)
     r = attacker.get("/api/v1/users/me")
-    # Currently broken: the saved cookie is still valid because the
-    # logout didn't blacklist the cookie signature.
-    assert r.status_code == 200, (
+    assert r.status_code == 401, (
         f"expected server-side invalidation (401) after logout; got "
         f"{r.status_code}: {r.text[:200]}"
     )
 
-    # Same finding on the HTML GET /logout flow.
+    # Same closure on the HTML GET /logout flow. Use a different
+    # user so the cookie value (which encodes the user_id) hashes
+    # to a fresh slot in the revocation list.
+    fresh_cookie = auth_mod.sign_session(_DEV_SECRET, "email:approver@example.com")
     c2 = TestClient(app, raise_server_exceptions=False)
-    c2.cookies.set("iam_jit_session", cookie_value)
+    c2.cookies.set("iam_jit_session", fresh_cookie)
     assert c2.get("/api/v1/users/me").status_code == 200
     c2.get("/logout", follow_redirects=False)
     attacker2 = TestClient(app, raise_server_exceptions=False)
-    attacker2.cookies.set("iam_jit_session", cookie_value)
-    assert attacker2.get("/api/v1/users/me").status_code == 200
+    attacker2.cookies.set("iam_jit_session", fresh_cookie)
+    assert attacker2.get("/api/v1/users/me").status_code == 401
 
 
 # ---------------------------------------------------------------------
@@ -244,14 +245,23 @@ def test_bb3_02_openapi_json_returns_500(app):
     `Response` ForwardRef. Either call `Model.model_rebuild()` at app
     startup, or annotate with the resolved `starlette.responses.
     Response` type."""
+    # BB3-02 CLOSED: routes with `-> Response` got an explicit
+    # `response_class=Response` to skip pydantic's body-schema
+    # inference, and `response: Response` parameters were refactored
+    # away. /openapi.json now returns 200.
     c = TestClient(app, raise_server_exceptions=False)
     r = c.get("/openapi.json")
-    # Currently broken: 500.
-    assert r.status_code == 500, (
-        f"expected /openapi.json to be broken (current state); got "
-        f"{r.status_code}. If it's now 200, flip this assertion and "
-        f"the fix has landed."
+    assert r.status_code == 200, (
+        f"/openapi.json should return 200; got {r.status_code}. "
+        f"The pydantic ForwardRef issue may have regressed."
     )
+    schema = r.json()
+    assert schema.get("openapi", "").startswith("3."), (
+        "expected an OpenAPI 3.x schema body"
+    )
+    # /api/v1/score is the core public route — its presence proves the
+    # schema generation reaches the real endpoints.
+    assert "/api/v1/score" in schema.get("paths", {})
 
 
 # ---------------------------------------------------------------------
