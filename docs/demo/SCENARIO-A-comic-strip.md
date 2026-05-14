@@ -1,13 +1,20 @@
 # Scenario A — comic-strip brief
 
 **Same story as `SCENARIO-A-dev-amendment.md`, formatted for an
-illustrator.** Each panel below is a self-contained artist
-brief: setting, characters, speech/caption, mood cue. Hand this
-file to a freelance illustrator — they should be able to
-produce all 8 panels from these briefs alone.
+illustrator.** Each panel is a self-contained artist brief:
+setting, characters, speech/caption, mood cue. Hand this file
+to a freelance illustrator — they should be able to produce
+all panels from these briefs alone.
 
 **Format:** 8 landscape panels, intended for a 2-column × 4-row
 grid (web-friendly + Twitter-card-shareable).
+
+**Tone:** humorous, with real (or realistic-looking) terminal
+screenshots embedded in panels where the CLI shows up. Devs
+trust comics that show actual command output way more than
+abstracted ones. The humor is *recognition* humor — every
+character's frustration is something the audience has felt this
+week.
 
 **Cast:**
 - **Gopher** = Go gopher (Renee French), our developer character
@@ -23,43 +30,69 @@ grid (web-friendly + Twitter-card-shareable).
 ## PANEL 1 — "AccessDenied"
 
 - **Setting:** Gopher's home workspace. Desk, laptop, plant.
-  Time-of-day: afternoon (warm lighting).
-- **Characters:** Gopher, looking surprised.
-- **On-screen text (laptop):** A terminal showing
-  `AccessDenied: User alice is not authorized to perform: s3:GetObject`
-- **Gopher speech balloon:** "Wait, I just need to read one
-  file..."
-- **Mood:** Frustrated but neutral. The "everyone has had this
-  Tuesday" face.
+  Time-of-day: afternoon (warm lighting). It's Friday — small
+  weekend-vibe element (a coffee cup with "TGIF" or a sunny
+  view out the window).
+- **Characters:** Gopher, mid-double-take at the screen.
+- **EMBED — terminal screenshot in panel:** real-looking
+  terminal output:
+  ```
+  $ aws s3 cp s3://staging-data/customers.csv ./
+  An error occurred (AccessDenied) when calling the GetObject
+  operation: User: alice is not authorized to perform:
+  s3:GetObject on resource: "arn:aws:s3:::staging-data/customers.csv"
+  ```
+- **Gopher speech balloon:** "Wait — `customers.csv`? I literally
+  just need to *look* at it."
+- **Mood:** Mild outrage, dead-pan. Universal "every developer's
+  Friday" energy.
 
 ---
 
-## PANEL 2 — "The old workflow"
+## PANEL 2 — "The Slack message"
 
-- **Setting:** Split panel — Gopher's screen on the left,
-  Tux's monitor on the right (different rooms, connected by a
-  Slack window stretched across both).
-- **Characters:** Gopher (typing), Tux (sleeping at desk, "ZZZ"
-  bubble over head; it's late in Tux's timezone).
-- **On-screen Slack message (from Gopher):** "@admins — can
-  someone grant me read access to the staging data bucket?"
-- **Caption strip at bottom:** "2:13 PM"
-- **Mood:** Subdued. Gopher looks tired of this dance. Tux is
-  literally asleep.
+- **Setting:** Split panel. Gopher's screen (left) is open to
+  Slack; on the right, we see Tux's home through a window — Tux
+  is on a couch with a mug, in a knitted sweater. Sunday vibes.
+  A small "BBQ" graphic or grill is visible behind Tux.
+- **Characters:** Gopher (mid-shrug, typing one-handed), Tux
+  (about to take a sip, glaring at the laptop on the coffee
+  table).
+- **EMBED — Slack screenshot in the comic:**
+  ```
+  alice  ·  Sun 2:13 PM
+  @admins — can someone grant me access to the
+  customer-data-staging-prod-eu-west-2 bucket? read-only,
+  for a few hours. I'm trying to debug the sync job 🙏
+  ```
+- **Tux speech balloon (to the air, deeply grumpy):**
+  "It's *Sunday*."
+- **Mood:** Grumpy weekend energy from Tux; cheerful clueless
+  energy from Gopher.
 
 ---
 
-## PANEL 3 — "Two hours later"
+## PANEL 3 — "Two hours later, the absurdity sets in"
 
-- **Setting:** Same as panel 2 but the clock now says 4:14 PM.
-  Gopher's plant is slightly wilted (visual time-passing gag).
-- **Characters:** Gopher (slumped over keyboard), Tux (just
-  waking up, coffee in hand).
-- **Tux speech balloon (Slack):** "Wait, which bucket exactly?
-  Is this for the sync job?"
-- **Gopher speech balloon (small, defeated):** "...yes"
-- **Mood:** Resignation. The classic "we have to redo this
-  every Tuesday" energy.
+- **Setting:** Gopher's screen, now showing the Slack thread
+  with more context. The wall clock says 4:14 PM. Gopher's
+  coffee is now cold (visible "🧊" / cold steam vs the warm
+  steam in panel 1).
+- **Characters:** Gopher (slumped, head in paws), nobody else
+  visible — but a chat reply bubble from Tux appears on
+  screen.
+- **EMBED — Slack screenshot in the comic:**
+  ```
+  Tux  ·  4:11 PM
+  he says he'll look at it after lunch
+  ```
+- **Gopher speech balloon (full grump, big text):**
+  "WHAT DO YOU MEAN HE'LL LOOK AFTER LUNCH —
+  IT'S JUST THE *NAME* OF A BUCKET."
+- **Caption strip at the bottom:**
+  "(it's read-only)"
+- **Mood:** Peak frustration humor. The panel that gets
+  retweeted on its own.
 
 ---
 

@@ -27,6 +27,30 @@ Parameters:
       Must be globally unique. Convention: `iam-jit-state-<account-id>`.
       No default — every deploy must set this.
 
+  ReservedConcurrency:
+    Type: Number
+    Default: 100
+    MinValue: 1
+    MaxValue: 1000
+    Description: |
+      Maximum concurrent Lambda invocations for the iam-jit
+      function. Capping protects the rest of the AWS account
+      from a CI burst exhausting all 1000 default concurrent
+      executions. Set to ~10% of the AWS account quota; raise
+      for high-volume deployments.
+
+  ProvisionedConcurrency:
+    Type: Number
+    Default: 0
+    MinValue: 0
+    MaxValue: 100
+    Description: |
+      Number of pre-warmed Lambda instances to eliminate cold
+      starts on the hot path (/api/v1/score and /api/v1/users/me).
+      Each costs ~$2/mo at idle. Recommended: 5 for launch (kills
+      cold-start latency for the first 5 concurrent requests after
+      a quiet period). Set to 0 to disable (default for dev).
+
   ProvisionerRoleArns:
     Type: CommaDelimitedList
     Default: "arn:aws:iam::000000000000:role/iam-jit-provisioner-placeholder"
@@ -575,6 +599,7 @@ Parameters:
 Conditions:
   UsesAnthropic: !Equals [!Ref LLMBackend, anthropic]
   UsesBedrock: !Equals [!Ref LLMBackend, bedrock]
+  HasProvisionedConcurrency: !Not [!Equals [!Ref ProvisionedConcurrency, 0]]
   HasAnthropicSecret: !And [!Condition UsesAnthropic, !Not [!Equals [!Ref AnthropicApiKeySecret, ""]]]
   AuthLocal: !Equals [!Ref AuthMode, local]
   AuthAwsIam: !Equals [!Ref AuthMode, aws_iam]
@@ -739,6 +764,12 @@ Globals:
         # claim-release closures only enforce within a single
         # instance — multi-instance redeliveries re-mint tokens.
         IAM_JIT_PROCESSED_EVENTS_TABLE: !Ref ProcessedEventsTable
+        # Per-customer monthly LLM-narrative budget. Without this,
+        # a single Pro customer in CI burst can rack up $thousands/
+        # month in Bedrock charges against a $99 subscription.
+        # Default caps: Pro=1500, Team=15000, Enterprise=unlimited.
+        # Override per tier via IAM_JIT_LLM_BUDGET_<TIER>.
+        IAM_JIT_LLM_BUDGET_TABLE: !Ref LLMBudgetTable
         # Floor params — surface them to the runtime so the admin
         # PATCH validator can refuse loosen-below-floor attempts and
         # the GET endpoint can show "locked by deploy" indicators.
@@ -1012,6 +1043,30 @@ Resources:
         - Key: managed-by
           Value: iam-jit
 
+  LLMBudgetTable:
+    Type: AWS::DynamoDB::Table
+    DeletionPolicy: Delete
+    UpdateReplacePolicy: Delete
+    Properties:
+      TableName: !Sub "iam-jit-llm-budget-${AWS::StackName}"
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - AttributeName: customer_id
+          AttributeType: S
+        - AttributeName: year_month
+          AttributeType: S
+      KeySchema:
+        - AttributeName: customer_id
+          KeyType: HASH
+        - AttributeName: year_month
+          KeyType: RANGE
+      TimeToLiveSpecification:
+        AttributeName: ttl_at
+        Enabled: true
+      Tags:
+        - Key: managed-by
+          Value: iam-jit
+
   RequestsTable:
     Type: AWS::DynamoDB::Table
     DeletionPolicy: Retain
@@ -1109,6 +1164,7 @@ Resources:
                   - !GetAtt BansTable.Arn
                   - !GetAtt SessionRevocationTable.Arn
                   - !GetAtt ProcessedEventsTable.Arn
+                  - !GetAtt LLMBudgetTable.Arn
               - !If
                   - AuthLocal
                   - Effect: Allow
@@ -1233,6 +1289,24 @@ Resources:
       Role: !GetAtt ApiLambdaRole.Arn
       CodeUri: ../../src/
       Handler: iam_jit.lambda_handler.handler
+      # ReservedConcurrentExecutions caps the max concurrent
+      # Lambda invocations for this function. Override per
+      # deployment via the parameter. Defaults to AWS's
+      # account-level pool (no reservation), which is fine for
+      # launch traffic but risks one function (e.g. iam-jit)
+      # eating the whole account's concurrency budget during a
+      # CI burst.
+      ReservedConcurrentExecutions: !Ref ReservedConcurrency
+      # AutoPublishAlias + ProvisionedConcurrencyConfig
+      # eliminates the cold-start tax on the first request after
+      # a quiet period (~500-800ms each, painful for /score
+      # users). 5 provisioned instances cost ~$10/mo. Override
+      # ProvisionedConcurrency=0 in cost-sensitive dev stacks.
+      AutoPublishAlias: live
+      ProvisionedConcurrencyConfig: !If
+        - HasProvisionedConcurrency
+        - ProvisionedConcurrentExecutions: !Ref ProvisionedConcurrency
+        - !Ref AWS::NoValue
       LoggingConfig:
         LogGroup: !Ref IAMJitLogGroup
       FunctionUrlConfig:

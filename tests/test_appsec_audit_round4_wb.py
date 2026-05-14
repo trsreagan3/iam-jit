@@ -739,35 +739,48 @@ def test_finding_stripe_release_race_double_mint_on_partial_failure() -> None:
 
         tokens.put = partial_failure_put  # type: ignore[method-assign]
 
-        # First delivery: claim succeeds, put writes, then raises.
-        # ROUND-4 REGRESSION FIX: dispatch_event no longer releases
-        # the claim on a generic exception — only on the narrowly-
-        # typed `HandlerPreWriteError`. The bare RuntimeError here
-        # is treated as "side effect may have committed; retain
-        # claim; operator confirms and manually releases."
-        with pytest.raises(RuntimeError):
+        # ROUND-5 SEMANTIC FLIP: handle_checkout_session_completed
+        # now converts any `tokens_store.put` exception into
+        # `HandlerPreWriteError` and releases the claim. This
+        # closes the round-5 HIGH (paid-customer-lockout on
+        # pre-write put failure) at the cost of accepting a
+        # specific double-mint shape: when `put` SUCCEEDED before
+        # raising, the retry will run again and mint a SECOND
+        # token. Trade-off chosen because:
+        #
+        #   - "customer paid + never got token" is silent and
+        #     requires manual operator intervention to recover.
+        #   - "customer got two tokens" is visible in the tokens
+        #     table and admin can revoke the duplicate.
+        #
+        # This pinned test documents the accepted shape. The
+        # admin "release-claim" UI is the post-launch follow-up
+        # for cases where the operator needs to manually
+        # reconcile.
+        from iam_jit.stripe_webhook import HandlerPreWriteError
+
+        with pytest.raises(HandlerPreWriteError):
             dispatch_event(
                 event, tokens_store=tokens, processed_events_store=processed,
             )
 
-        # The store has the token from the first attempt's commit.
+        # The store committed the first token (the put succeeded
+        # before raising).
         first_attempt_tokens = tokens.list_for_user("pay@example.com")
-        assert len(first_attempt_tokens) == 1, (
-            "Partial-failure simulation didn't commit a token; test "
-            "premise is broken."
-        )
+        assert len(first_attempt_tokens) == 1
 
-        # Stripe retries. Claim was RETAINED → retry short-circuits
-        # as duplicate. No second token is minted.
+        # Stripe retries. Claim was RELEASED → retry runs → mints
+        # a SECOND token. Documented accepted shape per the
+        # trade-off above.
         result = dispatch_event(
             event, tokens_store=tokens, processed_events_store=processed,
         )
-        assert result.get("duplicate") is True
+        assert result.get("handled") is True
         final_tokens = tokens.list_for_user("pay@example.com")
-        assert len(final_tokens) == 1, (
-            "expected exactly one token (no double-mint after "
-            "partial-success regression fix); got "
-            f"{len(final_tokens)}"
+        assert len(final_tokens) == 2, (
+            "expected accepted double-mint on the SUCCEEDED-THEN-"
+            "RAISED partial-failure case (post-round-5 trade-off); "
+            f"got {len(final_tokens)}"
         )
     finally:
         if saved is None:

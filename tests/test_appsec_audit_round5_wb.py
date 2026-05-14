@@ -263,39 +263,96 @@ def test_finding_handler_pre_write_error_dead_code() -> None:
         the explicit operator-tool to release a stuck claim with
         an audit-trail reason.
     """
+    # CLOSED: HandlerPreWriteError is now raised when the
+    # durable-write call (`tokens_store.put`) fails before commit.
+    # Dispatch's narrow-release semantics treat that as "claim
+    # should be released so Stripe can retry." A transient DDB
+    # throttle on the first attempt no longer leaves the customer
+    # permanently locked out.
     from iam_jit import stripe_webhook
 
-    # Verify the mechanism exists.
     assert hasattr(stripe_webhook, "HandlerPreWriteError")
 
-    # Walk the module source for any `raise HandlerPreWriteError`
-    # — there should be none today. A `raise` in the body (not in a
-    # comment) is detected as a leading-whitespace `raise` token.
     module_src = inspect.getsource(stripe_webhook)
     raise_lines = [
         ln for ln in module_src.splitlines()
         if "raise HandlerPreWriteError" in ln
         and not ln.lstrip().startswith("#")
     ]
-    assert len(raise_lines) == 0, (
-        f"HandlerPreWriteError now has {len(raise_lines)} raise "
-        "site(s) — the round-5 HIGH closure is in progress; "
-        "flip this test."
+    assert len(raise_lines) >= 1, (
+        "expected at least one `raise HandlerPreWriteError` in "
+        "stripe_webhook (the round-5 closure)"
     )
 
-    # Cross-check the specific places we'd expect raises if the fix
-    # landed: the no-email and no-tier soft-fail returns in
-    # handle_checkout_session_completed.
-    handler_src = inspect.getsource(stripe_webhook.handle_checkout_session_completed)
-    assert 'return None' in handler_src or 'return\n' in handler_src
-    # And there's no exception-bridging guard around tokens_store.put.
-    assert "tokens_store.put(record)" in handler_src
-    # The put call is NOT wrapped in try/except.
-    put_idx = handler_src.index("tokens_store.put(record)")
-    nearby = handler_src[max(0, put_idx - 200):put_idx + 100]
-    assert "try:" not in nearby or "except" not in nearby, (
-        "tokens_store.put is now wrapped — partial closure; review."
+    # Functional check: simulate tokens_store.put failing on the
+    # first call. Dispatch releases the claim; retry mints the
+    # token successfully.
+    from iam_jit.stripe_webhook import (
+        InMemoryProcessedEventsStore,
+        dispatch_event,
     )
+    from iam_jit.api_tokens_store import (
+        APITokenRecord,
+        InMemoryAPITokenStore,
+    )
+
+    saved_pricing = os.environ.get("STRIPE_PRICE_ID_TO_TIER")
+    try:
+        os.environ["STRIPE_PRICE_ID_TO_TIER"] = '{"price_pro":"pro"}'
+        tokens = InMemoryAPITokenStore()
+        processed = InMemoryProcessedEventsStore()
+        event = {
+            "id": "evt_pre_write_throttle",
+            "type": "checkout.session.completed",
+            "data": {
+                "object": {
+                    "customer_email": "paid@example.com",
+                    "line_items": {"data": [{"price": {"id": "price_pro"}}]},
+                }
+            },
+        }
+
+        # First put raises (simulating DDB throttle pre-commit).
+        real_put = tokens.put
+        call_count = {"n": 0}
+
+        def flaky_put(record: APITokenRecord) -> None:
+            call_count["n"] += 1
+            if call_count["n"] == 1:
+                raise RuntimeError(
+                    "simulated ProvisionedThroughputExceededException"
+                )
+            real_put(record)
+
+        tokens.put = flaky_put  # type: ignore[method-assign]
+
+        # First delivery raises HandlerPreWriteError → dispatch
+        # releases the claim.
+        import pytest as _pytest
+        with _pytest.raises(stripe_webhook.HandlerPreWriteError):
+            dispatch_event(
+                event,
+                tokens_store=tokens,
+                processed_events_store=processed,
+            )
+
+        # Second delivery (Stripe retry) finds claim released and
+        # mints normally.
+        result = dispatch_event(
+            event,
+            tokens_store=tokens,
+            processed_events_store=processed,
+        )
+        assert result.get("handled") is True
+        minted = tokens.list_for_user("paid@example.com")
+        assert len(minted) == 1, (
+            f"expected one token after retry; got {len(minted)}"
+        )
+    finally:
+        if saved_pricing is None:
+            os.environ.pop("STRIPE_PRICE_ID_TO_TIER", None)
+        else:
+            os.environ["STRIPE_PRICE_ID_TO_TIER"] = saved_pricing
 
 
 # ---------------------------------------------------------------------------

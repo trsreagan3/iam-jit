@@ -92,13 +92,22 @@ iam-risk-score infrastructure/iam/policy.json --offline --format sarif > iam.sar
 
 The 1–10 numeric score is **fully deterministic** in every tier. Same input → same score, every time. The deterministic engine runs ~30 calibrated rules covering service sensitivity, action breadth, resource scope, destructive verbs, access-type mismatch, PassRole escalation, NotAction/NotResource tricks, and grant-duration amplification.
 
-| Tier | Price | Quota | What you get |
-|---|---|---|---|
-| Free | $0 | 100 req/mo by IP | 1–10 score, factors, suggestions. Deterministic-only. Public API. |
-| Indie | $19/mo | 5K req/mo | + per-API-key auth, no rate-limit on per-key |
-| Pro | $99/mo | 50K req/mo | + **LLM narrative** (Claude Opus 4.7) — a plain-English explanation of the score for human reviewers |
-| Team | $499/mo | 500K req/mo | + admin context API, Slack notifications, weekly digest |
-| Enterprise | $2K+/mo | unlimited | + SOC 2 evidence export, dedicated calibration, SLA |
+| Tier | Price | Score quota | LLM-narrated scores | What you get |
+|---|---|---|---|---|
+| Free | $0 | 100/mo by IP | 0 | 1–10 score, factors, suggestions. Deterministic-only. Public API. |
+| Indie | $19/mo | 5K/mo | 0 | + per-API-key auth, no per-key rate-limit. Deterministic-only. |
+| Pro | $99/mo | 50K/mo | 1,500/mo | + **Claude Sonnet 4.6 narrative** on the first 1,500 scores. Past the cap: deterministic-only. |
+| Team | $499/mo | 500K/mo | 2,500/mo | + **Claude Opus 4.7 narrative** (deeper analysis), admin context API, Slack notifications, weekly digest. |
+| Enterprise | $2K+/mo | unlimited | unlimited Opus | + SOC 2 evidence export, dedicated calibration, SLA, custom budget |
+
+**Why the LLM is capped per tier:** the deterministic score is free
+to compute; the LLM narrative is real Bedrock compute (Sonnet $3/M
+input + $15/M output, Opus 5× more). Capping narratives per tier
+keeps the unit economics honest. Past the cap, deterministic-only
+continues — the safety contract holds because the 1-10 score never
+depends on the LLM. Team gets Opus quality on a tighter monthly
+cap; Pro gets Sonnet on a more generous cap. Both reflect the
+underlying compute cost per call.
 
 **Why this split is honest:** the LLM cannot lower the deterministic score. By explicit safety contract — verified by the `test_score_matches_calibration_corpus` regression test — the optional LLM only contributes narrative + extra suggestions. **A fully-compromised LLM cannot hallucinate a request into auto-approval.** That means the free tier is safety-equivalent to the paid tier; you only pay for the explanation, never the verdict.
 

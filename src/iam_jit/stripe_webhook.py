@@ -252,7 +252,18 @@ def handle_checkout_session_completed(
         created_at=issued.created_at,
         label=issued.label,
     )
-    tokens_store.put(record)
+    # HANDLER-PRE-WRITE-ERROR-DEAD-CODE (round 5 WB HIGH) closure:
+    # if the token store write fails BEFORE it commits, raise
+    # HandlerPreWriteError so dispatch_event releases the claim
+    # and Stripe's retry can re-attempt. Without this, a transient
+    # DDB throttle on the FIRST attempt left the claim durable +
+    # the customer's paid subscription never produced a token.
+    try:
+        tokens_store.put(record)
+    except Exception as e:
+        raise HandlerPreWriteError(
+            f"tokens_store.put failed before commit: {type(e).__name__}: {e}"
+        ) from e
 
     customer_id = obj.get("customer")
     subscription_id = obj.get("subscription")
