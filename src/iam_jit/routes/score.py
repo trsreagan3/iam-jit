@@ -558,7 +558,12 @@ def score_policy(
     return JSONResponse(
         content=body.model_dump(),
         headers={
-            "Cache-Control": "public, max-age=3600, s-maxage=86400",
+            # BB4-01 closure: tightened from `public, max-age=3600,
+            # s-maxage=86400` to `private, max-age=300,
+            # must-revalidate`. Prior shape risked CDN/proxy caching
+            # of stale scores past adversarial-loop rule updates,
+            # eroding the calibration discipline that IS the moat.
+            "Cache-Control": "private, max-age=300, must-revalidate",
             "Vary": "Authorization",
             "X-Policy-Fingerprint": fingerprint,
         },

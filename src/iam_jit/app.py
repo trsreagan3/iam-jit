@@ -368,6 +368,33 @@ def create_app(
                 )
         return await call_next(request)
 
+    @app.middleware("http")
+    async def _enforce_auth_cache_control(request, call_next):
+        """BB4-02 closure: auth'd PII responses get
+        `Cache-Control: no-store, private` so browser bfcache /
+        corporate proxies don't stale-serve one user's response to
+        another. /api/v1/score is exempt — it sets its own
+        scoring-safe Cache-Control (BB4-01 closure). Static
+        assets, /healthz, and the docs UI get no override.
+        """
+        response = await call_next(request)
+        path = request.url.path
+        # Exempt paths that have their own caching contract.
+        if path.startswith("/api/v1/score"):
+            return response
+        if path.startswith("/static/") or path == "/healthz":
+            return response
+        if path in {"/openapi.json", "/docs", "/redoc", "/docs/oauth2-redirect"}:
+            return response
+        # Only add the header on auth'd routes (any /api/v1/* or
+        # any non-public web route). Don't trample if the route
+        # already set one.
+        if "cache-control" in {k.lower() for k in response.headers.keys()}:
+            return response
+        if path.startswith("/api/v1/") or path.startswith("/admin"):
+            response.headers["Cache-Control"] = "no-store, private"
+        return response
+
     # Security headers applied to every response. Defenses:
     #   - X-Frame-Options: DENY — prevents the iam-jit UI from being
     #     embedded in an attacker-controlled iframe (clickjacking).

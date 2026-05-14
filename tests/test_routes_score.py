@@ -406,16 +406,24 @@ def test_score_default_free_tier_rate_is_30(
 
 def test_score_response_carries_cache_headers(client: TestClient) -> None:
     """The score is deterministic per policy_fingerprint — the
-    response must carry Cache-Control + X-Policy-Fingerprint so a
-    CDN in front of the Function URL can dedupe identical-content
-    requests (the big CI-rerun cost saving)."""
+    response carries Cache-Control + X-Policy-Fingerprint so
+    downstream consumers can dedupe identical-content requests.
+
+    BB4-01 closure tightened from `public, max-age=3600,
+    s-maxage=86400` to `private, max-age=300, must-revalidate`.
+    CDN dedup still works via explicit fingerprint matching;
+    must-revalidate forces revalidation past 5 minutes so an
+    adversarial-loop rule update propagates within minutes, not
+    a day."""
     r = client.post("/api/v1/score", json=_low_risk_payload())
     assert r.status_code == 200, r.text
 
     cache_control = r.headers.get("cache-control", "")
-    assert "public" in cache_control
-    assert "max-age=3600" in cache_control
-    assert "s-maxage=86400" in cache_control
+    assert "private" in cache_control
+    assert "max-age=300" in cache_control
+    assert "must-revalidate" in cache_control
+    assert "public" not in cache_control
+    assert "s-maxage" not in cache_control
 
     # Vary on Authorization so paid LLM narratives can't leak into
     # anonymous cache entries

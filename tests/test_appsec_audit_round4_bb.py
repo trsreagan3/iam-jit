@@ -184,20 +184,17 @@ def test_bb4_01_score_endpoint_cache_control_too_aggressive(app):
     `Cache-Control: no-cache` + `ETag: <fingerprint>` and rely on
     conditional GETs returning 304. The fingerprint should incorporate
     a rule-engine version so a rule update invalidates the ETag."""
+    # BB4-01 CLOSED: tightened to private + 5-min freshness + must-
+    # revalidate. CDN / proxy can no longer serve stale scores past
+    # an adversarial-loop rule update.
     dev = _client_as(app, "email:dev@example.com")
     r = dev.post("/api/v1/score", json=_score_body())
     assert r.status_code == 200
     cc = r.headers.get("cache-control", "")
-    # Currently broken: ships with public + s-maxage.
-    assert "public" in cc, (
-        f"expected current vulnerable shape (`public` directive); "
-        f"got cache-control={cc!r}. If `public` is now `private`, the "
-        f"fix has landed — flip the assertion."
-    )
-    assert "s-maxage" in cc, (
-        f"expected current vulnerable shape (`s-maxage`); got cache-"
-        f"control={cc!r}. If `s-maxage` is gone, the fix has landed."
-    )
+    assert "public" not in cc
+    assert "s-maxage" not in cc
+    assert "private" in cc
+    assert "must-revalidate" in cc
 
 
 # ---------------------------------------------------------------------
@@ -226,20 +223,23 @@ def test_bb4_02_auth_pii_endpoints_missing_cache_control(app):
     private` on every authenticated response. Whitelist `/api/v1/score`
     (cacheable per BB4-01 fix). Static assets get a separate caching
     policy."""
+    # BB4-02 CLOSED: middleware now emits `Cache-Control: no-store,
+    # private` on auth'd responses by default. /api/v1/score has
+    # its own (private + max-age=300 + must-revalidate); /healthz
+    # + /static/* + /docs are exempt.
     dev = _client_as(app, "email:dev@example.com")
     r = dev.get("/api/v1/users/me")
     assert r.status_code == 200
-    # Currently broken: no Cache-Control header.
-    assert "cache-control" not in {k.lower() for k in r.headers.keys()}, (
-        f"BB4-02 fix has landed — /api/v1/users/me now emits "
-        f"Cache-Control. Flip the assertion to assert "
-        f"'no-store' is present."
+    cc = r.headers.get("cache-control", "")
+    assert "no-store" in cc and "private" in cc, (
+        f"expected `no-store, private` on /api/v1/users/me; got: {cc!r}"
     )
 
     r2 = dev.get("/api/v1/tokens")
     assert r2.status_code == 200
-    assert "cache-control" not in {k.lower() for k in r2.headers.keys()}, (
-        f"BB4-02 fix landed on /api/v1/tokens — flip the assertion."
+    cc2 = r2.headers.get("cache-control", "")
+    assert "no-store" in cc2 and "private" in cc2, (
+        f"expected `no-store, private` on /api/v1/tokens; got: {cc2!r}"
     )
 
 
