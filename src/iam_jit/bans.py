@@ -114,10 +114,24 @@ class FilesystemBanStore:
 
     def get(self, user_id: str) -> Ban | None:
         with self._lock:
+            path = self._path_for(user_id)
             try:
-                data = json.loads(self._path_for(user_id).read_text())
-            except (FileNotFoundError, json.JSONDecodeError):
+                data = json.loads(path.read_text())
+            except FileNotFoundError:
                 return None
+            except json.JSONDecodeError as e:
+                # BAN-STORE-CORRUPT-FILE-UNBAN closure: a corrupt
+                # JSON file on disk MUST NOT silently un-ban the
+                # user. The audit log is the durable record of who
+                # is banned; if the on-disk copy is truncated or
+                # tampered with, fail closed (raise) so the caller
+                # (middleware) treats it as a store outage and
+                # responds 503 instead of 200.
+                logger.error(
+                    "FilesystemBanStore: corrupt ban file for %s at %s: %s",
+                    user_id, path, e,
+                )
+                raise
             return Ban(
                 user_id=data["user_id"],
                 banned_at=data["banned_at"],

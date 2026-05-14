@@ -181,11 +181,30 @@ def current_user(
     except HTTPException:
         raise
     except Exception:
-        # Fail-open if the bans store itself is broken — better to keep
-        # serving legitimate users than to lock the system.
+        # BAN-CHECK-FAIL-OPEN closure: fail CLOSED on bans-store
+        # failures. The previous fail-open path silently re-enabled
+        # banned users during a transient outage — the detection log
+        # still fired, but enforcement did not. Now: 503 so the
+        # operator's alarm catches it and a real investigation
+        # starts. Override via `IAM_JIT_BANS_FAIL_OPEN=1` for the
+        # rare case where availability is preferred over enforcement.
         import logging
+        import os as _os
 
-        logging.getLogger("iam_jit.bans").exception("ban check in middleware failed")
+        logging.getLogger("iam_jit.bans").exception(
+            "ban check in middleware failed for user_id=%s", user.id
+        )
+        if (_os.environ.get("IAM_JIT_BANS_FAIL_OPEN") or "").lower() not in {
+            "1", "true", "yes"
+        }:
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail=(
+                    "ban-status check is temporarily unavailable; please "
+                    "retry. Operators: set IAM_JIT_BANS_FAIL_OPEN=1 to "
+                    "prefer availability over enforcement."
+                ),
+            )
     return user
 
 

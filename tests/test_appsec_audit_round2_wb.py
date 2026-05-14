@@ -363,35 +363,27 @@ def test_finding_bootstrap_claim_toctou_race() -> None:
 
 
 def test_finding_middleware_ban_check_fails_open_on_store_error() -> None:
-    """Finding: BAN-CHECK-FAIL-OPEN.
+    """Finding: BAN-CHECK-FAIL-OPEN — CLOSED.
 
-    CWE-755 (Improper Handling of Exceptional Conditions) /
-    CWE-636 (Not Failing Securely).
-    Severity: MED.
-    Location: src/iam_jit/middleware.py:181-188 (`current_user`).
+    CWE-755 / CWE-636. Severity: MED.
 
-    `current_user` wraps the ban-check in a `try / except Exception`
-    that logs-and-continues. The comment explicitly states this is
-    intentional fail-open — but ban enforcement is the
-    prompt-injection control's enforcement leg. Any store-internal
-    error (DynamoDB throttling, JSON corruption on the filesystem
-    store, S3 5xx during a transient outage, a single malformed
-    `.json` file in `IAM_JIT_BANS_DIR`) silently re-enables a
-    banned user's access for the duration of the outage. The
-    detection log (`security.prompt_injection`) still fires;
-    enforcement does not.
-
-    Fix sketch: if `is_banned` raises, treat as "ban unknown" and
-    refuse the request with 503 (transient) rather than 200. The
-    operator's alarm on 503 will trigger a real investigation; the
-    current fail-open path is invisible to monitoring.
+    Closure: `current_user` now raises 503 when the bans store
+    raises. Operators can override with `IAM_JIT_BANS_FAIL_OPEN=1`
+    when they explicitly prefer availability over enforcement —
+    that opt-out is loud and intentional.
     """
     from iam_jit import middleware
 
     src = inspect.getsource(middleware.current_user)
-    # Current behavior is fail-open in the broken-store branch.
-    assert "Fail-open" in src
-    assert "except Exception:" in src
+    assert "BAN-CHECK-FAIL-OPEN" in src, (
+        "ban-check closure comment removed — investigate"
+    )
+    assert "503" in src, (
+        "ban-check should raise 503 on store failure; got source: " + src[:200]
+    )
+    assert "IAM_JIT_BANS_FAIL_OPEN" in src, (
+        "operator opt-out env var missing"
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -448,9 +440,15 @@ def test_finding_filesystem_ban_store_treats_corrupt_file_as_not_banned(
     path = store._path_for(user_id)
     path.write_text("{ not valid json")
 
-    # FilesystemBanStore now reports the user as NOT banned — silent
-    # unban.
-    assert not store.is_banned(user_id)
+    # BAN-STORE-CORRUPT-FILE-UNBAN closure: corrupt JSON now raises
+    # rather than silently returning None (which would un-ban the
+    # user). The middleware turns the raise into a 503, surfacing the
+    # state-corruption to operators instead of letting the banned
+    # user back in.
+    import json as _json
+    import pytest as _pytest
+    with _pytest.raises(_json.JSONDecodeError):
+        store.is_banned(user_id)
 
 
 # ---------------------------------------------------------------------------
