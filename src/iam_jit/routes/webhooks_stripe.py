@@ -128,6 +128,13 @@ async def stripe_webhook_endpoint(
     # raw token from the dashboard / DDB out-of-band.
     mailer = _ses_mailer if (os.environ.get("STRIPE_KEY_DELIVERY_FROM_EMAIL") or "").strip() else None
 
+    processed_events_store = getattr(
+        request.app.state, "processed_events_store", None,
+    )
+
     return stripe_webhook.dispatch_event(
-        event, tokens_store=tokens_store, mailer=mailer,
+        event,
+        tokens_store=tokens_store,
+        mailer=mailer,
+        processed_events_store=processed_events_store,
     )

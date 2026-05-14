@@ -37,7 +37,7 @@ import json
 import logging
 import os
 import time
-from typing import Any, Callable
+from typing import Any, Callable, Protocol
 
 from .api_tokens_store import APITokenNotFound, APITokenRecord, APITokenStore
 from .auth import issue_api_token
@@ -329,20 +329,79 @@ def handle_subscription_deleted(
 # ---- Dispatch -------------------------------------------------------
 
 
+class ProcessedEventsStore(Protocol):
+    """Idempotency store for Stripe event IDs.
+
+    Stripe's delivery model includes retries on non-2xx, dashboard-
+    initiated replays, and at-least-once semantics under network
+    faults. Without an idempotency check, `checkout.session.completed`
+    redeliveries mint duplicate API tokens; the customer ends up with
+    N valid tokens for one paid subscription. Audit finding
+    STRIPE-NO-IDEMPOTENCY (round 1 WB).
+    """
+
+    def has_processed(self, event_id: str) -> bool: ...
+    def mark_processed(self, event_id: str, result_summary: str = "") -> None: ...
+
+
+class InMemoryProcessedEventsStore:
+    """Process-local idempotency cache.
+
+    Sufficient for single-instance deployments. Multi-Lambda
+    deployments should use a DynamoDB-backed implementation with
+    `PutItem(ConditionExpression='attribute_not_exists(event_id)')`
+    as the atomic claim, plus a TTL of 30 days (Stripe retries for up
+    to 3 days; 30 is a generous safety margin).
+    """
+
+    def __init__(self) -> None:
+        self._seen: dict[str, str] = {}
+
+    def has_processed(self, event_id: str) -> bool:
+        return event_id in self._seen
+
+    def mark_processed(self, event_id: str, result_summary: str = "") -> None:
+        self._seen[event_id] = result_summary
+
+
 def dispatch_event(
     event: dict[str, Any],
     *,
     tokens_store: APITokenStore,
     mailer: Callable[[str, str, str], None] | None = None,
+    processed_events_store: ProcessedEventsStore | None = None,
 ) -> dict[str, Any]:
     """Dispatch a verified Stripe event to the right handler.
+
+    Idempotent: if `event["id"]` has been processed before (via
+    `processed_events_store`), the handler is skipped and a duplicate-
+    detected response is returned. The caller still returns HTTP 200
+    so Stripe doesn't retry. Audit finding STRIPE-NO-IDEMPOTENCY.
 
     Returns a dict suitable for the webhook HTTP response body. Caller
     should always return HTTP 200 — Stripe retries with exponential
     backoff on non-2xx, and we don't want retries for events we
     chose not to handle (unknown event types, unmapped price IDs, etc.).
     """
+    event_id = event.get("id") or ""
     event_type = event.get("type") or "unknown"
+
+    # Idempotency short-circuit. The store is optional — callers that
+    # explicitly opt out (e.g. unit tests verifying handler semantics
+    # in isolation) pass None and get the legacy non-idempotent path.
+    if processed_events_store is not None and event_id:
+        if processed_events_store.has_processed(event_id):
+            logger.info(
+                "Stripe event %s (%s) already processed — short-circuiting",
+                event_id, event_type,
+            )
+            return {
+                "handled": False,
+                "event_type": event_type,
+                "duplicate": True,
+                "event_id": event_id,
+            }
+
     handlers = {
         "checkout.session.completed": lambda: handle_checkout_session_completed(
             event, tokens_store=tokens_store, mailer=mailer,
@@ -354,9 +413,28 @@ def dispatch_event(
     handler = handlers.get(event_type)
     if handler is None:
         logger.info("Stripe event type %r not handled — skipping", event_type)
+        # Don't mark unknown events as processed — if the type-handler
+        # gets added later, a redelivery should run normally.
         return {"handled": False, "event_type": event_type}
 
     result = handler()
+
+    # Record successful processing so a redelivery is a no-op.
+    if processed_events_store is not None and event_id:
+        try:
+            processed_events_store.mark_processed(
+                event_id,
+                result_summary=f"{event_type}:handled",
+            )
+        except Exception as e:
+            # The handler already succeeded; logging failure to mark
+            # processed is non-fatal but worth surfacing because the
+            # next redelivery would re-run.
+            logger.warning(
+                "Stripe event %s handled but mark_processed failed: %s",
+                event_id, e,
+            )
+
     return {"handled": True, "event_type": event_type, "result": _serialize(result)}
 
 

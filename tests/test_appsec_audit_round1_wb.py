@@ -328,11 +328,16 @@ def test_finding_stripe_webhook_not_idempotent() -> None:
     short-circuit on hit. Stripe recommends this pattern explicitly:
     https://stripe.com/docs/webhooks#handle-duplicate-events
     """
-    from iam_jit.stripe_webhook import handle_checkout_session_completed
+    # FIXED — dispatch_event now accepts a processed_events_store
+    # parameter. A redelivery of the same event id short-circuits
+    # without re-running the handler.
+    from iam_jit.stripe_webhook import (
+        dispatch_event, InMemoryProcessedEventsStore,
+    )
     from iam_jit.api_tokens_store import InMemoryAPITokenStore
 
-    store = InMemoryAPITokenStore()
-    # Same event id used twice.
+    tokens = InMemoryAPITokenStore()
+    processed = InMemoryProcessedEventsStore()
     event = {
         "id": "evt_replay_test",
         "type": "checkout.session.completed",
@@ -347,14 +352,17 @@ def test_finding_stripe_webhook_not_idempotent() -> None:
     }
     os.environ["STRIPE_PRICE_ID_TO_TIER"] = '{"price_indie":"indie"}'
 
-    a = handle_checkout_session_completed(event, tokens_store=store)
-    b = handle_checkout_session_completed(event, tokens_store=store)
+    # First call runs the handler.
+    r1 = dispatch_event(event, tokens_store=tokens, processed_events_store=processed)
+    # Second call (same event id) short-circuits.
+    r2 = dispatch_event(event, tokens_store=tokens, processed_events_store=processed)
 
-    # Both calls returned issued tokens — proving the lack of dedupe.
-    assert a is not None and b is not None
-    assert a.raw_token != b.raw_token
-    # And both rows are in the store.
-    assert len(store.list_for_user("buyer@example.com")) == 2
+    assert r1.get("handled") is True
+    assert r2.get("duplicate") is True
+    # Only ONE token row exists — the second call did not mint.
+    assert len(tokens.list_for_user("buyer@example.com")) == 1, (
+        "Stripe redelivery minted a duplicate token — idempotency broken."
+    )
 
 
 # ---------------------------------------------------------------------------
