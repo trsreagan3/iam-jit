@@ -134,7 +134,7 @@ def update_user(
     user_id: str,
     payload: dict[str, Any],
     user_store: Annotated[UserStore, Depends(get_user_store)],
-    _: Annotated[User, Depends(require_admin)],
+    acting_admin: Annotated[User, Depends(require_admin)],
 ) -> dict[str, Any]:
     try:
         existing = user_store.get(user_id)
@@ -145,9 +145,74 @@ def update_user(
     enabled = payload.get("enabled")
     display_name = payload.get("display_name")
     notes = payload.get("notes")
+
+    # BB2-10 closure (round 2 MED, escalated round 5 HIGH after
+    # being open 3+ rounds): refuse self-demotion AND refuse the
+    # last-admin transition. A single CSRF click or admin lapse
+    # used to be able to drop the deployment into a no-admin
+    # state that required data-plane recovery.
+    had_admin_role = "admin" in existing.roles
+    target_after_roles = tuple(roles) if roles is not None else existing.roles
+    will_have_admin_role = "admin" in target_after_roles
+    will_be_disabled = (
+        not bool(enabled) if enabled is not None else not existing.enabled
+    )
+
+    losing_admin = had_admin_role and (
+        not will_have_admin_role or will_be_disabled
+    )
+
+    if losing_admin and existing.id == acting_admin.id:
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                "refusing self-demotion: an admin cannot remove their own "
+                "admin role or disable their own account. Ask another "
+                "admin to make this change."
+            ),
+        )
+
+    if losing_admin:
+        # Count remaining admins after the change. If zero, refuse.
+        try:
+            all_users = list(user_store.list(include_disabled=False))
+        except Exception:
+            # Store doesn't support listing — fail closed for
+            # safety. The self-demote guard above already covers
+            # the most common no-admin-left scenario (admin
+            # demoting themselves); this remaining branch protects
+            # the cross-admin demotion case. If the store can't
+            # enumerate, an admin can still recover by promoting
+            # another user first.
+            raise HTTPException(
+                status_code=409,
+                detail=(
+                    "cannot verify admin count via the user store; "
+                    "refusing role-removal as a safety measure. "
+                    "Promote another user to admin first, then "
+                    "retry."
+                ),
+            )
+        remaining_admins = [
+            u
+            for u in all_users
+            if "admin" in u.roles
+            and u.enabled
+            and u.id != existing.id
+        ]
+        if not remaining_admins:
+            raise HTTPException(
+                status_code=409,
+                detail=(
+                    "refusing last-admin demotion: at least one enabled "
+                    "admin must remain. Promote another user to admin "
+                    "first, then retry."
+                ),
+            )
+
     updated = User(
         id=existing.id,
-        roles=tuple(roles) if roles is not None else existing.roles,
+        roles=target_after_roles,
         enabled=bool(enabled) if enabled is not None else existing.enabled,
         display_name=display_name if display_name is not None else existing.display_name,
         notes=notes if notes is not None else existing.notes,

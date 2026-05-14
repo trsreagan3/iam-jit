@@ -57,17 +57,64 @@ def get_accounts_store(request: Request) -> Any:
 
 
 def _get_secret() -> str:
+    """Return the magic-link / session signing secret.
+
+    Round-5 WB CRIT closure: the prior implementation returned a
+    hard-coded, repo-committed string when
+    `IAM_JIT_DEV_INSECURE_SECRET=1` was set and the real secret
+    was missing. That string is public on GitHub. An attacker who
+    sees `IAM_JIT_DEV_INSECURE_SECRET=1` in a deployed prod env
+    (the `.env.example` bleed scenario the round-4 audit explicitly
+    modeled) could forge magic-links + session cookies + API
+    tokens. Full account takeover.
+
+    Closure: the dev-insecure fallback now gates on
+    `auth.is_dev_insecure_active()` — same single-source-of-truth
+    helper that gates CSRF + Secure-cookie + magic-link delivery.
+    Refuses to fall back in Lambda environments unless the operator
+    explicitly opted in via `IAM_JIT_ALLOW_DEV_INSECURE_IN_LAMBDA=1`.
+    And the dev fallback no longer uses a fixed string — it derives
+    a per-process random secret on first use, so even with the dev
+    flag on in Lambda (explicit opt-in), an attacker reading the
+    repo doesn't already have your signing key.
+    """
     secret = os.environ.get("IAM_JIT_MAGIC_LINK_SECRET")
-    if not secret:
-        # Allow local-dev fallback ONLY if the dev override flag is set;
-        # production must always have the real secret configured.
-        if os.environ.get("IAM_JIT_DEV_INSECURE_SECRET") == "1":
-            return "dev-only-insecure-secret-do-not-use-in-prod"
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail="IAM_JIT_MAGIC_LINK_SECRET is not configured",
-        )
-    return secret
+    if secret:
+        return secret
+
+    from .auth import is_dev_insecure_active
+
+    if is_dev_insecure_active():
+        return _ephemeral_dev_secret()
+
+    raise HTTPException(
+        status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+        detail="IAM_JIT_MAGIC_LINK_SECRET is not configured",
+    )
+
+
+_EPHEMERAL_DEV_SECRET: str | None = None
+
+
+def _ephemeral_dev_secret() -> str:
+    """Generate (once per process) a random dev secret. Replaces
+    the previous repo-committed fallback string. Sessions / magic
+    links signed with this secret survive the lifetime of the
+    Python process and no longer — adequate for local-dev / tests
+    where the operator explicitly opted into dev-insecure mode."""
+    global _EPHEMERAL_DEV_SECRET
+    if _EPHEMERAL_DEV_SECRET is None:
+        import secrets as _secrets
+
+        _EPHEMERAL_DEV_SECRET = _secrets.token_hex(32)
+    return _EPHEMERAL_DEV_SECRET
+
+
+def _reset_ephemeral_dev_secret_for_tests() -> None:
+    """Test helper — clear the cached per-process dev secret so
+    each test starts fresh."""
+    global _EPHEMERAL_DEV_SECRET
+    _EPHEMERAL_DEV_SECRET = None
 
 
 def _identify_user(request: Request, user_store: UserStore) -> User:

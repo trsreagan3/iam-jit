@@ -647,33 +647,43 @@ def test_bb2_10_admin_can_self_demote(app_rw):
         `admin` AND the actor is the last admin;
       - alternatively, refuse self-edits entirely and require
         another admin to demote (forcing a two-eyes path)."""
+    # BB2-10 / round-5-WB HIGH — CLOSED.
+    # PATCH refuses self-demotion AND refuses the last-admin
+    # demotion of any admin (not just self). Recovery requires
+    # promoting another user to admin first.
     app = app_rw
     admin = _client_as(app, "email:admin@example.com")
-    # Demote ANOTHER admin (admin2) first to make admin1 the only admin.
-    r = admin.patch(
-        "/api/v1/users/email:admin2@example.com",
-        json={"roles": ["requester"]},
-    )
-    assert r.status_code == 200, r.text
-    # Now demote ourself — last admin in the system.
+
+    # Self-demote attempt — refused 409.
     r = admin.patch(
         "/api/v1/users/email:admin@example.com",
         json={"roles": ["requester"]},
     )
-    # Currently broken: no last-admin protection.
-    assert r.status_code == 200, r.text
-    # Confirm: nobody is admin anymore.
-    listing = admin.get("/api/v1/users").json()
-    # The patch worked but the listing endpoint requires admin —
-    # we should now be locked out.
-    # (Either we lose admin immediately on this request, or we still
-    # have it because role check is per-request cached. Test both
-    # by hitting the listing again with a fresh client.)
-    admin2 = _client_as(app, "email:admin@example.com")
-    listing2 = admin2.get("/api/v1/users")
-    assert listing2.status_code == 403, (
-        f"expected post-demote admin endpoint to 403; got "
-        f"{listing2.status_code}: {listing2.text}"
+    assert r.status_code == 409, (
+        f"expected self-demote refused; got {r.status_code}: {r.text}"
+    )
+    assert "self-demotion" in r.text.lower()
+
+    # Demoting ANOTHER admin (admin2) when admin and admin2 are the
+    # only two admins is allowed — but if it would leave zero admins,
+    # the last-admin guard refuses.
+    r2 = admin.patch(
+        "/api/v1/users/email:admin2@example.com",
+        json={"roles": ["requester"]},
+    )
+    # admin2 was admin → after this, admin remains as sole admin (OK)
+    assert r2.status_code == 200, r2.text
+
+    # Now: attempt to demote admin (the actor) — both self-demote
+    # AND last-admin guards fire. The self-demote rule wins first.
+    r3 = admin.patch(
+        "/api/v1/users/email:admin@example.com",
+        json={"roles": ["requester"]},
+    )
+    assert r3.status_code == 409
+    assert (
+        "self-demotion" in r3.text.lower()
+        or "last-admin" in r3.text.lower()
     )
 
 
