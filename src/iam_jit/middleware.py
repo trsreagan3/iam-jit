@@ -159,10 +159,12 @@ def _identify_user(request: Request, user_store: UserStore) -> User:
     except HTTPException:
         raise
     except Exception:
-        # Fail closed on revocation-store outage (same posture as
-        # the BAN-CHECK-FAIL-OPEN closure). Override with
-        # IAM_JIT_SESSION_REVOCATION_FAIL_OPEN=1 if availability
-        # outranks revocation enforcement for the deployment.
+        # SESSION-REVOCATION-FAIL-OPEN-SILENT-BYPASS (round 4 WB
+        # HIGH) closure: matches the BANS_FAIL_OPEN treatment.
+        # Default 503; the `IAM_JIT_SESSION_REVOCATION_FAIL_OPEN=1`
+        # opt-out is preserved BUT every bypass invocation now
+        # emits CRITICAL so any SIEM / alarm catches the silent
+        # enforcement skip.
         import logging as _logging
         import os as _os
 
@@ -171,7 +173,15 @@ def _identify_user(request: Request, user_store: UserStore) -> User:
         )
         if (
             _os.environ.get("IAM_JIT_SESSION_REVOCATION_FAIL_OPEN") or ""
-        ).lower() not in {"1", "true", "yes"}:
+        ).lower() in {"1", "true", "yes"}:
+            _logging.getLogger("iam_jit.session_revocation").critical(
+                "SESSION_REVOCATION_FAIL_OPEN bypass invoked for "
+                "user_id=%s — store error, but revocation enforcement "
+                "was skipped because IAM_JIT_SESSION_REVOCATION_FAIL_"
+                "OPEN=1 is set. ALARM ON THIS LOG.",
+                user_id,
+            )
+        else:
             raise HTTPException(
                 status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
                 detail=(

@@ -146,28 +146,73 @@ def test_finding_stripe_claim_before_process_loses_event_on_handler_crash() -> N
             processed_events_store=processed,
         )
 
-    # Restore put for the retry so we know the *only* thing blocking
-    # token issuance is the persisted claim.
+    # Restore put for the retry.
     tokens.put = real_put  # type: ignore[attr-defined,method-assign]
 
-    # CLOSED: dispatch_event releases the claim on handler failure
-    # so the retry can actually run. The customer paid + the retry
-    # mints the token. No more permanent loss on transient crash.
+    # ROUND-4 REGRESSION FIX: the original round-3 release-on-any-
+    # exception closure was too broad — it could release after the
+    # durable write succeeded, causing the retry to double-mint.
+    # The tightened semantics: only release on the narrowly-typed
+    # `HandlerPreWriteError`. A generic RuntimeError (like the
+    # simulated DDB throttle here) does NOT release. The retry sees
+    # "duplicate" and short-circuits. The operator confirms via the
+    # tokens store + manually releases if a re-run is desired.
+    #
+    # This is conservative-by-default: better to lose a retry than
+    # to double-mint on a partial-success crash.
     result = dispatch_event(
         event,
         tokens_store=tokens,
         processed_events_store=processed,
     )
-    assert result.get("duplicate") is not True, (
-        "Expected the retry to run normally (not short-circuit as "
-        "duplicate) now that the claim is released on handler crash. "
-        "Got: " + repr(result)
+    assert result.get("duplicate") is True, (
+        "Expected the retry to short-circuit as duplicate (claim "
+        "retained on generic exception). Operator must verify and "
+        "manually release if a re-run is desired. Got: " + repr(result)
     )
     minted = tokens.list_for_user("paid@example.com")
-    assert len(minted) == 1, (
-        "Expected exactly one token minted on the retry (claim was "
-        "released after the first attempt's crash). "
-        f"Got {len(minted)} tokens. "
+    assert len(minted) == 0, (
+        f"Expected ZERO tokens minted: handler crashed pre-write "
+        f"AND retry was no-op'd by the retained claim. Got "
+        f"{len(minted)} tokens. The recovery path is operator-"
+        f"initiated release, not auto-retry."
+    )
+
+    # Verify the opt-in pre-write path: handlers that raise the
+    # specific `HandlerPreWriteError` DO get the claim released
+    # and the retry mints normally.
+    from iam_jit.stripe_webhook import HandlerPreWriteError
+
+    processed2 = type(processed)()  # fresh store
+    tokens2 = type(tokens)()
+    event2 = dict(event, id="evt_explicit_pre_write_error")
+
+    raise_count = {"n": 0}
+
+    def crashing_put_with_signal(record):  # type: ignore[no-untyped-def]
+        raise_count["n"] += 1
+        if raise_count["n"] == 1:
+            raise HandlerPreWriteError("explicit pre-write failure")
+        tokens2._store[record.token_hash] = record  # type: ignore[attr-defined]
+
+    tokens2.put = crashing_put_with_signal  # type: ignore[attr-defined,method-assign]
+    with pytest.raises(HandlerPreWriteError):
+        dispatch_event(
+            event2,
+            tokens_store=tokens2,
+            processed_events_store=processed2,
+        )
+    # Restore put so retry succeeds
+    tokens2_real_put = type(tokens2).put.__get__(tokens2)
+    tokens2.put = tokens2_real_put  # type: ignore[attr-defined,method-assign]
+    result2 = dispatch_event(
+        event2,
+        tokens_store=tokens2,
+        processed_events_store=processed2,
+    )
+    assert result2.get("duplicate") is not True, (
+        "HandlerPreWriteError path should release the claim and "
+        "let the retry run. Got: " + repr(result2)
     )
 
 

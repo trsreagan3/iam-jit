@@ -12,7 +12,6 @@ from __future__ import annotations
 
 import os
 import threading
-from collections import defaultdict
 from typing import Annotated, Any
 
 from fastapi import APIRouter, Depends, HTTPException, Request, status
@@ -26,14 +25,22 @@ router = APIRouter(prefix="/api/v1/tokens", tags=["tokens"])
 
 _DEFAULT_TOKEN_CAP_PER_USER = 50
 
-# TOKENS-PER-USER-CAP-TOCTOU (round 3 WB MED) closure: per-user
-# lock so the read-then-write window in `create_token` is atomic
-# within a single Lambda instance. Multi-instance Lambdas can
-# still leak up to N tokens per cap if N instances race the same
-# user concurrently — that's a follow-up that would need a DDB
-# atomic-counter approach. For launch traffic this is acceptable
-# (the cap is a soft cap; small over-shoots aren't load-bearing).
-_PER_USER_MINT_LOCKS: dict[str, threading.Lock] = defaultdict(threading.Lock)
+# TOKENS-PER-USER-CAP-TOCTOU (round 3 WB MED) closure + round-4
+# regression fix: previous version used a defaulting dict that
+# was NOT atomic on the cold path — two concurrent first-mints
+# for the same user_id could each construct their own Lock and
+# bypass mutual exclusion. Now uses `dict.setdefault` which IS
+# atomic under the CPython GIL, so two racers get the SAME Lock
+# object on first-create.
+_PER_USER_MINT_LOCKS_REGISTRY: dict[str, threading.Lock] = {}
+
+
+def _per_user_lock(user_id: str) -> threading.Lock:
+    """Return the canonical per-user Lock for `user_id`, creating
+    it idempotently."""
+    fresh = threading.Lock()
+    existing = _PER_USER_MINT_LOCKS_REGISTRY.setdefault(user_id, fresh)
+    return existing
 
 
 def _per_user_cap() -> int:
@@ -74,7 +81,7 @@ def create_token(
     # per-user lock to close the round-3 WB TOCTOU race (within a
     # single Lambda instance).
     cap = _per_user_cap()
-    with _PER_USER_MINT_LOCKS[user.id]:
+    with _per_user_lock(user.id):
         existing = store.list_for_user(user.id)
         if len(existing) >= cap:
             raise HTTPException(

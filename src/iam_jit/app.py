@@ -128,30 +128,22 @@ def _build_api_tokens_store_from_env() -> APITokenStore:
 
 def _build_processed_events_store_from_env():
     """Idempotency store for Stripe webhook events. Closes audit
-    finding STRIPE-NO-IDEMPOTENCY (round 1 WB).
+    finding STRIPE-NO-IDEMPOTENCY (round 1 WB) AND the round-4
+    STRIPE-DDB-PROCESSED-EVENTS-UNWIRED HIGH (the DDB-backed
+    implementation now actually ships).
 
-    Local-dev fallback: in-memory cache. Production should set
-    `IAM_JIT_PROCESSED_EVENTS_TABLE` to a DynamoDB table with
-    TTL on a 30-day window (Stripe retries for ~3 days; 30 is a
-    safety margin against dashboard-initiated replays).
+    Production: set `IAM_JIT_PROCESSED_EVENTS_TABLE` to a DynamoDB
+    table with TTL on `expires_at`. Local-dev / single-instance:
+    in-memory cache (default).
     """
-    from .stripe_webhook import InMemoryProcessedEventsStore
-
-    table = os.environ.get("IAM_JIT_PROCESSED_EVENTS_TABLE")
-    if not table:
-        return InMemoryProcessedEventsStore()
-    # DynamoDB-backed implementation isn't shipped yet; in-memory
-    # works for single-instance Lambda. Multi-instance prod
-    # deployments should ship a DDB store and wire it here.
-    # For now we accept the in-memory store as the default even
-    # when the env var is set, with a log warning.
-    import logging as _logging
-    _logging.getLogger(__name__).warning(
-        "IAM_JIT_PROCESSED_EVENTS_TABLE is set but DynamoDB-backed "
-        "ProcessedEventsStore is not yet implemented; falling back "
-        "to in-memory (single-instance only). Multi-instance Stripe "
-        "idempotency will need a DDB-backed store before launch."
+    from .stripe_webhook import (
+        DynamoDBProcessedEventsStore,
+        InMemoryProcessedEventsStore,
     )
+
+    table = (os.environ.get("IAM_JIT_PROCESSED_EVENTS_TABLE") or "").strip()
+    if table:
+        return DynamoDBProcessedEventsStore(table)
     return InMemoryProcessedEventsStore()
 
 

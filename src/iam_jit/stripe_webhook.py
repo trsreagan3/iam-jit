@@ -54,6 +54,18 @@ class InvalidStripeSignature(Exception):
     """Raised when the Stripe-Signature header fails verification."""
 
 
+class HandlerPreWriteError(Exception):
+    """Raised by a handler BEFORE it commits any durable side
+    effect (token mint, mailer call, DDB write). `dispatch_event`
+    catches this specific class and releases the claim so a
+    retry can re-run the handler.
+
+    Any OTHER exception bubbles up with the claim INTACT — Stripe
+    retries will short-circuit as duplicate. Operator must verify
+    no side effect committed and release the claim manually if a
+    retry is desired."""
+
+
 @dataclasses.dataclass(frozen=True)
 class IssuedTokenResult:
     """Returned by `handle_checkout_session_completed` when a key is minted."""
@@ -392,6 +404,70 @@ class InMemoryProcessedEventsStore:
         self._seen.pop(event_id, None)
 
 
+class DynamoDBProcessedEventsStore:
+    """DynamoDB-backed ProcessedEventsStore — atomic across Lambda
+    instances.
+
+    Closes STRIPE-DDB-PROCESSED-EVENTS-UNWIRED (round 4 WB HIGH):
+    the round-2/3 idempotency closures assumed a multi-instance
+    store but the app.py factory was silently falling back to
+    in-memory.
+
+    Schema:
+      table: <IAM_JIT_PROCESSED_EVENTS_TABLE>
+      partition key: `event_id` (String)
+      TTL attribute: `expires_at` (Number — unix seconds; the table
+        MUST have TimeToLiveSpecification enabled on `expires_at`)
+
+    `claim` uses `PutItem(ConditionExpression="attribute_not_exists(
+    event_id)")` for atomic check-and-set across instances.
+    `release` is a `DeleteItem` so retries can re-run the handler
+    after a transient failure.
+    """
+
+    # Stripe retries for ~3 days; 30d is a safety margin against
+    # dashboard-initiated replays and operator backfills.
+    _TTL_SECONDS = 30 * 24 * 60 * 60
+
+    def __init__(self, table_name: str, *, client: object | None = None) -> None:
+        self._table_name = table_name
+        if client is not None:
+            self._client = client
+        else:
+            import boto3
+
+            self._client = boto3.client("dynamodb")
+
+    def claim(self, event_id: str) -> bool:
+        expires_at = int(time.time() + self._TTL_SECONDS)
+        try:
+            self._client.put_item(
+                TableName=self._table_name,
+                Item={
+                    "event_id": {"S": event_id},
+                    "expires_at": {"N": str(expires_at)},
+                },
+                ConditionExpression="attribute_not_exists(event_id)",
+            )
+            return True
+        except Exception as e:
+            if "ConditionalCheckFailedException" in str(e) or (
+                hasattr(e, "response")
+                and getattr(e, "response", {})
+                .get("Error", {})
+                .get("Code")
+                == "ConditionalCheckFailedException"
+            ):
+                return False
+            raise
+
+    def release(self, event_id: str) -> None:
+        self._client.delete_item(
+            TableName=self._table_name,
+            Key={"event_id": {"S": event_id}},
+        )
+
+
 def dispatch_event(
     event: dict[str, Any],
     *,
@@ -471,29 +547,48 @@ def dispatch_event(
         logger.info("Stripe event type %r not handled — skipping", event_type)
         return {"handled": False}
 
-    # Atomic claim() above already reserved this event_id in the store.
-    # The claim is RELEASED on handler crash so Stripe's retry can
-    # actually run — STRIPE-CLAIM-BEFORE-PROCESS (round-3 WB) closure.
-    # Without the release, a transient handler failure (DDB throttle,
-    # SES error, Lambda timeout) leaves the event permanently claimed
-    # and the customer's paid subscription never produces a token.
+    # Atomic claim() above already reserved this event_id in the
+    # store. STRIPE-CLAIM-BEFORE-PROCESS (round-3) closure + round-4
+    # regression fix: release ONLY on a narrowly-typed pre-side-
+    # effect exception so we never double-mint on a partial-success
+    # handler. Handlers raise HandlerPreWriteError before they
+    # commit any durable side effect; ANY other exception bubbles
+    # up with the claim INTACT and Stripe retries see "duplicate"
+    # (operator manually releases if they confirmed no write
+    # happened). Conservative default: a crash mid-handler should
+    # NOT replay automatically — better to lose a retry than to
+    # double-charge / double-mint.
     try:
         result = handler()
-    except Exception:
+    except HandlerPreWriteError:
         if processed_events_store is not None and event_id:
             try:
                 processed_events_store.release(event_id)
                 logger.warning(
-                    "Stripe handler failed; released claim on event %s so "
-                    "the retry can re-attempt",
+                    "Stripe handler raised pre-write; released claim "
+                    "on event %s so the retry can re-attempt",
                     event_id,
                 )
             except Exception:
                 logger.exception(
-                    "failed to release claim on event %s after handler crash; "
-                    "Stripe retries will short-circuit as duplicate",
+                    "failed to release claim on event %s after "
+                    "pre-write failure",
                     event_id,
                 )
+        raise
+    except Exception:
+        # Unknown error during/after the handler's side effect.
+        # Do NOT release — the side effect may have committed.
+        # Stripe retries will short-circuit as duplicate; operator
+        # confirms via the tokens store and manually releases if
+        # the handler truly crashed pre-write.
+        logger.exception(
+            "Stripe handler raised after claim on event %s; claim "
+            "RETAINED to avoid double-mint on retry. Operator: "
+            "verify no token was minted; release the claim manually "
+            "via the admin path if a re-run is desired.",
+            event_id,
+        )
         raise
 
     return {"handled": True, "event_type": event_type, "result": _serialize(result)}

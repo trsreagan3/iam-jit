@@ -733,6 +733,12 @@ Globals:
         # revoked entries auto-evict at the cookie's natural
         # expiry.
         IAM_JIT_SESSION_REVOCATION_TABLE: !Ref SessionRevocationTable
+        # Stripe webhook idempotency across Lambda instances —
+        # STRIPE-DDB-PROCESSED-EVENTS-UNWIRED (round 4 WB) closure.
+        # Without this, the round-2 atomic-claim and round-3
+        # claim-release closures only enforce within a single
+        # instance — multi-instance redeliveries re-mint tokens.
+        IAM_JIT_PROCESSED_EVENTS_TABLE: !Ref ProcessedEventsTable
         # Floor params — surface them to the runtime so the admin
         # PATCH validator can refuse loosen-below-floor attempts and
         # the GET endpoint can show "locked by deploy" indicators.
@@ -986,6 +992,26 @@ Resources:
         - Key: managed-by
           Value: iam-jit
 
+  ProcessedEventsTable:
+    Type: AWS::DynamoDB::Table
+    DeletionPolicy: Delete
+    UpdateReplacePolicy: Delete
+    Properties:
+      TableName: !Sub "iam-jit-stripe-processed-events-${AWS::StackName}"
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - AttributeName: event_id
+          AttributeType: S
+      KeySchema:
+        - AttributeName: event_id
+          KeyType: HASH
+      TimeToLiveSpecification:
+        AttributeName: expires_at
+        Enabled: true
+      Tags:
+        - Key: managed-by
+          Value: iam-jit
+
   RequestsTable:
     Type: AWS::DynamoDB::Table
     DeletionPolicy: Retain
@@ -1082,6 +1108,7 @@ Resources:
                   - !GetAtt MagicLinkNoncesTable.Arn
                   - !GetAtt BansTable.Arn
                   - !GetAtt SessionRevocationTable.Arn
+                  - !GetAtt ProcessedEventsTable.Arn
               - !If
                   - AuthLocal
                   - Effect: Allow
