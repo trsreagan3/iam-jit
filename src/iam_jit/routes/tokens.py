@@ -11,6 +11,8 @@ exactly once at creation; subsequent reads return only the metadata.
 from __future__ import annotations
 
 import os
+import threading
+from collections import defaultdict
 from typing import Annotated, Any
 
 from fastapi import APIRouter, Depends, HTTPException, Request, status
@@ -23,6 +25,15 @@ from ..users_store import User
 router = APIRouter(prefix="/api/v1/tokens", tags=["tokens"])
 
 _DEFAULT_TOKEN_CAP_PER_USER = 50
+
+# TOKENS-PER-USER-CAP-TOCTOU (round 3 WB MED) closure: per-user
+# lock so the read-then-write window in `create_token` is atomic
+# within a single Lambda instance. Multi-instance Lambdas can
+# still leak up to N tokens per cap if N instances race the same
+# user concurrently — that's a follow-up that would need a DDB
+# atomic-counter approach. For launch traffic this is acceptable
+# (the cap is a soft cap; small over-shoots aren't load-bearing).
+_PER_USER_MINT_LOCKS: dict[str, threading.Lock] = defaultdict(threading.Lock)
 
 
 def _per_user_cap() -> int:
@@ -59,26 +70,30 @@ def create_token(
 
     # BB2-05 closure: per-user soft cap on active tokens. Operators
     # who genuinely need more can raise IAM_JIT_API_TOKEN_CAP_PER_USER.
+    # The list_for_user → cap check → put sequence is wrapped in a
+    # per-user lock to close the round-3 WB TOCTOU race (within a
+    # single Lambda instance).
     cap = _per_user_cap()
-    existing = store.list_for_user(user.id)
-    if len(existing) >= cap:
-        raise HTTPException(
-            status_code=status.HTTP_429_TOO_MANY_REQUESTS,
-            detail=(
-                f"per-user token cap reached ({cap}). Revoke unused "
-                f"tokens via DELETE /api/v1/tokens/{{hash}}, or raise "
-                f"IAM_JIT_API_TOKEN_CAP_PER_USER."
-            ),
-        )
+    with _PER_USER_MINT_LOCKS[user.id]:
+        existing = store.list_for_user(user.id)
+        if len(existing) >= cap:
+            raise HTTPException(
+                status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+                detail=(
+                    f"per-user token cap reached ({cap}). Revoke unused "
+                    f"tokens via DELETE /api/v1/tokens/{{hash}}, or raise "
+                    f"IAM_JIT_API_TOKEN_CAP_PER_USER."
+                ),
+            )
 
-    issued = issue_api_token(user.id, label=label)
-    record = APITokenRecord(
-        token_hash=issued.hash,
-        user_id=issued.user_id,
-        created_at=issued.created_at,
-        label=issued.label,
-    )
-    store.put(record)
+        issued = issue_api_token(user.id, label=label)
+        record = APITokenRecord(
+            token_hash=issued.hash,
+            user_id=issued.user_id,
+            created_at=issued.created_at,
+            label=issued.label,
+        )
+        store.put(record)
     return {
         "token": issued.raw,  # shown once
         "token_hash": issued.hash,

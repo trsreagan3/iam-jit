@@ -216,29 +216,38 @@ def current_user(
         raise
     except Exception:
         # BAN-CHECK-FAIL-OPEN closure: fail CLOSED on bans-store
-        # failures. The previous fail-open path silently re-enabled
-        # banned users during a transient outage — the detection log
-        # still fired, but enforcement did not. Now: 503 so the
-        # operator's alarm catches it and a real investigation
-        # starts. Override via `IAM_JIT_BANS_FAIL_OPEN=1` for the
-        # rare case where availability is preferred over enforcement.
+        # failures. Default behavior is 503. Operator opt-out via
+        # `IAM_JIT_BANS_FAIL_OPEN=1` — but BANS-DDB-FAIL-OPEN-VIA-
+        # ENV (round 3 WB MED) closure requires the opt-out to be
+        # *loud*: every fail-open invocation emits a CRITICAL log
+        # line so any SIEM / alarm picks it up. The default-quiet
+        # fail-open posture is what made the round-1 finding
+        # invisible to monitoring; this preserves the operator
+        # escape hatch but kills the silent-bypass shape.
         import logging
         import os as _os
 
         logging.getLogger("iam_jit.bans").exception(
             "ban check in middleware failed for user_id=%s", user.id
         )
-        if (_os.environ.get("IAM_JIT_BANS_FAIL_OPEN") or "").lower() not in {
+        if (_os.environ.get("IAM_JIT_BANS_FAIL_OPEN") or "").lower() in {
             "1", "true", "yes"
         }:
-            raise HTTPException(
-                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-                detail=(
-                    "ban-status check is temporarily unavailable; please "
-                    "retry. Operators: set IAM_JIT_BANS_FAIL_OPEN=1 to "
-                    "prefer availability over enforcement."
-                ),
+            logging.getLogger("iam_jit.bans").critical(
+                "BANS_FAIL_OPEN bypass invoked for user_id=%s — store "
+                "error, but enforcement was skipped because "
+                "IAM_JIT_BANS_FAIL_OPEN=1 is set. ALARM ON THIS LOG.",
+                user.id,
             )
+            return user
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail=(
+                "ban-status check is temporarily unavailable; please "
+                "retry. Operators: set IAM_JIT_BANS_FAIL_OPEN=1 to "
+                "prefer availability over enforcement."
+            ),
+        )
     return user
 
 

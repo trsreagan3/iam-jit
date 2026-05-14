@@ -57,24 +57,38 @@ class DeliveryDecision:
 def decide() -> DeliveryDecision:
     """Pick the delivery channel for the current deployment.
 
-    Precedence (BB-12 closure):
-      1. `IAM_JIT_DEV_INSECURE_SECRET=1` → in_response (local-dev).
-      2. `IAM_JIT_SES_SENDER` set → email (the prod path).
-      3. `IAM_JIT_ALLOW_LOG_CHANNEL=1` → log (opt-in; small teams that
-         genuinely want CloudWatch as the delivery channel). The log
-         line only contains the token *fingerprint*, NOT the full URL
-         — so a CloudWatch reader cannot construct a working link
-         without also possessing the magic-link secret.
-      4. Otherwise → none. Refuse to issue rather than leak. The
-         caller (routes/auth) returns 503 so the operator gets a
-         loud, actionable signal at launch time.
+    Precedence (MAGIC-LINK-DEV-INSECURE-OUTRANKS-SES round-3 closure):
+      1. **SES email** wins over EVERYTHING when configured. If a
+         deployment has `IAM_JIT_SES_SENDER` set, that's the
+         production posture and we refuse to fall back to channels
+         that leak the link (in_response, log) — even if a
+         developer's `.env` template accidentally inherited
+         `IAM_JIT_DEV_INSECURE_SECRET=1` into prod.
+      2. `IAM_JIT_DEV_INSECURE_SECRET=1` → in_response (local-dev
+         convenience). Refused when running in Lambda
+         (`AWS_LAMBDA_FUNCTION_NAME` set) unless the operator also
+         sets `IAM_JIT_ALLOW_DEV_INSECURE_IN_LAMBDA=1` — closes
+         the DEV-INSECURE-SECRET-MULTI-EFFECT-FOOTGUN finding's
+         delivery leg.
+      3. `IAM_JIT_ALLOW_LOG_CHANNEL=1` → log (opt-in; small teams
+         that genuinely want CloudWatch as the delivery channel).
+         Log line emits only the token *fingerprint*, NOT the full
+         URL — see deliver().
+      4. Otherwise → none. Refuse to issue rather than leak.
     """
-    if os.environ.get("IAM_JIT_DEV_INSECURE_SECRET") == "1":
+    if os.environ.get("IAM_JIT_SES_SENDER", "").strip():
+        return DeliveryDecision(channel="email", show_in_response=False)
+
+    dev_insecure = os.environ.get("IAM_JIT_DEV_INSECURE_SECRET") == "1"
+    in_lambda = bool(os.environ.get("AWS_LAMBDA_FUNCTION_NAME"))
+    allow_dev_in_lambda = (
+        os.environ.get("IAM_JIT_ALLOW_DEV_INSECURE_IN_LAMBDA", "").lower()
+        in {"1", "true", "yes"}
+    )
+    if dev_insecure and (not in_lambda or allow_dev_in_lambda):
         return DeliveryDecision(
             channel="in_response", show_in_response=True
         )
-    if os.environ.get("IAM_JIT_SES_SENDER", "").strip():
-        return DeliveryDecision(channel="email", show_in_response=False)
     if os.environ.get("IAM_JIT_ALLOW_LOG_CHANNEL", "").lower() in {
         "1", "true", "yes"
     }:

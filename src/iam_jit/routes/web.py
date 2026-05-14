@@ -512,7 +512,9 @@ def setup_submit(
 
 
 @router.get("/auth/magic-callback")
-def magic_callback(token: str, return_to: str = "/") -> Response:
+def magic_callback(
+    request: Request, token: str, return_to: str = "/"
+) -> Response:
     try:
         user_id = auth_mod.verify_magic_link(_get_secret(), token)
     except BadSignature:

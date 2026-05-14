@@ -428,16 +428,37 @@ def test_finding_body_size_guard_chunked_transfer_encoding_bypass() -> None:
     `transfer-encoding: chunked` is present without
     Content-Length (or pre-buffer + count bytes).
     """
+    # CLOSED: middleware now also refuses `Transfer-Encoding:
+    # chunked` requests and requires Content-Length on body-bearing
+    # methods.
     from iam_jit import app as app_mod
 
     src = inspect.getsource(app_mod.create_app)
-    # The middleware exists.
     assert "_enforce_max_body_size" in src
-    # It checks Content-Length…
-    assert "content-length" in src
-    # …but does NOT check Transfer-Encoding.
-    assert "transfer-encoding" not in src.lower()
-    assert "chunked" not in src.lower()
+    assert "content-length" in src.lower()
+    assert "transfer-encoding" in src.lower()
+    assert "chunked" in src.lower()
+
+    # Functional check: a chunked POST is refused with 411 before
+    # reaching the route handler.
+    from fastapi.testclient import TestClient
+    from iam_jit import app as _app_mod
+
+    test_app = _app_mod.create_app()
+    with TestClient(test_app, raise_server_exceptions=False) as c:
+        # Force chunked encoding via header. TestClient sends with
+        # Content-Length by default, so we explicitly set the
+        # transfer-encoding header — the middleware refuses
+        # regardless of whether httpx actually streams.
+        r = c.post(
+            "/api/v1/score",
+            content=b'{"policy":{}}',
+            headers={
+                "Transfer-Encoding": "chunked",
+                "Content-Type": "application/json",
+            },
+        )
+        assert r.status_code == 411
 
 
 # ---------------------------------------------------------------------------
@@ -491,12 +512,15 @@ def test_finding_magic_link_dev_insecure_outranks_ses() -> None:
         os.environ["IAM_JIT_SES_SENDER"] = "noreply@iam-jit.com"
         os.environ.pop("IAM_JIT_ALLOW_LOG_CHANNEL", None)
         decision = mld.decide()
-        # Current buggy precedence — dev-insecure wins.
-        assert decision.channel == "in_response", (
-            f"decide() now correctly prefers SES when both flags are "
-            f"set — got channel={decision.channel!r}. Flip this test."
+        # CLOSED: SES now outranks dev-insecure. A leaked
+        # IAM_JIT_DEV_INSECURE_SECRET=1 in a prod deploy with SES
+        # configured can no longer cause the magic link to be
+        # returned in the response body.
+        assert decision.channel == "email", (
+            f"SES should win over dev-insecure when both are set; "
+            f"got channel={decision.channel!r}"
         )
-        assert decision.show_in_response is True
+        assert decision.show_in_response is False
     finally:
         for k, v in saved.items():
             if v is None:

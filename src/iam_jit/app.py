@@ -324,6 +324,25 @@ def create_app(
     async def _enforce_max_body_size(request, call_next):
         from fastapi.responses import JSONResponse
 
+        # BODY-SIZE-GUARD-CHUNKED-BYPASS (round 3 WB MED) closure:
+        # `Transfer-Encoding: chunked` requests omit Content-Length
+        # and previously bypassed this gate. Refuse chunked-encoded
+        # requests here so route handlers don't see unbounded
+        # bodies. Lambda Function URLs and CloudFront both forward
+        # Content-Length on regular POSTs; chunked is unusual for
+        # an API caller and an obvious DoS amplification vector.
+        te = (request.headers.get("transfer-encoding") or "").lower()
+        if "chunked" in te:
+            return JSONResponse(
+                {
+                    "detail": (
+                        "chunked Transfer-Encoding is not supported; "
+                        "send a Content-Length-bounded request body."
+                    )
+                },
+                status_code=411,
+            )
+
         cl = request.headers.get("content-length")
         if cl is not None:
             try:
@@ -336,6 +355,20 @@ def create_app(
                 return JSONResponse(
                     {"detail": "invalid Content-Length header"},
                     status_code=400,
+                )
+        else:
+            # No Content-Length AND no chunked Transfer-Encoding —
+            # this should not happen for a real POST; refuse rather
+            # than process an unbounded body via streaming.
+            if request.method in {"POST", "PUT", "PATCH"}:
+                return JSONResponse(
+                    {
+                        "detail": (
+                            "missing Content-Length on a body-bearing "
+                            "request method."
+                        )
+                    },
+                    status_code=411,
                 )
         return await call_next(request)
 
