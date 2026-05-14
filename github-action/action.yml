@@ -17,13 +17,38 @@ inputs:
       WORST score is used for the pass/fail gate.
     required: true
 
+  preset:
+    description: |
+      Pre-configured gate. Sets `threshold` and `access-type`
+      together so you don't have to think about them. Override any
+      individual field by setting it explicitly.
+
+        - `strict`     — threshold=3, access-type=read-only.
+                        Refuses almost any privilege beyond
+                        read-only. Right for prod IAM,
+                        compliance-tracked accounts, customer-data
+                        roles.
+        - `standard`   — threshold=5, access-type=read-write.
+                        Default — refuses HIGH-tier policies.
+                        Right for the vast majority of CI gates.
+        - `permissive` — threshold=7, access-type=read-write.
+                        Refuses only the most egregious (admin/*,
+                        IAM full, CloudTrail-tamper). Right for
+                        dev/staging where false-positives hurt
+                        more than the rare HIGH slipping through.
+
+      Leave unset (`''`) to use the explicit threshold/access-type
+      inputs without a preset.
+    required: false
+    default: 'standard'
+
   threshold:
     description: |
-      Score threshold for the pass/fail gate. Default is 5
-      (matches iam-jit's default auto-approve floor). Set lower
-      (e.g. 3) for stricter gating.
+      Score threshold for the pass/fail gate (overrides the
+      preset's threshold if both are set). Set lower (e.g. 3) for
+      stricter gating.
     required: false
-    default: '5'
+    default: ''
 
   api-url:
     description: |
@@ -41,9 +66,11 @@ inputs:
     default: ''
 
   access-type:
-    description: '"read-only" or "read-write" — affects scoring'
+    description: |
+      "read-only" or "read-write" — affects scoring (overrides
+      the preset's access-type if both are set).
     required: false
-    default: 'read-write'
+    default: ''
 
   duration-hours:
     description: 'Hypothetical grant duration in hours (default 1)'
@@ -56,6 +83,15 @@ inputs:
       Requires write permissions on issues. Default 'false'.
     required: false
     default: 'false'
+
+  sarif-output:
+    description: |
+      Optional path to write a SARIF 2.1.0 report. When set, the
+      action also writes the report at this path so a follow-up
+      `actions/upload-sarif@v3` step can publish it to GitHub Code
+      Scanning. Example: `iam.sarif`.
+    required: false
+    default: ''
 
 outputs:
   score:
@@ -92,7 +128,33 @@ runs:
         IAM_RISK_SCORE_API_URL: ${{ inputs.api-url }}
         IAM_RISK_SCORE_API_KEY: ${{ inputs.api-key }}
       run: |
-        # Expand glob
+        # ---- Resolve preset → defaults; explicit inputs override ----
+        preset="${{ inputs.preset }}"
+        explicit_threshold="${{ inputs.threshold }}"
+        explicit_access_type="${{ inputs.access-type }}"
+        case "$preset" in
+          strict)
+            preset_threshold=3
+            preset_access_type=read-only
+            ;;
+          standard|"")
+            preset_threshold=5
+            preset_access_type=read-write
+            ;;
+          permissive)
+            preset_threshold=7
+            preset_access_type=read-write
+            ;;
+          *)
+            echo "::error::unknown preset '$preset'. Use one of: strict, standard, permissive."
+            exit 2
+            ;;
+        esac
+        threshold="${explicit_threshold:-$preset_threshold}"
+        access_type="${explicit_access_type:-$preset_access_type}"
+        echo "Preset=$preset  threshold=$threshold  access-type=$access_type"
+
+        # ---- Expand glob ----
         shopt -s nullglob globstar
         files=( ${{ inputs.policy-file }} )
         if [ ${#files[@]} -eq 0 ]; then
@@ -104,30 +166,52 @@ runs:
         worst_tier="low"
         worst_fingerprint=""
         worst_file=""
-        overall_exit=0
 
         offline_flag=""
         if [ -z "${{ inputs.api-url }}" ]; then
           offline_flag="--offline"
         fi
 
+        sarif_out="${{ inputs.sarif-output }}"
+        # Collect per-file SARIF results into a combined report when
+        # sarif_out is set. Each file's run becomes one element in
+        # the top-level runs array.
+        combined_sarif_runs="[]"
+
         for f in "${files[@]}"; do
           echo "::group::Scoring $f"
-          # Capture the JSON output (don't fail on non-zero from CLI;
-          # we use the JSON score for the gate).
+          # JSON output for the gate decision
           result=$(iam-risk-score $offline_flag \
             --format json \
-            --access-type "${{ inputs.access-type }}" \
+            --access-type "$access_type" \
             --duration-hours "${{ inputs.duration-hours }}" \
-            --threshold "${{ inputs.threshold }}" \
+            --threshold "$threshold" \
             "$f" || true)
           echo "$result"
           score=$(echo "$result" | python3 -c "import sys, json; print(json.load(sys.stdin)['score'])")
           tier=$(echo "$result" | python3 -c "import sys, json; print(json.load(sys.stdin)['tier'])")
           fingerprint=$(echo "$result" | python3 -c "import sys, json; print(json.load(sys.stdin)['policy_fingerprint'])")
+
+          # SARIF — only run if the caller asked for it. Avoids the
+          # cost of a second CLI invocation when SARIF isn't used.
+          if [ -n "$sarif_out" ]; then
+            sarif_one=$(iam-risk-score $offline_flag \
+              --format sarif \
+              --access-type "$access_type" \
+              --duration-hours "${{ inputs.duration-hours }}" \
+              --threshold "$threshold" \
+              "$f" || true)
+            combined_sarif_runs=$(python3 -c "
+import json, sys
+existing = json.loads('''$combined_sarif_runs''')
+one = json.loads('''$sarif_one''')
+existing.extend(one.get('runs', []))
+print(json.dumps(existing))
+")
+          fi
           echo "::endgroup::"
 
-          # Emit a GH annotation
+          # GH annotation
           ann_level="notice"
           [ "$tier" = "medium" ] && ann_level="warning"
           [ "$tier" = "high" ] && ann_level="error"
@@ -142,20 +226,36 @@ runs:
           fi
         done
 
+        # Write the combined SARIF file if requested
+        if [ -n "$sarif_out" ]; then
+          python3 -c "
+import json
+runs = json.loads('''$combined_sarif_runs''')
+sarif = {
+    '\$schema': 'https://raw.githubusercontent.com/oasis-tcs/sarif-spec/master/Schemata/sarif-schema-2.1.0.json',
+    'version': '2.1.0',
+    'runs': runs,
+}
+with open('$sarif_out', 'w') as f:
+    json.dump(sarif, f, indent=2)
+print(f'Wrote {len(runs)} run(s) to $sarif_out')
+"
+        fi
+
         echo "score=$worst_score" >> "$GITHUB_OUTPUT"
         echo "tier=$worst_tier" >> "$GITHUB_OUTPUT"
         echo "policy_fingerprint=$worst_fingerprint" >> "$GITHUB_OUTPUT"
         echo "worst_file=$worst_file" >> "$GITHUB_OUTPUT"
 
-        if [ "$worst_score" -ge "${{ inputs.threshold }}" ]; then
+        if [ "$worst_score" -ge "$threshold" ]; then
           echo "would_auto_approve=false" >> "$GITHUB_OUTPUT"
           echo ""
-          echo "::error::Worst score $worst_score (from $worst_file) is at or above threshold ${{ inputs.threshold }}. Review required."
+          echo "::error::Worst score $worst_score (from $worst_file) is at or above threshold $threshold (preset=$preset). Review required."
           exit 1
         else
           echo "would_auto_approve=true" >> "$GITHUB_OUTPUT"
           echo ""
-          echo "✓ All policies scored below threshold ${{ inputs.threshold }} (worst: $worst_score)"
+          echo "✓ All policies scored below threshold $threshold (worst: $worst_score, preset=$preset)"
           exit 0
         fi
 
