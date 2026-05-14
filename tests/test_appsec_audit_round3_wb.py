@@ -706,13 +706,17 @@ def test_finding_magic_link_ip_limiter_peer_only_dos() -> None:
     Fix sketch: extract `network_acl._read_source_ip` to a shared
     helper and call it from this function with the same gating.
     """
+    # CLOSED: _magic_link_client_ip now resolves the real client
+    # via the shared trusted_proxy helper. Behind a trusted
+    # CloudFront/ALB, the limiter keys on the actual end-user IP,
+    # not the edge-PoP. Without trusted-proxy config, it still
+    # falls back to peer.host (the right default for a direct
+    # Function URL deployment).
     from iam_jit.routes import auth as auth_route
 
     src = inspect.getsource(auth_route._magic_link_client_ip)
-    # Current code only reads peer.host; never consults XFF.
-    assert "request.client.host" in src
-    assert "x-forwarded-for" not in src.lower()
-    assert "IAM_JIT_TRUSTED_PROXY_CIDRS" not in src
+    assert "trusted_proxy" in src
+    assert "x-forwarded-for" in src.lower()
 
 
 # ---------------------------------------------------------------------------

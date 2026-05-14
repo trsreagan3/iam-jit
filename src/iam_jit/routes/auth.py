@@ -78,14 +78,31 @@ def _reset_magic_link_ip_limiter_for_tests() -> None:
 
 
 def _magic_link_client_ip(request: Request) -> str:
-    """Same trust posture as score._client_ip — XFF only when peer is
-    a configured trusted proxy. For the magic-link route, source-IP
-    accuracy matters less (we just want a per-IP bucket); we fall back
-    to peer.host directly when no trusted proxy is configured."""
+    """Real client IP for the magic-link per-IP limiter.
+
+    MAGIC-LINK-IP-LIMITER-PEER-ONLY-DOS (round 3 WB LOW) closure:
+    when iam-jit runs behind a trusted proxy (CloudFront, ALB), the
+    peer.host is the proxy's IP and every request through one
+    edge-PoP shares it. The limiter then becomes a per-PoP global
+    cap and one user's burst denies sign-in for everyone else
+    routed through that PoP. Resolve the real client through the
+    shared trusted_proxy helper so each user has their own bucket.
+    """
+    from .. import trusted_proxy
+
     try:
-        return request.client.host if request.client else "unknown"
+        peer = request.client.host if request.client else None
     except Exception:
+        peer = None
+    if not peer:
         return "unknown"
+    xff = ""
+    try:
+        xff = request.headers.get("x-forwarded-for") or ""
+    except Exception:
+        pass
+    resolved = trusted_proxy.real_client_from_xff(peer, xff)
+    return resolved or peer
 
 
 @router.post("/magic-link", status_code=status.HTTP_202_ACCEPTED)
