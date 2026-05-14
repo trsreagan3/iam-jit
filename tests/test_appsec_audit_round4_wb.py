@@ -241,23 +241,18 @@ def test_finding_web_login_client_ip_inline_cidr_parser() -> None:
     `trusted_proxy.real_client_from_xff` call that
     `_magic_link_client_ip` uses.
     """
+    # CLOSED: _login_client_id now delegates to the shared
+    # trusted_proxy.real_client_from_xff helper. All five XFF call
+    # sites now share one source of truth (score, network_acl,
+    # public_url, magic-link route, web login).
     from iam_jit.routes import web as web_mod
 
     src = inspect.getsource(web_mod._login_client_id)
-    # The inline parser + matcher is still present.
-    assert "ip_network" in src
-    assert "ip_address" in src
-    # And the helper that should be used is NOT.
-    assert "trusted_proxy" not in src, (
-        "_login_client_id now calls into iam_jit.trusted_proxy — the "
-        "fix has shipped. Flip this test."
-    )
-    # Specifically: no IPv4-mapped normalization (the round-3 fix
-    # that DID land at every other site that uses trusted_proxy).
-    assert "ipv4_mapped" not in src, (
-        "_login_client_id now normalizes IPv4-mapped IPv6 inline — "
-        "the drift is partly closed. Verify and flip this test."
-    )
+    assert "trusted_proxy" in src
+    assert "real_client_from_xff" in src
+    # No inline parser.
+    assert "ip_network" not in src
+    assert "ip_address" not in src
 
 
 # ---------------------------------------------------------------------------

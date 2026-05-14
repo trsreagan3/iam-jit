@@ -198,62 +198,20 @@ def _normalize_login_email(raw: str) -> str | None:
 def _login_client_id(request: Request) -> str:
     """Identify the calling client for /login rate limiting.
 
-    LOGIN-WEB-XFF-LEFTMOST-RATE-LIMIT-BYPASS closure: this used to
-    take the leftmost XFF token, letting any external caller rotate
-    a fake leading IP per request to defeat the limiter (same shape
-    as round-2 SCORE-XFF-LEFTMOST-TRUSTED at the score endpoint).
-    Now: only trust XFF when the immediate peer is in
-    `IAM_JIT_TRUSTED_PROXY_CIDRS`, and walk right-to-left to skip
-    proxy hops. Otherwise key on the peer.host directly.
+    Delegates to the shared `trusted_proxy.real_client_from_xff`
+    helper — single source of truth shared with
+    `routes/score._client_ip`, `network_acl._read_source_ip`,
+    `public_url._peer_in_trusted_proxy_cidrs`, and
+    `routes/auth._magic_link_client_ip`. Round-4 WB
+    WEB-LOGIN-CLIENT-IP-INLINE-CIDR-PARSER closure.
     """
+    from .. import trusted_proxy
+
     peer = request.client.host if request.client else None
-
-    trusted_cidrs_raw = (
-        os.environ.get("IAM_JIT_TRUSTED_PROXY_CIDRS") or ""
-    ).strip()
-    if trusted_cidrs_raw and peer:
-        import ipaddress as _ipaddress
-
-        try:
-            peer_addr = _ipaddress.ip_address(peer)
-        except ValueError:
-            peer_addr = None
-        trusted_nets: list = []
-        for tok in trusted_cidrs_raw.replace(",", " ").split():
-            tok = tok.strip()
-            if not tok:
-                continue
-            try:
-                trusted_nets.append(_ipaddress.ip_network(tok, strict=False))
-            except ValueError:
-                continue
-        peer_trusted = (
-            peer_addr is not None
-            and any(
-                isinstance(peer_addr, _ipaddress.IPv4Address)
-                == isinstance(n.network_address, _ipaddress.IPv4Address)
-                and peer_addr in n
-                for n in trusted_nets
-            )
-        )
-        if peer_trusted:
-            xff = request.headers.get("x-forwarded-for") or ""
-            if xff:
-                tokens = [t.strip() for t in xff.split(",") if t.strip()]
-                for candidate in reversed(tokens):
-                    try:
-                        cand_addr = _ipaddress.ip_address(candidate)
-                    except ValueError:
-                        return f"ip:{peer}"
-                    if any(
-                        isinstance(cand_addr, _ipaddress.IPv4Address)
-                        == isinstance(n.network_address, _ipaddress.IPv4Address)
-                        and cand_addr in n
-                        for n in trusted_nets
-                    ):
-                        continue
-                    return f"ip:{candidate}"
-
+    xff = request.headers.get("x-forwarded-for") or ""
+    resolved = trusted_proxy.real_client_from_xff(peer, xff)
+    if resolved:
+        return f"ip:{resolved}"
     if peer:
         return f"ip:{peer}"
     return "ip:unknown"
