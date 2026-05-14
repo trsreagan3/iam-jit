@@ -414,6 +414,23 @@ def dispatch_event(
     event_id = event.get("id") or ""
     event_type = event.get("type") or "unknown"
 
+    # BB3-05 closure: refuse events with empty / missing event.id.
+    # Stripe always populates `id` on real events; an empty value
+    # is either a malformed retry, a replay attempt, or a
+    # signature-verified malicious payload. Without the id we
+    # can't store anything in the idempotency cache so the same
+    # event would be processed N times on N retries.
+    if not event_id:
+        logger.warning(
+            "Stripe event missing event.id (type=%s) — refusing", event_type
+        )
+        return {
+            "handled": False,
+            "event_type": event_type,
+            "rejected": True,
+            "reason": "missing_event_id",
+        }
+
     # Idempotency short-circuit. The store is optional — callers that
     # explicitly opt out (e.g. unit tests verifying handler semantics
     # in isolation) pass None and get the non-idempotent path.

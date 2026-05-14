@@ -668,13 +668,14 @@ def test_finding_public_url_xfh_leftmost_token() -> None:
     entries — same pattern as XFF in round 2. (XFH proxies typically
     do NOT chain like XFF, but defense-in-depth.)
     """
+    # CLOSED: base_for now walks right-to-left and matches against
+    # the allowed-public-hosts list. The leftmost (attacker-
+    # controlled) XFH value is no longer authoritative.
     from iam_jit import public_url
 
     src = inspect.getsource(public_url.base_for)
-    # Current code takes the leftmost token.
-    assert 'xfh.split(",")[0]' in src
-    # No right-to-left walk.
-    assert "reversed(" not in src
+    assert "reversed(" in src
+    assert "allowed" in src.lower()
 
 
 # ---------------------------------------------------------------------------
@@ -751,14 +752,12 @@ def test_finding_xfp_scheme_injection_in_public_url() -> None:
     Fix sketch: one-line allowlist on `scheme` after the
     `xfp.split(",")[0]` extraction.
     """
+    # CLOSED: scheme is now allowlisted to {"http", "https"}; any
+    # other value (javascript, file, …) falls back to https.
     from iam_jit import public_url
 
     src = inspect.getsource(public_url.base_for)
-    # No allowlist of {"http", "https"} on the scheme.
-    assert '"http"' not in src or "scheme" not in src or (
-        '"http", "https"' not in src and "{'http', 'https'}" not in src
-        and 'scheme in (' not in src
-    )
+    assert '{"http", "https"}' in src
 
 
 # ---------------------------------------------------------------------------

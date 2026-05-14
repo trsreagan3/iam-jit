@@ -399,14 +399,14 @@ def test_bb3_05_stripe_idempotency_skipped_for_missing_event_id(monkeypatch, tmp
         )
         responses.append(r.json())
 
-    # Currently broken: 3 of 3 are treated as fresh events; no
-    # `duplicate: True` on any. (Compare with BB2-03 which pins that
-    # an event WITH an id correctly short-circuits 2/3 times.)
-    duplicate_count = sum(1 for r in responses if r.get("duplicate") is True)
-    assert duplicate_count == 0, (
-        f"expected the missing-event-id case to bypass the idempotency "
-        f"store (current broken behavior); got {duplicate_count} "
-        f"duplicates. Responses: {responses}"
+    # BB3-05 CLOSED: events missing event.id are now refused with
+    # rejected=True and never reach the idempotency store. Stripe
+    # always populates event.id; missing-id requests are malformed
+    # or malicious. Reject all three.
+    rejected_count = sum(1 for r in responses if r.get("rejected") is True)
+    assert rejected_count == 3, (
+        f"expected all 3 missing-event-id deliveries to be rejected; "
+        f"got {rejected_count}. Responses: {responses}"
     )
 
     # Same for `id: ""` empty string.
@@ -421,12 +421,10 @@ def test_bb3_05_stripe_idempotency_skipped_for_missing_event_id(monkeypatch, tmp
             headers={"Stripe-Signature": hdr2, "Content-Type": "application/json"},
         )
         responses2.append(r.json())
-    duplicate_count2 = sum(1 for r in responses2 if r.get("duplicate") is True)
-    # Currently broken — empty id is treated like missing.
-    assert duplicate_count2 == 0, (
-        f"expected the empty-event-id case to also bypass the "
-        f"idempotency store; got {duplicate_count2} duplicates. "
-        f"Responses: {responses2}"
+    rejected_count2 = sum(1 for r in responses2 if r.get("rejected") is True)
+    assert rejected_count2 == 3, (
+        f"expected all 3 empty-event-id deliveries to be rejected; "
+        f"got {rejected_count2}. Responses: {responses2}"
     )
 
 

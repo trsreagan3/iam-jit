@@ -53,36 +53,19 @@ def _allowed_public_hosts() -> list[str]:
 def _peer_in_trusted_proxy_cidrs(request: Any) -> bool:
     """The immediate peer must fall in a configured trusted-proxy CIDR
     before XFH is honored — closes BB2-09 host-header poisoning on
-    deployments where the Function URL is reachable directly."""
-    cidrs_raw = (os.environ.get("IAM_JIT_TRUSTED_PROXY_CIDRS") or "").strip()
-    if not cidrs_raw:
-        return False
+    deployments where the Function URL is reachable directly.
+
+    Delegates to the shared `trusted_proxy.peer_in_trusted_cidrs`
+    helper so the parser rules and IPv4-mapped-IPv6 normalization
+    stay consistent with score / network_acl / web.
+    """
     try:
         peer_host = request.client.host if request.client else None
     except Exception:
         peer_host = None
-    if not peer_host:
-        return False
-    import ipaddress as _ipaddress
-    try:
-        peer_addr = _ipaddress.ip_address(peer_host)
-    except ValueError:
-        return False
-    for tok in cidrs_raw.replace(",", " ").split():
-        tok = tok.strip()
-        if not tok:
-            continue
-        try:
-            net = _ipaddress.ip_network(tok, strict=False)
-        except ValueError:
-            continue
-        if isinstance(peer_addr, _ipaddress.IPv4Address) != isinstance(
-            net.network_address, _ipaddress.IPv4Address
-        ):
-            continue
-        if peer_addr in net:
-            return True
-    return False
+    from . import trusted_proxy
+
+    return trusted_proxy.peer_in_trusted_cidrs(peer_host)
 
 
 def base_for(request: Any | None) -> str:
@@ -117,11 +100,27 @@ def base_for(request: Any | None) -> str:
                 xfp = request.headers.get("x-forwarded-proto") or ""
             except Exception:
                 pass
-            scheme = (xfp.split(",")[0].strip() or "https")
-            host = xfh.split(",")[0].strip().lower()
+            # XFP-SCHEME-INJECTION-IN-PUBLIC-URL closure: allowlist
+            # the scheme to {http, https}. A malicious upstream that
+            # set `X-Forwarded-Proto: javascript` would otherwise
+            # produce `javascript://allowed-host/...` which is a
+            # functional JavaScript URL on click. Default to https
+            # for any unrecognized scheme.
+            raw_scheme = xfp.split(",")[0].strip().lower()
+            scheme = raw_scheme if raw_scheme in {"http", "https"} else "https"
+            # PUBLIC-URL-XFH-LEFTMOST-TOKEN closure: pick the
+            # right-most XFH token that's in the allowed-public-hosts
+            # list. Each trusted proxy appends its host on the right,
+            # so the right-most is closer to the public surface than
+            # the (attacker-controlled) leftmost.
             allowed = _allowed_public_hosts()
-            if host and allowed and host in allowed:
-                return f"{scheme}://{host}".rstrip("/")
+            if allowed:
+                xfh_tokens = [
+                    t.strip().lower() for t in xfh.split(",") if t.strip()
+                ]
+                for candidate in reversed(xfh_tokens):
+                    if candidate in allowed:
+                        return f"{scheme}://{candidate}".rstrip("/")
 
     explicit = (os.environ.get("IAM_JIT_PUBLIC_URL") or "").strip()
     if explicit:
