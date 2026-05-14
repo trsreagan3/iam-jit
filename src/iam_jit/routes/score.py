@@ -262,12 +262,56 @@ def _require_api_key(authorization: str | None) -> None:
 
 
 def _client_ip(request: Request) -> str:
-    """Best-effort client IP. Trusts X-Forwarded-For when iam-jit's
-    middleware says it should (ALB / Function URL deployments)."""
-    xff = request.headers.get("x-forwarded-for")
-    if xff:
-        return xff.split(",")[0].strip()
-    return request.client.host if request.client else "unknown"
+    """Best-effort client IP for rate-limit keying.
+
+    Defaults to the real socket peer (`request.client.host`), which is
+    what Lambda Function URLs and direct connections give us — and
+    which an attacker cannot forge.
+
+    `X-Forwarded-For` is honored ONLY when both:
+      1. `IAM_JIT_TRUST_FORWARDED_FOR_FOR_SCORE=1` is explicitly set, AND
+      2. the immediate client is in `IAM_JIT_TRUSTED_PROXY_CIDRS`
+         (typically CloudFront / ALB CIDRs).
+
+    Without these guards an attacker rotates `X-Forwarded-For` per
+    request to defeat the rate limiter — the limit IS keyed off this
+    value. Audit finding SCORE-XFF-RATELIMIT-BYPASS (round 1 WB).
+    """
+    real_client = request.client.host if request.client else "unknown"
+
+    trust_xff = os.environ.get(
+        "IAM_JIT_TRUST_FORWARDED_FOR_FOR_SCORE", "0"
+    ).lower() in {"1", "true", "yes"}
+    if not trust_xff:
+        return real_client
+
+    # Only honor XFF when the immediate client is a configured trusted
+    # proxy. Without this check, setting the env var would re-open the
+    # bypass; the env var alone is not sufficient.
+    trusted_cidrs_env = os.environ.get("IAM_JIT_TRUSTED_PROXY_CIDRS", "").strip()
+    if not trusted_cidrs_env:
+        return real_client
+
+    import ipaddress as _ipaddress
+    try:
+        client_addr = _ipaddress.ip_address(real_client)
+    except ValueError:
+        return real_client  # unparseable peer → don't escalate trust
+
+    for token in trusted_cidrs_env.split(","):
+        token = token.strip()
+        if not token:
+            continue
+        try:
+            net = _ipaddress.ip_network(token, strict=False)
+            if client_addr in net:
+                xff = request.headers.get("x-forwarded-for")
+                if xff:
+                    return xff.split(",")[0].strip()
+                break
+        except ValueError:
+            continue
+    return real_client
 
 
 def _iter_string_values(obj: Any, path: str = "") -> Any:
