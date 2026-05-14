@@ -853,18 +853,20 @@ def test_finding_xff_ipv4_mapped_ipv6_three_callsites_open() -> None:
         if isinstance(addr, ipaddress.IPv6Address) and addr.ipv4_mapped:
             addr = ipaddress.ip_address(str(addr.ipv4_mapped))
     """
-    from iam_jit import network_acl, public_url
-    from iam_jit.routes import score as score_mod
+    # CLOSED: all three call sites now delegate to
+    # `iam_jit.trusted_proxy`, which normalizes IPv4-mapped IPv6
+    # addresses before the membership check. Verifying via the
+    # helper, since each call site is now a thin wrapper.
+    from iam_jit import trusted_proxy
+    import ipaddress
 
-    # None of the three call sites normalize ipv4_mapped before
-    # the membership check.
-    score_src = inspect.getsource(score_mod._client_ip)
-    network_acl_src = inspect.getsource(network_acl._read_source_ip)
-    public_url_src = inspect.getsource(public_url._peer_in_trusted_proxy_cidrs)
+    helper_src = inspect.getsource(trusted_proxy.peer_in_trusted_cidrs)
+    assert "ipv4_mapped" in helper_src
 
-    assert "ipv4_mapped" not in score_src
-    assert "ipv4_mapped" not in network_acl_src
-    assert "ipv4_mapped" not in public_url_src
+    # Functional check: a peer arriving as ::ffff:10.0.0.5 IS
+    # recognized as a trusted-proxy IP when the CIDR is 10.0.0.0/8.
+    nets = trusted_proxy.parse_trusted_cidrs("10.0.0.0/8")
+    assert trusted_proxy.peer_in_trusted_cidrs("::ffff:10.0.0.5", nets)
 
 
 # ---------------------------------------------------------------------------

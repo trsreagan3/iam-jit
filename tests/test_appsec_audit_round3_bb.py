@@ -104,6 +104,8 @@ def _reset_singletons():
     _score_route._reset_limiter_for_tests()
     from iam_jit.routes import auth as _auth_route
     _auth_route._reset_magic_link_ip_limiter_for_tests()
+    from iam_jit import session_revocation as _sr
+    _sr.reset_default_store_for_tests()
 
 
 @pytest.fixture
