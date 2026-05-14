@@ -76,6 +76,18 @@ curl -X POST https://api.iam-risk-score.com/api/v1/score \
     comment-on-pr: true
 ```
 
+**Any CI — SARIF output** — the CLI emits SARIF 2.1.0, the OASIS-standard format consumed natively by GitHub Code Scanning, GitLab Code Quality, and most security-CI tooling. One flag, broad reach.
+
+```bash
+iam-risk-score infrastructure/iam/policy.json --offline --format sarif > iam.sarif
+
+# Then upload to whatever your CI consumes:
+#   GitHub: actions/upload-sarif@v3
+#   GitLab: codequality artifact
+#   Generic: pipe to anything that reads SARIF
+```
+
+
 ### Free vs paid — the deterministic safety contract
 
 The 1–10 numeric score is **fully deterministic** in every tier. Same input → same score, every time. The deterministic engine runs ~30 calibrated rules covering service sensitivity, action breadth, resource scope, destructive verbs, access-type mismatch, PassRole escalation, NotAction/NotResource tricks, and grant-duration amplification.

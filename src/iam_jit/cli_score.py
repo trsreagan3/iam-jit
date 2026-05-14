@@ -179,6 +179,147 @@ def _format_human(result: dict[str, Any], threshold: int) -> str:
     return "\n".join(lines)
 
 
+def _format_sarif(
+    result: dict[str, Any], threshold: int, *, policy_path: str
+) -> str:
+    """SARIF 2.1.0 output.
+
+    The Static Analysis Results Interchange Format (OASIS) is the
+    lingua franca for CI security tooling: GitHub Code Scanning,
+    GitLab Code Quality, and most enterprise SIEMs ingest it
+    natively. Emitting SARIF makes iam-jit consumable by any CI
+    that already understands "security findings" — no plugin
+    required.
+
+    One result per risk factor; the policy file is the artifact;
+    threshold-FAIL becomes a `level=error`, otherwise `note`. The
+    rule id is the score-tier so dashboards group by severity.
+    """
+    score = result["score"]
+    tier = result["tier"]
+    factors = result.get("factors") or []
+    suggestions = result.get("suggestions") or []
+    fingerprint = result.get("policy_fingerprint", "")
+    fail = score >= threshold
+
+    # Stable artifact location: relative path the CI checked out the
+    # policy from. "-" (stdin) becomes a synthetic stdin: URI.
+    if policy_path == "-":
+        artifact_uri = "stdin://policy.json"
+    else:
+        artifact_uri = policy_path
+
+    sarif_level = "error" if fail else ("warning" if tier == "medium" else "note")
+
+    rules = [
+        {
+            "id": f"iam-risk-score/{tier}",
+            "name": f"IamPolicyRisk{tier.title()}",
+            "shortDescription": {
+                "text": f"IAM policy scored as {tier} risk ({score}/10)"
+            },
+            "fullDescription": {
+                "text": (
+                    "iam-jit's deterministic IAM policy risk scorer "
+                    "rates this policy on a 1-10 scale calibrated "
+                    "against 1,489 AWS-managed policies and 217 "
+                    "documented attack patterns. See "
+                    "https://iam-risk-score.com/scoring for the "
+                    "scoring rubric."
+                )
+            },
+            "defaultConfiguration": {"level": sarif_level},
+            "helpUri": "https://iam-risk-score.com/scoring",
+        }
+    ]
+
+    results: list[dict[str, Any]] = []
+    if not factors:
+        # Always emit at least one result so the SARIF artifact has
+        # the score in it; otherwise green policies look like the
+        # scanner didn't run.
+        results.append(
+            {
+                "ruleId": f"iam-risk-score/{tier}",
+                "level": sarif_level,
+                "message": {
+                    "text": (
+                        f"IAM policy score: {score}/10 ({tier}). "
+                        f"Threshold: {threshold}. "
+                        f"{'FAIL' if fail else 'PASS'}."
+                    )
+                },
+                "locations": [
+                    {
+                        "physicalLocation": {
+                            "artifactLocation": {"uri": artifact_uri}
+                        }
+                    }
+                ],
+                "partialFingerprints": (
+                    {"policy.fingerprint/v1": fingerprint}
+                    if fingerprint else {}
+                ),
+            }
+        )
+    else:
+        for i, factor in enumerate(factors):
+            suggestion = (
+                suggestions[i] if i < len(suggestions) else None
+            )
+            text = f"{factor}"
+            if suggestion:
+                text += f"\n\nSuggested mitigation: {suggestion}"
+            results.append(
+                {
+                    "ruleId": f"iam-risk-score/{tier}",
+                    "level": sarif_level,
+                    "message": {"text": text},
+                    "locations": [
+                        {
+                            "physicalLocation": {
+                                "artifactLocation": {"uri": artifact_uri}
+                            }
+                        }
+                    ],
+                    "partialFingerprints": (
+                        {"policy.fingerprint/v1": fingerprint}
+                        if fingerprint else {}
+                    ),
+                }
+            )
+
+    sarif = {
+        "$schema": (
+            "https://raw.githubusercontent.com/oasis-tcs/sarif-spec/"
+            "master/Schemata/sarif-schema-2.1.0.json"
+        ),
+        "version": "2.1.0",
+        "runs": [
+            {
+                "tool": {
+                    "driver": {
+                        "name": "iam-risk-score",
+                        "version": __version__,
+                        "informationUri": "https://iam-risk-score.com",
+                        "rules": rules,
+                    }
+                },
+                "results": results,
+                "properties": {
+                    "iam_jit.score": score,
+                    "iam_jit.tier": tier,
+                    "iam_jit.threshold": threshold,
+                    "iam_jit.pass": not fail,
+                    "iam_jit.analyzer": result.get("analyzer", ""),
+                    "iam_jit.api_version": result.get("api_version", ""),
+                },
+            }
+        ],
+    }
+    return json.dumps(sarif, indent=2)
+
+
 def _format_github(result: dict[str, Any], threshold: int) -> str:
     """GitHub Actions workflow commands.
 
@@ -260,9 +401,13 @@ def main(argv: list[str] | None = None) -> int:
         ),
     )
     parser.add_argument(
-        "--format", choices=["human", "json", "github"],
+        "--format", choices=["human", "json", "github", "sarif"],
         default="human",
-        help="Output format (default: human)",
+        help=(
+            "Output format (default: human). "
+            "`sarif` emits SARIF 2.1.0 for GitHub Code Scanning, "
+            "GitLab Code Quality, and other security-CI consumers."
+        ),
     )
     parser.add_argument(
         "--timeout", type=int, default=30,
@@ -309,6 +454,10 @@ def main(argv: list[str] | None = None) -> int:
         print(json.dumps(result, indent=2))
     elif args.format == "github":
         print(_format_github(result, args.threshold))
+    elif args.format == "sarif":
+        print(_format_sarif(
+            result, args.threshold, policy_path=args.policy_file,
+        ))
     else:
         print(_format_human(result, args.threshold))
 
