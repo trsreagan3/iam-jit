@@ -464,10 +464,12 @@ def dispatch_event(
     }
     handler = handlers.get(event_type)
     if handler is None:
+        # BB3-10 closure: log the event_type for operator visibility
+        # but don't echo it back to the caller. An attacker who
+        # leaked a webhook secret could otherwise enumerate which
+        # event types iam-jit handles, refining their attack.
         logger.info("Stripe event type %r not handled — skipping", event_type)
-        # Don't mark unknown events as processed — if the type-handler
-        # gets added later, a redelivery should run normally.
-        return {"handled": False, "event_type": event_type}
+        return {"handled": False}
 
     # Atomic claim() above already reserved this event_id in the store.
     # The claim is RELEASED on handler crash so Stripe's retry can

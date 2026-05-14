@@ -399,10 +399,14 @@ def test_finding_stripe_webhook_leaks_signature_failure_detail() -> None:
     Fix: return a uniform `"signature verification failed"` and log
     the specific reason server-side only.
     """
+    # CLOSED: route returns a generic detail; the verbose reason
+    # (timestamp / clock / tolerance window) lives in operator logs
+    # only. Same closure as round-3 BB3-04.
     import iam_jit.routes.webhooks_stripe as route
 
     src = inspect.getsource(route.stripe_webhook_endpoint)
-    assert 'detail=f"signature verification failed: {e}"' in src
+    assert 'detail="signature verification failed"' in src
+    assert 'detail=f"signature verification failed: {e}"' not in src
 
 
 # ---------------------------------------------------------------------------

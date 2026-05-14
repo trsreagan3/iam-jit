@@ -826,10 +826,13 @@ def test_bb_25_stripe_signature_verification_correct(app, monkeypatch):
     )
     c = TestClient(app2, raise_server_exceptions=False)
     body = b'{"id": "evt_1", "type": "ping"}'
-    # Missing signature
+    # Missing signature — response body is now generic (BB3-04 closure
+    # collapsed all signature-failure details into "signature
+    # verification failed" so attackers can't fingerprint the failure
+    # mode or read the server clock).
     r = c.post("/api/v1/webhooks/stripe", content=body, headers={"Content-Type": "application/json"})
     assert r.status_code == 400
-    assert "missing Stripe-Signature" in r.text
+    assert "signature verification failed" in r.text
     # Malformed signature
     r = c.post(
         "/api/v1/webhooks/stripe",
@@ -843,8 +846,11 @@ def test_bb_25_stripe_signature_verification_correct(app, monkeypatch):
         content=body,
         headers={"Stripe-Signature": "t=1,v1=deadbeef", "Content-Type": "application/json"},
     )
+    # BB3-04 closure: detail is uniform across all signature
+    # failure modes. The specific reason (clock, malformed, etc.)
+    # lives in operator logs, not the response body.
     assert r.status_code == 400
-    assert "300s tolerance" in r.text
+    assert "signature verification failed" in r.text
     # Valid signature → accepted
     ts = str(int(time.time()))
     sig = hmac.new(b"whsec_test_dummy_25", f"{ts}.".encode() + body, hashlib.sha256).hexdigest()

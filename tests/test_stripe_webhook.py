@@ -314,12 +314,14 @@ def test_subscription_deleted_without_user_id_metadata_skips() -> None:
 # ---- Dispatch -------------------------------------------------------
 
 
-def test_dispatch_returns_event_type_for_unhandled() -> None:
+def test_dispatch_unhandled_event_does_not_echo_event_type() -> None:
+    """BB3-10 closure — the not-handled response no longer echoes
+    the caller's event_type. Operator visibility lives in logs."""
     store = InMemoryAPITokenStore()
     event = {"id": "evt", "type": "invoice.paid", "data": {"object": {}}}
     result = stripe_webhook.dispatch_event(event, tokens_store=store)
     assert result["handled"] is False
-    assert result["event_type"] == "invoice.paid"
+    assert "event_type" not in result
 
 
 def test_dispatch_handles_checkout_completed(

@@ -110,10 +110,15 @@ async def stripe_webhook_endpoint(
             secret=secret,
         )
     except stripe_webhook.InvalidStripeSignature as e:
+        # BB3-04 closure: detailed reason (server clock, timestamp,
+        # tolerance window) stays in operator logs only. The
+        # response body returns a generic message — an attacker
+        # probing with bad signatures no longer gets a free
+        # server-clock-sync gadget.
         logger.warning("Stripe webhook signature verification failed: %s", e)
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
-            detail=f"signature verification failed: {e}",
+            detail="signature verification failed",
         )
 
     tokens_store = get_api_tokens_store(request)

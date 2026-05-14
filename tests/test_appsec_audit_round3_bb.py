@@ -348,13 +348,15 @@ def test_bb3_04_stripe_error_echoes_server_now(monkeypatch, tmp_path):
         content=body,
         headers={"Stripe-Signature": f"t={ts},v1={sig}", "Content-Type": "application/json"},
     )
+    # BB3-04 CLOSED: response body is now generic. The detailed
+    # reason (server clock, timestamp, tolerance window) lives in
+    # server logs only — no clock-sync gadget for attackers.
     assert r.status_code == 400
-    # Currently broken: the response body includes `now=<epoch>`.
     detail = r.json().get("detail", "")
-    assert "now=" in detail, (
-        f"expected response to leak the server clock as `now=<epoch>`; "
-        f"got: {detail}"
+    assert "now=" not in detail, (
+        f"server clock should not be echoed to the caller; got: {detail}"
     )
+    assert detail == "signature verification failed"
 
 
 # ---------------------------------------------------------------------
@@ -621,13 +623,15 @@ def test_bb3_10_stripe_webhook_echoes_event_type(monkeypatch, tmp_path):
         content=body,
         headers={"Stripe-Signature": f"t={ts},v1={sig}", "Content-Type": "application/json"},
     )
+    # BB3-10 CLOSED: response body no longer echoes the attacker's
+    # event_type on the not-handled path. Just `{"handled": false}`.
     assert r.status_code == 200
     body_json = r.json()
-    # Currently broken: the attacker's chosen event_type is echoed.
-    assert body_json.get("event_type") == "my.totally.fake.event", (
-        f"expected event_type echo (current broken behavior); got "
-        f"{body_json}"
+    assert "event_type" not in body_json, (
+        f"event_type should not leak to webhook caller on not-handled "
+        f"path; got {body_json}"
     )
+    assert body_json.get("handled") is False
 
 
 # =====================================================================
