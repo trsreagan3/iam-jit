@@ -1,5 +1,19 @@
 # iam-jit / iam-risk-score
 
+> **A deterministic AWS IAM risk-scoring engine, adversarially calibrated.**
+>
+> | Corpus | Pass rate |
+> |---|---:|
+> | AWS-managed policies (every published one) | **1,489 / 1,489 (100%)** |
+> | Documented attack patterns (Bishop Fox / Rhino / HackingTheCloud / MITRE) | **203 / 217 (93.5%)** |
+> | Adversarial rounds run | **10** (max_gap=0 on the latest white-box round) |
+>
+> Open corpus, open methodology, open commit history. No competitor publishes
+> a comparable metric — most don't expose their scoring rules at all. See
+> [docs/CONVERGENCE-REPORT-2026-05.md](docs/CONVERGENCE-REPORT-2026-05.md).
+
+---
+
 Two products from one repo. Pick the one that fits your need.
 
 | Product | What it is | Who it's for | Install |
