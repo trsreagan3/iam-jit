@@ -428,15 +428,23 @@ def test_finding_web_state_changing_routes_have_no_csrf_token() -> None:
     or (b) check `Origin` header against the configured public URL
     and reject mismatches on POST/PATCH/DELETE.
     """
-    from iam_jit.routes import web as web_mod
-
-    src = inspect.getsource(web_mod)
-    # No CSRF token plumbing whatsoever.
-    assert "csrf" not in src.lower(), (
-        "Found 'csrf' in web.py — finding may be addressed; re-review."
+    # FIXED — CSRF middleware now lives in app.py (`_enforce_csrf`).
+    # The middleware rejects cookie-authenticated state-changing
+    # requests whose Origin/Referer doesn't match the host. SameSite
+    # also flipped from lax → strict on the session cookie.
+    from iam_jit import app as app_mod
+    src = inspect.getsource(app_mod)
+    assert "_enforce_csrf" in src, (
+        "CSRF middleware missing from app.py — regression."
     )
-    # Also no Origin checking on state-changing handlers.
-    assert "Origin" not in src or "request.headers.get(\"origin\")" not in src
+    # SameSite is now strict, not lax.
+    from iam_jit.routes import auth as auth_mod
+    auth_src = inspect.getsource(auth_mod)
+    assert 'samesite="strict"' in auth_src, (
+        "session cookie SameSite regressed to lax — should be strict."
+    )
+    # The middleware DOES check Origin/Referer headers (this is the fix).
+    assert 'request.headers.get("origin")' in src or 'request.headers.get("referer")' in src
 
 
 # ---------------------------------------------------------------------------

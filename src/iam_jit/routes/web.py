@@ -413,7 +413,7 @@ def setup_submit(
         value=cookie_value,
         httponly=True,
         secure=os.environ.get("IAM_JIT_DEV_INSECURE_SECRET") != "1",
-        samesite="lax",
+        samesite="strict",
         path="/",
         max_age=24 * 60 * 60,
     )
@@ -525,7 +525,7 @@ def magic_callback(token: str, return_to: str = "/") -> Response:
         value=cookie_value,
         httponly=True,
         secure=os.environ.get("IAM_JIT_DEV_INSECURE_SECRET") != "1",
-        samesite="lax",
+        samesite="strict",
         path="/",
         max_age=24 * 60 * 60,
     )

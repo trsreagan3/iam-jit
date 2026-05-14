@@ -208,6 +208,118 @@ def create_app(
             )
         return await call_next(request)
 
+    # CSRF defense. Cookie-authenticated state-changing requests must
+    # carry an Origin or Referer header that matches the application's
+    # own host. Cross-site form posts triggered by an attacker page
+    # cannot forge these headers (they're set by the browser per spec).
+    # Bearer-token and SigV4 requests are exempt — the token itself is
+    # the CSRF protection (an attacker page cannot read it).
+    # Audit findings: WEB-NO-CSRF-TOKEN (round 1 WB, MED elevated to
+    # HIGH by round 1 BB after end-to-end verification on /approve and
+    # /tokens endpoints).
+    _CSRF_SAFE_METHODS = {"GET", "HEAD", "OPTIONS"}
+    _CSRF_EXEMPT_PATH_PREFIXES = (
+        "/api/v1/webhooks/stripe",  # Stripe has its own signature verification
+        "/healthz",
+    )
+
+    @app.middleware("http")
+    async def _enforce_csrf(request, call_next):
+        from fastapi.responses import JSONResponse
+        from urllib.parse import urlparse
+
+        # Dev / test mode bypass. Tests use TestClient which doesn't
+        # send Origin/Referer headers; production uses real browsers
+        # that always set them on form POSTs per spec. The existing
+        # IAM_JIT_DEV_INSECURE_SECRET=1 flag is the project's
+        # documented "don't enforce production security rules" gate.
+        if os.environ.get("IAM_JIT_DEV_INSECURE_SECRET") == "1":
+            return await call_next(request)
+
+        # Safe methods don't change state — no CSRF risk.
+        if request.method in _CSRF_SAFE_METHODS:
+            return await call_next(request)
+
+        path = request.url.path
+        if any(path.startswith(p) for p in _CSRF_EXEMPT_PATH_PREFIXES):
+            return await call_next(request)
+
+        # Bearer / SigV4 auth = CSRF-safe (attacker can't read the token
+        # to forge the request). Cookie-only auth = needs origin check.
+        auth_header = request.headers.get("authorization") or ""
+        if auth_header.startswith("Bearer ") or auth_header.startswith("AWS4-HMAC"):
+            return await call_next(request)
+
+        # No cookie at all = unauthenticated request; route handler will
+        # 401 as appropriate. No need to CSRF-check here.
+        if not request.cookies.get("iam_jit_session"):
+            return await call_next(request)
+
+        # Cookie-based request: require Origin or Referer to match host.
+        origin = request.headers.get("origin")
+        referer = request.headers.get("referer")
+        expected_host = (request.headers.get("host") or "").lower()
+        # Also accept the explicit env-configured base URL if set.
+        configured_base = os.environ.get("IAM_JIT_BASE_URL", "")
+
+        def _host_matches(value: str) -> bool:
+            if not value:
+                return False
+            try:
+                parsed_host = (urlparse(value).netloc or "").lower()
+            except Exception:
+                return False
+            if expected_host and parsed_host == expected_host:
+                return True
+            if configured_base:
+                try:
+                    cfg_host = (urlparse(configured_base).netloc or "").lower()
+                except Exception:
+                    cfg_host = ""
+                if cfg_host and parsed_host == cfg_host:
+                    return True
+            return False
+
+        if origin and origin != "null":
+            if not _host_matches(origin):
+                import logging as _logging
+                _logging.getLogger("iam_jit.csrf").warning(
+                    "rejecting cookie-based %s %s: Origin %r != host %r",
+                    request.method, path, origin, expected_host,
+                )
+                return JSONResponse(
+                    {"detail": "CSRF check failed: Origin does not match host"},
+                    status_code=403,
+                )
+        elif referer:
+            if not _host_matches(referer):
+                import logging as _logging
+                _logging.getLogger("iam_jit.csrf").warning(
+                    "rejecting cookie-based %s %s: Referer %r != host %r",
+                    request.method, path, referer, expected_host,
+                )
+                return JSONResponse(
+                    {"detail": "CSRF check failed: Referer does not match host"},
+                    status_code=403,
+                )
+        else:
+            # Neither Origin nor Referer present on a cookie-authenticated
+            # state-changing request. Browsers always send at least one
+            # for cross-origin form posts; the absence usually indicates
+            # a hand-crafted request (curl, attacker script bypassing the
+            # browser security model). Reject conservatively.
+            import logging as _logging
+            _logging.getLogger("iam_jit.csrf").warning(
+                "rejecting cookie-based %s %s: no Origin or Referer header",
+                request.method, path,
+            )
+            return JSONResponse(
+                {"detail": "CSRF check failed: missing Origin and Referer"},
+                status_code=403,
+            )
+
+        return await call_next(request)
+
     @app.middleware("http")
     async def _enforce_max_body_size(request, call_next):
         from fastapi.responses import JSONResponse

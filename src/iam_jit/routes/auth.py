@@ -140,7 +140,7 @@ def magic_link_callback(token: str) -> Response:
         value=cookie_value,
         httponly=True,
         secure=os.environ.get("IAM_JIT_DEV_INSECURE_SECRET") != "1",
-        samesite="lax",
+        samesite="strict",
         path="/",
         max_age=24 * 60 * 60,
     )
