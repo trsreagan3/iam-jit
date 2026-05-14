@@ -137,6 +137,17 @@ class ScoreResponse(BaseModel):
     factors: list[str] = Field(default_factory=list)
     suggestions: list[str] = Field(default_factory=list)
     llm_narrative: str | None = None
+    llm_budget_exceeded: bool = Field(
+        default=False,
+        description=(
+            "True iff the caller's monthly LLM-narrative quota for "
+            "their tier was exhausted before this request. The "
+            "deterministic score + factors + suggestions are still "
+            "produced; only the LLM narrative is omitted. "
+            "Free / Indie callers always see false (those tiers are "
+            "deterministic-only by design)."
+        ),
+    )
     analyzer: str = Field(..., description="deterministic | deterministic+<llm>")
     policy_fingerprint: str = Field(
         ...,
@@ -259,6 +270,56 @@ def _require_api_key(authorization: str | None) -> None:
             detail="Invalid API key.",
             headers={"WWW-Authenticate": "Bearer"},
         )
+
+
+def _resolve_caller_tier(
+    request: Request, authorization: str | None
+) -> tuple[str | None, str]:
+    """Identify the caller's customer_id + billing tier from the
+    Authorization header.
+
+    Returns (customer_id, tier):
+      - per-customer Stripe-issued API token (`iamjit_*` Bearer):
+        looks up in api_tokens_store, returns (token.user_id, tier
+        parsed from token.label like "stripe:pro").
+      - deployment-wide API key match: (None, "free") — the
+        deployment-wide key path isn't tied to a Stripe subscription,
+        so no LLM narrative.
+      - anonymous: (None, "free").
+
+    The `tier` controls LLM-narrative budget consumption AND model
+    selection in the score handler.
+    """
+    if not authorization:
+        return None, "free"
+    raw = authorization.strip()
+    if raw.lower().startswith("bearer "):
+        raw = raw[7:].strip()
+    if not raw.startswith("iamjit_"):
+        # Not a per-customer token. Could be the deployment-wide
+        # API key — that's free tier (no LLM).
+        return None, "free"
+    # Per-customer Stripe-issued token.
+    tokens_store = getattr(request.app.state, "api_tokens_store", None)
+    if tokens_store is None:
+        return None, "free"
+    try:
+        from ..api_tokens_store import APITokenNotFound
+        from ..auth import hash_token
+
+        record = tokens_store.get_by_hash(hash_token(raw))
+    except Exception:
+        return None, "free"
+
+    label = (record.label or "").lower()
+    if label.startswith("stripe:"):
+        tier = label[len("stripe:"):].strip()
+        # Normalize to one of the known tiers; unknown → free
+        if tier not in {"free", "indie", "pro", "team", "enterprise"}:
+            tier = "free"
+    else:
+        tier = "free"
+    return record.user_id, tier
 
 
 def _client_ip(request: Request) -> str:
@@ -520,9 +581,36 @@ def score_policy(
     extra_services = tuple(payload.additional_sensitive_services or ())
     extra_actions = tuple(payload.additional_high_impact_actions or ())
 
+    # Per-customer tier resolution + LLM budget check. Pro/Team/
+    # Enterprise customers get a tier-appropriate LLM narrative IF
+    # they're under their monthly budget. Past the budget, the
+    # deterministic floor takes over — no narrative, but the score
+    # itself is unchanged. Closes the launch-economics gap:
+    # without this, Pro at $99/mo with unbounded Opus would cost
+    # ~$7,500/mo per customer.
+    customer_id, caller_tier = _resolve_caller_tier(request, authorization)
+    llm_backend = None
+    llm_budget_exceeded = False
+    if customer_id and caller_tier in {"pro", "team", "enterprise"}:
+        from .. import llm_budget
+
+        budget_store = llm_budget.get_default_store()
+        if budget_store.consume_or_reject(customer_id, caller_tier):
+            try:
+                from ..llm import get_backend_for_tier
+                llm_backend = get_backend_for_tier(caller_tier)
+            except Exception:
+                # Backend init failed (e.g. boto3 missing, Bedrock
+                # model not enabled in this region). Fall back to
+                # deterministic-only — preserves the safety floor.
+                llm_backend = None
+        else:
+            llm_budget_exceeded = True
+
     try:
         analysis = review.analyze_policy(
             payload.policy, request_shape,
+            backend=llm_backend,
             extra_sensitive_services=extra_services,
             extra_high_impact_actions=extra_actions,
         )
@@ -552,6 +640,7 @@ def score_policy(
         factors=list(analysis.risk_factors),
         suggestions=list(analysis.suggestions),
         llm_narrative=analysis.llm_narrative,
+        llm_budget_exceeded=llm_budget_exceeded,
         analyzer=analysis.analyzer,
         policy_fingerprint=fingerprint,
     )

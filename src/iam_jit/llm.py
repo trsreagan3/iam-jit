@@ -546,6 +546,43 @@ def _register_context_fingerprints() -> None:
             pass
 
 
+def get_backend_for_tier(tier: str) -> LLMBackend:
+    """Return an LLM backend configured for the caller's billing
+    tier. Picks the backend MODE (Bedrock / Anthropic / Ollama)
+    from deployment-wide config exactly the same way `get_backend`
+    does — but overrides the MODEL ID via
+    `llm_budget.model_for_tier(tier)`.
+
+    Pro+Team customers get the appropriate model for their tier
+    (Sonnet for Pro, Opus for Team / Enterprise). Free/Indie
+    callers receive a NoOpBackend regardless of deployment config
+    — those tiers are deterministic-only by design.
+    """
+    from . import llm_budget
+
+    tier_norm = (tier or "free").lower().strip()
+    if tier_norm in {"free", "indie"}:
+        return NoOpBackend()
+
+    model_for_tier = llm_budget.model_for_tier(tier_norm)
+    explicit = os.environ.get("IAM_JIT_LLM", "").lower()
+    if explicit == "none":
+        return NoOpBackend()
+    if explicit == "ollama":
+        return OllamaBackend(
+            host=os.environ.get("OLLAMA_HOST") or "http://localhost:11434",
+            model=model_for_tier,
+        )
+    if explicit == "anthropic" or os.environ.get("ANTHROPIC_API_KEY"):
+        return AnthropicBackend(model=model_for_tier)
+    if explicit == "bedrock" or os.environ.get("IAM_JIT_BEDROCK_MODEL"):
+        return BedrockBackend(
+            model_id=model_for_tier,
+            region=os.environ.get("IAM_JIT_BEDROCK_REGION") or os.environ.get("AWS_REGION"),
+        )
+    return NoOpBackend()
+
+
 def get_backend() -> LLMBackend:
     """Return the configured LLM backend per the precedence rules in the module docstring."""
     _register_context_fingerprints()
