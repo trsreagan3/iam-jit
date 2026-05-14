@@ -5,6 +5,41 @@ entry has a one-liner motivation so the priority isn't lost.
 
 ## v2 — pending
 
+### Continuous role auto-discovery + risk-threshold alerts (self-hosted)
+
+Targets the self-hosted deployment. iam-jit continuously enumerates
+IAM roles across connected AWS accounts, scores each one with the
+deterministic scorer (+ Pro-tier LLM where licensed), and emits a
+notification when a role's score crosses a user-configured "high
+risk" threshold.
+
+- **Discovery triggers**: CloudTrail event subscription on
+  `CreateRole`, `PutRolePolicy`, `AttachRolePolicy`, `PutUserPolicy`,
+  `AttachUserPolicy`, plus a scheduled full-account sweep as a
+  backstop (CloudTrail can miss / lag rare event types).
+- **Scoring**: same engine as the request-time gate. Effective-policy
+  composition (inline + attached + boundary) is re-evaluated end to
+  end — the amendment-workflow rule applies: never score deltas, only
+  the full effective policy.
+- **Threshold config**: per-environment + per-role-prefix, with a
+  per-deployment default. Day-1 defaults must NOT be noisy or the
+  feature gets muted and adoption dies (same lesson as Snyk's first
+  noisy-by-default era).
+- **Notification channels**: webhook first (cheapest, most flexible),
+  then Slack and email, then PagerDuty / generic SIEM forwarders.
+- **Trend history**: score history per role-arn surfaced as a chart
+  in the UI. This is the artifact auditors find comfortable — the
+  same trust-building shape as the scoring-bands page.
+- **Positioning**: turns iam-jit from a request-time gate into a
+  continuous posture monitor. Mirrors the Snyk/Semgrep "scan
+  everything, alert on regressions" playbook that produced their
+  "we run X in CI" market position.
+- **Threat-model note**: discovery runs read-only IAM APIs; iam-jit
+  never auto-revokes. The notification is the action; humans decide.
+  A future enhancement could offer one-click "open a remediation
+  ticket" via the same webhook channel, but the destructive step
+  stays out of scope.
+
 ### EKS / Kubernetes cluster access
 
 Granting time-bound access to a Kubernetes cluster, not just to AWS

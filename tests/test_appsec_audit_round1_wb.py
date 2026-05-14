@@ -455,24 +455,18 @@ def test_finding_web_state_changing_routes_have_no_csrf_token() -> None:
 def test_finding_magic_link_logged_in_plaintext(
     monkeypatch: pytest.MonkeyPatch, caplog
 ) -> None:
-    """Finding: MAGIC-LINK-LOG-CHANNEL.
+    """Finding: MAGIC-LINK-LOG-CHANNEL — CLOSED.
 
     CWE-532 (Insertion of Sensitive Information into Log File).
-    Severity: MED (documented; restating for the audit).
-    Location: src/iam_jit/magic_link_delivery.py:109-117.
+    Severity: MED.
 
-    When `IAM_JIT_SES_SENDER` is empty and
-    `IAM_JIT_DEV_INSECURE_SECRET` is unset, magic-links are emitted
-    via `logger.warning("MAGIC_LINK channel=log user_id=%s url=%s",
-    ...)`. The URL contains the bearer-equivalent signed token
-    valid for 15 minutes. Anyone with CloudWatch read access on the
-    log group can sign in as any user during that window. The
-    module's own docstring acknowledges this; the finding restates
-    it so it shows up in the round-1 inventory.
-
-    Fix: prefer SES; if SES isn't configured, refuse to issue a
-    magic-link and tell the caller to use `/setup` (bootstrap
-    secret) or configure SES. NEVER log the full URL.
+    Closure:
+      - Default fail-closed: when neither SES nor an explicit
+        opt-in is configured, `decide()` returns channel='none'
+        and `deliver()` logs an error WITHOUT the link.
+      - Opt-in log channel (`IAM_JIT_ALLOW_LOG_CHANNEL=1`) emits
+        only the sha256 *fingerprint* of the link — never the
+        full URL containing the bearer token.
     """
     import logging
 
@@ -480,15 +474,34 @@ def test_finding_magic_link_logged_in_plaintext(
 
     monkeypatch.delenv("IAM_JIT_SES_SENDER", raising=False)
     monkeypatch.delenv("IAM_JIT_DEV_INSECURE_SECRET", raising=False)
+    monkeypatch.delenv("IAM_JIT_ALLOW_LOG_CHANNEL", raising=False)
 
+    # Default path: channel='none', NO link in logs.
     with caplog.at_level(logging.WARNING, logger="iam_jit.auth"):
         mld.deliver(
             email="victim@example.com",
             user_id="email:victim@example.com",
             link="https://x.example.com/cb?token=SECRET_TOKEN_DO_NOT_LEAK",
         )
-    # Token leaks in the log message.
-    assert any("SECRET_TOKEN_DO_NOT_LEAK" in r.getMessage() for r in caplog.records)
+    assert not any(
+        "SECRET_TOKEN_DO_NOT_LEAK" in r.getMessage() for r in caplog.records
+    )
+
+    # Opt-in log channel: fingerprint only, never the token.
+    caplog.clear()
+    monkeypatch.setenv("IAM_JIT_ALLOW_LOG_CHANNEL", "1")
+    with caplog.at_level(logging.WARNING, logger="iam_jit.auth"):
+        mld.deliver(
+            email="victim@example.com",
+            user_id="email:victim@example.com",
+            link="https://x.example.com/cb?token=SECRET_TOKEN_DO_NOT_LEAK",
+        )
+    assert not any(
+        "SECRET_TOKEN_DO_NOT_LEAK" in r.getMessage() for r in caplog.records
+    )
+    assert any(
+        "link_fingerprint=" in r.getMessage() for r in caplog.records
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -632,11 +645,14 @@ def test_finding_magic_link_json_endpoint_has_no_rate_limit() -> None:
     Fix: add the same `rate_limit.check(client_id, kind="login")`
     call the HTML route uses, before any `sign_magic_link()` call.
     """
+    # CLOSED: per-IP magic-link limiter added via
+    # `_get_magic_link_ip_limiter().check(ip, kind="magic_link")`.
     from iam_jit.routes import auth as auth_route
 
     src = inspect.getsource(auth_route.issue_magic_link)
-    assert "rate_limit" not in src
-    assert "limiter" not in src
+    assert "limiter" in src and "check" in src, (
+        "magic-link route should call its per-IP limiter — regression"
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -984,9 +1000,13 @@ def test_finding_token_label_unbounded() -> None:
     admin.py:334-337); also add a per-user quota on tokens-issued
     (`POST /api/v1/tokens` mints arbitrary tokens).
     """
+    # Partially CLOSED: per-user token mint quota now enforced via
+    # `_per_user_cap()` + `list_for_user(user.id)` check before mint.
+    # The label length cap remains a follow-up nit (LOW severity);
+    # this assertion is split so the closure progress is pinned.
     from iam_jit.routes import tokens as tokens_route
 
     src = inspect.getsource(tokens_route.create_token)
-    assert "len(label)" not in src
-    # And the function doesn't bound how many tokens a single user can hold.
-    assert "list_for_user" not in src
+    assert "list_for_user" in src, (
+        "per-user token cap should call list_for_user — regression"
+    )

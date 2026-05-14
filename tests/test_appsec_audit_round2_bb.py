@@ -385,39 +385,30 @@ def test_bb2_04_stripe_idempotency_atomic_claim_closed(monkeypatch, tmp_path):
 # ---------------------------------------------------------------------
 # BB2-05: No per-user cap on POST /api/v1/tokens (token-mint flood)
 # ---------------------------------------------------------------------
-def test_bb2_05_token_mint_flood_per_user(app):
-    """An authenticated user can mint 500+ API tokens in a tight loop
-    with no per-user cap and no rate limit. Each one is a valid
-    bearer credential that survives session logout. Cost vectors:
-
-      - DynamoDB storage growth (one row per token, no cap);
-      - DynamoDB partition heat on the user_id GSI (token list
-        becomes O(N) on every authenticated read);
-      - Once a paid customer has 10k tokens, listing their tokens
-        in the UI is a self-DoS;
-      - If any single token is leaked, the audit forensics question
-        "which token was used?" becomes much harder.
-
-    Severity: MED (resource abuse + audit-clarity damage).
-
-    Fix sketch: per-user soft cap (e.g. 50 active tokens) +
-    rate-limit (e.g. 5 mints / minute / user). 429 on excess."""
+def test_bb2_05_token_mint_flood_per_user(app, monkeypatch):
+    """BB2-05 — CLOSED. Per-user token cap enforced at mint time;
+    the 51st mint returns 429. Cap is configurable via
+    IAM_JIT_API_TOKEN_CAP_PER_USER for operators who need more,
+    but the default protects against abuse + accidental floods at
+    launch."""
+    monkeypatch.setenv("IAM_JIT_API_TOKEN_CAP_PER_USER", "10")
     dev = _client_as(app, "email:dev@example.com")
-    counts = []
+    succeeded = 0
     last_status = None
-    for i in range(150):
+    for i in range(20):
         r = dev.post("/api/v1/tokens", json={"label": f"flood-{i}"})
         last_status = r.status_code
-        if r.status_code != 201:
+        if r.status_code == 201:
+            succeeded += 1
+        else:
             break
-        counts.append(r.json().get("token_hash"))
-    # Currently broken: all 150 succeed.
-    assert len(counts) == 150, (
-        f"expected throttling / per-user cap after some N; got "
-        f"len={len(counts)} last_status={last_status}"
+    assert succeeded == 10, (
+        f"expected exactly cap (10) successful mints; got {succeeded}, "
+        f"last_status={last_status}"
     )
+    assert last_status == 429
     after = dev.get("/api/v1/tokens").json()["count"]
-    assert after == 150
+    assert after == 10
 
 
 # ---------------------------------------------------------------------
@@ -553,21 +544,14 @@ def test_bb2_07_bootstrap_claim_check_then_write_race(tmp_path, monkeypatch):
 #         (regression check on round-1 BB-12 fix)
 # ---------------------------------------------------------------------
 def test_bb2_08_magic_link_log_emits_token_when_ses_unset(caplog, monkeypatch, tmp_path):
-    """Round 1 flagged BB-12 / MAGIC-LINK-LOG-CHANNEL. The fix
-    sketched was either "refuse to start when channel=='log' in
-    prod" OR an explicit `IAM_JIT_ALLOW_LOG_DELIVERY=1` override.
-    Confirm whether either has shipped. Today the warning log
-    line still includes the full callback URL with the signed
-    token.
-
-    Severity: HIGH (operational — CloudWatch reader → session
-    takeover).
-
-    Fix sketch: gate the deploy. Refuse to boot in non-local mode
-    when SES is unset, unless `IAM_JIT_ALLOW_LOG_DELIVERY=1`."""
+    """BB2-08 / BB-12 — CLOSED. Default fail-closed + opt-in log
+    channel with fingerprint-only logging. Same closure as the
+    round-1 BB-12 pinned test; this variant exercises the round-2
+    surface (re-audit) to confirm no regression."""
     monkeypatch.delenv("IAM_JIT_DEV_INSECURE_SECRET", raising=False)
-    monkeypatch.setenv("IAM_JIT_MAGIC_LINK_SECRET", "x" * 40)
     monkeypatch.delenv("IAM_JIT_SES_SENDER", raising=False)
+    monkeypatch.delenv("IAM_JIT_ALLOW_LOG_CHANNEL", raising=False)
+    monkeypatch.setenv("IAM_JIT_MAGIC_LINK_SECRET", "x" * 40)
     users_yaml = tmp_path / "users.yaml"
     users_yaml.write_text(_USERS_YAML)
     app2 = create_app(
@@ -577,13 +561,21 @@ def test_bb2_08_magic_link_log_emits_token_when_ses_unset(caplog, monkeypatch, t
     )
     c = TestClient(app2, raise_server_exceptions=False)
     caplog.set_level(logging.WARNING, logger="iam_jit.auth")
+
+    # Default: no delivery channel → 503, no token leak.
     r = c.post("/api/v1/auth/magic-link", json={"email": "dev@example.com"})
-    assert r.status_code == 202
+    assert r.status_code == 503
     msgs = [rec.getMessage() for rec in caplog.records]
-    # Currently broken: token URL leaks into log output.
-    assert any("MAGIC_LINK" in m and "token=" in m for m in msgs), (
-        f"expected token in log; got: {msgs}"
-    )
+    assert not any("token=" in m for m in msgs)
+
+    # Opt-in log channel → 202 + fingerprint only, never the URL.
+    monkeypatch.setenv("IAM_JIT_ALLOW_LOG_CHANNEL", "1")
+    caplog.clear()
+    r2 = c.post("/api/v1/auth/magic-link", json={"email": "dev@example.com"})
+    assert r2.status_code == 202
+    msgs2 = [rec.getMessage() for rec in caplog.records]
+    assert not any("token=" in m for m in msgs2)
+    assert any("link_fingerprint=" in m for m in msgs2)
 
 
 # ---------------------------------------------------------------------

@@ -603,11 +603,15 @@ def test_finding_tokens_no_per_user_mint_quota() -> None:
     with 409. Use this cap as the soft signal too — at 10 active
     tokens, surface a warning in the response with revoke links.
     """
+    # CLOSED: `create_token` now calls `list_for_user(user.id)` and
+    # refuses with 429 once the per-user cap is reached.
     from iam_jit.routes import tokens as tokens_route
 
     src = inspect.getsource(tokens_route.create_token)
-    # No "if N tokens already" check.
-    assert "list_for_user" not in src
+    assert "list_for_user" in src, (
+        "per-user token mint quota should be enforced — regression"
+    )
+    assert "429" in src or "TOO_MANY_REQUESTS" in src
 
 
 # ---------------------------------------------------------------------------

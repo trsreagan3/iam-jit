@@ -55,14 +55,31 @@ class DeliveryDecision:
 
 
 def decide() -> DeliveryDecision:
-    """Pick the delivery channel for the current deployment."""
+    """Pick the delivery channel for the current deployment.
+
+    Precedence (BB-12 closure):
+      1. `IAM_JIT_DEV_INSECURE_SECRET=1` → in_response (local-dev).
+      2. `IAM_JIT_SES_SENDER` set → email (the prod path).
+      3. `IAM_JIT_ALLOW_LOG_CHANNEL=1` → log (opt-in; small teams that
+         genuinely want CloudWatch as the delivery channel). The log
+         line only contains the token *fingerprint*, NOT the full URL
+         — so a CloudWatch reader cannot construct a working link
+         without also possessing the magic-link secret.
+      4. Otherwise → none. Refuse to issue rather than leak. The
+         caller (routes/auth) returns 503 so the operator gets a
+         loud, actionable signal at launch time.
+    """
     if os.environ.get("IAM_JIT_DEV_INSECURE_SECRET") == "1":
         return DeliveryDecision(
             channel="in_response", show_in_response=True
         )
     if os.environ.get("IAM_JIT_SES_SENDER", "").strip():
         return DeliveryDecision(channel="email", show_in_response=False)
-    return DeliveryDecision(channel="log", show_in_response=False)
+    if os.environ.get("IAM_JIT_ALLOW_LOG_CHANNEL", "").lower() in {
+        "1", "true", "yes"
+    }:
+        return DeliveryDecision(channel="log", show_in_response=False)
+    return DeliveryDecision(channel="none", show_in_response=False)
 
 
 def deliver(*, email: str, user_id: str, link: str) -> DeliveryDecision:
@@ -107,12 +124,32 @@ def deliver(*, email: str, user_id: str, link: str) -> DeliveryDecision:
         return decision
 
     if decision.channel == "log":
-        # Structured one-line emit so operators can grep CloudWatch:
-        #   aws logs filter-log-events --log-group-name /aws/lambda/iam-jit \
-        #     --filter-pattern 'MAGIC_LINK'
+        # Log the token FINGERPRINT — never the full URL. A reader
+        # with CloudWatch access can confirm a magic link was issued
+        # for `user_id` and correlate against access logs, but can't
+        # use the fingerprint to construct a working link without
+        # also possessing the magic-link secret. Reconstruction
+        # requires both the secret AND the original token, so the
+        # log line alone is non-spendable.
+        import hashlib
+
+        fp = hashlib.sha256(link.encode("utf-8")).hexdigest()[:16]
         logger.warning(
-            "MAGIC_LINK channel=log user_id=%s url=%s",
-            user_id, link,
+            "MAGIC_LINK channel=log user_id=%s link_fingerprint=%s "
+            "(out-of-band: deliver the link to user via your own channel)",
+            user_id, fp,
+        )
+        return decision
+
+    if decision.channel == "none":
+        # No delivery channel configured. Surface loudly so the
+        # operator notices at launch rather than silently dropping
+        # auth attempts.
+        logger.error(
+            "MAGIC_LINK channel=none user_id=%s — refusing to issue. "
+            "Configure IAM_JIT_SES_SENDER, IAM_JIT_ALLOW_LOG_CHANNEL=1, "
+            "or IAM_JIT_DEV_INSECURE_SECRET=1.",
+            user_id,
         )
         return decision
 

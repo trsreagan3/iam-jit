@@ -331,28 +331,32 @@ def test_bb_08_session_cookie_includes_plaintext_user_id(app):
 # ---------------------------------------------------------------------
 # BB-09: No rate limit on /api/v1/auth/magic-link
 # ---------------------------------------------------------------------
-def test_bb_09_no_rate_limit_on_magic_link(app):
-    """POST /api/v1/auth/magic-link accepts 200 consecutive requests
-    in a tight loop with no throttling. An attacker can:
-      (a) email-bomb a known user (200 magic-link emails / minute);
-      (b) flood SES quota to deny legitimate sign-ins;
-      (c) brute-force enumerate registered emails if the response
-          differentiates (here it does not — that part is defended).
+def test_bb_09_no_rate_limit_on_magic_link(app, monkeypatch):
+    """BB-09 — CLOSED. Per-IP sliding-window limiter on the magic-
+    link route (5 req/min/IP soft, 15 hard by default). Protects SES
+    quota and email-domain reputation at launch.
 
-    Severity: MED (resource abuse / billing-exfil via SES).
+    Also enables the opt-in log channel so the route returns 202
+    (the rate-limit code path under test) instead of 503 (BB-12
+    fail-closed when no channel is configured)."""
+    monkeypatch.setenv("IAM_JIT_ALLOW_LOG_CHANNEL", "1")
+    monkeypatch.setenv("IAM_JIT_MAGIC_LINK_IP_SOFT_CAP", "5")
+    monkeypatch.setenv("IAM_JIT_MAGIC_LINK_IP_HARD_CAP", "15")
+    # The autouse reset fixture clears the limiter, but env-var caps
+    # are read lazily — force a fresh instance with these caps.
+    from iam_jit.routes import auth as _auth_route
+    _auth_route._reset_magic_link_ip_limiter_for_tests()
 
-    Fix sketch: per-IP and per-email token-bucket on the magic-link
-    endpoint (the project already has rate_limit.py for /api/v1/score —
-    just bind it here)."""
     c = TestClient(app, raise_server_exceptions=False)
     statuses = []
-    for i in range(150):
+    for i in range(20):
         r = c.post("/api/v1/auth/magic-link", json={"email": f"u{i}@example.com"})
         statuses.append(r.status_code)
     cnt = Counter(statuses)
-    # Currently broken: 100% 202.
-    assert cnt.get(429, 0) == 0
-    assert cnt[202] == 150
+    assert cnt.get(429, 0) >= 1, f"expected at least one 429; got {cnt}"
+    assert cnt.get(202, 0) <= 5, (
+        f"expected at most soft-cap (5) successful mints; got {cnt}"
+    )
 
 
 # ---------------------------------------------------------------------
@@ -449,25 +453,34 @@ def test_bb_11_stripe_webhook_replay_idempotency_missing(app, monkeypatch):
 # BB-12: Magic-link delivered via log channel exposes token URL
 # ---------------------------------------------------------------------
 def test_bb_12_magic_link_logs_token_in_plaintext_when_ses_unset(app, caplog, monkeypatch):
-    """When SES is not configured, magic-link URLs (containing the
-    SIGNED login token) are emitted via the Python logger as
-    `MAGIC_LINK channel=log user_id=... url=...` records. In
-    Lambda/CloudWatch this becomes a log line containing the full
-    bearer-equivalent token URL. Anyone with log-read permission
-    becomes a credential-equivalent insider.
+    """BB-12 — CLOSED.
 
-    Severity: HIGH (operational — log readers gain account-takeover
-    capability). Cited in /healthz security_posture as a known
-    posture issue, so this is "accepted risk" — flagging it as a
-    behaviorally-confirmed finding nonetheless.
+    Two complementary defenses, both pinned:
 
-    Fix sketch: require SES (or any non-log delivery channel) for
-    production; refuse to start if delivery_channel == 'log'. Add an
-    env-gate `IAM_JIT_REQUIRE_EMAIL_CHANNEL=1` that hard-fails boot."""
+      1. **Default fail-closed** — when no SES sender is configured
+         and no explicit opt-in env var is set, /api/v1/auth/magic-
+         link returns 503 universally (uniform across known/unknown
+         emails to avoid registration enumeration). This is the
+         common case at launch: operators MUST configure SES (or
+         opt-in to a log channel) before magic-link auth works.
+
+      2. **Log-channel redaction (opt-in)** — when an operator
+         explicitly sets `IAM_JIT_ALLOW_LOG_CHANNEL=1`, the log
+         line emits only a sha256 *fingerprint* of the link, not
+         the full URL. A CloudWatch reader cannot construct a
+         working link from the fingerprint alone.
+
+    This test pins both behaviors."""
     import logging
 
     monkeypatch.delenv("IAM_JIT_DEV_INSECURE_SECRET", raising=False)
+    monkeypatch.delenv("IAM_JIT_SES_SENDER", raising=False)
+    monkeypatch.delenv("IAM_JIT_ALLOW_LOG_CHANNEL", raising=False)
     monkeypatch.setenv("IAM_JIT_MAGIC_LINK_SECRET", "x" * 40)
+    monkeypatch.setenv("IAM_JIT_MAGIC_LINK_IP_SOFT_CAP", "999")
+    monkeypatch.setenv("IAM_JIT_MAGIC_LINK_IP_HARD_CAP", "9999")
+    from iam_jit.routes import auth as _auth_route
+    _auth_route._reset_magic_link_ip_limiter_for_tests()
     tmp = pathlib.Path(tempfile.mkdtemp())
     users_yaml = tmp / "users.yaml"
     users_yaml.write_text(_USERS_YAML)
@@ -478,12 +491,26 @@ def test_bb_12_magic_link_logs_token_in_plaintext_when_ses_unset(app, caplog, mo
     )
     c = TestClient(app2, raise_server_exceptions=False)
     caplog.set_level(logging.WARNING, logger="iam_jit.auth")
+
+    # Default: no delivery channel configured → 503, no logged URL.
     r = c.post("/api/v1/auth/magic-link", json={"email": "dev@example.com"})
-    assert r.status_code == 202
+    assert r.status_code == 503
     msgs = [rec.getMessage() for rec in caplog.records]
-    # Currently the token URL leaks into log output.
-    assert any("MAGIC_LINK" in m for m in msgs)
-    assert any("token=" in m for m in msgs)
+    assert not any("token=" in m for m in msgs), (
+        f"no token URL should be logged when delivery is unconfigured; "
+        f"got: {msgs}"
+    )
+
+    # Opt-in log channel: link fingerprint logged, never the URL.
+    monkeypatch.setenv("IAM_JIT_ALLOW_LOG_CHANNEL", "1")
+    caplog.clear()
+    r2 = c.post("/api/v1/auth/magic-link", json={"email": "dev@example.com"})
+    assert r2.status_code == 202
+    msgs2 = [rec.getMessage() for rec in caplog.records]
+    assert not any("token=" in m for m in msgs2), (
+        f"log channel must redact the token URL; got: {msgs2}"
+    )
+    assert any("link_fingerprint=" in m for m in msgs2)
 
 
 # ---------------------------------------------------------------------
@@ -645,6 +672,17 @@ def test_bb_19_magic_link_uniform_response_unknown_email(app, monkeypatch):
 
     Severity: N/A (defended)."""
     monkeypatch.delenv("IAM_JIT_DEV_INSECURE_SECRET", raising=False)
+    # Enable opt-in log channel so the uniform-response code path is
+    # exercised. Without ANY channel, BB-12 closure returns 503
+    # universally — which is uniform but a different shape.
+    monkeypatch.setenv("IAM_JIT_ALLOW_LOG_CHANNEL", "1")
+    # The per-IP magic-link limiter would otherwise 429 the 5
+    # consecutive requests below; raise the cap so this test
+    # exercises uniformity, not throttling.
+    monkeypatch.setenv("IAM_JIT_MAGIC_LINK_IP_SOFT_CAP", "999")
+    monkeypatch.setenv("IAM_JIT_MAGIC_LINK_IP_HARD_CAP", "9999")
+    from iam_jit.routes import auth as _auth_route
+    _auth_route._reset_magic_link_ip_limiter_for_tests()
     tmp = pathlib.Path(tempfile.mkdtemp())
     users_yaml = tmp / "users.yaml"
     users_yaml.write_text(_USERS_YAML)

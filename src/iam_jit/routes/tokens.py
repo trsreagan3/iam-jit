@@ -10,6 +10,7 @@ exactly once at creation; subsequent reads return only the metadata.
 
 from __future__ import annotations
 
+import os
 from typing import Annotated, Any
 
 from fastapi import APIRouter, Depends, HTTPException, Request, status
@@ -20,6 +21,19 @@ from ..middleware import current_user, get_api_tokens_store
 from ..users_store import User
 
 router = APIRouter(prefix="/api/v1/tokens", tags=["tokens"])
+
+_DEFAULT_TOKEN_CAP_PER_USER = 50
+
+
+def _per_user_cap() -> int:
+    raw = (os.environ.get("IAM_JIT_API_TOKEN_CAP_PER_USER") or "").strip()
+    if not raw:
+        return _DEFAULT_TOKEN_CAP_PER_USER
+    try:
+        n = int(raw)
+        return max(1, n)
+    except ValueError:
+        return _DEFAULT_TOKEN_CAP_PER_USER
 
 
 def _store_or_500(request: Request) -> APITokenStore:
@@ -42,6 +56,21 @@ def create_token(
     label = (payload or {}).get("label")
     if label is not None and not isinstance(label, str):
         raise HTTPException(status_code=400, detail="label must be a string")
+
+    # BB2-05 closure: per-user soft cap on active tokens. Operators
+    # who genuinely need more can raise IAM_JIT_API_TOKEN_CAP_PER_USER.
+    cap = _per_user_cap()
+    existing = store.list_for_user(user.id)
+    if len(existing) >= cap:
+        raise HTTPException(
+            status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+            detail=(
+                f"per-user token cap reached ({cap}). Revoke unused "
+                f"tokens via DELETE /api/v1/tokens/{{hash}}, or raise "
+                f"IAM_JIT_API_TOKEN_CAP_PER_USER."
+            ),
+        )
+
     issued = issue_api_token(user.id, label=label)
     record = APITokenRecord(
         token_hash=issued.hash,

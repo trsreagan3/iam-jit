@@ -52,6 +52,42 @@ def _safe_email(raw: str) -> str | None:
 router = APIRouter(prefix="/api/v1/auth", tags=["auth"])
 
 
+_magic_link_ip_limiter = None
+
+
+def _get_magic_link_ip_limiter():
+    """Per-IP rate limiter for the magic-link issuance route — guards
+    SES quota and email-domain reputation at launch. Separate from the
+    chat/intake limiter so its caps can be tighter."""
+    global _magic_link_ip_limiter
+    from .. import rate_limit
+
+    if _magic_link_ip_limiter is None:
+        soft = int(os.environ.get("IAM_JIT_MAGIC_LINK_IP_SOFT_CAP", "5"))
+        hard = int(os.environ.get("IAM_JIT_MAGIC_LINK_IP_HARD_CAP", "15"))
+        _magic_link_ip_limiter = rate_limit.InMemoryRateLimiter(
+            soft_cap=soft, hard_cap=hard
+        )
+    return _magic_link_ip_limiter
+
+
+def _reset_magic_link_ip_limiter_for_tests() -> None:
+    """Reset the per-IP limiter between tests."""
+    global _magic_link_ip_limiter
+    _magic_link_ip_limiter = None
+
+
+def _magic_link_client_ip(request: Request) -> str:
+    """Same trust posture as score._client_ip — XFF only when peer is
+    a configured trusted proxy. For the magic-link route, source-IP
+    accuracy matters less (we just want a per-IP bucket); we fall back
+    to peer.host directly when no trusted proxy is configured."""
+    try:
+        return request.client.host if request.client else "unknown"
+    except Exception:
+        return "unknown"
+
+
 @router.post("/magic-link", status_code=status.HTTP_202_ACCEPTED)
 def issue_magic_link(
     request: Request,
@@ -66,6 +102,36 @@ def issue_magic_link(
     """
     if (os.environ.get("IAM_JIT_AUTH_MODE") or "local").lower() != "local":
         raise HTTPException(status_code=400, detail="magic-link auth is only available in local mode")
+
+    # Per-IP rate limit (BB-09 / launch-day SES quota guard). 5
+    # req/min/IP soft, 15 hard. Uniform 429 regardless of email so
+    # the limit doesn't double as a registration oracle.
+    ip = _magic_link_client_ip(request)
+    decision = _get_magic_link_ip_limiter().check(ip, kind="magic_link")
+    if not decision.allowed:
+        raise HTTPException(
+            status_code=429,
+            detail="too many magic-link requests; try again later",
+            headers={"Retry-After": str(max(1, decision.retry_after_seconds))},
+        )
+
+    # BB-12 closure: refuse universally before email lookup when no
+    # delivery channel is configured. Refusing here is uniform across
+    # known/unknown emails so we don't leak registration status. The
+    # operator gets a loud 503 at launch instead of silently dropping
+    # auth attempts (and instead of logging the full link URL).
+    if magic_link_delivery.decide().channel == "none":
+        raise HTTPException(
+            status_code=503,
+            detail=(
+                "magic-link delivery is not configured. Set "
+                "IAM_JIT_SES_SENDER to a verified SES address (prod), "
+                "or IAM_JIT_ALLOW_LOG_CHANNEL=1 (small-team CloudWatch "
+                "out-of-band delivery), or IAM_JIT_DEV_INSECURE_SECRET=1 "
+                "(local dev)."
+            ),
+        )
+
     email_raw = (payload or {}).get("email")
     safe = _safe_email(email_raw if isinstance(email_raw, str) else "")
     if safe is None:
