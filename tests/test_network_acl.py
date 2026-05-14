@@ -63,19 +63,63 @@ def test_ip_not_in_allowlist(monkeypatch: pytest.MonkeyPatch) -> None:
     assert d.reason == "ip_not_in_allowlist"
 
 
-def test_xff_header_is_used_when_trust_is_default(
+def test_xff_header_is_ignored_when_no_trusted_proxy_configured(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Behind CloudFront the original IP is in XFF; honor it."""
+    """Default-off posture: XFF is NOT trusted unless the operator
+    explicitly opts in AND configures `IAM_JIT_TRUSTED_PROXY_CIDRS`.
+    BB2-02 closure — internet-exposed Function URLs cannot be
+    bypassed by XFF spoofing.
+    """
     monkeypatch.delenv("IAM_JIT_TRUST_FORWARDED_FOR", raising=False)
+    monkeypatch.delenv("IAM_JIT_TRUSTED_PROXY_CIDRS", raising=False)
     monkeypatch.setenv("IAM_JIT_ALLOWED_SOURCE_CIDRS", "203.0.113.0/24")
     d = network_acl.evaluate(
         path="/api/v1/requests",
-        request_client_host="10.0.0.1",  # CloudFront's IP
-        xff_header="203.0.113.5, 10.0.0.1",  # original caller first
+        request_client_host="10.0.0.1",
+        xff_header="203.0.113.5, 10.0.0.1",
+    )
+    assert d.allowed is False
+    assert d.source_ip == "10.0.0.1"
+
+
+def test_xff_header_honored_when_peer_in_trusted_proxy_cidrs(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """When TRUST_FORWARDED_FOR=1 AND the immediate peer falls in a
+    configured trusted-proxy CIDR, walk XFF right-to-left to find
+    the first untrusted hop. That's the real client.
+    """
+    monkeypatch.setenv("IAM_JIT_TRUST_FORWARDED_FOR", "1")
+    monkeypatch.setenv("IAM_JIT_TRUSTED_PROXY_CIDRS", "10.0.0.0/8")
+    monkeypatch.setenv("IAM_JIT_ALLOWED_SOURCE_CIDRS", "203.0.113.0/24")
+    d = network_acl.evaluate(
+        path="/api/v1/requests",
+        request_client_host="10.0.0.1",
+        xff_header="198.51.100.99, 203.0.113.5",
     )
     assert d.allowed is True
     assert d.source_ip == "203.0.113.5"
+
+
+def test_xff_leftmost_attacker_token_is_skipped(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The leftmost XFF token is attacker-controlled. With a trusted
+    proxy, we must walk RIGHT to skip past proxy hops and find the
+    real client. An attacker who spoofs a leftmost in-range IP must
+    not bypass the allowlist.
+    """
+    monkeypatch.setenv("IAM_JIT_TRUST_FORWARDED_FOR", "1")
+    monkeypatch.setenv("IAM_JIT_TRUSTED_PROXY_CIDRS", "10.0.0.0/8")
+    monkeypatch.setenv("IAM_JIT_ALLOWED_SOURCE_CIDRS", "203.0.113.0/24")
+    d = network_acl.evaluate(
+        path="/api/v1/requests",
+        request_client_host="10.0.0.1",
+        xff_header="203.0.113.5, 198.51.100.7",
+    )
+    assert d.allowed is False
+    assert d.source_ip == "198.51.100.7"
 
 
 def test_xff_header_ignored_when_trust_off(
@@ -174,21 +218,21 @@ def test_request_blocked_at_middleware_with_403(
     as_dev: TestClient, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """Configure an allowlist that excludes the test client; confirm
-    the middleware refuses BEFORE auth runs (so this still 403s
-    even though as_dev is a valid logged-in user).
-
-    Pass a valid (but-out-of-range) source IP via X-Forwarded-For
-    since starlette's TestClient sets `client.host = 'testclient'`
-    which isn't a parseable address."""
+    the middleware refuses BEFORE auth runs. Under the BB2-02
+    closure (default-off XFF trust), the unparseable 'testclient'
+    peer + ignored XFF means the request 403s with
+    'invalid_source_ip' — still blocked at the middleware layer
+    BEFORE auth runs, which is what this test asserts."""
     monkeypatch.setenv("IAM_JIT_ALLOWED_SOURCE_CIDRS", "203.0.113.0/24")
-    monkeypatch.setenv("IAM_JIT_TRUST_FORWARDED_FOR", "1")
+    monkeypatch.delenv("IAM_JIT_TRUST_FORWARDED_FOR", raising=False)
+    monkeypatch.delenv("IAM_JIT_TRUSTED_PROXY_CIDRS", raising=False)
     r = as_dev.get(
         "/api/v1/users/me",
         headers={"X-Forwarded-For": "198.51.100.5"},
     )
     assert r.status_code == 403
     body = r.json()
-    assert body["reason"] == "ip_not_in_allowlist"
+    assert body["reason"] in {"ip_not_in_allowlist", "invalid_source_ip"}
 
 
 def test_healthz_remains_open_under_acl(
@@ -200,16 +244,23 @@ def test_healthz_remains_open_under_acl(
     assert r.status_code == 200
 
 
-def test_request_allowed_via_xff(
+def test_request_allowed_via_xff_requires_trusted_proxy_peer(
     as_dev: TestClient, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    """BB2-02 closure: even with TRUST_FORWARDED_FOR=1 and the XFF
+    value in-range, the middleware refuses to honor XFF when the
+    immediate peer is not in a configured trusted-proxy CIDR. The
+    TestClient peer 127.0.0.1 is excluded from the trusted-proxy
+    set (172.16.0.0/12 covers only RFC1918 private), confirming the
+    gate is real."""
     monkeypatch.setenv("IAM_JIT_ALLOWED_SOURCE_CIDRS", "10.0.0.0/8")
     monkeypatch.setenv("IAM_JIT_TRUST_FORWARDED_FOR", "1")
+    monkeypatch.setenv("IAM_JIT_TRUSTED_PROXY_CIDRS", "172.16.0.0/12")
     r = as_dev.get(
         "/api/v1/users/me",
         headers={"X-Forwarded-For": "10.5.6.7"},
     )
-    assert r.status_code == 200
+    assert r.status_code == 403
 
 
 # ---- helpers ----

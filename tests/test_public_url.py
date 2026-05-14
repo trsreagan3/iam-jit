@@ -18,12 +18,16 @@ from iam_jit import public_url
 def _fake_request(
     headers: dict[str, str] | None = None,
     base_url: str = "https://lambda-url.example.com/",
+    peer_host: str = "10.0.0.5",
 ) -> Any:
-    """Minimal Request-like stand-in. The helper only touches
-    `.headers` (Mapping-like) and `.base_url` (string-coercible)."""
+    """Minimal Request-like stand-in. The helper touches
+    `.headers` (Mapping-like), `.base_url` (string-coercible), and
+    `.client.host` (peer IP — used by the BB2-09 trusted-proxy
+    gate)."""
     return SimpleNamespace(
         headers=(headers or {}),
         base_url=base_url,
+        client=SimpleNamespace(host=peer_host),
     )
 
 
@@ -42,11 +46,12 @@ def test_env_var_overrides_request_base_url(monkeypatch: pytest.MonkeyPatch) -> 
 
 
 def test_xfh_wins_when_trust_flag_set(monkeypatch: pytest.MonkeyPatch) -> None:
-    """The CloudFront posture: trust flag on, X-Forwarded-Host set, the
-    public surface (CF domain) takes precedence over both the
-    request.base_url (Function URL origin) and any IAM_JIT_PUBLIC_URL.
-    """
+    """The CloudFront posture (BB2-09 closure): trust flag on, peer
+    in trusted-proxy CIDRs, AND the XFH value is in the allowed
+    public-host list. All three must be present."""
     monkeypatch.setenv("IAM_JIT_TRUST_FORWARDED_HOST", "1")
+    monkeypatch.setenv("IAM_JIT_TRUSTED_PROXY_CIDRS", "10.0.0.0/8")
+    monkeypatch.setenv("IAM_JIT_ALLOWED_PUBLIC_HOSTS", "d1234.cloudfront.net")
     monkeypatch.setenv("IAM_JIT_PUBLIC_URL", "https://stale.example.com")
     req = _fake_request(
         headers={
@@ -60,9 +65,12 @@ def test_xfh_wins_when_trust_flag_set(monkeypatch: pytest.MonkeyPatch) -> None:
 
 def test_xfh_takes_first_when_comma_separated(monkeypatch: pytest.MonkeyPatch) -> None:
     """A request that hits Layer-7 LB → CloudFront → Lambda can stack
-    multiple XFH values. Per RFC 7239 the leftmost (original) is the
-    one users actually typed; take that."""
+    multiple XFH values. Take the leftmost (the public host the user
+    actually typed) — and the public-host allowlist must include it
+    for the BB2-09 gate to honor it."""
     monkeypatch.setenv("IAM_JIT_TRUST_FORWARDED_HOST", "1")
+    monkeypatch.setenv("IAM_JIT_TRUSTED_PROXY_CIDRS", "10.0.0.0/8")
+    monkeypatch.setenv("IAM_JIT_ALLOWED_PUBLIC_HOSTS", "iam-jit.example.com")
     req = _fake_request(
         headers={"x-forwarded-host": "iam-jit.example.com, d1234.cloudfront.net"},
     )
@@ -83,6 +91,8 @@ def test_xfh_ignored_when_trust_flag_unset(monkeypatch: pytest.MonkeyPatch) -> N
 
 def test_xfh_default_scheme_is_https(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("IAM_JIT_TRUST_FORWARDED_HOST", "1")
+    monkeypatch.setenv("IAM_JIT_TRUSTED_PROXY_CIDRS", "10.0.0.0/8")
+    monkeypatch.setenv("IAM_JIT_ALLOWED_PUBLIC_HOSTS", "iam-jit.example.com")
     req = _fake_request(headers={"x-forwarded-host": "iam-jit.example.com"})
     # No XFP header → assume https (the standard for any prod CDN).
     assert public_url.base_for(req) == "https://iam-jit.example.com"
@@ -90,6 +100,8 @@ def test_xfh_default_scheme_is_https(monkeypatch: pytest.MonkeyPatch) -> None:
 
 def test_xfp_overrides_default_scheme(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("IAM_JIT_TRUST_FORWARDED_HOST", "1")
+    monkeypatch.setenv("IAM_JIT_TRUSTED_PROXY_CIDRS", "10.0.0.0/8")
+    monkeypatch.setenv("IAM_JIT_ALLOWED_PUBLIC_HOSTS", "iam-jit.example.com")
     req = _fake_request(
         headers={
             "x-forwarded-host": "iam-jit.example.com",
@@ -97,6 +109,37 @@ def test_xfp_overrides_default_scheme(monkeypatch: pytest.MonkeyPatch) -> None:
         },
     )
     assert public_url.base_for(req) == "http://iam-jit.example.com"
+
+
+def test_bb2_09_xfh_ignored_when_peer_not_trusted(monkeypatch: pytest.MonkeyPatch) -> None:
+    """BB2-09 closure: even with TRUST_FORWARDED_HOST=1 and an
+    allowed-public-hosts list set, an attacker hitting the Function
+    URL directly (peer outside trusted-proxy CIDRs) cannot poison
+    the public base URL."""
+    monkeypatch.setenv("IAM_JIT_TRUST_FORWARDED_HOST", "1")
+    monkeypatch.setenv("IAM_JIT_TRUSTED_PROXY_CIDRS", "10.0.0.0/8")
+    monkeypatch.setenv("IAM_JIT_ALLOWED_PUBLIC_HOSTS", "iam-jit.example.com")
+    req = _fake_request(
+        headers={"x-forwarded-host": "iam-jit.example.com"},
+        peer_host="203.0.113.42",  # not in 10.0.0.0/8
+    )
+    assert public_url.base_for(req) == "https://lambda-url.example.com"
+
+
+def test_bb2_09_xfh_ignored_when_value_not_in_allowlist(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """BB2-09 closure: even from a trusted proxy, an XFH value not
+    in the public-host allowlist is ignored. Defense-in-depth
+    against a misconfigured / compromised proxy."""
+    monkeypatch.setenv("IAM_JIT_TRUST_FORWARDED_HOST", "1")
+    monkeypatch.setenv("IAM_JIT_TRUSTED_PROXY_CIDRS", "10.0.0.0/8")
+    monkeypatch.setenv("IAM_JIT_ALLOWED_PUBLIC_HOSTS", "iam-jit.example.com")
+    req = _fake_request(
+        headers={"x-forwarded-host": "evil.attacker.example"},
+        peer_host="10.0.0.5",
+    )
+    assert public_url.base_for(req) == "https://lambda-url.example.com"
 
 
 def test_no_request_falls_back_to_env_or_default(monkeypatch: pytest.MonkeyPatch) -> None:

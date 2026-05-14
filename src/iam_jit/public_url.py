@@ -39,17 +39,74 @@ def _trust_xfh() -> bool:
     }
 
 
+def _allowed_public_hosts() -> list[str]:
+    raw = (os.environ.get("IAM_JIT_ALLOWED_PUBLIC_HOSTS") or "").strip()
+    if not raw:
+        return []
+    return [
+        h.strip().lower()
+        for h in raw.replace(",", " ").split()
+        if h.strip()
+    ]
+
+
+def _peer_in_trusted_proxy_cidrs(request: Any) -> bool:
+    """The immediate peer must fall in a configured trusted-proxy CIDR
+    before XFH is honored — closes BB2-09 host-header poisoning on
+    deployments where the Function URL is reachable directly."""
+    cidrs_raw = (os.environ.get("IAM_JIT_TRUSTED_PROXY_CIDRS") or "").strip()
+    if not cidrs_raw:
+        return False
+    try:
+        peer_host = request.client.host if request.client else None
+    except Exception:
+        peer_host = None
+    if not peer_host:
+        return False
+    import ipaddress as _ipaddress
+    try:
+        peer_addr = _ipaddress.ip_address(peer_host)
+    except ValueError:
+        return False
+    for tok in cidrs_raw.replace(",", " ").split():
+        tok = tok.strip()
+        if not tok:
+            continue
+        try:
+            net = _ipaddress.ip_network(tok, strict=False)
+        except ValueError:
+            continue
+        if isinstance(peer_addr, _ipaddress.IPv4Address) != isinstance(
+            net.network_address, _ipaddress.IPv4Address
+        ):
+            continue
+        if peer_addr in net:
+            return True
+    return False
+
+
 def base_for(request: Any | None) -> str:
     """Return the resolved public base URL with no trailing slash.
 
     `request` is the FastAPI Request (optional — None forces the
     env-var or fallback paths). The signature accepts `Any` to keep
     this module import-free of FastAPI types.
+
+    XFH-trust path (BB2-09 closure) requires ALL of:
+      - `IAM_JIT_TRUST_FORWARDED_HOST=1`
+      - the immediate peer IS in `IAM_JIT_TRUSTED_PROXY_CIDRS`
+      - the X-Forwarded-Host value matches an entry in
+        `IAM_JIT_ALLOWED_PUBLIC_HOSTS`
+    Any one missing → fall through to env-pinned `IAM_JIT_PUBLIC_URL`
+    or `request.base_url`. This kills host-header smuggling on
+    Function-URL deployments where an attacker could otherwise spoof
+    XFH directly.
     """
-    if request is not None and _trust_xfh():
-        # Reading from `request.headers` works for both Starlette
-        # Request and TestClient because both expose a Mapping-like
-        # `.headers`.
+    if (
+        request is not None
+        and _trust_xfh()
+        and _peer_in_trusted_proxy_cidrs(request)
+    ):
         try:
             xfh = request.headers.get("x-forwarded-host") or ""
         except Exception:
@@ -61,10 +118,9 @@ def base_for(request: Any | None) -> str:
             except Exception:
                 pass
             scheme = (xfp.split(",")[0].strip() or "https")
-            # X-Forwarded-Host can be a comma-separated chain; take
-            # the original (leftmost) per RFC 7239 semantics.
-            host = xfh.split(",")[0].strip()
-            if host:
+            host = xfh.split(",")[0].strip().lower()
+            allowed = _allowed_public_hosts()
+            if host and allowed and host in allowed:
                 return f"{scheme}://{host}".rstrip("/")
 
     explicit = (os.environ.get("IAM_JIT_PUBLIC_URL") or "").strip()

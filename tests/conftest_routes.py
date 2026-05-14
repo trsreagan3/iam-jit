@@ -132,8 +132,15 @@ def make_client(shared_app: FastAPI) -> Callable[[str | None], TestClient]:
     in-memory stores), but cookies and headers are independent per client.
     """
 
-    def _factory(user_id: str | None = None) -> TestClient:
-        c = TestClient(shared_app, raise_server_exceptions=True)
+    def _factory(
+        user_id: str | None = None,
+        client: tuple[str, int] = ("127.0.0.1", 50000),
+    ) -> TestClient:
+        c = TestClient(
+            shared_app,
+            raise_server_exceptions=True,
+            client=client,
+        )
         if user_id is not None:
             cookie = auth_mod.sign_session(_DEV_SECRET, user_id)
             c.cookies.set("iam_jit_session", cookie)

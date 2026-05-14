@@ -145,45 +145,55 @@ def test_finding_stripe_idempotency_toctou_under_concurrency() -> None:
 def test_finding_xff_leftmost_attacker_controlled_behind_trusted_proxy(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Finding: SCORE-XFF-LEFTMOST-TRUSTED.
+    """Finding: SCORE-XFF-LEFTMOST-TRUSTED — CLOSED.
 
-    CWE-348 (Use of Less Trusted Source) — defense-in-depth bypass.
-    Severity: HIGH (regression in the round-1 fix).
-    Location: src/iam_jit/routes/score.py:308-311 (`_client_ip`).
+    CWE-348 (Use of Less Trusted Source).
+    Severity: HIGH.
+    Location: src/iam_jit/routes/score.py — `_client_ip`.
 
-    The fix correctly gates XFF trust on a configured proxy CIDR
-    list. But when the immediate client IS a trusted proxy, the
-    function takes `xff.split(",")[0].strip()` — the LEFTMOST token.
-    Standard XFF semantics: each hop APPENDS its client; so the
-    leftmost is the first hop seen, which IS the attacker's
-    Header value (the attacker can set XFF on their request, and the
-    trusted proxy appends the real client to the right).
-
-    Realistic deployment: CloudFront in front of Lambda. CloudFront
-    adds the original client to the END of any pre-existing XFF
-    header it received. So `XFF: <victim-target>` from the attacker
-    arrives at iam-jit as `XFF: <victim-target>, <real-client>`. The
-    code keys rate-limit on `<victim-target>`, NOT the real client.
-    Attacker rotates `<victim-target>` per-request to bypass the
-    limit, AND can DoS legitimate user-IPs by burning their rate
-    quota under their key.
-
-    Fix: parse XFF right-to-left, skipping IPs that fall in
+    Closure: when the immediate peer is in a configured trusted CIDR,
+    we now walk XFF RIGHT-TO-LEFT, skipping any tokens that fall in
     `IAM_JIT_TRUSTED_PROXY_CIDRS`. The first non-trusted IP from the
-    right is the real client. This is the documented pattern (e.g.
-    Django's `SECURE_PROXY_SSL_HEADER` doc, AWS WAF's
-    `forwarded_ip_config`).
+    right is the real client. Standard pattern (mirrors Django's
+    `SECURE_PROXY_SSL_HEADER` and AWS WAF `forwarded_ip_config`
+    docs).
+
+    Functional test below confirms the live behavior: an attacker
+    that spoofs `XFF: <victim-ip>` from behind a CloudFront-style
+    proxy now gets keyed on the proxy-appended IP, not on the
+    attacker-supplied leftmost token.
     """
     from iam_jit.routes import score as score_mod
-    from fastapi import Request
 
     src = inspect.getsource(score_mod._client_ip)
-    # Code takes leftmost — the bug.
-    assert 'xff.split(",")[0].strip()' in src, (
-        "_client_ip XFF parsing changed shape — re-evaluate the finding."
+    # New shape: right-to-left walk, leftmost extraction gone.
+    assert 'xff.split(",")[0].strip()' not in src, (
+        "_client_ip still takes the leftmost XFF token — regression"
     )
-    # No rightmost / loop-from-right walk in the implementation.
-    assert "[-1]" not in src and "reversed(" not in src
+    assert "reversed(" in src, (
+        "_client_ip should walk XFF right-to-left to skip trusted proxies"
+    )
+
+    # Functional check: simulate the exact CloudFront-in-front-of-
+    # Lambda topology the audit described. Trusted proxy CIDR
+    # 10.0.0.0/8, immediate peer 10.0.0.5 (proxy), attacker-supplied
+    # XFF leftmost token 203.0.113.99, real-client appended at right
+    # as 198.51.100.7.
+    monkeypatch.setenv("IAM_JIT_TRUST_FORWARDED_FOR_FOR_SCORE", "1")
+    monkeypatch.setenv("IAM_JIT_TRUSTED_PROXY_CIDRS", "10.0.0.0/8")
+
+    class _FakeClient:
+        host = "10.0.0.5"
+
+    class _FakeRequest:
+        client = _FakeClient()
+        headers = {"x-forwarded-for": "203.0.113.99, 198.51.100.7"}
+
+    resolved = score_mod._client_ip(_FakeRequest())  # type: ignore[arg-type]
+    assert resolved == "198.51.100.7", (
+        f"expected the right-most non-trusted IP (198.51.100.7) to be "
+        f"the resolved client; got {resolved!r}"
+    )
 
 
 # ---------------------------------------------------------------------------

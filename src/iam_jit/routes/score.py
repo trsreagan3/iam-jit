@@ -307,7 +307,33 @@ def _client_ip(request: Request) -> str:
             if client_addr in net:
                 xff = request.headers.get("x-forwarded-for")
                 if xff:
-                    return xff.split(",")[0].strip()
+                    # Walk RIGHT-TO-LEFT: each trusted proxy appends
+                    # its client to the right; the leftmost token is
+                    # attacker-controlled (any client can set the
+                    # initial XFF header). Skip past trusted-proxy
+                    # hops to find the first untrusted IP — that's
+                    # the real client.
+                    tokens = [t.strip() for t in xff.split(",") if t.strip()]
+                    trusted_nets = []
+                    for net_tok in trusted_cidrs_env.split(","):
+                        net_tok = net_tok.strip()
+                        if not net_tok:
+                            continue
+                        try:
+                            trusted_nets.append(
+                                _ipaddress.ip_network(net_tok, strict=False)
+                            )
+                        except ValueError:
+                            continue
+                    for candidate in reversed(tokens):
+                        try:
+                            cand_addr = _ipaddress.ip_address(candidate)
+                        except ValueError:
+                            return real_client
+                        if any(cand_addr in n for n in trusted_nets):
+                            continue
+                        return candidate
+                    return real_client
                 break
         except ValueError:
             continue

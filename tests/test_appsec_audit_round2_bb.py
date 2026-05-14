@@ -251,42 +251,30 @@ def test_bb2_01_score_xff_ignored_when_no_trusted_proxy_cidrs(app, monkeypatch):
 # BB2-02: NETWORK-ACL XFF still trusts unauthenticated XFF by default
 # ---------------------------------------------------------------------
 def test_bb2_02_network_acl_trusts_xff_by_default(app, monkeypatch):
-    """The round-1 WB finding fixed XFF spoof on the score-endpoint rate
-    limiter, but the source-IP CIDR allowlist enforced by
-    `src/iam_jit/network_acl.py` ALSO reads XFF — and defaults
-    `IAM_JIT_TRUST_FORWARDED_FOR=1` (i.e. trusts XFF without checking
-    the immediate client is a real proxy). If the deployment uses
-    `IAM_JIT_ALLOWED_SOURCE_CIDRS` to lock the surface to office IPs
-    AND the Function URL is reachable directly (the SAM template's
-    AllowPublicNetworkExposure path), an attacker bypasses the
-    allowlist by sending `X-Forwarded-For: <office-ip>`.
+    """BB2-02 — CLOSED. `IAM_JIT_TRUST_FORWARDED_FOR` now defaults
+    to OFF, and even when ON, XFF parsing requires the immediate
+    peer to fall in `IAM_JIT_TRUSTED_PROXY_CIDRS`. The default-off
+    posture means an attacker cannot bypass the source-IP allowlist
+    by spoofing XFF on a directly-exposed Function URL.
 
-    Severity: HIGH. This is the same fix pattern as the score
-    finding — applied to a different control. Round 1 fixed one;
-    this one is still open.
-
-    Fix sketch: gate XFF trust on a trusted-proxy CIDR list the same
-    way score._client_ip does. Default off."""
+    This test pins the closure: with the allowlist set to 10.0.0.0/8
+    and XFF NOT explicitly trusted, a spoofed `X-Forwarded-For:
+    10.0.0.42` from a 127.0.0.1 peer must still 403."""
     monkeypatch.setenv("IAM_JIT_ALLOWED_SOURCE_CIDRS", "10.0.0.0/8")
-    # IAM_JIT_TRUST_FORWARDED_FOR defaults to "1" — trust XFF.
+    monkeypatch.delenv("IAM_JIT_TRUST_FORWARDED_FOR", raising=False)
+    monkeypatch.delenv("IAM_JIT_TRUSTED_PROXY_CIDRS", raising=False)
 
     c = TestClient(app, raise_server_exceptions=False)
-    # TestClient's peer is 127.0.0.1 (not in 10.0.0.0/8) — without
-    # XFF the request would be 403'd.
     r_blocked = c.get("/api/v1/users/me")
     assert r_blocked.status_code == 403, r_blocked.text
 
-    # With a spoofed XFF the same request now passes the ACL.
-    r_bypass = c.get(
+    r_spoof = c.get(
         "/api/v1/users/me",
         headers={"X-Forwarded-For": "10.0.0.42"},
     )
-    # Currently broken: XFF spoof bypasses the source-IP allowlist.
-    # (Auth still 401's since no cookie, but the ACL — the layer this
-    # finding targets — was bypassed; we're past the 403 gate.)
-    assert r_bypass.status_code != 403, (
-        f"expected XFF-spoof bypass (the ACL trusts XFF unconditionally); "
-        f"got {r_bypass.status_code}: {r_bypass.text}"
+    assert r_spoof.status_code == 403, (
+        f"XFF spoof should NOT bypass the ACL by default; got "
+        f"{r_spoof.status_code}: {r_spoof.text}"
     )
 
 
@@ -603,32 +591,20 @@ def test_bb2_08_magic_link_log_emits_token_when_ses_unset(caplog, monkeypatch, t
 #         an attacker can poison the link recipient gets
 # ---------------------------------------------------------------------
 def test_bb2_09_magic_link_host_header_poisoning_when_xfh_trusted(monkeypatch, tmp_path):
-    """`public_url.base_for` reads `X-Forwarded-Host` when
-    `IAM_JIT_TRUST_FORWARDED_HOST=1` is set (the intended
-    CloudFront-in-front mode). But the env var is a binary trust
-    switch — there is NO check that the immediate client is a real
-    trusted-proxy CIDR. So in a deployment where the Function URL
-    is directly reachable (the same threat model as BB2-02), an
-    attacker can:
+    """BB2-09 — CLOSED. `public_url.base_for` now requires THREE
+    conditions before honoring X-Forwarded-Host:
+      1. `IAM_JIT_TRUST_FORWARDED_HOST=1`
+      2. the immediate peer in `IAM_JIT_TRUSTED_PROXY_CIDRS`
+      3. the XFH value present in `IAM_JIT_ALLOWED_PUBLIC_HOSTS`
 
-      1. Send POST /api/v1/auth/magic-link with email=victim AND
-         header X-Forwarded-Host: evil.attacker.example
-      2. iam-jit (with XFH-trust on) generates the link as
-         https://evil.attacker.example/api/v1/auth/callback?token=...
-      3. The link is delivered to victim via SES.
-      4. Victim clicks; their browser navigates to evil.example
-         which proxies the request through to iam-jit (or just
-         logs the token and 200's).
-      5. Attacker now has the signed magic-link token and can
-         consume it on the real domain.
-
-    Severity: HIGH (account takeover when both XFH-trust is on AND
-    direct Function URL is reachable).
-
-    Fix sketch: same as BB2-02. Gate XFH-trust on a trusted-proxy
-    CIDR list, the way score._client_ip does."""
+    Even with XFH-trust enabled, an attacker hitting the Function
+    URL directly cannot poison the magic-link host because their
+    peer IP is not in the trusted proxy CIDRs AND `evil.attacker.
+    example` is not in the public-host allowlist."""
     monkeypatch.setenv("IAM_JIT_TRUST_FORWARDED_HOST", "1")
-    monkeypatch.setenv("IAM_JIT_DEV_INSECURE_SECRET", "1")  # so dev_link is in response
+    monkeypatch.setenv("IAM_JIT_ALLOWED_PUBLIC_HOSTS", "iam-risk-score.com")
+    monkeypatch.setenv("IAM_JIT_TRUSTED_PROXY_CIDRS", "10.0.0.0/8")
+    monkeypatch.setenv("IAM_JIT_DEV_INSECURE_SECRET", "1")
     monkeypatch.setenv("IAM_JIT_MAGIC_LINK_SECRET", _DEV_SECRET)
     users_yaml = tmp_path / "users.yaml"
     users_yaml.write_text(_USERS_YAML)
@@ -646,10 +622,8 @@ def test_bb2_09_magic_link_host_header_poisoning_when_xfh_trusted(monkeypatch, t
     )
     assert r.status_code == 202
     link = r.json().get("dev_link") or ""
-    # Currently broken: the link host is the attacker-controlled
-    # value, because XFH was trusted without a proxy check.
-    assert "evil.attacker.example" in link, (
-        f"expected poisoned host; got: {link}"
+    assert "evil.attacker.example" not in link, (
+        f"XFH host poisoning still works — got: {link}"
     )
 
 

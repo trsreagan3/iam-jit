@@ -160,6 +160,7 @@ _XFF_INSIDE = {"X-Forwarded-For": "10.5.6.7"}
 
 def test_admin_list_cidrs(as_admin: TestClient, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("IAM_JIT_TRUST_FORWARDED_FOR", "1")
+    monkeypatch.setenv("IAM_JIT_TRUSTED_PROXY_CIDRS", "127.0.0.0/8")
     cidr_store.get_default_store().add(_entry("10.0.0.0/8", note="rfc1918"))
     body = as_admin.get(
         "/api/v1/admin/network/cidrs", headers=_XFF_INSIDE
@@ -201,6 +202,7 @@ def test_admin_remove_cidr(
     as_admin: TestClient, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     monkeypatch.setenv("IAM_JIT_TRUST_FORWARDED_FOR", "1")
+    monkeypatch.setenv("IAM_JIT_TRUSTED_PROXY_CIDRS", "127.0.0.0/8")
     cidr_store.get_default_store().add(_entry("10.0.0.0/8"))
     cidr_store.get_default_store().add(_entry("203.0.113.0/24"))
     r = as_admin.delete(
@@ -219,6 +221,7 @@ def test_admin_remove_refuses_last_entry(
     """Removing the only remaining CIDR would disable enforcement
     silently — refuse."""
     monkeypatch.setenv("IAM_JIT_TRUST_FORWARDED_FOR", "1")
+    monkeypatch.setenv("IAM_JIT_TRUSTED_PROXY_CIDRS", "127.0.0.0/8")
     cidr_store.get_default_store().add(_entry("10.0.0.0/8"))
     r = as_admin.delete(
         "/api/v1/admin/network/cidrs/10.0.0.0/8", headers=_XFF_INSIDE
@@ -233,6 +236,7 @@ def test_admin_remove_missing_returns_404(
     as_admin: TestClient, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     monkeypatch.setenv("IAM_JIT_TRUST_FORWARDED_FOR", "1")
+    monkeypatch.setenv("IAM_JIT_TRUSTED_PROXY_CIDRS", "127.0.0.0/8")
     cidr_store.get_default_store().add(_entry("10.0.0.0/8"))
     cidr_store.get_default_store().add(_entry("192.168.0.0/16"))
     r = as_admin.delete(
@@ -266,6 +270,7 @@ def test_runtime_store_overrides_env_allowlist(
     is whatever TestClient sends — we use XFF to control the source."""
     monkeypatch.setenv("IAM_JIT_ALLOWED_SOURCE_CIDRS", "203.0.113.0/24")
     monkeypatch.setenv("IAM_JIT_TRUST_FORWARDED_FOR", "1")
+    monkeypatch.setenv("IAM_JIT_TRUSTED_PROXY_CIDRS", "127.0.0.0/8")
     # Confirm the env-only allowlist refuses an IP outside its range.
     r1 = as_dev.get(
         "/api/v1/users/me",
@@ -289,6 +294,7 @@ def test_env_allowlist_used_when_runtime_empty(
     """No runtime entries → env list applies."""
     monkeypatch.setenv("IAM_JIT_ALLOWED_SOURCE_CIDRS", "10.0.0.0/8")
     monkeypatch.setenv("IAM_JIT_TRUST_FORWARDED_FOR", "1")
+    monkeypatch.setenv("IAM_JIT_TRUSTED_PROXY_CIDRS", "127.0.0.0/8")
     r = as_dev.get(
         "/api/v1/users/me",
         headers={"X-Forwarded-For": "10.5.6.7"},
