@@ -285,59 +285,15 @@ def _client_ip(request: Request) -> str:
     if not trust_xff:
         return real_client
 
-    # Only honor XFF when the immediate client is a configured trusted
-    # proxy. Without this check, setting the env var would re-open the
-    # bypass; the env var alone is not sufficient.
-    trusted_cidrs_env = os.environ.get("IAM_JIT_TRUSTED_PROXY_CIDRS", "").strip()
-    if not trusted_cidrs_env:
-        return real_client
+    # Use the shared trusted-proxy parser/matcher — single source of
+    # truth across score, network_acl, public_url, and web routes.
+    # Closes TRUSTED-PROXY-CIDRS-PARSER-DISCREPANCY (round 3 WB).
+    from .. import trusted_proxy
 
-    import ipaddress as _ipaddress
-    try:
-        client_addr = _ipaddress.ip_address(real_client)
-    except ValueError:
-        return real_client  # unparseable peer → don't escalate trust
-
-    for token in trusted_cidrs_env.split(","):
-        token = token.strip()
-        if not token:
-            continue
-        try:
-            net = _ipaddress.ip_network(token, strict=False)
-            if client_addr in net:
-                xff = request.headers.get("x-forwarded-for")
-                if xff:
-                    # Walk RIGHT-TO-LEFT: each trusted proxy appends
-                    # its client to the right; the leftmost token is
-                    # attacker-controlled (any client can set the
-                    # initial XFF header). Skip past trusted-proxy
-                    # hops to find the first untrusted IP — that's
-                    # the real client.
-                    tokens = [t.strip() for t in xff.split(",") if t.strip()]
-                    trusted_nets = []
-                    for net_tok in trusted_cidrs_env.split(","):
-                        net_tok = net_tok.strip()
-                        if not net_tok:
-                            continue
-                        try:
-                            trusted_nets.append(
-                                _ipaddress.ip_network(net_tok, strict=False)
-                            )
-                        except ValueError:
-                            continue
-                    for candidate in reversed(tokens):
-                        try:
-                            cand_addr = _ipaddress.ip_address(candidate)
-                        except ValueError:
-                            return real_client
-                        if any(cand_addr in n for n in trusted_nets):
-                            continue
-                        return candidate
-                    return real_client
-                break
-        except ValueError:
-            continue
-    return real_client
+    resolved = trusted_proxy.real_client_from_xff(
+        real_client, request.headers.get("x-forwarded-for")
+    )
+    return resolved or real_client
 
 
 def _iter_string_values(obj: Any, path: str = "") -> Any:

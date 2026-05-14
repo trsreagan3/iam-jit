@@ -795,19 +795,20 @@ def test_finding_trusted_proxy_cidrs_parser_discrepancy() -> None:
     Fix sketch: extract a shared `parse_trusted_proxy_cidrs()`
     helper in `network_acl.py` and call it from all three sites.
     """
-    from iam_jit import network_acl, public_url
+    # CLOSED: all three call sites now delegate to the shared
+    # `iam_jit.trusted_proxy` helper.
+    from iam_jit import network_acl, trusted_proxy
     from iam_jit.routes import score as score_mod
 
     score_src = inspect.getsource(score_mod._client_ip)
-    public_url_src = inspect.getsource(public_url._peer_in_trusted_proxy_cidrs)
     network_acl_src = inspect.getsource(network_acl._read_source_ip)
 
-    # Confirm the inconsistency: score uses plain split(","); the
-    # other two use replace(",", " ").split().
-    assert '.split(",")' in score_src
-    assert 'replace(",", " ")' not in score_src
-    assert 'replace(",", " ")' in public_url_src
-    assert 'replace(",", " ")' in network_acl_src
+    assert "trusted_proxy" in score_src
+    assert "trusted_proxy" in network_acl_src
+    # Single source of truth: the helper exists and uses the
+    # whitespace-tolerant parser.
+    helper_src = inspect.getsource(trusted_proxy.parse_trusted_cidrs)
+    assert 'replace(",", " ")' in helper_src
 
 
 # ---------------------------------------------------------------------------

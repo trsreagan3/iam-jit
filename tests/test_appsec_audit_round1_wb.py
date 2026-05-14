@@ -943,12 +943,16 @@ def test_finding_healthz_leaks_deployment_posture_unauthenticated() -> None:
     Move the posture block to `/api/v1/admin/security-posture`
     where it already lives (admin-gated).
     """
+    # CLOSED: /healthz returns only `{"status": "ok", "version": "..."}`.
+    # Admin-gated posture object remains at /api/v1/admin/security-
+    # posture.
     from iam_jit.routes.health import healthz
 
     out = healthz()
-    assert "auth_mode" in out
-    assert "security_posture" in out
-    assert "llm_backend" in out
+    assert "auth_mode" not in out
+    assert "security_posture" not in out
+    assert "llm_backend" not in out
+    assert out["status"] == "ok"
 
 
 # ---------------------------------------------------------------------------

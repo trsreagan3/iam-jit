@@ -102,11 +102,9 @@ def _read_source_ip(request_client_host: str | None, xff_header: str | None) -> 
       - `IAM_JIT_TRUST_FORWARDED_FOR=1`
       - `IAM_JIT_TRUSTED_PROXY_CIDRS=<CIDRs of real proxies in front>`
 
-    When both are set AND the immediate peer falls in a trusted-proxy
-    CIDR, we walk XFF right-to-left, skipping trusted-proxy hops to
-    find the first untrusted IP — that's the real client. Each hop
-    appends its client to the right, so the leftmost token is
-    attacker-supplied.
+    Resolution uses the shared trusted-proxy helper so all four call
+    sites (score, network_acl, public_url, web) agree on what the
+    "real client" is.
     """
     trust_xff = (
         os.environ.get("IAM_JIT_TRUST_FORWARDED_FOR", "0").lower()
@@ -115,51 +113,11 @@ def _read_source_ip(request_client_host: str | None, xff_header: str | None) -> 
     if not (trust_xff and xff_header and request_client_host):
         return request_client_host or None
 
-    trusted_cidrs_env = os.environ.get("IAM_JIT_TRUSTED_PROXY_CIDRS", "").strip()
-    if not trusted_cidrs_env:
-        return request_client_host
+    from . import trusted_proxy
 
-    try:
-        peer_addr = ipaddress.ip_address(request_client_host)
-    except ValueError:
-        return request_client_host
-
-    trusted_nets: list[ipaddress.IPv4Network | ipaddress.IPv6Network] = []
-    for tok in trusted_cidrs_env.replace(",", " ").split():
-        tok = tok.strip()
-        if not tok:
-            continue
-        try:
-            trusted_nets.append(ipaddress.ip_network(tok, strict=False))
-        except ValueError:
-            continue
-    if not trusted_nets:
-        return request_client_host
-
-    peer_trusted = any(
-        isinstance(peer_addr, ipaddress.IPv4Address)
-        == isinstance(n.network_address, ipaddress.IPv4Address)
-        and peer_addr in n
-        for n in trusted_nets
+    return trusted_proxy.real_client_from_xff(
+        request_client_host, xff_header
     )
-    if not peer_trusted:
-        return request_client_host
-
-    tokens = [t.strip() for t in xff_header.split(",") if t.strip()]
-    for candidate in reversed(tokens):
-        try:
-            cand_addr = ipaddress.ip_address(candidate)
-        except ValueError:
-            return request_client_host
-        if any(
-            isinstance(cand_addr, ipaddress.IPv4Address)
-            == isinstance(n.network_address, ipaddress.IPv4Address)
-            and cand_addr in n
-            for n in trusted_nets
-        ):
-            continue
-        return candidate
-    return request_client_host
 
 
 def evaluate(

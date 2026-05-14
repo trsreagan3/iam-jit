@@ -517,27 +517,19 @@ def test_bb_12_magic_link_logs_token_in_plaintext_when_ses_unset(app, caplog, mo
 # BB-13: /healthz exposes security posture to unauthenticated callers
 # ---------------------------------------------------------------------
 def test_bb_13_healthz_leaks_security_posture(app):
-    """GET /healthz returns (unauthenticated) the full security-posture
-    object: whether an ALB is in front, whether HTTPS cert configured,
-    whether network ACL is active, whether SES is configured, the
-    LLM backend identity, the auth mode, the user-config source. This
-    is a recon goldmine for an attacker probing a public deployment.
-
-    Severity: LOW (info disclosure; no direct exploit, but materially
-    accelerates targeted attack).
-
-    Fix sketch: keep /healthz as a 1-byte 'ok' response; move the
-    posture object to /api/v1/admin/security-posture (already exists
-    and is admin-gated)."""
+    """BB-13 — CLOSED. /healthz is now a bare liveness response
+    (status + version only). The full posture object lives at
+    /api/v1/admin/security-posture (admin-gated)."""
     c = TestClient(app, raise_server_exceptions=False)
     r = c.get("/healthz")
     assert r.status_code == 200
     body = r.json()
-    # Today /healthz reveals all of this.
-    assert "security_posture" in body
-    assert "auth_mode" in body
-    assert "llm_backend" in body
-    assert "user_config_source" in body
+    assert "status" in body and body["status"] == "ok"
+    assert "version" in body
+    assert "security_posture" not in body
+    assert "auth_mode" not in body
+    assert "llm_backend" not in body
+    assert "user_config_source" not in body
 
 
 # ---------------------------------------------------------------------

@@ -164,15 +164,19 @@ def test_finding_xff_leftmost_attacker_controlled_behind_trusted_proxy(
     attacker-supplied leftmost token.
     """
     from iam_jit.routes import score as score_mod
+    from iam_jit import trusted_proxy as _tp
 
     src = inspect.getsource(score_mod._client_ip)
-    # New shape: right-to-left walk, leftmost extraction gone.
+    # New shape: delegates to the shared trusted_proxy helper.
     assert 'xff.split(",")[0].strip()' not in src, (
         "_client_ip still takes the leftmost XFF token — regression"
     )
-    assert "reversed(" in src, (
-        "_client_ip should walk XFF right-to-left to skip trusted proxies"
+    assert "trusted_proxy" in src, (
+        "_client_ip should delegate to the shared trusted_proxy helper"
     )
+    # The shared helper walks right-to-left.
+    helper_src = inspect.getsource(_tp.real_client_from_xff)
+    assert "reversed(" in helper_src
 
     # Functional check: simulate the exact CloudFront-in-front-of-
     # Lambda topology the audit described. Trusted proxy CIDR
@@ -679,13 +683,15 @@ def test_finding_trusted_proxy_cidr_no_malformed_entry_rejection() -> None:
     Init` or by parsing the env var in a `boto3.client('lambda')`
     healthcheck before traffic is routed.
     """
-    from iam_jit.routes import score as score_mod
+    # The parser logic is now in the shared trusted_proxy module;
+    # the silent-skip behavior moved with it. Still LOW (operator
+    # footgun, not a security bypass). Pin against the helper.
+    from iam_jit import trusted_proxy as _tp
 
-    src = inspect.getsource(score_mod._client_ip)
-    # `except ValueError: continue` — silent skip, no log.
+    src = inspect.getsource(_tp.parse_trusted_cidrs)
     assert "except ValueError:" in src
     assert "continue" in src
-    # No structured logging around the malformed-entry path.
+    # No structured logging around the malformed-entry path yet.
     assert "logger.warning" not in src
     assert "logger.error" not in src
 

@@ -120,13 +120,13 @@ def test_append_dismissal_replaces_existing_for_same_id() -> None:
 # ---- /healthz integration ----
 
 
-def test_healthz_exposes_security_posture(client: TestClient) -> None:
-    """Anonymous /healthz includes the posture so agents can detect
-    a degraded deploy without auth."""
+def test_healthz_does_NOT_expose_security_posture(client: TestClient) -> None:
+    """BB-13 / BB3-03 closure: /healthz no longer leaks posture to
+    unauthenticated callers. Posture moved to the admin-gated
+    /api/v1/admin/security-posture route."""
     body = client.get("/healthz").json()
-    assert "security_posture" in body
-    assert body["security_posture"]["severity"] in {"ok", "warn", "critical"}
-    assert "issues" in body["security_posture"]
+    assert "security_posture" not in body
+    assert body.get("status") == "ok"
 
 
 # ---- admin endpoint ----

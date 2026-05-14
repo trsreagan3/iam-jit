@@ -15,20 +15,14 @@ router = APIRouter()
 
 @router.get("/healthz")
 def healthz() -> dict:
-    """Health summary + security posture.
+    """Health summary.
 
-    The `security_posture` block is included unauthenticated so
-    agents that integrate with iam-jit can detect a degraded
-    deploy (open SG + HTTP-only is the worst combo) before they
-    submit any request. The block contains no secrets — just
-    boolean flags and severity classifiers."""
-    from .. import security_posture
-
-    return {
-        "status": "ok",
-        "version": __version__,
-        "auth_mode": os.environ.get("IAM_JIT_AUTH_MODE", "local"),
-        "user_config_source": os.environ.get("IAM_JIT_USER_CONFIG_SOURCE", "dynamodb"),
-        "llm_backend": os.environ.get("IAM_JIT_LLM", "none"),
-        "security_posture": security_posture.compute(),
-    }
+    BB-13 / BB3-03 closure: `/healthz` is now a minimal liveness
+    response only. The previous version returned the full
+    `security_posture` block (auth_mode, user_config_source,
+    llm_backend, network ACL status, etc.) unauthenticated — that
+    accelerates targeted attacker recon. Operators who need the
+    posture object should hit `/api/v1/admin/security-posture`
+    (admin-gated).
+    """
+    return {"status": "ok", "version": __version__}

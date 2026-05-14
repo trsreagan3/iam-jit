@@ -30,12 +30,19 @@ def client(tmp_path: pathlib.Path) -> TestClient:
 
 
 def test_healthz_unauthenticated(client: TestClient) -> None:
+    """BB-13 / BB3-03 closure: /healthz returns the bare minimum
+    needed for a load-balancer liveness probe — status + version.
+    The full security_posture object moved to the admin route."""
     resp = client.get("/healthz")
     assert resp.status_code == 200
     body = resp.json()
     assert body["status"] == "ok"
     assert "version" in body
-    assert "auth_mode" in body
+    # The leaky fields are GONE from /healthz.
+    assert "auth_mode" not in body
+    assert "security_posture" not in body
+    assert "user_config_source" not in body
+    assert "llm_backend" not in body
 
 
 def test_healthz_does_not_require_auth(client: TestClient) -> None:

@@ -285,23 +285,24 @@ def test_bb3_03_healthz_leaks_full_security_posture(app):
     Fix sketch: return `{"status":"ok"}` for `/healthz` and serve the
     posture at the admin-gated `/api/v1/admin/security-posture` (which
     already exists)."""
+    # BB3-03 / BB-13 — CLOSED. /healthz is a bare liveness response.
     c = TestClient(app, raise_server_exceptions=False)
     r = c.get("/healthz")
     assert r.status_code == 200
     body = r.json()
-    # Currently leaking — same shape as BB-13 round 1.
-    assert "auth_mode" in body
-    assert "user_config_source" in body
-    assert "llm_backend" in body
-    assert "security_posture" in body
-    posture = body["security_posture"]
-    # The issues array is the most damaging part — verbose fix hints
-    # for unauthenticated callers.
-    assert "issues" in posture
-    if posture["issues"]:
+    assert body.get("status") == "ok"
+    assert "version" in body
+    assert "auth_mode" not in body
+    assert "user_config_source" not in body
+    assert "llm_backend" not in body
+    assert "security_posture" not in body
+    # The original test continues below — short-circuit by
+    # returning here since the closure path is now the asserted
+    # behavior.
+    return
+    posture = body.get("security_posture") or {}
+    if posture.get("issues"):
         sample = posture["issues"][0]
-        # Both `detail` and `fix` are present; both are free-form
-        # strings with operational hints.
         assert "detail" in sample or "fix" in sample
 
 
