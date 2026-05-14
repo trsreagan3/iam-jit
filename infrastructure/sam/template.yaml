@@ -717,6 +717,15 @@ Globals:
         IAM_JIT_CIDRS_TABLE: !Ref CidrsTable
         IAM_JIT_SETTINGS_TABLE: !Ref SettingsTable
         IAM_JIT_ACCOUNTS_TABLE: !Ref AccountsTable
+        # Atomic single-use enforcement across Lambda instances —
+        # MAGIC-LINK-REPLAY-MULTI-INSTANCE closure. The table uses
+        # TimeToLiveSpecification on `expires_at` so consumed-token
+        # rows auto-evict at 2× the magic-link TTL.
+        IAM_JIT_MAGIC_LINK_NONCES_TABLE: !Ref MagicLinkNoncesTable
+        # Cross-instance ban store — BAN-MULTI-INSTANCE-DESYNC
+        # closure. Without this, a banned user simply re-trips on
+        # the next Lambda instance.
+        IAM_JIT_BANS_TABLE: !Ref BansTable
         # Floor params — surface them to the runtime so the admin
         # PATCH validator can refuse loosen-below-floor attempts and
         # the GET endpoint can show "locked by deploy" indicators.
@@ -911,6 +920,45 @@ Resources:
         - Key: managed-by
           Value: iam-jit
 
+  MagicLinkNoncesTable:
+    Type: AWS::DynamoDB::Table
+    DeletionPolicy: Delete
+    UpdateReplacePolicy: Delete
+    Properties:
+      TableName: !Sub "iam-jit-magic-link-nonces-${AWS::StackName}"
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - AttributeName: token_hash
+          AttributeType: S
+      KeySchema:
+        - AttributeName: token_hash
+          KeyType: HASH
+      TimeToLiveSpecification:
+        AttributeName: expires_at
+        Enabled: true
+      Tags:
+        - Key: managed-by
+          Value: iam-jit
+
+  BansTable:
+    Type: AWS::DynamoDB::Table
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Properties:
+      TableName: !Sub "iam-jit-bans-${AWS::StackName}"
+      BillingMode: PAY_PER_REQUEST
+      PointInTimeRecoverySpecification:
+        PointInTimeRecoveryEnabled: true
+      AttributeDefinitions:
+        - AttributeName: user_id
+          AttributeType: S
+      KeySchema:
+        - AttributeName: user_id
+          KeyType: HASH
+      Tags:
+        - Key: managed-by
+          Value: iam-jit
+
   RequestsTable:
     Type: AWS::DynamoDB::Table
     DeletionPolicy: Retain
@@ -1004,6 +1052,8 @@ Resources:
                   - !GetAtt CidrsTable.Arn
                   - !GetAtt SettingsTable.Arn
                   - !GetAtt AccountsTable.Arn
+                  - !GetAtt MagicLinkNoncesTable.Arn
+                  - !GetAtt BansTable.Arn
               - !If
                   - AuthLocal
                   - Effect: Allow

@@ -67,13 +67,77 @@ class InMemoryMagicLinkNonceStore:
             self._consumed.clear()
 
 
+class DynamoDBMagicLinkNonceStore:
+    """DynamoDB-backed single-use enforcement, atomic across Lambda
+    instances.
+
+    Schema:
+      table: <IAM_JIT_MAGIC_LINK_NONCES_TABLE>
+      partition key: `token_hash` (String)
+      TTL attribute: `expires_at` (Number — unix seconds; the table
+        MUST have TimeToLiveSpecification enabled on `expires_at`)
+
+    The `consume_or_reject` operation is a single PutItem with
+    `ConditionExpression="attribute_not_exists(token_hash)"`. The
+    conditional check fails atomically if any other instance already
+    consumed the same token; we raise TokenAlreadyUsed in that case.
+    """
+
+    def __init__(self, table_name: str, *, client: object | None = None) -> None:
+        self._table_name = table_name
+        if client is not None:
+            self._client = client
+        else:
+            import boto3
+
+            self._client = boto3.client("dynamodb")
+
+    def consume_or_reject(self, token_hash: str) -> None:
+        expires_at = int(time.time() + _STORE_TTL_SECONDS)
+        try:
+            self._client.put_item(
+                TableName=self._table_name,
+                Item={
+                    "token_hash": {"S": token_hash},
+                    "expires_at": {"N": str(expires_at)},
+                },
+                ConditionExpression="attribute_not_exists(token_hash)",
+            )
+        except Exception as e:
+            # boto3 raises ClientError with Code='ConditionalCheckFailedException'
+            # when the conditional check fails — meaning another instance
+            # already consumed this token. We detect it by string match
+            # to avoid hard-importing botocore here.
+            if "ConditionalCheckFailedException" in str(e) or (
+                hasattr(e, "response")
+                and getattr(e, "response", {})
+                .get("Error", {})
+                .get("Code")
+                == "ConditionalCheckFailedException"
+            ):
+                raise TokenAlreadyUsed(
+                    "magic-link token has already been used; request a new one"
+                )
+            raise
+
+    def reset_for_tests(self) -> None:
+        # No-op for the DDB backend — table cleanup is operator-managed.
+        return None
+
+
 _GLOBAL: MagicLinkNonceStore | None = None
 
 
 def get_default_store() -> MagicLinkNonceStore:
     global _GLOBAL
     if _GLOBAL is None:
-        _GLOBAL = InMemoryMagicLinkNonceStore()
+        table = (
+            os.environ.get("IAM_JIT_MAGIC_LINK_NONCES_TABLE") or ""
+        ).strip()
+        if table:
+            _GLOBAL = DynamoDBMagicLinkNonceStore(table)
+        else:
+            _GLOBAL = InMemoryMagicLinkNonceStore()
     return _GLOBAL
 
 

@@ -212,6 +212,111 @@ def ban_for_injection(
     return ban
 
 
+class DynamoDBBanStore:
+    """DynamoDB-backed ban store. Atomic across Lambda instances.
+
+    Schema:
+      table: <IAM_JIT_BANS_TABLE>
+      partition key: `user_id` (String)
+      attribute: `ban_json` (String — JSON-serialized Ban record)
+    """
+
+    def __init__(self, table_name: str, *, client: object | None = None) -> None:
+        self._table_name = table_name
+        if client is not None:
+            self._client = client
+        else:
+            import boto3
+
+            self._client = boto3.client("dynamodb")
+
+    def add(self, ban: "Ban") -> None:
+        import dataclasses
+        import json
+
+        payload = json.dumps(dataclasses.asdict(ban), separators=(",", ":"))
+        self._client.put_item(
+            TableName=self._table_name,
+            Item={
+                "user_id": {"S": ban.user_id},
+                "ban_json": {"S": payload},
+            },
+        )
+
+    def is_banned(self, user_id: str) -> bool:
+        return self.get(user_id) is not None
+
+    def get(self, user_id: str) -> "Ban | None":
+        try:
+            resp = self._client.get_item(
+                TableName=self._table_name,
+                Key={"user_id": {"S": user_id}},
+                ConsistentRead=True,
+            )
+        except Exception:
+            # BAN-CHECK-FAIL-OPEN closure: fail CLOSED on DDB errors.
+            # A transient ddb outage shouldn't allow a banned user
+            # back in. The caller (middleware) treats None as "not
+            # banned"; we raise instead so the middleware can decide
+            # whether to 503 or fail closed by ban-by-default.
+            raise
+        item = resp.get("Item") if isinstance(resp, dict) else None
+        if not item:
+            return None
+        import json
+
+        try:
+            data = json.loads(item["ban_json"]["S"])
+        except Exception:
+            return None
+        return Ban(
+            user_id=data.get("user_id", user_id),
+            banned_at=data.get("banned_at", ""),
+            reasons=list(data.get("reasons") or []),
+            snippets=list(data.get("snippets") or []),
+            confidence=data.get("confidence", "med"),
+            actor=data.get("actor", "system"),
+        )
+
+    def remove(self, user_id: str) -> None:
+        self._client.delete_item(
+            TableName=self._table_name,
+            Key={"user_id": {"S": user_id}},
+        )
+
+    def list_all(self) -> list["Ban"]:
+        # Scans are fine here — ban list is small (< 1000 in any
+        # realistic deployment) and used only by the admin UI.
+        out: list[Ban] = []
+        last_key = None
+        while True:
+            kwargs: dict = {"TableName": self._table_name}
+            if last_key is not None:
+                kwargs["ExclusiveStartKey"] = last_key
+            resp = self._client.scan(**kwargs)
+            for item in resp.get("Items", []) or []:
+                import json
+
+                try:
+                    data = json.loads(item["ban_json"]["S"])
+                except Exception:
+                    continue
+                out.append(
+                    Ban(
+                        user_id=data.get("user_id", ""),
+                        banned_at=data.get("banned_at", ""),
+                        reasons=list(data.get("reasons") or []),
+                        snippets=list(data.get("snippets") or []),
+                        confidence=data.get("confidence", "med"),
+                        actor=data.get("actor", "system"),
+                    )
+                )
+            last_key = resp.get("LastEvaluatedKey")
+            if not last_key:
+                break
+        return out
+
+
 _GLOBAL_STORE: BanStore | None = None
 
 
@@ -220,11 +325,15 @@ def get_default_store() -> BanStore:
     if _GLOBAL_STORE is None:
         import os
 
-        local = os.environ.get("IAM_JIT_BANS_DIR")
-        if local:
-            _GLOBAL_STORE = FilesystemBanStore(local)
+        table = (os.environ.get("IAM_JIT_BANS_TABLE") or "").strip()
+        if table:
+            _GLOBAL_STORE = DynamoDBBanStore(table)
         else:
-            _GLOBAL_STORE = InMemoryBanStore()
+            local = os.environ.get("IAM_JIT_BANS_DIR")
+            if local:
+                _GLOBAL_STORE = FilesystemBanStore(local)
+            else:
+                _GLOBAL_STORE = InMemoryBanStore()
     return _GLOBAL_STORE
 
 

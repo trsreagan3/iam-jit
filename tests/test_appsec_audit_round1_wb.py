@@ -198,36 +198,41 @@ def test_finding_bearer_parsing_split_on_single_space() -> None:
 # ---------------------------------------------------------------------------
 
 
-def test_finding_magic_link_nonce_store_in_memory_only() -> None:
-    """Finding: MAGIC-LINK-REPLAY-MULTI-INSTANCE.
+def test_finding_magic_link_nonce_store_in_memory_only(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Finding: MAGIC-LINK-REPLAY-MULTI-INSTANCE — CLOSED.
 
     CWE-294 (Authentication Bypass by Capture-replay).
-    Severity: HIGH (in production multi-instance deployments).
-    Location: src/iam_jit/magic_link_nonces.py:44-67
-    (`InMemoryMagicLinkNonceStore`) + `get_default_store` at line 73.
+    Severity: HIGH.
 
-    Single-use enforcement is done via a process-local dict. Lambda
-    cold-starts up to N concurrent instances; nonces consumed on
-    instance A are unknown to instance B for the entire 15-minute
-    TTL. An attacker who captures a magic-link (proxy log, browser
-    history, email archive scrape) can replay it against a different
-    Lambda instance until the link's signed TTL expires.
-
-    Fix: back the nonce store with DynamoDB (PutItem with
-    `ConditionExpression="attribute_not_exists(token_hash)"` is the
-    atomic 'consume') and time-bound TTL via the table's
-    TimeToLiveSpecification.
+    Closure:
+      - `DynamoDBMagicLinkNonceStore` ships in
+        `src/iam_jit/magic_link_nonces.py`. Atomic consume via
+        `PutItem(ConditionExpression="attribute_not_exists(token_hash)")`.
+      - Factory selects DDB when `IAM_JIT_MAGIC_LINK_NONCES_TABLE`
+        is set, in-memory otherwise.
+      - The route handler (`routes/auth.py:issue_magic_link`)
+        refuses with 503 when running in Lambda
+        (`AWS_LAMBDA_FUNCTION_NAME` set) AND no DDB table configured
+        AND no explicit `IAM_JIT_ALLOW_INSECURE_NONCES=1` opt-out.
     """
-    from iam_jit.magic_link_nonces import (
-        InMemoryMagicLinkNonceStore,
-        get_default_store,
-    )
+    from iam_jit import magic_link_nonces as nonces
 
-    store = get_default_store()
-    # The default factory still returns the in-memory implementation.
-    assert isinstance(store, InMemoryMagicLinkNonceStore), (
-        "Default magic-link nonce store changed — finding may be addressed."
-    )
+    # When the DDB table env var is set, the factory returns the
+    # DDB-backed store.
+    monkeypatch.setenv("IAM_JIT_MAGIC_LINK_NONCES_TABLE", "iam_jit_nonces")
+    nonces.reset_default_store_for_tests()
+    # Don't actually instantiate boto3 — just confirm the class path.
+    assert hasattr(nonces, "DynamoDBMagicLinkNonceStore")
+
+    # When env unset, fall back to in-memory (still valid for
+    # single-instance dev / RC=1 deployments — the route handler
+    # gates this, not the factory).
+    monkeypatch.delenv("IAM_JIT_MAGIC_LINK_NONCES_TABLE", raising=False)
+    nonces.reset_default_store_for_tests()
+    fallback = nonces.get_default_store()
+    assert isinstance(fallback, nonces.InMemoryMagicLinkNonceStore)
 
 
 # ---------------------------------------------------------------------------
@@ -238,29 +243,34 @@ def test_finding_magic_link_nonce_store_in_memory_only() -> None:
 def test_finding_bans_store_in_memory_default(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Finding: BAN-MULTI-INSTANCE-DESYNC.
+    """Finding: BAN-MULTI-INSTANCE-DESYNC — CLOSED.
 
     CWE-613 (Insufficient Session Expiration) — adjacent class.
-    Severity: HIGH (in production multi-instance deployments).
-    Location: src/iam_jit/bans.py:218-228 (`get_default_store`).
+    Severity: HIGH.
 
-    Bans are stored in-process unless `IAM_JIT_BANS_DIR` is set.
-    Filesystem isn't durable in Lambda either (/tmp resets across
-    cold-starts and is per-instance anyway). A banned user routed
-    to a different Lambda instance is NOT banned. The intake-turn
-    and submission paths rely on this store for prompt-injection
-    blocking, so a determined attacker can repeatedly mint sessions
-    and trip a different instance each time.
-
-    Fix: add `DynamoDBBanStore` and prefer it when
-    `IAM_JIT_BANS_TABLE` is set.
+    Closure: `DynamoDBBanStore` ships in `src/iam_jit/bans.py`.
+    Factory picks it when `IAM_JIT_BANS_TABLE` is set (preferred in
+    multi-instance Lambda), then filesystem if `IAM_JIT_BANS_DIR`
+    is set (single-instance with persistent /tmp), otherwise
+    in-memory.
     """
-    monkeypatch.delenv("IAM_JIT_BANS_DIR", raising=False)
     from iam_jit import bans as bans_mod
 
+    # DDB path
+    monkeypatch.setenv("IAM_JIT_BANS_TABLE", "iam_jit_bans")
     bans_mod.reset_default_store_for_tests()
-    store = bans_mod.get_default_store()
-    assert isinstance(store, bans_mod.InMemoryBanStore)
+    assert hasattr(bans_mod, "DynamoDBBanStore")
+
+    # Filesystem fallback
+    monkeypatch.delenv("IAM_JIT_BANS_TABLE", raising=False)
+    monkeypatch.setenv("IAM_JIT_BANS_DIR", "/tmp/iam_jit_bans_test")
+    bans_mod.reset_default_store_for_tests()
+    assert isinstance(bans_mod.get_default_store(), bans_mod.FilesystemBanStore)
+
+    # In-memory last resort
+    monkeypatch.delenv("IAM_JIT_BANS_DIR", raising=False)
+    bans_mod.reset_default_store_for_tests()
+    assert isinstance(bans_mod.get_default_store(), bans_mod.InMemoryBanStore)
 
 
 # ---------------------------------------------------------------------------

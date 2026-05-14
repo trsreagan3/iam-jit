@@ -103,6 +103,33 @@ def issue_magic_link(
     if (os.environ.get("IAM_JIT_AUTH_MODE") or "local").lower() != "local":
         raise HTTPException(status_code=400, detail="magic-link auth is only available in local mode")
 
+    # MAGIC-LINK-REPLAY-MULTI-INSTANCE closure: if we're running in
+    # Lambda (multi-instance possible) AND no DynamoDB-backed nonce
+    # store is configured AND the operator hasn't explicitly opted
+    # in to the in-memory store, refuse. The in-memory store can't
+    # enforce single-use across Lambda instances, so a captured
+    # link replays. Opt-out env var: IAM_JIT_ALLOW_INSECURE_NONCES=1
+    # (e.g. single-instance dev / RC=1 deployments).
+    _in_lambda = bool(os.environ.get("AWS_LAMBDA_FUNCTION_NAME"))
+    _has_ddb_nonces = bool(
+        (os.environ.get("IAM_JIT_MAGIC_LINK_NONCES_TABLE") or "").strip()
+    )
+    _allow_insecure = (
+        os.environ.get("IAM_JIT_ALLOW_INSECURE_NONCES", "").lower()
+        in {"1", "true", "yes"}
+    )
+    if _in_lambda and not _has_ddb_nonces and not _allow_insecure:
+        raise HTTPException(
+            status_code=503,
+            detail=(
+                "multi-instance magic-link replay protection is not "
+                "configured. Set IAM_JIT_MAGIC_LINK_NONCES_TABLE to a "
+                "DynamoDB table (recommended), or "
+                "IAM_JIT_ALLOW_INSECURE_NONCES=1 if you've capped the "
+                "Lambda to a single instance (reserved concurrency=1)."
+            ),
+        )
+
     # Per-IP rate limit (BB-09 / launch-day SES quota guard). 5
     # req/min/IP soft, 15 hard. Uniform 429 regardless of email so
     # the limit doesn't double as a registration oracle.
