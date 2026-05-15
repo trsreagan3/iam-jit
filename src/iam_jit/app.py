@@ -43,6 +43,8 @@ from .routes.web import router as web_router
 from .routes.webhooks_stripe import router as webhooks_stripe_router
 from .routes.blacklist import router as blacklist_router
 from .routes.feedback import router as feedback_router
+from .routes.slack import router as slack_router
+from .routes.oidc import router as oidc_router
 from .store import FilesystemStore, RequestStore
 from .users_store import FileUserStore, UserStore
 
@@ -555,6 +557,8 @@ def create_app(
     app.include_router(webhooks_stripe_router)
     app.include_router(blacklist_router)
     app.include_router(feedback_router)
+    app.include_router(slack_router)
+    app.include_router(oidc_router)
     app.include_router(web_router)
 
     # Serve static assets (CSS, JS) for the web UI. Templates reference

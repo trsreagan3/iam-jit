@@ -48,6 +48,19 @@ class Account:
     registered_by: str | None = None
     notes: str | None = None
     enabled: bool = True
+    # Per-account LLM-usage policy. When set, gates whether iam-jit
+    # uses the (paid) LLM backend for grants touching this account.
+    # Decision ordering: account.llm_policy → deployment default
+    # → per-customer budget → confidence band.
+    # Values: "use_llm" | "deterministic_only" | None (= deployment default)
+    llm_policy: str | None = None
+    llm_policy_reason: str | None = None
+    # Per-account safety-mode override (per [[safety-mode-two-modes]]).
+    # When set, overrides the deployment-default IAM_JIT_SAFETY_MODE.
+    # Typical: deployment default read_write_swap, prod accounts
+    # opt up to strict.
+    # Values: "strict" | "read_write_swap" | None (= deployment default)
+    safety_mode_override: str | None = None
 
     @property
     def id(self) -> str:
@@ -106,6 +119,9 @@ def _account_from_dict(d: dict[str, Any]) -> Account:
         registered_by=d.get("registered_by"),
         notes=d.get("notes"),
         enabled=bool(d.get("enabled", True)),
+        llm_policy=d.get("llm_policy"),
+        llm_policy_reason=d.get("llm_policy_reason"),
+        safety_mode_override=d.get("safety_mode_override"),
     )
 
 
@@ -131,6 +147,12 @@ def _account_to_dict(a: Account) -> dict[str, Any]:
         out["registered_by"] = a.registered_by
     if a.notes:
         out["notes"] = a.notes
+    if a.llm_policy:
+        out["llm_policy"] = a.llm_policy
+    if a.llm_policy_reason:
+        out["llm_policy_reason"] = a.llm_policy_reason
+    if a.safety_mode_override:
+        out["safety_mode_override"] = a.safety_mode_override
     return out
 
 
@@ -307,6 +329,12 @@ class DynamoDBAccountStore:
             item["registered_by"] = a.registered_by
         if a.notes:
             item["notes"] = a.notes
+        if a.llm_policy:
+            item["llm_policy"] = a.llm_policy
+        if a.llm_policy_reason:
+            item["llm_policy_reason"] = a.llm_policy_reason
+        if a.safety_mode_override:
+            item["safety_mode_override"] = a.safety_mode_override
         return item
 
     @staticmethod
@@ -324,6 +352,9 @@ class DynamoDBAccountStore:
             registered_by=item.get("registered_by"),
             notes=item.get("notes"),
             enabled=bool(item.get("enabled", True)),
+            llm_policy=item.get("llm_policy"),
+            llm_policy_reason=item.get("llm_policy_reason"),
+            safety_mode_override=item.get("safety_mode_override"),
         )
 
     def get(self, account_id: str) -> Account:

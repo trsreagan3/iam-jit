@@ -87,6 +87,53 @@ def peer_in_trusted_cidrs(
     return False
 
 
+def client_ip(
+    request: object,
+    *,
+    legacy_env_flags: tuple[str, ...] = (),
+) -> str:
+    """Single source of truth for rate-limit-keying client IP.
+
+    Reads the socket peer (`request.client.host`); honors
+    `X-Forwarded-For` only when:
+      1. `IAM_JIT_TRUST_FORWARDED_FOR` (or any legacy_env_flag) is
+         explicitly enabled, AND
+      2. the immediate peer is in `IAM_JIT_TRUSTED_PROXY_CIDRS`.
+
+    Closes WB7F-07 — sibling-miss where `routes/feedback.py` read
+    `request.client.host` raw while `routes/score.py` had the
+    defended path. Per-route inlines invite drift; this helper is
+    the only place that interprets the trust flag.
+
+    `legacy_env_flags` keeps backward compat for deployments that
+    set route-specific flags (e.g.,
+    `IAM_JIT_TRUST_FORWARDED_FOR_FOR_SCORE=1`). Pass them in and
+    the route still honors its old toggle without forcing a
+    redeploy.
+    """
+    try:
+        client = getattr(request, "client", None)
+        real_client = client.host if client and client.host else "unknown"
+    except Exception:
+        return "unknown"
+
+    enabled_keys = ("IAM_JIT_TRUST_FORWARDED_FOR",) + tuple(legacy_env_flags)
+    trust_xff = any(
+        os.environ.get(k, "0").lower() in {"1", "true", "yes"}
+        for k in enabled_keys
+    )
+    if not trust_xff:
+        return real_client
+
+    try:
+        xff = request.headers.get("x-forwarded-for")  # type: ignore[attr-defined]
+    except Exception:
+        xff = None
+
+    resolved = real_client_from_xff(real_client, xff)
+    return resolved or real_client
+
+
 def real_client_from_xff(
     peer_host: str | None,
     xff_header: str | None,

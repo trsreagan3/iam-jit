@@ -115,6 +115,23 @@ class ScoreRequest(BaseModel):
     additional_sensitive_services: list[str] | None = None
     additional_high_impact_actions: list[str] | None = None
 
+    # Optional destination AWS account ID. When supplied AND the
+    # account is registered in iam-jit's accounts store, the
+    # per-account LLM policy ([[per-account-llm-policy]] memo) gates
+    # whether the LLM backend is consulted for this score. Lets
+    # enterprise customers configure "use LLM on prod, deterministic
+    # only on dev/staging." Decision flow: account.llm_policy →
+    # IAM_JIT_LLM_DEFAULT_POLICY → per-customer budget cap.
+    account_id: str | None = Field(
+        default=None,
+        pattern=r"^[0-9]{12}$",
+        description=(
+            "Optional 12-digit AWS account ID. When provided, "
+            "iam-jit applies the per-account LLM policy gate. "
+            "Without an account_id the deployment default applies."
+        ),
+    )
+
 
 class ScoreResponse(BaseModel):
     """Programmatic-consumption response shape.
@@ -134,6 +151,36 @@ class ScoreResponse(BaseModel):
             "threshold; this is a hint."
         ),
     )
+    auto_approve_threshold: int | None = Field(
+        default=None,
+        description=(
+            "The configured auto-approve threshold for THIS deployment "
+            "(if set). Requests scoring strictly below this value "
+            "auto-approve; at-or-above route to human review. None "
+            "means auto-approve is disabled — all requests route to "
+            "humans."
+        ),
+    )
+    would_auto_approve: bool | None = Field(
+        default=None,
+        description=(
+            "Threshold-aware version of would_auto_approve_at_threshold_5. "
+            "True iff this score is strictly below the deployment's "
+            "configured threshold. None when the deployment has "
+            "auto-approve disabled. Agents should prefer this over "
+            "the hardcoded-5 variant."
+        ),
+    )
+    threshold_advice: str | None = Field(
+        default=None,
+        description=(
+            "Human / agent readable advice when the score is at or "
+            "above the deployment threshold. Example: 'Score is 8; "
+            "auto-approve threshold is < 4. Drop the score by 4+ to "
+            "qualify.' None when would_auto_approve is True or when "
+            "auto-approve is disabled."
+        ),
+    )
     factors: list[str] = Field(default_factory=list)
     suggestions: list[str] = Field(default_factory=list)
     llm_narrative: str | None = None
@@ -146,6 +193,30 @@ class ScoreResponse(BaseModel):
             "produced; only the LLM narrative is omitted. "
             "Free / Indie callers always see false (those tiers are "
             "deterministic-only by design)."
+        ),
+    )
+    llm_used: bool = Field(
+        default=False,
+        description=(
+            "True iff an LLM backend actually produced narrative for "
+            "this score. False when LLM was skipped via per-account "
+            "policy, deployment default, or budget exhaustion."
+        ),
+    )
+    llm_skip_reason: str | None = Field(
+        default=None,
+        description=(
+            "Short label for why LLM was skipped (when applicable). "
+            "Values: 'account_policy:deterministic_only' | "
+            "'deployment_default:deterministic_only' | "
+            "'llm_budget_exceeded' | 'tier_does_not_use_llm' | None."
+        ),
+    )
+    llm_skip_detail: str | None = Field(
+        default=None,
+        description=(
+            "Human-readable detail when LLM was skipped (e.g., the "
+            "admin's llm_policy_reason on the account)."
         ),
     )
     analyzer: str = Field(..., description="deterministic | deterministic+<llm>")
@@ -323,38 +394,21 @@ def _resolve_caller_tier(
 
 
 def _client_ip(request: Request) -> str:
-    """Best-effort client IP for rate-limit keying.
+    """Delegate to the shared trusted_proxy.client_ip helper.
 
-    Defaults to the real socket peer (`request.client.host`), which is
-    what Lambda Function URLs and direct connections give us — and
-    which an attacker cannot forge.
-
-    `X-Forwarded-For` is honored ONLY when both:
-      1. `IAM_JIT_TRUST_FORWARDED_FOR_FOR_SCORE=1` is explicitly set, AND
-      2. the immediate client is in `IAM_JIT_TRUSTED_PROXY_CIDRS`
-         (typically CloudFront / ALB CIDRs).
-
-    Without these guards an attacker rotates `X-Forwarded-For` per
-    request to defeat the rate limiter — the limit IS keyed off this
-    value. Audit finding SCORE-XFF-RATELIMIT-BYPASS (round 1 WB).
+    The defended XFF interpretation logic now lives in one place
+    (`trusted_proxy.client_ip`) to prevent sibling-miss drift
+    (WB7F-07 — feedback.py was reading raw `request.client.host`
+    while this route had the defended path). Legacy env-var name
+    `IAM_JIT_TRUST_FORWARDED_FOR_FOR_SCORE` is still honored so
+    deployments that set it don't regress.
     """
-    real_client = request.client.host if request.client else "unknown"
-
-    trust_xff = os.environ.get(
-        "IAM_JIT_TRUST_FORWARDED_FOR_FOR_SCORE", "0"
-    ).lower() in {"1", "true", "yes"}
-    if not trust_xff:
-        return real_client
-
-    # Use the shared trusted-proxy parser/matcher — single source of
-    # truth across score, network_acl, public_url, and web routes.
-    # Closes TRUSTED-PROXY-CIDRS-PARSER-DISCREPANCY (round 3 WB).
     from .. import trusted_proxy
 
-    resolved = trusted_proxy.real_client_from_xff(
-        real_client, request.headers.get("x-forwarded-for")
+    return trusted_proxy.client_ip(
+        request,
+        legacy_env_flags=("IAM_JIT_TRUST_FORWARDED_FOR_FOR_SCORE",),
     )
-    return resolved or real_client
 
 
 def _iter_string_values(obj: Any, path: str = "") -> Any:
@@ -591,21 +645,47 @@ def score_policy(
     customer_id, caller_tier = _resolve_caller_tier(request, authorization)
     llm_backend = None
     llm_budget_exceeded = False
-    if customer_id and caller_tier in {"pro", "team", "enterprise"}:
-        from .. import llm_budget
+    llm_used = False
+    llm_skip_reason: str | None = None
+    llm_skip_detail: str | None = None
 
-        budget_store = llm_budget.get_default_store()
-        if budget_store.consume_or_reject(customer_id, caller_tier):
-            try:
-                from ..llm import get_backend_for_tier
-                llm_backend = get_backend_for_tier(caller_tier)
-            except Exception:
-                # Backend init failed (e.g. boto3 missing, Bedrock
-                # model not enabled in this region). Fall back to
-                # deterministic-only — preserves the safety floor.
-                llm_backend = None
+    if caller_tier not in {"pro", "team", "enterprise"}:
+        # Free / indie tiers are deterministic-only by design.
+        llm_skip_reason = "tier_does_not_use_llm"
+    elif customer_id:
+        # Per-account LLM policy gate runs BEFORE the budget cap —
+        # cheapest gate first. See [[per-account-llm-policy]].
+        from .. import llm_account_policy
+
+        accounts_store = getattr(request.app.state, "accounts_store", None)
+        decision = llm_account_policy.decide(
+            account_id=payload.account_id,
+            accounts_store=accounts_store,
+        )
+        if not decision.use_llm:
+            llm_skip_reason = decision.skip_reason
+            llm_skip_detail = decision.skip_detail
         else:
-            llm_budget_exceeded = True
+            # Account policy allows LLM. Check the per-customer
+            # monthly budget cap next.
+            from .. import llm_budget
+
+            budget_store = llm_budget.get_default_store()
+            if budget_store.consume_or_reject(customer_id, caller_tier):
+                try:
+                    from ..llm import get_backend_for_tier
+                    llm_backend = get_backend_for_tier(caller_tier)
+                    llm_used = True
+                except Exception:
+                    # Backend init failed (e.g. boto3 missing, Bedrock
+                    # model not enabled in this region). Fall back to
+                    # deterministic-only — preserves the safety floor.
+                    llm_backend = None
+                    llm_used = False
+                    llm_skip_reason = "backend_init_failed"
+            else:
+                llm_budget_exceeded = True
+                llm_skip_reason = "llm_budget_exceeded"
 
     try:
         analysis = review.analyze_policy(
@@ -623,6 +703,35 @@ def score_policy(
             detail=f"could not score policy: {type(e).__name__}: {e}",
         )
 
+    # Threshold-aware auto-approve telemetry. Pulled from settings
+    # so agents see what's actually configured for THIS deployment,
+    # not the hardcoded-5 hint. None when auto-approve is disabled
+    # (all requests route to humans regardless of score).
+    auto_approve_threshold: int | None = None
+    would_auto_approve_threshold: bool | None = None
+    threshold_advice: str | None = None
+    try:
+        from .. import settings_store as _settings_mod
+        _settings = _settings_mod.get_default_store().get()
+        auto_approve_threshold = _settings.auto_approve_risk_below
+    except Exception:
+        # If settings store is unavailable, leave fields as None.
+        # Backward-compat: the hardcoded-5 flag still ships.
+        pass
+    if auto_approve_threshold is not None:
+        would_auto_approve_threshold = analysis.risk_score < auto_approve_threshold
+        if not would_auto_approve_threshold:
+            gap = analysis.risk_score - auto_approve_threshold + 1
+            threshold_advice = (
+                f"Score is {analysis.risk_score}; auto-approve "
+                f"threshold is < {auto_approve_threshold}. Drop the "
+                f"score by {gap}+ to qualify. Try: tightening resource "
+                f"ARNs to specific names instead of wildcards, removing "
+                f"action wildcards (s3:*, ec2:*) in favor of specific "
+                f"actions, shortening the duration, or splitting into "
+                f"multiple smaller requests."
+            )
+
     # The score is deterministic per policy_fingerprint, so the
     # response is safely cacheable on any CDN keyed by content-hash.
     # `s-maxage=86400` is the shared-cache TTL (CloudFront / proxies) —
@@ -637,10 +746,16 @@ def score_policy(
         score=analysis.risk_score,
         tier=_tier_for(analysis.risk_score),
         would_auto_approve_at_threshold_5=analysis.risk_score < 5,
+        auto_approve_threshold=auto_approve_threshold,
+        would_auto_approve=would_auto_approve_threshold,
+        threshold_advice=threshold_advice,
         factors=list(analysis.risk_factors),
         suggestions=list(analysis.suggestions),
         llm_narrative=analysis.llm_narrative,
         llm_budget_exceeded=llm_budget_exceeded,
+        llm_used=llm_used,
+        llm_skip_reason=llm_skip_reason,
+        llm_skip_detail=llm_skip_detail,
         analyzer=analysis.analyzer,
         policy_fingerprint=fingerprint,
     )

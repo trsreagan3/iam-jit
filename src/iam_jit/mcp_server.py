@@ -76,11 +76,22 @@ TOOLS = [
             "Generate a minimum-scope AWS IAM policy for a described task. "
             "The policy is scored by a deterministic risk engine (1-10) "
             "and includes refinement hints if the output may be too broad "
-            "or too narrow. The agent should review the score and "
-            "refinement_hints before requesting credentials based on this "
-            "policy. Use this when the agent needs temporary scoped AWS "
+            "or too narrow. Use this when you need temporary scoped AWS "
             "access (read S3, query DynamoDB, deploy Lambda, etc.) and "
-            "wants to avoid using long-lived admin credentials."
+            "want to avoid using long-lived admin credentials.\n"
+            "\n"
+            "IMPORTANT — read-only default convention "
+            "([[read-only-default]]): ALWAYS request "
+            "`access_type: \"read-only\"` by default. ONLY request "
+            "`read-write` when the user has explicitly asked you to make "
+            "a state-changing operation in their current message "
+            "(create / update / delete / modify resources). If you are "
+            "uncertain whether a task needs writes, default to read-only "
+            "and re-call this tool with read-write later if reads fail "
+            "with permission errors. This is the convention that makes "
+            "iam-jit's safety-mode work: the user has explicit visibility "
+            "into when writes happen vs invisible read-only operation. "
+            "Defaulting to read-write defeats the entire point."
         ),
         "inputSchema": {
             "type": "object",
@@ -93,6 +104,18 @@ TOOLS = [
                         "specific about resources (bucket name, function "
                         "name, table name) and the operation (read, "
                         "write, deploy)."
+                    ),
+                },
+                "access_type": {
+                    "type": "string",
+                    "enum": ["read-only", "read-write"],
+                    "default": "read-only",
+                    "description": (
+                        "REQUIRED behavioral default: 'read-only'. "
+                        "Only set to 'read-write' when the user has "
+                        "explicitly authorized a state-changing "
+                        "operation. When in doubt, use 'read-only' and "
+                        "re-request later if needed."
                     ),
                 },
                 "account_id": {
@@ -174,9 +197,18 @@ def _generate_for_mcp(args: dict[str, Any]) -> dict[str, Any]:
             rationale=args.get("rationale", ""),
         )
     bias = args.get("bias", "allow")
+    # access_type defaults to read-only per [[read-only-default]] —
+    # the tool description tells the agent to default to read-only.
+    # If the agent passes something else, honor it (the user's
+    # explicit choice). If the agent passes something invalid,
+    # coerce to read-only (the safe default).
+    access_type = args.get("access_type", "read-only")
+    if access_type not in {"read-only", "read", "read-write"}:
+        access_type = "read-only"
     req = GenerationRequest(
         task_description=task,
         bias=BIAS_ALLOW if bias == "allow" else BIAS_DENY,
+        access_type=access_type,
         context=GenerationContext(
             account_id=args.get("account_id"),
             region=args.get("region"),

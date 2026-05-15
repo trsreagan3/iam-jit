@@ -95,10 +95,16 @@ def _submitter_id(request: Request) -> str | None:
 
 
 def _submitter_ip(request: Request) -> str:
-    try:
-        return request.client.host if request.client else "unknown"
-    except Exception:
-        return "unknown"
+    """Delegate to the shared trusted_proxy.client_ip helper.
+
+    Closes WB7F-07 sibling-miss — this route was reading
+    `request.client.host` raw while `routes/score.py` had the
+    defended XFF path. Behind an ALB/CloudFront the per-IP rate
+    limit was collapsing to deployment-wide.
+    """
+    from .. import trusted_proxy
+
+    return trusted_proxy.client_ip(request)
 
 
 @router.post(

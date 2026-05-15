@@ -1,5 +1,95 @@
 # Changelog
 
+All notable changes to iam-jit + iam-risk-score follow [Keep a
+Changelog](https://keepachangelog.com/en/1.1.0/) and adhere to
+semantic versioning per [docs/UPGRADING.md](docs/UPGRADING.md).
+
+Scorer / calibration corpus version is tracked separately from
+software version — see `IAM_JIT_SCORER_VERSION` env var. Major
+scorer updates are noted as `### Scorer` blocks.
+
+## Unreleased (2026-05-15)
+
+### Added — multi-feature push
+
+- **Multi-provider OIDC SSO** (`src/iam_jit/oidc.py` +
+  `src/iam_jit/routes/oidc.py`) — generic OIDC client with
+  Google Workspace + Okta provider configs; generic provider
+  for Azure AD / Auth0 / others. Full authorization-code flow,
+  JWKS-cached signature verification, mandatory claim checks
+  (iss, aud, exp, iat, nonce), provider-specific gates (Google
+  `hd`, Okta `groups`), AMR-based MFA detection per RFC 8176.
+  54 OIDC tests; round-9 BB+WB audit shipped + closures
+  landed.
+- **Per-account LLM policy** (`src/iam_jit/llm_account_policy.py`)
+  — per-`Account` `llm_policy` field (use_llm /
+  deterministic_only / unset) gates LLM-backend selection
+  BEFORE the per-customer monthly budget cap. Decision flow:
+  account policy → deployment default → budget cap. Surfaced
+  in score response as `llm_used` + `llm_skip_reason` +
+  `llm_skip_detail`. 12 unit + 7 route tests.
+- **Slack approval bot** (`src/iam_jit/slack_bot.py` +
+  `src/iam_jit/routes/slack.py`) — interactive approve / reject
+  / request-changes flow with signed-request authentication
+  (HMAC + 300s replay window), Block Kit rendering, modal-based
+  context capture. Approver resolution by explicit
+  `slack_user_id` mapping OR Slack `users.info` → email →
+  iam-jit User. Workspace + channel pinning. App manifest +
+  setup runbook. 105 Slack-surface tests.
+- **Read-only-default for agent-safety mode** — MCP server's
+  `generate_iam_policy` tool description instructs Claude to
+  default to `access_type: "read-only"`. The behavioral contract
+  for the agent-safety adoption channel. 7 pinned tests.
+- **Safety-mode two-mode resolver** (`src/iam_jit/safety_mode.py`)
+  — `read_write_swap` (default, lean-permissive) vs `strict`
+  (compliance-strict) modes. Per-deployment / per-account /
+  per-session override resolution. 14 tests.
+
+### Security
+
+- **Round-7 audit closures** (`docs/security/AUDIT-2026-05-WB-ROUND7-FOCUSED.md`):
+  Deleted `bridge_role.py` (made 6 of 8 findings moot — the
+  module violated [[creates-never-mutates]]; pattern superseded
+  by Secrets Manager rotation recipe). WB7F-07 MED + WB7F-08
+  LOW closed via shared `trusted_proxy.client_ip` + anchored
+  `is_conditional_check_failed` substring match.
+- **Round-8 Slack-bot audit closures**
+  (`docs/security/AUDIT-2026-05-WB-ROUND8-SLACK-BOT.md`):
+  WB8-01 HIGH (Block Kit / mrkdwn injection via
+  `spec.description` + `risk_factors` — closed via
+  `_escape_mrkdwn` helper applied to requester-influenced
+  fields). WB8-02 MED (ambiguous `slack_user_id` mapping —
+  closed via multi-match raise). WB8-03 MED (workspace pin
+  via `IAM_JIT_SLACK_TEAM_ID`). WB8-04 MED (channel pin via
+  approval channel ID).
+- **Round-9 OIDC audit closures**
+  (`docs/security/AUDIT-2026-05-WB-ROUND9-OIDC.md`):
+  WB9-01 HIGH (MFA cookie now bound to `user.id`). WB9-02
+  MED (token-exchange error no longer leaks access_token to
+  logs). WB9-04 MED (endpoints cache has 1hr TTL). WB9-05
+  LOW (iss-missing → clean error). WB9-06 LOW (AMR set
+  tightened per RFC 8176 + NIST 800-63B). WB9-07 LOW
+  (`_cookie_secure` delegates to canonical helper).
+
+### Documentation
+
+- **README rewrite** (499 → 234 lines): three-mode framing
+  leading with "Don't give Claude your AWS keys." Removed
+  terraform references (we use SAM); removed outdated
+  "upsell SaaS" framing.
+- **`docs/recipes/AGENT-IAMJIT-HOOP-EXAMPLES.md`** — six
+  agent + iam-jit + Hoop scenarios using Secrets Manager
+  rotation pattern.
+- **`docs/recipes/SLACK-APP-SETUP.md`** — operator runbook
+  for the Slack approval bot.
+- **`docs/recipes/GOOGLE-OIDC-SSO.md`** — multi-provider OIDC
+  setup with Google + Okta sections.
+- **`docs/RECOMMENDER-API-SPEC.md`** — recommender intent +
+  needs_context flow spec.
+- **DEPLOYMENT.md** Step 5.5 (self-host Bedrock billing) +
+  Step 5.6 (pilot deployment profile with cost-capped
+  Enterprise tier).
+
 ## Unreleased (pre-launch — 2026-05-14)
 
 ### Added

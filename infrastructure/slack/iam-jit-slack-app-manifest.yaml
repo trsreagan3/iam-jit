@@ -1,0 +1,50 @@
+# iam-jit Slack App manifest.
+#
+# This file is the "paste and go" Slack App config. Drop it into
+# Slack's App Manifest editor at https://api.slack.com/apps and
+# 80% of the App setup is done in one step. The operator then only
+# has to:
+#
+#   1. Install the App to their workspace (one click)
+#   2. Copy the Bot User OAuth Token (xoxb-…) and Signing Secret
+#      into the iam-jit deployment env
+#   3. Invite the bot user into the approval channel
+#
+# After deploying iam-jit with these env vars set, the Interactive
+# Components Request URL above becomes live and Approve / Reject
+# buttons start working end-to-end.
+#
+# Substitute YOUR_IAM_JIT_HOST below.
+
+display_information:
+  name: iam-jit Approvals
+  description: Just-in-time IAM grant approvals from Slack
+  background_color: "#1a1a1a"
+  long_description: |
+    iam-jit posts approval requests into your access-approvals channel
+    with rich context (requester, score, scope, risk factors) and
+    inline Approve / Reject buttons. Clicks are authenticated via
+    Slack's signed-request protocol; only Slack users mapped to
+    iam-jit accounts with the `approver` (or `admin`) role can act.
+    Audit rows include the Slack user_id of the approver.
+
+features:
+  bot_user:
+    display_name: iam-jit
+    always_online: false
+
+oauth_config:
+  scopes:
+    bot:
+      - chat:write             # Post approval messages
+      - chat:write.public      # Post to channels the bot isn't invited to (optional)
+      - users:read             # Look up Slack user IDs
+      - users:read.email       # Resolve Slack user → email → iam-jit user
+
+settings:
+  interactivity:
+    is_enabled: true
+    request_url: https://YOUR_IAM_JIT_HOST/api/v1/slack/interactive
+  org_deploy_enabled: false
+  socket_mode_enabled: false
+  token_rotation_enabled: false

@@ -586,9 +586,15 @@ def test_finding_stripe_claim_exception_classification_string_fragile() -> None:
     assert "is_conditional_check_failed" in src
     assert '"ConditionalCheckFailedException" in str(e)' not in src
 
-    # The helper itself does both shapes.
+    # The helper itself does both shapes. WB7F-08 tightened the
+    # substring fallback from `"CCFE" in str(exc)` (loose) to
+    # anchored: start-of-string OR paren-wrapped. Tracked via the
+    # _CCFE module-level constant + the `startswith` / `f"({_CCFE})"`
+    # guards. Either anchor pattern in the source is the closure.
     helper_src = inspect.getsource(ddb_utils.is_conditional_check_failed)
-    assert '"ConditionalCheckFailedException" in str' in helper_src
+    assert ".startswith(_CCFE)" in helper_src or 'f"({_CCFE})"' in helper_src
+    # And the loose, unanchored pattern is gone.
+    assert '"ConditionalCheckFailedException" in str(exc)' not in helper_src
 
     # Behavioral residual: a non-ClientError whose str() carries
     # the substring still maps to False (duplicate). This is the

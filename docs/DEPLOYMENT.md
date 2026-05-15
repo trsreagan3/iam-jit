@@ -194,6 +194,326 @@ it's both cheaper *and* better-quality.
 
 For self-hosted Ollama, see [the LLM hosting Terraform modules](../infrastructure/terraform/) (ships in a follow-up phase) or run Ollama in your own ECS/EKS cluster.
 
+## Step 5.5 — cost ownership for self-hosted deployments
+
+**When you self-host iam-jit, every cost lands on YOUR AWS bill —
+not on iam-jit (the company).** This is by design and is structurally
+enforced by the deployment shape:
+
+- The Lambda runs in your account → Lambda costs on your bill
+- DynamoDB tables are in your account → DDB costs on your bill
+- Bedrock calls use the Lambda's local execution role → **Bedrock
+  costs billed to your AWS account directly**
+- Anthropic-API calls (if you chose `LLMBackend=anthropic`) use the
+  API key in *your* Secrets Manager secret → billed to your
+  Anthropic account
+- iam-jit phones home for nothing — no telemetry, no usage reports,
+  no licensing call-back. You can deploy in a sealed account with
+  no egress to anything outside AWS APIs
+
+The `IAM_JIT_LLM_BUDGET_*` per-tier monthly call caps that exist in
+the code default to multi-tenant SaaS values (Pro=1500/mo,
+Team=2500/mo). For a single-tenant self-hosted deployment, those
+defaults are typically too low — they exist to protect iam-jit's
+hosted-SaaS wallet from a single noisy customer, not yours from
+yourself. **For self-hosted, either raise the caps far above your
+expected volume, or disable them and use AWS Budgets as your
+real spending control:**
+
+```bash
+# Disable the per-tier LLM call caps (recommend AWS Budgets for spend
+# control instead — see CDK snippet below).
+sam deploy ... --parameter-overrides \
+    LLMBackend=bedrock \
+    BedrockModelId=anthropic.claude-sonnet-4-6-20251001-v1:0 \
+    LLMBudgetPro=unlimited \
+    LLMBudgetTeam=unlimited \
+    LLMBudgetEnterprise=unlimited
+```
+
+Accepted values for the `LLMBudget*` parameters: `unlimited`,
+`none`, `-1`, or any positive integer (monthly call cap).
+
+### AWS Budget alarm (recommended)
+
+Add an account-level Budget alarm scoped to Bedrock so AWS notifies
+you before you spend more than expected:
+
+```yaml
+# Append to your SAM template OR deploy as a separate stack.
+BedrockBudgetAlarm:
+  Type: AWS::Budgets::Budget
+  Properties:
+    Budget:
+      BudgetName: iam-jit-bedrock-monthly
+      BudgetType: COST
+      TimeUnit: MONTHLY
+      BudgetLimit:
+        Amount: 100        # adjust to your expected monthly spend
+        Unit: USD
+      CostFilters:
+        Service:
+          - "Amazon Bedrock"
+    NotificationsWithSubscribers:
+      - Notification:
+          NotificationType: ACTUAL
+          ComparisonOperator: GREATER_THAN
+          Threshold: 80     # alert at 80% of budget
+        Subscribers:
+          - SubscriptionType: EMAIL
+            Address: !Ref BudgetAlertEmail
+      - Notification:
+          NotificationType: FORECASTED
+          ComparisonOperator: GREATER_THAN
+          Threshold: 100    # alert if forecast exceeds 100%
+        Subscribers:
+          - SubscriptionType: EMAIL
+            Address: !Ref BudgetAlertEmail
+```
+
+Sized starting points (Bedrock Sonnet 4.6, no caps):
+
+| Volume                | Approx monthly Bedrock spend |
+|-----------------------|------------------------------|
+| 50 grants/day         | ~$20                         |
+| 200 grants/day        | ~$80                         |
+| 1,000 grants/day      | ~$400                        |
+| 5,000 grants/day      | ~$2,000                      |
+
+Multiply by ~5x for Opus, divide by ~3x for Haiku.
+
+### Bedrock model access — your customer-side prerequisite
+
+Before iam-jit's Bedrock backend will work in your account, you
+must enable Anthropic model access in the Bedrock console for the
+deployment region. AWS gates this per-account via a one-time
+verification (typically a short questionnaire about intended use).
+
+1. Open the Bedrock console in your deployment region
+2. Go to **Model access**
+3. Request access for the Anthropic Claude models you'll use
+4. Wait for approval (usually under 30 minutes; sometimes a day)
+
+You only do this once per account / region. iam-jit can't do this
+on your behalf — Bedrock model access is account-scoped, and the
+verification is binding to your AWS account holder's terms with
+Anthropic.
+
+### What this means for pricing if you eventually subscribe to a paid tier
+
+If you self-host iam-jit Pro/Team/Enterprise (paid tiers), the
+subscription covers the **software license + support**, not the
+infrastructure cost. Standard enterprise self-host model (same
+shape as GitLab Self-Managed, Sentry Self-Hosted, Mattermost, etc.).
+You continue to pay AWS / Anthropic directly for the runtime; you
+pay iam-jit (the company) for the right to use the paid-tier
+features and for support/SLA.
+
+This separation of cost ownership is captured in the
+[[self-host-zero-billing-dependency]] memo and is a deliberate
+architectural choice.
+
+## Step 5.6 — Pilot deployment profile (design-partner / first-customer)
+
+If you are evaluating iam-jit as a design partner — full
+Enterprise-tier feature set on, but with hard cost ceilings so the
+trial cannot accidentally generate substantial Bedrock spend — use
+this parameter set. It's intentionally conservative on cost while
+leaving every feature exercisable.
+
+### What this profile does
+
+- Enables Enterprise-tier features (task-description analysis,
+  audit report export, custom intent types) so the customer can
+  test the full surface.
+- Picks Sonnet — not Opus — as the LLM backend for all tiers.
+  Sonnet is ~5× cheaper, handles the scoring + narrative prompts
+  cleanly, and is the right cost/quality point for a pilot.
+- Sets a per-tier monthly LLM-call cap that is generous for
+  pilot-scale traffic (a 20-engineer team running 5-10 grants per
+  engineer per day) but tight enough to surface runaway usage
+  before the bill is large.
+- Disables LLM use entirely for any grant whose deterministic
+  score is already high-confidence (≥0.7 or ≤0.2), so the LLM
+  budget gets spent on the borderline cases where it actually
+  helps.
+- Provisions an AWS Budget alarm scoped to Bedrock at $50 / $200
+  / $500 monthly thresholds.
+
+### Parameter overrides
+
+```bash
+sam deploy \
+  --template-file infrastructure/sam/template.yaml \
+  --stack-name iam-jit-pilot \
+  --capabilities CAPABILITY_NAMED_IAM \
+  --parameter-overrides \
+      Tier=enterprise \
+      LLMBackend=bedrock \
+      BedrockModelId=anthropic.claude-sonnet-4-6-20251001-v1:0 \
+      BedrockModelIdEnterpriseOverride=anthropic.claude-sonnet-4-6-20251001-v1:0 \
+      LLMBudgetPro=5000 \
+      LLMBudgetTeam=5000 \
+      LLMBudgetEnterprise=10000 \
+      LLMSkipBelowConfidence=0.2 \
+      LLMSkipAboveConfidence=0.7 \
+      EnableEnterpriseFeatures=true \
+      EnableTaskDescriptionAnalysis=true \
+      EnableAuditReportExport=true \
+      EnableRoleDiscovery=true \
+      ReservedConcurrentExecutions=10 \
+      ProvisionedConcurrency=2 \
+  --profile <hub-account>
+```
+
+`BedrockModelIdEnterpriseOverride` is deliberately set to Sonnet
+(not Opus) for the pilot — the launch-default has Enterprise on
+Opus per [[launch-infra-vs-pricing-audit]], but a pilot doesn't
+need Opus's marginal quality improvement and Opus is ~5× the cost.
+Flip this to `anthropic.claude-opus-4-7-20251015-v1:0` after the
+pilot validates volume and you've sized the steady-state spend.
+
+### AWS Budget alarms (CloudFormation stack)
+
+Deploy this alongside the iam-jit stack — same hub account.
+Substitute your alerting email.
+
+```yaml
+Resources:
+  IAMJitBedrockBudget:
+    Type: AWS::Budgets::Budget
+    Properties:
+      Budget:
+        BudgetName: iam-jit-pilot-bedrock
+        BudgetType: COST
+        TimeUnit: MONTHLY
+        BudgetLimit:
+          Amount: 500
+          Unit: USD
+        CostFilters:
+          Service:
+            - "Amazon Bedrock"
+      NotificationsWithSubscribers:
+        - Notification:
+            NotificationType: ACTUAL
+            ComparisonOperator: GREATER_THAN
+            Threshold: 10        # $50 — early signal
+          Subscribers:
+            - SubscriptionType: EMAIL
+              Address: !Ref AlertEmail
+        - Notification:
+            NotificationType: ACTUAL
+            ComparisonOperator: GREATER_THAN
+            Threshold: 40        # $200 — mid alarm
+          Subscribers:
+            - SubscriptionType: EMAIL
+              Address: !Ref AlertEmail
+        - Notification:
+            NotificationType: FORECASTED
+            ComparisonOperator: GREATER_THAN
+            Threshold: 100       # $500 — projection alarm
+          Subscribers:
+            - SubscriptionType: EMAIL
+              Address: !Ref AlertEmail
+```
+
+### What a pilot's monthly Bedrock spend looks like (sanity check)
+
+Sonnet 4.6 pricing (2026): ~$3/M input, ~$15/M output. A typical
+intake turn is ~5K input + ~1K output tokens ≈ $0.030. So:
+
+| Pilot volume                           | Approx Bedrock spend per month |
+| -------------------------------------- | ------------------------------ |
+| 20 engineers × 5 grants/day, all use LLM | ~$90                           |
+| 20 engineers × 10 grants/day, all use LLM | ~$180                          |
+| 100 engineers × 10 grants/day, all use LLM | ~$900                          |
+
+With `LLMSkipBelowConfidence=0.2` + `LLMSkipAboveConfidence=0.7`
+filtering out high-confidence requests (typically 50-70% of
+traffic), the realistic spend at 20 × 5 grants/day pilot scale is
+**~$30-50/month** — well inside the $50 first-alarm threshold.
+
+### Per-account LLM policy (Enterprise feature)
+
+For customers with many accounts of varying sensitivity, the
+deployment-wide LLM toggle is too coarse. iam-jit Enterprise
+supports a per-account `llm_policy` field on the Account record
+so the customer can surgically choose which accounts get LLM
+narrative on grant scoring:
+
+```yaml
+# accounts.yaml (or DDB UpdateItem)
+accounts:
+  - account_id: "111111111111"
+    alias: dev
+    llm_policy: deterministic_only        # don't pay for LLM here
+    llm_policy_reason: "high volume; LLM narrative not worth the spend"
+  - account_id: "222222222222"
+    alias: staging-non-pci
+    llm_policy: deterministic_only
+  - account_id: "222222222223"
+    alias: staging-pci
+    llm_policy: use_llm                   # PCI gets LLM regardless of env
+  - account_id: "333333333333"
+    alias: prod
+    llm_policy: use_llm
+  - account_id: "444444444444"
+    alias: infra
+    llm_policy: use_llm
+  - account_id: "555555555555"
+    alias: management
+    llm_policy: use_llm
+```
+
+Decision order at score time (cheapest gate first):
+
+1. **Account policy** — if `account.llm_policy` is set, honor it
+2. **Deployment default** — `LLMDefaultPolicy=deterministic_only`
+   (or `use_llm`) when account policy is unset
+3. **Budget cap** — per-customer monthly LLM-call cap
+4. **Confidence band** — skip LLM when deterministic score is
+   already high-confidence (`LLMSkipBelowConfidence` /
+   `LLMSkipAboveConfidence`)
+
+The score response includes `llm_used` + `llm_skip_reason` so
+approvers can see why a given grant did or didn't get LLM
+narrative.
+
+This is typically the LARGEST cost-control lever at Enterprise
+scale — a customer with 60 dev accounts + 5 prod accounts can cut
+LLM spend ~10× by setting `deterministic_only` on dev while
+keeping `use_llm` on prod where the narrative actually helps
+approvers.
+
+### Pilot cost controls iam-jit enforces automatically
+
+The defaults below ship in code; the parameter overrides above
+just expose them at deploy time so the pilot operator can tune
+them without redeploying:
+
+| Control                                  | Default for pilot profile | Behavior when exceeded |
+| ---------------------------------------- | ------------------------- | ---------------------- |
+| Monthly LLM-call cap per tier            | 5,000 (Pro/Team), 10,000 (Enterprise) | Falls back to deterministic-only scoring; logs a `LLM_BUDGET_EXCEEDED` event |
+| Per-request LLM token cap                | 4,096 output tokens       | Truncates the response; flagged in audit log |
+| Bedrock model whitelist                  | Sonnet only               | Other model IDs rejected at boot — prevents accidental Opus usage |
+| AWS Budget alarm (operator-installed)    | $50 / $200 / $500         | Notification only — does not block (iam-jit cannot enforce AWS-side billing) |
+
+### Recommended pilot success metrics
+
+Collect these during the pilot so the post-trial readout is concrete:
+
+- **Time-to-grant** (request submitted → credentials issued)
+- **Auto-approve rate** (grants below threshold / total grants)
+- **Approver burden** (admin Slack interactions per business day)
+- **Bedrock spend per business day** (from the AWS Budget metric)
+- **Blast-radius reduction** (average grant TTL vs prior 8-hour
+  Hoop session)
+- **False-positive auto-approvals** (grants that, on retrospective
+  audit, should have routed to approval)
+
+The last metric is the calibration signal — feeds the scoring
+adversarial loop ([[adversarial-loop-process]]).
+
 ## Step 6 — verify cross-account assume-role
 
 From the hub account, simulate the assume-role chain:

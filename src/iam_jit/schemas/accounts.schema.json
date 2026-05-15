@@ -40,7 +40,22 @@
         "registered_at": { "type": "string", "format": "date-time" },
         "registered_by": { "type": ["string", "null"] },
         "notes": { "type": ["string", "null"] },
-        "enabled": { "type": "boolean" }
+        "enabled": { "type": "boolean" },
+        "llm_policy": {
+          "description": "Per-account LLM-usage policy. Gates whether iam-jit uses an LLM backend for grants touching this account. When unset, falls back to IAM_JIT_LLM_DEFAULT_POLICY.",
+          "type": ["string", "null"],
+          "enum": ["use_llm", "deterministic_only", null]
+        },
+        "llm_policy_reason": {
+          "description": "Free-text admin justification for the llm_policy choice; surfaces in the LLM-skip audit detail.",
+          "type": ["string", "null"],
+          "maxLength": 500
+        },
+        "safety_mode_override": {
+          "description": "Per-account safety-mode override. When set, overrides deployment-default IAM_JIT_SAFETY_MODE. Typical: deployment default read_write_swap, prod accounts opt up to strict.",
+          "type": ["string", "null"],
+          "enum": ["strict", "read_write_swap", null]
+        }
       }
     }
   }
