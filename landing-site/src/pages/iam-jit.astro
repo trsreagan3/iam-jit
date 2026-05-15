@@ -1,0 +1,414 @@
+---
+const title = "iam-jit — Don't give Claude your AWS keys";
+const description =
+  "iam-jit is a safety layer between your AI agent and AWS. Claude (or any agent) gets scoped, time-bound, audited credentials per task — never your standing admin keys.";
+
+const installSample = `# 1. Install + bootstrap
+$ pip install iam-jit
+$ iam-jit init-solo
+
+# 2. Start the local server
+$ iam-jit serve --local
+  Listening on http://127.0.0.1:8765
+  Admin:    email:you@your-laptop.local
+  Audit:    ~/.iam-jit/
+
+# 3. Point Claude Code at the MCP server
+$ iam-jit init-solo --print-mcp-config
+  {"mcpServers": {"iam-jit": {"command": "iam-jit", ...}}}`;
+
+const agentSample = `You ▸ "Claude, find the bucket eating the most S3 storage in prod"
+
+Claude (via MCP) ▸ Requesting read-only:
+                    s3:ListBuckets, s3:GetBucketLocation,
+                    cloudwatch:GetMetricStatistics
+                    Duration: 30 min · Score: 2/10 (low)
+
+iam-jit ▸ Auto-approved (read-only, low risk, your authority).
+          Audit: req-7f3a → granted at 14:22:01.
+
+Claude ▸ "Top bucket is logs-archive-2023 at 47 TB; you can drop
+          objects older than 90d to save ~$1100/mo. Want me to
+          draft the lifecycle policy?"
+
+You ▸ "Yes — apply it to non-prod first."
+
+Claude ▸ Requesting write:
+          s3:PutBucketLifecycleConfiguration on
+          logs-archive-2023-staging. Score: 4/10 (medium-low).
+
+iam-jit ▸ Write grant — confirm? [y/N]`;
+
+const beforeAfter = `BEFORE iam-jit:
+    Claude has your admin keys.
+    Anything Claude can be tricked into doing,
+    Claude can do — globally, indefinitely.
+
+AFTER iam-jit:
+    Claude gets a 30-minute scoped role per task.
+    Reads auto-approve. Writes ask first.
+    Audit log shows exactly what was touched, by whom,
+    why, when, and what the score said.`;
+
+interface Pillar {
+  title: string;
+  body: string;
+}
+
+const pillars: Pillar[] = [
+  {
+    title: "Read-only by default",
+    body:
+      "~80% of agent operations are reads with near-zero blast radius. " +
+      "iam-jit issues a read-only role by default; writes require a " +
+      "separate, explicit grant. The audit log distinguishes them so " +
+      "'what did Claude actually change?' is a question with a 1-second answer.",
+  },
+  {
+    title: "Time-bound",
+    body:
+      "Every grant has a duration (default 1h, configurable per request). " +
+      "When it expires, the credentials expire — no orphaned admin keys " +
+      "sitting in env vars from a session three weeks ago.",
+  },
+  {
+    title: "Scoped to the task",
+    body:
+      "iam-jit uses a deterministic scoring engine plus (optionally) an " +
+      "LLM to translate the task description into the narrowest IAM policy " +
+      "that does the job. You see the score, the factors, and the " +
+      "suggested narrower scope BEFORE the grant is issued.",
+  },
+  {
+    title: "Compliant audit chain",
+    body:
+      "Every grant records: who requested, who approved (or the system " +
+      "rule that auto-approved), the risk score and factors, the safety " +
+      "mode, the floor, and the issued policy. PCI 8.x / SOC 2 CC6.x / " +
+      "HIPAA 164.312(b) attestation evidence drops out for free.",
+  },
+];
+
+interface Mode {
+  name: string;
+  audience: string;
+  price: string;
+  shape: string;
+  cta: string;
+  featured?: boolean;
+}
+
+const modes: Mode[] = [
+  {
+    name: "Local (free)",
+    audience: "Solo devs, individual admins",
+    price: "$0",
+    shape: "Runs on your laptop. ZERO iam-jit-the-company involvement. " +
+      "Trust model is 'trust the binary' (same as aws-cli, kubectl). " +
+      "Uses your local AWS credentials. SQLite audit log.",
+    cta: "pip install iam-jit",
+    featured: true,
+  },
+  {
+    name: "Hosted (Indie / Pro / Team)",
+    audience: "Small teams to mid-market",
+    price: "from $39/mo",
+    shape: "iam-jit-the-company runs the control plane. You apply a " +
+      "~90-second CloudFormation that creates a trust role. iam-jit " +
+      "never holds AWS credentials directly — the customer's " +
+      "permissions boundary is the hard max.",
+    cta: "Start free trial",
+  },
+  {
+    name: "Self-host (Enterprise)",
+    audience: "Regulated / data-sovereign",
+    price: "Annual license",
+    shape: "You deploy iam-jit into your own AWS account via SAM. " +
+      "Bedrock/Anthropic/AWS bills route directly to your account. " +
+      "No phone-home. No telemetry. Annual support + SLA.",
+    cta: "Contact sales",
+  },
+];
+---
+
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>{title}</title>
+    <meta name="description" content={description} />
+    <style>
+      :root {
+        --fg: #0f172a;
+        --muted: #64748b;
+        --bg: #ffffff;
+        --bg-alt: #f8fafc;
+        --accent: #0a72ff;
+        --accent-dark: #0a4ed1;
+        --code-bg: #0f172a;
+        --code-fg: #e2e8f0;
+        --border: #e2e8f0;
+      }
+      * { box-sizing: border-box; }
+      body {
+        margin: 0;
+        font-family: -apple-system, BlinkMacSystemFont, "Segoe UI",
+          system-ui, sans-serif;
+        color: var(--fg);
+        background: var(--bg);
+        line-height: 1.55;
+      }
+      .container {
+        max-width: 960px;
+        margin: 0 auto;
+        padding: 0 24px;
+      }
+      header {
+        padding: 48px 0 24px;
+      }
+      .hero {
+        padding: 24px 0 64px;
+        text-align: center;
+      }
+      .hero h1 {
+        font-size: clamp(36px, 6vw, 56px);
+        margin: 0 0 16px;
+        letter-spacing: -0.02em;
+        line-height: 1.1;
+      }
+      .hero p.lede {
+        font-size: clamp(18px, 2.4vw, 22px);
+        color: var(--muted);
+        max-width: 680px;
+        margin: 0 auto 32px;
+      }
+      .cta-row {
+        display: flex;
+        gap: 12px;
+        justify-content: center;
+        flex-wrap: wrap;
+      }
+      .cta-row a {
+        padding: 12px 24px;
+        border-radius: 8px;
+        text-decoration: none;
+        font-weight: 600;
+        font-size: 16px;
+        border: 1px solid var(--accent);
+      }
+      .cta-primary { background: var(--accent); color: white; }
+      .cta-primary:hover { background: var(--accent-dark); }
+      .cta-secondary {
+        background: white;
+        color: var(--accent);
+      }
+      section {
+        padding: 48px 0;
+        border-top: 1px solid var(--border);
+      }
+      section.alt { background: var(--bg-alt); }
+      h2 {
+        font-size: clamp(24px, 3.5vw, 32px);
+        margin: 0 0 16px;
+        letter-spacing: -0.01em;
+      }
+      .lede-section {
+        font-size: 18px;
+        color: var(--muted);
+        max-width: 720px;
+      }
+      pre {
+        background: var(--code-bg);
+        color: var(--code-fg);
+        padding: 20px;
+        border-radius: 8px;
+        overflow-x: auto;
+        font-size: 14px;
+        line-height: 1.5;
+      }
+      .pillars {
+        display: grid;
+        grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
+        gap: 24px;
+        margin-top: 24px;
+      }
+      .pillar {
+        padding: 20px;
+        border: 1px solid var(--border);
+        border-radius: 8px;
+        background: white;
+      }
+      .pillar h3 {
+        margin: 0 0 8px;
+        font-size: 18px;
+      }
+      .pillar p {
+        margin: 0;
+        font-size: 15px;
+        color: var(--muted);
+      }
+      .modes {
+        display: grid;
+        grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
+        gap: 16px;
+        margin-top: 24px;
+      }
+      .mode {
+        padding: 20px;
+        border: 1px solid var(--border);
+        border-radius: 8px;
+        background: white;
+        display: flex;
+        flex-direction: column;
+      }
+      .mode.featured {
+        border-color: var(--accent);
+        box-shadow: 0 4px 16px rgba(10, 114, 255, 0.08);
+      }
+      .mode h3 { margin: 0 0 4px; font-size: 18px; }
+      .mode .audience { font-size: 13px; color: var(--muted); margin-bottom: 12px; }
+      .mode .price { font-size: 20px; font-weight: 700; margin-bottom: 12px; }
+      .mode .shape { font-size: 14px; color: var(--muted); flex: 1; margin-bottom: 16px; }
+      .mode a {
+        text-align: center;
+        padding: 10px 16px;
+        background: var(--accent);
+        color: white;
+        border-radius: 6px;
+        text-decoration: none;
+        font-weight: 600;
+        font-size: 14px;
+      }
+      footer {
+        padding: 48px 0;
+        text-align: center;
+        color: var(--muted);
+        font-size: 14px;
+        border-top: 1px solid var(--border);
+      }
+      .accent-strip {
+        display: inline-block;
+        padding: 4px 10px;
+        background: var(--bg-alt);
+        border: 1px solid var(--border);
+        border-radius: 999px;
+        font-size: 13px;
+        color: var(--muted);
+        margin-bottom: 16px;
+      }
+    </style>
+  </head>
+  <body>
+    <header>
+      <div class="container hero">
+        <span class="accent-strip">v1 · agent-safety mode · works with Claude Code, Cursor, Devin</span>
+        <h1>Don't give Claude your AWS keys.</h1>
+        <p class="lede">{description}</p>
+        <div class="cta-row">
+          <a class="cta-primary" href="#install">Install in 90 seconds</a>
+          <a class="cta-secondary" href="#how-it-works">See how it works</a>
+        </div>
+      </div>
+    </header>
+
+    <section id="how-it-works">
+      <div class="container">
+        <h2>What you actually see, day to day</h2>
+        <p class="lede-section">
+          Claude (or any MCP-aware agent) requests AWS access through
+          iam-jit instead of using your env-var credentials.
+          The scoring engine grades each request and issues the
+          narrowest possible role, time-boxed to the task.
+        </p>
+        <pre>{agentSample}</pre>
+      </div>
+    </section>
+
+    <section class="alt">
+      <div class="container">
+        <h2>Before / after</h2>
+        <pre>{beforeAfter}</pre>
+      </div>
+    </section>
+
+    <section>
+      <div class="container">
+        <h2>Four load-bearing pillars</h2>
+        <div class="pillars">
+          {pillars.map((p) => (
+            <div class="pillar">
+              <h3>{p.title}</h3>
+              <p>{p.body}</p>
+            </div>
+          ))}
+        </div>
+      </div>
+    </section>
+
+    <section class="alt" id="install">
+      <div class="container">
+        <h2>Install (local mode is free; no signup, no phone-home)</h2>
+        <pre>{installSample}</pre>
+        <p class="lede-section">
+          That's it. You're now in agent-safety mode: any AWS access
+          Claude wants flows through iam-jit. The trust model is
+          "trust the binary on your laptop" — same as <code>aws-cli</code>,
+          <code>kubectl</code>, and <code>gh</code>.
+        </p>
+      </div>
+    </section>
+
+    <section>
+      <div class="container">
+        <h2>Three ways to run it</h2>
+        <div class="modes">
+          {modes.map((m) => (
+            <div class={"mode" + (m.featured ? " featured" : "")}>
+              <h3>{m.name}</h3>
+              <div class="audience">{m.audience}</div>
+              <div class="price">{m.price}</div>
+              <div class="shape">{m.shape}</div>
+              <a href="#install">{m.cta}</a>
+            </div>
+          ))}
+        </div>
+      </div>
+    </section>
+
+    <section class="alt">
+      <div class="container">
+        <h2>What iam-jit does NOT protect against</h2>
+        <p class="lede-section">
+          Honest list, because the rest is honest too:
+        </p>
+        <ul>
+          <li>
+            <strong>An attacker on your laptop</strong> with shell access can
+            just read <code>~/.aws/credentials</code> directly. iam-jit
+            is a layer over agent access, not a key vault.
+          </li>
+          <li>
+            <strong>Prompt injection that targets approved actions</strong>
+            still works within the grant's scope. iam-jit shrinks the
+            blast radius from "everything you can do" to "the actions
+            in this specific grant, for the next hour."
+          </li>
+          <li>
+            <strong>Bugs in iam-jit itself.</strong> The scorer is
+            calibrated against an open adversarial-loop corpus
+            (1500+ examples). We publish the corpus, the false-positive
+            rate, and the threshold-band convergence numbers on
+            every release.
+          </li>
+        </ul>
+      </div>
+    </section>
+
+    <footer>
+      <div class="container">
+        iam-jit is open-source under the same author as
+        iam-risk-score. Built by Reagan Rodriguez. Pre-launch.
+      </div>
+    </footer>
+  </body>
+</html>
