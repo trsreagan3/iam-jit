@@ -36,13 +36,15 @@ class AutoApproveDecision:
     auto_approve: bool
     reason: str
     """One of:
-      'success'              — all gates passed; auto-approve
-      'feature_disabled'     — settings.auto_approve_risk_below is None
-      'above_threshold'      — score >= threshold
-      'service_blocked'      — statement touches a blocklisted service
-      'account_blocked'      — request targets a blocklisted account
-      'over_quota'           — user hit per-hour cap
-      'no_policy'            — request has no policy (shouldn't reach here)
+      'success'                       — all gates passed; auto-approve
+      'feature_disabled'              — settings.auto_approve_risk_below is None
+      'above_threshold'               — score >= threshold
+      'service_blocked'               — statement touches a blocklisted service
+      'account_blocked'               — request targets a blocklisted account
+      'over_quota'                    — user hit per-hour cap
+      'no_policy'                     — request has no policy (shouldn't reach here)
+      'strict_mode_action_wildcard'   — strict mode disallows action wildcards
+      'strict_mode_admin_fallback'    — strict mode disallows the *:* admin shape
     """
     details: dict[str, Any]
     """Structured detail for the audit log + admin UI.
@@ -54,6 +56,46 @@ class AutoApproveDecision:
     """
 
 
+def _statement_has_action_wildcard(statements: list[dict[str, Any]]) -> str | None:
+    """Return the first wildcard-bearing Action seen in any Allow
+    statement, or None. Used by the strict-mode wildcard gate.
+
+    Matches `*` and `?` per AWS IAM's wildcard primitives, plus the
+    degenerate `Action: "*"`.
+    """
+    for stmt in statements:
+        if stmt.get("Effect") != "Allow":
+            continue
+        actions = stmt.get("Action") or []
+        if isinstance(actions, str):
+            actions = [actions]
+        for action in actions:
+            if not isinstance(action, str):
+                continue
+            if "*" in action or "?" in action:
+                return action
+    return None
+
+
+def _statement_is_admin_fallback(statements: list[dict[str, Any]]) -> bool:
+    """The admin-fallback shape: a single Allow with Action=`*` and
+    Resource=`*` (the "iam admin" preset). Strict mode forbids it
+    because admin-fallback defeats the purpose of JIT scoping.
+    """
+    if len(statements) != 1:
+        return False
+    stmt = statements[0]
+    if stmt.get("Effect") != "Allow":
+        return False
+    actions = stmt.get("Action") or []
+    if isinstance(actions, str):
+        actions = [actions]
+    resources = stmt.get("Resource") or []
+    if isinstance(resources, str):
+        resources = [resources]
+    return "*" in actions and "*" in resources
+
+
 def evaluate(
     *,
     request: dict[str, Any],
@@ -61,11 +103,22 @@ def evaluate(
     user_id: str,
     settings: "Settings",  # type: ignore[name-defined]
     quota_limiter: RateLimiter,
+    effective_threshold: int | None = None,
+    floor_max_auto_approve_risk_below: int | None = None,
+    safety_thresholds: "SafetyModeThresholds | None" = None,  # type: ignore[name-defined]
 ) -> AutoApproveDecision:
     """Decide whether to auto-approve `request`. Pure function except
     for the quota_limiter side-effect (which is intentional — the
     counter only advances on a successful auto-approve, so the
-    function must call check() rather than peek())."""
+    function must call check() rather than peek()).
+
+    `effective_threshold` (per [[safety-mode-two-modes]] memo) lets
+    the caller override `settings.auto_approve_risk_below` based on
+    safety-mode + access_type. When None (default), the
+    deployment-wide setting is used. When provided, it takes
+    precedence — None vs 0 distinction matters since 0 is a valid
+    threshold (deny everything).
+    """
     # Toggle gate fires FIRST — admin-curated toggles short-circuit
     # both directions. Two toggle actions evaluated in this order:
     #   1. force_review_if: any matching enabled toggle → review
@@ -109,13 +162,44 @@ def evaluate(
     # but still run the floor checks below (service/account
     # blocklists). The toggle is a "this shape is pre-vetted"
     # statement, not a "ignore safety checks" override.
-    threshold = settings.auto_approve_risk_below  # type: ignore[assignment]
+    # WB-safety-mode wiring: prefer the caller-supplied
+    # `effective_threshold` (which incorporates safety mode +
+    # access_type) over the deployment-wide setting.
+    threshold = (
+        effective_threshold
+        if effective_threshold is not None
+        else settings.auto_approve_risk_below
+    )  # type: ignore[assignment]
+    # WB10-02 clamp: the safety-mode resolver can hand back a
+    # threshold (e.g., read_write_swap + read-only → 9) that exceeds
+    # the platform-team-owned floor. The floor is the iam-jit
+    # equivalent of an AWS SCP — admins cannot loosen above it. The
+    # PATCH validator enforces this for settings-derived thresholds;
+    # we also enforce it here for resolver-derived thresholds.
+    threshold_was_clamped = False
+    pre_clamp_threshold = threshold
+    if (
+        threshold is not None
+        and floor_max_auto_approve_risk_below is not None
+        and threshold > floor_max_auto_approve_risk_below
+    ):
+        threshold = floor_max_auto_approve_risk_below
+        threshold_was_clamped = True
     if auto_approve_via_toggle is None:
         if analysis_score >= threshold:
+            details: dict[str, Any] = {
+                "score": analysis_score,
+                "threshold": threshold,
+            }
+            if threshold_was_clamped:
+                details["threshold_pre_clamp"] = pre_clamp_threshold
+                details["floor_max_auto_approve_risk_below"] = (
+                    floor_max_auto_approve_risk_below
+                )
             return AutoApproveDecision(
                 auto_approve=False,
                 reason="above_threshold",
-                details={"score": analysis_score, "threshold": threshold},
+                details=details,
             )
 
     spec = request.get("spec") or {}
@@ -127,6 +211,31 @@ def evaluate(
             reason="no_policy",
             details={},
         )
+
+    # WB10-04 strict-mode gates: wire `allow_action_wildcards` and
+    # `allow_admin_fallback` from SafetyModeThresholds. Without these
+    # the strict-mode docstring made promises the code didn't enforce.
+    if safety_thresholds is not None:
+        if not safety_thresholds.allow_action_wildcards:
+            offending = _statement_has_action_wildcard(statements)
+            if offending is not None:
+                return AutoApproveDecision(
+                    auto_approve=False,
+                    reason="strict_mode_action_wildcard",
+                    details={
+                        "mode": safety_thresholds.mode,
+                        "offending_action": offending,
+                    },
+                )
+        if not safety_thresholds.allow_admin_fallback:
+            if _statement_is_admin_fallback(statements):
+                return AutoApproveDecision(
+                    auto_approve=False,
+                    reason="strict_mode_admin_fallback",
+                    details={
+                        "mode": safety_thresholds.mode,
+                    },
+                )
 
     # Service blocklist: any action in any Allow statement that
     # touches a blocked service forces review.

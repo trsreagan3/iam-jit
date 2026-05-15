@@ -10,6 +10,7 @@ from iam_jit.accounts_store import (
     Account,
     AccountNotFound,
     AccountStoreReadOnly,
+    DynamoDBAccountStore,
     FileAccountStore,
     InMemoryAccountStore,
     utcnow_iso,
@@ -120,3 +121,39 @@ def test_file_store_missing_file_returns_empty(tmp_path: pathlib.Path) -> None:
     assert store.list() == []
     with pytest.raises(AccountNotFound):
         store.get("111111111111")
+
+
+# WB10-01 regression: DynamoDBAccountStore._to_item / _from_item must
+# round-trip safety_mode_override, llm_policy, llm_policy_reason.
+# Prior to the fix these three fields were silently dropped, leaving
+# strict-mode and per-account LLM policy unenforceable on DDB-backed
+# (production) deployments.
+def test_ddb_roundtrips_safety_and_llm_overrides() -> None:
+    src = _account(
+        "999999999999",
+        safety_mode_override="strict",
+        llm_policy="disabled",
+        llm_policy_reason="customer-mandated; sov controls",
+    )
+    item = DynamoDBAccountStore._to_item(src)
+    assert item["safety_mode_override"] == "strict"
+    assert item["llm_policy"] == "disabled"
+    assert item["llm_policy_reason"] == "customer-mandated; sov controls"
+
+    rt = DynamoDBAccountStore._from_item(item)
+    assert rt.safety_mode_override == "strict"
+    assert rt.llm_policy == "disabled"
+    assert rt.llm_policy_reason == "customer-mandated; sov controls"
+
+
+def test_ddb_omits_overrides_when_unset() -> None:
+    src = _account("111111111111")  # no overrides
+    item = DynamoDBAccountStore._to_item(src)
+    assert "safety_mode_override" not in item
+    assert "llm_policy" not in item
+    assert "llm_policy_reason" not in item
+
+    rt = DynamoDBAccountStore._from_item(item)
+    assert rt.safety_mode_override is None
+    assert rt.llm_policy is None
+    assert rt.llm_policy_reason is None

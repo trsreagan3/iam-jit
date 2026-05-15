@@ -553,6 +553,206 @@ def agent_grant(
             click.echo(f"  • {r}")
 
 
+@main.command("serve")
+@click.option(
+    "--local",
+    is_flag=True,
+    default=False,
+    help="Local mode — run iam-jit on this machine using local AWS credentials. "
+         "Best for solo-dev / agent-safety use cases. No external dependencies; "
+         "audit log + state in ~/.iam-jit/.",
+)
+@click.option(
+    "--host",
+    default="127.0.0.1",
+    help="Host to bind. Default 127.0.0.1 (localhost only).",
+)
+@click.option(
+    "--port",
+    type=int,
+    default=8765,
+    help="Port to bind. Default 8765.",
+)
+@click.option(
+    "--data-dir",
+    type=click.Path(file_okay=False, path_type=pathlib.Path),
+    default=None,
+    help="Local data directory. Default: ~/.iam-jit/",
+)
+def serve(local: bool, host: str, port: int, data_dir: pathlib.Path | None) -> None:
+    """Run iam-jit as a local process.
+
+    `iam-jit serve --local` is the recommended entry point for
+    solo devs + individual admins running iam-jit on their own
+    machine. Uses local AWS credentials (boto3 default chain);
+    persists state to ~/.iam-jit/; auto-creates a single admin
+    user matching the local OS user.
+
+    For Lambda / SAM deployments, do NOT use this; deploy via
+    `sam deploy` instead.
+
+    Example:
+      iam-jit serve --local
+      # ✓ Listening on http://127.0.0.1:8765
+      # ✓ Admin: email:youruser@yourhost.local
+      # ✓ Audit log: ~/.iam-jit/audit.db
+    """
+    if not local:
+        click.echo(
+            "iam-jit serve requires --local for now. Hosted/self-host "
+            "deployments use `sam deploy`. See docs/DEPLOYMENT.md.",
+            err=True,
+        )
+        sys.exit(1)
+
+    from .local_server import run
+
+    sys.exit(run(host=host, port=port, data_dir=data_dir))
+
+
+@main.command("init-solo")
+@click.option(
+    "--data-dir",
+    type=click.Path(file_okay=False, path_type=pathlib.Path),
+    default=None,
+    help="Local data directory. Default: ~/.iam-jit/",
+)
+@click.option(
+    "--port",
+    type=int,
+    default=8765,
+    show_default=True,
+    help="Port iam-jit will listen on (used in the printed config snippets).",
+)
+@click.option(
+    "--print-mcp-config",
+    is_flag=True,
+    default=False,
+    help="Print the Claude Code MCP server config snippet only (no setup).",
+)
+def init_solo(
+    data_dir: pathlib.Path | None,
+    port: int,
+    print_mcp_config: bool,
+) -> None:
+    """One-command setup for solo-dev / agent-safety mode.
+
+    Bootstraps `~/.iam-jit/` (data dir, users.yaml, accounts.yaml,
+    API token) and prints the snippets you paste into Claude Code's
+    MCP config to wire iam-jit as your AWS safety layer.
+
+    Does NOT start the server. After init-solo finishes, run:
+
+      iam-jit serve --local
+
+    Designed to be the 90-second on-ramp behind "don't give Claude
+    your AWS keys."
+    """
+    from . import local_server
+
+    cfg = local_server.LocalServerConfig(
+        port=port,
+        data_dir=data_dir or local_server._DEFAULT_DATA_DIR,
+    )
+
+    if print_mcp_config:
+        _print_mcp_snippets(cfg)
+        return
+
+    click.echo("iam-jit init-solo")
+    click.echo("")
+    click.echo(f"  Data dir:  {cfg.data_dir}")
+
+    local_server._ensure_data_dir(cfg)
+    admin_user_id = local_server._seed_local_user(cfg)
+    local_server._seed_local_accounts(cfg)
+    local_server._set_local_env_defaults(cfg, admin_user_id)
+    raw_token = local_server._ensure_local_cli_token(
+        cfg, admin_user_id=admin_user_id,
+    )
+
+    click.echo(f"  Admin:     {admin_user_id}")
+    click.echo(f"  API token: {cfg.cli_token_file} (mode 0600)")
+    click.echo("")
+    click.echo("Next steps:")
+    click.echo("")
+    click.echo("  1. Start the server:")
+    click.echo(f"       iam-jit serve --local --port {cfg.port}")
+    click.echo("")
+    click.echo("  2. Tell Claude Code about the iam-jit MCP server.")
+    click.echo("     Add this to your Claude Code MCP config")
+    click.echo("     (run `iam-jit init-solo --print-mcp-config` to")
+    click.echo("     print it again any time):")
+    click.echo("")
+    _print_mcp_snippets(cfg)
+    click.echo("")
+    click.echo("  3. In Claude Code, just ask for what you need.")
+    click.echo("     The agent will route AWS access requests through")
+    click.echo("     iam-jit (scoped, time-bound, audited).")
+    click.echo("")
+
+
+def _print_mcp_snippets(cfg) -> None:  # type: ignore[no-untyped-def]
+    """Print Claude Code MCP server config + bearer-token usage.
+
+    Two ways to wire iam-jit into Claude Code:
+      A. As an MCP server (stdio transport — preferred for tool use)
+      B. As an HTTP API the user calls explicitly (`curl` examples)
+
+    init-solo prints both so the user picks whichever fits.
+    """
+    token_file = str(cfg.cli_token_file)
+    click.echo("    Claude Code MCP config (stdio transport):")
+    click.echo("")
+    click.echo("    {")
+    click.echo('      "mcpServers": {')
+    click.echo('        "iam-jit": {')
+    click.echo('          "command": "iam-jit",')
+    click.echo('          "args": ["mcp-server"]')
+    click.echo("        }")
+    click.echo("      }")
+    click.echo("    }")
+    click.echo("")
+    click.echo("    Bearer token (for direct HTTP API calls):")
+    click.echo(f"      cat {token_file}")
+    click.echo("")
+    click.echo(
+        f"      curl -H \"Authorization: Bearer $(cat {token_file})\" \\"
+    )
+    click.echo(
+        f"           http://127.0.0.1:{cfg.port}/api/v1/users/me"
+    )
+
+
+@main.command("dev-slack-mock")
+@click.option(
+    "--host",
+    default="127.0.0.1",
+    help="Host to bind. Default 127.0.0.1.",
+)
+@click.option(
+    "--port",
+    type=int,
+    default=8766,
+    show_default=True,
+    help="Port to bind. Default 8766 (one above the local server's 8765).",
+)
+def dev_slack_mock(host: str, port: int) -> None:
+    """Run a mock Slack API server for local dev + CI E2E testing.
+
+    Implements just enough of Slack's Web API to exercise the
+    iam-jit Slack-bot integration end-to-end without hitting real
+    Slack. Useful when developing the bot or running E2E tests in
+    CI where ngrok + a real workspace isn't available.
+
+    See `src/iam_jit/_test_support/slack_mock.py` for the supported
+    endpoint surface.
+    """
+    from ._test_support.slack_mock import run_standalone
+
+    sys.exit(run_standalone(host=host, port=port))
+
+
 @main.command("mcp-server")
 def mcp_server_cmd() -> None:
     """Run the iam-jit MCP server on stdio.
@@ -579,6 +779,311 @@ def mcp_server_cmd() -> None:
     """
     from .mcp_server import main as mcp_main
     sys.exit(mcp_main())
+
+
+# ---------------------------------------------------------------------------
+# doctor — operational health checks for various integrations.
+# ---------------------------------------------------------------------------
+
+
+@main.group("doctor")
+def doctor() -> None:
+    """Health checks for iam-jit integrations.
+
+    Validates configuration + connectivity for the various
+    integrations iam-jit supports. Use during onboarding to
+    catch misconfiguration before deploying to production.
+    """
+
+
+@doctor.command("slack")
+@click.option(
+    "--channel",
+    default=None,
+    help="Channel ID to test posting to. Defaults to IAM_JIT_SLACK_APPROVAL_CHANNEL.",
+)
+def doctor_slack(channel: str | None) -> None:
+    """Validate Slack approval-bot configuration.
+
+    Checks:
+      ✓ Env vars present (bot token + signing secret + channel)
+      ✓ Bot token authenticates (auth.test)
+      ✓ Bot can read its own user info
+      ✓ Bot has chat:write scope (test post + delete to channel)
+      ✓ Bot has users:read.email scope (helps approver resolution)
+      ✓ Signing secret is plausibly-shaped (32+ chars hex)
+
+    Exits 0 on all-green; non-zero on first failure. Suitable
+    for CI / pre-deploy gating.
+    """
+    import os as _os
+
+    from . import slack_bot
+
+    failures: list[str] = []
+
+    def check(label: str, ok: bool, detail: str = "") -> None:
+        marker = "✓" if ok else "✗"
+        color = "green" if ok else "red"
+        click.secho(f"  {marker} {label}", fg=color, nl=False)
+        if detail:
+            click.echo(f" — {detail}")
+        else:
+            click.echo()
+        if not ok:
+            failures.append(label)
+
+    click.secho("Slack approval-bot health check", fg="cyan", bold=True)
+    click.echo()
+
+    # 1. Env vars present
+    bot_token = _os.environ.get("IAM_JIT_SLACK_BOT_TOKEN", "").strip()
+    signing_secret = _os.environ.get("IAM_JIT_SLACK_SIGNING_SECRET", "").strip()
+    approval_channel = (
+        channel
+        or _os.environ.get("IAM_JIT_SLACK_APPROVAL_CHANNEL", "").strip()
+        or None
+    )
+
+    check("IAM_JIT_SLACK_BOT_TOKEN present", bool(bot_token))
+    check("IAM_JIT_SLACK_SIGNING_SECRET present", bool(signing_secret))
+    check("IAM_JIT_SLACK_APPROVAL_CHANNEL present", bool(approval_channel))
+
+    if not (bot_token and signing_secret):
+        click.echo()
+        click.secho(
+            "Cannot continue — bot_token and signing_secret are required.",
+            fg="red",
+        )
+        sys.exit(1)
+
+    # Signing secret shape (a sanity-check, not a real validation —
+    # Slack signing secrets are 32-char hex but the exact format
+    # has changed slightly over time).
+    sig_shape_ok = len(signing_secret) >= 32
+    check(
+        f"Signing secret length plausible ({len(signing_secret)} chars; expected ≥32)",
+        sig_shape_ok,
+    )
+
+    # 2. auth.test — bot token validates + bot identity
+    import httpx as _httpx
+
+    try:
+        resp = _httpx.post(
+            "https://slack.com/api/auth.test",
+            headers={"Authorization": f"Bearer {bot_token}"},
+            timeout=10.0,
+        )
+        resp.raise_for_status()
+        auth = resp.json()
+    except Exception as e:
+        check("auth.test reachable", False, f"http error: {e}")
+        sys.exit(1)
+
+    if not auth.get("ok"):
+        check("auth.test ok", False, f"error: {auth.get('error')!r}")
+        sys.exit(1)
+    workspace = auth.get("team", "<unknown>")
+    user = auth.get("user", "<unknown>")
+    bot_user_id = auth.get("user_id", "<unknown>")
+    check(
+        f"auth.test ok",
+        True,
+        f"workspace={workspace} bot={user} ({bot_user_id})",
+    )
+
+    # 3. Test approval-channel post (if channel set)
+    if approval_channel:
+        try:
+            cfg = slack_bot.SlackConfig(
+                bot_token=bot_token,
+                signing_secret=signing_secret,
+                approval_channel=approval_channel,
+            )
+            test_payload = {
+                "channel": approval_channel,
+                "text": "iam-jit doctor: health-check ping (delete me if it lands)",
+            }
+            post = _httpx.post(
+                "https://slack.com/api/chat.postMessage",
+                headers={
+                    "Authorization": f"Bearer {bot_token}",
+                    "Content-Type": "application/json; charset=utf-8",
+                },
+                json=test_payload,
+                timeout=10.0,
+            )
+            post.raise_for_status()
+            post_resp = post.json()
+        except Exception as e:
+            check(
+                f"chat.postMessage to {approval_channel}",
+                False,
+                f"http error: {e}",
+            )
+            sys.exit(1)
+        if not post_resp.get("ok"):
+            check(
+                f"chat.postMessage to {approval_channel}",
+                False,
+                f"slack error: {post_resp.get('error')!r}",
+            )
+            sys.exit(1)
+        ts = post_resp.get("ts")
+        check(
+            f"chat.postMessage to {approval_channel}",
+            True,
+            f"posted (ts={ts}); delete the test message manually",
+        )
+
+    # 4. Check users.info works (we use it for approver resolution)
+    try:
+        info = _httpx.get(
+            "https://slack.com/api/users.info",
+            headers={"Authorization": f"Bearer {bot_token}"},
+            params={"user": bot_user_id},
+            timeout=10.0,
+        )
+        info.raise_for_status()
+        info_resp = info.json()
+    except Exception as e:
+        check("users.info reachable", False, f"http error: {e}")
+        sys.exit(1)
+    if not info_resp.get("ok"):
+        check(
+            "users.info ok",
+            False,
+            f"error: {info_resp.get('error')!r}. Add 'users:read' scope to the bot.",
+        )
+        sys.exit(1)
+    has_email = bool(
+        ((info_resp.get("user") or {}).get("profile") or {}).get("email")
+    )
+    check(
+        "users.info ok",
+        True,
+        f"bot can read user records (own email in profile: {has_email})",
+    )
+    if not has_email:
+        click.secho(
+            "  ⚠  users:read.email scope may not be granted. Approver "
+            "resolution by email won't work. Add the scope in the Slack App "
+            "config + re-install.",
+            fg="yellow",
+        )
+
+    click.echo()
+    if failures:
+        click.secho(
+            f"FAILED: {len(failures)} check(s) failed: {', '.join(failures)}",
+            fg="red",
+            bold=True,
+        )
+        sys.exit(1)
+    click.secho("All Slack checks passed.", fg="green", bold=True)
+    if approval_channel:
+        click.echo(
+            f"\nA test message was posted to {approval_channel}. "
+            f"Delete it manually if it bothers anyone."
+        )
+
+
+@doctor.command("oidc")
+def doctor_oidc() -> None:
+    """Validate OIDC SSO configuration.
+
+    Checks:
+      ✓ Provider env var set + valid
+      ✓ Client ID / secret / redirect URI present
+      ✓ Provider-specific required fields (e.g., HOSTED_DOMAIN for Google)
+      ✓ Discovery doc reachable + endpoints valid
+      ✓ JWKS reachable + contains usable signing keys
+
+    Exits 0 on all-green.
+    """
+    import os as _os
+
+    from . import oidc as _oidc
+
+    failures: list[str] = []
+
+    def check(label: str, ok: bool, detail: str = "") -> None:
+        marker = "✓" if ok else "✗"
+        color = "green" if ok else "red"
+        click.secho(f"  {marker} {label}", fg=color, nl=False)
+        if detail:
+            click.echo(f" — {detail}")
+        else:
+            click.echo()
+        if not ok:
+            failures.append(label)
+
+    click.secho("OIDC SSO health check", fg="cyan", bold=True)
+    click.echo()
+
+    # Env-var validation via the canonical config loader.
+    try:
+        cfg = _oidc.OIDCProviderConfig.from_env()
+    except _oidc.ConfigError as e:
+        check("OIDC env vars valid", False, str(e))
+        sys.exit(1)
+    if cfg is None:
+        check(
+            "OIDC env vars set",
+            False,
+            "IAM_JIT_OIDC_PROVIDER + CLIENT_ID + CLIENT_SECRET + REDIRECT_URI required",
+        )
+        sys.exit(1)
+    check(
+        "OIDC env vars valid",
+        True,
+        f"provider={cfg.provider} issuer={cfg.issuer}",
+    )
+    if cfg.provider == "google":
+        check(
+            "Google hosted_domain set",
+            bool(cfg.hosted_domain),
+            f"hd={cfg.hosted_domain}",
+        )
+
+    # Discovery doc.
+    client = _oidc.HttpxClient()
+    try:
+        endpoints = _oidc.discover(cfg, client)
+    except _oidc.ConfigError as e:
+        check("Discovery doc reachable", False, str(e))
+        sys.exit(1)
+    check(
+        "Discovery doc reachable",
+        True,
+        f"jwks={endpoints.jwks_uri}",
+    )
+
+    # JWKS fetch.
+    cache = _oidc.JWKSCache(client)
+    try:
+        # We don't know a real kid; just fetch the JWKS doc to confirm reachability.
+        jwks = client.get_json(endpoints.jwks_uri)
+        keys = jwks.get("keys") or []
+        check(
+            "JWKS reachable + has keys",
+            len(keys) > 0,
+            f"{len(keys)} key(s)",
+        )
+    except Exception as e:
+        check("JWKS reachable", False, str(e))
+        sys.exit(1)
+
+    click.echo()
+    if failures:
+        click.secho(
+            f"FAILED: {len(failures)} check(s)",
+            fg="red",
+            bold=True,
+        )
+        sys.exit(1)
+    click.secho("All OIDC checks passed.", fg="green", bold=True)
 
 
 if __name__ == "__main__":

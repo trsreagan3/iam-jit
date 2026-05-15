@@ -299,12 +299,42 @@ def preview_request(
             hard_cap=settings.auto_approve_quota_per_hour * 10 + 1,
             window_seconds=3600,
         )
+        # Safety-mode threshold resolution: pick the right threshold
+        # based on safety mode (read_write_swap vs strict) and
+        # access_type (read vs write). Per [[safety-mode-two-modes]]
+        # + [[read-only-default]] memos. For multi-account requests
+        # we pick the MOST RESTRICTIVE mode across the set so a
+        # mixed [dev, prod-strict] request cannot weaken the prod
+        # policy (WB10-03).
+        from .. import safety_mode as _safety_mode
+        from .. import settings_store as _settings_store_mod
+        _spec = req.get("spec") or {}
+        _access_type = (_spec.get("access_type") or "read-write").strip()
+        _accounts = _spec.get("accounts") or []
+        _account_ids = [
+            a.get("account_id") for a in _accounts
+            if isinstance(a, dict) and a.get("account_id")
+        ]
+        _accounts_store = getattr(request.app.state, "accounts_store", None)
+        _mode = _safety_mode.resolve_mode_for_accounts(
+            account_ids=_account_ids, accounts_store=_accounts_store,
+        )
+        _effective_threshold = _safety_mode.auto_approve_threshold_for(
+            _mode, access_type=_access_type,
+        )
+        _safety_thresholds = _safety_mode.thresholds_for(_mode)
+        _floors = _settings_store_mod.Floors.from_env()
         auto_decision = auto_approve_mod.evaluate(
             request=req,
             analysis_score=analysis.risk_score,
             user_id=user.id,
             settings=settings,
             quota_limiter=sim_quota,
+            effective_threshold=_effective_threshold,
+            floor_max_auto_approve_risk_below=(
+                _floors.max_auto_approve_risk_below
+            ),
+            safety_thresholds=_safety_thresholds,
         )
 
     # Surface concrete advice on how to reduce risk. The deterministic
@@ -478,18 +508,55 @@ def submit_request(
 
         settings = settings_mod.get_default_store().get()
         quota = rate_limit_mod.get_default_limiter()
+        # Safety-mode threshold resolution per [[safety-mode-two-modes]].
+        # Mirrors the preview-route logic above. Multi-account requests
+        # use the MOST RESTRICTIVE mode across the set (WB10-03);
+        # threshold is clamped to the platform-team floor (WB10-02).
+        from .. import safety_mode as _safety_mode
+        _submit_spec = req.get("spec") or {}
+        _submit_access_type = (_submit_spec.get("access_type") or "read-write").strip()
+        _submit_accounts = _submit_spec.get("accounts") or []
+        _submit_account_ids = [
+            a.get("account_id") for a in _submit_accounts
+            if isinstance(a, dict) and a.get("account_id")
+        ]
+        _submit_accounts_store = getattr(request.app.state, "accounts_store", None)
+        _submit_mode = _safety_mode.resolve_mode_for_accounts(
+            account_ids=_submit_account_ids,
+            accounts_store=_submit_accounts_store,
+        )
+        _submit_effective_threshold = _safety_mode.auto_approve_threshold_for(
+            _submit_mode, access_type=_submit_access_type,
+        )
+        _submit_safety_thresholds = _safety_mode.thresholds_for(_submit_mode)
+        _submit_floors = settings_mod.Floors.from_env()
         auto_decision = auto_approve_mod.evaluate(
             request=req,
             analysis_score=review_block.get("risk_score", 10),
             user_id=user.id,
+            effective_threshold=_submit_effective_threshold,
             settings=settings,
             quota_limiter=quota,
+            floor_max_auto_approve_risk_below=(
+                _submit_floors.max_auto_approve_risk_below
+            ),
+            safety_thresholds=_submit_safety_thresholds,
         )
         # Surface the decision in the audit log + (when auto-approved)
         # the history event. We intentionally don't write it onto
         # status.review — that block has a strict schema. The
         # response body + audit chain are the durable surfaces.
         try:
+            # WB10-05: include safety-mode context so a compliance
+            # auditor can prove a grant was made under strict mode
+            # (or wasn't). `mode_source` says whether the effective
+            # threshold came from the resolver (per-account /
+            # safety-mode) or the deployment-wide setting.
+            _mode_source = (
+                "safety_mode_resolver"
+                if _submit_effective_threshold is not None
+                else "deployment_setting"
+            )
             audit_mod.emit(
                 actor="system:auto-approver",
                 kind=(
@@ -499,11 +566,23 @@ def submit_request(
                 ),
                 summary=(
                     f"auto-approve evaluated for {metadata['id']}: "
-                    f"{auto_decision.reason}"
+                    f"{auto_decision.reason} "
+                    f"(mode={_submit_mode})"
                 ),
                 details={
                     "request_id": metadata["id"],
                     "owner_id": user.id,
+                    "safety_mode": _submit_mode,
+                    "mode_source": _mode_source,
+                    "allow_action_wildcards": (
+                        _submit_safety_thresholds.allow_action_wildcards
+                    ),
+                    "allow_admin_fallback": (
+                        _submit_safety_thresholds.allow_admin_fallback
+                    ),
+                    "floor_max_auto_approve_risk_below": (
+                        _submit_floors.max_auto_approve_risk_below
+                    ),
                     **auto_decision.details,
                 },
             )
@@ -586,6 +665,28 @@ def submit_request(
                 )
 
     store.put(metadata["id"], req)
+
+    # Fire-and-forget Slack approval-card post when the request lands
+    # in pending state (i.e., did NOT auto-approve). Failures are
+    # logged and SWALLOWED — a Slack outage must not block iam-jit
+    # submissions.
+    if req.get("status", {}).get("state") == "pending":
+        try:
+            from .. import slack_bot
+
+            slack_cfg = slack_bot.SlackConfig.from_env()
+            if slack_cfg is not None:
+                slack_bot.post_approval_message(
+                    request=req,
+                    config=slack_cfg,
+                    deployment_url=os.environ.get("IAM_JIT_PUBLIC_URL"),
+                )
+        except Exception as e:
+            import logging
+            logging.getLogger("iam_jit.routes.requests").warning(
+                "slack approval post failed (request still submitted): %s", e
+            )
+
     return {
         "request": req,
         "review": review_block,
