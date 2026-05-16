@@ -185,7 +185,7 @@ Option 3 is the recommended path even for "I'm just using the web UI" users. The
 
 This is why the docs encourage agents EVEN FOR human-driven sessions: they're the only place where codebase context lives, and codebase context is what makes narrowing tractable.
 
-**Pro-tier option (planned):** for agentless users who don't want to edit JSON, iam-jit's Pro tier offers a conversational LLM-guided reduction walkthrough in the web UI ("do you need RDS? secrets? which region?"). The LLM acts as UX, not as policy author — user's answers drive deterministic modifications, which go through the same scorer. Different category from the NL synthesis we removed. See [project_ui_guided_reduction_pro_tier](../README.md#status) for status.
+**Pro-tier option (planned):** for agentless users who don't want to edit JSON, iam-jit's Pro tier offers a conversational LLM-guided reduction walkthrough in the web UI. The UX is a single "which of these do you NOT need" multi-select checklist — ~8-12 curated high-impact items (NOT an exhaustive AWS service list). Defaults pre-checked for the sensible-defaults deny set (secrets, KMS decrypt, sensitive-pattern S3, audit-infra destruction). User adjusts, picks accounts/regions, submits in one shot. The LLM acts as UX, not as policy author — user's answers drive deterministic modifications, which go through the same scorer. Different category from the NL synthesis we removed. Checklist items are CURATED by score-impact (presence/absence shifts the scorer by ≥1 point) and customer-configurable per Pro+ org. See `project_ui_guided_reduction_pro_tier` memo for the full design.
 
 ## Strict-mode considerations
 
