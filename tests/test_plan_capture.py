@@ -223,3 +223,65 @@ def test_summarize_empty() -> None:
     assert s["total"] == 0
     assert s["by_service"] == {}
     assert s["iam_actions"] == []
+
+
+# WB11-09 regression: iam_resource: null is rejected, not silently
+# normalised to "*".
+def test_parse_line_iam_resource_null_rejected() -> None:
+    line = json.dumps({
+        "schema": SCHEMA_VERSION_V1ALPHA1,
+        "ts": "2026-05-16T14:22:01.503Z",
+        "service": "s3",
+        "action": "ListBuckets",
+        "region": "us-east-1",
+        "iam_jit": {
+            "iam_action": "s3:ListBuckets",
+            "iam_resource": None,
+            "access_type": "read-only",
+        },
+    })
+    with pytest.raises(PlanCaptureError, match="iam_resource"):
+        parse_line(line)
+
+
+def test_parse_line_iam_resource_empty_array_rejected() -> None:
+    line = _line(iam_jit={
+        "iam_action": "s3:GetObject",
+        "iam_resource": [],
+        "access_type": "read-only",
+    })
+    with pytest.raises(PlanCaptureError, match="must not be empty"):
+        parse_line(line)
+
+
+# WB11-10 regression: per-line + total-file caps protect against
+# decompression-bomb captures.
+def test_read_capture_rejects_oversized_line(
+    tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A single JSONL line over the 1MB cap aborts iteration."""
+    import iam_jit.plan_capture as pc
+    monkeypatch.setattr(pc, "_MAX_LINE_BYTES", 256)  # tighter for test
+    p = tmp_path / "huge.jsonl"
+    bloat = "X" * 1024
+    p.write_text(json.dumps({
+        "schema": SCHEMA_VERSION_V1ALPHA1,
+        "ts": "t", "service": "s3", "action": "A", "region": "us-east-1",
+        "iam_jit": {"iam_action": "s3:A", "iam_resource": "*", "access_type": "read-only"},
+        "bloat": bloat,
+    }) + "\n")
+    with pytest.raises(PlanCaptureError, match="exceeds"):
+        list(read_capture(p))
+
+
+def test_read_capture_rejects_oversized_total(
+    tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Many small lines summing past the total-file cap aborts iteration."""
+    import iam_jit.plan_capture as pc
+    monkeypatch.setattr(pc, "_MAX_FILE_BYTES_UNCOMPRESSED", 1024)
+    p = tmp_path / "many.jsonl"
+    line = _line() + "\n"
+    p.write_text(line * 100)  # > 1024 bytes total
+    with pytest.raises(PlanCaptureError, match="decompression-bomb"):
+        list(read_capture(p))

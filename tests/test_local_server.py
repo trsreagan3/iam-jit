@@ -417,3 +417,23 @@ def test_run_banner_does_not_print_raw_token() -> None:
             f"this leaks the bearer token to stdout (WB11-04). "
             f"Reference the file path instead."
         )
+
+
+# WB11-08 regression: serve --local refuses non-localhost binds.
+def test_local_server_refuses_lan_bind() -> None:
+    """`iam-jit serve --local --host 0.0.0.0` would expose the
+    admin token + AWS-bridging server to the LAN. Must refuse."""
+    with pytest.raises(SystemExit) as excinfo:
+        local_server._validate_local_bind("0.0.0.0")
+    assert "refuses to bind" in str(excinfo.value)
+
+
+def test_local_server_refuses_external_ip() -> None:
+    with pytest.raises(SystemExit):
+        local_server._validate_local_bind("192.168.1.42")
+
+
+def test_local_server_accepts_loopback_addresses() -> None:
+    for host in ("127.0.0.1", "::1", "localhost"):
+        # Should not raise
+        local_server._validate_local_bind(host)

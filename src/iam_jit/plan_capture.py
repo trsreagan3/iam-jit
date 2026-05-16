@@ -34,6 +34,14 @@ SCHEMA_VERSION_V1ALPHA1 = "iam-jit.dev/plan-capture/v1alpha1"
 # Schemas the reader accepts. Add v1, v2, ... here as they ship.
 _ACCEPTED_SCHEMAS: frozenset[str] = frozenset({SCHEMA_VERSION_V1ALPHA1})
 
+# WB11-10 closure: cap reader inputs so a poisoned capture file
+# can't OOM the recommender. A real-world plan capture is on the
+# order of hundreds of KB even for large terraform plans; multi-MB
+# is suspicious and gigabyte-scale is hostile (decompression bombs,
+# log-injected captures from a compromised proxy).
+_MAX_LINE_BYTES = 1 * 1024 * 1024          # 1 MB per JSONL line
+_MAX_FILE_BYTES_UNCOMPRESSED = 256 * 1024 * 1024   # 256 MB total uncompressed
+
 
 class PlanCaptureError(Exception):
     """Raised when a capture file fails validation."""
@@ -61,16 +69,33 @@ class CapturedCall:
 
 
 def _open_capture(path: pathlib.Path | str) -> Iterator[str]:
-    """Open the capture file, transparently handling .gz."""
+    """Open the capture file, transparently handling .gz.
+
+    Enforces per-line + total-size caps to defend against
+    decompression-bomb captures (WB11-10). Lines exceeding
+    `_MAX_LINE_BYTES` raise PlanCaptureError; total uncompressed
+    bytes exceeding `_MAX_FILE_BYTES_UNCOMPRESSED` aborts iteration.
+    """
     p = pathlib.Path(path)
-    if p.suffix == ".gz" or str(p).endswith(".jsonl.gz"):
-        with gzip.open(p, "rt", encoding="utf-8") as f:
-            for line in f:
-                yield line
-    else:
-        with open(p, "r", encoding="utf-8") as f:
-            for line in f:
-                yield line
+    is_gz = p.suffix == ".gz" or str(p).endswith(".jsonl.gz")
+    opener = gzip.open if is_gz else open  # type: ignore[assignment]
+    total = 0
+    with opener(p, "rt", encoding="utf-8") as f:
+        for lineno, line in enumerate(f, start=1):
+            line_bytes = len(line.encode("utf-8"))
+            if line_bytes > _MAX_LINE_BYTES:
+                raise PlanCaptureError(
+                    f"line {lineno}: exceeds {_MAX_LINE_BYTES} bytes "
+                    f"(was {line_bytes}). A single API call should never "
+                    f"need this much capture data; reject as malformed."
+                )
+            total += line_bytes
+            if total > _MAX_FILE_BYTES_UNCOMPRESSED:
+                raise PlanCaptureError(
+                    f"capture exceeds {_MAX_FILE_BYTES_UNCOMPRESSED} "
+                    f"uncompressed bytes (decompression-bomb defense)"
+                )
+            yield line
 
 
 def parse_line(line: str, *, lineno: int = 0) -> CapturedCall:
@@ -112,11 +137,14 @@ def parse_line(line: str, *, lineno: int = 0) -> CapturedCall:
     access_type = iam_jit_block.get("access_type")
     if not (isinstance(iam_action, str)
             and isinstance(access_type, str)
-            and (iam_resource is None
-                 or isinstance(iam_resource, (str, list)))):
+            and isinstance(iam_resource, (str, list))):
+        # WB11-09 closure: iam_resource MUST be present + typed.
+        # Previously `iam_resource: null` was silently promoted to
+        # `"*"` — a producer bug + a recommender footgun.
         raise PlanCaptureError(
             f"line {lineno}: iam_jit must have "
-            "iam_action:str, iam_resource:str|array, access_type:str"
+            "iam_action:str, iam_resource:str|array (NOT null), "
+            "access_type:str"
         )
 
     # Normalise iam_resource to a str or tuple[str, ...]
@@ -125,9 +153,11 @@ def parse_line(line: str, *, lineno: int = 0) -> CapturedCall:
             raise PlanCaptureError(
                 f"line {lineno}: iam_resource array must contain strings"
             )
+        if not iam_resource:
+            raise PlanCaptureError(
+                f"line {lineno}: iam_resource array must not be empty"
+            )
         iam_resource_normalized: str | tuple[str, ...] = tuple(iam_resource)
-    elif iam_resource is None:
-        iam_resource_normalized = "*"
     else:
         iam_resource_normalized = iam_resource
 

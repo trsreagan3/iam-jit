@@ -335,6 +335,36 @@ def _set_local_env_defaults(config: LocalServerConfig, admin_user_id: str) -> No
     os.environ.setdefault("IAM_JIT_LLM_BACKEND", "none")
 
 
+_LOCALHOST_HOSTS: frozenset[str] = frozenset({
+    "127.0.0.1", "::1", "localhost",
+})
+
+
+def _validate_local_bind(host: str) -> None:
+    """Refuse to bind a local-mode server to anything other than
+    localhost. WB11-08 closure: `serve --local --host 0.0.0.0`
+    would expose the admin token + AWS-bridging server to the
+    entire LAN (the local-mode trust model is single-machine,
+    single-user). The defaults bypass cookie Secure flag,
+    enable an ephemeral magic-link secret, and self-approve
+    reductions for the OS user; none of that is safe on a
+    network-reachable bind.
+
+    If a developer genuinely needs to share their local iam-jit
+    with another machine, they should use `iam-jit serve` in
+    HOSTED mode instead, with proper TLS / OIDC / DDB-backed stores.
+    """
+    if host in _LOCALHOST_HOSTS:
+        return
+    raise SystemExit(
+        f"iam-jit serve --local refuses to bind {host!r}. "
+        f"Local mode is single-machine; binding to a non-localhost "
+        f"address would expose the admin bearer token + the "
+        f"AWS-bridging server to the network. Use 127.0.0.1 / ::1 / "
+        f"localhost. For multi-machine deployments, use hosted mode."
+    )
+
+
 def run(
     *,
     host: str = _DEFAULT_HOST,
@@ -345,6 +375,7 @@ def run(
 
     Returns process exit code.
     """
+    _validate_local_bind(host)
     config = LocalServerConfig(
         host=host,
         port=port,

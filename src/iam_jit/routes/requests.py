@@ -546,6 +546,57 @@ def submit_request(
         # the history event. We intentionally don't write it onto
         # status.review — that block has a strict schema. The
         # response body + audit chain are the durable surfaces.
+        # WB11-05/06 annotation pass: evaluate the MFA freshness
+        # gate + self-approve-reductions eligibility for THIS request
+        # and record their verdicts in the audit chain. These are
+        # ANNOTATIONS not enforcement decisions — wiring them as
+        # actual transition gates needs a separate auth-flow change
+        # set (cookie plumbing in the route + state-machine update)
+        # which is queued as a follow-up. Recording them now means
+        # the data is in the audit trail when enforcement ships.
+        _mfa_audit: dict[str, Any] = {"mfa_gate_evaluated": False}
+        try:
+            from .. import mfa_gate as _mfa_gate
+            from ..auth import _get_secret as _auth_secret_getter  # type: ignore[attr-defined]
+            mfa_cookie = request.cookies.get("iam_jit_session_mfa") if hasattr(request, "cookies") else None
+            mfa_secret = _auth_secret_getter()
+            mfa_result = _mfa_gate.verify(
+                cookie_value=mfa_cookie,
+                secret=mfa_secret,
+                expected_user_id=user.id,
+                max_age_seconds=_mfa_gate.step_up_max_age_seconds(),
+            )
+            _mfa_audit = {
+                "mfa_gate_evaluated": True,
+                "mfa_step_up_floor": (
+                    int(_mfa_gate._high_risk_score_floor())
+                ),
+                "would_require_mfa": _mfa_gate.is_high_risk(
+                    review_block.get("risk_score", 0)
+                ),
+                **mfa_result.as_audit_dict(),
+            }
+        except Exception:
+            # Best-effort — never let the annotation pass block a grant.
+            pass
+
+        _self_approve_audit: dict[str, Any] = {"self_approve_evaluated": False}
+        try:
+            from .. import self_approve_reductions as _sar
+            sar_decision = _sar.evaluate(
+                request=req,
+                user_id=user.id,
+                user_is_admin=getattr(user, "is_admin", False),
+                blocked_services=tuple(settings.never_auto_approve_services),
+            )
+            _self_approve_audit = {
+                "self_approve_evaluated": True,
+                "self_approve_eligible": sar_decision.self_approved,
+                "self_approve_reason": sar_decision.reason,
+            }
+        except Exception:
+            pass
+
         try:
             # WB10-05: include safety-mode context so a compliance
             # auditor can prove a grant was made under strict mode
@@ -583,6 +634,8 @@ def submit_request(
                     "floor_max_auto_approve_risk_below": (
                         _submit_floors.max_auto_approve_risk_below
                     ),
+                    **_mfa_audit,
+                    **_self_approve_audit,
                     **auto_decision.details,
                 },
             )
