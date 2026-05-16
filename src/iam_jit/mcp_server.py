@@ -1,29 +1,36 @@
-"""MCP (Model Context Protocol) server exposing iam-jit policy generation.
+"""MCP (Model Context Protocol) server exposing iam-jit's agent-facing tools.
 
 Lets any MCP-aware agent (Claude Code, Cursor, custom Claude SDK
-builds, etc.) natively request scoped AWS IAM policies for specific
-tasks. The agent describes what it needs to do; the server returns a
-generated policy + risk score; the agent (or its orchestrator) decides
-whether to attach the policy to a JIT-issued STS credential.
+builds, etc.) browse iam-jit's template catalog, score arbitrary
+IAM policies, and submit grant requests. Per [[no-nl-synthesis]]
+(decision 2026-05-16), the server does NOT synthesize policies
+from natural-language prompts — the agent (with its codebase
+context + LLM) does the authoring, iam-jit scores and gates.
+See docs/AGENTS.md for the reduction-loop pattern.
 
-Architecture:
-  agent → MCP request: { task, context, bias }
-        ↓
-  this server: validates input, calls generate_policy(), runs the
-               output through the deterministic scorer
-        ↓
-  agent ← MCP response: { policy, risk_score, refinement_hints }
+Architecture (4 live tools + 1 tombstone):
 
-The server uses the stdio transport (one MCP server per CLI invocation,
-typically spawned by the agent's MCP-host configuration). Stdio is the
-simplest transport — no auth, no network, perfect for local
-developer-facing agents.
+  list_templates  — browse the catalog (AWS-managed baselines +
+                    iam-jit-curated entries like
+                    ExploreReadOnlyWithSensitiveExclusions)
+  get_template    — fetch a specific template's policy shape
+  score_iam_policy — rate any policy 1-10 with per-factor breakdown
+  submit_policy   — submit a finished policy for grant issuance
+                    (HTTP POSTs to IAM_JIT_URL when configured)
+  generate_iam_policy — REMOVED in 0.4.0; tombstone returns the
+                        deprecation block + null policy + pointer
+                        to replacement tools
+
+The server uses the stdio transport (one MCP server per CLI
+invocation, typically spawned by the agent's MCP-host configuration).
+Stdio is the simplest transport — no auth, no network, perfect
+for local developer-facing agents.
 
 Spec reference: https://modelcontextprotocol.io/specification
 
 Implementation note: this is a MINIMAL JSON-RPC 2.0 over stdio
 implementation. We deliberately avoid pulling in heavy MCP SDK
-dependencies — the protocol surface we need is tiny (one tool, no
+dependencies — the protocol surface we need is tiny (4 tools, no
 prompts, no resources) and the spec is small. Going dependency-light
 also keeps the iam-jit install footprint usable for environments
 that don't want a full MCP SDK.
@@ -80,86 +87,14 @@ TOOLS = [
             "baseline → score → reduce using your codebase context → "
             "re-score → submit. See docs/AGENTS.md."
         ),
-        "inputSchema": {
-            "type": "object",
-            "required": ["task"],
-            "properties": {
-                "task": {
-                    "type": "string",
-                    "description": (
-                        "Plain-English description of the task. Be "
-                        "specific about resources (bucket name, function "
-                        "name, table name) and the operation (read, "
-                        "write, deploy)."
-                    ),
-                },
-                "access_type": {
-                    "type": "string",
-                    "enum": ["read-only", "read-write"],
-                    "default": "read-only",
-                    "description": (
-                        "REQUIRED behavioral default: 'read-only'. "
-                        "Only set to 'read-write' when the user has "
-                        "explicitly authorized a state-changing "
-                        "operation. When in doubt, use 'read-only' and "
-                        "re-request later if needed."
-                    ),
-                },
-                "account_id": {
-                    "type": "string",
-                    "description": "AWS account ID for ARN construction. Wildcards if omitted.",
-                },
-                "region": {
-                    "type": "string",
-                    "description": "AWS region. Wildcards if omitted.",
-                },
-                "partition": {
-                    "type": "string",
-                    "enum": ["aws", "aws-cn", "aws-us-gov"],
-                    "description": "AWS partition. Default: aws.",
-                },
-                "resources": {
-                    "type": "array",
-                    "items": {"type": "string"},
-                    "description": (
-                        "Optional list of explicit resource ARNs. Use when "
-                        "the agent has already resolved a resource to its ARN."
-                    ),
-                },
-                "bias": {
-                    "type": "string",
-                    "enum": ["allow", "deny"],
-                    "description": (
-                        "How to resolve ambiguity in the task description. "
-                        "'allow' (default) includes more actions; 'deny' "
-                        "includes only explicit ones."
-                    ),
-                },
-                "exclude_actions": {
-                    "type": "array",
-                    "items": {"type": "string"},
-                    "description": (
-                        "Refinement: actions (or service:* globs) to "
-                        "REMOVE from a prior result that was too broad."
-                    ),
-                },
-                "include_actions": {
-                    "type": "array",
-                    "items": {"type": "string"},
-                    "description": (
-                        "Refinement: extra service:Action items to ADD "
-                        "to a prior result that was too narrow."
-                    ),
-                },
-                "rationale": {
-                    "type": "string",
-                    "description": (
-                        "Free-text reason for the refinement. Surfaces "
-                        "in audit logs for compliance review."
-                    ),
-                },
-            },
-        },
+        # Tombstone — schema deliberately empty. Per LOW-16-03 closure:
+        # the old per-property descriptions (task / access_type / bias /
+        # exclude_actions / etc.) described synthesis behavior the
+        # tombstone doesn't provide. Leaving them would undermine the
+        # REMOVED signal. Agents discover the migration via the
+        # description above + the structured deprecation block in any
+        # response.
+        "inputSchema": {"type": "object"},
     },
     {
         "name": "score_iam_policy",

@@ -683,9 +683,20 @@ def mcp_server_cmd() -> None:
       }
     }
 
-    The agent then has access to the `generate_iam_policy` tool, which
-    returns a scoped IAM policy + risk score + refinement hints for
-    any task description it submits.
+    The agent gets access to four live tools (per [[no-nl-synthesis]]
+    decision 2026-05-16; see docs/AGENTS.md for the reduction-loop
+    pattern):
+
+      list_templates    — browse the AWS-managed + iam-jit catalog
+      get_template      — fetch a template's policy shape by name
+      score_iam_policy  — rate any policy 1-10 with per-factor breakdown
+      submit_policy     — submit a finished policy for grant issuance
+
+    Plus one tombstone (`generate_iam_policy`) that returns a
+    deprecation pointer to the four tools above. Natural-language
+    policy synthesis was removed in 0.4.0 after the 100-prompt
+    calibration measured it at 1.8% joint sufficiency — the agent
+    (with its codebase context + LLM) is the policy author now.
     """
     from .mcp_server import main as mcp_main
     sys.exit(mcp_main())

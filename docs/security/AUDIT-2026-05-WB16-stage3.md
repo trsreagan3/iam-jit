@@ -8,6 +8,17 @@ Scope: deletion of `src/iam_jit/policy_gen/` (20 files, ~2163 LOC), deletion of 
 
 4 findings: 0 CRIT, 0 HIGH, 0 MED, 4 LOW. Clean deletion at the code level — no dangling callers, no broken imports, no behavior regressions, no test regressions. All four LOWs are documentation/cleanup hygiene gaps inherited from a deletion of this scale; none affect runtime, security, or scoring correctness. Stage 3 lands as planned. The big-deletion failure mode (dangling references) didn't materialize: only the orphan-`__pycache__`-as-namespace-package gotcha (LOW-16-04) is even arguable as "dangling," and it's inert.
 
+## Closure status (2026-05-16, post-audit fix pass)
+
+| Finding | Status |
+|---|---|
+| LOW-16-01 (mcp_server module docstring stale) | ✅ FIXED — rewritten to describe the four live MCP tools + tombstone; references [[no-nl-synthesis]] decision + docs/AGENTS.md |
+| LOW-16-02 (cli mcp-server command docstring stale) | ✅ FIXED — rewritten to enumerate the four tools + the tombstone; explains the agent-author / iam-jit-gates architecture |
+| LOW-16-03 (tombstone inputSchema property descriptions undermine REMOVED signal) | ✅ FIXED — schema reduced to `{"type": "object"}`; per-property descriptions deleted; tool remains discoverable but signals tombstone status consistently |
+| LOW-16-04 (orphan `__pycache__/` directories) | ✅ FIXED — working-tree cleanup; verified directories absent |
+
+All 90 MCP+catalog tests still pass after the closure pass.
+
 ## CRIT findings
 
 None.
