@@ -376,7 +376,7 @@ TOOLS = [
                     "type": "array",
                     "items": {"type": "string"},
                     "description": (
-                        "12-digit AWS account IDs. Adds aws:Requested"
+                        "12-digit AWS account IDs. Adds aws:Resource"
                         "Account StringEquals condition to every "
                         "Allow statement. Non-conforming IDs rejected."
                     ),

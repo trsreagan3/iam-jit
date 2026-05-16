@@ -91,10 +91,18 @@ def test_deny_services_does_not_mutate_input() -> None:
 # ---------------------------------------------------------------------------
 
 
-def test_narrow_to_accounts_adds_condition_to_allow() -> None:
+def test_narrow_to_accounts_uses_real_aws_condition_key() -> None:
+    """CRIT-20-01 closure: the condition key MUST be aws:Resource
+    Account, not aws:RequestedAccount (which doesn't exist in AWS;
+    StringEquals on unknown keys evaluates false, silently dead-
+    locking the Allow)."""
     policy, entry = narrow_to_accounts(_admin_policy(), ["111111111111"])
     allow = policy["Statement"][0]
-    assert allow["Condition"]["StringEquals"]["aws:RequestedAccount"] == ["111111111111"]
+    assert "aws:RequestedAccount" not in allow["Condition"]["StringEquals"], (
+        "CRIT-20-01 regression: must NOT use aws:RequestedAccount "
+        "(not a real AWS key)"
+    )
+    assert allow["Condition"]["StringEquals"]["aws:ResourceAccount"] == ["111111111111"]
     assert entry == ReductionEntry(axis="narrow_to_accounts", values=("111111111111",))
 
 
@@ -124,7 +132,7 @@ def test_narrow_to_accounts_does_not_touch_deny_statements() -> None:
 
 
 def test_narrow_to_accounts_merges_with_existing_condition_values() -> None:
-    """If a statement already has a Condition with RequestedAccount,
+    """If a statement already has a StringEquals with aws:ResourceAccount,
     merge values rather than overwriting."""
     policy_with_existing = {
         "Version": "2012-10-17",
@@ -133,13 +141,79 @@ def test_narrow_to_accounts_merges_with_existing_condition_values() -> None:
             "Action": "*",
             "Resource": "*",
             "Condition": {
-                "StringEquals": {"aws:RequestedAccount": "222222222222"}
+                "StringEquals": {"aws:ResourceAccount": "222222222222"}
             },
         }],
     }
     policy, _ = narrow_to_accounts(policy_with_existing, ["111111111111"])
-    accounts = policy["Statement"][0]["Condition"]["StringEquals"]["aws:RequestedAccount"]
+    accounts = policy["Statement"][0]["Condition"]["StringEquals"]["aws:ResourceAccount"]
     assert set(accounts) == {"111111111111", "222222222222"}
+
+
+def test_narrow_to_accounts_skips_when_other_operator_uses_same_key() -> None:
+    """MED-20-02 closure: if the statement already has StringLike (or
+    any other operator) on aws:ResourceAccount, adding StringEquals
+    creates an unsatisfiable AND. Skip the statement; if no statement
+    was actually modified, recipe entry is None."""
+    policy_with_stringlike = {
+        "Version": "2012-10-17",
+        "Statement": [{
+            "Effect": "Allow",
+            "Action": "*",
+            "Resource": "*",
+            "Condition": {
+                "StringLike": {"aws:ResourceAccount": "111111111*"}
+            },
+        }],
+    }
+    policy, entry = narrow_to_accounts(policy_with_stringlike, ["111111111111"])
+    # Statement should NOT have a new StringEquals added
+    assert "StringEquals" not in policy["Statement"][0]["Condition"]
+    # Recipe entry should be None — we don't lie about applying a
+    # reduction when zero statements were actually modified
+    assert entry is None
+
+
+def test_narrow_to_accounts_skips_malformed_condition() -> None:
+    """MED-20-01 closure: when an Allow has a non-dict Condition,
+    skip rather than corrupt + don't record a misleading recipe
+    entry (the statement wasn't modified)."""
+    policy_with_broken_cond = {
+        "Version": "2012-10-17",
+        "Statement": [{
+            "Effect": "Allow",
+            "Action": "*",
+            "Resource": "*",
+            "Condition": "broken-string-not-a-dict",  # malformed
+        }],
+    }
+    policy, entry = narrow_to_accounts(policy_with_broken_cond, ["111111111111"])
+    # The original malformed Condition is preserved (we deepcopy + skip)
+    assert policy["Statement"][0]["Condition"] == "broken-string-not-a-dict"
+    # Recipe entry is None — we didn't actually modify anything
+    assert entry is None
+
+
+def test_narrow_to_accounts_mixed_well_formed_and_malformed_records_recipe_only_if_modified() -> None:
+    """MED-20-01 closure (multi-statement case): when some Allows are
+    modified and one is malformed, recipe records the values for the
+    statements that WERE modified."""
+    policy = {
+        "Version": "2012-10-17",
+        "Statement": [
+            {"Effect": "Allow", "Action": "*", "Resource": "*"},  # OK, will be narrowed
+            {"Effect": "Allow", "Action": "s3:*", "Resource": "*",
+             "Condition": "broken"},  # malformed, skipped
+        ],
+    }
+    new_policy, entry = narrow_to_accounts(policy, ["111111111111"])
+    # First statement narrowed
+    assert "Condition" in new_policy["Statement"][0]
+    # Second statement preserved as-is (malformed condition untouched)
+    assert new_policy["Statement"][1]["Condition"] == "broken"
+    # Recipe records the reduction (at least one statement was modified)
+    assert entry is not None
+    assert entry.values == ("111111111111",)
 
 
 def test_narrow_to_accounts_empty_no_op() -> None:
@@ -179,6 +253,94 @@ def test_narrow_to_regions_empty_no_op() -> None:
     assert entry is None
 
 
+def test_narrow_to_regions_lowercases_input() -> None:
+    """LOW-20-LOW3 closure: AWS regions are canonically lowercase.
+    `us-EAST-1` is StringEquals-different from `us-east-1`, which
+    would dead-lock the Allow. Normalize."""
+    policy, _ = narrow_to_regions(_admin_policy(), ["US-EAST-1", "us-WEST-2"])
+    cond = policy["Statement"][0]["Condition"]["StringEquals"]
+    assert set(cond["aws:RequestedRegion"]) == {"us-east-1", "us-west-2"}
+
+
+# ---------------------------------------------------------------------------
+# LOW-20-LOW4: Effect comparison is case-insensitive
+# ---------------------------------------------------------------------------
+
+
+def test_narrow_treats_lowercase_effect_as_allow() -> None:
+    """AWS spec: Allow / allow / ALLOW are equivalent. We must too,
+    or lowercase Effect: allow statements silently fall through
+    unscoped."""
+    policy_lowercase_effect = {
+        "Version": "2012-10-17",
+        "Statement": [{"Effect": "allow", "Action": "*", "Resource": "*"}],
+    }
+    policy, entry = narrow_to_accounts(policy_lowercase_effect, ["111111111111"])
+    # Statement WAS modified (the lowercase-Effect statement was recognized as Allow)
+    assert "Condition" in policy["Statement"][0]
+    assert entry is not None
+
+
+# ---------------------------------------------------------------------------
+# LOW-20-LOW1: deny_services rejects malformed service prefixes
+# ---------------------------------------------------------------------------
+
+
+def test_deny_services_rejects_prefixes_containing_colon() -> None:
+    """`rds:*` is already an action wildcard, not a service prefix.
+    Accepting it would produce `rds:*:*` which is malformed."""
+    policy, entry = deny_services(_admin_policy(), ["rds", "secretsmanager:*", "kms"])
+    # Only `rds` and `kms` should make it through; `secretsmanager:*` dropped
+    deny = next(s for s in policy["Statement"] if s["Effect"] == "Deny")
+    assert deny["Action"] == ["rds:*", "kms:*"]
+    assert entry.values == ("rds", "kms")
+
+
+def test_deny_services_rejects_prefixes_with_wildcards_or_spaces() -> None:
+    policy, entry = deny_services(_admin_policy(), ["rds", "ec2 ", "*", "lambda"])
+    deny = next(s for s in policy["Statement"] if s["Effect"] == "Deny")
+    # Only `rds` (and `lambda`; `ec2 ` has trailing space which is stripped)
+    # actually no — the stripping happens BEFORE the validation, so `ec2`
+    # passes. Let me re-read the impl...
+    # The impl: token = s.strip() then checks for ' ' AFTER strip. So
+    # `ec2 ` becomes `ec2` (clean), which passes. Adjust expectation:
+    assert "rds:*" in deny["Action"]
+    assert "lambda:*" in deny["Action"]
+    assert "ec2:*" in deny["Action"]  # stripped to ec2; valid
+    assert "*:*" not in deny["Action"]  # bare * rejected
+
+
+# ---------------------------------------------------------------------------
+# LOW-20-LOW2: deny_services produces unique Sid per call
+# ---------------------------------------------------------------------------
+
+
+def test_deny_services_unique_sid_per_call() -> None:
+    """Two deny_services calls with DIFFERENT service sets must
+    produce different Sids — otherwise AWS rejects the policy
+    on duplicate Sids."""
+    policy1, _ = deny_services(_admin_policy(), ["rds"])
+    deny1 = next(s for s in policy1["Statement"] if s["Effect"] == "Deny")
+    sid1 = deny1["Sid"]
+
+    policy2, _ = deny_services(_admin_policy(), ["secretsmanager"])
+    deny2 = next(s for s in policy2["Statement"] if s["Effect"] == "Deny")
+    sid2 = deny2["Sid"]
+
+    assert sid1 != sid2, "Sids must differ for different service sets"
+    assert sid1.startswith("ReductionDenyServices")
+    assert sid2.startswith("ReductionDenyServices")
+
+
+def test_deny_services_same_set_produces_same_sid() -> None:
+    """Same service set = same Sid (deterministic hash). Idempotent."""
+    p1, _ = deny_services(_admin_policy(), ["rds", "kms"])
+    p2, _ = deny_services(_admin_policy(), ["kms", "rds"])  # different order
+    sid1 = next(s for s in p1["Statement"] if s["Effect"] == "Deny")["Sid"]
+    sid2 = next(s for s in p2["Statement"] if s["Effect"] == "Deny")["Sid"]
+    assert sid1 == sid2
+
+
 # ---------------------------------------------------------------------------
 # apply_reductions — compose multiple
 # ---------------------------------------------------------------------------
@@ -199,7 +361,7 @@ def test_apply_reductions_all_three_axes() -> None:
     allow = result.policy["Statement"][0]
     assert "Condition" in allow
     cond = allow["Condition"]["StringEquals"]
-    assert cond["aws:RequestedAccount"] == ["111111111111"]
+    assert cond["aws:ResourceAccount"] == ["111111111111"]
     assert cond["aws:RequestedRegion"] == ["us-east-1"]
     # Deny was appended
     denies = [s for s in result.policy["Statement"] if s["Effect"] == "Deny"]

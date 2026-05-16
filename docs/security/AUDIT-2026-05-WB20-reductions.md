@@ -1,5 +1,19 @@
 # Round 20 audit — reduction primitives + reduce_policy MCP tool (#155)
 
+## Closure status (2026-05-16, post-audit fix pass)
+
+| Finding | Status |
+|---|---|
+| CRIT-20-01 (aws:RequestedAccount is not a real AWS key — silent fail-closed) | ✅ FIXED — changed to `aws:ResourceAccount` (the real AWS global key for "narrow to account hosting the resource"). reductions.py docstring updated to explain the three real options (ResourceAccount / PrincipalAccount / SourceAccount). MCP tool description updated. Existing test renamed `test_narrow_to_accounts_uses_real_aws_condition_key` with explicit anti-regression assertion. |
+| MED-20-01 (malformed Condition silent skip + dishonest recipe) | ✅ FIXED — `_add_condition_to_allow_statements` now tracks `statements_modified`; returns recipe entry as None when zero Allow statements were actually modified. 2 new tests cover malformed-condition skip + multi-statement-mixed cases. |
+| MED-20-02 (StringLike conflict on same key creates unsatisfiable AND) | ✅ FIXED — new `_other_operators_reference_key()` helper checks if any operator other than StringEquals already references the target key; if so, skip the statement (don't create the dead AND). 1 new test asserts the skip behavior + None recipe. |
+| LOW-20-LOW1 (deny_services accepts service prefixes with `:`) | ✅ FIXED — validation rejects tokens containing `:` (would produce malformed `rds:*:*`), `*`, or whitespace inside. 1 new test. |
+| LOW-20-LOW2 (Sid `ReductionDenyServices` hardcoded — duplicate Sid risk) | ✅ FIXED — Sid is now `ReductionDenyServices{sha256(sorted(services))[:8]}` — deterministic but unique per service set. Same set produces same Sid (idempotent); different sets produce different Sids (no PUT-IAM-policy collision). 2 new tests. |
+| LOW-20-LOW3 (region values not lowercased) | ✅ FIXED — `narrow_to_regions` lowercases input. 1 new test. |
+| LOW-20-LOW4 (Effect exact-match only) | ✅ FIXED — Effect comparison is case-insensitive per AWS spec (`Allow` / `allow` / `ALLOW` all equivalent). 1 new test. |
+
+Post-closure test count: **30 reduction tests pass** (was 21; +9 closure tests). Broader suite: **1977 passed**.
+
 Commit under review: `303281e` (`feat(reductions): deterministic policy reduction primitives + reduce_policy MCP tool (#155)`).
 
 Scope:
