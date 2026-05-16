@@ -78,6 +78,20 @@ iam-risk-score = "iam_jit.cli_score:main"
 [tool.setuptools.packages.find]
 where = ["src"]
 
+[tool.setuptools.package-data]
+# Schema JSONs + templates are loaded via `_resources.find` at
+# runtime. Without explicit inclusion setuptools ships only .py
+# files and `iam-jit` fails on first import (request validation,
+# user-store load, account discovery). Caught during the TestPyPI
+# dry-run on 2026-05-16.
+"iam_jit" = [
+  "schemas/*.json",
+  "templates/*.html",
+  "templates/**/*.html",
+  "static/**/*",
+  "py.typed",
+]
+
 [tool.ruff]
 line-length = 100
 target-version = "py310"
