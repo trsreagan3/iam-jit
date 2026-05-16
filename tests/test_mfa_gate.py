@@ -166,3 +166,46 @@ def test_step_up_max_age_default() -> None:
 def test_step_up_max_age_env_override(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("IAM_JIT_MFA_STEP_UP_MAX_AGE_SECONDS", "60")
     assert mfa_gate.step_up_max_age_seconds() == 60
+
+
+# ---------------------------------------------------------------------------
+# WB13-10 regression: env-tunable score-floor + max-age clamp boundaries.
+# The clamps were added in WB12-03 (round-12 closure) but no test pinned
+# the exact boundary behaviour. WB13-10 (MED, round-13) flagged the gap.
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("env_value,expected", [
+    ("999", 10),   # too high → clamp to 10
+    ("11", 10),    # just above 10 → clamp to 10
+    ("10", 10),   # at upper bound → passes through
+    ("7", 7),     # within range → passes through
+    ("1", 1),     # at lower bound → passes through
+    ("0", 1),     # below 1 → clamp to 1
+    ("-5", 1),    # negative → clamp to 1
+    ("not-int", 7),  # invalid → default 7
+    ("", 7),       # empty → default 7
+])
+def test_high_risk_score_floor_clamp_boundaries(
+    env_value: str, expected: int, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("IAM_JIT_MFA_STEP_UP_AT_SCORE", env_value)
+    assert mfa_gate._high_risk_score_floor() == expected
+
+
+@pytest.mark.parametrize("env_value,expected", [
+    ("86401", 86400),  # too high → clamp to 86400 (1 day)
+    ("86400", 86400),  # at upper bound
+    ("3600", 3600),    # within range (1 hour)
+    ("300", 300),      # default-equal
+    ("30", 30),        # at lower bound
+    ("29", 30),        # below 30 → clamp to 30
+    ("0", 30),         # zero → clamp to 30
+    ("-100", 30),      # negative → clamp to 30
+    ("not-int", 300),  # invalid → default 300
+])
+def test_step_up_max_age_seconds_clamp_boundaries(
+    env_value: str, expected: int, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("IAM_JIT_MFA_STEP_UP_MAX_AGE_SECONDS", env_value)
+    assert mfa_gate.step_up_max_age_seconds() == expected
