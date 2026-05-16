@@ -1274,6 +1274,141 @@ _KNOWN_CONDITION_OPERATORS = _KNOWN_CONDITION_OPERATORS | frozenset(
 )
 
 
+def _federated_trust_is_scoped(federated_arn: str, condition: object) -> bool:
+    """True if a Principal.Federated ARN + Condition pair represents
+    a PROPERLY-SCOPED federated trust (vs an attacker-controlled or
+    wildcard-bound one).
+
+    Three accepted patterns (per Cluster A round-14 closure):
+
+    1. EKS IRSA: federated_arn contains `oidc.eks.<region>.amazonaws.com`.
+       AWS hosts the OIDC provider for the cluster's account by
+       construction, so the provider can NEVER be attacker-controlled.
+       The condition usually binds `:sub` to
+       `system:serviceaccount:<ns>:<sa>` for a specific pod identity.
+
+    2. GitHub Actions / GitLab / CircleCI / generic OIDC: condition
+       contains a non-wildcard `:sub` AND a `:aud` bound to
+       `sts.amazonaws.com`. The sub typically encodes
+       `repo:org/repo:ref:refs/heads/main` or similar.
+
+    3. SAML SSO: condition contains `SAML:aud` bound to a specific
+       AWS sign-in URL (typically `https://signin.aws.amazon.com/saml`).
+    """
+    if not isinstance(condition, dict):
+        return False
+
+    # Case 1: EKS IRSA — same-account by construction.
+    if "oidc.eks." in federated_arn and ".amazonaws.com" in federated_arn:
+        # IRSA must still have SOME condition (even just the sub
+        # binding) to count as scoped.
+        if condition:
+            return True
+
+    # Walk the condition operators to look for SAML:aud and
+    # `<provider>:sub` / `<provider>:aud` literal bindings.
+    saml_aud_ok = False
+    sub_ok = False
+    aud_ok = False
+    for op_raw, kvs in condition.items():
+        op = "" if op_raw is None else str(op_raw)
+        if not isinstance(kvs, dict):
+            continue
+        for key_raw, val_raw in kvs.items():
+            key_lc = str(key_raw).lower()
+            vals = val_raw if isinstance(val_raw, list) else [val_raw]
+            vals_str = [str(v) for v in vals]
+            # SAML:aud binding
+            if key_lc.endswith(":aud") and key_lc.startswith("saml"):
+                if all(v and "*" not in v for v in vals_str):
+                    saml_aud_ok = True
+            # OIDC :sub binding — non-wildcard literal or
+            # StringLike with a real prefix (not bare `*`)
+            if key_lc.endswith(":sub"):
+                if op.startswith("StringEquals"):
+                    if all(v and "*" not in v for v in vals_str):
+                        sub_ok = True
+                elif op.startswith("StringLike"):
+                    # Tolerate trailing wildcards in the prefix
+                    # (e.g., `repo:org/repo:*`) but NOT a bare `*`.
+                    if all(v and v != "*" and not v.startswith("*") for v in vals_str):
+                        sub_ok = True
+            # OIDC :aud binding — should be sts.amazonaws.com
+            if key_lc.endswith(":aud") and not key_lc.startswith("saml"):
+                if op.startswith("StringEquals"):
+                    if any("sts.amazonaws.com" in v for v in vals_str):
+                        aud_ok = True
+
+    # OIDC: need BOTH sub and aud bindings.
+    if sub_ok and aud_ok:
+        return True
+    # SAML: SAML:aud binding alone is the standard pattern.
+    if saml_aud_ok:
+        return True
+
+    return False
+
+
+def _trust_has_external_id_condition(condition: object) -> bool:
+    """True if `condition` contains a StringEquals (or IfExists variant)
+    on `sts:ExternalId` with a value that's PLAUSIBLY a high-entropy
+    secret (the only kind of External-ID that actually mitigates
+    confused-deputy attacks).
+
+    Used by the trust-policy cross-account scorer (Cluster D round-14
+    closure). AWS recommends a 32-character random secret. Anything
+    shorter or all-digit/short is brute-forceable and shouldn't
+    earn the External-ID floor reduction.
+
+    Validity checks:
+      - Operator must be StringEquals (or IfExists variant). Other
+        operators (StringLike, etc.) don't guarantee literal match.
+      - Value must be 16+ characters. (AWS recommends 32; we accept
+        16 as a floor that still requires real entropy.)
+      - Value must not be all-wildcard or contain wildcards.
+      - If multiple values are listed, EVERY value must pass —
+        a list with even one weak value (e.g., `["secure-secret",
+        "test"]`) is brute-forceable by trying the weak ones.
+      - All-digit values must be 32+ chars (tenant-ID-style short
+        numeric IDs are predictable).
+    """
+    if not isinstance(condition, dict):
+        return False
+    valid_ops = {
+        "StringEquals", "StringEqualsIgnoreCase",
+        "StringEqualsIfExists", "StringEqualsIgnoreCaseIfExists",
+    }
+    for op_raw, kvs in condition.items():
+        op = "" if op_raw is None else str(op_raw)
+        if op not in valid_ops:
+            continue
+        if not isinstance(kvs, dict):
+            continue
+        for key_raw, val_raw in kvs.items():
+            key_lc = str(key_raw).lower()
+            if key_lc != "sts:externalid":
+                continue
+            vals = val_raw if isinstance(val_raw, list) else [val_raw]
+            if not vals:
+                continue
+            all_strong = True
+            for v in vals:
+                vs = str(v)
+                if not vs or "*" in vs:
+                    all_strong = False
+                    break
+                if len(vs) < 16:
+                    all_strong = False
+                    break
+                # Numeric-only values need higher length (tenant IDs).
+                if vs.isdigit() and len(vs) < 32:
+                    all_strong = False
+                    break
+            if all_strong:
+                return True
+    return False
+
+
 def _detect_inverted_deny_bool(condition: object) -> str:
     """Detect the inverted-Deny-on-safety-key pattern.
 
@@ -1398,9 +1533,38 @@ def _condition_is_vacuous(condition: object) -> tuple[bool, str]:
                     )
                 # Pattern 6: StringLike on federated-identity claim
                 # (sub/aud) with `*` inside the value.
+                #
+                # CALIBRATION (round-14 Cluster A): differentiate the
+                # legitimate trailing-wildcard pattern (e.g.,
+                # `repo:myorg/myrepo:*` — the AWS+GitHub recommended
+                # scoping for OIDC trust) from the actually-degenerate
+                # cases (`:sub: "*"`, `:sub: "repo:*"`, etc.).
+                #
+                # The principle: a wildcard at the END of a value that
+                # has SUBSTANTIVE structural prefix (named org + named
+                # repo + colons) is scoped. A wildcard that's the entire
+                # value, or that replaces a structural segment, is
+                # degenerate.
                 if key_lc.endswith(":sub") or key_lc.endswith(":aud"):
                     for v in vals_str:
-                        if "*" in v:
+                        if "*" not in v:
+                            continue
+                        # Strip trailing `*` chars to inspect prefix.
+                        prefix = v.rstrip("*").rstrip(":")
+                        # Degenerate cases — return vacuous:
+                        #   - bare "*"
+                        #   - empty prefix after strip
+                        #   - prefix is just a service identifier
+                        #     ("repo", "system", "https") with no
+                        #     subsequent identifier-segments
+                        #   - any `*` INSIDE the prefix (mid-value
+                        #     wildcards replace structural segments)
+                        is_degenerate = (
+                            not prefix
+                            or "*" in prefix
+                            or prefix.count(":") == 0
+                        )
+                        if is_degenerate:
                             return True, (
                                 f"`Condition.{op}.{key}: \"{v}\"` "
                                 "wildcards the federated-identity "
@@ -2498,23 +2662,60 @@ def _deterministic(
                     federated_vals = principal["Federated"]
                     if isinstance(federated_vals, str):
                         federated_vals = [federated_vals]
-                    has_condition = bool(stmt.get("Condition"))
+                    cond_block = stmt.get("Condition")
+                    has_condition = bool(cond_block)
                     for fv in federated_vals:
                         if not isinstance(fv, str):
                             continue
                         if fv.startswith("arn:"):
-                            # Federated ARN — cross-account SAML/OIDC
-                            # provider possibly attacker-controlled.
-                            score = max(score, 7)
-                            factors.append(
-                                f"`Principal.Federated` is an ARN "
-                                f"(`{fv}`) — without context the scorer "
-                                "can't verify the named SAML/OIDC "
-                                "provider is in the policy owner's "
-                                "account. Cross-account federated "
-                                "providers let third parties mint "
-                                "tokens that assume this role."
-                            )
+                            # Cluster A (round-14): differentiate
+                            # well-scoped federated trust from
+                            # unmitigated cross-account federated
+                            # provider. GitHub Actions OIDC + EKS IRSA
+                            # + corporate SAML SSO all use ARN-shaped
+                            # Federated principals; with proper sub/aud
+                            # conditions they're LEGITIMATE narrow trust.
+                            #
+                            # Cases that earn the LOWER floor (4):
+                            #   - EKS IRSA: ARN contains "oidc.eks.<region>.
+                            #     amazonaws.com" — same-account by
+                            #     construction (AWS-hosted OIDC for that
+                            #     EKS cluster). With sub-scoping condition,
+                            #     it's a single service-account trust.
+                            #   - GitHub Actions / GitLab / CircleCI OIDC:
+                            #     Condition has non-wildcard `:sub` AND
+                            #     `:aud=sts.amazonaws.com` → bound to a
+                            #     specific repo/branch/workflow.
+                            #   - SAML SSO: Condition has SAML:aud bound
+                            #     to AWS sign-in URL.
+                            scoped = _federated_trust_is_scoped(fv, cond_block)
+                            if scoped:
+                                score = max(score, 4)
+                                factors.append(
+                                    f"`Principal.Federated: \"{fv}\"` "
+                                    "with scoped Condition — federated "
+                                    "trust is bound to specific "
+                                    "sub/aud claim values. Verify the "
+                                    "claim values match your intended "
+                                    "scope (repo/workflow/service-"
+                                    "account)."
+                                )
+                            else:
+                                # Federated ARN with no proper scoping
+                                # condition — cross-account SAML/OIDC
+                                # provider possibly attacker-controlled,
+                                # OR same-account provider with wildcards
+                                # in sub/aud.
+                                score = max(score, 7)
+                                factors.append(
+                                    f"`Principal.Federated` is an ARN "
+                                    f"(`{fv}`) without a properly-"
+                                    "scoped Condition on sub/aud "
+                                    "claims. The scorer can't verify "
+                                    "the trust binds to a specific "
+                                    "principal; flagged for human "
+                                    "review."
+                                )
                             break
                         elif not has_condition:
                             # Federated service principal (cognito, OIDC
@@ -2575,21 +2776,53 @@ def _deterministic(
                             # Bare 12-digit account ID
                             principal_accounts.add(v)
                     if principal_accounts and is_assume_role_action:
-                        # Trust-policy backdoor primitive
-                        score = max(score, 7)
-                        factors.append(
-                            "Trust-policy statement with literal account-ARN "
-                            "Principal on `sts:AssumeRole` — grants role-assume "
-                            "to a specific external account. Without context "
-                            "the scorer can't verify the account is trusted; "
-                            "flagged for human review (Rhino #14 / Pacu "
-                            "iam__backdoor_assume_role)."
+                        # Cluster D (round-14): when the trust policy
+                        # includes a `sts:ExternalId` condition with a
+                        # non-empty literal value, the confused-deputy
+                        # mitigation is in place and the cross-account
+                        # trust deserves a LOWER floor. AWS explicitly
+                        # documents this as the recommended pattern for
+                        # third-party integrations (e.g., Datadog, Wiz,
+                        # SaaS monitoring tools). Without it, the floor
+                        # stays at 7 (no mitigation present).
+                        has_external_id = _trust_has_external_id_condition(
+                            stmt.get("Condition")
                         )
-                        suggestions.append(
-                            "Verify the trusted account ID matches an "
-                            "approved partner. Add a `aws:PrincipalOrgID` "
-                            "condition if the trust should be org-bounded."
-                        )
+                        if has_external_id:
+                            score = max(score, 4)
+                            factors.append(
+                                "Trust-policy with cross-account Principal "
+                                "AND `sts:ExternalId` condition — the "
+                                "External-ID is the canonical confused-"
+                                "deputy mitigation. Verify the External-ID "
+                                "value matches the trusted partner's "
+                                "issued value."
+                            )
+                            suggestions.append(
+                                "External-ID is present (good). Confirm "
+                                "the value is a high-entropy secret you "
+                                "received OUT-OF-BAND from the partner — "
+                                "AWS docs recommend avoiding "
+                                "predictable values like account names."
+                            )
+                        else:
+                            # Trust-policy backdoor primitive
+                            score = max(score, 7)
+                            factors.append(
+                                "Trust-policy statement with literal account-ARN "
+                                "Principal on `sts:AssumeRole` — grants role-assume "
+                                "to a specific external account. Without context "
+                                "the scorer can't verify the account is trusted; "
+                                "flagged for human review (Rhino #14 / Pacu "
+                                "iam__backdoor_assume_role)."
+                            )
+                            suggestions.append(
+                                "Verify the trusted account ID matches an "
+                                "approved partner. Add a `aws:PrincipalOrgID` "
+                                "condition if the trust should be org-bounded. "
+                                "Also consider requiring `sts:ExternalId` to "
+                                "prevent confused-deputy attacks."
+                            )
                     elif principal_accounts:
                         # Resource-policy cross-account grant. Compare
                         # principal account against Resource ARN account(s).
