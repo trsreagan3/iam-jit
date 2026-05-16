@@ -422,6 +422,88 @@ _CATALOG: tuple[ManagedPolicyEntry, ...] = (
             ],
         },
     ),
+    # Per [[admin-minus-sensitive-baseline]] (task #154) — the
+    # recommended-default admin-class baseline. Broad authority MINUS
+    # secret data reads, KMS decrypt, sensitive-named S3 buckets, and
+    # audit-infrastructure destruction. Default presentation in the
+    # template browser when an admin-class request is needed; raw
+    # AdministratorAccess is shown as the "I really need everything"
+    # escape hatch.
+    ManagedPolicyEntry(
+        name="AdminLikeWithSensitiveExclusions",
+        arn="iam-jit:catalog/AdminLikeWithSensitiveExclusions",
+        summary=(
+            "Broad admin power minus the things most admin tasks "
+            "don't actually need: secret data reads, KMS decrypt, "
+            "sensitive-pattern S3 buckets, audit-infra destruction. "
+            "Recommended default over raw AdministratorAccess for "
+            "incident response, infrastructure work, and most "
+            "admin-class tasks. Customer can tune the denylist "
+            "per-deployment."
+        ),
+        services=("*",),
+        access_type="admin",
+        use_case_tags=(
+            "admin", "safe-admin", "admin-default",
+            "admin-minus-secrets", "incident-response", "infra-admin",
+            "investigate-with-power", "broad-but-safer",
+        ),
+        policy_shape={
+            "Version": "2012-10-17",
+            "Statement": [
+                {
+                    "Sid": "BroadAdmin",
+                    "Effect": "Allow",
+                    "Action": "*",
+                    "Resource": "*",
+                },
+                {
+                    "Sid": "DenySecretData",
+                    "Effect": "Deny",
+                    "Action": [
+                        "secretsmanager:GetSecretValue",
+                        "ssm:GetParameter",
+                        "ssm:GetParameters",
+                        "ssm:GetParametersByPath",
+                        "kms:Decrypt",
+                        "kms:GenerateDataKey",
+                        "kms:ReEncrypt*",
+                    ],
+                    "Resource": "*",
+                },
+                {
+                    "Sid": "DenySensitiveBucketReads",
+                    "Effect": "Deny",
+                    "Action": [
+                        "s3:GetObject",
+                        "s3:ListBucket",
+                        "s3:GetObjectVersion",
+                    ],
+                    "Resource": [
+                        "arn:aws:s3:::*-secrets/*",
+                        "arn:aws:s3:::*-sensitive/*",
+                        "arn:aws:s3:::*-pii/*",
+                        "arn:aws:s3:::*-customer-data/*",
+                    ],
+                },
+                {
+                    "Sid": "DenyAuditInfraDestruction",
+                    "Effect": "Deny",
+                    "Action": [
+                        "cloudtrail:StopLogging",
+                        "cloudtrail:DeleteTrail",
+                        "config:DeleteConfigRule",
+                        "config:DeleteConfigurationRecorder",
+                        "guardduty:DeleteDetector",
+                        "guardduty:DisassociateFromMasterAccount",
+                        "kms:ScheduleKeyDeletion",
+                        "kms:DisableKey",
+                    ],
+                    "Resource": "*",
+                },
+            ],
+        },
+    ),
 )
 
 

@@ -76,6 +76,109 @@ def test_explore_baseline_excludes_secrets_in_policy_shape() -> None:
 
 
 # ---------------------------------------------------------------------------
+# AdminLikeWithSensitiveExclusions (task #154) — third baseline in the
+# broad-with-denylist family. Pre-launch sentinel that confirms each
+# of the four deny categories is present + the wildcard Allow is intact.
+# ---------------------------------------------------------------------------
+
+
+def test_admin_like_baseline_present_in_catalog() -> None:
+    """The AdminLikeWithSensitiveExclusions baseline must exist as
+    a catalog entry — it's the recommended-default for admin-class
+    requests per [[admin-minus-sensitive-baseline]]."""
+    names = {e.name for e in _CATALOG}
+    assert "AdminLikeWithSensitiveExclusions" in names
+
+
+def test_admin_like_baseline_has_broad_allow_and_three_deny_statements() -> None:
+    entry = next(
+        e for e in _CATALOG
+        if e.name == "AdminLikeWithSensitiveExclusions"
+    )
+    assert entry.access_type == "admin"
+    assert entry.arn.startswith("iam-jit:catalog/")
+    stmts = entry.policy_shape["Statement"]
+    # Statement 0 is the broad Allow
+    assert stmts[0]["Effect"] == "Allow"
+    assert stmts[0]["Action"] == "*"
+    assert stmts[0]["Resource"] == "*"
+    # Statements 1-3 are the three deny-category blocks (audit-infra
+    # destruction + kms-key destruction are combined into one block).
+    deny_stmts = [s for s in stmts[1:] if s["Effect"] == "Deny"]
+    assert len(deny_stmts) == 3
+    deny_sids = {s.get("Sid") for s in deny_stmts}
+    assert deny_sids == {
+        "DenySecretData",
+        "DenySensitiveBucketReads",
+        "DenyAuditInfraDestruction",
+    }
+
+
+def test_admin_like_baseline_denies_secret_data() -> None:
+    entry = next(
+        e for e in _CATALOG
+        if e.name == "AdminLikeWithSensitiveExclusions"
+    )
+    deny_actions: list[str] = []
+    for s in entry.policy_shape["Statement"][1:]:
+        actions = s["Action"] if isinstance(s["Action"], list) else [s["Action"]]
+        deny_actions.extend(actions)
+    # Critical secret-reads must be in the deny list
+    for action in ["secretsmanager:GetSecretValue", "ssm:GetParameter",
+                   "kms:Decrypt", "kms:GenerateDataKey"]:
+        assert action in deny_actions, f"missing critical deny: {action}"
+
+
+def test_admin_like_baseline_denies_sensitive_s3_patterns() -> None:
+    entry = next(
+        e for e in _CATALOG
+        if e.name == "AdminLikeWithSensitiveExclusions"
+    )
+    # Find the sensitive-bucket-deny statement
+    sensitive_deny = next(
+        s for s in entry.policy_shape["Statement"]
+        if s.get("Sid") == "DenySensitiveBucketReads"
+    )
+    resources = sensitive_deny["Resource"]
+    for pattern in ["*-secrets/*", "*-sensitive/*", "*-pii/*", "*-customer-data/*"]:
+        assert any(pattern in r for r in resources), f"missing pattern: {pattern}"
+
+
+def test_admin_like_baseline_denies_audit_infra_destruction() -> None:
+    """Even with broad admin power, the audit trail must survive
+    a (hypothetical) compromise — cloudtrail/config/guardduty are
+    pinned + KMS key destruction is blocked."""
+    entry = next(
+        e for e in _CATALOG
+        if e.name == "AdminLikeWithSensitiveExclusions"
+    )
+    audit_deny = next(
+        s for s in entry.policy_shape["Statement"]
+        if s.get("Sid") == "DenyAuditInfraDestruction"
+    )
+    actions = audit_deny["Action"]
+    for action in ["cloudtrail:StopLogging", "config:DeleteConfigRule",
+                   "guardduty:DeleteDetector", "kms:ScheduleKeyDeletion"]:
+        assert action in actions, f"missing audit-infra-destruction deny: {action}"
+
+
+def test_admin_like_baseline_filterable_by_admin_access_type() -> None:
+    """Browsing admin-tier templates should include AdminLikeWithSensitiveExclusions."""
+    admin_entries = list_entries(access_type="admin")
+    names = {e["name"] for e in admin_entries}
+    assert "AdminLikeWithSensitiveExclusions" in names
+    assert "AdministratorAccess" in names
+
+
+def test_admin_like_baseline_get_entry_returns_policy() -> None:
+    """get_entry should fetch the AdminLike baseline's full body."""
+    entry = get_entry("AdminLikeWithSensitiveExclusions")
+    assert entry is not None
+    assert entry["access_type"] == "admin"
+    assert entry["policy"]["Statement"][0]["Effect"] == "Allow"
+
+
+# ---------------------------------------------------------------------------
 # Browse API — list_entries with various filters
 # ---------------------------------------------------------------------------
 
