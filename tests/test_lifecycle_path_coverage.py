@@ -299,30 +299,7 @@ def test_intake_caps_at_ten_turns_before_force_completing() -> None:
     """User asked: after 10 back-and-forth turns, recommend best we can
     and stop. Verified by direct intake.take_turn invocation here so we
     don't depend on a live LLM."""
-    import json
-
-    from iam_jit import intake
-
-    class _ChattyStub:
-        name = "stub"
-
-        def refine(self, **kw):
-            return [], []
-
-        def chat(self, *, system_prompt, messages):
-            return json.dumps(
-                {
-                    "ask": "yet another question",
-                    "fields": {"account_id": "060392206767", "services": ["s3"]},
-                    "complete": False,
-                }
-            )
-
-    convo: list[dict[str, str]] = []
-    for i in range(intake.MAX_USER_TURNS_BEFORE_COMPLETE):
-        convo.append({"role": "user", "content": f"reply-{i}"})
-        convo.append({"role": "assistant", "content": f"q-{i}"})
-    turn = intake.take_turn(convo, _ChattyStub())
-    assert turn.complete is True, "after 10 turns, force-complete should fire"
-    assert turn.draft_policy is not None
-    assert turn.ask is None
+    import pytest
+    pytest.skip(
+        "closed by deletion: intake/intake_drafts/suggest/narrow modules removed in 0.4.0 ([[no-nl-synthesis]] Stage 4); test probed behavior of deleted code."
+    )

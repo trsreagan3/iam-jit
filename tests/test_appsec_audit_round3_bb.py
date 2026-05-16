@@ -88,7 +88,6 @@ def _reset_singletons():
     from iam_jit import (
         bans as _bans,
         cidr_store as _cidrs,
-        intake_drafts as _drafts,
         magic_link_nonces as _nonces,
         rate_limit as _rl,
         settings_store as _settings,
@@ -96,7 +95,6 @@ def _reset_singletons():
 
     _rl.reset_default_limiter_for_tests()
     _bans.reset_default_store_for_tests()
-    _drafts.reset_default_store_for_tests()
     _nonces.reset_default_store_for_tests()
     _cidrs.reset_default_store_for_tests()
     _settings.reset_default_store_for_tests()
@@ -757,33 +755,8 @@ def test_bb3_13_cookie_tampering_still_rejected(app):
 #         CSRF surface partially fixed on this specific HTML route.
 # ---------------------------------------------------------------------
 def test_bb3_14_requests_new_chat_refuses_cross_origin_post(app):
-    """The chat-intake HTML endpoint refuses POST when called as a
-    bare cookie-only request. Whether the refusal is 403 (CSRF
-    middleware) or 200-with-a-redirect-back-to-the-form depends on
-    the implementation, but the behavior we WANT is that a cross-
-    origin POST cannot trigger an LLM-cost-incurring intake-turn
-    silently.
-
-    Severity: N/A (defended). Honest negative.
-
-    Note: this finding is about HTML form, not the JSON
-    /api/v1/intake/turn endpoint (which uses Bearer tokens and is
-    naturally CSRF-safe)."""
-    dev = _client_as(app, "email:dev@example.com")
-    r = dev.post(
-        "/requests/new/chat",
-        data={"message": "x"},
-        headers={"Origin": "https://evil.example.com"},
-    )
-    # Either 403 (CSRF reject) or 200 (HTML form re-render — no
-    # state change). The behavior we DON'T want is a 303 redirect
-    # confirming state change.
-    assert r.status_code in (200, 403), (
-        f"expected 200 (no-op re-render) or 403 (CSRF reject); got "
-        f"{r.status_code}: {r.text[:200]}"
-    )
-
-
+    import pytest
+    pytest.skip("closed by deletion: /requests/new/chat + /api/v1/intake/turn routes removed in 0.4.0 ([[no-nl-synthesis]] Stage 4).")
 # ---------------------------------------------------------------------
 # BB3-15: Session cookie ships with SameSite=Strict on auth callback.
 #         Round-1 noted SameSite=Lax; this is a silent upgrade.

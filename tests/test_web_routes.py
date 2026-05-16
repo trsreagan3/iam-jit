@@ -140,17 +140,12 @@ def test_new_paste_form_renders(as_dev: TestClient) -> None:
 
 
 def test_new_describe_redirects_when_no_ai(as_dev: TestClient) -> None:
-    resp = as_dev.get("/requests/new/generate", follow_redirects=False)
-    # No-AI by default → redirects to paste mode
-    assert resp.status_code == 303
-    assert "/paste" in resp.headers["location"]
-
+    import pytest
+    pytest.skip("closed by deletion: route removed in 0.4.0 ([[no-nl-synthesis]] Stage 4); replaced by paste-mode + MCP submit_policy.")
 
 def test_new_describe_renders_when_ai_enabled(with_llm: None, as_dev: TestClient) -> None:
-    resp = as_dev.get("/requests/new/generate")
-    assert resp.status_code == 200
-    assert "Describe what you need" in resp.text
-
+    import pytest
+    pytest.skip("closed by deletion: route removed in 0.4.0 ([[no-nl-synthesis]] Stage 4); replaced by paste-mode + MCP submit_policy.")
 
 def test_tokens_page_renders(as_dev: TestClient) -> None:
     resp = as_dev.get("/tokens")

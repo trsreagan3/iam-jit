@@ -232,13 +232,11 @@ def setup_app(
     from iam_jit import (
         bans as _bans,
         cidr_store as _cidrs,
-        intake_drafts as _drafts,
         magic_link_nonces as _nonces,
         rate_limit as _rl,
     )
     _rl.reset_default_limiter_for_tests()
     _bans.reset_default_store_for_tests()
-    _drafts.reset_default_store_for_tests()
     _nonces.reset_default_store_for_tests()
     _cidrs.reset_default_store_for_tests()
 

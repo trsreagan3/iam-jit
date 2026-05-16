@@ -6,7 +6,11 @@ from typing import Any
 
 from iam_jit.review import analyze_policy
 from iam_jit.schema import load_request, scaffold_request, validate_request
-from iam_jit.suggest import suggest_policy
+
+# NOTE: tests for iam_jit.suggest's read-only strip / read-write keep
+# behavior were deleted in Stage 4 of [[no-nl-synthesis]] along with
+# the suggest module itself. Read-only-default behavior at the MCP
+# layer is now tested in tests/test_mcp_read_only_default.py.
 
 
 def _request(**overrides: Any) -> dict[str, Any]:
@@ -64,41 +68,6 @@ def test_schema_rejects_unknown_access_type() -> None:
     request = _request(access_type="admin")
     errors = validate_request(request)
     assert any("access_type" in e for e in errors)
-
-
-def test_suggest_strips_write_when_read_only() -> None:
-    request = _request(
-        access_type="read-only",
-        task_intent={"services": ["s3"], "actions": ["read", "list", "write", "tagging"]},
-    )
-    policy = suggest_policy(request, use_llm=False)
-    actions_in_policy = []
-    for stmt in policy["Statement"]:
-        actions = stmt["Action"]
-        if isinstance(actions, str):
-            actions = [actions]
-        actions_in_policy.extend(actions)
-    # No write/put/delete/create actions for s3 should be present.
-    write_verbs = ("Put", "Delete", "Create", "Write", "Update", "Copy", "Restore")
-    assert not any(
-        any(verb in a for verb in write_verbs) for a in actions_in_policy
-    ), [a for a in actions_in_policy if any(v in a for v in write_verbs)]
-
-
-def test_suggest_keeps_write_when_read_write() -> None:
-    request = _request(
-        access_type="read-write",
-        task_intent={"services": ["s3"], "actions": ["read", "write"]},
-    )
-    policy = suggest_policy(request, use_llm=False)
-    actions_in_policy = []
-    for stmt in policy["Statement"]:
-        actions = stmt["Action"]
-        if isinstance(actions, str):
-            actions = [actions]
-        actions_in_policy.extend(actions)
-    # Some write actions (e.g. s3:PutObject) should appear.
-    assert any(a.startswith("s3:Put") for a in actions_in_policy)
 
 
 def test_review_flags_mismatched_read_only_with_wildcard_write() -> None:

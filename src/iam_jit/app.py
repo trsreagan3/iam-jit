@@ -31,7 +31,10 @@ from .api_tokens_store import APITokenStore, InMemoryAPITokenStore
 from .routes.accounts import router as accounts_router
 from .routes.admin import router as admin_router
 from .routes.auth import router as auth_router
-from .routes.intake import router as intake_router
+# NOTE: intake_router deleted in Stage 4 of [[no-nl-synthesis]].
+# Conversational LLM intake was part of the synthesis-from-prompt
+# pattern that measured 1.8% joint sufficiency. Replaced by raw-JSON
+# submit via the existing request-creation endpoint + MCP submit_policy.
 from .routes.health import router as health_router
 from .routes.policy import router as policy_router
 from .routes.reports import router as reports_router
@@ -553,7 +556,7 @@ def create_app(
     app.include_router(policy_router)
     app.include_router(accounts_router)
     app.include_router(admin_router)
-    app.include_router(intake_router)
+    # intake_router removed in Stage 4 of [[no-nl-synthesis]]
     app.include_router(webhooks_stripe_router)
     app.include_router(blacklist_router)
     app.include_router(feedback_router)

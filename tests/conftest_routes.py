@@ -49,13 +49,12 @@ _DEV_SECRET = "test-secret-for-route-tests-aaaaaaaaa"
 
 @pytest.fixture(autouse=True)
 def _reset_global_singletons() -> None:
-    """Module-level singletons (rate limiter, bans, intake drafts) leak
+    """Module-level singletons (rate limiter, bans) leak
     state between tests. Reset them before each test so one test's
     activity can't throttle/ban a fixture user in the next test."""
     from iam_jit import (
         bans as _bans,
         cidr_store as _cidrs,
-        intake_drafts as _drafts,
         llm_budget as _llmb,
         magic_link_nonces as _nonces,
         rate_limit as _rl,
@@ -66,7 +65,6 @@ def _reset_global_singletons() -> None:
 
     _rl.reset_default_limiter_for_tests()
     _bans.reset_default_store_for_tests()
-    _drafts.reset_default_store_for_tests()
     _nonces.reset_default_store_for_tests()
     _cidrs.reset_default_store_for_tests()
     _settings.reset_default_store_for_tests()

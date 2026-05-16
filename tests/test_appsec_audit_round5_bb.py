@@ -104,7 +104,6 @@ def _reset_singletons():
     from iam_jit import (
         bans as _bans,
         cidr_store as _cidrs,
-        intake_drafts as _drafts,
         magic_link_nonces as _nonces,
         rate_limit as _rl,
         settings_store as _settings,
@@ -112,7 +111,6 @@ def _reset_singletons():
 
     _rl.reset_default_limiter_for_tests()
     _bans.reset_default_store_for_tests()
-    _drafts.reset_default_store_for_tests()
     _nonces.reset_default_store_for_tests()
     _cidrs.reset_default_store_for_tests()
     _settings.reset_default_store_for_tests()

@@ -167,28 +167,10 @@ def test_magic_callback_rejects_external_return_to(
 
 
 def test_chat_login_redirect_uses_safe_return_to(client: TestClient) -> None:
-    """The chat page's logged-out redirect must produce a return_to
-    that the magic-callback validator will accept."""
-    resp = client.get(
-        "/requests/new/chat?resume=drft-totally-safe-id",
-        follow_redirects=False,
-    )
-    assert resp.status_code == 303
-    loc = resp.headers["location"]
-    assert "return_to=/requests/new/chat" in loc
-    # Resume value is preserved but URL-encoded so it can't smuggle
-    # additional query parameters or path segments.
-    assert "drft-totally-safe-id" in loc
-
+    import pytest
+    pytest.skip("closed by deletion: route removed in 0.4.0 ([[no-nl-synthesis]] Stage 4); replaced by paste-mode + MCP submit_policy.")
 
 def test_chat_login_redirect_strips_dangerous_resume(client: TestClient) -> None:
-    """A crafted ?resume= containing URL-syntax characters must be
-    stripped to alphanumeric+hyphen before being embedded into the
-    return_to value."""
-    resp = client.get(
-        "/requests/new/chat?resume=foo%26return_to=//evil.example.com",
-        follow_redirects=False,
-    )
-    assert resp.status_code == 303
-    loc = resp.headers["location"]
-    assert "evil.example.com" not in loc
+    import pytest
+    pytest.skip("closed by deletion: route removed in 0.4.0 ([[no-nl-synthesis]] Stage 4); replaced by paste-mode + MCP submit_policy.")
+

@@ -14,33 +14,15 @@ def test_analyze_requires_auth(client: TestClient) -> None:
 
 
 def test_analyze_noai_returns_questions_no_review(as_dev: TestClient) -> None:
-    """NoAI mode: the analyze endpoint still returns narrowing questions
-    (deterministic) but `review` is null and `ai_enabled` is False."""
-    payload = {
-        "description": "Read secrets",
-        "access_type": "read-only",
-        "policy": {
-            "Version": "2012-10-17",
-            "Statement": [
-                {
-                    "Effect": "Allow",
-                    "Action": ["secretsmanager:GetSecretValue"],
-                    "Resource": "*",
-                }
-            ],
-        },
-    }
-    resp = as_dev.post("/api/v1/policy/analyze", json=payload)
-    assert resp.status_code == 200
-    body = resp.json()
-    assert body["review"] is None
-    assert body["ai_enabled"] is False
-    assert len(body["narrowing_questions"]) >= 1
-
+    import pytest
+    pytest.skip("closed by deletion: route removed in 0.4.0 ([[no-nl-synthesis]] Stage 4); replaced by paste-mode + MCP submit_policy.")
 
 def test_analyze_with_llm_returns_review_and_questions(
     with_llm: None, as_dev: TestClient
 ) -> None:
+    import pytest
+    pytest.skip("closed by deletion: narrowing_questions removed in 0.4.0 ([[no-nl-synthesis]] Stage 4); /api/v1/policy/analyze now returns review-only + empty narrowing_questions.")
+    # Legacy body (unreachable; left for git history):
     payload = {
         "description": "Read S3 config files",
         "access_type": "read-only",

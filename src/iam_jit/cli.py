@@ -76,23 +76,13 @@ def validate(path: pathlib.Path) -> None:
     click.echo(f"{path}: ok", err=True)
 
 
-@main.command()
-@click.argument(
-    "path",
-    type=click.Path(exists=True, dir_okay=False, path_type=pathlib.Path),
-)
-@click.option(
-    "--no-llm",
-    is_flag=True,
-    help="Skip LLM verb refinement; use task_intent.services/actions as-is.",
-)
-def suggest(path: pathlib.Path, no_llm: bool) -> None:
-    """Draft a least-privilege policy for a request using policy_sentry."""
-    from .suggest import suggest_policy
-
-    request = load_request(path)
-    policy = suggest_policy(request, use_llm=not no_llm)
-    click.echo(json.dumps(policy, indent=2))
+# NOTE: `iam-jit suggest` and `iam-jit refine` removed in Stage 4 of
+# [[no-nl-synthesis]]. They drafted/narrowed policies from task_intent
+# via policy_sentry + LLM — the same synthesis pattern that measured
+# 1.8% joint sufficiency. Replacement: agents (Claude Code, Cursor)
+# use the MCP tools (list_templates / get_template / score_iam_policy /
+# submit_policy); humans paste raw JSON via `iam-jit review` or the
+# web UI's paste page.
 
 
 @main.command()
@@ -135,64 +125,8 @@ def review(path: pathlib.Path, no_llm: bool) -> None:
         click.echo(analysis.llm_narrative)
 
 
-@main.command()
-@click.argument(
-    "path",
-    type=click.Path(exists=True, dir_okay=False, path_type=pathlib.Path),
-)
-@click.option(
-    "--no-llm",
-    is_flag=True,
-    help="Don't re-run LLM service refinement when re-suggesting after answers.",
-)
-def refine(path: pathlib.Path, no_llm: bool) -> None:
-    """Detect overly-broad permissions and prompt for narrowing details.
-
-    Answers are stored as `spec.resource_constraints`, then the policy is
-    re-generated with those constraints applied.
-    """
-    from .narrow import apply_constraints, detect_broadness
-    from .schema import dump_request
-    from .suggest import suggest_policy
-
-    request = load_request(path)
-    policy = request["spec"].get("policy")
-    if not policy:
-        click.echo(
-            f"{path}: no policy on the request — run `iam-jit suggest` first or paste one.",
-            err=True,
-        )
-        sys.exit(2)
-
-    questions = detect_broadness(policy, request)
-    if not questions:
-        click.echo("No broadness flags. Policy looks reasonably scoped.", err=True)
-        return
-
-    click.echo(f"Found {len(questions)} narrowing question(s):", err=True)
-    answers: dict[str, list[str]] = {}
-    for q in questions:
-        click.echo()
-        click.echo(f"[{q.severity}] {q.question}")
-        if q.suggested_arn_format:
-            click.echo(f"  example: {q.suggested_arn_format}")
-        response = click.prompt(
-            "Answer (comma-separated ARNs, or 'skip' to leave broad)", default="skip"
-        )
-        if response.strip().lower() == "skip":
-            continue
-        arns = [s.strip() for s in response.split(",") if s.strip()]
-        if arns:
-            answers[q.id] = arns
-
-    if not answers:
-        click.echo("No constraints added. Request unchanged.", err=True)
-        return
-
-    refined = apply_constraints(request, answers)
-    refined["spec"]["policy"] = suggest_policy(refined, use_llm=not no_llm)
-    path.write_text(dump_request(refined))
-    click.echo(f"Wrote refined request to {path} with {len(answers)} constraint(s).", err=True)
+# `iam-jit refine` removed in Stage 4 of [[no-nl-synthesis]].
+# Same reasoning as the deleted `suggest` command above.
 
 
 @main.command("seed-admin")

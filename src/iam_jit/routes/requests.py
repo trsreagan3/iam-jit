@@ -29,7 +29,7 @@ def _now_iso_z() -> str:
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response, status
 
-from .. import assume as assume_mod, audit as audit_mod, bans as bans_mod, lifecycle, narrow, prompt_injection, provision as provision_mod, review, schema
+from .. import assume as assume_mod, audit as audit_mod, bans as bans_mod, lifecycle, prompt_injection, provision as provision_mod, review, schema
 from ..lifecycle import IllegalTransition, NotAuthorized
 from ..middleware import (
     current_user,
@@ -715,13 +715,13 @@ def submit_request(
     lifecycle.init_status(req, owner=user)
     review_block = _build_review_block(req)
     questions = []
+    # narrow.detect_broadness removed in Stage 4 of [[no-nl-synthesis]];
+    # narrowing-questions surface deleted along with suggest/refine.
+    # Agents now iterate via score_iam_policy's per-factor breakdown.
     _spec_for_policy = req.get("spec")
     policy = _spec_for_policy.get("policy") if isinstance(_spec_for_policy, dict) else None
     if policy:
-        questions = [
-            q.__dict__ if hasattr(q, "__dict__") else q
-            for q in narrow.detect_broadness(policy, req)
-        ]
+        questions = []
 
     # Auto-approve gate. Composes four checks: feature enabled,
     # score < threshold, no blocklisted service/account, user under

@@ -14,7 +14,7 @@ Effect of a ban:
     used to inject — that escalation is a different attack class
     handled separately).
 
-Stores: in-memory + filesystem, mirroring the intake_drafts pattern.
+Stores: in-memory + filesystem.
 DynamoDB backend can be added later — bans are low-cardinality, so a
 single-row config file works for most deployments.
 """

@@ -58,13 +58,8 @@ def test_banned_user_list_requests_403(
 def test_banned_user_intake_turn_403(
     as_dev: TestClient, banned_dev: None
 ) -> None:
-    r = as_dev.post(
-        "/api/v1/intake/turn",
-        json={"conversation": [{"role": "user", "content": "s3 read please"}]},
-    )
-    assert r.status_code == 403
-
-
+    import pytest
+    pytest.skip("closed by deletion: /requests/new/chat + /api/v1/intake/turn routes removed in 0.4.0 ([[no-nl-synthesis]] Stage 4).")
 def test_banned_user_token_create_403(
     as_dev: TestClient, banned_dev: None
 ) -> None:
@@ -102,39 +97,18 @@ def test_banned_user_policy_analyze_403(
 def test_banned_user_chat_get_403(
     as_dev: TestClient, banned_dev: None, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    from iam_jit import review
-
-    monkeypatch.setattr(review, "is_review_enabled", lambda: True)
-    r = as_dev.get("/requests/new/chat")
-    assert r.status_code == 403
-
-
+    import pytest
+    pytest.skip("closed by deletion: /requests/new/chat + /api/v1/intake/turn routes removed in 0.4.0 ([[no-nl-synthesis]] Stage 4).")
 def test_banned_user_chat_post_403(
     as_dev: TestClient, banned_dev: None, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    from iam_jit import review
-
-    monkeypatch.setattr(review, "is_review_enabled", lambda: True)
-    r = as_dev.post(
-        "/requests/new/chat",
-        data={"conversation": "", "message": "I need s3 read"},
-    )
-    assert r.status_code == 403
-
-
+    import pytest
+    pytest.skip("closed by deletion: /requests/new/chat + /api/v1/intake/turn routes removed in 0.4.0 ([[no-nl-synthesis]] Stage 4).")
 def test_banned_user_chat_stream_403(
     as_dev: TestClient, banned_dev: None, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    from iam_jit import review
-
-    monkeypatch.setattr(review, "is_review_enabled", lambda: True)
-    r = as_dev.post(
-        "/requests/new/chat/stream",
-        data={"conversation": "", "message": "I need s3 read"},
-    )
-    assert r.status_code == 403
-
-
+    import pytest
+    pytest.skip("closed by deletion: /requests/new/chat + /api/v1/intake/turn routes removed in 0.4.0 ([[no-nl-synthesis]] Stage 4).")
 def test_banned_user_web_action_approve_403(
     as_approver: TestClient, request_payload: dict
 ) -> None:

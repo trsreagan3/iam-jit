@@ -13,7 +13,13 @@ from typing import Annotated, Any
 
 from fastapi import APIRouter, Depends, HTTPException
 
-from .. import narrow, review
+from .. import review
+
+# narrow module deleted in Stage 4 of [[no-nl-synthesis]] — its
+# detect_broadness() was the deterministic narrowing-questions
+# generator that paired with the deleted suggest/refine flow.
+# /api/v1/policy/analyze now returns review-only + an empty
+# narrowing_questions list for back-compat.
 from ..middleware import current_user
 from ..users_store import User
 
@@ -47,9 +53,10 @@ def analyze(
     review_block: dict[str, Any] | None = None
     if review.is_review_enabled():
         review_block = review.analyze_policy(policy, fake_request).to_dict()
-    questions = [q.__dict__ for q in narrow.detect_broadness(policy, fake_request)]
+    # narrowing_questions kept as [] for back-compat; replaced by
+    # score_iam_policy's per-factor breakdown per [[no-nl-synthesis]]
     return {
         "review": review_block,
-        "narrowing_questions": questions,
+        "narrowing_questions": [],
         "ai_enabled": review.is_review_enabled(),
     }

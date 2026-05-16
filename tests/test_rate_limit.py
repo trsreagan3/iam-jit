@@ -124,150 +124,25 @@ def test_limiter_reset_clears_user() -> None:
 def test_chat_post_429_after_soft_cap(
     as_dev: TestClient, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Soft cap is configurable via env. Tighten it to verify the
-    route layer surfaces 429 + Retry-After."""
-    monkeypatch.setenv("IAM_JIT_CHAT_RATE_SOFT_CAP", "3")
-    monkeypatch.setenv("IAM_JIT_CHAT_RATE_HARD_CAP", "100")
-    rate_limit.reset_default_limiter_for_tests()
-
-    from iam_jit import intake as intake_mod
-
-    monkeypatch.setattr(
-        intake_mod,
-        "take_turn",
-        lambda h, b: intake_mod.IntakeTurn(ask="ok", complete=False, fields={}),
-    )
-
-    # 3 allowed
-    for _ in range(3):
-        r = as_dev.post(
-            "/requests/new/chat",
-            data={"conversation": "", "message": "I need s3 read in dev"},
-        )
-        assert r.status_code == 200
-    # 4th hits 429
-    r = as_dev.post(
-        "/requests/new/chat",
-        data={"conversation": "", "message": "another message"},
-    )
-    assert r.status_code == 429
-    assert "Retry-After" in r.headers
-
-
+    import pytest
+    pytest.skip("closed by deletion: /requests/new/chat + /api/v1/intake/turn routes removed in 0.4.0 ([[no-nl-synthesis]] Stage 4).")
 def test_chat_post_hard_cap_bans_user(
     as_dev: TestClient, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Crossing the hard cap auto-bans via the bans store.
-
-    We pre-populate the deque directly (not via check()) so refused
-    calls don't artificially block us from reaching the hard threshold."""
-    monkeypatch.setenv("IAM_JIT_CHAT_RATE_SOFT_CAP", "3")
-    monkeypatch.setenv("IAM_JIT_CHAT_RATE_HARD_CAP", "5")
-    rate_limit.reset_default_limiter_for_tests()
-
-    from iam_jit import bans, intake as intake_mod
-
-    monkeypatch.setattr(
-        intake_mod,
-        "take_turn",
-        lambda h, b: intake_mod.IntakeTurn(ask="ok", complete=False, fields={}),
-    )
-
-    limiter = rate_limit.get_default_limiter()
-    # Stuff 5 timestamps directly into the bucket; the next route call
-    # will be the 6th, which exceeds hard_cap=5.
-    now = time.time()
-    bucket = limiter._buckets.setdefault(
-        ("email:dev@example.com", "chat"),
-        type(limiter)._buckets.fget if False else __import__("collections").deque(),
-    )
-    for _ in range(5):
-        bucket.append(now)
-
-    r = as_dev.post(
-        "/requests/new/chat",
-        data={"conversation": "", "message": "msg"},
-    )
-    assert r.status_code == 403
-    assert bans.get_default_store().is_banned("email:dev@example.com")
-
-
+    import pytest
+    pytest.skip("closed by deletion: /requests/new/chat + /api/v1/intake/turn routes removed in 0.4.0 ([[no-nl-synthesis]] Stage 4).")
 def test_admin_not_banned_on_hard_cap(
     as_admin: TestClient, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Admin accounts are exempt from the auto-ban path."""
-    monkeypatch.setenv("IAM_JIT_CHAT_RATE_SOFT_CAP", "2")
-    monkeypatch.setenv("IAM_JIT_CHAT_RATE_HARD_CAP", "3")
-    rate_limit.reset_default_limiter_for_tests()
-
-    from iam_jit import bans, intake as intake_mod
-    from collections import deque
-
-    monkeypatch.setattr(
-        intake_mod,
-        "take_turn",
-        lambda h, b: intake_mod.IntakeTurn(ask="ok", complete=False, fields={}),
-    )
-
-    limiter = rate_limit.get_default_limiter()
-    bucket = limiter._buckets.setdefault(
-        ("email:admin@example.com", "chat"), deque()
-    )
-    for _ in range(3):
-        bucket.append(time.time())
-
-    r = as_admin.post(
-        "/requests/new/chat",
-        data={"conversation": "", "message": "msg"},
-    )
-    # Admin still gets 403 (their request is refused), but not banned.
-    assert r.status_code == 403
-    assert not bans.get_default_store().is_banned("email:admin@example.com")
-
-
+    import pytest
+    pytest.skip("closed by deletion: /requests/new/chat + /api/v1/intake/turn routes removed in 0.4.0 ([[no-nl-synthesis]] Stage 4).")
 def test_chat_stream_rate_limited(
     as_dev: TestClient, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Pre-fill the bucket; the next /chat/stream call must 429."""
-    from collections import deque
-
-    monkeypatch.setenv("IAM_JIT_CHAT_RATE_SOFT_CAP", "1")
-    monkeypatch.setenv("IAM_JIT_CHAT_RATE_HARD_CAP", "5")
-    rate_limit.reset_default_limiter_for_tests()
-    limiter = rate_limit.get_default_limiter()
-    bucket = limiter._buckets.setdefault(
-        ("email:dev@example.com", "chat-stream"), deque()
-    )
-    bucket.append(time.time())  # already at soft cap of 1
-
-    r = as_dev.post(
-        "/requests/new/chat/stream",
-        data={"conversation": "", "message": "second"},
-    )
-    assert r.status_code == 429
-    assert "Retry-After" in r.headers
-
-
+    import pytest
+    pytest.skip("closed by deletion: /requests/new/chat + /api/v1/intake/turn routes removed in 0.4.0 ([[no-nl-synthesis]] Stage 4).")
 def test_intake_turn_429_after_soft_cap(
     as_dev: TestClient, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    monkeypatch.setenv("IAM_JIT_CHAT_RATE_SOFT_CAP", "2")
-    monkeypatch.setenv("IAM_JIT_CHAT_RATE_HARD_CAP", "10")
-    rate_limit.reset_default_limiter_for_tests()
-
-    from iam_jit import intake as intake_mod
-
-    monkeypatch.setattr(
-        intake_mod,
-        "take_turn",
-        lambda h, b: intake_mod.IntakeTurn(ask="ok", complete=False, fields={}),
-    )
-
-    body = {"conversation": [{"role": "user", "content": "s3 read in dev"}]}
-    r1 = as_dev.post("/api/v1/intake/turn", json=body)
-    r2 = as_dev.post("/api/v1/intake/turn", json=body)
-    r3 = as_dev.post("/api/v1/intake/turn", json=body)
-    assert r1.status_code == 200
-    assert r2.status_code == 200
-    assert r3.status_code == 429
-    assert "Retry-After" in r3.headers
+    import pytest
+    pytest.skip("closed by deletion: /requests/new/chat + /api/v1/intake/turn routes removed in 0.4.0 ([[no-nl-synthesis]] Stage 4).")
