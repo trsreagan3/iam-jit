@@ -1274,6 +1274,47 @@ _KNOWN_CONDITION_OPERATORS = _KNOWN_CONDITION_OPERATORS | frozenset(
 )
 
 
+def _detect_inverted_deny_bool(condition: object) -> str:
+    """Detect the inverted-Deny-on-safety-key pattern.
+
+    `Effect: Deny + Bool: { aws:MultiFactorAuthPresent: "true" }` is
+    the canonical inversion: the Deny ONLY fires when MFA IS
+    present, which is the OPPOSITE of "require MFA". Sessions that
+    skipped MFA pass through. Same defect for `aws:SecureTransport`
+    (Deny when transport IS secure → permits HTTP).
+
+    Returns a human-readable reason if the pattern is detected,
+    else empty string. Caller checks `Effect == "Deny"` separately.
+    """
+    if not isinstance(condition, dict):
+        return ""
+    safety_keys = {
+        "aws:multifactorauthpresent",
+        "aws:securetransport",
+    }
+    for op_raw, kvs in condition.items():
+        op = "" if op_raw is None else str(op_raw)
+        if op != "Bool" and op != "BoolIfExists":
+            continue
+        if not isinstance(kvs, dict):
+            continue
+        for key_raw, val_raw in kvs.items():
+            key_lc = str(key_raw).lower()
+            if key_lc not in safety_keys:
+                continue
+            vals = val_raw if isinstance(val_raw, list) else [val_raw]
+            for v in vals:
+                if str(v).lower() == "true":
+                    return (
+                        f"`Effect: Deny + {op}: {{{key_raw}: \"true\"}}` "
+                        "is the INVERTED form: the Deny fires only "
+                        "when the key IS present/true — the opposite "
+                        "of \"require this safety property\". Non-MFA "
+                        "or non-secure-transport callers are unaffected."
+                    )
+    return ""
+
+
 def _condition_is_vacuous(condition: object) -> tuple[bool, str]:
     """Heuristic: does the Condition block fail to constrain the grant?
 
@@ -2310,6 +2351,28 @@ def _deterministic(
                         f"Remove `{action}` from the policy, or change access_type to read-write."
                     )
 
+    # Cluster-A round-14 pre-pass: detect inverted-Deny patterns
+    # BEFORE the Allow-only main loop. A Deny statement is normally
+    # protective, but `Effect: Deny + Bool: aws:MultiFactorAuthPresent
+    # = "true"` is the inverted form — the Deny ONLY blocks sessions
+    # WITH MFA, defeating the apparent intent of "require MFA." Same
+    # for aws:SecureTransport. agent-303 closure.
+    for stmt in policy["Statement"]:
+        if stmt.get("Effect") != "Deny":
+            continue
+        inverted_msg = _detect_inverted_deny_bool(stmt.get("Condition"))
+        if inverted_msg:
+            score = max(score, 6)
+            factors.append(inverted_msg)
+            suggestions.append(
+                "An inverted-Deny like `Bool: "
+                "{aws:MultiFactorAuthPresent: \"true\"}` only blocks "
+                "MFA-authenticated sessions — it does not require MFA. "
+                "Either use `BoolIfExists` with the absent-key behavior "
+                "you actually want, or invert the Deny to an Allow "
+                "guarded by the presence-check."
+            )
+
     for stmt in policy["Statement"]:
         if not _effect_is_allow(stmt):
             continue
@@ -2711,6 +2774,20 @@ def _deterministic(
                     for a in stmt_actions
                 )
                 floor = 7 if touches_high_risk else 5
+                # Cluster-A round-14: vacuous condition + resource
+                # contains `*` (bucket-wide or broader) → bump floor
+                # by 1. The condition LOOKS like scoping, but the
+                # underlying resource is broad — corpus-author
+                # consensus (agent-156, agent-302, agent-327) is that
+                # this combo should land 1 tier higher than "vacuous +
+                # narrow resource."
+                stmt_resources = _as_list(stmt.get("Resource"))
+                resource_has_wildcard = any(
+                    isinstance(r, str) and ("*" in r or "?" in r)
+                    for r in stmt_resources
+                )
+                if resource_has_wildcard and not touches_high_risk:
+                    floor = max(floor, 6)
                 score = max(score, floor)
                 factors.append(vac_reason)
                 suggestions.append(
@@ -2720,6 +2797,61 @@ def _deterministic(
                     "attributes (e.g. `StringEquals` on "
                     "`aws:PrincipalOrgID`, `aws:PrincipalAccount`, "
                     "`aws:SourceVpce`, or a specific resource tag)."
+                )
+
+            # Cluster-A round-14: Bool inverted Deny on safety-key.
+            # `Effect: Deny + Bool: {aws:MultiFactorAuthPresent:
+            # "true"}` is the inverted form — the Deny fires ONLY
+            # when MFA IS present (i.e., never blocks non-MFA
+            # sessions, the opposite of what the author intended).
+            # Same defect class for aws:SecureTransport. Pattern
+            # documented in agent-303.
+            if stmt.get("Effect") == "Deny":
+                inverted_msg = _detect_inverted_deny_bool(condition)
+                if inverted_msg:
+                    score = max(score, 6)
+                    factors.append(inverted_msg)
+                    suggestions.append(
+                        "An inverted-Deny like `Bool: "
+                        "{aws:MultiFactorAuthPresent: \"true\"}` "
+                        "only blocks MFA-authenticated sessions — "
+                        "it does not require MFA. Either use "
+                        "`BoolIfExists` with the absent-key "
+                        "behavior you actually want, or invert "
+                        "the Deny to an Allow guarded by the "
+                        "presence-check."
+                    )
+
+        # Cluster-A round-14: missing critical condition on
+        # sensitive KMS actions. `kms:Decrypt` / `kms:GenerateDataKey`
+        # without `kms:ViaService` (calling-service restriction) or
+        # `kms:EncryptionContext` (per-encryption tag binding) means
+        # ANY caller with the key ARN can decrypt anything encrypted
+        # under it — cross-service ciphertext exposure. Pattern
+        # documented in agent-235.
+        if not condition:
+            stmt_actions = _as_list(stmt.get("Action"))
+            kms_sensitive = ("kms:decrypt", "kms:generatedatakey",
+                             "kms:generatedatakeywithoutplaintext")
+            touches_kms_sensitive = any(
+                _canonical_action(a) in kms_sensitive
+                or any(_canonical_action(a) == s for s in kms_sensitive)
+                for a in stmt_actions
+            )
+            if touches_kms_sensitive:
+                score = max(score, 4)
+                factors.append(
+                    "`kms:Decrypt` / `kms:GenerateDataKey` without "
+                    "`kms:ViaService` or `kms:EncryptionContext` "
+                    "condition — any caller with the key ARN can "
+                    "decrypt ciphertexts produced by ANY service."
+                )
+                suggestions.append(
+                    "Add `Condition: { StringEquals: { "
+                    "kms:ViaService: \"s3.us-east-1.amazonaws.com\" "
+                    "} }` (replace with the calling service you "
+                    "actually use) to restrict decrypt to that "
+                    "service path."
                 )
 
         # NotAction / NotResource handling. These keys are the inverse
