@@ -1305,11 +1305,16 @@ def _federated_trust_is_scoped(federated_arn: str, condition: object) -> bool:
         if condition:
             return True
 
-    # Walk the condition operators to look for SAML:aud and
-    # `<provider>:sub` / `<provider>:aud` literal bindings.
+    # Walk the condition operators to look for SAML:aud + OIDC :aud
+    # bindings AND any non-wildcard literal narrowing claim under
+    # the federated provider. Different IdPs use different claim
+    # names — GitHub Actions / EKS IRSA use `:sub`, CircleCI uses
+    # `:project-id`, GitLab uses `:project_path`, etc. — but the
+    # pattern is always: `:aud=sts.amazonaws.com` plus some
+    # narrowing claim.
     saml_aud_ok = False
-    sub_ok = False
     aud_ok = False
+    has_narrowing_claim = False
     for op_raw, kvs in condition.items():
         op = "" if op_raw is None else str(op_raw)
         if not isinstance(kvs, dict):
@@ -1322,25 +1327,29 @@ def _federated_trust_is_scoped(federated_arn: str, condition: object) -> bool:
             if key_lc.endswith(":aud") and key_lc.startswith("saml"):
                 if all(v and "*" not in v for v in vals_str):
                     saml_aud_ok = True
-            # OIDC :sub binding — non-wildcard literal or
-            # StringLike with a real prefix (not bare `*`)
-            if key_lc.endswith(":sub"):
-                if op.startswith("StringEquals"):
-                    if all(v and "*" not in v for v in vals_str):
-                        sub_ok = True
-                elif op.startswith("StringLike"):
-                    # Tolerate trailing wildcards in the prefix
-                    # (e.g., `repo:org/repo:*`) but NOT a bare `*`.
-                    if all(v and v != "*" and not v.startswith("*") for v in vals_str):
-                        sub_ok = True
+                continue
             # OIDC :aud binding — should be sts.amazonaws.com
-            if key_lc.endswith(":aud") and not key_lc.startswith("saml"):
+            if key_lc.endswith(":aud"):
                 if op.startswith("StringEquals"):
                     if any("sts.amazonaws.com" in v for v in vals_str):
                         aud_ok = True
+                continue
+            # ANY other claim binding under the federated provider —
+            # treated as a narrowing claim when it's a non-wildcard
+            # literal. Covers `:sub` (GitHub / EKS IRSA), `:project-id`
+            # (CircleCI), `:project_path` (GitLab), `:repository_owner`
+            # (variant GitHub patterns), etc.
+            if op.startswith("StringEquals"):
+                if all(v and "*" not in v for v in vals_str):
+                    has_narrowing_claim = True
+            elif op.startswith("StringLike"):
+                # Tolerate trailing-wildcard prefixes (e.g.,
+                # `repo:org/repo:*`) but reject bare `*`.
+                if all(v and v != "*" and not v.startswith("*") for v in vals_str):
+                    has_narrowing_claim = True
 
-    # OIDC: need BOTH sub and aud bindings.
-    if sub_ok and aud_ok:
+    # OIDC: need aud binding + at least one narrowing claim.
+    if aud_ok and has_narrowing_claim:
         return True
     # SAML: SAML:aud binding alone is the standard pattern.
     if saml_aud_ok:
