@@ -154,7 +154,7 @@ This is the asymmetry that matters: ~80% of agent operations are reads with near
 
 ## Anti-patterns
 
-- ❌ **Don't ask iam-jit to generate a policy from the user's natural-language request.** The deterministic NL synthesis path was measured at 1.8% joint sufficiency and removed. You (the agent) have codebase context iam-jit doesn't; you do the narrowing.
+- ❌ **Don't ask iam-jit to generate a policy from the user's natural-language request.** The deterministic NL synthesis path was measured and removed when it didn't deliver. You (the agent) have codebase context iam-jit doesn't; you do the narrowing.
 
 - ❌ **Don't loop on `score_iam_policy` blindly trying random reductions.** Read the factor breakdown; pick the highest-contribution factor; address it specifically. Each call costs ~50ms; ~3 iterations is a reasonable budget. **Better: group changes** — apply service-list narrowing + account-condition + region-condition in a single revised policy, then re-score once. Faster than asking the user one question per round.
 
@@ -202,5 +202,5 @@ If the agent's first reduction round produces an action-wildcard policy and the 
 - [README.md](../README.md) — top-level overview
 - [docs/RECOMMENDER-API-SPEC.md](./RECOMMENDER-API-SPEC.md) — API spec
 - [docs/recipes/agent-safety-mode.md](./recipes/agent-safety-mode.md) — local-mode safety pattern
-- [docs/calibration/100-prompt-sufficiency-loop.md](./calibration/100-prompt-sufficiency-loop.md) — why iam-jit doesn't author policies (the 1.8% measurement)
+- [docs/calibration/100-prompt-sufficiency-loop.md](./calibration/100-prompt-sufficiency-loop.md) — calibration measurement that informed the architectural decision not to author policies
 - [docs/ROADMAP-V1.1.md](./ROADMAP-V1.1.md) — post-launch scope

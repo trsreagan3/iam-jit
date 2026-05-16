@@ -15,7 +15,7 @@ deferral criterion was too loose:
 
 - **Bar for legitimate deferral:** the feature has been tried,
   measured, and proven to not deliver value (e.g., natural-language
-  policy synthesis at 1.8% joint sufficiency rate — see
+  policy synthesis was measured + removed when it didn't deliver — see
   [docs/calibration/100-prompt-sufficiency-loop.md] and
   `docs/calibration/feature-reality-check.md`).
 - **NOT valid deferral reasons:** multi-week build, complex admin
