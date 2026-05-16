@@ -158,6 +158,19 @@ def _identify_user(request: Request, user_store: UserStore) -> User:
             )
         # Best-effort last-used update.
         tokens_store.touch_last_used(record.token_hash, epoch_seconds=int(time.time()))
+        # Phase-1 MFA propagation: surface the token record on
+        # request.state so the per-action MFA gate can read
+        # `mfa_at_issuance` and treat bearer-token requests as
+        # MFA-evidenced when the issuance timestamp is within the
+        # deployment's freshness window. Per [[mfa-compliance-strategy]]
+        # PCI §8.6 — agent system account inherits the human
+        # authorizer's MFA.
+        try:
+            request.state.api_token_record = record
+        except Exception:
+            # request.state may not be available in unusual test
+            # harnesses; best-effort.
+            pass
         return user
 
     # 2. aws_iam mode — Function URL has already validated SigV4.

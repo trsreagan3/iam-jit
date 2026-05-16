@@ -94,11 +94,46 @@ def create_token(
             )
 
         issued = issue_api_token(user.id, label=label)
+
+        # Phase-1 MFA-at-issuance propagation (per
+        # [[mfa-compliance-strategy]] PCI §8.6): if the human
+        # authorizer's iam_jit_session_mfa cookie is valid + fresh
+        # at this moment, stamp the timestamp onto the token record.
+        # The per-action MFA gate later checks freshness against THIS
+        # field for bearer-authenticated requests. Agent inherits
+        # the human's MFA assertion as long as the token is fresher
+        # than the deployment's IAM_JIT_MFA_STEP_UP_MAX_AGE_SECONDS.
+        mfa_at_issuance: int | None = None
+        try:
+            from .. import mfa_gate as _mfa_gate
+            from ..middleware import _get_secret as _auth_secret_getter
+            mfa_cookie = request.cookies.get("iam_jit_session_mfa")
+            if mfa_cookie:
+                # Use a generous max_age here — we just want to know
+                # if MFA was asserted at all in the recent past; the
+                # per-action gate later does its own short-window
+                # freshness check.
+                mfa_result = _mfa_gate.verify(
+                    cookie_value=mfa_cookie,
+                    secret=_auth_secret_getter(),
+                    expected_user_id=user.id,
+                    max_age_seconds=24 * 3600,
+                )
+                if mfa_result.present:
+                    mfa_at_issuance = int(issued.created_at)
+        except Exception:
+            # Best-effort — never let the MFA stamp block token mint.
+            # The token still works; it just lacks MFA evidence and
+            # high-risk grants will be blocked until the user
+            # re-authenticates and mints a new token.
+            pass
+
         record = APITokenRecord(
             token_hash=issued.hash,
             user_id=issued.user_id,
             created_at=issued.created_at,
             label=issued.label,
+            mfa_at_issuance=mfa_at_issuance,
         )
         store.put(record)
     return {
@@ -107,9 +142,20 @@ def create_token(
         "user_id": issued.user_id,
         "created_at": issued.created_at,
         "label": issued.label,
+        "mfa_at_issuance": mfa_at_issuance,
         "warning": (
             "This token is shown only once. Store it now — there's no way to retrieve "
             "it later. Use it as `Authorization: Bearer <token>` against the iam-jit API."
+        ),
+        "mfa_note": (
+            "Token carries MFA-at-issuance evidence — high-risk grants will "
+            "be auto-approved up to IAM_JIT_MFA_STEP_UP_MAX_AGE_SECONDS after "
+            "issuance, then require token re-mint."
+            if mfa_at_issuance is not None
+            else "Token was minted WITHOUT a fresh MFA assertion in the "
+            "user's session. High-risk grants from this token will be "
+            "blocked. Re-authenticate via OIDC and mint a new token to "
+            "carry MFA evidence."
         ),
     }
 

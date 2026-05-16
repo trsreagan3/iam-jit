@@ -209,3 +209,133 @@ def test_step_up_max_age_seconds_clamp_boundaries(
 ) -> None:
     monkeypatch.setenv("IAM_JIT_MFA_STEP_UP_MAX_AGE_SECONDS", env_value)
     assert mfa_gate.step_up_max_age_seconds() == expected
+
+
+# ---------------------------------------------------------------------------
+# Phase-1 closure: evaluate_for_route — cookie + bearer-token-issuance
+# resolution chain per [[mfa-compliance-strategy]] PCI §8.6.
+# ---------------------------------------------------------------------------
+
+
+class _FakeTokenRecord:
+    """Minimal duck-type stand-in for APITokenRecord."""
+
+    def __init__(self, mfa_at_issuance: int | None) -> None:
+        self.mfa_at_issuance = mfa_at_issuance
+
+
+def test_evaluate_for_route_cookie_path_present() -> None:
+    cookie = _sign(USER_ID)
+    result = mfa_gate.evaluate_for_route(
+        cookie_value=cookie,
+        secret=SECRET,
+        user_id=USER_ID,
+        risk_score=8,
+        api_token_record=None,
+    )
+    assert result["mfa_present"] is True
+    assert result["mfa_source"] == "cookie"
+    assert result["would_require_mfa"] is True
+
+
+def test_evaluate_for_route_no_cookie_no_token_absent() -> None:
+    result = mfa_gate.evaluate_for_route(
+        cookie_value=None,
+        secret=SECRET,
+        user_id=USER_ID,
+        risk_score=8,
+        api_token_record=None,
+    )
+    assert result["mfa_present"] is False
+    assert result["mfa_source"] == "absent"
+    assert result["mfa_reason"] == "no_mfa_cookie"
+
+
+def test_evaluate_for_route_bearer_token_fresh_issuance_satisfies(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Bearer token minted 60s ago with MFA → counts as MFA-present
+    even when cookie absent. Agent inherits the human's MFA per PCI §8.6."""
+    import time as _t
+    monkeypatch.setenv("IAM_JIT_MFA_STEP_UP_MAX_AGE_SECONDS", "300")
+    now = int(_t.time())
+    token = _FakeTokenRecord(mfa_at_issuance=now - 60)
+    result = mfa_gate.evaluate_for_route(
+        cookie_value=None,
+        secret=SECRET,
+        user_id=USER_ID,
+        risk_score=8,
+        api_token_record=token,
+    )
+    assert result["mfa_present"] is True
+    assert result["mfa_source"] == "token_at_issuance"
+    assert result["mfa_reason"] == "ok_via_token_issuance"
+    assert 60 <= result["mfa_age_seconds"] <= 65
+
+
+def test_evaluate_for_route_bearer_token_stale_issuance_rejected(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Bearer token minted 1 hour ago + 5 min freshness window → stale."""
+    import time as _t
+    monkeypatch.setenv("IAM_JIT_MFA_STEP_UP_MAX_AGE_SECONDS", "300")
+    now = int(_t.time())
+    token = _FakeTokenRecord(mfa_at_issuance=now - 3600)
+    result = mfa_gate.evaluate_for_route(
+        cookie_value=None,
+        secret=SECRET,
+        user_id=USER_ID,
+        risk_score=8,
+        api_token_record=token,
+    )
+    assert result["mfa_present"] is False
+    assert result["mfa_source"] == "token_at_issuance_stale"
+    assert result["mfa_reason"] == "token_mfa_too_stale"
+
+
+def test_evaluate_for_route_bearer_token_no_mfa_evidence(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Bearer token minted before MFA-at-issuance tracking shipped
+    (mfa_at_issuance=None). Distinct audit reason from 'no cookie'."""
+    token = _FakeTokenRecord(mfa_at_issuance=None)
+    result = mfa_gate.evaluate_for_route(
+        cookie_value=None,
+        secret=SECRET,
+        user_id=USER_ID,
+        risk_score=8,
+        api_token_record=token,
+    )
+    assert result["mfa_present"] is False
+    assert result["mfa_source"] == "token_no_mfa"
+    assert result["mfa_reason"] == "token_lacks_mfa_evidence"
+
+
+def test_evaluate_for_route_cookie_wins_over_token() -> None:
+    """If both cookie AND token have evidence, cookie wins (the more
+    recent of the two; cookie is a per-session live assertion)."""
+    import time as _t
+    cookie = _sign(USER_ID)
+    token = _FakeTokenRecord(mfa_at_issuance=int(_t.time()) - 100)
+    result = mfa_gate.evaluate_for_route(
+        cookie_value=cookie,
+        secret=SECRET,
+        user_id=USER_ID,
+        risk_score=8,
+        api_token_record=token,
+    )
+    assert result["mfa_source"] == "cookie"
+
+
+def test_evaluate_for_route_low_risk_score_would_require_false() -> None:
+    """At low scores, would_require_mfa is False (MFA gate won't fire
+    even if mfa_present is False)."""
+    result = mfa_gate.evaluate_for_route(
+        cookie_value=None,
+        secret=SECRET,
+        user_id=USER_ID,
+        risk_score=2,
+        api_token_record=None,
+    )
+    assert result["would_require_mfa"] is False
+    assert result["mfa_present"] is False  # truthful annotation

@@ -23,6 +23,15 @@ class APITokenRecord:
     created_at: int
     label: str | None
     last_used_at: int | None = None
+    # Epoch seconds at which the human authorizer's MFA was asserted
+    # when this token was minted. Per [[mfa-compliance-strategy]]
+    # agents are system accounts under PCI §8.6 — the human's MFA
+    # at issuance satisfies the requirement, and the per-action MFA
+    # gate checks freshness against THIS field for bearer-token
+    # requests (vs the iam_jit_session_mfa cookie for browser/session
+    # requests). None = legacy token issued before this tracking
+    # shipped; treated as "no MFA evidence" by the freshness gate.
+    mfa_at_issuance: int | None = None
 
 
 class APITokenNotFound(Exception):
@@ -98,6 +107,8 @@ class DynamoDBAPITokenStore:
             item["label"] = r.label
         if r.last_used_at is not None:
             item["last_used_at"] = r.last_used_at
+        if r.mfa_at_issuance is not None:
+            item["mfa_at_issuance"] = r.mfa_at_issuance
         return item
 
     @staticmethod
@@ -108,6 +119,10 @@ class DynamoDBAPITokenStore:
             created_at=int(item["created_at"]),
             label=item.get("label"),
             last_used_at=int(item["last_used_at"]) if item.get("last_used_at") is not None else None,
+            mfa_at_issuance=(
+                int(item["mfa_at_issuance"])
+                if item.get("mfa_at_issuance") is not None else None
+            ),
         )
 
     def put(self, record: APITokenRecord) -> None:

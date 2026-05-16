@@ -1226,6 +1226,54 @@ _PRIVATE_IPV4_PREFIXES = (
 )
 
 
+# Canonical AWS IAM condition operators. Source: AWS IAM JSON policy
+# reference. Used to detect mis-spelled / unknown operators which AWS
+# rejects at policy-attach time — meaning the condition never
+# evaluates and the Allow is effectively unconditional.
+# Order matches the AWS docs grouping (string, numeric, date, bool,
+# binary, ip, arn, null) + `IfExists` variants for each.
+_KNOWN_CONDITION_OPERATORS: frozenset[str] = frozenset({
+    # String
+    "StringEquals", "StringNotEquals",
+    "StringEqualsIgnoreCase", "StringNotEqualsIgnoreCase",
+    "StringLike", "StringNotLike",
+    # Numeric
+    "NumericEquals", "NumericNotEquals",
+    "NumericLessThan", "NumericLessThanEquals",
+    "NumericGreaterThan", "NumericGreaterThanEquals",
+    # Date
+    "DateEquals", "DateNotEquals",
+    "DateLessThan", "DateLessThanEquals",
+    "DateGreaterThan", "DateGreaterThanEquals",
+    # Boolean
+    "Bool",
+    # Binary
+    "BinaryEquals",
+    # IP
+    "IpAddress", "NotIpAddress",
+    # ARN
+    "ArnEquals", "ArnLike", "ArnNotEquals", "ArnNotLike",
+    # Null check
+    "Null",
+    # ForAllValues / ForAnyValue prefixes (multivalued); used as
+    # standalone qualifiers attached to the above operator names.
+    # We accept the bare operator name + the qualified form below.
+})
+# Add the IfExists variant of each (`StringEqualsIfExists`, etc.).
+_KNOWN_CONDITION_OPERATORS = _KNOWN_CONDITION_OPERATORS | frozenset(
+    f"{op}IfExists" for op in _KNOWN_CONDITION_OPERATORS
+    # Don't double-suffix Null (which is its own existence check) or
+    # already-IfExists entries.
+    if not op.endswith("IfExists") and op != "Null"
+)
+# Add the ForAllValues / ForAnyValue prefix variants for the
+# multivalued operators. AWS docs: ForAnyValue:StringEquals, etc.
+_KNOWN_CONDITION_OPERATORS = _KNOWN_CONDITION_OPERATORS | frozenset(
+    f"{prefix}:{op}" for prefix in ("ForAllValues", "ForAnyValue")
+    for op in list(_KNOWN_CONDITION_OPERATORS)
+)
+
+
 def _condition_is_vacuous(condition: object) -> tuple[bool, str]:
     """Heuristic: does the Condition block fail to constrain the grant?
 
@@ -1255,6 +1303,29 @@ def _condition_is_vacuous(condition: object) -> tuple[bool, str]:
     """
     if not isinstance(condition, dict):
         return False, ""
+
+    # Pattern 8 (Cluster A, round-14): unknown / mis-spelled condition
+    # operator. AWS rejects unknown operators at policy-attach time —
+    # so the condition NEVER evaluates, making the Allow effectively
+    # unconditional. The scorer used to silently skip past unknown
+    # operators (the hard-coded `op == "StringLike"` etc. matches
+    # would just not fire). Now we check the operator against the
+    # canonical set and flag misses. Catches the `StringEqual`
+    # (missing trailing s), `IPAddress` (wrong case), `BoolNot`
+    # (no such operator) family of typos.
+    #
+    # Source: AWS IAM JSON policy reference — condition operators.
+    for op_raw_check in condition.keys():
+        if op_raw_check is None:
+            continue  # handled below as `Null`
+        op_check = str(op_raw_check)
+        if op_check not in _KNOWN_CONDITION_OPERATORS:
+            return True, (
+                f"`Condition.{op_check}` is not a recognized AWS IAM "
+                f"condition operator. AWS rejects unknown operators at "
+                f"policy-attach time, so the condition does not "
+                f"evaluate — the grant is effectively unconditional."
+            )
 
     for op_raw, kvs in condition.items():
         # YAML quirk: an unquoted `Null:` key parses to Python None

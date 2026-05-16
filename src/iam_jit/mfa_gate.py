@@ -162,6 +162,93 @@ def _high_risk_score_floor() -> int:
     return v
 
 
+def evaluate_for_route(
+    *,
+    cookie_value: str | None,
+    secret: str,
+    user_id: str,
+    risk_score: int,
+    api_token_record: Any = None,
+    now: int | None = None,
+) -> dict[str, Any]:
+    """High-level MFA evaluation for the request route — combines
+    cookie-based freshness with bearer-token-issuance fallback.
+
+    Used at both /api/v1/requests/preview and /api/v1/requests (submit)
+    so the two paths can't drift. Returns the full audit dict that
+    the route splats into the enforcement helper + audit log:
+
+      {
+        "mfa_gate_evaluated": True,
+        "mfa_source": "cookie" | "token_at_issuance"
+                      | "token_at_issuance_stale" | "token_no_mfa" | "absent",
+        "mfa_step_up_floor": int,
+        "would_require_mfa": bool,
+        "mfa_present": bool,
+        "mfa_age_seconds": int | None,
+        "mfa_reason": str,
+      }
+
+    Resolution priority (per [[mfa-compliance-strategy]] PCI §8.6):
+      1. iam_jit_session_mfa cookie (browser / session auth)
+      2. api_token_record.mfa_at_issuance within freshness window
+         (bearer-token auth — agent inherits human authorizer's MFA)
+      3. Nothing → mfa_present=False, gate decides whether high-risk
+         block fires
+    """
+    import time as _time
+
+    max_age = step_up_max_age_seconds()
+    floor = _high_risk_score_floor()
+
+    # 1. Cookie path.
+    cookie_result = verify(
+        cookie_value=cookie_value,
+        secret=secret,
+        expected_user_id=user_id,
+        max_age_seconds=max_age,
+    )
+    audit_dict = cookie_result.as_audit_dict()
+    source = "cookie" if cookie_result.present else "absent"
+
+    # 2. Bearer-token issuance fallback when the cookie path didn't
+    #    satisfy. Token record may be None (session auth, or token
+    #    minted before mfa_at_issuance tracking shipped).
+    if not cookie_result.present and api_token_record is not None:
+        mfa_at_issuance = getattr(api_token_record, "mfa_at_issuance", None)
+        if mfa_at_issuance is not None:
+            age = int(now if now is not None else _time.time()) - int(mfa_at_issuance)
+            if 0 <= age <= max_age:
+                audit_dict = {
+                    "mfa_present": True,
+                    "mfa_age_seconds": age,
+                    "mfa_reason": "ok_via_token_issuance",
+                }
+                source = "token_at_issuance"
+            else:
+                audit_dict = {
+                    "mfa_present": False,
+                    "mfa_age_seconds": age,
+                    "mfa_reason": "token_mfa_too_stale",
+                }
+                source = "token_at_issuance_stale"
+        else:
+            audit_dict = {
+                "mfa_present": False,
+                "mfa_age_seconds": None,
+                "mfa_reason": "token_lacks_mfa_evidence",
+            }
+            source = "token_no_mfa"
+
+    return {
+        "mfa_gate_evaluated": True,
+        "mfa_source": source,
+        "mfa_step_up_floor": floor,
+        "would_require_mfa": is_high_risk(risk_score),
+        **audit_dict,
+    }
+
+
 def step_up_max_age_seconds() -> int:
     """Return the max age of an iam_jit_session_mfa cookie that
     still counts as 'fresh'. Clamped to [30, 86400] seconds so a

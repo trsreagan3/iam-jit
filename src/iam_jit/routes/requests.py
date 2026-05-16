@@ -512,18 +512,15 @@ def preview_request(
             from .. import mfa_gate as _mfa_gate
             from ..middleware import _get_secret as _auth_secret_getter  # type: ignore[attr-defined]
             _mfa_cookie = request.cookies.get("iam_jit_session_mfa") if hasattr(request, "cookies") else None
-            _mfa_result = _mfa_gate.verify(
+            _preview_mfa_audit = _mfa_gate.evaluate_for_route(
                 cookie_value=_mfa_cookie,
                 secret=_auth_secret_getter(),
-                expected_user_id=user.id,
-                max_age_seconds=_mfa_gate.step_up_max_age_seconds(),
+                user_id=user.id,
+                risk_score=analysis.risk_score,
+                api_token_record=getattr(
+                    getattr(request, "state", None), "api_token_record", None,
+                ),
             )
-            _preview_mfa_audit = {
-                "mfa_gate_evaluated": True,
-                "mfa_step_up_floor": int(_mfa_gate._high_risk_score_floor()),
-                "would_require_mfa": _mfa_gate.is_high_risk(analysis.risk_score),
-                **_mfa_result.as_audit_dict(),
-            }
         except Exception:
             pass
 
@@ -774,23 +771,15 @@ def submit_request(
             from .. import mfa_gate as _mfa_gate
             from ..middleware import _get_secret as _auth_secret_getter  # type: ignore[attr-defined]
             mfa_cookie = request.cookies.get("iam_jit_session_mfa") if hasattr(request, "cookies") else None
-            mfa_secret = _auth_secret_getter()
-            mfa_result = _mfa_gate.verify(
+            _mfa_audit = _mfa_gate.evaluate_for_route(
                 cookie_value=mfa_cookie,
-                secret=mfa_secret,
-                expected_user_id=user.id,
-                max_age_seconds=_mfa_gate.step_up_max_age_seconds(),
+                secret=_auth_secret_getter(),
+                user_id=user.id,
+                risk_score=review_block.get("risk_score", 0),
+                api_token_record=getattr(
+                    getattr(request, "state", None), "api_token_record", None,
+                ),
             )
-            _mfa_audit = {
-                "mfa_gate_evaluated": True,
-                "mfa_step_up_floor": (
-                    int(_mfa_gate._high_risk_score_floor())
-                ),
-                "would_require_mfa": _mfa_gate.is_high_risk(
-                    review_block.get("risk_score", 0)
-                ),
-                **mfa_result.as_audit_dict(),
-            }
         except Exception:
             pass
 
