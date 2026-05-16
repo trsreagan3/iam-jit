@@ -400,6 +400,70 @@ TOOLS = [
         },
     },
     {
+        "name": "tail_grant",
+        "description": (
+            "Return recent AWS API events made under a JIT-issued "
+            "grant's role session — the 'what is alice's agent "
+            "doing right now with the grant I approved 10 min ago?' "
+            "view. Reads from the configured LiveActionTailSource "
+            "(default: null source returns empty; self-host admins "
+            "wire CloudTrailLookupSource; Enterprise plugin wires "
+            "EventBridge real-time streaming). Per "
+            "[[creates-never-mutates]] this only READS — never "
+            "modifies IAM. Per [[no-hosted-saas]] the query runs "
+            "against the customer's own CloudTrail in the customer's "
+            "own account. Returns the events plus the source's "
+            "self-description so the caller knows what they're "
+            "reading + the inherent freshness lag."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "required": ["grant_id"],
+            "properties": {
+                "grant_id": {
+                    "type": "string",
+                    "description": (
+                        "The iam-jit request ID whose issued role "
+                        "session you want to tail. The grant must be "
+                        "in `status.provisioned` state (role created)."
+                    ),
+                },
+                "since": {
+                    "type": "string",
+                    "description": (
+                        "Optional ISO-8601 UTC lower bound. Defaults "
+                        "to the grant's provisioned-at timestamp."
+                    ),
+                },
+                "until": {
+                    "type": "string",
+                    "description": (
+                        "Optional ISO-8601 UTC upper bound. Defaults "
+                        "to the grant's expires_at timestamp."
+                    ),
+                },
+                "aws_region": {
+                    "type": "string",
+                    "description": (
+                        "Optional AWS region code to narrow to. If "
+                        "omitted, the source's default region is used "
+                        "(CloudTrail is regional)."
+                    ),
+                },
+                "only_errors": {
+                    "type": "boolean",
+                    "default": False,
+                    "description": "If true, return only failed API calls (non-empty errorCode).",
+                },
+                "max_events": {
+                    "type": "integer",
+                    "default": 100,
+                    "description": "Max events to return (hard cap 1000 in OSS).",
+                },
+            },
+        },
+    },
+    {
         "name": "reduce_policy",
         "description": (
             "Apply deterministic reductions to a baseline policy. The "
@@ -848,6 +912,112 @@ def _list_my_templates_for_mcp(args: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def _tail_grant_for_mcp(args: dict[str, Any]) -> dict[str, Any]:
+    """Return CloudTrail events for the JIT-issued role session of
+    a given grant. See the `tail_grant` MCP tool definition for the
+    full contract; this function does the validation + lookup +
+    formatting."""
+    from .live_action_tail import (
+        TailQuery,
+        extract_tail_inputs_from_grant,
+        format_event_summary,
+        get_default_source,
+    )
+
+    grant_id = args.get("grant_id")
+    if not isinstance(grant_id, str) or not grant_id.strip():
+        return {
+            "error": "grant_id is required and must be a non-empty string",
+            "events": [],
+            "source": None,
+        }
+
+    since = args.get("since")
+    until = args.get("until")
+    aws_region = args.get("aws_region")
+    for field in ("since", "until", "aws_region"):
+        val = args.get(field)
+        if val is not None and not isinstance(val, str):
+            return {
+                "error": f"{field} must be a string if provided",
+                "events": [],
+                "source": None,
+            }
+
+    only_errors = args.get("only_errors", False)
+    if not isinstance(only_errors, bool):
+        return {
+            "error": "only_errors must be a boolean if provided",
+            "events": [],
+            "source": None,
+        }
+
+    max_events = args.get("max_events", 100)
+    if not isinstance(max_events, int) or isinstance(max_events, bool):
+        return {
+            "error": "max_events must be an integer if provided",
+            "events": [],
+            "source": None,
+        }
+    if max_events < 1:
+        return {
+            "error": "max_events must be >= 1",
+            "events": [],
+            "source": None,
+        }
+    # Hard cap matches CloudTrailLookupSource.HARD_MAX_EVENTS
+    max_events = min(max_events, 1000)
+
+    # Load the grant from the request store. Lazy import so MCP
+    # consumers without a configured store still get a clean error.
+    try:
+        from .app import _build_request_store_from_env
+
+        store = _build_request_store_from_env()
+        request = store.get(grant_id.strip())
+    except Exception as e:
+        return {
+            "error": f"could not load grant '{grant_id}': {e}",
+            "events": [],
+            "source": None,
+        }
+
+    base_query = extract_tail_inputs_from_grant(request)
+    if base_query is None:
+        return {
+            "error": (
+                f"grant '{grant_id}' has no provisioned role to tail "
+                "(status.provisioned missing or incomplete)"
+            ),
+            "events": [],
+            "source": None,
+        }
+
+    query = TailQuery(
+        role_name=base_query.role_name,
+        session_name=base_query.session_name,
+        account_id=base_query.account_id,
+        since=since or base_query.since,
+        until=until or base_query.until,
+        aws_region=aws_region or base_query.aws_region,
+        max_events=max_events,
+        only_errors=only_errors,
+    )
+
+    source = get_default_source()
+    events = source.fetch_events(query)
+    return {
+        "grant_id": grant_id,
+        "session_name": query.session_name,
+        "role_name": query.role_name,
+        "account_id": query.account_id,
+        "source": source.describe(),
+        "event_count": len(events),
+        "events": [e.to_dict() for e in events],
+        "summaries": [format_event_summary(e) for e in events],
+    }
+
+
 def _get_reduction_checklist_for_mcp(args: dict[str, Any]) -> dict[str, Any]:
     """Return the curated reduction checklist."""
     from .guided_reduction import get_checklist
@@ -1193,6 +1363,8 @@ def _handle_request(req: dict[str, Any]) -> dict[str, Any] | None:
             result_payload = _get_reduction_checklist_for_mcp(args)
         elif tool_name == "apply_reduction_checklist":
             result_payload = _apply_reduction_checklist_for_mcp(args)
+        elif tool_name == "tail_grant":
+            result_payload = _tail_grant_for_mcp(args)
         else:
             return _err(rid, -32601, f"unknown tool: {tool_name}")
         # MCP tool result format: { content: [{type: "text", text: "..."}] }

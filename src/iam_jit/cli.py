@@ -597,6 +597,119 @@ def dev_slack_mock(host: str, port: int) -> None:
     sys.exit(run_standalone(host=host, port=port))
 
 
+@main.command("tail")
+@click.argument("grant_id", type=str)
+@click.option(
+    "--since",
+    type=str,
+    default=None,
+    help="ISO-8601 UTC lower bound (default: grant's provisioned-at).",
+)
+@click.option(
+    "--until",
+    type=str,
+    default=None,
+    help="ISO-8601 UTC upper bound (default: grant's expires_at).",
+)
+@click.option(
+    "--region",
+    "aws_region",
+    type=str,
+    default=None,
+    help="Narrow to one AWS region (CloudTrail is regional).",
+)
+@click.option(
+    "--errors-only",
+    is_flag=True,
+    default=False,
+    help="Only show failed API calls (non-empty errorCode).",
+)
+@click.option(
+    "--max",
+    "max_events",
+    type=int,
+    default=100,
+    show_default=True,
+    help="Max events to display (hard cap 1000).",
+)
+def tail_cmd(
+    grant_id: str,
+    since: str | None,
+    until: str | None,
+    aws_region: str | None,
+    errors_only: bool,
+    max_events: int,
+) -> None:
+    """Show recent AWS API events for a JIT-issued grant's role session.
+
+    Per [[live-action-tail-pro-tier]]: the "what is alice's agent
+    doing right now with the grant I approved 10 min ago?" view.
+    Reads from the configured LiveActionTailSource (default: null
+    source). Self-host admins wire CloudTrailLookupSource in
+    bootstrap; the Enterprise plugin wires EventBridge streaming.
+
+    The grant must already be provisioned (status.provisioned set).
+    Output is one event per line in CloudTrail-descending order.
+
+    Example:
+
+    \b
+        iam-jit tail req-2026-05-17-alice-readonly --errors-only
+
+    """
+    from .app import _build_request_store_from_env
+    from .live_action_tail import (
+        TailQuery,
+        extract_tail_inputs_from_grant,
+        format_event_summary,
+        get_default_source,
+    )
+
+    try:
+        store = _build_request_store_from_env()
+        request = store.get(grant_id)
+    except Exception as e:
+        click.echo(f"could not load grant '{grant_id}': {e}", err=True)
+        sys.exit(2)
+
+    base_query = extract_tail_inputs_from_grant(request)
+    if base_query is None:
+        click.echo(
+            f"grant '{grant_id}' has no provisioned role to tail "
+            "(status.provisioned missing or incomplete)",
+            err=True,
+        )
+        sys.exit(2)
+
+    query = TailQuery(
+        role_name=base_query.role_name,
+        session_name=base_query.session_name,
+        account_id=base_query.account_id,
+        since=since or base_query.since,
+        until=until or base_query.until,
+        aws_region=aws_region or base_query.aws_region,
+        max_events=max(1, min(max_events, 1000)),
+        only_errors=errors_only,
+    )
+
+    source = get_default_source()
+    events = source.fetch_events(query)
+
+    click.echo(f"# grant: {grant_id}")
+    click.echo(f"# role:  {query.role_name} (session: {query.session_name})")
+    click.echo(f"# account: {query.account_id}")
+    click.echo(f"# source: {source.describe()}")
+    click.echo(f"# events: {len(events)}")
+    if not events:
+        click.echo(
+            "# (no events — check that the source is configured "
+            "and that the session window contains activity)"
+        )
+        return
+    for ev in events:
+        click.echo(format_event_summary(ev))
+
+
 @main.command("mcp-server")
 def mcp_server_cmd() -> None:
     """Run the iam-jit MCP server on stdio.
@@ -617,20 +730,27 @@ def mcp_server_cmd() -> None:
       }
     }
 
-    The agent gets access to four live tools (per [[no-nl-synthesis]]
+    The agent has access to a live tool surface (per [[no-nl-synthesis]]
     decision 2026-05-16; see docs/AGENTS.md for the reduction-loop
     pattern):
 
-      list_templates    — browse the AWS-managed + iam-jit catalog
-      get_template      — fetch a template's policy shape by name
-      score_iam_policy  — rate any policy 1-10 with per-factor breakdown
-      submit_policy     — submit a finished policy for grant issuance
+      list_templates             — browse the AWS-managed + iam-jit catalog
+      get_template               — fetch a template's policy shape by name
+      score_iam_policy           — rate any policy 1-10 with per-factor breakdown
+      submit_policy              — submit a finished policy for grant issuance
+      reduce_policy              — narrow a baseline along deny/scope axes
+      get_reduction_checklist    — list curated reduction options
+      apply_reduction_checklist  — apply checklist selections to a baseline
+      save_template              — save a custom policy to your personal library
+      list_my_templates          — list your saved policies
+      get_my_template            — fetch one of your saved policies
+      find_similar_templates     — find templates similar to a candidate
+      tail_grant                 — read recent CloudTrail events for a JIT grant
 
     Plus one tombstone (`generate_iam_policy`) that returns a
-    deprecation pointer to the four tools above. Natural-language
-    policy synthesis was removed in 0.4.0 after the 100-prompt
-    calibration measured it at 1.8% joint sufficiency — the agent
-    (with its codebase context + LLM) is the policy author now.
+    deprecation pointer to the live tools above. Natural-language
+    policy synthesis was removed in 0.4.0 — the agent (with its
+    codebase context + LLM) is the policy author now.
     """
     from .mcp_server import main as mcp_main
     sys.exit(mcp_main())
