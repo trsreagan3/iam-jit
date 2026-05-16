@@ -241,6 +241,102 @@ TOOLS = [
         },
     },
     {
+        "name": "save_template",
+        "description": (
+            "Save a policy as a NAMED TEMPLATE in your personal library. "
+            "Per [[evolving-preset-library]] — once you've authored a "
+            "policy that works (e.g. via score_iam_policy + iteration), "
+            "save it so next time the same access is needed you can "
+            "list_templates(source='personal-recurring') + get_template "
+            "instead of re-authoring. The library COMPOUNDS in value "
+            "as you use it. Per [[scorer-is-ground-truth]], the saved "
+            "template is just a starting point — the scorer re-evaluates "
+            "every submission. Past approval does NOT lower current risk."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "required": ["name", "policy"],
+            "properties": {
+                "name": {
+                    "type": "string",
+                    "description": (
+                        "Human-friendly name for the template (e.g. "
+                        "'payment-incident-read', 'rotate-staging-secret'). "
+                        "Must be unique within your personal library."
+                    ),
+                },
+                "policy": {
+                    "type": "object",
+                    "description": "The IAM policy document to save.",
+                },
+                "description": {
+                    "type": "string",
+                    "description": (
+                        "Optional free-text description of what this "
+                        "template is for. Helps you remember context "
+                        "when browsing your library later."
+                    ),
+                },
+                "source_grant_id": {
+                    "type": "string",
+                    "description": (
+                        "Optional: the grant id this template was "
+                        "derived from. Surfaces in the audit log as "
+                        "'based on saved template X originally from "
+                        "grant Y'."
+                    ),
+                },
+            },
+        },
+    },
+    {
+        "name": "list_my_templates",
+        "description": (
+            "List the templates in your personal library (saved via "
+            "save_template). Returns metadata only (no policy bodies — "
+            "use get_template for the full shape). To browse the broader "
+            "AWS-managed + iam-jit catalog, use list_templates instead."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {},
+        },
+    },
+    {
+        "name": "find_similar_templates",
+        "description": (
+            "Find templates in your personal library similar to a "
+            "candidate policy. Useful when you're about to author a "
+            "new policy — check whether you already have a saved one "
+            "that fits. Similarity is action-overlap (Jaccard) based; "
+            "returns top-K matches above min_similarity. NO fuzzy "
+            "natural-language matching — purely shape-based comparison."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "required": ["policy"],
+            "properties": {
+                "policy": {
+                    "type": "object",
+                    "description": "The candidate policy to compare against your library.",
+                },
+                "top_k": {
+                    "type": "integer",
+                    "default": 5,
+                    "description": "Max number of matches to return.",
+                },
+                "min_similarity": {
+                    "type": "number",
+                    "default": 0.3,
+                    "description": (
+                        "Minimum Jaccard similarity (0.0-1.0) to "
+                        "include a match. Default 0.3 ~ 'meaningful overlap'."
+                    ),
+                },
+            },
+        },
+    },
+    {
         "name": "submit_policy",
         "description": (
             "Submit a finished IAM policy for grant issuance. Runs the "
@@ -437,6 +533,136 @@ def _get_template_for_mcp(args: dict[str, Any]) -> dict[str, Any]:
             "policy": None,
         }
     return entry
+
+
+# ---------------------------------------------------------------------------
+# Personal preset library (per [[evolving-preset-library]] pre-launch slice)
+# ---------------------------------------------------------------------------
+
+
+def _current_user_id() -> str:
+    """The user id for personal-library operations.
+
+    MCP runs stdio-local; there's no authenticated session. We use a
+    process-stable identifier from env or fall back to 'local'. In
+    hosted/team mode (post-launch), this would derive from the bearer
+    token. For local-mode + tests, 'local' is fine — the library lives
+    on the user's laptop and they own all of it.
+    """
+    import os
+    return (
+        os.environ.get("IAM_JIT_USER_ID")
+        or os.environ.get("USER")
+        or "local"
+    )
+
+
+def _save_template_for_mcp(args: dict[str, Any]) -> dict[str, Any]:
+    """Save a policy as a named template in the user's personal library."""
+    import time
+    import uuid
+    from .user_templates_store import (
+        UserTemplate,
+        UserTemplateNameTaken,
+        compute_shape_hash,
+        get_default_store,
+    )
+
+    name = args.get("name")
+    policy = args.get("policy")
+    if not isinstance(name, str) or not name.strip():
+        return {"error": "name is required and must be a non-empty string", "template_id": None}
+    if not isinstance(policy, dict):
+        return {"error": "policy is required and must be a JSON object", "template_id": None}
+
+    desc = args.get("description")
+    if desc is not None and not isinstance(desc, str):
+        return {"error": "description must be a string if provided", "template_id": None}
+    source_grant = args.get("source_grant_id")
+    if source_grant is not None and not isinstance(source_grant, str):
+        return {"error": "source_grant_id must be a string if provided", "template_id": None}
+
+    store = get_default_store()
+    user_id = _current_user_id()
+    template = UserTemplate(
+        template_id=f"tmpl_{uuid.uuid4().hex[:12]}",
+        user_id=user_id,
+        name=name.strip(),
+        policy=policy,
+        created_at=int(time.time()),
+        source_grant_id=source_grant,
+        source_description=(desc or None),
+        shape_hash=compute_shape_hash(policy),
+    )
+    try:
+        store.put(template)
+    except UserTemplateNameTaken as e:
+        return {"error": str(e), "template_id": None}
+    return {
+        "template_id": template.template_id,
+        "name": template.name,
+        "shape_hash": template.shape_hash,
+        "saved_at": template.created_at,
+    }
+
+
+def _list_my_templates_for_mcp(args: dict[str, Any]) -> dict[str, Any]:
+    """List the current user's personal templates (metadata only)."""
+    from .user_templates_store import get_default_store
+
+    store = get_default_store()
+    user_id = _current_user_id()
+    templates = store.list_for_user(user_id)
+    return {
+        "templates": [
+            {
+                "template_id": t.template_id,
+                "name": t.name,
+                "created_at": t.created_at,
+                "shape_hash": t.shape_hash,
+                "reuse_count": t.reuse_count,
+                "source_grant_id": t.source_grant_id,
+                "source_description": t.source_description,
+            }
+            for t in templates
+        ],
+        "total": len(templates),
+    }
+
+
+def _find_similar_templates_for_mcp(args: dict[str, Any]) -> dict[str, Any]:
+    """Find templates in the user's library similar to a candidate policy."""
+    from .user_templates_store import find_similar, get_default_store
+
+    policy = args.get("policy")
+    if not isinstance(policy, dict):
+        return {"error": "policy is required and must be a JSON object", "matches": []}
+
+    top_k = args.get("top_k", 5)
+    if not isinstance(top_k, int) or isinstance(top_k, bool) or top_k < 1 or top_k > 50:
+        return {"error": "top_k must be an integer in [1, 50]", "matches": []}
+    min_sim = args.get("min_similarity", 0.3)
+    if not isinstance(min_sim, (int, float)) or isinstance(min_sim, bool) or min_sim < 0 or min_sim > 1:
+        return {"error": "min_similarity must be a number in [0.0, 1.0]", "matches": []}
+
+    store = get_default_store()
+    user_id = _current_user_id()
+    matches = find_similar(
+        store, user_id, policy, top_k=top_k, min_similarity=float(min_sim)
+    )
+    return {
+        "matches": [
+            {
+                "template_id": t.template_id,
+                "name": t.name,
+                "similarity": round(sim, 3),
+                "created_at": t.created_at,
+                "reuse_count": t.reuse_count,
+            }
+            for t, sim in matches
+        ],
+        "total": len(matches),
+    }
 
 
 def _submit_policy_for_mcp(args: dict[str, Any]) -> dict[str, Any]:
@@ -653,6 +879,12 @@ def _handle_request(req: dict[str, Any]) -> dict[str, Any] | None:
             result_payload = _get_template_for_mcp(args)
         elif tool_name == "submit_policy":
             result_payload = _submit_policy_for_mcp(args)
+        elif tool_name == "save_template":
+            result_payload = _save_template_for_mcp(args)
+        elif tool_name == "list_my_templates":
+            result_payload = _list_my_templates_for_mcp(args)
+        elif tool_name == "find_similar_templates":
+            result_payload = _find_similar_templates_for_mcp(args)
         else:
             return _err(rid, -32601, f"unknown tool: {tool_name}")
         # MCP tool result format: { content: [{type: "text", text: "..."}] }
