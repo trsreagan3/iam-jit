@@ -414,6 +414,20 @@ def test_list_templates_rejects_non_string_source() -> None:
     assert "source" in out["error"]
 
 
+def test_list_templates_rejects_non_string_tag() -> None:
+    out = _list_templates_for_mcp({"tag": ["audit"]})
+    assert "error" in out
+    assert "tag" in out["error"]
+
+
+def test_list_templates_filters_by_tag() -> None:
+    """LOW-15-02 closure: use_case_tags now wired to the browse API."""
+    out = _list_templates_for_mcp({"tag": "security-audit"})
+    assert "error" not in out
+    names = {t["name"] for t in out["templates"]}
+    assert "SecurityAudit" in names
+
+
 def test_list_templates_accepts_none_for_all_filters() -> None:
     """None means 'no filter' — that's the explicit no-arg case."""
     out = _list_templates_for_mcp({

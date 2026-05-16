@@ -1,39 +1,32 @@
 """Curated catalog of AWS-managed IAM policies used as recommender
 baselines.
 
-Per [[aws-managed-baseline-strategy]] — for many user requests
-(especially vague ones like "data lake access"), the right answer
-is to START from a known AWS-managed policy and narrow it, not
-synthesize from scratch.
+Per [[no-nl-synthesis]] (Stage 2, 2026-05-16): the fuzzy-match
+functions that used to live here (`match_baseline`, `best_baseline`,
+etc.) were deleted because they were part of the 1.8% joint-
+sufficiency failure mode. The catalog itself + browse API
+(`list_entries`, `get_entry`) is the surviving surface.
 
-This module is the registry + the fuzzy-match function. It does NOT
-hard-code the actual policy JSON (those are AWS's to maintain and
-some are large) — instead it captures:
+What this module captures per entry:
 
 - The policy's identity (name, ARN)
 - One-line summary
 - Service coverage (which AWS services it touches)
-- Access-type alignment (read-only / read-write)
-- Use-case tags for keyword matching against user prompts
-- A representative policy SHAPE (action list, scoping pattern) the
-  scorer can grade — this is what the recommender emits as the
-  starting point.
+- Access-type alignment (read-only / read-write / admin)
+- Use-case tags for browse-time filtering (e.g. "audit",
+  "incident-response") — exposed via `list_entries(tag=...)`
+- A representative policy SHAPE (action list, scoping pattern)
+  the scorer can grade
 
-When the catalog match succeeds, the recommender returns:
-
-    {
-        "policy": {...},          # the representative shape
-        "provenance": {
-            "baseline": "AmazonS3ReadOnlyAccess",
-            "baseline_arn": "arn:aws:iam::aws:policy/AmazonS3ReadOnlyAccess",
-            "reductions": [],     # populated by the narrowing step
-            "match_confidence": "high" | "medium" | "low",
-            "matched_tags": [...],
-        },
-    }
+When an agent picks a template via `get_entry(name)`, they get
+the full policy_shape ready to score / narrow / submit per the
+agent-driven reduction loop (see docs/AGENTS.md). No fuzzy
+matching — the agent picks by name + optional filter.
 
 Pre-launch ships a SMALL initial catalog (~10 most-common policies).
-Full catalog is post-launch.
+Full catalog + parameterized task templates + org-curated /
+personal-recurring tiers per [[evolving-preset-library]] are
+post-launch.
 """
 
 from __future__ import annotations
@@ -51,7 +44,7 @@ class ManagedPolicyEntry:
     summary: str
     services: tuple[str, ...]       # canonical AWS service names
     access_type: str                # "read-only" | "read-write" | "admin"
-    use_case_tags: tuple[str, ...]  # kebab-case keywords for fuzzy match
+    use_case_tags: tuple[str, ...]  # kebab-case browse-filter tags ("audit", "incident-response", etc.)
     policy_shape: dict[str, Any]    # representative policy JSON
 
 
@@ -451,6 +444,7 @@ def _entry_to_summary_dict(entry: ManagedPolicyEntry) -> dict[str, Any]:
         "summary": entry.summary,
         "services": list(entry.services),
         "access_type": entry.access_type,
+        "tags": list(entry.use_case_tags),
     }
 
 
@@ -468,6 +462,7 @@ def list_entries(
     service: str | None = None,
     source: str | None = None,
     query: str | None = None,
+    tag: str | None = None,
 ) -> list[dict[str, Any]]:
     """Browse the catalog. Returns metadata only (no policy_shape).
 
@@ -478,6 +473,8 @@ def list_entries(
     - source: 'aws-managed' | 'org-curated' | 'personal-recurring' — pre-launch
       only 'aws-managed' returns entries; the other two are reserved
     - query: case-insensitive substring on entry.name — NO fuzzy match
+    - tag: exact match against an entry's use_case_tags (e.g. 'audit',
+      'incident-response', 'explore'). Case-insensitive. NO fuzzy match.
     """
     out: list[ManagedPolicyEntry] = list(_CATALOG)
     if access_type is not None:
@@ -495,6 +492,9 @@ def list_entries(
     if query is not None and query.strip():
         q = query.strip().lower()
         out = [e for e in out if q in e.name.lower()]
+    if tag is not None and tag.strip():
+        t = tag.strip().lower()
+        out = [e for e in out if any(tg.lower() == t for tg in e.use_case_tags)]
     return [_entry_to_summary_dict(e) for e in out]
 
 

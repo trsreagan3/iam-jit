@@ -290,6 +290,16 @@ TOOLS = [
                         "use if you already know part of an exact name."
                     ),
                 },
+                "tag": {
+                    "type": "string",
+                    "description": (
+                        "Optional exact-match filter against an entry's "
+                        "use-case tags. Examples: 'audit', 'incident-"
+                        "response', 'explore', 'data-read', 'admin'. "
+                        "Case-insensitive. NO fuzzy / NL search — exact "
+                        "string match on the tag list."
+                    ),
+                },
             },
         },
     },
@@ -474,7 +484,7 @@ def _list_templates_for_mcp(args: dict[str, Any]) -> dict[str, Any]:
     """
     from .aws_managed_catalog import list_entries
 
-    for field in ("access_type", "service", "source", "query"):
+    for field in ("access_type", "service", "source", "query", "tag"):
         val = args.get(field)
         if val is not None and not isinstance(val, str):
             return {
@@ -488,6 +498,7 @@ def _list_templates_for_mcp(args: dict[str, Any]) -> dict[str, Any]:
         service=args.get("service"),
         source=args.get("source"),
         query=args.get("query"),
+        tag=args.get("tag"),
     )
     truncated = len(entries) > 50
     return {

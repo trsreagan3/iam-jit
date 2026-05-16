@@ -131,12 +131,35 @@ def test_list_entries_filter_by_query_substring_case_insensitive() -> None:
     assert list_entries(query="ThisStringIsNotInAnyTemplateName") == []
 
 
-def test_list_entries_summary_shape_excludes_policy_body() -> None:
+def test_list_entries_filter_by_tag_exact_match() -> None:
+    """Tag filter is an exact case-insensitive match against the
+    entry's use_case_tags list. NOT fuzzy."""
+    # SecurityAudit has 'security-audit' + 'auditor' + 'compliance' tags
+    out = list_entries(tag="security-audit")
+    names = {e["name"] for e in out}
+    assert "SecurityAudit" in names
+    # Tag the catalog doesn't have returns empty
+    assert list_entries(tag="not-a-real-tag-xyz") == []
+
+
+def test_list_entries_filter_by_tag_case_insensitive() -> None:
+    """Same tag lookup as above but with uppercase input — should
+    match regardless of case."""
+    out = list_entries(tag="SECURITY-AUDIT")
+    names = {e["name"] for e in out}
+    assert "SecurityAudit" in names
+
+
+def test_list_entries_summary_shape_includes_tags_excludes_policy_body() -> None:
     """The listing endpoint MUST NOT inline policy_shape — that would
-    bloat MCP responses. Use get_entry() for the full body."""
+    bloat MCP responses. Use get_entry() for the full body. The
+    summary DOES include tags so agents can filter on subsequent calls."""
     for entry in list_entries():
         assert "policy" not in entry
         assert "policy_shape" not in entry
+        assert "tags" in entry
+        assert isinstance(entry["tags"], list)
+        assert len(entry["tags"]) >= 1
 
 
 # ---------------------------------------------------------------------------

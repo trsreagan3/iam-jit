@@ -8,6 +8,15 @@ Scope: `src/iam_jit/aws_managed_catalog.py` (-104 LOC), `src/iam_jit/mcp_server.
 
 2 findings: 0 CRIT, 0 HIGH, 0 MED, 2 LOW. Clean deletion — no dangling callers, no broken imports, no behavior regressions. Both LOWs are documentation/dead-data hygiene gaps inherited from the deletion; neither affects runtime or security. Stage 2 lands as planned.
 
+## Closure status (2026-05-16, post-audit fix pass)
+
+| Finding | Status |
+|---|---|
+| LOW-15-01 (stale module docstring) | ✅ FIXED — docstring rewritten to describe browse API + reference [[no-nl-synthesis]] Stage 2 |
+| LOW-15-02 (use_case_tags dead data) | ✅ FIXED — wired into `list_entries(tag=...)` filter; surfaced in summary dict; MCP tool schema updated; 4 new tests |
+
+Test count after closures: **91 passing** (was 87; +4 tag-filter tests). All clean.
+
 All Stage-1 carry-forward items addressed:
 
 | Stage-1 carry-forward | Status |
