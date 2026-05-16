@@ -121,18 +121,43 @@ Done. Claude Code now has iam-jit as its AWS access layer.
 
 ### How agents use it
 
+iam-jit exposes **four MCP tools**. The agent (Claude Code, Cursor, etc.) drives the loop using its own LLM + codebase context; iam-jit scores and gates.
+
+| Tool | Purpose |
+|---|---|
+| `list_templates` | Browse the catalog (AWS-managed policies + your saved team templates) |
+| `get_template` | Fetch a template's policy shape |
+| `score_iam_policy` | Rate any policy 1–10; returns per-factor breakdown so the agent knows what to narrow |
+| `submit_policy` | Submit a policy for grant issuance; gated by score + safety mode |
+
+Typical flow:
+
 ```
 User: "investigate the wallet-svc latency spike"
-Claude: [calls iam-jit MCP, requests read-only on CloudWatch + ECS]
+Claude: [reads source code; knows wallet-svc lives in account 123,
+         uses ECS + CloudWatch + DynamoDB, doesn't touch secrets]
+Claude → iam-jit: list_templates(access_type="read-only")
+        → ReadOnlyAccess, ExploreReadOnly..., SecurityAudit, ...
+Claude → iam-jit: get_template("ExploreReadOnlyWithSensitiveExclusions")
+        → full policy shape
+Claude → iam-jit: score_iam_policy(<that policy>)
+        → score=7; factors=[broad_resource, …]
+Claude: [adds Deny on rds:*, narrows Resource to account 123 + us-east-1]
+Claude → iam-jit: score_iam_policy(<narrowed policy>)
+        → score=4
+Claude → iam-jit: submit_policy(<narrowed>) → AUTO-APPROVED
         Reading metrics, reading task definitions, reading logs...
         Found: connection pool exhausted on the v2.4 deploy.
         Want me to roll back?
 User: "yes"
-Claude: [calls iam-jit MCP, requests read-write on the specific task def ARN]
+Claude → iam-jit: submit_policy(<write policy on specific task def ARN>)
+        → score=3, AUTO-APPROVED (narrow write)
         Rolling back. Done.
 ```
 
 User sees ZERO friction prompts in the read-only investigation phase. The single write-elevation prompt is the moment that matters. Audit log shows the read/write split explicitly.
+
+**iam-jit does not synthesize policies from natural-language prompts.** The agent (with its source-code context) writes the JSON, picks templates, and narrows. iam-jit scores and gates — that's the whole job.
 
 ---
 
@@ -142,13 +167,16 @@ User sees ZERO friction prompts in the read-only investigation phase. The single
 
 ### What's included
 
+- **Template browser** — AWS-managed policies as starting points; one-click reductions (drop secrets / drop sensitive S3 / drop audit-infra writes); the `AdminLikeWithSensitiveExclusions` baseline as the recommended fallback when a user has no policy and no agent
+- **Agent-driven reduction** — even human-driven web-UI sessions are encouraged to pull up Claude Code / Cursor for the narrowing step; iam-jit's UI deliberately doesn't try to be smart about the policy (no NL synthesis, no "narrow this for me" button), the user's agent does that with codebase context
+- **Evolving preset library** — your team's recurring shapes get saved automatically after re-use; "based on `payment-incident-triage` template" in the audit trail; per-customer, no cross-tenant learning
 - **Multi-user accounts** with role-based access (requester / approver / admin)
 - **OIDC SSO** — Google Workspace + Okta out of the box; generic OIDC for Azure AD / Auth0 / others
 - **Slack approval bot** — approve/reject + request-changes modal in your existing Slack workspace; signed-request authenticated; team_id + channel pinning available
 - **Web UI + JSON API + CLI + MCP server** — all four are equal-class surfaces; agents and humans use the same endpoints
 - **Cross-account provisioning** — hub Lambda + destination accounts via cross-account assume-role
 - **Time-bounded, scored, audited** — same scoring engine as iam-risk-score; auto-revocation when grants expire
-- **Per-account LLM policy** — gate LLM narrative cost by account ("use LLM on prod, deterministic on dev")
+- **Per-account LLM policy** — gate LLM-narrative (scoring explanation) cost by account; iam-jit does not synthesize policies, only narrates scores
 - **MFA propagation** — propagates IdP MFA assertion through to `aws:MultiFactorAuthPresent` AWS Conditions
 - **Safety modes** — `read_write_swap` (default, lean-permissive) and `strict` (compliance environments); configurable per-deployment, per-account, per-session
 
@@ -186,12 +214,15 @@ See [docs/security/](docs/security/) for the BB+WB audit history (9 rounds shipp
 
 ## How it works (60 seconds)
 
-1. **Caller submits a policy request** (via MCP / CLI / API / web UI) — either a raw JSON policy, a selection from the AWS-managed catalog browser, or one drafted by an IDE agent with codebase context (Claude Code, Cursor). iam-jit scores and gates; it does not synthesize policies from natural-language prompts.
-2. **Scoring engine evaluates the policy** on a 1–10 risk scale. Pinned by the calibration corpus.
-3. **Decision gate** — auto-approve if score < threshold (configurable per deployment / per account / per access_type); else route to human approval via Slack + web UI.
-4. **Issue short-lived credentials** — provision the role in the destination account, return STS credentials to the caller. Default 1-hour TTL.
-5. **Audit log** — captures who, what, why, when, score, approver. Retained per the customer's compliance policy.
-6. **Auto-revoke at TTL** — role is deleted; credentials expire naturally.
+1. **Caller submits a policy** (via MCP / CLI / API / web UI) — either a raw JSON policy, a selection from the template browser, or one drafted by an IDE agent with codebase context. iam-jit scores and gates; it does not synthesize policies from natural-language prompts.
+2. **Scoring engine evaluates the policy** on a 1–10 risk scale + per-factor breakdown. Pinned by the calibration corpus.
+3. **Iteration (agent-driven)** — the agent reads the factor list, narrows what's not needed (drops services, narrows ARNs, adds explicit Denies), and re-scores. iam-jit doesn't reason about the user's task; the agent does that with its codebase context.
+4. **Decision gate** — auto-approve if score < threshold (configurable per deployment / per account / per access_type); else route to human approval via Slack + web UI.
+5. **Issue short-lived credentials** — provision the role in the destination account, return STS credentials to the caller. Default 1-hour TTL.
+6. **Audit log** — captures who, what, why, when, score, approver, template lineage if any. Retained per the customer's compliance policy.
+7. **Auto-revoke at TTL** — role is deleted; credentials expire naturally.
+
+See [docs/AGENTS.md](docs/AGENTS.md) for the agent-driven reduction-loop pattern in detail.
 
 ---
 
@@ -216,11 +247,14 @@ See [docs/security/](docs/security/) for the BB+WB audit history (9 rounds shipp
 
 ## Status
 
-- **iam-risk-score**: launched. Stable schema; CLI + API + GitHub Action shipped.
-- **iam-jit local**: in active development; targeted for v1 launch.
-- **iam-jit hosted / self-host**: in active development; targeted for v1 launch with multi-provider OIDC, Slack approval bot, per-account LLM policy.
+- **iam-risk-score**: launched. Stable schema; CLI + API + GitHub Action shipped. 1,489 / 1,489 AWS-managed-policy corpus pass rate.
+- **iam-jit local**: in active development; targeted for v1.0 launch.
+- **iam-jit hosted / self-host**: in active development; targeted for v1.0 launch with multi-provider OIDC, Slack approval bot, template browser, evolving preset library, agent-driven reduction loop, MFA propagation, safety modes.
 
-See [CHANGELOG.md](CHANGELOG.md) for release history.
+**What's NOT in iam-jit** (intentional, not deferred):
+- Natural-language policy synthesis. The deterministic generator was measured at 1.8% joint sufficiency rate ([docs/calibration/100-prompt-sufficiency-loop.md](docs/calibration/100-prompt-sufficiency-loop.md)); the LLM-augmented variant faces the same structural limit (no codebase context). iam-jit is scorer + catalog + gate — the agent (with codebase context + LLM) does the policy authoring.
+
+See [CHANGELOG.md](CHANGELOG.md) for release history and [docs/ROADMAP-V1.1.md](docs/ROADMAP-V1.1.md) for post-launch scope.
 
 ---
 
