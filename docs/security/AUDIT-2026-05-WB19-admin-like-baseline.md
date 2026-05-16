@@ -1,5 +1,17 @@
 # Round 19 audit — AdminLikeWithSensitiveExclusions baseline (#154)
 
+## Closure status (2026-05-16, post-audit fix pass)
+
+| Finding | Status |
+|---|---|
+| MED-19-01 (s3:ListBucket falls through Deny — missing bucket-level ARN) | ✅ FIXED — DenySensitiveBucketReads now lists BOTH bucket-level (no /*) AND object-level (/*) ARNs for each sensitive pattern. New test asserts both forms; matches sibling ExploreReadOnlyWithSensitiveExclusions. |
+| MED-19-02 (discrete actions don't cover audit-tampering vectors) | ✅ FIXED — block renamed DenyAuditInfraDestructionOrTampering; uses wildcards (cloudtrail:Stop*/Delete*/Update*, config:Stop*/Delete*, guardduty:Delete*/Disassociate*/Update*) + adds PutEventSelectors, PutInsightSelectors, logs:DeleteLogGroup/DeleteLogStream. cloudtrail:Update* closes the redirect-logs vector. New test asserts both destruction AND tampering wildcards. |
+| LOW-19-03 (ssm:GetParameter* wildcard) | ✅ FIXED — DenySecretData uses ssm:GetParameter* wildcard + adds secretsmanager:BatchGetSecretValue (AWS 2024-01 bypass). New test. |
+| LOW-19-04 (test comment refers to non-existent kms-block) | ✅ FIXED — comment updated. |
+| LOW-19-05 (summary missing IAM principal-pivot note) | ✅ FIXED — entry summary explicitly notes "this policy DOES NOT block IAM principal-pivot (Allow `iam:*` + `sts:*`). For full containment, pair with a Permissions Boundary." |
+
+Old test test_admin_like_baseline_denies_secret_data deleted — superseded by wildcard-form test. Post-closure: 25 catalog tests pass.
+
 Commit under review: `16f8803` (`feat(catalog): add AdminLikeWithSensitiveExclusions baseline (#154)`).
 
 Scope: catalog-data addition. One new `ManagedPolicyEntry` (`AdminLikeWithSensitiveExclusions`) in `src/iam_jit/aws_managed_catalog.py` + 6 sentinel tests in `tests/test_aws_managed_catalog.py`. No logic changes; no new functions; the browse API (`list_entries`, `get_entry`) is unchanged. The entry composes the third member of the broad-with-denylist family alongside `ExploreReadOnlyWithSensitiveExclusions` (read-only) and raw `AdministratorAccess` (unconstrained).

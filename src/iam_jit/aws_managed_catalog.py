@@ -435,11 +435,15 @@ _CATALOG: tuple[ManagedPolicyEntry, ...] = (
         summary=(
             "Broad admin power minus the things most admin tasks "
             "don't actually need: secret data reads, KMS decrypt, "
-            "sensitive-pattern S3 buckets, audit-infra destruction. "
-            "Recommended default over raw AdministratorAccess for "
-            "incident response, infrastructure work, and most "
-            "admin-class tasks. Customer can tune the denylist "
-            "per-deployment."
+            "sensitive-pattern S3 buckets, audit-infra destruction "
+            "+ tampering. Recommended default over raw "
+            "AdministratorAccess for incident response, "
+            "infrastructure work, and most admin-class tasks. "
+            "Customer can tune the denylist per-deployment. "
+            "NOTE: this policy DOES NOT block IAM principal-pivot "
+            "(Allow `iam:*` + `sts:*` lets the principal create a "
+            "new role + assume it, evading the Denies). For full "
+            "containment, pair with a Permissions Boundary."
         ),
         services=("*",),
         access_type="admin",
@@ -458,13 +462,15 @@ _CATALOG: tuple[ManagedPolicyEntry, ...] = (
                     "Resource": "*",
                 },
                 {
+                    # LOW-19-03 closure: use wildcards for the ssm read
+                    # family (covers GetParameterHistory + future variants)
+                    # + add BatchGetSecretValue (added by AWS 2024-01).
                     "Sid": "DenySecretData",
                     "Effect": "Deny",
                     "Action": [
                         "secretsmanager:GetSecretValue",
-                        "ssm:GetParameter",
-                        "ssm:GetParameters",
-                        "ssm:GetParametersByPath",
+                        "secretsmanager:BatchGetSecretValue",
+                        "ssm:GetParameter*",
                         "kms:Decrypt",
                         "kms:GenerateDataKey",
                         "kms:ReEncrypt*",
@@ -472,30 +478,59 @@ _CATALOG: tuple[ManagedPolicyEntry, ...] = (
                     "Resource": "*",
                 },
                 {
+                    # MED-19-01 closure: s3:ListBucket operates on the
+                    # BUCKET-level ARN (no trailing /*); object-level
+                    # actions need the /* form. Sibling
+                    # ExploreReadOnlyWithSensitiveExclusions gets this
+                    # right — both forms are needed.
                     "Sid": "DenySensitiveBucketReads",
                     "Effect": "Deny",
                     "Action": [
                         "s3:GetObject",
-                        "s3:ListBucket",
                         "s3:GetObjectVersion",
+                        "s3:ListBucket",
                     ],
                     "Resource": [
+                        "arn:aws:s3:::*-secrets",
                         "arn:aws:s3:::*-secrets/*",
+                        "arn:aws:s3:::*-sensitive",
                         "arn:aws:s3:::*-sensitive/*",
+                        "arn:aws:s3:::*-pii",
                         "arn:aws:s3:::*-pii/*",
+                        "arn:aws:s3:::*-customer-data",
                         "arn:aws:s3:::*-customer-data/*",
                     ],
                 },
                 {
-                    "Sid": "DenyAuditInfraDestruction",
+                    # MED-19-02 closure: use wildcards + cover audit-
+                    # tampering (not just destruction).
+                    # cloudtrail:UpdateTrail alone is sufficient for
+                    # audit evasion (redirect logs to attacker bucket).
+                    # cloudtrail:PutEventSelectors filters attacker
+                    # activity out of the log. config:Stop*Recorder
+                    # silently stops recording. guardduty:UpdateDetector
+                    # can disable findings. logs:DeleteLogGroup wipes
+                    # custom application logs.
+                    "Sid": "DenyAuditInfraDestructionOrTampering",
                     "Effect": "Deny",
                     "Action": [
-                        "cloudtrail:StopLogging",
-                        "cloudtrail:DeleteTrail",
-                        "config:DeleteConfigRule",
-                        "config:DeleteConfigurationRecorder",
-                        "guardduty:DeleteDetector",
-                        "guardduty:DisassociateFromMasterAccount",
+                        # CloudTrail: destruction + tampering
+                        "cloudtrail:Stop*",
+                        "cloudtrail:Delete*",
+                        "cloudtrail:Update*",
+                        "cloudtrail:PutEventSelectors",
+                        "cloudtrail:PutInsightSelectors",
+                        # Config: destruction + tampering
+                        "config:Stop*",
+                        "config:Delete*",
+                        # GuardDuty: destruction + tampering
+                        "guardduty:Delete*",
+                        "guardduty:Disassociate*",
+                        "guardduty:Update*",
+                        # CloudWatch Logs: destruction
+                        "logs:DeleteLogGroup",
+                        "logs:DeleteLogStream",
+                        # KMS: key destruction
                         "kms:ScheduleKeyDeletion",
                         "kms:DisableKey",
                     ],

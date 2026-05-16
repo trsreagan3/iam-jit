@@ -102,64 +102,105 @@ def test_admin_like_baseline_has_broad_allow_and_three_deny_statements() -> None
     assert stmts[0]["Effect"] == "Allow"
     assert stmts[0]["Action"] == "*"
     assert stmts[0]["Resource"] == "*"
-    # Statements 1-3 are the three deny-category blocks (audit-infra
-    # destruction + kms-key destruction are combined into one block).
+    # Statements 1-3 are the three deny-category blocks. KMS key
+    # destruction is bundled into the audit-tampering block since
+    # both are "preserve incident-investigation surface."
     deny_stmts = [s for s in stmts[1:] if s["Effect"] == "Deny"]
     assert len(deny_stmts) == 3
     deny_sids = {s.get("Sid") for s in deny_stmts}
     assert deny_sids == {
         "DenySecretData",
         "DenySensitiveBucketReads",
-        "DenyAuditInfraDestruction",
+        "DenyAuditInfraDestructionOrTampering",  # WB19 closure: rename + tampering scope
     }
 
 
-def test_admin_like_baseline_denies_secret_data() -> None:
+# NOTE: test_admin_like_baseline_denies_secret_data deleted —
+# superseded by test_admin_like_baseline_denies_secret_reads_via_wildcards
+# (LOW-19-03 closure) which asserts the WILDCARD form of ssm:GetParameter*
+# instead of the literal ssm:GetParameter.
+
+
+def test_admin_like_baseline_denies_sensitive_s3_patterns_at_both_resource_levels() -> None:
+    """MED-19-01 closure: the deny must list BOTH the bucket-level
+    ARN (no trailing /*) AND the object-level ARN (/*). Otherwise
+    s3:ListBucket (a bucket-level operation) falls through the Deny
+    and leaks key-name enumeration."""
     entry = next(
         e for e in _CATALOG
         if e.name == "AdminLikeWithSensitiveExclusions"
     )
-    deny_actions: list[str] = []
-    for s in entry.policy_shape["Statement"][1:]:
-        actions = s["Action"] if isinstance(s["Action"], list) else [s["Action"]]
-        deny_actions.extend(actions)
-    # Critical secret-reads must be in the deny list
-    for action in ["secretsmanager:GetSecretValue", "ssm:GetParameter",
-                   "kms:Decrypt", "kms:GenerateDataKey"]:
-        assert action in deny_actions, f"missing critical deny: {action}"
-
-
-def test_admin_like_baseline_denies_sensitive_s3_patterns() -> None:
-    entry = next(
-        e for e in _CATALOG
-        if e.name == "AdminLikeWithSensitiveExclusions"
-    )
-    # Find the sensitive-bucket-deny statement
     sensitive_deny = next(
         s for s in entry.policy_shape["Statement"]
         if s.get("Sid") == "DenySensitiveBucketReads"
     )
     resources = sensitive_deny["Resource"]
-    for pattern in ["*-secrets/*", "*-sensitive/*", "*-pii/*", "*-customer-data/*"]:
-        assert any(pattern in r for r in resources), f"missing pattern: {pattern}"
+    # Each sensitive pattern must appear in BOTH forms (bucket + object)
+    for pattern in ["*-secrets", "*-sensitive", "*-pii", "*-customer-data"]:
+        bucket_arn = f"arn:aws:s3:::{pattern}"
+        object_arn = f"arn:aws:s3:::{pattern}/*"
+        assert bucket_arn in resources, (
+            f"missing BUCKET-level ARN for {pattern}; s3:ListBucket "
+            f"would silently leak through the Deny"
+        )
+        assert object_arn in resources, (
+            f"missing OBJECT-level ARN for {pattern}; s3:GetObject "
+            f"would silently leak through the Deny"
+        )
 
 
-def test_admin_like_baseline_denies_audit_infra_destruction() -> None:
-    """Even with broad admin power, the audit trail must survive
-    a (hypothetical) compromise — cloudtrail/config/guardduty are
-    pinned + KMS key destruction is blocked."""
+def test_admin_like_baseline_denies_audit_infra_destruction_and_tampering() -> None:
+    """MED-19-02 closure: not just destruction — also tampering
+    (UpdateTrail redirects logs, PutEventSelectors filters them,
+    UpdateDetector disables findings). Real audit-evasion pivots
+    use these, not just *:Delete*.
+    """
     entry = next(
         e for e in _CATALOG
         if e.name == "AdminLikeWithSensitiveExclusions"
     )
     audit_deny = next(
         s for s in entry.policy_shape["Statement"]
-        if s.get("Sid") == "DenyAuditInfraDestruction"
+        if s.get("Sid") == "DenyAuditInfraDestructionOrTampering"
     )
     actions = audit_deny["Action"]
-    for action in ["cloudtrail:StopLogging", "config:DeleteConfigRule",
-                   "guardduty:DeleteDetector", "kms:ScheduleKeyDeletion"]:
-        assert action in actions, f"missing audit-infra-destruction deny: {action}"
+    # Wildcard families covering destruction
+    for expected in ["cloudtrail:Stop*", "cloudtrail:Delete*",
+                     "config:Stop*", "config:Delete*",
+                     "guardduty:Delete*",
+                     "kms:ScheduleKeyDeletion", "kms:DisableKey"]:
+        assert expected in actions, f"missing destruction deny: {expected}"
+    # Wildcard families + specific actions covering TAMPERING
+    # (audit-evasion vectors that aren't *:Delete*)
+    for expected in ["cloudtrail:Update*", "cloudtrail:PutEventSelectors",
+                     "guardduty:Update*",
+                     "logs:DeleteLogGroup"]:
+        assert expected in actions, (
+            f"missing audit-tampering deny: {expected} "
+            f"(real audit-evasion vector, not just destruction)"
+        )
+
+
+def test_admin_like_baseline_denies_secret_reads_via_wildcards() -> None:
+    """LOW-19-03 closure: use ssm:GetParameter* wildcard so newer
+    or related SSM read actions (GetParameterHistory) are also
+    blocked. And cover secretsmanager:BatchGetSecretValue (added
+    by AWS 2024-01)."""
+    entry = next(
+        e for e in _CATALOG
+        if e.name == "AdminLikeWithSensitiveExclusions"
+    )
+    secrets_deny = next(
+        s for s in entry.policy_shape["Statement"]
+        if s.get("Sid") == "DenySecretData"
+    )
+    actions = secrets_deny["Action"]
+    assert "ssm:GetParameter*" in actions, (
+        "ssm wildcard required to cover GetParameterHistory + future variants"
+    )
+    assert "secretsmanager:BatchGetSecretValue" in actions, (
+        "BatchGetSecretValue (added AWS 2024-01) was a known bypass"
+    )
 
 
 def test_admin_like_baseline_filterable_by_admin_access_type() -> None:
