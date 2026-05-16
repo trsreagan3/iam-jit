@@ -633,6 +633,94 @@ TOOLS = [
         },
     },
     # ---------------------------------------------------------------
+    # Applicability framework (per [[iam-jit-inapplicable-cases]]):
+    # agents call these BEFORE submitting a request so they don't
+    # waste cycles trying iam-jit on cases where it fundamentally
+    # can't help (k8s IRSA, EC2 instance profile, Lambda exec, etc.).
+    # Per [[agent-friendly-not-bypassable]] Lens A: every non-PROCEED
+    # response includes a next_action_hint so the agent has a path
+    # forward, not just a vague "can't help."
+    # ---------------------------------------------------------------
+    {
+        "name": "check_iam_jit_compatibility",
+        "description": (
+            "Ask iam-jit whether it can help with a specific use case "
+            "BEFORE submitting a grant request. Returns one of four "
+            "verdicts: 'proceed' (iam-jit-the-issuer can mint a JIT "
+            "role), 'use_existing' (the workload requires a fixed "
+            "pre-existing role — k8s IRSA, EC2 instance profile, "
+            "Lambda exec role; iam-jit can't help with issuance but "
+            "iam-jit-the-bouncer can gate), 'use_bouncer' (issuance "
+            "doesn't apply but the local proxy does), 'cannot_help' "
+            "(rare; escalate to human). Every non-PROCEED response "
+            "includes reasoning + next_action_hint so the agent has "
+            "a concrete path forward, not a vague error. Call this "
+            "FIRST when you're about to use iam-jit in an unfamiliar "
+            "environment — saves cycles trying iam-jit where it "
+            "fundamentally can't help."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "required": ["workload"],
+            "properties": {
+                "workload": {
+                    "type": "string",
+                    "enum": [
+                        "k8s_pod",
+                        "eks_pod_identity",
+                        "ec2_instance",
+                        "lambda_function",
+                        "ecs_task",
+                        "ci_runner",
+                        "agent_local_dev",
+                        "human_cli",
+                        "other",
+                    ],
+                    "description": (
+                        "What's making the AWS API call. Distinct "
+                        "workloads have distinct compatibility profiles."
+                    ),
+                },
+                "target_account_id": {
+                    "type": "string",
+                    "description": "Optional 12-digit AWS account ID.",
+                },
+                "target_services": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": (
+                        "Optional list of AWS service prefixes the "
+                        "workload needs to call (e.g. ['s3', 'dynamodb'])."
+                    ),
+                },
+                "description": {
+                    "type": "string",
+                    "description": "Free-text use-case description (audit log only).",
+                },
+                "existing_role_hint": {
+                    "type": "string",
+                    "description": (
+                        "Optional ARN of a pre-existing role the agent "
+                        "already knows about. If the verdict is "
+                        "'use_existing', this is echoed back so the "
+                        "agent has a single response to act on."
+                    ),
+                },
+            },
+        },
+    },
+    {
+        "name": "list_compatibility_catalog",
+        "description": (
+            "List the curated known-incompatible patterns iam-jit "
+            "uses to answer compatibility questions. Useful for "
+            "agents that want to see the full set of cases iam-jit "
+            "recognizes (k8s IRSA, EC2 IP, Lambda exec, ECS task, "
+            "OIDC CI, etc.) and the canonical next-action for each."
+        ),
+        "inputSchema": {"type": "object", "properties": {}},
+    },
+    # ---------------------------------------------------------------
     # iam-jit-bouncer (Lens A per [[agent-friendly-not-bypassable]]):
     # MCP-mirror of the iam-jit-bouncer CLI so agents can read +
     # configure the bouncer without shelling out. Every mutation here
@@ -1116,6 +1204,72 @@ def _list_my_templates_for_mcp(args: dict[str, Any]) -> dict[str, Any]:
         ],
         "total": len(templates),
     }
+
+
+# ---------------------------------------------------------------------------
+# Compatibility-checker MCP tools (per [[iam-jit-inapplicable-cases]])
+# ---------------------------------------------------------------------------
+
+
+def _check_compatibility_for_mcp(args: dict[str, Any]) -> dict[str, Any]:
+    """Run the applicability checker against an agent-provided intent.
+    Returns a self-describing verdict so the agent has a path forward
+    regardless of whether iam-jit can directly help."""
+    from .compatibility import (
+        CompatibilityIntent,
+        WorkloadType,
+        check_compatibility,
+    )
+
+    workload = args.get("workload")
+    if not isinstance(workload, str) or not workload.strip():
+        return {"error": "workload is required and must be a string"}
+    try:
+        workload_enum = WorkloadType(workload.strip())
+    except ValueError:
+        valid = ", ".join(w.value for w in WorkloadType)
+        return {
+            "error": f"unknown workload {workload!r}; must be one of: {valid}",
+        }
+
+    target_account_id = args.get("target_account_id")
+    if target_account_id is not None and not isinstance(target_account_id, str):
+        return {"error": "target_account_id must be a string if provided"}
+
+    target_services_raw = args.get("target_services")
+    if target_services_raw is not None and not isinstance(target_services_raw, list):
+        return {"error": "target_services must be a list if provided"}
+    target_services = target_services_raw or []
+    for item in target_services:
+        if not isinstance(item, str):
+            return {"error": "target_services items must all be strings"}
+
+    description = args.get("description")
+    if description is not None and not isinstance(description, str):
+        return {"error": "description must be a string if provided"}
+
+    existing_role_hint = args.get("existing_role_hint")
+    if existing_role_hint is not None and not isinstance(existing_role_hint, str):
+        return {"error": "existing_role_hint must be a string if provided"}
+
+    intent = CompatibilityIntent(
+        workload=workload_enum,
+        target_account_id=target_account_id,
+        target_services=tuple(target_services),
+        description=description,
+        existing_role_hint=existing_role_hint,
+    )
+    result = check_compatibility(intent)
+    return result.to_dict()
+
+
+def _list_compatibility_catalog_for_mcp(args: dict[str, Any]) -> dict[str, Any]:
+    """Return the curated known-incompatible catalog so agents can
+    see the full set of cases iam-jit recognizes."""
+    from .compatibility import list_catalog
+
+    entries = list_catalog()
+    return {"entries": entries, "count": len(entries)}
 
 
 # ---------------------------------------------------------------------------
@@ -1859,6 +2013,10 @@ def _handle_request(req: dict[str, Any]) -> dict[str, Any] | None:
             result_payload = _bouncer_tail_events_for_mcp(args)
         elif tool_name == "bouncer_tail_decisions":
             result_payload = _bouncer_tail_decisions_for_mcp(args)
+        elif tool_name == "check_iam_jit_compatibility":
+            result_payload = _check_compatibility_for_mcp(args)
+        elif tool_name == "list_compatibility_catalog":
+            result_payload = _list_compatibility_catalog_for_mcp(args)
         else:
             return _err(rid, -32601, f"unknown tool: {tool_name}")
         # MCP tool result format: { content: [{type: "text", text: "..."}] }

@@ -9,6 +9,40 @@ iam-jit is **scorer + catalog + gate**. It does NOT author IAM policies. The age
 
 This is the architectural choice that lets iam-jit be small, reliable, and fast. The agent has information iam-jit deliberately doesn't have (source code, customer infrastructure context, the user's literal request). The agent's LLM does the narrowing reasoning. iam-jit's deterministic scorer evaluates the output honestly — no LLM in the gate, no flexible interpretation.
 
+## When iam-jit can / can't help (call `check_iam_jit_compatibility` FIRST)
+
+**Always start by calling `check_iam_jit_compatibility`** with the workload type you're running in. It returns one of four verdicts so you don't waste cycles trying iam-jit where it fundamentally can't help:
+
+| Verdict | Meaning | What you do |
+|---|---|---|
+| `proceed` | iam-jit-the-issuer can mint a JIT role for this case | Continue with the normal flow below. |
+| `use_existing` | The workload requires a fixed pre-existing role (k8s IRSA, EC2 instance profile, Lambda exec role, etc.) | Use the role declared in `existing_role_arn` (echoed back if you provided `existing_role_hint`). Don't try to mint a new one — the workload won't accept it. |
+| `use_bouncer` | iam-jit-the-issuer can't help, but iam-jit-the-bouncer can | Run the local bouncer proxy (`iam-jit-bouncer`) to gate calls made via whichever role you ended up using. |
+| `cannot_help` | Neither iam-jit product applies | Escalate to a human; iam-jit isn't the right tool here. |
+
+Every non-PROCEED response includes `reasoning` + `next_action_hint` so you have a concrete path forward, not a vague error. This is the **agent-friendly-not-bypassable** contract: easy to configure for your use case, impossible to silently bypass.
+
+### Workload types
+
+When calling `check_iam_jit_compatibility`, classify yourself accurately:
+
+| Workload | Typical verdict | Why |
+|---|---|---|
+| `k8s_pod` / `eks_pod_identity` | `use_existing` | Pod is bound to an IRSA role at pod creation; can't choose another at runtime. |
+| `ec2_instance` | `use_existing` | Code on EC2 uses the instance profile attached at launch; can't swap. |
+| `lambda_function` | `use_existing` | Function uses the execution role pinned at function creation. |
+| `ecs_task` | `use_existing` | ECS task uses the Task Role from the task definition. |
+| `ci_runner` | `proceed` | CI runners are OIDC-federated; iam-jit can issue here. |
+| `agent_local_dev` | `proceed` | Local agent on a dev laptop — iam-jit's primary case. |
+| `human_cli` | `proceed` | Human at a terminal can assume any role they're permitted to. |
+| `other` | `proceed` (with fallback note) | Unknown workload; iam-jit tries, with bouncer as fallback. |
+
+Pass `target_account_id`, `target_services`, and `existing_role_hint` (if you know the existing role) for a more precise answer.
+
+### Why this matters
+
+iam-jit's whole model is "create a NEW short-lived role" (per [[creates-never-mutates]]). For workloads where the role is fixed at creation time (k8s IRSA, EC2 IP, Lambda exec), there's no point in iam-jit minting a role the workload can't use. Without the compatibility check, you'd waste cycles trying iam-jit, fail mysteriously, and eventually reach for "disable iam-jit, give me admin" — exactly the failure mode iam-jit is designed to prevent. **Always check first.**
+
 ## The four MCP tools
 
 | Tool | Purpose | Returns |
