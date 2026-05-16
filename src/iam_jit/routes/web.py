@@ -119,7 +119,9 @@ _SAFE_RETURN_TO = {
     "/",
     "/queue",
     "/requests/new",
-    "/requests/new/chat",
+    # /requests/new/chat removed (LOW-17-07 closure): chat route deleted
+    # in Stage 4 of [[no-nl-synthesis]]; pinning it in this allowlist
+    # would let a post-login redirect bounce to a deleted 404 page.
     "/requests/new/paste",
     "/admin",
     "/admin/accounts",
@@ -698,15 +700,13 @@ def new_chooser(request: Request) -> Response:
     user = _try_current_user(request)
     if user is None:
         return RedirectResponse(url="/login", status_code=303)
-    # When AI is enabled, conversational intake is the primary surface.
-    # Paste mode is still linked from the chat page and from the chooser
-    # for users who want a deterministic flow.
-    if review.is_review_enabled():
-        return RedirectResponse(url="/requests/new/chat", status_code=303)
+    # CRIT-17-02 closure: the AI-enabled branch used to redirect to
+    # /requests/new/chat, which was deleted in Stage 4 of
+    # [[no-nl-synthesis]]. The chooser now always renders the same
+    # template — agents use the MCP tools, humans paste raw JSON via
+    # /requests/new/paste.
     return _render(request, "new_request.html", active="new", user=user)
 
-
-_CHAT_PARSE_ERRORS_BEFORE_FALLBACK = 2
 
 
 def _check_banned(user: Any) -> Response | None:
@@ -734,82 +734,6 @@ def _check_banned(user: Any) -> Response | None:
 
         logging.getLogger("iam_jit.bans").exception("ban check failed")
     return None
-
-
-def _enforce_rate_limit(user: Any, *, kind: str = "chat") -> Response | None:
-    """Per-user rate limit. Soft cap → 429 + Retry-After.
-    Hard cap → ban via `bans_mod.ban_for_injection` (treated as DDoS,
-    same audit category as prompt-injection). Returns a Response on
-    refusal, None when allowed."""
-    if user is None:
-        return None
-    try:
-        decision = rate_limit_mod.get_default_limiter().check(user.id, kind=kind)
-    except Exception:
-        return None  # fail-open on limiter error
-    if decision.allowed:
-        return None
-
-    try:
-        audit.emit(
-            actor=user.id,
-            kind=(
-                "security.rate_limit_hard"
-                if decision.over_hard
-                else "security.rate_limit_soft"
-            ),
-            summary=(
-                f"chat rate-limit: {decision.count} requests in "
-                f"{decision.window_seconds}s "
-                f"(soft={decision.soft_cap}, hard={decision.hard_cap})"
-            ),
-            details={
-                "kind": kind,
-                "count": decision.count,
-                "window_seconds": decision.window_seconds,
-                "soft_cap": decision.soft_cap,
-                "hard_cap": decision.hard_cap,
-                "over_hard": decision.over_hard,
-            },
-        )
-    except Exception:
-        pass
-
-    if decision.over_hard:
-        try:
-            bans_mod.ban_for_injection(
-                store=bans_mod.get_default_store(),
-                user_id=user.id,
-                reasons=["chat-rate-ddos"],
-                snippets=[
-                    f"{decision.count} requests in "
-                    f"{decision.window_seconds}s, exceeds hard cap "
-                    f"{decision.hard_cap}"
-                ],
-                confidence="high",
-                is_admin=bool(getattr(user, "is_admin", False)),
-            )
-        except Exception:
-            import logging
-
-            logging.getLogger("iam_jit.bans").exception(
-                "auto-ban on rate-limit-hard failed"
-            )
-        return Response(
-            status_code=403,
-            content=(
-                "Account suspended for sustained excessive request rate "
-                "(possible DDoS). Contact your iam-jit administrator."
-            ),
-        )
-    return Response(
-        status_code=429,
-        content=(
-            f"Too many requests. Wait {decision.retry_after_seconds}s and "
-            "try again."
-        ),
-        headers={"Retry-After": str(max(1, decision.retry_after_seconds))},
-    )
 
 
 def _enforce_no_injection(
@@ -882,82 +806,6 @@ def _enforce_no_injection(
             ),
         )
     return None
-
-
-def _sign_intake_state(
-    history: list[dict[str, str]],
-    *,
-    parse_error_count: int = 0,
-) -> str:
-    payload = json.dumps(
-        {"history": history, "parse_error_count": parse_error_count},
-        separators=(",", ":"),
-    )
-    return auth_mod.sign_intake_state(_get_secret(), payload)
-
-
-def _sign_intake_conversation(history: list[dict[str, str]]) -> str:
-    """Backwards-compat wrapper. Prefer _sign_intake_state."""
-    return _sign_intake_state(history, parse_error_count=0)
-
-
-def _load_intake_state(token: str) -> dict[str, Any]:
-    """Decode the signed intake token. Returns a dict with `history` and
-    `parse_error_count`. Tolerates the legacy bare-list format."""
-    if not token:
-        return {"history": [], "parse_error_count": 0}
-    try:
-        raw = auth_mod.verify_intake_state(_get_secret(), token)
-    except Exception:
-        return {"history": [], "parse_error_count": 0}
-    try:
-        data = json.loads(raw)
-    except Exception:
-        return {"history": [], "parse_error_count": 0}
-
-    if isinstance(data, list):
-        # Legacy format: bare history list.
-        history_raw = data
-        parse_error_count = 0
-    elif isinstance(data, dict):
-        history_raw = data.get("history") or []
-        parse_error_count = int(data.get("parse_error_count") or 0)
-    else:
-        return {"history": [], "parse_error_count": 0}
-
-    history: list[dict[str, str]] = []
-    for item in history_raw:
-        if not isinstance(item, dict):
-            continue
-        role = item.get("role")
-        content = item.get("content")
-        if role in ("user", "assistant") and isinstance(content, str):
-            history.append({"role": role, "content": content})
-    return {"history": history, "parse_error_count": parse_error_count}
-
-
-def _load_intake_conversation(token: str) -> list[dict[str, str]]:
-    if not token:
-        return []
-    try:
-        raw = auth_mod.verify_intake_state(_get_secret(), token)
-    except Exception:
-        return []
-    try:
-        data = json.loads(raw)
-    except Exception:
-        return []
-    if not isinstance(data, list):
-        return []
-    out: list[dict[str, str]] = []
-    for item in data:
-        if not isinstance(item, dict):
-            continue
-        role = item.get("role")
-        content = item.get("content")
-        if role in ("user", "assistant") and isinstance(content, str):
-            out.append({"role": role, "content": content})
-    return out
 
 
 @router.get("/requests/new/paste", response_class=HTMLResponse)

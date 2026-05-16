@@ -52,7 +52,7 @@ curl -X DELETE {{ public_url }}/api/v1/tokens/&lt;token_hash&gt; \
   -H 'Authorization: Bearer iamjit_...'</pre>
 
     <h3>Submit a request from an agent</h3>
-    <p>The simplest path: <code>POST /api/v1/intake/turn</code> drives the conversational flow; <code>POST /api/v1/requests</code> takes a structured policy directly. Both accept the same bearer token.</p>
+    <p>For raw-JSON submission: <code>POST /api/v1/requests</code> with the bearer token. For agent-driven authoring with codebase context, run the iam-jit MCP server locally (<code>iam-jit mcp-server</code>) and use the <code>list_templates</code> / <code>get_template</code> / <code>score_iam_policy</code> / <code>submit_policy</code> tools — see docs/AGENTS.md.</p>
 
     <p class="muted small">Tokens never expire on their own. Revoke them when you're done. There's no rate limit yet — just don't share tokens between agents.</p>
   </details>

@@ -129,10 +129,15 @@ def test_return_to_known_path_is_preserved() -> None:
     from iam_jit.routes.web import _safe_return_to
 
     assert _safe_return_to("/queue") == "/queue"
-    assert _safe_return_to("/requests/new/chat") == "/requests/new/chat"
-    assert _safe_return_to("/requests/new/chat?resume=drft-abc") == (
-        "/requests/new/chat?resume=drft-abc"
-    )
+    # LOW-17-07 closure: /requests/new/chat was removed from the
+    # allowlist in Stage 4 of [[no-nl-synthesis]] (the route was
+    # deleted). /requests/new/paste is the surviving submission
+    # path that remains in the allowlist.
+    assert _safe_return_to("/requests/new/paste") == "/requests/new/paste"
+    assert _safe_return_to("/requests/new") == "/requests/new"
+    # /requests/new/chat should NO LONGER be preserved — it's not
+    # in the allowlist, so it falls back to "/"
+    assert _safe_return_to("/requests/new/chat") == "/"
 
 
 def test_return_to_unknown_path_falls_back_to_root() -> None:

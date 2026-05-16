@@ -67,18 +67,21 @@ def me(user: Annotated[User, Depends(current_user)]) -> dict[str, Any]:
                     "owner, history, runs schema validation + risk review."
                 ),
             },
-            "submit_request_conversational": {
-                "method": "POST",
-                "path": "/api/v1/intake/turn",
-                "body": {
-                    "conversation": [
-                        {"role": "user", "content": "<your request in plain English>"}
-                    ],
-                },
+            "agent_mcp_workflow": {
+                "method": "MCP",
+                "transport": "stdio",
+                "tools": [
+                    "list_templates",
+                    "get_template",
+                    "score_iam_policy",
+                    "submit_policy",
+                ],
                 "notes": (
-                    "Stateless turn-by-turn intake. Each call returns "
-                    "{ask, fields, complete, draft_policy, prefill}. When "
-                    "complete=true, hand 'prefill' to /api/v1/requests."
+                    "Agents author policies via the iam-jit MCP server "
+                    "with their own LLM + codebase context, then submit "
+                    "via submit_policy. The conversational intake API "
+                    "(/api/v1/intake/turn) was removed in 0.4.0 — see "
+                    "docs/AGENTS.md for the agent-driven reduction loop."
                 ),
             },
             "list_my_requests": {

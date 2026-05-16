@@ -68,26 +68,6 @@ def verify_session(secret: str, cookie_value: str, *, max_age: int = _SESSION_TT
     return raw.decode("utf-8")
 
 
-def sign_intake_state(secret: str, payload: str) -> str:
-    """Sign a short-lived intake conversation blob.
-
-    The conversation lives entirely in the signed cookie / form field —
-    no server-side store. Signature prevents tampering; max_age on verify
-    bounds replay.
-    """
-    signer = TimestampSigner(secret, salt="iam-jit-intake")
-    return signer.sign(payload.encode("utf-8")).decode("ascii")
-
-
-def verify_intake_state(secret: str, signed: str, *, max_age: int = 30 * 60) -> str:
-    signer = TimestampSigner(secret, salt="iam-jit-intake")
-    try:
-        raw = signer.unsign(signed.encode("ascii"), max_age=max_age)
-    except BadSignature as e:
-        raise BadSignature(f"invalid intake token: {e}") from e
-    return raw.decode("utf-8")
-
-
 def sign_magic_link(secret: str, email: str) -> str:
     """Issue a single-use magic-link token for the given email."""
     signer = TimestampSigner(secret, salt="iam-jit-magic-link")

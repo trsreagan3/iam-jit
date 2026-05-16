@@ -14,6 +14,20 @@ The unit + integration test suite remains green at the commit-message-claimed nu
 
 Stage 4 should not be declared "complete / NL deprecation done" until at minimum CRIT-17-01 + CRIT-17-02 + HIGH-17-03 are closed.
 
+## Closure status (2026-05-16, post-audit fix pass)
+
+| Finding | Status |
+|---|---|
+| CRIT-17-01 (cli_remote chat + submit-from-chat POST deleted route) | ✅ FIXED — both commands replaced with tombstone that prints deprecation message + exits 2; same pattern as Stage-3 agent-grant tombstone |
+| CRIT-17-02 (new_chooser redirects to deleted /chat) | ✅ FIXED — AI-enabled redirect removed; chooser always renders the paste-only card |
+| HIGH-17-03 (/me agent_hints advertises /api/v1/intake/turn) | ✅ FIXED — submit_request_conversational replaced with `agent_mcp_workflow` hint pointing at the four MCP tools; pinned test updated to assert new hint shape |
+| LOW-17-04 (new_request.html chooser links to /generate) | ✅ FIXED — Generate card removed; chooser is paste-only; surgical fix on `test_new_request_chooser_renders` (was pinning the deleted string) |
+| LOW-17-05 (tokens.html advertises /api/v1/intake/turn) | ✅ FIXED — rewritten to describe MCP tools path + /api/v1/requests JSON submit |
+| LOW-17-06 (orphan helpers in web.py + auth.py) | ✅ FIXED — deleted `_sign_intake_state`, `_sign_intake_conversation`, `_load_intake_state`, `_load_intake_conversation`, `_enforce_rate_limit`, `_CHAT_PARSE_ERRORS_BEFORE_FALLBACK` from web.py + `sign_intake_state`, `verify_intake_state` from auth.py (~165 LOC). `augment_for_debug` left in place because it has dedicated tests in `test_debug_bundles.py` (audit was incomplete on that one) |
+| LOW-17-07 (_safe_return_to allowlist + pinned test) | ✅ FIXED — `/requests/new/chat` removed from allowlist; pinned test updated to assert fallback to `/` |
+
+Post-closure test suite: **1897 passing, 29 skipped, 14 deselected.** Zero failures. #149 NL deprecation truly closed.
+
 ## Closure status
 
 | Finding | Status |

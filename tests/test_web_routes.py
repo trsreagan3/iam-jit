@@ -127,10 +127,13 @@ def test_all_requests_page_redirects_unauthenticated(client: TestClient) -> None
 
 
 def test_new_request_chooser_renders(as_dev: TestClient) -> None:
+    """Stage 4 [[no-nl-synthesis]]: 'Generate a new role' card removed
+    along with the NL synthesis path; only the Paste card remains."""
     resp = as_dev.get("/requests/new")
     assert resp.status_code == 200
-    assert "Generate a new role" in resp.text
     assert "Paste a role" in resp.text
+    # The Generate card was deleted; chooser is paste-only now
+    assert "Generate a new role" not in resp.text
 
 
 def test_new_paste_form_renders(as_dev: TestClient) -> None:

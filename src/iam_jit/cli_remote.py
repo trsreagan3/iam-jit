@@ -103,53 +103,29 @@ _token_opt = click.option(
 
 
 @remote.command("chat")
-@_url_opt
-@_token_opt
-@click.option(
-    "--conversation",
-    "convo_path",
-    type=click.Path(dir_okay=False),
-    help="JSON file holding the conversation so far. Read on entry, "
-    "rewritten on exit. Pass the same path across calls to continue.",
-)
-@click.argument("message")
-def chat(url: str | None, token: str | None, convo_path: str | None, message: str) -> None:
-    """Send one user turn to the LLM intake; print the response.
+def chat() -> None:
+    """REMOVED in iam-jit 0.4.0 — the conversational intake endpoint
+    (/api/v1/intake/turn) was deleted in Stage 4 of [[no-nl-synthesis]].
 
-    \b
-    First turn:
-      iam-jit remote chat --conversation /tmp/c.json "I need s3 read in 060392206767"
-
-    \b
-    Continue:
-      iam-jit remote chat --conversation /tmp/c.json "the analytics-prod bucket"
-
-    The response includes `complete: true` once the LLM has enough
-    fields to draft a policy. At that point the conversation file
-    holds a `prefill` block ready for `iam-jit remote submit-from-chat`.
+    Replacement workflow: the agent uses the MCP tools
+    (list_templates / get_template / score_iam_policy / submit_policy)
+    to author + submit a policy with codebase context, OR the human
+    pastes raw JSON via `iam-jit remote submit` (still works) or the
+    web UI's paste page. See docs/AGENTS.md.
     """
-    convo: list[dict[str, str]] = []
-    if convo_path and os.path.exists(convo_path):
-        try:
-            with open(convo_path) as f:
-                convo = json.load(f) or []
-        except Exception as e:
-            raise click.ClickException(f"could not read {convo_path}: {e}")
-    convo.append({"role": "user", "content": message})
-    with _client(url, token) as c:
-        resp = c.post("/api/v1/intake/turn", json={"conversation": convo})
-        _bail(resp)
-        body = resp.json()
-    if body.get("ask"):
-        convo.append({"role": "assistant", "content": body["ask"]})
-    if convo_path:
-        with open(convo_path, "w") as f:
-            json.dump(convo, f, indent=2)
-        click.echo(f"# conversation saved to {convo_path}", err=True)
-    _emit(body)
-
-
-# ---- submit ----
+    import click
+    click.secho(
+        "iam-jit remote chat has been removed in 0.4.0.",
+        fg="yellow", err=True,
+    )
+    click.echo(
+        "The conversational intake API was deleted in Stage 4 of the "
+        "NL-synthesis deprecation. Use the MCP tools (list_templates / "
+        "get_template / score_iam_policy / submit_policy) or "
+        "`iam-jit remote submit` with raw JSON instead. See docs/AGENTS.md.",
+        err=True,
+    )
+    raise click.exceptions.Exit(2)
 
 
 @remote.command("submit")
@@ -220,64 +196,30 @@ def submit(
         _emit(resp.json())
 
 
-@remote.command("submit-from-chat")
-@_url_opt
-@_token_opt
-@click.option("--conversation", "convo_path",
-              type=click.Path(exists=True, dir_okay=False), required=True,
-              help="Path to the conversation JSON written by `remote chat`.")
-def submit_from_chat(
-    url: str | None, token: str | None, convo_path: str
-) -> None:
-    """Submit a request using the prefill the LLM produced.
+@remote.command("chat")
+def chat() -> None:
+    """REMOVED in iam-jit 0.4.0 — the conversational intake endpoint
+    (/api/v1/intake/turn) was deleted in Stage 4 of [[no-nl-synthesis]].
 
-    Run `remote chat` until the response shows `complete: true`. The
-    last response carries `prefill` — pull those fields out of the
-    intake conversation by hitting `/api/v1/intake/turn` one more time
-    in the same conversation, then submit.
+    Replacement workflow: the agent uses the MCP tools
+    (list_templates / get_template / score_iam_policy / submit_policy)
+    to author + submit a policy with codebase context, OR the human
+    pastes raw JSON via `iam-jit remote submit` (still works) or the
+    web UI's paste page. See docs/AGENTS.md.
     """
-    with open(convo_path) as f:
-        convo = json.load(f)
-    with _client(url, token) as c:
-        # Re-issue the intake call to get the latest prefill snapshot.
-        resp = c.post("/api/v1/intake/turn", json={"conversation": convo})
-        _bail(resp)
-        intake = resp.json()
-        if not intake.get("complete"):
-            raise click.ClickException(
-                "intake conversation isn't complete yet — run "
-                "`remote chat` more turns until you see `complete: true`"
-            )
-        prefill = intake.get("prefill") or {}
-        spec: dict[str, Any] = {
-            "access_type": prefill.get("access_type") or "read-only",
-            "accounts": [
-                {"account_id": a.strip()}
-                for a in (prefill.get("accounts") or "").split(",")
-                if a.strip()
-            ],
-            "duration": {"duration_hours": int(prefill.get("duration_hours") or 24)},
-        }
-        if prefill.get("description"):
-            spec["description"] = prefill["description"]
-        if intake.get("draft_policy"):
-            spec["policy"] = intake["draft_policy"]
-        if prefill.get("ticket"):
-            spec["ticket"] = prefill["ticket"]
-        if prefill.get("assume_principal_arn"):
-            spec["assume_by"] = {"principal_arn": prefill["assume_principal_arn"]}
-        payload = {
-            "apiVersion": "iam-jit.dev/v1alpha1",
-            "kind": "RoleRequest",
-            "metadata": {},
-            "spec": spec,
-        }
-        resp2 = c.post("/api/v1/requests", json=payload)
-        _bail(resp2)
-        _emit(resp2.json())
-
-
-# ---- read / status ----
+    import click
+    click.secho(
+        "iam-jit remote chat has been removed in 0.4.0.",
+        fg="yellow", err=True,
+    )
+    click.echo(
+        "The conversational intake API was deleted in Stage 4 of the "
+        "NL-synthesis deprecation. Use the MCP tools (list_templates / "
+        "get_template / score_iam_policy / submit_policy) or "
+        "`iam-jit remote submit` with raw JSON instead. See docs/AGENTS.md.",
+        err=True,
+    )
+    raise click.exceptions.Exit(2)
 
 
 @remote.command("status")

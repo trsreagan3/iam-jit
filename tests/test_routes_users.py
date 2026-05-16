@@ -27,7 +27,12 @@ def test_me_returns_agent_hints_for_token_minting(as_dev: TestClient) -> None:
     assert hints["revoke_token"]["path"].startswith("/api/v1/tokens/")
     # Submission paths
     assert hints["submit_request_structured"]["path"] == "/api/v1/requests"
-    assert hints["submit_request_conversational"]["path"] == "/api/v1/intake/turn"
+    # HIGH-17-03 closure: submit_request_conversational pointed at the
+    # /api/v1/intake/turn route deleted in Stage 4 of [[no-nl-synthesis]].
+    # Replaced by an agent_mcp_workflow hint pointing at the MCP tool triad.
+    assert "agent_mcp_workflow" in hints
+    assert "submit_policy" in hints["agent_mcp_workflow"]["tools"]
+    assert "submit_request_conversational" not in hints
     # Read paths
     assert hints["list_my_requests"]["path"] == "/api/v1/requests"
     assert "hide_cancelled" in hints["list_my_requests"]["query"]
