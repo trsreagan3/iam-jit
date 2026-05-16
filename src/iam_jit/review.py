@@ -3651,11 +3651,17 @@ def _deterministic(
         # AND has the right to bind a role to it. The narrow ARN doesn't
         # mitigate — if it points at an admin-ish role, the result is
         # RCE-as-admin. Floor at 9 regardless of resource scope.
+        #
+        # CLUSTER E NOTE (2026-05-16): I tried demoting this to 7 for
+        # narrow-PassRole shapes (EKS nodegroup controller pattern)
+        # and it regressed 15+ corpus examples that test PassRole-on-
+        # narrow-admin-role attacks. The deterministic scorer cannot
+        # know whether the named target role is admin without analyzing
+        # it — so the floor stays 9. The right fix is at the
+        # RECOMMENDER layer: agent-shape recognition for legitimate
+        # CI/CD patterns. Tracked as #144 follow-up.
         floor = 9
         score = max(score, floor)
-        # Find which actions matched. Use the glob-aware check so a
-        # wildcard action like `lambda:Create*` is included in the
-        # display (rather than producing an empty list and crashing).
         which = sorted([
             a for a in action_names
             if _action_covers_any(a, _CODE_EXECUTION_PRIMITIVES_LC)
