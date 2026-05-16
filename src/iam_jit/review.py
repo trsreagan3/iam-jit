@@ -3451,10 +3451,55 @@ def _deterministic(
                         "primitives."
                     )
                 elif service in effective_sensitive:
-                    score = max(score, 7)
-                    factors.append(
-                        f"Wildcard within sensitive service action: `{action}`"
+                    # Cluster B (round-14): when the action-wildcard is
+                    # a READ-class operation (Get*/List*/Describe*/
+                    # Search*/Lookup*) AND the request is marked read-
+                    # only, the wildcard expansion is bounded to read
+                    # APIs in the sensitive service — not state-changing
+                    # ones. Demote the floor so canonical security-
+                    # audit shapes (Wiz, organizations-audit, etc.)
+                    # don't trip the "human review required" gate.
+                    #
+                    # Surgical: this only affects WILDCARDS THAT END
+                    # WITH a read verb. `iam:*` or `iam:Delete*` still
+                    # max-flag at 7. `iam:Get*` / `kms:List*` etc.
+                    # drop to 4 when read-only.
+                    request_is_read_only = (
+                        (request.get("spec") or {}).get("access_type")
+                        in ("read", "read-only")
                     )
+                    action_verb_part = (
+                        action.split(":", 1)[1] if ":" in action else action
+                    ).lower()
+                    read_verb_wildcards = (
+                        "get*", "list*", "describe*", "search*",
+                        "lookup*", "batchget*", "head*", "query*",
+                        "scan*",
+                    )
+                    is_read_wildcard = any(
+                        action_verb_part == pfx
+                        or action_verb_part.startswith(pfx[:-1])
+                        and action_verb_part.endswith("*")
+                        and not any(
+                            x in action_verb_part
+                            for x in ("delete", "put", "create", "update",
+                                       "modify", "attach", "detach", "remove",
+                                       "revoke", "set", "write")
+                        )
+                        for pfx in read_verb_wildcards
+                    )
+                    if is_read_wildcard and request_is_read_only:
+                        score = max(score, 4)
+                        factors.append(
+                            f"Read-class wildcard in sensitive service: "
+                            f"`{action}` (bounded to read APIs only "
+                            "under read-only request)"
+                        )
+                    else:
+                        score = max(score, 7)
+                        factors.append(
+                            f"Wildcard within sensitive service action: `{action}`"
+                        )
                 else:
                     action_part = (action.split(":", 1)[1] if ":" in action else action).lower()
                     destructive_prefixes_lc = (
