@@ -376,3 +376,317 @@ def test_generate_iam_policy_baseline_fallback_also_has_deprecation() -> None:
     })
     # Either matched a baseline OR synthesized — either way deprecation present
     assert "deprecation" in result
+
+
+def test_generate_iam_policy_empty_task_error_also_has_deprecation() -> None:
+    """LOW-14-07: when generate_iam_policy is called with an empty
+    task, the error response ALSO carries the deprecation block so
+    confused agents get the same migration pointer."""
+    from iam_jit.mcp_server import _generate_for_mcp
+    result = _generate_for_mcp({"task": ""})
+    assert "deprecation" in result
+    assert result["policy"] is None
+    assert "error" in result
+
+
+# ---------------------------------------------------------------------------
+# Audit findings — MED-14-01: list_templates type validation
+# ---------------------------------------------------------------------------
+
+
+def test_list_templates_rejects_non_string_service() -> None:
+    out = _list_templates_for_mcp({"service": {"inject": 1}})
+    assert "error" in out
+    assert "service" in out["error"]
+    assert out["templates"] == []
+    assert out["total"] == 0
+
+
+def test_list_templates_rejects_non_string_query() -> None:
+    out = _list_templates_for_mcp({"query": 42})
+    assert "error" in out
+    assert "query" in out["error"]
+
+
+def test_list_templates_rejects_non_string_access_type() -> None:
+    out = _list_templates_for_mcp({"access_type": ["read-only"]})
+    assert "error" in out
+    assert "access_type" in out["error"]
+
+
+def test_list_templates_rejects_non_string_source() -> None:
+    out = _list_templates_for_mcp({"source": True})  # bool, not str
+    assert "error" in out
+    assert "source" in out["error"]
+
+
+def test_list_templates_accepts_none_for_all_filters() -> None:
+    """None means 'no filter' — that's the explicit no-arg case."""
+    out = _list_templates_for_mcp({
+        "access_type": None, "service": None,
+        "source": None, "query": None,
+    })
+    assert "error" not in out
+    assert len(out["templates"]) >= 1
+
+
+# ---------------------------------------------------------------------------
+# Audit findings — MED-14-02: submit_policy account-item validation
+# ---------------------------------------------------------------------------
+
+
+def test_submit_policy_rejects_non_string_account_items() -> None:
+    """MED-14-02: ints/dicts/None in the accounts list don't slip
+    through to the would_submit payload."""
+    env_patch = {"IAM_JIT_URL": "", "IAM_JIT_TOKEN": ""}
+    with patch.dict(os.environ, env_patch, clear=False):
+        result = _submit_policy_for_mcp({
+            "policy": _safe_policy(),
+            "description": "x",
+            "accounts": [123, None, {"evil": "object"}, "111111111111"],
+        })
+    assert result["request_id"] is None
+    assert "accounts" in result["error"]
+
+
+def test_submit_policy_rejects_empty_string_account_items() -> None:
+    env_patch = {"IAM_JIT_URL": "", "IAM_JIT_TOKEN": ""}
+    with patch.dict(os.environ, env_patch, clear=False):
+        result = _submit_policy_for_mcp({
+            "policy": _safe_policy(),
+            "description": "x",
+            "accounts": ["111111111111", "  "],  # second is whitespace-only
+        })
+    assert result["request_id"] is None
+    assert "accounts" in result["error"]
+
+
+# ---------------------------------------------------------------------------
+# Audit findings — MED-14-03: assume_principal_arn / ticket type checks
+# ---------------------------------------------------------------------------
+
+
+def test_submit_policy_drops_non_string_assume_principal_arn() -> None:
+    """MED-14-03: dict/list/number assume_principal_arn is silently
+    dropped (not echoed into would_submit)."""
+    env_patch = {"IAM_JIT_URL": "", "IAM_JIT_TOKEN": ""}
+    with patch.dict(os.environ, env_patch, clear=False):
+        result = _submit_policy_for_mcp({
+            "policy": _safe_policy(),
+            "description": "x",
+            "accounts": ["111111111111"],
+            "assume_principal_arn": {"inject": "object"},
+        })
+    spec = result["would_submit"]["spec"]
+    assert "assume_principal_arn" not in spec
+
+
+def test_submit_policy_drops_non_string_ticket() -> None:
+    env_patch = {"IAM_JIT_URL": "", "IAM_JIT_TOKEN": ""}
+    with patch.dict(os.environ, env_patch, clear=False):
+        result = _submit_policy_for_mcp({
+            "policy": _safe_policy(),
+            "description": "x",
+            "accounts": ["111111111111"],
+            "ticket": ["array", "inject"],
+        })
+    spec = result["would_submit"]["spec"]
+    assert "ticket" not in spec
+
+
+def test_submit_policy_keeps_valid_string_assume_principal_arn_and_ticket() -> None:
+    """Confirm the validator doesn't reject the happy path."""
+    env_patch = {"IAM_JIT_URL": "", "IAM_JIT_TOKEN": ""}
+    with patch.dict(os.environ, env_patch, clear=False):
+        result = _submit_policy_for_mcp({
+            "policy": _safe_policy(),
+            "description": "x",
+            "accounts": ["111111111111"],
+            "assume_principal_arn": "arn:aws:iam::111111111111:role/alice",
+            "ticket": "JIRA-1234",
+        })
+    spec = result["would_submit"]["spec"]
+    assert spec["assume_principal_arn"] == "arn:aws:iam::111111111111:role/alice"
+    assert spec["ticket"] == "JIRA-1234"
+
+
+# ---------------------------------------------------------------------------
+# Audit findings — LOW-14-08: duration_hours must reject bool
+# ---------------------------------------------------------------------------
+
+
+def test_submit_policy_rejects_bool_duration_hours() -> None:
+    """LOW-14-08: bool subclasses int in Python; we explicitly
+    reject so True doesn't slip through as duration=1."""
+    env_patch = {"IAM_JIT_URL": "", "IAM_JIT_TOKEN": ""}
+    with patch.dict(os.environ, env_patch, clear=False):
+        result = _submit_policy_for_mcp({
+            "policy": _safe_policy(),
+            "description": "x",
+            "accounts": ["111111111111"],
+            "duration_hours": True,
+        })
+    assert "duration_hours" in result["error"]
+
+
+# ---------------------------------------------------------------------------
+# Audit findings — MED-14-04: HTTP submission branch coverage via respx
+# ---------------------------------------------------------------------------
+
+# Use respx for httpx mocking. respx>=0.21 is already a test dep
+# per pyproject.toml.
+respx = pytest.importorskip("respx")
+import httpx  # noqa: E402  (after pytest.importorskip)
+
+
+@respx.mock
+def test_submit_policy_http_success_returns_request_id() -> None:
+    """Backend returns 200 with request_id + status → submit_policy
+    surfaces them to the agent."""
+    respx.post("http://iam-jit.test/api/v1/requests").mock(
+        return_value=httpx.Response(200, json={
+            "request_id": "req_abc123",
+            "status": "approved",
+            "review_url": "http://iam-jit.test/requests/req_abc123",
+        }),
+    )
+    env_patch = {
+        "IAM_JIT_URL": "http://iam-jit.test",
+        "IAM_JIT_TOKEN": "test-token-secret-xyz",
+    }
+    with patch.dict(os.environ, env_patch, clear=False):
+        result = _submit_policy_for_mcp({
+            "policy": _safe_policy(),
+            "description": "x",
+            "accounts": ["111111111111"],
+        })
+    assert result["submitted"] is True
+    assert result["request_id"] == "req_abc123"
+    assert result["auto_approved"] is True
+    assert result["review_url"] == "http://iam-jit.test/requests/req_abc123"
+    # Score still surfaced from the local pre-check
+    assert result["score"] is not None
+    # Critical: token must NOT appear anywhere in the response payload
+    import json as _json
+    payload_str = _json.dumps(result, default=str)
+    assert "test-token-secret-xyz" not in payload_str
+
+
+@respx.mock
+def test_submit_policy_http_400_returns_error_without_leaking_token() -> None:
+    """Backend rejects → submit_policy reports HTTP status, includes
+    truncated body, and does NOT leak the bearer token."""
+    respx.post("http://iam-jit.test/api/v1/requests").mock(
+        return_value=httpx.Response(400, text="invalid policy"),
+    )
+    env_patch = {
+        "IAM_JIT_URL": "http://iam-jit.test",
+        "IAM_JIT_TOKEN": "test-token-secret-xyz",
+    }
+    with patch.dict(os.environ, env_patch, clear=False):
+        result = _submit_policy_for_mcp({
+            "policy": _safe_policy(),
+            "description": "x",
+            "accounts": ["111111111111"],
+        })
+    assert result["submitted"] is False
+    assert result["request_id"] is None
+    assert "HTTP 400" in result["error"]
+    import json as _json
+    payload_str = _json.dumps(result, default=str)
+    assert "test-token-secret-xyz" not in payload_str
+
+
+@respx.mock
+def test_submit_policy_http_500_returns_error_without_leaking_token() -> None:
+    respx.post("http://iam-jit.test/api/v1/requests").mock(
+        return_value=httpx.Response(500, text="x" * 1000),
+    )
+    env_patch = {
+        "IAM_JIT_URL": "http://iam-jit.test",
+        "IAM_JIT_TOKEN": "another-secret",
+    }
+    with patch.dict(os.environ, env_patch, clear=False):
+        result = _submit_policy_for_mcp({
+            "policy": _safe_policy(),
+            "description": "x",
+            "accounts": ["111111111111"],
+        })
+    assert result["submitted"] is False
+    assert "HTTP 500" in result["error"]
+    # 400-char body truncation
+    assert len(result["error"]) < 500
+    import json as _json
+    payload_str = _json.dumps(result, default=str)
+    assert "another-secret" not in payload_str
+
+
+@respx.mock
+def test_submit_policy_http_connection_error_handled_gracefully() -> None:
+    """Backend connection refused → no crash, structured error,
+    no token leak."""
+    respx.post("http://iam-jit.test/api/v1/requests").mock(
+        side_effect=httpx.ConnectError("connection refused"),
+    )
+    env_patch = {
+        "IAM_JIT_URL": "http://iam-jit.test",
+        "IAM_JIT_TOKEN": "test-token-secret-xyz",
+    }
+    with patch.dict(os.environ, env_patch, clear=False):
+        result = _submit_policy_for_mcp({
+            "policy": _safe_policy(),
+            "description": "x",
+            "accounts": ["111111111111"],
+        })
+    assert result["submitted"] is False
+    assert "HTTP submission failed" in result["error"]
+    import json as _json
+    payload_str = _json.dumps(result, default=str)
+    assert "test-token-secret-xyz" not in payload_str
+
+
+@respx.mock
+def test_submit_policy_http_non_json_response_does_not_crash() -> None:
+    """If backend returns non-JSON 200, the body=={} fallback fires
+    and submit_policy still returns a structured response."""
+    respx.post("http://iam-jit.test/api/v1/requests").mock(
+        return_value=httpx.Response(
+            200,
+            content=b"<html>not json</html>",
+            headers={"content-type": "text/html"},
+        ),
+    )
+    env_patch = {
+        "IAM_JIT_URL": "http://iam-jit.test",
+        "IAM_JIT_TOKEN": "test-token-secret-xyz",
+    }
+    with patch.dict(os.environ, env_patch, clear=False):
+        result = _submit_policy_for_mcp({
+            "policy": _safe_policy(),
+            "description": "x",
+            "accounts": ["111111111111"],
+        })
+    assert result["submitted"] is True
+    assert result["request_id"] is None  # body parse fallback yields no id
+    # No crash; structured response returned
+
+
+@respx.mock
+def test_submit_policy_strips_trailing_slash_from_url() -> None:
+    """IAM_JIT_URL='http://iam-jit.test/' should still POST to
+    /api/v1/requests (no double-slash bug)."""
+    respx.post("http://iam-jit.test/api/v1/requests").mock(
+        return_value=httpx.Response(200, json={"request_id": "req_1"}),
+    )
+    env_patch = {
+        "IAM_JIT_URL": "http://iam-jit.test/",  # trailing slash
+        "IAM_JIT_TOKEN": "test-token-secret-xyz",
+    }
+    with patch.dict(os.environ, env_patch, clear=False):
+        result = _submit_policy_for_mcp({
+            "policy": _safe_policy(),
+            "description": "x",
+            "accounts": ["111111111111"],
+        })
+    assert result["submitted"] is True
+    assert result["request_id"] == "req_1"

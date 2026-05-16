@@ -465,8 +465,23 @@ _DEPRECATION_BLOCK = {
 
 
 def _list_templates_for_mcp(args: dict[str, Any]) -> dict[str, Any]:
-    """Browse the iam-jit template catalog (metadata only)."""
+    """Browse the iam-jit template catalog (metadata only).
+
+    Input validation per MED-14-01: every filter arg must be a
+    string if provided; otherwise return a structured rejection
+    (not a raise) so the agent gets a useful error rather than
+    a generic -32603 internal-error wrapper.
+    """
     from .aws_managed_catalog import list_entries
+
+    for field in ("access_type", "service", "source", "query"):
+        val = args.get(field)
+        if val is not None and not isinstance(val, str):
+            return {
+                "error": f"{field} must be a string (got {type(val).__name__})",
+                "templates": [],
+                "total": 0,
+            }
 
     entries = list_entries(
         access_type=args.get("access_type"),
@@ -531,8 +546,23 @@ def _submit_policy_for_mcp(args: dict[str, Any]) -> dict[str, Any]:
                      "of AWS account IDs",
             "request_id": None,
         }
+    # MED-14-02: every account must be a non-empty string. Without
+    # this, ints/dicts/None pass through to would_submit verbatim
+    # and confuse downstream tools that trust account-IDs.
+    if not all(isinstance(a, str) and a.strip() for a in accounts):
+        return {
+            "error": "accounts items must each be a non-empty string",
+            "request_id": None,
+        }
     duration_hours = args.get("duration_hours", 1)
-    if not isinstance(duration_hours, int) or duration_hours < 1 or duration_hours > 720:
+    # LOW-14-08: bool subclasses int — reject explicitly so True/False
+    # don't slip into a numeric field.
+    if (
+        isinstance(duration_hours, bool)
+        or not isinstance(duration_hours, int)
+        or duration_hours < 1
+        or duration_hours > 720
+    ):
         return {
             "error": "duration_hours must be an integer in [1, 720]",
             "request_id": None,
@@ -557,10 +587,15 @@ def _submit_policy_for_mcp(args: dict[str, Any]) -> dict[str, Any]:
             "access_type": access_type,
         },
     }
-    if args.get("assume_principal_arn"):
-        request_body["spec"]["assume_principal_arn"] = args["assume_principal_arn"]
-    if args.get("ticket"):
-        request_body["spec"]["ticket"] = args["ticket"]
+    # MED-14-03: only accept string assume_principal_arn / ticket.
+    # Drop silently if wrong-typed (the schema marks them optional;
+    # an audit-search tool downstream might assume string).
+    apa = args.get("assume_principal_arn")
+    if isinstance(apa, str) and apa.strip():
+        request_body["spec"]["assume_principal_arn"] = apa.strip()
+    ticket = args.get("ticket")
+    if isinstance(ticket, str) and ticket.strip():
+        request_body["spec"]["ticket"] = ticket.strip()
 
     base_url = os.environ.get("IAM_JIT_URL", "").strip()
     token = os.environ.get("IAM_JIT_TOKEN", "").strip()
@@ -639,6 +674,7 @@ def _generate_for_mcp(args: dict[str, Any]) -> dict[str, Any]:
     task = args.get("task", "")
     if not isinstance(task, str) or not task.strip():
         return {
+            "deprecation": _DEPRECATION_BLOCK,
             "error": "task is required and must be a non-empty string",
             "policy": None,
         }

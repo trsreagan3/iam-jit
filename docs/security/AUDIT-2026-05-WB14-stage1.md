@@ -7,6 +7,22 @@ Scope: `src/iam_jit/mcp_server.py`, `src/iam_jit/aws_managed_catalog.py`, `tests
 ## Headline
 9 findings: 0 CRIT, 0 HIGH, 4 MED, 5 LOW/INFO. Clean security posture — no credential leaks, no authorization bypass, no information disclosure beyond the public catalog, no SSRF beyond the inherent trust model of operator-set env vars. All input-validation gaps are server-internal misbehavior (raises, silent-empties, or pass-through) and would be caught/rejected by the iam-jit backend on submission. Test coverage of the HTTP submission branch is the most actionable gap.
 
+## Closure status (2026-05-16, post-audit fix pass)
+
+| Finding | Status |
+|---|---|
+| MED-14-01 list_templates type validation | ✅ FIXED — `isinstance(str)` guards added; 5 new tests in test_mcp_template_tools.py |
+| MED-14-02 submit_policy accounts items type-check | ✅ FIXED — non-string / empty rejected with structured error; 2 new tests |
+| MED-14-03 assume_principal_arn / ticket type-check | ✅ FIXED — non-string dropped silently (per schema-as-optional), strip applied; 3 new tests |
+| MED-14-04 HTTP submission branch test coverage | ✅ FIXED — 6 respx-mocked tests covering success/400/500/ConnectError/non-JSON/trailing-slash; token-non-leak asserted in each |
+| LOW-14-05 silent-empty for unknown access_type/source | ⏸ ACCEPTED — better UX than 500; documented behavior |
+| LOW-14-06 SSRF via operator IAM_JIT_URL | ⏸ ACCEPTED — inherent env-var trust model; same as `aws-cli`/`kubectl`; documented |
+| LOW-14-07 deprecation block missing on generate error path | ✅ FIXED — block added to empty-task error return; new test |
+| LOW-14-08 duration_hours accepts Python bool | ✅ FIXED — explicit `isinstance(_, bool)` check ordered before int check; new test |
+| INFO-14-09 garbage policy shapes silently score 1 | ⏸ DEFERRED — pre-existing in scorer; addressed in Stage 2 if touched |
+
+Test count after fixes: **94 passing** (49 pre-existing + 45 new). Stage 2 carry-forward checklist below still applies.
+
 ## CRIT findings
 None.
 
