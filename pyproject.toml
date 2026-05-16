@@ -74,6 +74,7 @@ dev = [
 [project.scripts]
 iam-jit = "iam_jit.cli:main"
 iam-risk-score = "iam_jit.cli_score:main"
+iam-jit-bouncer = "iam_jit.bouncer_cli:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]
