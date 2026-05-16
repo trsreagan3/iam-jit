@@ -1,5 +1,17 @@
 # Round 18 audit — preset library pre-launch slice
 
+## Closure status (2026-05-16, post-audit fix pass)
+
+| Finding | Status |
+|---|---|
+| HIGH-18-01 (store.get cross-user leak risk) | ✅ FIXED — `get(template_id, *, user_id)` requires user_id; raises UserTemplateNotFound for mismatch (same exception as nonexistent, so template_id enumeration is blocked). `delete()` + `increment_reuse()` also gained the required user_id arg. Existing tests updated; 3 new tests assert cross-user isolation at the store layer. |
+| MED-18-02 (action_overlap silent zero on single-dict Statement) | ✅ FIXED — `_extract_actions` normalizes single-dict Statement the same way compute_shape_hash does. New test asserts similarity=1.0 for single-dict-vs-list forms of the same actions. |
+| MED-18-03 (no read path for personal templates) | ✅ FIXED — added `get_my_template` MCP tool that fetches by name or template_id; enforces per-user isolation (HIGH-18-01); increments reuse_count on each fetch (the signal post-launch "save-as-recurring" will key off). save_template + list_my_templates descriptions updated to point at the new tool. 7 new tests including cross-user-isolation probe. |
+
+Post-closure test suite: **133 MCP+catalog+user-template tests pass** (was 122; +11 closure tests). No regressions in broader suite.
+
+The 5 LOW/INFO findings will be triaged + addressed in the next preset-library iteration (post-launch slice). None block #154 from proceeding.
+
 Commit under review: `b2e748b` (`feat(preset library): personal-tier templates + similarity matcher (#150)`).
 
 Scope: pre-launch slice of [[evolving-preset-library]] — the personal-tier templates. Adds `src/iam_jit/user_templates_store.py` (293 LOC: `UserTemplate` dataclass, `UserTemplateStore` Protocol, `InMemoryUserTemplateStore`, `compute_shape_hash`, `action_overlap_similarity`, `find_similar`, `find_by_shape_hash`, module-level singleton + reset helper), three new MCP tools in `src/iam_jit/mcp_server.py` (`save_template`, `list_my_templates`, `find_similar_templates`) with `_handle_request` dispatch wiring, and `tests/test_user_templates.py` (408 LOC, 32 tests). Net +933 LOC across 3 files. White-box review of the per-user isolation invariant, input validation, shape-hash determinism, and `action_overlap_similarity` edge cases. Black-box probes via direct dispatch + `tools/list` + the structured-content path on `_handle_request`.

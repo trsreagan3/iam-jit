@@ -294,12 +294,45 @@ TOOLS = [
         "description": (
             "List the templates in your personal library (saved via "
             "save_template). Returns metadata only (no policy bodies — "
-            "use get_template for the full shape). To browse the broader "
-            "AWS-managed + iam-jit catalog, use list_templates instead."
+            "use get_my_template for the full shape). To browse the "
+            "broader AWS-managed + iam-jit catalog, use list_templates "
+            "instead."
         ),
         "inputSchema": {
             "type": "object",
             "properties": {},
+        },
+    },
+    {
+        "name": "get_my_template",
+        "description": (
+            "Fetch one of YOUR saved templates' full policy shape by "
+            "name (or template_id). The personal-library read path — "
+            "complements list_my_templates. Catalog templates (AWS-"
+            "managed, etc.) are NOT served here; use get_template for "
+            "those. Per [[evolving-preset-library]]: each fetch "
+            "increments the template's reuse_count, which drives "
+            "post-launch 'save-as-recurring' suggestions."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "name": {
+                    "type": "string",
+                    "description": (
+                        "Template name (as you saved it). Exact match. "
+                        "Either name or template_id is required."
+                    ),
+                },
+                "template_id": {
+                    "type": "string",
+                    "description": (
+                        "Template id (e.g. 'tmpl_abc123'). Either name "
+                        "or template_id is required. If both are given, "
+                        "template_id wins."
+                    ),
+                },
+            },
         },
     },
     {
@@ -606,6 +639,55 @@ def _save_template_for_mcp(args: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def _get_my_template_for_mcp(args: dict[str, Any]) -> dict[str, Any]:
+    """Fetch one of the user's saved templates by name or template_id.
+
+    MED-18-03 closure: the personal-library read path. Increments
+    reuse_count on each successful fetch (the signal post-launch
+    'save-as-recurring' suggestions key off of).
+    """
+    from .user_templates_store import UserTemplateNotFound, get_default_store
+
+    name = args.get("name")
+    template_id = args.get("template_id")
+
+    if template_id is not None and not isinstance(template_id, str):
+        return {"error": "template_id must be a string if provided", "policy": None}
+    if name is not None and not isinstance(name, str):
+        return {"error": "name must be a string if provided", "policy": None}
+    if not template_id and not (name and name.strip()):
+        return {
+            "error": "either name or template_id is required",
+            "policy": None,
+        }
+
+    store = get_default_store()
+    user_id = _current_user_id()
+    try:
+        if template_id:
+            t = store.get(template_id.strip(), user_id=user_id)
+        else:
+            assert name is not None  # narrowed by guard above
+            t = store.get_by_name(user_id, name.strip())
+    except UserTemplateNotFound:
+        ident = template_id or name
+        return {"error": f"template not found: {ident}", "policy": None}
+
+    # Reuse counter — the signal post-launch will key off
+    store.increment_reuse(t.template_id, user_id=user_id)
+
+    return {
+        "template_id": t.template_id,
+        "name": t.name,
+        "policy": t.policy,
+        "shape_hash": t.shape_hash,
+        "created_at": t.created_at,
+        "reuse_count": t.reuse_count + 1,  # reflect the increment we just did
+        "source_grant_id": t.source_grant_id,
+        "source_description": t.source_description,
+    }
+
+
 def _list_my_templates_for_mcp(args: dict[str, Any]) -> dict[str, Any]:
     """List the current user's personal templates (metadata only)."""
     from .user_templates_store import get_default_store
@@ -883,6 +965,8 @@ def _handle_request(req: dict[str, Any]) -> dict[str, Any] | None:
             result_payload = _save_template_for_mcp(args)
         elif tool_name == "list_my_templates":
             result_payload = _list_my_templates_for_mcp(args)
+        elif tool_name == "get_my_template":
+            result_payload = _get_my_template_for_mcp(args)
         elif tool_name == "find_similar_templates":
             result_payload = _find_similar_templates_for_mcp(args)
         else:

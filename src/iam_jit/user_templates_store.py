@@ -62,11 +62,15 @@ class UserTemplateNameTaken(Exception):
 
 class UserTemplateStore(Protocol):
     def put(self, record: UserTemplate) -> None: ...
-    def get(self, template_id: str) -> UserTemplate: ...
+    # HIGH-18-01 closure: user_id is REQUIRED. The store enforces
+    # per-user isolation at this entry point so future MCP tools
+    # (get_my_template, delete_my_template, etc.) cannot accidentally
+    # leak across users.
+    def get(self, template_id: str, *, user_id: str) -> UserTemplate: ...
     def get_by_name(self, user_id: str, name: str) -> UserTemplate: ...
     def list_for_user(self, user_id: str) -> list[UserTemplate]: ...
-    def delete(self, template_id: str) -> None: ...
-    def increment_reuse(self, template_id: str) -> None: ...
+    def delete(self, template_id: str, *, user_id: str) -> None: ...
+    def increment_reuse(self, template_id: str, *, user_id: str) -> None: ...
 
 
 # ---------------------------------------------------------------------------
@@ -157,11 +161,20 @@ def action_overlap_similarity(
 
 
 def _extract_actions(policy: dict[str, Any]) -> set[str]:
-    """All Allow-statement actions, flattened to a set."""
+    """All Allow-statement actions, flattened to a set.
+
+    MED-18-02 closure: AWS permits Statement to be a single dict
+    (not just a list). Normalize that same way compute_shape_hash
+    does so similarity matching doesn't silently return 0 for the
+    single-dict form.
+    """
     out: set[str] = set()
     if not isinstance(policy, dict):
         return out
-    for s in policy.get("Statement") or []:
+    stmts = policy.get("Statement") or []
+    if isinstance(stmts, dict):
+        stmts = [stmts]
+    for s in stmts:
         if not isinstance(s, dict):
             continue
         if s.get("Effect") != "Allow":
@@ -200,10 +213,16 @@ class InMemoryUserTemplateStore:
                 )
         self._items[record.template_id] = record
 
-    def get(self, template_id: str) -> UserTemplate:
-        if template_id not in self._items:
+    def get(self, template_id: str, *, user_id: str) -> UserTemplate:
+        """HIGH-18-01 closure: enforce per-user ownership at this entry
+        point. Raises UserTemplateNotFound — same exception type as
+        nonexistent template — so callers can't distinguish "doesn't
+        exist" from "exists but belongs to someone else" (avoids
+        enumeration of other users' template_ids)."""
+        existing = self._items.get(template_id)
+        if existing is None or existing.user_id != user_id:
             raise UserTemplateNotFound(template_id)
-        return self._items[template_id]
+        return existing
 
     def get_by_name(self, user_id: str, name: str) -> UserTemplate:
         for r in self._items.values():
@@ -218,12 +237,16 @@ class InMemoryUserTemplateStore:
             reverse=True,  # newest first
         )
 
-    def delete(self, template_id: str) -> None:
-        self._items.pop(template_id, None)
-
-    def increment_reuse(self, template_id: str) -> None:
+    def delete(self, template_id: str, *, user_id: str) -> None:
+        """Per-user isolation: silently no-op if template doesn't exist
+        OR belongs to a different user."""
         existing = self._items.get(template_id)
-        if existing is None:
+        if existing is not None and existing.user_id == user_id:
+            self._items.pop(template_id, None)
+
+    def increment_reuse(self, template_id: str, *, user_id: str) -> None:
+        existing = self._items.get(template_id)
+        if existing is None or existing.user_id != user_id:
             return
         self._items[template_id] = dataclasses.replace(
             existing, reuse_count=existing.reuse_count + 1

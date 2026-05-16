@@ -14,6 +14,7 @@ import pytest
 
 from iam_jit.mcp_server import (
     _find_similar_templates_for_mcp,
+    _get_my_template_for_mcp,
     _handle_request,
     _list_my_templates_for_mcp,
     _save_template_for_mcp,
@@ -59,9 +60,58 @@ def test_store_put_and_get_round_trip() -> None:
         policy=_policy("s3:GetObject"), created_at=int(time.time()),
     )
     s.put(t)
-    out = s.get("tmpl_1")
+    out = s.get("tmpl_1", user_id="alice")
     assert out.name == "read-prod-s3"
     assert out.user_id == "alice"
+
+
+def test_store_get_enforces_user_isolation() -> None:
+    """HIGH-18-01 closure: store.get(template_id, user_id=X) raises
+    UserTemplateNotFound when the template belongs to a different user.
+    Same exception type as nonexistent template — callers can't
+    distinguish 'doesn't exist' from 'exists but not yours' (prevents
+    template_id enumeration of other users)."""
+    s = InMemoryUserTemplateStore()
+    s.put(UserTemplate(
+        template_id="tmpl_alice", user_id="alice", name="alice-template",
+        policy=_policy("s3:GetObject"), created_at=0,
+    ))
+    # alice can fetch her own
+    assert s.get("tmpl_alice", user_id="alice").name == "alice-template"
+    # bob CANNOT fetch alice's — same exception as nonexistent
+    with pytest.raises(UserTemplateNotFound):
+        s.get("tmpl_alice", user_id="bob")
+    with pytest.raises(UserTemplateNotFound):
+        s.get("nonexistent_id", user_id="alice")
+
+
+def test_store_delete_enforces_user_isolation() -> None:
+    s = InMemoryUserTemplateStore()
+    s.put(UserTemplate(
+        template_id="tmpl_alice", user_id="alice", name="x",
+        policy=_policy("s3:GetObject"), created_at=0,
+    ))
+    # bob's delete is a no-op (silent), alice's template survives
+    s.delete("tmpl_alice", user_id="bob")
+    assert s.get("tmpl_alice", user_id="alice").name == "x"
+    # alice's delete works
+    s.delete("tmpl_alice", user_id="alice")
+    with pytest.raises(UserTemplateNotFound):
+        s.get("tmpl_alice", user_id="alice")
+
+
+def test_store_increment_reuse_enforces_user_isolation() -> None:
+    s = InMemoryUserTemplateStore()
+    s.put(UserTemplate(
+        template_id="tmpl_alice", user_id="alice", name="x",
+        policy=_policy("s3:GetObject"), created_at=0, reuse_count=0,
+    ))
+    # bob's increment is a no-op
+    s.increment_reuse("tmpl_alice", user_id="bob")
+    assert s.get("tmpl_alice", user_id="alice").reuse_count == 0
+    # alice's increment works
+    s.increment_reuse("tmpl_alice", user_id="alice")
+    assert s.get("tmpl_alice", user_id="alice").reuse_count == 1
 
 
 def test_store_get_by_name() -> None:
@@ -126,9 +176,9 @@ def test_store_increment_reuse() -> None:
         template_id="tmpl_1", user_id="alice", name="x",
         policy=_policy("s3:GetObject"), created_at=0, reuse_count=0,
     ))
-    s.increment_reuse("tmpl_1")
-    s.increment_reuse("tmpl_1")
-    assert s.get("tmpl_1").reuse_count == 2
+    s.increment_reuse("tmpl_1", user_id="alice")
+    s.increment_reuse("tmpl_1", user_id="alice")
+    assert s.get("tmpl_1", user_id="alice").reuse_count == 2
 
 
 def test_store_isolation_per_user() -> None:
@@ -204,6 +254,25 @@ def test_action_overlap_partial() -> None:
         _policy(["s3:GetObject", "s3:ListBucket"]),
     )
     assert abs(sim - 2/3) < 0.001
+
+
+def test_action_overlap_handles_single_dict_statement() -> None:
+    """MED-18-02 closure: AWS permits Statement to be a single dict
+    (not wrapped in a list). _extract_actions must normalize that
+    same way compute_shape_hash does — otherwise semantically-identical
+    policies silently fail to match."""
+    single_dict_form = {
+        "Version": "2012-10-17",
+        "Statement": {  # single dict, not a list
+            "Effect": "Allow",
+            "Action": "s3:GetObject",
+            "Resource": "*",
+        },
+    }
+    list_form = _policy("s3:GetObject")
+    # Both forms have the same actions → similarity must be 1.0
+    assert action_overlap_similarity(single_dict_form, list_form) == 1.0
+    assert action_overlap_similarity(single_dict_form, single_dict_form) == 1.0
 
 
 def test_action_overlap_ignores_deny() -> None:
@@ -399,10 +468,86 @@ def test_dispatch_find_similar_templates() -> None:
 
 
 def test_three_new_tools_appear_in_tools_list() -> None:
+    """MED-18-03 closure: get_my_template added — verify all FOUR
+    personal-library tools surface in tools/list."""
     resp = _handle_request({
         "jsonrpc": "2.0", "id": 1, "method": "tools/list", "params": {},
     })
     names = {t["name"] for t in resp["result"]["tools"]}
     assert "save_template" in names
     assert "list_my_templates" in names
+    assert "get_my_template" in names
     assert "find_similar_templates" in names
+
+
+# ---------------------------------------------------------------------------
+# MED-18-03 closure: get_my_template (personal-library read path)
+# ---------------------------------------------------------------------------
+
+
+def test_mcp_get_my_template_by_name_returns_policy_body() -> None:
+    with patch.dict(os.environ, {"IAM_JIT_USER_ID": "alice"}, clear=False):
+        _save_template_for_mcp({
+            "name": "my-read", "policy": _policy("s3:GetObject"),
+        })
+        result = _get_my_template_for_mcp({"name": "my-read"})
+    assert result["name"] == "my-read"
+    assert result["policy"] == _policy("s3:GetObject")
+    assert result["reuse_count"] == 1  # incremented on fetch
+
+
+def test_mcp_get_my_template_by_id_returns_policy_body() -> None:
+    with patch.dict(os.environ, {"IAM_JIT_USER_ID": "alice"}, clear=False):
+        saved = _save_template_for_mcp({
+            "name": "my-read", "policy": _policy("s3:GetObject"),
+        })
+        result = _get_my_template_for_mcp({"template_id": saved["template_id"]})
+    assert result["template_id"] == saved["template_id"]
+    assert "policy" in result
+
+
+def test_mcp_get_my_template_increments_reuse_on_each_fetch() -> None:
+    with patch.dict(os.environ, {"IAM_JIT_USER_ID": "alice"}, clear=False):
+        _save_template_for_mcp({"name": "x", "policy": _policy("s3:GetObject")})
+        r1 = _get_my_template_for_mcp({"name": "x"})
+        r2 = _get_my_template_for_mcp({"name": "x"})
+        r3 = _get_my_template_for_mcp({"name": "x"})
+    assert r1["reuse_count"] == 1
+    assert r2["reuse_count"] == 2
+    assert r3["reuse_count"] == 3
+
+
+def test_mcp_get_my_template_cross_user_isolation() -> None:
+    """HIGH-18-01 + MED-18-03: bob cannot fetch alice's template even
+    if he knows the template_id."""
+    with patch.dict(os.environ, {"IAM_JIT_USER_ID": "alice"}, clear=False):
+        saved = _save_template_for_mcp({
+            "name": "alice-secret", "policy": _policy("s3:GetObject"),
+        })
+    # bob attempts to fetch by id
+    with patch.dict(os.environ, {"IAM_JIT_USER_ID": "bob"}, clear=False):
+        by_id = _get_my_template_for_mcp({"template_id": saved["template_id"]})
+        by_name = _get_my_template_for_mcp({"name": "alice-secret"})
+    assert by_id["policy"] is None
+    assert "not found" in by_id["error"]
+    assert by_name["policy"] is None
+    assert "not found" in by_name["error"]
+
+
+def test_mcp_get_my_template_requires_name_or_id() -> None:
+    result = _get_my_template_for_mcp({})
+    assert result["policy"] is None
+    assert "name or template_id" in result["error"]
+
+
+def test_mcp_get_my_template_rejects_non_string_name() -> None:
+    result = _get_my_template_for_mcp({"name": 42})
+    assert result["policy"] is None
+    assert "name" in result["error"]
+
+
+def test_mcp_get_my_template_unknown_returns_error() -> None:
+    with patch.dict(os.environ, {"IAM_JIT_USER_ID": "alice"}, clear=False):
+        result = _get_my_template_for_mcp({"name": "nonexistent"})
+    assert result["policy"] is None
+    assert "not found" in result["error"]
