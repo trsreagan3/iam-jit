@@ -534,3 +534,79 @@ def best_baseline(
             "reductions": [],  # populated by narrowing step (post-launch)
         },
     }
+
+
+# ---------------------------------------------------------------------------
+# Browse API (per [[no-nl-synthesis]]) — exact-lookup, no fuzzy match.
+#
+# These functions back the new MCP tools list_templates + get_template.
+# They EXPOSE the catalog without doing any keyword reasoning. The agent
+# (or human) picks an entry by name; no fuzzy auto-fire (which is the
+# pattern being deleted in #149 Stage 2).
+# ---------------------------------------------------------------------------
+
+
+def _entry_to_summary_dict(entry: ManagedPolicyEntry) -> dict[str, Any]:
+    """Catalog-listing shape — NO inlined policy_shape (use get_entry)."""
+    return {
+        "name": entry.name,
+        "arn": entry.arn,
+        "source": "aws-managed",  # only source pre-launch; org/personal post-launch
+        "summary": entry.summary,
+        "services": list(entry.services),
+        "access_type": entry.access_type,
+    }
+
+
+def _entry_to_full_dict(entry: ManagedPolicyEntry) -> dict[str, Any]:
+    """Single-entry shape including the full policy_shape."""
+    return {
+        **_entry_to_summary_dict(entry),
+        "policy": entry.policy_shape,
+    }
+
+
+def list_entries(
+    *,
+    access_type: str | None = None,
+    service: str | None = None,
+    source: str | None = None,
+    query: str | None = None,
+) -> list[dict[str, Any]]:
+    """Browse the catalog. Returns metadata only (no policy_shape).
+
+    Filters:
+    - access_type: 'read-only' | 'read-write' | 'admin' — exact match
+    - service: AWS service prefix (e.g. 's3') — matches if entry.services
+      contains the service or contains '*' (catch-all baselines)
+    - source: 'aws-managed' | 'org-curated' | 'personal-recurring' — pre-launch
+      only 'aws-managed' returns entries; the other two are reserved
+    - query: case-insensitive substring on entry.name — NO fuzzy match
+    """
+    out: list[ManagedPolicyEntry] = list(_CATALOG)
+    if access_type is not None:
+        out = [e for e in out if e.access_type == access_type]
+    if service is not None:
+        svc_lc = service.lower()
+        out = [
+            e for e in out
+            if "*" in e.services or any(s.lower() == svc_lc for s in e.services)
+        ]
+    if source is not None and source != "aws-managed":
+        # Pre-launch: only aws-managed source. org-curated / personal-recurring
+        # are valid filter values but return nothing until those tiers land.
+        return []
+    if query is not None and query.strip():
+        q = query.strip().lower()
+        out = [e for e in out if q in e.name.lower()]
+    return [_entry_to_summary_dict(e) for e in out]
+
+
+def get_entry(name: str) -> dict[str, Any] | None:
+    """Fetch one entry by EXACT name match. Returns full policy_shape."""
+    if not isinstance(name, str) or not name:
+        return None
+    for entry in _CATALOG:
+        if entry.name == name:
+            return _entry_to_full_dict(entry)
+    return None
