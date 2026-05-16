@@ -198,6 +198,78 @@ _CATALOG: tuple[ManagedPolicyEntry, ...] = (
             ],
         },
     ),
+    # ---- Broad-read-with-sensitive-exclusions (the "I'm not sure" baseline) ----
+    # Per [[broad-read-fallback-ux]]: when the user is uncertain
+    # which resources they need AND would otherwise be guessing
+    # narrow scopes that turn out to be insufficient, this gives
+    # them broad visibility with the sensitive bits excluded.
+    # Not technically an AWS-managed policy — it's composed from
+    # `ReadOnlyAccess` minus a denylist for secrets + KMS decrypt
+    # + conventionally-named sensitive S3 buckets.
+    ManagedPolicyEntry(
+        name="ExploreReadOnlyWithSensitiveExclusions",
+        arn="iam-jit:catalog/ExploreReadOnlyWithSensitiveExclusions",
+        summary=(
+            "Read across the entire environment EXCEPT secrets, "
+            "KMS decrypt, and conventionally-named sensitive S3 "
+            "buckets. The 'I'm investigating, not sure what I "
+            "need' baseline — broader than a narrow guess, "
+            "safer than admin."
+        ),
+        services=("*",),
+        access_type="read-only",
+        use_case_tags=(
+            "explore", "investigate", "investigating", "diagnose",
+            "diagnosing", "debug", "debugging",
+            "not-sure", "look-around", "uncertain", "discovery",
+            "general-read", "broad-read", "incident-investigation",
+            "post-mortem", "what-changed", "drift", "compare",
+        ),
+        policy_shape={
+            "Version": "2012-10-17",
+            "Statement": [
+                {
+                    "Sid": "ReadEverything",
+                    "Effect": "Allow",
+                    "Action": [
+                        "*:Describe*", "*:Get*", "*:List*",
+                        "*:View*", "*:Lookup*", "*:Search*",
+                    ],
+                    "Resource": "*",
+                },
+                {
+                    "Sid": "ExcludeSensitiveReads",
+                    "Effect": "Deny",
+                    "Action": [
+                        "secretsmanager:GetSecretValue",
+                        "ssm:GetParameter",
+                        "ssm:GetParameters",
+                        "ssm:GetParametersByPath",
+                        "kms:Decrypt",
+                        "kms:GenerateDataKey",
+                        "kms:ReEncryptFrom",
+                        "kms:ReEncryptTo",
+                    ],
+                    "Resource": "*",
+                },
+                {
+                    "Sid": "ExcludeSensitiveBucketReads",
+                    "Effect": "Deny",
+                    "Action": ["s3:GetObject", "s3:ListBucket"],
+                    "Resource": [
+                        "arn:aws:s3:::*-secrets/*",
+                        "arn:aws:s3:::*-sensitive/*",
+                        "arn:aws:s3:::*-pii/*",
+                        "arn:aws:s3:::*-customer-data/*",
+                        "arn:aws:s3:::*-secrets",
+                        "arn:aws:s3:::*-sensitive",
+                        "arn:aws:s3:::*-pii",
+                        "arn:aws:s3:::*-customer-data",
+                    ],
+                },
+            ],
+        },
+    ),
     # ---- Job-function baselines (read-write) ----
     ManagedPolicyEntry(
         name="DatabaseAdministrator",

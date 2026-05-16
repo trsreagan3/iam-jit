@@ -129,7 +129,12 @@ def test_best_baseline_returns_provenance() -> None:
     prov = out["provenance"]
     assert "baseline" in prov
     assert "baseline_arn" in prov
-    assert prov["baseline_arn"].startswith("arn:aws:iam::aws:policy/")
+    # Either a real AWS-managed ARN or an iam-jit-composed baseline
+    # (e.g., ExploreReadOnlyWithSensitiveExclusions).
+    assert (
+        prov["baseline_arn"].startswith("arn:aws:iam::aws:policy/")
+        or prov["baseline_arn"].startswith("iam-jit:catalog/")
+    )
     assert "match_confidence" in prov
     assert prov["match_confidence"] in ("low", "medium", "high")
     assert "reductions" in prov
@@ -160,7 +165,13 @@ def test_catalog_entries_have_required_fields() -> None:
     from iam_jit.aws_managed_catalog import _CATALOG
     for entry in _CATALOG:
         assert entry.name, "name required"
-        assert entry.arn.startswith("arn:aws:iam::aws:policy/")
+        # ARN is either an AWS-managed policy OR an iam-jit-internal
+        # composed baseline (e.g., ExploreReadOnlyWithSensitiveExclusions
+        # which composes Allow + Deny — not a verbatim AWS-managed shape).
+        assert (
+            entry.arn.startswith("arn:aws:iam::aws:policy/")
+            or entry.arn.startswith("iam-jit:catalog/")
+        ), f"unexpected ARN shape on {entry.name}: {entry.arn}"
         assert entry.summary, "summary required"
         assert entry.access_type in ("read-only", "read-write", "admin")
         assert entry.use_case_tags, "at least one use-case tag required"
@@ -178,3 +189,49 @@ def test_catalog_names_unique() -> None:
     from iam_jit.aws_managed_catalog import _CATALOG
     names = [e.name for e in _CATALOG]
     assert len(names) == len(set(names)), "duplicate name in catalog"
+
+
+# ---------------------------------------------------------------------------
+# Broad-read fallback (per [[broad-read-fallback-ux]]).
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("prompt", [
+    "I'm investigating an incident and not sure what I need",
+    "explore the env to figure out what's happening",
+    "debug a customer issue, no idea which services are involved",
+    "I want to look around prod after the deploy",
+    "post-mortem on yesterday's outage",
+])
+def test_uncertain_prompts_match_explore_baseline(prompt: str) -> None:
+    """The 'I'm not sure' family of prompts should land on the
+    ExploreReadOnlyWithSensitiveExclusions baseline."""
+    matches = match_baseline(prompt, access_type="read-only")
+    assert matches, f"no match for prompt: {prompt}"
+    names = [m[0].name for m in matches[:3]]
+    assert "ExploreReadOnlyWithSensitiveExclusions" in names, (
+        f"expected ExploreReadOnly in top-3, got {names}"
+    )
+
+
+def test_explore_baseline_excludes_secrets_in_policy_shape() -> None:
+    """The Explore baseline MUST have a Deny statement covering
+    secretsmanager:GetSecretValue and friends — that's the whole
+    point of the pattern."""
+    from iam_jit.aws_managed_catalog import _CATALOG
+    explore = next(
+        e for e in _CATALOG
+        if e.name == "ExploreReadOnlyWithSensitiveExclusions"
+    )
+    stmts = explore.policy_shape["Statement"]
+    # First statement: broad Allow on read verbs
+    assert stmts[0]["Effect"] == "Allow"
+    # Subsequent statements: Deny on sensitive
+    deny_actions = []
+    for s in stmts[1:]:
+        assert s["Effect"] == "Deny"
+        action_list = s["Action"] if isinstance(s["Action"], list) else [s["Action"]]
+        deny_actions.extend(action_list)
+    # Critical secrets-reads are explicitly denied
+    assert "secretsmanager:GetSecretValue" in deny_actions
+    assert "kms:Decrypt" in deny_actions
