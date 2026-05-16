@@ -20,7 +20,30 @@ This is the architectural choice that lets iam-jit be small, reliable, and fast.
 
 That's the complete agent-facing surface. There is no `generate_iam_policy`, no `narrow_for_me`, no `suggest_reductions`. The agent does the work; iam-jit scores and gates.
 
-## The reduction loop
+## The decision at intake — known vs. unknown
+
+Before the reduction loop, the agent makes one decision:
+
+**Are the needed resources specific and known?**
+
+- **YES** → use a **parameterized task template** from the catalog.
+  Examples: `update-one-secret(arn)`, `download-one-file(bucket, key)`,
+  `invoke-one-lambda(arn)`, `read-one-cloudwatch-log-group(arn)`.
+  Fill in the ARN(s), submit. Resulting policy scores 1-3 and
+  almost always auto-approves. **No reduction loop needed.**
+
+- **NO / not yet known** (investigation, exploration, multi-resource
+  work) → use a **broad baseline** and reduce from there:
+  - Read-only / investigation → `ExploreReadOnlyWithSensitiveExclusions`
+  - Write / admin-class → `AdminLikeWithSensitiveExclusions`
+  - Run the reduction loop below to narrow toward auto-approval.
+
+Pick the path that matches the task. Don't run the full loop on
+"update this one secret" — that's wasted iterations. Don't try
+to use a parameterized template for "investigate why X is broken" —
+you can't enumerate the resources up front.
+
+## The reduction loop (for the "unknown" path)
 
 ```
 1. Pick a starting point
@@ -28,7 +51,7 @@ That's the complete agent-facing surface. There is no `generate_iam_policy`, no 
    - Agent reads source code to infer scope (which services, which
      resources, which account, which region)
    - Agent calls list_templates() to see what's available
-   - Agent picks the closest baseline OR drafts JSON from scratch
+   - Agent picks the broad baseline appropriate to the task class
 
 2. Score
    - Agent calls score_iam_policy(<policy>)
@@ -133,7 +156,7 @@ This is the asymmetry that matters: ~80% of agent operations are reads with near
 
 - ❌ **Don't ask iam-jit to generate a policy from the user's natural-language request.** The deterministic NL synthesis path was measured at 1.8% joint sufficiency and removed. You (the agent) have codebase context iam-jit doesn't; you do the narrowing.
 
-- ❌ **Don't loop on `score_iam_policy` blindly trying random reductions.** Read the factor breakdown; pick the highest-contribution factor; address it specifically. Each call costs ~50ms; ~3 iterations is a reasonable budget.
+- ❌ **Don't loop on `score_iam_policy` blindly trying random reductions.** Read the factor breakdown; pick the highest-contribution factor; address it specifically. Each call costs ~50ms; ~3 iterations is a reasonable budget. **Better: group changes** — apply service-list narrowing + account-condition + region-condition in a single revised policy, then re-score once. Faster than asking the user one question per round.
 
 - ❌ **Don't request `access_type: read-write` by default.** Reads first. Elevate explicitly when the user has stated they want a state-changing operation.
 
