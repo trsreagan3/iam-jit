@@ -365,17 +365,11 @@ def test_generate_iam_policy_emits_deprecation_block() -> None:
     assert "submit_policy" in dep["replacement_tools"]
 
 
-def test_generate_iam_policy_baseline_fallback_also_has_deprecation() -> None:
-    """The baseline-fallback path (when synthesis returns empty)
-    also includes the deprecation block."""
-    from iam_jit.mcp_server import _generate_for_mcp
-    # A prompt that the catalog will baseline-fallback on
-    result = _generate_for_mcp({
-        "task": "look around the staging account I just inherited",
-        "access_type": "read-only",
-    })
-    # Either matched a baseline OR synthesized — either way deprecation present
-    assert "deprecation" in result
+# NOTE: Stage 2 removed the baseline-fallback path in
+# _generate_for_mcp. The test that previously asserted the
+# fallback's deprecation block fired has been deleted along
+# with the fallback. The deprecation block on the synthesis
+# success path + the empty-task error path are still tested.
 
 
 def test_generate_iam_policy_empty_task_error_also_has_deprecation() -> None:

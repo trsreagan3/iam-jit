@@ -164,84 +164,45 @@ def test_score_passes_context_through_for_audit() -> None:
 
 
 # ---------------------------------------------------------------------------
-# AWS-managed-baseline fallback (#147)
+# AWS-managed-baseline fallback — DELETED in Stage 2 of [[no-nl-synthesis]].
 #
-# When from-scratch synthesis returns nothing, the generator should
-# fall back to the closest AWS-managed policy as a starting point.
-# Closes the 33% no-output rate the calibration roleplay agent flagged.
+# The fallback used to fire here when from-scratch synthesis returned
+# empty, fuzzy-matching the prompt to a catalog entry. The 100-prompt
+# calibration measured this path as part of the 1.8% joint-sufficiency
+# failure mode. Agents that get policy=None should now switch to
+# list_templates + get_template + submit_policy (see docs/AGENTS.md).
+# Tests for the new triad live in tests/test_mcp_template_tools.py.
 # ---------------------------------------------------------------------------
 
 
-def test_generate_falls_back_to_baseline_for_vague_intent() -> None:
-    """The canonical no-output scenario from the calibration agent:
-    'data lake access' — synthesis returns nothing; baseline match
-    should kick in and return DataScientist or AmazonS3ReadOnlyAccess."""
+def test_generate_no_longer_baseline_falls_back_when_synthesis_empty() -> None:
+    """Sentinel for [[no-nl-synthesis]] Stage 2: vague prompts that
+    used to trigger the catalog-fallback now return policy=None
+    (or whatever synthesis would have returned)."""
     from iam_jit.mcp_server import _generate_for_mcp
     result = _generate_for_mcp({
         "task": "I need read access to data lake resources",
         "access_type": "read-only",
     })
-    # MUST have a policy now (no more zero-output)
-    assert result.get("policy") is not None
-    assert result["policy"].get("Statement"), "policy must have statements"
-    # Provenance metadata should identify it as a baseline match
     matched = result.get("matched_patterns") or []
-    assert any(p.startswith("aws-managed:") for p in matched), (
-        f"expected aws-managed: pattern, got {matched}"
-    )
-    assert "baseline_provenance" in result
-    assert result["baseline_provenance"]["baseline"]
-
-
-def test_generate_baseline_includes_refinement_guidance() -> None:
-    """A prompt the existing synthesis can't handle but the baseline
-    catalog matches — refinement hints + 'baseline' wording must be
-    in the output so the agent knows to narrow it before deploying."""
-    from iam_jit.mcp_server import _generate_for_mcp
-    # 'Soc2 compliance audit' is a baseline match (SecurityAudit) but
-    # not a from-scratch synthesis pattern.
-    result = _generate_for_mcp({
-        "task": "soc2 compliance audit across the account",
-        "access_type": "read-only",
-    })
-    assert result.get("policy") is not None
-    matched = result.get("matched_patterns") or []
-    # We expect the baseline fallback to have fired
-    assert any(p.startswith("aws-managed:") for p in matched), (
-        f"baseline fallback didn't fire as expected: {matched}"
-    )
-    # Refinement hints push the agent to narrow before deploying
-    hints = " ".join(result.get("refinement_hints") or [])
-    assert "narrow" in hints.lower() or "exclude" in hints.lower()
-    # Suggestions tell the user this is a BASELINE
-    suggestions = " ".join(result.get("risk_suggestions") or [])
-    assert "baseline" in suggestions.lower()
-
-
-def test_generate_does_not_fallback_when_synthesis_succeeds() -> None:
-    """If the existing pattern matcher returns a real policy, the
-    fallback should NOT activate — preserves the existing precision."""
-    from iam_jit.mcp_server import _generate_for_mcp
-    # Use a specific intent that the existing matcher recognizes:
-    # "read S3 bucket" is one of the core canned patterns.
-    result = _generate_for_mcp({
-        "task": "read s3 bucket called my-bucket",
-        "account_id": "111111111111",
-        "access_type": "read-only",
-    })
-    matched = result.get("matched_patterns") or []
-    # Should NOT have come from the baseline fallback
+    # No aws-managed: prefix means no baseline-fallback fired
     assert not any(p.startswith("aws-managed:") for p in matched), (
-        f"baseline fallback fired when synthesis should have worked: {matched}"
+        f"baseline-fallback path was deleted in Stage 2 but still firing: {matched}"
     )
+    # Deprecation block still present pointing agents at the new tools
+    assert "deprecation" in result
 
 
-def test_generate_baseline_handles_admin_intent() -> None:
-    """Explicit admin requests should get an admin baseline."""
+def test_generate_does_not_introduce_baseline_provenance_field() -> None:
+    """The baseline_provenance field used to be set on the fallback
+    path. Stage 2 deletes that path, so the field should never appear."""
     from iam_jit.mcp_server import _generate_for_mcp
-    result = _generate_for_mcp({
-        "task": "I'm responding to an incident and need full admin access",
-        "access_type": "read-write",  # generator defaults; we'd refine in real use
-    })
-    # Either synthesis matches OR baseline matches — both produce a policy
-    assert result.get("policy") is not None
+    for task in [
+        "I need read access to data lake resources",
+        "soc2 compliance audit across the account",
+        "I'm responding to an incident and need full admin access",
+    ]:
+        result = _generate_for_mcp({"task": task, "access_type": "read-only"})
+        assert "baseline_provenance" not in result, (
+            f"baseline_provenance leaked from deleted Stage-2 path on task: {task}"
+        )

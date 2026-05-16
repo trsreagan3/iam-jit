@@ -1,172 +1,37 @@
-"""Tests for the AWS-managed-policy catalog + fuzzy match.
+"""Tests for the AWS-managed-policy catalog.
 
-Per [[aws-managed-baseline-strategy]]: vague requests like "data lake
-access" should map to a known AWS-managed policy baseline rather
-than fail to generate. Validates the matcher recognizes the
-canonical use cases.
+Stage 2 of [[no-nl-synthesis]] (#149) deleted the fuzzy-match
+functions (`match_baseline`, `best_baseline`, `confidence_label`,
+`_score_match`, `_tokenize`). The catalog itself + the
+browse-API (`list_entries`, `get_entry`) stay. This file tests
+the surviving surfaces.
+
+The browse API is exercised more thoroughly via the MCP
+dispatch tests in `test_mcp_template_tools.py`. The tests here
+cover catalog data hygiene + direct calls into the browse
+functions.
 """
 
 from __future__ import annotations
 
-import pytest
-
 from iam_jit.aws_managed_catalog import (
-    best_baseline,
-    confidence_label,
-    match_baseline,
+    _CATALOG,
+    ManagedPolicyEntry,
+    get_entry,
+    list_entries,
 )
 
 
 # ---------------------------------------------------------------------------
-# Fuzzy match — vague intents should land on the right baseline
-# ---------------------------------------------------------------------------
-
-
-def test_data_lake_access_matches_data_scientist() -> None:
-    """The agent-roleplay scenario that triggered this whole feature:
-    'data lake resources' should land on DataScientist baseline."""
-    matches = match_baseline("I need read access to data lake resources",
-                              access_type="read-only")
-    assert len(matches) >= 1
-    # Read-only filter keeps only read-only baselines; DataScientist
-    # is read-write, so we expect S3ReadOnly or a generic match first.
-    # The match function falls back to non-admin when no read-only
-    # entry scored.
-    top_name = matches[0][0].name
-    # Either S3 read-only (covers data-read tag) or one of the
-    # read-only catalogs picked up via service/tag overlap.
-    assert top_name in (
-        "AmazonS3ReadOnlyAccess", "DataScientist",
-        "ReadOnlyAccess",
-    ), f"unexpected top match: {top_name}"
-
-
-def test_audit_intent_matches_security_audit() -> None:
-    matches = match_baseline(
-        "I need read access for a SOC2 compliance audit",
-        access_type="read-only",
-    )
-    assert matches
-    names = [m[0].name for m in matches]
-    assert "SecurityAudit" in names or "ReadOnlyAccess" in names
-
-
-def test_database_admin_intent_matches_dba() -> None:
-    matches = match_baseline(
-        "I need to do schema migration on the RDS clusters",
-        access_type="read-write",
-    )
-    assert matches
-    names = [m[0].name for m in matches]
-    assert "DatabaseAdministrator" in names or "AmazonRDSReadOnlyAccess" in names
-
-
-def test_network_admin_intent_matches() -> None:
-    matches = match_baseline(
-        "I need to update the VPC route tables and security groups",
-        access_type="read-write",
-    )
-    assert matches
-    names = [m[0].name for m in matches]
-    assert "NetworkAdministrator" in names
-
-
-def test_cloudwatch_logs_intent_matches() -> None:
-    matches = match_baseline(
-        "Investigate cloudwatch logs for the payment service",
-        access_type="read-only",
-    )
-    assert matches
-    names = [m[0].name for m in matches]
-    assert "CloudWatchReadOnlyAccess" in names
-
-
-def test_admin_intent_only_in_admin_mode() -> None:
-    """AdministratorAccess should only surface when access_type=admin
-    OR the prompt contains admin keywords. Otherwise users would get
-    "AdministratorAccess" recommended for innocuous requests."""
-    matches = match_baseline(
-        "I need s3 read access",
-        access_type="read-only",
-    )
-    names = [m[0].name for m in matches]
-    assert "AdministratorAccess" not in names
-
-
-def test_admin_intent_in_admin_mode_surfaces_admin() -> None:
-    matches = match_baseline(
-        "I'm responding to an incident and need full admin",
-        access_type="admin",
-    )
-    assert matches
-    names = [m[0].name for m in matches]
-    assert "AdministratorAccess" in names or "PowerUserAccess" in names
-
-
-def test_no_match_returns_empty() -> None:
-    """A prompt with no matching keywords returns no matches."""
-    matches = match_baseline(
-        "xyzzy quux foobar baz nonexistent words",
-        access_type="read-only",
-    )
-    assert matches == []
-
-
-# ---------------------------------------------------------------------------
-# best_baseline — the recommender's actual entry point
-# ---------------------------------------------------------------------------
-
-
-def test_best_baseline_returns_provenance() -> None:
-    out = best_baseline(
-        "I need to look at all our s3 buckets",
-        access_type="read-only",
-    )
-    assert out is not None
-    assert "policy" in out
-    assert out["policy"]["Version"] == "2012-10-17"
-    assert "provenance" in out
-    prov = out["provenance"]
-    assert "baseline" in prov
-    assert "baseline_arn" in prov
-    # Either a real AWS-managed ARN or an iam-jit-composed baseline
-    # (e.g., ExploreReadOnlyWithSensitiveExclusions).
-    assert (
-        prov["baseline_arn"].startswith("arn:aws:iam::aws:policy/")
-        or prov["baseline_arn"].startswith("iam-jit:catalog/")
-    )
-    assert "match_confidence" in prov
-    assert prov["match_confidence"] in ("low", "medium", "high")
-    assert "reductions" in prov
-    assert prov["reductions"] == []  # populated by narrowing step (post-launch)
-
-
-def test_best_baseline_returns_none_on_no_match() -> None:
-    out = best_baseline("xyzzy quux foobar", access_type="read-only")
-    assert out is None
-
-
-def test_confidence_label_tiers() -> None:
-    assert confidence_label(0) == "none"
-    assert confidence_label(1) == "low"
-    assert confidence_label(2) == "low"
-    assert confidence_label(3) == "medium"
-    assert confidence_label(5) == "medium"
-    assert confidence_label(6) == "high"
-    assert confidence_label(100) == "high"
-
-
-# ---------------------------------------------------------------------------
-# Catalog hygiene — every entry should be self-consistent
+# Catalog hygiene — every entry must be self-consistent
 # ---------------------------------------------------------------------------
 
 
 def test_catalog_entries_have_required_fields() -> None:
-    from iam_jit.aws_managed_catalog import _CATALOG
     for entry in _CATALOG:
         assert entry.name, "name required"
         # ARN is either an AWS-managed policy OR an iam-jit-internal
-        # composed baseline (e.g., ExploreReadOnlyWithSensitiveExclusions
+        # composed baseline (e.g. ExploreReadOnlyWithSensitiveExclusions
         # which composes Allow + Deny — not a verbatim AWS-managed shape).
         assert (
             entry.arn.startswith("arn:aws:iam::aws:policy/")
@@ -180,45 +45,19 @@ def test_catalog_entries_have_required_fields() -> None:
 
 
 def test_catalog_arns_unique() -> None:
-    from iam_jit.aws_managed_catalog import _CATALOG
     arns = [e.arn for e in _CATALOG]
     assert len(arns) == len(set(arns)), "duplicate ARN in catalog"
 
 
 def test_catalog_names_unique() -> None:
-    from iam_jit.aws_managed_catalog import _CATALOG
     names = [e.name for e in _CATALOG]
     assert len(names) == len(set(names)), "duplicate name in catalog"
 
 
-# ---------------------------------------------------------------------------
-# Broad-read fallback (per [[broad-read-fallback-ux]]).
-# ---------------------------------------------------------------------------
-
-
-@pytest.mark.parametrize("prompt", [
-    "I'm investigating an incident and not sure what I need",
-    "explore the env to figure out what's happening",
-    "debug a customer issue, no idea which services are involved",
-    "I want to look around prod after the deploy",
-    "post-mortem on yesterday's outage",
-])
-def test_uncertain_prompts_match_explore_baseline(prompt: str) -> None:
-    """The 'I'm not sure' family of prompts should land on the
-    ExploreReadOnlyWithSensitiveExclusions baseline."""
-    matches = match_baseline(prompt, access_type="read-only")
-    assert matches, f"no match for prompt: {prompt}"
-    names = [m[0].name for m in matches[:3]]
-    assert "ExploreReadOnlyWithSensitiveExclusions" in names, (
-        f"expected ExploreReadOnly in top-3, got {names}"
-    )
-
-
 def test_explore_baseline_excludes_secrets_in_policy_shape() -> None:
-    """The Explore baseline MUST have a Deny statement covering
-    secretsmanager:GetSecretValue and friends — that's the whole
-    point of the pattern."""
-    from iam_jit.aws_managed_catalog import _CATALOG
+    """The Explore baseline MUST deny secretsmanager:GetSecretValue
+    and kms:Decrypt — that's the whole point of the pattern.
+    Pre-launch sentinel for the broad-read-with-denylist UX."""
     explore = next(
         e for e in _CATALOG
         if e.name == "ExploreReadOnlyWithSensitiveExclusions"
@@ -227,11 +66,120 @@ def test_explore_baseline_excludes_secrets_in_policy_shape() -> None:
     # First statement: broad Allow on read verbs
     assert stmts[0]["Effect"] == "Allow"
     # Subsequent statements: Deny on sensitive
-    deny_actions = []
+    deny_actions: list[str] = []
     for s in stmts[1:]:
         assert s["Effect"] == "Deny"
         action_list = s["Action"] if isinstance(s["Action"], list) else [s["Action"]]
         deny_actions.extend(action_list)
-    # Critical secrets-reads are explicitly denied
     assert "secretsmanager:GetSecretValue" in deny_actions
     assert "kms:Decrypt" in deny_actions
+
+
+# ---------------------------------------------------------------------------
+# Browse API — list_entries with various filters
+# ---------------------------------------------------------------------------
+
+
+def test_list_entries_no_filters_returns_everything() -> None:
+    out = list_entries()
+    assert len(out) == len(_CATALOG)
+    # Spot-check: at least one well-known entry present
+    names = {e["name"] for e in out}
+    assert "AdministratorAccess" in names
+    assert "ExploreReadOnlyWithSensitiveExclusions" in names
+
+
+def test_list_entries_filter_by_access_type() -> None:
+    read_only = list_entries(access_type="read-only")
+    assert all(e["access_type"] == "read-only" for e in read_only)
+    admin = list_entries(access_type="admin")
+    assert all(e["access_type"] == "admin" for e in admin)
+    names = {e["name"] for e in admin}
+    assert "AdministratorAccess" in names
+
+
+def test_list_entries_filter_by_service() -> None:
+    """A service filter should match entries that include the service
+    AND catch-all entries with services=['*']."""
+    out = list_entries(service="s3")
+    names = {e["name"] for e in out}
+    assert "AmazonS3ReadOnlyAccess" in names
+    assert "AdministratorAccess" in names  # catch-all
+    assert "ReadOnlyAccess" in names  # catch-all
+
+
+def test_list_entries_filter_source_aws_managed() -> None:
+    out = list_entries(source="aws-managed")
+    assert len(out) >= 1
+    assert all(e["source"] == "aws-managed" for e in out)
+
+
+def test_list_entries_filter_source_org_curated_empty_pre_launch() -> None:
+    """Pre-launch only aws-managed source returns entries; org-curated
+    and personal-recurring are reserved for post-launch when those
+    tiers ship."""
+    assert list_entries(source="org-curated") == []
+    assert list_entries(source="personal-recurring") == []
+
+
+def test_list_entries_filter_by_query_substring_case_insensitive() -> None:
+    """The `query` filter is an exact case-insensitive substring on
+    `name`. NOT a fuzzy match — that's the deleted code path."""
+    out = list_entries(query="ReadOnly")
+    assert all("readonly" in e["name"].lower() for e in out)
+    # Query that matches nothing returns empty
+    assert list_entries(query="ThisStringIsNotInAnyTemplateName") == []
+
+
+def test_list_entries_summary_shape_excludes_policy_body() -> None:
+    """The listing endpoint MUST NOT inline policy_shape — that would
+    bloat MCP responses. Use get_entry() for the full body."""
+    for entry in list_entries():
+        assert "policy" not in entry
+        assert "policy_shape" not in entry
+
+
+# ---------------------------------------------------------------------------
+# Browse API — get_entry by exact name
+# ---------------------------------------------------------------------------
+
+
+def test_get_entry_returns_full_shape_by_name() -> None:
+    entry = get_entry("AdministratorAccess")
+    assert entry is not None
+    assert entry["name"] == "AdministratorAccess"
+    assert "policy" in entry
+    assert entry["policy"]["Version"] == "2012-10-17"
+
+
+def test_get_entry_unknown_returns_none() -> None:
+    assert get_entry("NotARealTemplate") is None
+
+
+def test_get_entry_empty_or_non_string_returns_none() -> None:
+    assert get_entry("") is None
+    assert get_entry(None) is None  # type: ignore[arg-type]
+
+
+def test_get_entry_exact_match_not_fuzzy() -> None:
+    """get_entry requires the EXACT name. Case-sensitive."""
+    assert get_entry("AdministratorAccess") is not None
+    assert get_entry("administratoraccess") is None
+
+
+# ---------------------------------------------------------------------------
+# Dataclass hygiene
+# ---------------------------------------------------------------------------
+
+
+def test_managed_policy_entry_is_frozen() -> None:
+    """Frozen dataclass — entries can't be mutated at runtime."""
+    import dataclasses
+    entry = ManagedPolicyEntry(
+        name="x", arn="iam-jit:catalog/x", summary="",
+        services=("s3",), access_type="read-only",
+        use_case_tags=("x",), policy_shape={"Version": "2012-10-17", "Statement": []},
+    )
+    import pytest
+    with pytest.raises(dataclasses.FrozenInstanceError):
+        entry.name = "y"  # type: ignore[misc]

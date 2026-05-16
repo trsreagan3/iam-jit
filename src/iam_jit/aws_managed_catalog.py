@@ -39,7 +39,6 @@ Full catalog is post-launch.
 from __future__ import annotations
 
 import dataclasses
-import re
 from typing import Any
 
 
@@ -431,109 +430,6 @@ _CATALOG: tuple[ManagedPolicyEntry, ...] = (
         },
     ),
 )
-
-
-# ---------------------------------------------------------------------------
-# Matching
-# ---------------------------------------------------------------------------
-
-
-_WORD_SPLIT_RE = re.compile(r"[\s,;_\-/()]+")
-
-
-def _tokenize(text: str) -> list[str]:
-    """Lowercase, split on common separators, strip empty."""
-    return [t for t in _WORD_SPLIT_RE.split(text.lower()) if t]
-
-
-def _score_match(entry: ManagedPolicyEntry, prompt_tokens: list[str]) -> int:
-    """Score how well `entry` matches the prompt. Higher = better.
-
-    Each use_case_tag token that appears in the prompt scores 2;
-    each service name that appears scores 1.
-    """
-    score = 0
-    prompt_set = set(prompt_tokens)
-    # Build a token set from the entry's tags (split kebab-case).
-    entry_tag_tokens: set[str] = set()
-    for tag in entry.use_case_tags:
-        for tok in tag.split("-"):
-            if tok:
-                entry_tag_tokens.add(tok)
-    for tok in entry_tag_tokens:
-        if tok in prompt_set:
-            score += 2
-    for svc in entry.services:
-        if svc != "*" and svc in prompt_set:
-            score += 1
-    return score
-
-
-def match_baseline(
-    prompt: str,
-    *,
-    access_type: str = "read-only",
-    top_k: int = 3,
-) -> list[tuple[ManagedPolicyEntry, int]]:
-    """Return up to top_k catalog entries ranked by match score.
-
-    Filters by `access_type` first — a read-only request prefers
-    read-only baselines, falls back to read-write only if no
-    read-only matched. Admin baselines only surface when access_type
-    is "admin" or the prompt explicitly contains admin keywords.
-    """
-    prompt_tokens = _tokenize(prompt)
-
-    # Filter by access_type with permissive fallback.
-    if access_type in ("read-only", "read"):
-        filtered = [e for e in _CATALOG if e.access_type == "read-only"]
-        if not filtered:
-            filtered = [e for e in _CATALOG if e.access_type != "admin"]
-    elif access_type == "admin":
-        filtered = list(_CATALOG)
-    else:  # read-write
-        filtered = [e for e in _CATALOG if e.access_type != "admin"]
-
-    scored = [(e, _score_match(e, prompt_tokens)) for e in filtered]
-    # Only return entries with at least one match signal.
-    matched = [(e, s) for e, s in scored if s > 0]
-    matched.sort(key=lambda x: x[1], reverse=True)
-    return matched[:top_k]
-
-
-def confidence_label(score: int) -> str:
-    if score >= 6:
-        return "high"
-    if score >= 3:
-        return "medium"
-    if score >= 1:
-        return "low"
-    return "none"
-
-
-def best_baseline(
-    prompt: str, *, access_type: str = "read-only",
-) -> dict[str, Any] | None:
-    """Return the single best match as the recommender's
-    starting-point output, or None if no match scored above zero.
-    """
-    candidates = match_baseline(prompt, access_type=access_type, top_k=1)
-    if not candidates:
-        return None
-    entry, score = candidates[0]
-    return {
-        "policy": entry.policy_shape,
-        "provenance": {
-            "baseline": entry.name,
-            "baseline_arn": entry.arn,
-            "summary": entry.summary,
-            "services": list(entry.services),
-            "access_type": entry.access_type,
-            "match_score": score,
-            "match_confidence": confidence_label(score),
-            "reductions": [],  # populated by narrowing step (post-launch)
-        },
-    }
 
 
 # ---------------------------------------------------------------------------
