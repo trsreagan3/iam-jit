@@ -223,7 +223,8 @@ def _build_review_block(req: dict[str, Any]) -> dict[str, Any] | None:
 
     Returns None only when there's no policy to score.
     """
-    policy = (req.get("spec") or {}).get("policy")
+    _spec_for_policy = req.get("spec")
+    policy = _spec_for_policy.get("policy") if isinstance(_spec_for_policy, dict) else None
     if not policy:
         return None
     extra_services, extra_actions = _admin_risk_context()
@@ -289,7 +290,7 @@ def preview_request(
     # so the analyzer sees the same shape. Avoid mutating the caller's
     # payload.
     req = dict(payload)
-    metadata = dict(req.get("metadata") or {})
+    _metadata_raw = req.get("metadata"); metadata = dict(_metadata_raw) if isinstance(_metadata_raw, dict) else {}
     metadata["id"] = "preview-no-id"
     metadata["requester"] = {
         "email": user.id.removeprefix("email:") if user.id.startswith("email:") else user.id,
@@ -303,7 +304,8 @@ def preview_request(
     # bring the score down").
     schema_errors = schema.validate_request(req)
 
-    policy = (req.get("spec") or {}).get("policy")
+    _spec_for_policy = req.get("spec")
+    policy = _spec_for_policy.get("policy") if isinstance(_spec_for_policy, dict) else None
     analysis_dict = None
     auto_decision = None
     threshold = None
@@ -478,7 +480,7 @@ def submit_request(
     # client-supplied value through must not be able to forge identity
     # or collide with another user's request id.
     req = dict(payload)
-    metadata = dict(req.get("metadata") or {})
+    _metadata_raw = req.get("metadata"); metadata = dict(_metadata_raw) if isinstance(_metadata_raw, dict) else {}
     # Always assign a fresh server-generated id. Refuse client-supplied
     # ids: even if they pass schema validation, accepting them lets a
     # client overwrite an existing request by guessing or reusing an id.
@@ -535,7 +537,8 @@ def submit_request(
     lifecycle.init_status(req, owner=user)
     review_block = _build_review_block(req)
     questions = []
-    policy = (req.get("spec") or {}).get("policy")
+    _spec_for_policy = req.get("spec")
+    policy = _spec_for_policy.get("policy") if isinstance(_spec_for_policy, dict) else None
     if policy:
         questions = [
             q.__dict__ if hasattr(q, "__dict__") else q
