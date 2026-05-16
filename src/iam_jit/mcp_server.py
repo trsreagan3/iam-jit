@@ -327,6 +327,54 @@ def _generate_for_mcp(args: dict[str, Any]) -> dict[str, Any]:
         refinement=refinement,
     )
     result = generate_policy(req)
+
+    # AWS-managed-baseline fallback (#147 / [[aws-managed-baseline-strategy]]).
+    # The calibration roleplay agent found that 33% of realistic vague
+    # requests ("data lake access", "EKS cluster unhealthy", etc.) get
+    # ZERO output from the from-scratch synthesis. When that happens,
+    # try to match the prompt to a known AWS-managed policy as the
+    # starting point. The agent can then narrow from there.
+    if (
+        not result.policy
+        or not (result.policy.get("Statement") if isinstance(result.policy, dict) else None)
+    ):
+        from .aws_managed_catalog import best_baseline
+        baseline = best_baseline(task, access_type=access_type)
+        if baseline is not None:
+            return {
+                "policy": baseline["policy"],
+                "matched_patterns": [
+                    f"aws-managed:{baseline['provenance']['baseline']}"
+                ],
+                "confidence": baseline["provenance"]["match_confidence"],
+                "scored_risk": None,
+                "risk_factors": [],
+                "risk_suggestions": [
+                    "Policy is a starting-point baseline from AWS-managed "
+                    f"`{baseline['provenance']['baseline']}` "
+                    f"(`{baseline['provenance']['baseline_arn']}`). "
+                    "Narrow it via `exclude_actions` / `resources` "
+                    "refinement params to fit your specific resource "
+                    "set before deploying."
+                ],
+                "suppressed_actions": [],
+                "refinement_hints": [
+                    "This is a BASELINE — narrow the resource ARNs to "
+                    "the specific resources you need.",
+                    "Drop sub-services you don't need via "
+                    "`exclude_actions: ['service:*']`.",
+                ],
+                "unmatched_reason": (
+                    "From-scratch synthesis didn't match; returned the "
+                    "closest AWS-managed baseline instead."
+                ),
+                "reasons": [
+                    f"Matched AWS-managed policy: {baseline['provenance']['baseline']}",
+                    f"Confidence: {baseline['provenance']['match_confidence']}",
+                ],
+                "baseline_provenance": baseline["provenance"],
+            }
+
     return {
         "policy": result.policy,
         "matched_patterns": result.matched_patterns,

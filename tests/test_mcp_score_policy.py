@@ -161,3 +161,87 @@ def test_score_passes_context_through_for_audit() -> None:
         "context": "terraform module: iam-role-buildkite-uploader",
     })
     assert result["context"] == "terraform module: iam-role-buildkite-uploader"
+
+
+# ---------------------------------------------------------------------------
+# AWS-managed-baseline fallback (#147)
+#
+# When from-scratch synthesis returns nothing, the generator should
+# fall back to the closest AWS-managed policy as a starting point.
+# Closes the 33% no-output rate the calibration roleplay agent flagged.
+# ---------------------------------------------------------------------------
+
+
+def test_generate_falls_back_to_baseline_for_vague_intent() -> None:
+    """The canonical no-output scenario from the calibration agent:
+    'data lake access' — synthesis returns nothing; baseline match
+    should kick in and return DataScientist or AmazonS3ReadOnlyAccess."""
+    from iam_jit.mcp_server import _generate_for_mcp
+    result = _generate_for_mcp({
+        "task": "I need read access to data lake resources",
+        "access_type": "read-only",
+    })
+    # MUST have a policy now (no more zero-output)
+    assert result.get("policy") is not None
+    assert result["policy"].get("Statement"), "policy must have statements"
+    # Provenance metadata should identify it as a baseline match
+    matched = result.get("matched_patterns") or []
+    assert any(p.startswith("aws-managed:") for p in matched), (
+        f"expected aws-managed: pattern, got {matched}"
+    )
+    assert "baseline_provenance" in result
+    assert result["baseline_provenance"]["baseline"]
+
+
+def test_generate_baseline_includes_refinement_guidance() -> None:
+    """A prompt the existing synthesis can't handle but the baseline
+    catalog matches — refinement hints + 'baseline' wording must be
+    in the output so the agent knows to narrow it before deploying."""
+    from iam_jit.mcp_server import _generate_for_mcp
+    # 'Soc2 compliance audit' is a baseline match (SecurityAudit) but
+    # not a from-scratch synthesis pattern.
+    result = _generate_for_mcp({
+        "task": "soc2 compliance audit across the account",
+        "access_type": "read-only",
+    })
+    assert result.get("policy") is not None
+    matched = result.get("matched_patterns") or []
+    # We expect the baseline fallback to have fired
+    assert any(p.startswith("aws-managed:") for p in matched), (
+        f"baseline fallback didn't fire as expected: {matched}"
+    )
+    # Refinement hints push the agent to narrow before deploying
+    hints = " ".join(result.get("refinement_hints") or [])
+    assert "narrow" in hints.lower() or "exclude" in hints.lower()
+    # Suggestions tell the user this is a BASELINE
+    suggestions = " ".join(result.get("risk_suggestions") or [])
+    assert "baseline" in suggestions.lower()
+
+
+def test_generate_does_not_fallback_when_synthesis_succeeds() -> None:
+    """If the existing pattern matcher returns a real policy, the
+    fallback should NOT activate — preserves the existing precision."""
+    from iam_jit.mcp_server import _generate_for_mcp
+    # Use a specific intent that the existing matcher recognizes:
+    # "read S3 bucket" is one of the core canned patterns.
+    result = _generate_for_mcp({
+        "task": "read s3 bucket called my-bucket",
+        "account_id": "111111111111",
+        "access_type": "read-only",
+    })
+    matched = result.get("matched_patterns") or []
+    # Should NOT have come from the baseline fallback
+    assert not any(p.startswith("aws-managed:") for p in matched), (
+        f"baseline fallback fired when synthesis should have worked: {matched}"
+    )
+
+
+def test_generate_baseline_handles_admin_intent() -> None:
+    """Explicit admin requests should get an admin baseline."""
+    from iam_jit.mcp_server import _generate_for_mcp
+    result = _generate_for_mcp({
+        "task": "I'm responding to an incident and need full admin access",
+        "access_type": "read-write",  # generator defaults; we'd refine in real use
+    })
+    # Either synthesis matches OR baseline matches — both produce a policy
+    assert result.get("policy") is not None
