@@ -215,3 +215,88 @@ def test_no_mfa_evaluation_skips_mfa_branch() -> None:
     assert decision is original
     assert actor == "system:auto-approver"
     assert block is None
+
+
+# ---------------------------------------------------------------------------
+# WB13-08 regression: MFA must block even when self-approve flipped
+# the decision. Pre-fix, MFA only fired on auto_decision.auto_approve==True
+# at entry; if the score gate denied with above_threshold and self-approve
+# flipped to True, MFA never re-checked. Admin + solo + high-risk + stale
+# MFA could auto-provision.
+# ---------------------------------------------------------------------------
+
+
+def test_self_approve_high_risk_stale_mfa_still_blocks_via_mfa() -> None:
+    """Score-denied + self-approve-eligible + high-risk + stale MFA.
+
+    Expected: self-approve flips to True, THEN MFA blocks with
+    mfa_required_for_high_risk. Self-approve does NOT bypass MFA.
+    """
+    decision, actor, block = _apply_mfa_and_self_approve_enforcement(
+        _deny("above_threshold", score=8),  # score-gate denied
+        mfa_audit={
+            "mfa_gate_evaluated": True,
+            "would_require_mfa": True,    # high-risk
+            "mfa_present": False,         # stale/missing
+            "mfa_reason": "mfa_too_stale",
+        },
+        self_approve_audit={
+            "self_approve_evaluated": True,
+            "self_approve_eligible": True,  # admin reduction in solo
+        },
+        analysis_score=8,
+        user_id="email:admin@example.com",
+    )
+    # The final decision MUST be the MFA block (not the self-approve
+    # flip). The audit actor reverts to system because the FINAL
+    # gate is MFA, not the user's reduction.
+    assert decision.auto_approve is False
+    assert decision.reason == "mfa_required_for_high_risk"
+    assert actor == "system:auto-approver"
+    assert block is not None
+    assert block["mfa_step_up_required"] is True
+
+
+def test_self_approve_high_risk_fresh_mfa_passes() -> None:
+    """Same scenario but MFA is fresh: self-approve flips to True
+    AND MFA allows it through. Audit actor is the self-approve one."""
+    decision, actor, block = _apply_mfa_and_self_approve_enforcement(
+        _deny("above_threshold", score=8),
+        mfa_audit={
+            "mfa_gate_evaluated": True,
+            "would_require_mfa": True,
+            "mfa_present": True,
+            "mfa_age_seconds": 30,
+        },
+        self_approve_audit={
+            "self_approve_evaluated": True,
+            "self_approve_eligible": True,
+        },
+        analysis_score=8,
+        user_id="email:admin@example.com",
+    )
+    assert decision.auto_approve is True
+    assert decision.reason == "self_approve_reduction"
+    assert actor == "self_approve_reduction:email:admin@example.com"
+    assert block is None
+
+
+def test_self_approve_low_risk_stale_mfa_passes() -> None:
+    """Low-risk doesn't require MFA, so even stale MFA is fine."""
+    decision, actor, block = _apply_mfa_and_self_approve_enforcement(
+        _deny("above_threshold", score=4),
+        mfa_audit={
+            "mfa_gate_evaluated": True,
+            "would_require_mfa": False,  # low-risk
+            "mfa_present": False,        # but irrelevant
+        },
+        self_approve_audit={
+            "self_approve_evaluated": True,
+            "self_approve_eligible": True,
+        },
+        analysis_score=4,
+        user_id="email:admin@example.com",
+    )
+    assert decision.auto_approve is True
+    assert decision.reason == "self_approve_reduction"
+    assert actor == "self_approve_reduction:email:admin@example.com"

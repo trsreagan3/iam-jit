@@ -92,13 +92,64 @@ def _apply_mfa_and_self_approve_enforcement(
     # the audit dicts (e.g., a future mfa_gate that returns a
     # bool-like object, or a missing key returning None) are handled
     # safely. Old `is True` check would reject any non-True truthy.
-    _auto_approve_currently = bool(getattr(auto_decision, "auto_approve", False))
     _would_require_mfa = bool(mfa_audit.get("would_require_mfa"))
     _mfa_present = bool(mfa_audit.get("mfa_present"))
     _self_approve_eligible = bool(self_approve_audit.get("self_approve_eligible"))
 
-    # 1. MFA enforcement: high-risk + missing/stale MFA blocks auto-approve.
-    if _auto_approve_currently and _would_require_mfa and not _mfa_present:
+    # Track the audit actor through the override chain.
+    effective_decision = auto_decision
+    audit_actor = "system:auto-approver"
+
+    # ------------------------------------------------------------------
+    # STAGE 1: Self-approve override. If the score gate said
+    # above_threshold AND the user qualifies as an admin doing a
+    # reduction, flip to approve here. The MFA gate (stage 2) will
+    # then run against this FLIPPED decision so a self-approved
+    # high-risk request still requires fresh MFA.
+    #
+    # WB13-08 closure: previously MFA ran first and only fired when
+    # auto_decision.auto_approve was originally True. Score-gate
+    # denial bypassed MFA, then self-approve flipped to True
+    # unconditionally — an admin with stale MFA could auto-provision
+    # a high-risk role. Reordering self-approve → MFA closes that
+    # gap so MFA is the final word regardless of intermediate flips.
+    #
+    # NOTE: strict-mode-blocked reasons (strict_mode_action_wildcard,
+    # strict_mode_admin_fallback) are NOT eligible for self-approve.
+    # Strict mode is a deploy-time policy ceiling that admins cannot
+    # individually override — by design. WB12-08.
+    # ------------------------------------------------------------------
+    if (
+        not bool(getattr(effective_decision, "auto_approve", False))
+        and getattr(effective_decision, "reason", "") == "above_threshold"
+        and _self_approve_eligible
+    ):
+        from ..auto_approve import AutoApproveDecision
+        from .. import self_approve_reductions as _sar_mod
+        effective_decision = AutoApproveDecision(
+            auto_approve=True,
+            reason="self_approve_reduction",
+            details={
+                "score": analysis_score,
+                "original_reason": "above_threshold",
+                "self_approve_reason": self_approve_audit.get("self_approve_reason"),
+                "details_pre_override": dict(getattr(auto_decision, "details", {}) or {}),
+            },
+        )
+        audit_actor = _sar_mod.audit_actor_for(user_id)
+
+    # ------------------------------------------------------------------
+    # STAGE 2: MFA enforcement. Runs on the (possibly self-approve-
+    # flipped) decision. If the effective decision is approve AND the
+    # request is high-risk AND MFA is missing/stale → BLOCK with
+    # mfa_required_for_high_risk. Audit actor reverts to system since
+    # MFA is a system gate (not a user action).
+    # ------------------------------------------------------------------
+    if (
+        bool(getattr(effective_decision, "auto_approve", False))
+        and _would_require_mfa
+        and not _mfa_present
+    ):
         from ..auto_approve import AutoApproveDecision
         # WB12-11 closure: do NOT leak the original (would-have-been)
         # reason or score back to the caller. A stale-MFA attacker
@@ -110,48 +161,25 @@ def _apply_mfa_and_self_approve_enforcement(
             reason="mfa_required_for_high_risk",
             details={
                 "mfa_step_up_required": True,
-                "mfa_step_up_max_age_seconds": mfa_audit.get("mfa_step_up_floor"),
+                # WB13-09 closure: this field is the score-floor at
+                # or above which MFA is required, not a duration. Was
+                # mis-labeled `_max_age_seconds` previously (copy/paste
+                # from the cookie max-age field).
+                "mfa_step_up_at_score": mfa_audit.get("mfa_step_up_floor"),
                 "client_action": "re_authenticate_via_oidc",
             },
         )
         block_response = {
             "mfa_step_up_required": True,
-            # Reason is INTENTIONALLY OPAQUE in the response body —
-            # don't tell the attacker whether MFA was missing
-            # entirely vs merely stale vs signature-bad. Audit log
-            # has the full mfa_reason.
             "reason": "fresh_mfa_required",
             "redirect_to": "/api/v1/auth/oidc/login",
         }
+        # Actor reverts to system: MFA is a platform gate, not a user
+        # decision. Even if self-approve fired first, the MFA block
+        # takes precedence in the actor field.
         return blocked, "system:auto-approver", block_response
 
-    # 2. Self-approve override: if score gate said above_threshold AND
-    #    the user qualifies as admin doing a reduction, flip to approve.
-    # NOTE: strict-mode-blocked reasons (strict_mode_action_wildcard,
-    # strict_mode_admin_fallback) are NOT eligible for self-approve.
-    # Strict mode is a deploy-time policy ceiling that admins cannot
-    # individually override — by design. WB12-08.
-    if (
-        not _auto_approve_currently
-        and getattr(auto_decision, "reason", "") == "above_threshold"
-        and _self_approve_eligible
-    ):
-        from ..auto_approve import AutoApproveDecision
-        from .. import self_approve_reductions as _sar_mod
-        approved = AutoApproveDecision(
-            auto_approve=True,
-            reason="self_approve_reduction",
-            details={
-                "score": analysis_score,
-                "original_reason": "above_threshold",
-                "self_approve_reason": self_approve_audit.get("self_approve_reason"),
-                "details_pre_override": dict(getattr(auto_decision, "details", {}) or {}),
-            },
-        )
-        return approved, _sar_mod.audit_actor_for(user_id), None
-
-    # 3. No override.
-    return auto_decision, "system:auto-approver", None
+    return effective_decision, audit_actor, None
 
 
 def _scan_submission_for_injection(
