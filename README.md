@@ -84,6 +84,28 @@ Every IAM policy structure: action wildcards, narrow vs broad resource ARNs, con
 
 The 1–10 scale is **adversarially calibrated**: every scoring rule is pinned by tests sourced from real attack patterns + the full AWS-managed-policy corpus. See [docs/CONVERGENCE-REPORT-2026-05.md](docs/CONVERGENCE-REPORT-2026-05.md) and [docs/ADVERSARIAL-LOOP-PROCESS.md](docs/ADVERSARIAL-LOOP-PROCESS.md).
 
+### How does this compare to AWS IAM Access Analyzer?
+
+Honest answer: **complementary, not a replacement.** They solve adjacent problems.
+
+| | AWS IAM Access Analyzer | iam-risk-score |
+|---|---|---|
+| **Cost** | Free, built into AWS | Free (offline CLI / `pip install`); 100/mo free via API; paid tiers above |
+| **What it answers** | "What does this policy allow? Is there unused permission? Is anything publicly accessible?" | "If this policy is granted + compromised, how bad is the blast radius? (1–10)" |
+| **Output shape** | Findings (pass/warning/error), policy validation, CloudTrail-based refinement suggestions | Numeric score 1–10 + per-factor breakdown |
+| **Runs where** | AWS API call from an AWS context | Offline CLI, local API, hosted API, GitHub Action — no AWS account needed |
+| **Methodology** | Amazon proprietary | Open calibration corpus + adversarial test suite (1,489 / 1,489 AWS-managed pass rate) |
+| **CI integration** | DIY via AWS API + custom wrap | Drop-in GitHub Action + SARIF output |
+| **Designed for agents** | No — human-reviewer-oriented | Yes — per-factor breakdown is the iteration signal |
+| **CloudTrail-based refinement** | ✅ unique strength (narrows existing roles based on actual usage) | No (and not planned — different problem) |
+| **External-access analysis** | ✅ strong (cross-account, public buckets) | Partial (some patterns flagged via scoring factors) |
+
+**Use Access Analyzer for** what it does uniquely well: CloudTrail-based policy refinement, external-access findings, AWS-Organizations-wide analysis. It's free and built-in; there's no reason not to.
+
+**Use iam-risk-score for** pre-grant risk scoring with a numeric scale, CI gates that fail on score thresholds, agent iteration loops where the per-factor breakdown drives narrowing, or any review that needs to happen offline / outside AWS. The open calibration corpus is reusable — you can extend it, audit it, contribute to it.
+
+**Together** they catch different things: Access Analyzer tells you "this policy permits cross-account access you didn't intend"; iam-risk-score tells you "this policy scores 8/10 because it grants `iam:PassRole` on `*` without a Condition." Either alone leaves the other gap.
+
 ---
 
 ## `iam-jit local`
