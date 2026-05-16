@@ -21,9 +21,11 @@ Open corpus, open methodology, open commit history.
 |---|---|---|---|
 | **[iam-risk-score](#iam-risk-score)** | A 1–10 risk score for any AWS IAM policy in <100ms. API + CLI + GitHub Action. Free for the first 100 requests/month. | CI pipelines, IDE plugins, anyone who wants a verdict before granting permissions. | `pip install iam-risk-score` |
 | **[iam-jit local](#iam-jit-local)** *(new)* | Local-only safety layer between your AI agent and AWS. Runs on your laptop. Zero SaaS dependency. Your AWS credentials never leave your machine. | Solo devs / individual admins who want Claude bounded. | `pip install iam-jit && iam-jit serve --local` (90 seconds) |
-| **[iam-jit hosted / self-host](#iam-jit-hosted--self-host)** | Full JIT-IAM provisioner: time-bound roles, scoring, approval workflow, Slack approval bot, OIDC SSO (Google + Okta), audit trail, auto-revocation. | Teams + enterprises with shared audit + multi-user + compliance needs. | Hosted SaaS ($19–$499/mo) **or** self-host SAM stack (Enterprise). |
+| **[iam-jit self-host](#iam-jit-self-host)** | Full JIT-IAM provisioner: time-bound roles, scoring, approval workflow, Slack approval bot, OIDC SSO (Google + Okta), audit trail, auto-revocation — running in your own AWS account. | Teams + enterprises with shared audit + multi-user + compliance needs. | `git clone` + `sam deploy --guided` |
 
 All three share the same deterministic scoring engine. Open source under Apache 2.0.
+
+> **No multi-tenant hosted SaaS.** iam-jit-the-company does not operate a shared infrastructure tier — running a tool that holds trust roles into many customer AWS accounts would create a SolarWinds-style blast radius we refuse to host. iam-risk-score.com (the stateless scorer) is hosted because no credentials are involved; iam-jit itself runs in your AWS account. Dedicated single-tenant managed Enterprise contracts are available for large customers at high-fee — but each deployment is fully isolated, not shared.
 
 ---
 
@@ -166,9 +168,9 @@ User sees ZERO friction prompts in the read-only investigation phase. The single
 
 ---
 
-## `iam-jit` hosted / self-host
+## `iam-jit` self-host
 
-> The full provisioner. For teams + enterprises that need shared audit, multi-user, OIDC SSO, Slack approval workflows, and either hosted convenience or self-host compliance scope.
+> The full provisioner — runs in your own AWS account. For teams + enterprises that need shared audit, multi-user, OIDC SSO, Slack approval workflows. No multi-tenant hosted SaaS — each customer's deployment is isolated by design (see two-tier table below).
 
 ### What's included
 
@@ -188,17 +190,16 @@ User sees ZERO friction prompts in the read-only investigation phase. The single
 - **MFA propagation** — propagates IdP MFA assertion through to `aws:MultiFactorAuthPresent` AWS Conditions
 - **Safety modes** — `read_write_swap` (default, lean-permissive) and `strict` (compliance environments); configurable per-deployment, per-account, per-session
 
-### Tiers
+### Tiers (two-tier model)
 
-| Tier | Hosting | LLM backend | Pricing |
+| Tier | What it is | LLM backend | Pricing |
 |---|---|---|---|
-| Free | Local-only OR self-host | None | $0 |
-| Indie | Hosted SaaS | Sonnet (capped) | $19/mo |
-| Pro | Hosted SaaS OR self-host | Sonnet | $99/mo |
-| Team | Hosted SaaS OR self-host | Opus | $499/mo |
-| Enterprise | Self-host only | Opus (customer's Bedrock) | Annual license + support |
+| **Free** | Self-host the OSS Apache 2.0 core in your own AWS account. Unlimited users (honor-system threshold ~25 users to consider Enterprise). All MCP tools, scoring engine, audit log, OIDC SSO, MFA propagation, Slack approval bot, raw-JSON submission, personal-tier template library. | Customer-chosen (Bedrock / Anthropic / OpenAI / Ollama — any) | $0 |
+| **Enterprise** | Free + proprietary plugins (live action tail / org-tier preset library / UI guided reduction) + support contract with SLA + signed release binaries. Self-host in your account OR dedicated-managed (single-tenant in a dedicated AWS account) for large customers. | Customer-chosen for self-host; managed-tier negotiated | Annual contract; typical $25–100K/yr self-host; $200K+/yr dedicated-managed |
 
-Hosted-SaaS Indie/Pro/Team use a CloudFormation-onboarding pattern — customer applies a one-click stack that creates an IAM role iam-jit-the-company assumes per grant. Trust path is bounded by the customer's permissions boundary policy. Enterprise customers self-host in their own AWS account for full control + compliance scope.
+**Why no per-seat hosted tier.** A hosted iam-jit would hold cross-account trust into every customer's AWS account — one breach pivots to many customers. We refuse to operate that. The OSS self-host model keeps each customer's blast radius bounded to their own account, the same as their existing IAM tooling.
+
+**LLM-touching features (risk narrative, per-account LLM policy, LLM-augmented suggestions) are FREE in OSS** — you pay the LLM bills directly to your provider; iam-jit-the-company doesn't double-charge to enable features where you do the work. Enterprise pricing only applies to proprietary plugins where iam-jit-the-company maintains real infrastructure on your behalf.
 
 ### Self-host quickstart
 
@@ -311,7 +312,7 @@ See [docs/AGENTS.md](docs/AGENTS.md) for the agent-driven reduction-loop pattern
 
 - **iam-risk-score**: launched. Stable schema; CLI + API + GitHub Action shipped. 1,489 / 1,489 AWS-managed-policy corpus pass rate.
 - **iam-jit local**: in active development; targeted for v1.0 launch.
-- **iam-jit hosted / self-host**: in active development; targeted for v1.0 launch with multi-provider OIDC, Slack approval bot, template browser, evolving preset library, agent-driven reduction loop, MFA propagation, safety modes.
+- **iam-jit self-host**: in active development; targeted for v1.0 launch with multi-provider OIDC, Slack approval bot, template browser, evolving preset library, agent-driven reduction loop, MFA propagation, safety modes. No multi-tenant hosted SaaS planned; Enterprise customers either self-host or contract for dedicated-managed single-tenant.
 - **MCP server**: v0.3.0 — adds `list_templates`, `get_template`, `submit_policy` to the existing `score_iam_policy`. Legacy `generate_iam_policy` is deprecated (removed in 0.4.0) — replaced by the agent-driven workflow per [docs/AGENTS.md](docs/AGENTS.md).
 
 **What's NOT in iam-jit** (intentional, not deferred):
