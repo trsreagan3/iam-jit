@@ -212,11 +212,61 @@ See [docs/GETTING-STARTED.md](docs/GETTING-STARTED.md) for the full walkthrough 
 ### Compliance posture
 
 - **MFA chain** — IdP-MFA → ID token `amr` claim → propagated to STS via `aws:MultiFactorAuthPresent` Condition. PCI DSS §8.4, SOC 2 CC6.6, HIPAA §164.312(d) satisfied.
-- **Audit log** — every grant, every transition, every approver action; tamper-evident; SOC 2 CC7.2 / HIPAA §164.312(b).
+- **Audit log** — every grant, every transition, every approver action; tamper-evident; SOC 2 CC7.2 / HIPAA §164.312(b). (Audit features detailed below.)
 - **`creates-never-mutates`** — iam-jit creates new IAM resources; never modifies existing ones the customer owns. Clean CloudTrail attribution.
 - **No phone-home** — self-host customers run iam-jit in a sealed AWS account with no external dependencies.
 
 See [docs/security/](docs/security/) for the BB+WB audit history (13 rounds shipped) and [docs/compliance/](docs/compliance/) for the framework mapping.
+
+---
+
+## Audit & observability
+
+Every deployment writes a structured, queryable audit log. The exact storage backend varies by mode but the schema and guarantees are identical.
+
+### What's captured per grant
+
+- **Request:** who requested, when, the natural-language task description (if any), the policy submitted, the template lineage (if based on a catalog entry)
+- **Scoring:** the deterministic score (1–10), every risk factor that contributed, the suggestion list returned to the requester
+- **Decision:** auto-approved or human-reviewed; if reviewed: who approved/denied, when, with what justification; safety mode + threshold in effect at decision time
+- **Issuance:** the IAM role ARN created, the STS session ID, the assume-principal, the TTL
+- **Lifecycle transitions:** every state change (pending → approved → issued → expired → revoked) with timestamp + actor
+- **Closure:** revocation time, reason (expired vs. manual), role deletion confirmation
+
+### Where the log lives, per mode
+
+| Mode | Backend | Retention | Query |
+|---|---|---|---|
+| **iam-jit local** (`serve --local`) | SQLite at `~/.iam-jit/audit.db` | Forever (until user prunes) | `iam-jit audit ls`, `iam-jit audit show <id>`, raw SQL |
+| **Hosted (SaaS)** | DynamoDB (customer's tenant slice) | Per customer's retention policy (default 7 years for compliance tiers) | Web UI grant-detail page, JSON API `/api/v1/audit/...`, exportable CSV/JSONL |
+| **Self-host** | DynamoDB in customer's hub account | Per customer's CloudFormation params | Same as hosted; customer also has raw DDB access |
+
+All modes additionally emit structured logs to stdout/CloudWatch (one-line JSON per event) so existing SIEM pipelines (Datadog, Splunk, Sumo, Wiz) can ingest in real time. No proprietary format.
+
+### Compliance attestation drops out for free
+
+The grant-record fields map 1:1 to common compliance evidence asks:
+- **SOC 2 CC6.3** (logical access removal): the issuance + auto-revoke records prove access was time-bound
+- **SOC 2 CC7.2** (anomaly detection): the score + factor list is the anomaly-detection signal; scores ≥7 are reviewable
+- **PCI DSS §10** (audit trails): every state change is captured with actor, timestamp, before/after
+- **HIPAA §164.312(b)** (audit controls): the structured log + tamper-evidence satisfies the "regular review" requirement
+- **HIPAA §164.312(d)** (entity authentication): the MFA chain + IdP `amr` propagation is recorded per-grant
+
+See [docs/compliance/](docs/compliance/) for the full framework mapping.
+
+### Live action tail *(Pro+ tier, planned)*
+
+> "What is alice's agent doing right now with the grant I approved 10 minutes ago?"
+
+For grants currently within their TTL window, Pro+ tier surfaces a live stream of CloudTrail events filtered to the JIT-issued role's session ID. Three surfaces:
+
+- **Web UI** — the grant-detail page shows actions as they happen, with `service:Action` + resource ARN per row
+- **Slack DM** — opt-in periodic summaries ("alice's grant has executed 47 API calls in the last 5 min: s3:GetObject ×40, cloudwatch:GetMetricData ×7")
+- **CLI** — `iam-jit grants tail <request-id>` follows the event stream
+
+Requires CloudTrail-read in the customer's account, wired via the standard CFN onboarding (EventBridge rule filtering on `userIdentity.sessionContext.sessionIssuer.arn` matching iam-jit-created roles). Permission is scoped narrowly — iam-jit can only see events about roles iam-jit created.
+
+The standard post-grant audit log already satisfies most compliance asks ("what did alice's agent do during that 1-hour window?" — answer: query the log later). The live tail is a UX win for the "I want to watch in real time" case, not a compliance prerequisite. See [docs/ROADMAP-V1.1.md](docs/ROADMAP-V1.1.md) for prioritization status.
 
 ---
 
