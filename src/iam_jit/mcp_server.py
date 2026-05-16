@@ -336,6 +336,67 @@ TOOLS = [
         },
     },
     {
+        "name": "reduce_policy",
+        "description": (
+            "Apply deterministic reductions to a baseline policy. The "
+            "core agent-driven reduction loop primitive — given a "
+            "broad starting baseline (e.g. AdminLikeWithSensitive "
+            "Exclusions or ReadOnlyAccess), reduce it along one or "
+            "more axes before submission: drop services the task "
+            "doesn't need, scope to specific accounts, scope to "
+            "specific regions. Each reduction is recorded in the "
+            "returned recipe — the audit-chain artifact (\"baseline "
+            "X minus [rds, secretsmanager], scoped to account 123 + "
+            "us-east-1\"). Use score_iam_policy after to verify the "
+            "reduction lowered the risk; use submit_policy to "
+            "submit. Per [[scorer-is-ground-truth]]: this tool only "
+            "transforms; the scorer always evaluates the result."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "required": ["policy"],
+            "properties": {
+                "policy": {
+                    "type": "object",
+                    "description": (
+                        "The policy to reduce — typically a baseline "
+                        "fetched via get_template or get_my_template."
+                    ),
+                },
+                "deny_services": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": (
+                        "Service prefixes to deny (e.g. ['rds', "
+                        "'secretsmanager']). Appends a Deny statement "
+                        "blocking <service>:* for each."
+                    ),
+                },
+                "narrow_to_accounts": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": (
+                        "12-digit AWS account IDs. Adds aws:Requested"
+                        "Account StringEquals condition to every "
+                        "Allow statement. Non-conforming IDs rejected."
+                    ),
+                },
+                "narrow_to_regions": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": (
+                        "AWS region codes (e.g. ['us-east-1']). Adds "
+                        "aws:RequestedRegion StringEquals condition "
+                        "to every Allow statement. Note: GLOBAL "
+                        "services (IAM, STS, billing) ignore this — "
+                        "this narrowing is incremental defense, not "
+                        "absolute."
+                    ),
+                },
+            },
+        },
+    },
+    {
         "name": "find_similar_templates",
         "description": (
             "Find templates in your personal library similar to a "
@@ -712,6 +773,39 @@ def _list_my_templates_for_mcp(args: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def _reduce_policy_for_mcp(args: dict[str, Any]) -> dict[str, Any]:
+    """Apply deterministic reductions to a baseline policy and return
+    the reduced policy + recipe metadata. Pure function: doesn't
+    mutate the input.
+    """
+    from .reductions import apply_reductions
+
+    policy = args.get("policy")
+    if not isinstance(policy, dict):
+        return {
+            "error": "policy is required and must be a JSON object",
+            "policy": None,
+            "recipe": [],
+        }
+
+    for field in ("deny_services", "narrow_to_accounts", "narrow_to_regions"):
+        val = args.get(field)
+        if val is not None and not isinstance(val, list):
+            return {
+                "error": f"{field} must be a list of strings if provided",
+                "policy": None,
+                "recipe": [],
+            }
+
+    result = apply_reductions(
+        policy,
+        deny_services_list=args.get("deny_services") or [],
+        narrow_to_accounts_list=args.get("narrow_to_accounts") or [],
+        narrow_to_regions_list=args.get("narrow_to_regions") or [],
+    )
+    return result.to_dict()
+
+
 def _find_similar_templates_for_mcp(args: dict[str, Any]) -> dict[str, Any]:
     """Find templates in the user's library similar to a candidate policy."""
     from .user_templates_store import find_similar, get_default_store
@@ -969,6 +1063,8 @@ def _handle_request(req: dict[str, Any]) -> dict[str, Any] | None:
             result_payload = _get_my_template_for_mcp(args)
         elif tool_name == "find_similar_templates":
             result_payload = _find_similar_templates_for_mcp(args)
+        elif tool_name == "reduce_policy":
+            result_payload = _reduce_policy_for_mcp(args)
         else:
             return _err(rid, -32601, f"unknown tool: {tool_name}")
         # MCP tool result format: { content: [{type: "text", text: "..."}] }
