@@ -116,8 +116,18 @@ def evaluate(
     # submitted on behalf of another user still flow through normal
     # approval (a real human approval signal is still required for
     # someone else's grant).
+    #
+    # WB12-02 closure: the canonical owner field is `status.owner`
+    # (set by lifecycle.init_status). The legacy `metadata.owner`
+    # is also checked for compat with hand-authored requests + the
+    # auto_grant CLI surface that fills metadata.owner directly.
+    status = request.get("status") or {}
     metadata = request.get("metadata") or {}
-    owner = metadata.get("owner") or ""
+    owner = (
+        (status.get("owner") if isinstance(status, dict) else None)
+        or (metadata.get("owner") if isinstance(metadata, dict) else None)
+        or ""
+    )
     if owner != user_id:
         return SelfApproveDecision(
             self_approved=False, reason="not_owner",

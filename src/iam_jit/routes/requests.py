@@ -457,6 +457,57 @@ def preview_request(
             safety_thresholds=_safety_thresholds,
         )
 
+        # Apply the SAME MFA + self-approve enforcement on preview
+        # that we apply on submit. Otherwise preview tells the user
+        # "this WILL auto-approve" but submit later blocks because
+        # MFA is stale — a frustrating false-positive. Compute the
+        # gate annotations the same way submit does, then run the
+        # helper.
+        _preview_mfa_audit: dict[str, Any] = {"mfa_gate_evaluated": False}
+        try:
+            from .. import mfa_gate as _mfa_gate
+            from ..middleware import _get_secret as _auth_secret_getter  # type: ignore[attr-defined]
+            _mfa_cookie = request.cookies.get("iam_jit_session_mfa") if hasattr(request, "cookies") else None
+            _mfa_result = _mfa_gate.verify(
+                cookie_value=_mfa_cookie,
+                secret=_auth_secret_getter(),
+                expected_user_id=user.id,
+                max_age_seconds=_mfa_gate.step_up_max_age_seconds(),
+            )
+            _preview_mfa_audit = {
+                "mfa_gate_evaluated": True,
+                "mfa_step_up_floor": int(_mfa_gate._high_risk_score_floor()),
+                "would_require_mfa": _mfa_gate.is_high_risk(analysis.risk_score),
+                **_mfa_result.as_audit_dict(),
+            }
+        except Exception:
+            pass
+
+        _preview_sar_audit: dict[str, Any] = {"self_approve_evaluated": False}
+        try:
+            from .. import self_approve_reductions as _sar
+            _sar_dec = _sar.evaluate(
+                request=req,
+                user_id=user.id,
+                user_is_admin=getattr(user, "is_admin", False),
+                blocked_services=tuple(settings.never_auto_approve_services),
+            )
+            _preview_sar_audit = {
+                "self_approve_evaluated": True,
+                "self_approve_eligible": _sar_dec.self_approved,
+                "self_approve_reason": _sar_dec.reason,
+            }
+        except Exception:
+            pass
+
+        auto_decision, _, _ = _apply_mfa_and_self_approve_enforcement(
+            auto_decision,
+            mfa_audit=_preview_mfa_audit,
+            self_approve_audit=_preview_sar_audit,
+            analysis_score=analysis.risk_score,
+            user_id=user.id,
+        )
+
     # Surface concrete advice on how to reduce risk. The deterministic
     # scorer already returns `suggestions` in the analysis; we
     # supplement with auto-approve specific guidance the UI can show
@@ -677,7 +728,7 @@ def submit_request(
         _mfa_audit: dict[str, Any] = {"mfa_gate_evaluated": False}
         try:
             from .. import mfa_gate as _mfa_gate
-            from ..auth import _get_secret as _auth_secret_getter  # type: ignore[attr-defined]
+            from ..middleware import _get_secret as _auth_secret_getter  # type: ignore[attr-defined]
             mfa_cookie = request.cookies.get("iam_jit_session_mfa") if hasattr(request, "cookies") else None
             mfa_secret = _auth_secret_getter()
             mfa_result = _mfa_gate.verify(

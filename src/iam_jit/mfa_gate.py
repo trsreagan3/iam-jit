@@ -139,16 +139,41 @@ def is_high_risk(score: int) -> bool:
 
 
 def _high_risk_score_floor() -> int:
+    """Return the score-floor at or above which MFA freshness is
+    required. Clamped to [1, 10] so an env value like 999 (which
+    would silently disable the gate) or 0 / negative (which would
+    require MFA on EVERY grant, blocking all read-only ops) cannot
+    misconfigure the gate. WB12-03 closure.
+    """
     raw = (os.environ.get("IAM_JIT_MFA_STEP_UP_AT_SCORE") or "").strip()
     try:
-        return int(raw) if raw else _DEFAULT_HIGH_RISK_SCORE
+        v = int(raw) if raw else _DEFAULT_HIGH_RISK_SCORE
     except ValueError:
-        return _DEFAULT_HIGH_RISK_SCORE
+        v = _DEFAULT_HIGH_RISK_SCORE
+    # Risk scores are 1-10 per the scoring engine. Anything outside
+    # that range is nonsense and is clamped to the defaults' safe
+    # interpretation: too-high values clamp DOWN to 10 (the most
+    # permissive valid floor), too-low values clamp UP to 1 (every
+    # grant requires MFA, which is annoying but safe).
+    if v > 10:
+        return 10
+    if v < 1:
+        return 1
+    return v
 
 
 def step_up_max_age_seconds() -> int:
+    """Return the max age of an iam_jit_session_mfa cookie that
+    still counts as 'fresh'. Clamped to [30, 86400] seconds so a
+    bogus env value can't disable the freshness check or require
+    impossibly-recent MFA."""
     raw = (os.environ.get("IAM_JIT_MFA_STEP_UP_MAX_AGE_SECONDS") or "").strip()
     try:
-        return int(raw) if raw else _DEFAULT_MAX_AGE_SECONDS
+        v = int(raw) if raw else _DEFAULT_MAX_AGE_SECONDS
     except ValueError:
-        return _DEFAULT_MAX_AGE_SECONDS
+        v = _DEFAULT_MAX_AGE_SECONDS
+    if v > 86400:
+        return 86400
+    if v < 30:
+        return 30
+    return v
