@@ -34,30 +34,9 @@ def tmp_data_dir(tmp_path: pathlib.Path) -> pathlib.Path:
     return tmp_path / "iam-jit-data"
 
 
-@pytest.fixture(autouse=True)
-def _restore_iam_jit_env() -> "Iterator[None]":  # type: ignore[name-defined]
-    """Snapshot/restore IAM_JIT_* env vars around every test.
-
-    `local_server._set_local_env_defaults` writes to os.environ via
-    setdefault. Without this fixture, those writes leak into later
-    tests in the suite — caused 8 test failures in routes_accounts +
-    routes_admin during the full pytest run while passing those tests
-    in isolation. Targeted snapshot keeps the leak local.
-    """
-    from typing import Iterator
-    snapshot = {
-        k: v for k, v in os.environ.items() if k.startswith("IAM_JIT_")
-    }
-    try:
-        yield
-    finally:
-        # Restore: remove any IAM_JIT_* vars added during the test,
-        # and reset any that were modified back to their snapshot value.
-        for k in list(os.environ.keys()):
-            if k.startswith("IAM_JIT_") and k not in snapshot:
-                del os.environ[k]
-        for k, v in snapshot.items():
-            os.environ[k] = v
+# IAM_JIT_* env-leak protection now lives in the global
+# tests/conftest.py (session-snapshot, per-test restore). Removed
+# the per-file copy here so we don't double-restore.
 
 
 # ---------------------------------------------------------------------------

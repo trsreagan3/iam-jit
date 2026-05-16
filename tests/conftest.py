@@ -12,6 +12,44 @@ from collections.abc import Iterator
 import pytest
 
 
+# ---------------------------------------------------------------------------
+# Global env isolation (applies to EVERY test in the suite).
+#
+# `IAM_JIT_*` env vars get written by various tests (mostly via
+# `local_server._set_local_env_defaults` which uses `os.environ.setdefault`
+# bypassing monkeypatch). Those writes leaked across tests and caused
+# 8 routes_accounts + routes_admin failures in the full-suite run that
+# passed when targeted. Snapshot at session start + restore per test
+# keeps every test starting from the same clean env.
+# ---------------------------------------------------------------------------
+
+
+_SESSION_IAM_JIT_ENV: dict[str, str] = {}
+
+
+@pytest.fixture(scope="session", autouse=True)
+def _snapshot_session_iam_jit_env() -> None:
+    _SESSION_IAM_JIT_ENV.clear()
+    _SESSION_IAM_JIT_ENV.update({
+        k: v for k, v in os.environ.items() if k.startswith("IAM_JIT_")
+    })
+
+
+@pytest.fixture(autouse=True)
+def _restore_iam_jit_env_per_test() -> Iterator[None]:
+    """After every test, restore IAM_JIT_* env to the session-start
+    snapshot. Catches the env-leak pattern globally so no test in
+    the suite can pollute another's env."""
+    try:
+        yield
+    finally:
+        for k in list(os.environ.keys()):
+            if k.startswith("IAM_JIT_") and k not in _SESSION_IAM_JIT_ENV:
+                del os.environ[k]
+        for k, v in _SESSION_IAM_JIT_ENV.items():
+            os.environ[k] = v
+
+
 @pytest.fixture
 def mock_aws_env(monkeypatch: pytest.MonkeyPatch) -> None:
     """Set fake AWS credentials so boto3 doesn't try to use real ones."""
