@@ -902,37 +902,15 @@ def test_bb2_17_mcp_server_is_stateless(app):
     by design); cross-session leak would require module-level
     mutable state in iam_jit.policy_gen — which there isn't (we
     grep'd it)."""
-    from iam_jit.policy_gen import (
-        BIAS_ALLOW,
-        GenerationContext,
-        GenerationRequest,
-        generate_policy,
+    import pytest
+    pytest.skip(
+        "closed by deletion: policy_gen package removed in 0.4.0 "
+        "([[no-nl-synthesis]] Stage 3). The MCP server's new tool "
+        "triad (list_templates / get_template / submit_policy) is "
+        "explicitly stateless — each call constructs its own response "
+        "from immutable catalog data + caller args. Cross-session "
+        "leak surface is gone with the deleted pattern matcher."
     )
-
-    req1 = GenerationRequest(
-        task_description="read bucket logs-prod-1",
-        bias=BIAS_ALLOW,
-        context=GenerationContext(
-            account_id="111122223333", region="us-east-1", partition="aws",
-            resources=[],
-        ),
-    )
-    req2 = GenerationRequest(
-        task_description="write to dynamodb table users-prod",
-        bias=BIAS_ALLOW,
-        context=GenerationContext(
-            account_id="444455556666", region="eu-west-2", partition="aws",
-            resources=[],
-        ),
-    )
-    r1 = generate_policy(req1)
-    r2 = generate_policy(req2)
-    pol1 = json.dumps(r1.policy)
-    pol2 = json.dumps(r2.policy)
-    # No cross-leak: req2's policy must not mention req1's account
-    # or region, and vice versa.
-    assert "111122223333" not in pol2
-    assert "444455556666" not in pol1
 
 
 # ---------------------------------------------------------------------

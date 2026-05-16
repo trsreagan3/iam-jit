@@ -468,6 +468,11 @@ def test_finding_mcp_generate_no_task_description_cap() -> None:
     Location: src/iam_jit/mcp_server.py:157-200 (`_generate_for_mcp`),
     src/iam_jit/policy_gen/result.py:101 (`GenerationRequest.task_description`).
 
+    NOTE 2026-05-16: closed by deletion in [[no-nl-synthesis]]
+    Stage 3 (iam-jit 0.4.0). The policy_gen package is gone;
+    generate_iam_policy is a tombstone that returns null policy
+    + deprecation block. No task-description path exists to bound.
+
     `_generate_for_mcp` accepts `args["task"]` as any non-empty
     string — no length cap. The pattern matcher then tokenizes the
     full string (re.findall over `[a-z0-9*][a-z0-9*\\-_]*`) and the
@@ -484,19 +489,14 @@ def test_finding_mcp_generate_no_task_description_cap() -> None:
     Fix sketch: cap `task` at 2000 chars; refuse with `-32602`
     invalid-params if exceeded.
     """
-    from iam_jit import mcp_server
-
-    src = inspect.getsource(mcp_server._generate_for_mcp)
-    # No length-based rejection of `task`.
-    assert "len(task)" not in src
-    assert "max_length" not in src
-    # And `task_description` on the Pydantic-less dataclass has no
-    # validator.
-    from iam_jit.policy_gen import GenerationRequest
-    # Just confirm it's a plain dataclass field, no validator.
-    field = GenerationRequest.__dataclass_fields__["task_description"]
-    # `metadata` empty = no length validator pinned via dataclass field.
-    assert not field.metadata
+    import pytest
+    pytest.skip(
+        "closed by deletion: policy_gen package removed in 0.4.0 "
+        "([[no-nl-synthesis]] Stage 3); finding documents historical "
+        "state. The replacement tools (list_templates, get_template, "
+        "submit_policy) carry their own input validation tested in "
+        "test_mcp_template_tools.py."
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -560,22 +560,13 @@ def test_finding_mcp_arn_segments_unvalidated() -> None:
     account_id is `r"^[0-9]{12}$"` if present; validate region
     against `r"^[a-z]{2}-[a-z]+-\\d+$"` if present.
     """
-    from iam_jit.policy_gen import (
-        GenerationContext,
-        GenerationRequest,
-        generate_policy,
+    import pytest
+    pytest.skip(
+        "closed by deletion: policy_gen package removed in 0.4.0 "
+        "([[no-nl-synthesis]] Stage 3); ARN-construction code path "
+        "no longer exists. submit_policy now takes a finished policy "
+        "and the scorer evaluates it; no server-side ARN construction."
     )
-
-    # Craft a partition that would never be a valid AWS partition.
-    req = GenerationRequest(
-        task_description="read s3 bucket data",
-        context=GenerationContext(partition="../../etc", account_id="bogus"),
-    )
-    result = generate_policy(req)
-    # The bogus partition string flows through into the generated ARNs.
-    if result.policy:
-        json_blob = repr(result.policy)
-        assert "../../etc" in json_blob
 
 
 # ---------------------------------------------------------------------------
@@ -762,13 +753,14 @@ def test_finding_policy_gen_no_prompt_injection_scan() -> None:
     `task_description` and `rationale` with the same audit-log +
     refuse pattern the score endpoint uses.
     """
-    from iam_jit.policy_gen import generate as generate_mod
-    from iam_jit import mcp_server
-
-    gen_src = inspect.getsource(generate_mod)
-    mcp_src = inspect.getsource(mcp_server)
-    assert "prompt_injection" not in gen_src
-    assert "prompt_injection" not in mcp_src
+    import pytest
+    pytest.skip(
+        "closed by deletion: policy_gen package removed in 0.4.0 "
+        "([[no-nl-synthesis]] Stage 3); no free-text task_description "
+        "is accepted by the MCP surface anymore. submit_policy takes "
+        "structured JSON; description field is bounded to 1024 chars "
+        "and never fed to an LLM."
+    )
 
 
 # ---------------------------------------------------------------------------

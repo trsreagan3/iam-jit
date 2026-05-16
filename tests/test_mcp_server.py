@@ -42,7 +42,10 @@ def test_tools_list_returns_generate_policy():
     assert "generate_iam_policy" in tool_names
 
 
-def test_tools_call_generate_iam_policy_round_trips():
+def test_tools_call_generate_iam_policy_returns_tombstone():
+    """Stage 3 of [[no-nl-synthesis]] (0.4.0): generate_iam_policy
+    is a tombstone. Round-trip succeeds, but the response is the
+    deprecation block + null policy + replacement_tools pointer."""
     resp = _handle_request({
         "jsonrpc": "2.0",
         "id": 3,
@@ -60,12 +63,14 @@ def test_tools_call_generate_iam_policy_round_trips():
     content = resp["result"]["content"]
     assert len(content) == 1
     payload = json.loads(content[0]["text"])
-    assert payload["policy"] is not None
-    assert payload["scored_risk"] is not None
-    assert payload["scored_risk"] <= 4
-    # Structured content also populated
+    # Tombstone: null policy + deprecation block + error string
+    assert payload["policy"] is None
+    assert "deprecation" in payload
+    assert "0.4.0" in payload["deprecation"]["removed_in"]
+    assert "list_templates" in payload["deprecation"]["replacement_tools"]
+    # Structured content matches
     sc = resp["result"]["structuredContent"]
-    assert sc["policy"] == payload["policy"]
+    assert sc["policy"] is None
 
 
 def test_tools_call_unknown_tool_returns_error():
@@ -114,8 +119,11 @@ def test_missing_task_returns_error_payload():
     assert payload["policy"] is None
 
 
-def test_refinement_args_round_trip():
-    """exclude_actions and rationale flow through to GenerationResult."""
+def test_refinement_args_ignored_by_tombstone():
+    """Stage 3 of [[no-nl-synthesis]] (0.4.0): refinement args
+    (exclude_actions, rationale, etc.) used to flow through to
+    GenerationResult. Now the tombstone ignores them and returns
+    the same null-policy response regardless of input."""
     resp = _handle_request({
         "jsonrpc": "2.0",
         "id": 7,
@@ -132,23 +140,18 @@ def test_refinement_args_round_trip():
         },
     })
     payload = resp["result"]["structuredContent"]
-    assert payload["policy"] is not None
-    # PassRole should be absent from the output
-    all_actions = []
-    for s in payload["policy"]["Statement"]:
-        a = s["Action"]
-        if isinstance(a, list):
-            all_actions.extend(a)
-        else:
-            all_actions.append(a)
-    assert "iam:PassRole" not in all_actions
-    # Rationale flows into reasons
-    assert any("code-only deploy" in r for r in payload["reasons"])
+    assert payload["policy"] is None
+    assert "deprecation" in payload
 
 
 def test_tools_list_schema_well_formed():
-    """The tool schema is valid JSON Schema with required `task` field."""
+    """The tombstoned tool's schema is preserved for back-compat
+    discovery (agents that cached the old name find it + read the
+    DEPRECATED description). Schema still validates as JSON Schema."""
     tool = next(t for t in TOOLS if t["name"] == "generate_iam_policy")
     assert tool["inputSchema"]["type"] == "object"
-    assert "task" in tool["inputSchema"]["required"]
-    assert tool["inputSchema"]["properties"]["bias"]["enum"] == ["allow", "deny"]
+    # Per Stage 3, the schema was trimmed when the tool became a
+    # tombstone — required `task` field and `bias` enum no longer
+    # apply; the tool returns the same tombstone regardless of args.
+    # The schema being well-formed (i.e. a valid type:object) is
+    # what tools/list needs.

@@ -51,18 +51,10 @@ import json
 import sys
 from typing import Any
 
-from .policy_gen import (
-    BIAS_ALLOW,
-    BIAS_DENY,
-    GenerationContext,
-    GenerationRequest,
-    Refinement,
-    generate_policy,
-)
-
-
 SERVER_NAME = "iam-jit"
-SERVER_VERSION = "0.3.0"  # bumped for the list/get/submit triad + generate_iam_policy deprecation
+# 0.4.0: stage 3 of NL deprecation deletes the policy_gen package
+# entirely; generate_iam_policy is now a hard tombstone.
+SERVER_VERSION = "0.4.0"
 MCP_PROTOCOL_VERSION = "2024-11-05"
 
 
@@ -73,35 +65,20 @@ TOOLS = [
     {
         "name": "generate_iam_policy",
         "description": (
-            "DEPRECATED in iam-jit 0.3.0; will be removed in 0.4.0. "
-            "Natural-language policy synthesis was measured at 1.8% joint "
-            "sufficiency (see docs/calibration/100-prompt-sufficiency-loop.md) "
-            "and is structurally limited because iam-jit lacks codebase "
-            "context. Replacement tools: `list_templates` (browse the "
-            "AWS-managed catalog), `get_template` (fetch a policy shape "
-            "by name), `score_iam_policy` (rate any policy + get a per-"
-            "factor breakdown the agent can iterate against), and "
-            "`submit_policy` (submit a finished policy for grant issuance). "
-            "Agent-driven workflow: pick a baseline → score → reduce using "
-            "your codebase context → re-score → submit. See docs/AGENTS.md.\n"
-            "\n"
-            "(Legacy behavior retained below.) Generate a minimum-scope "
-            "AWS IAM policy for a described task. The policy is scored by "
-            "a deterministic risk engine (1-10) and includes refinement "
-            "hints if the output may be too broad or too narrow.\n"
-            "\n"
-            "IMPORTANT — read-only default convention "
-            "([[read-only-default]]): ALWAYS request "
-            "`access_type: \"read-only\"` by default. ONLY request "
-            "`read-write` when the user has explicitly asked you to make "
-            "a state-changing operation in their current message "
-            "(create / update / delete / modify resources). If you are "
-            "uncertain whether a task needs writes, default to read-only "
-            "and re-call this tool with read-write later if reads fail "
-            "with permission errors. This is the convention that makes "
-            "iam-jit's safety-mode work: the user has explicit visibility "
-            "into when writes happen vs invisible read-only operation. "
-            "Defaulting to read-write defeats the entire point."
+            "REMOVED in iam-jit 0.4.0 (tombstone). Calling this tool "
+            "returns a deprecation block + null policy + a pointer to "
+            "the replacement tools. Natural-language policy synthesis "
+            "was measured at 1.8% joint sufficiency (see "
+            "docs/calibration/100-prompt-sufficiency-loop.md) and is "
+            "structurally limited because iam-jit lacks codebase "
+            "context. Replacements: `list_templates` (browse the "
+            "AWS-managed catalog), `get_template` (fetch a policy "
+            "shape by name), `score_iam_policy` (rate any policy + "
+            "get a per-factor breakdown the agent can iterate "
+            "against), and `submit_policy` (submit a finished policy "
+            "for grant issuance). Agent-driven workflow: pick a "
+            "baseline → score → reduce using your codebase context → "
+            "re-score → submit. See docs/AGENTS.md."
         ),
         "inputSchema": {
             "type": "object",
@@ -681,67 +658,30 @@ def _submit_policy_for_mcp(args: dict[str, Any]) -> dict[str, Any]:
 
 
 def _generate_for_mcp(args: dict[str, Any]) -> dict[str, Any]:
-    """Call generate_policy with MCP-flavored args; return MCP-flavored result."""
-    task = args.get("task", "")
-    if not isinstance(task, str) or not task.strip():
-        return {
-            "deprecation": _DEPRECATION_BLOCK,
-            "error": "task is required and must be a non-empty string",
-            "policy": None,
-        }
-    refinement = None
-    if (
-        args.get("exclude_actions")
-        or args.get("include_actions")
-        or args.get("rationale")
-    ):
-        refinement = Refinement(
-            exclude_actions=list(args.get("exclude_actions") or []),
-            include_actions=list(args.get("include_actions") or []),
-            rationale=args.get("rationale", ""),
-        )
-    bias = args.get("bias", "allow")
-    # access_type defaults to read-only per [[read-only-default]] —
-    # the tool description tells the agent to default to read-only.
-    # If the agent passes something else, honor it (the user's
-    # explicit choice). If the agent passes something invalid,
-    # coerce to read-only (the safe default).
-    access_type = args.get("access_type", "read-only")
-    if access_type not in {"read-only", "read", "read-write"}:
-        access_type = "read-only"
-    req = GenerationRequest(
-        task_description=task,
-        bias=BIAS_ALLOW if bias == "allow" else BIAS_DENY,
-        access_type=access_type,
-        context=GenerationContext(
-            account_id=args.get("account_id"),
-            region=args.get("region"),
-            partition=args.get("partition", "aws"),
-            resources=list(args.get("resources") or []),
-        ),
-        refinement=refinement,
-    )
-    result = generate_policy(req)
-
-    # NOTE: Stage 2 of [[no-nl-synthesis]] removed the AWS-managed-
-    # baseline fallback that used to fire here when synthesis returned
-    # empty. The fallback relied on fuzzy keyword matching against the
-    # catalog, which the 100-prompt calibration measured as part of the
-    # 1.8% joint-sufficiency failure mode. Agents that get policy=None
-    # should switch to list_templates + get_template + submit_policy
-    # per docs/AGENTS.md.
+    """TOMBSTONE — Stage 3 of [[no-nl-synthesis]] (iam-jit 0.4.0)
+    deleted the entire policy_gen package. This entry point now
+    returns a deprecation block + null policy + replacement_tools
+    pointer. Tool stays discoverable in tools/list so agents that
+    have it cached find out about the migration explicitly.
+    See docs/AGENTS.md for the new agent-driven reduction loop.
+    """
     return {
         "deprecation": _DEPRECATION_BLOCK,
-        "policy": result.policy,
-        "matched_patterns": result.matched_patterns,
-        "confidence": result.confidence,
-        "scored_risk": result.scored_risk,
-        "risk_factors": result.risk_factors,
-        "risk_suggestions": result.risk_suggestions,
-        "suppressed_actions": result.suppressed_actions,
-        "refinement_hints": result.refinement_hints,
-        "unmatched_reason": result.unmatched_reason,
-        "reasons": result.reasons,
+        "error": (
+            "generate_iam_policy is removed in iam-jit 0.4.0. "
+            "Use list_templates + get_template + score_iam_policy + "
+            "submit_policy instead (see docs/AGENTS.md)."
+        ),
+        "policy": None,
+        "matched_patterns": [],
+        "confidence": None,
+        "scored_risk": None,
+        "risk_factors": [],
+        "risk_suggestions": [],
+        "suppressed_actions": [],
+        "refinement_hints": [],
+        "unmatched_reason": "tool removed in 0.4.0",
+        "reasons": [],
     }
 
 

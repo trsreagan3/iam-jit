@@ -36,8 +36,10 @@ from iam_jit.mcp_server import (
 
 
 def test_server_version_bumped_for_new_triad() -> None:
-    """0.3.0 marks the triad + deprecation."""
-    assert SERVER_VERSION == "0.3.0"
+    """0.3.0 added the triad + tombstoned generate_iam_policy.
+    0.4.0 deleted policy_gen entirely; generate_iam_policy is now
+    a hard tombstone returning {policy: null, deprecation: ...}."""
+    assert SERVER_VERSION == "0.4.0"
 
 
 def test_tools_list_includes_new_triad() -> None:
@@ -52,13 +54,16 @@ def test_tools_list_includes_new_triad() -> None:
     assert "generate_iam_policy" in names  # still present, tombstoned
 
 
-def test_generate_iam_policy_description_is_deprecated() -> None:
-    """The legacy tool's description must announce deprecation so
-    MCP hosts surface the warning before agents call it."""
+def test_generate_iam_policy_description_announces_removal() -> None:
+    """0.4.0: the legacy tool's description must announce REMOVED
+    (Stage 3 tombstone) and point at the replacement tools so MCP
+    hosts surface the migration path before agents call it."""
     gen = next(t for t in TOOLS if t["name"] == "generate_iam_policy")
-    assert "DEPRECATED" in gen["description"]
-    assert "list_templates" in gen["description"]
-    assert "submit_policy" in gen["description"]
+    desc = gen["description"]
+    assert "REMOVED" in desc or "DEPRECATED" in desc
+    assert "0.4.0" in desc
+    assert "list_templates" in desc
+    assert "submit_policy" in desc
 
 
 # ---------------------------------------------------------------------------
@@ -352,9 +357,11 @@ def test_dispatch_submit_policy() -> None:
 # ---------------------------------------------------------------------------
 
 
-def test_generate_iam_policy_emits_deprecation_block() -> None:
-    """Legacy tool still works but emits a `deprecation` field
-    pointing at the new triad."""
+def test_generate_iam_policy_is_tombstone_returns_null_policy() -> None:
+    """Stage 3 of [[no-nl-synthesis]] (iam-jit 0.4.0): the legacy
+    tool is now a hard tombstone. Calling it returns a deprecation
+    block + null policy + replacement_tools pointer + an error
+    string. No synthesis happens; no policy_gen package exists."""
     from iam_jit.mcp_server import _generate_for_mcp
     result = _generate_for_mcp({"task": "read s3 bucket my-bucket"})
     assert "deprecation" in result
@@ -363,24 +370,33 @@ def test_generate_iam_policy_emits_deprecation_block() -> None:
     assert dep["removed_in"] == "0.4.0"
     assert "list_templates" in dep["replacement_tools"]
     assert "submit_policy" in dep["replacement_tools"]
+    # Tombstone guarantees
+    assert result["policy"] is None
+    assert result["matched_patterns"] == []
+    assert "error" in result
+    assert "0.4.0" in result["error"]
 
 
 # NOTE: Stage 2 removed the baseline-fallback path in
-# _generate_for_mcp. The test that previously asserted the
-# fallback's deprecation block fired has been deleted along
-# with the fallback. The deprecation block on the synthesis
-# success path + the empty-task error path are still tested.
+# _generate_for_mcp. Stage 3 removed the synthesis path too —
+# the function is now a tombstone. The test that previously
+# asserted the fallback's deprecation block fired has been
+# deleted; the tombstone test above covers the only remaining
+# behavior.
 
 
-def test_generate_iam_policy_empty_task_error_also_has_deprecation() -> None:
-    """LOW-14-07: when generate_iam_policy is called with an empty
-    task, the error response ALSO carries the deprecation block so
-    confused agents get the same migration pointer."""
+def test_generate_iam_policy_tombstone_response_is_consistent() -> None:
+    """Stage 3: the tombstone returns the same response shape for
+    every input — empty task, valid task, garbage args all produce
+    {deprecation, error, policy=null, ...}. WAS: empty task got a
+    distinct error path; Stage 3 collapsed all paths into one
+    tombstone."""
     from iam_jit.mcp_server import _generate_for_mcp
-    result = _generate_for_mcp({"task": ""})
-    assert "deprecation" in result
-    assert result["policy"] is None
-    assert "error" in result
+    for args in [{}, {"task": ""}, {"task": "valid task"}, {"foo": "bar"}]:
+        result = _generate_for_mcp(args)
+        assert "deprecation" in result
+        assert result["policy"] is None
+        assert "error" in result
 
 
 # ---------------------------------------------------------------------------

@@ -319,189 +319,27 @@ main.add_command(_remote_group)
 
 
 @main.command("agent-grant")
-@click.option(
-    "--task", "-t", required=True,
-    help="Plain-English description of the task the role is for.",
-)
-@click.option(
-    "--account", "-a", default=None,
-    help="AWS account ID for ARN construction. Defaults to '*' wildcard.",
-)
-@click.option(
-    "--region", "-r", default=None,
-    help="AWS region. Defaults to '*' wildcard.",
-)
-@click.option(
-    "--partition", default="aws",
-    type=click.Choice(["aws", "aws-cn", "aws-us-gov"]),
-    show_default=True,
-)
-@click.option(
-    "--resource", "resources", multiple=True,
-    help="Explicit resource ARN. Repeat for multiple. Caller-supplied "
-         "ARNs are preferred over names extracted from --task.",
-)
-@click.option(
-    "--bias",
-    type=click.Choice(["allow", "deny"]),
-    default="allow",
-    show_default=True,
-    help="When the task description is ambiguous, prefer broader "
-         "actions (allow) or narrower (deny). `allow` is more usable; "
-         "`deny` is safer for fully-automated agent loops.",
-)
-@click.option(
-    "--duration-hours", "-h", type=int, default=1, show_default=True,
-    help="How long the grant should last.",
-)
-@click.option(
-    "--exclude-action", "exclude_actions", multiple=True,
-    help="Refinement: action (or `service:*` glob) to exclude from the "
-         "generated policy. Repeat for multiple. Use after reviewing a "
-         "previous output that was too broad.",
-)
-@click.option(
-    "--include-action", "include_actions", multiple=True,
-    help="Refinement: extra action to include (must be service:Action "
-         "form). Use after a previous output was too strict.",
-)
-@click.option(
-    "--rationale", default="",
-    help="Human-readable explanation for any refinement (--exclude-action / "
-         "--include-action). Surfaces in audit logs.",
-)
-@click.option(
-    "--format", "output_format",
-    type=click.Choice(["json", "policy", "human"]),
-    default="human", show_default=True,
-    help="`json` = full GenerationResult; `policy` = just the IAM policy "
-         "JSON (pipe-friendly); `human` = formatted report.",
-)
-def agent_grant(
-    task: str,
-    account: str | None,
-    region: str | None,
-    partition: str,
-    resources: tuple[str, ...],
-    bias: str,
-    duration_hours: int,
-    exclude_actions: tuple[str, ...],
-    include_actions: tuple[str, ...],
-    rationale: str,
-    output_format: str,
-) -> None:
-    """Generate a scoped IAM policy from a task description.
+def agent_grant() -> None:
+    """REMOVED in iam-jit 0.4.0 — see docs/AGENTS.md.
 
-    Produces a minimum-scope policy for the described task, scores it
-    via the deterministic risk engine, and surfaces refinement hints
-    the caller can use to iterate. The output is consumable by an
-    agent (`--format json`), a downstream pipeline (`--format policy`),
-    or a human reviewer (`--format human`, the default).
-
-    Examples:
-
-      iam-jit agent-grant -t "read S3 logs from the prod-logs bucket"
-
-      iam-jit agent-grant -t "deploy lambda incident-handler with role app-runtime-role" \\
-                          --account 123456789012 --region us-east-1
-
-      # Refine after seeing too-broad output:
-      iam-jit agent-grant -t "deploy lambda" \\
-                          --exclude-action iam:PassRole \\
-                          --rationale "code-only deploy, role unchanged"
+    Natural-language policy synthesis was measured at 1.8% joint
+    sufficiency (docs/calibration/100-prompt-sufficiency-loop.md)
+    and removed in [[no-nl-synthesis]] Stage 3. The replacement
+    workflow uses the MCP tools list_templates + get_template +
+    score_iam_policy + submit_policy, driven by an IDE agent with
+    codebase context.
     """
-    from .policy_gen import (
-        BIAS_ALLOW, BIAS_DENY,
-        GenerationContext, GenerationRequest, Refinement,
-        generate_policy,
+    click.secho(
+        'iam-jit agent-grant has been removed in 0.4.0.',
+        fg='yellow', err=True,
     )
-
-    refinement = None
-    if exclude_actions or include_actions or rationale:
-        refinement = Refinement(
-            exclude_actions=list(exclude_actions),
-            include_actions=list(include_actions),
-            rationale=rationale,
-        )
-
-    req = GenerationRequest(
-        task_description=task,
-        bias=BIAS_ALLOW if bias == "allow" else BIAS_DENY,
-        context=GenerationContext(
-            account_id=account,
-            region=region,
-            partition=partition,
-            resources=list(resources),
-        ),
-        duration_hours=duration_hours,
-        refinement=refinement,
+    click.echo(
+        'Use the MCP tools (list_templates / get_template / '
+        'score_iam_policy / submit_policy) instead. '
+        'See docs/AGENTS.md.',
+        err=True,
     )
-    result = generate_policy(req)
-
-    if output_format == "json":
-        # Full structured output for agents / MCP servers.
-        payload = {
-            "policy": result.policy,
-            "matched_patterns": result.matched_patterns,
-            "reasons": result.reasons,
-            "confidence": result.confidence,
-            "scored_risk": result.scored_risk,
-            "risk_factors": result.risk_factors,
-            "risk_suggestions": result.risk_suggestions,
-            "suppressed_actions": result.suppressed_actions,
-            "refinement_hints": result.refinement_hints,
-            "unmatched_reason": result.unmatched_reason,
-        }
-        click.echo(json.dumps(payload, indent=2))
-        return
-
-    if output_format == "policy":
-        # Just the IAM policy JSON, suitable for piping into
-        # `aws iam create-policy --policy-document file://-`.
-        if result.policy is None:
-            click.echo(f"# No policy: {result.unmatched_reason}", err=True)
-            sys.exit(2)
-        click.echo(json.dumps(result.policy, indent=2))
-        return
-
-    # Human-readable report
-    if result.policy is None:
-        click.secho("No policy generated.", fg="yellow", err=True)
-        click.echo(f"Reason: {result.unmatched_reason}", err=True)
-        sys.exit(2)
-
-    click.secho(f"Matched patterns: {', '.join(result.matched_patterns)}", fg="cyan")
-    click.echo(f"Confidence: {result.confidence}/10 (1=high, 10=low)")
-    risk_color = "green" if result.scored_risk and result.scored_risk <= 3 else (
-        "yellow" if result.scored_risk and result.scored_risk <= 6 else "red"
-    )
-    click.secho(f"Risk score: {result.scored_risk}/10", fg=risk_color)
-    click.echo()
-    click.secho("Policy:", fg="cyan")
-    click.echo(json.dumps(result.policy, indent=2))
-    if result.risk_factors:
-        click.echo()
-        click.secho("Risk factors:", fg="cyan")
-        for f in result.risk_factors[:5]:
-            click.echo(f"  • {f}")
-    if result.suppressed_actions:
-        click.echo()
-        click.secho(
-            f"Suppressed by deny bias ({len(result.suppressed_actions)} actions):",
-            fg="cyan",
-        )
-        for a in result.suppressed_actions[:5]:
-            click.echo(f"  • {a}")
-    if result.refinement_hints:
-        click.echo()
-        click.secho("Refinement hints:", fg="cyan")
-        for h in result.refinement_hints:
-            click.echo(f"  • {h}")
-    if result.reasons:
-        click.echo()
-        click.secho("Generation notes:", fg="cyan")
-        for r in result.reasons[:5]:
-            click.echo(f"  • {r}")
+    raise click.exceptions.Exit(2)
 
 
 @main.command("serve")
