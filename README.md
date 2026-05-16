@@ -3,7 +3,7 @@
 > **Don't give Claude your AWS keys.**
 > iam-jit issues narrow, time-bound, audited AWS credentials per task — so your AI agent can do real AWS work without standing access.
 
-[![CI](https://img.shields.io/badge/CI-7%20rounds%20BB%2BWB%20audited-brightgreen)](docs/security/) [![Calibration](https://img.shields.io/badge/AWS--managed%20corpus-1489%2F1489-brightgreen)](docs/CONVERGENCE-REPORT-2026-05.md) [![License](https://img.shields.io/badge/license-Apache--2.0-blue)](LICENSE)
+[![CI](https://img.shields.io/badge/CI-13%20rounds%20BB%2BWB%20audited-brightgreen)](docs/security/) [![Calibration](https://img.shields.io/badge/AWS--managed%20corpus-1489%2F1489-brightgreen)](docs/CONVERGENCE-REPORT-2026-05.md) [![License](https://img.shields.io/badge/license-Apache--2.0-blue)](LICENSE)
 
 | Corpus | Pass rate |
 |---|---:|
@@ -121,14 +121,19 @@ Done. Claude Code now has iam-jit as its AWS access layer.
 
 ### How agents use it
 
-iam-jit exposes **four MCP tools**. The agent (Claude Code, Cursor, etc.) drives the loop using its own LLM + codebase context; iam-jit scores and gates.
+iam-jit exposes **four MCP tools** (MCP server v0.3.0). The agent (Claude Code, Cursor, etc.) drives the loop using its own LLM + codebase context; iam-jit scores and gates.
 
 | Tool | Purpose |
 |---|---|
-| `list_templates` | Browse the catalog (AWS-managed policies + your saved team templates) |
+| `list_templates` | Browse the catalog (AWS-managed policies + parameterized task templates + your saved team templates) |
 | `get_template` | Fetch a template's policy shape |
 | `score_iam_policy` | Rate any policy 1–10; returns per-factor breakdown so the agent knows what to narrow |
 | `submit_policy` | Submit a policy for grant issuance; gated by score + safety mode |
+
+**The decision at intake — known vs. unknown:**
+
+- **Known resources** (specific ARN, single secret, single bucket+key) → pick a **parameterized task template** (`update-one-secret(arn)`, `download-one-file(bucket, key)`, etc.), fill the ARN, submit. Scores 1-3, auto-approves. No reduction loop needed.
+- **Unknown resources** (investigation, exploration, multi-resource work) → pick a **broad baseline** (`ExploreReadOnlyWithSensitiveExclusions` for reads, `AdminLikeWithSensitiveExclusions` for writes) and **reduce from there** using the agent's codebase context. Three reduction axes: drop services, narrow ARNs, drop action classes.
 
 Typical flow:
 
@@ -211,7 +216,7 @@ See [docs/GETTING-STARTED.md](docs/GETTING-STARTED.md) for the full walkthrough 
 - **`creates-never-mutates`** — iam-jit creates new IAM resources; never modifies existing ones the customer owns. Clean CloudTrail attribution.
 - **No phone-home** — self-host customers run iam-jit in a sealed AWS account with no external dependencies.
 
-See [docs/security/](docs/security/) for the BB+WB audit history (9 rounds shipped) and [docs/compliance/](docs/compliance/) for the framework mapping.
+See [docs/security/](docs/security/) for the BB+WB audit history (13 rounds shipped) and [docs/compliance/](docs/compliance/) for the framework mapping.
 
 ---
 
@@ -240,11 +245,15 @@ See [docs/AGENTS.md](docs/AGENTS.md) for the agent-driven reduction-loop pattern
 
 ## Documentation
 
+- **[docs/AGENTS.md](docs/AGENTS.md)** — the agent-driven reduction loop in detail (known-vs-unknown intake, four MCP tools, three reduction axes, anti-patterns, human-user fallback)
 - **[docs/GETTING-STARTED.md](docs/GETTING-STARTED.md)** — first-time deployment walkthrough
 - **[docs/DEPLOYMENT.md](docs/DEPLOYMENT.md)** — full production-deployment guide; pilot deployment profile; cost-control levers
 - **[docs/recipes/](docs/recipes/)** — patterns + integration recipes (agent + Hoop examples, Slack setup, EKS template roles, terraform workflow)
-- **[docs/security/](docs/security/)** — BB+WB audit history (9 rounds), security policy, vulnerability disclosure
+- **[docs/security/](docs/security/)** — BB+WB audit history (13 rounds), security policy, vulnerability disclosure
 - **[docs/CONVERGENCE-REPORT-2026-05.md](docs/CONVERGENCE-REPORT-2026-05.md)** — calibration discipline + corpus methodology
+- **[docs/calibration/100-prompt-sufficiency-loop.md](docs/calibration/100-prompt-sufficiency-loop.md)** — the measurement (1.8% joint sufficiency) that drove the NL synthesis removal
+- **[docs/calibration/feature-reality-check.md](docs/calibration/feature-reality-check.md)** — feature-by-feature "claim vs. delivery" audit
+- **[docs/ROADMAP-V1.1.md](docs/ROADMAP-V1.1.md)** — post-launch scope (currently empty per [[v1-scope-bar]])
 
 ---
 
@@ -253,10 +262,20 @@ See [docs/AGENTS.md](docs/AGENTS.md) for the agent-driven reduction-loop pattern
 - **iam-risk-score**: launched. Stable schema; CLI + API + GitHub Action shipped. 1,489 / 1,489 AWS-managed-policy corpus pass rate.
 - **iam-jit local**: in active development; targeted for v1.0 launch.
 - **iam-jit hosted / self-host**: in active development; targeted for v1.0 launch with multi-provider OIDC, Slack approval bot, template browser, evolving preset library, agent-driven reduction loop, MFA propagation, safety modes.
+- **MCP server**: v0.3.0 — adds `list_templates`, `get_template`, `submit_policy` to the existing `score_iam_policy`. Legacy `generate_iam_policy` is deprecated (removed in 0.4.0) — replaced by the agent-driven workflow per [docs/AGENTS.md](docs/AGENTS.md).
 
 **What's NOT in iam-jit** (intentional, not deferred):
 - Natural-language policy synthesis from a free-form prompt. The deterministic generator was measured at 1.8% joint sufficiency rate ([docs/calibration/100-prompt-sufficiency-loop.md](docs/calibration/100-prompt-sufficiency-loop.md)); any iam-jit-side LLM-as-AUTHOR faces the same structural limit (no codebase context). iam-jit is scorer + catalog + gate — the agent (with codebase context + LLM) does the policy authoring.
 - *What IS in iam-jit, distinctly:* LLM-as-UX-helper in the Pro-tier UI walkthrough (LLM asks bounded questions about a fixed baseline; user's answers drive deterministic policy modifications; scorer evaluates). Different category — the LLM never invents policy content.
+
+**Pre-launch queue** (each finished fully before the next per *deliberate-feature-completion*):
+- ✅ Remarketing pass (claims aligned with shipped reality, v1.1 roadmap collapsed)
+- 🔄 NL synthesis deprecation Stage 1 done (`list_templates`/`get_template`/`submit_policy` ship as MCP 0.3.0; legacy `generate_iam_policy` tombstoned); Stages 2–4 to go
+- ⏸ Preset library — `save_as_template` + similarity matcher + auto-suggest
+- ⏸ `AdminLikeWithSensitiveExclusions` baseline (catalog entry + default presentation)
+- ⏸ Reduction UX on templates (three reduction axes + grouped questions + one-shot checklist)
+- ⏸ UI guided reduction (Pro tier, LLM-as-UX-helper, customer-configurable questions)
+- ⏸ Real-IdP doctor validation (blocked on AWS account verification)
 
 See [CHANGELOG.md](CHANGELOG.md) for release history and [docs/ROADMAP-V1.1.md](docs/ROADMAP-V1.1.md) for post-launch scope.
 
