@@ -62,10 +62,18 @@ class LiveActionEvent:
     resources: tuple[str, ...] = ()  # ARN strings touched
     source_ip: str | None = None
     user_agent: str | None = None
-    # The CloudTrail userIdentity sessionContext.sessionIssuer.userName
-    # — confirms this event was made under the JIT role's session,
-    # not some other principal that happens to share a name.
-    session_name: str | None = None
+    # IAM role NAME from sessionContext.sessionIssuer.userName — this
+    # is the value that matches the iam-jit-issued role's `role_name`
+    # one-to-one. CRIT-22-01 closure: do NOT confuse this with the
+    # role SESSION name (the per-assume `RoleSessionName` the end-user
+    # picks freely — CloudTrail records that as `Username`, we cannot
+    # predict it, and it must NOT be used as a filter).
+    role_name: str | None = None
+    # The end-user-chosen RoleSessionName, derived from the assumed-role
+    # ARN's last segment. Surfaced as audit-display context only; never
+    # used to filter (we don't know what the user picked, and they can
+    # pick anything legal under the role's trust policy).
+    role_session_name: str | None = None
 
     @property
     def action(self) -> str:
@@ -92,8 +100,31 @@ class LiveActionEvent:
             "resources": list(self.resources),
             "source_ip": self.source_ip,
             "user_agent": self.user_agent,
-            "session_name": self.session_name,
+            "role_name": self.role_name,
+            "role_session_name": self.role_session_name,
             "succeeded": self.succeeded,
+        }
+
+
+@dataclasses.dataclass(frozen=True)
+class TailResult:
+    """The return shape of `LiveActionTailSource.fetch_events`.
+
+    Per WB22 MED-22-03 + LOW-22-03 closures: a bare `list[LiveActionEvent]`
+    return can't distinguish "no activity" from "source failed". Wrapping
+    in a result lets callers branch on `ok` and surface `error` honestly
+    (UI banner, CLI non-zero exit, MCP error field).
+    """
+
+    events: tuple[LiveActionEvent, ...] = ()
+    ok: bool = True
+    error: str | None = None
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "events": [e.to_dict() for e in self.events],
+            "ok": self.ok,
+            "error": self.error,
         }
 
 
@@ -125,11 +156,14 @@ class LiveActionTailSource(abc.ABC):
     """
 
     @abc.abstractmethod
-    def fetch_events(self, query: TailQuery) -> list[LiveActionEvent]:
-        """Return events matching `query` in time-descending order.
-        Concrete impls must respect `query.max_events` as a hard cap
-        and `query.only_errors` as a server-side filter where possible
-        (else apply client-side via `filter_events`).
+    def fetch_events(self, query: TailQuery) -> TailResult:
+        """Return events matching `query` in time-descending order,
+        wrapped in a `TailResult` so callers can distinguish "no
+        events" (`ok=True, events=[]`) from "source failed"
+        (`ok=False, error="..."`). Concrete impls must respect
+        `query.max_events` as a hard cap and `query.only_errors` as
+        a server-side filter where possible (else apply client-side
+        via `filter_events`).
         """
 
     def describe(self) -> str:
@@ -148,8 +182,8 @@ class NullLiveActionTailSource(LiveActionTailSource):
     `live_action_tail_source` config knob.
     """
 
-    def fetch_events(self, query: TailQuery) -> list[LiveActionEvent]:
-        return []
+    def fetch_events(self, query: TailQuery) -> TailResult:
+        return TailResult(events=(), ok=True)
 
     def describe(self) -> str:
         return (
@@ -165,6 +199,12 @@ class InMemoryLiveActionTailSource(LiveActionTailSource):
     instruments their workflow, and (notably) demos / comic-strip
     scenarios — see [[comic-strip-demo-format]] — where pre-recorded
     event sequences play back deterministically.
+
+    Filter semantics: events are matched on `role_name` (the value of
+    `sessionContext.sessionIssuer.userName` in the original CloudTrail
+    record). CRIT-22-01 closure: do NOT filter on `role_session_name`
+    — that's the end-user-chosen RoleSessionName and we don't know
+    what they'll pick, so we'd silently drop their real activity.
     """
 
     def __init__(self, events: list[LiveActionEvent] | None = None) -> None:
@@ -173,10 +213,10 @@ class InMemoryLiveActionTailSource(LiveActionTailSource):
     def add(self, event: LiveActionEvent) -> None:
         self._events.append(event)
 
-    def fetch_events(self, query: TailQuery) -> list[LiveActionEvent]:
+    def fetch_events(self, query: TailQuery) -> TailResult:
         matched = [
             e for e in self._events
-            if (e.session_name is None or e.session_name == query.session_name)
+            if (e.role_name is None or e.role_name == query.role_name)
             and (query.aws_region is None or e.aws_region == query.aws_region)
         ]
         matched = filter_events(
@@ -187,7 +227,8 @@ class InMemoryLiveActionTailSource(LiveActionTailSource):
         )
         # CloudTrail orders descending by time; mirror that.
         matched.sort(key=lambda e: e.event_time, reverse=True)
-        return matched[: max(0, query.max_events)]
+        capped = matched[: max(0, query.max_events)]
+        return TailResult(events=tuple(capped), ok=True)
 
     def describe(self) -> str:
         return f"in-memory ({len(self._events)} pre-loaded events)"
@@ -309,6 +350,50 @@ def _extract_provisioned_at(request: dict[str, Any], provisioned: dict[str, Any]
 # ---------------------------------------------------------------------------
 # Source registry (single configurable runtime source)
 # ---------------------------------------------------------------------------
+
+
+def record_tail_read_in_history(
+    store: Any,
+    request: dict[str, Any],
+    *,
+    grant_id: str,
+    query: TailQuery,
+    result_ok: bool,
+    event_count: int,
+    actor: str,
+) -> None:
+    """Append a tail-read event to the grant's status.history so the
+    audit chain doesn't have a hole. WB22 HIGH-22-01 closure.
+
+    Best-effort: callers should wrap in try/except; this helper does
+    NOT raise on store-write failure (the read already succeeded;
+    we don't want to mask the result behind a write error).
+    """
+    import datetime as _dt
+
+    status = request.setdefault("status", {})
+    history = status.setdefault("history", [])
+    if not isinstance(history, list):
+        return
+    history.append({
+        "kind": "tail_read",
+        "at": _dt.datetime.now(_dt.UTC).strftime("%Y-%m-%dT%H:%M:%SZ"),
+        "actor": actor,
+        "since": query.since,
+        "until": query.until,
+        "aws_region": query.aws_region,
+        "only_errors": query.only_errors,
+        "max_events": query.max_events,
+        "result_ok": result_ok,
+        "event_count": event_count,
+    })
+    try:
+        store.put(grant_id, request)
+    except Exception:
+        # Don't mask a successful read behind an audit-log persistence
+        # failure. The read happened; the operator's logs will still
+        # contain it; this is best-effort.
+        pass
 
 
 _active_source: LiveActionTailSource | None = None

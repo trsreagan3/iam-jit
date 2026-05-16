@@ -94,6 +94,50 @@ Output is one event per line in CloudTrail-descending order:
 15:14:01Z FAIL[AccessDenied] secretsmanager:GetSecretValue (us-east-1)
 ```
 
+## Filtering semantics — what's matched, what's not
+
+A grant's tail is scoped by the IAM **role name** (e.g.
+`iam-jit-grant-1`), NOT by any per-assume session name. The end-user
+(or their agent) picks their own `RoleSessionName` when they call
+`sts:AssumeRole` — we have no way to predict what they'll pick, so
+filtering on it would silently drop their real activity (WB22
+CRIT-22-01).
+
+What we filter on instead: every CloudTrail event for an assumed-role
+call records `userIdentity.sessionContext.sessionIssuer.userName`,
+which IS the role name. The tail pulls events for the time window
+and keeps the ones whose `sessionIssuer.userName` matches the
+iam-jit-issued role.
+
+The trade-off: more events fetched per page than strictly needed.
+For typical iam-jit grants (short-lived, single role, light traffic)
+this stays well below the 2 TPS LookupEvents quota.
+
+## Audit-log entry for tail reads
+
+Every `tail_grant` call appends an entry to the grant's
+`status.history`:
+
+```yaml
+status:
+  history:
+    - kind: tail_read
+      at: 2026-05-17T15:14:00Z
+      actor: admin@example.com
+      event_count: 3
+      result_ok: true
+      since: 2026-05-17T14:00:00Z
+      until: 2026-05-17T20:00:00Z
+      aws_region: us-east-1
+      only_errors: false
+      max_events: 100
+```
+
+This satisfies SOC 2 CC6.x / PCI 10.x "who read what when" against
+the JIT role's activity. Every other admin action against a grant
+(approve/reject/revoke/provision) writes a similar entry; tail reads
+must too.
+
 ## MCP usage (for agents)
 
 Agents can fetch a tail via the `tail_grant` tool:

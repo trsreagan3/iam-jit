@@ -16,10 +16,12 @@ from iam_jit.live_action_tail import (
     LiveActionEvent,
     NullLiveActionTailSource,
     TailQuery,
+    TailResult,
     extract_tail_inputs_from_grant,
     filter_events,
     format_event_summary,
     get_default_source,
+    record_tail_read_in_history,
     set_default_source,
 )
 
@@ -35,7 +37,11 @@ def _ev(**overrides) -> LiveActionEvent:
         "event_name": "GetObject",
         "event_source": "s3.amazonaws.com",
         "aws_region": "us-east-1",
-        "session_name": "iam-jit-provision-req-1",
+        # WB22 CRIT-22-01 closure: filter is on role_name (the IAM role
+        # name from sessionIssuer.userName), NOT the per-assume
+        # role-session-name.
+        "role_name": "iam-jit-grant-1",
+        "role_session_name": "alice-laptop",
     }
     defaults.update(overrides)
     return LiveActionEvent(**defaults)
@@ -62,6 +68,11 @@ def test_event_to_dict_round_trip() -> None:
     assert d["action"] == "s3:GetObject"
     assert d["succeeded"] is False
     assert d["resources"] == ["arn:aws:s3:::b/k"]
+    # WB22 CRIT-22-01: surface both role_name (filter target) and
+    # role_session_name (audit context).
+    assert d["role_name"] == "iam-jit-grant-1"
+    assert d["role_session_name"] == "alice-laptop"
+    assert "session_name" not in d  # renamed away from the misleading label
 
 
 # ---------------------------------------------------------------------------
@@ -69,16 +80,23 @@ def test_event_to_dict_round_trip() -> None:
 # ---------------------------------------------------------------------------
 
 
-def _query() -> TailQuery:
-    return TailQuery(
-        role_name="iam-jit-req-1",
-        session_name="iam-jit-provision-req-1",
-        account_id="111111111111",
-    )
+def _query(**overrides) -> TailQuery:
+    defaults = {
+        "role_name": "iam-jit-grant-1",
+        "session_name": "iam-jit-provision-grant-1",
+        "account_id": "111111111111",
+    }
+    defaults.update(overrides)
+    return TailQuery(**defaults)
 
 
-def test_null_source_returns_empty() -> None:
-    assert NullLiveActionTailSource().fetch_events(_query()) == []
+def test_null_source_returns_empty_ok_result() -> None:
+    """WB22 TailResult shape: ok=True, events=()."""
+    result = NullLiveActionTailSource().fetch_events(_query())
+    assert isinstance(result, TailResult)
+    assert result.ok is True
+    assert result.events == ()
+    assert result.error is None
 
 
 def test_null_source_describe_mentions_unconfigured() -> None:
@@ -90,14 +108,32 @@ def test_null_source_describe_mentions_unconfigured() -> None:
 # ---------------------------------------------------------------------------
 
 
-def test_in_memory_source_filters_by_session() -> None:
+def test_in_memory_source_filters_by_role_name_not_session_name() -> None:
+    """WB22 CRIT-22-01 closure: filter is on role_name (the IAM role
+    name from sessionIssuer.userName), NOT the user-chosen
+    role_session_name."""
     src = InMemoryLiveActionTailSource(events=[
-        _ev(session_name="iam-jit-provision-req-1", event_time="2026-05-17T14:00:00Z"),
-        _ev(session_name="iam-jit-provision-req-2", event_time="2026-05-17T14:05:00Z"),
+        _ev(role_name="iam-jit-grant-1", role_session_name="alice-laptop",
+            event_time="2026-05-17T14:00:00Z"),
+        _ev(role_name="iam-jit-grant-2", role_session_name="alice-laptop",
+            event_time="2026-05-17T14:05:00Z"),
     ])
-    out = src.fetch_events(_query())
+    out = src.fetch_events(_query()).events
     assert len(out) == 1
-    assert out[0].session_name == "iam-jit-provision-req-1"
+    assert out[0].role_name == "iam-jit-grant-1"
+
+
+def test_in_memory_source_does_not_filter_by_role_session_name() -> None:
+    """WB22 CRIT-22-01: end-user picks any RoleSessionName, so we must
+    match regardless of what they pick. Same role_name + different
+    role_session_names should all match."""
+    src = InMemoryLiveActionTailSource(events=[
+        _ev(role_name="iam-jit-grant-1", role_session_name="alice-laptop"),
+        _ev(role_name="iam-jit-grant-1", role_session_name="alice-ci"),
+        _ev(role_name="iam-jit-grant-1", role_session_name="random-suffix-xyz"),
+    ])
+    out = src.fetch_events(_query()).events
+    assert len(out) == 3
 
 
 def test_in_memory_source_filters_by_region() -> None:
@@ -105,13 +141,7 @@ def test_in_memory_source_filters_by_region() -> None:
         _ev(aws_region="us-east-1"),
         _ev(aws_region="eu-west-1"),
     ])
-    q = TailQuery(
-        role_name="iam-jit-req-1",
-        session_name="iam-jit-provision-req-1",
-        account_id="111111111111",
-        aws_region="us-east-1",
-    )
-    out = src.fetch_events(q)
+    out = src.fetch_events(_query(aws_region="us-east-1")).events
     assert all(e.aws_region == "us-east-1" for e in out)
 
 
@@ -121,7 +151,7 @@ def test_in_memory_source_sorts_descending_by_time() -> None:
         _ev(event_time="2026-05-17T14:10:00Z", event_name="B"),
         _ev(event_time="2026-05-17T14:05:00Z", event_name="C"),
     ])
-    out = src.fetch_events(_query())
+    out = src.fetch_events(_query()).events
     assert [e.event_name for e in out] == ["B", "C", "A"]
 
 
@@ -130,24 +160,12 @@ def test_in_memory_source_respects_max_events() -> None:
         _ev(event_time=f"2026-05-17T14:0{i}:00Z", event_name=f"E{i}")
         for i in range(5)
     ])
-    q = TailQuery(
-        role_name="iam-jit-req-1",
-        session_name="iam-jit-provision-req-1",
-        account_id="111111111111",
-        max_events=2,
-    )
-    assert len(src.fetch_events(q)) == 2
+    assert len(src.fetch_events(_query(max_events=2)).events) == 2
 
 
 def test_in_memory_source_max_events_zero_returns_empty() -> None:
     src = InMemoryLiveActionTailSource(events=[_ev()])
-    q = TailQuery(
-        role_name="iam-jit-req-1",
-        session_name="iam-jit-provision-req-1",
-        account_id="111111111111",
-        max_events=0,
-    )
-    assert src.fetch_events(q) == []
+    assert src.fetch_events(_query(max_events=0)).events == ()
 
 
 def test_in_memory_source_only_errors_filters() -> None:
@@ -155,22 +173,16 @@ def test_in_memory_source_only_errors_filters() -> None:
         _ev(event_name="ok"),
         _ev(event_name="fail", error_code="AccessDenied"),
     ])
-    q = TailQuery(
-        role_name="iam-jit-req-1",
-        session_name="iam-jit-provision-req-1",
-        account_id="111111111111",
-        only_errors=True,
-    )
-    out = src.fetch_events(q)
+    out = src.fetch_events(_query(only_errors=True)).events
     assert len(out) == 1
     assert out[0].event_name == "fail"
 
 
-def test_in_memory_source_session_none_matches_any() -> None:
-    """An event with session_name=None is treated as match-any session
+def test_in_memory_source_role_name_none_matches_any() -> None:
+    """An event with role_name=None is treated as match-any role
     (useful for manually instrumented test events)."""
-    src = InMemoryLiveActionTailSource(events=[_ev(session_name=None)])
-    assert len(src.fetch_events(_query())) == 1
+    src = InMemoryLiveActionTailSource(events=[_ev(role_name=None)])
+    assert len(src.fetch_events(_query()).events) == 1
 
 
 # ---------------------------------------------------------------------------
@@ -316,6 +328,99 @@ def test_set_default_source_swaps_in_a_real_source() -> None:
         assert get_default_source() is stub
     finally:
         set_default_source(None)
+
+
+# ---------------------------------------------------------------------------
+# record_tail_read_in_history (WB22 HIGH-22-01 closure)
+# ---------------------------------------------------------------------------
+
+
+class _FakeStore:
+    """In-memory dict store enough for tail-read audit tests."""
+
+    def __init__(self) -> None:
+        self.requests: dict[str, dict] = {}
+        self.put_calls: list[tuple[str, dict]] = []
+
+    def put(self, request_id: str, request: dict) -> None:
+        self.put_calls.append((request_id, request))
+        self.requests[request_id] = request
+
+
+def _grant() -> dict:
+    return {"metadata": {"id": "g1"}, "status": {"history": []}}
+
+
+def test_record_tail_read_appends_history_entry() -> None:
+    store = _FakeStore()
+    grant = _grant()
+    record_tail_read_in_history(
+        store, grant,
+        grant_id="g1",
+        query=_query(),
+        result_ok=True,
+        event_count=7,
+        actor="admin@example.com",
+    )
+    history = grant["status"]["history"]
+    assert len(history) == 1
+    entry = history[0]
+    assert entry["kind"] == "tail_read"
+    assert entry["actor"] == "admin@example.com"
+    assert entry["event_count"] == 7
+    assert entry["result_ok"] is True
+    assert "at" in entry
+
+
+def test_record_tail_read_persists_via_store_put() -> None:
+    store = _FakeStore()
+    grant = _grant()
+    record_tail_read_in_history(
+        store, grant,
+        grant_id="g1", query=_query(), result_ok=True,
+        event_count=0, actor="admin",
+    )
+    assert store.put_calls == [("g1", grant)]
+
+
+def test_record_tail_read_handles_missing_history_list() -> None:
+    """If status.history is missing entirely, helper initializes it."""
+    store = _FakeStore()
+    grant: dict = {"metadata": {"id": "g1"}}
+    record_tail_read_in_history(
+        store, grant,
+        grant_id="g1", query=_query(), result_ok=True,
+        event_count=0, actor="admin",
+    )
+    assert len(grant["status"]["history"]) == 1
+
+
+def test_record_tail_read_failure_path_marked_in_audit() -> None:
+    store = _FakeStore()
+    grant = _grant()
+    record_tail_read_in_history(
+        store, grant,
+        grant_id="g1", query=_query(), result_ok=False,
+        event_count=0, actor="admin",
+    )
+    assert grant["status"]["history"][0]["result_ok"] is False
+
+
+def test_record_tail_read_swallows_store_put_failure() -> None:
+    """Store write failure must not raise — read already succeeded."""
+    class FailingStore:
+        def put(self, request_id, request):
+            raise RuntimeError("ddb down")
+
+    grant = _grant()
+    # Must NOT raise:
+    record_tail_read_in_history(
+        FailingStore(), grant,
+        grant_id="g1", query=_query(), result_ok=True,
+        event_count=0, actor="admin",
+    )
+    # History still got the entry locally (caller can flush later)
+    assert len(grant["status"]["history"]) == 1
 
 
 @pytest.fixture(autouse=True)

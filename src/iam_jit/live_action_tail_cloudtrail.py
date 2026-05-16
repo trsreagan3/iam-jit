@@ -39,6 +39,7 @@ from .live_action_tail import (
     LiveActionEvent,
     LiveActionTailSource,
     TailQuery,
+    TailResult,
     filter_events,
 )
 
@@ -47,13 +48,27 @@ logger = logging.getLogger(__name__)
 
 class CloudTrailLookupSource(LiveActionTailSource):
     """Concrete `LiveActionTailSource` that queries CloudTrail's
-    `LookupEvents` API.
+    `LookupEvents` API (the Event-history endpoint).
 
-    Filter strategy: CloudTrail supports `LookupAttributes` with
-    `Username` matching the assumed-role session name (see
-    `provision.py`'s `iam-jit-provision-{request_id}` pattern).
-    That's the surgical filter — we don't have to scan every event
-    in the account.
+    Filter strategy (CRIT-22-01 closure): CloudTrail's `Username`
+    LookupAttribute for assumed-role events corresponds to the
+    end-user-chosen `RoleSessionName` — not the role name and not
+    iam-jit's internal provision-session-name. Since the end-user
+    picks the session name freely, we cannot use Username as a
+    server-side filter without missing all their real activity.
+
+    Instead we pull events for the time window (no server filter,
+    or a conservative `ResourceType=AWS::IAM::Role` filter when
+    available) and filter client-side by
+    `sessionContext.sessionIssuer.userName == role_name`. The
+    `role_name` IS predictable (iam-jit minted the role; the value
+    is in the grant's `status.provisioned.role_name`).
+
+    Trade-off: client-side filtering reads more events than necessary
+    against the 2 TPS LookupEvents quota. For tight time windows
+    (typical iam-jit grants <24h) the volume stays well-bounded.
+    The Enterprise plugin's EventBridge subscription avoids this
+    by receiving the events directly.
     """
 
     # Hard cap on per-fetch results to keep accidental cost-spikes
@@ -79,8 +94,12 @@ class CloudTrailLookupSource(LiveActionTailSource):
 
     def describe(self) -> str:
         return (
-            f"cloudtrail:LookupEvents (region={self._default_region}, "
-            f"lag~15min, retention=90d)"
+            f"cloudtrail:LookupEvents Event-history (region={self._default_region}, "
+            "lag~15min, history-window=90d). Note: Event-history is "
+            "CloudTrail's built-in 90-day API lookup, not your trail's "
+            "S3 retention. For events older than 90 days or for "
+            "real-time streaming, use CloudTrail Lake or the Enterprise "
+            "EventBridge plugin."
         )
 
     def _session(self) -> Any:
@@ -93,27 +112,46 @@ class CloudTrailLookupSource(LiveActionTailSource):
     def _client(self, region: str) -> Any:
         return self._session().client("cloudtrail", region_name=region)
 
-    def fetch_events(self, query: TailQuery) -> list[LiveActionEvent]:
+    # LOW-22-01 closure: if the API returns NextToken but successive
+    # `Events` payloads are empty, give up after this many consecutive
+    # empties so we don't spin paging forever.
+    EMPTY_PAGE_LIMIT = 3
+
+    # Pagination outer-bound: a soft cap on how many additional pages
+    # we'll fetch beyond what max_events naively requires. Because
+    # we're filtering client-side by role_name, the raw event volume
+    # can far exceed `max_events`; this lets us drain a reasonable
+    # window without unbounded paging.
+    SCAN_AMPLIFICATION = 4
+
+    def fetch_events(self, query: TailQuery) -> TailResult:
         region = query.aws_region or self._default_region
         max_events = min(query.max_events, self.HARD_MAX_EVENTS)
         if max_events <= 0:
-            return []
+            return TailResult(events=(), ok=True)
 
         try:
             client = self._client(region)
         except Exception as e:
             # boto3 import error / no credentials / no region — fail
-            # soft: surface as an empty result + a logged warning so
-            # callers can show the user a "couldn't reach CloudTrail"
-            # banner without crashing the whole MCP / CLI flow.
+            # honestly: surface as an error in TailResult so callers
+            # can distinguish "no activity" from "couldn't reach
+            # CloudTrail" (MED-22-03 / LOW-22-03 closure).
             logger.warning("cloudtrail client init failed: %s", e)
-            return []
+            return TailResult(
+                events=(),
+                ok=False,
+                error=f"could not initialize CloudTrail client: {e}",
+            )
 
+        # CRIT-22-01 closure: do NOT filter by Username here. Username
+        # for assumed-role events = the end-user's chosen RoleSessionName,
+        # which we cannot predict. Pull events in the time window and
+        # filter client-side by sessionContext.sessionIssuer.userName ==
+        # role_name. We omit LookupAttributes entirely — scanning is
+        # bounded by EMPTY_PAGE_LIMIT + SCAN_AMPLIFICATION.
         params: dict[str, Any] = {
-            "LookupAttributes": [
-                {"AttributeKey": "Username", "AttributeValue": query.session_name}
-            ],
-            "MaxResults": min(50, max_events),  # API max is 50 per call
+            "MaxResults": 50,  # API max is 50 per call
         }
         if query.since:
             params["StartTime"] = _parse_iso8601(query.since)
@@ -122,9 +160,8 @@ class CloudTrailLookupSource(LiveActionTailSource):
 
         collected: list[LiveActionEvent] = []
         next_token: str | None = None
-        # Bound the pagination loop to a sensible cap so a runaway
-        # session window can't iterate forever.
-        max_pages = max(1, (max_events + 49) // 50)
+        max_pages = max(1, ((max_events + 49) // 50)) * self.SCAN_AMPLIFICATION
+        consecutive_empty_pages = 0
         for _ in range(max_pages):
             if next_token is not None:
                 params["NextToken"] = next_token
@@ -132,26 +169,47 @@ class CloudTrailLookupSource(LiveActionTailSource):
                 resp = client.lookup_events(**params)
             except Exception as e:
                 logger.warning(
-                    "cloudtrail lookup_events failed (session=%s, region=%s): %s",
-                    query.session_name,
+                    "cloudtrail lookup_events failed (role=%s, region=%s): %s",
+                    query.role_name,
                     region,
                     e,
                 )
-                break
-            for raw in resp.get("Events", []) or []:
+                return TailResult(
+                    events=tuple(collected),
+                    ok=False,
+                    error=f"cloudtrail:LookupEvents failed: {e}",
+                )
+
+            page_events = resp.get("Events", []) or []
+            matched_this_page = 0
+            for raw in page_events:
                 ev = _parse_cloudtrail_event(raw, fallback_region=region)
-                if ev is not None:
-                    collected.append(ev)
+                if ev is None:
+                    continue
+                # Client-side role-name filter (the CRIT-22-01 anchor).
+                if ev.role_name and ev.role_name != query.role_name:
+                    continue
+                collected.append(ev)
+                matched_this_page += 1
                 if len(collected) >= max_events:
                     break
             if len(collected) >= max_events:
                 break
+
+            if not page_events:
+                consecutive_empty_pages += 1
+                if consecutive_empty_pages >= self.EMPTY_PAGE_LIMIT:
+                    break
+            else:
+                consecutive_empty_pages = 0
+
             next_token = resp.get("NextToken")
             if not next_token:
                 break
 
         # Client-side belt-and-suspenders filter (only_errors etc.)
-        return filter_events(collected, only_errors=query.only_errors)[:max_events]
+        filtered = filter_events(collected, only_errors=query.only_errors)[:max_events]
+        return TailResult(events=tuple(filtered), ok=True)
 
 
 # ---------------------------------------------------------------------------
@@ -213,15 +271,36 @@ def _parse_cloudtrail_event(raw: dict[str, Any], *, fallback_region: str) -> Liv
             if name:
                 resources.append(str(name))
 
-    # Session-name extraction from userIdentity.sessionContext.sessionIssuer.userName
-    session_name = None
+    # CRIT-22-01 closure: extract BOTH the role name (from sessionIssuer
+    # — the value we filter on) AND the role session name (from
+    # principalId / arn — display context only). For an assumed-role
+    # event the userIdentity looks like:
+    #   {"type": "AssumedRole",
+    #    "principalId": "ABCDEFG:alice-laptop",
+    #    "arn": "arn:aws:sts::ACCT:assumed-role/iam-jit-grant-1/alice-laptop",
+    #    "sessionContext": {
+    #      "sessionIssuer": {"type": "Role", "userName": "iam-jit-grant-1"}
+    #    }}
+    # role_name        = "iam-jit-grant-1"  (matches the iam-jit role)
+    # role_session_name = "alice-laptop"     (end-user-chosen; for audit only)
+    role_name = None
+    role_session_name = None
     user_identity = detail.get("userIdentity") or {}
     if isinstance(user_identity, dict):
         sc = user_identity.get("sessionContext") or {}
         if isinstance(sc, dict):
             si = sc.get("sessionIssuer") or {}
             if isinstance(si, dict):
-                session_name = si.get("userName")
+                role_name = si.get("userName")
+        # Role-session-name is the segment after the last '/' in the
+        # assumed-role ARN, or the segment after ':' in principalId.
+        arn = user_identity.get("arn")
+        if isinstance(arn, str) and "/" in arn and "assumed-role" in arn:
+            role_session_name = arn.rsplit("/", 1)[-1]
+        else:
+            pid = user_identity.get("principalId")
+            if isinstance(pid, str) and ":" in pid:
+                role_session_name = pid.split(":", 1)[1]
 
     return LiveActionEvent(
         event_time=event_time,
@@ -234,5 +313,6 @@ def _parse_cloudtrail_event(raw: dict[str, Any], *, fallback_region: str) -> Liv
         resources=tuple(resources),
         source_ip=str(source_ip) if source_ip else None,
         user_agent=str(user_agent) if user_agent else None,
-        session_name=str(session_name) if session_name else None,
+        role_name=str(role_name) if role_name else None,
+        role_session_name=str(role_session_name) if role_session_name else None,
     )

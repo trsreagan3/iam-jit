@@ -1005,16 +1005,38 @@ def _tail_grant_for_mcp(args: dict[str, Any]) -> dict[str, Any]:
     )
 
     source = get_default_source()
-    events = source.fetch_events(query)
+    result = source.fetch_events(query)
+
+    # WB22 HIGH-22-01 closure: every other admin action on a grant
+    # appends to status.history; tail reads must too so the audit
+    # chain doesn't have a hole. Best-effort: never block the read
+    # if the audit-log write fails.
+    try:
+        from .live_action_tail import record_tail_read_in_history
+
+        record_tail_read_in_history(
+            store,
+            request,
+            grant_id=grant_id.strip(),
+            query=query,
+            result_ok=result.ok,
+            event_count=len(result.events),
+            actor=_current_user_id(),
+        )
+    except Exception:
+        pass
+
     return {
         "grant_id": grant_id,
-        "session_name": query.session_name,
+        "role_session_provision_name": query.session_name,
         "role_name": query.role_name,
         "account_id": query.account_id,
         "source": source.describe(),
-        "event_count": len(events),
-        "events": [e.to_dict() for e in events],
-        "summaries": [format_event_summary(e) for e in events],
+        "ok": result.ok,
+        "error": result.error,
+        "event_count": len(result.events),
+        "events": [e.to_dict() for e in result.events],
+        "summaries": [format_event_summary(e) for e in result.events],
     }
 
 

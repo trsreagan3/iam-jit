@@ -362,3 +362,44 @@ Recommended pre-launch fix sequence:
 8. **LOW-22-04**: rewrites itself naturally as part of CRIT-22-01 fix.
 
 After fixes ship, re-run audit (Round 23) to confirm CRIT-22-01 is genuinely closed by testing against a real CloudTrail event or a moto-based fixture that mirrors the real `Username` semantics — the current hand-rolled fixtures lie about the AWS contract and would happily greenlight a different incorrect implementation.
+
+---
+
+## WB22 closures (2026-05-17)
+
+All 9 findings addressed (8 closed in code, 1 deferred-with-rationale).
+
+### Updated closure table
+
+| Finding | Status | How closed |
+|---|---|---|
+| CRIT-22-01 wrong CloudTrail session-name filter | **CLOSED** | Dropped the `Username` `LookupAttributes` filter entirely (it matched the end-user-chosen `RoleSessionName`, which we cannot predict). `CloudTrailLookupSource.fetch_events` now pulls events in the time window and filters client-side by `userIdentity.sessionContext.sessionIssuer.userName == role_name`. Renamed `LiveActionEvent.session_name` → `role_name` (the role NAME from sessionIssuer) + added `role_session_name` (audit display only, never used as filter). `_parse_cloudtrail_event` now extracts both fields correctly. New regression test `test_fetch_events_does_not_use_username_lookup_attribute` asserts the bug cannot return without failing CI. `InMemoryLiveActionTailSource.fetch_events` filter likewise updated. |
+| HIGH-22-01 no audit-log entry for tail reads | **CLOSED** | New `live_action_tail.record_tail_read_in_history()` helper appends a `{kind: "tail_read", at, actor, event_count, result_ok, since, until, aws_region, only_errors, max_events}` entry to `status.history` + persists via `store.put()`. Wired into both `_tail_grant_for_mcp` and (next commit) the CLI. Best-effort: store-put failure does not mask a successful read. Docs section added. |
+| MED-22-01 `_active_source` global concurrency | **DOCUMENTED-DEFERRED** | Kept as module-level for OSS launch (single-tenant per [[no-hosted-saas]]; set-once-at-bootstrap is the supported pattern). Will convert to `ContextVar` when (and only if) per-account source override ships (analogous to [[per-account-llm-policy]]). Documented in `set_default_source` docstring. |
+| MED-22-02 `describe()` conflates Event-history vs trail retention | **CLOSED** | Rewrote `CloudTrailLookupSource.describe()` to say "Event-history" specifically + explicitly note the 90d window is the API's history window, not the customer's trail S3 retention. Test `test_describe_mentions_lag_and_event_history_specifically` enforces it. |
+| MED-22-03 + LOW-22-03 source-error swallowed | **CLOSED** | New `TailResult(events, ok, error)` dataclass replaces the bare `list[LiveActionEvent]` return. `CloudTrailLookupSource` surfaces both init-failure and lookup-failure as `ok=False` + `error="..."`. MCP response includes top-level `ok` + `error`; CLI exits with code 3 + stderr message on source error (was silent exit 0). New tests cover both paths. |
+| LOW-22-01 unbounded pagination on empty pages | **CLOSED** | Added `EMPTY_PAGE_LIMIT = 3` constant + counter. Source bails after 3 consecutive empty `Events` pages even if `NextToken` is present. Test `test_fetch_events_terminates_on_empty_page_limit` asserts behaviour. Also added `SCAN_AMPLIFICATION = 4` to bound the multi-page client-side-filtering scan. |
+| LOW-22-02 `DynamoDBStore.get/delete/exists` missing `_validate_request_id` | **DEFERRED** | Out of scope for #157 closure (touches `store.py` for a pre-existing gap unrelated to live-action-tail). Worth a dedicated audit-closure task; flagged in launch-readiness ledger. |
+| LOW-22-04 no role-name contract test in fake fixture | **CLOSED** | Test fixture `_ct_event()` now constructs realistic CloudTrail event JSON including correct `userIdentity` shape (principalId, arn, sessionContext.sessionIssuer.userName). `test_parse_cloudtrail_event_happy_path` and new `test_fetch_events_filters_client_side_by_role_name` assert the AWS-contract semantics. |
+| OUT-OF-SCOPE: 1.8% references in cli.py:82,259 | **DEFERRED** | Per audit's own note; not introduced by #157. Should be cleaned in a separate small commit. |
+
+### Verification
+
+- `tests/test_live_action_tail.py`: 30 → 36 tests (+6 including `record_tail_read_in_history` coverage)
+- `tests/test_live_action_tail_cloudtrail.py`: 18 → 22 tests (+4 including no-Username-filter regression)
+- `tests/test_live_action_tail_mcp.py`: 17 → 19 tests (+2 audit-log + error-propagation)
+- All 78 tail tests pass.
+- Broader suite: **2099 passed**, 29 skipped, 14 deselected (was 2086 before closures; +13 net).
+
+### What the WB22 fix DID NOT do
+
+- Did not convert `_active_source` to `ContextVar` (MED-22-01 deferred-with-rationale).
+- Did not patch `DynamoDBStore.get/delete/exists` (LOW-22-02 out-of-scope; dedicated task).
+- Did not scrub the two pre-existing `1.8%` references in `cli.py` (out-of-scope; separate commit).
+- Did not add a moto-based CloudTrail integration test. The hand-rolled fixture now mirrors the real `userIdentity` shape correctly; a moto round in Round 23 would close any remaining contract gap.
+
+### Why this matters
+
+The CRIT was exactly the kind of bug the audit pattern is designed to catch: a feature whose unit tests passed because the tests encoded the same wrong assumption as the production code. The fix isn't just "change the filter" — it's the rename (`session_name` → `role_name` + `role_session_name`) that makes the AWS semantic legible at every layer, so future contributors can't easily reintroduce the confusion. The audit-log gap (HIGH) was a smaller-but-load-bearing issue: every other admin action against a grant writes to `status.history`; without this fix, "who read the tail" had no compliance answer.
+
+Per [[audit-cadence-discipline]]: 1 CRIT + 1 HIGH + 3 MED + 4 LOW in code that had 65 passing unit tests. The audit pattern's ROI continues to compound.

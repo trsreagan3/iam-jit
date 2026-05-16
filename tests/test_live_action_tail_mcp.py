@@ -22,7 +22,10 @@ def _ev(**overrides) -> LiveActionEvent:
         "event_name": "GetObject",
         "event_source": "s3.amazonaws.com",
         "aws_region": "us-east-1",
-        "session_name": "iam-jit-provision-grant-1",
+        # WB22 CRIT-22-01: filter is on role_name; role_session_name
+        # is audit display only.
+        "role_name": "iam-jit-grant-1",
+        "role_session_name": "alice-laptop",
     }
     defaults.update(overrides)
     return LiveActionEvent(**defaults)
@@ -30,11 +33,12 @@ def _ev(**overrides) -> LiveActionEvent:
 
 def _grant_yaml() -> dict:
     return {
-        "apiVersion": "iam-jit/v1",
-        "kind": "AccessRequest",
+        "apiVersion": "iam-jit.dev/v1alpha1",
+        "kind": "RoleRequest",
         "metadata": {
             "id": "grant-1",
-            "requester": {"email": "alice@example.com"},
+            "requester": {"name": "Alice Tester", "email": "alice@example.com"},
+            "created_at": "2026-05-17T14:00:00Z",
         },
         "spec": {
             "access_type": "read-only",
@@ -48,13 +52,15 @@ def _grant_yaml() -> dict:
         },
         "status": {
             "state": "active",
+            "history": [
+                {"to_state": "active", "at": "2026-05-17T14:00:00Z"},
+            ],
             "provisioned": {
                 "role_arn": "arn:aws:iam::111111111111:role/iam-jit/iam-jit-grant-1",
                 "role_name": "iam-jit-grant-1",
                 "account_id": "111111111111",
                 "session_name": "iam-jit-provision-grant-1",
                 "expires_at": "2026-05-17T20:00:00Z",
-                "tags": {"provisioned-at": "2026-05-17T14:00:00Z"},
             },
         },
     }
@@ -165,15 +171,16 @@ def test_unprovisioned_grant_returns_error(tmp_path, monkeypatch) -> None:
 
 def test_returns_events_via_configured_source(grant_store, stub_source) -> None:
     out = _tail_grant_for_mcp({"grant_id": "grant-1"})
-    assert "error" not in out
+    # WB22 MED-22-03 closure: top-level error is now None on success
+    assert out.get("error") is None
+    assert out["ok"] is True
     assert out["grant_id"] == "grant-1"
     assert out["role_name"] == "iam-jit-grant-1"
-    assert out["session_name"] == "iam-jit-provision-grant-1"
+    assert out["role_session_provision_name"] == "iam-jit-provision-grant-1"
     assert out["account_id"] == "111111111111"
     assert out["event_count"] == 2
     assert len(out["events"]) == 2
     assert len(out["summaries"]) == 2
-    # source.describe() is included so the caller knows what they got
     assert "in-memory" in out["source"]
 
 
@@ -192,7 +199,7 @@ def test_max_events_is_capped_at_1000(grant_store, monkeypatch) -> None:
     set_default_source(src)
     try:
         out = _tail_grant_for_mcp({"grant_id": "grant-1", "max_events": 999_999})
-        assert "error" not in out
+        assert out["ok"] is True
         # Source only had 50 events; result reflects that
         assert out["event_count"] == 50
     finally:
@@ -203,6 +210,42 @@ def test_summaries_are_human_readable(grant_store, stub_source) -> None:
     out = _tail_grant_for_mcp({"grant_id": "grant-1", "only_errors": False})
     assert any("OK" in s for s in out["summaries"])
     assert any("FAIL[AccessDenied]" in s for s in out["summaries"])
+
+
+def test_tail_read_appends_audit_log_entry(grant_store, stub_source) -> None:
+    """WB22 HIGH-22-01 closure: tail reads write to status.history
+    so the audit chain isn't broken."""
+    import yaml
+    _tail_grant_for_mcp({"grant_id": "grant-1"})
+    # Re-read grant from disk to confirm the history entry persisted
+    grant_path = grant_store / "grant-1.yaml"
+    grant = yaml.safe_load(grant_path.read_text())
+    history = grant["status"]["history"]
+    tail_entries = [e for e in history if e.get("kind") == "tail_read"]
+    assert len(tail_entries) == 1
+    assert tail_entries[0]["event_count"] == 2
+    assert tail_entries[0]["result_ok"] is True
+
+
+def test_source_error_propagated_to_mcp_response(grant_store) -> None:
+    """WB22 MED-22-03 closure: when the source returns ok=False,
+    MCP response surfaces ok=False + error message."""
+    from iam_jit.live_action_tail import TailResult
+
+    class _FailingSource(InMemoryLiveActionTailSource):
+        def fetch_events(self, query):
+            return TailResult(events=(), ok=False, error="simulated failure")
+
+        def describe(self) -> str:
+            return "failing source"
+
+    set_default_source(_FailingSource())
+    try:
+        out = _tail_grant_for_mcp({"grant_id": "grant-1"})
+        assert out["ok"] is False
+        assert out["error"] == "simulated failure"
+    finally:
+        set_default_source(None)
 
 
 # ---------------------------------------------------------------------------

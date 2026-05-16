@@ -693,20 +693,26 @@ def tail_cmd(
     )
 
     source = get_default_source()
-    events = source.fetch_events(query)
+    result = source.fetch_events(query)
 
     click.echo(f"# grant: {grant_id}")
-    click.echo(f"# role:  {query.role_name} (session: {query.session_name})")
+    click.echo(f"# role:  {query.role_name}")
     click.echo(f"# account: {query.account_id}")
     click.echo(f"# source: {source.describe()}")
-    click.echo(f"# events: {len(events)}")
-    if not events:
+    click.echo(f"# events: {len(result.events)}")
+    if not result.ok:
+        # WB22 LOW-22-03 closure: don't silently exit 0 when the
+        # source itself failed — admin needs to know "no events
+        # because source broken" vs "no events because no activity".
+        click.echo(f"# source error: {result.error}", err=True)
+        sys.exit(3)
+    if not result.events:
         click.echo(
             "# (no events — check that the source is configured "
             "and that the session window contains activity)"
         )
         return
-    for ev in events:
+    for ev in result.events:
         click.echo(format_event_summary(ev))
 
 
