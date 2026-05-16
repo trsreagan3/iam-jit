@@ -29,13 +29,16 @@ shipping with hidden gaps.
 | Round 10 (safety mode) | 2026-05-15 | 1 CRIT, 3 HIGH, 1 MED | closed |
 | Round 11 (session delta) | 2026-05-15 | 4 HIGH, 4 MED, 4 LOW, 4 INFO | HIGH+MED closed; INFO docs only |
 | Round 12 (MFA enforcement) | 2026-05-16 | 2 CRIT, 3 HIGH, 4 MED | CRIT+HIGH+MED closed; INFO open |
-| Round 13 (verify round-12) | 2026-05-16 | (in progress) | — |
+| Round 13 (verify round-12) | 2026-05-16 | 1 CRIT, 2 MED, 3 LOW + verify-passes | CRIT + MEDs closed |
 
 **The audit pattern works.** Every round has caught real
 shipping bugs in code that looked done at the time. Round-12
-in particular caught 2 CRITs in MFA enforcement that would have
-shipped to the pilot as "compliance-grade MFA" while actually
-being bypassed.
+caught 2 CRITs in MFA enforcement that would have shipped to
+the pilot as "compliance-grade MFA" while actually being
+bypassed. Round-13 then verified those fixes — and caught a
+THIRD CRIT (self-approve flipping past the MFA gate). The
+discipline of always-audit-after-fix is now memo'd as
+`[[audit-cadence-discipline]]`.
 
 ## Mode-by-mode readiness
 
