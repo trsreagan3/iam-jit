@@ -70,14 +70,23 @@ def test_mfa_stale_high_risk_blocks_auto_approve() -> None:
     assert decision.auto_approve is False
     assert decision.reason == "mfa_required_for_high_risk"
     assert decision.details["mfa_step_up_required"] is True
-    assert decision.details["mfa_reason"] == "mfa_too_stale"
     assert decision.details["client_action"] == "re_authenticate_via_oidc"
+    # WB12-11: mfa_reason / original_reason / score are INTENTIONALLY
+    # absent from the response-facing details. Audit log has them via
+    # the separate _mfa_audit dict the route emits; the response body
+    # stays opaque to deny attackers a stale-MFA oracle.
+    assert "mfa_reason" not in decision.details
+    assert "original_reason" not in decision.details
+    assert "score" not in decision.details
     # Actor unchanged — this is still "system" doing the gating;
     # MFA is a system policy, not a user action.
     assert actor == "system:auto-approver"
     assert block is not None
     assert block["mfa_step_up_required"] is True
     assert block["redirect_to"] == "/api/v1/auth/oidc/login"
+    # The response-body reason is the generic "fresh_mfa_required"
+    # rather than the granular mfa_reason from the gate.
+    assert block["reason"] == "fresh_mfa_required"
 
 
 def test_mfa_fresh_high_risk_passes_through() -> None:

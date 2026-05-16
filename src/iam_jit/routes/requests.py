@@ -87,38 +87,54 @@ def _apply_mfa_and_self_approve_enforcement(
 
     3. Otherwise return the original decision unchanged.
     """
+    # WB12-04 closure: use truthy-vs-falsy comparison rather than
+    # `is True` / `is False`. Any falsy / truthy values returned by
+    # the audit dicts (e.g., a future mfa_gate that returns a
+    # bool-like object, or a missing key returning None) are handled
+    # safely. Old `is True` check would reject any non-True truthy.
+    _auto_approve_currently = bool(getattr(auto_decision, "auto_approve", False))
+    _would_require_mfa = bool(mfa_audit.get("would_require_mfa"))
+    _mfa_present = bool(mfa_audit.get("mfa_present"))
+    _self_approve_eligible = bool(self_approve_audit.get("self_approve_eligible"))
+
     # 1. MFA enforcement: high-risk + missing/stale MFA blocks auto-approve.
-    if (
-        getattr(auto_decision, "auto_approve", False) is True
-        and mfa_audit.get("would_require_mfa") is True
-        and mfa_audit.get("mfa_present") is False
-    ):
+    if _auto_approve_currently and _would_require_mfa and not _mfa_present:
         from ..auto_approve import AutoApproveDecision
+        # WB12-11 closure: do NOT leak the original (would-have-been)
+        # reason or score back to the caller. A stale-MFA attacker
+        # probing for "what was the score" by submitting variations
+        # benefits from the oracle. Audit chain still captures
+        # everything; the response body strips it.
         blocked = AutoApproveDecision(
             auto_approve=False,
             reason="mfa_required_for_high_risk",
             details={
-                "score": analysis_score,
                 "mfa_step_up_required": True,
                 "mfa_step_up_max_age_seconds": mfa_audit.get("mfa_step_up_floor"),
-                "mfa_reason": mfa_audit.get("mfa_reason"),
                 "client_action": "re_authenticate_via_oidc",
-                "original_reason": getattr(auto_decision, "reason", "success"),
             },
         )
         block_response = {
             "mfa_step_up_required": True,
-            "reason": mfa_audit.get("mfa_reason"),
+            # Reason is INTENTIONALLY OPAQUE in the response body —
+            # don't tell the attacker whether MFA was missing
+            # entirely vs merely stale vs signature-bad. Audit log
+            # has the full mfa_reason.
+            "reason": "fresh_mfa_required",
             "redirect_to": "/api/v1/auth/oidc/login",
         }
         return blocked, "system:auto-approver", block_response
 
     # 2. Self-approve override: if score gate said above_threshold AND
     #    the user qualifies as admin doing a reduction, flip to approve.
+    # NOTE: strict-mode-blocked reasons (strict_mode_action_wildcard,
+    # strict_mode_admin_fallback) are NOT eligible for self-approve.
+    # Strict mode is a deploy-time policy ceiling that admins cannot
+    # individually override — by design. WB12-08.
     if (
-        getattr(auto_decision, "auto_approve", False) is False
+        not _auto_approve_currently
         and getattr(auto_decision, "reason", "") == "above_threshold"
-        and self_approve_audit.get("self_approve_eligible") is True
+        and _self_approve_eligible
     ):
         from ..auto_approve import AutoApproveDecision
         from .. import self_approve_reductions as _sar_mod
