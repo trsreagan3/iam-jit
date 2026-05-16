@@ -1,0 +1,7 @@
+name: iam-create-user-with-keys
+category: dangerous
+expected_score_min: 9
+expected_score_max: 10
+why: The persistent-backdoor recipe. Create user → mint access keys → attach AdministratorAccess (or any policy). The keys outlive the iam-jit grant duration; the new user is invisible to the agent's audit log because the new principal is a separate identity.
+demonstrates: "Why iam-jit treats the iam: service as a hard-floor blocklist regardless of mode. Even strict mode at the action-wildcard gate doesn't catch this because each action is a literal name."
+real_world: "Common ransomware playbook: gain temp credentials → create persistent IAM user → use the new user for the actual extortion phase."

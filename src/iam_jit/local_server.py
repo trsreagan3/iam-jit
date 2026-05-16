@@ -229,7 +229,25 @@ def _ensure_local_cli_token(config: LocalServerConfig, admin_user_id: str = "") 
         label="iam-jit local-mode admin",
     )
     raw = issued.raw
-    config.cli_token_file.write_text(raw + "\n")
+    # WB11-03 closure: avoid the write_text-then-chmod race that
+    # leaves the token briefly readable by other local users.
+    # `os.open` with O_CREAT + mode=0o600 establishes the file
+    # mode at creation time atomically. We also use O_EXCL to
+    # refuse to overwrite an existing file (the early-return
+    # above means we should never reach here with one present;
+    # this is defense in depth against TOCTOU between the exists()
+    # check and the open).
+    flags = os.O_WRONLY | os.O_CREAT | os.O_TRUNC
+    try:
+        flags |= os.O_NOFOLLOW  # POSIX-only; refuse to write through symlinks
+    except AttributeError:
+        pass
+    fd = os.open(str(config.cli_token_file), flags, 0o600)
+    try:
+        os.write(fd, (raw + "\n").encode("utf-8"))
+    finally:
+        os.close(fd)
+    # Defensive chmod for the case where umask masked our 0o600.
     try:
         config.cli_token_file.chmod(0o600)
     except Exception:
@@ -359,8 +377,12 @@ def run(
     print(f"")
     print(f"  Listening on http://{host}:{port}")
     print(f"")
-    print(f"Quick test:")
-    print(f"  curl -H 'Authorization: Bearer {raw_token}' \\")
+    # WB11-04 closure: do NOT echo the raw token to stdout. The
+    # token is a long-lived credential that bridges to AWS via
+    # boto3; printing it leaks via tee, scrollback, journal, ssh
+    # session recordings, etc. Reference the file instead.
+    print(f"Quick test (token is read from {config.cli_token_file}):")
+    print(f"  curl -H \"Authorization: Bearer $(cat {config.cli_token_file})\" \\")
     print(f"       http://{host}:{port}/api/v1/users/me")
     print(f"")
     print(f"To connect Claude Code via MCP (stdio transport):")

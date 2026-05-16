@@ -1,0 +1,15 @@
+name: kms-decrypt-no-condition
+category: dangerous
+expected_score_min: 7
+expected_score_max: 10
+why: kms:Decrypt with Resource:* and no Condition lets the principal decrypt ANY ciphertext in the account. Since most encrypted data uses KMS (S3 SSE-KMS, RDS, Secrets Manager, etc.), this effectively reads all data at rest.
+demonstrates: "Sensitive-action floor. The action by itself is moderate; the absence of `kms:ViaService` or key-resource scoping is what makes it catastrophic."
+fix_pattern: |
+  Add a Condition to constrain to one calling service:
+    "Condition": {
+      "StringEquals": {
+        "kms:ViaService": "s3.us-east-1.amazonaws.com"
+      }
+    }
+  Or scope to one key ARN:
+    "Resource": "arn:aws:kms:us-east-1:123456789012:key/abcd-..."

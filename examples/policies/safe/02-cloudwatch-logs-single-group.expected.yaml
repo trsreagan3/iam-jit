@@ -1,0 +1,6 @@
+name: cloudwatch-logs-single-group
+category: safe
+expected_score_min: 1
+expected_score_max: 3
+why: Reading log streams from one named log group. Multiple actions but all read-only and all scoped to one log group ARN. The trailing `:*` is the AWS-canonical way to address all streams within the group; not a permissive wildcard.
+demonstrates: "Multi-action read-only grants with proper resource scoping. The most common 'agent investigates a service' shape."

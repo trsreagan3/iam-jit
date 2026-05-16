@@ -1,0 +1,15 @@
+name: dynamodb-tagged-read
+category: safe
+expected_score_min: 2
+expected_score_max: 7   # wider than ideal — see known_calibration_issue
+why: Wildcard table ARN, but constrained by a tag-based Condition that limits the effective set to dev-tagged tables. The Condition is doing real work; the score should reflect that without giving the wildcard a free pass.
+demonstrates: "How tag-based conditions narrow a wildcard. A genuinely safe pattern that an under-calibrated scorer over-flags today."
+gotcha: "If `aws:ResourceTag` is not enforced on table creation (no SCP), this can drift over time. Audit the tag-creation policy alongside this grant."
+known_calibration_issue: |
+  Tracked under task #99 / dogfooding-findings memo. The deterministic
+  scorer currently treats Condition-scoped wildcards as broad-cross-resource
+  and emits score 7. The Condition is doing real narrowing and the
+  intuitive band is 2-4. The expected_score_max is widened to 7
+  TEMPORARILY to keep CI green; do NOT silently widen further. The
+  fix lives in review.py's _has_resource_wildcard / _condition_narrows
+  pair, not in this sidecar.

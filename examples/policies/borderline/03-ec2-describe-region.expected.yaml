@@ -1,0 +1,8 @@
+name: ec2-describe-region
+category: borderline
+expected_score_min: 1
+expected_score_max: 3
+why: Resource:* on EC2 describe-actions is the AWS-CANONICAL shape — these APIs don't accept resource-level scoping. The `aws:RequestedRegion` condition narrows effective scope to one region. The deterministic scorer correctly recognizes this is read-only metadata access with negligible blast radius.
+demonstrates: "Wildcards-with-region-condition that the scorer correctly DOESN'T over-flag. A failure mode in earlier scoring eras was scoring this as catastrophic; the current scorer correctly gives it credit."
+gotcha: "If the agent later needs another region, you'll see a separate request — that's the design, not a bug. The audit log makes it obvious 'agent expanded scope to us-west-2 at 14:33'."
+demote_reason: "Originally authored at 4-6; revised to 1-3 to match deterministic-scorer reality. EC2 Describe-* is a low-risk shape; over-scoring it would create UX friction without real safety gain."

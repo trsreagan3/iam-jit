@@ -61,11 +61,28 @@ def _statement_has_action_wildcard(statements: list[dict[str, Any]]) -> str | No
     statement, or None. Used by the strict-mode wildcard gate.
 
     Matches `*` and `?` per AWS IAM's wildcard primitives, plus the
-    degenerate `Action: "*"`.
+    degenerate `Action: "*"`. Also scans `NotAction` (WB11-02
+    closure) — `Effect: Allow, NotAction: "iam:*", Resource: "*"`
+    is the canonical NotAction-bypass shape and must trip the gate
+    in strict mode. Any presence of NotAction in an Allow is
+    inherently a wildcard expansion ("everything except X") and
+    treated as wildcard regardless of value.
     """
     for stmt in statements:
         if stmt.get("Effect") != "Allow":
             continue
+
+        # NotAction in an Allow statement is itself an
+        # "all-actions-except" wildcard. The strict gate treats
+        # ANY NotAction as forbidden because the effective
+        # action set is unbounded by definition.
+        not_actions = stmt.get("NotAction")
+        if not_actions:
+            if isinstance(not_actions, str):
+                return f"NotAction:{not_actions}"
+            if isinstance(not_actions, list) and not_actions:
+                return f"NotAction:{not_actions[0]}"
+
         actions = stmt.get("Action") or []
         if isinstance(actions, str):
             actions = [actions]

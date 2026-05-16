@@ -1,0 +1,8 @@
+name: s3-bucket-prefix-read
+category: borderline
+expected_score_min: 1
+expected_score_max: 3
+why: GetObject on a single bucket prefix. The deterministic scorer treats a fully-qualified prefix as nearly-as-narrow as a single object — the bucket is named, the prefix is fixed, no wildcard surface. Score 1-3 is correct; the "is the prefix sensitive" question requires customer context the deterministic scorer doesn't have.
+demonstrates: "The deterministic scorer cannot infer prefix sensitivity from the ARN alone. Customers who want sensitivity-aware scoring on specific prefixes should layer the LLM tier (Pro+) which CAN reason about names like 'customer-data-prod'."
+gotcha: "Despite the low score, READ operations on customer-data prefixes carry real PII / compliance risk. The deterministic-only score is a structural risk score, not a data-sensitivity score."
+demote_reason: "Originally authored at expected 4-6 expecting sensitivity-aware scoring; revised to 1-3 to match deterministic-scorer reality. Sensitivity-aware scoring is the LLM tier's job, not the deterministic baseline's."

@@ -1,0 +1,7 @@
+name: s3-star-on-everything
+category: dangerous
+expected_score_min: 9
+expected_score_max: 10
+why: s3:* on Resource:* includes DeleteBucket, DeleteObject, PutBucketPolicy (replacing existing access controls), GetBucketPolicy on every bucket. Equivalent to "this principal can ransomware your entire S3 estate."
+demonstrates: "Service-wide wildcard scoring. The `s3:*` is more dangerous than `s3:GetObject` on `*` because of the destructive verbs (Delete, Put on policy)."
+real_world: "The Code Spaces (2014) shutdown — attacker got AWS credentials, then deleted all S3 buckets + EC2 instances. Company died in 12 hours."

@@ -431,3 +431,156 @@ def test_no_safety_thresholds_skips_strict_gates() -> None:
     )
     # Strict gates skipped → would auto-approve (only score gate applies)
     assert decision.auto_approve is True
+
+
+# ---------------------------------------------------------------------------
+# WB11-01: per-account safety_mode_override cannot DOWNGRADE the
+# deployment default. Most-restrictive of (account, deployment) wins.
+# ---------------------------------------------------------------------------
+
+
+def test_account_override_cannot_downgrade_strict_deployment(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Deployment is strict; one account has override read_write_swap.
+    Single-account request must STILL resolve as strict — overrides
+    can strengthen, never weaken. Pre-fix: account override won.
+    """
+    monkeypatch.setenv("IAM_JIT_SAFETY_MODE", "strict")
+
+    class _StubAccount:
+        safety_mode_override = "read_write_swap"
+
+    class _StubStore:
+        def get(self, account_id: str) -> _StubAccount:
+            return _StubAccount()
+
+    mode = safety_mode.resolve_mode(
+        account_id="111111111111", accounts_store=_StubStore(),
+    )
+    assert mode == safety_mode.SAFETY_MODE_STRICT
+
+
+def test_account_override_can_strengthen_default_deployment(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Deployment is read_write_swap; one account has override strict.
+    The single-account request resolves as strict (override-up allowed).
+    """
+    monkeypatch.delenv("IAM_JIT_SAFETY_MODE", raising=False)
+
+    class _StubAccount:
+        safety_mode_override = "strict"
+
+    class _StubStore:
+        def get(self, account_id: str) -> _StubAccount:
+            return _StubAccount()
+
+    mode = safety_mode.resolve_mode(
+        account_id="111111111111", accounts_store=_StubStore(),
+    )
+    assert mode == safety_mode.SAFETY_MODE_STRICT
+
+
+def test_no_account_override_uses_deployment_default(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("IAM_JIT_SAFETY_MODE", "strict")
+
+    class _StubAccount:
+        safety_mode_override = None
+
+    class _StubStore:
+        def get(self, account_id: str) -> _StubAccount:
+            return _StubAccount()
+
+    mode = safety_mode.resolve_mode(
+        account_id="111111111111", accounts_store=_StubStore(),
+    )
+    assert mode == safety_mode.SAFETY_MODE_STRICT
+
+
+# ---------------------------------------------------------------------------
+# WB11-02: NotAction in an Allow statement counts as wildcard
+# expansion under the strict-mode action-wildcard gate.
+# ---------------------------------------------------------------------------
+
+
+def test_strict_mode_blocks_not_action_allow() -> None:
+    """`Effect: Allow, NotAction: "iam:*"` = "everything except IAM"
+    — an unbounded action set. Strict mode must route to review.
+    """
+    decision = auto_approve.evaluate(
+        request=_request_with({
+            "Version": "2012-10-17",
+            "Statement": [
+                {
+                    "Effect": "Allow",
+                    "NotAction": "iam:*",
+                    "Resource": "*",
+                }
+            ],
+        }),
+        analysis_score=1,
+        user_id="alice",
+        settings=_settings(threshold=4),
+        quota_limiter=_limiter(),
+        effective_threshold=4,
+        safety_thresholds=_strict_thresholds(),
+    )
+    assert decision.auto_approve is False
+    assert decision.reason == "strict_mode_action_wildcard"
+    assert decision.details["offending_action"].startswith("NotAction:")
+
+
+def test_strict_mode_blocks_not_action_array_allow() -> None:
+    decision = auto_approve.evaluate(
+        request=_request_with({
+            "Version": "2012-10-17",
+            "Statement": [
+                {
+                    "Effect": "Allow",
+                    "NotAction": ["iam:DeleteUser", "iam:DeleteRole"],
+                    "Resource": "*",
+                }
+            ],
+        }),
+        analysis_score=1,
+        user_id="alice",
+        settings=_settings(threshold=4),
+        quota_limiter=_limiter(),
+        effective_threshold=4,
+        safety_thresholds=_strict_thresholds(),
+    )
+    assert decision.auto_approve is False
+    assert decision.reason == "strict_mode_action_wildcard"
+
+
+def test_strict_mode_does_not_block_not_action_in_deny() -> None:
+    """`Effect: Deny, NotAction:` is a perfectly valid allow-list pattern
+    (deny everything except a small set). The strict gate only fires on
+    Allow statements."""
+    decision = auto_approve.evaluate(
+        request=_request_with({
+            "Version": "2012-10-17",
+            "Statement": [
+                {
+                    "Effect": "Allow",
+                    "Action": "s3:GetObject",
+                    "Resource": "arn:aws:s3:::x",
+                },
+                {
+                    "Effect": "Deny",
+                    "NotAction": ["s3:GetObject"],
+                    "Resource": "*",
+                },
+            ],
+        }),
+        analysis_score=1,
+        user_id="alice",
+        settings=_settings(threshold=4),
+        quota_limiter=_limiter(),
+        effective_threshold=4,
+        safety_thresholds=_strict_thresholds(),
+    )
+    assert decision.auto_approve is True

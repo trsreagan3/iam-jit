@@ -353,3 +353,67 @@ def test_seed_api_token_puts_record_with_hash() -> None:
     record = _StubApp.state.api_tokens_store.get_by_hash(_auth.hash_token(raw))
     assert record.user_id == "email:admin@laptop.local"
     assert record.label == "iam-jit local-mode admin"
+
+
+# WB11-03 regression: token file must be created with mode 0o600
+# atomically (not write-then-chmod, which leaves a window).
+def test_token_file_created_atomically_with_0600(
+    tmp_data_dir: pathlib.Path,
+) -> None:
+    cfg = local_server.LocalServerConfig(data_dir=tmp_data_dir)
+    local_server._ensure_data_dir(cfg)
+    raw = local_server._ensure_local_cli_token(cfg, admin_user_id="email:a@b")
+    assert raw.startswith("iamjit_")
+    if os.name == "posix":
+        # Owner-only at creation time. We can't easily prove the
+        # absence of a permission window in a unit test, but we can
+        # at minimum confirm the file is 0o600 after the call.
+        mode = cfg.cli_token_file.stat().st_mode & 0o777
+        assert mode == 0o600
+
+
+def test_token_file_refuses_symlink_followthrough(
+    tmp_data_dir: pathlib.Path, tmp_path: pathlib.Path,
+) -> None:
+    """O_NOFOLLOW prevents an attacker who pre-creates a symlink
+    at the token-file path from redirecting the write to a file
+    they own."""
+    if os.name != "posix":
+        pytest.skip("symlink-followthrough test POSIX-only")
+    if not hasattr(os, "O_NOFOLLOW"):
+        pytest.skip("O_NOFOLLOW not available")
+    cfg = local_server.LocalServerConfig(data_dir=tmp_data_dir)
+    local_server._ensure_data_dir(cfg)
+    # Pre-place a symlink at the token-file path pointing somewhere
+    # the attacker controls.
+    target = tmp_path / "attacker-controlled"
+    target.write_text("attacker placeholder\n")
+    cfg.cli_token_file.symlink_to(target)
+    with pytest.raises(OSError):
+        local_server._ensure_local_cli_token(cfg, admin_user_id="email:a@b")
+    # Attacker file must not have been written through.
+    assert target.read_text() == "attacker placeholder\n"
+
+
+# WB11-04 regression: the raw token must NOT appear in the run()
+# banner. We can't easily test the actual stdout of run() without
+# starting uvicorn; instead we test the banner-construction logic
+# by inspecting the local_server module's `run` source for any
+# direct interpolation of the raw token into a print() call.
+def test_run_banner_does_not_print_raw_token() -> None:
+    import inspect
+    src = inspect.getsource(local_server.run)
+    # The raw_token variable is established for seeding into the
+    # token store. It must NOT be passed to print() in any form.
+    # (We allow {config.cli_token_file} since that's a path, not
+    # the secret itself.)
+    bad_patterns = [
+        "{raw_token}",
+        "Bearer {raw_token}",
+    ]
+    for pattern in bad_patterns:
+        assert pattern not in src, (
+            f"local_server.run() banner contains {pattern!r} — "
+            f"this leaks the bearer token to stdout (WB11-04). "
+            f"Reference the file path instead."
+        )

@@ -1,0 +1,7 @@
+name: admin-star-star
+category: dangerous
+expected_score_min: 10
+expected_score_max: 10
+why: The literal AWS-managed AdministratorAccess shape. The maximum possible blast radius. iam-jit will route this to human review under any mode; strict mode forbids it entirely (allow_admin_fallback=False).
+demonstrates: "The score-10 ceiling. Useful as a sanity check: if iam-jit ever scores this less than 10, the calibration corpus has drifted."
+gotcha: "Some agents propose this when they don't know exactly which permissions they need. The recommender should narrow it from natural language; if the agent INSISTS on this shape, treat as a red flag (likely prompt injection or hallucination)."

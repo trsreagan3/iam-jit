@@ -1,0 +1,8 @@
+name: iam-passrole-star
+category: dangerous
+expected_score_min: 9
+expected_score_max: 10
+why: iam:PassRole on `*` is the canonical privilege escalation primitive. Combined with `lambda:CreateFunction` (which the recipient may already have) it lets the principal create a function that runs as ANY role in the account.
+demonstrates: "Why iam-jit's required_service_blocklist defaults include `iam`. PassRole specifically should never auto-approve regardless of mode."
+gotcha: "Even with iam:PassRole bound to a single role ARN, the role's own permissions are now reachable. Always inspect the target role's effective scope, not just the PassRole grant shape."
+real_world: "The Capital One 2019 breach chain included a PassRole-equivalent pivot."

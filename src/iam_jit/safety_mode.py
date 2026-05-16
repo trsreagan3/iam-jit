@@ -89,6 +89,15 @@ class _AccountsView(Protocol):
     def get(self, account_id: str) -> object: ...
 
 
+# Mode strictness ranking: higher value = stricter. Used to compute
+# most-restrictive across (deployment, account_override) and across
+# multi-account request sets. Defined here so resolve_mode can use it.
+_MODE_STRICTNESS: dict[str, int] = {
+    SAFETY_MODE_READ_WRITE_SWAP: 0,
+    SAFETY_MODE_STRICT: 1,
+}
+
+
 def resolve_mode(
     *,
     session_override: str | None = None,
@@ -98,40 +107,56 @@ def resolve_mode(
 ) -> str:
     """Resolve the effective safety mode for a request.
 
-    Priority (highest to lowest):
-      1. session_override (e.g., --strict CLI flag)
+    Inputs (highest to lowest precedence):
+      1. session_override (e.g., --strict CLI flag) — operator-supplied
       2. account.safety_mode_override (per-account config)
       3. deployment default (IAM_JIT_SAFETY_MODE env var)
       4. fallback: read_write_swap
 
+    **Resolution rule (WB11-01 closure):** the per-account override
+    is only allowed to STRENGTHEN, never weaken. We compute
+    `most_restrictive(account_override, deployment_default)` so a
+    customer who set IAM_JIT_SAFETY_MODE=strict at deploy time
+    cannot have a single account silently downgraded to
+    read_write_swap. Strict-up: yes. Strict-down: no.
+
+    The session_override is honored as-is — it represents an
+    operator-driven choice (typically a CLI flag) and is intended
+    to support both directions for development / debugging.
+
     Invalid values are coerced to read_write_swap (safe-by-default;
     falling back to strict would surprise the customer).
     """
-    # 1. Session override
+    # 1. Session override (honored as-is — operator intent)
     if session_override is not None:
         candidate = (session_override or "").strip().lower()
         if candidate in _VALID_MODES:
             return candidate
 
-    # 2. Per-account override
+    # 3. Deployment default from env (read first; it sets the floor)
+    env_val = (os.environ.get(default_env) or "").strip().lower()
+    deployment = env_val if env_val in _VALID_MODES else _DEFAULT_MODE
+
+    # 2. Per-account override — but only allowed to STRENGTHEN.
+    account_override: str | None = None
     if account_id is not None and accounts_store is not None:
         try:
             account = accounts_store.get(account_id)
-            override = getattr(account, "safety_mode_override", None)
-            if override:
-                candidate = str(override).strip().lower()
+            raw = getattr(account, "safety_mode_override", None)
+            if raw:
+                candidate = str(raw).strip().lower()
                 if candidate in _VALID_MODES:
-                    return candidate
+                    account_override = candidate
         except Exception:
             pass
 
-    # 3. Deployment default from env
-    env_val = (os.environ.get(default_env) or "").strip().lower()
-    if env_val in _VALID_MODES:
-        return env_val
-
-    # 4. Fallback
-    return _DEFAULT_MODE
+    if account_override is None:
+        return deployment
+    # Most-restrictive of (account_override, deployment).
+    return max(
+        (account_override, deployment),
+        key=lambda m: _MODE_STRICTNESS.get(m, 0),
+    )
 
 
 def thresholds_for(mode: str) -> SafetyModeThresholds:
@@ -140,17 +165,6 @@ def thresholds_for(mode: str) -> SafetyModeThresholds:
     Unknown mode coerces to the read_write_swap defaults.
     """
     return _THRESHOLDS_BY_MODE.get(mode, _THRESHOLDS_BY_MODE[_DEFAULT_MODE])
-
-
-# Mode strictness ranking: higher value = stricter. Used when a
-# request spans multiple accounts: the most-restrictive mode across
-# the set wins. Otherwise a [dev-no-override, prod-strict-override]
-# request would silently inherit dev's (looser) mode and defeat the
-# prod policy. (WB10-03 closure.)
-_MODE_STRICTNESS: dict[str, int] = {
-    SAFETY_MODE_READ_WRITE_SWAP: 0,
-    SAFETY_MODE_STRICT: 1,
-}
 
 
 def resolve_mode_for_accounts(
