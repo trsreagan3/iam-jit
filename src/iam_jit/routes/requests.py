@@ -52,6 +52,92 @@ def _generate_id() -> str:
     return secrets.token_urlsafe(8).lower().replace("_", "").replace("-", "")[:12] or secrets.token_urlsafe(8)
 
 
+def _apply_mfa_and_self_approve_enforcement(
+    auto_decision: "Any",  # AutoApproveDecision; quoted to dodge late-binding
+    *,
+    mfa_audit: dict[str, Any],
+    self_approve_audit: dict[str, Any],
+    analysis_score: int,
+    user_id: str,
+):
+    """Apply MFA + self-approve enforcement on top of the score-gate decision.
+
+    Returns `(effective_decision, audit_actor, mfa_block_response)` where
+      - `effective_decision` is the (possibly-overridden) AutoApproveDecision
+        the rest of the route should treat as authoritative.
+      - `audit_actor` is the string written to the audit log
+        ("system:auto-approver" by default; "self_approve_reduction:<id>"
+        when the self-approve override fired).
+      - `mfa_block_response` is a dict with structured fields the route
+        can splat into the response body so the API client knows to
+        re-authenticate. None when no MFA override fired.
+
+    Enforcement order is deliberate:
+
+    1. MFA freshness gate runs FIRST. A high-risk grant requires recent
+       MFA regardless of whether the user is otherwise an admin who
+       could self-approve. Admin self-approval is a reduction-of-
+       authority gate, not a "skip security checks" gate.
+
+    2. Self-approve override runs SECOND. If MFA didn't block AND the
+       score gate said "above_threshold" AND the user qualifies for
+       self-approve-reductions (admin + owns request + not blocklisted),
+       flip auto_decision to approve with actor
+       `self_approve_reduction:<user.id>`.
+
+    3. Otherwise return the original decision unchanged.
+    """
+    # 1. MFA enforcement: high-risk + missing/stale MFA blocks auto-approve.
+    if (
+        getattr(auto_decision, "auto_approve", False) is True
+        and mfa_audit.get("would_require_mfa") is True
+        and mfa_audit.get("mfa_present") is False
+    ):
+        from ..auto_approve import AutoApproveDecision
+        blocked = AutoApproveDecision(
+            auto_approve=False,
+            reason="mfa_required_for_high_risk",
+            details={
+                "score": analysis_score,
+                "mfa_step_up_required": True,
+                "mfa_step_up_max_age_seconds": mfa_audit.get("mfa_step_up_floor"),
+                "mfa_reason": mfa_audit.get("mfa_reason"),
+                "client_action": "re_authenticate_via_oidc",
+                "original_reason": getattr(auto_decision, "reason", "success"),
+            },
+        )
+        block_response = {
+            "mfa_step_up_required": True,
+            "reason": mfa_audit.get("mfa_reason"),
+            "redirect_to": "/api/v1/auth/oidc/login",
+        }
+        return blocked, "system:auto-approver", block_response
+
+    # 2. Self-approve override: if score gate said above_threshold AND
+    #    the user qualifies as admin doing a reduction, flip to approve.
+    if (
+        getattr(auto_decision, "auto_approve", False) is False
+        and getattr(auto_decision, "reason", "") == "above_threshold"
+        and self_approve_audit.get("self_approve_eligible") is True
+    ):
+        from ..auto_approve import AutoApproveDecision
+        from .. import self_approve_reductions as _sar_mod
+        approved = AutoApproveDecision(
+            auto_approve=True,
+            reason="self_approve_reduction",
+            details={
+                "score": analysis_score,
+                "original_reason": "above_threshold",
+                "self_approve_reason": self_approve_audit.get("self_approve_reason"),
+                "details_pre_override": dict(getattr(auto_decision, "details", {}) or {}),
+            },
+        )
+        return approved, _sar_mod.audit_actor_for(user_id), None
+
+    # 3. No override.
+    return auto_decision, "system:auto-approver", None
+
+
 def _scan_submission_for_injection(
     user: User, **fields: str
 ) -> HTTPException | None:
@@ -551,6 +637,8 @@ def submit_request(
     # human review. Audit captures the gate that fired so a reviewer
     # can answer "why didn't this auto-approve?" in one click.
     auto_decision = None
+    _mfa_block_response: dict[str, Any] | None = None
+    _auto_audit_actor = "system:auto-approver"
     if review_block:
         from .. import auto_approve as auto_approve_mod
         from .. import settings_store as settings_mod
@@ -580,30 +668,12 @@ def submit_request(
         )
         _submit_safety_thresholds = _safety_mode.thresholds_for(_submit_mode)
         _submit_floors = settings_mod.Floors.from_env()
-        auto_decision = auto_approve_mod.evaluate(
-            request=req,
-            analysis_score=review_block.get("risk_score", 10),
-            user_id=user.id,
-            effective_threshold=_submit_effective_threshold,
-            settings=settings,
-            quota_limiter=quota,
-            floor_max_auto_approve_risk_below=(
-                _submit_floors.max_auto_approve_risk_below
-            ),
-            safety_thresholds=_submit_safety_thresholds,
-        )
-        # Surface the decision in the audit log + (when auto-approved)
-        # the history event. We intentionally don't write it onto
-        # status.review — that block has a strict schema. The
-        # response body + audit chain are the durable surfaces.
-        # WB11-05/06 annotation pass: evaluate the MFA freshness
-        # gate + self-approve-reductions eligibility for THIS request
-        # and record their verdicts in the audit chain. These are
-        # ANNOTATIONS not enforcement decisions — wiring them as
-        # actual transition gates needs a separate auth-flow change
-        # set (cookie plumbing in the route + state-machine update)
-        # which is queued as a follow-up. Recording them now means
-        # the data is in the audit trail when enforcement ships.
+
+        # MFA + self-approve evaluation runs BEFORE auto_decision so
+        # the enforcement override can use both verdicts. Each block
+        # is wrapped in try/except so a bug in the gate code never
+        # blocks a grant — failure mode is "annotation missing", not
+        # "request stuck".
         _mfa_audit: dict[str, Any] = {"mfa_gate_evaluated": False}
         try:
             from .. import mfa_gate as _mfa_gate
@@ -627,7 +697,6 @@ def submit_request(
                 **mfa_result.as_audit_dict(),
             }
         except Exception:
-            # Best-effort — never let the annotation pass block a grant.
             pass
 
         _self_approve_audit: dict[str, Any] = {"self_approve_evaluated": False}
@@ -647,6 +716,33 @@ def submit_request(
         except Exception:
             pass
 
+        auto_decision = auto_approve_mod.evaluate(
+            request=req,
+            analysis_score=review_block.get("risk_score", 10),
+            user_id=user.id,
+            effective_threshold=_submit_effective_threshold,
+            settings=settings,
+            quota_limiter=quota,
+            floor_max_auto_approve_risk_below=(
+                _submit_floors.max_auto_approve_risk_below
+            ),
+            safety_thresholds=_submit_safety_thresholds,
+        )
+
+        # Apply MFA + self-approve enforcement on top of the score-gate
+        # decision. MFA stale + high-risk → block (downgrade to review).
+        # Admin self-approve eligible + above-threshold → flip to approve
+        # with actor `self_approve_reduction:<user.id>`.
+        auto_decision, _auto_audit_actor, _mfa_block_response = (
+            _apply_mfa_and_self_approve_enforcement(
+                auto_decision,
+                mfa_audit=_mfa_audit,
+                self_approve_audit=_self_approve_audit,
+                analysis_score=review_block.get("risk_score", 10),
+                user_id=user.id,
+            )
+        )
+
         try:
             # WB10-05: include safety-mode context so a compliance
             # auditor can prove a grant was made under strict mode
@@ -659,7 +755,7 @@ def submit_request(
                 else "deployment_setting"
             )
             audit_mod.emit(
-                actor="system:auto-approver",
+                actor=_auto_audit_actor,
                 kind=(
                     "request.auto_approved"
                     if auto_decision.auto_approve
@@ -668,7 +764,7 @@ def submit_request(
                 summary=(
                     f"auto-approve evaluated for {metadata['id']}: "
                     f"{auto_decision.reason} "
-                    f"(mode={_submit_mode})"
+                    f"(mode={_submit_mode}, actor={_auto_audit_actor})"
                 ),
                 details={
                     "request_id": metadata["id"],
@@ -753,7 +849,7 @@ def submit_request(
             status["state"] = "provisioning"
             history = status.setdefault("history", [])
             history.append({
-                "actor": "system:auto-approver",
+                "actor": _auto_audit_actor,
                 "action": "auto_approve",
                 "to_state": "provisioning",
                 "at": _now_iso_z(),
@@ -790,7 +886,7 @@ def submit_request(
                 "slack approval post failed (request still submitted): %s", e
             )
 
-    return {
+    response: dict[str, Any] = {
         "request": req,
         "review": review_block,
         "narrowing_questions": questions,
@@ -802,6 +898,13 @@ def submit_request(
             } if auto_decision else None
         ),
     }
+    # MFA enforcement signal: when the gate downgraded auto-approve
+    # to review because MFA was missing/stale on a high-risk grant,
+    # surface the structured re-auth hint so the API client can
+    # bounce the user through OIDC and resubmit.
+    if _mfa_block_response is not None:
+        response["mfa_step_up"] = _mfa_block_response
+    return response
 
 
 # ---- Listing + reading ----
