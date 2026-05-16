@@ -310,3 +310,63 @@ def test_download_requires_auth(
     rid = as_dev.post("/api/v1/requests", json=request_payload).json()["request"]["metadata"]["id"]
     resp = client.get(f"/api/v1/requests/{rid}/download")
     assert resp.status_code == 401
+
+
+# ---------------------------------------------------------------------------
+# WB-UX-2 regression: malformed POST bodies must produce 4xx, never 5xx.
+# Caught during round-2 UX deep-test (2026-05-16) — `_auto_name` ran
+# before validation and crashed on a string `spec.duration`.
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("bad_spec", [
+    # spec.duration as a string instead of {"duration_hours": N}
+    {"duration": "PT15M", "accounts": [{"account_id": "111111111111"}]},
+    # spec.duration as a list
+    {"duration": [1, 2, 3]},
+    # spec.duration as an int
+    {"duration": 42},
+    # spec.accounts as a string
+    {"accounts": "111111111111"},
+    # spec.services as a dict
+    {"services": {"key": "val"}},
+    # spec itself wrong type — actually wrap in a top-level malformation
+])
+def test_submit_malformed_body_produces_4xx_never_500(
+    as_dev: TestClient, bad_spec: dict,
+) -> None:
+    """Any client-supplied malformation must produce a 4xx status,
+    never a 5xx. Schema validation is the only legitimate gatekeeper."""
+    payload = {
+        "apiVersion": "iam-jit.dev/v1alpha1",
+        "kind": "RoleRequest",
+        "spec": bad_spec,
+    }
+    resp = as_dev.post("/api/v1/requests", json=payload)
+    assert resp.status_code < 500, (
+        f"Got {resp.status_code} for malformed spec={bad_spec!r}; "
+        f"validator should have rejected with 4xx. Body: {resp.text[:300]}"
+    )
+
+
+def test_submit_spec_wrong_type_produces_4xx(as_dev: TestClient) -> None:
+    """spec is an int instead of a dict."""
+    payload = {
+        "apiVersion": "iam-jit.dev/v1alpha1",
+        "kind": "RoleRequest",
+        "spec": 42,
+    }
+    resp = as_dev.post("/api/v1/requests", json=payload)
+    assert resp.status_code < 500
+
+
+def test_submit_no_spec_produces_4xx(as_dev: TestClient) -> None:
+    payload = {"apiVersion": "iam-jit.dev/v1alpha1", "kind": "RoleRequest"}
+    resp = as_dev.post("/api/v1/requests", json=payload)
+    assert resp.status_code < 500
+
+
+def test_submit_completely_garbage_body_produces_4xx(as_dev: TestClient) -> None:
+    payload = {"random": "garbage", "with": [1, 2, 3]}
+    resp = as_dev.post("/api/v1/requests", json=payload)
+    assert resp.status_code < 500

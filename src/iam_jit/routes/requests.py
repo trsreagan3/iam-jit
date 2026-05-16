@@ -115,32 +115,64 @@ def _auto_name(req: dict[str, Any]) -> str:
     Format: '<verb> <services> in <account/alias> (<duration>h)'
     Falls back to the first ~70 chars of the description if we can't
     construct anything cleaner.
-    """
-    spec = req.get("spec") or {}
-    description = (spec.get("description") or "").strip()
-    services = spec.get("services") or spec.get("task_intent", {}).get("services") or []
-    if not isinstance(services, list):
-        services = []
-    accounts = spec.get("accounts") or []
-    account_alias = ""
-    if accounts and isinstance(accounts[0], dict):
-        account_alias = accounts[0].get("alias") or accounts[0].get("account_id") or ""
-    duration = (spec.get("duration") or {}).get("duration_hours")
-    access_type = spec.get("access_type") or ""
 
-    parts: list[str] = []
-    if access_type:
-        parts.append(access_type)
-    if services:
-        parts.append("/".join(s for s in services if isinstance(s, str))[:30])
-    if account_alias:
-        parts.append(f"in {account_alias}")
-    if duration:
-        parts.append(f"({duration}h)")
-    candidate = " ".join(parts).strip()
-    if len(candidate) < 8:
-        candidate = description[:80]
-    return candidate[:80] or "iam-jit request"
+    DEFENSIVE: this runs BEFORE schema validation in the submit path
+    (so the validator sees the auto-named request and can flag a
+    metadata.name issue alongside whatever else is wrong). That means
+    every field this function reads can be the wrong type or missing.
+    Caught during the round-2 UX test (2026-05-16): a `spec.duration`
+    sent as a string crashed `.get("duration_hours")` and produced a
+    500 instead of the schema 400 the user expected. Guard each
+    accessor; on any unexpected shape, return the safe fallback.
+    """
+    try:
+        spec = req.get("spec") or {}
+        if not isinstance(spec, dict):
+            return "iam-jit request"
+        description = (spec.get("description") or "").strip() if isinstance(spec.get("description"), str) else ""
+        services_raw = spec.get("services") or (
+            spec.get("task_intent", {}).get("services")
+            if isinstance(spec.get("task_intent"), dict)
+            else None
+        ) or []
+        services = services_raw if isinstance(services_raw, list) else []
+        accounts = spec.get("accounts") or []
+        account_alias = ""
+        if isinstance(accounts, list) and accounts and isinstance(accounts[0], dict):
+            account_alias = (
+                accounts[0].get("alias")
+                or accounts[0].get("account_id")
+                or ""
+            )
+        # WB-UX-2 closure: `spec.duration` may be a string, None, or
+        # any other shape in malformed input. Only treat it as a
+        # source of `duration_hours` when it's actually a dict.
+        duration_block = spec.get("duration")
+        duration = None
+        if isinstance(duration_block, dict):
+            duration = duration_block.get("duration_hours")
+        access_type = spec.get("access_type")
+        if not isinstance(access_type, str):
+            access_type = ""
+
+        parts: list[str] = []
+        if access_type:
+            parts.append(access_type)
+        if services:
+            parts.append("/".join(s for s in services if isinstance(s, str))[:30])
+        if account_alias:
+            parts.append(f"in {account_alias}")
+        if duration:
+            parts.append(f"({duration}h)")
+        candidate = " ".join(parts).strip()
+        if len(candidate) < 8:
+            candidate = description[:80]
+        return candidate[:80] or "iam-jit request"
+    except Exception:
+        # Last-resort safety net so a crash here can never produce
+        # a 500 in the submit path. The schema validator will reject
+        # the request shortly with the actual diagnostic.
+        return "iam-jit request"
 
 
 def _validate_or_400(req: dict[str, Any]) -> None:
@@ -412,15 +444,30 @@ def submit_request(
     # back into the LLM (review block, memory store, agent prompts) or
     # into the approver's UI — both attack surfaces for indirect
     # injection. High-confidence detection bans the user.
-    spec_in = payload.get("spec") or {}
-    metadata_in = payload.get("metadata") or {}
-    requester_in = metadata_in.get("requester") or {}
+    # WB-UX-2 closure: defend against malformed `spec` / `metadata` /
+    # `requester` shapes from the client. The injection-scan + the
+    # downstream metadata stamping both call `.get()` on these blocks;
+    # if a client sends `spec: 42`, those crashes produce 5xx instead
+    # of the schema 400 the user expected. Coerce non-dicts to empty
+    # dicts here; `_validate_or_400` below will produce the actual
+    # schema diagnostic.
+    spec_in_raw = payload.get("spec")
+    spec_in = spec_in_raw if isinstance(spec_in_raw, dict) else {}
+    metadata_in_raw = payload.get("metadata")
+    metadata_in = metadata_in_raw if isinstance(metadata_in_raw, dict) else {}
+    requester_in_raw = metadata_in.get("requester")
+    requester_in = requester_in_raw if isinstance(requester_in_raw, dict) else {}
+
+    def _safe_str(d: dict, key: str) -> str:
+        v = d.get(key)
+        return v if isinstance(v, str) else ""
+
     refused = _scan_submission_for_injection(
         user,
-        description=spec_in.get("description") or "",
-        ticket=spec_in.get("ticket") or "",
-        requester_name=requester_in.get("name") or "",
-        request_name=metadata_in.get("name") or "",
+        description=_safe_str(spec_in, "description"),
+        ticket=_safe_str(spec_in, "ticket"),
+        requester_name=_safe_str(requester_in, "name"),
+        request_name=_safe_str(metadata_in, "name"),
     )
     if refused is not None:
         raise refused
