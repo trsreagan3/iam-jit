@@ -1,0 +1,39 @@
+name: circleci-oidc-trust-scoped
+description: |
+  CircleCI OIDC trust policy: federated AssumeRoleWithWebIdentity bound
+  to a specific CircleCI organization's OIDC provider AND scoped to a
+  specific project-id. This is CircleCI's documented pattern.
+
+  Expected score: MEDIUM (3-5). Same shape as the GitHub Actions OIDC
+  case — narrow trust to a known IdP + project. Federated trust always
+  carries SOME residual risk (compromise of the IdP), but properly
+  scoped is the right pattern.
+
+  CALIBRATION GAP: scored 7, expected 1-5.
+  Reason: same Federated-ARN-cannot-verify rule. See gap notes on
+  02-github-actions-oidc-trust-scoped.yaml — properly-scoped third-party
+  OIDC trust is being scored identically to broken/unsafe variants.
+
+  SOURCE: https://circleci.com/docs/openid-connect-tokens/
+
+policy:
+  Version: "2012-10-17"
+  Statement:
+    - Effect: Allow
+      Principal:
+        Federated: "arn:aws:iam::111111111111:oidc-provider/oidc.circleci.com/org/aaaa-bbbb-cccc-dddd"
+      Action: "sts:AssumeRoleWithWebIdentity"
+      Condition:
+        StringEquals:
+          "oidc.circleci.com/org/aaaa-bbbb-cccc-dddd:aud": "sts.amazonaws.com"
+          "oidc.circleci.com/org/aaaa-bbbb-cccc-dddd:oidc.circleci.com/project-id": "ffff-1111-2222-3333"
+
+request:
+  spec:
+    access_type: read-write
+    duration:
+      duration_hours: 1
+
+expected:
+  score_min: 1
+  score_max: 5

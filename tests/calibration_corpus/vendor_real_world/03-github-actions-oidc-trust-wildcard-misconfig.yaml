@@ -1,0 +1,37 @@
+name: github-actions-oidc-trust-wildcard-misconfig
+description: |
+  The DANGEROUS variant of the GitHub Actions OIDC trust policy: missing
+  the sub-claim condition entirely. This means ANY GitHub repository
+  (every public and private repo on github.com) can assume this role —
+  trivially exploitable by attacker creating a public repo and triggering
+  a workflow. Documented as a critical misconfiguration in multiple
+  security write-ups (e.g. Tinder Sec, Praetorian, Datadog SecLabs).
+
+  Expected score: HIGH (8+). The structural risk is "any internet
+  attacker can assume this role" which is functionally equivalent to
+  publishing the role's credentials publicly.
+
+  SOURCE: https://docs.github.com/en/actions/deployment/security-hardening-your-deployments/configuring-openid-connect-in-amazon-web-services
+  (page emphasises the sub claim should be evaluated; this example shows
+  what NOT to do)
+
+policy:
+  Version: "2012-10-17"
+  Statement:
+    - Effect: Allow
+      Principal:
+        Federated: "arn:aws:iam::111111111111:oidc-provider/token.actions.githubusercontent.com"
+      Action: "sts:AssumeRoleWithWebIdentity"
+      Condition:
+        StringEquals:
+          "token.actions.githubusercontent.com:aud": "sts.amazonaws.com"
+
+request:
+  spec:
+    access_type: read-write
+    duration:
+      duration_hours: 1
+
+expected:
+  score_min: 6
+  score_max: 10

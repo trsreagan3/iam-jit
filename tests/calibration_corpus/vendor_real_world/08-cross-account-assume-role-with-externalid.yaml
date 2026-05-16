@@ -1,0 +1,35 @@
+name: cross-account-assume-role-with-externalid
+description: |
+  Canonical cross-account AssumeRole trust policy with sts:ExternalId
+  condition — the AWS-recommended pattern for SaaS vendors (the
+  "confused deputy" mitigation). Allows a specific role in a partner
+  account to assume this role only when it presents the agreed external
+  ID.
+
+  Expected score: MEDIUM (3-5). Cross-account trust IS a real attack
+  surface (compromise of the partner account, leaked external ID), but
+  the External ID + named-principal scoping is the documented best
+  practice. Should be reviewable but not panic-flagged.
+
+  SOURCE: https://aws.amazon.com/blogs/security/how-to-use-trust-policies-with-iam-roles/
+
+policy:
+  Version: "2012-10-17"
+  Statement:
+    - Effect: Allow
+      Principal:
+        AWS: "arn:aws:iam::222222222222:role/PartnerVendorRole"
+      Action: "sts:AssumeRole"
+      Condition:
+        StringEquals:
+          "sts:ExternalId": "myorg-unique-shared-secret-phrase"
+
+request:
+  spec:
+    access_type: read-write
+    duration:
+      duration_hours: 1
+
+expected:
+  score_min: 1
+  score_max: 6

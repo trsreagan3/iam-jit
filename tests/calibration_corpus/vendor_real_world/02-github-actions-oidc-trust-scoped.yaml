@@ -1,0 +1,53 @@
+name: github-actions-oidc-trust-scoped
+description: |
+  Canonical GitHub Actions OIDC trust policy, properly scoped: federated
+  AssumeRoleWithWebIdentity bound to BOTH the audience claim
+  (sts.amazonaws.com) AND a specific repo subject (repo:myorg/myrepo:*).
+  This is the AWS+GitHub recommended pattern; it allows any workflow in
+  myorg/myrepo to assume the role but blocks all other repos and other
+  IdPs.
+
+  Expected score: MEDIUM (3-5). The role itself isn't a permissions
+  policy (it's a trust policy), but the request shape passes through the
+  scorer. The trust is narrow (specific repo) and the audience binding
+  prevents token confusion. Should NOT auto-approve at strict thresholds
+  because federated trust to an external IdP is an attack surface, but
+  is well within "normal CI/CD" for default thresholds.
+
+  CALIBRATION GAP: scored 7, expected 1-5.
+  Reason: scorer hits the Federated-principal rule twice — once for the
+  ARN (cross-account-could-not-verify) and once for the StringLike on the
+  sub claim (treats `repo:myorg/myrepo:*` as a wildcarded claim, but the
+  trailing `:*` is canonical: it covers all branches/jobs of THE NAMED
+  REPO). Recommendation for next round: recognise that
+  `repo:OWNER/REPO:*` (with non-wildcard OWNER and REPO) is the AWS- and
+  GitHub-recommended scoping, not a wildcard misconfiguration. Compare
+  vs. `:03-github-actions-oidc-trust-wildcard-misconfig.yaml` which has
+  NO sub condition at all and (correctly) also scored 7 — same score for
+  two policies with very different real-world risk is the calibration
+  signal.
+
+  SOURCE: https://docs.github.com/en/actions/deployment/security-hardening-your-deployments/configuring-openid-connect-in-amazon-web-services
+
+policy:
+  Version: "2012-10-17"
+  Statement:
+    - Effect: Allow
+      Principal:
+        Federated: "arn:aws:iam::111111111111:oidc-provider/token.actions.githubusercontent.com"
+      Action: "sts:AssumeRoleWithWebIdentity"
+      Condition:
+        StringLike:
+          "token.actions.githubusercontent.com:sub": "repo:myorg/myrepo:*"
+        StringEquals:
+          "token.actions.githubusercontent.com:aud": "sts.amazonaws.com"
+
+request:
+  spec:
+    access_type: read-write
+    duration:
+      duration_hours: 1
+
+expected:
+  score_min: 1
+  score_max: 5

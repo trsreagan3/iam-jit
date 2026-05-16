@@ -342,6 +342,11 @@ class DiscoveredEndpoints:
     # Some providers (Okta) include `end_session_endpoint`; we don't
     # use it at v1 but it's worth knowing about for logout-via-IdP.
     end_session_endpoint: str | None = None
+    # RFC 8628 Device Authorization Grant endpoint (Phase 2 MFA work).
+    # When set, agents can authenticate without a browser via the
+    # device-flow. Google + Okta both publish this in their discovery
+    # docs; not all generic OIDC providers do.
+    device_authorization_endpoint: str | None = None
 
 
 def discover(config: OIDCProviderConfig, client: HTTPClient) -> DiscoveredEndpoints:
@@ -384,6 +389,166 @@ def discover(config: OIDCProviderConfig, client: HTTPClient) -> DiscoveredEndpoi
         jwks_uri=jwks,
         issuer=issuer,
         end_session_endpoint=doc.get("end_session_endpoint"),
+        device_authorization_endpoint=(
+            doc.get("device_authorization_endpoint")
+        ),
+    )
+
+
+# ---------------------------------------------------------------------------
+# Device Authorization Grant (RFC 8628) — Phase 2 of MFA agent story.
+# ---------------------------------------------------------------------------
+
+
+@dataclasses.dataclass(frozen=True)
+class DeviceFlowStart:
+    """Response from the device-authorization request.
+
+    The caller (CLI or API) presents `user_code` + `verification_uri`
+    to the human, then polls `token_endpoint` with `device_code` until
+    the user completes the flow.
+    """
+
+    device_code: str
+    user_code: str
+    verification_uri: str
+    verification_uri_complete: str | None
+    expires_in: int
+    interval: int  # min seconds between poll attempts
+
+
+@dataclasses.dataclass(frozen=True)
+class DeviceFlowToken:
+    """Successful device-flow exchange returns these."""
+
+    access_token: str
+    id_token: str
+    expires_in: int
+    token_type: str
+    refresh_token: str | None = None
+
+
+class DeviceFlowPending(Exception):
+    """The user hasn't completed the flow yet. Keep polling."""
+
+
+class DeviceFlowSlowDown(Exception):
+    """Polling too aggressively; double the interval."""
+
+
+class DeviceFlowExpired(Exception):
+    """Device code expired (user didn't complete in time)."""
+
+
+class DeviceFlowDenied(Exception):
+    """User explicitly denied the request at the IdP."""
+
+
+def start_device_flow(
+    config: OIDCProviderConfig,
+    endpoints: DiscoveredEndpoints,
+    client: HTTPClient,
+) -> DeviceFlowStart:
+    """Initiate RFC 8628 device authorization. Returns the user-facing
+    code + verification URI the caller presents to the human.
+
+    Per RFC 8628: client POSTs to the device_authorization_endpoint
+    with `client_id` and `scope`. Provider returns a device_code +
+    user_code pair the human types at the verification_uri.
+    """
+    if not endpoints.device_authorization_endpoint:
+        raise ConfigError(
+            "Provider does not publish a device_authorization_endpoint "
+            "in its discovery document. Device-flow login is unavailable; "
+            "use the browser flow or contact your IdP admin."
+        )
+
+    body = {
+        "client_id": config.client_id,
+        "scope": " ".join(config.scopes),
+    }
+    try:
+        resp = client.post_form(endpoints.device_authorization_endpoint, body)
+    except Exception as e:
+        raise ConfigError(
+            f"device_authorization request failed: {e}"
+        ) from e
+
+    device_code = resp.get("device_code")
+    user_code = resp.get("user_code")
+    verification_uri = resp.get("verification_uri") or resp.get("verification_url")
+    if not (isinstance(device_code, str) and isinstance(user_code, str) and isinstance(verification_uri, str)):
+        raise ConfigError(
+            "device_authorization response missing required fields "
+            "(device_code, user_code, verification_uri)"
+        )
+    return DeviceFlowStart(
+        device_code=device_code,
+        user_code=user_code,
+        verification_uri=verification_uri,
+        verification_uri_complete=resp.get("verification_uri_complete"),
+        expires_in=int(resp.get("expires_in", 600)),
+        interval=int(resp.get("interval", 5)),
+    )
+
+
+def poll_device_flow(
+    config: OIDCProviderConfig,
+    endpoints: DiscoveredEndpoints,
+    device_code: str,
+    client: HTTPClient,
+) -> DeviceFlowToken:
+    """Poll the token endpoint with the device_code grant_type.
+
+    Per RFC 8628:
+      - 200 with access_token → done; return the token
+      - 4xx with error="authorization_pending" → raise DeviceFlowPending
+      - 4xx with error="slow_down" → raise DeviceFlowSlowDown
+      - 4xx with error="expired_token" → raise DeviceFlowExpired
+      - 4xx with error="access_denied" → raise DeviceFlowDenied
+      - other errors → raise ConfigError
+
+    Caller is responsible for sleep(interval) between polls and for
+    enforcing the expires_in deadline.
+    """
+    body = {
+        "client_id": config.client_id,
+        "client_secret": config.client_secret,
+        "device_code": device_code,
+        "grant_type": "urn:ietf:params:oauth:grant-type:device_code",
+    }
+    try:
+        resp = client.post_form(endpoints.token_endpoint, body)
+    except Exception as e:
+        raise ConfigError(f"device-flow token poll failed: {e}") from e
+
+    err = resp.get("error")
+    if err:
+        if err == "authorization_pending":
+            raise DeviceFlowPending(err)
+        if err == "slow_down":
+            raise DeviceFlowSlowDown(err)
+        if err == "expired_token":
+            raise DeviceFlowExpired(err)
+        if err == "access_denied":
+            raise DeviceFlowDenied(err)
+        raise ConfigError(
+            f"device-flow token poll returned error: {err} "
+            f"({resp.get('error_description', '')})"
+        )
+
+    access_token = resp.get("access_token")
+    id_token = resp.get("id_token")
+    if not (isinstance(access_token, str) and isinstance(id_token, str)):
+        raise ConfigError(
+            "device-flow token response missing access_token or id_token"
+        )
+    return DeviceFlowToken(
+        access_token=access_token,
+        id_token=id_token,
+        expires_in=int(resp.get("expires_in", 3600)),
+        token_type=resp.get("token_type", "Bearer"),
+        refresh_token=resp.get("refresh_token"),
     )
 
 

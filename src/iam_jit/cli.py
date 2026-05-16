@@ -675,6 +675,127 @@ def _print_mcp_snippets(cfg) -> None:  # type: ignore[no-untyped-def]
     )
 
 
+@main.group("auth")
+def auth_group() -> None:
+    """OIDC-based authentication flows for iam-jit (agent-friendly)."""
+
+
+@auth_group.command("device")
+@click.option(
+    "--api-url",
+    default=None,
+    help="iam-jit API URL. Default: http://127.0.0.1:8765",
+)
+@click.option(
+    "--print-token",
+    is_flag=True,
+    default=False,
+    help="Print the minted bearer token on success (otherwise just save to "
+         "~/.iam-jit/cli-token.device).",
+)
+def auth_device(api_url: str | None, print_token: bool) -> None:
+    """Browser-less OIDC login via RFC 8628 Device Authorization Grant.
+
+    Run this from an agent / SSH / container where you can't open a
+    browser. Prints a code + URL; you complete the dance on your phone
+    or another machine; the command polls until success then mints a
+    bearer token with MFA-at-issuance evidence for the iam-jit API.
+
+    Per [[mfa-compliance-strategy]] PCI §8.6 — agent inherits the
+    human's MFA via the token's mfa_at_issuance timestamp.
+    """
+    import sys
+    import time as _time
+
+    from .oidc import (
+        OIDCProviderConfig,
+        discover,
+        start_device_flow,
+        poll_device_flow,
+        DeviceFlowPending,
+        DeviceFlowSlowDown,
+        DeviceFlowExpired,
+        DeviceFlowDenied,
+        HttpxClient,
+    )
+
+    config = OIDCProviderConfig.from_env()
+    if config is None:
+        click.echo(
+            "OIDC not configured. Set IAM_JIT_OIDC_PROVIDER + the "
+            "provider-specific env vars (CLIENT_ID, CLIENT_SECRET, "
+            "REDIRECT_URI, HOSTED_DOMAIN for Google).",
+            err=True,
+        )
+        sys.exit(2)
+
+    client = HttpxClient()
+    endpoints = discover(config, client)
+
+    try:
+        start = start_device_flow(config, endpoints, client)
+    except Exception as e:
+        click.echo(f"Device-flow start failed: {e}", err=True)
+        sys.exit(3)
+
+    click.echo("")
+    click.echo("Open this URL on any browser-equipped device:")
+    if start.verification_uri_complete:
+        click.echo(f"  {start.verification_uri_complete}")
+    else:
+        click.echo(f"  {start.verification_uri}")
+        click.echo("And enter this code:")
+        click.echo(f"  {start.user_code}")
+    click.echo("")
+    click.echo(f"Waiting for you to complete the flow "
+               f"(timeout in {start.expires_in}s)...")
+
+    interval = start.interval
+    deadline = _time.time() + start.expires_in
+    while _time.time() < deadline:
+        _time.sleep(interval)
+        try:
+            token = poll_device_flow(
+                config, endpoints, start.device_code, client,
+            )
+            break
+        except DeviceFlowPending:
+            continue
+        except DeviceFlowSlowDown:
+            interval = min(interval * 2, 60)
+            continue
+        except DeviceFlowExpired:
+            click.echo("Device code expired before you completed the flow.",
+                       err=True)
+            sys.exit(4)
+        except DeviceFlowDenied:
+            click.echo("You denied the request at the IdP.", err=True)
+            sys.exit(5)
+    else:
+        click.echo("Timed out waiting for device-flow completion.", err=True)
+        sys.exit(6)
+
+    click.echo("")
+    click.echo("✓ OIDC device flow complete.")
+
+    # TODO Phase 2 follow-up: validate the id_token AMR claim, mint an
+    # iam-jit bearer token via the running iam-jit API (POST /api/v1/tokens)
+    # passing the id_token as proof-of-MFA, and persist the bearer to
+    # ~/.iam-jit/cli-token.device for the agent to use.
+    #
+    # For now (skeleton): print the id_token so the user can manually
+    # validate or pass it as a bearer for OIDC-bearer endpoints.
+    if print_token:
+        click.echo("")
+        click.echo("ID token (for manual validation only — not the "
+                   "iam-jit bearer token):")
+        click.echo(token.id_token)
+    else:
+        click.echo("Use --print-token to display the raw id_token. "
+                   "iam-jit bearer-token minting via the device flow is "
+                   "Phase 2 follow-up work (#142).")
+
+
 @main.command("dev-slack-mock")
 @click.option(
     "--host",

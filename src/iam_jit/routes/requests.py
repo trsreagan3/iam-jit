@@ -988,6 +988,29 @@ def submit_request(
     # bounce the user through OIDC and resubmit.
     if _mfa_block_response is not None:
         response["mfa_step_up"] = _mfa_block_response
+        # Phase 3 (minimal): fire-and-forget Slack DM nudge to the
+        # human authorizer. They click the link, re-auth via OIDC,
+        # then the agent resubmits and MFA freshness passes. Failures
+        # are swallowed — never block iam-jit's own response on a
+        # Slack outage.
+        try:
+            from .. import slack_bot as _slack_bot
+            _slack_cfg = _slack_bot.SlackConfig.from_env()
+            if _slack_cfg is not None and _slack_cfg.bot_token:
+                # Resolve the user's slack_user_id from the user store
+                # if available (most user records carry the mapping).
+                _slack_uid = getattr(user, "slack_user_id", None)
+                if _slack_uid:
+                    _slack_bot.post_mfa_step_up_nudge(
+                        user_id=user.id,
+                        slack_user_id=_slack_uid,
+                        request_id=metadata["id"],
+                        config=_slack_cfg,
+                        deployment_url=os.environ.get("IAM_JIT_PUBLIC_URL"),
+                        reason=_mfa_block_response.get("reason", "fresh_mfa_required"),
+                    )
+        except Exception:
+            pass
     return response
 
 

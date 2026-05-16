@@ -673,6 +673,111 @@ def post_approval_message(
     return resp
 
 
+def post_mfa_step_up_nudge(
+    *,
+    user_id: str,
+    slack_user_id: str | None,
+    request_id: str,
+    config: SlackConfig,
+    deployment_url: str | None = None,
+    reason: str = "fresh_mfa_required",
+    client: SlackHTTPClient | None = None,
+) -> dict[str, Any]:
+    """Send a Slack DM nudging the human authorizer to re-authenticate.
+
+    Phase 3 of MFA-for-agents (minimal version): when an agent's
+    high-risk grant is blocked by stale MFA, this helper sends the
+    human a DM with a one-click re-auth link. The human re-auths via
+    OIDC; the agent resubmits the grant; the MFA freshness gate now
+    passes.
+
+    Trade-off vs full OAuth proxy: this version requires the human
+    to actively re-authenticate. The fully-proxied alternative
+    (#143 follow-up) would let iam-jit-hosted handle the dance
+    directly. For pilot: nudge is sufficient + minimally invasive.
+
+    Returns the Slack API response. Raises SlackError on failure.
+    Caller should swallow — a failing nudge must NOT block iam-jit's
+    own audit-log emission.
+    """
+    # Direct-message the user. Slack allows DM via channel=<slack_user_id>
+    # for chat.postMessage when the user has accepted the bot.
+    if not slack_user_id:
+        raise SlackError(
+            f"no slack_user_id known for {user_id}; cannot nudge for MFA"
+        )
+
+    base_url = (deployment_url or "https://iam-jit.example.com").rstrip("/")
+    reauth_url = f"{base_url}/api/v1/auth/oidc/login?next=/api/v1/requests/{request_id}"
+
+    blocks = [
+        {
+            "type": "section",
+            "text": {
+                "type": "mrkdwn",
+                "text": (
+                    f":lock: *Fresh MFA required for grant request "
+                    f"`{request_id}`*\n\n"
+                    f"An agent acting on your authority submitted a high-"
+                    f"risk grant request, but your MFA assertion is "
+                    f"stale ({_escape_mrkdwn(reason)}). Re-authenticate "
+                    f"to allow the agent to proceed."
+                ),
+            },
+        },
+        {
+            "type": "actions",
+            "elements": [
+                {
+                    "type": "button",
+                    "style": "primary",
+                    "text": {
+                        "type": "plain_text",
+                        "text": "Re-authenticate",
+                    },
+                    "url": reauth_url,
+                }
+            ],
+        },
+        {
+            "type": "context",
+            "elements": [
+                {
+                    "type": "mrkdwn",
+                    "text": (
+                        "After re-auth, the agent can resubmit the grant "
+                        "and iam-jit will honor your fresh MFA assertion. "
+                        f"Request: `{request_id}`"
+                    ),
+                }
+            ],
+        },
+    ]
+
+    body = {
+        "channel": slack_user_id,
+        "blocks": blocks,
+        "text": f"Fresh MFA required for grant request {request_id}",
+        "unfurl_links": False,
+        "unfurl_media": False,
+    }
+
+    cli = client or HttpxSlackClient()
+    resp = cli.post_json(
+        f"{_SLACK_API_BASE}/chat.postMessage",
+        headers={
+            "Authorization": f"Bearer {config.bot_token}",
+            "Content-Type": "application/json; charset=utf-8",
+        },
+        json_body=body,
+    )
+    if not resp.get("ok"):
+        raise SlackError(
+            f"MFA-nudge chat.postMessage failed: {resp.get('error', resp)}"
+        )
+    return resp
+
+
 def resolve_slack_user_to_email(
     slack_user_id: str,
     *,

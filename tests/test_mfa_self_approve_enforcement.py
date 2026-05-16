@@ -300,3 +300,35 @@ def test_self_approve_low_risk_stale_mfa_passes() -> None:
     assert decision.auto_approve is True
     assert decision.reason == "self_approve_reduction"
     assert actor == "self_approve_reduction:email:admin@example.com"
+
+
+# ---------------------------------------------------------------------------
+# Slack-optional invariant: MFA-block response must always include
+# the structured `mfa_step_up` hint so non-Slack clients (CLI / dashboard
+# / agents) still know how to re-authenticate.
+# ---------------------------------------------------------------------------
+
+
+def test_mfa_block_response_self_contained_without_slack() -> None:
+    """The MFA-block response must carry enough info for the API client
+    to re-auth on its own — no Slack required. The Slack DM nudge is
+    a bonus notification, not the primary channel."""
+    decision, actor, block = _apply_mfa_and_self_approve_enforcement(
+        _approve(score=8),
+        mfa_audit={
+            "mfa_gate_evaluated": True,
+            "would_require_mfa": True,
+            "mfa_present": False,
+            "mfa_reason": "mfa_too_stale",
+        },
+        self_approve_audit={"self_approve_evaluated": False},
+        analysis_score=8,
+        user_id="email:alice@example.com",
+    )
+    assert block is not None
+    # Three keys the client uses on its own:
+    assert block["mfa_step_up_required"] is True
+    assert "reason" in block            # opaque per WB12-11
+    assert "redirect_to" in block       # where to bounce the user
+    # The block's redirect_to is the iam-jit OIDC login route.
+    assert block["redirect_to"].startswith("/api/v1/auth/oidc/")

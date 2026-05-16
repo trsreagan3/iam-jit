@@ -1,0 +1,141 @@
+name: datadog-aws-integration-readonly
+description: |
+  Datadog's official AWS integration role permissions policy. This is
+  attached to MILLIONS of AWS accounts in production and is the canonical
+  "vendor cloud monitoring read-only" pattern. Almost every action is a
+  Describe*/Get*/List* — observability needs broad-but-shallow read access
+  across many services. The few non-read actions (logs:DeleteSubscriptionFilter,
+  logs:PutSubscriptionFilter, sns:Publish, s3:PutBucketNotification,
+  events:CreateEventBus) are integration-bootstrap actions used to wire up
+  log forwarding, NOT data-plane writes.
+
+  Expected score: LOW (3-5). This is a read-mostly observability role with
+  a small write surface needed for telemetry plumbing. If iam-jit scores
+  this as high-risk, every Datadog customer would bounce on first install.
+  The slight floor above pure-read is justified by the writeable log/SNS
+  bits, but it should NOT trigger human review by default.
+
+  CALIBRATION GAP: scored 8, expected 2-5.
+  Reason: The "request marked read-only but X is Write" rule + the
+  cumulative wildcard-in-action rule (~25 Describe*/List* wildcards)
+  push the cumulative score well past the auto-approve threshold. Both
+  rules fire correctly per their docstrings; the issue is that NEITHER
+  knows this is the Datadog vendor pattern. Two possible fixes for the
+  next round: (a) cap the wildcard-action contribution by service-family
+  (Describe*/List* across N services should NOT scale linearly), or
+  (b) downweight when access_type=read-only AND the writes-found set is
+  bounded (here: 6 known telemetry-plumbing actions, all write-but-not-
+  destructive-of-data). See also dogfooding-findings memo (Condition-
+  scoped wildcards false-positive) — this is the same family.
+
+  SOURCE: https://docs.datadoghq.com/integrations/guide/aws-manual-setup/
+
+policy:
+  Version: "2012-10-17"
+  Statement:
+    - Effect: Allow
+      Action:
+        - "account:GetAccountInformation"
+        - "airflow:GetEnvironment"
+        - "airflow:ListEnvironments"
+        - "apigateway:GET"
+        - "appsync:ListGraphqlApis"
+        - "autoscaling:Describe*"
+        - "backup:List*"
+        - "batch:DescribeJobDefinitions"
+        - "batch:DescribeJobQueues"
+        - "batch:DescribeJobs"
+        - "batch:ListJobs"
+        - "budgets:ViewBudget"
+        - "cloudfront:GetDistributionConfig"
+        - "cloudfront:ListDistributions"
+        - "cloudtrail:DescribeTrails"
+        - "cloudtrail:GetTrail"
+        - "cloudtrail:GetTrailStatus"
+        - "cloudtrail:ListTrails"
+        - "cloudtrail:LookupEvents"
+        - "cloudwatch:Describe*"
+        - "cloudwatch:Get*"
+        - "cloudwatch:List*"
+        - "codebuild:BatchGetProjects"
+        - "codebuild:ListProjects"
+        - "codedeploy:BatchGet*"
+        - "codedeploy:List*"
+        - "directconnect:Describe*"
+        - "dynamodb:Describe*"
+        - "dynamodb:List*"
+        - "ec2:Describe*"
+        - "ecs:Describe*"
+        - "ecs:List*"
+        - "eks:DescribeCluster"
+        - "eks:ListClusters"
+        - "elasticache:Describe*"
+        - "elasticache:List*"
+        - "elasticfilesystem:DescribeAccessPoints"
+        - "elasticfilesystem:DescribeFileSystems"
+        - "elasticfilesystem:DescribeTags"
+        - "elasticloadbalancing:Describe*"
+        - "elasticmapreduce:Describe*"
+        - "elasticmapreduce:List*"
+        - "es:DescribeElasticsearchDomains"
+        - "es:ListDomainNames"
+        - "es:ListTags"
+        - "events:CreateEventBus"
+        - "fsx:DescribeFileSystems"
+        - "fsx:ListTagsForResource"
+        - "health:DescribeAffectedEntities"
+        - "health:DescribeEventDetails"
+        - "health:DescribeEvents"
+        - "iam:ListAccountAliases"
+        - "kinesis:Describe*"
+        - "kinesis:List*"
+        - "lambda:List*"
+        - "logs:DeleteSubscriptionFilter"
+        - "logs:DescribeLogGroups"
+        - "logs:DescribeLogStreams"
+        - "logs:DescribeSubscriptionFilters"
+        - "logs:FilterLogEvents"
+        - "logs:PutSubscriptionFilter"
+        - "logs:TestMetricFilter"
+        - "organizations:Describe*"
+        - "organizations:List*"
+        - "rds:Describe*"
+        - "rds:List*"
+        - "redshift:DescribeClusters"
+        - "redshift:DescribeLoggingStatus"
+        - "route53:List*"
+        - "s3:GetBucketLocation"
+        - "s3:GetBucketLogging"
+        - "s3:GetBucketNotification"
+        - "s3:GetBucketTagging"
+        - "s3:GetObject"
+        - "s3:ListAllMyBuckets"
+        - "s3:ListBucket"
+        - "s3:PutBucketNotification"
+        - "ses:Get*"
+        - "ses:List*"
+        - "sns:GetSubscriptionAttributes"
+        - "sns:List*"
+        - "sns:Publish"
+        - "sqs:ListQueues"
+        - "states:DescribeStateMachine"
+        - "states:ListStateMachines"
+        - "support:DescribeTrustedAdvisor*"
+        - "support:RefreshTrustedAdvisorCheck"
+        - "tag:GetResources"
+        - "tag:GetTagKeys"
+        - "tag:GetTagValues"
+        - "xray:BatchGetTraces"
+        - "xray:GetTraceSummaries"
+      Resource: "*"
+
+request:
+  spec:
+    access_type: read-only
+    duration:
+      duration_hours: 24
+
+expected:
+  score_min: 2
+  score_max: 5
+  must_auto_approve: true

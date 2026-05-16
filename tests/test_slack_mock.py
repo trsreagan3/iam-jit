@@ -206,3 +206,71 @@ def test_e2e_post_approval_message_against_mock(
     assert call.json_body["channel"] == "C_APPROVALS"
     # The approval message has Block Kit blocks.
     assert "blocks" in call.json_body
+
+
+# ---------------------------------------------------------------------------
+# Phase 3 (minimal): post_mfa_step_up_nudge — DM the human authorizer
+# when MFA blocks an agent's high-risk grant.
+# ---------------------------------------------------------------------------
+
+
+def test_mfa_step_up_nudge_posts_dm_with_reauth_link(
+    mock: MockSlackServer, client: TestClient,
+) -> None:
+    from iam_jit import slack_bot
+
+    class _ProxyClient:
+        def post_json(self, url: str, *, headers: dict[str, str], json_body: dict[str, Any]) -> dict[str, Any]:
+            path = url.replace("https://slack.com", "")
+            r = client.post(path, headers=headers, json=json_body)
+            return r.json()
+
+        def get_user_info(self, user_id: str, *, bot_token: str) -> dict[str, Any]:
+            raise NotImplementedError
+
+    cfg = slack_bot.SlackConfig(
+        bot_token="xoxb-test",
+        signing_secret="dummy",
+        approval_channel="C_APPROVALS",
+        expected_team_id="T_MOCK",
+    )
+    resp = slack_bot.post_mfa_step_up_nudge(
+        user_id="email:alice@example.com",
+        slack_user_id="U_ALICE",
+        request_id="req-7f3a",
+        config=cfg,
+        deployment_url="https://iam-jit.example.com",
+        reason="token_mfa_too_stale",
+        client=_ProxyClient(),
+    )
+    assert resp["ok"] is True
+    # Verify the DM was sent to the user's Slack ID + carries a
+    # re-auth link with the request id baked in.
+    posted = mock.find_calls("/chat.postMessage")
+    assert len(posted) == 1
+    body = posted[0].json_body
+    assert body["channel"] == "U_ALICE"
+    assert "req-7f3a" in body["text"]
+    # The block kit payload should include a button URL pointing at
+    # the OIDC login endpoint with `next=` set to the request URL.
+    blocks_json = str(body["blocks"])
+    assert "/api/v1/auth/oidc/login" in blocks_json
+    assert "req-7f3a" in blocks_json
+
+
+def test_mfa_step_up_nudge_requires_slack_user_id() -> None:
+    """If we don't know the user's Slack ID, we can't DM them — fail
+    explicitly rather than DM the wrong person."""
+    from iam_jit import slack_bot
+    cfg = slack_bot.SlackConfig(
+        bot_token="xoxb-test",
+        signing_secret="dummy",
+        approval_channel="C_APPROVALS",
+    )
+    with pytest.raises(slack_bot.SlackError, match="no slack_user_id known"):
+        slack_bot.post_mfa_step_up_nudge(
+            user_id="email:alice@example.com",
+            slack_user_id=None,
+            request_id="req-7f3a",
+            config=cfg,
+        )

@@ -1,0 +1,46 @@
+name: eks-irsa-trust-policy
+description: |
+  Canonical EKS IRSA (IAM Roles for Service Accounts) trust policy:
+  sts:AssumeRoleWithWebIdentity bound to a specific cluster's OIDC
+  provider AND a specific Kubernetes service account in a specific
+  namespace. This is the AWS-recommended pattern for granting AWS
+  permissions to pods.
+
+  Expected score: LOW-MEDIUM (2-4). The trust is narrow (one SA in one
+  namespace in one cluster), the audience is bound, and the federated
+  IdP is in the same account. This is the foundational pattern for
+  every EKS workload using AWS APIs.
+
+  CALIBRATION GAP: scored 7, expected 1-5.
+  Reason: same Federated-principal rule firing — but the scorer cannot
+  tell that `oidc.eks.us-east-1.amazonaws.com/id/...` provider ARNs
+  point to a same-account EKS cluster. EKS OIDC providers are ALWAYS
+  in-account (you create them with `eksctl utils associate-iam-oidc-
+  provider` against your own cluster). Recommendation: special-case the
+  `oidc.eks.<region>.amazonaws.com` host portion of provider ARNs as
+  in-account by construction, OR allow the request to carry an
+  account-context hint that the scorer can use to verify same-account.
+
+  SOURCE: https://docs.aws.amazon.com/eks/latest/userguide/iam-roles-for-service-accounts-technical-overview.html
+
+policy:
+  Version: "2012-10-17"
+  Statement:
+    - Effect: Allow
+      Principal:
+        Federated: "arn:aws:iam::111111111111:oidc-provider/oidc.eks.us-east-1.amazonaws.com/id/EXAMPLED539D4633E53DE1B71EXAMPLE"
+      Action: "sts:AssumeRoleWithWebIdentity"
+      Condition:
+        StringEquals:
+          "oidc.eks.us-east-1.amazonaws.com/id/EXAMPLED539D4633E53DE1B71EXAMPLE:aud": "sts.amazonaws.com"
+          "oidc.eks.us-east-1.amazonaws.com/id/EXAMPLED539D4633E53DE1B71EXAMPLE:sub": "system:serviceaccount:myapp-namespace:myapp-sa"
+
+request:
+  spec:
+    access_type: read-write
+    duration:
+      duration_hours: 1
+
+expected:
+  score_min: 1
+  score_max: 5

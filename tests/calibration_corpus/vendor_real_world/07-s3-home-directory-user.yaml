@@ -1,0 +1,53 @@
+name: s3-home-directory-user
+description: |
+  AWS reference policy: "S3 user home directory access." Allows full S3
+  access to a per-user prefix (home/${aws:username}/*) within a single
+  bucket. Read-only listing for top-level + the user's own prefix.
+
+  Expected score: LOW-MEDIUM (2-4). The s3:* on the per-user prefix is
+  technically a wildcard action, but it's resource-scoped to a single
+  user's path inside a single bucket — blast radius is one user's
+  files. The bucket-level ListBucket is condition-scoped by s3:prefix.
+  Should auto-approve.
+
+  SOURCE: https://docs.aws.amazon.com/IAM/latest/UserGuide/reference_policies_examples_s3_home-directory-console.html
+
+policy:
+  Version: "2012-10-17"
+  Statement:
+    - Sid: S3ConsoleAccess
+      Effect: Allow
+      Action:
+        - "s3:GetAccountPublicAccessBlock"
+        - "s3:GetBucketAcl"
+        - "s3:GetBucketLocation"
+        - "s3:GetBucketPolicyStatus"
+        - "s3:GetBucketPublicAccessBlock"
+        - "s3:ListAccessPoints"
+        - "s3:ListAllMyBuckets"
+      Resource: "*"
+    - Sid: ListObjectsInBucket
+      Effect: Allow
+      Action: "s3:ListBucket"
+      Resource: "arn:aws:s3:::myorg-prod-bucket"
+      Condition:
+        StringLike:
+          "s3:prefix":
+            - ""
+            - "home/"
+            - "home/${aws:username}/*"
+    - Effect: Allow
+      Action: "s3:*"
+      Resource:
+        - "arn:aws:s3:::myorg-prod-bucket/home/${aws:username}"
+        - "arn:aws:s3:::myorg-prod-bucket/home/${aws:username}/*"
+
+request:
+  spec:
+    access_type: read-write
+    duration:
+      duration_hours: 8
+
+expected:
+  score_min: 1
+  score_max: 5
