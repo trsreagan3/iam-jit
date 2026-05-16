@@ -195,55 +195,6 @@ def refine(path: pathlib.Path, no_llm: bool) -> None:
     click.echo(f"Wrote refined request to {path} with {len(answers)} constraint(s).", err=True)
 
 
-@main.command()
-@click.option("--host", default="127.0.0.1", show_default=True, help="Bind address.")
-@click.option("--port", default=8000, show_default=True, type=int, help="TCP port.")
-@click.option(
-    "--reload/--no-reload",
-    default=True,
-    show_default=True,
-    help="Auto-reload on source changes (dev mode).",
-)
-@click.option(
-    "--users-file",
-    type=click.Path(exists=True, dir_okay=False, path_type=pathlib.Path),
-    help="Local users.yaml for FileUserStore (dev convenience).",
-)
-def serve(
-    host: str,
-    port: int,
-    reload: bool,
-    users_file: pathlib.Path | None,
-) -> None:
-    """Run the iam-jit FastAPI app locally.
-
-    Defaults wire up FilesystemStore for requests (`./requests/`) and an
-    insecure dev secret for sessions, so it just works on a laptop. For
-    production, deploy via SAM and let the Lambda handler bring up the
-    same FastAPI app with S3- and DynamoDB-backed stores.
-    """
-    import os
-    import uvicorn
-
-    os.environ.setdefault("IAM_JIT_DEV_INSECURE_SECRET", "1")
-    os.environ.setdefault("IAM_JIT_AUTH_MODE", "local")
-    if users_file:
-        os.environ["IAM_JIT_USER_CONFIG_SOURCE"] = "file"
-        os.environ["IAM_JIT_USERS_FILE_LOCAL_PATH"] = str(users_file.resolve())
-
-    click.echo(f"Starting iam-jit on http://{host}:{port}", err=True)
-    if users_file:
-        click.echo(f"Users file: {users_file}", err=True)
-    uvicorn.run(
-        "iam_jit.app:create_app",
-        factory=True,
-        host=host,
-        port=port,
-        reload=reload,
-        reload_dirs=["src/iam_jit"] if reload else None,
-    )
-
-
 @main.command("seed-admin")
 @click.option(
     "--email",

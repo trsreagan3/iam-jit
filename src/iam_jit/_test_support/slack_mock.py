@@ -81,12 +81,20 @@ class MockSlackServer:
         server = cls(app=app)
 
         def _record(req: Request, json_body: dict[str, Any] | None) -> SlackCall:
+            # WB11-15 closure: mask the bearer token in the recorded
+            # call so a captured SlackCall list doesn't leak raw
+            # tokens via test logs / CI artifacts. Tests that need
+            # to assert "the right token was used" can match on the
+            # masked prefix (first 8 chars + ellipsis).
             auth = req.headers.get("authorization", "")
-            token = auth[7:] if auth.lower().startswith("bearer ") else None
+            raw_token = auth[7:] if auth.lower().startswith("bearer ") else None
+            masked: str | None = None
+            if raw_token:
+                masked = raw_token[:8] + "…" if len(raw_token) > 8 else "…"
             call = SlackCall(
                 method=req.method,
                 url=str(req.url.path),
-                bot_token=token,
+                bot_token=masked,
                 headers={k: v for k, v in req.headers.items() if not k.lower().startswith("authorization")},
                 json_body=json_body,
                 query_params=dict(req.query_params),

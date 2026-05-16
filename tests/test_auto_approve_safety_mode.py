@@ -584,3 +584,44 @@ def test_strict_mode_does_not_block_not_action_in_deny() -> None:
         safety_thresholds=_strict_thresholds(),
     )
     assert decision.auto_approve is True
+
+
+# WB11-11 regression: Unicode wildcard lookalikes trip the strict gate.
+@pytest.mark.parametrize("lookalike", ["＊", "？", "⁎", "✱", "∗"])
+def test_strict_mode_blocks_unicode_wildcard_lookalikes(lookalike: str) -> None:
+    decision = auto_approve.evaluate(
+        request=_request_with({
+            "Version": "2012-10-17",
+            "Statement": [
+                {"Effect": "Allow", "Action": f"s3:Get{lookalike}", "Resource": "*"}
+            ],
+        }),
+        analysis_score=1,
+        user_id="alice",
+        settings=_settings(threshold=4),
+        quota_limiter=_limiter(),
+        effective_threshold=4,
+        safety_thresholds=_strict_thresholds(),
+    )
+    assert decision.auto_approve is False
+    assert decision.reason == "strict_mode_action_wildcard"
+
+
+# WB11-17 regression: when both threshold inputs are None, return
+# feature_disabled instead of TypeError on `score >= None`.
+def test_evaluate_no_threshold_returns_feature_disabled() -> None:
+    decision = auto_approve.evaluate(
+        request=_request(),
+        analysis_score=5,
+        user_id="alice",
+        settings=Settings(
+            auto_approve_risk_below=None,
+            auto_approve_quota_per_hour=10,
+            never_auto_approve_services=(),
+            never_auto_approve_accounts=(),
+        ),
+        quota_limiter=_limiter(),
+        effective_threshold=None,
+    )
+    assert decision.auto_approve is False
+    assert decision.reason == "feature_disabled"

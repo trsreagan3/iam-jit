@@ -56,6 +56,27 @@ class AutoApproveDecision:
     """
 
 
+# Unicode wildcard lookalikes that AWS IAM does NOT honour as
+# wildcards but that look like wildcards visually. Since AWS
+# treats them as literal characters (so they generally fail to
+# match anything), they're not directly exploitable — but they
+# ARE a strong "this policy was crafted weird" signal that we
+# want strict mode to flag for review. WB11-11 closure.
+_WILDCARD_LOOKALIKES: frozenset[str] = frozenset({
+    "*",  # ASCII *  (the canonical primitive)
+    "?",  # ASCII ?  (the canonical primitive)
+    "＊",  # FULLWIDTH ASTERISK
+    "？",  # FULLWIDTH QUESTION MARK
+    "⁎",  # LOW ASTERISK
+    "✱",  # HEAVY ASTERISK
+    "∗",  # ASTERISK OPERATOR
+})
+
+
+def _has_wildcard_or_lookalike(s: str) -> bool:
+    return any(ch in s for ch in _WILDCARD_LOOKALIKES)
+
+
 def _statement_has_action_wildcard(statements: list[dict[str, Any]]) -> str | None:
     """Return the first wildcard-bearing Action seen in any Allow
     statement, or None. Used by the strict-mode wildcard gate.
@@ -67,6 +88,13 @@ def _statement_has_action_wildcard(statements: list[dict[str, Any]]) -> str | No
     in strict mode. Any presence of NotAction in an Allow is
     inherently a wildcard expansion ("everything except X") and
     treated as wildcard regardless of value.
+
+    Also flags Unicode wildcard LOOKALIKES (full-width asterisk,
+    asterisk operator, etc. — see _WILDCARD_LOOKALIKES). AWS IAM
+    treats these as literal characters, but their presence in a
+    proposed policy is suspicious enough to deserve human review
+    in strict mode regardless of how AWS would resolve them.
+    WB11-11 closure.
     """
     for stmt in statements:
         if stmt.get("Effect") != "Allow":
@@ -89,7 +117,7 @@ def _statement_has_action_wildcard(statements: list[dict[str, Any]]) -> str | No
         for action in actions:
             if not isinstance(action, str):
                 continue
-            if "*" in action or "?" in action:
+            if _has_wildcard_or_lookalike(action):
                 return action
     return None
 
@@ -187,6 +215,17 @@ def evaluate(
         if effective_threshold is not None
         else settings.auto_approve_risk_below
     )  # type: ignore[assignment]
+    # WB11-17 closure: when both effective_threshold AND
+    # settings.auto_approve_risk_below are None, the threshold
+    # gate has no value to compare against. Treat this as
+    # feature_disabled (the only safe interpretation). Pre-fix
+    # this hit a TypeError on `analysis_score >= None`.
+    if threshold is None and auto_approve_via_toggle is None:
+        return AutoApproveDecision(
+            auto_approve=False,
+            reason="feature_disabled",
+            details={"threshold": None, "reason_detail": "no_threshold_configured"},
+        )
     # WB10-02 clamp: the safety-mode resolver can hand back a
     # threshold (e.g., read_write_swap + read-only → 9) that exceeds
     # the platform-team-owned floor. The floor is the iam-jit

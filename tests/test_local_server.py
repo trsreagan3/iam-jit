@@ -437,3 +437,56 @@ def test_local_server_accepts_loopback_addresses() -> None:
     for host in ("127.0.0.1", "::1", "localhost"):
         # Should not raise
         local_server._validate_local_bind(host)
+
+
+# WB11-12 regression: poisoned $USER cannot inject YAML structure.
+def test_safe_identity_token_strips_yaml_injection() -> None:
+    poisoned = 'evil"\nrole: admin\n# '
+    safe = local_server._safe_identity_token(poisoned, fallback="fallback")
+    # Sanitiser strips quote, newline, colon, space, hash, etc.
+    assert "\n" not in safe
+    assert '"' not in safe
+    assert ":" not in safe
+    assert " " not in safe
+    assert safe.startswith("evil")
+
+
+def test_safe_identity_token_falls_back_on_empty() -> None:
+    assert local_server._safe_identity_token("", fallback="anonymous") == "anonymous"
+    assert local_server._safe_identity_token(None, fallback="anonymous") == "anonymous"
+    # All-non-ASCII collapses to fallback
+    assert local_server._safe_identity_token("中国 🚀", fallback="anonymous") == "anonymous"
+
+
+def test_resolve_admin_email_sanitises_poisoned_user(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """End-to-end: a poisoned $USER doesn't break out of the YAML."""
+    monkeypatch.setattr("getpass.getuser", lambda: 'evil"\n  injected: true')
+    monkeypatch.setattr("socket.gethostname", lambda: "laptop")
+    cfg = local_server.LocalServerConfig()
+    email = cfg.resolve_admin_email()
+    assert "\n" not in email
+    assert ":" not in email or email.endswith(".local")
+    assert email.endswith(".local")
+
+
+# WB11-13 regression: when no AWS credentials are present, the seeded
+# accounts.yaml must include a PLACEHOLDER warning so the user can't
+# accidentally ship grants targeting "000000000000".
+def test_seed_accounts_yaml_marks_placeholder_visibly(
+    tmp_data_dir: pathlib.Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    cfg = local_server.LocalServerConfig(data_dir=tmp_data_dir)
+    local_server._ensure_data_dir(cfg)
+
+    def _fail(*a, **k):
+        raise Exception("no creds")
+    monkeypatch.setattr("boto3.client", _fail)
+    local_server._seed_local_accounts(cfg)
+    content = cfg.accounts_yaml.read_text()
+    assert "000000000000" in content
+    assert "PLACEHOLDER" in content, (
+        "Placeholder account_id must be visibly flagged so users "
+        "don't accidentally ship grants against the placeholder."
+    )

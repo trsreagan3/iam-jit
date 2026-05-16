@@ -43,7 +43,7 @@ def test_chat_post_message_returns_ts_and_records_call(
     assert len(mock.calls) == 1
     call = mock.calls[0]
     assert call.url.endswith("/chat.postMessage")
-    assert call.bot_token == "xoxb-test"
+    assert call.bot_token == "xoxb-tes…"  # masked per WB11-15
     assert call.json_body["text"] == "hi"
 
 
@@ -202,7 +202,7 @@ def test_e2e_post_approval_message_against_mock(
     posted = mock.find_calls("/chat.postMessage")
     assert len(posted) == 1
     call = posted[0]
-    assert call.bot_token == "xoxb-test"
+    assert call.bot_token == "xoxb-tes…"  # masked per WB11-15
     assert call.json_body["channel"] == "C_APPROVALS"
     # The approval message has Block Kit blocks.
     assert "blocks" in call.json_body

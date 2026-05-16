@@ -58,6 +58,23 @@ _DEFAULT_PORT = 8765
 _DEFAULT_HOST = "127.0.0.1"
 
 
+_IDENTITY_SAFE_RE = __import__("re").compile(r"[^A-Za-z0-9._-]")
+
+
+def _safe_identity_token(value: str, *, fallback: str) -> str:
+    """Sanitize an identity token (user / hostname) for safe
+    interpolation into YAML / JSON / shell.
+
+    Strips any character outside `[A-Za-z0-9._-]`. If the result is
+    empty (e.g., the input was all whitespace or non-ASCII), returns
+    `fallback`. WB11-12 closure: a poisoned `$USER` like
+    `evil"\\nrole: admin\\n# ` is now neutered to `evilroleadmin`
+    or similar before reaching users.yaml.
+    """
+    sanitized = _IDENTITY_SAFE_RE.sub("", value or "")
+    return sanitized or fallback
+
+
 @dataclasses.dataclass(frozen=True)
 class LocalServerConfig:
     """Per-process configuration for the local server."""
@@ -94,6 +111,14 @@ class LocalServerConfig:
 
         Avoids double-`.local` suffix when the hostname already ends
         with `.local` (e.g., macOS reports `host.local` by default).
+
+        WB11-12 closure: both `$USER` (via getpass.getuser /
+        $USER env) and the hostname can be attacker-controlled
+        in adversarial environments — a poisoned $USER like
+        `evil"\\nrole: admin\\n# ` would inject YAML structure into
+        users.yaml. We pass them through `_safe_identity_token`
+        which strips everything outside `[A-Za-z0-9._-]`. If the
+        sanitized form is empty, fall back to a stable default.
         """
         if self.admin_email:
             return self.admin_email
@@ -105,11 +130,13 @@ class LocalServerConfig:
             host = socket.gethostname()
         except Exception:
             host = "localhost"
+        user_safe = _safe_identity_token(user, fallback="local")
+        host_safe = _safe_identity_token(host, fallback="localhost")
         # Strip trailing `.local` if hostname already has it, then
         # re-append uniformly. Keeps the identity stable across
         # platforms.
-        host_clean = host.rstrip(".").removesuffix(".local")
-        return f"{user}@{host_clean}.local"
+        host_clean = host_safe.rstrip(".").removesuffix(".local")
+        return f"{user_safe}@{host_clean}.local"
 
 
 def _ensure_data_dir(config: LocalServerConfig) -> None:
@@ -170,6 +197,7 @@ def _seed_local_accounts(config: LocalServerConfig) -> None:
     # current AWS credentials. Captures the account_id without
     # any standing config.
     account_id = "000000000000"
+    placeholder_used = False
     try:
         import boto3
         sts = boto3.client("sts")
@@ -178,16 +206,29 @@ def _seed_local_accounts(config: LocalServerConfig) -> None:
     except Exception as e:
         logger.warning(
             "Could not resolve AWS account from default credentials: %s. "
-            "Accounts file will use a placeholder.", e,
+            "Accounts file will use a placeholder (%s). Edit "
+            "%s to point at your real account before issuing grants.",
+            e, account_id, config.accounts_yaml,
         )
+        placeholder_used = True
+    if account_id == "000000000000":
+        # WB11-13: explicit warning when the placeholder is in
+        # effect — even when boto3 succeeds but returns the
+        # placeholder shape (unusual but defensive). The string
+        # makes it grep-friendly in the seeded yaml.
+        placeholder_used = True
 
+    placeholder_marker = (
+        " # PLACEHOLDER: edit before issuing grants"
+        if placeholder_used else ""
+    )
     contents = f"""\
 # iam-jit local-mode accounts file.
 # Auto-generated on first run. Add more accounts as you connect them.
 apiVersion: iam-jit.dev/v1alpha1
 kind: AccountList
 accounts:
-  - account_id: "{account_id}"
+  - account_id: "{account_id}"{placeholder_marker}
     alias: "local"
     provisioner_role_arn: "arn:aws:iam::{account_id}:role/iam-jit-local-provisioner"
     provisioner_external_id: "iam-jit-local-{account_id}"
