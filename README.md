@@ -186,13 +186,12 @@ See [docs/security/](docs/security/) for the BB+WB audit history (9 rounds shipp
 
 ## How it works (60 seconds)
 
-1. **Caller submits an intent** (via MCP / CLI / API / web UI) describing what they need to do. Example: *"read CloudWatch logs for the payments service for the last hour."*
-2. **iam-jit synthesizes a minimum-scope IAM policy** matching that intent. Pattern-based (deterministic) + LLM-augmented for Pro+ tiers.
-3. **Scoring engine evaluates the policy** on a 1–10 risk scale. Pinned by the calibration corpus.
-4. **Decision gate** — auto-approve if score < threshold (configurable per deployment / per account / per access_type); else route to human approval via Slack + web UI.
-5. **Issue short-lived credentials** — provision the role in the destination account, return STS credentials to the caller. Default 1-hour TTL.
-6. **Audit log** — captures who, what, why, when, score, approver. Retained per the customer's compliance policy.
-7. **Auto-revoke at TTL** — role is deleted; credentials expire naturally.
+1. **Caller submits a policy request** (via MCP / CLI / API / web UI) — either a raw JSON policy, a selection from the AWS-managed catalog browser, or one drafted by an IDE agent with codebase context (Claude Code, Cursor). iam-jit scores and gates; it does not synthesize policies from natural-language prompts.
+2. **Scoring engine evaluates the policy** on a 1–10 risk scale. Pinned by the calibration corpus.
+3. **Decision gate** — auto-approve if score < threshold (configurable per deployment / per account / per access_type); else route to human approval via Slack + web UI.
+4. **Issue short-lived credentials** — provision the role in the destination account, return STS credentials to the caller. Default 1-hour TTL.
+5. **Audit log** — captures who, what, why, when, score, approver. Retained per the customer's compliance policy.
+6. **Auto-revoke at TTL** — role is deleted; credentials expire naturally.
 
 ---
 

@@ -72,12 +72,13 @@ const pillars: Pillar[] = [
       "sitting in env vars from a session three weeks ago.",
   },
   {
-    title: "Scoped to the task",
+    title: "Scored before issued",
     body:
-      "iam-jit uses a deterministic scoring engine plus (optionally) an " +
-      "LLM to translate the task description into the narrowest IAM policy " +
-      "that does the job. You see the score, the factors, and the " +
-      "suggested narrower scope BEFORE the grant is issued.",
+      "You submit the policy you need — paste raw JSON, pick from the " +
+      "AWS-managed catalog, or have your IDE agent (Claude Code, Cursor) " +
+      "draft it from your codebase context. iam-jit's deterministic scoring " +
+      "engine rates the risk 1–10 with explicit factors. Auto-approve below " +
+      "your threshold; human review above. No surprises in CloudTrail.",
   },
   {
     title: "Compliant audit chain",

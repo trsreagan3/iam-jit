@@ -1,7 +1,10 @@
 # Plan-capture file format (v1alpha1)
 
-*Spec for the JSONL capture file produced by the plan-mode
-capture proxy and consumed by iam-jit's recommender.*
+*Spec for the JSONL capture file format. The **reader**
+(`iam_jit.plan_capture`) ships in v1.0 and consumes hand-authored
+or externally-produced captures. The **producer** (an HTTP/SDK
+proxy that records `terraform plan` / `cdk synth` calls
+automatically) is planned for v1.1 — see [docs/ROADMAP-V1.1.md].*
 
 The file is **line-delimited JSON**. One captured AWS API call per
 line. Comment / blank lines are not permitted. Files may be gzipped
@@ -79,17 +82,22 @@ Readers MAY warn (but not fail) if these fields are present.
 
 ## Producing a capture file
 
-Three sanctioned producers:
+**v1.0 (shipping):**
 
-1. **`iam-jit plan-capture` HTTP proxy** (`#118` / `#119`)
-   — runs as a local SigV4-speaking endpoint;
+1. **Hand-authored capture** — conforming JSONL is accepted by
+   the reader. Used today for recommender unit tests and any
+   pipeline that emits capture files via its own tooling.
+
+**v1.1 (planned, see [docs/ROADMAP-V1.1.md]):**
+
+2. **`iam-jit plan-capture` HTTP proxy** (`#132` / `#119`)
+   — local SigV4-speaking endpoint;
    set `AWS_ENDPOINT_URL=http://127.0.0.1:8767` and run
-   `terraform plan` / `cdk synth` / `cfn-lint`.
-2. **`iam-jit plan-capture from-boto3`** — wraps a boto3
+   `terraform plan` / `cdk synth` / `cfn-lint`. **Not yet implemented.**
+3. **`iam-jit plan-capture from-boto3`** — wraps a boto3
    `Session` with an event-handler that records all calls.
    Useful for Python-only workflows (Pulumi-Python, CDK-Python).
-3. **Hand-authored capture** — for unit tests of the recommender;
-   conforming JSONL is accepted.
+   **Not yet implemented.**
 
 ## Consuming a capture file
 
