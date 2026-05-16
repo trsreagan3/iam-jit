@@ -716,6 +716,26 @@ def tail_cmd(
         click.echo(format_event_summary(ev))
 
 
+@main.command("bouncer", context_settings={"ignore_unknown_options": True, "allow_extra_args": True})
+@click.pass_context
+def bouncer_pointer(ctx: click.Context) -> None:
+    """Pointer to the standalone `iam-jit-bouncer` binary.
+
+    Per [[four-products-one-brand]] the bouncer is a separate product
+    with its own entry point. This stub catches users who type
+    `iam-jit bouncer ...` and gently redirects them. WB23 LOW-23-04
+    closure.
+    """
+    extra = " " + " ".join(ctx.args) if ctx.args else " --help"
+    click.echo(
+        "iam-jit-bouncer is shipped as a separate binary "
+        "(per [[four-products-one-brand]]).",
+        err=True,
+    )
+    click.echo(f"Run:   iam-jit-bouncer{extra}", err=True)
+    sys.exit(2)
+
+
 @main.command("mcp-server")
 def mcp_server_cmd() -> None:
     """Run the iam-jit MCP server on stdio.

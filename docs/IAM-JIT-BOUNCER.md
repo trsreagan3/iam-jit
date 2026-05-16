@@ -199,3 +199,59 @@ only (no Alembic, no ORM). Current schema: `rules` + `decisions`.
 - Web UI for rule management
 - Anomaly detection (call pattern outliers, off-hours flags)
 - Multi-account aggregation
+
+## Agent-friendly, not bypassable
+
+Per [[agent-friendly-not-bypassable]]: the bouncer is configurable
+by agents AND impossible to silently bypass. Both directions are
+load-bearing.
+
+**Agent-friendly (Lens A):** every CLI command has an MCP equivalent
+so agents can read posture, propose changes, and verify outcomes
+without shelling out:
+
+| CLI | MCP tool |
+|---|---|
+| `iam-jit-bouncer rules list` | `bouncer_list_rules` |
+| `iam-jit-bouncer rules add ...` | `bouncer_add_rule` |
+| `iam-jit-bouncer rules remove ...` | `bouncer_remove_rule` |
+| `iam-jit-bouncer decide ...` | `bouncer_decide` |
+| `iam-jit-bouncer presets list` | `bouncer_list_presets` |
+| `iam-jit-bouncer presets show ...` | `bouncer_show_preset` |
+| `iam-jit-bouncer presets apply ...` | `bouncer_apply_preset` |
+| `iam-jit-bouncer events tail` | `bouncer_tail_events` |
+| `iam-jit-bouncer logs tail` | `bouncer_tail_decisions` |
+
+Curated presets (`bouncer_list_presets`) give agents vetted starting
+points instead of authoring rules from scratch:
+
+- `readonly` — broad Get*/List*/Describe* allow + deny on secret reads
+- `admin-minus-sensitive` — allow * except IAM admin, secrets, billing, audit-infra destruction
+- `prod-deny-destructive` — deny `*:Delete*` / `*:Terminate*` + KMS deletion / RDS / EKS / etc.
+- `deny-iam-admin` — block all IAM modification + STS escalation paths
+
+`bouncer_decide` returns a `how_to_allow` hint when a call is denied
+without a matching rule, so the agent can propose the right config
+change in its next turn — no vague "denied" responses with no path
+forward.
+
+**Uncircumventable (Lens B):** every config change writes to a
+config-event audit log (`bouncer_tail_events` / `iam-jit-bouncer events
+tail`). The audit chain captures:
+
+| Event kind | What's recorded |
+|---|---|
+| `rule_added` | actor + rule pattern + scope + note |
+| `rule_removed` | actor + FULL prior rule content (post-hoc forensics) |
+| `mode_changed` | actor + old mode + new mode + reason |
+| `preset_applied` | actor + preset name + rule count |
+
+There is intentionally NO MCP tool or CLI flag that:
+- Disables the bouncer
+- Skips audit logging
+- Removes events from the audit log
+- Switches modes without recording the switch
+
+LEARN mode is permissive — it never DENIES — but it still RECORDS
+every call to the decision audit log. The cost of bypass must
+always exceed the cost of compliance.

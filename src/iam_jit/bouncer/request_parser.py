@@ -43,8 +43,27 @@ from typing import Any
 #   Credential=AKIAIOSFODNN7EXAMPLE/20130524/us-east-1/s3/aws4_request,
 #   SignedHeaders=host;range;x-amz-date,
 #   Signature=fe5f80f77d5fa3beca038a248ff027d0445342fe2855ddc963176630326f1024
+#
+# WB23 MED-23-03 closure: also accept AWS4-ECDSA-P256-SHA256 (SigV4a,
+# used by S3 Multi-Region Access Points + a handful of newer services).
+# The Credential structure is identical to SigV4; only the algorithm
+# prefix differs.
 _SIGV4_AUTH_RE = re.compile(
-    r"AWS4-HMAC-SHA256\s+Credential=[^/]+/\d+/(?P<region>[^/]+)/(?P<service>[^/]+)/aws4_request",
+    r"AWS4-(?:HMAC-SHA256|ECDSA-P256-SHA256)\s+"
+    r"Credential=[^/]+/\d+/(?P<region>[^/]+)/(?P<service>[^/]+)/aws4_request",
+    re.IGNORECASE,
+)
+
+# WB23 MED-23-04 closure: presigned S3 URLs put the signature pieces
+# in query parameters, not in the Authorization header. The shape is:
+#   X-Amz-Algorithm=AWS4-HMAC-SHA256
+#   X-Amz-Credential=AKIA.../<DATE>/<REGION>/<SERVICE>/aws4_request
+#   X-Amz-Signature=<hex>
+# We extract service+region from the X-Amz-Credential param (URL-decoded
+# already by the time we see it). The query-form regex is more permissive
+# than the header regex because there's no "AWS4-..." prefix to anchor.
+_SIGV4_QUERY_CREDENTIAL_RE = re.compile(
+    r"^[^/]+/\d+/(?P<region>[^/]+)/(?P<service>[^/]+)/aws4_request$",
     re.IGNORECASE,
 )
 
@@ -84,21 +103,45 @@ class ParsedRequest:
 
 def extract_service_and_region(
     authorization: str | None,
+    *,
+    query: dict[str, str] | None = None,
 ) -> tuple[str, str] | None:
-    """Pull (service, region) out of the SigV4 Authorization header.
+    """Pull (service, region) out of the SigV4 Authorization header
+    OR from presigned-URL query parameters.
 
-    Returns None if header is missing / malformed (e.g. anonymous
-    S3 calls). Bouncer's policy for unsigned requests is the
-    caller's choice (Stage 2 will gate them by default).
+    WB23 MED-23-04 closure: presigned URLs carry the signature in
+    X-Amz-Algorithm / X-Amz-Credential / X-Amz-Signature query
+    parameters, not the Authorization header. Browser uploads,
+    time-limited download links, and many other legitimate use
+    cases rely on this. Falling back to query-string parsing keeps
+    those calls classifiable.
+
+    Returns None ONLY if no SigV4 signature is present at all (true
+    anonymous request — e.g. public-bucket S3 GET). Stage-2 default-
+    denies anonymous, but the parser must distinguish anonymous from
+    "we couldn't parse it" so the caller can emit the right error.
     """
-    if not authorization or not isinstance(authorization, str):
-        return None
-    m = _SIGV4_AUTH_RE.search(authorization)
-    if m is None:
-        return None
-    service = m.group("service").lower()
-    region = m.group("region")
-    return service, region
+    # 1. Try the Authorization header first.
+    if isinstance(authorization, str) and authorization:
+        m = _SIGV4_AUTH_RE.search(authorization)
+        if m is not None:
+            return m.group("service").lower(), m.group("region")
+
+    # 2. Fall back to query-string SigV4 (presigned URLs).
+    if query:
+        # Header lookups in `query` may be case-sensitive depending on
+        # how the caller constructed the dict; AWS canonicalizes to
+        # `X-Amz-Algorithm` / `X-Amz-Credential` exact-case, but be
+        # forgiving.
+        query_lc = {k.lower(): v for k, v in query.items() if isinstance(v, str)}
+        algo = query_lc.get("x-amz-algorithm", "").upper()
+        cred = query_lc.get("x-amz-credential", "")
+        if algo in {"AWS4-HMAC-SHA256", "AWS4-ECDSA-P256-SHA256"} and cred:
+            cred_match = _SIGV4_QUERY_CREDENTIAL_RE.match(cred)
+            if cred_match:
+                return cred_match.group("service").lower(), cred_match.group("region")
+
+    return None
 
 
 def parse_request(
@@ -120,7 +163,10 @@ def parse_request(
     casing the caller passes; we lowercase keys for lookup.
     """
     headers_lc = {k.lower(): v for k, v in (headers or {}).items()}
-    extracted = extract_service_and_region(headers_lc.get("authorization"))
+    extracted = extract_service_and_region(
+        headers_lc.get("authorization"),
+        query=query,
+    )
     if extracted is None:
         return None
     service, region = extracted
@@ -320,16 +366,43 @@ def _s3_action_and_resource(
 
     # Sub-resource queries (?policy, ?acl, ?lifecycle, etc.) imply
     # specific S3 operations. Order matters: check sub-resources first.
-    for sr_param, get_action, put_action, del_action in (
+    # WB23 HIGH-23-01 closure: expanded from 5 to 18 sub-resources so
+    # deny rules on the less-common ops (tagging/cors/notification/etc.)
+    # actually fire. Each tuple = (query_key, GET_action, PUT_action,
+    # DELETE_action) — None means that HTTP method isn't defined for
+    # the sub-resource. Object-level variants are chosen when `key`
+    # is present.
+    s3_sub_resources: tuple[tuple[str, str | None, str | None, str | None], ...] = (
         ("policy", "GetBucketPolicy", "PutBucketPolicy", "DeleteBucketPolicy"),
-        ("acl", "GetObjectAcl" if key else "GetBucketAcl",
-                "PutObjectAcl" if key else "PutBucketAcl",
-                None),
+        ("acl",
+            "GetObjectAcl" if key else "GetBucketAcl",
+            "PutObjectAcl" if key else "PutBucketAcl",
+            None),
         ("lifecycle", "GetLifecycleConfiguration", "PutLifecycleConfiguration", "DeleteLifecycle"),
         ("versioning", "GetBucketVersioning", "PutBucketVersioning", None),
         ("encryption", "GetEncryptionConfiguration", "PutEncryptionConfiguration", "DeleteEncryption"),
-    ):
-        if sr_param in query:
+        ("tagging",
+            "GetObjectTagging" if key else "GetBucketTagging",
+            "PutObjectTagging" if key else "PutBucketTagging",
+            "DeleteObjectTagging" if key else "DeleteBucketTagging"),
+        ("cors", "GetBucketCORS", "PutBucketCORS", "DeleteBucketCORS"),
+        ("notification", "GetBucketNotification", "PutBucketNotification", None),
+        ("logging", "GetBucketLogging", "PutBucketLogging", None),
+        ("requestPayment", "GetBucketRequestPayment", "PutBucketRequestPayment", None),
+        ("website", "GetBucketWebsite", "PutBucketWebsite", "DeleteBucketWebsite"),
+        ("replication", "GetReplicationConfiguration", "PutReplicationConfiguration", "DeleteReplicationConfiguration"),
+        ("inventory", "GetInventoryConfiguration", "PutInventoryConfiguration", "DeleteInventoryConfiguration"),
+        ("accelerate", "GetAccelerateConfiguration", "PutAccelerateConfiguration", None),
+        ("publicAccessBlock", "GetBucketPublicAccessBlock", "PutBucketPublicAccessBlock", "DeleteBucketPublicAccessBlock"),
+        ("ownershipControls", "GetBucketOwnershipControls", "PutBucketOwnershipControls", "DeleteBucketOwnershipControls"),
+        ("object-lock", "GetObjectLockConfiguration", "PutObjectLockConfiguration", None),
+        ("intelligent-tiering", "GetIntelligentTieringConfiguration", "PutIntelligentTieringConfiguration", "DeleteIntelligentTieringConfiguration"),
+    )
+    # Case-insensitive sub-resource lookup; AWS accepts mixed case for
+    # query keys (e.g. ?Tagging) on most operations.
+    query_keys_lc = {k.lower(): k for k in query.keys()}
+    for sr_param, get_action, put_action, del_action in s3_sub_resources:
+        if sr_param.lower() in query_keys_lc:
             action_map = {"GET": get_action, "PUT": put_action, "DELETE": del_action}
             action = action_map.get(m)
             if action:
@@ -361,17 +434,72 @@ def _s3_action_and_resource(
     return m, None
 
 
+_S3_VHOST_SUFFIX_RE = re.compile(
+    # Match the AWS S3 endpoint suffix anchored at the END of the host:
+    #   <bucket>.s3.amazonaws.com
+    #   <bucket>.s3.us-east-1.amazonaws.com
+    #   <bucket>.s3-us-east-1.amazonaws.com         (legacy regional)
+    #   <bucket>.s3.dualstack.us-east-1.amazonaws.com
+    #   <bucket>.s3-accelerate.amazonaws.com
+    #   <bucket>.s3-accelerate.dualstack.amazonaws.com
+    #   <bucket>.s3-fips.us-east-1.amazonaws.com
+    #
+    # WB23 CRIT-23-01 closure: the prefix segment MUST be a whole
+    # token equal to `s3` or `s3-<something>` (NOT just contain `.s3`
+    # as a substring). The negative lookahead inside the optional
+    # middle-segments prevents another `s3` segment from being absorbed
+    # by the greedy quantifier, which used to make a bucket like
+    # `my.s3.bucket-name.s3.<region>.amazonaws.com` extract bucket=`my`
+    # instead of `my.s3.bucket-name`.
+    r"\.(?:s3|s3-[a-z0-9-]+)"
+    r"(?:\.(?!s3(?:\.|-|$))[a-z0-9-]+)*"
+    r"\.amazonaws\.com$",
+    re.IGNORECASE,
+)
+
+
 def _split_s3_bucket_and_key(*, host: str, path: str) -> tuple[str | None, str | None]:
     """Resolve (bucket, key) from S3 URL parts. Returns (None, None)
-    for the empty service-root request."""
+    for the empty service-root request.
+
+    WB23 CRIT-23-01 closure: the virtual-hosted branch is gated by
+    matching the AWS S3 endpoint suffix anchored at the END of the
+    host string, NOT by `.s3` appearing anywhere. AWS S3 buckets may
+    legally contain `.s3` in the name (e.g. `my.s3.bucket-name`);
+    splitting on first `.s3` returns the wrong bucket in those cases,
+    silently bypassing ARN-scoped rules + misattributing the audit log.
+    """
     host_lc = (host or "").lower()
     path = path or ""
-    if "s3" in host_lc and not host_lc.startswith("s3"):
-        # Virtual-hosted: <bucket>.s3.<...>.amazonaws.com
-        bucket = host_lc.split(".s3", 1)[0]
+
+    # Path-style hosts: bare s3.amazonaws.com, s3.<region>.amazonaws.com,
+    # s3-<region>.amazonaws.com — always START with "s3".
+    if host_lc.startswith("s3.") or host_lc.startswith("s3-"):
+        stripped = path.lstrip("/")
+        if not stripped:
+            return None, None
+        parts = stripped.split("/", 1)
+        bucket = parts[0]
+        key = parts[1] if len(parts) > 1 and parts[1] else None
+        return bucket, key
+
+    # Virtual-hosted: <bucket>.<s3-vhost-suffix>. The suffix is
+    # anchored at the END so a bucket name containing `.s3` doesn't
+    # short-circuit the split (the CRIT-23-01 bug).
+    m = _S3_VHOST_SUFFIX_RE.search(host_lc)
+    if m is not None:
+        # Bucket is whatever precedes the matched suffix.
+        bucket = host_lc[: m.start()]
+        # Defensive: an empty bucket name (e.g. host == ".s3.amazonaws.com")
+        # is not a valid AWS bucket; treat as service-root.
+        if not bucket:
+            return None, None
         key = path.lstrip("/") or None
         return bucket, key
-    # Path-style: /<bucket>/<key...>
+
+    # Host wasn't recognizable as either S3 style — fall back to
+    # path-style parsing on the path alone (e.g. hits via a custom
+    # endpoint, LocalStack, or an unusual SigV4-signed proxy chain).
     stripped = path.lstrip("/")
     if not stripped:
         return None, None

@@ -12,6 +12,7 @@ proxy server (`run`) lands in Stage 2.
 
 from __future__ import annotations
 
+import contextlib
 import json
 import sys
 
@@ -23,9 +24,42 @@ from .bouncer.decisions import (
     Mode,
     decide,
 )
+from .bouncer.presets import PRESETS, get_preset, list_preset_names
 from .bouncer.request_parser import parse_request
 from .bouncer.rules import Effect, ProxyRule, RuleSet
-from .bouncer.store import BouncerStore, default_db_path
+from .bouncer.store import BouncerStore, InvalidRuleError, default_db_path
+
+
+def _current_actor() -> str:
+    """Best-effort actor identification for audit-log entries. Reads
+    IAM_JIT_BOUNCER_ACTOR if set (lets agents identify themselves
+    explicitly), else falls back to the OS username. Per
+    [[agent-friendly-not-bypassable]] Lens B: there is NO way to
+    write an audit-log row with no actor — even unidentified callers
+    get tagged with their OS username."""
+    import getpass
+    import os
+
+    explicit = os.environ.get("IAM_JIT_BOUNCER_ACTOR")
+    if explicit:
+        return explicit
+    try:
+        return getpass.getuser()
+    except Exception:
+        return "unknown"
+
+
+@contextlib.contextmanager
+def _opened_store(db_path: str | None):
+    """WB23 LOW-23-01 closure: every CLI command opens via this
+    context manager so the SQLite connection always gets closed.
+    Eliminates the per-invocation leak that's harmless for CLI but
+    pattern-dangerous for the Stage-2 long-running proxy."""
+    store = BouncerStore(db_path=db_path)
+    try:
+        yield store
+    finally:
+        store.close()
 
 
 @click.group()
@@ -57,12 +91,158 @@ def main() -> None:
     default=None,
     help="SQLite DB path (default: ~/.iam-jit/bouncer/state.db)",
 )
-def init_cmd(db: str | None) -> None:
-    """Initialize the bouncer's local SQLite state."""
-    store = BouncerStore(db_path=db)
-    click.echo(f"bouncer initialized at: {store.db_path}")
-    click.echo(f"current rules: {len(store.list_rules())}")
-    click.echo(f"current decisions: {store.count_decisions()}")
+@click.option(
+    "--preset",
+    "preset_name",
+    type=click.Choice(sorted(PRESETS.keys()), case_sensitive=False),
+    default=None,
+    help="Apply a curated baseline ruleset at init time.",
+)
+def init_cmd(db: str | None, preset_name: str | None) -> None:
+    """Initialize the bouncer's local SQLite state.
+
+    Pass `--preset NAME` to seed with a curated baseline (run
+    `iam-jit-bouncer presets list` to see options). Presets are
+    audit-logged at apply time so the audit chain captures what
+    starting point you chose.
+    """
+    with _opened_store(db) as store:
+        click.echo(f"bouncer initialized at: {store.db_path}")
+        if preset_name:
+            preset = get_preset(preset_name)
+            assert preset is not None  # narrowed by click.Choice
+            added = 0
+            actor = _current_actor()
+            for rule in preset.rules:
+                try:
+                    store.add_rule(rule, actor=actor)
+                    added += 1
+                except InvalidRuleError as e:
+                    # Should not happen — presets are author-curated.
+                    # But if it does, log + skip the bad rule.
+                    click.echo(f"warning: preset rule rejected: {e}", err=True)
+            store.record_preset_applied(
+                preset_name=preset.name, rules_added=added, actor=actor
+            )
+            click.echo(f"applied preset '{preset.name}': {added} rules added")
+        click.echo(f"current rules: {len(store.list_rules())}")
+        click.echo(f"current decisions: {store.count_decisions()}")
+
+
+# ---------------------------------------------------------------------------
+# presets
+# ---------------------------------------------------------------------------
+
+
+@main.group("presets")
+def presets_group() -> None:
+    """Curated rule baselines for common use cases."""
+
+
+@presets_group.command("list")
+@click.option("--json", "as_json", is_flag=True, default=False)
+def presets_list(as_json: bool) -> None:
+    """List available preset baselines."""
+    items = [PRESETS[name] for name in list_preset_names()]
+    if as_json:
+        click.echo(json.dumps([p.to_dict() for p in items], indent=2))
+        return
+    for p in items:
+        click.echo(f"{p.name}  ({len(p.rules)} rules)")
+        click.echo(f"  {p.description}")
+        click.echo()
+
+
+@presets_group.command("show")
+@click.argument("preset_name")
+@click.option("--json", "as_json", is_flag=True, default=False)
+def presets_show(preset_name: str, as_json: bool) -> None:
+    """Show the rules a preset would add (without applying)."""
+    p = get_preset(preset_name)
+    if p is None:
+        click.echo(f"no preset named {preset_name!r}; try `presets list`", err=True)
+        sys.exit(2)
+    if as_json:
+        click.echo(json.dumps(p.to_dict(), indent=2))
+        return
+    click.echo(f"preset: {p.name}")
+    click.echo(f"  {p.description}")
+    click.echo()
+    for r in p.rules:
+        scope_bits = []
+        if r.arn_scope:
+            scope_bits.append(f"arn={r.arn_scope}")
+        if r.region_scope:
+            scope_bits.append(f"region={r.region_scope}")
+        scope = f" [{', '.join(scope_bits)}]" if scope_bits else ""
+        note = f"  # {r.note}" if r.note else ""
+        click.echo(f"  {r.effect.value:>5}  {r.pattern}{scope}{note}")
+
+
+@presets_group.command("apply")
+@click.argument("preset_name", type=click.Choice(sorted(PRESETS.keys()), case_sensitive=False))
+@click.option("--db", type=click.Path(dir_okay=False), default=None)
+def presets_apply(preset_name: str, db: str | None) -> None:
+    """Add all rules from a preset to the current ruleset.
+
+    Existing rules are preserved (preset rules are appended).
+    The application itself is audit-logged via config_events.
+    """
+    preset = get_preset(preset_name)
+    assert preset is not None
+    actor = _current_actor()
+    added = 0
+    with _opened_store(db) as store:
+        for rule in preset.rules:
+            try:
+                store.add_rule(rule, actor=actor)
+                added += 1
+            except InvalidRuleError as e:
+                click.echo(f"warning: preset rule rejected: {e}", err=True)
+        store.record_preset_applied(
+            preset_name=preset.name, rules_added=added, actor=actor
+        )
+    click.echo(f"applied preset '{preset.name}': {added} rules added")
+
+
+# ---------------------------------------------------------------------------
+# events — config-change audit log (Lens B)
+# ---------------------------------------------------------------------------
+
+
+@main.group("events")
+def events_group() -> None:
+    """Inspect config-change events (rule add/remove, mode changes,
+    preset applications). Separate from `logs` (which shows
+    decisions); together they form the full audit chain so post-
+    incident review can answer 'what was the bouncer's config at
+    time T, and what calls did it gate.'"""
+
+
+@events_group.command("tail")
+@click.option("--limit", type=int, default=50, show_default=True)
+@click.option(
+    "--kind",
+    type=click.Choice(
+        ["rule_added", "rule_removed", "mode_changed", "preset_applied"],
+        case_sensitive=False,
+    ),
+    default=None,
+)
+@click.option("--db", type=click.Path(dir_okay=False), default=None)
+@click.option("--json", "as_json", is_flag=True, default=False)
+def events_tail(limit: int, kind: str | None, db: str | None, as_json: bool) -> None:
+    """Show recent config-change events, newest first."""
+    with _opened_store(db) as store:
+        out = store.list_config_events(limit=limit, kind_filter=kind)
+    if as_json:
+        click.echo(json.dumps(out, indent=2))
+        return
+    if not out:
+        click.echo("(no config events logged)")
+        return
+    for row in out:
+        click.echo(f"{row['at']}  {row['actor']:>20}  {row['kind']:>16}  {row['summary']}")
 
 
 # ---------------------------------------------------------------------------
@@ -80,8 +260,8 @@ def rules_group() -> None:
 @click.option("--json", "as_json", is_flag=True, default=False, help="JSON output")
 def rules_list(db: str | None, as_json: bool) -> None:
     """List all rules in evaluation order."""
-    store = BouncerStore(db_path=db)
-    rules = store.list_rules()
+    with _opened_store(db) as store:
+        rules = store.list_rules()
     if as_json:
         click.echo(json.dumps([{"id": rid, **r.to_dict()} for rid, r in rules], indent=2))
         return
@@ -133,8 +313,14 @@ def rules_add(
         note=note,
         origin="user",
     )
-    store = BouncerStore(db_path=db)
-    rid = store.add_rule(rule)
+    with _opened_store(db) as store:
+        try:
+            rid = store.add_rule(rule, actor=_current_actor())
+        except InvalidRuleError as e:
+            # WB23 MED-23-02 closure: surface validation errors at CLI
+            # time rather than letting a never-matches rule enter the DB.
+            click.echo(f"rejected: {e}", err=True)
+            sys.exit(2)
     click.echo(f"added rule #{rid}: {rule.effect.value} {rule.pattern}")
 
 
@@ -142,9 +328,11 @@ def rules_add(
 @click.argument("rule_id", type=int)
 @click.option("--db", type=click.Path(dir_okay=False), default=None)
 def rules_remove(rule_id: int, db: str | None) -> None:
-    """Remove a rule by id."""
-    store = BouncerStore(db_path=db)
-    removed = store.remove_rule(rule_id)
+    """Remove a rule by id. The deletion is itself audit-logged so
+    post-incident review can answer 'what rule existed at time T'
+    (per [[agent-friendly-not-bypassable]] Lens B)."""
+    with _opened_store(db) as store:
+        removed = store.remove_rule(rule_id, actor=_current_actor())
     if removed:
         click.echo(f"removed rule #{rule_id}")
     else:
@@ -174,9 +362,9 @@ def logs_group() -> None:
 @click.option("--json", "as_json", is_flag=True, default=False)
 def logs_tail(limit: int, decision: str | None, db: str | None, as_json: bool) -> None:
     """Show recent decisions, newest first."""
-    store = BouncerStore(db_path=db)
     decision_filter = Decision(decision.lower()) if decision else None
-    out = store.list_decisions(limit=limit, decision_filter=decision_filter)
+    with _opened_store(db) as store:
+        out = store.list_decisions(limit=limit, decision_filter=decision_filter)
     if as_json:
         click.echo(json.dumps(out, indent=2))
         return
@@ -237,27 +425,38 @@ def decide_cmd(
         iam-jit-bouncer decide --service s3 --action GetObject \\
             --arn arn:aws:s3:::my-bucket/file.txt --region us-east-1
     """
-    store = BouncerStore(db_path=db)
-    ruleset = RuleSet(rules=[r for _, r in store.list_rules()])
-    record_obj = decide(
-        ruleset,
-        mode=Mode(mode.lower()),
-        default_policy=DefaultPolicy(default_policy.lower()),
-        service=service,
-        action=action,
-        arn=arn,
-        region=region,
-    )
-    click.echo(f"decision: {record_obj.decision.value}")
-    click.echo(f"reason:   {record_obj.reason}")
-    if record_obj.matched_rule:
-        click.echo(
-            f"rule:     {record_obj.matched_rule.effect.value} "
-            f"{record_obj.matched_rule.pattern}"
+    with _opened_store(db) as store:
+        # WB23 HIGH-23-02 closure: build an id-tagged ruleset so we know
+        # which row matched, then pass that id through to record_decision
+        # below. Without this, the audit log records every entry with
+        # matched_rule_id=NULL even when an explicit rule matched.
+        id_tagged = store.list_rules()
+        ruleset = RuleSet(rules=[r for _, r in id_tagged])
+        record_obj = decide(
+            ruleset,
+            mode=Mode(mode.lower()),
+            default_policy=DefaultPolicy(default_policy.lower()),
+            service=service,
+            action=action,
+            arn=arn,
+            region=region,
         )
-    if record:
-        store.record_decision(record_obj)
-        click.echo("(recorded to audit log)")
+        matched_rule_id: int | None = None
+        if record_obj.matched_rule is not None:
+            for rid, r in id_tagged:
+                if r == record_obj.matched_rule:
+                    matched_rule_id = rid
+                    break
+        click.echo(f"decision: {record_obj.decision.value}")
+        click.echo(f"reason:   {record_obj.reason}")
+        if record_obj.matched_rule:
+            click.echo(
+                f"rule:     #{matched_rule_id} {record_obj.matched_rule.effect.value} "
+                f"{record_obj.matched_rule.pattern}"
+            )
+        if record:
+            store.record_decision(record_obj, matched_rule_id=matched_rule_id)
+            click.echo("(recorded to audit log)")
 
 
 # ---------------------------------------------------------------------------

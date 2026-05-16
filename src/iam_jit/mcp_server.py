@@ -632,6 +632,212 @@ TOOLS = [
             },
         },
     },
+    # ---------------------------------------------------------------
+    # iam-jit-bouncer (Lens A per [[agent-friendly-not-bypassable]]):
+    # MCP-mirror of the iam-jit-bouncer CLI so agents can read +
+    # configure the bouncer without shelling out. Every mutation here
+    # writes to the bouncer's config-events audit log (Lens B); there
+    # is no MCP tool that disables the bouncer or skips audit.
+    # ---------------------------------------------------------------
+    {
+        "name": "bouncer_list_rules",
+        "description": (
+            "List the iam-jit-bouncer rules currently configured on "
+            "this machine. Per [[agent-friendly-not-bypassable]]: "
+            "agents should READ before WRITE so they understand the "
+            "existing posture before proposing changes. Returns each "
+            "rule with id + effect + pattern + scope + note + origin "
+            "('user' / 'preset' / 'learn'). Read-only; doesn't change "
+            "anything."
+        ),
+        "inputSchema": {"type": "object", "properties": {}},
+    },
+    {
+        "name": "bouncer_add_rule",
+        "description": (
+            "Add a new iam-jit-bouncer rule. The rule is validated + "
+            "the addition is written to the bouncer's config-events "
+            "audit log (no silent additions per "
+            "[[agent-friendly-not-bypassable]] Lens B). Rejects "
+            "malformed patterns immediately so a typo doesn't silently "
+            "no-op. Use sparingly — prefer applying a preset baseline "
+            "(`bouncer_list_presets` + `bouncer_apply_preset`) over "
+            "authoring one-off rules."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "required": ["pattern"],
+            "properties": {
+                "pattern": {
+                    "type": "string",
+                    "description": (
+                        "service:action_glob (e.g. 's3:GetObject', "
+                        "'s3:Put*', 'iam:Delete*'). Service must be "
+                        "a bare prefix (no wildcards in service "
+                        "position); action may include '*'."
+                    ),
+                },
+                "effect": {
+                    "type": "string",
+                    "enum": ["allow", "deny"],
+                    "default": "allow",
+                },
+                "arn_scope": {
+                    "type": "string",
+                    "description": "Optional ARN-glob to narrow the rule's scope.",
+                },
+                "region_scope": {
+                    "type": "string",
+                    "description": "Optional region-glob (e.g. 'us-east-1', 'us-*').",
+                },
+                "note": {
+                    "type": "string",
+                    "description": "Human-readable reason this rule exists (recommended).",
+                },
+            },
+        },
+    },
+    {
+        "name": "bouncer_remove_rule",
+        "description": (
+            "Remove a bouncer rule by id. The deletion is itself "
+            "audit-logged with the full prior content of the rule so "
+            "post-incident review can answer 'what rule existed at "
+            "time T'. Per [[agent-friendly-not-bypassable]] Lens B: "
+            "no agent can rules-add-then-remove to cover its tracks."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "required": ["rule_id"],
+            "properties": {
+                "rule_id": {"type": "integer", "minimum": 1},
+            },
+        },
+    },
+    {
+        "name": "bouncer_decide",
+        "description": (
+            "Dry-run: ask the bouncer what it WOULD do for a "
+            "hypothetical AWS API call, without forwarding it. The "
+            "primary agent tool for 'before I make this call, will "
+            "it pass?' — use this to figure out which rules need to "
+            "exist before proposing them. Self-describing per "
+            "[[agent-friendly-not-bypassable]]: response includes "
+            "the matched rule id (if any) and the reason, so the "
+            "agent can propose a config change in its next turn."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "required": ["service", "action"],
+            "properties": {
+                "service": {
+                    "type": "string",
+                    "description": "Lowercase AWS service prefix (e.g. 's3', 'iam').",
+                },
+                "action": {
+                    "type": "string",
+                    "description": "AWS action name (e.g. 'GetObject', 'CreateRole').",
+                },
+                "arn": {"type": "string", "description": "Optional target ARN."},
+                "region": {"type": "string", "description": "Optional AWS region."},
+                "mode": {
+                    "type": "string",
+                    "enum": ["learn", "enforce", "prompt"],
+                    "default": "enforce",
+                },
+                "default_policy": {
+                    "type": "string",
+                    "enum": ["allow", "deny"],
+                    "default": "deny",
+                    "description": "What enforce mode does when no rule matches.",
+                },
+            },
+        },
+    },
+    {
+        "name": "bouncer_list_presets",
+        "description": (
+            "List the curated preset baselines available "
+            "(readonly / admin-minus-sensitive / prod-deny-destructive / "
+            "deny-iam-admin). Per [[agent-friendly-not-bypassable]] "
+            "Lens A: agents start from a vetted preset and narrow, "
+            "instead of authoring rules from scratch. Returns each "
+            "preset's name + description + rule count."
+        ),
+        "inputSchema": {"type": "object", "properties": {}},
+    },
+    {
+        "name": "bouncer_show_preset",
+        "description": (
+            "Show the rules a preset would add, WITHOUT applying "
+            "them. Use to preview before `bouncer_apply_preset`."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "required": ["preset_name"],
+            "properties": {
+                "preset_name": {"type": "string"},
+            },
+        },
+    },
+    {
+        "name": "bouncer_apply_preset",
+        "description": (
+            "Add all rules from a preset baseline to the current "
+            "ruleset. Existing rules are PRESERVED — the preset "
+            "rules are appended. The application is audit-logged "
+            "with the preset name so post-review knows what starting "
+            "point was chosen."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "required": ["preset_name"],
+            "properties": {
+                "preset_name": {"type": "string"},
+            },
+        },
+    },
+    {
+        "name": "bouncer_tail_events",
+        "description": (
+            "Inspect the bouncer's config-change audit log (rule "
+            "additions, removals, mode changes, preset applications). "
+            "Per [[agent-friendly-not-bypassable]] Lens B: this is "
+            "the chain that proves nothing was changed silently. "
+            "Newest first. Filter by event kind."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "limit": {"type": "integer", "default": 50, "minimum": 1, "maximum": 1000},
+                "kind": {
+                    "type": "string",
+                    "enum": ["rule_added", "rule_removed", "mode_changed", "preset_applied"],
+                    "description": "Optional event-kind filter.",
+                },
+            },
+        },
+    },
+    {
+        "name": "bouncer_tail_decisions",
+        "description": (
+            "Inspect the bouncer's decision audit log (every call "
+            "the bouncer has gated). Per "
+            "[[agent-friendly-not-bypassable]]: even LEARN mode "
+            "records here — there is no silent path. Newest first."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "limit": {"type": "integer", "default": 50, "minimum": 1, "maximum": 1000},
+                "decision": {
+                    "type": "string",
+                    "enum": ["allow", "deny", "prompt"],
+                    "description": "Optional decision-class filter.",
+                },
+            },
+        },
+    },
 ]
 
 
@@ -910,6 +1116,254 @@ def _list_my_templates_for_mcp(args: dict[str, Any]) -> dict[str, Any]:
         ],
         "total": len(templates),
     }
+
+
+# ---------------------------------------------------------------------------
+# Bouncer MCP tools (Lens A per [[agent-friendly-not-bypassable]])
+# ---------------------------------------------------------------------------
+
+
+def _bouncer_actor() -> str:
+    """Identify the agent making bouncer mutations. Mirrors the
+    bouncer_cli `_current_actor` helper: IAM_JIT_BOUNCER_ACTOR env
+    if set (lets agents identify themselves explicitly), else
+    'mcp-agent' so audit-log readers can distinguish MCP traffic
+    from CLI traffic at a glance."""
+    import os
+    return os.environ.get("IAM_JIT_BOUNCER_ACTOR") or "mcp-agent"
+
+
+def _bouncer_list_rules_for_mcp(args: dict[str, Any]) -> dict[str, Any]:
+    from .bouncer.store import BouncerStore
+
+    store = BouncerStore()
+    try:
+        rules = store.list_rules()
+    finally:
+        store.close()
+    return {
+        "rules": [{"id": rid, **r.to_dict()} for rid, r in rules],
+        "count": len(rules),
+    }
+
+
+def _bouncer_add_rule_for_mcp(args: dict[str, Any]) -> dict[str, Any]:
+    from .bouncer.rules import Effect, ProxyRule
+    from .bouncer.store import BouncerStore, InvalidRuleError
+
+    pattern = args.get("pattern")
+    if not isinstance(pattern, str) or not pattern.strip():
+        return {"error": "pattern is required and must be a non-empty string"}
+
+    effect_str = args.get("effect", "allow")
+    if effect_str not in ("allow", "deny"):
+        return {"error": "effect must be 'allow' or 'deny'"}
+
+    for field in ("arn_scope", "region_scope", "note"):
+        val = args.get(field)
+        if val is not None and not isinstance(val, str):
+            return {"error": f"{field} must be a string if provided"}
+
+    rule = ProxyRule(
+        pattern=pattern,
+        effect=Effect(effect_str),
+        arn_scope=args.get("arn_scope"),
+        region_scope=args.get("region_scope"),
+        note=args.get("note"),
+        origin="mcp-agent",
+    )
+    store = BouncerStore()
+    try:
+        try:
+            rid = store.add_rule(rule, actor=_bouncer_actor())
+        except InvalidRuleError as e:
+            return {
+                "error": str(e),
+                "hint": "Patterns must be in service:action_glob form (e.g. 's3:GetObject' or 's3:Put*').",
+            }
+    finally:
+        store.close()
+    return {
+        "rule_id": rid,
+        "effect": rule.effect.value,
+        "pattern": rule.pattern,
+        "audit_event_kind": "rule_added",
+    }
+
+
+def _bouncer_remove_rule_for_mcp(args: dict[str, Any]) -> dict[str, Any]:
+    from .bouncer.store import BouncerStore
+
+    rule_id = args.get("rule_id")
+    if not isinstance(rule_id, int) or isinstance(rule_id, bool) or rule_id < 1:
+        return {"error": "rule_id must be a positive integer"}
+
+    store = BouncerStore()
+    try:
+        removed = store.remove_rule(rule_id, actor=_bouncer_actor())
+    finally:
+        store.close()
+    if not removed:
+        return {"error": f"no rule with id #{rule_id}"}
+    return {"removed": True, "rule_id": rule_id, "audit_event_kind": "rule_removed"}
+
+
+def _bouncer_decide_for_mcp(args: dict[str, Any]) -> dict[str, Any]:
+    from .bouncer.decisions import DefaultPolicy, Mode, decide
+    from .bouncer.rules import RuleSet
+    from .bouncer.store import BouncerStore
+
+    service = args.get("service")
+    action = args.get("action")
+    if not isinstance(service, str) or not service.strip():
+        return {"error": "service is required"}
+    if not isinstance(action, str) or not action.strip():
+        return {"error": "action is required"}
+    for field in ("arn", "region"):
+        val = args.get(field)
+        if val is not None and not isinstance(val, str):
+            return {"error": f"{field} must be a string if provided"}
+
+    mode_str = args.get("mode", "enforce")
+    if mode_str not in ("learn", "enforce", "prompt"):
+        return {"error": "mode must be 'learn', 'enforce', or 'prompt'"}
+    default_policy_str = args.get("default_policy", "deny")
+    if default_policy_str not in ("allow", "deny"):
+        return {"error": "default_policy must be 'allow' or 'deny'"}
+
+    store = BouncerStore()
+    try:
+        id_tagged = store.list_rules()
+    finally:
+        store.close()
+    ruleset = RuleSet(rules=[r for _, r in id_tagged])
+    record = decide(
+        ruleset,
+        mode=Mode(mode_str),
+        default_policy=DefaultPolicy(default_policy_str),
+        service=service,
+        action=action,
+        arn=args.get("arn"),
+        region=args.get("region"),
+    )
+    matched_rule_id: int | None = None
+    if record.matched_rule is not None:
+        for rid, r in id_tagged:
+            if r == record.matched_rule:
+                matched_rule_id = rid
+                break
+    out: dict[str, Any] = record.to_dict()
+    out["matched_rule_id"] = matched_rule_id
+    # Self-describing: give the agent enough context to propose a fix
+    # in its next turn if the decision was a deny.
+    if record.decision.value == "deny" and record.matched_rule is None:
+        out["how_to_allow"] = (
+            f"No rule matched. To allow this call, call bouncer_add_rule "
+            f"with pattern='{service}:{action}' (or a narrower glob)."
+        )
+    return out
+
+
+def _bouncer_list_presets_for_mcp(args: dict[str, Any]) -> dict[str, Any]:
+    from .bouncer.presets import PRESETS, list_preset_names
+
+    presets = [PRESETS[name].to_dict() for name in list_preset_names()]
+    # Trim the rules array from the listing to keep response sizes
+    # bounded; agents should call bouncer_show_preset to see full rules.
+    for p in presets:
+        p.pop("rules", None)
+    return {"presets": presets, "count": len(presets)}
+
+
+def _bouncer_show_preset_for_mcp(args: dict[str, Any]) -> dict[str, Any]:
+    from .bouncer.presets import get_preset
+
+    preset_name = args.get("preset_name")
+    if not isinstance(preset_name, str) or not preset_name.strip():
+        return {"error": "preset_name is required"}
+    preset = get_preset(preset_name.strip())
+    if preset is None:
+        return {"error": f"no preset named {preset_name!r}; try bouncer_list_presets"}
+    return preset.to_dict()
+
+
+def _bouncer_apply_preset_for_mcp(args: dict[str, Any]) -> dict[str, Any]:
+    from .bouncer.presets import get_preset
+    from .bouncer.store import BouncerStore, InvalidRuleError
+
+    preset_name = args.get("preset_name")
+    if not isinstance(preset_name, str) or not preset_name.strip():
+        return {"error": "preset_name is required"}
+    preset = get_preset(preset_name.strip())
+    if preset is None:
+        return {"error": f"no preset named {preset_name!r}"}
+
+    actor = _bouncer_actor()
+    added = 0
+    skipped: list[dict[str, Any]] = []
+    store = BouncerStore()
+    try:
+        for rule in preset.rules:
+            try:
+                store.add_rule(rule, actor=actor)
+                added += 1
+            except InvalidRuleError as e:
+                # Shouldn't happen with curated presets, but record
+                # if it does so the audit chain isn't surprised.
+                skipped.append({"pattern": rule.pattern, "error": str(e)})
+        store.record_preset_applied(
+            preset_name=preset.name, rules_added=added, actor=actor
+        )
+    finally:
+        store.close()
+    return {
+        "preset_name": preset.name,
+        "rules_added": added,
+        "rules_skipped": skipped,
+        "audit_event_kind": "preset_applied",
+    }
+
+
+def _bouncer_tail_events_for_mcp(args: dict[str, Any]) -> dict[str, Any]:
+    from .bouncer.store import BouncerStore
+
+    limit = args.get("limit", 50)
+    if not isinstance(limit, int) or isinstance(limit, bool) or limit < 1:
+        return {"error": "limit must be a positive integer"}
+    limit = min(limit, 1000)
+    kind = args.get("kind")
+    if kind is not None and not isinstance(kind, str):
+        return {"error": "kind must be a string if provided"}
+
+    store = BouncerStore()
+    try:
+        events = store.list_config_events(limit=limit, kind_filter=kind)
+    finally:
+        store.close()
+    return {"events": events, "count": len(events)}
+
+
+def _bouncer_tail_decisions_for_mcp(args: dict[str, Any]) -> dict[str, Any]:
+    from .bouncer.decisions import Decision
+    from .bouncer.store import BouncerStore
+
+    limit = args.get("limit", 50)
+    if not isinstance(limit, int) or isinstance(limit, bool) or limit < 1:
+        return {"error": "limit must be a positive integer"}
+    limit = min(limit, 1000)
+    decision = args.get("decision")
+    decision_filter: Decision | None = None
+    if decision is not None:
+        if decision not in ("allow", "deny", "prompt"):
+            return {"error": "decision must be 'allow', 'deny', or 'prompt'"}
+        decision_filter = Decision(decision)
+
+    store = BouncerStore()
+    try:
+        out = store.list_decisions(limit=limit, decision_filter=decision_filter)
+    finally:
+        store.close()
+    return {"decisions": out, "count": len(out)}
 
 
 def _tail_grant_for_mcp(args: dict[str, Any]) -> dict[str, Any]:
@@ -1387,6 +1841,24 @@ def _handle_request(req: dict[str, Any]) -> dict[str, Any] | None:
             result_payload = _apply_reduction_checklist_for_mcp(args)
         elif tool_name == "tail_grant":
             result_payload = _tail_grant_for_mcp(args)
+        elif tool_name == "bouncer_list_rules":
+            result_payload = _bouncer_list_rules_for_mcp(args)
+        elif tool_name == "bouncer_add_rule":
+            result_payload = _bouncer_add_rule_for_mcp(args)
+        elif tool_name == "bouncer_remove_rule":
+            result_payload = _bouncer_remove_rule_for_mcp(args)
+        elif tool_name == "bouncer_decide":
+            result_payload = _bouncer_decide_for_mcp(args)
+        elif tool_name == "bouncer_list_presets":
+            result_payload = _bouncer_list_presets_for_mcp(args)
+        elif tool_name == "bouncer_show_preset":
+            result_payload = _bouncer_show_preset_for_mcp(args)
+        elif tool_name == "bouncer_apply_preset":
+            result_payload = _bouncer_apply_preset_for_mcp(args)
+        elif tool_name == "bouncer_tail_events":
+            result_payload = _bouncer_tail_events_for_mcp(args)
+        elif tool_name == "bouncer_tail_decisions":
+            result_payload = _bouncer_tail_decisions_for_mcp(args)
         else:
             return _err(rid, -32601, f"unknown tool: {tool_name}")
         # MCP tool result format: { content: [{type: "text", text: "..."}] }

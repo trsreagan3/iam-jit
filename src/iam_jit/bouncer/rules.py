@@ -26,7 +26,7 @@ whole point of a gate.
 from __future__ import annotations
 
 import dataclasses
-import fnmatch
+import re
 from enum import Enum
 from typing import Any
 
@@ -71,24 +71,65 @@ def parse_pattern(pattern: str) -> tuple[str, str] | None:
     """Split a `service:action_glob` pattern. Returns (service, action)
     or None if malformed.
 
-    Service must be a bare prefix (no wildcards in service position —
-    mirrors `reductions.deny_actions` validation). Action may include
-    `*` (e.g. `Put*`, `Get*`, `*`).
+    Accepted shapes:
+    - `service:action_glob`  e.g. `s3:GetObject`, `s3:Put*`, `iam:*`
+    - `*:action_glob`        e.g. `*:Delete*` (cross-service deny pattern,
+      essential for prod-deny-destructive presets)
+    - `*`                    bare wildcard = match any service:any action
+      (normalized to `*:*`)
+
+    Action may include `*` and `?`. Service may be either a bare prefix
+    (lowercased) or `*`. Empty parts and whitespace are rejected.
+
+    Mirrors AWS IAM policy spec (where `*` is the legal "any" wildcard).
     """
     if not isinstance(pattern, str):
         return None
     token = pattern.strip()
     if not token or " " in token:
         return None
+    # Bare `*` = any service, any action (the catch-all per AWS IAM spec)
+    if token == "*":
+        return "*", "*"
     parts = token.split(":")
     if len(parts) != 2:
         return None
     service, action = parts
     if not service or not action:
         return None
-    if "*" in service:
+    # Service may be `*` (cross-service patterns) or a bare prefix.
+    # If it has a `*` anywhere else (e.g. `s*` partial wildcard), reject
+    # — AWS service prefixes are flat strings, not globs.
+    if service != "*" and "*" in service:
         return None
     return service.lower(), action
+
+
+def _glob_to_regex(pattern: str) -> re.Pattern[str]:
+    """Translate an AWS-IAM-style glob (only `*` and `?` are meta;
+    `*` matches any run of chars, `?` matches one char) into a
+    compiled regex.
+
+    WB23 LOW-23-02 closure: `fnmatch.fnmatchcase` admits `[abc]`
+    character-class syntax that AWS IAM policy globs do NOT support.
+    A user writing a literal `[` in an action / ARN pattern would
+    get character-class semantics they didn't ask for. This helper
+    matches AWS's documented glob spec exactly: `*` and `?` only.
+    """
+    out_chars: list[str] = []
+    for ch in pattern:
+        if ch == "*":
+            out_chars.append(".*")
+        elif ch == "?":
+            out_chars.append(".")
+        else:
+            out_chars.append(re.escape(ch))
+    return re.compile(r"\A" + "".join(out_chars) + r"\Z")
+
+
+def _aws_glob_match(value: str, pattern: str) -> bool:
+    """True iff `value` matches the AWS-IAM-style glob `pattern`."""
+    return _glob_to_regex(pattern).match(value) is not None
 
 
 def rule_matches(
@@ -112,10 +153,11 @@ def rule_matches(
         return False
     rule_service, rule_action = parsed
 
-    if rule_service != service.lower():
+    # Service comparison: `*` in the rule matches any service.
+    if rule_service != "*" and rule_service != service.lower():
         return False
 
-    if not fnmatch.fnmatchcase(action, rule_action):
+    if not _aws_glob_match(action, rule_action):
         return False
 
     if rule.arn_scope and rule.arn_scope != "*":
@@ -124,13 +166,13 @@ def rule_matches(
             # be conservative: don't match. Caller falls through to
             # default policy.
             return False
-        if not fnmatch.fnmatchcase(arn, rule.arn_scope):
+        if not _aws_glob_match(arn, rule.arn_scope):
             return False
 
     if rule.region_scope and rule.region_scope != "*":
         if region is None:
             return False
-        if not fnmatch.fnmatchcase(region, rule.region_scope):
+        if not _aws_glob_match(region, rule.region_scope):
             return False
 
     return True

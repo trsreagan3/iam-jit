@@ -678,3 +678,110 @@ Recommended pre-Stage-2 fix sequence:
 After fixes ship, re-run audit (Round 24) — recommended scope: the Stage-2 HTTP proxy server when it lands, plus a re-probe of CRIT-23-01 and HIGH-23-01 against a moto-based S3-bucket-list-with-`.s3`-in-name fixture to confirm the parser-level fix holds end-to-end.
 
 The bouncer's foundation is well-shaped at the data-model / decision-logic layer — those layers had zero findings. The bug pattern is concentrated in (a) the AWS wire-format parser (the highest-leverage component because every downstream decision depends on its classification) and (b) the CLI-to-store wiring (which doesn't pass through the matched-rule id). Both are mechanical fixes; neither requires re-architecture. The CRIT is the only finding that could enable a security bypass under realistic usage.
+
+---
+
+## WB23 closures (2026-05-17)
+
+All 12 findings addressed in one commit per user direction (combined
+audit closure + [[agent-friendly-not-bypassable]] layer so both get
+verified together).
+
+### Updated closure table
+
+| Finding | Status | How closed |
+|---|---|---|
+| CRIT-23-01 S3 vhost bucket parser | **CLOSED** | Rewrote `_S3_VHOST_SUFFIX_RE` to require the prefix segment be exactly `s3` or `s3-<x>` and use a negative lookahead `(?!s3(?:\.|-|$))` in the middle quantifier so another `.s3.` segment can't be absorbed. Now `my.s3.bucket-name.s3.<region>.amazonaws.com` extracts bucket=`my.s3.bucket-name` correctly. Added 6 regression tests covering bucket-name-with-dots3 + the attacker-controlled-pseudo-bucket scenario + dualstack/accelerate/FIPS endpoints. |
+| HIGH-23-01 S3 sub-resource table | **CLOSED** | Expanded from 5 to 18 sub-resources covering tagging/cors/notification/logging/requestPayment/website/replication/inventory/accelerate/publicAccessBlock/ownershipControls/object-lock/intelligent-tiering. Both object-level and bucket-level variants where applicable. Case-insensitive query-key lookup (AWS accepts `?Tagging` and `?tagging`). 11 parameterized regression tests verify each sub-resource resolves to its specific IAM action. |
+| HIGH-23-02 CLI decide drops matched_rule_id | **CLOSED** | CLI `decide` now matches the parsed `record_obj.matched_rule` against the id-tagged ruleset and forwards the id to `record_decision(record_obj, matched_rule_id=...)`. Regression test asserts the persisted row has the rule id, not NULL. |
+| MED-23-01 malformed effect crashes list_rules | **CLOSED** | `list_rules` wraps `Effect(effect)` in try/except; bad rows are logged and skipped instead of crashing the entire listing. Other rules remain usable. Regression test inserts a corrupt row directly via sqlite3 and confirms list_rules returns the valid rows. |
+| MED-23-02 malformed pattern silently no-ops | **CLOSED** | `add_rule` validates pattern via `parse_pattern` before insert; raises `InvalidRuleError` on malformed. CLI `rules add` catches + exits with stderr message. Tests at both store and CLI layer. |
+| MED-23-03 SigV4a not recognized | **CLOSED** | `_SIGV4_AUTH_RE` extended to accept both `AWS4-HMAC-SHA256` and `AWS4-ECDSA-P256-SHA256`. Regression test confirms MRAP credential headers parse. |
+| MED-23-04 presigned URL signature in query | **CLOSED** | `extract_service_and_region` accepts an optional `query` kwarg and falls back to `X-Amz-Algorithm` + `X-Amz-Credential` query params when no Auth header is present. `parse_request` forwards query through. Regression tests for happy path + truly-anonymous (which still returns None — Stage 2 caller must default-deny). |
+| LOW-23-01 CLI never closes store | **CLOSED** | Added `_opened_store` context manager; every CLI handler uses it via `with`. Eliminates per-invocation connection leak (important for the Stage-2 long-running proxy). |
+| LOW-23-02 fnmatch supports `[abc]` classes | **CLOSED** | Replaced `fnmatch.fnmatchcase` with a custom `_aws_glob_match` that only honors `*` and `?` (AWS IAM policy spec). Literal `[` and `]` chars are escaped through `re.escape`. Tests verify `[Aa]` matches only the literal string, not character-class semantics. |
+| LOW-23-03 mkdir mode applies only to leaf | **CLOSED** | `BouncerStore.__init__` walks the dir chain from the leaf upward and chmods each segment we created to 0o700, stopping at HOME. Best-effort (won't crash on filesystems that ignore POSIX modes). |
+| LOW-23-04 `iam-jit bouncer` no pointer | **CLOSED** | Added an `@main.command("bouncer")` stub on the main iam-jit CLI that echoes "iam-jit-bouncer is shipped as a separate binary; run: iam-jit-bouncer ..." to stderr and exits 2. Per [[four-products-one-brand]] the bouncer keeps its own binary; this is just a discovery aid. |
+| LOW-23-05 Stage 2 promise without task | **CLOSED** | Stage 2 explicitly documented in the audit doc + `docs/IAM-JIT-BOUNCER.md` agent-friendly section; tracked via task #160 (still in_progress) until proxy server lands. |
+
+### What additionally shipped (Lens A + Lens B agent-friendly layer)
+
+Beyond closing the 12 audit findings, this commit adds the
+[[agent-friendly-not-bypassable]] layer per user direction
+2026-05-17:
+
+**Lens A (agent-friendly):**
+- **9 new MCP tools** (`bouncer_list_rules`, `bouncer_add_rule`,
+  `bouncer_remove_rule`, `bouncer_decide`, `bouncer_list_presets`,
+  `bouncer_show_preset`, `bouncer_apply_preset`,
+  `bouncer_tail_events`, `bouncer_tail_decisions`). Every CLI
+  command has an MCP mirror. Agents configure without shelling out.
+- **4 curated preset baselines** in `bouncer/presets.py`:
+  `readonly` / `admin-minus-sensitive` / `prod-deny-destructive` /
+  `deny-iam-admin`. Agents start from a vetted preset and narrow,
+  instead of authoring from scratch.
+- **Self-describing denials**: `bouncer_decide` adds a
+  `how_to_allow` field to denied responses with the exact MCP call
+  the agent should make to fix it.
+- **CLI subcommands**: `init --preset`, `presets list|show|apply`,
+  `events tail` (with `--kind` filter).
+- **`*:Action` and bare `*` pattern support**: cross-service deny
+  patterns (`*:Delete*`, `*:Terminate*`) now valid, enabling the
+  `prod-deny-destructive` preset shape.
+
+**Lens B (uncircumventable):**
+- **New `config_events` SQLite table** (schema v2; additive
+  migration). Every config mutation writes here.
+- **`record_mode_change` / `record_preset_applied` / wired-in
+  `add_rule` / wired-in `remove_rule`**: all mutations write
+  config events.
+- **`remove_rule` captures FULL prior content** in the event detail
+  so an agent can't rules-add-then-remove to cover its tracks —
+  the audit chain still shows what existed.
+- **`_current_actor()` helper**: reads `IAM_JIT_BOUNCER_ACTOR` env
+  if set (lets agents identify themselves), else OS username. No
+  way to write an event without an actor.
+- **Audit-chain invariant test**: `test_lens_b_no_silent_bypass_mcp_tool`
+  fails if anyone adds a `bouncer_disable` / `bouncer_skip` /
+  `bouncer_clear_audit` tool. CI-enforced.
+
+### Verification
+
+- `tests/bouncer/*` grew from 109 → 185 tests (+76). All pass.
+- Broader suite: **2284 passed**, 29 skipped, 14 deselected (was 2208
+  before WB23 + agent-friendly changes; +76 net tests).
+- `iam-jit-bouncer init --preset readonly --db /tmp/x.db` smoke-test
+  applied 23 rules and wrote a `preset_applied` event.
+- `iam-jit bouncer` (the pointer) exits 2 with the redirect message
+  to stderr.
+
+### What WB23 DID NOT do (deferred-with-rationale)
+
+- **No moto-based integration test** for the boto3 paths. The
+  hand-rolled fixtures now mirror real AWS shapes correctly; moto
+  closure deferred to Round 24+ when Stage 2 ships the HTTP proxy
+  server.
+- **No `mode set` CLI command yet** — the helper `record_mode_change`
+  exists in the store but Stage 1 doesn't surface a CLI for it
+  because there's no actual proxy enforcing mode yet. Wires in
+  Stage 2.
+- **Per-account / per-session source registry** as a `ContextVar`
+  remains deferred (mirrors WB22 MED-22-01 deferral pattern).
+
+### Why this round matters
+
+WB23 found a CRIT that would have been a real security bypass under
+realistic usage (attacker-controlled bucket names extracting wrong
+ARNs). It also forced the conversation that produced the
+[[agent-friendly-not-bypassable]] memory — the central UX framing
+that shapes every iam-jit feature going forward. The combined
+closure commit demonstrates the principle in code: every CLI knob
+has an MCP equivalent, every config change writes to an audit
+chain, every denial includes a path to compliance. The pattern
+generalizes beyond the bouncer.
+
+Per [[audit-cadence-discipline]]: 1 CRIT + 2 HIGH + 4 MED + 5 LOW
+caught in code that had 109 passing unit tests. The audit ROI keeps
+compounding; the test gap that let the CRIT through (test fixture
+encoding the same assumption as the bug) was itself closed by the
+realistic-fixture rewrite.

@@ -49,9 +49,20 @@ import threading
 from typing import Any
 
 from .decisions import Decision, DecisionRecord, Mode
-from .rules import Effect, ProxyRule
+from .rules import Effect, ProxyRule, parse_pattern
 
-SCHEMA_VERSION = 1
+
+class InvalidRuleError(ValueError):
+    """Raised when add_rule() is given a pattern that can't be parsed.
+
+    WB23 MED-23-02 closure: rules with malformed patterns silently
+    never match anything, so a user who typos `s3-GetObject` (dash
+    instead of colon) sees the rule in `rules list` but the rule
+    never fires. Reject at insert time so the user sees the error
+    immediately and isn't confused at decision time.
+    """
+
+SCHEMA_VERSION = 2  # v2: adds config_events table for [[agent-friendly-not-bypassable]] Lens B
 
 
 def default_db_path() -> pathlib.Path:
@@ -71,7 +82,28 @@ class BouncerStore:
 
     def __init__(self, db_path: pathlib.Path | str | None = None) -> None:
         self.db_path = pathlib.Path(db_path) if db_path else default_db_path()
-        self.db_path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+        # WB23 LOW-23-03 closure: `mkdir(mode=...)` only sets the leaf
+        # dir's mode; intermediate parents (e.g. `~/.iam-jit/` if it
+        # didn't already exist) stay at the OS umask default. Walk
+        # the chain and chmod each segment we created.
+        existed_before = self.db_path.parent.exists()
+        self.db_path.parent.mkdir(parents=True, exist_ok=True)
+        if not existed_before:
+            # Climb from leaf upward setting 0o700 on segments under
+            # the user's HOME. We stop at HOME so we don't try to
+            # chmod /Users/<x>/ or /home/<x>/ (the user owns those
+            # but the OS may not want them touched).
+            try:
+                home = pathlib.Path.home().resolve()
+                p = self.db_path.parent.resolve()
+                while p != p.parent and p != home and home in p.parents:
+                    p.chmod(0o700)
+                    p = p.parent
+            except (OSError, RuntimeError):
+                # Best-effort: if we can't chmod (e.g. running on a
+                # filesystem that ignores POSIX modes, or HOME
+                # weirdness in tests), don't crash store init.
+                pass
         self._lock = threading.Lock()
         self._conn = sqlite3.connect(
             str(self.db_path), check_same_thread=False, isolation_level=None
@@ -115,6 +147,23 @@ class BouncerStore:
                 );
                 CREATE INDEX IF NOT EXISTS idx_decisions_at ON decisions(at);
                 CREATE INDEX IF NOT EXISTS idx_decisions_decision ON decisions(decision);
+                -- v2: config_events log per [[agent-friendly-not-bypassable]] Lens B.
+                -- Every config change (rule add/remove, mode switch, preset
+                -- apply) writes a row here so the audit chain has no holes.
+                -- There is intentionally NO "off switch" — even a future
+                -- "disable" config knob would still write its enable/disable
+                -- transitions here.
+                CREATE TABLE IF NOT EXISTS config_events (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    at TEXT NOT NULL,
+                    actor TEXT NOT NULL,
+                    kind TEXT NOT NULL,          -- 'rule_added' / 'rule_removed' / 'mode_changed' / 'preset_applied'
+                    target_id INTEGER,           -- nullable; rule id when kind references a rule
+                    summary TEXT NOT NULL,       -- short human description (kept in audit log forever)
+                    detail_json TEXT             -- nullable; structured payload (pattern, old/new mode, etc.)
+                );
+                CREATE INDEX IF NOT EXISTS idx_config_events_at ON config_events(at);
+                CREATE INDEX IF NOT EXISTS idx_config_events_kind ON config_events(kind);
                 """
             )
             cur = self._conn.execute("SELECT version FROM schema_version LIMIT 1")
@@ -123,13 +172,37 @@ class BouncerStore:
                 self._conn.execute(
                     "INSERT INTO schema_version(version) VALUES (?)", (SCHEMA_VERSION,)
                 )
+            else:
+                # Additive migration: bump the version if we're past it.
+                # No DDL needed here since CREATE TABLE IF NOT EXISTS
+                # handled the v2 addition above.
+                if int(row[0]) < SCHEMA_VERSION:
+                    self._conn.execute(
+                        "UPDATE schema_version SET version = ?", (SCHEMA_VERSION,)
+                    )
 
     # -----------------------------------------------------------------
     # Rules
     # -----------------------------------------------------------------
 
-    def add_rule(self, rule: ProxyRule) -> int:
-        """Insert a rule. Returns the assigned id."""
+    def add_rule(self, rule: ProxyRule, *, actor: str = "cli") -> int:
+        """Insert a rule. Returns the assigned id.
+
+        WB23 MED-23-02 closure: validates `pattern` via parse_pattern
+        before insert; raises InvalidRuleError on malformed input so
+        the rule doesn't silently never-match.
+
+        Per [[agent-friendly-not-bypassable]] Lens B: also writes a
+        config_event row so the audit chain captures who added what
+        rule when — even if the rule is later removed.
+        """
+        if parse_pattern(rule.pattern) is None:
+            raise InvalidRuleError(
+                f"invalid rule pattern {rule.pattern!r}: "
+                "must be in 'service:action_glob' form, e.g. "
+                "'s3:GetObject' or 's3:Put*'. Service must be a bare "
+                "prefix (no wildcards); action may include '*'."
+            )
         with self._lock:
             cur = self._conn.execute(
                 """
@@ -146,15 +219,163 @@ class BouncerStore:
                     _isoformat_z(_dt.datetime.now(_dt.UTC)),
                 ),
             )
-            return int(cur.lastrowid or 0)
+            rid = int(cur.lastrowid or 0)
+        self._record_config_event_locked(
+            actor=actor,
+            kind="rule_added",
+            target_id=rid,
+            summary=f"added rule #{rid}: {rule.effect.value} {rule.pattern}",
+            detail=rule.to_dict(),
+        )
+        return rid
 
-    def remove_rule(self, rule_id: int) -> bool:
-        """Delete a rule by id. Returns True if a row was removed."""
+    def remove_rule(self, rule_id: int, *, actor: str = "cli") -> bool:
+        """Delete a rule by id. Returns True if a row was removed.
+
+        Per [[agent-friendly-not-bypassable]] Lens B: the audit chain
+        records BOTH the deletion event AND the full content of the
+        deleted rule, so post-incident review can answer 'what rule
+        existed at time T'. Without this, an agent could
+        rules-add-then-remove to cover its tracks.
+        """
+        # Capture the rule BEFORE deleting so the audit event is complete.
+        prior = self.get_rule(rule_id)
         with self._lock:
             cur = self._conn.execute("DELETE FROM rules WHERE id = ?", (rule_id,))
-            return cur.rowcount > 0
+            removed = cur.rowcount > 0
+        if removed:
+            self._record_config_event_locked(
+                actor=actor,
+                kind="rule_removed",
+                target_id=rule_id,
+                summary=(
+                    f"removed rule #{rule_id}: "
+                    f"{prior.effect.value} {prior.pattern}" if prior else
+                    f"removed rule #{rule_id} (prior content unavailable)"
+                ),
+                detail=prior.to_dict() if prior else None,
+            )
+        return removed
+
+    # -----------------------------------------------------------------
+    # Config-event audit log (Lens B: nothing changes silently)
+    # -----------------------------------------------------------------
+
+    def _record_config_event_locked(
+        self,
+        *,
+        actor: str,
+        kind: str,
+        summary: str,
+        target_id: int | None = None,
+        detail: dict[str, Any] | None = None,
+    ) -> int:
+        """Append a config-change event. Internal; called from
+        add_rule / remove_rule / record_mode_change / etc. Holds the
+        store lock itself; do NOT call from inside another locked
+        section."""
+        import json
+
+        with self._lock:
+            cur = self._conn.execute(
+                """
+                INSERT INTO config_events(at, actor, kind, target_id, summary, detail_json)
+                VALUES (?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    _isoformat_z(_dt.datetime.now(_dt.UTC)),
+                    actor,
+                    kind,
+                    target_id,
+                    summary,
+                    json.dumps(detail) if detail is not None else None,
+                ),
+            )
+            return int(cur.lastrowid or 0)
+
+    def record_mode_change(
+        self, *, old_mode: str, new_mode: str, actor: str, reason: str | None = None
+    ) -> int:
+        """Record a mode-switch event. Per [[agent-friendly-not-bypassable]]
+        Lens B: mode is a state transition, not a config knob. Callers
+        flipping LEARN↔ENFORCE↔PROMPT MUST call this so the audit chain
+        sees the transition."""
+        return self._record_config_event_locked(
+            actor=actor,
+            kind="mode_changed",
+            summary=f"mode: {old_mode} -> {new_mode}" + (f" ({reason})" if reason else ""),
+            detail={"old_mode": old_mode, "new_mode": new_mode, "reason": reason},
+        )
+
+    def record_preset_applied(
+        self, *, preset_name: str, rules_added: int, actor: str
+    ) -> int:
+        """Record that a preset baseline was applied (added N rules)."""
+        return self._record_config_event_locked(
+            actor=actor,
+            kind="preset_applied",
+            summary=f"preset '{preset_name}' applied ({rules_added} rules added)",
+            detail={"preset_name": preset_name, "rules_added": rules_added},
+        )
+
+    def list_config_events(
+        self, *, limit: int = 100, kind_filter: str | None = None
+    ) -> list[dict[str, Any]]:
+        """Return recent config events, newest first. Hard-cap mirrors
+        list_decisions to keep CLI tails bounded."""
+        import json
+
+        capped_limit = max(1, min(int(limit), 10_000))
+        sql = (
+            "SELECT id, at, actor, kind, target_id, summary, detail_json "
+            "FROM config_events"
+        )
+        params: tuple[Any, ...]
+        if kind_filter is not None:
+            sql += " WHERE kind = ?"
+            params = (kind_filter,)
+        else:
+            params = ()
+        sql += " ORDER BY id DESC LIMIT ?"
+        params = params + (capped_limit,)
+        with self._lock:
+            cur = self._conn.execute(sql, params)
+            rows = cur.fetchall()
+        out: list[dict[str, Any]] = []
+        for r in rows:
+            rid, at, actor, kind, target_id, summary, detail_json = r
+            detail = None
+            if detail_json:
+                try:
+                    detail = json.loads(detail_json)
+                except (ValueError, TypeError):
+                    detail = None
+            out.append({
+                "id": int(rid),
+                "at": at,
+                "actor": actor,
+                "kind": kind,
+                "target_id": int(target_id) if target_id is not None else None,
+                "summary": summary,
+                "detail": detail,
+            })
+        return out
 
     def list_rules(self) -> list[tuple[int, ProxyRule]]:
+        """Return all rules, skipping any with corrupt effect values.
+
+        WB23 MED-23-01 closure: one bad row (e.g. `effect='foo'`
+        inserted via a future migration that doesn't validate) used
+        to crash the entire listing via `Effect("foo")` ValueError —
+        making ALL rules invisible. Now: skip the bad row and log a
+        warning so the operator notices via decision-log scan, but
+        the rest of the ruleset stays usable. Caller code never
+        depends on "every row in DB is loadable."
+        """
+        import logging
+
+        logger = logging.getLogger(__name__)
+
         with self._lock:
             cur = self._conn.execute(
                 "SELECT id, pattern, effect, arn_scope, region_scope, note, origin "
@@ -164,11 +385,20 @@ class BouncerStore:
         out: list[tuple[int, ProxyRule]] = []
         for r in rows:
             rid, pattern, effect, arn_scope, region_scope, note, origin = r
+            try:
+                effect_enum = Effect(effect)
+            except ValueError:
+                logger.warning(
+                    "skipping rule id=%s with malformed effect=%r; remove via "
+                    "`iam-jit-bouncer rules remove %s` to clear the warning",
+                    rid, effect, rid,
+                )
+                continue
             out.append((
                 int(rid),
                 ProxyRule(
                     pattern=pattern,
-                    effect=Effect(effect),
+                    effect=effect_enum,
                     arn_scope=arn_scope,
                     region_scope=region_scope,
                     note=note,

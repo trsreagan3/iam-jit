@@ -31,9 +31,20 @@ def test_parse_pattern_allows_action_wildcard() -> None:
     assert parse_pattern("s3:*") == ("s3", "*")
 
 
-def test_parse_pattern_rejects_service_wildcard() -> None:
-    assert parse_pattern("*:GetObject") is None
+def test_parse_pattern_accepts_full_service_wildcard() -> None:
+    """`*:Action` and bare `*` are valid (WB23-closure expansion to
+    match AWS IAM policy spec; supports cross-service DENY patterns
+    like `*:Delete*` used in prod-deny-destructive preset)."""
+    assert parse_pattern("*:GetObject") == ("*", "GetObject")
+    assert parse_pattern("*:Delete*") == ("*", "Delete*")
+    assert parse_pattern("*") == ("*", "*")
+
+
+def test_parse_pattern_rejects_partial_service_wildcard() -> None:
+    """Partial-wildcard service prefixes (e.g. `s*`) remain rejected —
+    AWS service prefixes are flat strings, not globs."""
     assert parse_pattern("s*:GetObject") is None
+    assert parse_pattern("ec*:Describe*") is None
 
 
 def test_parse_pattern_rejects_missing_colon() -> None:
@@ -165,6 +176,28 @@ def test_malformed_rule_never_matches() -> None:
     assert not rule_matches(
         rule, service="s3", action="GetObject", arn=None, region=None
     )
+
+
+def test_cross_service_wildcard_matches_any_service() -> None:
+    """A `*:Delete*` rule must match s3:DeleteObject, ec2:DeleteVpc,
+    rds:DeleteDBInstance, etc. This is the prod-deny-destructive
+    preset's main mechanism."""
+    rule = _r("*:Delete*", effect=Effect.DENY)
+    for svc, action in [
+        ("s3", "DeleteObject"),
+        ("ec2", "DeleteVpc"),
+        ("rds", "DeleteDBInstance"),
+        ("cloudformation", "DeleteStack"),
+    ]:
+        assert rule_matches(rule, service=svc, action=action, arn=None, region=None), (
+            f"cross-service wildcard rule failed to match {svc}:{action}"
+        )
+
+
+def test_full_wildcard_matches_everything() -> None:
+    rule = _r("*", effect=Effect.ALLOW)
+    assert rule_matches(rule, service="s3", action="GetObject", arn=None, region=None)
+    assert rule_matches(rule, service="iam", action="CreateRole", arn=None, region=None)
 
 
 # ---------------------------------------------------------------------------
