@@ -1,0 +1,48 @@
+name: terraform-state-rw
+description: |
+  ABSTRACTED FROM REAL DEPLOY: Terraform/Terragrunt state-bucket
+  access. The canonical IaC pattern: read+write on the state
+  bucket prefix that holds the team's Terraform state files +
+  lock-table access on DynamoDB.
+
+  Should score LOW-MEDIUM (3-5). The state files contain
+  EVERYTHING about the customer's infrastructure (incl. some
+  sensitive outputs), so this is not as low-risk as a single-
+  object read; but it's also a daily-use pattern that should
+  not max-flag.
+
+policy:
+  Version: "2012-10-17"
+  Statement:
+    - Sid: S3StatePrefix
+      Effect: Allow
+      Action:
+        - "s3:GetObject"
+        - "s3:PutObject"
+        - "s3:DeleteObject"
+      Resource:
+        - "arn:aws:s3:::terraform-state-prod/env:/prod/*"
+    - Sid: S3ListPrefix
+      Effect: Allow
+      Action: ["s3:ListBucket"]
+      Resource: "arn:aws:s3:::terraform-state-prod"
+      Condition:
+        StringLike:
+          "s3:prefix": ["env:/prod/*"]
+    - Sid: DDBLockTable
+      Effect: Allow
+      Action:
+        - "dynamodb:GetItem"
+        - "dynamodb:PutItem"
+        - "dynamodb:DeleteItem"
+      Resource: "arn:aws:dynamodb:us-east-1:111111111111:table/terraform-state-locks"
+
+request:
+  spec:
+    access_type: read-write
+    duration:
+      duration_hours: 2
+
+expected:
+  score_min: 2
+  score_max: 6

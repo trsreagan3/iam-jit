@@ -1,0 +1,76 @@
+name: security-audit-readonly
+description: |
+  ABSTRACTED FROM REAL DEPLOY: a SecurityAudit role pattern. AWS
+  has a managed policy by this name; many orgs attach it directly
+  to a human role for compliance auditors. Read-only across an
+  enormous service surface — this is what "read-only for
+  everything" actually looks like in production.
+
+  Should score LOW-MEDIUM (3-5). It's broad but read-only with no
+  destructive verbs. Over-flagging this would block legitimate
+  audit/compliance work; under-flagging would miss that "read-only
+  on everything" still surfaces a LOT of secrets/PII (IAM policy
+  documents, CloudFormation templates with embedded keys, etc.).
+
+  Pattern abstracted from the AWS-managed SecurityAudit policy
+  (which orgs often attach as-is to audit roles).
+
+policy:
+  Version: "2012-10-17"
+  Statement:
+    - Sid: ReadOnlyDescribes
+      Effect: Allow
+      Action:
+        - "iam:GetAccountAuthorizationDetails"
+        - "iam:GetAccountPasswordPolicy"
+        - "iam:GetAccountSummary"
+        - "iam:GetCredentialReport"
+        - "iam:ListAttachedGroupPolicies"
+        - "iam:ListAttachedRolePolicies"
+        - "iam:ListAttachedUserPolicies"
+        - "iam:ListEntitiesForPolicy"
+        - "iam:ListGroupPolicies"
+        - "iam:ListGroups"
+        - "iam:ListGroupsForUser"
+        - "iam:ListInstanceProfiles"
+        - "iam:ListPolicies"
+        - "iam:ListPolicyVersions"
+        - "iam:ListRolePolicies"
+        - "iam:ListRoles"
+        - "iam:ListSAMLProviders"
+        - "iam:ListUsers"
+        - "ec2:DescribeAccountAttributes"
+        - "ec2:DescribeAddresses"
+        - "ec2:DescribeInstances"
+        - "ec2:DescribeNetworkAcls"
+        - "ec2:DescribeRouteTables"
+        - "ec2:DescribeSecurityGroups"
+        - "ec2:DescribeSnapshots"
+        - "ec2:DescribeVolumes"
+        - "ec2:DescribeVpcs"
+        - "s3:GetBucketAcl"
+        - "s3:GetBucketLocation"
+        - "s3:GetBucketLogging"
+        - "s3:GetBucketPolicy"
+        - "s3:GetBucketVersioning"
+        - "s3:GetEncryptionConfiguration"
+        - "s3:ListAllMyBuckets"
+        - "rds:DescribeDBInstances"
+        - "rds:DescribeDBSnapshots"
+        - "cloudtrail:DescribeTrails"
+        - "cloudtrail:GetTrailStatus"
+        - "kms:ListAliases"
+        - "kms:ListKeys"
+        - "logs:DescribeLogGroups"
+        - "logs:DescribeMetricFilters"
+      Resource: "*"
+
+request:
+  spec:
+    access_type: read-only
+    duration:
+      duration_hours: 8
+
+expected:
+  score_min: 2
+  score_max: 5

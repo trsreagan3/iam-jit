@@ -1,0 +1,57 @@
+name: cicd-lambda-ecr-deploy
+description: |
+  ABSTRACTED FROM REAL DEPLOY: CI/CD role that pushes a container
+  image to ECR + updates a Lambda function to use it. The ECR
+  action list is long (13 actions) but each is narrow in scope —
+  ECR APIs are generally read+small-write with no per-image
+  resource scoping.
+
+  Shape pattern:
+    - 13 ecr:* actions on Resource:* (canonical for image push)
+    - kms:CreateGrant + GenerateDataKey on ONE specific key ARN
+      (the lambda env-var encryption key)
+    - lambda:UpdateFunctionCode on Resource:* (the API doesn't
+      scope this well at the resource level pre-2024)
+
+  Should score MEDIUM (5-7) — the Resource:* on lambda update is
+  the real risk signal, but the ECR list is structurally fine.
+  Over-flagging this shape is a UX killer for CI/CD teams.
+
+policy:
+  Version: "2012-10-17"
+  Statement:
+    - Sid: AllowECRImagePush
+      Effect: Allow
+      Action:
+        - "ecr:GetAuthorizationToken"
+        - "ecr:SetRepositoryPolicy"
+        - "ecr:GetDownloadUrlForLayer"
+        - "ecr:BatchGetImage"
+        - "ecr:CompleteLayerUpload"
+        - "ecr:DescribeImages"
+        - "ecr:DescribeRepositories"
+        - "ecr:UploadLayerPart"
+        - "ecr:ListImages"
+        - "ecr:InitiateLayerUpload"
+        - "ecr:BatchCheckLayerAvailability"
+        - "ecr:GetRepositoryPolicy"
+        - "ecr:PutImage"
+      Resource: "*"
+    - Sid: AllowKMSGrantForLambdaEnv
+      Effect: Allow
+      Action: ["kms:CreateGrant", "kms:GenerateDataKey"]
+      Resource: "arn:aws:kms:us-east-1:111111111111:key/abcd1234-1234-1234-1234-123456789012"
+    - Sid: AllowLambdaUpdate
+      Effect: Allow
+      Action: ["lambda:UpdateFunctionCode"]
+      Resource: "*"
+
+request:
+  spec:
+    access_type: read-write
+    duration:
+      duration_hours: 1
+
+expected:
+  score_min: 5
+  score_max: 8

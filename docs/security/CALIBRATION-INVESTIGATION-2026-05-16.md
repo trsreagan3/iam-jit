@@ -202,6 +202,49 @@ the impact table.
   — curated examples that flag the same drift in
   `known_calibration_issue:` fields
 
+## Cluster E (newly identified 2026-05-16): legitimate-composite OVER-flags
+
+Real-world Terraform/Terragrunt deployments produce multi-statement
+policies that are LEGITIMATELY scoped but trip our scorer's
+high-risk patterns simultaneously. Three new failing shapes in
+`tests/calibration_corpus/realworld_composite/`:
+
+- **cicd-eks-nodegroup-controller**: scored 9, expected 4-7.
+  iam:PassRole on 2 named role ARNs + ec2:RunInstances on Resource:*
+  (AWS-canonical, the API doesn't accept resource-level scoping) +
+  EKS cluster wildcards — three independently-reasonable patterns
+  composing into a max-flag.
+
+- **glue-crawler-data-lake**: scored 8, expected 2-5. Glue API
+  Resource:* is AWS-canonical for most actions; our scorer treats
+  it as broad-cross-resource.
+
+- **security-audit-readonly**: scored 6, expected 2-5. The AWS-
+  managed SecurityAudit policy shape (40+ iam:List* / Describe*
+  actions on Resource:*) trips IAM-sensitivity floor without
+  recognizing it's read-only.
+
+**Cluster E fix shape:** the scorer needs an "AWS-canonical-
+Resource:*-actions" allowlist (Glue + EC2 Describe* + ECR push +
+ec2:RunInstances + lambda:UpdateFunctionCode) that grants
+narrowing credit. The iam:PassRole-on-narrow + write-action
+combo also needs a specific "narrow-PassRole + bounded-write"
+pattern that's not the max-flag.
+
+Cluster E is the highest-leverage post-launch fix because it
+directly affects the CI/CD adoption funnel — every pilot user
+will run terraform plans whose generated roles look like these.
+
+## Round-14 closures (this commit set)
+
+- Cluster A wave 1: agent-156, agent-303, agent-424 close
+  (unknown operator + inverted-Deny pre-pass + vacuous-resource
+  floor bump). 89 → 86 failures.
+- Cluster A wave 1.5 (this addition): 3 NEW failures from
+  Cluster E composites added to the corpus (89 → 89). These are
+  intentionally visible — they're the next-priority fix.
+
 ---
 
-*Investigation complete. Fix work tracked under task #99.*
+*Investigation complete. Fix work tracked under task #99 (clusters
+A-D) + #100 (cluster E composites).*

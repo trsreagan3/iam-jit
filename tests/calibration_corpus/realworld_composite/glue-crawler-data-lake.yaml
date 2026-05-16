@@ -1,0 +1,72 @@
+name: glue-crawler-data-lake
+description: |
+  ABSTRACTED FROM REAL DEPLOY: AWS Glue crawler role for a BI/
+  data-lake setup. Crawler reads from S3 data buckets + writes
+  metadata to the Glue Data Catalog + logs to CloudWatch.
+
+  Multi-statement, mixed scope:
+    - s3:Get* / List* on the bi-data-lake bucket and a few
+      partner buckets (read-only, named buckets)
+    - glue:GetDatabase / CreateTable / UpdateTable / etc. on
+      Resource:* (Glue API resource-level perms are limited)
+    - logs:CreateLogGroup / CreateLogStream / PutLogEvents on
+      a /aws-glue/* log group prefix
+    - kms:Decrypt on a specific data-lake KMS key (with
+      kms:ViaService condition)
+
+  Should score LOW-MEDIUM (3-5). The Glue Resource:* is
+  AWS-canonical. The s3 list is broad but read-only. KMS is
+  properly conditioned.
+
+policy:
+  Version: "2012-10-17"
+  Statement:
+    - Sid: S3DataLakeRead
+      Effect: Allow
+      Action:
+        - "s3:GetObject"
+        - "s3:ListBucket"
+        - "s3:GetBucketLocation"
+      Resource:
+        - "arn:aws:s3:::bi-data-lake-prod"
+        - "arn:aws:s3:::bi-data-lake-prod/*"
+        - "arn:aws:s3:::bi-partner-data-prod"
+        - "arn:aws:s3:::bi-partner-data-prod/*"
+    - Sid: GlueDataCatalog
+      Effect: Allow
+      Action:
+        - "glue:GetDatabase"
+        - "glue:GetDatabases"
+        - "glue:GetTable"
+        - "glue:GetTables"
+        - "glue:CreateTable"
+        - "glue:UpdateTable"
+        - "glue:DeleteTable"
+        - "glue:GetPartition"
+        - "glue:GetPartitions"
+        - "glue:BatchCreatePartition"
+      Resource: "*"
+    - Sid: CloudWatchLogs
+      Effect: Allow
+      Action:
+        - "logs:CreateLogGroup"
+        - "logs:CreateLogStream"
+        - "logs:PutLogEvents"
+      Resource: "arn:aws:logs:us-east-1:111111111111:log-group:/aws-glue/*"
+    - Sid: KMSDecryptDataLake
+      Effect: Allow
+      Action: ["kms:Decrypt"]
+      Resource: "arn:aws:kms:us-east-1:111111111111:key/abcd1234-1234-1234-1234-123456789012"
+      Condition:
+        StringEquals:
+          "kms:ViaService": "s3.us-east-1.amazonaws.com"
+
+request:
+  spec:
+    access_type: read-write
+    duration:
+      duration_hours: 6
+
+expected:
+  score_min: 2
+  score_max: 5

@@ -1,0 +1,41 @@
+name: cert-manager-dns01
+description: |
+  ABSTRACTED FROM REAL DEPLOY: cert-manager DNS-01 challenge role.
+  Used by Kubernetes cert-manager to write TXT records to Route 53
+  for ACME / Let's Encrypt DNS-01 verification.
+
+  Shape: route53:ChangeResourceRecordSets on a specific hosted-
+  zone ARN. Single-statement, narrow. This is the right shape
+  but the action IS write-on-DNS which can be misused if scoped
+  wrong (e.g., not pinned to one zone). Should score LOW (2-3)
+  for the canonical narrow-zone shape; would score higher if
+  Resource were "*".
+
+policy:
+  Version: "2012-10-17"
+  Statement:
+    - Sid: ChangeRR
+      Effect: Allow
+      Action:
+        - "route53:GetChange"
+      Resource: "arn:aws:route53:::change/*"
+    - Sid: ChangeRRSets
+      Effect: Allow
+      Action: ["route53:ChangeResourceRecordSets"]
+      Resource: "arn:aws:route53:::hostedzone/Z01234567890ABCDEFGH"
+    - Sid: ListZones
+      Effect: Allow
+      Action:
+        - "route53:ListHostedZonesByName"
+        - "route53:ListResourceRecordSets"
+      Resource: "*"
+
+request:
+  spec:
+    access_type: read-write
+    duration:
+      duration_hours: 2
+
+expected:
+  score_min: 1
+  score_max: 5
