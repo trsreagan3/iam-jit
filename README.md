@@ -167,8 +167,11 @@ User sees ZERO friction prompts in the read-only investigation phase. The single
 
 ### What's included
 
-- **Template browser** — AWS-managed policies as starting points; one-click reductions (drop secrets / drop sensitive S3 / drop audit-infra writes); the `AdminLikeWithSensitiveExclusions` baseline as the recommended fallback when a user has no policy and no agent
-- **Agent-driven reduction** — even human-driven web-UI sessions are encouraged to pull up Claude Code / Cursor for the narrowing step; iam-jit's UI deliberately doesn't try to be smart about the policy (no NL synthesis, no "narrow this for me" button), the user's agent does that with codebase context
+- **Template browser** — three kinds of templates side by side:
+  - **Broad baselines** — AWS-managed (`ReadOnlyAccess`, `SecurityAudit`, etc.) + iam-jit's `AdminLikeWithSensitiveExclusions` (broad admin minus secrets/sensitive S3/KMS decrypt/audit-infra destruction)
+  - **Parameterized task templates** — narrow shapes like `update-one-secret(arn)`, `download-one-file(bucket, key)`, `invoke-one-lambda(arn)`, `read-one-cloudwatch-log-group(arn)` — score 1-3, almost always auto-approve
+  - **Saved templates** — your team's recurring shapes (auto-evolved from re-use) and admin-promoted org-tier templates
+- **Agent-driven reduction** — even human-driven web-UI sessions are encouraged to pull up Claude Code / Cursor for the narrowing step. iam-jit's UI never authors policies from natural-language prompts. Free tier: pick a template + fill parameters, OR submit raw JSON. Pro tier: also gets an LLM-guided Q&A walkthrough ("do you need RDS? secrets? which region?") that picks reductions for you — LLM acts as UX, not as author; questions are customer-configurable for tighter fit with your org's reduction patterns
 - **Evolving preset library** — your team's recurring shapes get saved automatically after re-use; "based on `payment-incident-triage` template" in the audit trail; per-customer, no cross-tenant learning
 - **Multi-user accounts** with role-based access (requester / approver / admin)
 - **OIDC SSO** — Google Workspace + Okta out of the box; generic OIDC for Azure AD / Auth0 / others
@@ -252,7 +255,8 @@ See [docs/AGENTS.md](docs/AGENTS.md) for the agent-driven reduction-loop pattern
 - **iam-jit hosted / self-host**: in active development; targeted for v1.0 launch with multi-provider OIDC, Slack approval bot, template browser, evolving preset library, agent-driven reduction loop, MFA propagation, safety modes.
 
 **What's NOT in iam-jit** (intentional, not deferred):
-- Natural-language policy synthesis. The deterministic generator was measured at 1.8% joint sufficiency rate ([docs/calibration/100-prompt-sufficiency-loop.md](docs/calibration/100-prompt-sufficiency-loop.md)); the LLM-augmented variant faces the same structural limit (no codebase context). iam-jit is scorer + catalog + gate — the agent (with codebase context + LLM) does the policy authoring.
+- Natural-language policy synthesis from a free-form prompt. The deterministic generator was measured at 1.8% joint sufficiency rate ([docs/calibration/100-prompt-sufficiency-loop.md](docs/calibration/100-prompt-sufficiency-loop.md)); any iam-jit-side LLM-as-AUTHOR faces the same structural limit (no codebase context). iam-jit is scorer + catalog + gate — the agent (with codebase context + LLM) does the policy authoring.
+- *What IS in iam-jit, distinctly:* LLM-as-UX-helper in the Pro-tier UI walkthrough (LLM asks bounded questions about a fixed baseline; user's answers drive deterministic policy modifications; scorer evaluates). Different category — the LLM never invents policy content.
 
 See [CHANGELOG.md](CHANGELOG.md) for release history and [docs/ROADMAP-V1.1.md](docs/ROADMAP-V1.1.md) for post-launch scope.
 
