@@ -11,10 +11,13 @@ The reduction recipe is the AUDIT-CHAIN ARTIFACT:
 scoped to account 111... + region us-east-1"
 — much more reviewable than an opaque 47-action custom policy.
 
-Three reduction axes ship pre-launch (#155):
-- deny_services: append Deny statements for entire services
-- narrow_to_accounts: add aws:ResourceAccount StringEquals condition
-- narrow_to_regions: add aws:RequestedRegion StringEquals condition
+Reduction axes shipped pre-launch:
+- deny_services: append Deny statement covering `service:*` for each service (#155)
+- deny_actions: append Deny statement for specific action globs like `s3:Put*` (WB21
+  HIGH-21-01 / MED-21-01 closure — guided-reduction items like "no S3 writes" and
+  "no secret reads" need action-glob granularity, not whole-service granularity)
+- narrow_to_accounts: add aws:ResourceAccount StringEquals condition (#155)
+- narrow_to_regions: add aws:RequestedRegion StringEquals condition (#155)
 
 Deferred to follow-up:
 - strip_action_classes (writes / destructive / destructive_no_recovery)
@@ -63,7 +66,9 @@ class ReductionResult:
         parts = []
         for e in self.recipe:
             if e.axis == "deny_services":
-                parts.append(f"minus [{', '.join(e.values)}]")
+                parts.append(f"minus services [{', '.join(e.values)}]")
+            elif e.axis == "deny_actions":
+                parts.append(f"minus actions [{', '.join(e.values)}]")
             elif e.axis == "narrow_to_accounts":
                 parts.append(f"scoped to account(s) {', '.join(e.values)}")
             elif e.axis == "narrow_to_regions":
@@ -132,6 +137,80 @@ def deny_services(
     }
     stmts.append(deny_stmt)
     return new_policy, ReductionEntry(axis="deny_services", values=tuple(valid))
+
+
+# ---------------------------------------------------------------------------
+# Reduction axis #1b: append Deny statement for specific action globs
+# ---------------------------------------------------------------------------
+
+
+def deny_actions(
+    policy: dict[str, Any], actions: list[str]
+) -> tuple[dict[str, Any], ReductionEntry | None]:
+    """Append a Deny statement covering specific action globs like
+    `s3:Put*`, `ssm:GetParameter*`, `kms:Decrypt`.
+
+    WB21 HIGH-21-01 / MED-21-01 closure: deny_services (`service:*`)
+    is too coarse for guided-reduction checklist items like "I don't
+    need to WRITE to S3" (keeps reads) or "I don't need to READ
+    secrets" (needs ssm:GetParameter*, not ssm:*). Without this axis,
+    those items either no-op (the WB21 HIGH) or partially deliver
+    (the WB21 MED) — both lying in the audit chain.
+
+    Token format: `service:action_glob`, exactly one colon. Service
+    part must be a bare prefix (no wildcards). Action part may include
+    `*` (e.g. `Put*`, `Get*`, `*`).
+    Examples that pass: `s3:Put*`, `kms:Decrypt`, `iam:CreateRole`.
+    Examples that drop: `s3` (no colon), `s3:Put:Bucket` (two colons),
+    `*:Put*` (service wildcard), `s3 :Put*` (whitespace).
+
+    Sid is suffixed with a hash of the action set, mirroring
+    deny_services's LOW-20-LOW2 pattern so concurrent calls don't
+    collide.
+
+    Empty / missing actions list → policy unchanged + None recipe.
+    """
+    if not actions:
+        return policy, None
+    valid: list[str] = []
+    seen: set[str] = set()
+    for a in actions:
+        if not isinstance(a, str):
+            continue
+        token = a.strip()
+        if not token or " " in token:
+            continue
+        parts = token.split(":")
+        if len(parts) != 2:
+            continue
+        service, action = parts
+        if not service or not action:
+            continue
+        if "*" in service:
+            continue
+        if token in seen:
+            continue
+        seen.add(token)
+        valid.append(token)
+    if not valid:
+        return policy, None
+
+    new_policy = copy.deepcopy(policy)
+    stmts = new_policy.setdefault("Statement", [])
+    if isinstance(stmts, dict):
+        stmts = [stmts]
+        new_policy["Statement"] = stmts
+
+    import hashlib
+    sid_hash = hashlib.sha256(",".join(sorted(valid)).encode()).hexdigest()[:8]
+    deny_stmt = {
+        "Sid": f"ReductionDenyActions{sid_hash}",
+        "Effect": "Deny",
+        "Action": sorted(valid),
+        "Resource": "*",
+    }
+    stmts.append(deny_stmt)
+    return new_policy, ReductionEntry(axis="deny_actions", values=tuple(sorted(valid)))
 
 
 # ---------------------------------------------------------------------------
@@ -317,15 +396,17 @@ def apply_reductions(
     policy: dict[str, Any],
     *,
     deny_services_list: list[str] | None = None,
+    deny_actions_list: list[str] | None = None,
     narrow_to_accounts_list: list[str] | None = None,
     narrow_to_regions_list: list[str] | None = None,
 ) -> ReductionResult:
     """Apply multiple reductions in a deterministic order.
 
     Order matters for predictable output:
-    1. Deny statements (additive — no merge complexity)
-    2. Account narrowing (conditions on every Allow)
-    3. Region narrowing (conditions on every Allow)
+    1. Deny services (additive — `service:*`)
+    2. Deny actions (additive — specific action globs like `s3:Put*`)
+    3. Account narrowing (conditions on every Allow)
+    4. Region narrowing (conditions on every Allow)
 
     Each step that produces a recipe entry contributes to the final
     recipe; steps with empty inputs are no-ops and don't appear.
@@ -335,6 +416,10 @@ def apply_reductions(
 
     if deny_services_list:
         current, entry = deny_services(current, deny_services_list)
+        if entry is not None:
+            recipe.append(entry)
+    if deny_actions_list:
+        current, entry = deny_actions(current, deny_actions_list)
         if entry is not None:
             recipe.append(entry)
     if narrow_to_accounts_list:

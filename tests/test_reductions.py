@@ -15,6 +15,7 @@ from iam_jit.reductions import (
     ReductionEntry,
     ReductionResult,
     apply_reductions,
+    deny_actions,
     deny_services,
     narrow_to_accounts,
     narrow_to_regions,
@@ -444,3 +445,121 @@ def test_reduce_policy_appears_in_tools_list() -> None:
     })
     names = {t["name"] for t in resp["result"]["tools"]}
     assert "reduce_policy" in names
+
+
+# ---------------------------------------------------------------------------
+# deny_actions (WB21 HIGH-21-01 / MED-21-01 closure)
+# ---------------------------------------------------------------------------
+
+
+def test_deny_actions_appends_deny_statement_with_action_globs() -> None:
+    policy, entry = deny_actions(_admin_policy(), ["s3:Put*", "s3:Delete*"])
+    denies = [s for s in policy["Statement"] if s["Effect"] == "Deny"]
+    assert len(denies) == 1
+    # Actions are sorted for determinism
+    assert denies[0]["Action"] == ["s3:Delete*", "s3:Put*"]
+    assert denies[0]["Resource"] == "*"
+    assert entry == ReductionEntry(
+        axis="deny_actions", values=("s3:Delete*", "s3:Put*")
+    )
+
+
+def test_deny_actions_empty_list_no_op() -> None:
+    original = _admin_policy()
+    policy, entry = deny_actions(original, [])
+    assert policy == original
+    assert entry is None
+
+
+def test_deny_actions_rejects_malformed_tokens() -> None:
+    """Tokens must be service:action — no colons-too-many, no missing
+    parts, no wildcards in service name, no whitespace."""
+    policy, entry = deny_actions(
+        _admin_policy(),
+        [
+            "s3",           # no colon → drop
+            "s3::Put",      # double colon (parts != 2) → drop
+            "*:Put*",       # wildcard service → drop
+            ":GetObject",   # empty service → drop
+            "s3:",          # empty action → drop
+            "s3 :Put*",     # whitespace → drop
+            42,             # non-string → drop
+            "s3:Put*",      # valid → keep
+        ],
+    )
+    denies = [s for s in policy["Statement"] if s["Effect"] == "Deny"]
+    assert len(denies) == 1
+    assert denies[0]["Action"] == ["s3:Put*"]
+    assert entry == ReductionEntry(axis="deny_actions", values=("s3:Put*",))
+
+
+def test_deny_actions_all_invalid_returns_none_entry() -> None:
+    policy, entry = deny_actions(_admin_policy(), ["s3", "*:Put*"])
+    # Original policy unchanged (no Deny appended)
+    assert all(s["Effect"] == "Allow" for s in policy["Statement"])
+    assert entry is None
+
+
+def test_deny_actions_deduplicates() -> None:
+    policy, entry = deny_actions(
+        _admin_policy(), ["s3:Put*", "s3:Put*", "s3:Delete*"]
+    )
+    denies = [s for s in policy["Statement"] if s["Effect"] == "Deny"]
+    assert denies[0]["Action"] == ["s3:Delete*", "s3:Put*"]
+    assert entry.values == ("s3:Delete*", "s3:Put*")
+
+
+def test_deny_actions_unique_sid_per_action_set() -> None:
+    """Sid hash differs by content so multiple deny_actions calls
+    don't collide on the same policy."""
+    p1, _ = deny_actions(_admin_policy(), ["s3:Put*"])
+    p2, _ = deny_actions(p1, ["ssm:GetParameter*"])
+    sids = [s.get("Sid") for s in p2["Statement"] if s["Effect"] == "Deny"]
+    assert len(sids) == 2
+    assert sids[0] != sids[1]
+
+
+def test_deny_actions_does_not_mutate_input() -> None:
+    original = _admin_policy()
+    snapshot = {**original, "Statement": [dict(s) for s in original["Statement"]]}
+    deny_actions(original, ["s3:Put*"])
+    assert original == snapshot
+
+
+def test_apply_reductions_includes_deny_actions_axis() -> None:
+    result = apply_reductions(
+        _admin_policy(),
+        deny_actions_list=["s3:Put*", "ssm:GetParameter*"],
+    )
+    assert len(result.recipe) == 1
+    assert result.recipe[0].axis == "deny_actions"
+    assert set(result.recipe[0].values) == {"s3:Put*", "ssm:GetParameter*"}
+
+
+def test_apply_reductions_summary_mentions_action_globs() -> None:
+    result = apply_reductions(
+        _admin_policy(),
+        deny_actions_list=["s3:Put*"],
+    )
+    summary = result.to_dict()["summary"]
+    assert "actions" in summary
+    assert "s3:Put*" in summary
+
+
+def test_mcp_reduce_policy_accepts_deny_actions() -> None:
+    result = _reduce_policy_for_mcp({
+        "policy": _admin_policy(),
+        "deny_actions": ["s3:Put*"],
+    })
+    assert "policy" in result
+    assert result["recipe"][0]["axis"] == "deny_actions"
+    assert result["recipe"][0]["values"] == ["s3:Put*"]
+
+
+def test_mcp_reduce_policy_rejects_non_list_deny_actions() -> None:
+    result = _reduce_policy_for_mcp({
+        "policy": _admin_policy(),
+        "deny_actions": "s3:Put*",
+    })
+    assert "error" in result
+    assert "deny_actions" in result["error"]

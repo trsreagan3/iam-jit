@@ -290,3 +290,41 @@ Recommended pre-launch sequence:
 3. **MED-21-02**: rewrite `deny-iam-admin` description to match reality (lateral-movement vectors NOT blocked).
 4. **MED-21-03**: add the parameterized description-claim test; it should fail on HIGH-21-01 / MED-21-01 / MED-21-02 today, then pass once they're fixed.
 5. **LOW-21-01..04**: clean up at convenience; none block launch.
+
+---
+
+## WB21 closures (2026-05-16)
+
+All 8 findings addressed in one commit. Pre-launch trust gap closed.
+
+### Updated closure table
+
+| Finding | Status | How closed |
+|---|---|---|
+| HIGH-21-01 `deny-s3-writes` no-op | **CLOSED** | Added `deny_actions` reduction axis in `reductions.py`. `deny-s3-writes` now declares `reduction_axis="deny_actions"` with `("s3:Put*", "s3:Delete*", "s3:Create*", "s3:Restore*", "s3:Replicate*")`. Item now produces a real Deny statement that blocks the writes its label promises while keeping reads — verified by the new `CHECKLIST_BLOCK_CLAIMS` parameterized test in `test_guided_reduction.py`. |
+| MED-21-01 `deny-secrets` partial | **CLOSED** | Same `deny_actions` axis. `deny-secrets` now denies `("secretsmanager:GetSecretValue", "secretsmanager:BatchGetSecretValue", "ssm:GetParameter*")` — mirrors `AdminLikeWithSensitiveExclusions.DenySecretData`. Description updated to explicitly call out that `kms:Decrypt` is NOT blocked (too broad — would break every KMS-encrypted blob in S3/RDS/EBS) and direct users to a dedicated policy for that. Parameterized test asserts both directions. |
+| MED-21-02 `deny-iam-admin` overclaim | **CLOSED** | Description rewritten to honestly say "closes the CreateRole + PutRolePolicy + AssumeRole principal-pivot path" and explicitly call out the four vectors it does NOT block (`sts:AssumeRole` into pre-existing trusts, `kms:CreateGrant`, `s3:PutBucketPolicy`, `lambda:AddPermission`) plus the Permissions Boundary as the harder-containment recommendation. Aligned with WB19-LOW-05's parent-baseline guidance. |
+| MED-21-03 description-vs-implementation test gap | **CLOSED** | Added `CHECKLIST_BLOCK_CLAIMS` table + `test_each_checklist_item_description_matches_implementation` parameterized over `DEFAULT_CHECKLIST`. For every item, the test asserts (a) actions the description promises to BLOCK are denied in the output policy and (b) actions the description promises NOT to block are NOT denied. Adding any new checklist item without claims-table coverage fails the test, enforcing the discipline going forward. |
+| LOW-21-01 unknown reduction axes silently dropped | **CLOSED** | `apply_selections` now skips items with unknown axes but still reports them in `selected_item_ids`. Combined with LOW-21-02 closure (`applied_item_ids`), unknown-axis items are visibly "selected but not applied" in the audit chain. Documented in the `apply_selections` docstring. |
+| LOW-21-02 selected vs applied conflated | **CLOSED** | Added `applied_item_ids` to the `apply_selections` return shape. `selected_item_ids` = user picked AND we recognize; `applied_item_ids` = subset whose axis actually fired a recipe entry. MCP `apply_reduction_checklist` description updated. New test `test_applied_item_ids_distinguishes_selected_from_fired` covers it. |
+| LOW-21-03 `apply_selections(None)` AttributeError | **CLOSED** | Added defensive `isinstance(policy, dict)` guard at the top of `apply_selections`. Returns the same structured `{policy: None, recipe: [], error: "policy must be a dict", ...}` shape that the MCP wrapper produces. New test `test_apply_selections_handles_none_policy` covers it. |
+| LOW-21-04 MCP per-element type validation | **DEFERRED** | Matches `_reduce_policy_for_mcp`'s existing depth (one-level list-or-not check); tightening it here without tightening the sibling validator would be inconsistent. Filed as a future cleanup that should touch BOTH wrappers together. Downstream filtering already drops non-string items safely, so risk is presentation-only. |
+
+### Verification
+
+- `tests/test_guided_reduction.py`: 19 → 26 tests (+7); all pass.
+- `tests/test_reductions.py`: 30 → 40 tests (+10 covering `deny_actions`); all pass.
+- Broader suite: **2021 passed**, 29 skipped, 14 deselected (was 1997 before WB21 closures; +24 net tests).
+- Pre-existing 96 `tests/test_calibration_corpus.py` failures unchanged (not caused by WB21 work).
+
+### What the WB21 fix DID NOT do
+
+- Did not add a `narrow_resources` axis (still deferred per `reductions.py` docstring).
+- Did not split LOW-21-04 into both wrappers; flagged for a paired-touch follow-up.
+- Did not introduce a new `kms:Decrypt` deny item (intentional — too broad; user can compose via `reduce_policy` directly with `deny_actions=["kms:Decrypt"]`).
+
+### Why this matters
+
+The WB19→WB20→WB21 pattern keeps repeating: a feature ships with unit tests that verify mechanics, an audit catches descriptions that lie, fixes go in, the trust-gap test pattern travels forward. After this round, the `CHECKLIST_BLOCK_CLAIMS` test enforces the rule mechanically — any future checklist addition without claims coverage will fail. The audit chain now distinguishes "selected" from "actually changed the policy," which closes the dishonest-audit-chain category at the data-model level.
+
+Per [[audit-cadence-discipline]]: 1 HIGH + 3 MED + 4 LOW in code that had 19 passing unit tests. Worth it.

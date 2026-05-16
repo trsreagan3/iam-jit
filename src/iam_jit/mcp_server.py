@@ -361,11 +361,13 @@ TOOLS = [
             "policy + return the reduced result. The high-level "
             "wrapper over reduce_policy that takes ID-based "
             "selections from get_reduction_checklist's output. "
-            "Returns the same shape as reduce_policy "
-            "({policy, recipe, summary}) plus selected_item_ids "
-            "for audit-chain accounting. Unknown item IDs are "
-            "silently ignored (forward-compatible with Enterprise-"
-            "plugin checklist customizations)."
+            "Returns {policy, recipe, summary, selected_item_ids, "
+            "applied_item_ids}: selected_item_ids = what the user "
+            "picked AND we recognize; applied_item_ids = subset "
+            "whose axis actually fired (the audit chain distinguishes "
+            "'user clicked' from 'policy actually changed'). Unknown "
+            "IDs and unknown axes are silently ignored (forward-"
+            "compatible with Enterprise-plugin checklist customizations)."
         ),
         "inputSchema": {
             "type": "object",
@@ -432,6 +434,17 @@ TOOLS = [
                         "Service prefixes to deny (e.g. ['rds', "
                         "'secretsmanager']). Appends a Deny statement "
                         "blocking <service>:* for each."
+                    ),
+                },
+                "deny_actions": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": (
+                        "Specific action globs to deny (e.g. "
+                        "['s3:Put*', 'ssm:GetParameter*', 'kms:Decrypt']). "
+                        "Use when 'block whole service' is too coarse — "
+                        "e.g. 'block S3 writes but keep reads'. Each "
+                        "token must be in service:action format."
                     ),
                 },
                 "narrow_to_accounts": {
@@ -893,7 +906,12 @@ def _reduce_policy_for_mcp(args: dict[str, Any]) -> dict[str, Any]:
             "recipe": [],
         }
 
-    for field in ("deny_services", "narrow_to_accounts", "narrow_to_regions"):
+    for field in (
+        "deny_services",
+        "deny_actions",
+        "narrow_to_accounts",
+        "narrow_to_regions",
+    ):
         val = args.get(field)
         if val is not None and not isinstance(val, list):
             return {
@@ -905,6 +923,7 @@ def _reduce_policy_for_mcp(args: dict[str, Any]) -> dict[str, Any]:
     result = apply_reductions(
         policy,
         deny_services_list=args.get("deny_services") or [],
+        deny_actions_list=args.get("deny_actions") or [],
         narrow_to_accounts_list=args.get("narrow_to_accounts") or [],
         narrow_to_regions_list=args.get("narrow_to_regions") or [],
     )

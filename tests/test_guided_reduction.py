@@ -246,3 +246,180 @@ def test_two_new_tools_in_tools_list() -> None:
     names = {t["name"] for t in resp["result"]["tools"]}
     assert "get_reduction_checklist" in names
     assert "apply_reduction_checklist" in names
+
+
+# ---------------------------------------------------------------------------
+# WB21 closures — description-vs-implementation trust gap
+# ---------------------------------------------------------------------------
+
+
+def _action_blocked_by(action: str, policy: dict, deny_must_match_action: bool = True) -> bool:
+    """Return True if `action` is denied by at least one Deny statement
+    in `policy`. Honors `*` glob in deny Action strings."""
+    import fnmatch
+
+    for s in policy.get("Statement", []):
+        if not isinstance(s, dict):
+            continue
+        if s.get("Effect") != "Deny":
+            continue
+        deny_actions = s.get("Action", [])
+        if isinstance(deny_actions, str):
+            deny_actions = [deny_actions]
+        for pattern in deny_actions:
+            if fnmatch.fnmatchcase(action, pattern):
+                return True
+    return False
+
+
+# WB21 MED-21-03 closure: for each checklist item, assert that what
+# the description CLAIMS gets blocked is actually blocked in the
+# output policy. This is the test that would have failed on
+# HIGH-21-01 (deny-s3-writes no-op) and MED-21-01 (deny-secrets
+# partial) at PR time.
+#
+# Map: item_id → list of (action, expect_blocked) tuples that reflect
+# what each description promises.
+CHECKLIST_BLOCK_CLAIMS: dict[str, list[tuple[str, bool]]] = {
+    "deny-secrets": [
+        ("secretsmanager:GetSecretValue", True),
+        ("secretsmanager:BatchGetSecretValue", True),
+        ("ssm:GetParameter", True),
+        ("ssm:GetParameters", True),
+        ("ssm:GetParametersByPath", True),
+        # description explicitly says KMS Decrypt is NOT blocked here
+        ("kms:Decrypt", False),
+        # reads of non-secret S3 objects should NOT be blocked
+        ("s3:GetObject", False),
+    ],
+    "deny-iam-admin": [
+        # the CreateRole-pivot path the description claims to close
+        ("iam:CreateRole", True),
+        ("iam:PutRolePolicy", True),
+        ("iam:PassRole", True),
+        ("iam:AttachRolePolicy", True),
+        # description honestly says sts:AssumeRole is NOT blocked
+        ("sts:AssumeRole", False),
+        # description honestly says other-pivot vectors are NOT blocked
+        ("kms:CreateGrant", False),
+        ("lambda:AddPermission", False),
+    ],
+    "deny-org-billing": [
+        ("organizations:CreateAccount", True),
+        ("account:CloseAccount", True),
+        ("billing:GetBillingData", True),
+    ],
+    "deny-rds": [
+        ("rds:CreateDBInstance", True),
+        ("rds:DeleteDBInstance", True),
+        ("rds:DescribeDBInstances", True),
+    ],
+    "deny-dynamodb": [
+        ("dynamodb:PutItem", True),
+        ("dynamodb:Scan", True),
+    ],
+    "deny-s3-writes": [
+        # writes that the description promises to block
+        ("s3:PutObject", True),
+        ("s3:DeleteObject", True),
+        ("s3:CreateBucket", True),
+        # description says read access is KEPT
+        ("s3:GetObject", False),
+        ("s3:ListBucket", False),
+    ],
+    "deny-cloudformation": [
+        ("cloudformation:CreateStack", True),
+        ("cloudformation:DeleteStack", True),
+    ],
+    "deny-ecs-eks": [
+        ("ecs:RunTask", True),
+        ("eks:CreateCluster", True),
+    ],
+    "deny-lambda-deploy": [
+        ("lambda:CreateFunction", True),
+        ("lambda:UpdateFunctionCode", True),
+        ("lambda:InvokeFunction", True),
+    ],
+}
+
+
+@pytest.mark.parametrize("item", DEFAULT_CHECKLIST, ids=lambda i: i.id)
+def test_each_checklist_item_description_matches_implementation(item) -> None:
+    """For each curated checklist item, the actions its description
+    promises to block must actually be blocked when the item is
+    selected, AND the actions the description promises NOT to block
+    must not be blocked. Caught WB21 HIGH-21-01 + MED-21-01 + MED-21-02
+    at PR time."""
+    claims = CHECKLIST_BLOCK_CLAIMS.get(item.id)
+    assert claims is not None, (
+        f"checklist item {item.id} is missing from CHECKLIST_BLOCK_CLAIMS — "
+        "add description-vs-implementation expectations alongside any new "
+        "item to keep the trust-gap audit honest."
+    )
+    out = apply_selections(_admin_policy(), selected_item_ids=[item.id])
+    # Selected items with non-empty values should be reported as applied.
+    if item.reduction_values:
+        assert item.id in out["applied_item_ids"], (
+            f"{item.id} has values but didn't fire — likely an unknown axis"
+        )
+    for action, expect_blocked in claims:
+        actually_blocked = _action_blocked_by(action, out["policy"])
+        assert actually_blocked is expect_blocked, (
+            f"{item.id}: action {action!r} expected blocked={expect_blocked} "
+            f"but got {actually_blocked}. Description and implementation "
+            f"disagree — fix one or the other."
+        )
+
+
+def test_applied_item_ids_distinguishes_selected_from_fired() -> None:
+    """WB21 LOW-21-02: a known item whose axis is supported should
+    appear in BOTH selected_item_ids and applied_item_ids; an unknown
+    item should appear in neither."""
+    out = apply_selections(
+        _admin_policy(),
+        selected_item_ids=["deny-rds", "not-a-real-item"],
+    )
+    assert "deny-rds" in out["selected_item_ids"]
+    assert "deny-rds" in out["applied_item_ids"]
+    assert "not-a-real-item" not in out["selected_item_ids"]
+    assert "not-a-real-item" not in out["applied_item_ids"]
+
+
+def test_apply_selections_handles_none_policy() -> None:
+    """WB21 LOW-21-03: direct (non-MCP) callers shouldn't get an
+    opaque AttributeError. apply_selections returns a structured
+    error shape instead."""
+    out = apply_selections(None, selected_item_ids=["deny-rds"])  # type: ignore[arg-type]
+    assert out["policy"] is None
+    assert out["applied_item_ids"] == []
+    assert "error" in out
+
+
+def test_deny_secrets_and_deny_s3_writes_aggregate_into_one_deny_actions() -> None:
+    """Both items use deny_actions axis — should produce one Deny
+    statement with the union of action globs."""
+    out = apply_selections(
+        _admin_policy(),
+        selected_item_ids=["deny-secrets", "deny-s3-writes"],
+    )
+    denies = [s for s in out["policy"]["Statement"] if s["Effect"] == "Deny"]
+    # One Deny for deny_actions axis (aggregated), since neither item
+    # contributed deny_services values.
+    assert len(denies) == 1
+    deny_actions = denies[0]["Action"]
+    # Both items' action globs are present
+    assert "secretsmanager:GetSecretValue" in deny_actions
+    assert "s3:Put*" in deny_actions
+
+
+def test_mixed_axes_produce_two_separate_denies() -> None:
+    """deny-rds (deny_services) + deny-secrets (deny_actions) should
+    produce TWO Deny statements — one per axis."""
+    out = apply_selections(
+        _admin_policy(),
+        selected_item_ids=["deny-rds", "deny-secrets"],
+    )
+    denies = [s for s in out["policy"]["Statement"] if s["Effect"] == "Deny"]
+    assert len(denies) == 2
+    axes = {e["axis"] for e in out["recipe"]}
+    assert axes == {"deny_services", "deny_actions"}
