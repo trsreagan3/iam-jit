@@ -1,0 +1,86 @@
+name: wiz-style-securityaudit-readonly
+description: |
+  Cloud security posture vendors (Wiz, Orca, Lacework, Prisma Cloud) all
+  attach the AWS-managed SecurityAudit policy to their connector role.
+  Permission scope is intentionally broad-read across the entire account
+  for compliance scanning. This YAML reflects the documented connector
+  shape: SecurityAudit + ViewOnlyAccess style permissions, ALL read-only,
+  Resource:* by design (you can't audit "some" of the account).
+
+  Expected score: LOW (3-5). This is the "broad legitimate read for
+  security/audit" shape — bypassing scoring for it would defeat the
+  purpose of the entire CSPM market category. Should auto-approve.
+
+  CALIBRATION GAP: scored 7, expected 1-5.
+  Reason: Same family as the Datadog gap — many `Service:Describe*` /
+  `Service:List*` wildcards across ec2, iam, kms, organizations,
+  cloudtrail accumulate score even though every action is read-only
+  AND access_type=read-only is set in the request. Recommendation: when
+  EVERY action in a statement is in the AWS-classified Read or List
+  access level AND access_type=read-only, the wildcard-action rule
+  should not fire (or should fire with a strongly-reduced weight).
+  Cluster this with the Datadog example and the dogfooding-findings
+  Condition-scoped wildcard finding for the next round.
+
+  SOURCE: https://docs.wiz.io/wiz-docs/docs/aws-account-connection
+  (note: page returned 403 in our fetch; content reflects the documented
+  pattern from public security-vendor blog posts and the AWS-managed
+  SecurityAudit policy itself, which is the actual artifact deployed)
+
+policy:
+  Version: "2012-10-17"
+  Statement:
+    - Effect: Allow
+      Action:
+        - "ec2:Describe*"
+        - "ec2:Get*"
+        - "ec2:List*"
+        - "iam:Get*"
+        - "iam:List*"
+        - "iam:GenerateCredentialReport"
+        - "iam:GenerateServiceLastAccessedDetails"
+        - "s3:GetBucketAcl"
+        - "s3:GetBucketLocation"
+        - "s3:GetBucketLogging"
+        - "s3:GetBucketPolicy"
+        - "s3:GetBucketPolicyStatus"
+        - "s3:GetBucketPublicAccessBlock"
+        - "s3:GetBucketTagging"
+        - "s3:GetEncryptionConfiguration"
+        - "s3:GetLifecycleConfiguration"
+        - "s3:GetReplicationConfiguration"
+        - "s3:ListAllMyBuckets"
+        - "s3:ListBucket"
+        - "rds:Describe*"
+        - "rds:List*"
+        - "lambda:GetFunction"
+        - "lambda:GetPolicy"
+        - "lambda:ListFunctions"
+        - "kms:Describe*"
+        - "kms:Get*"
+        - "kms:List*"
+        - "cloudtrail:Describe*"
+        - "cloudtrail:Get*"
+        - "cloudtrail:List*"
+        - "cloudtrail:LookupEvents"
+        - "config:Describe*"
+        - "config:Get*"
+        - "config:List*"
+        - "guardduty:Get*"
+        - "guardduty:List*"
+        - "securityhub:Get*"
+        - "securityhub:List*"
+        - "organizations:Describe*"
+        - "organizations:List*"
+      Resource: "*"
+
+request:
+  spec:
+    access_type: read-only
+    duration:
+      duration_hours: 24
+
+expected:
+  score_min: 1
+  score_max: 5
+  must_auto_approve: true

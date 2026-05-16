@@ -174,7 +174,116 @@ TOOLS = [
             },
         },
     },
+    {
+        "name": "score_iam_policy",
+        "description": (
+            "Score an existing AWS IAM policy on a 1-10 risk scale. "
+            "Returns the score, risk factors, and a tier "
+            "(low/medium/high). USE THIS PROACTIVELY whenever you "
+            "generate or modify an IAM policy in any artifact the "
+            "user will deploy — terraform `aws_iam_policy` resources, "
+            "CloudFormation IAM templates, CDK `iam.PolicyDocument`, "
+            "or raw JSON. The user should NOT have to manually pipe "
+            "the policy through any other tool; calling this is the "
+            "agent's responsibility before suggesting `terraform "
+            "apply` / `cdk deploy` / `aws iam create-policy`.\n"
+            "\n"
+            "If score >= 5, surface the risk factors to the user and "
+            "offer to refine the policy. If score >= 8, decline to "
+            "suggest deploying without explicit user confirmation."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "required": ["policy"],
+            "properties": {
+                "policy": {
+                    "type": "object",
+                    "description": (
+                        "The IAM policy document as a JSON object. "
+                        "Must have `Version` and `Statement` keys. "
+                        "Pass the FULL document, not a single statement."
+                    ),
+                },
+                "access_type": {
+                    "type": "string",
+                    "enum": ["read-only", "read-write"],
+                    "default": "read-write",
+                    "description": (
+                        "Hint about the policy's intended access type. "
+                        "Affects suggested-fix prose; doesn't change "
+                        "the raw score."
+                    ),
+                },
+                "context": {
+                    "type": "string",
+                    "description": (
+                        "Optional free-text context: what role this "
+                        "policy is for, what workflow uses it. Helps "
+                        "the audit log + future calibration."
+                    ),
+                },
+            },
+        },
+    },
 ]
+
+
+def _score_for_mcp(args: dict[str, Any]) -> dict[str, Any]:
+    """Score an existing IAM policy via the deterministic engine.
+
+    Wired so agents (Claude Code, Cursor) can score policies they
+    just generated in a terraform/cdk/cfn artifact WITHOUT requiring
+    the human to manually pipe the JSON anywhere. Per user direction
+    2026-05-16: 'devs don't want to manually pipe the json through —
+    it should just happen.'
+    """
+    policy = args.get("policy")
+    if not isinstance(policy, dict):
+        return {
+            "error": "policy is required and must be a JSON object "
+                     "with `Version` and `Statement` keys",
+            "score": None,
+        }
+    access_type = args.get("access_type", "read-write")
+    request_shell = {
+        "spec": {
+            "policy": policy,
+            "access_type": access_type,
+            "duration_hours": 1,
+        },
+    }
+    try:
+        from .review import analyze_policy
+        analysis = analyze_policy(policy, request_shell)
+    except Exception as e:
+        return {
+            "error": f"scoring engine failed: {e}",
+            "score": None,
+        }
+
+    score = analysis.risk_score
+    tier = "high" if score >= 7 else ("medium" if score >= 4 else "low")
+
+    # Agent-facing decision hints in the structured response. The
+    # tool description tells the agent the policy-on-policy rule
+    # (>=5 surface to user, >=8 decline) but we ALSO compute the
+    # recommended action here so a less-careful agent still does
+    # the right thing.
+    if score >= 8:
+        recommended_action = "DECLINE_TO_DEPLOY_WITHOUT_EXPLICIT_CONFIRM"
+    elif score >= 5:
+        recommended_action = "SURFACE_FACTORS_TO_USER"
+    else:
+        recommended_action = "OK_TO_PROCEED"
+
+    return {
+        "score": score,
+        "tier": tier,
+        "factors": list(analysis.risk_factors),
+        "suggestions": list(analysis.suggestions or []),
+        "recommended_action": recommended_action,
+        "context": args.get("context", ""),
+    }
 
 
 def _generate_for_mcp(args: dict[str, Any]) -> dict[str, Any]:
@@ -254,10 +363,13 @@ def _handle_request(req: dict[str, Any]) -> dict[str, Any] | None:
 
     if method == "tools/call":
         tool_name = params.get("name")
-        if tool_name != "generate_iam_policy":
-            return _err(rid, -32601, f"unknown tool: {tool_name}")
         args = params.get("arguments") or {}
-        result_payload = _generate_for_mcp(args)
+        if tool_name == "generate_iam_policy":
+            result_payload = _generate_for_mcp(args)
+        elif tool_name == "score_iam_policy":
+            result_payload = _score_for_mcp(args)
+        else:
+            return _err(rid, -32601, f"unknown tool: {tool_name}")
         # MCP tool result format: { content: [{type: "text", text: "..."}] }
         return _ok(rid, {
             "content": [

@@ -1,0 +1,48 @@
+name: organizations-audit-role-readonly
+description: |
+  AWS Organizations audit role: read-only across the org tree, used by
+  multi-account inventory and compliance tools. Only ListAccounts /
+  Describe* / ListTagsForResource — no SCP attachment, no account
+  creation.
+
+  Expected score: LOW (2-4). Pure read-only against org metadata. Even
+  though organizations: is a sensitive-service namespace, "list which
+  accounts exist" is far below the threshold for human review and is
+  required by every multi-account tool.
+
+  CALIBRATION GAP: scored 6, expected 1-4.
+  Reason: every `organizations:List*` / `Describe*` accumulates score
+  via the "touches sensitive service organizations" rule, regardless of
+  IAM-classified access level. Read-only actions on a sensitive service
+  ARE not the same as write actions. Recommendation: the sensitive-
+  service rule should respect the IAM access-level classification
+  (Read/List vs Write/Permissions-management). Same family as the
+  Wiz/Datadog gap.
+
+  SOURCE: https://docs.aws.amazon.com/organizations/latest/userguide/orgs_reference_iam-syntax.html
+
+policy:
+  Version: "2012-10-17"
+  Statement:
+    - Effect: Allow
+      Action:
+        - "organizations:ListAccounts"
+        - "organizations:ListAccountsForParent"
+        - "organizations:ListOrganizationalUnitsForParent"
+        - "organizations:ListRoots"
+        - "organizations:ListTagsForResource"
+        - "organizations:DescribeAccount"
+        - "organizations:DescribeOrganization"
+        - "organizations:DescribeOrganizationalUnit"
+      Resource: "*"
+
+request:
+  spec:
+    access_type: read-only
+    duration:
+      duration_hours: 1
+
+expected:
+  score_min: 1
+  score_max: 4
+  must_auto_approve: true

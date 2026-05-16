@@ -11,6 +11,17 @@ description: |
   the External ID + named-principal scoping is the documented best
   practice. Should be reviewable but not panic-flagged.
 
+  CALIBRATION GAP: scored 7, expected 1-6.
+  Reason: scorer flags cross-account trust at +7 regardless of whether
+  an sts:ExternalId condition is present. Compare vs.
+  09-cross-account-assume-role-no-externalid.yaml — same score for
+  policies with very different real-world risk. The whole reason
+  External ID exists is to mitigate confused-deputy; not differentiating
+  between the WITH and WITHOUT cases throws away that signal.
+  Recommendation: when Principal.AWS is an external account ARN AND
+  Condition contains sts:ExternalId equality on a non-empty value,
+  reduce the cross-account contribution by ~3 points.
+
   SOURCE: https://aws.amazon.com/blogs/security/how-to-use-trust-policies-with-iam-roles/
 
 policy:

@@ -1,0 +1,42 @@
+name: aws-managed-poweruseraccess-equivalent
+description: |
+  AWS-managed PowerUserAccess policy shape: `* on *` MINUS the iam:,
+  organizations:, account: namespaces. Common short-hand for "developer
+  in a sandbox account who can do everything except change governance."
+  Defined as a NotAction-style policy in the AWS managed catalog.
+
+  Expected score: HIGH (8-10). Even excluding governance services, this
+  grants destruction of every data-plane resource, full network rewrite,
+  full secret access, full Lambda exec, etc. Should never auto-approve.
+
+  SOURCE: https://docs.aws.amazon.com/aws-managed-policy/latest/reference/PowerUserAccess.html
+
+policy:
+  Version: "2012-10-17"
+  Statement:
+    - Effect: Allow
+      NotAction:
+        - "iam:*"
+        - "organizations:*"
+        - "account:*"
+      Resource: "*"
+    - Effect: Allow
+      Action:
+        - "iam:CreateServiceLinkedRole"
+        - "iam:DeleteServiceLinkedRole"
+        - "iam:ListRoles"
+        - "organizations:DescribeOrganization"
+        - "account:ListRegions"
+        - "account:GetAccountInformation"
+      Resource: "*"
+
+request:
+  spec:
+    access_type: read-write
+    duration:
+      duration_hours: 1
+
+expected:
+  score_min: 7
+  score_max: 10
+  must_auto_approve: false

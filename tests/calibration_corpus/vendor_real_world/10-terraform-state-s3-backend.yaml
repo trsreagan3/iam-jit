@@ -1,0 +1,40 @@
+name: terraform-state-s3-backend
+description: |
+  Terraform's recommended IAM policy for an S3 backend role — read/write
+  on a single state object key inside one bucket, plus prefix-restricted
+  ListBucket. The minimum to make `terraform plan/apply` work against a
+  remote state file.
+
+  Expected score: LOW-MEDIUM (2-5). All actions are resource-scoped to
+  ONE state key; ListBucket is condition-scoped by s3:prefix. The
+  blast radius is "one terraform workspace's state file." Should
+  auto-approve.
+
+  SOURCE: https://developer.hashicorp.com/terraform/language/settings/backends/s3
+
+policy:
+  Version: "2012-10-17"
+  Statement:
+    - Effect: Allow
+      Action: "s3:ListBucket"
+      Resource: "arn:aws:s3:::myorg-tfstate-bucket"
+      Condition:
+        StringEquals:
+          "s3:prefix": "myorg-tfstate-bucket/path/to/my/key"
+    - Effect: Allow
+      Action:
+        - "s3:GetObject"
+        - "s3:PutObject"
+      Resource:
+        - "arn:aws:s3:::myorg-tfstate-bucket/path/to/my/key"
+
+request:
+  spec:
+    access_type: read-write
+    duration:
+      duration_hours: 2
+
+expected:
+  score_min: 1
+  score_max: 4
+  must_auto_approve: true

@@ -10,6 +10,17 @@ description: |
   files. The bucket-level ListBucket is condition-scoped by s3:prefix.
   Should auto-approve.
 
+  CALIBRATION GAP: scored 9, expected 1-5.
+  Reason: `s3:*` is flagged as service-wildcard regardless of the
+  Resource scoping. The scorer's `s3:*` rule fires "every action in
+  s3" without checking that Resource is a per-user object prefix
+  (blast radius = one user's home), not the entire bucket. Same family
+  as the dogfooding-findings memo: action-wildcards inside narrowly-
+  resource-scoped statements are over-flagged. Recommendation: when
+  Action contains `service:*` AND Resource is a sub-bucket prefix
+  (object-key path inside one bucket) AND prefix uses a principal
+  variable, downweight the wildcard contribution.
+
   SOURCE: https://docs.aws.amazon.com/IAM/latest/UserGuide/reference_policies_examples_s3_home-directory-console.html
 
 policy:

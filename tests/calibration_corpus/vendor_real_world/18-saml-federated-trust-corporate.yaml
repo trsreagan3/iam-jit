@@ -1,0 +1,40 @@
+name: saml-federated-trust-corporate
+description: |
+  Standard SAML federation trust policy: trusts the corporate IdP's
+  SAML provider in this account, with SAML:aud = AWS sign-in URL.
+  This is the AWS-recommended pattern for SSO from Okta / Azure AD /
+  Google Workspace.
+
+  Expected score: LOW-MEDIUM (2-5). The Federated principal is an
+  in-account SAML provider (the customer onboarded their own IdP),
+  audience is AWS sign-in. The risk surface is "compromise of the
+  corporate IdP" — real, but well outside iam-jit's scope.
+
+  CALIBRATION GAP: scored 7, expected 1-5.
+  Reason: same Federated-ARN-scorer-cant-verify-account rule. Same
+  family as 02/04/05 (GitHub OIDC, EKS IRSA, CircleCI OIDC). The
+  scorer needs an account-context hint to distinguish in-account
+  federation (the normal SSO setup) from cross-account federation.
+
+  SOURCE: https://docs.aws.amazon.com/IAM/latest/UserGuide/id_roles_create_for-idp_saml.html
+
+policy:
+  Version: "2012-10-17"
+  Statement:
+    - Effect: Allow
+      Principal:
+        Federated: "arn:aws:iam::111111111111:saml-provider/myorg-okta-prod"
+      Action: "sts:AssumeRoleWithSAML"
+      Condition:
+        StringEquals:
+          "SAML:aud": "https://signin.aws.amazon.com/saml"
+
+request:
+  spec:
+    access_type: read-write
+    duration:
+      duration_hours: 8
+
+expected:
+  score_min: 1
+  score_max: 5

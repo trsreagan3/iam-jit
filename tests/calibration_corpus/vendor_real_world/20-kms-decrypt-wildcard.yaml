@@ -1,0 +1,33 @@
+name: kms-decrypt-wildcard
+description: |
+  kms:Decrypt on Resource:* — decrypt anything in the account that's
+  encrypted with any KMS key. Common misconfiguration in Lambda
+  execution roles where the developer didn't bother to scope to a
+  specific key ARN.
+
+  Expected score: HIGH (6-9). KMS keys protect every encrypted-at-rest
+  resource in AWS — S3, EBS, RDS, Secrets Manager, SSM Parameter Store,
+  DynamoDB, etc. Decrypt-everything = read-everything-encrypted. Should
+  route to human review.
+
+  SOURCE: https://docs.aws.amazon.com/kms/latest/developerguide/iam-policies.html
+
+policy:
+  Version: "2012-10-17"
+  Statement:
+    - Effect: Allow
+      Action:
+        - "kms:Decrypt"
+        - "kms:DescribeKey"
+      Resource: "*"
+
+request:
+  spec:
+    access_type: read-only
+    duration:
+      duration_hours: 1
+
+expected:
+  score_min: 5
+  score_max: 9
+  must_auto_approve: false

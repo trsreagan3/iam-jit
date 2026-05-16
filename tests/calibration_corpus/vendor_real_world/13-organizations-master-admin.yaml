@@ -1,0 +1,32 @@
+name: organizations-master-admin
+description: |
+  AWS Organizations management-account admin role: full control over
+  the org structure, OU/account creation, and SCP attachment. This is
+  the keys-to-the-kingdom for a multi-account AWS deployment.
+
+  Expected score: HIGH (8-10). organizations:* on Resource:* in the
+  management account effectively controls every member account's IAM
+  posture (via SCPs), can create new accounts under attacker control,
+  and can move accounts between OUs. Must route to human review.
+
+  SOURCE: https://docs.aws.amazon.com/organizations/latest/userguide/orgs_reference_iam-syntax.html
+  (action list reflects the docs' "Required Permissions" section)
+
+policy:
+  Version: "2012-10-17"
+  Statement:
+    - Effect: Allow
+      Action:
+        - "organizations:*"
+      Resource: "*"
+
+request:
+  spec:
+    access_type: read-write
+    duration:
+      duration_hours: 1
+
+expected:
+  score_min: 7
+  score_max: 10
+  must_auto_approve: false

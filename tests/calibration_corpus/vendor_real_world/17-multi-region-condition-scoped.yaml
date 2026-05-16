@@ -1,0 +1,53 @@
+name: multi-region-condition-scoped
+description: |
+  EC2 management restricted to two specific regions via aws:RequestedRegion
+  condition. Common pattern for "ops team can only touch us-east-1 and
+  eu-west-1" — guard rails against accidental resource creation in
+  unsupported regions.
+
+  Expected score: MEDIUM (3-5). The actions include ec2:RunInstances,
+  ec2:TerminateInstances, ec2:StartInstances etc. — high-impact — but
+  the Condition strictly bounds them to two regions. Should NOT be
+  scored as if the condition didn't exist.
+
+  CALIBRATION GAP: scored 8, expected 1-5.
+  Reason: scorer ignores the `aws:RequestedRegion` Condition and
+  treats the statement as if Resource:* were unconditional. This is
+  the same pattern flagged in the dogfooding-findings memo
+  (Condition-scoped wildcards false-positive). Recommendation:
+  condition-scoped statements with `aws:RequestedRegion` /
+  `aws:SourceArn` / `aws:SourceAccount` to a non-wildcard value should
+  reduce the wildcard-resource contribution. The blast radius IS
+  bounded — by the condition, not by the Resource ARN — and the scorer
+  needs to see both halves.
+
+  SOURCE: https://docs.aws.amazon.com/IAM/latest/UserGuide/reference_policies_condition-keys.html
+  (canonical pattern documented in the condition-keys reference)
+
+policy:
+  Version: "2012-10-17"
+  Statement:
+    - Effect: Allow
+      Action:
+        - "ec2:RunInstances"
+        - "ec2:TerminateInstances"
+        - "ec2:StartInstances"
+        - "ec2:StopInstances"
+        - "ec2:RebootInstances"
+        - "ec2:Describe*"
+      Resource: "*"
+      Condition:
+        StringEquals:
+          "aws:RequestedRegion":
+            - "us-east-1"
+            - "eu-west-1"
+
+request:
+  spec:
+    access_type: read-write
+    duration:
+      duration_hours: 4
+
+expected:
+  score_min: 1
+  score_max: 5
