@@ -336,6 +336,68 @@ TOOLS = [
         },
     },
     {
+        "name": "get_reduction_checklist",
+        "description": (
+            "Return the curated checklist of reduction options for "
+            "the guided-reduction walkthrough (per [[ui-guided-"
+            "reduction-pro-tier]]). ~10 high-impact items: 'I don't "
+            "need secrets', 'I don't need RDS', etc. UI users + "
+            "agents who want a structured starting point use this. "
+            "Each item has an id, label, description, and the "
+            "reduction it applies. Pre-checked-by-default items are "
+            "the sensitive-deny set most admins almost certainly "
+            "don't need. NOT exhaustive — surfaces only items whose "
+            "presence/absence shifts the scorer ≥1 point."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {},
+        },
+    },
+    {
+        "name": "apply_reduction_checklist",
+        "description": (
+            "Apply the user's checklist selections to a baseline "
+            "policy + return the reduced result. The high-level "
+            "wrapper over reduce_policy that takes ID-based "
+            "selections from get_reduction_checklist's output. "
+            "Returns the same shape as reduce_policy "
+            "({policy, recipe, summary}) plus selected_item_ids "
+            "for audit-chain accounting. Unknown item IDs are "
+            "silently ignored (forward-compatible with Enterprise-"
+            "plugin checklist customizations)."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "required": ["policy", "selected_item_ids"],
+            "properties": {
+                "policy": {
+                    "type": "object",
+                    "description": "The baseline policy to reduce.",
+                },
+                "selected_item_ids": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": (
+                        "Item IDs from get_reduction_checklist that "
+                        "the user checked (= 'I don't need this'). "
+                        "Each adds a Deny to the policy."
+                    ),
+                },
+                "narrow_to_accounts": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": "Optional 12-digit account IDs to scope to.",
+                },
+                "narrow_to_regions": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": "Optional AWS region codes to scope to.",
+                },
+            },
+        },
+    },
+    {
         "name": "reduce_policy",
         "description": (
             "Apply deterministic reductions to a baseline policy. The "
@@ -773,6 +835,49 @@ def _list_my_templates_for_mcp(args: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def _get_reduction_checklist_for_mcp(args: dict[str, Any]) -> dict[str, Any]:
+    """Return the curated reduction checklist."""
+    from .guided_reduction import get_checklist
+
+    items = get_checklist()
+    return {"items": items, "total": len(items)}
+
+
+def _apply_reduction_checklist_for_mcp(args: dict[str, Any]) -> dict[str, Any]:
+    """Apply checklist selections to a baseline policy."""
+    from .guided_reduction import apply_selections
+
+    policy = args.get("policy")
+    selected = args.get("selected_item_ids")
+    if not isinstance(policy, dict):
+        return {
+            "error": "policy is required and must be a JSON object",
+            "policy": None,
+            "recipe": [],
+        }
+    if not isinstance(selected, list):
+        return {
+            "error": "selected_item_ids must be a list of strings",
+            "policy": None,
+            "recipe": [],
+        }
+    for field in ("narrow_to_accounts", "narrow_to_regions"):
+        val = args.get(field)
+        if val is not None and not isinstance(val, list):
+            return {
+                "error": f"{field} must be a list of strings if provided",
+                "policy": None,
+                "recipe": [],
+            }
+
+    return apply_selections(
+        policy,
+        selected_item_ids=selected,
+        narrow_to_accounts=args.get("narrow_to_accounts"),
+        narrow_to_regions=args.get("narrow_to_regions"),
+    )
+
+
 def _reduce_policy_for_mcp(args: dict[str, Any]) -> dict[str, Any]:
     """Apply deterministic reductions to a baseline policy and return
     the reduced policy + recipe metadata. Pure function: doesn't
@@ -1065,6 +1170,10 @@ def _handle_request(req: dict[str, Any]) -> dict[str, Any] | None:
             result_payload = _find_similar_templates_for_mcp(args)
         elif tool_name == "reduce_policy":
             result_payload = _reduce_policy_for_mcp(args)
+        elif tool_name == "get_reduction_checklist":
+            result_payload = _get_reduction_checklist_for_mcp(args)
+        elif tool_name == "apply_reduction_checklist":
+            result_payload = _apply_reduction_checklist_for_mcp(args)
         else:
             return _err(rid, -32601, f"unknown tool: {tool_name}")
         # MCP tool result format: { content: [{type: "text", text: "..."}] }
