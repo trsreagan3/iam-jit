@@ -958,6 +958,145 @@ TOOLS = [
         },
     },
     {
+        "name": "iam_jit_scope_self_for_task",
+        "description": (
+            "ONE-SHOT 'scope me for this task' composer. The canonical "
+            "agent self-scoping tool per "
+            "[[self-scoping-without-interaction]]. Wires three "
+            "narrowing systems atomically: (1) compatibility check, "
+            "(2) bouncer task scope creation, (3) optional JIT role "
+            "submission. Returns one of five terminal states: "
+            "'scoped' (both bouncer task + JIT role active), "
+            "'scoped_bouncer_only' (bouncer task active; existing "
+            "creds gated), 'needs_human' (scope too broad for "
+            "auto-approval), 'cannot_help' (admin allowlist says "
+            "out-of-scope), 'failed' (validation / concurrent task "
+            "conflict). No user interaction required when the "
+            "declared scope is narrow enough. After task duration "
+            "expires, scope evaporates + baseline restored "
+            "automatically."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "required": ["description", "allow_rules"],
+            "properties": {
+                "description": {
+                    "type": "string",
+                    "description": "Human-readable task description (audit-logged).",
+                },
+                "allow_rules": {
+                    "type": "array",
+                    "description": (
+                        "Positive declaration of what the task needs. "
+                        "Each item: {pattern: 'service:action', "
+                        "arn_scope?, region_scope?, note?}. The "
+                        "implied JIT policy is derived from these rules."
+                    ),
+                    "items": {
+                        "type": "object",
+                        "required": ["pattern"],
+                        "properties": {
+                            "pattern": {"type": "string"},
+                            "arn_scope": {"type": "string"},
+                            "region_scope": {"type": "string"},
+                            "note": {"type": "string"},
+                        },
+                    },
+                },
+                "deny_rules": {
+                    "type": "array",
+                    "description": (
+                        "Explicit denies for the task scope (e.g. "
+                        "'no prod account'). Task-deny wins over "
+                        "global allows."
+                    ),
+                    "items": {
+                        "type": "object",
+                        "required": ["pattern"],
+                        "properties": {
+                            "pattern": {"type": "string"},
+                            "arn_scope": {"type": "string"},
+                            "region_scope": {"type": "string"},
+                            "note": {"type": "string"},
+                        },
+                    },
+                },
+                "duration_minutes": {
+                    "type": "integer",
+                    "default": 30,
+                    "minimum": 1,
+                    "maximum": 1440,
+                },
+                "workload": {
+                    "type": "string",
+                    "enum": [
+                        "k8s_pod", "eks_pod_identity", "ec2_instance",
+                        "lambda_function", "ecs_task", "codebuild_project",
+                        "step_functions", "glue_job", "sagemaker",
+                        "app_runner", "batch_job", "ci_runner",
+                        "agent_local_dev", "human_cli", "other",
+                    ],
+                    "description": (
+                        "Workload classification per the compatibility "
+                        "framework. If a fixed-role workload (k8s_pod, "
+                        "etc.) is declared, the composer skips JIT role "
+                        "submission and returns 'scoped_bouncer_only'."
+                    ),
+                },
+                "target_account_id": {
+                    "type": "string",
+                    "description": (
+                        "12-digit AWS account ID. Required for JIT role "
+                        "submission; bouncer-only scoping works without it."
+                    ),
+                },
+                "target_services": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": "AWS service prefixes (for compatibility check).",
+                },
+                "owner": {
+                    "type": "string",
+                    "description": (
+                        "Per-owner identifier for concurrent task "
+                        "scopes (Slice C). Omit for default-owner slot."
+                    ),
+                },
+                "submit_jit_role": {
+                    "type": "boolean",
+                    "default": True,
+                    "description": (
+                        "When false, skip JIT role submission entirely "
+                        "and return scoped_bouncer_only. Useful for "
+                        "the explicit 'gate me but don't issue a role' "
+                        "path."
+                    ),
+                },
+            },
+        },
+    },
+    {
+        "name": "bouncer_effective_scope",
+        "description": (
+            "Read-only snapshot of what's gating the caller RIGHT "
+            "NOW. Returns the active task (if any) + global rule "
+            "count + composed visibility info. Per the 'return to "
+            "baseline' clarification (2026-05-17): after a task "
+            "ends, has_active_task becomes False and global rules "
+            "ARE the effective scope. Use this to verify your scope "
+            "before making a sensitive call."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "owner": {
+                    "type": "string",
+                    "description": "Owner identifier (omit for default-owner slot).",
+                },
+            },
+        },
+    },
+    {
         "name": "bouncer_recommend_rules",
         "description": (
             "Synthesize a draft ruleset from observed decisions in "
@@ -2065,6 +2204,69 @@ def _bouncer_active_task_for_mcp(args: dict[str, Any]) -> dict[str, Any]:
     return {"active": scope.to_dict()}
 
 
+def _scope_self_for_task_for_mcp(args: dict[str, Any]) -> dict[str, Any]:
+    """Slice E composer. Validates input + delegates to
+    bouncer.self_scoping.scope_self_for_task; returns the unified
+    SelfScopeResult dict."""
+    from .bouncer.self_scoping import scope_self_for_task
+
+    description = args.get("description")
+    if not isinstance(description, str) or not description.strip():
+        return {"error": "description is required and must be a non-empty string"}
+
+    allow_rules = args.get("allow_rules")
+    if not isinstance(allow_rules, list) or not allow_rules:
+        return {"error": "allow_rules is required and must be a non-empty list"}
+    for r in allow_rules:
+        if not isinstance(r, dict) or not r.get("pattern"):
+            return {"error": "allow_rules items must be dicts with a 'pattern' field"}
+
+    deny_rules = args.get("deny_rules")
+    if deny_rules is not None and not isinstance(deny_rules, list):
+        return {"error": "deny_rules must be a list if provided"}
+
+    duration = args.get("duration_minutes", 30)
+    if not isinstance(duration, int) or isinstance(duration, bool):
+        return {"error": "duration_minutes must be an integer"}
+
+    for field in ("workload", "target_account_id", "owner"):
+        val = args.get(field)
+        if val is not None and not isinstance(val, str):
+            return {"error": f"{field} must be a string if provided"}
+
+    target_services = args.get("target_services")
+    if target_services is not None and not isinstance(target_services, list):
+        return {"error": "target_services must be a list if provided"}
+
+    submit_jit_role = args.get("submit_jit_role", True)
+    if not isinstance(submit_jit_role, bool):
+        return {"error": "submit_jit_role must be a boolean if provided"}
+
+    result = scope_self_for_task(
+        description=description,
+        allow_rules=allow_rules,
+        deny_rules=deny_rules,
+        duration_minutes=duration,
+        workload=args.get("workload"),
+        target_account_id=args.get("target_account_id"),
+        target_services=target_services,
+        owner=args.get("owner"),
+        submit_jit_role=submit_jit_role,
+        actor=_bouncer_actor(),
+    )
+    return result.to_dict()
+
+
+def _effective_scope_for_mcp(args: dict[str, Any]) -> dict[str, Any]:
+    """Read-only snapshot of bouncer's current effective scope."""
+    from .bouncer.self_scoping import get_effective_scope
+
+    owner = args.get("owner")
+    if owner is not None and not isinstance(owner, str):
+        return {"error": "owner must be a string if provided"}
+    return get_effective_scope(owner=owner).to_dict()
+
+
 def _bouncer_recommend_rules_for_mcp(args: dict[str, Any]) -> dict[str, Any]:
     """Slice D rule recommender — synthesize a draft ruleset from
     observed decisions in the audit log."""
@@ -2776,6 +2978,10 @@ def _handle_request(req: dict[str, Any]) -> dict[str, Any] | None:
             result_payload = _bouncer_recommend_rules_for_mcp(args)
         elif tool_name == "bouncer_apply_recommendation":
             result_payload = _bouncer_apply_recommendation_for_mcp(args)
+        elif tool_name == "iam_jit_scope_self_for_task":
+            result_payload = _scope_self_for_task_for_mcp(args)
+        elif tool_name == "bouncer_effective_scope":
+            result_payload = _effective_scope_for_mcp(args)
         elif tool_name == "check_iam_jit_compatibility":
             result_payload = _check_compatibility_for_mcp(args)
         elif tool_name == "list_compatibility_catalog":

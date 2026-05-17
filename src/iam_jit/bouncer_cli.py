@@ -782,6 +782,44 @@ def tasks_start(
 # ---------------------------------------------------------------------------
 
 
+@main.command("effective-scope")
+@click.option("--owner", default=None,
+              help="Owner identifier (Slice C); omit for default-owner slot.")
+@click.option("--db", type=click.Path(dir_okay=False), default=None)
+@click.option("--json", "as_json", is_flag=True, default=False)
+def effective_scope_cmd(owner: str | None, db: str | None, as_json: bool) -> None:
+    """Show what's gating the caller RIGHT NOW.
+
+    Per [[self-scoping-without-interaction]] + user direction
+    2026-05-17: returns the composed snapshot of active task (if any)
+    + global rule count. After a task ends, has_active_task becomes
+    False — the proxy has returned to its baseline setting.
+    """
+    from .bouncer.self_scoping import get_effective_scope
+
+    # The CLI passes db via an env override since get_effective_scope
+    # uses BouncerStore() with default-path lookup. We don't have a
+    # plumbed-in store for self_scoping; use env.
+    import os
+    if db:
+        os.environ["IAM_JIT_BOUNCER_DB"] = db
+    scope = get_effective_scope(owner=owner)
+    if as_json:
+        click.echo(json.dumps(scope.to_dict(), indent=2))
+        return
+    if not scope.has_active_task:
+        click.echo("(no active task — at baseline)")
+        click.echo(f"global rules: {scope.global_rule_count}")
+        return
+    click.echo(f"active task:       {scope.active_task_id}")
+    click.echo(f"  description:    {scope.active_task_description}")
+    click.echo(f"  expires:        {scope.active_task_expires_at}")
+    click.echo(f"  owner:          {scope.active_task_owner or '(default)'}")
+    click.echo(f"  allow rules:    {scope.active_task_allow_rule_count}")
+    click.echo(f"  deny rules:     {scope.active_task_deny_rule_count}")
+    click.echo(f"global rules:    {scope.global_rule_count}")
+
+
 @main.command("recommend")
 @click.option("--since", default=None,
               help="ISO-8601 lower bound (e.g. 2026-05-10T00:00:00Z). "
