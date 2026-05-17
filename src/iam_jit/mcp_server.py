@@ -958,6 +958,87 @@ TOOLS = [
         },
     },
     {
+        "name": "bouncer_recommend_rules",
+        "description": (
+            "Synthesize a draft ruleset from observed decisions in "
+            "the bouncer's audit log. Per "
+            "[[bouncer-learn-then-recommend]] + [[apply-little-snitch-"
+            "principles]] Research Assistant pattern: groups observed "
+            "decisions by service:action, detects ARN/region patterns, "
+            "recommends ALLOW rules with the discovered scope, and "
+            "attaches curated 'what does this action do' explanations "
+            "for common actions. Closes the loop from LEARN mode to "
+            "ENFORCE: run learn mode for a few days, call this, "
+            "review + adjust + apply via bouncer_apply_recommendation. "
+            "Pure read; never modifies anything."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "since": {
+                    "type": "string",
+                    "description": "ISO-8601 lower bound. Omit for 'everything in log'.",
+                },
+                "until": {
+                    "type": "string",
+                    "description": "ISO-8601 upper bound. Omit for 'until now'.",
+                },
+                "min_support": {
+                    "type": "integer",
+                    "default": 3,
+                    "minimum": 1,
+                    "description": "Skip groups with fewer than N observed calls.",
+                },
+                "limit": {
+                    "type": "integer",
+                    "default": 10000,
+                    "minimum": 1,
+                    "maximum": 10000,
+                    "description": "Max decisions to read from the audit log.",
+                },
+            },
+        },
+    },
+    {
+        "name": "bouncer_apply_recommendation",
+        "description": (
+            "Apply a SUBSET of recommendations from "
+            "bouncer_recommend_rules as new rules. Each is added "
+            "individually via the same audit-logged path as manual "
+            "adds; plus a `recommendation_applied` config event "
+            "records the batch. Per "
+            "[[agent-friendly-not-bypassable]] Lens A: agents review "
+            "the recommendation list, cherry-pick + modify before "
+            "applying."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "required": ["rules"],
+            "properties": {
+                "rules": {
+                    "type": "array",
+                    "description": (
+                        "List of rule dicts to add. Typically the "
+                        "agent passes a subset of proposed_rule "
+                        "values from bouncer_recommend_rules's "
+                        "response, possibly with adjustments."
+                    ),
+                    "items": {
+                        "type": "object",
+                        "required": ["pattern"],
+                        "properties": {
+                            "pattern": {"type": "string"},
+                            "effect": {"type": "string", "enum": ["allow", "deny"]},
+                            "arn_scope": {"type": "string"},
+                            "region_scope": {"type": "string"},
+                            "note": {"type": "string"},
+                        },
+                    },
+                },
+            },
+        },
+    },
+    {
         "name": "bouncer_task_review",
         "description": (
             "Post-task review summary for a given task_id. Returns "
@@ -1984,6 +2065,104 @@ def _bouncer_active_task_for_mcp(args: dict[str, Any]) -> dict[str, Any]:
     return {"active": scope.to_dict()}
 
 
+def _bouncer_recommend_rules_for_mcp(args: dict[str, Any]) -> dict[str, Any]:
+    """Slice D rule recommender — synthesize a draft ruleset from
+    observed decisions in the audit log."""
+    from .bouncer.recommender import summarize_window, synthesize_rules
+    from .bouncer.store import BouncerStore
+
+    since = args.get("since")
+    until = args.get("until")
+    if since is not None and not isinstance(since, str):
+        return {"error": "since must be a string (ISO-8601) if provided"}
+    if until is not None and not isinstance(until, str):
+        return {"error": "until must be a string (ISO-8601) if provided"}
+
+    min_support = args.get("min_support", 3)
+    if not isinstance(min_support, int) or isinstance(min_support, bool) or min_support < 1:
+        return {"error": "min_support must be a positive integer"}
+
+    limit = args.get("limit", 10000)
+    if not isinstance(limit, int) or isinstance(limit, bool) or limit < 1:
+        return {"error": "limit must be a positive integer"}
+    limit = min(limit, 10000)
+
+    store = BouncerStore()
+    try:
+        all_decisions = store.list_decisions(limit=limit)
+    finally:
+        store.close()
+    decisions = [
+        d for d in all_decisions
+        if (since is None or (d.get("at") and d["at"] >= since))
+        and (until is None or (d.get("at") and d["at"] <= until))
+    ]
+    summary = summarize_window(decisions)
+    recs = synthesize_rules(decisions, min_support=min_support)
+    return {
+        "summary": summary,
+        "recommendations": [r.to_dict() for r in recs],
+        "count": len(recs),
+    }
+
+
+def _bouncer_apply_recommendation_for_mcp(args: dict[str, Any]) -> dict[str, Any]:
+    """Apply a subset of recommended rules. Each addition goes through
+    the normal audit-logged add_rule path; plus a `recommendation_applied`
+    config event records the batch."""
+    from .bouncer.rules import Effect, ProxyRule
+    from .bouncer.store import BouncerStore, InvalidRuleError
+
+    rules_arg = args.get("rules")
+    if not isinstance(rules_arg, list) or not rules_arg:
+        return {"error": "rules is required and must be a non-empty list"}
+
+    actor = _bouncer_actor()
+    added = 0
+    rejected: list[dict[str, Any]] = []
+    store = BouncerStore()
+    try:
+        for entry in rules_arg:
+            if not isinstance(entry, dict):
+                rejected.append({"entry": entry, "error": "not a dict"})
+                continue
+            pattern = entry.get("pattern")
+            if not isinstance(pattern, str) or not pattern.strip():
+                rejected.append({"entry": entry, "error": "pattern required"})
+                continue
+            effect_str = entry.get("effect", "allow")
+            if effect_str not in ("allow", "deny"):
+                rejected.append({"entry": entry, "error": "effect must be allow|deny"})
+                continue
+            rule = ProxyRule(
+                pattern=pattern,
+                effect=Effect(effect_str),
+                arn_scope=entry.get("arn_scope"),
+                region_scope=entry.get("region_scope"),
+                note=entry.get("note") or "applied from bouncer recommendation",
+                origin="recommendation",
+            )
+            try:
+                store.add_rule(rule, actor=actor)
+                added += 1
+            except InvalidRuleError as e:
+                rejected.append({"entry": entry, "error": str(e)})
+        # Top-level batch event
+        store._record_config_event_locked(
+            actor=actor,
+            kind="recommendation_applied",
+            summary=f"applied {added} recommended rule(s) via MCP",
+            detail={"count": added, "rejected_count": len(rejected)},
+        )
+    finally:
+        store.close()
+    return {
+        "applied": added,
+        "rejected": rejected,
+        "audit_event_kind": "recommendation_applied",
+    }
+
+
 def _bouncer_task_review_for_mcp(args: dict[str, Any]) -> dict[str, Any]:
     """Slice C per-task review summary. WB27 HIGH-27-02 closure:
     enforces owner-match so an agent can't review another agent's
@@ -2593,6 +2772,10 @@ def _handle_request(req: dict[str, Any]) -> dict[str, Any] | None:
             result_payload = _bouncer_active_task_for_mcp(args)
         elif tool_name == "bouncer_task_review":
             result_payload = _bouncer_task_review_for_mcp(args)
+        elif tool_name == "bouncer_recommend_rules":
+            result_payload = _bouncer_recommend_rules_for_mcp(args)
+        elif tool_name == "bouncer_apply_recommendation":
+            result_payload = _bouncer_apply_recommendation_for_mcp(args)
         elif tool_name == "check_iam_jit_compatibility":
             result_payload = _check_compatibility_for_mcp(args)
         elif tool_name == "list_compatibility_catalog":

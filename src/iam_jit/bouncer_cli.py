@@ -782,6 +782,123 @@ def tasks_start(
 # ---------------------------------------------------------------------------
 
 
+@main.command("recommend")
+@click.option("--since", default=None,
+              help="ISO-8601 lower bound (e.g. 2026-05-10T00:00:00Z). "
+                   "Omit to read the full audit log.")
+@click.option("--until", default=None,
+              help="ISO-8601 upper bound. Omit for 'until now'.")
+@click.option("--min-support", type=int, default=3, show_default=True,
+              help="Skip groups with fewer than N observed calls.")
+@click.option("--limit", type=int, default=10000, show_default=True,
+              help="Max number of decisions to read from the audit log.")
+@click.option("--db", type=click.Path(dir_okay=False), default=None)
+@click.option("--json", "as_json", is_flag=True, default=False)
+@click.option("--apply", "apply_now", is_flag=True, default=False,
+              help="Apply ALL recommendations as new rules. Skip for review-only.")
+def recommend_cmd(
+    since: str | None,
+    until: str | None,
+    min_support: int,
+    limit: int,
+    db: str | None,
+    as_json: bool,
+    apply_now: bool,
+) -> None:
+    """Synthesize a draft ruleset from observed traffic in a window.
+
+    Per [[bouncer-learn-then-recommend]] + [[apply-little-snitch-principles]]
+    Research Assistant pattern: groups observed decisions by
+    service:action, detects ARN/region patterns, recommends ALLOW
+    rules with the discovered scope, and attaches a curated
+    'what does this action do' note for common actions.
+
+    Review-first by default. Pass `--apply` to bulk-add all
+    recommendations as new rules in one audit-logged batch.
+    """
+    from .bouncer.recommender import summarize_window, synthesize_rules
+
+    with _opened_store(db) as store:
+        all_decisions = store.list_decisions(limit=limit)
+    # Filter by time window (server-side filtering is not available
+    # on list_decisions today; do it here).
+    decisions = [
+        d for d in all_decisions
+        if (since is None or (d.get("at") and d["at"] >= since))
+        and (until is None or (d.get("at") and d["at"] <= until))
+    ]
+
+    summary = summarize_window(decisions)
+    recs = synthesize_rules(decisions, min_support=min_support)
+
+    if as_json:
+        click.echo(json.dumps({
+            "summary": summary,
+            "recommendations": [r.to_dict() for r in recs],
+        }, indent=2))
+        if apply_now and recs:
+            _apply_recommendations_via_cli(db, recs)
+        return
+
+    click.echo(f"# observation window: {summary['window_start']} -> {summary['window_end']}")
+    click.echo(f"# {summary['total_calls']} total calls "
+               f"(allow={summary['allow_count']} deny={summary['deny_count']} prompt={summary['prompt_count']})")
+    click.echo(f"# {summary['distinct_services']} distinct services, "
+               f"{summary['distinct_actions']} distinct actions")
+    click.echo()
+    if not recs:
+        click.echo("(no recommendations — either no observed calls or all groups below "
+                   f"the --min-support threshold of {min_support})")
+        return
+    click.echo(f"## Recommended rules ({len(recs)}):")
+    for r in recs:
+        scope_bits = []
+        if r.proposed_rule.arn_scope:
+            scope_bits.append(f"arn={r.proposed_rule.arn_scope}")
+        if r.proposed_rule.region_scope:
+            scope_bits.append(f"region={r.proposed_rule.region_scope}")
+        scope = f" [{', '.join(scope_bits)}]" if scope_bits else ""
+        click.echo(f"  ALLOW {r.proposed_rule.pattern}{scope}")
+        click.echo(f"    support: {r.support_count} calls "
+                   f"({round(r.hit_rate * 100, 1)}% of window)")
+        if r.arn_pattern_rationale:
+            click.echo(f"    arn:    {r.arn_pattern_rationale}")
+        if r.region_pattern_rationale:
+            click.echo(f"    region: {r.region_pattern_rationale}")
+        if r.research_note:
+            click.echo(f"    note:   {r.research_note['summary']}")
+            click.echo(f"            {r.research_note['typical_use']}")
+        click.echo()
+
+    if apply_now:
+        _apply_recommendations_via_cli(db, recs)
+
+
+def _apply_recommendations_via_cli(db_path: str | None, recs: list) -> None:
+    """Apply all recommendations as rules in a single audit-logged batch."""
+    from .bouncer.store import InvalidRuleError
+
+    with _opened_store(db_path) as store:
+        actor = _current_actor()
+        added = 0
+        for r in recs:
+            try:
+                store.add_rule(r.proposed_rule, actor=actor)
+                added += 1
+            except InvalidRuleError as e:
+                click.echo(f"warning: rejected recommended rule {r.proposed_rule.pattern}: {e}",
+                           err=True)
+        # Log a top-level "recommendations applied" event so the
+        # audit chain shows the batch shape.
+        store._record_config_event_locked(
+            actor=actor,
+            kind="recommendation_applied",
+            summary=f"applied {added} recommended rule(s)",
+            detail={"count": added},
+        )
+    click.echo(f"applied {added} recommended rules.")
+
+
 @main.command("inspect")
 @click.option("--method", required=True, help="HTTP method (GET / POST / ...)")
 @click.option("--host", required=True, help="HTTP Host header value")

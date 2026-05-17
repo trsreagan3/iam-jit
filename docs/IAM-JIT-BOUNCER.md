@@ -325,6 +325,82 @@ call alongside the task that was active. Without task scope, the
 global rules might have allowed the prod call (especially in
 admin-minus-sensitive's permissive baseline).
 
+## Observation-based recommender (Slice D)
+
+Per [[bouncer-learn-then-recommend]] + [[apply-little-snitch-principles]]:
+the bouncer can synthesize a draft ruleset from observed traffic in
+LEARN mode. Closes the loop from "learn-first lean-permissive
+default" to "switch to ENFORCE with a real ruleset" without
+hand-authoring rules from thousands of audit-log lines.
+
+### Workflow
+
+```bash
+# Day 0: install + smart default (admin-minus-sensitive)
+iam-jit-bouncer init
+
+# Day 0-7: run normally; the bouncer records everything in LEARN mode
+
+# Day 7: ask for a recommendation
+iam-jit-bouncer recommend --since 2026-05-10T00:00:00Z
+
+# observation window: 2026-05-10T00:00:00Z -> 2026-05-17T15:14:22Z
+# 847 total calls (allow=847 deny=0 prompt=0)
+# 6 distinct services, 23 distinct actions
+#
+# ## Recommended rules (12):
+#   ALLOW s3:GetObject [arn=arn:aws:s3:::reports-*]
+#     support: 643 calls (75.9% of window)
+#     arn:    8 of 10 observed ARNs (80%) share the prefix 'arn:aws:s3:::reports-'
+#     region: 643 of 643 calls in us-east-1 (100%)
+#     note:   Read object data from an S3 bucket.
+#             Fetching files for analysis, download, or display.
+#   ...
+#
+# Apply as-is? Cherry-pick? Modify? (--apply to bulk-add)
+```
+
+### Research Assistant pattern
+
+Per [[apply-little-snitch-principles]]: every recommended rule
+carries:
+
+- **support** — how many observed calls matched (sort by impact)
+- **ARN-pattern rationale** — e.g. "92% hit `arn:aws:s3:::reports-*`"
+- **region rationale** — e.g. "all calls in us-east-1"
+- **research note** — curated "what does this action do + when is it
+  typical" for ~30 common AWS actions (s3:GetObject, sts:AssumeRole,
+  iam:PassRole, etc.). The agent / admin doesn't have to look up
+  every action to review a recommendation.
+
+### Synthesis algorithm
+
+Deterministic, no LLM ([[scorer-is-ground-truth]]):
+
+1. Group decisions by `(service, action)`.
+2. Skip groups below `--min-support` (default 3) — sparse traffic
+   will default-deny in enforce mode; agent can add explicit rules
+   if needed.
+3. For each remaining group: detect ARN-prefix pattern (full LCP
+   preferred; fall back to majority-cluster); detect dominant
+   region (≥90% in one region).
+4. Recommend an ALLOW rule with the discovered scopes.
+5. Attach the research note if the action is in the curated catalog.
+
+### Apply
+
+Review-first by default. `iam-jit-bouncer recommend --apply` (or
+MCP `bouncer_apply_recommendation`) bulk-adds the recommendations
+as new rules in one batch + writes a `recommendation_applied`
+config event to the audit chain so post-hoc review can spot
+which batch each rule came from.
+
+### MCP tools
+
+- `bouncer_recommend_rules` — synthesize + return draft
+- `bouncer_apply_recommendation` — apply a subset (agent reviews,
+  cherry-picks, modifies, applies)
+
 ## Agent-friendly, not bypassable
 
 Per [[agent-friendly-not-bypassable]]: the bouncer is configurable
