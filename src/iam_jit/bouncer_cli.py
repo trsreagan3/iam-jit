@@ -84,6 +84,16 @@ def main() -> None:
     """
 
 
+# Per [[proxy-smart-defaults-and-task-scope]] Slice A: the protective
+# default applied when `init` is run on an empty store without an
+# explicit --preset. Chosen because it's the closest match to "works
+# for most people" — denies the sensitive set (secrets, IAM admin,
+# billing, audit-infra destruction) while allowing everything else,
+# so day-one users get protection without breaking common workflows.
+# Per [[safety-mode-lean-permissive]]: blocks are rare and surgical.
+DEFAULT_PRESET_NAME = "admin-minus-sensitive"
+
+
 @main.command("init")
 @click.option(
     "--db",
@@ -96,37 +106,87 @@ def main() -> None:
     "preset_name",
     type=click.Choice(sorted(PRESETS.keys()), case_sensitive=False),
     default=None,
-    help="Apply a curated baseline ruleset at init time.",
+    help="Apply a specific curated baseline ruleset at init time.",
 )
-def init_cmd(db: str | None, preset_name: str | None) -> None:
+@click.option(
+    "--no-default",
+    is_flag=True,
+    default=False,
+    help=(
+        "Skip the protective default. Use this if you want an empty "
+        "ruleset (typically because you'll build rules manually or "
+        "from learn-mode captures)."
+    ),
+)
+def init_cmd(db: str | None, preset_name: str | None, no_default: bool) -> None:
     """Initialize the bouncer's local SQLite state.
 
-    Pass `--preset NAME` to seed with a curated baseline (run
-    `iam-jit-bouncer presets list` to see options). Presets are
-    audit-logged at apply time so the audit chain captures what
-    starting point you chose.
+    On a fresh install (empty rule store), iam-jit-bouncer applies a
+    PROTECTIVE DEFAULT BASELINE (`admin-minus-sensitive`) so day-one
+    users get protection against secret reads + IAM admin + billing +
+    audit-infra destruction without any further config. Per
+    [[proxy-smart-defaults-and-task-scope]]: the bouncer should be
+    useful out of the box, not "wait for the user to curate rules."
+
+    Opt out with `--no-default` (e.g. when you intend to build rules
+    from learn-mode captures or apply a different preset). Pass
+    `--preset NAME` to use a specific named baseline instead.
+
+    Re-running `init` on a store that ALREADY has rules is a no-op
+    for the default (your existing rules are preserved); `--preset
+    NAME` still appends.
     """
     with _opened_store(db) as store:
         click.echo(f"bouncer initialized at: {store.db_path}")
+        actor = _current_actor()
+        existing_rule_count = len(store.list_rules())
+
         if preset_name:
+            # Explicit preset — apply regardless of existing rules.
             preset = get_preset(preset_name)
-            assert preset is not None  # narrowed by click.Choice
-            added = 0
-            actor = _current_actor()
-            for rule in preset.rules:
-                try:
-                    store.add_rule(rule, actor=actor)
-                    added += 1
-                except InvalidRuleError as e:
-                    # Should not happen — presets are author-curated.
-                    # But if it does, log + skip the bad rule.
-                    click.echo(f"warning: preset rule rejected: {e}", err=True)
-            store.record_preset_applied(
-                preset_name=preset.name, rules_added=added, actor=actor
+            assert preset is not None
+            _apply_preset_to_store(store, preset, actor)
+            click.echo(f"applied preset '{preset.name}': {len(preset.rules)} rules added")
+        elif no_default:
+            click.echo("(skipped protective default per --no-default)")
+        elif existing_rule_count > 0:
+            click.echo(
+                f"(store already has {existing_rule_count} rules; "
+                "skipping protective default. Pass --preset NAME to "
+                "append a specific baseline.)"
             )
-            click.echo(f"applied preset '{preset.name}': {added} rules added")
+        else:
+            # Fresh install — apply the protective default. This is
+            # the [[proxy-smart-defaults-and-task-scope]] change.
+            preset = get_preset(DEFAULT_PRESET_NAME)
+            assert preset is not None
+            _apply_preset_to_store(store, preset, actor)
+            click.echo(
+                f"applied protective default '{preset.name}': "
+                f"{len(preset.rules)} rules. Deny on secrets/IAM-admin/"
+                "billing/audit-infra; allow everything else. Run "
+                "`iam-jit-bouncer rules list` to inspect; "
+                "`iam-jit-bouncer init --no-default` to skip."
+            )
+
         click.echo(f"current rules: {len(store.list_rules())}")
         click.echo(f"current decisions: {store.count_decisions()}")
+
+
+def _apply_preset_to_store(store: BouncerStore, preset, actor: str) -> int:
+    """Apply a preset's rules to the store + record the audit event.
+    Returns the count of rules actually added."""
+    added = 0
+    for rule in preset.rules:
+        try:
+            store.add_rule(rule, actor=actor)
+            added += 1
+        except InvalidRuleError as e:
+            click.echo(f"warning: preset rule rejected: {e}", err=True)
+    store.record_preset_applied(
+        preset_name=preset.name, rules_added=added, actor=actor
+    )
+    return added
 
 
 # ---------------------------------------------------------------------------

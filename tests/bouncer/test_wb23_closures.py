@@ -442,17 +442,20 @@ def test_cli_presets_show(runner: CliRunner) -> None:
 
 
 def test_cli_presets_apply_audit_logged(runner: CliRunner, db_path: str) -> None:
-    runner.invoke(main, ["init", "--db", db_path])
+    # `--no-default` keeps the audit log slim; this test asserts on a
+    # specific preset-apply event, not on every preset event ever.
+    runner.invoke(main, ["init", "--db", db_path, "--no-default"])
     result = runner.invoke(
         main, ["presets", "apply", "deny-iam-admin", "--db", db_path]
     )
     assert result.exit_code == 0
-    # Verify the preset_applied event was written
+    # Verify the deny-iam-admin event specifically (regardless of any
+    # other preset events that may exist from the smart default).
     store = BouncerStore(db_path=db_path)
     try:
         events = store.list_config_events(kind_filter="preset_applied")
-        assert len(events) == 1
-        assert events[0]["detail"]["preset_name"] == "deny-iam-admin"
+        deny_iam_events = [e for e in events if e["detail"]["preset_name"] == "deny-iam-admin"]
+        assert len(deny_iam_events) == 1
     finally:
         store.close()
 
