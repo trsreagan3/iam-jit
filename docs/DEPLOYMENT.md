@@ -588,6 +588,38 @@ Wait until `not_after` passes (or set a short duration for testing). The expiry 
 | Expiry never runs | EventBridge schedule disabled on `IAMJitFunction`; `aws lambda list-event-source-mappings` or check the SAM-generated rule |
 | Function URL returns 503 | Phase 1.6 stub — Phase 2 fills in the real handler |
 
+## Docker (ibounce local proxy)
+
+Convenience image for running the **ibounce** local AWS-API proxy without installing Python on the host. Published to GHCR on every push to `main` and on every `v*` tag.
+
+```bash
+docker pull ghcr.io/trsreagan3/ibounce:latest
+
+# Run with your host AWS credentials mounted in.
+docker run --rm -it \
+  -v "$HOME/.aws:/home/ibounce/.aws:ro" \
+  -v "$HOME/.iam-jit:/home/ibounce/.iam-jit" \
+  -e AWS_PROFILE=default \
+  -p 127.0.0.1:8767:8767 \
+  ghcr.io/trsreagan3/ibounce:latest \
+    run --host 0.0.0.0 --port 8767 --i-know-this-binds-externally
+```
+
+Then point your AWS SDK at it:
+
+```bash
+export AWS_ENDPOINT_URL=http://127.0.0.1:8767
+aws sts get-caller-identity   # flows through ibounce, gets logged + scored
+```
+
+**A few intentional things about this image:**
+
+- It is a **packaging convenience**, not a different product. Same binary as `pip install iam-jit`, same opt-in `ibounce version-check`, no phone-home, no telemetry.
+- The image does **not** include the AWS CLI. Mount `~/.aws` from the host so `AWS_PROFILE` / SSO sessions work.
+- The audit DB lives at `~/.iam-jit/bouncer/state.db` inside the container. Mount `~/.iam-jit` from the host (as above) to persist your rules + decision log across `docker run` invocations.
+- The container binds **loopback only by default** for the same security reasons the binary refuses external binds without an explicit acknowledgement flag. To make the proxy reachable from outside the container you need both `-p 127.0.0.1:8767:8767` (host → container port forward) *and* `--host 0.0.0.0 --i-know-this-binds-externally` (binary refuses external bind otherwise). The example above publishes only on the host loopback, which is the sane default.
+- The image runs as a non-root user `ibounce` (UID 10001).
+
 ## Tearing down
 
 ```bash

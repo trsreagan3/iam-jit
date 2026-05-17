@@ -1,0 +1,64 @@
+# Keep the Docker build context lean. The image only needs runtime
+# artifacts (pyproject.toml + src/ + README.md). Anything below is
+# either a development side-effect, a non-runtime asset, or large
+# content we don't want shipped in image layers.
+
+# VCS + editor noise
+.git
+.github
+.gitignore
+.gitattributes
+.idea
+.vscode
+.DS_Store
+*.swp
+
+# Virtualenvs + caches
+.venv
+venv
+env
+__pycache__
+*.py[cod]
+*$py.class
+.pytest_cache
+.mypy_cache
+.ruff_cache
+.coverage
+htmlcov
+.tox
+
+# Build artifacts (would otherwise bloat the context)
+build
+dist
+*.egg-info
+.eggs
+
+# AWS / SAM / Localstack local state
+.aws-sam
+.localstack
+
+# Test + e2e suites — never executed inside the runtime image
+tests
+docker-compose.dev.yml
+docker-compose.test.yml
+
+# Documentation + marketing assets — not needed at runtime
+docs
+docs-site
+landing-site
+recordings
+examples
+comic-scripts
+
+# Reference data + repo-local stores (not consumed by the binary)
+library
+requests
+schemas
+mcp-server
+github-action
+tools
+
+# Lockfile / env files
+.env
+.env.local
+node_modules
