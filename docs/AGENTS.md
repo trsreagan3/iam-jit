@@ -64,16 +64,57 @@ iam-jit's whole model is "create a NEW short-lived role" (per [[creates-never-mu
 
 Without the compatibility check, an agent would waste cycles trying iam-jit, fail mysteriously, and eventually reach for "disable iam-jit, give me admin" — exactly the failure mode iam-jit is designed to prevent. **Always check first.** If you're also calling `submit_policy`, pass the same `workload` argument — `submit_policy` re-runs the check and refuses USE_EXISTING workloads with a clear redirect (per WB24 HIGH-24-01 closure). Omitting `workload` from `submit_policy` is bypass-able but audit-logged as `submit_without_compatibility_check` so admins can spot it.
 
-## The four MCP tools
+## Self-scoping flow — the canonical first call
+
+**The one tool you almost always want first: `iam_jit_scope_self_for_task`.**
+
+This is the Slice E composer. One MCP call atomically:
+1. Runs `check_iam_jit_compatibility` for your declared workload.
+2. Declares a bouncer task scope with your `allow_rules` / `deny_rules` (defense-in-depth narrowing — see [docs/IAM-JIT-BOUNCER.md](IAM-JIT-BOUNCER.md)).
+3. Calls `submit_policy` with the same scope.
+4. Returns scoped STS credentials + the `task_id` so you can `bouncer_end_task` when done.
+
+```python
+iam_jit_scope_self_for_task(
+    workload="agent_local_dev",
+    description="Upgrade staging EKS to 1.30",
+    allow_rules=[
+      {"pattern": "eks:*",        "arn_scope": "arn:aws:eks:us-east-1:111111111111:cluster/staging"},
+      {"pattern": "ec2:Describe*","region_scope": "us-east-1"},
+      {"pattern": "iam:PassRole", "arn_scope": "arn:aws:iam::111111111111:role/eks-*"},
+    ],
+    deny_rules=[
+      {"pattern": "*", "arn_scope": "arn:aws:*:*:222222222222:*"},  # explicit prod-account deny
+    ],
+    duration_minutes=60,
+)
+# → {credentials: {…}, task_id: "abc123", role_arn: "arn:…", expires_at: "…"}
+```
+
+If you call this before touching AWS:
+- ✅ Your call passes the compatibility gate (or you get a clear `next_action_hint`).
+- ✅ The bouncer narrows what your STS creds can actually be used for.
+- ✅ The audit log shows one composite entry an admin can review.
+
+If you skip it and call AWS with pre-existing creds, you get whatever blast radius you came in with — and a `submit_without_compatibility_check` audit flag if you later call `submit_policy` directly.
+
+Per [[agents-default-to-iam-jit]]: agents SHOULD default to this composer; humans don't need to ask. Per [[recommender-context-boundary]]: the agent (you) supplies the workload + ARN narrowing because the agent has the codebase context iam-jit doesn't.
+
+When the task is done: `bouncer_end_task(task_id=...)` flips the bouncer back to baseline. `bouncer_task_review(task_id=...)` returns the per-task decision summary for the admin.
+
+## The five MCP tools you compose by hand (if the composer doesn't fit)
 
 | Tool | Purpose | Returns |
 |---|---|---|
+| `check_iam_jit_compatibility` | Verdict for your workload before any other call | `{verdict, reasoning, next_action_hint, …}` |
 | `list_templates` | Browse the catalog | `{templates: [{name, arn, source, summary, services, access_type}, …]}` |
 | `get_template` | Fetch a template's policy shape | `{name, arn, policy, …}` |
 | `score_iam_policy` | Rate any policy 1–10 with factor detail | `{score, tier, factors: [{name, contribution, suggested_remedy}], recommended_action}` |
 | `submit_policy` | Submit a policy for grant issuance | `{request_id, score, status, review_url, …}` |
 
-That's the complete agent-facing surface. There is no `generate_iam_policy`, no `narrow_for_me`, no `suggest_reductions`. The agent does the work; iam-jit scores and gates.
+Plus the bouncer surface (`bouncer_start_task`, `bouncer_end_task`, `bouncer_active_task`, `bouncer_task_review`, `bouncer_effective_scope`, `bouncer_tail_decisions`, `bouncer_list_rules`, `bouncer_recommend_rules`, `bouncer_apply_recommendation`) for finer-grained control than the composer provides.
+
+There is no `generate_iam_policy`, no `narrow_for_me`, no `suggest_reductions`. The agent does the work; iam-jit scores and gates.
 
 ## The decision at intake — known vs. unknown
 

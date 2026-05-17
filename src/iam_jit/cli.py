@@ -725,10 +725,10 @@ def allowlist_group() -> None:
     declare 'for account X + workload Y, always use existing role Z'
     or 'for account A, iam-jit cannot help.'
 
-    Per [[agent-friendly-not-bypassable]] Lens B: every mutation is
-    audit-logged to the bouncer's `config_events` table. Agents can
-    READ the allowlist via the `list_compatibility_overrides` MCP
-    tool but can NOT mutate it — only admins, via this CLI.
+    Every mutation is audit-logged to the bouncer's
+    `config_events` table. Agents can READ the allowlist via the
+    `list_compatibility_overrides` MCP tool but can NOT mutate it
+    — only admins, via this CLI.
     """
 
 
@@ -891,15 +891,13 @@ def allowlist_show(rule_id: str) -> None:
 def bouncer_pointer(ctx: click.Context) -> None:
     """Pointer to the standalone `iam-jit-bouncer` binary.
 
-    Per [[four-products-one-brand]] the bouncer is a separate product
-    with its own entry point. This stub catches users who type
-    `iam-jit bouncer ...` and gently redirects them. WB23 LOW-23-04
-    closure.
+    The bouncer is a separate product with its own entry point;
+    this stub catches users who type `iam-jit bouncer ...` and
+    redirects them to the right binary.
     """
     extra = " " + " ".join(ctx.args) if ctx.args else " --help"
     click.echo(
-        "iam-jit-bouncer is shipped as a separate binary "
-        "(per [[four-products-one-brand]]).",
+        "iam-jit-bouncer is a separate binary. Use it directly:",
         err=True,
     )
     click.echo(f"Run:   iam-jit-bouncer{extra}", err=True)
@@ -955,6 +953,73 @@ def mcp_server_cmd() -> None:
 # ---------------------------------------------------------------------------
 # doctor — operational health checks for various integrations.
 # ---------------------------------------------------------------------------
+
+
+@main.group("license")
+def license_group() -> None:
+    """Inspect the iam-jit license + user-count cap (#161).
+
+    Free tier: up to 25 users, no license file required.
+    Pro / Team / Enterprise: install a signed license at
+    `~/.iam-jit/license.json` (or `$IAM_JIT_LICENSE_FILE`) to raise
+    the cap. The cap is enforced ONLY on new user creation; existing
+    users keep working.
+
+    No phone home, no telemetry, no licensing call-back.
+    """
+
+
+@license_group.command("show")
+def license_show() -> None:
+    """Show the active license + current cap. Exit 0 always."""
+    from . import license as _license_mod
+
+    try:
+        lic = _license_mod.load_license()
+    except _license_mod.LicenseInvalidError as e:
+        click.secho("license: REJECTED", fg="red", bold=True)
+        click.echo(f"  reason:    {e}")
+        click.echo(f"  fallback:  Free tier (cap {_license_mod.FREE_TIER_MAX_USERS})")
+        sys.exit(0)
+    if lic is None:
+        click.secho(
+            f"license: not installed (Free tier, cap {_license_mod.FREE_TIER_MAX_USERS} users)",
+            fg="yellow",
+        )
+        click.echo(
+            "  to raise the cap, install a signed license at "
+            f"{os.environ.get(_license_mod.LICENSE_PATH_ENV) or '~/.iam-jit/license.json'}"
+        )
+        sys.exit(0)
+    click.secho(f"license: ACTIVE ({lic.tier})", fg="green", bold=True)
+    click.echo(f"  issued_to:  {lic.issued_to}")
+    click.echo(f"  license_id: {lic.license_id}")
+    click.echo(f"  max_users:  {lic.max_users}")
+    click.echo(f"  issued_at:  {lic.issued_at.isoformat()}")
+    click.echo(f"  expires_at: {lic.expires_at.isoformat()} ({lic.days_until_expiry} days)")
+
+
+@license_group.command("verify")
+@click.argument("path", type=click.Path(exists=True, dir_okay=False))
+def license_verify(path: str) -> None:
+    """Verify a license file at PATH and print a structured report.
+
+    Use this BEFORE moving a license file into place so a bad signature
+    or expired license is caught with a clear error rather than a
+    silent Free-tier fallback at server-start time."""
+    from . import license as _license_mod
+
+    try:
+        lic = _license_mod.load_license(path=path)
+    except _license_mod.LicenseInvalidError as e:
+        click.secho(f"INVALID: {e}", fg="red", bold=True, err=True)
+        sys.exit(1)
+    if lic is None:
+        click.secho("license file is empty or unreadable", fg="red", bold=True, err=True)
+        sys.exit(1)
+    click.secho(f"VALID — tier={lic.tier} max_users={lic.max_users}", fg="green", bold=True)
+    click.echo(f"issued_to:  {lic.issued_to}")
+    click.echo(f"expires_at: {lic.expires_at.isoformat()}")
 
 
 @main.group("doctor")
@@ -1315,10 +1380,9 @@ def doctor_compatibility(
           --target-account-id 123456789012 \\
           --target-service s3 --target-service dynamodb
 
-    Per [[recommender-context-boundary]]: this is workload
-    classification only — iam-jit does NOT inspect source code or
-    external systems. The agent / human declares the workload; the
-    checker uses it.
+    This is workload classification only — iam-jit does NOT inspect
+    source code or external systems. The agent / human declares the
+    workload; the checker uses it.
     """
     # `json` is already imported at module top; alias is fine
     # for clarity but redundant. Use module-level json directly.

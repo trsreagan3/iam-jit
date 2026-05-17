@@ -15,17 +15,22 @@ Open corpus, open methodology, open commit history.
 
 ---
 
-## Three modes — pick the one that fits
+## Four products — pick the one that fits
 
-| Mode | What it is | Who it's for | Install |
-|---|---|---|---|
-| **[iam-risk-score](#iam-risk-score)** | A 1–10 risk score for any AWS IAM policy in <100ms. API + CLI + GitHub Action. Free for the first 100 requests/month. | CI pipelines, IDE plugins, anyone who wants a verdict before granting permissions. | `pip install iam-risk-score` |
-| **[iam-jit local](#iam-jit-local)** *(new)* | Local-only safety layer between your AI agent and AWS. Runs on your laptop. Zero SaaS dependency. Your AWS credentials never leave your machine. | Solo devs / individual admins who want Claude bounded. | `pip install iam-jit && iam-jit serve --local` (90 seconds) |
-| **[iam-jit self-host](#iam-jit-self-host)** | Full JIT-IAM provisioner: time-bound roles, scoring, approval workflow, Slack approval bot, OIDC SSO (Google + Okta), audit trail, auto-revocation — running in your own AWS account. | Teams + enterprises with shared audit + multi-user + compliance needs. | `git clone` + `sam deploy --guided` |
+Per [[four-products-one-brand]]: iam-jit is four separate products that share a scorer + brand, not "four modes of one product." Different audiences, different friction profiles, different monetization. Most users of products 1–3 will never become product-4 customers — that's fine, they're separate markets.
 
-All three share the same deterministic scoring engine. Open source under Apache 2.0.
+| # | Product | What it is | Who it's for | Install | Ships in |
+|---|---|---|---|---|---|
+| 1 | **[iam-risk-score](#iam-risk-score)** | 1–10 risk score for any AWS IAM policy in <100ms. API + CLI + GitHub Action. Free for the first 100 requests/month. | CI pipelines, IDE plugins, anyone who wants a verdict before granting permissions. | `pip install iam-risk-score` | **v1.0** |
+| 2 | **[iam-jit-bouncer](#iam-jit-bouncer)** | Local proxy that gates every AWS API call against rules. Defense-in-depth over IAM scoping. v1.0 ships agent-cooperative MCP enforcement; transparent HTTP-proxy interception in v1.1. | Solo devs / admins who want an additional gate on top of role scoping; agents that want defense-in-depth. | `pip install iam-jit && iam-jit-bouncer init` | **v1.0** (CLI + MCP); v1.1 (HTTP proxy) |
+| 3 | **[iam-jit local](#iam-jit-local)** | Local-only safety layer between your AI agent and AWS. Runs on your laptop. Zero SaaS dependency. Your AWS credentials never leave your machine. | Solo devs / individual admins who want Claude bounded. | `pip install iam-jit && iam-jit serve --local` | **v1.0** |
+| 4 | **[iam-jit self-host](#iam-jit-self-host)** | Full JIT-IAM provisioner: time-bound roles, scoring, approval workflow, Slack approval bot, OIDC SSO (Google + Okta), audit trail, auto-revocation — running in your own AWS account. | Teams + enterprises with shared audit + multi-user + compliance needs. | `git clone` + `sam deploy --guided` | **v1.0** |
 
-> **No multi-tenant hosted SaaS.** iam-jit-the-company does not operate a shared infrastructure tier — running a tool that holds trust roles into many customer AWS accounts would create a SolarWinds-style blast radius we refuse to host. iam-risk-score.com (the stateless scorer) is hosted because no credentials are involved; iam-jit itself runs in your AWS account. Dedicated single-tenant managed Enterprise contracts are available for large customers at high-fee — but each deployment is fully isolated, not shared.
+All four share the same deterministic scoring engine. Open source under Apache 2.0.
+
+> **No multi-tenant hosted SaaS.** iam-jit-the-company does not operate a shared infrastructure tier — running a tool that holds trust roles into many customer AWS accounts would create a SolarWinds-style blast radius we refuse to host. iam-risk-score.com (the stateless scorer) is hosted because no credentials are involved; the other three products run on your laptop or in your own AWS account. Dedicated single-tenant managed Enterprise contracts are available for large customers at high-fee — but each deployment is fully isolated, not shared.
+
+> **What "ships in v1.0" vs "v1.1" means.** Products 1, 3, and 4 are complete in v1.0. Product 2 (iam-jit-bouncer) ships its CLI + MCP enforcement surfaces in v1.0 — that path is what agents calling `iam_jit_scope_self_for_task` use today. The transparent HTTP-proxy interception (`iam-jit-bouncer run` redirecting `AWS_ENDPOINT_URL` traffic) is post-launch v1.1. See [docs/IAM-JIT-BOUNCER.md §"What works today vs what's coming"](docs/IAM-JIT-BOUNCER.md#what-works-today-vs-whats-coming) for the precise split.
 
 ---
 
@@ -105,6 +110,58 @@ Honest answer: **complementary, not a replacement.** They solve adjacent problem
 **Use iam-risk-score for** pre-grant risk scoring with a numeric scale, CI gates that fail on score thresholds, agent iteration loops where the per-factor breakdown drives narrowing, or any review that needs to happen offline / outside AWS. The open calibration corpus is reusable — you can extend it, audit it, contribute to it.
 
 **Together** they catch different things: Access Analyzer tells you "this policy permits cross-account access you didn't intend"; iam-risk-score tells you "this policy scores 8/10 because it grants `iam:PassRole` on `*` without a Condition." Either alone leaves the other gap.
+
+---
+
+## `iam-jit-bouncer`
+
+> Local proxy that gates every AWS API call against rules. Defense-in-depth over IAM role scoping — when the boundary the JIT role draws is correct but the call TARGET was wrong (prompt injection, agent misstep, typo on a destructive call), the bouncer catches it.
+>
+> **In v1.0**: agent-cooperative MCP enforcement + CLI rule/task/audit management. **In v1.1**: transparent HTTP-proxy interception via `AWS_ENDPOINT_URL`. See [docs/IAM-JIT-BOUNCER.md](docs/IAM-JIT-BOUNCER.md) for the stage split.
+
+### 30-second example (v1.0 — MCP path)
+
+```bash
+$ pip install iam-jit
+$ iam-jit-bouncer init     # smart default: admin-minus-sensitive baseline rules
+✓ initialized at ~/.iam-jit/bouncer/state.db
+✓ applied 17 protective rules (block secrets reads, billing changes, audit-infra destruction)
+
+$ iam-jit-bouncer rules list
+# id  effect  pattern                       arn_scope
+# 1   deny    secretsmanager:Get*           *
+# 2   deny    iam:Delete*                   *
+# ...
+
+$ iam-jit-bouncer tasks start \
+    --description "staging-eks-upgrade" \
+    --allow "eks:*@arn:aws:eks:us-east-1:111:cluster/staging" \
+    --deny  "*@arn:aws:*:*:222222222222:*" \
+    --duration-minutes 60
+✓ task abc123 active until 2026-05-17T16:00:00Z
+```
+
+Then the agent (Claude Code, Cursor, etc.) calls `iam_jit_scope_self_for_task` via MCP and gets scoped STS credentials gated by the task scope above.
+
+### Why this exists separately from `iam-jit local`
+
+IAM is coarse. A role granted `s3:GetObject` on `bucket/*` can call `GetObject` on every key in the bucket for the session's lifetime — even when the prompt-injected agent meant to read ONE file. The bouncer adds an in-process question: **is THIS specific call allowed right now?**
+
+- **iam-jit local** issues NARROW credentials.
+- **iam-jit-bouncer** denies calls that fall outside the declared task scope EVEN WHEN the credentials would otherwise allow them.
+
+Two-layer defense; either layer alone leaves the other gap.
+
+### What ships in v1.0 vs v1.1
+
+- **v1.0 (now)**: CLI for rule + per-task-scope + audit management; MCP enforcement via `iam_jit_scope_self_for_task` composer; observation-based rule recommender. Agents that call the MCP composer before AWS get scoped creds + an audit log. Agents that bypass it use whatever creds they already had.
+- **v1.1 (post-launch)**: `iam-jit-bouncer run` HTTP proxy that intercepts SDK traffic via `AWS_ENDPOINT_URL=http://127.0.0.1:8767` — makes enforcement uncircumventable for processes that didn't go through the MCP composer.
+
+### Trust model
+
+Same as iam-jit local: trust the binary. Zero dependency on iam-jit-the-company's infrastructure — no phone home, no telemetry, no licensing call-back. Per [[self-host-zero-billing-dependency]].
+
+See [docs/IAM-JIT-BOUNCER.md](docs/IAM-JIT-BOUNCER.md) for full CLI + MCP reference, task-scope composition rules, and the recommender workflow.
 
 ---
 
@@ -318,7 +375,9 @@ See [docs/AGENTS.md](docs/AGENTS.md) for the agent-driven reduction-loop pattern
 
 ## Documentation
 
-- **[docs/AGENTS.md](docs/AGENTS.md)** — the agent-driven reduction loop in detail (known-vs-unknown intake, four MCP tools, three reduction axes, anti-patterns, human-user fallback)
+- **[docs/AGENTS.md](docs/AGENTS.md)** — the agent-driven reduction loop in detail (self-scoping flow, MCP tool catalog, three reduction axes, anti-patterns, human-user fallback)
+- **[docs/IAM-JIT-BOUNCER.md](docs/IAM-JIT-BOUNCER.md)** — bouncer reference: stages, CLI, per-task scopes, audit chain, recommender, MCP-CLI parity table
+- **[docs/recipes/agent-safety-mode.md](docs/recipes/agent-safety-mode.md)** — read-only-default contract for agents
 - **[docs/GETTING-STARTED.md](docs/GETTING-STARTED.md)** — first-time deployment walkthrough
 - **[docs/DEPLOYMENT.md](docs/DEPLOYMENT.md)** — full production-deployment guide; pilot deployment profile; cost-control levers
 - **[docs/recipes/](docs/recipes/)** — patterns + integration recipes (agent + Hoop examples, Slack setup, EKS template roles, terraform workflow)
@@ -332,10 +391,11 @@ See [docs/AGENTS.md](docs/AGENTS.md) for the agent-driven reduction-loop pattern
 
 ## Status
 
-- **iam-risk-score**: launched. Stable schema; CLI + API + GitHub Action shipped. 1,489 / 1,489 AWS-managed-policy corpus pass rate.
-- **iam-jit local**: in active development; targeted for v1.0 launch.
-- **iam-jit self-host**: in active development; targeted for v1.0 launch with multi-provider OIDC, Slack approval bot, template browser, evolving preset library, agent-driven reduction loop, MFA propagation, safety modes. No multi-tenant hosted SaaS planned; Enterprise customers either self-host or contract for dedicated-managed single-tenant.
-- **MCP server**: v0.3.0 — adds `list_templates`, `get_template`, `submit_policy` to the existing `score_iam_policy`. Legacy `generate_iam_policy` is deprecated (removed in 0.4.0) — replaced by the agent-driven workflow per [docs/AGENTS.md](docs/AGENTS.md).
+- **Product 1 — iam-risk-score**: shipped. Stable schema; CLI + API + GitHub Action live. 1,489 / 1,489 AWS-managed-policy corpus pass rate.
+- **Product 2 — iam-jit-bouncer**: v1.0 ships CLI rule/task/audit management + MCP enforcement surface (`iam_jit_scope_self_for_task` composer + `bouncer_*` tools). Transparent HTTP-proxy interception (`iam-jit-bouncer run`) is v1.1.
+- **Product 3 — iam-jit local**: v1.0 ready. `iam-jit serve --local` + read-only-default + region/account scoping + 1h TTL + local SQLite audit.
+- **Product 4 — iam-jit self-host**: v1.0 ready with multi-provider OIDC (Google + Okta), Slack approval bot, template browser, evolving preset library, agent-driven reduction loop, MFA propagation, two safety modes, applicability framework, per-account LLM policy. No multi-tenant hosted SaaS planned; Enterprise customers either self-host or contract for dedicated-managed single-tenant.
+- **MCP server**: v0.3.0 — adds `list_templates`, `get_template`, `submit_policy`, `check_iam_jit_compatibility`, the `bouncer_*` tool family, and `iam_jit_scope_self_for_task` to the existing `score_iam_policy`. Legacy `generate_iam_policy` is deprecated (removed in 0.4.0) — replaced by the agent-driven workflow per [docs/AGENTS.md](docs/AGENTS.md).
 
 **What's NOT in iam-jit** (intentional, not deferred):
 - Natural-language policy synthesis from a free-form prompt. We measured the approach + removed it when it didn't deliver — any iam-jit-side LLM-as-AUTHOR faces the same structural limit (no codebase context). iam-jit is scorer + catalog + gate; the agent (with codebase context + LLM) does the policy authoring.

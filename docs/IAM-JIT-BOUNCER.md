@@ -5,22 +5,55 @@ over IAM role scoping — when the boundary the JIT role draws is correct
 but the call TARGET was wrong (prompt injection, agent misstep, typo on
 a destructive call), the bouncer catches it.
 
-Per [[iam-jit-bouncer]]: doesn't exist productized elsewhere. Per
-[[four-products-one-brand]]: separate product, separate binary
-(`iam-jit-bouncer`).
+## What works today vs what's coming
 
-## Status
+> **READ THIS BEFORE FOLLOWING ANY WORKFLOW BELOW.** The bouncer
+> ships in stages. Sections later in this doc describe both Stage 1
+> (available now) and Stage 2 (post-launch). Where a workflow
+> requires Stage 2, the heading is tagged **[v1.1: HTTP proxy]** so
+> you can tell what's usable today from what's coming.
 
-**Stage 1 (this release):** Foundation — data model, rule matcher,
-decision logic, SQLite store, request parser, CLI for rule + log
-management + dry-run decisions.
+### Stage 1 — Foundation (v1.0, available now)
 
-**Stage 2 (next release):** HTTP proxy server (the actual runtime
-that intercepts `AWS_ENDPOINT_URL`-redirected calls), interactive
-PROMPT-mode UX.
+What ships:
 
-**Stage 3 (Enterprise):** Multi-machine fleet rules, web UI,
-anomaly detection.
+- **CLI rule management** (`iam-jit-bouncer rules add|list|remove`)
+- **Per-task scopes** (`iam-jit-bouncer tasks start|active|end|review`)
+  for declaring narrow allow/deny rules for one specific job +
+  ending back to baseline
+- **Dry-run decision evaluator** (`iam-jit-bouncer decide`) — ask
+  "what would the bouncer do if it saw this request?" without
+  actually intercepting anything
+- **Audit chain** (`iam-jit-bouncer logs tail` + per-task review)
+  records decisions + config changes in a local SQLite chain
+- **Observation-based rule recommender** (`iam-jit-bouncer
+  recommend`) synthesizes a draft ruleset from observed decisions
+- **Compatibility allowlist** (`iam-jit allowlist`) for per-account /
+  per-workload overrides
+- **MCP server tools** — full agent-discoverable API for everything
+  above; see [docs/AGENTS.md](AGENTS.md) for the canonical agent
+  flow. **In v1.0 the MCP path is the real-time enforcement
+  surface**: agents that call `iam_jit_scope_self_for_task` before
+  touching AWS get scoped credentials + an audit log. Agents that
+  bypass it use whatever creds they already had.
+
+What is NOT yet in Stage 1: an HTTP proxy that transparently
+intercepts AWS SDK traffic. In v1.0 enforcement is
+**agent-cooperative** through the MCP path; transparent network-
+level interception lands in Stage 2.
+
+### Stage 2 — HTTP proxy (v1.1, post-launch)
+
+A localhost HTTP proxy (`iam-jit-bouncer run`) that intercepts SDK
+traffic via `AWS_ENDPOINT_URL=http://127.0.0.1:8767`, evaluates each
+request against the same rule store Stage 1 already manages, and
+enforces deny / prompt verdicts at the network layer. Makes
+enforcement uncircumventable for processes that didn't go through
+the MCP composer.
+
+### Stage 3 — Enterprise (post-v1.1)
+
+Multi-machine fleet rules, web UI, anomaly detection.
 
 ## Why a local proxy
 
@@ -335,11 +368,22 @@ hand-authoring rules from thousands of audit-log lines.
 
 ### Workflow
 
+> **The "Day 0-7: run normally" step requires the Stage 2 HTTP
+> proxy [v1.1: HTTP proxy] to capture traffic transparently.** In
+> v1.0, decisions only land in the audit log when (a) an agent calls
+> the MCP tools (see [docs/AGENTS.md](AGENTS.md)) or (b) the admin
+> runs `iam-jit-bouncer decide ... --record` for each call. Once
+> Stage 2 ships, this workflow becomes the canonical Day-0/Day-7
+> path; for now the recommender works on any audit-log entries that
+> exist, but seeding them requires one of those two paths.
+
 ```bash
 # Day 0: install + smart default (admin-minus-sensitive)
 iam-jit-bouncer init
 
-# Day 0-7: run normally; the bouncer records everything in LEARN mode
+# Day 0-7 [v1.1: HTTP proxy]: run normally; the bouncer records
+# everything in LEARN mode. (In v1.0, see callout above for how to
+# seed the audit log via MCP or decide --record.)
 
 # Day 7: ask for a recommendation
 iam-jit-bouncer recommend --since 2026-05-10T00:00:00Z
@@ -422,6 +466,21 @@ without shelling out:
 | `iam-jit-bouncer presets apply ...` | `bouncer_apply_preset` |
 | `iam-jit-bouncer events tail` | `bouncer_tail_events` |
 | `iam-jit-bouncer logs tail` | `bouncer_tail_decisions` |
+| `iam-jit-bouncer tasks start ...` | `bouncer_start_task` |
+| `iam-jit-bouncer tasks active` | `bouncer_active_task` |
+| `iam-jit-bouncer tasks end ...` | `bouncer_end_task` |
+| `iam-jit-bouncer tasks review ...` | `bouncer_task_review` |
+| `iam-jit-bouncer effective-scope` | `bouncer_effective_scope` |
+| `iam-jit-bouncer recommend ...` | `bouncer_recommend_rules` + `bouncer_apply_recommendation` |
+| (composer — no CLI equivalent) | `iam_jit_scope_self_for_task` |
+
+The `iam_jit_scope_self_for_task` composer (Slice E) is the
+canonical agent-side entry point: one MCP call atomically declares
+a bouncer task scope, requests a JIT role with the same narrowing,
+and returns scoped STS credentials + the task_id. Most agents
+should call this BEFORE touching AWS rather than threading
+`bouncer_start_task` + `submit_policy` by hand. See
+[docs/AGENTS.md](AGENTS.md) for the full agent flow.
 
 Curated presets (`bouncer_list_presets`) give agents vetted starting
 points instead of authoring rules from scratch:

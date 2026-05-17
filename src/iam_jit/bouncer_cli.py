@@ -71,8 +71,8 @@ def main() -> None:
 
     Defense-in-depth over IAM role scoping. Sits between local AWS
     SDK calls and AWS endpoints; gates each call against rules.
-    Per [[creates-never-mutates]] never modifies IAM. Per
-    [[no-hosted-saas]] runs entirely on your machine.
+    Never modifies IAM (creates-never-mutates invariant). Runs
+    entirely on your machine — no phone home, no SaaS dependency.
 
     Foundation commands (this slice):
       init    — initialize SQLite state at ~/.iam-jit/bouncer/
@@ -472,7 +472,10 @@ def logs_tail(limit: int, decision: str | None, db: str | None, as_json: bool) -
     help="What ENFORCE does when no rule matches (default: deny).",
 )
 @click.option("--db", type=click.Path(dir_okay=False), default=None)
-@click.option("--record/--no-record", default=False, help="Persist decision to audit log.")
+@click.option("--record/--no-record", default=None,
+              help="Persist decision to audit log. Default: True when a "
+                   "task is active (so `tasks review` has data); False "
+                   "otherwise. Override either way with the flag.")
 def decide_cmd(
     service: str,
     action: str,
@@ -481,7 +484,7 @@ def decide_cmd(
     mode: str,
     default_policy: str,
     db: str | None,
-    record: bool,
+    record: bool | None,
 ) -> None:
     """Dry-run: ask the bouncer what it WOULD do for a hypothetical
     request, without forwarding it to AWS. Useful for sanity-checking
@@ -526,13 +529,28 @@ def decide_cmd(
             )
         if active_task is not None:
             click.echo(f"active task: {active_task.task_id} ({active_task.description[:60]})")
-        if record:
+        # WB30 UAT-A H1 + UAT-B B1: when a task is active, default
+        # --record to True so `tasks review` actually shows the
+        # decisions made under that scope. Outside an active task,
+        # keep the conservative no-record default for true dry-runs.
+        # Caller can still flip either way explicitly with the flag.
+        if record is None:
+            effective_record = active_task is not None
+        else:
+            effective_record = record
+        if effective_record:
             store.record_decision(
                 record_obj,
                 matched_rule_id=matched_rule_id,
                 task_id=active_task.task_id if active_task is not None else None,
             )
             click.echo("(recorded to audit log)")
+        elif active_task is None:
+            click.echo(
+                "(not recorded — pass --record to seed the audit log, "
+                "or start a task with `iam-jit-bouncer tasks start` to "
+                "auto-record decisions while it's active)"
+            )
 
 
 # ---------------------------------------------------------------------------
@@ -601,10 +619,32 @@ def tasks_active(owner: str | None, db: str | None, as_json: bool) -> None:
     if as_json:
         click.echo(json.dumps(active.to_dict(), indent=2))
         return
+    # WB30 UAT-B M1 closure: surface a relative expiry countdown so
+    # the user sees "expires in 17m" not just an ISO timestamp.
+    import datetime as _dt
+    expires_in_str = ""
+    try:
+        exp_dt = _dt.datetime.fromisoformat(active.expires_at.replace("Z", "+00:00"))
+        now = _dt.datetime.now(_dt.UTC)
+        delta = exp_dt - now
+        secs = int(delta.total_seconds())
+        if secs <= 0:
+            expires_in_str = "  (EXPIRED)"
+        else:
+            hours, rem = divmod(secs, 3600)
+            mins = rem // 60
+            if hours:
+                expires_in_str = f"  (in {hours}h {mins}m)"
+            else:
+                expires_in_str = f"  (in {mins}m {secs % 60}s)"
+            if secs < 600:
+                expires_in_str += "  ⚠ EXPIRING SOON"
+    except (ValueError, AttributeError):
+        pass
     click.echo(f"task_id:      {active.task_id}")
     click.echo(f"description:  {active.description}")
     click.echo(f"started_at:   {active.started_at}")
-    click.echo(f"expires_at:   {active.expires_at}")
+    click.echo(f"expires_at:   {active.expires_at}{expires_in_str}")
     click.echo(f"started_by:   {active.started_by}")
     click.echo(f"allow rules:  {len(active.allow_rules)}")
     for r in active.allow_rules:
@@ -624,12 +664,85 @@ def tasks_active(owner: str | None, db: str | None, as_json: bool) -> None:
         click.echo(f"  - {r.pattern}{scope}")
 
 
+def _resolve_task_selector(store, selector: str) -> str | None:
+    """WB30 UAT-B H1 closure: accept exact id, id-prefix, OR
+    description-prefix when the user references a task on
+    end/show/review.
+
+    Matching order (most-specific wins):
+    1. Exact task_id match.
+    2. Unique task_id prefix match (≥4 chars).
+    3. Unique description-prefix match (≥4 chars, case-insensitive).
+
+    Returns the resolved task_id, or None if no unique match exists.
+    Ambiguous matches return None too (caller surfaces a helpful
+    "did you mean..." message).
+    """
+    if not selector or len(selector.strip()) < 1:
+        return None
+    sel = selector.strip()
+
+    exact = store.get_task(sel)
+    if exact is not None:
+        return sel
+
+    candidates = []
+    try:
+        all_tasks = store.list_tasks(limit=500)
+    except Exception:
+        return None
+    sel_lower = sel.lower()
+    for t in all_tasks:
+        if len(sel) >= 4 and t.task_id.startswith(sel):
+            candidates.append(("id", t.task_id, t.description))
+            continue
+        desc = (t.description or "").lower()
+        if len(sel) >= 4 and desc.startswith(sel_lower):
+            candidates.append(("desc", t.task_id, t.description))
+    if len(candidates) == 1:
+        return candidates[0][1]
+    return None
+
+
+def _resolve_or_die(store, selector: str) -> str:
+    """As _resolve_task_selector, but click-exit on miss/ambiguity
+    with a helpful diagnostic message."""
+    resolved = _resolve_task_selector(store, selector)
+    if resolved is not None:
+        return resolved
+    try:
+        all_tasks = store.list_tasks(limit=500)
+    except Exception:
+        click.echo(f"no task matching {selector!r}", err=True)
+        sys.exit(1)
+    matches = [
+        t for t in all_tasks
+        if t.task_id.startswith(selector)
+        or (t.description or "").lower().startswith(selector.lower())
+    ]
+    if len(matches) > 1:
+        click.echo(
+            f"selector {selector!r} matches {len(matches)} tasks; "
+            "be more specific:", err=True,
+        )
+        for t in matches[:10]:
+            click.echo(f"  {t.task_id[:12]}  {t.description[:60]}", err=True)
+    else:
+        click.echo(f"no task matching {selector!r}", err=True)
+    sys.exit(1)
+
+
 @tasks_group.command("show")
-@click.argument("task_id")
+@click.argument("selector")
 @click.option("--db", type=click.Path(dir_okay=False), default=None)
-def tasks_show(task_id: str, db: str | None) -> None:
-    """Show full details for one task scope."""
+def tasks_show(selector: str, db: str | None) -> None:
+    """Show full details for one task scope.
+
+    SELECTOR can be the exact task_id, a unique 4+ char id-prefix,
+    or a unique 4+ char description-prefix.
+    """
     with _opened_store(db) as store:
+        task_id = _resolve_or_die(store, selector)
         scope = store.get_task(task_id)
     if scope is None:
         click.echo(f"no task with id {task_id!r}", err=True)
@@ -638,15 +751,19 @@ def tasks_show(task_id: str, db: str | None) -> None:
 
 
 @tasks_group.command("review")
-@click.argument("task_id")
+@click.argument("selector")
 @click.option("--db", type=click.Path(dir_okay=False), default=None)
 @click.option("--json", "as_json", is_flag=True, default=False)
-def tasks_review(task_id: str, db: str | None, as_json: bool) -> None:
-    """Post-task review summary: total decisions, allow/deny breakdown,
-    list of denied calls. Slice C of [[proxy-smart-defaults-and-task-scope]]:
-    after-action report for a task scope — admins use this to see
-    whether the scope was right-sized."""
+def tasks_review(selector: str, db: str | None, as_json: bool) -> None:
+    """Post-task review summary: total decisions, allow/deny
+    breakdown, list of denied calls. Admins use this to see whether
+    the scope was right-sized.
+
+    SELECTOR can be the exact task_id, a unique 4+ char id-prefix,
+    or a unique 4+ char description-prefix.
+    """
     with _opened_store(db) as store:
+        task_id = _resolve_or_die(store, selector)
         summary = store.task_review_summary(task_id)
     if not summary:
         click.echo(f"no task with id {task_id!r}", err=True)
@@ -670,14 +787,19 @@ def tasks_review(task_id: str, db: str | None, as_json: bool) -> None:
 
 
 @tasks_group.command("end")
-@click.argument("task_id")
+@click.argument("selector")
 @click.option("--reason", default="manually ended",
               help="End reason recorded in audit log.")
 @click.option("--db", type=click.Path(dir_okay=False), default=None)
-def tasks_end(task_id: str, reason: str, db: str | None) -> None:
-    """End the named task. The deletion-style audit event is written
-    via config_events (kind=task_ended)."""
+def tasks_end(selector: str, reason: str, db: str | None) -> None:
+    """End the named task.
+
+    SELECTOR can be the exact task_id, a unique 4+ char id-prefix,
+    or a unique 4+ char description-prefix. The audit event is
+    written via config_events (kind=task_ended).
+    """
     with _opened_store(db) as store:
+        task_id = _resolve_or_die(store, selector)
         ok = store.end_task(task_id, actor=_current_actor(), end_reason=reason)
     if not ok:
         click.echo(
@@ -791,10 +913,9 @@ def tasks_start(
 def effective_scope_cmd(owner: str | None, db: str | None, as_json: bool) -> None:
     """Show what's gating the caller RIGHT NOW.
 
-    Per [[self-scoping-without-interaction]] + user direction
-    2026-05-17: returns the composed snapshot of active task (if any)
-    + global rule count. After a task ends, has_active_task becomes
-    False — the proxy has returned to its baseline setting.
+    Returns the composed snapshot of active task (if any) + global
+    rule count. After a task ends, has_active_task becomes False —
+    the proxy has returned to its baseline setting.
     """
     from .bouncer.self_scoping import get_effective_scope
 
@@ -856,14 +977,13 @@ def recommend_cmd(
 ) -> None:
     """Synthesize a draft ruleset from observed traffic in a window.
 
-    Per [[bouncer-learn-then-recommend]] + [[apply-little-snitch-principles]]
-    Research Assistant pattern: groups observed decisions by
-    service:action, detects ARN/region patterns, recommends ALLOW
-    rules with the discovered scope, and attaches a curated
-    'what does this action do' note for common actions.
+    Groups observed decisions by service:action, detects ARN/region
+    patterns, recommends ALLOW rules with the discovered scope, and
+    attaches a curated 'what does this action do' note for common
+    actions.
 
-    Review-first by default. Pass `--apply` to add recommendations
-    as new rules. Combine with `--apply-only` to cherry-pick which
+    Review-first by default. Pass --apply to add recommendations as
+    new rules. Combine with --apply-only to cherry-pick which
     patterns to apply.
     """
     from .bouncer.recommender import (
