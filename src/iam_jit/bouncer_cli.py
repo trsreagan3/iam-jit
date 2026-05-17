@@ -27,6 +27,12 @@ from .bouncer.decisions import (
     decide,
 )
 from .bouncer.presets import PRESETS, get_preset, list_preset_names
+from .bouncer.profile_naming import (
+    AUTO_NAME_SENTINEL as _AUTO_NAME_SENTINEL,
+    resolve_profile_name,
+    suggest_profile_name_for_prompts_answer,
+    suggest_profile_name_for_recommender,
+)
 from .bouncer.request_parser import parse_request
 from .bouncer.rules import Effect, ProxyRule, RuleSet
 from .bouncer.store import BouncerStore, InvalidRuleError, default_db_path
@@ -966,17 +972,18 @@ def effective_scope_cmd(owner: str | None, db: str | None, as_json: bool) -> Non
               help="By default, task-scoped (Slice C one-off session) "
                    "decisions are excluded. Pass this to include them.")
 @click.option("--save-as-profile", "save_as_profile", default=None,
-              metavar="NAME",
-              help="Persist the recommendations as a NEW profile named NAME "
-                   "in ~/.iam-jit/bouncer/profiles.yaml. Profile holds the "
-                   "synthesized rules as `allow_rules`, so `--profile NAME` "
-                   "on future `run` invocations applies them. Refuses to "
-                   "overwrite an existing profile sourced from an org URL.")
-# TODO(#226 profile-auto-naming): per the profile-auto-naming memo,
-# NAME should become OPTIONAL — when omitted, the CLI either prompts
-# the user on a TTY or auto-generates from request shape / timestamp.
-# Separate scope; do not implement here. Same TODO for `prompts answer
-# --kind profile --target` below.
+              is_flag=False, flag_value=_AUTO_NAME_SENTINEL,
+              metavar="[NAME]",
+              help="Persist the recommendations as a NEW profile in "
+                   "~/.iam-jit/bouncer/profiles.yaml. NAME is optional "
+                   "(#226 profile-auto-naming): pass `--save-as-profile` "
+                   "alone for a context-suggested name (TTY: prompts; "
+                   "non-TTY: auto-generates as "
+                   "`auto-YYYY-MM-DD-{services}-{shape}` + prints to stderr). "
+                   "Pass `--save-as-profile NAME` for an explicit name. "
+                   "Refuses to overwrite an existing profile sourced from "
+                   "an org URL; collision-avoids local names via -2/-3 "
+                   "suffix.")
 @click.option("--profile-description", default=None,
               help="With --save-as-profile, the description string written "
                    "into the new profile. Falls back to a generated summary.")
@@ -1075,9 +1082,23 @@ def recommend_cmd(
     if apply_now:
         _apply_recommendations_via_cli(db, recs, apply_patterns)
 
-    if save_as_profile:
+    if save_as_profile is not None:
+        # #226 profile-auto-naming: resolve the actual name from the
+        # CLI value via the shared resolver. `_AUTO_NAME_SENTINEL`
+        # (set by Click when the user passed `--save-as-profile` with
+        # NO value) triggers suggest+TTY-prompt-or-auto-gen; any other
+        # value is treated as an explicit name (still collision-avoided).
+        from .bouncer.profiles import load_profiles
+        suggested = suggest_profile_name_for_recommender(recs, summary)
+        try:
+            existing = load_profiles()
+        except Exception:
+            existing = {}
+        resolved_name = resolve_profile_name(
+            save_as_profile, suggested, taken=existing.keys(),
+        )
         _save_recommendations_as_profile(
-            recs, save_as_profile,
+            recs, resolved_name,
             description=profile_description,
             apply_patterns=apply_patterns,
         )
@@ -1626,11 +1647,16 @@ def prompts_show_cmd(prompt_id: int, db: str | None) -> None:
                    "a local profile, not org-distributed). ignore = "
                    "mark answered without side effect.")
 @click.option("--target", default=None,
-              help="With --kind profile: the profile name to append to.")
-# TODO(#226 profile-auto-naming): per the profile-auto-naming memo,
-# --target should become OPTIONAL — on a TTY prompt the user for a
-# name (default to auto-gen); non-TTY auto-generate from prompt
-# context. Separate scope; do not implement here.
+              is_flag=False, flag_value=_AUTO_NAME_SENTINEL,
+              metavar="[NAME]",
+              help="With --kind profile: the profile name to append to. "
+                   "NAME is optional (#226 profile-auto-naming): pass "
+                   "`--target` alone to auto-name from the prompt's "
+                   "service+action (TTY: prompts; non-TTY: auto-generates "
+                   "as `auto-YYYY-MM-DD-prompt-{ID}-{service}-{action}` + "
+                   "prints to stderr). If the chosen name doesn't yet "
+                   "exist, the profile is created (as a local profile) "
+                   "before the allow_rule is appended.")
 @click.option("--db", type=click.Path(dir_okay=False), default=None)
 def prompts_answer_cmd(
     prompt_id: int, kind: str, target: str | None, db: str | None,
@@ -1643,8 +1669,19 @@ def prompts_answer_cmd(
         upsert_profile,
     )
     actor = _current_actor()
-    if kind == "profile" and not target:
-        click.secho("--kind profile requires --target NAME", fg="red", err=True)
+    # #226 profile-auto-naming: `target` is now optional for --kind
+    # profile. If the operator passed neither `--target` nor
+    # `--target NAME`, that's still an error (need to opt in to the
+    # auto-name path explicitly, otherwise a typo'd command would
+    # silently create a brand-new profile). If `--target` was passed
+    # alone, Click set target = _AUTO_NAME_SENTINEL and we'll resolve
+    # the name once we have the prompt context below.
+    if kind == "profile" and target is None:
+        click.secho(
+            "--kind profile requires --target [NAME] (use --target alone "
+            "for an auto-generated name).",
+            fg="red", err=True,
+        )
         sys.exit(2)
 
     with _opened_store(db) as store:
@@ -1701,18 +1738,32 @@ def prompts_answer_cmd(
             )
         elif kind == "profile":
             profs = load_profiles()
+            # #226 profile-auto-naming: resolve `target` against the
+            # prompt's context. If `target == _AUTO_NAME_SENTINEL` the
+            # user passed `--target` with no value → suggest from the
+            # prompt + TTY-or-auto. Explicit names still get
+            # collision-avoided so a typo'd duplicate doesn't clobber.
+            suggested = suggest_profile_name_for_prompts_answer(prompt)
+            target = resolve_profile_name(
+                target, suggested, taken=profs.keys(),
+            )
+            # If the chosen name doesn't exist, this answer CREATES a
+            # new local profile (the auto-name path expects this; even
+            # the explicit-name path may land here when the operator
+            # typed a fresh name they intend as a new profile).
             if target not in profs:
-                click.secho(
-                    f"profile {target!r} not found", fg="red", err=True,
-                )
-                sys.exit(1)
-            prof = profs[target]
-            if prof.source != "local":
-                click.secho(
-                    f"profile {target!r} is sourced from {prof.source!r} "
-                    f"and is read-only", fg="red", err=True,
-                )
-                sys.exit(2)
+                prof = Profile(name=target, description=(
+                    f"created by `ibounce prompts answer #{prompt_id}` "
+                    f"(#226 profile-auto-naming)"
+                ))
+            else:
+                prof = profs[target]
+                if prof.source != "local":
+                    click.secho(
+                        f"profile {target!r} is sourced from {prof.source!r} "
+                        f"and is read-only", fg="red", err=True,
+                    )
+                    sys.exit(2)
             new_rule = ProfileAllowRule(
                 pattern=f"{prompt['service']}:{prompt['action']}",
                 arn_scope=prompt["arn"],

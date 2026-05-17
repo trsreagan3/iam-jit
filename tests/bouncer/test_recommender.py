@@ -994,3 +994,272 @@ def test_low_28_04_datetime_window_parses_mixed_tz() -> None:
     assert len(out_offset) == 2
     # Both windows must select identical decisions
     assert [d["at"] for d in out_z] == [d["at"] for d in out_offset]
+
+
+# ---------------------------------------------------------------------------
+# #226 profile-auto-naming — helper unit tests + recommend CLI integration
+#
+# Mirrors kbouncer's auto-naming tests (kbounce commit cd0b1f7,
+# `internal/cli/recommend_test.go`). Same five resolution cases, same
+# collision-avoid case, plus the recommend-CLI integration that ties
+# the helpers into Click + the profile-store side effect.
+# ---------------------------------------------------------------------------
+
+
+def test_suggest_profile_name_for_recommender_uses_top_services() -> None:
+    """Top 1-2 services sorted by support DESC end up in the name.
+    Shape suffix is `readonly` when every recommendation is a Read.
+    """
+    from iam_jit.bouncer.profile_naming import (
+        suggest_profile_name_for_recommender,
+    )
+    from iam_jit.bouncer.recommender import RuleRecommendation
+    from iam_jit.bouncer.rules import Effect, ProxyRule
+
+    recs = [
+        RuleRecommendation(
+            proposed_rule=ProxyRule(
+                pattern="s3:GetObject",
+                effect=Effect.ALLOW,
+                arn_scope=None, region_scope=None, note="",
+                origin="recommender",
+            ),
+            support_count=10, hit_rate=0.5,
+            arn_pattern_rationale=None,
+            region_pattern_rationale=None,
+            research_note=None,
+        ),
+        RuleRecommendation(
+            proposed_rule=ProxyRule(
+                pattern="ec2:DescribeInstances",
+                effect=Effect.ALLOW,
+                arn_scope=None, region_scope=None, note="",
+                origin="recommender",
+            ),
+            support_count=5, hit_rate=0.25,
+            arn_pattern_rationale=None,
+            region_pattern_rationale=None,
+            research_note=None,
+        ),
+    ]
+    summary = {"window_end": "2026-05-17T17:00:00Z"}
+    name = suggest_profile_name_for_recommender(recs, summary)
+    # Top service (s3) first, second (ec2), date pulled from window_end.
+    assert name == "auto-2026-05-17-s3-ec2-readonly"
+    # Cap + charset invariants
+    assert len(name) <= 63
+    assert all(ch.islower() or ch.isdigit() or ch == "-" for ch in name)
+
+
+def test_suggest_profile_name_for_recommender_uses_session_shape_for_writes() -> None:
+    """If ANY rec is a non-read action, suffix flips from readonly to
+    session (more honest about blast radius)."""
+    from iam_jit.bouncer.profile_naming import (
+        suggest_profile_name_for_recommender,
+    )
+    from iam_jit.bouncer.recommender import RuleRecommendation
+    from iam_jit.bouncer.rules import Effect, ProxyRule
+
+    recs = [
+        RuleRecommendation(
+            proposed_rule=ProxyRule(
+                pattern="s3:GetObject", effect=Effect.ALLOW,
+                arn_scope=None, region_scope=None, note="",
+                origin="recommender"),
+            support_count=10, hit_rate=0.5,
+            arn_pattern_rationale=None,
+            region_pattern_rationale=None,
+            research_note=None),
+        RuleRecommendation(
+            proposed_rule=ProxyRule(
+                pattern="s3:PutObject", effect=Effect.ALLOW,
+                arn_scope=None, region_scope=None, note="",
+                origin="recommender"),
+            support_count=2, hit_rate=0.1,
+            arn_pattern_rationale=None,
+            region_pattern_rationale=None,
+            research_note=None),
+    ]
+    name = suggest_profile_name_for_recommender(
+        recs, {"window_end": "2026-05-17T00:00:00Z"})
+    assert name.endswith("-session")
+    assert "s3" in name
+
+
+def test_suggest_profile_name_for_prompts_answer_uses_prompt_context() -> None:
+    """Shape: auto-{YYYY-MM-DD}-prompt-{ID}-{service}-{action}.
+    Date = today (the answer event). Audit-cadence (c): no ARN in
+    name; only the (service, action) pair the audit-log already has.
+    """
+    from iam_jit.bouncer.profile_naming import (
+        suggest_profile_name_for_prompts_answer,
+    )
+    prompt = {
+        "id": 42, "service": "s3", "action": "PutObject",
+        "arn": "arn:aws:s3:::secret-bucket/secret-key",  # MUST NOT leak
+    }
+    name = suggest_profile_name_for_prompts_answer(prompt)
+    assert name.startswith("auto-")
+    assert "prompt-42" in name
+    assert "s3" in name
+    assert "putobject" in name
+    # audit-cadence (c): the resource-bucket name does NOT leak.
+    assert "secret-bucket" not in name
+    assert "secret-key" not in name
+    assert len(name) <= 63
+
+
+def test_resolve_profile_name_explicit_wins(monkeypatch) -> None:
+    """Case 1: explicit arg returned regardless of TTY state."""
+    from iam_jit.bouncer.profile_naming import resolve_profile_name
+    # Even if the TTY-detect would say "yes prompt", an explicit name
+    # bypasses the prompt entirely.
+    chosen = resolve_profile_name(
+        "my-explicit-name",
+        suggested="auto-2026-05-17-s3-readonly",
+        taken=set(),
+        is_interactive=lambda: True,
+        input_fn=lambda _p: pytest.fail(
+            "input_fn must not be called when explicit name given"),
+    )
+    assert chosen == "my-explicit-name"
+
+
+def test_resolve_profile_name_tty_prompts_suggested() -> None:
+    """Case 2: TTY mode — prompt is shown; empty input → suggested
+    default. Test seam: input_fn returns "" to simulate Enter."""
+    from iam_jit.bouncer.profile_naming import (
+        AUTO_NAME_SENTINEL, resolve_profile_name,
+    )
+    seen_prompt = []
+    def fake_input(prompt):
+        seen_prompt.append(prompt)
+        return ""  # operator hit Enter
+    chosen = resolve_profile_name(
+        AUTO_NAME_SENTINEL,
+        suggested="auto-2026-05-17-s3-readonly",
+        taken=set(),
+        is_interactive=lambda: True,
+        input_fn=fake_input,
+    )
+    assert chosen == "auto-2026-05-17-s3-readonly"
+    # The prompt actually appeared + included the default.
+    assert "auto-2026-05-17-s3-readonly" in seen_prompt[0]
+
+
+def test_resolve_profile_name_tty_override() -> None:
+    """Case 3: TTY mode — operator types a name, it wins over the
+    suggested default."""
+    from iam_jit.bouncer.profile_naming import (
+        AUTO_NAME_SENTINEL, resolve_profile_name,
+    )
+    chosen = resolve_profile_name(
+        AUTO_NAME_SENTINEL,
+        suggested="auto-2026-05-17-s3-readonly",
+        taken=set(),
+        is_interactive=lambda: True,
+        input_fn=lambda _p: "my-override",
+    )
+    assert chosen == "my-override"
+
+
+def test_resolve_profile_name_non_tty_uses_suggested(capsys) -> None:
+    """Case 4: non-TTY → suggested used + printed to stderr (per the
+    memo's "Don't auto-name without printing the chosen name" rule).
+    """
+    from iam_jit.bouncer.profile_naming import (
+        AUTO_NAME_SENTINEL, resolve_profile_name,
+    )
+    chosen = resolve_profile_name(
+        AUTO_NAME_SENTINEL,
+        suggested="auto-2026-05-17-s3-readonly",
+        taken=set(),
+        is_interactive=lambda: False,
+        input_fn=lambda _p: pytest.fail(
+            "input_fn must not be called in non-TTY branch"),
+    )
+    assert chosen == "auto-2026-05-17-s3-readonly"
+    err = capsys.readouterr().err
+    assert "auto-2026-05-17-s3-readonly" in err
+    assert "auto-generated" in err.lower()
+
+
+def test_avoid_name_collision_appends_suffix() -> None:
+    """Case 5: existing name → -2; existing -2 → -3; etc.
+
+    Audit-cadence (b): collision-avoid applies universally — even an
+    EXPLICITLY-typed name that collides gets suffixed. Otherwise
+    --save-as-profile becomes a foot-gun (overwrite-by-typo)."""
+    from iam_jit.bouncer.profile_naming import avoid_name_collision
+    # Fresh name → unchanged
+    assert avoid_name_collision("fresh", set()) == "fresh"
+    # One collision → -2
+    assert avoid_name_collision("p", {"p"}) == "p-2"
+    # Walks past taken suffixes
+    assert avoid_name_collision("p", {"p", "p-2", "p-3"}) == "p-4"
+    # Universal: even explicit name collisions get suffixed
+    from iam_jit.bouncer.profile_naming import resolve_profile_name
+    chosen = resolve_profile_name(
+        "existing-name",
+        suggested="auto-fallback",
+        taken={"existing-name"},
+        is_interactive=lambda: False,
+    )
+    assert chosen == "existing-name-2"
+
+
+def test_recommend_save_as_profile_without_name_uses_suggested(
+    db_path, tmp_path, monkeypatch,
+) -> None:
+    """End-to-end: `recommend --save-as-profile` (no NAME) →
+    auto-named profile lands in profiles.yaml. Click test-runner has
+    no TTY so this hits the non-TTY auto-gen branch."""
+    monkeypatch.setenv(
+        "IAM_JIT_BOUNCER_PROFILES_FILE", str(tmp_path / "profiles.yaml"))
+    _seed_decisions(db_path, [
+        _decision(service="s3", action="GetObject",
+                  arn="arn:aws:s3:::reports/q1.csv",
+                  at="2026-05-17T15:00:00Z") for _ in range(5)
+    ])
+    runner = CliRunner()
+    # `--save-as-profile` with NO NAME triggers the auto-name path.
+    result = runner.invoke(
+        main, ["recommend", "--db", db_path, "--save-as-profile"],
+    )
+    assert result.exit_code == 0, result.output
+    # Audit-cadence: the chosen name was printed to stderr (mixed into
+    # result.output by CliRunner's default mix-stderr).
+    assert "auto-2026-05-17" in result.output
+    assert "s3" in result.output
+    # The profile actually landed in the YAML.
+    from iam_jit.bouncer.profiles import load_profiles
+    profs = load_profiles()
+    auto_named = [
+        n for n in profs if n.startswith("auto-2026-05-17") and "s3" in n
+    ]
+    assert auto_named, f"expected an auto-named profile, got: {list(profs)}"
+    chosen_name = auto_named[0]
+    assert profs[chosen_name].source == "local"
+    assert len(profs[chosen_name].allow_rules) >= 1
+
+
+def test_recommend_save_as_profile_with_explicit_name_still_works(
+    db_path, tmp_path, monkeypatch,
+) -> None:
+    """Backwards-compat: passing NAME explicitly still saves under
+    that exact name (no auto-naming involved)."""
+    monkeypatch.setenv(
+        "IAM_JIT_BOUNCER_PROFILES_FILE", str(tmp_path / "profiles.yaml"))
+    _seed_decisions(db_path, [
+        _decision(service="s3", action="GetObject") for _ in range(5)
+    ])
+    runner = CliRunner()
+    result = runner.invoke(
+        main, ["recommend", "--db", db_path,
+               "--save-as-profile", "my-explicit"],
+    )
+    assert result.exit_code == 0, result.output
+    from iam_jit.bouncer.profiles import load_profiles
+    profs = load_profiles()
+    assert "my-explicit" in profs
+    assert profs["my-explicit"].source == "local"

@@ -206,3 +206,100 @@ def test_decision_id_links_back_to_decisions_row(tmp_path) -> None:
     assert decision_row[0] == "s3"
     assert decision_row[1] == "GetObject"
     store.close()
+
+
+# ---------------------------------------------------------------------------
+# #226 profile-auto-naming — `prompts answer --target` end-to-end
+#
+# Unit tests for the shared helpers live in test_recommender.py;
+# this file covers the OTHER call site so both surfaces are exercised
+# end-to-end (per [[deliberate-feature-completion]]).
+# ---------------------------------------------------------------------------
+
+
+def test_prompts_answer_target_optional_with_kind_profile(
+    tmp_path, monkeypatch,
+) -> None:
+    """End-to-end: `prompts answer ID --kind profile --target` (no
+    NAME) → auto-named profile is CREATED + the allow_rule appended.
+
+    Click test-runner has no TTY so this hits the non-TTY auto-gen
+    branch. The chosen name is announced on stderr (per the memo's
+    "always tell the operator what name was used" rule).
+    """
+    from click.testing import CliRunner
+
+    from iam_jit.bouncer.profiles import load_profiles
+    from iam_jit.bouncer_cli import main
+
+    db_path = str(tmp_path / "b.db")
+    profiles_path = tmp_path / "profiles.yaml"
+    monkeypatch.setenv("IAM_JIT_BOUNCER_PROFILES_FILE", str(profiles_path))
+
+    # Seed a pending prompt directly via the store.
+    store = BouncerStore(db_path=db_path)
+    try:
+        pid = store.add_pending_prompt(
+            decision_id=1,
+            service="s3", action="GetObject",
+            arn="arn:aws:s3:::reports/q1.csv",
+            region="us-east-1",
+            deny_reason="rule denied",
+        )
+    finally:
+        store.close()
+
+    runner = CliRunner()
+    # `--target` with NO value triggers the auto-name path.
+    result = runner.invoke(
+        main, ["prompts", "answer", str(pid),
+               "--kind", "profile", "--target", "--db", db_path],
+    )
+    assert result.exit_code == 0, result.output
+    # Auto-name landed in stderr (mixed into output by default).
+    assert "auto-" in result.output
+
+    profs = load_profiles()
+    auto_named = [n for n in profs if n.startswith("auto-")]
+    assert auto_named, (
+        f"expected auto-named profile, got: {list(profs)}")
+    prof = profs[auto_named[0]]
+    # Profile was CREATED (didn't exist before) + the allow_rule
+    # captured the prompt's service:action + ARN.
+    assert prof.source == "local"
+    assert len(prof.allow_rules) == 1
+    rule = prof.allow_rules[0]
+    assert rule.pattern == "s3:GetObject"
+    assert rule.arn_scope == "arn:aws:s3:::reports/q1.csv"
+
+
+def test_prompts_answer_target_required_when_absent_entirely(
+    tmp_path, monkeypatch,
+) -> None:
+    """Guardrail: if --target is NOT passed at all (vs. passed with
+    no value), --kind profile still errors. Otherwise a typo'd
+    command (`answer 5 --kind profile`) would silently create a
+    new auto-named profile when the operator intended to FAIL."""
+    from click.testing import CliRunner
+
+    from iam_jit.bouncer_cli import main
+
+    db_path = str(tmp_path / "b.db")
+    monkeypatch.setenv(
+        "IAM_JIT_BOUNCER_PROFILES_FILE", str(tmp_path / "profiles.yaml"))
+    store = BouncerStore(db_path=db_path)
+    try:
+        pid = store.add_pending_prompt(
+            decision_id=1, service="s3", action="GetObject",
+            arn=None, region=None, deny_reason="t",
+        )
+    finally:
+        store.close()
+
+    runner = CliRunner()
+    result = runner.invoke(
+        main, ["prompts", "answer", str(pid),
+               "--kind", "profile", "--db", db_path],
+    )
+    assert result.exit_code == 2
+    assert "--target" in result.output

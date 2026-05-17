@@ -98,11 +98,29 @@ Security:
 
 ### Recommender + `--save-as-profile`
 
-(`ibounce recommend [--save-as-profile NAME]`) — synthesizes
+(`ibounce recommend [--save-as-profile [NAME]]`) — synthesizes
 a draft ruleset from observed decisions; with `--save-as-profile`
 the recommendations are written as that profile's `allow_rules` so
 future `--profile NAME` activates them. Merges on re-run (deduped
 on pattern+arn+region).
+
+**Profile naming.** The `NAME` argument is optional (#226). When
+omitted on an interactive terminal, you're prompted with a
+suggested default (e.g. `auto-2026-05-17-s3-ec2-readonly`). In
+non-interactive contexts (CI, MCP-tool calls, scripts), the
+suggested name is used automatically + printed to stderr.
+Format: `auto-{YYYY-MM-DD}-{top-1-2-services}-{shape}` where
+`shape` is `readonly` if every recommendation is a Read action,
+else `session`. Collisions are avoided via a `-2`/`-3` suffix.
+Per-profile `source` field stays `local` — auto-named profiles
+are normal local profiles (editable, deletable). Org-distributed
+profiles (installed via `profile install --from URL`) never get
+auto-named — their names come from the bundle.
+
+The same auto-naming applies to `ibounce prompts answer ID --kind
+profile --target` — `--target` alone (no NAME) auto-generates from
+the prompt's service+action as
+`auto-{YYYY-MM-DD}-prompt-{ID}-{service}-{action}`.
 
 ### Timed pause (`bouncer pause --for 30m`)
 
