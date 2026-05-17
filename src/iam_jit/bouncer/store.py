@@ -671,6 +671,14 @@ class BouncerStore:
                 "pause duration cannot exceed 24h; for longer windows "
                 "stop the proxy and restart later"
             )
+        # MED-33-06 closure: reason is operator-supplied free text;
+        # cap length + strip control chars so a misbehaving caller
+        # can't bloat the audit row or sneak newlines through into
+        # monitor parsers.
+        reason = "".join(
+            ch for ch in (reason or "")
+            if ch == " " or (32 <= ord(ch) < 127)
+        )[:500]
         now = _dt.datetime.now(_dt.UTC)
         ends = now + _dt.timedelta(seconds=duration_seconds)
         with self._lock:

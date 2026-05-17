@@ -1654,6 +1654,29 @@ def prompts_answer_cmd(
         # prompt answered. Otherwise we'd lose the prompt + not have
         # applied the answer.
         if kind == "always":
+            # HIGH-33-03 closure: refuse `always` when the prompt's
+            # resolved arn is null. Otherwise the answer adds a
+            # global ALLOW with arn_scope=None (matches ANY arn for
+            # that action — broader than the operator likely
+            # intends). Force the operator to either:
+            #   (a) use --kind profile --target NAME (scoped to
+            #       a specific profile), OR
+            #   (b) edit the rules manually with a deliberate
+            #       arn_scope.
+            if not prompt.get("arn"):
+                click.secho(
+                    f"prompt #{prompt_id}: 'always' answer refused "
+                    f"because the prompt has no ARN scope. A global "
+                    f"ALLOW with arn_scope=None would match ANY "
+                    f"{prompt['service']}:{prompt['action']} request, "
+                    f"which is rarely the intent. Use --kind profile "
+                    f"--target NAME for a scoped allow, OR add a rule "
+                    f"manually with `iam-jit-bouncer rules add "
+                    f"--pattern {prompt['service']}:{prompt['action']} "
+                    f"--arn-scope <ARN>`. HIGH-33-03 closure.",
+                    fg="red", err=True,
+                )
+                sys.exit(2)
             from .bouncer.rules import Effect, ProxyRule
             store.add_rule(
                 ProxyRule(

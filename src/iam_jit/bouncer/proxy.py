@@ -42,6 +42,34 @@ from __future__ import annotations
 import asyncio
 import dataclasses
 import os
+import threading
+
+# HIGH-32-05 mitigation counter: pause-lookup failures are caught
+# + logged but the proxy continues to enforce. Without surfacing
+# this, an operator who typed `pause start` thinks they have a
+# bypass window, but the proxy keeps 403ing because the lookup
+# silently fails. Counter is exposed on /healthz so monitors can
+# alert on a non-zero value.
+_pause_lookup_errors_lock = threading.Lock()
+_pause_lookup_errors_total = 0
+
+
+def _bump_pause_lookup_error_counter() -> None:
+    global _pause_lookup_errors_total
+    with _pause_lookup_errors_lock:
+        _pause_lookup_errors_total += 1
+
+
+def _pause_lookup_error_count() -> int:
+    with _pause_lookup_errors_lock:
+        return _pause_lookup_errors_total
+
+
+def _reset_pause_lookup_error_counter_for_tests() -> None:
+    """Reset hook for tests. Not part of the public surface."""
+    global _pause_lookup_errors_total
+    with _pause_lookup_errors_lock:
+        _pause_lookup_errors_total = 0
 import datetime as _dt
 import enum
 import logging
@@ -229,6 +257,19 @@ def evaluate_request(
             matched_rule=None,
             reason="unclassifiable request — no SigV4 auth header",
         )
+        # HIGH-32-01 closure: persist the unclassifiable-deny to the
+        # audit log too. Otherwise an operator running `bouncer logs
+        # tail` sees nothing for traffic that the proxy refused —
+        # making it harder to spot scanners / probe traffic / mis-
+        # configured clients.
+        try:
+            store.record_decision(
+                synthetic, matched_rule_id=None, task_id=None,
+            )
+        except Exception as e:
+            logger.warning(
+                "bouncer-proxy unclassifiable audit-write failed: %s", e,
+            )
         return _build_observation(
             method=method, host=host, path=path,
             parsed=None, record=synthetic, mode=mode,
@@ -356,6 +397,12 @@ def evaluate_request(
     try:
         active_pause = store.get_active_pause()
     except Exception as e:
+        # HIGH-32-05 closure: bump a counter that /healthz exposes
+        # so the operator's monitor can alert on "pause is supposedly
+        # active but my proxy can't see it." Without this, the proxy
+        # silently enforces through a window the operator thought
+        # they had opened.
+        _bump_pause_lookup_error_counter()
         logger.warning("bouncer-proxy pause-lookup failed: %s", e)
     effective_mode = mode
     if active_pause is not None and mode == ProxyMode.TRANSPARENT:
@@ -494,30 +541,45 @@ def _is_allowed_forward_host(host: str) -> bool:
     return False
 
 
-def _strip_hop_headers(headers: dict[str, str]) -> dict[str, str]:
+_HOP_HEADERS = frozenset({
+    "connection",
+    "keep-alive",
+    "proxy-authenticate",
+    "proxy-authorization",
+    "te",
+    "trailers",
+    "transfer-encoding",
+    "upgrade",
+    "content-length",
+})
+
+
+def _strip_hop_headers(headers):
     """Remove RFC 7230 hop-by-hop headers + headers the upstream
-    library will recompute. Returns a NEW dict; doesn't mutate input.
+    library will recompute. Returns a NEW container of the same
+    shape (dict-in → dict-out, list-of-tuples-in → list-of-tuples-out).
+    Doesn't mutate input.
+
+    HIGH-32-04 (multi-value headers): callers should prefer the
+    list-of-tuples form so duplicate header keys round-trip. The
+    dict form is kept for backward compatibility with existing
+    Slice 2 tests + tools.
 
     Hop-by-hop headers (RFC 7230 §6.1) must not be forwarded. The
     Host header is preserved because the client signed against it.
     Content-Length is dropped because aiohttp recomputes it from
     the body bytes.
     """
-    hop_headers = {
-        "connection",
-        "keep-alive",
-        "proxy-authenticate",
-        "proxy-authorization",
-        "te",
-        "trailers",
-        "transfer-encoding",
-        "upgrade",
-        "content-length",
-    }
-    return {
-        k: v for k, v in headers.items()
-        if k.lower() not in hop_headers
-    }
+    if isinstance(headers, dict):
+        return {
+            k: v for k, v in headers.items()
+            if k.lower() not in _HOP_HEADERS
+        }
+    # list-of-tuples / CIMultiDict.items() / other iterable
+    return [
+        (k, v) for (k, v) in headers
+        if k.lower() not in _HOP_HEADERS
+    ]
 
 
 async def _forward_to_aws(
@@ -668,12 +730,17 @@ async def _handle_request(request, *, store, config: ProxyConfig, session):
         )
 
     # ALLOW (either mode) OR cooperative+DENY → forward to AWS
+    # HIGH-32-04 closure: aiohttp's request.headers is a CIMultiDict;
+    # converting via dict() collapses duplicate keys to the last
+    # value, which can break legitimate clients sending multi-value
+    # headers (e.g. multiple `Forwarded:` headers via a proxy chain).
+    # Pass as list-of-tuples instead so multi-values round-trip.
     try:
         status, resp_headers, resp_body = await _forward_to_aws(
             method=request.method,
             host=host_header,
             path_qs=request.path_qs,
-            headers=dict(request.headers),
+            headers=list(request.headers.items()),
             body=body,
             forward_scheme=config.forward_scheme,
             session=session,
@@ -755,18 +822,35 @@ async def serve(config: ProxyConfig, *, store: BouncerStore) -> None:
         # #6a — surface pause state so monitoring can flag a window
         # that's still open (e.g. ops left it on overnight by mistake)
         # without us having to invent a separate probe endpoint.
+        # HIGH-33-02 closure: truncate operator-supplied free text +
+        # strip control chars so a maliciously-crafted reason can't
+        # break monitor parsers (newlines splitting the JSON line,
+        # NULL bytes confusing C parsers, etc).
         pause_payload = None
         try:
             active_pause = store.get_active_pause()
             if active_pause is not None:
+                reason = active_pause["reason"] or ""
+                # Strip control chars + cap length
+                reason = "".join(
+                    ch for ch in reason if ch == " " or (32 <= ord(ch) < 127)
+                )[:200]
                 pause_payload = {
                     "id": active_pause["id"],
                     "started_at": active_pause["started_at"],
                     "ends_at": active_pause["ends_at"],
-                    "reason": active_pause["reason"],
+                    "reason": reason,
                 }
         except Exception:
             pass
+        pause_errs = _pause_lookup_error_count()
+        if pause_errs > 0 and status_str == "ok":
+            # HIGH-32-05 mitigation: a non-zero count means the proxy
+            # has been silently enforcing through a window the operator
+            # thought they had opened. Flip status so monitor probes
+            # alert before the operator wonders why their pause "isn't
+            # working."
+            status_str = "degraded"
         return web.json_response({
             "status": status_str,
             "mode": config.mode.value,
@@ -774,6 +858,7 @@ async def serve(config: ProxyConfig, *, store: BouncerStore) -> None:
             "active_profile": active_profile.name if active_profile else "",
             "decisions_count": decision_count,
             "pause": pause_payload,
+            "pause_lookup_errors_total": pause_errs,
         })
 
     # /healthz registered BEFORE the catch-all so it wins route
