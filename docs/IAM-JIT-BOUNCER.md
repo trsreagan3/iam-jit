@@ -5,55 +5,126 @@ over IAM role scoping — when the boundary the JIT role draws is correct
 but the call TARGET was wrong (prompt injection, agent misstep, typo on
 a destructive call), the bouncer catches it.
 
-## What works today vs what's coming
+## What ships in v1.0
 
-> **READ THIS BEFORE FOLLOWING ANY WORKFLOW BELOW.** The bouncer
-> ships in stages. Sections later in this doc describe both Stage 1
-> (available now) and Stage 2 (post-launch). Where a workflow
-> requires Stage 2, the heading is tagged **[v1.1: HTTP proxy]** so
-> you can tell what's usable today from what's coming.
+The bouncer is feature-complete for v1.0. The HTTP proxy that
+originally was Stage 2 work landed in pre-launch and is the
+default enforcement surface today. Below is the full v1.0 shape.
 
-### Stage 1 — Foundation (v1.0, available now)
+### CLI + audit foundation
 
-What ships:
-
-- **CLI rule management** (`iam-jit-bouncer rules add|list|remove`)
+- **Rule management** (`iam-jit-bouncer rules add|list|remove`)
 - **Per-task scopes** (`iam-jit-bouncer tasks start|active|end|review`)
-  for declaring narrow allow/deny rules for one specific job +
-  ending back to baseline
-- **Dry-run decision evaluator** (`iam-jit-bouncer decide`) — ask
-  "what would the bouncer do if it saw this request?" without
-  actually intercepting anything
-- **Audit chain** (`iam-jit-bouncer logs tail` + per-task review)
-  records decisions + config changes in a local SQLite chain
-- **Observation-based rule recommender** (`iam-jit-bouncer
-  recommend`) synthesizes a draft ruleset from observed decisions
+  for declaring narrow allow/deny rules for one specific job
+- **Dry-run decision evaluator** (`iam-jit-bouncer decide`)
+- **Audit chain** (`iam-jit-bouncer logs tail` + per-task review +
+  per-pause review) — SQLite-backed local-only
 - **Compatibility allowlist** (`iam-jit allowlist`) for per-account /
   per-workload overrides
-- **MCP server tools** — full agent-discoverable API for everything
-  above; see [docs/AGENTS.md](AGENTS.md) for the canonical agent
-  flow. **In v1.0 the MCP path is the real-time enforcement
-  surface**: agents that call `iam_jit_scope_self_for_task` before
-  touching AWS get scoped credentials + an audit log. Agents that
-  bypass it use whatever creds they already had.
 
-What is NOT yet in Stage 1: an HTTP proxy that transparently
-intercepts AWS SDK traffic. In v1.0 enforcement is
-**agent-cooperative** through the MCP path; transparent network-
-level interception lands in Stage 2.
+### HTTP proxy (`iam-jit-bouncer run`)
 
-### Stage 2 — HTTP proxy (v1.1, post-launch)
+Localhost-only aiohttp server that intercepts AWS SDK traffic via
+`AWS_ENDPOINT_URL=http://127.0.0.1:8767`. SigV4-preserving — the
+proxy never re-signs, never holds credentials, never phones home.
 
-A localhost HTTP proxy (`iam-jit-bouncer run`) that intercepts SDK
-traffic via `AWS_ENDPOINT_URL=http://127.0.0.1:8767`, evaluates each
-request against the same rule store Stage 1 already manages, and
-enforces deny / prompt verdicts at the network layer. Makes
-enforcement uncircumventable for processes that didn't go through
-the MCP composer.
+Two modes (user picks, configurable per-deployment):
+- **COOPERATIVE** (default): every call is parsed + logged but
+  forwarded regardless of verdict (advisory)
+- **TRANSPARENT**: DENY verdicts return 403 to the SDK client
+  (enforcing); ALLOW verdicts forward unchanged
 
-### Stage 3 — Enterprise (post-v1.1)
+`/healthz` liveness endpoint returns status + mode + active profile +
+decisions count + active pause window if any. Bypasses audit log.
 
-Multi-machine fleet rules, web UI, anomaly detection.
+### Environment profiles
+
+Named, switchable rule layers that act as a HARD FLOOR above task
+scopes + global rules. Default-shipped: `none`, `dev-only`,
+`staging-work`, `prod-readonly`, `incident-response`. Activate
+with `--profile NAME` on `iam-jit-bouncer run`.
+
+Profile fields: `deny_keywords` (with word_boundary matching +
+per-profile exceptions list), `keyword_targets`, `only_account_ids`,
+`deny_verbs`, `allow_rules` (profile-scoped ALLOW rules that merge
+into the rule engine when this profile is active), `source` (org
+URL when installed via `profile install --from URL`; read-only at
+the CLI surface when non-local).
+
+### Profile distribution (`profile install --from URL`)
+
+HTTPS-only fetch of org-curated profile bundles. The
+[enterprise-profile-distribution](../README.md#enterprise-profile-distribution)
+shape: IT teams publish a curated profiles.yaml; engineers run
+`iam-jit-bouncer profile install --from <URL>` on day 1; installed
+profiles record their fetch URL in the `source` field, making them
+READ-ONLY at the CLI surface (engineers cannot edit org guardrails
+to bypass them).
+
+Security:
+- HTTPS-only (refuses `http://`)
+- Optional `--sha256 <hex>` pin for integrity (IT should ship the
+  hash in onboarding docs)
+- `source` field forced to the fetch URL even if payload tries to
+  spoof `source: local`
+- All-or-nothing install: validates every profile in the bundle
+  BEFORE writing any
+
+### Recommender + `--save-as-profile`
+
+(`iam-jit-bouncer recommend [--save-as-profile NAME]`) — synthesizes
+a draft ruleset from observed decisions; with `--save-as-profile`
+the recommendations are written as that profile's `allow_rules` so
+future `--profile NAME` activates them. Merges on re-run (deduped
+on pattern+arn+region).
+
+### Timed pause (`bouncer pause --for 30m`)
+
+Operator-controlled escape hatch. Demotes TRANSPARENT to
+COOPERATIVE for a window; auto-reverts at expiry; every decision
+inside the window is audit-linked to the pause id. Subcommands:
+`start --for DURATION [--reason]`, `stop`, `status`, `history`.
+Capped at 24h (longer is an "I don't want the proxy" signal, not
+a pause — stop the daemon instead). Pauses surface on `/healthz`
+so monitors can flag overnight-left-open windows.
+
+### Async deny prompts (`bouncer prompts`)
+
+When the proxy is run with `--prompt-on-deny`, every transparent-
+mode DENY also enqueues a `pending_prompts` row. Operator sees the
+queue with `bouncer prompts list`, inspects with `prompts show ID`,
+and answers with `prompts answer ID --kind always|profile|ignore`:
+- `always` → adds a global ALLOW rule for the exact
+  service:action[+arn]
+- `profile --target NAME` → appends a `ProfileAllowRule` to the
+  named local profile (refuses if profile is org-distributed)
+- `ignore` → marks answered, no rule change
+
+v1.0 is ASYNC — agent gets denied immediately; answer takes effect
+on the next call of the same shape. SYNC mode (proxy briefly waits
+for an answer) is post-launch v1.1.
+
+### MCP server tools
+
+Full agent-discoverable API for everything above; see
+[docs/AGENTS.md](AGENTS.md) for the canonical agent flow. Agents
+that call `iam_jit_scope_self_for_task` before touching AWS get
+scoped credentials + an audit log. Agents that bypass the MCP
+composer go through the HTTP proxy instead.
+
+## What's coming in v1.1
+
+- **Synchronous deny prompts** — proxy briefly waits for an
+  operator answer before returning; for now, async prompts cover
+  the "I want to know what my agent hit" use case
+- **HTTPS/MITM TLS handling** for proxied AWS endpoints behind a
+  TLS-required proxy chain
+- **Plan-capture proxy** for IaC (terraform / pulumi) workflows
+
+## Enterprise add-ons (post-v1.1)
+
+Multi-machine fleet rules, web UI, anomaly detection, live action
+tail with CloudTrail.
 
 ## Why a local proxy
 
@@ -347,6 +418,48 @@ iam-jit-bouncer logs tail
 iam-jit-bouncer logs tail --decision deny --limit 20
 iam-jit-bouncer logs tail --json
 ```
+
+### Pause (timed escape hatch)
+
+```bash
+iam-jit-bouncer pause start --for 30m --reason "incident response"
+iam-jit-bouncer pause status
+iam-jit-bouncer pause stop                 # end early
+iam-jit-bouncer pause history --limit 20
+```
+
+During a pause, TRANSPARENT mode is demoted to COOPERATIVE — the
+proxy still parses every call + logs the verdict, but DENY no
+longer 403s the client. Auto-reverts at the duration's expiry.
+Every decision inside the window carries `pause_id` in the audit
+log so `logs tail --pause-id N` (post-launch) can replay exactly
+what happened during the window. Caps at 24h.
+
+### Prompts (async deny notifications)
+
+When running the proxy with `--prompt-on-deny`, transparent-mode
+DENYs are also enqueued for later operator review:
+
+```bash
+iam-jit-bouncer run --mode transparent --default-policy deny \
+    --prompt-on-deny
+```
+
+In another terminal:
+
+```bash
+iam-jit-bouncer prompts list                       # pending
+iam-jit-bouncer prompts show 7
+iam-jit-bouncer prompts answer 7 --kind always     # add global ALLOW
+iam-jit-bouncer prompts answer 7 --kind profile \
+    --target dev-session                            # add to a profile
+iam-jit-bouncer prompts answer 7 --kind ignore     # mark answered
+```
+
+The agent has already been denied by the time the prompt appears;
+the answer's rule takes effect on the NEXT call of the same shape.
+The synchronous flow (proxy briefly waits for an operator answer
+before returning) ships in v1.1.
 
 ## Storage
 
