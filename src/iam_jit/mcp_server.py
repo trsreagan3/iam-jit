@@ -1739,26 +1739,14 @@ def _parse_compatibility_intent(args: dict[str, Any]) -> dict[str, Any]:
 def _compatibility_audit_sink():
     """Return the bouncer's config_events table as the compatibility-
     check audit sink — both are config-shape decisions and live in
-    the same local audit chain. WB24 MED-24-01 closure. Best-effort:
-    on any error (e.g. bouncer state.db not initialized), return None
-    and the checker skips audit-logging without crashing."""
-    try:
-        from .bouncer.store import BouncerStore
+    the same local audit chain. WB24 MED-24-01 closure.
 
-        store = BouncerStore()
-
-        class _SinkAdapter:
-            def record(self, *, kind, actor, summary, detail=None):
-                store._record_config_event_locked(
-                    actor=actor,
-                    kind=kind,
-                    summary=summary,
-                    detail=detail,
-                )
-
-        return _SinkAdapter()
-    except Exception:
-        return None
+    WB29 HIGH-29-02 closure: delegates to `compatibility.default_audit_sink`
+    so the HTTP `submit_request` gate (#166 Slice 3) and `doctor
+    compatibility` CLI (#166 Slice 4) emit identically-shaped audit
+    events. Single source of truth for the sink construction."""
+    from .compatibility import default_audit_sink
+    return default_audit_sink()
 
 
 def _compatibility_actor() -> str:

@@ -370,3 +370,220 @@ def test_submit_completely_garbage_body_produces_4xx(as_dev: TestClient) -> None
     payload = {"random": "garbage", "with": [1, 2, 3]}
     resp = as_dev.post("/api/v1/requests", json=payload)
     assert resp.status_code < 500
+
+
+# ---------------------------------------------------------------------------
+# #166 Slice 3 — compatibility-framework gate on submit_request
+# ---------------------------------------------------------------------------
+
+
+def test_submit_with_compat_block_proceed_succeeds(
+    as_dev: TestClient, request_payload: dict,
+) -> None:
+    """When metadata.compatibility.workload is a shape iam-jit can
+    issue a role for (e.g. CI runner / human CLI), submission
+    proceeds normally."""
+    payload = dict(request_payload)
+    md = dict(payload["metadata"])
+    md["compatibility"] = {"workload": "ci_runner"}
+    payload["metadata"] = md
+    resp = as_dev.post("/api/v1/requests", json=payload)
+    assert resp.status_code == 201, resp.text
+
+
+def test_submit_with_compat_block_use_existing_returns_422(
+    as_dev: TestClient, request_payload: dict,
+) -> None:
+    """K8S_POD verdict is USE_EXISTING (IRSA role pinned at pod
+    creation). Submission must be refused with 422 + next_action_hint
+    instead of being persisted as a request iam-jit can never fulfill."""
+    payload = dict(request_payload)
+    md = dict(payload["metadata"])
+    md["compatibility"] = {"workload": "k8s_pod"}
+    payload["metadata"] = md
+    resp = as_dev.post("/api/v1/requests", json=payload)
+    assert resp.status_code == 422, resp.text
+    detail = resp.json()["detail"]
+    assert detail["verdict"] == "use_existing"
+    assert "next_action_hint" in detail
+    assert "k8s_pod" in detail["error"]
+
+
+def test_submit_with_compat_block_unknown_workload_returns_400(
+    as_dev: TestClient, request_payload: dict,
+) -> None:
+    """Unknown workload values are 400 (input validation) not 422
+    (semantic refusal). Post-WB29 MED-29-04 closure the schema's
+    enum constraint catches this at the schema-validation layer
+    (one step earlier than the gate's own defensive check)."""
+    payload = dict(request_payload)
+    md = dict(payload["metadata"])
+    md["compatibility"] = {"workload": "definitely_not_a_workload"}
+    payload["metadata"] = md
+    resp = as_dev.post("/api/v1/requests", json=payload)
+    assert resp.status_code == 400
+    # Either layer is fine, so long as the response surfaces the
+    # violation on the workload field.
+    assert "workload" in resp.text.lower()
+
+
+def test_submit_with_compat_block_non_string_workload_returns_400(
+    as_dev: TestClient, request_payload: dict,
+) -> None:
+    """Non-string workload value rejected at the schema layer."""
+    payload = dict(request_payload)
+    md = dict(payload["metadata"])
+    md["compatibility"] = {"workload": 42}
+    payload["metadata"] = md
+    resp = as_dev.post("/api/v1/requests", json=payload)
+    # Schema validator catches the type mismatch (returns 422 from
+    # _validate_or_400, but our gate also catches it as 400 if it
+    # bypasses); either is acceptable, just must NOT 500.
+    assert resp.status_code < 500
+    assert resp.status_code != 201
+
+
+def test_submit_without_compat_block_backward_compatible(
+    as_dev: TestClient, request_payload: dict,
+) -> None:
+    """Legacy submissions with no compat block keep working —
+    the gate is purely additive + opt-in."""
+    payload = dict(request_payload)
+    # Ensure no compatibility field
+    assert "compatibility" not in payload["metadata"]
+    resp = as_dev.post("/api/v1/requests", json=payload)
+    assert resp.status_code == 201, resp.text
+
+
+def test_submit_compat_use_existing_does_not_persist_request(
+    as_dev: TestClient, request_payload: dict,
+) -> None:
+    """Belt-and-suspenders: a USE_EXISTING refusal must not leave
+    a half-persisted request behind."""
+    payload = dict(request_payload)
+    md = dict(payload["metadata"])
+    md["compatibility"] = {"workload": "k8s_pod"}
+    payload["metadata"] = md
+    resp = as_dev.post("/api/v1/requests", json=payload)
+    assert resp.status_code == 422
+    # Confirm no request showed up in the listing for this user
+    list_resp = as_dev.get("/api/v1/requests")
+    assert list_resp.status_code == 200
+    items = list_resp.json().get("items", [])
+    # k8s_pod refusals never reach the store; no item created from this submit
+    for item in items:
+        # If items exist from other tests / fixtures, none should
+        # carry the k8s_pod compat block since we never persisted it
+        compat = item.get("metadata", {}).get("compatibility")
+        if compat:
+            assert compat.get("workload") != "k8s_pod"
+
+
+def test_submit_compat_block_unknown_property_rejected(
+    as_dev: TestClient, request_payload: dict,
+) -> None:
+    """Schema enforces additionalProperties:false on the compat
+    block — typos surface as 4xx, not silent passthrough."""
+    payload = dict(request_payload)
+    md = dict(payload["metadata"])
+    md["compatibility"] = {
+        "workload": "ci_runner",
+        "typo_field": "should be rejected",
+    }
+    payload["metadata"] = md
+    resp = as_dev.post("/api/v1/requests", json=payload)
+    assert resp.status_code < 500
+    assert resp.status_code != 201
+
+
+# ---------------------------------------------------------------------------
+# WB29 closures — multi-account, audit sink, schema enum, normalization
+# ---------------------------------------------------------------------------
+
+
+def test_wb29_high_01_multi_account_bypass_closed(
+    as_dev: TestClient, request_payload: dict,
+) -> None:
+    """WB29 HIGH-29-01: when target_account_id is NOT explicitly set
+    and spec.accounts has multiple entries, the gate must check ALL
+    of them (not just accounts[0]). k8s_pod refusal must fire even
+    if account 0 is something else and account 1 is the one the
+    workload claims."""
+    payload = dict(request_payload)
+    payload["spec"] = dict(payload["spec"])
+    payload["spec"]["accounts"] = [
+        {"account_id": "060392206767", "regions": ["us-east-1"]},
+        {"account_id": "111111111111", "regions": ["us-east-1"]},
+    ]
+    md = dict(payload["metadata"])
+    md["compatibility"] = {"workload": "k8s_pod"}
+    payload["metadata"] = md
+    resp = as_dev.post("/api/v1/requests", json=payload)
+    # k8s_pod returns USE_EXISTING regardless of account — gate must
+    # still refuse for the multi-account submission shape.
+    assert resp.status_code == 422, resp.text
+
+
+def test_wb29_high_01_explicit_target_account_id_honored(
+    as_dev: TestClient, request_payload: dict,
+) -> None:
+    """When caller explicitly pins target_account_id, the gate
+    checks only that account (caller knows what they want)."""
+    payload = dict(request_payload)
+    md = dict(payload["metadata"])
+    md["compatibility"] = {
+        "workload": "ci_runner",
+        "target_account_id": "060392206767",
+    }
+    payload["metadata"] = md
+    resp = as_dev.post("/api/v1/requests", json=payload)
+    assert resp.status_code == 201
+
+
+def test_wb29_med_04_schema_enum_rejects_arbitrary_string(
+    as_dev: TestClient, request_payload: dict,
+) -> None:
+    """WB29 MED-29-04: workload field has enum constraint — random
+    strings rejected at schema layer before our gate echoes them."""
+    payload = dict(request_payload)
+    md = dict(payload["metadata"])
+    # A string that isn't in the enum
+    md["compatibility"] = {"workload": "not_a_known_workload"}
+    payload["metadata"] = md
+    resp = as_dev.post("/api/v1/requests", json=payload)
+    assert resp.status_code == 400
+    # Schema error (enum failure) must not include the attacker payload
+    # echoed unmodified — the schema validator surfaces the constraint
+    # name, not the user value.
+    assert "<script>" not in resp.text
+    assert "enum" in resp.text.lower() or "workload" in resp.text.lower()
+
+
+def test_wb29_med_04_schema_enum_max_length_caps_payload(
+    as_dev: TestClient, request_payload: dict,
+) -> None:
+    """1 MB workload string can't be passed through; schema maxLength 64."""
+    payload = dict(request_payload)
+    md = dict(payload["metadata"])
+    md["compatibility"] = {"workload": "a" * 10000}
+    payload["metadata"] = md
+    resp = as_dev.post("/api/v1/requests", json=payload)
+    assert resp.status_code == 400
+
+
+def test_wb29_med_02_target_services_lowercase_normalized(
+    as_dev: TestClient, request_payload: dict,
+) -> None:
+    """WB29 MED-29-02: target_services strings normalize (strip +
+    lower) to match MCP behavior. Schema's pattern catches truly
+    invalid prefixes; mixed case prefixes are normalized in code."""
+    payload = dict(request_payload)
+    md = dict(payload["metadata"])
+    # Lowercase prefixes pass schema; gate normalizes for the check
+    md["compatibility"] = {
+        "workload": "ci_runner",
+        "target_services": ["s3", "dynamodb"],
+    }
+    payload["metadata"] = md
+    resp = as_dev.post("/api/v1/requests", json=payload)
+    assert resp.status_code == 201

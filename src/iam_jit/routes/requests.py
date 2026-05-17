@@ -688,6 +688,145 @@ def submit_request(
 
     _validate_or_400(req)
 
+    # #166 Slice 3: compatibility-framework gate. When the requester
+    # includes a metadata.compatibility block, run the same check
+    # MCP submit_policy already enforces (per WB24 closure) and refuse
+    # non-PROCEED verdicts BEFORE persisting the request — so an
+    # admin can't approve a request iam-jit will never be able to
+    # fulfill, and the requester sees the next-action hint
+    # immediately. When the block is omitted, behavior is unchanged
+    # (legacy submissions keep working).
+    _compat_block = metadata.get("compatibility")
+    if isinstance(_compat_block, dict):
+        from ..compatibility import (
+            Compatibility,
+            CompatibilityIntent,
+            WorkloadType,
+        )
+
+        _workload_raw = _compat_block.get("workload")
+        if not isinstance(_workload_raw, str) or not _workload_raw.strip():
+            raise HTTPException(
+                status_code=400,
+                detail="metadata.compatibility.workload is required and must be a string",
+            )
+        try:
+            _workload_enum = WorkloadType(_workload_raw.strip())
+        except ValueError:
+            _valid = ", ".join(w.value for w in WorkloadType)
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    f"unknown workload {_workload_raw!r}; must be one of: {_valid}"
+                ),
+            )
+
+        # WB29 HIGH-29-01 closure: if the caller didn't pin a specific
+        # target_account_id, check EVERY account in spec.accounts and
+        # refuse on the most-restrictive verdict (same pattern as
+        # WB10-03 safety-mode resolution). Otherwise an admin can
+        # set "for account X, use_existing" and the gate would sail
+        # through on account Y while still ALSO issuing for X.
+        _explicit_target_account_id = _compat_block.get("target_account_id")
+        if _explicit_target_account_id is not None:
+            _accounts_to_check = [_explicit_target_account_id]
+        else:
+            _spec_for_compat = req.get("spec") or {}
+            _accounts_for_compat = _spec_for_compat.get("accounts") or []
+            _accounts_to_check = [
+                a.get("account_id")
+                for a in _accounts_for_compat
+                if isinstance(a, dict) and a.get("account_id")
+            ]
+            if not _accounts_to_check:
+                _accounts_to_check = [None]  # check without account scope
+
+        # WB29 MED-29-02 closure: lowercase + strip target_services
+        # so HTTP gate matches the MCP path's normalization at
+        # mcp_server.py:_parse_compatibility_intent.
+        _target_services_raw = _compat_block.get("target_services")
+        if _target_services_raw is None:
+            _target_services = ()
+        elif isinstance(_target_services_raw, list):
+            _normalized: list[str] = []
+            for _svc in _target_services_raw:
+                if not isinstance(_svc, str):
+                    raise HTTPException(
+                        status_code=400,
+                        detail="metadata.compatibility.target_services items must be strings",
+                    )
+                _normalized.append(_svc.strip().lower())
+            _target_services = tuple(_normalized)
+        else:
+            raise HTTPException(
+                status_code=400,
+                detail="metadata.compatibility.target_services must be a list if provided",
+            )
+
+        from ..compatibility import (
+            check_compatibility,
+            default_audit_sink,
+        )
+        try:
+            from ..compatibility_allowlist import build_default_store
+            _compat_allowlist = build_default_store()
+        except Exception:
+            _compat_allowlist = None
+        # WB29 MED-29-01 closure: prefix actor with surface so
+        # post-hoc audit-log review can distinguish HTTP submissions
+        # from MCP / CLI calls under the same email.
+        _compat_email = (
+            user.id.removeprefix("email:") if user.id.startswith("email:") else user.id
+        )
+        _compat_actor = f"http:{_compat_email}"
+        # WB29 HIGH-29-02 closure: pass audit_sink so refusal events
+        # land in the audit chain — was missing on HTTP + CLI
+        # surfaces, regressing WB24 MED-24-01 closure.
+        _compat_sink = default_audit_sink()
+
+        # Refuse on the FIRST non-PROCEED verdict; iterate so a
+        # multi-account refusal isn't masked by a permissive first
+        # account.
+        for _acct in _accounts_to_check:
+            _compat_intent = CompatibilityIntent(
+                workload=_workload_enum,
+                target_account_id=_acct,
+                target_services=_target_services,
+                description=_compat_block.get("description")
+                if isinstance(_compat_block.get("description"), str) else None,
+                existing_role_hint=_compat_block.get("existing_role_hint")
+                if isinstance(_compat_block.get("existing_role_hint"), str) else None,
+            )
+            _compat_result = check_compatibility(
+                _compat_intent,
+                allowlist=_compat_allowlist,
+                audit_sink=_compat_sink,
+                actor=_compat_actor,
+            )
+            if _compat_result.verdict in (
+                Compatibility.USE_EXISTING,
+                Compatibility.USE_BOUNCER,
+                Compatibility.CANNOT_HELP,
+            ):
+                # 422 Unprocessable Entity — request is syntactically
+                # valid but iam-jit can't act on it.
+                raise HTTPException(
+                    status_code=422,
+                    detail={
+                        "error": (
+                            f"iam-jit cannot issue a role for workload "
+                            f"{_workload_enum.value!r}"
+                            + (f" on account {_acct}" if _acct else "")
+                            + f": {_compat_result.reasoning}"
+                        ),
+                        "verdict": _compat_result.verdict.value,
+                        "next_action_hint": _compat_result.next_action_hint,
+                        "matched_pattern": _compat_result.matched_pattern,
+                        "bouncer_recommended": _compat_result.bouncer_recommended,
+                        "account_id": _acct,
+                    },
+                )
+
     # Enforce admin-configured org-wide max duration BEFORE init.
     # Done after schema validation so the operator sees schema errors
     # first if both apply. The check is structural — it walks the

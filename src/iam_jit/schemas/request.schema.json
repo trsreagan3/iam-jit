@@ -30,7 +30,47 @@
             "principal_arn": { "type": "string", "pattern": "^arn:aws:" }
           }
         },
-        "created_at": { "type": "string", "format": "date-time" }
+        "created_at": { "type": "string", "format": "date-time" },
+        "compatibility": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["workload"],
+          "description": "Optional applicability intent (#166 Slice 3). When present, iam-jit runs the compatibility check before persisting the request and refuses non-PROCEED verdicts (USE_EXISTING / USE_BOUNCER / CANNOT_HELP) with a 422 + next_action_hint. Mirrors the gate that MCP submit_policy already enforces. Omit this block to skip the check (legacy behavior).",
+          "properties": {
+            "workload": {
+              "type": "string",
+              "maxLength": 64,
+              "enum": [
+                "k8s_pod", "eks_pod_identity", "ec2_instance",
+                "lambda_function", "ecs_task", "codebuild_project",
+                "step_functions", "glue_job", "sagemaker",
+                "app_runner", "batch_job", "ci_runner",
+                "agent_local_dev", "human_cli", "other"
+              ],
+              "description": "Workload shape from the WorkloadType enum. Valid values: k8s_pod, eks_pod_identity, ec2_instance, lambda_function, ecs_task, codebuild_project, step_functions, glue_job, sagemaker, app_runner, batch_job, ci_runner, agent_local_dev, human_cli, other. Drives the verdict."
+            },
+            "target_account_id": {
+              "type": "string",
+              "pattern": "^[0-9]{12}$",
+              "description": "Optional account scope for the check. If omitted, the first account in spec.accounts is used."
+            },
+            "target_services": {
+              "type": "array",
+              "items": { "type": "string", "pattern": "^[a-z][a-z0-9-]{1,62}$" },
+              "description": "Optional service prefixes (e.g. ['s3', 'dynamodb']) the workload needs to touch."
+            },
+            "description": {
+              "type": "string",
+              "maxLength": 4000,
+              "description": "Optional free-form description of the task being authorized."
+            },
+            "existing_role_hint": {
+              "type": "string",
+              "maxLength": 256,
+              "description": "Optional ARN hint when the caller suspects an existing role might fit."
+            }
+          }
+        }
       }
     },
     "spec": {

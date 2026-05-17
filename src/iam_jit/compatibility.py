@@ -674,6 +674,37 @@ def check_compatibility(
     return result
 
 
+def default_audit_sink():
+    """WB29 HIGH-29-02 closure. Build the standard bouncer-backed
+    audit sink used by `check_compatibility` writes. Shared by the
+    MCP `submit_policy` gate, the HTTP `POST /api/v1/requests` gate
+    (#166 Slice 3), and the `iam-jit doctor compatibility` CLI
+    (#166 Slice 4) so all three surfaces emit the same
+    `compatibility_check` event into the local audit chain.
+
+    Best-effort: returns None on any error (bouncer state.db not
+    initialized, permission error, etc.) — `check_compatibility`
+    treats None as "skip audit" without crashing.
+    """
+    try:
+        from .bouncer.store import BouncerStore
+
+        store = BouncerStore()
+
+        class _SinkAdapter:
+            def record(self, *, kind, actor, summary, detail=None):
+                store._record_config_event_locked(
+                    actor=actor,
+                    kind=kind,
+                    summary=summary,
+                    detail=detail,
+                )
+
+        return _SinkAdapter()
+    except Exception:
+        return None
+
+
 def list_catalog() -> list[dict[str, Any]]:
     """Return the catalog as a list of dicts for MCP / CLI display."""
     return [

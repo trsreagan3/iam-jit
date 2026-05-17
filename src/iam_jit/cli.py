@@ -1257,5 +1257,177 @@ def doctor_oidc() -> None:
     click.secho("All OIDC checks passed.", fg="green", bold=True)
 
 
+@doctor.command("compatibility")
+@click.option(
+    "--workload",
+    required=True,
+    help="Workload shape to check (e.g. lambda_function, k8s_pod, "
+         "ec2_instance, ci_runner, codebuild_project).",
+)
+@click.option(
+    "--target-account-id",
+    default=None,
+    help="Optional AWS account ID (12 digits) for the check.",
+)
+@click.option(
+    "--target-service",
+    "target_services",
+    multiple=True,
+    help="Optional service prefix the workload needs to call. Repeatable.",
+)
+@click.option(
+    "--description",
+    default=None,
+    help="Optional free-form task description.",
+)
+@click.option(
+    "--existing-role-hint",
+    default=None,
+    help="Optional ARN of an existing role you suspect might fit.",
+)
+@click.option(
+    "--json",
+    "as_json",
+    is_flag=True,
+    default=False,
+    help="Emit the verdict as JSON instead of human-readable text.",
+)
+def doctor_compatibility(
+    workload: str,
+    target_account_id: str | None,
+    target_services: tuple[str, ...],
+    description: str | None,
+    existing_role_hint: str | None,
+    as_json: bool,
+) -> None:
+    """Check whether iam-jit can issue a role for a given workload
+    BEFORE submitting a request.
+
+    Runs the same applicability check the HTTP + MCP submit paths
+    use (#166 Slices 1+2+3) and prints a self-describing verdict +
+    next-action hint. Exits 0 only when the verdict is PROCEED.
+
+    Examples:
+
+      iam-jit doctor compatibility --workload ci_runner
+
+      iam-jit doctor compatibility --workload k8s_pod \\
+          --target-account-id 123456789012 \\
+          --target-service s3 --target-service dynamodb
+
+    Per [[recommender-context-boundary]]: this is workload
+    classification only — iam-jit does NOT inspect source code or
+    external systems. The agent / human declares the workload; the
+    checker uses it.
+    """
+    # `json` is already imported at module top; alias is fine
+    # for clarity but redundant. Use module-level json directly.
+    import re as _re
+
+    from .compatibility import (
+        Compatibility,
+        CompatibilityIntent,
+        WorkloadType,
+        check_compatibility,
+        default_audit_sink,
+    )
+
+    try:
+        workload_enum = WorkloadType(workload.strip())
+    except ValueError:
+        valid = ", ".join(w.value for w in WorkloadType)
+        click.secho(
+            f"unknown workload {workload!r}; must be one of: {valid}",
+            fg="red",
+            err=True,
+        )
+        sys.exit(2)
+
+    if target_account_id is not None:
+        if not _re.match(r"^[0-9]{12}$", target_account_id):
+            click.secho(
+                "--target-account-id must be exactly 12 digits",
+                fg="red",
+                err=True,
+            )
+            sys.exit(2)
+
+    services_clean: list[str] = []
+    for s in target_services:
+        s_norm = s.strip().lower()
+        if not s_norm:
+            continue
+        if not _re.match(r"^[a-z][a-z0-9-]{1,62}$", s_norm):
+            click.secho(
+                f"--target-service {s!r} is not a valid service prefix "
+                "(lowercase, start with a letter, max 63 chars)",
+                fg="red",
+                err=True,
+            )
+            sys.exit(2)
+        services_clean.append(s_norm)
+
+    intent = CompatibilityIntent(
+        workload=workload_enum,
+        target_account_id=target_account_id,
+        target_services=tuple(services_clean),
+        description=description,
+        existing_role_hint=existing_role_hint,
+    )
+
+    try:
+        from .compatibility_allowlist import build_default_store
+        allowlist = build_default_store()
+    except Exception:
+        allowlist = None
+
+    # WB29 HIGH-29-02 closure: pass audit_sink so doctor invocations
+    # land in the audit chain alongside HTTP + MCP submissions.
+    result = check_compatibility(
+        intent,
+        allowlist=allowlist,
+        audit_sink=default_audit_sink(),
+        actor="cli:doctor",
+    )
+
+    if as_json:
+        click.echo(json.dumps({
+            "verdict": result.verdict.value,
+            "reasoning": result.reasoning,
+            "next_action_hint": result.next_action_hint,
+            "matched_pattern": result.matched_pattern,
+            "bouncer_recommended": result.bouncer_recommended,
+            "existing_role_arn": result.existing_role_arn,
+        }, indent=2))
+    else:
+        verdict_color = {
+            Compatibility.PROCEED: "green",
+            Compatibility.USE_EXISTING: "yellow",
+            Compatibility.USE_BOUNCER: "yellow",
+            Compatibility.CANNOT_HELP: "red",
+        }.get(result.verdict, "white")
+        click.secho(
+            f"verdict:    {result.verdict.value}",
+            fg=verdict_color,
+            bold=True,
+        )
+        click.echo(f"reasoning:  {result.reasoning}")
+        if result.next_action_hint:
+            click.echo(f"next:       {result.next_action_hint}")
+        if result.matched_pattern:
+            click.echo(f"matched:    {result.matched_pattern}")
+        if result.existing_role_arn:
+            click.echo(f"role hint:  {result.existing_role_arn}")
+        if result.bouncer_recommended:
+            click.echo(
+                "bouncer:    recommended — consider iam-jit-bouncer "
+                "(local AWS-call gating proxy) for this workload"
+            )
+
+    # Exit 0 only for PROCEED so the command composes with `&&` in
+    # scripts ("if iam-jit can serve me, run my submit").
+    sys.exit(0 if result.verdict == Compatibility.PROCEED else 1)
+
+
 if __name__ == "__main__":
     main()
