@@ -41,6 +41,7 @@ from __future__ import annotations
 
 import asyncio
 import dataclasses
+import os
 import datetime as _dt
 import enum
 import logging
@@ -433,6 +434,66 @@ def _forward_url(host: str, path_qs: str, scheme: str = "https") -> str:
     return f"{scheme}://{host}{path_qs}"
 
 
+# CRIT-32-01 closure: outbound Host allowlist. The proxy receives
+# its destination from the inbound Host header, which is attacker-
+# controllable. Without this check, a compromised agent can set
+# Host: attacker.example.com on its proxy connection and the proxy
+# faithfully forwards the SigV4-signed body + AccessKeyId there.
+# That makes the bouncer an exfil channel — the inverse of its
+# promise.
+#
+# Allowlist strategy: accept the canonical AWS endpoint TLDs (cover
+# commercial + GovCloud + China + .dev). Extra hosts can be added
+# via IAM_JIT_BOUNCER_EXTRA_HOSTS (comma-separated suffix list) for
+# LocalStack, tests, or special-purpose deployments. Test code
+# passes `localhost` / `127.0.0.1:PORT` for the mock-AWS server;
+# those match via the loopback exception below.
+_AWS_HOST_SUFFIXES = (
+    ".amazonaws.com",        # commercial AWS
+    ".amazonaws.com.cn",     # AWS China
+    ".amazonaws.us",         # AWS GovCloud
+    ".api.aws",              # newer service domains
+    ".aws.dev",              # AWS developer / preview domains
+)
+
+
+def _is_allowed_forward_host(host: str) -> bool:
+    """True iff `host` is an AWS endpoint (or test loopback, or in
+    the operator's IAM_JIT_BOUNCER_EXTRA_HOSTS allowlist).
+
+    Strips an optional `:port` suffix; the comparison is on the
+    bare DNS host. Case-insensitive (AWS endpoints are lowercase
+    canonically but the SigV4 signature is normalized; some
+    legitimate clients send mixed-case hosts).
+    """
+    if not host:
+        return False
+    bare = host.split(":", 1)[0].lower().rstrip(".")
+    if not bare:
+        return False
+    # Loopback exception — tests + LocalStack default deploy use this
+    if bare in ("127.0.0.1", "localhost", "::1"):
+        return True
+    if bare.startswith("127.") and bare.replace(".", "").isdigit():
+        return True
+    # AWS canonical TLDs
+    for suffix in _AWS_HOST_SUFFIXES:
+        if bare.endswith(suffix):
+            return True
+    # Operator-supplied extras (comma-separated suffix list)
+    extras_env = os.environ.get("IAM_JIT_BOUNCER_EXTRA_HOSTS", "")
+    for raw_suffix in extras_env.split(","):
+        suffix = raw_suffix.strip().lower().lstrip(".")
+        if not suffix:
+            continue
+        # Compare with leading dot so "evil.example.com" doesn't slip
+        # past a "vil.example.com" allowlist entry by mistake.
+        suffix_with_dot = "." + suffix
+        if bare == suffix or bare.endswith(suffix_with_dot):
+            return True
+    return False
+
+
 def _strip_hop_headers(headers: dict[str, str]) -> dict[str, str]:
     """Remove RFC 7230 hop-by-hop headers + headers the upstream
     library will recompute. Returns a NEW dict; doesn't mutate input.
@@ -574,6 +635,36 @@ async def _handle_request(request, *, store, config: ProxyConfig, session):
             },
             status=400,
             headers={"x-iam-jit-bouncer-verdict": obs.decision_verdict},
+        )
+
+    # CRIT-32-01 closure: outbound Host allowlist. The Host header is
+    # attacker-controllable; without this check, a compromised agent
+    # can point the proxy at attacker.example.com and exfil the
+    # SigV4-signed body + AccessKeyId.
+    if not _is_allowed_forward_host(host_header):
+        logger.warning(
+            "iam-jit-bouncer refused forward to non-AWS host %r "
+            "(service=%s action=%s)",
+            host_header, obs.parsed_service, obs.parsed_action,
+        )
+        return web.json_response(
+            {
+                "error": "iam-jit-bouncer DENY (forward-host-mismatch)",
+                "decision_reason": (
+                    f"refused to forward to {host_header!r}: not an AWS "
+                    f"endpoint. CRIT-32-01 protection. Set "
+                    f"IAM_JIT_BOUNCER_EXTRA_HOSTS for legitimate non-AWS "
+                    f"targets (LocalStack etc)."
+                ),
+                "service": obs.parsed_service,
+                "action": obs.parsed_action,
+                "attempted_host": host_header,
+            },
+            status=403,
+            headers={
+                "x-iam-jit-bouncer-verdict": "deny",
+                "x-iam-jit-bouncer-refusal": "forward-host-mismatch",
+            },
         )
 
     # ALLOW (either mode) OR cooperative+DENY → forward to AWS

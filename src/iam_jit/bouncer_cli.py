@@ -1857,7 +1857,26 @@ def _parse_duration(raw: str) -> int:
     "--host", default="127.0.0.1", show_default=True,
     help="Interface to bind. Defaults to 127.0.0.1 (loopback). "
          "Binding to anything else exposes a credential-handling "
-         "surface to the network — local-only is the safe default.",
+         "surface to the network — refused unless you also pass "
+         "--i-know-this-binds-externally. CRIT-32-02 closure.",
+)
+@click.option(
+    "--i-know-this-binds-externally", "force_external_bind", is_flag=True,
+    default=False,
+    help="Required acknowledgement when --host is anything other than "
+         "127.0.0.1 / ::1 / localhost. Binding the bouncer externally "
+         "exposes a credential-handling surface; combined with the "
+         "exfil-vector this would be unrecoverable. Don't pass this "
+         "flag unless you have read the SECURITY.md threat model + "
+         "have a specific reason (e.g. dedicated test VM with no "
+         "real credentials).",
+)
+@click.option(
+    "--prompt-on-deny", is_flag=True, default=False,
+    help="Enqueue every transparent-mode DENY in the pending-prompts "
+         "queue so the operator can later answer via `bouncer prompts "
+         "answer ID --kind always|profile|ignore`. Async — agent gets "
+         "denied immediately, answer takes effect on the NEXT call.",
 )
 @click.option(
     "--mode",
@@ -1906,7 +1925,8 @@ def _parse_duration(raw: str) -> int:
 )
 @click.option("--db", type=click.Path(dir_okay=False), default=None)
 def run_cmd(
-    port: int, host: str, mode: str, default_policy: str,
+    port: int, host: str, force_external_bind: bool, prompt_on_deny: bool,
+    mode: str, default_policy: str,
     profile_name: str | None,
     account_id_flag: str | None,
     account_alias_flag: str | None,
@@ -1933,6 +1953,26 @@ def run_cmd(
     from .bouncer.profiles import load_profiles, resolve_active_profile
     from .bouncer.proxy import ProxyConfig, ProxyMode, serve
 
+    # CRIT-32-02 closure: refuse externally-bindable hosts unless the
+    # operator explicitly acknowledged. The proxy holds AWS SigV4
+    # signatures + receives unauthenticated client connections; an
+    # externally-bound instance is reachable by anyone on the network
+    # who can then drive the proxy to forward signed requests.
+    _LOOPBACK_HOSTS = {
+        "127.0.0.1", "::1", "localhost", "ip6-localhost", "ip6-loopback",
+    }
+    if host not in _LOOPBACK_HOSTS and not force_external_bind:
+        click.secho(
+            f"refusing to bind to {host!r}: this exposes the bouncer's "
+            f"credential-handling surface to the network.\n\n"
+            f"If you genuinely need to bind externally (test VM with no "
+            f"real credentials, network-segmented dev box), re-run with "
+            f"--i-know-this-binds-externally AND read docs/SECURITY.md "
+            f"first. CRIT-32-02 closure.",
+            fg="red", err=True,
+        )
+        sys.exit(2)
+
     # Resolve the active profile NOW (CLI flag → env var → 'none').
     # If the user passed --profile NAME and NAME doesn't exist,
     # resolve_active_profile raises with the available-names list —
@@ -1955,6 +1995,7 @@ def run_cmd(
         active_profile=active_profile,
         account_id=account_id_flag,
         account_alias=account_alias_flag,
+        prompt_on_deny=prompt_on_deny,
     )
 
     with _opened_store(db) as store:
