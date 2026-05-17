@@ -328,7 +328,7 @@ If `AuthMode=local` is blocked by SCP, the deployer's options are:
      that invokes the Lambda via `lambda:InvokeFunction` instead of
      `lambda:InvokeFunctionUrl`. The the customer SCP denies the latter
      broadly (any AuthType, any principal), but allows the former.
-     Verified working in omise-experimental 2026-05.
+     Verified working in my-aws-account 2026-05.
 
      Required additional parameters when EnablePublicALB=true:
        - `AlbVpcId=vpc-xxxx` (default VPC works)

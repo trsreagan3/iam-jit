@@ -104,7 +104,7 @@ Notes on pricing:
 **Week 1 (this week): production deploy + soft launch**
 
 1. Deploy the API to a production AWS account (NOT
-   omise-experimental — get a clean account or sub-account)
+   my-aws-account — get a clean account or sub-account)
 2. Set up Stripe sandbox + test billing flow
 3. Publish CLI to PyPI
 4. Publish action to GitHub Marketplace

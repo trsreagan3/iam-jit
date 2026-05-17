@@ -77,7 +77,7 @@ The action lives at `github-action/action.yml`. To publish:
 
 ### Infrastructure
 
-- [ ] **Production AWS account.** Use a clean account (not omise-experimental). Single-purpose: iam-jit production.
+- [ ] **Production AWS account.** Use a clean account (not my-aws-account). Single-purpose: iam-jit production.
 - [ ] **Domain.** Register `iam-risk-score.com` (or similar). Set up Route 53.
 - [ ] **ACM cert** for `api.iam-risk-score.com` (and `iam-risk-score.com` for the landing site).
 - [ ] **Deploy iam-jit SAM stack** with `LLMBackend=bedrock`, `BedrockModelId=us.anthropic.claude-opus-4-7`, `AlbCertificateArn=<the ACM cert>`.

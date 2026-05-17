@@ -510,7 +510,7 @@ def test_bootstrap_claim_url_ends_in_setup_without_double_slash() -> None:
 
 def test_sam_template_cloudfront_resources_are_condition_gated(sam_template: dict[str, Any]) -> None:
     """CloudFront support was originally removed in favor of ALB because
-    the prior Omise-org SCP denied `lambda:InvokeFunctionUrl` broadly
+    the prior Acme-org SCP denied `lambda:InvokeFunctionUrl` broadly
     and CloudFront fronting a Function URL still uses that action. As
     of 2026-05, CloudFront is RE-INTRODUCED as an opt-in
     `EnableEdgeProtection=true` capability (paired with WAFv2 rate-

@@ -373,7 +373,7 @@ What's deferred to later phases:
 - Webhooks fire to submitting agents so they know access has been revoked and can resubmit if still needed.
 
 **Phase 3.5 — admin org-context file (planned, small).**
-- An admin-managed YAML file (`org-context.yaml`) that gives the LLM standing context about the organization: account IDs and what each is for ("471112971302 = staging integration in us-east-1, runs Omise services"), default regions, whether Kubernetes is in use, naming conventions, etc.
+- An admin-managed YAML file (`org-context.yaml`) that gives the LLM standing context about the organization: account IDs and what each is for ("471112971302 = staging integration in us-east-1, runs payments services"), default regions, whether Kubernetes is in use, naming conventions, etc.
 - Loaded the same way `users.yaml` is — via the `UserConfigSource: file` pattern, S3-backed, hot-reloadable without redeploy.
 - Fed into the LLM's system prompt as immutable grounding so describe-mode generation produces account-aware suggestions without each user having to re-explain their environment.
 - Optional. Adopters can leave it empty; describe-mode still works with policy_sentry's deterministic backbone and falls back to generic suggestions.

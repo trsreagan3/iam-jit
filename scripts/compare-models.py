@@ -3,8 +3,8 @@
 Drives the conversational intake against several Ollama models on the
 exact prompts a user has been testing and scores each on:
 
-  - proper-noun preservation (no "merchante" → "Merchandize" paraphrasing)
-  - org-context grounding (does it resolve "merchante development" → account ID?)
+  - proper-noun preservation (no "beta" → "Betaize" paraphrasing)
+  - org-context grounding (does it resolve "beta development" → account ID?)
   - policy correctness (right service, right access type, non-empty)
   - follow-up count (fewer is better)
   - latency per turn
@@ -35,40 +35,40 @@ from iam_jit.llm import OllamaBackend  # noqa: E402
 
 SCENARIOS = [
     {
-        "name": "alb-ip-merchante-dev",
+        "name": "alb-ip-beta-dev",
         "user_messages": [
             "I need to get the ip of an alb in dev for the core service",
-            "847283080673",
+            "123456789012",
             "I dont know",
         ],
         "expected_services": {"elasticloadbalancing", "ec2"},
         "expected_read_only": True,
-        "expected_account_id": "847283080673",
-        "forbidden_paraphrasings": ["Merchandize", "Merchant ", "Merchande"],
+        "expected_account_id": "123456789012",
+        "forbidden_paraphrasings": ["Betaize", "Merchant ", "Merchande"],
     },
     {
-        "name": "secrets-merchante-dev",
+        "name": "secrets-beta-dev",
         "user_messages": [
-            "i need a policy to look at the secrets for the core service in merchante development account",
-            "847283080673",
+            "i need a policy to look at the secrets for the core service in beta development account",
+            "123456789012",
             "I dont know",
         ],
         "expected_services": {"secretsmanager"},
         "expected_read_only": True,
-        "expected_account_id": "847283080673",
-        "forbidden_paraphrasings": ["Merchandize", "Merchant ", "Merchande"],
+        "expected_account_id": "123456789012",
+        "forbidden_paraphrasings": ["Betaize", "Merchant ", "Merchande"],
     },
     {
-        "name": "dns-merchante-dev",
+        "name": "dns-beta-dev",
         "user_messages": [
-            "i need to get the value of a dns record in merchante development",
-            "847283080673",
+            "i need to get the value of a dns record in beta development",
+            "123456789012",
             "I dont know",
         ],
         "expected_services": {"route53"},
         "expected_read_only": True,
-        "expected_account_id": "847283080673",
-        "forbidden_paraphrasings": ["Merchandize", "Merchant ", "Merchande"],
+        "expected_account_id": "123456789012",
+        "forbidden_paraphrasings": ["Betaize", "Merchant ", "Merchande"],
     },
     {
         "name": "s3-with-bucket",
@@ -99,14 +99,14 @@ SCENARIOS = [
         # then fall back to read-only wildcards across both services.
         "name": "multi-service-no-arns",
         "user_messages": [
-            "I need access to the s3 buckets and dns records in omise staging",
+            "I need access to the s3 buckets and dns records in acme staging",
             "I dont know",
             "I dont know",
         ],
         "expected_services": {"s3", "route53"},
         "expected_read_only": True,
         "expected_account_id": "758279344746",
-        "forbidden_paraphrasings": ["Merchandize"],
+        "forbidden_paraphrasings": ["Betaize"],
     },
     {
         # User mentions write verbs in passing but doesn't justify the
@@ -126,7 +126,7 @@ SCENARIOS = [
         "name": "concrete-write-justification",
         "user_messages": [
             "I need to add a CNAME record pointing api.example.com to the new "
-            "staging ALB, in omise staging",
+            "staging ALB, in acme staging",
             "I dont know",
         ],
         "expected_services": {"route53"},

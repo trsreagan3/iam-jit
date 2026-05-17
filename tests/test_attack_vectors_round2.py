@@ -183,7 +183,7 @@ def test_provision_idempotent_when_role_already_exists(
             provisioner_role_arn="arn:aws:iam::060392206767:role/iam-jit-provisioner",
             provisioner_external_id="ext",
             provisioning_mode="classic_iam",
-            alias="omise-dev",
+            alias="dev-account",
         )
     )
     with mock_aws():

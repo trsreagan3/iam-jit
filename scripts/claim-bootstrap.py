@@ -30,7 +30,7 @@ Usage:
   scripts/claim-bootstrap.py [--profile PROFILE] [--stack STACK]
                               [--region REGION] [--no-browser]
 
-Defaults: --profile=omise-experimental, --stack=iam-jit,
+Defaults: --profile=my-aws-account, --stack=iam-jit,
 --region=us-east-1. Override via CLI args or env vars
 IAM_JIT_AWS_PROFILE / IAM_JIT_STACK_NAME / IAM_JIT_AWS_REGION.
 
@@ -58,7 +58,7 @@ import urllib.request
 
 
 DEFAULTS = {
-    "profile": os.environ.get("IAM_JIT_AWS_PROFILE", "omise-experimental"),
+    "profile": os.environ.get("IAM_JIT_AWS_PROFILE", "my-aws-account"),
     "stack": os.environ.get("IAM_JIT_STACK_NAME", "iam-jit"),
     "region": os.environ.get("IAM_JIT_AWS_REGION", "us-east-1"),
 }

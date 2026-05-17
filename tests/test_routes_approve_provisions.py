@@ -74,7 +74,7 @@ def app_with_registered_account(
                 provisioner_role_arn="arn:aws:iam::060392206767:role/iam-jit-provisioner",
                 provisioner_external_id="iam-jit-060392206767",
                 provisioning_mode="classic_iam",
-                alias="omise-dev",
+                alias="dev-account",
             )
         )
         app = create_app(

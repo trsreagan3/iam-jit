@@ -61,7 +61,7 @@ def registered_account(as_admin: TestClient) -> str:
             provisioner_role_arn="arn:aws:iam::060392206767:role/iam-jit-provisioner",
             provisioner_external_id="ext",
             provisioning_mode="classic_iam",
-            alias="omise-dev",
+            alias="dev-account",
         )
     )
     return "060392206767"

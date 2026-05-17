@@ -51,6 +51,7 @@ import gzip
 import hashlib
 import hmac
 import json
+import os
 import pathlib
 import subprocess
 import sys
@@ -496,12 +497,14 @@ def test_bb6_05_lambda_no_magic_link_secret_refuses():
         in to bypass the gate).
 
     Severity: N/A (defended). New closure re-pin."""
+    repo_src = str(pathlib.Path(__file__).resolve().parent.parent / "src")
     script = '''
 import os, sys, tempfile, pathlib
+_repo_src = os.environ.pop("BB6_05_REPO_SRC")
 os.environ.clear()
 os.environ["AWS_LAMBDA_FUNCTION_NAME"] = "iam-jit-test"
 os.environ["IAM_JIT_AUTH_MODE"] = "local"
-sys.path.insert(0, "/Users/reagan/repos/iam-roles/src")
+sys.path.insert(0, _repo_src)
 
 tmp = pathlib.Path(tempfile.mkdtemp())
 users = tmp / "users.yaml"
@@ -530,6 +533,7 @@ print(f"{r.status_code}|{r.text}")
     result = subprocess.run(
         [sys.executable, "-c", script],
         capture_output=True, text=True, timeout=30,
+        env={**os.environ, "BB6_05_REPO_SRC": repo_src},
     )
     assert result.returncode == 0, (
         f"subprocess failed: stderr={result.stderr[:500]}"

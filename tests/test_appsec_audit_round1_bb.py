@@ -931,7 +931,7 @@ def test_bb_28_mcp_server_handles_bogus_methods():
         input=(init + "\n" + evil + "\n").encode(),
         capture_output=True,
         timeout=15,
-        cwd="/Users/reagan/repos/iam-roles",
+        cwd=str(pathlib.Path(__file__).resolve().parent.parent),
     )
     lines = [l for l in proc.stdout.decode().splitlines() if l.strip()]
     assert len(lines) >= 2

@@ -59,7 +59,7 @@ apiVersion: iam-jit.dev/v1alpha1
 kind: AccountList
 accounts:
   - account_id: '060392206767'
-    alias: omise-dev
+    alias: dev-account
     provisioning_mode: classic_iam
     provisioner_role_arn: arn:aws:iam::060392206767:role/iam-jit-provisioner
     provisioner_external_id: iam-jit-060392206767

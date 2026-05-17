@@ -1,16 +1,16 @@
-# Bedrock LLM smoke test — `omise-experimental`, us-east-1
+# Bedrock LLM smoke test — `my-aws-account`, us-east-1
 
 **Purpose:** verify that iam-jit's LLM-narrative path works end-to-end
 when the Lambda is configured with `LLMBackend=bedrock`. Today the
 deployed Lambda has only been exercised in `LLMBackend=none` mode;
 this test closes that gap.
 
-**Scheduled:** when the user (Reagan / `thomas.s@opn.ooo`) is
+**Scheduled:** when the user (Reagan / `founder@example.com`) is
 available to monitor — explicitly NOT to be run unsupervised.
 
 **Hard constraints:**
 
-  - Use the **existing** Bedrock setup in `omise-experimental`. No
+  - Use the **existing** Bedrock setup in `my-aws-account`. No
     model-access changes, no provisioned throughput, no shared keys.
   - Test connectivity + one minimal invocation. Do **not** put the
     model under load.
@@ -22,7 +22,7 @@ A bare connectivity test was already run against this profile:
 
 ```
 $ aws bedrock-runtime converse \
-    --profile omise-experimental --region us-east-1 \
+    --profile my-aws-account --region us-east-1 \
     --model-id us.anthropic.claude-opus-4-7 \
     --messages '[{"role":"user","content":[{"text":"Reply with the single word: pong"}]}]' \
     --inference-config '{"maxTokens":20}'
@@ -42,12 +42,12 @@ session. Without this fix, the smoke test would have failed.
 
 ## Pre-flight (already verified — safe to proceed)
 
-The state of `omise-experimental` Bedrock as of test-plan write time:
+The state of `my-aws-account` Bedrock as of test-plan write time:
 
 | Property | Value | Risk to running env |
 |---|---|---|
 | Provisioned throughputs in region | **None** (`aws bedrock list-provisioned-model-throughputs` → empty) | Zero. No shared paid capacity to consume. |
-| Recent InvokeModel events (90d) | All from `thomas.s@opn.ooo`, none more recent than 2026-03-31 | Zero. No other workload would notice us. |
+| Recent InvokeModel events (90d) | All from `founder@example.com`, none more recent than 2026-03-31 | Zero. No other workload would notice us. |
 | Newest Opus inference profile | `us.anthropic.claude-opus-4-7` (status: ACTIVE, type: SYSTEM_DEFINED) | Standard on-demand. No reservation = no shared paid capacity. |
 | Bedrock model access already enabled | Implicit (the SYSTEM_DEFINED profile is listed for this account) | We're using what's already turned on; we don't request access we don't have. |
 | Lambda IAM grant for Bedrock | `bedrock-invoke` policy in `~/repos/iam-roles/infrastructure/sam/template.yaml` line 970+ already grants `bedrock:InvokeModel` + `bedrock:Converse` on `*` — fires only when `UsesBedrock` (LLMBackend=bedrock) | Scoped to OUR test Lambda's role; no other principal gets the grant. |
@@ -95,7 +95,7 @@ sam package \
   --template-file ~/repos/iam-roles/.aws-sam/build/template.yaml \
   --output-template-file ~/repos/iam-roles/.aws-sam/build/packaged.yaml \
   --resolve-s3 \
-  --profile omise-experimental --region us-east-1
+  --profile my-aws-account --region us-east-1
 
 # Use a fresh suffix to avoid retained-table collisions.
 # (The retained tables from earlier runs are NOT touched.)
@@ -104,7 +104,7 @@ SUFFIX="r4"
 sam deploy \
   --template-file ~/repos/iam-roles/.aws-sam/build/packaged.yaml \
   --stack-name iam-jit-test-${SUFFIX} \
-  --profile omise-experimental --region us-east-1 \
+  --profile my-aws-account --region us-east-1 \
   --capabilities CAPABILITY_IAM CAPABILITY_NAMED_IAM \
   --no-confirm-changeset --no-fail-on-empty-changeset --resolve-s3 \
   --parameter-overrides \
@@ -113,7 +113,7 @@ sam deploy \
     "SettingsTableName=iam-jit-test-${SUFFIX}-settings" \
     "CidrsTableName=iam-jit-test-${SUFFIX}-cidrs" \
     "AccountsTableName=iam-jit-test-${SUFFIX}-accounts" \
-    "StateBucketName=iam-jit-state-omise-experimental-test-${SUFFIX}-$(openssl rand -hex 4)" \
+    "StateBucketName=iam-jit-state-my-aws-account-test-${SUFFIX}-$(openssl rand -hex 4)" \
     "AdminBootstrapEmail=trsreagan3@gmail.com" \
     "BootstrapSetupKey=$(openssl rand -hex 32)" \
     "MagicLinkSecret=$(openssl rand -hex 32)" \
@@ -138,7 +138,7 @@ actually works:
 
 ```bash
 ALB=$(aws cloudformation describe-stacks --stack-name iam-jit-test-r4 \
-  --profile omise-experimental --region us-east-1 \
+  --profile my-aws-account --region us-east-1 \
   --query "Stacks[0].Outputs[?OutputKey=='PublicBaseUrl'].OutputValue" --output text)
 
 curl -sS "${ALB}/healthz"
@@ -194,7 +194,7 @@ include:
 
 ```bash
 aws cloudtrail lookup-events \
-  --profile omise-experimental --region us-east-1 \
+  --profile my-aws-account --region us-east-1 \
   --lookup-attributes AttributeKey=EventName,AttributeValue=InvokeModel \
   --start-time "$(date -u -v-1H +%Y-%m-%dT%H:%M:%SZ)" \
   --query "Events[].[EventTime,Username]" --output table
@@ -211,11 +211,11 @@ modified).
 ```bash
 aws cloudformation delete-stack \
   --stack-name iam-jit-test-r4 \
-  --profile omise-experimental --region us-east-1
+  --profile my-aws-account --region us-east-1
 
 aws cloudformation wait stack-delete-complete \
   --stack-name iam-jit-test-r4 \
-  --profile omise-experimental --region us-east-1
+  --profile my-aws-account --region us-east-1
 ```
 
 Persistent stores survive (retained policy). No Bedrock cleanup

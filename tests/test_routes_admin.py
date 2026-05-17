@@ -235,7 +235,7 @@ def test_force_delete_safety_gate_returns_422(
             provisioner_role_arn="arn:aws:iam::060392206767:role/iam-jit-provisioner",
             provisioner_external_id="ext",
             provisioning_mode="classic_iam",
-            alias="omise-dev",
+            alias="dev-account",
         )
     )
     pl = _force_delete_payload()
@@ -257,7 +257,7 @@ def test_force_delete_safety_gate_rejects_wrong_arn_pattern(
             provisioner_role_arn="arn:aws:iam::060392206767:role/iam-jit-provisioner",
             provisioner_external_id="ext",
             provisioning_mode="classic_iam",
-            alias="omise-dev",
+            alias="dev-account",
         )
     )
     pl = _force_delete_payload()
@@ -280,7 +280,7 @@ def test_force_delete_invokes_provision_revoke_when_safety_passes(
             provisioner_role_arn="arn:aws:iam::060392206767:role/iam-jit-provisioner",
             provisioner_external_id="ext",
             provisioning_mode="classic_iam",
-            alias="omise-dev",
+            alias="dev-account",
         )
     )
 

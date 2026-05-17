@@ -136,7 +136,7 @@ Explicitly deferred to v1.1 per UAT-A doc-reframing:
 
 ## External blockers (unchanged from 2026-05-16)
 
-- **AWS account 590519617224 verification** (Route 53 + Bedrock Anthropic
+- **AWS account 123456789012 verification** (Route 53 + Bedrock Anthropic
   access) — single support case unblocks both per
   `aws-account-verification`. Not blocking pre-launch self-host /
   bouncer / local pilots; blocks the iam-risk-score.com hosted scorer

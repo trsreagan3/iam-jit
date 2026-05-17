@@ -23,7 +23,7 @@ runtime. That means the SAME script runs against:
       python scripts/generate-adversarial-policies.py
 
   - AWS Bedrock (Opus / Sonnet) for production calibration:
-      AWS_PROFILE=omise-experimental \
+      AWS_PROFILE=my-aws-account \
       IAM_JIT_LLM=bedrock \
       IAM_JIT_LLM_MODEL=us.anthropic.claude-opus-4-7 \
       python scripts/generate-adversarial-policies.py

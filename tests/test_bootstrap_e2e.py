@@ -195,7 +195,7 @@ def test_email_bootstrap_admin_lifecycle_end_to_end(
         "/api/v1/accounts",
         json={
             "account_id": "060392206767",
-            "alias": "omise-dev",
+            "alias": "dev-account",
             "provisioning_mode": "classic_iam",
             "provisioner_role_arn": "arn:aws:iam::060392206767:role/iam-jit-provisioner",
             "provisioner_external_id": "iam-jit-060392206767",
@@ -431,7 +431,7 @@ def test_random_fallback_admin_can_complete_full_lifecycle(
         "/api/v1/accounts",
         json={
             "account_id": "060392206767",
-            "alias": "omise-dev",
+            "alias": "dev-account",
             "provisioning_mode": "classic_iam",
             "provisioner_role_arn": "arn:aws:iam::060392206767:role/iam-jit-provisioner",
             "provisioner_external_id": "iam-jit-060392206767",

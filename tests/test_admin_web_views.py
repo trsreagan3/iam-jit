@@ -81,7 +81,7 @@ def test_admin_rediscover_post_renders_report(
             accounts=[
                 rediscover.AccountReconciliation(
                     account_id="060392206767",
-                    alias="omise-dev",
+                    alias="dev-account",
                     success=True,
                 )
             ],
