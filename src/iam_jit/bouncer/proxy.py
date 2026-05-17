@@ -560,6 +560,30 @@ async def serve(config: ProxyConfig, *, store: BouncerStore) -> None:
             request, store=store, config=config, session=session,
         )
 
+    async def healthz_handler(request):
+        # Liveness probe. Bypasses proxy evaluation entirely (never
+        # parses as a request, never writes to the audit log) so
+        # monitor traffic doesn't pollute the operator's "what just
+        # happened" view in `iam-jit-bouncer logs tail`. Mirrors
+        # kbouncer's /healthz shape for cross-product symmetry.
+        active_profile = getattr(config, "active_profile", None)
+        try:
+            decision_count = store.count_decisions()
+            status_str = "ok"
+        except Exception:
+            decision_count = 0
+            status_str = "degraded"
+        return web.json_response({
+            "status": status_str,
+            "mode": config.mode.value,
+            "default_policy": config.default_policy.value,
+            "active_profile": active_profile.name if active_profile else "",
+            "decisions_count": decision_count,
+        })
+
+    # /healthz registered BEFORE the catch-all so it wins route
+    # precedence; aiohttp dispatches in registration order.
+    app.router.add_route("GET", "/healthz", healthz_handler)
     app.router.add_route("*", "/{tail:.*}", handler)
 
     runner = web.AppRunner(app)
