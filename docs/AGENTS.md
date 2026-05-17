@@ -1,6 +1,8 @@
 # AGENTS.md — using iam-jit from inside an IDE agent
 
-> If you're building a Claude Code / Cursor / custom-agent integration with iam-jit, read this doc.
+> iam-jit's MCP server speaks the open Model Context Protocol — any MCP-compatible agent runtime (Claude Code, Cursor, Codex MCP, Devin, custom) can use it. Examples below lean Claude Code because it's the most popular client, but every flow works identically for any MCP-speaking agent.
+>
+> If you're building an agent integration with iam-jit, read this doc.
 > If you're a human about to use iam-jit's web UI, **also read this doc** — the recommended workflow runs through an agent even for human-driven sessions.
 
 ## The core idea

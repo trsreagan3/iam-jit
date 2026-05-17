@@ -2,6 +2,8 @@
 
 > **Don't give Claude your AWS keys.**
 > iam-jit issues narrow, time-bound, audited AWS credentials per task — so your AI agent can do real AWS work without standing access.
+>
+> Works with any MCP-compatible agent: Claude Code, Cursor, Codex MCP, Devin, custom runtimes. The MCP server speaks the open Model Context Protocol — no agent-specific build required.
 
 [![CI](https://img.shields.io/badge/CI-13%20rounds%20BB%2BWB%20audited-brightgreen)](docs/security/) [![Calibration](https://img.shields.io/badge/AWS--managed%20corpus-1489%2F1489-brightgreen)](docs/CONVERGENCE-REPORT-2026-05.md) [![License](https://img.shields.io/badge/license-Apache--2.0-blue)](LICENSE)
 
@@ -173,14 +175,12 @@ See [docs/IAM-JIT-BOUNCER.md](docs/IAM-JIT-BOUNCER.md) for full CLI + MCP refere
 
 ```bash
 $ pip install iam-jit
-$ iam-jit serve --local
-✓ Started on http://localhost:8765
-✓ MCP endpoint: http://localhost:8765/mcp
-✓ Using ~/.aws/credentials (profile: default)
-
-$ iam-jit mcp install-claude-code
-✓ Added iam-jit MCP server to Claude Code config
+$ iam-jit init-solo                       # bootstraps ~/.iam-jit/, admin user, API token
+$ iam-jit serve --local                    # starts the local HTTP + MCP backend on 127.0.0.1
+$ iam-jit mcp install-claude-code          # writes the MCP entry into Claude Desktop config
 ```
+
+Then restart Claude Desktop / Claude Code so it re-reads the config. Use `iam-jit mcp show-config` instead if you're wiring a different MCP client (Cursor, Codex MCP, Devin, custom) — paste the JSON snippet into your agent's MCP config.
 
 Done. Claude Code now has iam-jit as its AWS access layer.
 
@@ -317,9 +317,9 @@ Every deployment writes a structured, queryable audit log. The exact storage bac
 
 | Mode | Backend | Retention | Query |
 |---|---|---|---|
-| **iam-jit local** (`serve --local`) | SQLite at `~/.iam-jit/audit.db` | Forever (until user prunes) | `iam-jit audit ls`, `iam-jit audit show <id>`, raw SQL |
-| **Hosted (SaaS)** | DynamoDB (customer's tenant slice) | Per customer's retention policy (default 7 years for compliance tiers) | Web UI grant-detail page, JSON API `/api/v1/audit/...`, exportable CSV/JSONL |
-| **Self-host** | DynamoDB in customer's hub account | Per customer's CloudFormation params | Same as hosted; customer also has raw DDB access |
+| **iam-jit local** (`serve --local`) | File-per-request YAML under `~/.iam-jit/requests/` + bouncer SQLite audit chain at `~/.iam-jit/bouncer/state.db` | Forever (until user prunes) | `iam-jit remote list`, `iam-jit remote status <id>`, `iam-jit-bouncer logs tail`, `iam-jit-bouncer tasks review <id>` |
+| **Self-host** | DynamoDB in customer's hub account | Per customer's CloudFormation params | JSON API `/api/v1/requests/...`, web UI grant-detail page, raw DDB access |
+| **Dedicated Enterprise** | Same as self-host (customer's dedicated AWS account) | Per customer's contract | Same as self-host |
 
 All modes additionally emit structured logs to stdout/CloudWatch (one-line JSON per event) so existing SIEM pipelines (Datadog, Splunk, Sumo, Wiz) can ingest in real time. No proprietary format.
 

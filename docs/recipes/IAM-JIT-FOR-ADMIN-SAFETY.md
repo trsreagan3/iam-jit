@@ -32,20 +32,21 @@ After ~5 minutes of setup:
 ## Quick install (90 seconds)
 
 ```bash
-# 1. Install
+# 1. Install + bootstrap
 $ pip install iam-jit
+$ iam-jit init-solo
 
 # 2. Start local mode
 $ iam-jit serve --local
-✓ Started on http://localhost:8765
-✓ MCP endpoint: http://localhost:8765/mcp
-✓ Using AWS credentials from ~/.aws/credentials (profile: default)
-✓ Audit log: ~/.iam-jit/audit.db
 
-# 3. Wire into Claude Code (one command)
+# 3. Wire into Claude Desktop / Claude Code (one command)
 $ iam-jit mcp install-claude-code
-✓ Added iam-jit MCP server to Claude Code config
-✓ Restart Claude Code to pick up the change
+✓ added iam-jit MCP server to ~/Library/Application Support/Claude/claude_desktop_config.json
+
+# (For Cursor / Codex MCP / Devin / custom: use `iam-jit mcp show-config`
+#  and paste the snippet into your agent's MCP config.)
+
+# Then restart Claude Desktop / Claude Code so it re-reads the config.
 ```
 
 Done. Next time you start Claude Code, iam-jit is the AWS access

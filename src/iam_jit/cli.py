@@ -905,47 +905,234 @@ def bouncer_pointer(ctx: click.Context) -> None:
     sys.exit(2)
 
 
+@main.group("mcp")
+def mcp_group() -> None:
+    """Wire iam-jit's MCP server into an agent runtime.
+
+    iam-jit's MCP server speaks the open Model Context Protocol — any
+    MCP-compatible agent (Claude Code, Cursor, Codex MCP, Devin,
+    custom runtimes) can use it. The subcommands here help with the
+    most-common integrations.
+    """
+
+
+def _mcp_server_config_dict() -> dict[str, object]:
+    """The canonical JSON config snippet any MCP client ingests to
+    use iam-jit as an MCP server (stdio transport). Centralized so
+    `show-config`, `install-claude-code`, and `init-solo --print-mcp-config`
+    all emit the SAME shape."""
+    return {
+        "mcpServers": {
+            "iam-jit": {
+                "command": "iam-jit",
+                "args": ["mcp-server"],
+            },
+        },
+    }
+
+
+@mcp_group.command("show-config")
+@click.option(
+    "--pretty/--compact",
+    default=True,
+    show_default=True,
+    help="Pretty-print the JSON (default) or emit compact.",
+)
+def mcp_show_config(pretty: bool) -> None:
+    """Print the MCP server JSON config snippet to stdout.
+
+    Vendor-neutral — paste into any MCP-compatible agent's config:
+    Claude Code, Cursor, Codex MCP, Devin, custom. For Claude Code
+    specifically, see `iam-jit mcp install-claude-code`.
+    """
+    cfg = _mcp_server_config_dict()
+    click.echo(
+        json.dumps(cfg, indent=2 if pretty else None,
+                   separators=(", ", ": ") if pretty else (",", ":")),
+    )
+
+
+def _claude_desktop_config_path() -> pathlib.Path:
+    """Best-effort detection of the Claude Desktop / Claude Code MCP
+    config path on this platform. Returns the path even if the file
+    doesn't exist yet (caller creates it).
+    """
+    import platform as _platform
+    home = pathlib.Path.home()
+    sysname = _platform.system()
+    if sysname == "Darwin":
+        return home / "Library" / "Application Support" / "Claude" / "claude_desktop_config.json"
+    if sysname == "Windows":
+        appdata = os.environ.get("APPDATA")
+        if appdata:
+            return pathlib.Path(appdata) / "Claude" / "claude_desktop_config.json"
+        return home / "AppData" / "Roaming" / "Claude" / "claude_desktop_config.json"
+    # Linux + other
+    return home / ".config" / "Claude" / "claude_desktop_config.json"
+
+
+@mcp_group.command("install-claude-code")
+@click.option(
+    "--path",
+    "explicit_path",
+    type=click.Path(dir_okay=False),
+    default=None,
+    help="Override the default Claude Desktop config path. "
+         "Default: ~/Library/Application Support/Claude/claude_desktop_config.json "
+         "(macOS) / ~/.config/Claude/... (Linux) / %APPDATA%/Claude/... (Windows).",
+)
+@click.option(
+    "--dry-run",
+    is_flag=True,
+    default=False,
+    help="Show what would be written without modifying any file.",
+)
+@click.option(
+    "--print-only",
+    is_flag=True,
+    default=False,
+    help="Just print the JSON snippet + the target path; don't write.",
+)
+def mcp_install_claude_code(
+    explicit_path: str | None,
+    dry_run: bool,
+    print_only: bool,
+) -> None:
+    """Install iam-jit as an MCP server in Claude Desktop / Claude Code config.
+
+    Best-effort: detects the platform-appropriate config path,
+    creates the parent directory if missing, and adds (or updates)
+    the `mcpServers.iam-jit` entry. If you already have other
+    mcpServers entries they are preserved. Existing iam-jit entries
+    are OVERWRITTEN.
+
+    After running, restart Claude Desktop / Claude Code so it
+    re-reads the config.
+
+    For other MCP clients (Cursor, Codex MCP, Devin, custom), use
+    `iam-jit mcp show-config` and paste the snippet into your
+    client's MCP config.
+    """
+    target = pathlib.Path(explicit_path) if explicit_path else _claude_desktop_config_path()
+    snippet = _mcp_server_config_dict()
+
+    if print_only or dry_run:
+        click.echo(f"target config path: {target}")
+        click.echo("")
+        click.echo("would write / merge:")
+        click.echo(json.dumps(snippet, indent=2))
+        if dry_run:
+            click.echo("")
+            click.echo("(dry run; no changes made)")
+        return
+
+    # Load existing config if present; merge mcpServers.
+    existing: dict[str, object] = {}
+    if target.exists():
+        try:
+            existing = json.loads(target.read_text())
+            if not isinstance(existing, dict):
+                click.secho(
+                    f"warning: {target} is not a JSON object; refusing to overwrite. "
+                    "Pass --print-only and merge by hand.",
+                    fg="red", err=True,
+                )
+                sys.exit(1)
+        except json.JSONDecodeError as e:
+            click.secho(
+                f"warning: {target} is not valid JSON ({e}); refusing to overwrite. "
+                "Pass --print-only and merge by hand.",
+                fg="red", err=True,
+            )
+            sys.exit(1)
+
+    mcp_servers = existing.setdefault("mcpServers", {})
+    if not isinstance(mcp_servers, dict):
+        click.secho(
+            f"warning: {target} has a non-object mcpServers value; refusing to overwrite. "
+            "Pass --print-only and merge by hand.",
+            fg="red", err=True,
+        )
+        sys.exit(1)
+    overwriting = "iam-jit" in mcp_servers
+    mcp_servers["iam-jit"] = snippet["mcpServers"]["iam-jit"]
+
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_text(json.dumps(existing, indent=2) + "\n")
+
+    if overwriting:
+        click.secho(f"✓ updated existing iam-jit MCP entry at {target}", fg="green")
+    else:
+        click.secho(f"✓ added iam-jit MCP server to {target}", fg="green")
+    click.echo(
+        "  Restart Claude Desktop / Claude Code so it re-reads the config. "
+        "If you don't see iam-jit's tools after restart, run "
+        "`iam-jit mcp show-config` and merge the snippet by hand."
+    )
+
+
 @main.command("mcp-server")
 def mcp_server_cmd() -> None:
     """Run the iam-jit MCP server on stdio.
 
-    Exposes the policy-generation feature to MCP-aware agents
-    (Claude Code, Claude Desktop, Cursor, custom Claude SDK builds).
+    Exposes iam-jit's tool surface to any MCP-compatible agent
+    runtime (Claude Code, Cursor, Codex MCP, Devin, custom). The
+    server speaks the open Model Context Protocol — agent-agnostic
+    by spec.
+
     Communicates via JSON-RPC over stdin/stdout — one request per
-    line. Typically launched by the agent's MCP host configuration:
+    line. Typically launched by the agent's MCP host configuration.
+    Use `iam-jit mcp install-claude-code` for the most-common path,
+    or `iam-jit mcp show-config` for a vendor-neutral JSON snippet
+    you paste into your client's MCP config.
 
-    \b
-    ~/.config/claude/mcp_settings.json:
-    {
-      "mcpServers": {
-        "iam-jit": {
-          "command": "iam-jit",
-          "args": ["mcp-server"]
-        }
-      }
-    }
+    The agent has access to this live tool surface (see
+    docs/AGENTS.md for the canonical self-scoping flow):
 
-    The agent has access to a live tool surface (per [[no-nl-synthesis]]
-    decision 2026-05-16; see docs/AGENTS.md for the reduction-loop
-    pattern):
+    Self-scoping + applicability:
+      iam_jit_scope_self_for_task — the canonical first call:
+                                   atomic compatibility check +
+                                   bouncer task scope + JIT role
+                                   issuance, returns scoped STS creds
+      check_iam_jit_compatibility — verdict for a workload before
+                                   any role request
+      list_compatibility_overrides — read the admin allowlist
 
+    Policy templates + scoring + submission:
       list_templates             — browse the AWS-managed + iam-jit catalog
       get_template               — fetch a template's policy shape by name
       score_iam_policy           — rate any policy 1-10 with per-factor breakdown
       submit_policy              — submit a finished policy for grant issuance
-      reduce_policy              — narrow a baseline along deny/scope axes
-      get_reduction_checklist    — list curated reduction options
-      apply_reduction_checklist  — apply checklist selections to a baseline
       save_template              — save a custom policy to your personal library
       list_my_templates          — list your saved policies
       get_my_template            — fetch one of your saved policies
       find_similar_templates     — find templates similar to a candidate
+
+    Bouncer (local AWS-call gating proxy):
+      bouncer_list_rules          — current gate rules
+      bouncer_add_rule            — add a rule (audit-logged)
+      bouncer_remove_rule         — remove a rule (audit-logged)
+      bouncer_decide              — dry-run a hypothetical request
+      bouncer_list_presets        — built-in protective baselines
+      bouncer_show_preset         — inspect a preset
+      bouncer_apply_preset        — apply a preset as rules
+      bouncer_tail_decisions      — recent allow/deny decisions
+      bouncer_tail_events         — recent config events
+      bouncer_start_task          — declare a one-off task scope
+      bouncer_active_task         — what's gating right now
+      bouncer_end_task            — return to baseline
+      bouncer_task_review         — per-task decision summary
+      bouncer_effective_scope     — composed snapshot (task + global rules)
+      bouncer_recommend_rules     — synthesize rules from observed traffic
+      bouncer_apply_recommendation — bulk-add recommended rules
+
+    Other:
       tail_grant                 — read recent CloudTrail events for a JIT grant
 
-    Plus one tombstone (`generate_iam_policy`) that returns a
-    deprecation pointer to the live tools above. Natural-language
-    policy synthesis was removed in 0.4.0 — the agent (with its
-    codebase context + LLM) is the policy author now.
+    Natural-language policy synthesis was removed in 0.4.0; the
+    agent (with its codebase context + LLM) is the policy author
+    now. The `generate_iam_policy` tool is a tombstone that returns
+    a deprecation pointer.
     """
     from .mcp_server import main as mcp_main
     sys.exit(mcp_main())
