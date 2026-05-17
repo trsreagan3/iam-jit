@@ -743,25 +743,28 @@ def test_med_26_05_record_decision_nullifies_stale_task_id(store: BouncerStore) 
     assert decisions[0]["task_id"] is None
 
 
-def test_low_26_02_shorthand_parser_splits_at_before_hash() -> None:
+def test_low_26_02_shorthand_parser_splits_at_before_hash(tmp_path) -> None:
     """WB26 LOW-26-02: ARN with `#` inside should be preserved (split
-    `@` first, then `#` from the END of the post-@ chunk)."""
+    `@` first, then `#` from the END of the post-@ chunk). Exercise
+    the CLI shorthand parser end-to-end."""
     runner = CliRunner()
-    # Build a task using the CLI shorthand with a `#` inside the ARN
-    # body. The region should be `us-east-1`, the ARN should keep
-    # its hash.
+    db_path = str(tmp_path / "low26-02.db")
+    # ARN body contains a `#`; region trailing. The split should
+    # extract arn=`arn:aws:s3:::bucket/path#fragment` and
+    # region=`us-east-1`.
     result = runner.invoke(main, [
         "tasks", "start", "--description", "test",
         "--allow", "s3:GetObject@arn:aws:s3:::bucket/path#fragment#us-east-1",
-        "--db", str(_dt.datetime.now(_dt.UTC).timestamp()) + ".db",
+        "--db", db_path,
     ])
-    # CLI tries to write to a path that probably doesn't exist;
-    # but we're checking that the parse doesn't choke. Actually
-    # let me just test the helper directly:
-    from iam_jit.bouncer_cli import tasks_start
-    # Skip indirect — exercise the parse via the start command on a
-    # tmp db
-    pass  # The integration is tested via test_high_26_02 + others.
+    assert result.exit_code == 0, result.output
+    # Confirm via show that the arn_scope kept the `#`
+    active = runner.invoke(main, ["tasks", "active", "--json", "--db", db_path])
+    parsed = json.loads(active.output)
+    arn_scope = parsed["allow_rules"][0]["arn_scope"]
+    assert "fragment" in arn_scope
+    region_scope = parsed["allow_rules"][0]["region_scope"]
+    assert region_scope == "us-east-1"
 
 
 def test_low_26_05_events_tail_kind_enum_includes_task_kinds(tmp_path) -> None:
