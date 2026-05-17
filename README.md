@@ -1,7 +1,7 @@
 # iam-jit · iam-risk-score
 
 > **Don't give Claude full admin.**
-> iam-jit issues narrow, time-bound, audited AWS credentials per task — and the iam-jit-bouncer gates every AWS API call against a local rule set — so your AI agent can do real infra work without standing admin authority.
+> iam-jit issues narrow, time-bound, audited AWS credentials per task — and `ibounce` (the Bounce-family AWS gate; formerly `iam-jit-bouncer`) gates every AWS API call against a local rule set — so your AI agent can do real infra work without standing admin authority.
 >
 > Works with any MCP-compatible agent: Claude Code, Cursor, Codex MCP, Devin, custom runtimes. The MCP server speaks the open Model Context Protocol — no agent-specific build required.
 
@@ -24,7 +24,7 @@ Per four-products-one-brand: iam-jit is four separate products that share a scor
 | # | Product | What it is | Who it's for | Install | Ships in |
 |---|---|---|---|---|---|
 | 1 | **[iam-risk-score](#iam-risk-score)** | 1–10 risk score for any AWS IAM policy in <100ms. API + CLI + GitHub Action. Free for the first 100 requests/month. | CI pipelines, IDE plugins, anyone who wants a verdict before granting permissions. | `pip install iam-risk-score` | **v1.0** |
-| 2 | **[iam-jit-bouncer](#iam-jit-bouncer)** | Local proxy that gates every AWS API call against rules. Defense-in-depth over IAM scoping. v1.0 ships BOTH the agent-cooperative MCP path AND transparent HTTP-proxy interception (SigV4-preserving forwarding, cooperative + transparent modes, environment profiles, timed pause-for, async deny prompts). | Devs at companies with locked-down IAM (no `iam:CreateRole` for individuals); contractors on read-only credentials; anyone doing rapid iteration where IAM propagation delays hurt; agents that want defense-in-depth on top of role scoping. | `pip install iam-jit && iam-jit-bouncer init` | **v1.0** (CLI + MCP + HTTP proxy + profiles + pause + prompts) |
+| 2 | **[ibounce](#ibounce)** *(was `iam-jit-bouncer`)* | Local proxy that gates every AWS API call against rules. Defense-in-depth over IAM scoping. v1.0 ships BOTH the agent-cooperative MCP path AND transparent HTTP-proxy interception (SigV4-preserving forwarding, cooperative + transparent modes, environment profiles, timed pause-for, async deny prompts). | Devs at companies with locked-down IAM (no `iam:CreateRole` for individuals); contractors on read-only credentials; anyone doing rapid iteration where IAM propagation delays hurt; agents that want defense-in-depth on top of role scoping. | `pip install iam-jit && ibounce init` | **v1.0** (CLI + MCP + HTTP proxy + profiles + pause + prompts) |
 | 3 | **[iam-jit local](#iam-jit-local)** | Local-only safety layer between your AI agent and AWS. Runs on your laptop. Zero SaaS dependency. Your AWS credentials never leave your machine. | Solo devs / individual admins who want Claude bounded. | `pip install iam-jit && iam-jit serve --local` | **v1.0** |
 | 4 | **[iam-jit self-host](#iam-jit-self-host)** | Full JIT-IAM provisioner: time-bound roles, scoring, approval workflow, Slack approval bot, OIDC SSO (Google + Okta), audit trail, auto-revocation — running in your own AWS account. | Teams + enterprises with shared audit + multi-user + compliance needs. | `git clone` + `sam deploy --guided` | **v1.0** |
 
@@ -32,7 +32,9 @@ All four share the same deterministic scoring engine. Open source under Apache 2
 
 > **No multi-tenant hosted SaaS.** iam-jit-the-company does not operate a shared infrastructure tier — running a tool that holds trust roles into many customer AWS accounts would create a SolarWinds-style blast radius we refuse to host. iam-risk-score.com (the stateless scorer) is hosted because no credentials are involved; the other three products run on your laptop or in your own AWS account. Dedicated single-tenant managed Enterprise contracts are available for large customers at high-fee — but each deployment is fully isolated, not shared.
 
-> **What "ships in v1.0" means.** All four products are complete in v1.0, including the iam-jit-bouncer HTTP proxy. The transparent HTTP-proxy interception (`iam-jit-bouncer run` redirecting `AWS_ENDPOINT_URL` traffic) is shipped with both cooperative + transparent modes; environment profiles as a hard-floor deny layer; `bouncer pause --for 30m` as a timed escape hatch; `bouncer prompts` as an async deny-notification queue; and HTTPS install of org-distributed profiles. See [docs/IAM-JIT-BOUNCER.md](docs/IAM-JIT-BOUNCER.md) for details.
+> **What "ships in v1.0" means.** All four products are complete in v1.0, including the `ibounce` HTTP proxy. The transparent HTTP-proxy interception (`ibounce run` redirecting `AWS_ENDPOINT_URL` traffic) is shipped with both cooperative + transparent modes; environment profiles as a hard-floor deny layer (cross-product defaults reduced to `full-user` + `readonly` in v1.0); `bouncer pause --for 30m` as a timed escape hatch; `bouncer prompts` as an async deny-notification queue; and HTTPS install of org-distributed profiles. See [docs/IBOUNCE.md](docs/IBOUNCE.md) for details.
+
+> **Bounce-suite rename (v1.0, 2026-05-17).** What used to be `iam-jit-bouncer` is now `ibounce` — the canonical name across the Bounce family (ibounce + kbounce + future). The `iam-jit-bouncer` console script keeps working for v1.0 (prints a deprecation warning + forwards to the same entrypoint) and is removed in v1.1. Every `bouncer_*` MCP tool gets an `ibounce_*` alias; both names dispatch to the same handler in v1.0. See [docs/UPGRADING.md](docs/UPGRADING.md) for the one-line migration.
 
 ---
 
@@ -115,27 +117,29 @@ Honest answer: **complementary, not a replacement.** They solve adjacent problem
 
 ---
 
-## `iam-jit-bouncer`
+## `ibounce`
 
-> Local proxy that gates every AWS API call against rules. Defense-in-depth over IAM role scoping — when the boundary the JIT role draws is correct but the call TARGET was wrong (prompt injection, agent misstep, typo on a destructive call), the bouncer catches it.
+> *(Renamed from `iam-jit-bouncer` in v1.0; the old name still works as a deprecation wrapper.)*
 >
-> **In v1.0**: full HTTP-proxy interception via `AWS_ENDPOINT_URL` (both cooperative + transparent modes, SigV4-preserving forwarding) + agent-cooperative MCP enforcement + CLI rule/task/audit management + environment profiles + timed pause + async deny prompts + HTTPS install of org-distributed profiles. See [docs/IAM-JIT-BOUNCER.md](docs/IAM-JIT-BOUNCER.md).
+> Local proxy that gates every AWS API call against rules. Defense-in-depth over IAM role scoping — when the boundary the JIT role draws is correct but the call TARGET was wrong (prompt injection, agent misstep, typo on a destructive call), ibounce catches it.
+>
+> **In v1.0**: full HTTP-proxy interception via `AWS_ENDPOINT_URL` (both cooperative + transparent modes, SigV4-preserving forwarding) + agent-cooperative MCP enforcement + CLI rule/task/audit management + environment profiles (built-in defaults reduced to `full-user` + `readonly`; community profiles installable from URL) + timed pause + async deny prompts + HTTPS install of org-distributed profiles. See [docs/IBOUNCE.md](docs/IBOUNCE.md).
 
 ### 30-second example (v1.0 — MCP path)
 
 ```bash
 $ pip install iam-jit
-$ iam-jit-bouncer init     # smart default: admin-minus-sensitive baseline rules
+$ ibounce init     # smart default: admin-minus-sensitive baseline rules
 ✓ initialized at ~/.iam-jit/bouncer/state.db
 ✓ applied 17 protective rules (block secrets reads, billing changes, audit-infra destruction)
 
-$ iam-jit-bouncer rules list
+$ ibounce rules list
 # id  effect  pattern                       arn_scope
 # 1   deny    secretsmanager:Get*           *
 # 2   deny    iam:Delete*                   *
 # ...
 
-$ iam-jit-bouncer tasks start \
+$ ibounce tasks start \
     --description "staging-eks-upgrade" \
     --allow "eks:*@arn:aws:eks:us-east-1:111:cluster/staging" \
     --deny  "*@arn:aws:*:*:222222222222:*" \
@@ -150,7 +154,7 @@ Then the agent (Claude Code, Cursor, etc.) calls `iam_jit_scope_self_for_task` v
 IAM is coarse. A role granted `s3:GetObject` on `bucket/*` can call `GetObject` on every key in the bucket for the session's lifetime — even when the prompt-injected agent meant to read ONE file. The bouncer adds an in-process question: **is THIS specific call allowed right now?**
 
 - **iam-jit local** issues NARROW credentials.
-- **iam-jit-bouncer** denies calls that fall outside the declared task scope EVEN WHEN the credentials would otherwise allow them.
+- **ibounce** denies calls that fall outside the declared task scope EVEN WHEN the credentials would otherwise allow them.
 
 Two-layer defense; either layer alone leaves the other gap.
 
@@ -159,9 +163,9 @@ Two-layer defense; either layer alone leaves the other gap.
 Even if your company gives you full IAM authority, IAM has structural limits the bouncer doesn't:
 
 - **Rapid iteration.** Bouncer rule changes take effect on the next request — local file edit + reload, no API call. IAM has propagation delays (seconds to a few minutes for some changes; longer for policy attachments + STS session refreshes) and rate limits if you iterate fast. When you're narrowing scope as you discover a new dangerous call, the bouncer keeps up; IAM doesn't.
-- **You don't need IAM-write permission.** A lot of developers work at companies where SecOps owns IAM and won't grant `iam:CreateRole` / `iam:PutRolePolicy` to individual engineers, or only via tickets that take days. The bouncer runs entirely on YOUR laptop using your existing credentials; it adds gating without needing any new IAM authority. You can be productive with iam-jit-bouncer even when your company doesn't let you touch IAM.
+- **You don't need IAM-write permission.** A lot of developers work at companies where SecOps owns IAM and won't grant `iam:CreateRole` / `iam:PutRolePolicy` to individual engineers, or only via tickets that take days. The bouncer runs entirely on YOUR laptop using your existing credentials; it adds gating without needing any new IAM authority. You can be productive with ibounce even when your company doesn't let you touch IAM.
 - **Local context.** Bouncer rules can reference your codebase context (`deny anything in the prod-* cluster`, `allow only the staging account`) without coordinating with a central IAM policy. Per-task scopes (`bouncer tasks start ...`) are declared in seconds, used for one job, then ended.
-- **Easy to disable when something breaks.** Need to unblock yourself fast at 2 AM? `iam-jit-bouncer tasks end <id>` or stop the proxy. No central ticket, no SecOps escalation. The bouncer is yours to flip on and off.
+- **Easy to disable when something breaks.** Need to unblock yourself fast at 2 AM? `ibounce tasks end <id>` or stop the proxy. No central ticket, no SecOps escalation. The bouncer is yours to flip on and off.
 
 This makes the bouncer the natural fit for: **developers at companies with locked-down IAM, contractors operating under read-only-by-default credentials, anyone doing rapid iteration where IAM propagation would slow them down, anyone who wants a kill-switch they control.** It composes with `iam-jit local` / Enterprise where you DO have IAM authority — bouncer is the fast inner loop, role narrowing is the slow outer loop.
 
@@ -170,8 +174,8 @@ This makes the bouncer the natural fit for: **developers at companies with locke
 - **CLI**: rule + per-task-scope + audit management
 - **MCP enforcement**: `iam_jit_scope_self_for_task` composer for agents calling iam-jit before AWS
 - **Observation-based rule recommender** with `--save-as-profile` to capture session traffic
-- **HTTP proxy** (`iam-jit-bouncer run`): intercepts SDK traffic via `AWS_ENDPOINT_URL=http://127.0.0.1:8767` with both COOPERATIVE (advisory) and TRANSPARENT (enforcing) modes. SigV4-preserving forwarding — the proxy never re-signs, never holds credentials, never phones home
-- **Environment profiles**: named, switchable hard-floor deny layers (`staging-work`, `prod-readonly`, `incident-response`, etc.) that fire BEFORE task/global rules; `--profile NAME` activation; YAML-edited; `profile install --from URL` for org-distributed bundles
+- **HTTP proxy** (`ibounce run`): intercepts SDK traffic via `AWS_ENDPOINT_URL=http://127.0.0.1:8767` with both COOPERATIVE (advisory) and TRANSPARENT (enforcing) modes. SigV4-preserving forwarding — the proxy never re-signs, never holds credentials, never phones home
+- **Environment profiles**: named, switchable hard-floor deny layers; cross-product built-in defaults are `full-user` (passthrough, default-active) + `readonly` (block write/destructive verbs); opt in to `readonly` with `--profile readonly` OR `export IAM_JIT_BOUNCER_PROFILE=readonly` in your shell rc; community profiles (`staging-work`, `dev-only`, `incident-response`, etc.) installable via `profile install --from URL` from `tools/community-profiles/` (future: `trsreagan3/bounce-profiles`)
 - **Timed pause** (`bouncer pause --for 30m`): operator-controlled escape hatch that demotes TRANSPARENT to COOPERATIVE for a window; auto-reverts; every call inside the window is audit-linked to the pause id
 - **Async deny prompts** (`bouncer prompts`): queue of DENY notifications the operator can later answer (always-allow / add-to-profile / ignore); rule takes effect on the next call of the same shape
 - **/healthz** liveness endpoint for monitoring
@@ -185,7 +189,7 @@ This makes the bouncer the natural fit for: **developers at companies with locke
 
 Same as iam-jit local: trust the binary. Zero dependency on iam-jit-the-company's infrastructure — no phone home, no telemetry, no licensing call-back. Per self-host-zero-billing-dependency.
 
-See [docs/IAM-JIT-BOUNCER.md](docs/IAM-JIT-BOUNCER.md) for full CLI + MCP reference, task-scope composition rules, and the recommender workflow.
+See [docs/IBOUNCE.md](docs/IBOUNCE.md) for full CLI + MCP reference, task-scope composition rules, and the recommender workflow.
 
 ---
 
@@ -339,7 +343,7 @@ Every deployment writes a structured, queryable audit log. The exact storage bac
 
 | Mode | Backend | Retention | Query |
 |---|---|---|---|
-| **iam-jit local** (`serve --local`) | File-per-request YAML under `~/.iam-jit/requests/` + bouncer SQLite audit chain at `~/.iam-jit/bouncer/state.db` | Forever (until user prunes) | `iam-jit remote list`, `iam-jit remote status <id>`, `iam-jit-bouncer logs tail`, `iam-jit-bouncer tasks review <id>` |
+| **iam-jit local** (`serve --local`) | File-per-request YAML under `~/.iam-jit/requests/` + bouncer SQLite audit chain at `~/.iam-jit/bouncer/state.db` | Forever (until user prunes) | `iam-jit remote list`, `iam-jit remote status <id>`, `ibounce logs tail`, `ibounce tasks review <id>` |
 | **Self-host** | DynamoDB in customer's hub account | Per customer's CloudFormation params | JSON API `/api/v1/requests/...`, web UI grant-detail page, raw DDB access |
 | **Dedicated Enterprise** | Same as self-host (customer's dedicated AWS account) | Per customer's contract | Same as self-host |
 
@@ -398,7 +402,7 @@ See [docs/AGENTS.md](docs/AGENTS.md) for the agent-driven reduction-loop pattern
 ## Documentation
 
 - **[docs/AGENTS.md](docs/AGENTS.md)** — the agent-driven reduction loop in detail (self-scoping flow, MCP tool catalog, three reduction axes, anti-patterns, human-user fallback)
-- **[docs/IAM-JIT-BOUNCER.md](docs/IAM-JIT-BOUNCER.md)** — bouncer reference: stages, CLI, per-task scopes, audit chain, recommender, MCP-CLI parity table
+- **[docs/IBOUNCE.md](docs/IBOUNCE.md)** — bouncer reference: stages, CLI, per-task scopes, audit chain, recommender, MCP-CLI parity table
 - **[docs/recipes/agent-safety-mode.md](docs/recipes/agent-safety-mode.md)** — read-only-default contract for agents
 - **[docs/GETTING-STARTED.md](docs/GETTING-STARTED.md)** — first-time deployment walkthrough
 - **[docs/DEPLOYMENT.md](docs/DEPLOYMENT.md)** — full production-deployment guide; pilot deployment profile; cost-control levers
@@ -414,7 +418,7 @@ See [docs/AGENTS.md](docs/AGENTS.md) for the agent-driven reduction-loop pattern
 ## Status
 
 - **Product 1 — iam-risk-score**: shipped. Stable schema; CLI + API + GitHub Action live. 1,489 / 1,489 AWS-managed-policy corpus pass rate.
-- **Product 2 — iam-jit-bouncer**: v1.0 ships everything — CLI rule/task/audit management, MCP enforcement surface (`iam_jit_scope_self_for_task` composer + `bouncer_*` tools), HTTP proxy with cooperative + transparent modes (SigV4-preserving forwarding via `iam-jit-bouncer run`), environment profiles + `--profile` activation + `profile install --from URL` for org-distributed bundles, `bouncer pause --for 30m` timed escape hatch, `bouncer prompts` async deny-notification queue, `/healthz` liveness endpoint. v1.1 follow-ups: synchronous deny-prompts, HTTPS/MITM TLS on the proxy listener itself, plan-capture for IaC workflows.
+- **Product 2 — ibounce** *(renamed from `iam-jit-bouncer` in v1.0)*: ships everything — CLI rule/task/audit management, MCP enforcement surface (`iam_jit_scope_self_for_task` composer + `ibounce_*` tools, aliased from `bouncer_*` for v1.0 backward-compat), HTTP proxy with cooperative + transparent modes (SigV4-preserving forwarding via `ibounce run`), environment profiles + `--profile` activation + cross-product `full-user` / `readonly` built-in defaults + community-profile install via `profile install --from URL`, `bouncer pause --for 30m` timed escape hatch, `bouncer prompts` async deny-notification queue, `/healthz` liveness endpoint. v1.1 follow-ups: synchronous deny-prompts, HTTPS/MITM TLS on the proxy listener itself, plan-capture for IaC workflows, removal of the `iam-jit-bouncer` + `bouncer_*` + `none` + `prod-readonly` deprecation aliases.
 - **Product 3 — iam-jit local**: v1.0 ready. `iam-jit serve --local` + read-only-default + region/account scoping + 1h TTL + local SQLite audit.
 - **Product 4 — iam-jit self-host**: v1.0 ready with multi-provider OIDC (Google + Okta), Slack approval bot, template browser, evolving preset library, agent-driven reduction loop, MFA propagation, two safety modes, applicability framework, per-account LLM policy. No multi-tenant hosted SaaS planned; Enterprise customers either self-host or contract for dedicated-managed single-tenant.
 - **MCP server**: v0.4.0 — canonical `list_templates`, `get_template`, `submit_policy`, `score_iam_policy`; plus extended surface `check_iam_jit_compatibility`, `list_compatibility_catalog`, `list_compatibility_overrides`, `save_template`, `list_my_templates`, `get_my_template`, `find_similar_templates`, `reduce_policy`, `get_reduction_checklist`, `apply_reduction_checklist`, `tail_grant`, `iam_jit_scope_self_for_task`, and the `bouncer_*` tool family. Legacy `generate_iam_policy` was removed in 0.4.0 — replaced by the agent-driven workflow per [docs/AGENTS.md](docs/AGENTS.md).

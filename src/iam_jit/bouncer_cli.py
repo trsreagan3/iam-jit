@@ -1,4 +1,4 @@
-"""`iam-jit-bouncer` CLI — separate entry point for the bouncer
+"""`ibounce` CLI — separate entry point for the bouncer
 product. Per [[four-products-one-brand]] the bouncer is one of four
 addressable products and gets its own binary; self-host admins who
 want only the bouncer can install just the iam-jit package and use
@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import contextlib
 import json
+import os
 import sys
 from typing import Any
 
@@ -67,7 +68,7 @@ def _opened_store(db_path: str | None):
 @click.group()
 @click.version_option()
 def main() -> None:
-    """iam-jit-bouncer — local AWS-API call gating proxy.
+    """ibounce — local AWS-API call gating proxy.
 
     Defense-in-depth over IAM role scoping. Sits between local AWS
     SDK calls and AWS endpoints; gates each call against rules.
@@ -123,7 +124,7 @@ DEFAULT_PRESET_NAME = "admin-minus-sensitive"
 def init_cmd(db: str | None, preset_name: str | None, no_default: bool) -> None:
     """Initialize the bouncer's local SQLite state.
 
-    On a fresh install (empty rule store), iam-jit-bouncer applies a
+    On a fresh install (empty rule store), ibounce applies a
     PROTECTIVE DEFAULT BASELINE (`admin-minus-sensitive`) so day-one
     users get protection against secret reads + IAM admin + billing +
     audit-infra destruction without any further config. Per
@@ -167,8 +168,8 @@ def init_cmd(db: str | None, preset_name: str | None, no_default: bool) -> None:
                 f"applied protective default '{preset.name}': "
                 f"{len(preset.rules)} rules. Deny on secrets/IAM-admin/"
                 "billing/audit-infra; allow everything else. Run "
-                "`iam-jit-bouncer rules list` to inspect; "
-                "`iam-jit-bouncer init --no-default` to skip."
+                "`ibounce rules list` to inspect; "
+                "`ibounce init --no-default` to skip."
             )
 
         click.echo(f"current rules: {len(store.list_rules())}")
@@ -368,8 +369,8 @@ def rules_add(
     """Add a new rule. Example:
 
     \b
-        iam-jit-bouncer rules add 's3:Get*' --arn 'arn:aws:s3:::my-bucket/*'
-        iam-jit-bouncer rules add 'iam:Delete*' --effect deny
+        ibounce rules add 's3:Get*' --arn 'arn:aws:s3:::my-bucket/*'
+        ibounce rules add 'iam:Delete*' --effect deny
     """
     rule = ProxyRule(
         pattern=pattern,
@@ -491,7 +492,7 @@ def decide_cmd(
     rules before flipping to enforce mode.
 
     \b
-        iam-jit-bouncer decide --service s3 --action GetObject \\
+        ibounce decide --service s3 --action GetObject \\
             --arn arn:aws:s3:::my-bucket/file.txt --region us-east-1
     """
     with _opened_store(db) as store:
@@ -548,7 +549,7 @@ def decide_cmd(
         elif active_task is None:
             click.echo(
                 "(not recorded — pass --record to seed the audit log, "
-                "or start a task with `iam-jit-bouncer tasks start` to "
+                "or start a task with `ibounce tasks start` to "
                 "auto-record decisions while it's active)"
             )
 
@@ -891,8 +892,8 @@ def tasks_start(
             # WB26 HIGH-26-02 closure: the store enforces; CLI just
             # surfaces the message + a remediation hint.
             click.echo(
-                f"{e}\nrun `iam-jit-bouncer tasks active` to see the "
-                "current task; `iam-jit-bouncer tasks end <id>` to end it.",
+                f"{e}\nrun `ibounce tasks active` to see the "
+                "current task; `ibounce tasks end <id>` to end it.",
                 err=True,
             )
             sys.exit(2)
@@ -1086,7 +1087,7 @@ def _save_recommendations_as_profile(
 ) -> None:
     """Persist synthesized recommendations as a NEW profile's allow_rules.
     The profile lives in ~/.iam-jit/bouncer/profiles.yaml under the
-    given name; future `iam-jit-bouncer run --profile NAME` invocations
+    given name; future `ibounce run --profile NAME` invocations
     will load those rules.
 
     Respects the org-distributed read-only invariant: profiles with
@@ -1169,7 +1170,7 @@ def _save_recommendations_as_profile(
         f"(total: {len(merged.allow_rules)}) at {path}"
     )
     click.echo(
-        f"activate with: iam-jit-bouncer run --profile {profile_name}"
+        f"activate with: ibounce run --profile {profile_name}"
     )
 
 
@@ -1344,7 +1345,7 @@ def profile_show_cmd(name: str) -> None:
     help="HTTPS URL of a profiles.yaml fragment (or single-profile YAML). "
          "Used by enterprises to distribute curated profiles: IT publishes "
          "`https://internal.acme.com/iam-jit-profiles/staging.yaml` + each "
-         "engineer runs `iam-jit-bouncer profile install --from <URL>`. "
+         "engineer runs `ibounce profile install --from <URL>`. "
          "Refuses http:// — distribution over plaintext could be MITM'd to "
          "substitute a permissive profile.",
 )
@@ -1504,7 +1505,7 @@ def profile_install_cmd(
         click.echo(f"  {name}")
     click.echo()
     click.echo("Activate one with:")
-    click.echo(f"  iam-jit-bouncer run --profile {written[0]}")
+    click.echo(f"  ibounce run --profile {written[0]}")
     click.echo("These profiles are READ-ONLY (sourced from URL); "
                "edit the upstream YAML + re-install to update.")
 
@@ -1671,7 +1672,7 @@ def prompts_answer_cmd(
                     f"{prompt['service']}:{prompt['action']} request, "
                     f"which is rarely the intent. Use --kind profile "
                     f"--target NAME for a scoped allow, OR add a rule "
-                    f"manually with `iam-jit-bouncer rules add "
+                    f"manually with `ibounce rules add "
                     f"--pattern {prompt['service']}:{prompt['action']} "
                     f"--arn-scope <ARN>`. HIGH-33-03 closure.",
                     fg="red", err=True,
@@ -1790,7 +1791,7 @@ def pause_start_cmd(duration: str, reason: str, db: str | None) -> None:
     )
     click.echo("Every call during this window is still recorded in the "
                "decisions audit log with pause_id linkage.")
-    click.echo("Run `iam-jit-bouncer pause stop` to end early.")
+    click.echo("Run `ibounce pause stop` to end early.")
 
 
 @pause_group.command("stop")
@@ -1929,7 +1930,7 @@ def _parse_duration(raw: str) -> int:
          "are a hard floor and CANNOT be overridden by task scopes or "
          "global rules. Example: --profile staging-work blocks any "
          "resource whose ARN matches 'prod' / 'uat' / 'production' "
-         "keywords even with admin credentials. Run `iam-jit-bouncer "
+         "keywords even with admin credentials. Run `ibounce "
          "profile list` to see available profiles.",
 )
 @click.option(
@@ -1966,9 +1967,9 @@ def run_cmd(
 
     Examples:
 
-      iam-jit-bouncer run                          # cooperative on :8767
-      iam-jit-bouncer run --mode transparent       # enforcement
-      iam-jit-bouncer run --port 9876              # custom port
+      ibounce run                          # cooperative on :8767
+      ibounce run --mode transparent       # enforcement
+      ibounce run --port 9876              # custom port
     """
     import asyncio as _asyncio
 
@@ -1996,11 +1997,13 @@ def run_cmd(
         )
         sys.exit(2)
 
-    # Resolve the active profile NOW (CLI flag → env var → 'none').
+    # Resolve the active profile NOW (CLI flag → env var → 'full-user').
     # If the user passed --profile NAME and NAME doesn't exist,
     # resolve_active_profile raises with the available-names list —
-    # better than silently falling back to 'none' (which would
-    # disable the safety the user thought they enabled).
+    # better than silently falling back to 'full-user' (which would
+    # disable the safety the user thought they enabled). Deprecated
+    # aliases ('none', 'prod-readonly') still resolve in v1.0 + emit
+    # a deprecation banner from resolve_active_profile itself.
     try:
         profiles_map = load_profiles()
         active_profile = resolve_active_profile(
@@ -2021,16 +2024,35 @@ def run_cmd(
         prompt_on_deny=prompt_on_deny,
     )
 
+    # Did the operator opt into a profile, or did we land on the
+    # passthrough default? When the latter, surface the
+    # write-block-opt-in instructions banner per
+    # `feedback_bounce_default_profile_pattern`.
+    operator_picked_profile = bool(
+        profile_name or os.environ.get("IAM_JIT_BOUNCER_PROFILE")
+    )
+    passthrough_default = (
+        not operator_picked_profile and active_profile.name == "full-user"
+    )
+
     with _opened_store(db) as store:
         click.echo(
-            f"iam-jit-bouncer proxy starting on http://{host}:{port} "
+            f"ibounce proxy starting on http://{host}:{port} "
             f"(mode={mode}, default-policy={default_policy}, "
             f"profile={active_profile.name})",
             err=True,
         )
-        if active_profile.name != "none":
+        if active_profile.name not in ("full-user", "none"):
             click.echo(
                 f"  profile: {active_profile.description}",
+                err=True,
+            )
+        if passthrough_default:
+            click.echo(
+                "  No profile selected; calls forwarded as-is + "
+                "audit-logged. To block write/destructive verbs, run "
+                "with `--profile readonly` or "
+                "`export IAM_JIT_BOUNCER_PROFILE=readonly` in your shell rc.",
                 err=True,
             )
         click.echo(
@@ -2041,7 +2063,25 @@ def run_cmd(
         try:
             _asyncio.run(serve(config, store=store))
         except KeyboardInterrupt:
-            click.echo("\nbouncer proxy stopped.", err=True)
+            click.echo("\nibounce proxy stopped.", err=True)
+
+
+def main_deprecated_alias() -> None:
+    """Console-script entrypoint for the deprecated `iam-jit-bouncer`
+    name. Prints a one-line stderr deprecation warning + forwards to
+    the canonical `ibounce` Click app with sys.argv intact.
+
+    Per the Bounce-suite rename plan (2026-05-17): `iam-jit-bouncer`
+    keeps working for v1.0 + is removed in v1.1. We don't add an
+    `IBOUNCE_*` env-var alias — `IAM_JIT_BOUNCER_*` env vars stay as
+    the canonical names (per the rename memo's backward-compat
+    section)."""
+    print(
+        "WARN: iam-jit-bouncer is the deprecated name; use 'ibounce'. "
+        "Both work in v1.0; iam-jit-bouncer is removed in v1.1.",
+        file=sys.stderr,
+    )
+    main()
 
 
 if __name__ == "__main__":

@@ -265,7 +265,12 @@ async def test_transparent_deny_returns_403_without_forwarding(tmp_path) -> None
                     body = await resp.json()
                     resp_headers = dict(resp.headers)
             assert resp.status == 403
-            assert body["error"] == "iam-jit-bouncer DENY"
+            # Post Bounce-suite rename (2026-05-17): error-body
+            # `error` is renamed to `ibounce DENY`. Wire-protocol
+            # response headers `x-iam-jit-bouncer-*` are intentionally
+            # kept stable for v1.0 backward-compat (deferred to v1.1
+            # alongside env-var alignment).
+            assert body["error"] == "ibounce DENY"
             assert body["decision_verdict"] == "deny"
             assert resp_headers.get("x-iam-jit-bouncer-verdict") == "deny"
             # No forward attempted

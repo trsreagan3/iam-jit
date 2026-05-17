@@ -312,3 +312,53 @@ def test_lens_b_no_silent_bypass_mcp_tool() -> None:
         f"WB23 closure invariant violated: forbidden bypass tools present: "
         f"{bouncer_tools & forbidden}"
     )
+
+
+# ---------------------------------------------------------------------------
+# Bounce-suite rename (2026-05-17): every `bouncer_*` tool has an
+# `ibounce_*` alias; both names dispatch to the same handler.
+# ---------------------------------------------------------------------------
+
+
+def test_tools_list_exposes_ibounce_aliases_for_every_bouncer_tool() -> None:
+    """Every `bouncer_*` tool gets an `ibounce_*` alias in the
+    `tools/list` response so agents discover the canonical v1.0 names."""
+    resp = _handle_request({
+        "jsonrpc": "2.0", "id": 1, "method": "tools/list", "params": {},
+    })
+    names = {t["name"] for t in resp["result"]["tools"]}
+    bouncer_names = {n for n in names if n.startswith("bouncer_")}
+    assert bouncer_names, "expected at least one bouncer_* tool"
+    for n in bouncer_names:
+        alias = "ibounce_" + n[len("bouncer_"):]
+        assert alias in names, f"missing ibounce_* alias for {n}"
+
+
+def test_bouncer_tool_descriptions_carry_deprecation_note() -> None:
+    """Every legacy `bouncer_*` description must carry the
+    `(DEPRECATED — use ibounce_* in v1.1)` prefix so agents see the
+    new naming on every `tools/list` response."""
+    resp = _handle_request({
+        "jsonrpc": "2.0", "id": 1, "method": "tools/list", "params": {},
+    })
+    for t in resp["result"]["tools"]:
+        if t["name"].startswith("bouncer_"):
+            assert "DEPRECATED" in t["description"], (
+                f"bouncer_* tool {t['name']!r} missing deprecation note"
+            )
+
+
+def test_ibounce_alias_dispatches_to_same_handler() -> None:
+    """Calling `ibounce_list_rules` returns the same shape as
+    `bouncer_list_rules` (they dispatch through the same code path)."""
+    legacy = _handle_request({
+        "jsonrpc": "2.0", "id": 1, "method": "tools/call",
+        "params": {"name": "bouncer_list_rules", "arguments": {}},
+    })
+    canonical = _handle_request({
+        "jsonrpc": "2.0", "id": 2, "method": "tools/call",
+        "params": {"name": "ibounce_list_rules", "arguments": {}},
+    })
+    # Same structuredContent payload regardless of which name the
+    # agent calls — the alias must not add or remove fields.
+    assert legacy["result"]["structuredContent"] == canonical["result"]["structuredContent"]

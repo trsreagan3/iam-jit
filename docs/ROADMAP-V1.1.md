@@ -6,7 +6,7 @@
 
 Three items are explicitly deferred from v1.0 to v1.1:
 
-### 1. Synchronous deny-prompts (iam-jit-bouncer / ibounce)
+### 1. Synchronous deny-prompts (ibounce; was `iam-jit-bouncer`)
 
 **What:** Today's `--prompt-on-deny` is async — agent gets denied
 immediately; operator answers later via `bouncer prompts answer`

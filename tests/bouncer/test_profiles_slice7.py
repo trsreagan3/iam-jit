@@ -7,8 +7,10 @@ Covers:
 - only_account_ids hard restriction
 - deny_verbs pattern matching
 - ProfileVerdict composition (which rule fires first)
-- resolve_active_profile resolution order (explicit > flag > env > 'none')
+- resolve_active_profile resolution order (explicit > flag > env > 'full-user')
 - Integration: profile DENY beats global ALLOW rule in evaluate_request
+- Backward-compat: legacy 'none' + 'prod-readonly' names still resolve
+  (post Bounce-suite rename 2026-05-17; removed in v1.1)
 """
 
 from __future__ import annotations
@@ -51,12 +53,26 @@ def _sigv4(*, service: str, region: str) -> str:
 
 
 def test_load_profiles_returns_defaults_when_file_absent(tmp_path, monkeypatch) -> None:
-    """First-run path: profiles.yaml doesn't exist → defaults returned."""
+    """First-run path: profiles.yaml doesn't exist → defaults returned.
+
+    Post Bounce-suite rename (2026-05-17), built-in defaults reduced
+    to the cross-product general-purpose pair (`full-user` +
+    `readonly`). Legacy names (`none`, `prod-readonly`) still appear
+    as aliases for v1.0 backward-compat (removed in v1.1). The
+    opinionated profiles (`dev-only`, `staging-work`,
+    `incident-response`) moved to `tools/community-profiles/`.
+    """
     monkeypatch.setenv("IAM_JIT_BOUNCER_PROFILES_FILE", str(tmp_path / "absent.yaml"))
     profiles = load_profiles()
-    assert set(profiles.keys()) >= {
-        "none", "dev-only", "staging-work", "prod-readonly", "incident-response",
-    }
+    # Canonical v1.0 defaults
+    assert set(profiles.keys()) >= {"full-user", "readonly"}
+    # Legacy aliases (deprecated; still resolve in v1.0)
+    assert "none" in profiles and profiles["none"] is profiles["full-user"]
+    assert "prod-readonly" in profiles and profiles["prod-readonly"] is profiles["readonly"]
+    # Opinionated profiles no longer built-in
+    assert "dev-only" not in profiles
+    assert "staging-work" not in profiles
+    assert "incident-response" not in profiles
 
 
 def test_load_profiles_reads_custom_yaml(tmp_path, monkeypatch) -> None:
@@ -74,7 +90,10 @@ def test_load_profiles_reads_custom_yaml(tmp_path, monkeypatch) -> None:
     profiles = load_profiles()
     assert "custom-strict" in profiles
     assert profiles["custom-strict"].deny_keywords == ("foo",)
-    # 'none' is always injected even if user didn't define it
+    # 'full-user' (the v1.0 passthrough default) is always injected
+    # even if user didn't define it; the legacy 'none' alias is
+    # also injected for backward-compat.
+    assert "full-user" in profiles
     assert "none" in profiles
 
 
@@ -128,24 +147,56 @@ def test_resolve_profiles_path_priority(tmp_path, monkeypatch) -> None:
 
 
 def test_resolve_active_profile_cli_flag_wins(tmp_path, monkeypatch) -> None:
-    monkeypatch.setenv(ACTIVE_PROFILE_ENV, "staging-work")
+    monkeypatch.setenv(ACTIVE_PROFILE_ENV, "full-user")
     profiles = load_profiles()
-    p = resolve_active_profile(cli_flag="prod-readonly", profiles=profiles)
-    assert p.name == "prod-readonly"
+    p = resolve_active_profile(cli_flag="readonly", profiles=profiles)
+    assert p.name == "readonly"
 
 
 def test_resolve_active_profile_env_var_used_when_no_flag(monkeypatch) -> None:
-    monkeypatch.setenv(ACTIVE_PROFILE_ENV, "prod-readonly")
+    monkeypatch.setenv(ACTIVE_PROFILE_ENV, "readonly")
     profiles = load_profiles()
     p = resolve_active_profile(cli_flag=None, profiles=profiles)
-    assert p.name == "prod-readonly"
+    assert p.name == "readonly"
 
 
-def test_resolve_active_profile_defaults_to_none(monkeypatch) -> None:
+def test_resolve_active_profile_defaults_to_full_user(monkeypatch) -> None:
+    """Post Bounce-suite rename: the default-active profile is
+    `full-user` (was `none`). `full-user` is still the passthrough
+    (no rule-engine interference) — the rename is name-only."""
     monkeypatch.delenv(ACTIVE_PROFILE_ENV, raising=False)
     profiles = load_profiles()
     p = resolve_active_profile(cli_flag=None, profiles=profiles)
-    assert p.name == "none"
+    assert p.name == "full-user"
+
+
+def test_resolve_active_profile_legacy_none_alias_still_works(monkeypatch, capsys) -> None:
+    """Backward-compat: `--profile none` keeps working in v1.0 (the
+    user-facing alias maps to the canonical `full-user` profile) +
+    emits a one-line stderr deprecation banner."""
+    monkeypatch.delenv(ACTIVE_PROFILE_ENV, raising=False)
+    profiles = load_profiles()
+    p = resolve_active_profile(cli_flag="none", profiles=profiles)
+    assert p.name == "full-user"  # canonical name on the Profile
+    captured = capsys.readouterr()
+    assert "deprecated" in captured.err
+    assert "full-user" in captured.err
+
+
+def test_resolve_active_profile_legacy_prod_readonly_alias_still_works(
+    monkeypatch, capsys,
+) -> None:
+    """Backward-compat: `--profile prod-readonly` keeps working in
+    v1.0 + maps to the canonical `readonly` (cross-product general-
+    purpose name; "prod" connotation dropped per the
+    bounce-default-profile-pattern memo)."""
+    monkeypatch.delenv(ACTIVE_PROFILE_ENV, raising=False)
+    profiles = load_profiles()
+    p = resolve_active_profile(cli_flag="prod-readonly", profiles=profiles)
+    assert p.name == "readonly"
+    captured = capsys.readouterr()
+    assert "deprecated" in captured.err
+    assert "readonly" in captured.err
 
 
 def test_resolve_active_profile_unknown_name_raises(monkeypatch) -> None:
@@ -280,7 +331,13 @@ def test_glob_match_pattern_semantics() -> None:
 def test_profile_deny_beats_global_allow_via_evaluate_request(tmp_path) -> None:
     """The key load-bearing test: a global ALLOW rule for s3:* does NOT
     override a profile keyword-deny on the same ARN. Profile is a hard
-    floor."""
+    floor.
+
+    Post Bounce-suite rename: the built-in `staging-work` profile
+    moved to `tools/community-profiles/`; this test constructs an
+    equivalent Profile inline to exercise the same composition
+    invariant without depending on a community-profile install.
+    """
     store = BouncerStore(db_path=str(tmp_path / "b.db"))
     # Add a global allow rule for everything in S3
     store.add_rule(
@@ -289,9 +346,15 @@ def test_profile_deny_beats_global_allow_via_evaluate_request(tmp_path) -> None:
                   note="permissive global", origin="manual"),
         actor="test",
     )
-    # Activate staging-work profile (denies 'prod' keyword)
-    profiles = load_profiles()
-    staging = profiles["staging-work"]
+    # Construct a staging-work-shaped profile inline (was built-in
+    # pre-rename; now lives in tools/community-profiles/staging-work.yaml)
+    staging = Profile(
+        name="staging-work",
+        description="block prod-shaped resources",
+        deny_keywords=("prod", "production", "uat", "live", "customer"),
+        keyword_targets=("arn", "resource_name"),
+        keyword_match="word_boundary",
+    )
 
     obs = evaluate_request(
         method="GET",
@@ -315,9 +378,9 @@ def test_profile_deny_beats_global_allow_via_evaluate_request(tmp_path) -> None:
     store.close()
 
 
-def test_profile_none_preserves_existing_behavior(tmp_path) -> None:
-    """With profile='none', the existing rule engine drives the verdict —
-    Slice 1/2 behavior unchanged."""
+def test_profile_full_user_preserves_existing_behavior(tmp_path) -> None:
+    """With profile='full-user' (was 'none' pre-rename), the existing
+    rule engine drives the verdict — Slice 1/2 behavior unchanged."""
     store = BouncerStore(db_path=str(tmp_path / "b.db"))
     store.add_rule(
         ProxyRule(pattern="s3:*", effect=Effect.ALLOW,
@@ -326,7 +389,7 @@ def test_profile_none_preserves_existing_behavior(tmp_path) -> None:
         actor="test",
     )
     profiles = load_profiles()
-    none_profile = profiles["none"]
+    none_profile = profiles["full-user"]
 
     obs = evaluate_request(
         method="GET",
@@ -343,7 +406,8 @@ def test_profile_none_preserves_existing_behavior(tmp_path) -> None:
         default_policy=DefaultPolicy.DENY,
         active_profile=none_profile,
     )
-    # Global allow drives the verdict; profile=none doesn't interfere
+    # Global allow drives the verdict; profile=full-user (passthrough)
+    # doesn't interfere
     assert obs.decision_verdict == "allow"
     store.close()
 
@@ -383,20 +447,24 @@ def test_default_profiles_load_without_error() -> None:
         assert name in profiles, f"default profile {name!r} missing"
 
 
-def test_staging_work_default_denies_prod_keyword_in_arn() -> None:
-    """End-to-end check that the shipped 'staging-work' default
-    denies the canonical case."""
+def test_readonly_default_denies_writes() -> None:
+    """End-to-end check that the shipped `readonly` default profile
+    blocks write/destructive verbs. `readonly` is the v1.0 cross-
+    product general-purpose write-blocker (renamed from
+    `prod-readonly` per the bounce-default-profile-pattern memo).
+    """
     profiles = load_profiles()
-    staging = profiles["staging-work"]
-    verdict = evaluate_profile(staging, arn="arn:aws:s3:::prod-data-2026")
-    assert verdict.denied
-
-
-def test_prod_readonly_default_denies_writes() -> None:
-    profiles = load_profiles()
-    prod_ro = profiles["prod-readonly"]
-    assert evaluate_profile(prod_ro, service="s3", action="DeleteObject").denied
-    assert evaluate_profile(prod_ro, service="s3", action="PutObject").denied
-    assert evaluate_profile(prod_ro, service="ec2", action="TerminateInstances").denied
+    readonly = profiles["readonly"]
+    assert evaluate_profile(readonly, service="s3", action="DeleteObject").denied
+    assert evaluate_profile(readonly, service="s3", action="PutObject").denied
+    assert evaluate_profile(readonly, service="ec2", action="TerminateInstances").denied
     # Reads still allowed (no objection at profile layer)
-    assert not evaluate_profile(prod_ro, service="s3", action="GetObject").denied
+    assert not evaluate_profile(readonly, service="s3", action="GetObject").denied
+
+
+def test_legacy_prod_readonly_alias_points_at_readonly() -> None:
+    """The deprecated `prod-readonly` name still resolves to the same
+    Profile object as the canonical `readonly` (v1.0 backward-compat;
+    alias removed in v1.1)."""
+    profiles = load_profiles()
+    assert profiles["prod-readonly"] is profiles["readonly"]

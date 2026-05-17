@@ -79,10 +79,10 @@ What read-only does NOT defend against in v1.0:
   scoring catch the dangerous ones; lower-risk write grants get
   through without human review by design.
 
-The v1.1 HTTP proxy (`iam-jit-bouncer run`, see
-[docs/IAM-JIT-BOUNCER.md](../IAM-JIT-BOUNCER.md) §"Stage 2") closes
-the first gap by intercepting the agent's pre-existing credentials
-at the network layer.
+The v1.1 HTTP proxy (`ibounce run`, see
+[docs/IBOUNCE.md](../IBOUNCE.md) §"Stage 2") closes the first gap by
+intercepting the agent's pre-existing credentials at the network
+layer.
 
 ## CLI / MCP surface
 

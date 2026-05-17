@@ -1,11 +1,14 @@
-# kbouncer (K8s API call gating)
+# kbounce (K8s API call gating)
 
-> **kbouncer lives in its own repository:** https://github.com/trsreagan3/kbouncer
+> **kbounce lives in its own repository:** https://github.com/trsreagan3/kbouncer
+> *(repo path retains the historical `kbouncer` slug; the CLI + brand
+> is `kbounce` per the v1.0 Bounce-suite naming.)*
 
-kbouncer is product 5 of 5 in the LLC's suite. It gates Kubernetes
-API calls for AI agents (and humans) the way `iam-jit-bouncer` gates
-AWS API calls — but written in Go, cloud-agnostic, and shipped from
-its own repo.
+kbounce is product 5 of 5 in the LLC's suite. It gates Kubernetes
+API calls for AI agents (and humans) the way `ibounce` (the AWS
+sibling; renamed from `iam-jit-bouncer` in v1.0) gates AWS API
+calls — but written in Go, cloud-agnostic, and shipped from its
+own repo.
 
 ## Why it's separate from this repo
 
@@ -29,9 +32,9 @@ broader "3 repos for 5 products" decision.
 
 ## How they compose
 
-- **iam-jit-bouncer** (this repo): AWS API call gating. Python.
-- **kbouncer** (separate repo): K8s API call gating. Go.
+- **ibounce** (this repo; formerly `iam-jit-bouncer`): AWS API call gating. Python.
+- **kbounce** (separate repo; module path `github.com/trsreagan3/kbouncer`): K8s API call gating. Go.
 - **Phase 2 recipe** ("iam-jit for K8s on AWS"): documented
   integration combining IRSA-bound IAM roles from iam-jit + K8s
-  call gating from kbouncer. Post-launch v1.1. NOT a sixth
+  call gating from kbounce. Post-launch v1.1. NOT a sixth
   product — a documented integration pattern.

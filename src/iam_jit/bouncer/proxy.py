@@ -123,8 +123,10 @@ class ProxyConfig:
     local mock-AWS server."""
     active_profile: Any = None
     """Slice 7: the resolved Profile object whose denies act as a
-    hard floor above task/global rules. None or `Profile(name='none')`
-    means no profile-level rules fire (existing behavior)."""
+    hard floor above task/global rules. None or `Profile(name='full-user')`
+    means no profile-level rules fire (existing behavior; `none` also
+    resolves here for v1.0 backward-compat — see DEPRECATED_PROFILE_ALIASES
+    in profiles.py)."""
     account_id: str | None = None
     account_alias: str | None = None
     """Account-id / alias used by profile.only_account_ids checks
@@ -229,7 +231,7 @@ def evaluate_request(
     - mode=TRANSPARENT + PROMPT → block, surface to user (later)
 
     Side effect: writes the decision to the store's audit log just
-    like `iam-jit-bouncer decide --record` does, so post-hoc review
+    like `ibounce decide --record` does, so post-hoc review
     of "what was the proxy doing 10 minutes ago?" works the same
     way `tasks review` does.
     """
@@ -662,14 +664,14 @@ async def _handle_request(request, *, store, config: ProxyConfig, session):
 
     if obs.enforced:
         # Transparent + (deny or prompt) → 403 without forwarding.
-        # Body is iam-jit-shaped JSON the SDK client won't parse as
+        # Body is ibounce-shaped JSON the SDK client won't parse as
         # an AWS error — that's intentional; the SDK will surface
         # the unparseable response as a client error. Slice 3 will
         # add an AWS-error-shaped body so SDK clients see a clean
         # AccessDenied with the iam-jit reason.
         return web.json_response(
             {
-                "error": "iam-jit-bouncer DENY",
+                "error": "ibounce DENY",
                 "decision_verdict": obs.decision_verdict,
                 "decision_reason": obs.decision_reason,
                 "service": obs.parsed_service,
@@ -678,6 +680,10 @@ async def _handle_request(request, *, store, config: ProxyConfig, session):
                 "mode": obs.mode_at_decision,
             },
             status=403,
+            # Wire-protocol response headers retain the
+            # `x-iam-jit-bouncer-*` prefix for v1.0 to keep agents +
+            # tooling that grep on them working unchanged. Renamed in
+            # v1.1 alongside the env-var alignment pass.
             headers={"x-iam-jit-bouncer-verdict": obs.decision_verdict},
         )
 
@@ -688,7 +694,7 @@ async def _handle_request(request, *, store, config: ProxyConfig, session):
     if not obs.parsed_service or not host_header:
         return web.json_response(
             {
-                "error": "iam-jit-bouncer cannot forward unclassifiable request",
+                "error": "ibounce cannot forward unclassifiable request",
                 "decision_reason": obs.decision_reason,
                 "hint": (
                     "request has no SigV4 Authorization header or no Host header; "
@@ -705,13 +711,13 @@ async def _handle_request(request, *, store, config: ProxyConfig, session):
     # SigV4-signed body + AccessKeyId.
     if not _is_allowed_forward_host(host_header):
         logger.warning(
-            "iam-jit-bouncer refused forward to non-AWS host %r "
+            "ibounce refused forward to non-AWS host %r "
             "(service=%s action=%s)",
             host_header, obs.parsed_service, obs.parsed_action,
         )
         return web.json_response(
             {
-                "error": "iam-jit-bouncer DENY (forward-host-mismatch)",
+                "error": "ibounce DENY (forward-host-mismatch)",
                 "decision_reason": (
                     f"refused to forward to {host_header!r}: not an AWS "
                     f"endpoint. CRIT-32-01 protection. Set "
@@ -747,11 +753,11 @@ async def _handle_request(request, *, store, config: ProxyConfig, session):
         )
     except Exception as e:
         # Forward failed (timeout, DNS, TLS, etc). Return 502 with
-        # iam-jit-shaped explanation.
-        logger.warning("iam-jit-bouncer forward failed: %s", e)
+        # ibounce-shaped explanation.
+        logger.warning("ibounce forward failed: %s", e)
         return web.json_response(
             {
-                "error": "iam-jit-bouncer forward to AWS failed",
+                "error": "ibounce forward to AWS failed",
                 "upstream_error": str(e),
                 "service": obs.parsed_service,
                 "action": obs.parsed_action,
@@ -810,7 +816,7 @@ async def serve(config: ProxyConfig, *, store: BouncerStore) -> None:
         # Liveness probe. Bypasses proxy evaluation entirely (never
         # parses as a request, never writes to the audit log) so
         # monitor traffic doesn't pollute the operator's "what just
-        # happened" view in `iam-jit-bouncer logs tail`. Mirrors
+        # happened" view in `ibounce logs tail`. Mirrors
         # kbouncer's /healthz shape for cross-product symmetry.
         active_profile = getattr(config, "active_profile", None)
         try:
@@ -871,7 +877,7 @@ async def serve(config: ProxyConfig, *, store: BouncerStore) -> None:
     site = web.TCPSite(runner, config.host, config.port)
     await site.start()
     logger.info(
-        "iam-jit-bouncer proxy listening on http://%s:%s (mode=%s)",
+        "ibounce proxy listening on http://%s:%s (mode=%s)",
         config.host, config.port, config.mode.value,
     )
     logger.info(

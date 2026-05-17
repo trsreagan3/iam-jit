@@ -134,3 +134,46 @@ MINOR boundaries during this phase. Once v1.0 ships:
 - Strict semver applies
 - Backward-compat windows kick in
 - Migration guides are committed for every major
+
+## v1.0 notes — Bounce-suite rename (`iam-jit-bouncer` → `ibounce`)
+
+The bouncer's canonical CLI name + MCP-tool prefix changed in v1.0
+to align with the cross-product Bounce family (`ibounce` for AWS;
+`kbounce` for K8s; future siblings under the same naming).
+
+| Surface | Old (v0.x) | New (v1.0 canonical) | Backward-compat in v1.0 |
+|---|---|---|---|
+| Console script | `iam-jit-bouncer` | `ibounce` | `iam-jit-bouncer` keeps working; prints a stderr deprecation banner + forwards to the same entrypoint |
+| MCP tools | `bouncer_*` | `ibounce_*` | Both names dispatch to the same handler; `bouncer_*` descriptions carry `(DEPRECATED — use ibounce_* in v1.1)` prefix |
+| Profile name (passthrough) | `none` | `full-user` | `--profile none` still resolves; stderr deprecation banner emitted |
+| Profile name (write block) | `prod-readonly` | `readonly` | `--profile prod-readonly` still resolves; stderr deprecation banner emitted |
+| Doc file | `docs/IAM-JIT-BOUNCER.md` | `docs/IBOUNCE.md` | `git mv` preserves history |
+| Launch post | `DONT-GIVE-CLAUDE-YOUR-AWS-KEYS.md` | `DONT-GIVE-CLAUDE-FULL-ADMIN.md` | `git mv` preserves history |
+
+**Migration:** mechanical — swap `iam-jit-bouncer` → `ibounce` in any
+scripts; rename `bouncer_*` → `ibounce_*` in any agent MCP allowlists.
+Both old names work in v1.0 and are removed in v1.1.
+
+**Not changed:** the `IAM_JIT_BOUNCER_*` env vars stay as the canonical
+names in v1.0 (no `IBOUNCE_*` aliases are added — env-var alignment
+happens in v1.1 alongside removal of the deprecation shims). HTTP
+response headers `x-iam-jit-bouncer-*` also retain their old prefix
+for v1.0 to keep agents + tooling that grep on them unchanged. The
+default-active profile remains the passthrough; opt into the
+write-block with `--profile readonly` or
+`export IAM_JIT_BOUNCER_PROFILE=readonly`.
+
+**Moved community profiles:** the formerly-built-in `dev-only`,
+`staging-work`, and `incident-response` profiles moved to
+`tools/community-profiles/` (future home: `trsreagan3/bounce-profiles`).
+Install them via `ibounce profile install --from URL`. If you depended
+on these as built-ins, install them from the bundle before upgrading
+to v1.1.
+
+**Reason for the rename:** cross-product naming consistency. The
+Bounce family ships `ibounce` (AWS API gating) + `kbounce` (K8s API
+gating) + future siblings under one short, memorable, prefix-keyed
+naming. The `iam-jit-bouncer` name conflated the umbrella brand
+(`iam-jit`) with one specific product; the rename lets each Bounce
+product market on its own ergonomics while still composing under the
+parent brand.

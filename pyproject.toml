@@ -75,7 +75,12 @@ dev = [
 [project.scripts]
 iam-jit = "iam_jit.cli:main"
 iam-risk-score = "iam_jit.cli_score:main"
-iam-jit-bouncer = "iam_jit.bouncer_cli:main"
+# Bounce-suite rename (2026-05-17): `ibounce` is the canonical bouncer
+# CLI as of v1.0. `iam-jit-bouncer` keeps working as a deprecation-
+# wrapper console-script that prints a stderr warning + forwards to
+# the same Click app; removed in v1.1.
+ibounce = "iam_jit.bouncer_cli:main"
+iam-jit-bouncer = "iam_jit.bouncer_cli:main_deprecated_alias"
 
 [tool.setuptools.packages.find]
 where = ["src"]

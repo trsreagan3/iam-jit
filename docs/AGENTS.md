@@ -5,6 +5,12 @@
 > If you're building an agent integration with iam-jit, read this doc.
 > If you're a human about to use iam-jit's web UI, **also read this doc** — the recommended workflow runs through an agent even for human-driven sessions.
 
+## Naming — `iam-jit` (umbrella brand) vs `ibounce` (the AWS gate)
+
+`iam-jit` is the umbrella brand + the Python wheel that ships the scorer + JIT-credential issuer + the local AWS-call gate. The local AWS-call gate's CLI + MCP-tool prefix is **`ibounce`** as of v1.0 (was `iam-jit-bouncer` in v0.x — both names work in v1.0; the old name is removed in v1.1). The K8s sibling under the same Bounce family is `kbounce` (Go binary, separate repo).
+
+If you see `iam-jit-bouncer` in older agent allowlists, swap to `ibounce` at your leisure; both resolve. If you see `bouncer_list_rules` in older MCP allowlists, swap to `ibounce_list_rules`; both dispatch through the same handler in v1.0.
+
 ## The core idea
 
 iam-jit is **scorer + catalog + gate**. It does NOT author IAM policies. The agent (with its codebase context + LLM) does the authoring; iam-jit evaluates and gates the result.
@@ -19,7 +25,7 @@ This is the architectural choice that lets iam-jit be small, reliable, and fast.
 |---|---|---|
 | `proceed` | iam-jit-the-issuer can mint a JIT role for this case | Continue with the normal flow below. |
 | `use_existing` | The workload requires a fixed pre-existing role (k8s IRSA, EC2 instance profile, Lambda exec role, etc.) | Use the role declared in `existing_role_arn` (echoed back if you provided `existing_role_hint`). Don't try to mint a new one — the workload won't accept it. |
-| `use_bouncer` | iam-jit-the-issuer can't help, but iam-jit-the-bouncer can | Run the local bouncer proxy (`iam-jit-bouncer`) to gate calls made via whichever role you ended up using. |
+| `use_bouncer` | iam-jit-the-issuer can't help, but `ibounce` (the local AWS-call gate; formerly `iam-jit-bouncer`) can | Run the local bouncer proxy (`ibounce`) to gate calls made via whichever role you ended up using. |
 | `cannot_help` | Neither iam-jit product applies | Escalate to a human; iam-jit isn't the right tool here. |
 
 Every non-PROCEED response includes `reasoning` + `next_action_hint` so you have a concrete path forward, not a vague error. This is the **agent-friendly-not-bypassable** contract: easy to configure for your use case, impossible to silently bypass.
@@ -74,7 +80,7 @@ This is the Slice E composer. One MCP call atomically:
 1. Runs `check_iam_jit_compatibility` for your declared workload.
 2. Declares a bouncer task scope with your `allow_rules` / `deny_rules` (defense-in-depth narrowing — see [docs/IAM-JIT-BOUNCER.md](IAM-JIT-BOUNCER.md)).
 3. Calls `submit_policy` with the same scope.
-4. Returns scoped STS credentials + the `task_id` so you can `bouncer_end_task` when done.
+4. Returns scoped STS credentials + the `task_id` so you can `ibounce_end_task` when done.
 
 ```python
 iam_jit_scope_self_for_task(
@@ -102,7 +108,7 @@ If you skip it and call AWS with pre-existing creds, you get whatever blast radi
 
 Per agents-default-to-iam-jit: agents SHOULD default to this composer; humans don't need to ask. Per recommender-context-boundary: the agent (you) supplies the workload + ARN narrowing because the agent has the codebase context iam-jit doesn't.
 
-When the task is done: `bouncer_end_task(task_id=...)` flips the bouncer back to baseline. `bouncer_task_review(task_id=...)` returns the per-task decision summary for the admin.
+When the task is done: `ibounce_end_task(task_id=...)` flips the bouncer back to baseline. `ibounce_task_review(task_id=...)` returns the per-task decision summary for the admin.
 
 ## The five MCP tools you compose by hand (if the composer doesn't fit)
 
@@ -114,7 +120,7 @@ When the task is done: `bouncer_end_task(task_id=...)` flips the bouncer back to
 | `score_iam_policy` | Rate any policy 1–10 with factor detail | `{score, tier, factors: [{name, contribution, suggested_remedy}], recommended_action}` |
 | `submit_policy` | Submit a policy for grant issuance | `{request_id, score, status, review_url, …}` |
 
-Plus the bouncer surface (`bouncer_start_task`, `bouncer_end_task`, `bouncer_active_task`, `bouncer_task_review`, `bouncer_effective_scope`, `bouncer_tail_decisions`, `bouncer_list_rules`, `bouncer_recommend_rules`, `bouncer_apply_recommendation`) for finer-grained control than the composer provides.
+Plus the ibounce surface (`ibounce_start_task`, `ibounce_end_task`, `ibounce_active_task`, `ibounce_task_review`, `ibounce_effective_scope`, `ibounce_tail_decisions`, `ibounce_list_rules`, `ibounce_recommend_rules`, `ibounce_apply_recommendation`) for finer-grained control than the composer provides. (The legacy `bouncer_*` names from v0.x still dispatch to the same handlers in v1.0 + carry a `(DEPRECATED — use ibounce_* in v1.1)` note in their MCP description.)
 
 There is no `generate_iam_policy`, no `narrow_for_me`, no `suggest_reductions`. The agent does the work; iam-jit scores and gates.
 

@@ -1,7 +1,8 @@
-"""iam-jit-bouncer — local AWS-API call gating proxy.
+"""ibounce — local AWS-API call gating proxy.
 
-Per [[iam-jit-bouncer]] memo: defense-in-depth over role scoping.
-The bouncer sits between the local AWS SDK (boto3, aws-cli, agent
+Per [[iam-jit-bouncer]] memo (now [[ibounce]] post Bounce-suite
+rename 2026-05-17): defense-in-depth over role scoping. The
+bouncer sits between the local AWS SDK (boto3, aws-cli, agent
 calls) and AWS API endpoints. It inspects every request, matches
 against learned rules, and gates the call (allow / deny / prompt).
 
@@ -12,8 +13,9 @@ elsewhere.
 
 Per [[four-products-one-brand]]: the bouncer is one of iam-jit's
 four shipped products — separately addressable market, separate
-brand asset (`iam-jit-bouncer` CLI), shares the scorer/audit
-infrastructure.
+brand asset (`ibounce` CLI; the legacy `iam-jit-bouncer` name still
+ships as a deprecation-warning console-script in v1.0 and is removed
+in v1.1), shares the scorer/audit infrastructure.
 
 Per [[no-hosted-saas]] and [[local-only-safety-mode]]: the bouncer
 runs entirely on the user's laptop, against their local AWS creds,

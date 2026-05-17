@@ -1369,7 +1369,7 @@ TOOLS = [
         "description": (
             "Return which environment profile is currently active for "
             "the bouncer (the value of --profile / IAM_JIT_BOUNCER_PROFILE "
-            "at proxy-start time, or 'none' if no profile was selected). "
+            "at proxy-start time, or 'full-user' if no profile was selected). "
             "Per [[agent-friendly-not-bypassable]]: agents can READ this "
             "but CANNOT change it — profile switching is a human/admin "
             "action requiring a proxy restart. Use this to introspect "
@@ -1405,6 +1405,33 @@ TOOLS = [
         },
     },
 ]
+
+
+# Bounce-suite rename (2026-05-17): every `bouncer_*` MCP tool gets
+# an `ibounce_*` alias in v1.0. Both names dispatch to the same
+# handler; the `bouncer_*` originals carry a `(DEPRECATED ...)` note
+# in their description so agents discover the new naming via
+# `tools/list`. The aliases are appended HERE rather than typed twice
+# above so additions stay in lockstep without manual upkeep. See
+# `project_bounce_suite_rename` memo.
+_BOUNCER_ALIAS_DEPRECATION = (
+    "(DEPRECATED — use ibounce_* in v1.1) "
+)
+for _t in list(TOOLS):
+    _name = _t.get("name", "")
+    if not _name.startswith("bouncer_"):
+        continue
+    # Tag the legacy tool's description so agents see the deprecation
+    # on every `tools/list` response.
+    _t["description"] = _BOUNCER_ALIAS_DEPRECATION + _t["description"]
+    # Append the ibounce_-prefixed alias with an identical input schema.
+    _alias = dict(_t)
+    _alias["name"] = "ibounce_" + _name[len("bouncer_"):]
+    # The alias's description drops the deprecation prefix; this is
+    # the canonical v1.1 name.
+    _alias["description"] = _t["description"][len(_BOUNCER_ALIAS_DEPRECATION):]
+    TOOLS.append(_alias)
+del _t, _name, _alias
 
 
 def _score_for_mcp(args: dict[str, Any]) -> dict[str, Any]:
@@ -2227,11 +2254,11 @@ def _bouncer_active_profile_for_mcp(args: dict[str, Any]) -> dict[str, Any]:
     """HIGH-05 closure (claims-audit): docs claim agents can READ the
     active profile via this tool; the tool now actually exists.
 
-    Resolves the active profile the same way `iam-jit-bouncer run`
-    does: --profile CLI flag (not visible to MCP) → IAM_JIT_BOUNCER_PROFILE
-    env var → 'none'. Returns the profile name + description + counts
-    + source so the agent can introspect whether a hard-floor deny
-    layer is active without inferring from prior failures.
+    Resolves the active profile the same way `ibounce run` does:
+    --profile CLI flag (not visible to MCP) → IAM_JIT_BOUNCER_PROFILE
+    env var → 'full-user'. Returns the profile name + description +
+    counts + source so the agent can introspect whether a hard-floor
+    deny layer is active without inferring from prior failures.
     """
     from .bouncer.profiles import load_profiles, resolve_active_profile
 
@@ -3019,6 +3046,12 @@ def _handle_request(req: dict[str, Any]) -> dict[str, Any] | None:
     if method == "tools/call":
         tool_name = params.get("name")
         args = params.get("arguments") or {}
+        # Bounce-suite rename (2026-05-17): `ibounce_*` is the canonical
+        # name; `bouncer_*` still works in v1.0 + dispatches to the same
+        # handler (see TOOLS-alias-loop above). Normalize here so each
+        # handler only knows its `bouncer_*` lookup string.
+        if isinstance(tool_name, str) and tool_name.startswith("ibounce_"):
+            tool_name = "bouncer_" + tool_name[len("ibounce_"):]
         if tool_name == "generate_iam_policy":
             result_payload = _generate_for_mcp(args)
         elif tool_name == "score_iam_policy":

@@ -1,0 +1,17 @@
+# dev-only — block anything not in dev/sandbox accounts.
+#
+# Former built-in (ibounce v0.x); moved to the community-profiles
+# bundle in v1.0. Install via:
+#   ibounce profile install --from <URL of this YAML>
+#
+# Keyword targets include `account_alias` — the proxy reads the
+# alias from the active session and refuses calls when the alias
+# matches `prod`, `production`, `live`, `customer`. Tune the
+# keywords to your shop's naming convention.
+
+profiles:
+  dev-only:
+    description: "Allow only in accounts whose alias starts with dev or sandbox."
+    deny_keywords: ["prod", "production", "live", "customer"]
+    keyword_targets: ["arn", "account_alias"]
+    keyword_match: "word_boundary"

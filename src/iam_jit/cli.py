@@ -891,7 +891,8 @@ def allowlist_show(rule_id: str) -> None:
 @main.command("bouncer", context_settings={"ignore_unknown_options": True, "allow_extra_args": True})
 @click.pass_context
 def bouncer_pointer(ctx: click.Context) -> None:
-    """Pointer to the standalone `iam-jit-bouncer` binary.
+    """Pointer to the standalone `ibounce` binary (formerly
+    `iam-jit-bouncer`; renamed in the v1.0 Bounce-suite rename).
 
     The bouncer is a separate product with its own entry point;
     this stub catches users who type `iam-jit bouncer ...` and
@@ -899,10 +900,11 @@ def bouncer_pointer(ctx: click.Context) -> None:
     """
     extra = " " + " ".join(ctx.args) if ctx.args else " --help"
     click.echo(
-        "iam-jit-bouncer is a separate binary. Use it directly:",
+        "ibounce is a separate binary (was `iam-jit-bouncer` before "
+        "v1.0). Use it directly:",
         err=True,
     )
-    click.echo(f"Run:   iam-jit-bouncer{extra}", err=True)
+    click.echo(f"Run:   ibounce{extra}", err=True)
     sys.exit(2)
 
 
@@ -1673,7 +1675,7 @@ def doctor_compatibility(
             click.echo(f"role hint:  {result.existing_role_arn}")
         if result.bouncer_recommended:
             click.echo(
-                "bouncer:    recommended — consider iam-jit-bouncer "
+                "bouncer:    recommended — consider ibounce "
                 "(local AWS-call gating proxy) for this workload"
             )
 

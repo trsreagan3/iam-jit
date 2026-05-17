@@ -96,7 +96,7 @@ def decide(
     """Combine rule evaluation + mode + default-policy into a final
     DecisionRecord. Pure: no I/O, no side effects.
 
-    The caller (proxy server or `iam-jit-bouncer decide` CLI) takes
+    The caller (proxy server or `ibounce decide` CLI) takes
     the result and either forwards the request (ALLOW), returns an
     error to the client (DENY), or invokes the interactive prompt
     UX (PROMPT).

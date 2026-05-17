@@ -81,8 +81,7 @@ def _default_hint_for_verdict(
         return (
             "Don't request a new role; use the bouncer to gate calls "
             "against whatever creds the workload already has. Run "
-            "iam-jit-bouncer alongside the workload — see "
-            "docs/IAM-JIT-BOUNCER.md."
+            "ibounce alongside the workload — see docs/IBOUNCE.md."
         )
     if verdict == Compatibility.CANNOT_HELP:
         return (

@@ -543,7 +543,7 @@ class BouncerStore:
             except ValueError:
                 logger.warning(
                     "skipping rule id=%s with malformed effect=%r; remove via "
-                    "`iam-jit-bouncer rules remove %s` to clear the warning",
+                    "`ibounce rules remove %s` to clear the warning",
                     rid, effect, rid,
                 )
                 continue
@@ -1230,7 +1230,7 @@ class BouncerStore:
         action list, time range. Returns {} if the task doesn't
         exist or no decisions were recorded under it.
 
-        Per Slice C: admins run `iam-jit-bouncer tasks review <id>`
+        Per Slice C: admins run `ibounce tasks review <id>`
         post-task to see what the agent actually attempted. This is
         the "after-action report" for a task scope — shows whether
         the scope was right-sized (lots of denies = too narrow; lots

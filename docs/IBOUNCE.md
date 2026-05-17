@@ -1,9 +1,16 @@
-# iam-jit-bouncer
+# ibounce
+
+> **Renamed in v1.0 (2026-05-17).** What used to be `iam-jit-bouncer`
+> is now `ibounce` — the canonical name across the Bounce family
+> (ibounce + kbounce + future). The `iam-jit-bouncer` console
+> script keeps working in v1.0 (prints a deprecation warning + forwards
+> to the same entrypoint); it's removed in v1.1. See [docs/UPGRADING.md](UPGRADING.md)
+> for the migration note.
 
 Local proxy that gates every AWS API call against rules. Defense-in-depth
 over IAM role scoping — when the boundary the JIT role draws is correct
 but the call TARGET was wrong (prompt injection, agent misstep, typo on
-a destructive call), the bouncer catches it.
+a destructive call), ibounce catches it.
 
 ## What ships in v1.0
 
@@ -13,16 +20,16 @@ default enforcement surface today. Below is the full v1.0 shape.
 
 ### CLI + audit foundation
 
-- **Rule management** (`iam-jit-bouncer rules add|list|remove`)
-- **Per-task scopes** (`iam-jit-bouncer tasks start|active|end|review`)
+- **Rule management** (`ibounce rules add|list|remove`)
+- **Per-task scopes** (`ibounce tasks start|active|end|review`)
   for declaring narrow allow/deny rules for one specific job
-- **Dry-run decision evaluator** (`iam-jit-bouncer decide`)
-- **Audit chain** (`iam-jit-bouncer logs tail` + per-task review +
+- **Dry-run decision evaluator** (`ibounce decide`)
+- **Audit chain** (`ibounce logs tail` + per-task review +
   per-pause review) — SQLite-backed local-only
 - **Compatibility allowlist** (`iam-jit allowlist`) for per-account /
   per-workload overrides
 
-### HTTP proxy (`iam-jit-bouncer run`)
+### HTTP proxy (`ibounce run`)
 
 Localhost-only aiohttp server that intercepts AWS SDK traffic via
 `AWS_ENDPOINT_URL=http://127.0.0.1:8767`. SigV4-preserving — the
@@ -40,9 +47,21 @@ decisions count + active pause window if any. Bypasses audit log.
 ### Environment profiles
 
 Named, switchable rule layers that act as a HARD FLOOR above task
-scopes + global rules. Default-shipped: `none`, `dev-only`,
-`staging-work`, `prod-readonly`, `incident-response`. Activate
-with `--profile NAME` on `iam-jit-bouncer run`.
+scopes + global rules. Default-shipped: **`full-user`** (passthrough,
+default-active) and **`readonly`** (cross-product write/destructive-verb
+block). Activate with `--profile NAME` on `ibounce run` OR
+`export IAM_JIT_BOUNCER_PROFILE=readonly` in your shell rc. Profile
+precedence (cross-product, both ibounce + kbounce): explicit
+`--profile` flag → `IAM_JIT_BOUNCER_PROFILE` / `KBOUNCER_PROFILE`
+env var → built-in `full-user` default. When `ibounce run` is invoked
+without `--profile`, it prints a one-line banner pointing operators
+at `--profile readonly` as the recommended write-block opt-in.
+
+Other community profiles (`dev-only`, `staging-work`,
+`incident-response`) ship as YAML files under
+`tools/community-profiles/` (future home:
+`trsreagan3/bounce-profiles`); install with
+`ibounce profile install --from URL`.
 
 Profile fields: `deny_keywords` (with word_boundary matching +
 per-profile exceptions list), `keyword_targets`, `only_account_ids`,
@@ -56,7 +75,7 @@ the CLI surface when non-local).
 HTTPS-only fetch of org-curated profile bundles. The
 [enterprise-profile-distribution](../README.md#enterprise-profile-distribution)
 shape: IT teams publish a curated profiles.yaml; engineers run
-`iam-jit-bouncer profile install --from <URL>` on day 1; installed
+`ibounce profile install --from <URL>` on day 1; installed
 profiles record their fetch URL in the `source` field, making them
 READ-ONLY at the CLI surface (engineers cannot edit org guardrails
 to bypass them).
@@ -72,7 +91,7 @@ Security:
 
 ### Recommender + `--save-as-profile`
 
-(`iam-jit-bouncer recommend [--save-as-profile NAME]`) — synthesizes
+(`ibounce recommend [--save-as-profile NAME]`) — synthesizes
 a draft ruleset from observed decisions; with `--save-as-profile`
 the recommendations are written as that profile's `allow_rules` so
 future `--profile NAME` activates them. Merges on re-run (deduped
@@ -161,7 +180,7 @@ authority at all.
   individual engineers, or only via tickets that take days. The
   bouncer runs entirely on YOUR laptop using your existing
   credentials; it adds gating without needing any new IAM authority.
-  You can be productive with iam-jit-bouncer even when your company
+  You can be productive with ibounce even when your company
   doesn't let you touch IAM.
 - **Local context in rules.** Bouncer rules can reference your
   codebase context (`deny anything in the prod-* cluster`, `allow
@@ -169,7 +188,7 @@ authority at all.
   policy. Per-task scopes (`bouncer tasks start ...`) are declared in
   seconds, used for one job, then ended.
 - **Easy to disable when something breaks.** Need to unblock yourself
-  fast at 2 AM? `iam-jit-bouncer tasks end <id>` or stop the proxy.
+  fast at 2 AM? `ibounce tasks end <id>` or stop the proxy.
   No central ticket, no SecOps escalation. The bouncer is yours to
   flip on and off.
 
@@ -190,7 +209,7 @@ own.
 boto3 / aws-cli / agent
         |
         v                       (AWS_ENDPOINT_URL=http://127.0.0.1:8767)
-http://127.0.0.1:8767  <-- iam-jit-bouncer (Stage 2 HTTP proxy)
+http://127.0.0.1:8767  <-- ibounce (Stage 2 HTTP proxy)
         |                            |
         |                            +--> rule matcher (Stage 1, this slice)
         |                            +--> SQLite audit log (Stage 1, this slice)
@@ -265,32 +284,61 @@ task-fired or global-fired denies. A permissive ALLOW rule
 cannot override a profile deny — that's the load-bearing
 property SecOps needs to approve installs in locked-down envs.
 
-### Built-in starter profiles
+### Built-in profiles (v1.0)
 
 | Profile | What it blocks |
 |---|---|
-| `none` (default) | Nothing — pure rule-engine behavior |
-| `dev-only` | Anything not in dev/sandbox accounts |
-| `staging-work` | ARNs containing `prod`, `production`, `live`, `customer-data`, `uat` keywords |
-| `prod-readonly` | All write verbs (`*:Delete*`, `*:Put*`, `*:Update*`, `*:Create*`) |
-| `incident-response` | All writes; read everything |
+| `full-user` (default-active) | Nothing — pure rule-engine behavior (the passthrough) |
+| `readonly` | All write/destructive verbs (`*:Delete*`, `*:Put*`, `*:Update*`, `*:Create*`, `*:Terminate*`, `*:Stop*`, `*:Reboot*`) |
 
-Write the starter set to disk with `iam-jit-bouncer profile install-defaults`.
-The file lives at `~/.iam-jit/bouncer/profiles.yaml` and can be
-edited freely — add your own profiles, override the defaults,
-or extend the `exceptions` list when a legitimate ARN trips the
-keyword check.
+The default-active profile is `full-user` — calls forwarded as-is +
+audit-logged. Operators opt into the cross-product write-block by
+running `ibounce run --profile readonly` OR
+`export IAM_JIT_BOUNCER_PROFILE=readonly` in their shell rc.
+
+### Backward-compat aliases (deprecated)
+
+The pre-rename names `none` (was the passthrough) and `prod-readonly`
+(was the write-block) keep working in v1.0 — they resolve to
+`full-user` and `readonly` respectively and emit a one-line stderr
+deprecation banner on use. Both aliases are removed in v1.1.
+
+### Community profiles
+
+The opinionated profiles that used to ship as built-ins (`dev-only`,
+`staging-work`, `incident-response`) now live in
+`tools/community-profiles/` (future home: the standalone
+`trsreagan3/bounce-profiles` cross-product bundle). Install one
+with:
+
+```bash
+ibounce profile install --from https://example.com/path/to/staging-work.yaml
+```
+
+Write the built-in `full-user` + `readonly` defaults to disk with
+`ibounce profile install-defaults`. The file lives at
+`~/.iam-jit/bouncer/profiles.yaml` and can be edited freely — add
+your own profiles, override the defaults, or extend the
+`exceptions` list when a legitimate ARN trips the keyword check.
 
 ### Activating a profile
 
 Three ways, in priority order:
 
-1. **CLI flag** (wins): `iam-jit-bouncer run --profile staging-work`
-2. **Env var**: `IAM_JIT_BOUNCER_PROFILE=staging-work iam-jit-bouncer run`
-3. **Default**: `none` profile — existing rule behavior unchanged
+1. **CLI flag** (wins): `ibounce run --profile readonly`
+2. **Env var**: `IAM_JIT_BOUNCER_PROFILE=readonly ibounce run` (the
+   env-var name stays `IAM_JIT_BOUNCER_PROFILE` in v1.0 — no
+   `IBOUNCE_PROFILE` alias is added; env-var alignment with the
+   `ibounce` CLI name happens in v1.1 alongside removal of the
+   deprecation shim). The same name is also recognized cross-product
+   by kbounce as `KBOUNCER_PROFILE`.
+3. **Default**: `full-user` profile (passthrough) — existing rule
+   behavior unchanged. `ibounce run` without `--profile` prints a
+   banner pointing the operator at `--profile readonly` as the
+   recommended write-block.
 
 A typo in `--profile` (unknown name) is a hard error — the proxy
-refuses to start. Silent fallback to `none` would disable a
+refuses to start. Silent fallback to `full-user` would disable a
 guardrail you thought you'd enabled.
 
 ### Profile YAML shape
@@ -305,8 +353,8 @@ profiles:
     only_account_ids: ["111122223333"]
     exceptions:
       - "eng-productivity-tooling"     # known false-positive
-  prod-readonly:
-    description: "Even in prod, no writes"
+  readonly:
+    description: "Cross-product read-only floor"
     deny_verbs: ["*:Delete*", "*:Put*", "*:Update*", "*:Create*"]
 ```
 
@@ -340,7 +388,7 @@ PascalCase and must match exactly).
 ### Initialize
 
 ```bash
-iam-jit-bouncer init
+ibounce init
 # bouncer initialized at: ~/.iam-jit/bouncer/state.db
 # current rules: 0
 # current decisions: 0
@@ -350,25 +398,25 @@ iam-jit-bouncer init
 
 ```bash
 # Allow S3 GetObject on a specific bucket
-iam-jit-bouncer rules add 's3:Get*' \
+ibounce rules add 's3:Get*' \
     --arn 'arn:aws:s3:::my-data/*' \
     --region us-east-1 \
     --note 'dev read access'
 
 # Deny all IAM writes (admin guardrail)
-iam-jit-bouncer rules add 'iam:Delete*' --effect deny
-iam-jit-bouncer rules add 'iam:Put*'    --effect deny
-iam-jit-bouncer rules add 'iam:Create*' --effect deny
+ibounce rules add 'iam:Delete*' --effect deny
+ibounce rules add 'iam:Put*'    --effect deny
+ibounce rules add 'iam:Create*' --effect deny
 
 # List
-iam-jit-bouncer rules list
+ibounce rules list
 #    1  allow  s3:Get*  [arn=arn:aws:s3:::my-data/*, region=us-east-1]  # dev read access
 #    2   deny  iam:Delete*
 #    3   deny  iam:Put*
 #    4   deny  iam:Create*
 
 # Remove by id
-iam-jit-bouncer rules remove 2
+ibounce rules remove 2
 ```
 
 ### Dry-run decisions
@@ -376,18 +424,18 @@ iam-jit-bouncer rules remove 2
 Before flipping to `enforce`, sanity-check what your rules would do:
 
 ```bash
-iam-jit-bouncer decide --service s3 --action GetObject \
+ibounce decide --service s3 --action GetObject \
     --arn arn:aws:s3:::my-data/file.txt --region us-east-1
 # decision: allow
 # reason:   explicit-allow rule
 # rule:     allow s3:Get*
 
-iam-jit-bouncer decide --service iam --action DeleteRole
+ibounce decide --service iam --action DeleteRole
 # decision: deny
 # reason:   explicit-deny rule
 # rule:     deny iam:Delete*
 
-iam-jit-bouncer decide --service ec2 --action DescribeInstances
+ibounce decide --service ec2 --action DescribeInstances
 # decision: deny
 # reason:   enforce-mode unmatched (default-deny)
 ```
@@ -397,7 +445,7 @@ iam-jit-bouncer decide --service ec2 --action DescribeInstances
 Useful for debugging the request parser:
 
 ```bash
-iam-jit-bouncer inspect \
+ibounce inspect \
     --method GET \
     --host s3.amazonaws.com \
     --path /my-bucket/file.txt \
@@ -414,18 +462,18 @@ iam-jit-bouncer inspect \
 ### Audit log
 
 ```bash
-iam-jit-bouncer logs tail
-iam-jit-bouncer logs tail --decision deny --limit 20
-iam-jit-bouncer logs tail --json
+ibounce logs tail
+ibounce logs tail --decision deny --limit 20
+ibounce logs tail --json
 ```
 
 ### Pause (timed escape hatch)
 
 ```bash
-iam-jit-bouncer pause start --for 30m --reason "incident response"
-iam-jit-bouncer pause status
-iam-jit-bouncer pause stop                 # end early
-iam-jit-bouncer pause history --limit 20
+ibounce pause start --for 30m --reason "incident response"
+ibounce pause status
+ibounce pause stop                 # end early
+ibounce pause history --limit 20
 ```
 
 During a pause, TRANSPARENT mode is demoted to COOPERATIVE — the
@@ -441,19 +489,19 @@ When running the proxy with `--prompt-on-deny`, transparent-mode
 DENYs are also enqueued for later operator review:
 
 ```bash
-iam-jit-bouncer run --mode transparent --default-policy deny \
+ibounce run --mode transparent --default-policy deny \
     --prompt-on-deny
 ```
 
 In another terminal:
 
 ```bash
-iam-jit-bouncer prompts list                       # pending
-iam-jit-bouncer prompts show 7
-iam-jit-bouncer prompts answer 7 --kind always     # add global ALLOW
-iam-jit-bouncer prompts answer 7 --kind profile \
+ibounce prompts list                       # pending
+ibounce prompts show 7
+ibounce prompts answer 7 --kind always     # add global ALLOW
+ibounce prompts answer 7 --kind profile \
     --target dev-session                            # add to a profile
-iam-jit-bouncer prompts answer 7 --kind ignore     # mark answered
+ibounce prompts answer 7 --kind ignore     # mark answered
 ```
 
 The agent has already been denied by the time the prompt appears;
@@ -513,7 +561,7 @@ Deployment shapes per environment (Stage 2 documents will go deeper):
   Lambda specifically. Use a Lambda execution-role-scoping flow at
   deploy time instead of runtime gating.
 
-In all cases, the bouncer's audit log (`iam-jit-bouncer logs tail`)
+In all cases, the bouncer's audit log (`ibounce logs tail`)
 shows every gated AWS call regardless of how the workload obtained
 its creds. The audit chain promise holds whether the role was
 issued by iam-jit or assigned by the platform.
@@ -569,13 +617,13 @@ require declaring every infrastructure call.
 
 ### Lifecycle
 
-- **Start** — `bouncer_start_task` MCP tool OR `iam-jit-bouncer
+- **Start** — `bouncer_start_task` MCP tool OR `ibounce
   tasks start` CLI.
 - **Active** — every decision during the task references its
   `task_id` in the decision audit log.
-- **End** — `bouncer_end_task` MCP tool OR `iam-jit-bouncer tasks
+- **End** — `bouncer_end_task` MCP tool OR `ibounce tasks
   end <task_id>` OR auto-expiry on the wall-clock duration.
-- **Inspect** — `iam-jit-bouncer tasks active` shows the current
+- **Inspect** — `ibounce tasks active` shows the current
   task; `tasks list` shows historical tasks; `tasks show <id>`
   shows full details.
 
@@ -587,7 +635,7 @@ task). Tasks without an explicit owner share the "default-owner
 slot" — useful for the single-laptop case where only one agent is
 running at a time.
 
-**Post-task review:** `iam-jit-bouncer tasks review <id>` (or
+**Post-task review:** `ibounce tasks review <id>` (or
 `bouncer_task_review` MCP tool) returns an aggregated summary of
 the task — total decisions, allow/deny breakdown, list of denied
 calls. Useful to see whether the scope was right-sized (lots of
@@ -625,21 +673,21 @@ hand-authoring rules from thousands of audit-log lines.
 > proxy [v1.1: HTTP proxy] to capture traffic transparently.** In
 > v1.0, decisions only land in the audit log when (a) an agent calls
 > the MCP tools (see [docs/AGENTS.md](AGENTS.md)) or (b) the admin
-> runs `iam-jit-bouncer decide ... --record` for each call. Once
+> runs `ibounce decide ... --record` for each call. Once
 > Stage 2 ships, this workflow becomes the canonical Day-0/Day-7
 > path; for now the recommender works on any audit-log entries that
 > exist, but seeding them requires one of those two paths.
 
 ```bash
 # Day 0: install + smart default (admin-minus-sensitive)
-iam-jit-bouncer init
+ibounce init
 
 # Day 0-7 [v1.1: HTTP proxy]: run normally; the bouncer records
 # everything in LEARN mode. (In v1.0, see callout above for how to
 # seed the audit log via MCP or decide --record.)
 
 # Day 7: ask for a recommendation
-iam-jit-bouncer recommend --since 2026-05-10T00:00:00Z
+ibounce recommend --since 2026-05-10T00:00:00Z
 
 # observation window: 2026-05-10T00:00:00Z -> 2026-05-17T15:14:22Z
 # 847 total calls (allow=847 deny=0 prompt=0)
@@ -686,7 +734,7 @@ Deterministic, no LLM (scorer-is-ground-truth):
 
 ### Apply
 
-Review-first by default. `iam-jit-bouncer recommend --apply` (or
+Review-first by default. `ibounce recommend --apply` (or
 MCP `bouncer_apply_recommendation`) bulk-adds the recommendations
 as new rules in one batch + writes a `recommendation_applied`
 config event to the audit chain so post-hoc review can spot
@@ -710,21 +758,21 @@ without shelling out:
 
 | CLI | MCP tool |
 |---|---|
-| `iam-jit-bouncer rules list` | `bouncer_list_rules` |
-| `iam-jit-bouncer rules add ...` | `bouncer_add_rule` |
-| `iam-jit-bouncer rules remove ...` | `bouncer_remove_rule` |
-| `iam-jit-bouncer decide ...` | `bouncer_decide` |
-| `iam-jit-bouncer presets list` | `bouncer_list_presets` |
-| `iam-jit-bouncer presets show ...` | `bouncer_show_preset` |
-| `iam-jit-bouncer presets apply ...` | `bouncer_apply_preset` |
-| `iam-jit-bouncer events tail` | `bouncer_tail_events` |
-| `iam-jit-bouncer logs tail` | `bouncer_tail_decisions` |
-| `iam-jit-bouncer tasks start ...` | `bouncer_start_task` |
-| `iam-jit-bouncer tasks active` | `bouncer_active_task` |
-| `iam-jit-bouncer tasks end ...` | `bouncer_end_task` |
-| `iam-jit-bouncer tasks review ...` | `bouncer_task_review` |
-| `iam-jit-bouncer effective-scope` | `bouncer_effective_scope` |
-| `iam-jit-bouncer recommend ...` | `bouncer_recommend_rules` + `bouncer_apply_recommendation` |
+| `ibounce rules list` | `bouncer_list_rules` |
+| `ibounce rules add ...` | `bouncer_add_rule` |
+| `ibounce rules remove ...` | `bouncer_remove_rule` |
+| `ibounce decide ...` | `bouncer_decide` |
+| `ibounce presets list` | `bouncer_list_presets` |
+| `ibounce presets show ...` | `bouncer_show_preset` |
+| `ibounce presets apply ...` | `bouncer_apply_preset` |
+| `ibounce events tail` | `bouncer_tail_events` |
+| `ibounce logs tail` | `bouncer_tail_decisions` |
+| `ibounce tasks start ...` | `bouncer_start_task` |
+| `ibounce tasks active` | `bouncer_active_task` |
+| `ibounce tasks end ...` | `bouncer_end_task` |
+| `ibounce tasks review ...` | `bouncer_task_review` |
+| `ibounce effective-scope` | `bouncer_effective_scope` |
+| `ibounce recommend ...` | `bouncer_recommend_rules` + `bouncer_apply_recommendation` |
 | (composer — no CLI equivalent) | `iam_jit_scope_self_for_task` |
 
 The `iam_jit_scope_self_for_task` composer (Slice E) is the
@@ -749,7 +797,7 @@ change in its next turn — no vague "denied" responses with no path
 forward.
 
 **Uncircumventable (Lens B):** every config change writes to a
-config-event audit log (`bouncer_tail_events` / `iam-jit-bouncer events
+config-event audit log (`bouncer_tail_events` / `ibounce events
 tail`). The audit chain captures:
 
 | Event kind | What's recorded |

@@ -1,0 +1,22 @@
+# incident-response — read everything, write nothing, audit
+# verbose. For use during live incidents where you need wide read
+# access but must not mutate anything.
+#
+# Former built-in (ibounce v0.x); moved to the community-profiles
+# bundle in v1.0. Install via:
+#   ibounce profile install --from <URL of this YAML>
+#
+# Note: this overlaps significantly with the shipped `readonly`
+# default profile. The named-context value here is the audit-log
+# label more than a distinct rule shape.
+
+profiles:
+  incident-response:
+    description: "Read everything, write nothing, audit verbose."
+    deny_verbs:
+      - "*:Delete*"
+      - "*:Put*"
+      - "*:Update*"
+      - "*:Create*"
+      - "*:Terminate*"
+      - "*:Stop*"

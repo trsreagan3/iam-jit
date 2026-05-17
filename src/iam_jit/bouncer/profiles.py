@@ -112,38 +112,42 @@ class ProfileVerdict:
 
 
 # Built-in default profiles. Shipped on `init` if profiles.yaml is
-# absent. Five profiles per the spec; an empty `none` profile exists
-# so the active=none path is explicit + auditable.
+# absent. Per `feedback_bounce_default_profile_pattern` (2026-05-17):
+# the cross-product (ibounce + kbounce + future) default reduces to
+# TWO general-purpose profiles — `full-user` (passthrough, default
+# active) and `readonly` (block write/destructive verbs). More
+# opinionated profiles (`dev-only`, `staging-work`,
+# `incident-response`) moved to `tools/community-profiles/` and are
+# installable via `ibounce profile install --from URL`.
 DEFAULT_PROFILES: dict[str, dict[str, Any]] = {
-    "none": {
-        "description": "No profile active; existing rule system unchanged.",
+    "full-user": {
+        "description": (
+            "No profile active; calls forwarded as-is + audit-logged. "
+            "Default; opt into 'readonly' for the cross-product write block."
+        ),
     },
-    "dev-only": {
-        "description": "Allow only in accounts whose alias starts with dev or sandbox.",
-        "deny_keywords": ["prod", "production", "live", "customer"],
-        "keyword_targets": ["arn", "account_alias"],
-        "keyword_match": "word_boundary",
-    },
-    "staging-work": {
-        "description": "Working on staging; block anything that looks like prod or uat.",
-        "deny_keywords": ["prod", "production", "uat", "live", "customer"],
-        "keyword_targets": ["arn", "resource_name", "account_alias"],
-        "keyword_match": "word_boundary",
-    },
-    "prod-readonly": {
-        "description": "Even in prod, no writes — read-only floor.",
+    "readonly": {
+        "description": (
+            "Cross-product read-only floor: block write + destructive verbs "
+            "regardless of credentials. The general-purpose 'readonly' default."
+        ),
         "deny_verbs": [
             "*:Delete*", "*:Put*", "*:Update*", "*:Create*",
             "*:Terminate*", "*:Stop*", "*:Reboot*",
         ],
     },
-    "incident-response": {
-        "description": "Read everything, write nothing, audit verbose.",
-        "deny_verbs": [
-            "*:Delete*", "*:Put*", "*:Update*", "*:Create*",
-            "*:Terminate*", "*:Stop*",
-        ],
-    },
+}
+
+
+# Deprecated profile-name aliases. Map old name → new name. Kept
+# working for v1.0; remove in v1.1. Per the rename plan, `none` →
+# `full-user` (rename only) and `prod-readonly` → `readonly` (rename
+# + drop the "prod" connotation). Both old names still resolve via
+# `resolve_active_profile`; resolution emits a one-line stderr
+# deprecation banner.
+DEPRECATED_PROFILE_ALIASES: dict[str, str] = {
+    "none": "full-user",
+    "prod-readonly": "readonly",
 }
 
 
@@ -184,8 +188,25 @@ def load_profiles(path: str | pathlib.Path | None = None) -> dict[str, Profile]:
         if not isinstance(body, dict):
             raise ValueError(f"profile {name!r} must be a YAML object")
         out[name] = _profile_from_dict(name, body)
-    # Always ensure `none` exists so callers can fall back safely.
-    out.setdefault("none", Profile(name="none", description="No profile active."))
+    # Always ensure the default-active profile exists so callers can
+    # fall back safely. `full-user` is the v1.0 canonical name (was
+    # `none`); the alias is added below for v1.0 backward-compat and
+    # removed in v1.1 per DEPRECATED_PROFILE_ALIASES.
+    out.setdefault("full-user", Profile(
+        name="full-user",
+        description=(
+            "No profile active; calls forwarded as-is + audit-logged."
+        ),
+    ))
+    # Backward-compat: every deprecated alias must resolve to the same
+    # Profile instance as its canonical name so existing users of
+    # `--profile none` / `--profile prod-readonly` keep working in
+    # v1.0. The deprecation banner is printed in
+    # `resolve_active_profile`, not here (avoids double-printing on
+    # every load).
+    for old_name, new_name in DEPRECATED_PROFILE_ALIASES.items():
+        if old_name not in out and new_name in out:
+            out[old_name] = out[new_name]
     return out
 
 
@@ -202,7 +223,14 @@ def write_default_profiles(path: str | pathlib.Path | None = None) -> pathlib.Pa
 
 
 def _build_default_profile_map() -> dict[str, Profile]:
-    return {name: _profile_from_dict(name, body) for name, body in DEFAULT_PROFILES.items()}
+    out = {name: _profile_from_dict(name, body) for name, body in DEFAULT_PROFILES.items()}
+    # Backward-compat aliases (v1.0; removed in v1.1). Map old name →
+    # same Profile object as the canonical name. The deprecation
+    # banner is printed in resolve_active_profile, not here.
+    for old_name, new_name in DEPRECATED_PROFILE_ALIASES.items():
+        if old_name not in out and new_name in out:
+            out[old_name] = out[new_name]
+    return out
 
 
 def _profile_from_dict(name: str, body: dict[str, Any]) -> Profile:
@@ -376,16 +404,31 @@ def resolve_active_profile(
     profiles: dict[str, Profile] | None = None,
 ) -> Profile:
     """Resolve which profile is active for this request, in priority:
-    explicit override → CLI flag → env var → 'none'. Returns the
-    `none` profile if no other source specified it."""
+    explicit override → CLI flag → env var → 'full-user'. Returns the
+    `full-user` (passthrough) profile if no other source specified it.
+
+    Deprecated profile names (`none`, `prod-readonly`) still resolve
+    in v1.0 but emit a one-line stderr deprecation banner so users
+    know to switch before v1.1 removes the alias.
+    """
+    import sys as _sys
+
     if explicit is not None:
         return explicit
     if profiles is None:
         profiles = load_profiles()
-    name = cli_flag or os.environ.get(ACTIVE_PROFILE_ENV) or "none"
+    name = cli_flag or os.environ.get(ACTIVE_PROFILE_ENV) or "full-user"
+    if name in DEPRECATED_PROFILE_ALIASES:
+        new_name = DEPRECATED_PROFILE_ALIASES[name]
+        print(
+            f"WARN: profile name {name!r} is deprecated; use "
+            f"{new_name!r}. Both work in v1.0; {name!r} is removed in v1.1.",
+            file=_sys.stderr,
+        )
+        name = new_name
     if name not in profiles:
         # Surface the misconfiguration loudly rather than silently
-        # falling back to 'none' — a typo in --profile that
+        # falling back to 'full-user' — a typo in --profile that
         # silently disables enforcement is worse than a crash.
         raise ValueError(
             f"profile {name!r} not found; available: {sorted(profiles.keys())}"
@@ -465,7 +508,8 @@ def evaluate_profile(
       3. Verb denies against `deny_verbs` → DENY
       4. No objection → allow downstream rules to decide
     """
-    # Profile 'none' (or any empty profile) is a no-op
+    # Profile 'full-user' (or any empty profile — incl. the legacy
+    # 'none' alias) is a no-op
     if not profile.deny_keywords and not profile.deny_verbs and not profile.only_account_ids:
         return ProfileVerdict(denied=False)
 

@@ -1,0 +1,13 @@
+# staging-work — working on staging, block anything that looks
+# like prod or uat.
+#
+# Former built-in (ibounce v0.x); moved to the community-profiles
+# bundle in v1.0. Install via:
+#   ibounce profile install --from <URL of this YAML>
+
+profiles:
+  staging-work:
+    description: "Working on staging; block anything that looks like prod or uat."
+    deny_keywords: ["prod", "production", "uat", "live", "customer"]
+    keyword_targets: ["arn", "resource_name", "account_alias"]
+    keyword_match: "word_boundary"

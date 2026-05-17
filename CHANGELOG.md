@@ -9,6 +9,90 @@ from software version (see `docs/ROADMAP-V1.1.md`); changes to
 the scorer corpus today are noted as `### Scorer` blocks
 within the same release.
 
+## Unreleased — Bounce-suite rename (2026-05-17)
+
+### Changed (canonical names; deprecation aliases ship in v1.0)
+
+- **`iam-jit-bouncer` → `ibounce`** — canonical CLI name for the
+  AWS-API gating proxy. Console-script `iam-jit-bouncer` keeps
+  working (prints a one-line stderr deprecation warning + forwards
+  to the same Click app); removed in v1.1. Wheel name unchanged
+  (`iam-jit` still ships both the scorer and `ibounce`).
+- **MCP tools: `bouncer_*` → `ibounce_*`** — every `bouncer_*` tool
+  gets an `ibounce_*` alias in v1.0. Both dispatch to the same
+  handler. The legacy `bouncer_*` descriptions carry a
+  `(DEPRECATED — use ibounce_* in v1.1)` prefix on every
+  `tools/list` response. Removed in v1.1.
+- **Built-in profiles reduced to two** — `full-user` (passthrough,
+  default-active) + `readonly` (cross-product write/destructive-verb
+  block). Replaces the pre-rename `none` + `prod-readonly` names.
+  Old names still resolve in v1.0 + emit a one-line stderr
+  deprecation banner; removed in v1.1.
+- **`ibounce run` banner** — when invoked without `--profile`, the
+  proxy now prints a one-line banner pointing the operator at
+  `--profile readonly` OR `export IAM_JIT_BOUNCER_PROFILE=readonly`
+  in their shell rc as the recommended write-block opt-in. Per
+  `feedback_bounce_default_profile_pattern`.
+
+### Moved
+
+- **Opinionated profiles moved out of built-ins** — `dev-only`,
+  `staging-work`, and `incident-response` profiles relocate from
+  `src/iam_jit/bouncer/profiles.py:DEFAULT_PROFILES` to standalone
+  YAML files under `tools/community-profiles/`. Future home:
+  `trsreagan3/bounce-profiles` (the cross-product community-profile
+  bundle). Install via `ibounce profile install --from URL` once
+  hosted.
+- **Doc file renames (`git mv` preserves history)**
+  `docs/IAM-JIT-BOUNCER.md` → `docs/IBOUNCE.md`;
+  `docs/launch-posts/DONT-GIVE-CLAUDE-YOUR-AWS-KEYS.md` →
+  `docs/launch-posts/DONT-GIVE-CLAUDE-FULL-ADMIN.md`.
+
+### Unchanged (v1.0 backward-compat surface)
+
+- `IAM_JIT_BOUNCER_*` env vars stay as the canonical names (no
+  `IBOUNCE_*` aliases — env-var alignment ships in v1.1 with the
+  rest of the deprecation removal).
+- HTTP response headers `x-iam-jit-bouncer-*` keep their old prefix
+  for v1.0 (agents + tooling that grep on them keep working);
+  renamed in v1.1.
+- Wire-protocol observability (audit-log row shape, SQLite schema,
+  `/healthz` JSON shape) unchanged.
+
+### Quality (audit-cadence)
+
+Per `feedback_audit_cadence_discipline`, a brief BB+WB self-check
+for the rename change-set:
+
+- **Does the deprecation shim actually run the new code path?** Yes
+  — `main_deprecated_alias()` in `src/iam_jit/bouncer_cli.py`
+  prints to stderr then calls the canonical `main()` Click app
+  with `sys.argv` intact. The `iam-jit-bouncer` console-script
+  binding in `pyproject.toml` points at the wrapper; both
+  entrypoints exercise the same Click groups and subcommands.
+- **Does any test assume the old name in a way that hides a
+  regression?** Tests updated to the new `full-user` / `readonly` /
+  `ibounce_*` names; backward-compat aliases get explicit pinned
+  tests (`test_resolve_active_profile_legacy_none_alias_still_works`,
+  `test_resolve_active_profile_legacy_prod_readonly_alias_still_works`,
+  `test_tools_list_exposes_ibounce_aliases_for_every_bouncer_tool`,
+  `test_bouncer_tool_descriptions_carry_deprecation_note`,
+  `test_ibounce_alias_dispatches_to_same_handler`,
+  `test_legacy_prod_readonly_alias_points_at_readonly`) so a
+  regression breaks loudly.
+- **Does the alias mechanism mask a permission elevation bug?** No
+  — every MCP `ibounce_*` call normalizes to its `bouncer_*` lookup
+  string at the dispatch boundary (one transform, no per-tool
+  branching), so the alias cannot accept arguments the canonical
+  name wouldn't accept. The profile-name aliases resolve to the
+  same `Profile` object instance (`profiles["none"] is
+  profiles["full-user"]`); there is no parallel resolution path
+  where an alias could pick up different rules. Pre-existing bug
+  in `bouncer_cli.py` — `os` not imported at module level despite
+  `os.environ` use in `profile_list_cmd` — fixed in passing
+  (caught by smoke-running `ibounce profile list` to verify the
+  rename touched paths still execute).
+
 ## Unreleased (2026-05-15)
 
 ### Added — multi-feature push
