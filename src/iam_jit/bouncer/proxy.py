@@ -117,10 +117,10 @@ def set_session_mode_override(mode: str | None) -> None:
         _session_mode_override = None
         return
     normalized = str(mode).strip().lower()
-    if normalized not in ("cooperative", "transparent", "off"):
+    if normalized not in ("cooperative", "transparent", "off", "plan-capture"):
         raise ValueError(
             f"set_session_mode_override: invalid mode {mode!r}; "
-            "expected one of cooperative | transparent | off"
+            "expected one of cooperative | transparent | off | plan-capture"
         )
     _session_mode_override = normalized
 
@@ -145,7 +145,7 @@ def resolve_active_mode() -> dict[str, str]:
     if _session_mode_override is not None:
         return {"mode": _session_mode_override, "source": "session_override"}
     raw = os.environ.get(ACTIVE_MODE_ENV, "").strip().lower()
-    if raw in ("cooperative", "transparent", "off"):
+    if raw in ("cooperative", "transparent", "off", "plan-capture"):
         return {"mode": raw, "source": "env"}
     return {"mode": "cooperative", "source": "default"}
 
@@ -171,6 +171,17 @@ class ProxyMode(str, enum.Enum):
     verdicts block + interactive prompt (later slices). Useful for:
     locked-down-IAM-dev environments, compliance-sensitive deploys,
     agent-safety-critical sessions."""
+
+    PLAN_CAPTURE = "plan-capture"
+    """Plan-mode capture (#132). Every call is parsed + audited +
+    RETURNED-WITH-SYNTHETIC-SUCCESS — NEVER forwarded to AWS. The
+    operator gets a recorded call graph the agent INTENDED to make
+    (terraform-plan-for-any-AWS-touching-agent-task) before any
+    state change. Per [[ibounce-honest-positioning]]: this is an
+    operator PREVIEW (deterrent), not a security boundary — an
+    adversarial agent can detect plan-capture mode + behave
+    differently. Per [[creates-never-mutates]]: synthetic
+    responses are FAKE; we never touch AWS in this mode."""
 
 
 @dataclasses.dataclass(frozen=True)
@@ -206,6 +217,13 @@ class ProxyConfig:
     operator's answer takes effect on the NEXT call of the same
     shape. v1.1 will add a synchronous mode where the proxy
     briefly waits for an answer before returning."""
+    plan_session_id: str | None = None
+    """#132 plan-capture: session id every intercepted call is
+    bound to for the lifetime of this serve() invocation. None
+    means "the proxy isn't in plan-capture mode" OR "the proxy
+    didn't get an explicit --plan-session-id and the serve() entry
+    point will mint one at startup." Only consulted when
+    `mode == ProxyMode.PLAN_CAPTURE`."""
     # Don't bind to 0.0.0.0 by default — proxy is a LOCAL-ONLY
     # thing per the local-only-safety-mode + no-hosted-saas memos.
     # Binding externally would silently expose a credential-handling
@@ -696,6 +714,113 @@ async def _forward_to_aws(
     return resp.status, resp_headers, resp_body
 
 
+async def _plan_capture_response(
+    *,
+    request,
+    body: bytes,
+    obs: RequestObservation,
+    store: BouncerStore,
+    config: ProxyConfig,
+):
+    """Build + return a synthetic SDK-shaped response and persist a
+    plan_calls row. Called from `_handle_request` when
+    `config.mode == ProxyMode.PLAN_CAPTURE`. Never forwards anything.
+
+    Two failure modes are surfaced inline (not raised) so the proxy
+    stays alive under malformed inbound traffic:
+      - Unclassifiable request (no SigV4) → unsupported-op error
+        for service='' action='' so the operator sees the entry in
+        the transcript instead of a silent drop.
+      - Op not in the synthetics registry → SDK-shaped 400 with
+        `PlanCaptureUnsupportedOperation` so the operator knows to
+        switch modes if they need the call to execute.
+    """
+    from aiohttp import web
+
+    from .plan_capture import (
+        PlanCaptureSynthetic,
+        UNSUPPORTED_OP_SHAPE,
+        current_session_id,
+        synthesize_response,
+    )
+
+    # Session-id resolution order:
+    #   1. ProxyConfig.plan_session_id (operator's --plan-session-id flag)
+    #   2. plan_capture.current_session_id() (the in-process slot the
+    #      `serve()` entry installed at startup)
+    #   3. literal "plan-default" — only hit when a caller invokes the
+    #      handler outside the serve() lifecycle (e.g. unit tests
+    #      poking _handle_request directly). The synthesizers don't
+    #      care about the value beyond it being a stable key.
+    session_id = (
+        config.plan_session_id
+        or current_session_id()
+        or "plan-default"
+    )
+    # Lazy-ensure the session row exists. ensure_plan_session is
+    # idempotent so we don't need to track whether `serve()` already
+    # created it.
+    try:
+        store.ensure_plan_session(
+            session_id=session_id,
+            started_by=os.environ.get("USER", "local"),
+            note="auto-created by plan-capture proxy",
+        )
+    except Exception as e:
+        # An audit-store write failure is high-priority but we don't
+        # crash the proxy — same posture as decisions.record_decision
+        # in evaluate_request above. Log + carry on with the synthesis;
+        # the operator notices the missing transcript and investigates.
+        logger.warning("plan-capture ensure_session failed: %s", e)
+
+    service = obs.parsed_service or ""
+    action = obs.parsed_action or ""
+    host_header = request.headers.get("host", "")
+    synth: PlanCaptureSynthetic = synthesize_response(
+        service=service,
+        action=action,
+        host=host_header,
+        path=request.path_qs,
+        body=body,
+        query=dict(request.query),
+    )
+    supported = (
+        synth.would_have_returned.get("kind") != UNSUPPORTED_OP_SHAPE
+        and bool(service) and bool(action)
+    )
+    verdict = obs.decision_verdict if supported else "unsupported"
+    would_have_called = (
+        f"{service}:{action}" if (service or action) else "unknown:unknown"
+    )
+    try:
+        store.record_plan_call(
+            session_id=session_id,
+            method=request.method,
+            host=host_header,
+            path=request.path_qs,
+            service=service,
+            action=action,
+            region=obs.parsed_region,
+            arn=obs.parsed_arn,
+            verdict=verdict,
+            would_have_called=would_have_called,
+            would_have_returned=synth.would_have_returned,
+            supported=supported,
+        )
+    except Exception as e:
+        logger.warning("plan-capture record_plan_call failed: %s", e)
+
+    # Always tag the synthetic response with bouncer headers so an
+    # operator running curl / mitmproxy / a debug client can tell
+    # this came from plan-capture, never AWS. Matches the existing
+    # x-iam-jit-bouncer-* surface used in transparent + cooperative.
+    out_headers = dict(synth.headers)
+    out_headers["x-iam-jit-bouncer-mode"] = ProxyMode.PLAN_CAPTURE.value
+    out_headers["x-iam-jit-bouncer-verdict"] = verdict
+    out_headers["x-iam-jit-bouncer-plan-session"] = session_id
+    return web.Response(body=synth.body, status=synth.status, headers=out_headers)
+
+
 async def _handle_request(request, *, store, config: ProxyConfig, session):
     """aiohttp handler for inbound proxy requests.
 
@@ -707,6 +832,14 @@ async def _handle_request(request, *, store, config: ProxyConfig, session):
         no enforcement at the wire)
       PROMPT (any mode) → Slice 2 treats as DENY for now; Slice 3
         will add interactive prompt UX
+
+    #132 plan-capture behavior:
+      ANY verdict + PLAN_CAPTURE → never forward; return a synthetic
+        SDK-shaped success (or unsupported-op error if the registry
+        doesn't know the op). The verdict the bouncer would have
+        assigned in transparent mode is recorded on the plan-call
+        row so the operator's transcript shows what would have been
+        blocked, alongside what the agent would have done.
     """
     from aiohttp import web
 
@@ -726,6 +859,19 @@ async def _handle_request(request, *, store, config: ProxyConfig, session):
         account_alias=config.account_alias,
         prompt_on_deny=config.prompt_on_deny,
     )
+
+    # #132 plan-capture short-circuit. Runs BEFORE the obs.enforced
+    # 403 branch + BEFORE the forwarding allowlist, since
+    # plan-capture's load-bearing invariant is "never forward." Per
+    # [[creates-never-mutates]]: synthetic responses never reach AWS.
+    # Per [[scorer-is-ground-truth]]: we keep the bouncer's verdict
+    # (allow/deny/prompt) on the plan-call row even though no 403
+    # is returned, so the operator sees what would have been blocked.
+    if config.mode == ProxyMode.PLAN_CAPTURE:
+        return await _plan_capture_response(
+            request=request, body=body, obs=obs,
+            store=store, config=config,
+        )
 
     if obs.enforced:
         # Transparent + (deny or prompt) → 403 without forwarding.
@@ -871,6 +1017,47 @@ async def serve(config: ProxyConfig, *, store: BouncerStore) -> None:
     connector = aiohttp.TCPConnector(limit=100, ttl_dns_cache=300)
     session = aiohttp.ClientSession(connector=connector)
     app = web.Application()
+
+    # #132 plan-capture: ensure the in-process session slot is set so
+    # every intercepted call records into the same logical transcript.
+    # If the operator passed --plan-session-id we honour that;
+    # otherwise mint a fresh id (`plan-YYYYMMDDTHHMMSSZ-...`) and
+    # log it so they can find the transcript via `ibounce plan show`.
+    # Only fires in PLAN_CAPTURE mode — other modes leave the slot
+    # alone so concurrent processes don't collide.
+    if config.mode == ProxyMode.PLAN_CAPTURE:
+        from . import plan_capture as _plan_capture_pkg
+        # Resolution priority: explicit config flag > existing in-
+        # process slot (the CLI's `run_cmd` may have set this so the
+        # operator could see the id BEFORE serve() starts) > mint a
+        # fresh one. The last branch is the natural test-only path
+        # (a test calls serve() directly without going through CLI).
+        resolved_session_id = (
+            config.plan_session_id
+            or _plan_capture_pkg.current_session_id()
+        )
+        if resolved_session_id:
+            _plan_capture_pkg.set_session_id(resolved_session_id)
+        else:
+            resolved_session_id = _plan_capture_pkg.new_session_id()
+        # Persist the header row eagerly so `ibounce plan list`
+        # shows the session even if zero calls land before stop.
+        try:
+            store.ensure_plan_session(
+                session_id=resolved_session_id,
+                started_by=os.environ.get("USER", "local"),
+                note="ibounce serve --mode plan-capture",
+            )
+        except Exception as e:
+            logger.warning(
+                "plan-capture serve: failed to persist session header: %s", e,
+            )
+        logger.info(
+            "plan-capture mode active; session_id=%s "
+            "(every call is parsed + audited + returned-with-synthetic; "
+            "nothing forwards to AWS)",
+            resolved_session_id,
+        )
 
     async def handler(request):
         return await _handle_request(

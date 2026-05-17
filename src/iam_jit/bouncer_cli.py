@@ -1965,15 +1965,31 @@ def _parse_duration(raw: str) -> int:
 )
 @click.option(
     "--mode",
-    type=click.Choice(["cooperative", "transparent"], case_sensitive=False),
+    type=click.Choice(
+        ["cooperative", "transparent", "plan-capture"], case_sensitive=False,
+    ),
     default="cooperative",
     show_default=True,
     help="cooperative: every call is parsed + verdict logged but "
          "always forwarded (advisory). transparent: DENY verdicts "
-         "return 403 to the SDK client (enforcement). Pick "
-         "cooperative for solo-dev iteration speed; transparent "
-         "for locked-down environments where any call must be "
-         "gated. Switch later by restarting with the other flag.",
+         "return 403 to the SDK client (enforcement). plan-capture "
+         "(#132): every call is parsed + audited + returned with a "
+         "synthetic SDK-shaped success — NEVER forwarded to AWS, "
+         "so the operator gets a recorded call graph the agent "
+         "intended to make ('terraform plan' for any AWS-touching "
+         "agent task). Pick cooperative for solo-dev iteration "
+         "speed; transparent for locked-down environments; "
+         "plan-capture to preview an agent flow before any state "
+         "change. Switch later by restarting with the other flag.",
+)
+@click.option(
+    "--plan-session-id",
+    "plan_session_id",
+    default=None,
+    help="Plan-capture session id to APPEND calls to. Only meaningful "
+         "with --mode plan-capture. Omit to mint a fresh "
+         "`plan-YYYYMMDDTHHMMSSZ-...` id at startup (the recommended "
+         "default — every serve() invocation gets its own session).",
 )
 @click.option(
     "--default-policy",
@@ -2011,7 +2027,7 @@ def _parse_duration(raw: str) -> int:
 @click.option("--db", type=click.Path(dir_okay=False), default=None)
 def run_cmd(
     port: int, host: str, force_external_bind: bool, prompt_on_deny: bool,
-    mode: str, default_policy: str,
+    mode: str, plan_session_id: str | None, default_policy: str,
     profile_name: str | None,
     account_id_flag: str | None,
     account_alias_flag: str | None,
@@ -2083,7 +2099,27 @@ def run_cmd(
         account_id=account_id_flag,
         account_alias=account_alias_flag,
         prompt_on_deny=prompt_on_deny,
+        plan_session_id=plan_session_id,
     )
+
+    # #132 plan-capture: surface the session id (operator-supplied or
+    # the auto-minted one) up-front so the operator can find the
+    # transcript later via `ibounce plan show <id>`. The serve()
+    # entry installs the in-process slot; we resolve the actual id
+    # AFTER serve() starts so the echoed value matches what gets
+    # persisted.
+    if ProxyMode(mode.lower()) == ProxyMode.PLAN_CAPTURE:
+        from .bouncer import plan_capture as _plan_capture_pkg
+        if plan_session_id:
+            _plan_capture_pkg.set_session_id(plan_session_id)
+            resolved_pid = plan_session_id
+        else:
+            resolved_pid = _plan_capture_pkg.new_session_id()
+        click.echo(
+            f"plan-capture session: {resolved_pid}  "
+            f"(view: ibounce plan show {resolved_pid})",
+            err=True,
+        )
 
     # Did the operator opt into a profile, or did we land on the
     # passthrough default? When the latter, surface the
@@ -2146,6 +2182,158 @@ def run_cmd(
             _asyncio.run(serve(config, store=store))
         except KeyboardInterrupt:
             click.echo("\nibounce proxy stopped.", err=True)
+
+
+# ---------------------------------------------------------------------------
+# `ibounce plan ...` — review + export plan-capture session transcripts
+# (#132). Sessions are populated by `ibounce serve --mode plan-capture`.
+# Read-only surface; nothing here forwards anything to AWS or mutates
+# the customer's IAM (per [[creates-never-mutates]]).
+# ---------------------------------------------------------------------------
+
+
+@main.group("plan")
+def plan_group() -> None:
+    """Inspect + export plan-capture session transcripts.
+
+    Plan-capture is the 4th proxy mode (alongside cooperative /
+    transparent / off). Start it via:
+
+        ibounce serve --mode plan-capture
+
+    Every intercepted SDK call is parsed + audited + returned
+    with a synthetic SDK-shaped success — nothing forwards to AWS.
+    The transcript that records "what the agent intended to do"
+    is what these subcommands let you inspect.
+
+    Subcommands:
+      list    — list recent plan sessions (newest first)
+      show    — show the full call graph for one session
+      export  — export one session as JSON for downstream tooling
+    """
+
+
+@plan_group.command("list")
+@click.option("--limit", type=int, default=20, show_default=True,
+              help="Maximum number of sessions to return.")
+@click.option("--db", type=click.Path(dir_okay=False), default=None,
+              help="SQLite DB path (default: ~/.iam-jit/bouncer/state.db)")
+@click.option("--json", "as_json", is_flag=True, default=False,
+              help="Emit JSON instead of the human table.")
+def plan_list_cmd(limit: int, db: str | None, as_json: bool) -> None:
+    """List recent plan-capture sessions with per-session roll-ups."""
+    with _opened_store(db) as store:
+        rows = store.list_plan_sessions(limit=limit)
+    if as_json:
+        click.echo(json.dumps(rows, indent=2))
+        return
+    if not rows:
+        click.echo(
+            "no plan-capture sessions recorded yet. "
+            "Start one: ibounce serve --mode plan-capture",
+            err=True,
+        )
+        return
+    for r in rows:
+        click.echo(
+            f"{r['session_id']}  "
+            f"started={r['started_at']}  by={r['started_by']}  "
+            f"calls={r['call_count']}  "
+            f"(allow={r['allow_count']} "
+            f"deny={r['deny_count']} "
+            f"unsupported={r['unsupported_count']})"
+        )
+        if r["note"]:
+            click.echo(f"   note: {r['note']}")
+
+
+@plan_group.command("show")
+@click.argument("session_id")
+@click.option("--db", type=click.Path(dir_okay=False), default=None,
+              help="SQLite DB path (default: ~/.iam-jit/bouncer/state.db)")
+@click.option("--json", "as_json", is_flag=True, default=False,
+              help="Emit JSON instead of the human table.")
+def plan_show_cmd(session_id: str, db: str | None, as_json: bool) -> None:
+    """Show the full call graph for one plan-capture session."""
+    with _opened_store(db) as store:
+        session = store.get_plan_session(session_id)
+        if session is None:
+            click.secho(
+                f"no plan-capture session with id {session_id!r}. "
+                f"Run `ibounce plan list` to see available ids.",
+                fg="red", err=True,
+            )
+            sys.exit(2)
+        calls = store.list_plan_calls(session_id)
+    if as_json:
+        click.echo(json.dumps(
+            {"session": session, "calls": calls}, indent=2,
+        ))
+        return
+    click.echo(
+        f"session: {session['session_id']}"
+    )
+    click.echo(
+        f"  started: {session['started_at']}  by={session['started_by']}"
+    )
+    click.echo(
+        f"  calls={session['call_count']}  "
+        f"allow={session['allow_count']} "
+        f"deny={session['deny_count']} "
+        f"unsupported={session['unsupported_count']}"
+    )
+    if session["note"]:
+        click.echo(f"  note: {session['note']}")
+    if not calls:
+        click.echo("  (no calls recorded)")
+        return
+    click.echo("calls:")
+    for c in calls:
+        flag = " " if c["supported"] else "!"
+        click.echo(
+            f"  {flag} #{c['id']}  {c['at']}  "
+            f"{c['method']:6s} {c['service']}:{c['action']}  "
+            f"verdict={c['verdict']}"
+        )
+
+
+@plan_group.command("export")
+@click.argument("session_id")
+@click.option("--output", "output_path", type=click.Path(dir_okay=False),
+              default=None,
+              help="Output file path (defaults to stdout).")
+@click.option("--db", type=click.Path(dir_okay=False), default=None,
+              help="SQLite DB path (default: ~/.iam-jit/bouncer/state.db)")
+def plan_export_cmd(
+    session_id: str, output_path: str | None, db: str | None,
+) -> None:
+    """Export one plan-capture session as JSON for downstream tooling.
+
+    The output shape is `{"session": {...}, "calls": [{...}, ...]}`
+    — the same shape `plan show --json` emits. Stable enough that
+    downstream consumers (custom dashboards, audit-log ingest)
+    can rely on the field names.
+    """
+    with _opened_store(db) as store:
+        session = store.get_plan_session(session_id)
+        if session is None:
+            click.secho(
+                f"no plan-capture session with id {session_id!r}",
+                fg="red", err=True,
+            )
+            sys.exit(2)
+        calls = store.list_plan_calls(session_id)
+    payload = {"session": session, "calls": calls}
+    blob = json.dumps(payload, indent=2)
+    if output_path:
+        # Plain write; no atomic-replace dance here (consumers point
+        # at the file POST-write, not concurrently). Matches the
+        # `tasks review --json > file` pattern elsewhere in the CLI.
+        with open(output_path, "w", encoding="utf-8") as f:
+            f.write(blob)
+        click.echo(f"wrote {output_path}", err=True)
+    else:
+        click.echo(blob)
 
 
 # ---------------------------------------------------------------------------

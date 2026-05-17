@@ -68,7 +68,7 @@ class ActiveTaskExistsError(Exception):
     is already active. Caller decides whether to end the existing
     task first or surface the conflict to the agent."""
 
-SCHEMA_VERSION = 6  # v6: adds pending_prompts table for #5 async deny-prompt UX (v1.0 subset)
+SCHEMA_VERSION = 7  # v7: adds plan_sessions + plan_calls tables for #132 plan-capture proxy mode
 
 
 def default_db_path() -> pathlib.Path:
@@ -240,6 +240,42 @@ class BouncerStore:
                 );
                 CREATE INDEX IF NOT EXISTS idx_pending_prompts_status ON pending_prompts(status);
                 CREATE INDEX IF NOT EXISTS idx_pending_prompts_created_at ON pending_prompts(created_at);
+                -- v7: plan-capture mode (#132). plan_sessions is the
+                -- header table — one row per `ibounce serve --mode
+                -- plan-capture` invocation (or per --plan-session-id).
+                -- plan_calls records every intercepted SDK call (with
+                -- the verdict the bouncer assigned + the synthetic
+                -- shape it returned). Sessions live forever in the
+                -- store; `ibounce plan list` / `show` / `export` read
+                -- from these tables. Per [[ibounce-honest-positioning]]:
+                -- the transcript is for OPERATOR PREVIEW, not security
+                -- (an adversarial agent can detect plan-capture).
+                CREATE TABLE IF NOT EXISTS plan_sessions (
+                    session_id TEXT PRIMARY KEY,
+                    started_at TEXT NOT NULL,
+                    started_by TEXT NOT NULL,
+                    note TEXT NOT NULL DEFAULT ''
+                );
+                CREATE INDEX IF NOT EXISTS idx_plan_sessions_started_at ON plan_sessions(started_at);
+                CREATE TABLE IF NOT EXISTS plan_calls (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    session_id TEXT NOT NULL,
+                    at TEXT NOT NULL,                 -- ISO-8601 UTC
+                    decision_id INTEGER,              -- soft FK -> decisions.id
+                    method TEXT NOT NULL,
+                    host TEXT NOT NULL,
+                    path TEXT NOT NULL,
+                    service TEXT NOT NULL,
+                    action TEXT NOT NULL,
+                    region TEXT,
+                    arn TEXT,
+                    verdict TEXT NOT NULL,            -- allow|deny|prompt|unsupported
+                    would_have_called TEXT NOT NULL,  -- canonical "service:Action"
+                    would_have_returned_json TEXT,    -- nullable; structured synthetic summary
+                    supported INTEGER NOT NULL DEFAULT 1
+                );
+                CREATE INDEX IF NOT EXISTS idx_plan_calls_session ON plan_calls(session_id, id);
+                CREATE INDEX IF NOT EXISTS idx_plan_calls_verdict ON plan_calls(session_id, verdict);
                 """
             )
             # v3 additive migration: add task_id column to existing
@@ -1298,6 +1334,292 @@ class BouncerStore:
             "denied_calls_truncated": denied_truncated,
             "denied_calls_cap": self.REVIEW_DENIED_CALL_CAP,
         }
+
+    # -----------------------------------------------------------------
+    # Plan-capture sessions + calls (#132)
+    # -----------------------------------------------------------------
+
+    def ensure_plan_session(
+        self,
+        *,
+        session_id: str,
+        started_by: str,
+        note: str = "",
+    ) -> bool:
+        """Insert a plan session row if one doesn't already exist.
+
+        Returns True if a row was inserted, False if a row with the
+        same session_id was already present (callers should treat
+        either as success). Idempotent so the proxy can call this
+        on every intercepted call without thinking about ordering.
+
+        The `note` is operator-supplied free text (cap 200 chars +
+        control-char strip) — used by `ibounce plan show` so an
+        operator can label a session ("trying out the X agent
+        workflow") without separately tracking it.
+        """
+        if not session_id or not isinstance(session_id, str):
+            raise ValueError("ensure_plan_session: session_id required")
+        # Bound + sanitize note the same way #6a pause reasons are
+        # bounded — operator-supplied free text is a known abuse
+        # surface for monitor parsers.
+        clean_note = "".join(
+            ch for ch in (note or "")
+            if ch == " " or (32 <= ord(ch) < 127)
+        )[:200]
+        with self._lock:
+            cur = self._conn.execute(
+                "SELECT 1 FROM plan_sessions WHERE session_id = ?",
+                (session_id,),
+            )
+            if cur.fetchone() is not None:
+                return False
+            self._conn.execute(
+                """
+                INSERT INTO plan_sessions(session_id, started_at, started_by, note)
+                VALUES (?, ?, ?, ?)
+                """,
+                (
+                    session_id,
+                    _isoformat_z(_dt.datetime.now(_dt.UTC)),
+                    started_by,
+                    clean_note,
+                ),
+            )
+            return True
+
+    def record_plan_call(
+        self,
+        *,
+        session_id: str,
+        method: str,
+        host: str,
+        path: str,
+        service: str,
+        action: str,
+        region: str | None,
+        arn: str | None,
+        verdict: str,
+        would_have_called: str,
+        would_have_returned: dict[str, Any] | None,
+        supported: bool,
+        decision_id: int | None = None,
+    ) -> int:
+        """Persist one plan-capture intercepted call. Returns the new
+        plan_calls.id. The caller (proxy handler) supplies the
+        verdict (`allow`/`deny`/`prompt`/`unsupported`) + the
+        synthetic-shape summary already produced by the synthetics
+        registry. No defaulting here so the proxy stays the single
+        place that knows what `would_have_returned` means."""
+        import json as _json
+
+        if not session_id:
+            raise ValueError("record_plan_call: session_id required")
+        body_json = (
+            _json.dumps(would_have_returned)
+            if would_have_returned is not None else None
+        )
+        with self._lock:
+            cur = self._conn.execute(
+                """
+                INSERT INTO plan_calls(
+                    session_id, at, decision_id, method, host, path,
+                    service, action, region, arn, verdict,
+                    would_have_called, would_have_returned_json, supported
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    session_id,
+                    _isoformat_z(_dt.datetime.now(_dt.UTC)),
+                    decision_id,
+                    method,
+                    host,
+                    path,
+                    service,
+                    action,
+                    region,
+                    arn,
+                    verdict,
+                    would_have_called,
+                    body_json,
+                    1 if supported else 0,
+                ),
+            )
+            return int(cur.lastrowid or 0)
+
+    def list_plan_sessions(self, *, limit: int = 50) -> list[dict[str, Any]]:
+        """Return recent plan sessions (newest first) with per-session
+        roll-up counts. Powers `ibounce plan list`."""
+        capped = max(1, min(int(limit), 10_000))
+        with self._lock:
+            cur = self._conn.execute(
+                """
+                SELECT ps.session_id, ps.started_at, ps.started_by, ps.note,
+                       COUNT(pc.id) AS call_count,
+                       SUM(CASE WHEN pc.verdict = 'allow' THEN 1 ELSE 0 END) AS allow_count,
+                       SUM(CASE WHEN pc.verdict = 'deny' THEN 1 ELSE 0 END) AS deny_count,
+                       SUM(CASE WHEN pc.verdict = 'prompt' THEN 1 ELSE 0 END) AS prompt_count,
+                       SUM(CASE WHEN pc.verdict = 'unsupported' THEN 1 ELSE 0 END) AS unsupported_count,
+                       MAX(pc.at) AS last_call_at
+                FROM plan_sessions ps
+                LEFT JOIN plan_calls pc ON pc.session_id = ps.session_id
+                GROUP BY ps.session_id
+                ORDER BY ps.started_at DESC
+                LIMIT ?
+                """,
+                (capped,),
+            )
+            rows = cur.fetchall()
+        return [
+            {
+                "session_id": r[0],
+                "started_at": r[1],
+                "started_by": r[2],
+                "note": r[3] or "",
+                "call_count": int(r[4] or 0),
+                "allow_count": int(r[5] or 0),
+                "deny_count": int(r[6] or 0),
+                "prompt_count": int(r[7] or 0),
+                "unsupported_count": int(r[8] or 0),
+                "last_call_at": r[9],
+            }
+            for r in rows
+        ]
+
+    def get_plan_session(self, session_id: str) -> dict[str, Any] | None:
+        """Return the session row + counts for a single session, or
+        None if no such session exists."""
+        if not session_id:
+            return None
+        with self._lock:
+            cur = self._conn.execute(
+                "SELECT session_id, started_at, started_by, note "
+                "FROM plan_sessions WHERE session_id = ?",
+                (session_id,),
+            )
+            row = cur.fetchone()
+        if row is None:
+            return None
+        summary = self.plan_session_summary(session_id)
+        return {
+            "session_id": row[0],
+            "started_at": row[1],
+            "started_by": row[2],
+            "note": row[3] or "",
+            **summary,
+        }
+
+    def plan_session_summary(self, session_id: str) -> dict[str, Any]:
+        """Aggregate counts for one plan session — total + per-verdict
+        + sets of services / actions touched. Used by the MCP
+        `bouncer_plan_session_summary` tool + the CLI `plan show`
+        header. Returns zero-count shape (not error) for unknown
+        sessions so callers can distinguish 'session exists, no
+        calls yet' from 'session id is wrong' via the membership
+        check on `list_plan_sessions`."""
+        with self._lock:
+            cur = self._conn.execute(
+                """
+                SELECT verdict, COUNT(*),
+                       SUM(CASE WHEN supported = 0 THEN 1 ELSE 0 END)
+                FROM plan_calls
+                WHERE session_id = ?
+                GROUP BY verdict
+                """,
+                (session_id,),
+            )
+            verdict_rows = cur.fetchall()
+            cur = self._conn.execute(
+                "SELECT DISTINCT service FROM plan_calls "
+                "WHERE session_id = ? ORDER BY service",
+                (session_id,),
+            )
+            services = [r[0] for r in cur.fetchall()]
+            cur = self._conn.execute(
+                "SELECT DISTINCT service || ':' || action FROM plan_calls "
+                "WHERE session_id = ? ORDER BY 1",
+                (session_id,),
+            )
+            actions = [r[0] for r in cur.fetchall()]
+            cur = self._conn.execute(
+                "SELECT MIN(at), MAX(at), COUNT(*) FROM plan_calls "
+                "WHERE session_id = ?",
+                (session_id,),
+            )
+            mm = cur.fetchone() or (None, None, 0)
+        counts = {
+            "allow_count": 0, "deny_count": 0, "prompt_count": 0,
+            "unsupported_count": 0,
+        }
+        unsupported_total = 0
+        for verdict, total, unsupported in verdict_rows:
+            key = f"{verdict}_count"
+            if key in counts:
+                counts[key] = int(total)
+            unsupported_total += int(unsupported or 0)
+        return {
+            "session_id": session_id,
+            "call_count": int(mm[2] or 0),
+            "first_call_at": mm[0],
+            "last_call_at": mm[1],
+            "services": services,
+            "would_have_called": actions,
+            "unsupported_total": unsupported_total,
+            **counts,
+        }
+
+    def list_plan_calls(
+        self, session_id: str, *, limit: int = 10_000,
+    ) -> list[dict[str, Any]]:
+        """Return the ordered call graph for one session (oldest
+        first — call order is the natural reading order). The cap
+        is high (10k) because export consumers want everything in
+        one read; CLI `show` paginates separately."""
+        capped = max(1, min(int(limit), 100_000))
+        with self._lock:
+            cur = self._conn.execute(
+                """
+                SELECT id, at, decision_id, method, host, path,
+                       service, action, region, arn, verdict,
+                       would_have_called, would_have_returned_json,
+                       supported
+                FROM plan_calls
+                WHERE session_id = ?
+                ORDER BY id ASC
+                LIMIT ?
+                """,
+                (session_id, capped),
+            )
+            rows = cur.fetchall()
+        import json as _json
+        out: list[dict[str, Any]] = []
+        for r in rows:
+            (
+                rid, at, decision_id, method, host, path,
+                service, action, region, arn, verdict,
+                would_have_called, would_have_returned_json, supported,
+            ) = r
+            try:
+                wh = _json.loads(would_have_returned_json) if would_have_returned_json else None
+            except (ValueError, TypeError):
+                wh = None
+            out.append({
+                "id": int(rid),
+                "at": at,
+                "decision_id": int(decision_id) if decision_id is not None else None,
+                "method": method,
+                "host": host,
+                "path": path,
+                "service": service,
+                "action": action,
+                "region": region,
+                "arn": arn,
+                "verdict": verdict,
+                "would_have_called": would_have_called,
+                "would_have_returned": wh,
+                "supported": bool(supported),
+            })
+        return out
 
     # -----------------------------------------------------------------
     # Lifecycle
