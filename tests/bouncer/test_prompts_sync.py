@@ -890,6 +890,164 @@ def test_mcp_tools_list_exposes_pending_sync_prompts() -> None:
 
 
 # ---------------------------------------------------------------------------
+# Cross-process poll fallback (#250) — mirrors dbounce d82ded9
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_cross_process_answer_polls_to_decision(tmp_path) -> None:
+    """#250 — when the operator answers from a DIFFERENT process than
+    `ibounce serve`, the in-process `wake_sync_pending_prompt` never
+    fires (the answerer's registry is separate). The proxy's poll
+    fallback MUST detect the DB-side status change within ~200ms and
+    return the corresponding allow/deny decision.
+
+    Simulated by calling `store.answer_pending_prompt` WITHOUT a
+    corresponding `wake_sync_pending_prompt` — the in-process Event
+    stays unset, so any decision the proxy returns has to have come
+    from the poll path.
+    """
+    backend = _MockAWS()
+    await backend.start()
+    backend.next_response_status = 200
+    backend.next_response_body = b'{"cross_proc":"allow"}'
+    try:
+        store = BouncerStore(db_path=str(tmp_path / "b.db"))
+        proxy_port = _free_port()
+        config = ProxyConfig(
+            host="127.0.0.1", port=proxy_port,
+            mode=ProxyMode.TRANSPARENT,
+            default_policy=DefaultPolicy.DENY,
+            forward_scheme="http",
+            sync_prompt_on_deny=True,
+            sync_prompt_timeout_seconds=5,
+            sync_prompt_default_decision="deny",
+        )
+        server_task = asyncio.create_task(serve(config, store=store))
+        try:
+            await _wait_for_listen("127.0.0.1", proxy_port)
+            import aiohttp
+
+            async def operator_answers_cross_process():
+                # Wait until the proxy has enqueued the row + registered
+                # the slot, then ONLY call `answer_pending_prompt`. NO
+                # `wake_sync_pending_prompt` — simulates the answer
+                # coming from a different Python process whose registry
+                # the serve process can't see. The proxy must notice via
+                # the 200ms poll fallback.
+                for _ in range(100):
+                    rows = store.list_waiting_sync_prompts()
+                    if rows:
+                        store.answer_pending_prompt(
+                            rows[0]["id"], answer_kind="always",
+                            answer_target=None, answered_by="bob",
+                        )
+                        return
+                    await asyncio.sleep(0.01)
+                raise AssertionError(
+                    "operator never observed a waiting prompt to answer"
+                )
+
+            answer_task = asyncio.create_task(
+                operator_answers_cross_process(),
+            )
+            t0 = asyncio.get_event_loop().time()
+            async with aiohttp.ClientSession() as session:
+                async with session.get(
+                    f"http://127.0.0.1:{proxy_port}/cross/proc",
+                    headers={
+                        "host": f"127.0.0.1:{backend.port}",
+                        "authorization": _sigv4(
+                            service="s3", region="us-east-1",
+                        ),
+                    },
+                ) as resp:
+                    body = await resp.read()
+                    resp_headers = dict(resp.headers)
+            elapsed_after_answer = asyncio.get_event_loop().time() - t0
+            await answer_task
+            # The answer mapped to allow (kind=always) -> forwarded.
+            assert resp.status == 200
+            assert body == b'{"cross_proc":"allow"}'
+            assert resp_headers.get("x-iam-jit-bouncer-sync") == "allow"
+            assert len(backend.received_requests) == 1
+            # Latency budget: poll fires every 200ms; allow generous
+            # headroom for CI jitter + upstream forward, but the test
+            # must NOT be just observing the --sync-prompt-default
+            # path firing at 5s. End-to-end should land under ~2s.
+            assert elapsed_after_answer < 2.0, (
+                f"cross-process answer took {elapsed_after_answer:.3f}s; "
+                "expected ≤200ms-cadence poll to fire well under 2s"
+            )
+        finally:
+            server_task.cancel()
+            try:
+                await server_task
+            except asyncio.CancelledError:
+                pass
+            store.close()
+    finally:
+        await backend.stop()
+
+
+@pytest.mark.asyncio
+async def test_cross_process_poll_respects_timeout(tmp_path) -> None:
+    """#250 — the poll fallback must NOT extend the wall-clock timeout.
+    With no answer ever, the proxy must return at the configured
+    timeout with --sync-prompt-default (here: deny -> 403)."""
+    backend = _MockAWS()
+    await backend.start()
+    try:
+        store = BouncerStore(db_path=str(tmp_path / "b.db"))
+        proxy_port = _free_port()
+        config = ProxyConfig(
+            host="127.0.0.1", port=proxy_port,
+            mode=ProxyMode.TRANSPARENT,
+            default_policy=DefaultPolicy.DENY,
+            forward_scheme="http",
+            sync_prompt_on_deny=True,
+            sync_prompt_timeout_seconds=1,
+            sync_prompt_default_decision="deny",
+        )
+        server_task = asyncio.create_task(serve(config, store=store))
+        try:
+            await _wait_for_listen("127.0.0.1", proxy_port)
+            import aiohttp
+            t0 = asyncio.get_event_loop().time()
+            async with aiohttp.ClientSession() as session:
+                async with session.get(
+                    f"http://127.0.0.1:{proxy_port}/no/answer",
+                    headers={
+                        "host": f"127.0.0.1:{backend.port}",
+                        "authorization": _sigv4(
+                            service="s3", region="us-east-1",
+                        ),
+                    },
+                ) as resp:
+                    body = await resp.json()
+            elapsed = asyncio.get_event_loop().time() - t0
+            assert resp.status == 403
+            assert body["error"] == "ibounce DENY"
+            assert backend.received_requests == []
+            # Should land near the 1s timeout, NOT extend past it
+            # (poll cadence rounds wait_for to remaining when remaining
+            # < 200ms, so the wall clock is the floor).
+            assert 0.9 <= elapsed < 2.0, (
+                f"poll-fallback path took {elapsed:.3f}s; expected ~1s "
+                "(the configured --sync-prompt-timeout)"
+            )
+        finally:
+            server_task.cancel()
+            try:
+                await server_task
+            except asyncio.CancelledError:
+                pass
+            store.close()
+    finally:
+        await backend.stop()
+
+
+# ---------------------------------------------------------------------------
 # Backward-compat guardrail: async --prompt-on-deny behavior unchanged.
 # ---------------------------------------------------------------------------
 

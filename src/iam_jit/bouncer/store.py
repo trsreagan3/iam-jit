@@ -1127,6 +1127,45 @@ class BouncerStore:
             )
             return int(cur.lastrowid or 0), sync_wait_id
 
+    def get_pending_prompt_by_sync_wait_id(
+        self, sync_wait_id: str,
+    ) -> dict[str, Any] | None:
+        """Return the pending_prompts row matching `sync_wait_id`, or None.
+
+        Used by the proxy's #250 cross-process poll fallback in
+        `_await_sync_deny_decision`: when the operator answers from a
+        DIFFERENT process than `ibounce serve`, the in-process
+        `wake_sync_pending_prompt` Event never fires (the registry is
+        per-process). The proxy polls this method on a 200ms cadence
+        to detect the DB-side status change + read out the recorded
+        answer kind so it can resolve to allow/deny without needing
+        the cross-process wake. Mirrors the dbounce d82ded9 fix.
+
+        Same row shape as `get_pending_prompt`; sync_wait_id has a
+        partial index so the SELECT is O(log n) even with many
+        historical rows.
+        """
+        with self._lock:
+            cur = self._conn.execute(
+                "SELECT id, created_at, decision_id, service, action, "
+                "arn, region, deny_reason, status, answer_kind, "
+                "answer_target, answered_by, answered_at, "
+                "kind, session_id, sync_wait_id "
+                "FROM pending_prompts WHERE sync_wait_id = ?",
+                (sync_wait_id,),
+            )
+            r = cur.fetchone()
+        if r is None:
+            return None
+        return {
+            "id": int(r[0]), "created_at": r[1], "decision_id": int(r[2]),
+            "service": r[3], "action": r[4], "arn": r[5], "region": r[6],
+            "deny_reason": r[7], "status": r[8], "answer_kind": r[9],
+            "answer_target": r[10], "answered_by": r[11], "answered_at": r[12],
+            "kind": r[13] or "deny-prompt", "session_id": r[14],
+            "sync_wait_id": r[15],
+        }
+
     def list_waiting_sync_prompts(
         self, *, sync_wait_ids: list[str] | None = None,
     ) -> list[dict[str, Any]]:

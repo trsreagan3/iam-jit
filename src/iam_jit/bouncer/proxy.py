@@ -43,6 +43,7 @@ import asyncio
 import dataclasses
 import os
 import threading
+import time
 
 # HIGH-32-05 mitigation counter: pause-lookup failures are caught
 # + logged but the proxy continues to enforce. Without surfacing
@@ -1179,12 +1180,57 @@ async def _plan_capture_response(
     return web.Response(body=synth.body, status=synth.status, headers=out_headers)
 
 
+# #250 — cross-process poll cadence (seconds). The proxy races the
+# in-process asyncio.Event against a DB poll on this interval so that
+# answers from a DIFFERENT process (the typical `ibounce serve` +
+# `ibounce prompts answer` operator workflow, where the two run in
+# different Python processes + thus different in-process registries)
+# still wake the blocked request. Operator-perceived latency on the
+# cross-process path is bounded by this cadence. 200ms is the same
+# value dbounce shipped in d82ded9 — small enough to feel instant on
+# a human-in-the-loop answer, large enough that a long
+# --sync-prompt-timeout (the 300s ceiling) costs ~1500 SELECTs total
+# on the indexed sync_wait_id column (sub-millisecond each).
+_SYNC_PROMPT_POLL_INTERVAL_SECONDS = 0.2
+
+
+def _answer_to_decision(row: dict) -> str:
+    """Map a pending_prompts row's answer fields to a sync decision.
+
+    The CLI `prompts answer` path persists `answer_kind` ∈
+    {always, profile, ignore} on the row. The proxy's sync path needs
+    a binary 'allow' | 'deny'. Mirrors the mapping in `bouncer_cli`
+    (kind=always|profile -> allow forwards to upstream; kind=ignore
+    -> deny returns the original 403).
+
+    Returns 'deny' as the safe fallback for any unrecognized /
+    missing kind, so a malformed row never lets a denied request
+    silently forward.
+    """
+    kind = row.get("answer_kind")
+    if kind in ("always", "profile"):
+        return "allow"
+    return "deny"
+
+
 async def _await_sync_deny_decision(
     *, obs: RequestObservation, store: BouncerStore, config: ProxyConfig,
 ) -> str:
-    """#203 — enqueue a sync pending-prompt row, register an asyncio.Event,
-    and block until either the operator answers via `ibounce prompts
-    answer` or `sync_prompt_timeout_seconds` elapses.
+    """#203 + #250 — enqueue a sync pending-prompt row, register an
+    asyncio.Event, and block until either the operator answers via
+    `ibounce prompts answer` (in-process Event wake OR cross-process
+    DB-status change) or `sync_prompt_timeout_seconds` elapses.
+
+    Cross-process semantics (#250): the in-process registry only sees
+    wakes from the SAME Python process. The typical operator workflow
+    runs `ibounce serve` and `ibounce prompts answer` in DIFFERENT
+    terminals + thus different processes; without a fallback the
+    answerer's wake fires into a registry the proxy can't see, and
+    the proxy blocks until --sync-prompt-default fires. We race the
+    in-process Event against a 200ms-cadence DB poll on the
+    pending_prompts.sync_wait_id row; either wins, whichever fires
+    first. Operator-perceived latency on the cross-process path is
+    ≤200ms after their answer commits. Mirrors dbounce d82ded9.
 
     Returns 'allow' or 'deny' — never raises. On timeout, returns
     `config.sync_prompt_default_decision`. On enqueue/registration
@@ -1224,25 +1270,59 @@ async def _await_sync_deny_decision(
         config.sync_prompt_default_decision,
     )
     try:
-        try:
-            await asyncio.wait_for(
-                slot.event.wait(),
-                timeout=float(config.sync_prompt_timeout_seconds),
-            )
-        except asyncio.TimeoutError:
-            decision = config.sync_prompt_default_decision
+        timeout_seconds = float(config.sync_prompt_timeout_seconds)
+        deadline = time.monotonic() + timeout_seconds
+        while True:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                # Wall-clock timeout — fall through to default below.
+                break
+            wait_for = min(_SYNC_PROMPT_POLL_INTERVAL_SECONDS, remaining)
+            try:
+                await asyncio.wait_for(slot.event.wait(), timeout=wait_for)
+            except asyncio.TimeoutError:
+                # No in-process wake this tick; check the DB for a
+                # cross-process answer. Any exception from the store
+                # (rare; SQLite is in-process) is logged + treated as
+                # "no answer yet" so the poll loop keeps running until
+                # the wall-clock timeout fires.
+                try:
+                    row = store.get_pending_prompt_by_sync_wait_id(
+                        sync_wait_id,
+                    )
+                except Exception as e:
+                    logger.warning(
+                        "ibounce sync-deny-prompt #%d poll lookup "
+                        "failed: %s (continuing to wait)", prompt_id, e,
+                    )
+                    row = None
+                if row is not None and row.get("status") == "answered":
+                    decision = _answer_to_decision(row)
+                    logger.info(
+                        "ibounce sync-deny-prompt #%d answered "
+                        "cross-process by %s (kind=%s) -> %s",
+                        prompt_id, row.get("answered_by") or "unknown",
+                        row.get("answer_kind") or "unknown", decision,
+                    )
+                    return decision
+                # Otherwise keep looping until either the in-process
+                # Event fires OR the wall-clock deadline elapses.
+                continue
+            # In-process Event fired — same-process wake path.
+            decision = slot.decision or "deny"
             logger.info(
-                "ibounce sync-deny-prompt #%d timed out after %ds; "
-                "applying default=%s",
-                prompt_id, config.sync_prompt_timeout_seconds, decision,
+                "ibounce sync-deny-prompt #%d answered by %s "
+                "(kind=%s) -> %s",
+                prompt_id, slot.answered_by or "unknown",
+                slot.answer_kind or "unknown", decision,
             )
             return decision if decision in ("allow", "deny") else "deny"
-        decision = slot.decision or "deny"
+        # Wall-clock timeout reached.
+        decision = config.sync_prompt_default_decision
         logger.info(
-            "ibounce sync-deny-prompt #%d answered by %s "
-            "(kind=%s) -> %s",
-            prompt_id, slot.answered_by or "unknown",
-            slot.answer_kind or "unknown", decision,
+            "ibounce sync-deny-prompt #%d timed out after %ds; "
+            "applying default=%s",
+            prompt_id, config.sync_prompt_timeout_seconds, decision,
         )
         return decision if decision in ("allow", "deny") else "deny"
     finally:
