@@ -24,7 +24,7 @@ Per four-products-one-brand: iam-jit is four separate products that share a scor
 | # | Product | What it is | Who it's for | Install | Ships in |
 |---|---|---|---|---|---|
 | 1 | **[iam-risk-score](#iam-risk-score)** | 1–10 risk score for any AWS IAM policy in <100ms. API + CLI + GitHub Action. Free for the first 100 requests/month. | CI pipelines, IDE plugins, anyone who wants a verdict before granting permissions. | `pip install iam-risk-score` | **v1.0** |
-| 2 | **[iam-jit-bouncer](#iam-jit-bouncer)** | Local proxy that gates every AWS API call against rules. Defense-in-depth over IAM scoping. v1.0 ships agent-cooperative MCP enforcement; transparent HTTP-proxy interception in v1.1. | Solo devs / admins who want an additional gate on top of role scoping; agents that want defense-in-depth. | `pip install iam-jit && iam-jit-bouncer init` | **v1.0** (CLI + MCP); v1.1 (HTTP proxy) |
+| 2 | **[iam-jit-bouncer](#iam-jit-bouncer)** | Local proxy that gates every AWS API call against rules. Defense-in-depth over IAM scoping. v1.0 ships agent-cooperative MCP enforcement; transparent HTTP-proxy interception in v1.1. | Devs at companies with locked-down IAM (no `iam:CreateRole` for individuals); contractors on read-only credentials; anyone doing rapid iteration where IAM propagation delays hurt; agents that want defense-in-depth on top of role scoping. | `pip install iam-jit && iam-jit-bouncer init` | **v1.0** (CLI + MCP); v1.1 (HTTP proxy) |
 | 3 | **[iam-jit local](#iam-jit-local)** | Local-only safety layer between your AI agent and AWS. Runs on your laptop. Zero SaaS dependency. Your AWS credentials never leave your machine. | Solo devs / individual admins who want Claude bounded. | `pip install iam-jit && iam-jit serve --local` | **v1.0** |
 | 4 | **[iam-jit self-host](#iam-jit-self-host)** | Full JIT-IAM provisioner: time-bound roles, scoring, approval workflow, Slack approval bot, OIDC SSO (Google + Okta), audit trail, auto-revocation — running in your own AWS account. | Teams + enterprises with shared audit + multi-user + compliance needs. | `git clone` + `sam deploy --guided` | **v1.0** |
 
@@ -153,6 +153,17 @@ IAM is coarse. A role granted `s3:GetObject` on `bucket/*` can call `GetObject` 
 - **iam-jit-bouncer** denies calls that fall outside the declared task scope EVEN WHEN the credentials would otherwise allow them.
 
 Two-layer defense; either layer alone leaves the other gap.
+
+### Why the proxy when you could just narrow the IAM role?
+
+Even if your company gives you full IAM authority, IAM has structural limits the bouncer doesn't:
+
+- **Rapid iteration.** Bouncer rule changes take effect on the next request — local file edit + reload, no API call. IAM has propagation delays (seconds to a few minutes for some changes; longer for policy attachments + STS session refreshes) and rate limits if you iterate fast. When you're narrowing scope as you discover a new dangerous call, the bouncer keeps up; IAM doesn't.
+- **You don't need IAM-write permission.** A lot of developers work at companies where SecOps owns IAM and won't grant `iam:CreateRole` / `iam:PutRolePolicy` to individual engineers, or only via tickets that take days. The bouncer runs entirely on YOUR laptop using your existing credentials; it adds gating without needing any new IAM authority. You can be productive with iam-jit-bouncer even when your company doesn't let you touch IAM.
+- **Local context.** Bouncer rules can reference your codebase context (`deny anything in the prod-* cluster`, `allow only the staging account`) without coordinating with a central IAM policy. Per-task scopes (`bouncer tasks start ...`) are declared in seconds, used for one job, then ended.
+- **Easy to disable when something breaks.** Need to unblock yourself fast at 2 AM? `iam-jit-bouncer tasks end <id>` or stop the proxy. No central ticket, no SecOps escalation. The bouncer is yours to flip on and off.
+
+This makes the bouncer the natural fit for: **developers at companies with locked-down IAM, contractors operating under read-only-by-default credentials, anyone doing rapid iteration where IAM propagation would slow them down, anyone who wants a kill-switch they control.** It composes with `iam-jit local` / Enterprise where you DO have IAM authority — bouncer is the fast inner loop, role narrowing is the slow outer loop.
 
 ### What ships in v1.0 vs v1.1
 
