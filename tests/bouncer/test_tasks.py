@@ -780,6 +780,244 @@ def test_low_26_05_events_tail_kind_enum_includes_task_kinds(tmp_path) -> None:
     assert "Invalid value" not in result.output
 
 
+# ---------------------------------------------------------------------------
+# Slice C: per-owner concurrent tasks + per-task review
+# ---------------------------------------------------------------------------
+
+
+def test_slice_c_owner_propagates_into_scope() -> None:
+    s = build_task_scope(
+        description="x",
+        allow_rules=[{"pattern": "eks:*"}],
+        started_by="agent",
+        owner="agent-session-A",
+    )
+    assert s.owner == "agent-session-A"
+
+
+def test_slice_c_owner_validates_non_empty() -> None:
+    with pytest.raises(TaskValidationError, match="owner must be a non-empty"):
+        build_task_scope(
+            description="x", allow_rules=[{"pattern": "eks:*"}],
+            started_by="agent", owner="   ",
+        )
+
+
+def test_slice_c_owner_rejects_oversize() -> None:
+    with pytest.raises(TaskValidationError, match="owner max length"):
+        build_task_scope(
+            description="x", allow_rules=[{"pattern": "eks:*"}],
+            started_by="agent", owner="o" * 257,
+        )
+
+
+def test_slice_c_concurrent_tasks_different_owners(store: BouncerStore) -> None:
+    """Two agents on the same machine can have concurrent active
+    tasks IF they declare distinct non-empty owners."""
+    s1 = build_task_scope(
+        description="agent A task", allow_rules=[{"pattern": "eks:*"}],
+        started_by="agent", owner="agent-A",
+    )
+    s2 = build_task_scope(
+        description="agent B task", allow_rules=[{"pattern": "s3:*"}],
+        started_by="agent", owner="agent-B",
+    )
+    store.add_task(s1)
+    store.add_task(s2)
+    # Each owner has their own active task
+    assert store.get_active_task(owner="agent-A").task_id == s1.task_id
+    assert store.get_active_task(owner="agent-B").task_id == s2.task_id
+
+
+def test_slice_c_same_owner_still_single_active(store: BouncerStore) -> None:
+    """Within a single owner the Slice B single-active invariant holds."""
+    from iam_jit.bouncer.store import ActiveTaskExistsError
+
+    s1 = build_task_scope(
+        description="first", allow_rules=[{"pattern": "eks:*"}],
+        started_by="agent", owner="agent-A",
+    )
+    s2 = build_task_scope(
+        description="second", allow_rules=[{"pattern": "eks:*"}],
+        started_by="agent", owner="agent-A",
+    )
+    store.add_task(s1)
+    with pytest.raises(ActiveTaskExistsError):
+        store.add_task(s2)
+
+
+def test_slice_c_default_owner_isolated_from_named_owners(store: BouncerStore) -> None:
+    """A task with no owner (NULL) doesn't conflict with named-owner
+    tasks; multiple tasks can coexist if one has NULL owner and
+    others have distinct names."""
+    s_default = build_task_scope(
+        description="default", allow_rules=[{"pattern": "eks:*"}],
+        started_by="agent",  # no owner
+    )
+    s_named = build_task_scope(
+        description="named", allow_rules=[{"pattern": "s3:*"}],
+        started_by="agent", owner="agent-A",
+    )
+    store.add_task(s_default)
+    store.add_task(s_named)
+    assert store.get_active_task().task_id == s_default.task_id  # default
+    assert store.get_active_task(owner="agent-A").task_id == s_named.task_id
+
+
+def test_slice_c_list_tasks_filter_by_owner(store: BouncerStore) -> None:
+    store.add_task(build_task_scope(
+        description="A's task", allow_rules=[{"pattern": "eks:*"}],
+        started_by="agent", owner="agent-A",
+    ))
+    store.add_task(build_task_scope(
+        description="B's task", allow_rules=[{"pattern": "s3:*"}],
+        started_by="agent", owner="agent-B",
+    ))
+    a_tasks = store.list_tasks(owner="agent-A")
+    assert len(a_tasks) == 1
+    assert a_tasks[0].description == "A's task"
+
+
+# ---------------------------------------------------------------------------
+# Per-task review summary
+# ---------------------------------------------------------------------------
+
+
+def test_slice_c_review_returns_empty_for_unknown_task(store: BouncerStore) -> None:
+    assert store.task_review_summary("not-a-real-id") == {}
+
+
+def test_slice_c_review_aggregates_decisions(store: BouncerStore) -> None:
+    from iam_jit.bouncer.decisions import DecisionRecord
+
+    s = _scope()
+    store.add_task(s)
+    # Record a mix of decisions under this task
+    for action, decision in [
+        ("DescribeCluster", Decision.ALLOW),
+        ("UpdateClusterVersion", Decision.ALLOW),
+        ("DeleteCluster", Decision.DENY),
+        ("BadCall", Decision.DENY),
+    ]:
+        rec = DecisionRecord(
+            decision=decision, mode=Mode.ENFORCE,
+            service="eks", action=action,
+            arn=None, region=None, matched_rule=None,
+            reason="test",
+        )
+        store.record_decision(rec, task_id=s.task_id)
+    summary = store.task_review_summary(s.task_id)
+    assert summary["decision_count"] == 4
+    assert summary["allow_count"] == 2
+    assert summary["deny_count"] == 2
+    assert len(summary["denied_calls"]) == 2
+    denied_actions = {d["action"] for d in summary["denied_calls"]}
+    assert denied_actions == {"DeleteCluster", "BadCall"}
+
+
+def test_slice_c_review_handles_zero_decisions(store: BouncerStore) -> None:
+    """Task with no recorded decisions returns a summary with
+    counts=0 + empty denied_calls."""
+    s = _scope()
+    store.add_task(s)
+    summary = store.task_review_summary(s.task_id)
+    assert summary["decision_count"] == 0
+    assert summary["allow_count"] == 0
+    assert summary["deny_count"] == 0
+    assert summary["denied_calls"] == []
+    assert summary["first_decision_at"] is None
+
+
+# ---------------------------------------------------------------------------
+# Slice C CLI + MCP
+# ---------------------------------------------------------------------------
+
+
+def test_cli_tasks_start_with_owner(cli_db: str) -> None:
+    runner = CliRunner()
+    result = runner.invoke(main, [
+        "tasks", "start", "--description", "test",
+        "--allow", "eks:*",
+        "--owner", "agent-A",
+        "--db", cli_db,
+    ])
+    assert result.exit_code == 0
+
+
+def test_cli_tasks_review(cli_db: str) -> None:
+    runner = CliRunner()
+    runner.invoke(main, [
+        "tasks", "start", "--description", "test",
+        "--allow", "eks:*", "--db", cli_db,
+    ])
+    list_out = runner.invoke(main, ["tasks", "list", "--json", "--db", cli_db])
+    task_id = json.loads(list_out.output)[0]["task_id"]
+
+    result = runner.invoke(main, ["tasks", "review", task_id, "--db", cli_db])
+    assert result.exit_code == 0
+    assert task_id in result.output
+    assert "decisions:" in result.output
+
+
+def test_cli_tasks_review_unknown(cli_db: str) -> None:
+    result = CliRunner().invoke(main, ["tasks", "review", "not-real", "--db", cli_db])
+    assert result.exit_code != 0
+
+
+def test_mcp_task_review() -> None:
+    from iam_jit.mcp_server import (
+        _bouncer_start_task_for_mcp, _bouncer_task_review_for_mcp,
+    )
+
+    started = _bouncer_start_task_for_mcp({
+        "description": "x", "allow_rules": [{"pattern": "eks:*"}],
+    })
+    out = _bouncer_task_review_for_mcp({"task_id": started["task_id"]})
+    assert out["task_id"] == started["task_id"]
+    assert out["decision_count"] == 0
+
+
+def test_mcp_task_review_unknown() -> None:
+    from iam_jit.mcp_server import _bouncer_task_review_for_mcp
+    out = _bouncer_task_review_for_mcp({"task_id": "not-real"})
+    assert "error" in out
+
+
+def test_mcp_start_task_with_owner() -> None:
+    from iam_jit.mcp_server import _bouncer_start_task_for_mcp
+
+    a = _bouncer_start_task_for_mcp({
+        "description": "agent A task",
+        "allow_rules": [{"pattern": "eks:*"}],
+        "owner": "agent-A",
+    })
+    b = _bouncer_start_task_for_mcp({
+        "description": "agent B task",
+        "allow_rules": [{"pattern": "s3:*"}],
+        "owner": "agent-B",
+    })
+    # Both succeed because they have distinct owners
+    assert a["owner"] == "agent-A"
+    assert b["owner"] == "agent-B"
+
+
+def test_mcp_active_task_with_owner_filter() -> None:
+    from iam_jit.mcp_server import (
+        _bouncer_active_task_for_mcp, _bouncer_start_task_for_mcp,
+    )
+
+    _bouncer_start_task_for_mcp({
+        "description": "A", "allow_rules": [{"pattern": "eks:*"}],
+        "owner": "agent-A",
+    })
+    out = _bouncer_active_task_for_mcp({"owner": "agent-A"})
+    assert out["active"] is not None
+    assert out["active"]["owner"] == "agent-A"
+    # Different owner has no active task
+    out_b = _bouncer_active_task_for_mcp({"owner": "agent-B"})
+    assert out_b["active"] is None
+
+
 def test_mcp_three_task_tools_in_tools_list() -> None:
     from iam_jit.mcp_server import _handle_request
 

@@ -68,7 +68,7 @@ class ActiveTaskExistsError(Exception):
     is already active. Caller decides whether to end the existing
     task first or surface the conflict to the agent."""
 
-SCHEMA_VERSION = 3  # v3: adds tasks table + task_id column on decisions for [[proxy-smart-defaults-and-task-scope]] Slice B
+SCHEMA_VERSION = 4  # v4: adds owner column on tasks for Slice C per-owner concurrent task scopes
 
 
 def default_db_path() -> pathlib.Path:
@@ -187,7 +187,8 @@ class BouncerStore:
                     status TEXT NOT NULL DEFAULT 'active',
                     ended_at TEXT,
                     ended_by TEXT,
-                    end_reason TEXT
+                    end_reason TEXT,
+                    owner TEXT
                 );
                 CREATE INDEX IF NOT EXISTS idx_tasks_status ON tasks(status);
                 CREATE INDEX IF NOT EXISTS idx_tasks_started_at ON tasks(started_at);
@@ -199,6 +200,18 @@ class BouncerStore:
             # duplicate column).
             try:
                 self._conn.execute("ALTER TABLE decisions ADD COLUMN task_id TEXT")
+            except sqlite3.OperationalError:
+                pass
+            # v4 additive migration: add owner column to tasks for
+            # per-owner concurrent task scopes (Slice C of
+            # [[proxy-smart-defaults-and-task-scope]]). Existing rows
+            # get NULL owner — treated as "default owner" by the
+            # match logic for backwards compat.
+            try:
+                self._conn.execute("ALTER TABLE tasks ADD COLUMN owner TEXT")
+                self._conn.execute(
+                    "CREATE INDEX IF NOT EXISTS idx_tasks_owner_status ON tasks(owner, status)"
+                )
             except sqlite3.OperationalError:
                 pass
             cur = self._conn.execute("SELECT version FROM schema_version LIMIT 1")
@@ -589,23 +602,37 @@ class BouncerStore:
         """
         import json as _json
 
+        # Slice C: per-owner uniqueness. owner=None means
+        # "default-owner slot" (Slice B compat — single-active task
+        # on this machine when nobody declares owner explicitly).
+        # Multiple concurrent tasks require declaring distinct
+        # non-NULL owners.
+        owner = scope.owner
         with self._lock:
-            # Atomic single-active check — same lock as INSERT below.
+            # Atomic per-OWNER single-active check — same lock as
+            # INSERT below. Multiple concurrent tasks are now
+            # allowed AS LONG AS each is for a different owner;
+            # within a single owner, single-active still holds
+            # (Slice B's invariant preserved at the per-owner
+            # granularity).
             cur = self._conn.execute(
-                "SELECT task_id FROM tasks WHERE status = 'active' LIMIT 1"
+                "SELECT task_id FROM tasks WHERE status = 'active' "
+                "AND (owner = ? OR (owner IS NULL AND ? IS NULL)) LIMIT 1",
+                (owner, owner),
             )
             existing = cur.fetchone()
             if existing is not None:
                 raise ActiveTaskExistsError(
-                    f"another task is already active ({existing[0]}); end it before starting a new one"
+                    f"another task is already active for owner {owner!r} "
+                    f"({existing[0]}); end it before starting a new one"
                 )
             self._conn.execute(
                 """
                 INSERT INTO tasks(
                     task_id, description, allow_rules_json, deny_rules_json,
                     started_at, expires_at, started_by, status,
-                    ended_at, ended_by, end_reason
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    ended_at, ended_by, end_reason, owner
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     scope.task_id,
@@ -619,6 +646,7 @@ class BouncerStore:
                     scope.ended_at,
                     scope.ended_by,
                     scope.end_reason,
+                    owner,
                 ),
             )
         self._record_config_event_locked(
@@ -636,24 +664,48 @@ class BouncerStore:
         )
         return scope.task_id
 
-    def get_active_task(self) -> Any | None:
-        """Return the currently-active task scope, or None if no task
-        is active. Auto-expires (writes back status='expired' + logs
-        the event) if the wall-clock expiry has passed."""
+    def get_active_task(self, *, owner: str | None = None) -> Any | None:
+        """Return the currently-active task scope for `owner`, or None
+        if no task is active for that owner. Auto-expires (writes
+        back status='expired' + logs the event) if the wall-clock
+        expiry has passed.
+
+        Slice C of [[proxy-smart-defaults-and-task-scope]]: `owner`
+        filter lets multiple concurrent agent sessions each have
+        their own task scope. `owner=None` means "match the default
+        owner" (existing Slice B callers; preserves the single-active
+        invariant for the default owner). To enumerate ALL active
+        tasks regardless of owner, use `list_tasks(status_filter='active')`.
+        """
         from .tasks import TaskScope, TaskStatus
 
         with self._lock:
-            cur = self._conn.execute(
-                """
-                SELECT task_id, description, allow_rules_json, deny_rules_json,
-                       started_at, expires_at, started_by, status,
-                       ended_at, ended_by, end_reason
-                FROM tasks
-                WHERE status = 'active'
-                ORDER BY started_at DESC
-                LIMIT 1
-                """
-            )
+            if owner is None:
+                # Default-owner lookup: matches rows where owner IS NULL.
+                cur = self._conn.execute(
+                    """
+                    SELECT task_id, description, allow_rules_json, deny_rules_json,
+                           started_at, expires_at, started_by, status,
+                           ended_at, ended_by, end_reason, owner
+                    FROM tasks
+                    WHERE status = 'active' AND owner IS NULL
+                    ORDER BY started_at DESC
+                    LIMIT 1
+                    """
+                )
+            else:
+                cur = self._conn.execute(
+                    """
+                    SELECT task_id, description, allow_rules_json, deny_rules_json,
+                           started_at, expires_at, started_by, status,
+                           ended_at, ended_by, end_reason, owner
+                    FROM tasks
+                    WHERE status = 'active' AND owner = ?
+                    ORDER BY started_at DESC
+                    LIMIT 1
+                    """,
+                    (owner,),
+                )
             row = cur.fetchone()
         if row is None:
             return None
@@ -678,7 +730,7 @@ class BouncerStore:
                 """
                 SELECT task_id, description, allow_rules_json, deny_rules_json,
                        started_at, expires_at, started_by, status,
-                       ended_at, ended_by, end_reason
+                       ended_at, ended_by, end_reason, owner
                 FROM tasks WHERE task_id = ?
                 """,
                 (task_id,),
@@ -691,23 +743,30 @@ class BouncerStore:
         *,
         limit: int = 50,
         status_filter: str | None = None,
+        owner: str | None = None,
     ) -> list[Any]:
+        """List tasks. Slice C: `owner` filter narrows to a specific
+        owner's tasks. If owner is None, returns all owners' tasks."""
         capped_limit = max(1, min(int(limit), 10_000))
         sql = (
             "SELECT task_id, description, allow_rules_json, deny_rules_json, "
             "started_at, expires_at, started_by, status, ended_at, ended_by, "
-            "end_reason FROM tasks"
+            "end_reason, owner FROM tasks"
         )
-        params: tuple[Any, ...]
+        where_clauses: list[str] = []
+        params: list[Any] = []
         if status_filter is not None:
-            sql += " WHERE status = ?"
-            params = (status_filter,)
-        else:
-            params = ()
+            where_clauses.append("status = ?")
+            params.append(status_filter)
+        if owner is not None:
+            where_clauses.append("owner = ?")
+            params.append(owner)
+        if where_clauses:
+            sql += " WHERE " + " AND ".join(where_clauses)
         sql += " ORDER BY started_at DESC LIMIT ?"
-        params = params + (capped_limit,)
+        params.append(capped_limit)
         with self._lock:
-            cur = self._conn.execute(sql, params)
+            cur = self._conn.execute(sql, tuple(params))
             rows = cur.fetchall()
         return [_row_to_task_scope(r) for r in rows]
 
@@ -763,6 +822,62 @@ class BouncerStore:
         return updated
 
     # -----------------------------------------------------------------
+    # Per-task review (Slice C of [[proxy-smart-defaults-and-task-scope]])
+    # -----------------------------------------------------------------
+
+    def task_review_summary(self, task_id: str) -> dict[str, Any]:
+        """Aggregate decisions made during a specific task into a
+        review summary: total calls, allow/deny breakdown, denied
+        action list, time range. Returns {} if the task doesn't
+        exist or no decisions were recorded under it.
+
+        Per Slice C: admins run `iam-jit-bouncer tasks review <id>`
+        post-task to see what the agent actually attempted. This is
+        the "after-action report" for a task scope — shows whether
+        the scope was right-sized (lots of denies = too narrow; lots
+        of allows but no use = too broad)."""
+        scope = self.get_task(task_id)
+        if scope is None:
+            return {}
+        with self._lock:
+            cur = self._conn.execute(
+                "SELECT decision, service, action, arn, reason, at "
+                "FROM decisions WHERE task_id = ? ORDER BY id",
+                (task_id,),
+            )
+            rows = cur.fetchall()
+        total = len(rows)
+        allow = sum(1 for r in rows if r[0] == "allow")
+        deny = sum(1 for r in rows if r[0] == "deny")
+        prompt = sum(1 for r in rows if r[0] == "prompt")
+        denied: list[dict[str, Any]] = []
+        for r in rows:
+            if r[0] == "deny":
+                denied.append({
+                    "service": r[1], "action": r[2], "arn": r[3],
+                    "reason": r[4], "at": r[5],
+                })
+        first_at = rows[0][5] if rows else None
+        last_at = rows[-1][5] if rows else None
+        return {
+            "task_id": task_id,
+            "description": scope.description,
+            "status": scope.status.value,
+            "started_at": scope.started_at,
+            "expires_at": scope.expires_at,
+            "ended_at": scope.ended_at,
+            "end_reason": scope.end_reason,
+            "owner": scope.owner,
+            "decision_count": total,
+            "allow_count": allow,
+            "deny_count": deny,
+            "prompt_count": prompt,
+            "first_decision_at": first_at,
+            "last_decision_at": last_at,
+            "denied_calls": denied,
+        }
+
+    # -----------------------------------------------------------------
     # Lifecycle
     # -----------------------------------------------------------------
 
@@ -773,16 +888,29 @@ class BouncerStore:
 
 def _row_to_task_scope(row) -> Any:
     """Reconstruct a TaskScope from a SQLite row. Lazy import keeps
-    `tasks.py` and `store.py` independent at module load."""
+    `tasks.py` and `store.py` independent at module load.
+
+    Row tuple shape (Slice C): adds trailing `owner` column.
+    Backwards-compat: if the row is 11 elements (pre-v4 stored
+    schema cached in some test fixtures), default owner to None.
+    """
     import json as _json
     from .tasks import TaskScope, TaskStatus
     from .rules import Effect, ProxyRule
 
-    (
-        task_id, description, allow_json, deny_json,
-        started_at, expires_at, started_by, status,
-        ended_at, ended_by, end_reason,
-    ) = row
+    if len(row) == 12:
+        (
+            task_id, description, allow_json, deny_json,
+            started_at, expires_at, started_by, status,
+            ended_at, ended_by, end_reason, owner,
+        ) = row
+    else:
+        (
+            task_id, description, allow_json, deny_json,
+            started_at, expires_at, started_by, status,
+            ended_at, ended_by, end_reason,
+        ) = row
+        owner = None
 
     def _decode_rules(blob: str, effect: Effect) -> tuple[ProxyRule, ...]:
         try:
@@ -815,4 +943,5 @@ def _row_to_task_scope(row) -> Any:
         ended_at=ended_at,
         ended_by=ended_by,
         end_reason=end_reason,
+        owner=owner,
     )

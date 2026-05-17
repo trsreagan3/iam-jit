@@ -582,13 +582,15 @@ def tasks_list(status: str | None, limit: int, db: str | None, as_json: bool) ->
 
 
 @tasks_group.command("active")
+@click.option("--owner", default=None,
+              help="Owner filter (Slice C); omit for default-owner slot.")
 @click.option("--db", type=click.Path(dir_okay=False), default=None)
 @click.option("--json", "as_json", is_flag=True, default=False)
-def tasks_active(db: str | None, as_json: bool) -> None:
+def tasks_active(owner: str | None, db: str | None, as_json: bool) -> None:
     """Show the currently-active task (if any). Reports None if
     no task is active OR the active task has timed out."""
     with _opened_store(db) as store:
-        active = store.get_active_task()
+        active = store.get_active_task(owner=owner)
     if active is None:
         if as_json:
             click.echo(json.dumps({"active": None}))
@@ -634,6 +636,38 @@ def tasks_show(task_id: str, db: str | None) -> None:
     click.echo(json.dumps(scope.to_dict(), indent=2))
 
 
+@tasks_group.command("review")
+@click.argument("task_id")
+@click.option("--db", type=click.Path(dir_okay=False), default=None)
+@click.option("--json", "as_json", is_flag=True, default=False)
+def tasks_review(task_id: str, db: str | None, as_json: bool) -> None:
+    """Post-task review summary: total decisions, allow/deny breakdown,
+    list of denied calls. Slice C of [[proxy-smart-defaults-and-task-scope]]:
+    after-action report for a task scope — admins use this to see
+    whether the scope was right-sized."""
+    with _opened_store(db) as store:
+        summary = store.task_review_summary(task_id)
+    if not summary:
+        click.echo(f"no task with id {task_id!r}", err=True)
+        sys.exit(1)
+    if as_json:
+        click.echo(json.dumps(summary, indent=2))
+        return
+    click.echo(f"task:        {summary['task_id']}")
+    click.echo(f"description: {summary['description']}")
+    click.echo(f"status:      {summary['status']}")
+    click.echo(f"owner:       {summary['owner']}")
+    click.echo(f"window:      {summary['started_at']} -> {summary['ended_at'] or summary['expires_at']}")
+    click.echo(f"decisions:   {summary['decision_count']} total "
+               f"(allow={summary['allow_count']} deny={summary['deny_count']} prompt={summary['prompt_count']})")
+    if summary["denied_calls"]:
+        click.echo(f"denied calls ({len(summary['denied_calls'])}):")
+        for d in summary["denied_calls"]:
+            arn_bit = f" {d['arn']}" if d["arn"] else ""
+            click.echo(f"  {d['at']}  {d['service']}:{d['action']}{arn_bit}")
+            click.echo(f"      -- {d['reason']}")
+
+
 @tasks_group.command("end")
 @click.argument("task_id")
 @click.option("--reason", default="manually ended",
@@ -663,12 +697,15 @@ def tasks_end(task_id: str, reason: str, db: str | None) -> None:
               help="Deny-rule in 'pattern[@arn][#region]' form. Repeatable.")
 @click.option("--duration", "duration_minutes", type=int, default=30,
               show_default=True, help="Task duration in minutes (1..1440).")
+@click.option("--owner", default=None,
+              help="Slice C: owner identifier for per-owner concurrent tasks.")
 @click.option("--db", type=click.Path(dir_okay=False), default=None)
 def tasks_start(
     description: str,
     allow_rules_raw: tuple[str, ...],
     deny_rules_raw: tuple[str, ...],
     duration_minutes: int,
+    owner: str | None,
     db: str | None,
 ) -> None:
     """Manually start a task scope (typically done via MCP from an
@@ -716,6 +753,7 @@ def tasks_start(
             deny_rules=[_parse_shorthand(s) for s in deny_rules_raw],
             duration_minutes=duration_minutes,
             started_by=_current_actor(),
+            owner=owner,
         )
     except TaskValidationError as e:
         click.echo(f"rejected: {e}", err=True)

@@ -89,6 +89,11 @@ class TaskScope:
     ended_at: str | None = None
     ended_by: str | None = None
     end_reason: str | None = None
+    # Slice C: per-owner task isolation. Multiple agent sessions on
+    # the same machine can each have their own active task scope as
+    # long as they declare distinct owners. None = "default owner"
+    # (Slice B compat — single-actor laptop case).
+    owner: str | None = None
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -103,6 +108,7 @@ class TaskScope:
             "ended_at": self.ended_at,
             "ended_by": self.ended_by,
             "end_reason": self.end_reason,
+            "owner": self.owner,
         }
 
     def is_expired(self, now: _dt.datetime | None = None) -> bool:
@@ -140,6 +146,7 @@ def build_task_scope(
     started_by: str,
     task_id: str | None = None,
     started_at: str | None = None,
+    owner: str | None = None,
 ) -> TaskScope:
     """Validating constructor used by the MCP tool + CLI + tests.
 
@@ -183,6 +190,18 @@ def build_task_scope(
     started = started_at or _isoformat_z(now)
     expires = _isoformat_z(now + _dt.timedelta(minutes=duration_minutes))
 
+    # Slice C: validate owner if provided (must be a non-empty
+    # string within length cap; same shape as started_by).
+    cleaned_owner: str | None = None
+    if owner is not None:
+        if not isinstance(owner, str) or not owner.strip():
+            raise TaskValidationError(
+                "owner must be a non-empty string if provided"
+            )
+        if len(owner) > 256:
+            raise TaskValidationError("owner max length is 256 chars")
+        cleaned_owner = owner.strip()
+
     return TaskScope(
         task_id=task_id or uuid.uuid4().hex[:12],
         description=description.strip(),
@@ -191,6 +210,7 @@ def build_task_scope(
         started_at=started,
         expires_at=expires,
         started_by=started_by,
+        owner=cleaned_owner,
     )
 
 

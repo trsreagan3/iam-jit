@@ -958,6 +958,26 @@ TOOLS = [
         },
     },
     {
+        "name": "bouncer_task_review",
+        "description": (
+            "Post-task review summary for a given task_id. Returns "
+            "the task's metadata + aggregated decision counts "
+            "(total / allow / deny / prompt) + the list of denied "
+            "calls. Slice C of [[proxy-smart-defaults-and-task-scope]]: "
+            "lets admins see what the agent actually attempted "
+            "during the task — useful for spotting tasks whose "
+            "scope was too narrow (many denies) or too broad "
+            "(broad allow rules but no use)."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "required": ["task_id"],
+            "properties": {
+                "task_id": {"type": "string"},
+            },
+        },
+    },
+    {
         "name": "bouncer_start_task",
         "description": (
             "Declare a TASK SCOPE that narrows the bouncer's behavior "
@@ -1036,6 +1056,17 @@ TOOLS = [
                         "active forever."
                     ),
                 },
+                "owner": {
+                    "type": "string",
+                    "description": (
+                        "Slice C: optional owner identifier. Multiple "
+                        "agent sessions on the same machine can each "
+                        "have their own active task scope as long as "
+                        "each declares a distinct non-empty owner. "
+                        "Omit for the default-owner slot (single-"
+                        "active machine-wide task; Slice B compat)."
+                    ),
+                },
             },
         },
     },
@@ -1064,14 +1095,22 @@ TOOLS = [
     {
         "name": "bouncer_active_task",
         "description": (
-            "Return the currently-active task scope, or null if no "
-            "task is active. Auto-expires if the wall-clock expiry "
-            "has passed (the returned value will be null in that "
-            "case, and an audit event records the expiry). Useful "
-            "for agents that want to verify their task is still "
-            "active before continuing work."
+            "Return the currently-active task scope for the given "
+            "owner, or null if no task is active. Auto-expires if "
+            "the wall-clock expiry has passed (the returned value "
+            "will be null in that case, and an audit event records "
+            "the expiry). Slice C: pass `owner` to look up a "
+            "specific owner's task; omit for the default-owner slot."
         ),
-        "inputSchema": {"type": "object", "properties": {}},
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "owner": {
+                    "type": "string",
+                    "description": "Owner identifier (omit for default-owner slot).",
+                },
+            },
+        },
     },
     {
         "name": "bouncer_tail_decisions",
@@ -1819,6 +1858,9 @@ def _bouncer_start_task_for_mcp(args: dict[str, Any]) -> dict[str, Any]:
     duration = args.get("duration_minutes", 30)
     if not isinstance(duration, int) or isinstance(duration, bool):
         return {"error": "duration_minutes must be an integer"}
+    owner = args.get("owner")
+    if owner is not None and not isinstance(owner, str):
+        return {"error": "owner must be a string if provided"}
 
     try:
         scope = build_task_scope(
@@ -1827,20 +1869,22 @@ def _bouncer_start_task_for_mcp(args: dict[str, Any]) -> dict[str, Any]:
             deny_rules=deny_rules,
             duration_minutes=duration,
             started_by=_bouncer_actor(),
+            owner=owner,
         )
     except TaskValidationError as e:
         return {"error": str(e)}
 
     store = BouncerStore()
     try:
-        # The store's add_task atomically enforces the single-active
-        # invariant (WB26 HIGH-26-02 closure). Catch the dedicated
-        # exception so the agent gets a structured error + the active
-        # task_id to act on.
+        # The store's add_task atomically enforces the per-owner
+        # single-active invariant (WB26 HIGH-26-02 closure +
+        # Slice C per-owner extension). Catch the dedicated exception
+        # so the agent gets a structured error + the active task_id
+        # to act on.
         try:
             store.add_task(scope, actor=_bouncer_actor())
         except ActiveTaskExistsError as e:
-            existing = store.get_active_task()
+            existing = store.get_active_task(owner=scope.owner)
             return {
                 "error": str(e),
                 "active_task_id": existing.task_id if existing else None,
@@ -1852,6 +1896,7 @@ def _bouncer_start_task_for_mcp(args: dict[str, Any]) -> dict[str, Any]:
         "expires_at": scope.expires_at,
         "allow_rule_count": len(scope.allow_rules),
         "deny_rule_count": len(scope.deny_rules),
+        "owner": scope.owner,
         "audit_event_kind": "task_started",
     }
 
@@ -1888,14 +1933,36 @@ def _bouncer_end_task_for_mcp(args: dict[str, Any]) -> dict[str, Any]:
 def _bouncer_active_task_for_mcp(args: dict[str, Any]) -> dict[str, Any]:
     from .bouncer.store import BouncerStore
 
+    owner = args.get("owner")
+    if owner is not None and not isinstance(owner, str):
+        return {"error": "owner must be a string if provided"}
+
     store = BouncerStore()
     try:
-        scope = store.get_active_task()
+        scope = store.get_active_task(owner=owner)
     finally:
         store.close()
     if scope is None:
         return {"active": None}
     return {"active": scope.to_dict()}
+
+
+def _bouncer_task_review_for_mcp(args: dict[str, Any]) -> dict[str, Any]:
+    """Slice C per-task review summary."""
+    from .bouncer.store import BouncerStore
+
+    task_id = args.get("task_id")
+    if not isinstance(task_id, str) or not task_id.strip():
+        return {"error": "task_id is required and must be a non-empty string"}
+
+    store = BouncerStore()
+    try:
+        summary = store.task_review_summary(task_id.strip())
+    finally:
+        store.close()
+    if not summary:
+        return {"error": f"no task with id {task_id!r}"}
+    return summary
 
 
 def _tail_grant_for_mcp(args: dict[str, Any]) -> dict[str, Any]:
@@ -2475,6 +2542,8 @@ def _handle_request(req: dict[str, Any]) -> dict[str, Any] | None:
             result_payload = _bouncer_end_task_for_mcp(args)
         elif tool_name == "bouncer_active_task":
             result_payload = _bouncer_active_task_for_mcp(args)
+        elif tool_name == "bouncer_task_review":
+            result_payload = _bouncer_task_review_for_mcp(args)
         elif tool_name == "check_iam_jit_compatibility":
             result_payload = _check_compatibility_for_mcp(args)
         elif tool_name == "list_compatibility_catalog":
