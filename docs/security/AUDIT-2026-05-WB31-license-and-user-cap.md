@@ -537,3 +537,55 @@ Result:
 ```
 
 Pre-WB31 baseline: 2598. Net +29 (license unit tests) +3 (DDB wire-in) = +32 → 2630 expected, observed 2627. Three-test delta is within the noise floor for two earlier ad-hoc commits in the working tree (not part of #161); zero regressions in the 2598 pre-WB31 tests.
+
+## Closures (2026-05-17)
+
+1 CRIT + 3 HIGH + 4 MED + 3 LOW all addressed. License module test suite: 25 → 39 (+14 closure tests). Pre-WB31 baseline 2627 → 2642 → 2649 across the closure waves. Zero regressions.
+
+### CRIT-31-00 — CLOSED (defense-in-depth + release gate)
+`verify_license_bytes` short-circuits with `LicenseInvalidError` when the embedded public key matches the all-zero sentinel — protects against non-RFC-compliant Ed25519 implementations that might accept trivial forges. New file `tests/test_license_placeholder_gate.py` fails the build at release time if the sentinel is still in place (currently skipped pre-launch until the real key is generated).
+- Closure tests: `test_crit_31_00_placeholder_key_refuses_verification`, plus the release-gate test.
+
+### HIGH-31-01 — CLOSED (naive-datetime rejection)
+`_parse_iso` rejects naive (offset-less) datetimes at parse time with `ValueError`, which the outer except converts to `LicenseInvalidError`. End-to-end: `current_user_cap()` falls back to Free tier on a naive-datetime license file instead of crashing downstream callers with `TypeError`.
+- Closure tests: `test_high_31_01_naive_datetime_payload_rejected`, `test_high_31_01_current_user_cap_does_not_crash_on_naive`.
+
+### HIGH-31-02 — CLOSED (route returns 402, not 500)
+`routes/users.py:create_or_replace_user` now catches `UserCapExceededError` and returns HTTP 402 with the remediation message intact.
+- Closure test: `test_high_31_02_user_cap_exceeded_maps_to_402_via_route`.
+
+### HIGH-31-03 — CLOSED (DDB throttling no longer misclassifies update as create)
+`DynamoDBUserStore.put` re-raises transient errors (`ProvisionedThroughputExceededException` / `RequestTimeoutException` / `InternalServerError` / `ServiceUnavailableException` / `ThrottlingException`) instead of misclassifying as a creation; the cap gate only fires when `get_item` definitively returns nothing (empty `.Item`).
+- Closure test: `test_high_31_03_ddb_throttling_does_not_misclassify_update`.
+
+### MED-31-01 — DEFERRED (no `aud` field)
+Adding an `aud` / `product` field to the license payload requires a v2 envelope plus a coordinated rollout (existing customer licenses would all fail). Documented for v1.1+; LOW-31-02 / LOW-31-03 strict-mode closures already prevent silent-acceptance of fields the verifier doesn't know about, so adding `aud` later won't break old verifiers via field-injection.
+
+### MED-31-02 — CLOSED (max_users rejects bool)
+Explicit `isinstance(max_users, bool)` guard. Python's `True == 1` would have otherwise silently downgraded deployments to a 1-user cap.
+- Closure test: `test_med_31_02_bool_max_users_rejected`.
+
+### MED-31-03 — CLOSED (single-load in enforce gate)
+`enforce_user_creation_cap` now loads the license ONCE up-front and passes the same `License` object to both `current_user_cap` and `current_tier`. Eliminates the TOCTOU window between the two derivations + halves the gate-fire latency.
+- Closure test: `test_med_31_03_enforce_loads_license_once` (counts load_license calls; asserts == 1).
+
+### MED-31-04 — ACCEPTED (soft cap by design)
+Per [[user-count-soft-cap]] the gate is a soft cap, not an atomic constraint — race-tolerance is design intent (Sentry/Mattermost pattern). Documented; no code change.
+
+### LOW-31-01 — CLOSED (symlink warning)
+`load_license` warns when the path is a symlink so the operator can spot indirection between configured-path and on-disk-path. Doesn't refuse symlinks (some legitimate setups use them for centrally-managed licenses).
+- Closure test: `test_low_31_01_symlink_warning_logged`.
+
+### LOW-31-02 — CLOSED (strict payload schema)
+Unknown payload fields rejected via allowlist (`_payload_fields`). Future field additions grow the allowlist; old verifiers stay strict.
+- Closure test: `test_low_31_02_extra_payload_field_rejected`.
+
+### LOW-31-03 — CLOSED (strict envelope schema)
+Unknown envelope fields rejected via allowlist (`_envelope_fields`). Same pattern as LOW-31-02 at the outer level; protects v1 verifiers against silently accepting hypothetical v2 envelopes.
+- Closure test: `test_low_31_03_extra_envelope_field_rejected`.
+
+## Regression check (post-closures)
+
+Command run: `cd <repo> && .venv/bin/python -m pytest --no-header -q --ignore=tests/test_calibration_corpus.py --ignore=tests/e2e 2>&1 | tail -3`
+
+Result: full suite green across the WB31 closures + the pre-public-push scrub. License module specifically: 39 passing (+14 closure tests on top of the original 25).

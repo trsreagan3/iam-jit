@@ -594,3 +594,109 @@ def test_high_31_03_ddb_throttling_does_not_misclassify_update(
     store = DynamoDBUserStore("test", dynamodb_resource=_Res())
     with pytest.raises(RuntimeError, match="throttled"):
         store.put(User(id="email:user@example.com", roles=("requester",)))
+
+
+# ---------------------------------------------------------------------------
+# WB31 LOW + MED closures (small follow-ups)
+# ---------------------------------------------------------------------------
+
+
+def test_low_31_02_extra_payload_field_rejected(keypair) -> None:
+    """WB31 LOW-31-02: a signed license with an unrecognized payload
+    field (e.g. an attacker-added 'features' list trying to unlock a
+    tier feature) must be rejected so the verifier never silently
+    accepts a newer-shape license from a fork."""
+    import base64, json as _json
+    private_key, pub_b64 = keypair
+    now = _dt.datetime.now(_dt.UTC).replace(microsecond=0)
+    payload = {
+        "tier": "enterprise",
+        "issued_to": "Test",
+        "issued_at": now.isoformat().replace("+00:00", "Z"),
+        "expires_at": (now + _dt.timedelta(days=365)).isoformat().replace("+00:00", "Z"),
+        "max_users": 100,
+        "license_id": "lic_extra",
+        "audience": "iam-jit-bouncer",  # not in allowed set
+    }
+    canonical = license_mod._canonical_payload_bytes(payload)
+    signature = private_key.sign(canonical)
+    raw = _json.dumps({
+        "payload": payload,
+        "signature": base64.b64encode(signature).decode("ascii"),
+    }).encode("utf-8")
+    with pytest.raises(license_mod.LicenseInvalidError, match="unknown payload"):
+        license_mod.verify_license_bytes(raw, public_key_b64=pub_b64)
+
+
+def test_low_31_03_extra_envelope_field_rejected() -> None:
+    """WB31 LOW-31-03: an extra outer-envelope field (e.g. v2 'kid')
+    must be rejected — old verifiers don't understand v2 fields and
+    silently accepting them would mean old code processing newer
+    formats it doesn't actually support."""
+    raw = json.dumps({
+        "payload": {"tier": "enterprise"},
+        "signature": "AAAA",
+        "kid": "v2-key-id",  # not in allowed envelope set
+    }).encode("utf-8")
+    with pytest.raises(license_mod.LicenseInvalidError, match="unknown envelope"):
+        license_mod.verify_license_bytes(raw, public_key_b64=_NONPLACEHOLDER_KEY_B64)
+
+
+def test_low_31_01_symlink_warning_logged(
+    tmp_path, monkeypatch, caplog, keypair,
+) -> None:
+    """WB31 LOW-31-01: if the license path resolves through a
+    symlink, log a warning so the operator knows the actual on-disk
+    location is somewhere other than what they configured."""
+    private_key, pub_b64 = keypair
+    monkeypatch.setattr(license_mod, "PRODUCTION_PUBLIC_KEY_B64", pub_b64)
+
+    raw = _make_signed_license(private_key)
+    target = tmp_path / "real-license.json"
+    target.write_bytes(raw)
+    link = tmp_path / "license.json"
+    link.symlink_to(target)
+
+    import logging
+    with caplog.at_level(logging.WARNING, logger="iam_jit.license"):
+        lic = license_mod.load_license(path=link)
+    assert lic is not None
+    assert any("symlink" in r.message for r in caplog.records), (
+        f"expected symlink warning; got records: {[r.message for r in caplog.records]}"
+    )
+
+
+def test_med_31_03_enforce_loads_license_once(
+    monkeypatch, tmp_path, keypair,
+) -> None:
+    """WB31 MED-31-03: enforce_user_creation_cap must load the
+    license ONCE up-front so cap + tier derivations come from the
+    same snapshot. Without this fix, a license-file swap between
+    the two calls produced inconsistent error messages.
+    """
+    private_key, pub_b64 = keypair
+    raw = _make_signed_license(private_key, max_users=5, tier="enterprise")
+    p = tmp_path / "lic.json"
+    p.write_bytes(raw)
+    monkeypatch.setenv(license_mod.LICENSE_PATH_ENV, str(p))
+    monkeypatch.setattr(license_mod, "PRODUCTION_PUBLIC_KEY_B64", pub_b64)
+
+    # Track how many times load_license is called from inside enforce_*
+    call_count = {"n": 0}
+    orig_load = license_mod.load_license
+
+    def counting_load(*args, **kwargs):
+        call_count["n"] += 1
+        return orig_load(*args, **kwargs)
+
+    monkeypatch.setattr(license_mod, "load_license", counting_load)
+
+    # current_user_count over the cap (5) -> error path
+    with pytest.raises(license_mod.UserCapExceededError):
+        license_mod.enforce_user_creation_cap(current_user_count=5)
+
+    # Pre-fix: 2 loads (cap + tier). Post-fix: 1 load (shared).
+    assert call_count["n"] == 1, (
+        f"enforce_user_creation_cap loaded license {call_count['n']}x; "
+        "should load once + reuse"
+    )

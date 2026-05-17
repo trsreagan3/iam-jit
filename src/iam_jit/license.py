@@ -222,11 +222,33 @@ def verify_license_bytes(
 
     if not isinstance(outer, dict):
         raise LicenseInvalidError("license file must be a JSON object")
+    # WB31 LOW-31-03 closure: strict envelope schema. Extra fields
+    # at the outer level (e.g. a hypothetical v2 `kid`/`alg`) must
+    # be explicitly rejected so old verifiers don't silently accept
+    # licenses from a newer file format they don't actually
+    # understand. Once a new envelope field is added, the allowlist
+    # here grows along with it.
+    _envelope_fields = {"payload", "signature"}
+    _extra_envelope = set(outer) - _envelope_fields
+    if _extra_envelope:
+        raise LicenseInvalidError(
+            f"unknown envelope fields: {sorted(_extra_envelope)}"
+        )
     payload = outer.get("payload")
     signature_b64 = outer.get("signature")
     if not isinstance(payload, dict) or not isinstance(signature_b64, str):
         raise LicenseInvalidError(
             "license file must contain 'payload' (object) + 'signature' (string)"
+        )
+    # WB31 LOW-31-02 closure: same strict-mode at the payload level.
+    _payload_fields = {
+        "tier", "issued_to", "issued_at", "expires_at",
+        "max_users", "license_id",
+    }
+    _extra_payload = set(payload) - _payload_fields
+    if _extra_payload:
+        raise LicenseInvalidError(
+            f"unknown payload fields: {sorted(_extra_payload)}"
         )
 
     try:
@@ -328,6 +350,23 @@ def load_license(
         path = pathlib.Path(path)
 
     try:
+        # WB31 LOW-31-01 closure: warn if the license path is a
+        # symlink, so an operator who installed a license at a
+        # symlinked path knows the actual on-disk location is
+        # somewhere else. We don't refuse to read symlinks
+        # (some legitimate setups use them for centrally-managed
+        # licenses pointed at by per-host symlinks), just surface
+        # the indirection so it's auditable.
+        if path.is_symlink():
+            try:
+                resolved = path.resolve()
+                if resolved != path:
+                    logger.warning(
+                        "license file %s is a symlink to %s",
+                        path, resolved,
+                    )
+            except OSError:
+                pass
         raw = path.read_bytes()
     except FileNotFoundError:
         return None
@@ -385,7 +424,18 @@ def enforce_user_creation_cap(
     in the store (not including the one being created). Updates to
     existing users do NOT need to pass through this gate; only new
     creations.
+
+    WB31 MED-31-03 closure: load the license ONCE up-front so the
+    `cap` and `tier` derivations both come from the same snapshot.
+    Otherwise a license-file replacement between `current_user_cap()`
+    and `current_tier()` would produce an inconsistent error message
+    (cap from old license, tier from new).
     """
+    if license_obj is None:
+        try:
+            license_obj = load_license()
+        except LicenseInvalidError:
+            license_obj = None
     cap = current_user_cap(license_obj)
     if current_user_count >= cap:
         tier = current_tier(license_obj)
