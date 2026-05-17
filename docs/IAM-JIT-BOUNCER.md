@@ -163,6 +163,102 @@ Within a ruleset:
 2. **Else, first matching ALLOW rule** wins.
 3. **Else, no match** — caller (decision module) falls back to mode default.
 
+When an environment profile is active, profile checks fire BEFORE
+the ruleset (see "Environment profiles" below). A profile DENY is
+a hard floor and cannot be overridden by an ALLOW rule or a task
+scope.
+
+## Environment profiles
+
+An **environment profile** is a named, switchable layer of
+hard-floor rules that activate at proxy start time. Profiles
+exist so a developer with broad IAM credentials can confidently
+work on staging while the proxy blocks anything that looks like
+production — no IAM change required, no SecOps ticket, just
+`--profile staging-work`.
+
+A profile can:
+
+- Block ARNs / resource names containing specific keywords
+  (`prod`, `production`, `live`, `customer-data`, etc.)
+- Lock the proxy to one or more AWS account IDs
+- Block whole verb classes (`*:Delete*`, `*:Put*`, etc.)
+- Carry per-profile exceptions for known false-positive names
+  (e.g. `eng-productivity-tooling`)
+
+**Composition with other rules:** profile checks run BEFORE the
+rule engine and BEFORE the active task scope. A profile DENY
+short-circuits with `decision_source: profile` in the audit log,
+so post-hoc review can distinguish profile-fired denies from
+task-fired or global-fired denies. A permissive ALLOW rule
+cannot override a profile deny — that's the load-bearing
+property SecOps needs to approve installs in locked-down envs.
+
+### Built-in starter profiles
+
+| Profile | What it blocks |
+|---|---|
+| `none` (default) | Nothing — pure rule-engine behavior |
+| `dev-only` | Anything not in dev/sandbox accounts |
+| `staging-work` | ARNs containing `prod`, `production`, `live`, `customer-data`, `uat` keywords |
+| `prod-readonly` | All write verbs (`*:Delete*`, `*:Put*`, `*:Update*`, `*:Create*`) |
+| `incident-response` | All writes; read everything |
+
+Write the starter set to disk with `iam-jit-bouncer profile install-defaults`.
+The file lives at `~/.iam-jit/bouncer/profiles.yaml` and can be
+edited freely — add your own profiles, override the defaults,
+or extend the `exceptions` list when a legitimate ARN trips the
+keyword check.
+
+### Activating a profile
+
+Three ways, in priority order:
+
+1. **CLI flag** (wins): `iam-jit-bouncer run --profile staging-work`
+2. **Env var**: `IAM_JIT_BOUNCER_PROFILE=staging-work iam-jit-bouncer run`
+3. **Default**: `none` profile — existing rule behavior unchanged
+
+A typo in `--profile` (unknown name) is a hard error — the proxy
+refuses to start. Silent fallback to `none` would disable a
+guardrail you thought you'd enabled.
+
+### Profile YAML shape
+
+```yaml
+profiles:
+  staging-work:
+    description: "Working on staging; block anything that looks like prod"
+    deny_keywords: ["prod", "production", "live", "customer-data", "uat"]
+    keyword_targets: ["arn", "resource_name"]
+    keyword_match: "word_boundary"     # vs "substring"
+    only_account_ids: ["111122223333"]
+    exceptions:
+      - "eng-productivity-tooling"     # known false-positive
+  prod-readonly:
+    description: "Even in prod, no writes"
+    deny_verbs: ["*:Delete*", "*:Put*", "*:Update*", "*:Create*"]
+```
+
+`word_boundary` (the default) matches a keyword only at a
+separator edge: `prod-bucket` matches, `productivity` does not.
+This drastically reduces false positives. `substring` mode
+matches anywhere and is stricter — use when you want zero
+chance of a `prod-*` resource slipping through.
+
+### Honest limitations
+
+- **Bypass-able by renaming.** An attacker who creates
+  `myapp-customer-stuff-2026` instead of `prod-customer-stuff-2026`
+  evades the keyword filter. Profiles are defense-in-depth, not
+  the primary security boundary. The `only_account_ids` lock is
+  the structured boundary; keywords are the human-friendly 80%
+  layer on top.
+- **No agent-controlled switching.** Agents can READ which
+  profile is active via MCP (`bouncer_active_profile`) but
+  cannot change it. Profile switching is a human/admin action.
+- **Profiles do not replace per-task scopes.** A profile sets
+  the OUTER envelope; the task scope can narrow further within it.
+
 Service prefix comparison is case-insensitive on the request side
 (AWS canonical prefixes are lowercase like `s3`, `ec2`, `iam`).
 Action and ARN globs are case-sensitive (AWS action names are

@@ -1152,6 +1152,67 @@ def inspect_cmd(
     click.echo(json.dumps(parsed.to_dict(), indent=2))
 
 
+@main.group("profile")
+def profile_group() -> None:
+    """Manage environment profiles (Slice 7).
+
+    Profiles are named, switchable rule layers that add environment-
+    aware keyword denies on top of per-task scopes + global rules.
+    Profile denies are a HARD FLOOR — they fire even if a task scope
+    or global rule would have allowed the call.
+    """
+
+
+@profile_group.command("list")
+def profile_list_cmd() -> None:
+    """List available profiles + show which would be active."""
+    from .bouncer.profiles import (
+        ACTIVE_PROFILE_ENV, load_profiles, resolve_profiles_path,
+    )
+    profiles = load_profiles()
+    env_active = os.environ.get(ACTIVE_PROFILE_ENV) or "(none set)"
+    click.echo(f"profiles file: {resolve_profiles_path()}")
+    click.echo(f"{ACTIVE_PROFILE_ENV}: {env_active}")
+    click.echo()
+    click.echo(f"{'name':<22} {'kw':>3} {'verbs':>5} {'accts':>5}  description")
+    click.echo("-" * 78)
+    for name in sorted(profiles.keys()):
+        p = profiles[name]
+        click.echo(
+            f"{name:<22} {len(p.deny_keywords):>3} "
+            f"{len(p.deny_verbs):>5} {len(p.only_account_ids):>5}  "
+            f"{p.description}"
+        )
+
+
+@profile_group.command("install-defaults")
+def profile_install_defaults_cmd() -> None:
+    """Write the default profiles.yaml to disk (no-op if it exists)."""
+    from .bouncer.profiles import resolve_profiles_path, write_default_profiles
+    target = resolve_profiles_path()
+    if target.exists():
+        click.echo(f"profiles file already exists at {target} (no change)")
+        return
+    written = write_default_profiles()
+    click.secho(f"wrote default profiles to {written}", fg="green")
+
+
+@profile_group.command("show")
+@click.argument("name")
+def profile_show_cmd(name: str) -> None:
+    """Show details for one profile."""
+    import dataclasses as _dc
+    from .bouncer.profiles import load_profiles
+    profiles = load_profiles()
+    if name not in profiles:
+        click.secho(
+            f"profile {name!r} not found. Available: {sorted(profiles.keys())}",
+            fg="red", err=True,
+        )
+        sys.exit(1)
+    click.echo(json.dumps(_dc.asdict(profiles[name]), indent=2, default=str))
+
+
 @main.command("run")
 @click.option(
     "--port", type=int, default=8767, show_default=True,
@@ -1182,9 +1243,39 @@ def inspect_cmd(
     show_default=True,
     help="What happens in TRANSPARENT mode when no rule matches.",
 )
+@click.option(
+    "--profile",
+    "profile_name",
+    default=None,
+    help="Active environment profile name (per Slice 7). Falls back to "
+         "IAM_JIT_BOUNCER_PROFILE env var, then 'none'. Profile denies "
+         "are a hard floor and CANNOT be overridden by task scopes or "
+         "global rules. Example: --profile staging-work blocks any "
+         "resource whose ARN matches 'prod' / 'uat' / 'production' "
+         "keywords even with admin credentials. Run `iam-jit-bouncer "
+         "profile list` to see available profiles.",
+)
+@click.option(
+    "--account-id",
+    "account_id_flag",
+    default=None,
+    help="Override the account-id surfaced to profile rules. Useful "
+         "when the proxy can't infer the account from the request.",
+)
+@click.option(
+    "--account-alias",
+    "account_alias_flag",
+    default=None,
+    help="Override the account-alias surfaced to profile rules. "
+         "Keyword targets that include 'account_alias' match this.",
+)
 @click.option("--db", type=click.Path(dir_okay=False), default=None)
 def run_cmd(
-    port: int, host: str, mode: str, default_policy: str, db: str | None,
+    port: int, host: str, mode: str, default_policy: str,
+    profile_name: str | None,
+    account_id_flag: str | None,
+    account_alias_flag: str | None,
+    db: str | None,
 ) -> None:
     """Start the HTTP proxy server.
 
@@ -1204,21 +1295,45 @@ def run_cmd(
     import asyncio as _asyncio
 
     from .bouncer.decisions import DefaultPolicy
+    from .bouncer.profiles import load_profiles, resolve_active_profile
     from .bouncer.proxy import ProxyConfig, ProxyMode, serve
+
+    # Resolve the active profile NOW (CLI flag → env var → 'none').
+    # If the user passed --profile NAME and NAME doesn't exist,
+    # resolve_active_profile raises with the available-names list —
+    # better than silently falling back to 'none' (which would
+    # disable the safety the user thought they enabled).
+    try:
+        profiles_map = load_profiles()
+        active_profile = resolve_active_profile(
+            cli_flag=profile_name, profiles=profiles_map,
+        )
+    except ValueError as e:
+        click.secho(f"profile error: {e}", fg="red", err=True)
+        sys.exit(2)
 
     config = ProxyConfig(
         host=host,
         port=port,
         mode=ProxyMode(mode.lower()),
         default_policy=DefaultPolicy(default_policy.lower()),
+        active_profile=active_profile,
+        account_id=account_id_flag,
+        account_alias=account_alias_flag,
     )
 
     with _opened_store(db) as store:
         click.echo(
             f"iam-jit-bouncer proxy starting on http://{host}:{port} "
-            f"(mode={mode}, default-policy={default_policy})",
+            f"(mode={mode}, default-policy={default_policy}, "
+            f"profile={active_profile.name})",
             err=True,
         )
+        if active_profile.name != "none":
+            click.echo(
+                f"  profile: {active_profile.description}",
+                err=True,
+            )
         click.echo(
             f"Point your SDK: export AWS_ENDPOINT_URL=http://{host}:{port}",
             err=True,

@@ -92,6 +92,16 @@ class ProxyConfig:
     """Outbound scheme for forwarding allowed requests. Defaults to
     HTTPS (real AWS endpoints). Tests pass "http" to forward to a
     local mock-AWS server."""
+    active_profile: Any = None
+    """Slice 7: the resolved Profile object whose denies act as a
+    hard floor above task/global rules. None or `Profile(name='none')`
+    means no profile-level rules fire (existing behavior)."""
+    account_id: str | None = None
+    account_alias: str | None = None
+    """Account-id / alias used by profile.only_account_ids checks
+    and keyword_targets that include 'account_alias'. Optional;
+    profile rules that target these fields simply don't match when
+    the values are None."""
     # Don't bind to 0.0.0.0 by default — proxy is a LOCAL-ONLY
     # thing per the local-only-safety-mode + no-hosted-saas memos.
     # Binding externally would silently expose a credential-handling
@@ -163,6 +173,9 @@ def evaluate_request(
     store: BouncerStore,
     mode: ProxyMode,
     default_policy: DefaultPolicy = DefaultPolicy.DENY,
+    active_profile=None,  # type: profiles.Profile | None
+    account_id: str | None = None,
+    account_alias: str | None = None,
 ) -> RequestObservation:
     """Pure-function evaluation of one inbound proxy request.
 
@@ -210,6 +223,53 @@ def evaluate_request(
             method=method, host=host, path=path,
             parsed=None, record=synthetic, mode=mode,
         )
+
+    # AWS Slice 7: profile is the HARD FLOOR. Evaluate BEFORE the
+    # rule engine so a permissive task scope or global allow rule
+    # CANNOT override a profile deny. Per the env-profiles spec:
+    # profile keyword denies + only_account_ids + deny_verbs all
+    # fire here; if a profile denies, short-circuit with
+    # decision_source=profile so post-hoc audit can distinguish
+    # profile-fired denies from task/global-fired denies.
+    if active_profile is not None:
+        from .decisions import Decision  # local import to avoid cycle
+        from .profiles import evaluate_profile
+        # The request_parser puts the synthesized AWS ARN on
+        # `resource_hint` (not `arn`) — that's the field we feed
+        # to the profile keyword check. Fall back to .arn if
+        # present for forward-compat with parsers that set both.
+        arn_for_profile = (
+            getattr(parsed, "resource_hint", None)
+            or getattr(parsed, "arn", None)
+        )
+        prof_verdict = evaluate_profile(
+            active_profile,
+            arn=arn_for_profile,
+            resource_name=arn_for_profile,
+            account_id=account_id,
+            account_alias=account_alias,
+            service=parsed.service,
+            action=parsed.action,
+        )
+        if prof_verdict.denied:
+            short_circuit = DecisionRecord(
+                decision=Decision.DENY,
+                mode=Mode.ENFORCE,
+                service=parsed.service,
+                action=parsed.action,
+                arn=getattr(parsed, "arn", None),
+                region=parsed.region,
+                matched_rule=None,
+                reason=prof_verdict.reason,
+            )
+            try:
+                store.record_decision(short_circuit, matched_rule_id=None, task_id=None)
+            except Exception as e:
+                logger.warning("bouncer-proxy audit-write failed: %s", e)
+            return _build_observation(
+                method=method, host=host, path=path,
+                parsed=parsed, record=short_circuit, mode=mode,
+            )
 
     # Compose the active ruleset (global rules + active task scope)
     id_tagged = store.list_rules()
@@ -384,6 +444,9 @@ async def _handle_request(request, *, store, config: ProxyConfig, session):
         store=store,
         mode=config.mode,
         default_policy=config.default_policy,
+        active_profile=config.active_profile,
+        account_id=config.account_id,
+        account_alias=config.account_alias,
     )
 
     if obs.enforced:
