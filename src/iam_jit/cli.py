@@ -253,6 +253,15 @@ from .cli_remote import remote as _remote_group  # noqa: E402
 main.add_command(_remote_group)
 
 
+# #102 — Enterprise self-bootstrapping. Registered late so any tier
+# gating happens inside the subcommand handler, not at import time
+# (load_license touches the filesystem; we don't want that on
+# `iam-jit --help`).
+from .enterprise.cli import enterprise_group as _enterprise_group  # noqa: E402
+
+main.add_command(_enterprise_group)
+
+
 @main.command("agent-grant")
 def agent_grant() -> None:
     """REMOVED in iam-jit 0.4.0 — see docs/AGENTS.md.
