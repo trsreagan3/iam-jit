@@ -20,7 +20,7 @@ flow:
   6. iam-jit issues a session cookie
 
 Providers supported as of v1:
-  - Google Workspace (Omise's IdP) — `hd` claim verification
+  - Google Workspace (pilot's IdP) — `hd` claim verification
   - Okta — issuer URL is per-customer; optional group requirements
 
 Future providers (Azure AD, Auth0, JumpCloud, OneLogin, Keycloak)

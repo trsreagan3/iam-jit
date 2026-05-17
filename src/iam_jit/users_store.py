@@ -280,11 +280,44 @@ class DynamoDBUserStore:
         # Enterprise license). Updates to existing users are NOT
         # gated — only new creations. Race-tolerant: this is a soft
         # cap by design, not an atomic constraint.
+        #
+        # WB31 HIGH-31-03 closure: distinguish "definitively not
+        # found" from "couldn't tell because DDB is throttling /
+        # timing out / temporarily unavailable." Misclassifying the
+        # latter as a creation makes the cap gate erroneously reject
+        # UPDATES to existing users during an availability incident
+        # — exactly when admins most need to mutate user roles.
+        existing: dict | None = None
+        existing_known = False
         try:
             existing = self.table.get_item(Key={"user_id": user.id}).get("Item")
-        except Exception:
-            existing = None
-        if existing is None:
+            existing_known = True
+        except Exception as e:
+            # If this is a transient DDB-side failure (throttling /
+            # service unavailable / timeout), we CAN'T tell whether
+            # this is a create or an update. Surface the underlying
+            # error rather than misclassifying as a create and
+            # firing the cap gate. Caller can retry.
+            err_code = ""
+            resp = getattr(e, "response", None)
+            if isinstance(resp, dict):
+                err_code = resp.get("Error", {}).get("Code", "")
+            transient_codes = {
+                "ProvisionedThroughputExceededException",
+                "RequestTimeoutException",
+                "InternalServerError",
+                "ServiceUnavailableException",
+                "ThrottlingException",
+            }
+            if err_code in transient_codes:
+                raise
+            # Genuine "not found" surfaces of get_item don't raise;
+            # they return an empty dict. Any other exception is
+            # something we don't recognize — fail loud rather than
+            # silently misclassifying.
+            raise
+
+        if existing_known and existing is None:
             from . import license as _license_mod
             current_count = self._count_users()
             _license_mod.enforce_user_creation_cap(

@@ -79,7 +79,7 @@ single `doctor slack` run against a real workspace. The mock is good
 won't discover scope-mismatch / mrkdwn-rendering / OAuth-permission
 quirks until you point at a real workspace.
 
-**Recommendation:** Before the Omise pilot, install the app in
+**Recommendation:** Before the first pilot, install the app in
 iam-jit's own workspace, run `iam-jit doctor slack`, fire one
 real `post_approval_message` + one click, then one real
 `post_mfa_step_up_nudge`. Reserve half a day. Add a section to the
@@ -113,8 +113,8 @@ Okta non-standard discovery paths (the dataclass has a
 `discovery_url` override for exactly this — but it's never been
 exercised against a real Okta tenant).
 
-**Recommendation:** Before any pilot that uses SSO, register an
-Omise (or test) Google OAuth client, set the env vars, run
+**Recommendation:** Before any pilot that uses SSO, register a
+test Google OAuth client, set the env vars, run
 `iam-jit doctor oidc`, then complete one full sign-in. ~30 min.
 
 ## MFA Phase 2 — Device Authorization Grant (RFC 8628) — ⚠️ PARTIAL

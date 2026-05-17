@@ -647,7 +647,7 @@ The following were probed per the audit prompt and found no issues:
 
 ## Regression check
 
-Command run: `cd /Users/reagan/repos/iam-roles && .venv/bin/python -m pytest --no-header -q --ignore=tests/test_calibration_corpus.py --ignore=tests/e2e 2>&1 | tail -5`
+Command run: `cd <repo> && .venv/bin/python -m pytest --no-header -q --ignore=tests/test_calibration_corpus.py --ignore=tests/e2e 2>&1 | tail -5`
 
 Result:
 ```

@@ -75,7 +75,7 @@ TOOLS = [
             "REMOVED in iam-jit 0.4.0 (tombstone). Calling this tool "
             "returns a deprecation block + null policy + a pointer to "
             "the replacement tools. Natural-language policy synthesis "
-            "was measured at 1.8% joint sufficiency (see "
+            "was measured at joint sufficiency below the calibration bar (see "
             "docs/calibration/100-prompt-sufficiency-loop.md) and is "
             "structurally limited because iam-jit lacks codebase "
             "context. Replacements: `list_templates` (browse the "
@@ -1449,7 +1449,7 @@ _DEPRECATION_BLOCK = {
     "deprecated": True,
     "removed_in": "0.4.0",
     "reason": (
-        "Natural-language policy synthesis scored 1.8% joint sufficiency "
+        "Natural-language policy synthesis scored joint sufficiency below the calibration bar "
         "in the 2026-05-16 calibration loop. See "
         "docs/calibration/100-prompt-sufficiency-loop.md."
     ),

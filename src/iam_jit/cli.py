@@ -80,7 +80,7 @@ def validate(path: pathlib.Path) -> None:
 # NOTE: `iam-jit suggest` and `iam-jit refine` removed in Stage 4 of
 # [[no-nl-synthesis]]. They drafted/narrowed policies from task_intent
 # via policy_sentry + LLM — the same synthesis pattern that measured
-# 1.8% joint sufficiency. Replacement: agents (Claude Code, Cursor)
+# joint sufficiency below the calibration bar. Replacement: agents (Claude Code, Cursor)
 # use the MCP tools (list_templates / get_template / score_iam_policy /
 # submit_policy); humans paste raw JSON via `iam-jit review` or the
 # web UI's paste page.
@@ -257,9 +257,10 @@ main.add_command(_remote_group)
 def agent_grant() -> None:
     """REMOVED in iam-jit 0.4.0 — see docs/AGENTS.md.
 
-    Natural-language policy synthesis was measured at 1.8% joint
-    sufficiency (docs/calibration/100-prompt-sufficiency-loop.md)
-    and removed in [[no-nl-synthesis]] Stage 3. The replacement
+    Natural-language policy synthesis was measured below the
+    calibration joint-sufficiency bar
+    (docs/calibration/100-prompt-sufficiency-loop.md) and removed
+    in [[no-nl-synthesis]] Stage 3. The replacement
     workflow uses the MCP tools list_templates + get_template +
     score_iam_policy + submit_policy, driven by an IDE agent with
     codebase context.

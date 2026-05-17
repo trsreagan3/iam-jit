@@ -151,21 +151,29 @@ def test_max_users_out_of_range_rejects(keypair) -> None:
             license_mod.verify_license_bytes(raw, public_key_b64=pub_b64)
 
 
+# These four tests use a non-placeholder dummy key so the WB31
+# CRIT-31-00 placeholder-guard doesn't short-circuit before reaching
+# the parse/validation paths they're exercising.
+_NONPLACEHOLDER_KEY_B64 = base64.b64encode(b"\x01" * 32).decode("ascii")
+
+
 def test_invalid_json_rejects() -> None:
     with pytest.raises(license_mod.LicenseInvalidError, match="JSON"):
-        license_mod.verify_license_bytes(b"not json at all")
+        license_mod.verify_license_bytes(
+            b"not json at all", public_key_b64=_NONPLACEHOLDER_KEY_B64,
+        )
 
 
 def test_missing_signature_field_rejects() -> None:
     raw = json.dumps({"payload": {"tier": "enterprise"}}).encode("utf-8")
     with pytest.raises(license_mod.LicenseInvalidError, match="payload.*signature"):
-        license_mod.verify_license_bytes(raw)
+        license_mod.verify_license_bytes(raw, public_key_b64=_NONPLACEHOLDER_KEY_B64)
 
 
 def test_missing_payload_field_rejects() -> None:
     raw = json.dumps({"signature": "AAAA"}).encode("utf-8")
     with pytest.raises(license_mod.LicenseInvalidError, match="payload.*signature"):
-        license_mod.verify_license_bytes(raw)
+        license_mod.verify_license_bytes(raw, public_key_b64=_NONPLACEHOLDER_KEY_B64)
 
 
 def test_non_base64_signature_rejects() -> None:
@@ -174,7 +182,7 @@ def test_non_base64_signature_rejects() -> None:
         "signature": "not-valid-base64!@#$",
     }).encode("utf-8")
     with pytest.raises(license_mod.LicenseInvalidError, match="base64"):
-        license_mod.verify_license_bytes(raw)
+        license_mod.verify_license_bytes(raw, public_key_b64=_NONPLACEHOLDER_KEY_B64)
 
 
 def test_canonical_payload_is_stable() -> None:
@@ -438,3 +446,151 @@ def test_ddb_user_store_allows_under_enterprise_license(
     for i in range(50):
         store.put(User(id=f"email:user{i}@example.com", roles=("requester",)))
     assert len(table.items) == 50
+
+
+# ---------------------------------------------------------------------------
+# WB31 closures
+# ---------------------------------------------------------------------------
+
+
+def test_crit_31_00_placeholder_key_refuses_verification(keypair, monkeypatch) -> None:
+    """Even if a forged signature were to verify against the all-zero
+    placeholder (e.g. via a non-RFC-compliant Ed25519 impl), the
+    runtime guard short-circuits and refuses BEFORE doing
+    cryptographic verification. Defense-in-depth for CRIT-31-00."""
+    private_key, _ = keypair
+    raw = _make_signed_license(private_key)
+    with pytest.raises(license_mod.LicenseInvalidError, match="placeholder"):
+        license_mod.verify_license_bytes(
+            raw,
+            public_key_b64=license_mod._PLACEHOLDER_KEY_SENTINEL,
+        )
+
+
+def test_high_31_01_naive_datetime_payload_rejected(keypair) -> None:
+    """A signed license with naive (offset-less) datetimes must be
+    rejected at verify time, not crash downstream with TypeError
+    when current_user_cap() tries to compare it against now."""
+    import base64, json as _json
+    private_key, pub_b64 = keypair
+    now = _dt.datetime.now(_dt.UTC).replace(microsecond=0)
+    payload = {
+        "tier": "enterprise",
+        "issued_to": "Test",
+        # NAIVE datetime — no Z, no offset
+        "issued_at": "2026-01-01T00:00:00",
+        "expires_at": (now + _dt.timedelta(days=365)).isoformat().replace("+00:00", "Z"),
+        "max_users": 100,
+        "license_id": "lic_naive",
+    }
+    canonical = license_mod._canonical_payload_bytes(payload)
+    signature = private_key.sign(canonical)
+    raw = _json.dumps({
+        "payload": payload,
+        "signature": base64.b64encode(signature).decode("ascii"),
+    }).encode("utf-8")
+    with pytest.raises(license_mod.LicenseInvalidError, match="ISO-8601|datetime|naive"):
+        license_mod.verify_license_bytes(raw, public_key_b64=pub_b64)
+
+
+def test_high_31_01_current_user_cap_does_not_crash_on_naive(
+    keypair, monkeypatch, tmp_path,
+) -> None:
+    """End-to-end: a license file with a naive datetime field must
+    fall back to Free tier gracefully, not crash callers of
+    current_user_cap()."""
+    import base64, json as _json
+    private_key, pub_b64 = keypair
+    monkeypatch.setattr(license_mod, "PRODUCTION_PUBLIC_KEY_B64", pub_b64)
+    now = _dt.datetime.now(_dt.UTC).replace(microsecond=0)
+    payload = {
+        "tier": "enterprise",
+        "issued_to": "Test",
+        "issued_at": "2026-01-01T00:00:00",  # naive
+        "expires_at": (now + _dt.timedelta(days=365)).isoformat().replace("+00:00", "Z"),
+        "max_users": 100,
+        "license_id": "lic_naive_2",
+    }
+    canonical = license_mod._canonical_payload_bytes(payload)
+    signature = private_key.sign(canonical)
+    raw = _json.dumps({
+        "payload": payload,
+        "signature": base64.b64encode(signature).decode("ascii"),
+    }).encode("utf-8")
+    p = tmp_path / "lic.json"
+    p.write_bytes(raw)
+    monkeypatch.setenv(license_mod.LICENSE_PATH_ENV, str(p))
+    # Should fall back to Free tier (no crash)
+    assert license_mod.current_user_cap() == license_mod.FREE_TIER_MAX_USERS
+
+
+def test_high_31_02_user_cap_exceeded_maps_to_402_via_route() -> None:
+    """The HTTP user-create route must surface UserCapExceededError
+    as 402 with the remediation message — not 500. Unit-level test
+    that exercises the except branch directly without the full app
+    factory (which carries heavy DDB / OIDC config).
+    """
+    from fastapi import HTTPException
+    from iam_jit.routes.users import create_or_replace_user
+
+    captured: dict = {}
+
+    class _CappedStore:
+        def put(self, u):
+            raise license_mod.UserCapExceededError(
+                "Free tier supports up to 25 users. You currently have 25. "
+                "To raise the cap, install an iam-jit Enterprise license file."
+            )
+
+    # Build a User instance for require_admin (the route dependency)
+    from iam_jit.users_store import User
+    admin = User(id="email:admin@example.com", roles=("admin",))
+    try:
+        create_or_replace_user(
+            payload={"id": "email:new@example.com", "roles": ["requester"]},
+            user_store=_CappedStore(),
+            _=admin,
+        )
+    except HTTPException as exc:
+        captured["status"] = exc.status_code
+        captured["detail"] = exc.detail
+    assert captured.get("status") == 402, captured
+    assert "free tier" in captured["detail"].lower()
+    assert "license" in captured["detail"].lower()
+
+
+def test_med_31_02_bool_max_users_rejected(keypair) -> None:
+    """Python bool is a subclass of int; without the isinstance(..., bool)
+    guard, max_users: true would be accepted as 1 — silently downgrading
+    deployments to a 1-user cap."""
+    private_key, pub_b64 = keypair
+    raw = _make_signed_license(private_key, max_users=True)
+    with pytest.raises(license_mod.LicenseInvalidError, match="max_users"):
+        license_mod.verify_license_bytes(raw, public_key_b64=pub_b64)
+
+
+def test_high_31_03_ddb_throttling_does_not_misclassify_update(
+    monkeypatch, tmp_path,
+) -> None:
+    """When DDB get_item raises a transient ClientError, the cap gate
+    must NOT fire for what could be an update — the error propagates
+    so the caller can retry."""
+    from iam_jit.users_store import DynamoDBUserStore, User
+
+    monkeypatch.setenv(license_mod.LICENSE_PATH_ENV, str(tmp_path / "absent.json"))
+
+    class _ThrottlingTable:
+        def get_item(self, **kw):
+            err = RuntimeError("throttled")
+            err.response = {"Error": {"Code": "ProvisionedThroughputExceededException"}}
+            raise err
+        def scan(self, **kw): return {"Count": 30}
+        def put_item(self, **kw): pass
+        def delete_item(self, **kw): pass
+
+    class _Res:
+        def Table(self, n): return _ThrottlingTable()
+
+    store = DynamoDBUserStore("test", dynamodb_resource=_Res())
+    with pytest.raises(RuntimeError, match="throttled"):
+        store.put(User(id="email:user@example.com", roles=("requester",)))

@@ -129,6 +129,15 @@ def create_or_replace_user(
         user_store.put(new_user)
     except StoreReadOnly as e:
         raise HTTPException(status_code=409, detail=str(e))
+    except Exception as e:
+        # WB31 HIGH-31-02 closure: surface UserCapExceededError as
+        # HTTP 402 (Payment Required) with the carefully-crafted
+        # remediation message intact. Imported lazily to avoid
+        # pulling cryptography deps at module import time.
+        from .. import license as _license_mod
+        if isinstance(e, _license_mod.UserCapExceededError):
+            raise HTTPException(status_code=402, detail=str(e))
+        raise
     return _serialize(new_user)
 
 

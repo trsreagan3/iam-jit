@@ -3,7 +3,7 @@ baselines.
 
 Per [[no-nl-synthesis]] (Stage 2, 2026-05-16): the fuzzy-match
 functions that used to live here (`match_baseline`, `best_baseline`,
-etc.) were deleted because they were part of the 1.8% joint-
+etc.) were deleted because they were part of the joint-
 sufficiency failure mode. The catalog itself + browse API
 (`list_entries`, `get_entry`) is the surviving surface.
 

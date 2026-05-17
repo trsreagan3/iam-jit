@@ -97,7 +97,7 @@ Use the Agent tool with this prompt template:
 You are an adversarial security researcher attacking the iam-risk-score
 deterministic policy scorer. Round N — BLACK-BOX (no source access).
 
-REPO: /Users/reagan/repos/iam-roles/
+REPO: <repo>/
 
 PRIOR-ART CONTEXT: [paste current closure state, mention recent
 closures so the agent doesn't rediscover them]

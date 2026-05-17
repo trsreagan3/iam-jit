@@ -63,6 +63,28 @@ logger = logging.getLogger(__name__)
 # we want pre-launch anyway).
 PRODUCTION_PUBLIC_KEY_B64 = "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA="
 
+# WB31 CRIT-31-00 closure: defense-in-depth against the placeholder
+# slipping into a release build. If the production key is still the
+# all-zero sentinel, `verify_license_bytes` refuses to verify ANYTHING
+# — preventing the "appears-to-work, silently-accepts-nothing" failure
+# mode where a forked Ed25519 implementation (e.g. older pynacl, some
+# Go impls) might accept trivial forges against the identity pubkey.
+#
+# The CI release gate (`tests/test_license_placeholder_gate.py`)
+# greps for this constant and fails the build if it's still the
+# sentinel — that's the launch-block enforcement. This runtime guard
+# is the defense-in-depth layer.
+_PLACEHOLDER_KEY_SENTINEL = "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA="
+_PLACEHOLDER_KEY_IN_USE = (PRODUCTION_PUBLIC_KEY_B64 == _PLACEHOLDER_KEY_SENTINEL)
+if _PLACEHOLDER_KEY_IN_USE:
+    logger.warning(
+        "iam-jit license: PRODUCTION_PUBLIC_KEY_B64 is the all-zero "
+        "placeholder. License verification will refuse all licenses "
+        "(Free-tier-only build). This is correct for pre-launch but "
+        "MUST be replaced with the real production key before the "
+        "v1.0 release tag."
+    )
+
 # Free-tier soft cap. Aligned with Sentry's 100 users (we run lower
 # because iam-jit's per-user surface is heavier per [[no-hosted-saas]]
 # self-host-only positioning + audit-chain growth).
@@ -136,8 +158,26 @@ def _canonical_payload_bytes(payload: dict[str, Any]) -> bytes:
 
 
 def _parse_iso(s: str) -> _dt.datetime:
-    """ISO-8601 datetime parser that handles `Z` suffix + offset."""
-    return _dt.datetime.fromisoformat(s.replace("Z", "+00:00"))
+    """ISO-8601 datetime parser that handles `Z` suffix + offset.
+
+    WB31 HIGH-31-01 closure: must REJECT naive (offset-less)
+    datetimes. A naive datetime in the license payload would later
+    crash downstream comparisons in `is_active()` (TypeError:
+    can't compare offset-naive and offset-aware datetimes), and
+    that crash propagates through `current_user_cap()` past the
+    "opaque failures only" trust boundary at `verify_license_bytes`.
+    Reject at parse time so the caller's `except ValueError` (which
+    becomes `LicenseInvalidError`) catches it.
+    """
+    if not isinstance(s, str):
+        raise ValueError(f"datetime must be a string, got {type(s).__name__}")
+    parsed = _dt.datetime.fromisoformat(s.replace("Z", "+00:00"))
+    if parsed.tzinfo is None:
+        raise ValueError(
+            f"naive datetime {s!r} not allowed; must include timezone "
+            "(use 'Z' suffix or '+00:00' offset)"
+        )
+    return parsed
 
 
 def verify_license_bytes(
@@ -160,6 +200,20 @@ def verify_license_bytes(
     )
 
     pub_b64 = public_key_b64 or PRODUCTION_PUBLIC_KEY_B64
+
+    # WB31 CRIT-31-00 defense-in-depth: refuse to verify against the
+    # all-zero sentinel. This prevents the "appears-to-work" failure
+    # mode where a non-RFC-compliant Ed25519 implementation might
+    # accept trivial forges. Real OpenSSL rejects identity-pubkey
+    # signatures per spec; this guard is for non-OpenSSL consumers.
+    # Tests can still inject their own keypair via `public_key_b64=`.
+    if pub_b64 == _PLACEHOLDER_KEY_SENTINEL:
+        raise LicenseInvalidError(
+            "license verification disabled: the embedded production "
+            "key is the all-zero placeholder. This build cannot "
+            "verify any license; running on Free tier only. Install "
+            "a build with the real production key embedded."
+        )
 
     try:
         outer = json.loads(raw)
@@ -213,7 +267,16 @@ def verify_license_bytes(
         raise LicenseInvalidError(f"issued_at/expires_at must be ISO-8601: {e}") from e
 
     max_users = payload.get("max_users")
-    if not isinstance(max_users, int) or max_users < 1 or max_users > 1_000_000:
+    # WB31 MED-31-02 closure: Python bool is a subclass of int; without
+    # the isinstance(..., bool) guard, `max_users: true` in JSON would
+    # be accepted as 1 — silently downgrading a deployment to a
+    # 1-user cap. Reject explicitly.
+    if (
+        not isinstance(max_users, int)
+        or isinstance(max_users, bool)
+        or max_users < 1
+        or max_users > 1_000_000
+    ):
         raise LicenseInvalidError("max_users must be an integer in [1, 1_000_000]")
 
     license_id = payload.get("license_id")

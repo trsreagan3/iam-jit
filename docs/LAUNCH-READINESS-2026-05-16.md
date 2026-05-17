@@ -93,7 +93,7 @@ aws-cli, kubectl, gh).
 - ⚠️ Hosted CFN onboarding deck (#115/#116) not built yet.
   Customers can self-deploy with manual role setup until then.
 
-**Verdict:** Ship-ready for a closed pilot (Omise). Multi-customer
+**Verdict:** Ship-ready for a closed pilot. Multi-customer
 SaaS launch waits on CFN onboarding ergonomics.
 
 ### Self-host mode (Enterprise) — READY pending pilot signal
@@ -157,7 +157,7 @@ thoroughly before we start the marketing stuff":
    end-to-end one more time
 3. **+2 days**: submit GitHub Action to marketplace (Option B
    in the checklist)
-4. **+2-3 days**: Omise pilot kickoff using local mode + canonical
+4. **+2-3 days**: first-pilot kickoff using local mode + canonical
    recipe (`docs/recipes/IAM-JIT-FOR-ADMIN-SAFETY.md`)
 5. **+1 week**: real PyPI release (after pilot installs cleanly)
 6. **+1-2 weeks**: comic strips + launch posts + ProductHunt /
@@ -174,4 +174,4 @@ thoroughly before we start the marketing stuff":
   needs CFN ergonomics
 - Marketing on hold pending pilot signal
 
-**You can ship the Omise pilot in local mode right now.**
+**You can ship the first pilot in local mode right now.**

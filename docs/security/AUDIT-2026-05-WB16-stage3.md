@@ -88,7 +88,7 @@ None.
   ```py
   $ .venv/bin/python -c "import iam_jit.policy_gen as p; print(p, p.__file__)"
   <module 'iam_jit.policy_gen' (namespace) from
-   ['/Users/reagan/repos/iam-roles/src/iam_jit/policy_gen']>
+   ['<repo>/src/iam_jit/policy_gen']>
   None
   ```
 - Behavior of stale `.pyc` files:

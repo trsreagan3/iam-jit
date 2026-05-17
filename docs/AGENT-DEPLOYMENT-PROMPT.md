@@ -323,10 +323,10 @@ curl -s -o /dev/null -w "%{http_code}\n" \
 
 If `AuthMode=local` is blocked by SCP, the deployer's options are:
 
-  1. **Set `EnablePublicALB=true`** (recommended for Omise-owned
+  1. **Set `EnablePublicALB=true`** (recommended for customer-owned
      accounts). The SAM template provisions an internet-facing ALB
      that invokes the Lambda via `lambda:InvokeFunction` instead of
-     `lambda:InvokeFunctionUrl`. The Omise SCP denies the latter
+     `lambda:InvokeFunctionUrl`. The the customer SCP denies the latter
      broadly (any AuthType, any principal), but allows the former.
      Verified working in omise-experimental 2026-05.
 
@@ -345,11 +345,11 @@ If `AuthMode=local` is blocked by SCP, the deployer's options are:
      principal ARN. The bootstrap admin then has to be seeded by ARN,
      not by email.
 
-     **Caveat:** the Omise org SCP denies *any*
+     **Caveat:** the the customer org SCP denies *any*
      `lambda:InvokeFunctionUrl` action, regardless of `AuthType`.
      CloudFront-with-OAC, AWS_IAM signing, and AuthType=NONE all
      fail equivalently. Verified 2026-05. The ALB path is the only
-     known SCP-safe public surface for Omise accounts.
+     known SCP-safe public surface for customer accounts.
 
   3. **Get the SCP relaxed for this account** — usually a no-go.
 

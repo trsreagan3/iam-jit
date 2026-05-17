@@ -513,7 +513,7 @@ CLI silently passes through non-empty `--existing-role-hint`. If it's an invalid
 
 ## Regression check
 
-Command: `cd /Users/reagan/repos/iam-roles && .venv/bin/python -m pytest --no-header -q --ignore=tests/test_calibration_corpus.py --ignore=tests/e2e 2>&1 | tail -3`
+Command: `cd <repo> && .venv/bin/python -m pytest --no-header -q --ignore=tests/test_calibration_corpus.py --ignore=tests/e2e 2>&1 | tail -3`
 
 Result:
 ```

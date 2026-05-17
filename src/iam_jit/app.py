@@ -33,7 +33,7 @@ from .routes.admin import router as admin_router
 from .routes.auth import router as auth_router
 # NOTE: intake_router deleted in Stage 4 of [[no-nl-synthesis]].
 # Conversational LLM intake was part of the synthesis-from-prompt
-# pattern that measured 1.8% joint sufficiency. Replaced by raw-JSON
+# pattern that measured joint sufficiency below the calibration bar. Replaced by raw-JSON
 # submit via the existing request-creation endpoint + MCP submit_policy.
 from .routes.health import router as health_router
 from .routes.policy import router as policy_router

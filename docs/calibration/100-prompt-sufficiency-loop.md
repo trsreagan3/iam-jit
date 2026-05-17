@@ -202,7 +202,7 @@ Estimated joint rate after the above: **45-60% (vs. 1.8% today)**. The most impo
 ## Method notes
 
 - Prompts authored across 11 categories, mixing specificity, urgency markers, and agent vs. human voice
-- All prompts run from `/Users/reagan/repos/iam-roles` against `iam_jit.mcp_server._generate_for_mcp` + `_score_for_mcp`
+- All prompts run from `<repo>` against `iam_jit.mcp_server._generate_for_mcp` + `_score_for_mcp`
 - Raw results: `/tmp/sufficiency_results.jsonl`
 - Judgment-augmented results: `/tmp/sufficiency_judged.jsonl`
 - Driver: `/tmp/sufficiency_loop.py`; evaluator: `/tmp/evaluate_sufficiency.py`

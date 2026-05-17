@@ -2,7 +2,7 @@
 
 > Status: design doc (2026-05-15). Implementation pending.
 > Pilot-blocking. Originally scoped for Google Workspace
-> (Omise's IdP); expanded to multi-provider after a second
+> (the first pilot's IdP); expanded to multi-provider after a second
 > early adopter confirmed Okta. Generic OIDC client +
 > provider-specific configs. Future providers (Azure AD,
 > Auth0, JumpCloud, OneLogin, Keycloak) are small additions.
@@ -75,7 +75,7 @@ IAM_JIT_OIDC_REDIRECT_URI=https://<host>/api/v1/auth/oidc/callback
 Plus provider-specific config:
 
 ```
-# For Google Workspace (Omise):
+# For Google Workspace pilots:
 IAM_JIT_OIDC_PROVIDER=google
 IAM_JIT_OIDC_HOSTED_DOMAIN=company.com      # mandatory; gates Workspace
                                             # (Google's `hd` claim check)
