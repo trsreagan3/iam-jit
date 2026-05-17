@@ -944,7 +944,12 @@ TOOLS = [
                 "limit": {"type": "integer", "default": 50, "minimum": 1, "maximum": 1000},
                 "kind": {
                     "type": "string",
-                    "enum": ["rule_added", "rule_removed", "mode_changed", "preset_applied"],
+                    "enum": [
+                        "rule_added", "rule_removed",
+                        "mode_changed", "preset_applied",
+                        # WB26 LOW-26-05: task lifecycle kinds
+                        "task_started", "task_ended",
+                    ],
                     "description": "Optional event-kind filter.",
                 },
             },
@@ -1783,7 +1788,7 @@ def _bouncer_tail_decisions_for_mcp(args: dict[str, Any]) -> dict[str, Any]:
 
 
 def _bouncer_start_task_for_mcp(args: dict[str, Any]) -> dict[str, Any]:
-    from .bouncer.store import BouncerStore
+    from .bouncer.store import ActiveTaskExistsError, BouncerStore
     from .bouncer.tasks import TaskValidationError, build_task_scope
 
     description = args.get("description")
@@ -1812,16 +1817,18 @@ def _bouncer_start_task_for_mcp(args: dict[str, Any]) -> dict[str, Any]:
 
     store = BouncerStore()
     try:
-        existing = store.get_active_task()
-        if existing is not None:
+        # The store's add_task atomically enforces the single-active
+        # invariant (WB26 HIGH-26-02 closure). Catch the dedicated
+        # exception so the agent gets a structured error + the active
+        # task_id to act on.
+        try:
+            store.add_task(scope, actor=_bouncer_actor())
+        except ActiveTaskExistsError as e:
+            existing = store.get_active_task()
             return {
-                "error": (
-                    f"another task is already active ({existing.task_id}); "
-                    "end it first via bouncer_end_task"
-                ),
-                "active_task_id": existing.task_id,
+                "error": str(e),
+                "active_task_id": existing.task_id if existing else None,
             }
-        store.add_task(scope, actor=_bouncer_actor())
     finally:
         store.close()
     return {

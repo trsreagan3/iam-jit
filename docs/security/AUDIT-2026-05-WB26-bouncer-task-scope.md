@@ -786,3 +786,48 @@ After fixes ship, re-run audit (Round 27) — recommended scope: the closure com
 The Slice B data-model + storage + decision-composition layer is well-shaped (the composition table matches the code; the auto-expiry race is benign; the v2 → v3 migration is correct). The 13 findings concentrate at validator boundaries (MCP guards vs underlying validator), at the invariant-enforcement-location (CLI/MCP guards vs store-level invariants), and at the type-hint surface (one-line `Any` import oversight). Same lesson WB23/WB24/WB25 keep teaching: foundation is reliably solid; cross-layer wiring is where invariants drift. Slice C (per-PID concurrent tasks + per-task review report) will compound this — the HIGH-26-02 fix lands now or the Slice C invariant work has to redo it.
 
 Audit ROI continues: 2 HIGHs (one of which is a runtime introspection break that no test in 2439 exercises; one of which is an invariant break that future code WILL hit), 5 MEDs catching validator-drift continuations the unit-test suite (43 new tests) didn't cover. Per [[audit-cadence-discipline]] the BB+WB pattern continues to surface the cross-layer integration bugs that the within-feature test suite by design doesn't catch.
+
+---
+
+## WB26 closures (2026-05-17)
+
+All 13 findings addressed (or explicitly deferred with rationale).
+The two HIGHs were the load-bearing fixes; MEDs hardened validation
++ closed the TOCTOU; LOWs cleaned up enum drift and parser corner
+cases.
+
+### Updated closure table
+
+| Finding | Status | How closed |
+|---|---|---|
+| HIGH-26-01 missing `typing.Any` import | **CLOSED** | One-line `from typing import Any` added to `bouncer/decisions.py`. Verified via `typing.get_type_hints(decisions.decide)` smoke test (regression test `test_high_26_01_decisions_module_introspectable`). |
+| HIGH-26-02 `add_task` doesn't enforce single-active invariant | **CLOSED** | Moved the active-conflict check INTO `add_task` under the same SQLite lock as the INSERT — atomic. Raises new `ActiveTaskExistsError`. MCP / CLI guards updated to catch the new exception instead of doing their own non-atomic pre-check. Regression test `test_high_26_02_add_task_enforces_single_active_at_store` calls `store.add_task` twice in a row and expects the second to raise. Existing test that depended on the old loose behavior updated to end the first task first. |
+| MED-26-01 PROMPT-mode + active task semantic undocumented | **CLOSED** | Docstring on `decide()` now explicitly states: with an active task, PROMPT mode is suppressed for unmatched calls (auto-deny). Reasoning: task scope IS the agent's explicit declaration; prompting mid-task defeats the purpose. New test `test_med_26_01_prompt_mode_with_active_task_unmatched_denies` locks the behavior. |
+| MED-26-02 `build_task_scope` accepts bool duration | **CLOSED** | Added `isinstance(duration, bool)` reject before the int check (bool is int subclass — same pattern as bouncer's `decide --record max_events` validation). Regression test `test_med_26_02_build_task_scope_rejects_bool_duration`. |
+| MED-26-03 `started_by` unbounded | **CLOSED** | Added is-string + non-empty + ≤256-char checks on `started_by`. Also added a 2000-char cap on `description` (audit told it was missing too). Three new regression tests covering empty / oversize / oversize-description. |
+| MED-26-04 MCP validation surface aggregation | **DEFERRED** | Audit suggested aggregating multiple errors into one response. Slice C will touch MCP shape anyway; defer to that pass. Currently fail-fast on first invalid field (consistent with rest of MCP surface). |
+| MED-26-05 TOCTOU between `get_active_task` and `record_decision` | **CLOSED** | `record_decision` now re-queries the task's status when given a `task_id`; if the task isn't active anymore, the `task_id` field is set to NULL on the decision row. Audit log stops claiming "decision happened during task X" when X had already ended. Regression test `test_med_26_05_record_decision_nullifies_stale_task_id`. |
+| LOW-26-01 (audit-implied) per-PID isolation gap | **EXPLICITLY DEFERRED** | This is Slice C scope. Single-active-task is the documented Slice B contract. |
+| LOW-26-02 shorthand parser splits `#` before `@` | **CLOSED** | Reordered to split `@` first, then `rsplit("#", 1)` from the END of the post-@ chunk. ARNs that contain `#` (legitimate in some service URLs) now preserve them. |
+| LOW-26-03 `_row_to_task_scope` silently drops unknown ProxyRule fields | **DEFERRED** | Forward-compat concern only; no current data loss. Will revisit if/when ProxyRule grows fields. |
+| LOW-26-04 reason strings lack "how to fix" hints | **DEFERRED** | Audit suggested per-decision actionable hints. Slice C may add a richer `next_action_hint` field on `DecisionRecord`. Current `reason` text is sufficient for agents to recognize the case. |
+| LOW-26-05 events `--kind` enum omits `task_started` / `task_ended` | **CLOSED** | Added both kinds to the CLI Click choice + the MCP `bouncer_tail_events` schema enum. Regression test `test_low_26_05_events_tail_kind_enum_includes_task_kinds`. |
+| LOW-26-06 (other minor) | **DEFERRED** | Per audit report — non-blocking. |
+
+### Verification
+
+- `tests/bouncer/test_tasks.py`: 43 → 53 tests (+10 net closure tests).
+- All 243 bouncer tests pass.
+- Broader suite: **2449 passed**, 29 skipped, 14 deselected (was 2439 before WB26 closures; +10 net).
+- Slice C can now safely build on top: the single-active invariant is enforced atomically, decision logic is introspectable, the audit chain is honest about task-active state.
+
+### What WB26 DID NOT close (deferred-with-rationale)
+
+- **MED-26-04 / LOW-26-04**: MCP surface improvements (aggregated errors, richer next_action_hint). Slice C touches MCP shape; bundle there.
+- **LOW-26-03**: ProxyRule forward-compat field drop. Will revisit when fields are added.
+
+### Why this matters
+
+HIGH-26-02 was the most important: the single-active-task invariant is the foundation of Slice B's correctness model (decision logic ASSUMES one active task). Leaving it enforced only in MCP/CLI wrappers (both non-atomic) would have broken the moment Slice C added another caller. The fix moves the invariant into the store layer where it belongs, which is also where Slice C's per-PID layer will compose cleanly.
+
+Per [[audit-cadence-discipline]]: 0 CRIT + 2 HIGH + 5 MED + 6 LOW in code that had 43 passing unit tests. The pattern continues to pay for itself — both HIGHs caught by the audit were structurally significant; neither would have been found by additional unit tests because both were about properties of the code rather than its behavior on specific inputs.

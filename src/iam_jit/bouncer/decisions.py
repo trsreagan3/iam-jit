@@ -27,6 +27,7 @@ from __future__ import annotations
 
 import dataclasses
 from enum import Enum
+from typing import Any  # WB26 HIGH-26-01: needed for `active_task: Any | None` annotation
 
 from .rules import Effect, ProxyRule, RuleSet
 
@@ -115,6 +116,16 @@ def decide(
 
     The result's `reason` includes the active task_id so the audit
     chain captures task-scope effect.
+
+    PROMPT mode + active task (WB26 MED-26-01 closure): when a task
+    is active, PROMPT mode is SUPPRESSED for unmatched calls — the
+    task scope IS the agent's explicit declaration of what the task
+    needs, so unmatched-by-task calls auto-DENY rather than prompt.
+    Rationale: prompting the user mid-task for every unexpected call
+    defeats the point of declaring a scope upfront. If the user
+    wanted per-call confirmation, they wouldn't have started a task.
+    Agents that want broader scope should end the task and start a
+    new one with wider allow rules.
     """
     matched = ruleset.evaluate(
         service=service, action=action, arn=arn, region=region

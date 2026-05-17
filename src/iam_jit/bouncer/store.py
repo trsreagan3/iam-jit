@@ -62,6 +62,12 @@ class InvalidRuleError(ValueError):
     immediately and isn't confused at decision time.
     """
 
+
+class ActiveTaskExistsError(Exception):
+    """WB26 HIGH-26-02 closure: raised by add_task when another task
+    is already active. Caller decides whether to end the existing
+    task first or surface the conflict to the agent."""
+
 SCHEMA_VERSION = 3  # v3: adds tasks table + task_id column on decisions for [[proxy-smart-defaults-and-task-scope]] Slice B
 
 
@@ -473,8 +479,25 @@ class BouncerStore:
         Slice B), or None if no task was active. Lets post-incident
         review answer "during task X, what calls were attempted and
         what were the outcomes?"
+
+        WB26 MED-26-05 closure: if `task_id` is provided, we re-check
+        atomically that the task is still status='active' at insert
+        time. If it ended between the caller's `get_active_task` and
+        this insert, we NULL out the task_id so the audit log doesn't
+        falsely claim the call was "during task X" when X had already
+        ended. This loses some context but is honest.
         """
         with self._lock:
+            effective_task_id: str | None = task_id
+            if task_id is not None:
+                cur = self._conn.execute(
+                    "SELECT status FROM tasks WHERE task_id = ?", (task_id,)
+                )
+                row = cur.fetchone()
+                if row is None or row[0] != "active":
+                    # Task was ended between get_active_task and the
+                    # insert — don't lie in the audit log.
+                    effective_task_id = None
             cur = self._conn.execute(
                 """
                 INSERT INTO decisions(at, decision, mode, service, action, arn, region, matched_rule_id, reason, task_id)
@@ -490,7 +513,7 @@ class BouncerStore:
                     dec.region,
                     matched_rule_id,
                     dec.reason,
-                    task_id,
+                    effective_task_id,
                 ),
             )
             return int(cur.lastrowid or 0)
@@ -550,11 +573,16 @@ class BouncerStore:
     def add_task(self, scope: Any, *, actor: str | None = None) -> str:
         """Persist a new task scope as ACTIVE.
 
-        Caller responsibility: end any previously active task before
-        calling add_task — concurrency is single-active-task in Slice B
-        (Slice C may add per-PID concurrent tasks). This method does
-        NOT check for active conflicts; the higher-level
-        `start_task` flow does that.
+        WB26 HIGH-26-02 closure: enforces the single-active-task
+        invariant ATOMICALLY at the store layer. Previously the check
+        lived only in the MCP / CLI wrappers (both non-atomic — a
+        concurrent add could race past the check). Now: the INSERT
+        and the active-conflict check happen under the same lock, so
+        racing callers can't both succeed.
+
+        Raises `ActiveTaskExistsError` if another task is already
+        active (caller decides whether to end it + retry or surface
+        the conflict to the agent).
 
         Also writes a `task_started` config_event so the audit chain
         captures the lifecycle.
@@ -562,6 +590,15 @@ class BouncerStore:
         import json as _json
 
         with self._lock:
+            # Atomic single-active check — same lock as INSERT below.
+            cur = self._conn.execute(
+                "SELECT task_id FROM tasks WHERE status = 'active' LIMIT 1"
+            )
+            existing = cur.fetchone()
+            if existing is not None:
+                raise ActiveTaskExistsError(
+                    f"another task is already active ({existing[0]}); end it before starting a new one"
+                )
             self._conn.execute(
                 """
                 INSERT INTO tasks(

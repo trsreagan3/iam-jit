@@ -151,12 +151,24 @@ def build_task_scope(
     """
     if not description or not description.strip():
         raise TaskValidationError("description is required and must be non-empty")
-    if not isinstance(duration_minutes, int) or duration_minutes < 1:
-        raise TaskValidationError("duration_minutes must be a positive integer")
+    if len(description) > 2000:
+        raise TaskValidationError("description max length is 2000 chars")
+    # WB26 MED-26-02: bool is subclass of int — explicitly reject so
+    # True/False don't sneak through as 1/0 durations.
+    if isinstance(duration_minutes, bool) or not isinstance(duration_minutes, int):
+        raise TaskValidationError("duration_minutes must be an integer")
+    if duration_minutes < 1:
+        raise TaskValidationError("duration_minutes must be >= 1")
     if duration_minutes > 24 * 60:
         raise TaskValidationError(
             "duration_minutes max is 1440 (24h); use multiple tasks for longer work"
         )
+    # WB26 MED-26-03: started_by was unbounded. Description is bounded
+    # right above; copy-paste oversight to leave started_by unchecked.
+    if not isinstance(started_by, str) or not started_by.strip():
+        raise TaskValidationError("started_by is required and must be non-empty")
+    if len(started_by) > 256:
+        raise TaskValidationError("started_by max length is 256 chars")
 
     allow_clean = _coerce_rules(allow_rules or [], default_effect=Effect.ALLOW)
     deny_clean = _coerce_rules(deny_rules or [], default_effect=Effect.DENY)

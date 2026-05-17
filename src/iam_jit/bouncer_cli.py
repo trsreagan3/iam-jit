@@ -285,7 +285,9 @@ def events_group() -> None:
 @click.option(
     "--kind",
     type=click.Choice(
-        ["rule_added", "rule_removed", "mode_changed", "preset_applied"],
+        # WB26 LOW-26-05 closure: include task lifecycle kinds.
+        ["rule_added", "rule_removed", "mode_changed", "preset_applied",
+         "task_started", "task_ended"],
         case_sensitive=False,
     ),
     default=None,
@@ -679,13 +681,26 @@ def tasks_start(
         --deny  '*@arn:aws:*::222:*'
     """
     def _parse_shorthand(s: str) -> dict:
+        # WB26 LOW-26-02 closure: split on `@` BEFORE `#`. ARN values
+        # can legitimately contain `#` (e.g. anchors in URLs encoded
+        # into a resource identifier); splitting region-first would
+        # truncate the ARN. Pattern + region delimiter `#` only
+        # applies AFTER the ARN segment is extracted.
         pattern = s
         arn = None
         region = None
-        if "#" in pattern:
-            pattern, region = pattern.split("#", 1)
         if "@" in pattern:
-            pattern, arn = pattern.split("@", 1)
+            pattern, after_at = pattern.split("@", 1)
+            # The ARN may itself contain `#`? Only canonical AWS ARNs
+            # don't, but defensive: split region off the END of the
+            # post-@ chunk using rsplit so a `#` inside the ARN body
+            # is preserved.
+            if "#" in after_at:
+                arn, region = after_at.rsplit("#", 1)
+            else:
+                arn = after_at
+        elif "#" in pattern:
+            pattern, region = pattern.split("#", 1)
         return {
             "pattern": pattern.strip(),
             "arn_scope": arn.strip() if arn else None,
@@ -704,16 +719,20 @@ def tasks_start(
         click.echo(f"rejected: {e}", err=True)
         sys.exit(2)
 
+    from .bouncer.store import ActiveTaskExistsError
+
     with _opened_store(db) as store:
-        existing = store.get_active_task()
-        if existing is not None:
+        try:
+            store.add_task(scope, actor=_current_actor())
+        except ActiveTaskExistsError as e:
+            # WB26 HIGH-26-02 closure: the store enforces; CLI just
+            # surfaces the message + a remediation hint.
             click.echo(
-                f"another task ({existing.task_id}) is already active; "
-                "end it first with `iam-jit-bouncer tasks end <id>`",
+                f"{e}\nrun `iam-jit-bouncer tasks active` to see the "
+                "current task; `iam-jit-bouncer tasks end <id>` to end it.",
                 err=True,
             )
             sys.exit(2)
-        store.add_task(scope, actor=_current_actor())
     click.echo(f"started task {scope.task_id} (expires {scope.expires_at})")
 
 
