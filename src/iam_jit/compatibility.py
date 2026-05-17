@@ -517,22 +517,29 @@ for _entry in CATALOG:
 def check_compatibility(
     intent: CompatibilityIntent,
     *,
+    allowlist: Any | None = None,  # AllowlistStore (Slice 2; avoid circular import)
     audit_sink: ConfigEventSink | None = None,
     actor: str | None = None,
 ) -> CompatibilityResult:
     """Pure decision: given an intent, return the verdict + reasoning
     + next-action hint.
 
-    Sources consulted (Slice 1 — Slice 2 will add admin allowlist):
-    1. Known-incompatible catalog (workload-keyed)
-    2. Default: PROCEED with a generic note
+    Sources consulted, in order:
+    1. Admin allowlist (Slice 2 — admin-supplied per-account/per-workload
+       overrides; first matching rule wins). Lets orgs declare
+       "for account X + workload Y, return USE_EXISTING(role Z)" or
+       "for account A, CANNOT_HELP."
+    2. Known-incompatible catalog (Slice 1 — workload-keyed defaults).
+    3. Default: PROCEED with a generic note.
 
     The function stays dependency-free for tests; the optional
     `audit_sink` lets the MCP handler / Slice 3 intake plumb in a real
     audit-log writer per WB24 MED-24-01 closure. When provided, every
-    check produces a `compatibility_check` event with the workload +
-    verdict + matched_pattern so post-incident review can answer "did
-    the agent know iam-jit said use_existing for this workload?"
+    check produces a `compatibility_check` event including
+    `matched_pattern` (catalog id OR `allowlist:<rule_id>`) so
+    post-incident review can answer "did the agent know iam-jit said
+    use_existing for this workload, and was that the catalog default
+    or an admin override?"
     """
     # WB24 MED-24-02 closure: validate the agent's role-ARN hint
     # BEFORE the catalog lookup so it surfaces in both PROCEED and
@@ -540,6 +547,63 @@ def check_compatibility(
     cleaned_hint, hint_was_invalid = _validate_existing_role_hint(
         intent.existing_role_hint
     )
+
+    # Slice 2: admin allowlist consulted FIRST. Admin overrides win
+    # over the curated catalog because the admin knows their org's
+    # specific shape; the catalog only knows generic AWS patterns.
+    allowlist_rule = None
+    if allowlist is not None:
+        try:
+            from .compatibility_allowlist import match_intent
+
+            allowlist_rule = match_intent(intent, allowlist)
+        except Exception:
+            # Allowlist failures must not crash the check; degrade
+            # to catalog-only behavior. Logged via audit_sink below
+            # if one is configured.
+            allowlist_rule = None
+
+    if allowlist_rule is not None:
+        result = allowlist_rule.to_result()
+        # Echo the agent's existing_role_hint if the rule's verdict
+        # is USE_EXISTING and the rule didn't pre-set an ARN
+        # (admin may have intentionally left it for the agent to
+        # supply).
+        if (
+            result.verdict == Compatibility.USE_EXISTING
+            and result.existing_role_arn is None
+            and cleaned_hint is not None
+        ):
+            result = dataclasses.replace(result, existing_role_arn=cleaned_hint)
+        # Surface invalid-hint state regardless of allowlist match
+        if hint_was_invalid:
+            result = dataclasses.replace(result, existing_role_hint_invalid=True)
+
+        if audit_sink is not None:
+            try:
+                audit_sink.record(
+                    kind="compatibility_check",
+                    actor=actor or "unknown",
+                    summary=(
+                        f"workload={intent.workload.value} "
+                        f"verdict={result.verdict.value} "
+                        f"(allowlist:{allowlist_rule.rule_id})"
+                    ),
+                    detail={
+                        "workload": intent.workload.value,
+                        "target_account_id": intent.target_account_id,
+                        "target_services": list(intent.target_services),
+                        "description": intent.description,
+                        "verdict": result.verdict.value,
+                        "matched_pattern": result.matched_pattern,
+                        "existing_role_arn": result.existing_role_arn,
+                        "existing_role_hint_invalid": result.existing_role_hint_invalid,
+                        "source": "allowlist",
+                    },
+                )
+            except Exception:
+                pass
+        return result
 
     entry = _CATALOG_BY_WORKLOAD.get(intent.workload)
     if entry is None:
@@ -596,6 +660,7 @@ def check_compatibility(
                     "matched_pattern": result.matched_pattern,
                     "existing_role_arn": result.existing_role_arn,
                     "existing_role_hint_invalid": result.existing_role_hint_invalid,
+                    "source": "catalog",
                 },
             )
         except Exception:

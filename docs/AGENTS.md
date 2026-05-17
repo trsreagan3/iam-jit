@@ -54,6 +54,10 @@ Real environments compose. Common cases:
 
 **Rule of thumb:** classify by the OUTER hosting environment — that's the constraint iam-jit can't change. When in doubt, pick the workload type that's the BASE identity of the AWS API call (what would show up as `userIdentity.sessionContext.sessionIssuer.userName` in CloudTrail if you made the call right now).
 
+### Admin allowlist overrides
+
+Your org's admin may have configured per-account / per-workload overrides via the compatibility allowlist (`docs/COMPATIBILITY-ALLOWLIST.md`). When that's the case, `check_iam_jit_compatibility` returns the admin verdict (which may differ from the catalog default) and sets `matched_pattern` to `allowlist:<rule_id>` so you can tell. Read what your org has configured via the `list_compatibility_overrides` MCP tool. Agents can READ the allowlist but cannot mutate it — only admins, via CLI.
+
 ### Why this matters
 
 iam-jit's whole model is "create a NEW short-lived role" (per [[creates-never-mutates]]). For workloads where the role is fixed at creation time (k8s IRSA, EC2 IP, Lambda exec, CodeBuild, Glue, etc.), the BASE identity can't be swapped at runtime — though sts:AssumeRole into a different role is technically possible. The practical answer for most workloads is "use the fixed role directly; add an iam-jit hop only when you specifically need scoping the base identity doesn't provide."

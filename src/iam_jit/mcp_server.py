@@ -749,6 +749,21 @@ TOOLS = [
         ),
         "inputSchema": {"type": "object", "properties": {}},
     },
+    {
+        "name": "list_compatibility_overrides",
+        "description": (
+            "List the admin-supplied compatibility allowlist (Slice 2 "
+            "of #166). Each rule overrides the curated catalog for a "
+            "specific account / workload combination — e.g. 'for "
+            "account 111 + k8s_pod, always use this shared role.' "
+            "Read-only for agents — only admins can mutate the "
+            "allowlist (via the `iam-jit allowlist` CLI). Per "
+            "[[agent-friendly-not-bypassable]]: agents can SEE what "
+            "their org has configured but cannot grant themselves "
+            "access by adding allowlist rules."
+        ),
+        "inputSchema": {"type": "object", "properties": {}},
+    },
     # ---------------------------------------------------------------
     # iam-jit-bouncer (Lens A per [[agent-friendly-not-bypassable]]):
     # MCP-mirror of the iam-jit-bouncer CLI so agents can read +
@@ -1339,6 +1354,18 @@ def _compatibility_actor() -> str:
     return os.environ.get("IAM_JIT_BOUNCER_ACTOR") or "mcp-agent"
 
 
+def _load_allowlist_for_check():
+    """Build the admin allowlist store for the checker. Best-effort:
+    if the store can't be loaded (e.g. permission error on the file),
+    return None and the checker degrades to catalog-only."""
+    try:
+        from .compatibility_allowlist import build_default_store
+
+        return build_default_store()
+    except Exception:
+        return None
+
+
 def _check_compatibility_for_mcp(args: dict[str, Any]) -> dict[str, Any]:
     """Run the applicability checker against an agent-provided intent.
     Returns a self-describing verdict so the agent has a path forward
@@ -1350,10 +1377,31 @@ def _check_compatibility_for_mcp(args: dict[str, Any]) -> dict[str, Any]:
         return parsed
     intent = parsed["intent"]
     sink = _compatibility_audit_sink()
+    allowlist = _load_allowlist_for_check()
     result = check_compatibility(
-        intent, audit_sink=sink, actor=_compatibility_actor()
+        intent,
+        allowlist=allowlist,
+        audit_sink=sink,
+        actor=_compatibility_actor(),
     )
     return result.to_dict()
+
+
+def _list_compatibility_overrides_for_mcp(args: dict[str, Any]) -> dict[str, Any]:
+    """Read-only view of the admin allowlist. Mutation is admin-only
+    via the CLI per [[agent-friendly-not-bypassable]] — agents see
+    what their org has configured but can't grant themselves access."""
+    from .compatibility_allowlist import build_default_store
+
+    try:
+        store = build_default_store()
+        rules = store.list()
+    except Exception as e:
+        return {"error": f"could not load allowlist: {e}", "rules": [], "count": 0}
+    return {
+        "rules": [r.to_dict() for r in rules],
+        "count": len(rules),
+    }
 
 
 def _list_compatibility_catalog_for_mcp(args: dict[str, Any]) -> dict[str, Any]:
@@ -1907,6 +1955,7 @@ def _submit_policy_for_mcp(args: dict[str, Any]) -> dict[str, Any]:
 
         check_result = check_compatibility(
             parsed["intent"],
+            allowlist=_load_allowlist_for_check(),
             audit_sink=_compatibility_audit_sink(),
             actor=_compatibility_actor(),
         )
@@ -2181,6 +2230,8 @@ def _handle_request(req: dict[str, Any]) -> dict[str, Any] | None:
             result_payload = _check_compatibility_for_mcp(args)
         elif tool_name == "list_compatibility_catalog":
             result_payload = _list_compatibility_catalog_for_mcp(args)
+        elif tool_name == "list_compatibility_overrides":
+            result_payload = _list_compatibility_overrides_for_mcp(args)
         else:
             return _err(rid, -32601, f"unknown tool: {tool_name}")
         # MCP tool result format: { content: [{type: "text", text: "..."}] }

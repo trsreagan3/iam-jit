@@ -716,6 +716,176 @@ def tail_cmd(
         click.echo(format_event_summary(ev))
 
 
+@main.group("allowlist")
+def allowlist_group() -> None:
+    """Manage the compatibility allowlist (#166 Slice 2).
+
+    Admin-supplied per-account/per-workload overrides that change
+    what `check_iam_jit_compatibility` returns. Lets your org
+    declare 'for account X + workload Y, always use existing role Z'
+    or 'for account A, iam-jit cannot help.'
+
+    Per [[agent-friendly-not-bypassable]] Lens B: every mutation is
+    audit-logged to the bouncer's `config_events` table. Agents can
+    READ the allowlist via the `list_compatibility_overrides` MCP
+    tool but can NOT mutate it — only admins, via this CLI.
+    """
+
+
+def _allowlist_actor() -> str:
+    import getpass
+    import os
+    explicit = os.environ.get("IAM_JIT_BOUNCER_ACTOR")
+    if explicit:
+        return explicit
+    try:
+        return getpass.getuser()
+    except Exception:
+        return "unknown"
+
+
+def _allowlist_audit_record(*, kind: str, summary: str, detail: dict | None = None) -> None:
+    """Mirror the bouncer's config_events writer. Best-effort — if
+    the bouncer store isn't initialized, the CLI continues."""
+    try:
+        from .bouncer.store import BouncerStore
+        store = BouncerStore()
+        try:
+            store._record_config_event_locked(
+                actor=_allowlist_actor(), kind=kind, summary=summary, detail=detail,
+            )
+        finally:
+            store.close()
+    except Exception:
+        pass
+
+
+@allowlist_group.command("list")
+@click.option("--json", "as_json", is_flag=True, default=False)
+def allowlist_list(as_json: bool) -> None:
+    """List all allowlist rules."""
+    from .compatibility_allowlist import build_default_store
+
+    store = build_default_store()
+    rules = store.list()
+    if as_json:
+        click.echo(json.dumps([r.to_dict() for r in rules], indent=2))
+        return
+    if not rules:
+        click.echo("(no allowlist rules configured)")
+        return
+    for r in rules:
+        acct = r.account_id or "*"
+        wl = r.workload.value if r.workload else "*"
+        arn_tail = f" -> {r.existing_role_arn}" if r.existing_role_arn else ""
+        click.echo(f"{r.rule_id}  {r.verdict.value:>13}  acct={acct}  workload={wl}{arn_tail}")
+        click.echo(f"    reason: {r.reason}")
+        click.echo(f"    by {r.created_by} at {r.created_at}")
+
+
+@allowlist_group.command("add")
+@click.option("--account", "account_id", default=None,
+              help="12-digit AWS account ID, or omit for any-account wildcard.")
+@click.option("--workload", default=None,
+              help="WorkloadType (e.g. k8s_pod), or omit for any-workload wildcard.")
+@click.option("--verdict", required=True,
+              type=click.Choice(["proceed", "use_existing", "use_bouncer", "cannot_help"]))
+@click.option("--role-arn", "existing_role_arn", default=None,
+              help="IAM role ARN — REQUIRED when verdict=use_existing.")
+@click.option("--reason", required=True,
+              help="Admin justification (recorded in audit log).")
+@click.option("--next-action-hint", default=None,
+              help="Optional override for the next_action_hint returned to agents.")
+def allowlist_add(
+    account_id: str | None,
+    workload: str | None,
+    verdict: str,
+    existing_role_arn: str | None,
+    reason: str,
+    next_action_hint: str | None,
+) -> None:
+    """Add an allowlist rule. Examples:
+
+    \b
+        # For account 111... + k8s pods, always use the shared role:
+        iam-jit allowlist add \\
+            --account 111111111111 --workload k8s_pod \\
+            --verdict use_existing \\
+            --role-arn arn:aws:iam::111111111111:role/shared-ml \\
+            --reason "shared ML cluster"
+
+    \b
+        # Mark account 222... as out-of-scope:
+        iam-jit allowlist add \\
+            --account 222222222222 \\
+            --verdict cannot_help \\
+            --reason "compliance environment; named-role-only"
+    """
+    from .compatibility_allowlist import (
+        InvalidRule, build_default_store, build_rule,
+    )
+
+    actor = _allowlist_actor()
+    try:
+        rule = build_rule(
+            account_id=account_id,
+            workload=workload,
+            verdict=verdict,
+            existing_role_arn=existing_role_arn,
+            reason=reason,
+            next_action_hint=next_action_hint,
+            created_by=actor,
+        )
+    except InvalidRule as e:
+        click.echo(f"rejected: {e}", err=True)
+        sys.exit(2)
+    store = build_default_store()
+    store.add(rule)
+    _allowlist_audit_record(
+        kind="allowlist_rule_added",
+        summary=f"allowlist rule {rule.rule_id} added: verdict={rule.verdict.value}",
+        detail=rule.to_dict(),
+    )
+    click.echo(f"added rule {rule.rule_id}: {rule.verdict.value}")
+
+
+@allowlist_group.command("remove")
+@click.argument("rule_id")
+def allowlist_remove(rule_id: str) -> None:
+    """Remove an allowlist rule. The deletion is audit-logged with
+    the rule's full prior content (per [[agent-friendly-not-
+    bypassable]] Lens B — no covering tracks)."""
+    from .compatibility_allowlist import RuleNotFound, build_default_store
+
+    store = build_default_store()
+    try:
+        removed = store.remove(rule_id)
+    except RuleNotFound:
+        click.echo(f"no rule with id {rule_id!r}", err=True)
+        sys.exit(1)
+    _allowlist_audit_record(
+        kind="allowlist_rule_removed",
+        summary=f"allowlist rule {rule_id} removed: verdict={removed.verdict.value}",
+        detail=removed.to_dict(),
+    )
+    click.echo(f"removed rule {rule_id}")
+
+
+@allowlist_group.command("show")
+@click.argument("rule_id")
+def allowlist_show(rule_id: str) -> None:
+    """Show one allowlist rule in detail."""
+    from .compatibility_allowlist import RuleNotFound, build_default_store
+
+    store = build_default_store()
+    try:
+        rule = store.get(rule_id)
+    except RuleNotFound:
+        click.echo(f"no rule with id {rule_id!r}", err=True)
+        sys.exit(1)
+    click.echo(json.dumps(rule.to_dict(), indent=2))
+
+
 @main.command("bouncer", context_settings={"ignore_unknown_options": True, "allow_extra_args": True})
 @click.pass_context
 def bouncer_pointer(ctx: click.Context) -> None:
