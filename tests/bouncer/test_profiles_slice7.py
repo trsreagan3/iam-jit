@@ -55,20 +55,24 @@ def _sigv4(*, service: str, region: str) -> str:
 def test_load_profiles_returns_defaults_when_file_absent(tmp_path, monkeypatch) -> None:
     """First-run path: profiles.yaml doesn't exist → defaults returned.
 
-    Post Bounce-suite rename (2026-05-17), built-in defaults reduced
-    to the cross-product general-purpose pair (`full-user` +
-    `readonly`). Legacy names (`none`, `prod-readonly`) still appear
-    as aliases for v1.0 backward-compat (removed in v1.1). The
-    opinionated profiles (`dev-only`, `staging-work`,
-    `incident-response`) moved to `tools/community-profiles/`.
+    Post safe-default reshape (2026-05-17), built-in defaults remain
+    the cross-product general-purpose pair (`full-user` +
+    `safe-default`). Legacy names (`none`, `prod-readonly`,
+    `readonly`) still appear as aliases for v1.0 backward-compat
+    (removed in v1.1). The opinionated profiles (`dev-only`,
+    `staging-work`, `incident-response`) moved to
+    `tools/community-profiles/`.
     """
     monkeypatch.setenv("IAM_JIT_BOUNCER_PROFILES_FILE", str(tmp_path / "absent.yaml"))
     profiles = load_profiles()
     # Canonical v1.0 defaults
-    assert set(profiles.keys()) >= {"full-user", "readonly"}
+    assert set(profiles.keys()) >= {"full-user", "safe-default"}
     # Legacy aliases (deprecated; still resolve in v1.0)
     assert "none" in profiles and profiles["none"] is profiles["full-user"]
-    assert "prod-readonly" in profiles and profiles["prod-readonly"] is profiles["readonly"]
+    assert "prod-readonly" in profiles
+    assert profiles["prod-readonly"] is profiles["safe-default"]
+    assert "readonly" in profiles
+    assert profiles["readonly"] is profiles["safe-default"]
     # Opinionated profiles no longer built-in
     assert "dev-only" not in profiles
     assert "staging-work" not in profiles
@@ -149,15 +153,15 @@ def test_resolve_profiles_path_priority(tmp_path, monkeypatch) -> None:
 def test_resolve_active_profile_cli_flag_wins(tmp_path, monkeypatch) -> None:
     monkeypatch.setenv(ACTIVE_PROFILE_ENV, "full-user")
     profiles = load_profiles()
-    p = resolve_active_profile(cli_flag="readonly", profiles=profiles)
-    assert p.name == "readonly"
+    p = resolve_active_profile(cli_flag="safe-default", profiles=profiles)
+    assert p.name == "safe-default"
 
 
 def test_resolve_active_profile_env_var_used_when_no_flag(monkeypatch) -> None:
-    monkeypatch.setenv(ACTIVE_PROFILE_ENV, "readonly")
+    monkeypatch.setenv(ACTIVE_PROFILE_ENV, "safe-default")
     profiles = load_profiles()
     p = resolve_active_profile(cli_flag=None, profiles=profiles)
-    assert p.name == "readonly"
+    assert p.name == "safe-default"
 
 
 def test_resolve_active_profile_defaults_to_full_user(monkeypatch) -> None:
@@ -186,17 +190,32 @@ def test_resolve_active_profile_legacy_none_alias_still_works(monkeypatch, capsy
 def test_resolve_active_profile_legacy_prod_readonly_alias_still_works(
     monkeypatch, capsys,
 ) -> None:
-    """Backward-compat: `--profile prod-readonly` keeps working in
-    v1.0 + maps to the canonical `readonly` (cross-product general-
-    purpose name; "prod" connotation dropped per the
-    bounce-default-profile-pattern memo)."""
+    """Backward-compat: `--profile prod-readonly` (v1.0-alpha) keeps
+    working in v1.0 + maps to the canonical `safe-default`
+    (readonly-admin-minus name; per safe_default_is_readonly_admin_minus
+    memo, 2026-05-17)."""
     monkeypatch.delenv(ACTIVE_PROFILE_ENV, raising=False)
     profiles = load_profiles()
     p = resolve_active_profile(cli_flag="prod-readonly", profiles=profiles)
-    assert p.name == "readonly"
+    assert p.name == "safe-default"
     captured = capsys.readouterr()
     assert "deprecated" in captured.err
-    assert "readonly" in captured.err
+    assert "safe-default" in captured.err
+
+
+def test_resolve_active_profile_legacy_readonly_alias_still_works(
+    monkeypatch, capsys,
+) -> None:
+    """Backward-compat: `--profile readonly` (v1.0-alpha-2, post-rename
+    batch 47b616a) keeps working in v1.0 + maps to the canonical
+    `safe-default` (per safe_default_is_readonly_admin_minus, 2026-05-17)."""
+    monkeypatch.delenv(ACTIVE_PROFILE_ENV, raising=False)
+    profiles = load_profiles()
+    p = resolve_active_profile(cli_flag="readonly", profiles=profiles)
+    assert p.name == "safe-default"
+    captured = capsys.readouterr()
+    assert "deprecated" in captured.err
+    assert "safe-default" in captured.err
 
 
 def test_resolve_active_profile_unknown_name_raises(monkeypatch) -> None:
@@ -447,24 +466,417 @@ def test_default_profiles_load_without_error() -> None:
         assert name in profiles, f"default profile {name!r} missing"
 
 
-def test_readonly_default_denies_writes() -> None:
-    """End-to-end check that the shipped `readonly` default profile
-    blocks write/destructive verbs. `readonly` is the v1.0 cross-
-    product general-purpose write-blocker (renamed from
-    `prod-readonly` per the bounce-default-profile-pattern memo).
+def test_safe_default_denies_writes_via_baseline_classification() -> None:
+    """End-to-end check that the shipped `safe-default` profile blocks
+    write/destructive verbs via the policy_sentry-backed
+    `allow_baseline: aws_managed_readonly_access` mechanism (NOT via
+    enumerated deny_verbs anymore). Per safe_default_is_readonly_admin_minus
+    (2026-05-17): the architectural pattern is "allow Read+List, deny
+    everything else by construction" — Write-classified actions are
+    structurally excluded from the baseline so they're denied at the
+    first profile layer.
     """
     profiles = load_profiles()
-    readonly = profiles["readonly"]
-    assert evaluate_profile(readonly, service="s3", action="DeleteObject").denied
-    assert evaluate_profile(readonly, service="s3", action="PutObject").denied
-    assert evaluate_profile(readonly, service="ec2", action="TerminateInstances").denied
+    sd = profiles["safe-default"]
+    assert evaluate_profile(sd, service="s3", action="DeleteObject").denied
+    assert evaluate_profile(sd, service="s3", action="PutObject").denied
+    assert evaluate_profile(sd, service="ec2", action="TerminateInstances").denied
     # Reads still allowed (no objection at profile layer)
-    assert not evaluate_profile(readonly, service="s3", action="GetObject").denied
+    assert not evaluate_profile(sd, service="s3", action="GetObject").denied
 
 
-def test_legacy_prod_readonly_alias_points_at_readonly() -> None:
+def test_legacy_prod_readonly_alias_points_at_safe_default() -> None:
     """The deprecated `prod-readonly` name still resolves to the same
-    Profile object as the canonical `readonly` (v1.0 backward-compat;
-    alias removed in v1.1)."""
+    Profile object as the canonical `safe-default` (v1.0 backward-compat;
+    alias removed in v1.1). Per safe_default_is_readonly_admin_minus
+    (2026-05-17)."""
     profiles = load_profiles()
-    assert profiles["prod-readonly"] is profiles["readonly"]
+    assert profiles["prod-readonly"] is profiles["safe-default"]
+
+
+def test_legacy_readonly_alias_points_at_safe_default() -> None:
+    """The post-47b616a-rename name `readonly` still resolves to the
+    same Profile object as the canonical `safe-default` for v1.0
+    backward-compat; alias removed in v1.1. Per
+    safe_default_is_readonly_admin_minus (2026-05-17)."""
+    profiles = load_profiles()
+    assert profiles["readonly"] is profiles["safe-default"]
+
+
+# ---------------------------------------------------------------------------
+# safe-default architectural reshape (readonly-admin-minus framing)
+# Per safe_default_is_readonly_admin_minus (2026-05-17)
+# ---------------------------------------------------------------------------
+
+
+def test_action_in_baseline_readonly_access_classifies_known_read_actions() -> None:
+    """policy_sentry classifies these as Read/List → baseline accepts.
+
+    These are universal SDK preflight / inspection actions that any
+    agent operating under safe-default must be able to call."""
+    from iam_jit.bouncer.profiles import _action_in_baseline
+    assert _action_in_baseline("aws_managed_readonly_access", "sts", "GetCallerIdentity")
+    assert _action_in_baseline("aws_managed_readonly_access", "iam", "SimulatePrincipalPolicy")
+    assert _action_in_baseline("aws_managed_readonly_access", "ec2", "DescribeInstances")
+    assert _action_in_baseline("aws_managed_readonly_access", "s3", "GetObject")
+    assert _action_in_baseline("aws_managed_readonly_access", "iam", "GetUser")
+
+
+def test_action_in_baseline_readonly_access_rejects_known_write_actions() -> None:
+    """policy_sentry classifies these as Write/Permissions management
+    → baseline rejects. These are the CRIT gaps the Opus audit found:
+    every one of them passed through the old deny_verbs list. The new
+    baseline-gate denies them structurally."""
+    from iam_jit.bouncer.profiles import _action_in_baseline
+    assert not _action_in_baseline("aws_managed_readonly_access", "sts", "AssumeRole")
+    assert not _action_in_baseline("aws_managed_readonly_access", "lambda", "InvokeFunction")
+    assert not _action_in_baseline("aws_managed_readonly_access", "ssm", "SendCommand")
+    assert not _action_in_baseline("aws_managed_readonly_access", "iam", "CreateAccessKey")
+    assert not _action_in_baseline("aws_managed_readonly_access", "iam", "PassRole")
+    assert not _action_in_baseline("aws_managed_readonly_access", "iam", "AttachRolePolicy")
+
+
+def test_action_in_baseline_unknown_service_fails_closed() -> None:
+    """Brand-new AWS service not yet in policy_sentry data → unknown.
+    Resolver must FAIL CLOSED (return False), since the safety
+    invariant is "agent can only do reads we've classified as reads."
+    """
+    from iam_jit.bouncer.profiles import _action_in_baseline
+    assert not _action_in_baseline(
+        "aws_managed_readonly_access", "nonexistent-svc-9999", "GetSomething",
+    )
+
+
+def test_action_in_baseline_star_sentinel_allows_everything() -> None:
+    """The "*" sentinel disables baseline gating entirely (used by
+    profiles that want deny_actions on top of pure passthrough)."""
+    from iam_jit.bouncer.profiles import _action_in_baseline
+    assert _action_in_baseline("*", "anything", "Whatsoever")
+
+
+def test_action_in_baseline_unknown_baseline_name_raises() -> None:
+    from iam_jit.bouncer.profiles import _action_in_baseline
+    with pytest.raises(ValueError, match="unknown allow_baseline"):
+        _action_in_baseline("not-a-baseline", "s3", "GetObject")
+
+
+def test_action_in_baseline_lru_cache_avoids_repeat_lookups() -> None:
+    """policy_sentry lookup happens once per service per process; the
+    second call hits the lru_cache and returns instantly. Validates by
+    inspecting the cache_info after a warm-up call."""
+    from iam_jit.bouncer.profiles import _service_read_list_actions
+    _service_read_list_actions.cache_clear()
+    _service_read_list_actions("s3")  # warmup
+    info1 = _service_read_list_actions.cache_info()
+    _service_read_list_actions("s3")  # cached
+    _service_read_list_actions("s3")  # cached
+    info2 = _service_read_list_actions.cache_info()
+    assert info2.hits == info1.hits + 2
+    assert info2.misses == info1.misses
+
+
+# --- safe-default end-to-end CRIT-gap regression tests --------------------
+
+
+def test_safe_default_baseline_denies_sts_assume_role() -> None:
+    """CRIT-gap-I-1 from Opus audit: sts:AssumeRole bypassed the
+    `*:Delete*` / `*:Put*` etc deny list. New baseline blocks it because
+    policy_sentry classifies AssumeRole as Write, so it's never in the
+    baseline."""
+    profiles = load_profiles()
+    sd = profiles["safe-default"]
+    v = evaluate_profile(sd, service="sts", action="AssumeRole")
+    assert v.denied
+    assert "allow_baseline" in v.reason
+
+
+def test_safe_default_baseline_denies_lambda_invoke_function() -> None:
+    """CRIT-gap-I-2 from Opus audit: lambda:InvokeFunction lets the
+    agent run arbitrary code under the function's role. Write-classified
+    → not in baseline → denied."""
+    profiles = load_profiles()
+    sd = profiles["safe-default"]
+    v = evaluate_profile(sd, service="lambda", action="InvokeFunction")
+    assert v.denied
+    assert "allow_baseline" in v.reason
+
+
+def test_safe_default_baseline_denies_ssm_send_command() -> None:
+    """CRIT-gap-I-3 from Opus audit: ssm:SendCommand is EC2 RCE.
+    Write-classified → not in baseline → denied."""
+    profiles = load_profiles()
+    sd = profiles["safe-default"]
+    v = evaluate_profile(sd, service="ssm", action="SendCommand")
+    assert v.denied
+    assert "allow_baseline" in v.reason
+
+
+def test_safe_default_baseline_denies_iam_pass_role() -> None:
+    """CRIT-gap-I-4 from Opus audit: iam:PassRole is privilege transfer.
+    Permissions-management classified → not in baseline → denied."""
+    profiles = load_profiles()
+    sd = profiles["safe-default"]
+    v = evaluate_profile(sd, service="iam", action="PassRole")
+    assert v.denied
+    assert "allow_baseline" in v.reason
+
+
+def test_safe_default_baseline_denies_iam_attach_role_policy() -> None:
+    """CRIT-gap-I-5 from Opus audit: iam:AttachRolePolicy grants
+    privileges without `Put`/`Create` shape. Permissions-management
+    classified → not in baseline → denied."""
+    profiles = load_profiles()
+    sd = profiles["safe-default"]
+    v = evaluate_profile(sd, service="iam", action="AttachRolePolicy")
+    assert v.denied
+    assert "allow_baseline" in v.reason
+
+
+# --- safe-default subtract list -------------------------------------------
+
+
+def test_safe_default_subtract_list_denies_secretsmanager_get_secret_value() -> None:
+    """secretsmanager:GetSecretValue is in the subtract list. Whether
+    policy_sentry classifies it as Read (baseline-eligible) or Write
+    (baseline-excluded), the explicit deny_actions entry guarantees
+    denial."""
+    profiles = load_profiles()
+    sd = profiles["safe-default"]
+    v = evaluate_profile(sd, service="secretsmanager", action="GetSecretValue")
+    assert v.denied
+
+
+def test_safe_default_subtract_list_denies_kms_decrypt() -> None:
+    """kms:Decrypt is in the subtract list. policy_sentry currently
+    classifies it as Write (so the baseline gate already denies it),
+    but the explicit deny_actions entry is belt-and-suspenders defense
+    against future policy_sentry reclassification."""
+    profiles = load_profiles()
+    sd = profiles["safe-default"]
+    v = evaluate_profile(sd, service="kms", action="Decrypt")
+    assert v.denied
+
+
+def test_safe_default_subtract_list_denies_ssm_get_parameter_securestring_path() -> None:
+    """ssm:GetParameter* can return SecureString values. policy_sentry
+    classifies them as Read so they'd be baseline-allowed; the
+    deny_actions subtract list takes them out."""
+    profiles = load_profiles()
+    sd = profiles["safe-default"]
+    v1 = evaluate_profile(sd, service="ssm", action="GetParameter")
+    v2 = evaluate_profile(sd, service="ssm", action="GetParameters")
+    v3 = evaluate_profile(sd, service="ssm", action="GetParametersByPath")
+    assert v1.denied and v2.denied and v3.denied
+    assert all("deny_actions" in v.reason for v in (v1, v2, v3))
+
+
+def test_safe_default_subtract_list_denies_ec2_get_password_data() -> None:
+    profiles = load_profiles()
+    sd = profiles["safe-default"]
+    v = evaluate_profile(sd, service="ec2", action="GetPasswordData")
+    assert v.denied
+
+
+def test_safe_default_subtract_list_denies_cognito_admin_get_user() -> None:
+    profiles = load_profiles()
+    sd = profiles["safe-default"]
+    v = evaluate_profile(sd, service="cognito-idp", action="AdminGetUser")
+    assert v.denied
+
+
+# --- safe-default permits the universal preflight surface ----------------
+
+
+def test_safe_default_allows_get_caller_identity() -> None:
+    """False-positive-K-2 analog: every AWS SDK preflights with
+    sts:GetCallerIdentity. safe-default MUST allow it (would otherwise
+    break every agent before its first useful call)."""
+    profiles = load_profiles()
+    sd = profiles["safe-default"]
+    assert not evaluate_profile(sd, service="sts", action="GetCallerIdentity").denied
+
+
+def test_safe_default_allows_iam_simulate_principal_policy() -> None:
+    """Used by agents to introspect their own grants before acting.
+    Read-classified, NOT in subtract list → allowed."""
+    profiles = load_profiles()
+    sd = profiles["safe-default"]
+    assert not evaluate_profile(
+        sd, service="iam", action="SimulatePrincipalPolicy",
+    ).denied
+
+
+def test_safe_default_allows_iam_get_user() -> None:
+    """Allowed by baseline. NOT a confidentiality boundary — we know
+    this leaks IAM metadata; documented explicitly in the profile
+    description's "WHAT IT DOES NOT COVER" callout."""
+    profiles = load_profiles()
+    sd = profiles["safe-default"]
+    assert not evaluate_profile(sd, service="iam", action="GetUser").denied
+
+
+def test_safe_default_allows_ec2_describe_instances() -> None:
+    profiles = load_profiles()
+    sd = profiles["safe-default"]
+    assert not evaluate_profile(sd, service="ec2", action="DescribeInstances").denied
+
+
+# --- safe-default conditional denies -------------------------------------
+
+
+def test_safe_default_conditional_deny_blocks_sensitive_dynamodb_scan() -> None:
+    """deny_actions_with_condition entry: dynamodb:Scan against tables
+    matching `secrets-*` is denied via resource_pattern condition."""
+    profiles = load_profiles()
+    sd = profiles["safe-default"]
+    v = evaluate_profile(
+        sd, service="dynamodb", action="Scan",
+        arn="arn:aws:dynamodb:us-east-1:111122223333:table/secrets-prod",
+    )
+    assert v.denied
+    assert "conditional" in v.reason.lower()
+
+
+def test_safe_default_conditional_deny_does_not_block_unrelated_dynamodb_scan() -> None:
+    """dynamodb:Scan against a NON-secrets table is allowed (baseline-
+    eligible Read; conditional deny doesn't fire because resource_pattern
+    doesn't match)."""
+    profiles = load_profiles()
+    sd = profiles["safe-default"]
+    v = evaluate_profile(
+        sd, service="dynamodb", action="Scan",
+        arn="arn:aws:dynamodb:us-east-1:111122223333:table/orders",
+    )
+    assert not v.denied
+
+
+def test_safe_default_conditional_deny_with_missing_arn_abstains() -> None:
+    """resource_pattern condition needs an ARN to evaluate; with no
+    ARN it abstains (does not deny). Baseline still allows the action
+    (dynamodb:Scan is Read-classified). Documented behavior."""
+    profiles = load_profiles()
+    sd = profiles["safe-default"]
+    v = evaluate_profile(sd, service="dynamodb", action="Scan", arn=None)
+    assert not v.denied
+
+
+# --- composition with existing fields ------------------------------------
+
+
+def test_existing_keyword_deny_still_works_when_baseline_set() -> None:
+    """Composition: a profile combining allow_baseline + deny_keywords
+    fires the baseline check FIRST (CRIT writes blocked structurally)
+    then keyword check (additional resource-name guardrail)."""
+    custom = Profile(
+        name="t",
+        allow_baseline="aws_managed_readonly_access",
+        deny_keywords=("prod",),
+        keyword_targets=("arn",),
+    )
+    # Write action denied by baseline regardless of keyword
+    v = evaluate_profile(
+        custom, service="s3", action="DeleteObject",
+        arn="arn:aws:s3:::dev-bucket",
+    )
+    assert v.denied and "allow_baseline" in v.reason
+    # Read action against prod-ARN denied by keyword (after baseline
+    # passes)
+    v = evaluate_profile(
+        custom, service="s3", action="GetObject",
+        arn="arn:aws:s3:::prod-bucket/file",
+    )
+    assert v.denied and "keyword" in v.reason
+    # Read against non-prod ARN: allowed (baseline pass + keyword miss)
+    v = evaluate_profile(
+        custom, service="s3", action="GetObject",
+        arn="arn:aws:s3:::dev-bucket/file",
+    )
+    assert not v.denied
+
+
+def test_existing_allow_rules_still_work_when_baseline_set() -> None:
+    """allow_rules sit OUTSIDE evaluate_profile (consumed by the
+    proxy's composed rule list). evaluate_profile must not crash or
+    mis-classify when a profile sets BOTH allow_rules + allow_baseline.
+    """
+    from iam_jit.bouncer.profiles import ProfileAllowRule
+    custom = Profile(
+        name="t",
+        allow_baseline="aws_managed_readonly_access",
+        allow_rules=(ProfileAllowRule(pattern="s3:GetObject"),),
+    )
+    # evaluate_profile only consults the baseline + deny layers; the
+    # allow_rules path is exercised by the proxy. This test verifies
+    # composition doesn't break the evaluator.
+    assert not evaluate_profile(custom, service="s3", action="GetObject").denied
+    assert evaluate_profile(custom, service="s3", action="DeleteObject").denied
+
+
+def test_unconditional_deny_actions_with_condition_entry() -> None:
+    """A deny_actions_with_condition entry with NO condition field
+    reduces to an unconditional deny (validated by the parser's "any
+    dict is allowed for condition" tolerance). Important: protects
+    against operator typo where they omit `condition:` and expect
+    the rule to still fire."""
+    custom = Profile(
+        name="t",
+        deny_actions_with_condition=(
+            {"action": "s3:GetObject", "condition": {}},
+        ),
+    )
+    v = evaluate_profile(custom, service="s3", action="GetObject")
+    assert v.denied
+
+
+# --- YAML parsing of new fields -------------------------------------------
+
+
+def test_load_profiles_rejects_unknown_allow_baseline(tmp_path, monkeypatch) -> None:
+    """Profile-load-time validation catches typos in allow_baseline
+    (silent fallthrough would be a security regression)."""
+    bad = tmp_path / "p.yaml"
+    bad.write_text(yaml.safe_dump({
+        "profiles": {"x": {"allow_baseline": "readonly-access"}},
+    }))
+    monkeypatch.setenv("IAM_JIT_BOUNCER_PROFILES_FILE", str(bad))
+    with pytest.raises(ValueError, match="allow_baseline"):
+        load_profiles()
+
+
+def test_load_profiles_rejects_malformed_deny_actions_with_condition(
+    tmp_path, monkeypatch,
+) -> None:
+    bad = tmp_path / "p.yaml"
+    bad.write_text(yaml.safe_dump({
+        "profiles": {"x": {
+            "deny_actions_with_condition": [{"no_action_field": True}],
+        }},
+    }))
+    monkeypatch.setenv("IAM_JIT_BOUNCER_PROFILES_FILE", str(bad))
+    with pytest.raises(ValueError, match="deny_actions_with_condition"):
+        load_profiles()
+
+
+def test_load_profiles_round_trips_new_fields(tmp_path, monkeypatch) -> None:
+    """Custom profile with all three new fields parses + round-trips."""
+    custom = tmp_path / "p.yaml"
+    custom.write_text(yaml.safe_dump({
+        "profiles": {
+            "custom-safe": {
+                "description": "test",
+                "allow_baseline": "aws_managed_readonly_access",
+                "deny_actions": ["kms:Decrypt", "secretsmanager:GetSecretValue"],
+                "deny_actions_with_condition": [
+                    {"action": "s3:GetObject",
+                     "condition": {"resource_pattern": "arn:aws:s3:::secret-*"}},
+                ],
+            },
+        },
+    }))
+    monkeypatch.setenv("IAM_JIT_BOUNCER_PROFILES_FILE", str(custom))
+    profiles = load_profiles()
+    p = profiles["custom-safe"]
+    assert p.allow_baseline == "aws_managed_readonly_access"
+    assert "kms:Decrypt" in p.deny_actions
+    assert len(p.deny_actions_with_condition) == 1
+    assert p.deny_actions_with_condition[0]["action"] == "s3:GetObject"

@@ -48,14 +48,16 @@ decisions count + active pause window if any. Bypasses audit log.
 
 Named, switchable rule layers that act as a HARD FLOOR above task
 scopes + global rules. Default-shipped: **`full-user`** (passthrough,
-default-active) and **`readonly`** (cross-product write/destructive-verb
-block). Activate with `--profile NAME` on `ibounce run` OR
-`export IAM_JIT_BOUNCER_PROFILE=readonly` in your shell rc. Profile
-precedence (cross-product, both ibounce + kbounce): explicit
+default-active) and **`safe-default`** (AWS readonly admin baseline
+minus sensitive reads — see "What safe-default does + does not cover"
+below). Activate with `--profile NAME` on `ibounce run` OR
+`export IAM_JIT_BOUNCER_PROFILE=safe-default` in your shell rc.
+Profile precedence (cross-product, both ibounce + kbounce): explicit
 `--profile` flag → `IAM_JIT_BOUNCER_PROFILE` / `KBOUNCER_PROFILE`
 env var → built-in `full-user` default. When `ibounce run` is invoked
 without `--profile`, it prints a one-line banner pointing operators
-at `--profile readonly` as the recommended write-block opt-in.
+at `--profile safe-default` as the recommended state-preservation
+opt-in.
 
 Other community profiles (`dev-only`, `staging-work`,
 `incident-response`) ship as YAML files under
@@ -66,9 +68,14 @@ Other community profiles (`dev-only`, `staging-work`,
 Profile fields: `deny_keywords` (with word_boundary matching +
 per-profile exceptions list), `keyword_targets`, `only_account_ids`,
 `deny_verbs`, `allow_rules` (profile-scoped ALLOW rules that merge
-into the rule engine when this profile is active), `source` (org
-URL when installed via `profile install --from URL`; read-only at
-the CLI surface when non-local).
+into the rule engine when this profile is active), `allow_baseline`
+(named structural allow-set — `aws_managed_readonly_access` resolves
+via `policy_sentry` to AWS's Read+List action classifications),
+`deny_actions` (exact-match `service:Action` strings denied even if
+they're in the baseline — the "subtract" half of readonly-admin-minus),
+`deny_actions_with_condition` (resource-pattern + tag-based subtract
+list), `source` (org URL when installed via `profile install --from
+URL`; read-only at the CLI surface when non-local).
 
 ### Profile distribution (`profile install --from URL`)
 
@@ -289,19 +296,63 @@ property SecOps needs to approve installs in locked-down envs.
 | Profile | What it blocks |
 |---|---|
 | `full-user` (default-active) | Nothing — pure rule-engine behavior (the passthrough) |
-| `readonly` | All write/destructive verbs (`*:Delete*`, `*:Put*`, `*:Update*`, `*:Create*`, `*:Terminate*`, `*:Stop*`, `*:Reboot*`) |
+| `safe-default` | AWS readonly admin baseline minus sensitive reads. See "What safe-default covers + does not cover" below. |
 
 The default-active profile is `full-user` — calls forwarded as-is +
-audit-logged. Operators opt into the cross-product write-block by
-running `ibounce run --profile readonly` OR
-`export IAM_JIT_BOUNCER_PROFILE=readonly` in their shell rc.
+audit-logged. Operators opt into the state-preservation safety floor
+by running `ibounce run --profile safe-default` OR
+`export IAM_JIT_BOUNCER_PROFILE=safe-default` in their shell rc.
+
+#### What `safe-default` covers + does NOT cover
+
+`safe-default` is a state-preservation profile, NOT a confidentiality
+boundary. The shape:
+
+- **BASELINE**: allow everything `policy_sentry` classifies as Read or
+  List access level. This matches the AWS managed `ReadOnlyAccess`
+  policy by construction and automatically inherits new-service
+  coverage as `policy_sentry` updates. The Opus AWS-side audit
+  (2026-05-17) found that the previous enumerated-deny-verb model
+  missed CRIT primitives — `sts:AssumeRole`, `lambda:InvokeFunction`,
+  `ssm:SendCommand`, `iam:PassRole`, `iam:Attach*Policy`,
+  `ec2:Authorize*`, `cloudformation:ExecuteChangeSet`,
+  `route53:ChangeResourceRecordSets`, `kms:ScheduleKeyDeletion`, and
+  many more — because their names don't start with
+  `Delete`/`Put`/`Update`/`Create`/`Terminate`/`Stop`/`Reboot`. Under
+  the new baseline model, those actions are denied by construction
+  because they're classified as Write or Permissions-management
+  (NOT in the Read+List set).
+- **SUBTRACT**: a small list of sensitive Read actions —
+  `kms:Decrypt`, `secretsmanager:GetSecretValue`, `ssm:GetParameter*`
+  (may return `SecureString`), `ec2:GetPasswordData`,
+  `ec2:GetConsoleScreenshot`, `cognito-idp:AdminGetUser`/
+  `AdminListGroupsForUser` — plus resource-pattern conditional denies
+  (e.g. `dynamodb:Scan` against `secrets-*` tables).
+
+**WHAT IT COVERS:** state-changing AWS operations (writes, privilege
+grants, credential minting, code execution, exfiltration verbs) +
+the curated sensitive-Read subtract list.
+
+**WHAT IT DOES NOT COVER:** this is NOT a confidentiality boundary.
+The baseline allows reads of S3 objects, RDS data, CloudWatch logs,
+IAM user metadata, etc. Pair with:
+- S3 bucket policies / KMS grants for data confidentiality
+- AWS-side IAM Condition keys for tag-based denial (the ibounce
+  `tag/<key>` condition in `deny_actions_with_condition` is
+  best-effort because the proxy boundary does not always surface
+  resource tags)
+- Resource-pattern denies in your own profiles for project-specific
+  carve-outs (e.g. `arn:aws:s3:::company-private-*`)
 
 ### Backward-compat aliases (deprecated)
 
-The pre-rename names `none` (was the passthrough) and `prod-readonly`
-(was the write-block) keep working in v1.0 — they resolve to
-`full-user` and `readonly` respectively and emit a one-line stderr
-deprecation banner on use. Both aliases are removed in v1.1.
+The pre-reshape names `none` (was the passthrough), `prod-readonly`
+(was the v1.0-alpha write-block), and `readonly` (was the
+v1.0-alpha-2 post-47b616a rename of `prod-readonly`) keep working in
+v1.0 — `none` resolves to `full-user`; `prod-readonly` + `readonly`
+both resolve to the new `safe-default` profile. Each emits a one-line
+stderr deprecation banner on use. All three aliases are removed in
+v1.1.
 
 ### Community profiles
 
@@ -315,7 +366,7 @@ with:
 ibounce profile install --from https://example.com/path/to/staging-work.yaml
 ```
 
-Write the built-in `full-user` + `readonly` defaults to disk with
+Write the built-in `full-user` + `safe-default` defaults to disk with
 `ibounce profile install-defaults`. The file lives at
 `~/.iam-jit/bouncer/profiles.yaml` and can be edited freely — add
 your own profiles, override the defaults, or extend the
@@ -325,8 +376,8 @@ your own profiles, override the defaults, or extend the
 
 Three ways, in priority order:
 
-1. **CLI flag** (wins): `ibounce run --profile readonly`
-2. **Env var**: `IAM_JIT_BOUNCER_PROFILE=readonly ibounce run` (the
+1. **CLI flag** (wins): `ibounce run --profile safe-default`
+2. **Env var**: `IAM_JIT_BOUNCER_PROFILE=safe-default ibounce run` (the
    env-var name stays `IAM_JIT_BOUNCER_PROFILE` in v1.0 — no
    `IBOUNCE_PROFILE` alias is added; env-var alignment with the
    `ibounce` CLI name happens in v1.1 alongside removal of the
@@ -334,8 +385,8 @@ Three ways, in priority order:
    by kbounce as `KBOUNCER_PROFILE`.
 3. **Default**: `full-user` profile (passthrough) — existing rule
    behavior unchanged. `ibounce run` without `--profile` prints a
-   banner pointing the operator at `--profile readonly` as the
-   recommended write-block.
+   banner pointing the operator at `--profile safe-default` as the
+   recommended state-preservation opt-in.
 
 A typo in `--profile` (unknown name) is a hard error — the proxy
 refuses to start. Silent fallback to `full-user` would disable a
@@ -353,9 +404,18 @@ profiles:
     only_account_ids: ["111122223333"]
     exceptions:
       - "eng-productivity-tooling"     # known false-positive
-  readonly:
-    description: "Cross-product read-only floor"
-    deny_verbs: ["*:Delete*", "*:Put*", "*:Update*", "*:Create*"]
+  safe-default:
+    description: "AWS readonly admin baseline minus sensitive reads"
+    allow_baseline: "aws_managed_readonly_access"  # policy_sentry Read+List
+    deny_actions:
+      - kms:Decrypt
+      - secretsmanager:GetSecretValue
+      - ssm:GetParameter
+    deny_actions_with_condition:
+      - action: s3:GetObject
+        condition: { tag/sensitive: "true" }
+      - action: dynamodb:Scan
+        condition: { resource_pattern: "arn:aws:dynamodb:*:*:table/secrets-*" }
 ```
 
 `word_boundary` (the default) matches a keyword only at a

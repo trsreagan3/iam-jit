@@ -105,19 +105,22 @@ async def test_healthz_does_not_write_audit_row(tmp_path) -> None:
 
 @pytest.mark.asyncio
 async def test_healthz_reports_active_profile_name(tmp_path) -> None:
-    """Post Bounce-suite rename (2026-05-17): `staging-work` is no
-    longer a built-in (moved to tools/community-profiles/); use the
-    shipped `readonly` cross-product default for the healthz
-    name-reporting assertion."""
+    """Post Bounce-suite rename + safe-default reshape (2026-05-17):
+    `staging-work` is no longer a built-in (moved to
+    tools/community-profiles/); use the shipped `safe-default`
+    cross-product default for the healthz name-reporting assertion.
+    The pre-reshape names `readonly` + `prod-readonly` still resolve
+    via deprecation aliases but the canonical Profile.name is
+    `safe-default`."""
     store = BouncerStore(db_path=str(tmp_path / "b.db"))
     profiles = load_profiles()
-    readonly = profiles["readonly"]
+    safe_default = profiles["safe-default"]
     port = _free_port()
     config = ProxyConfig(
         host="127.0.0.1", port=port,
         mode=ProxyMode.TRANSPARENT,
         default_policy=DefaultPolicy.DENY,
-        active_profile=readonly,
+        active_profile=safe_default,
     )
     task = asyncio.create_task(serve(config, store=store))
     try:
@@ -126,7 +129,7 @@ async def test_healthz_reports_active_profile_name(tmp_path) -> None:
         async with aiohttp.ClientSession() as session:
             async with session.get(f"http://127.0.0.1:{port}/healthz") as resp:
                 body = await resp.json()
-        assert body["active_profile"] == "readonly"
+        assert body["active_profile"] == "safe-default"
         assert body["mode"] == "transparent"
     finally:
         task.cancel()

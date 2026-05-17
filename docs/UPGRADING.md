@@ -146,7 +146,7 @@ to align with the cross-product Bounce family (`ibounce` for AWS;
 | Console script | `iam-jit-bouncer` | `ibounce` | `iam-jit-bouncer` keeps working; prints a stderr deprecation banner + forwards to the same entrypoint |
 | MCP tools | `bouncer_*` | `ibounce_*` | Both names dispatch to the same handler; `bouncer_*` descriptions carry `(DEPRECATED — use ibounce_* in v1.1)` prefix |
 | Profile name (passthrough) | `none` | `full-user` | `--profile none` still resolves; stderr deprecation banner emitted |
-| Profile name (write block) | `prod-readonly` | `readonly` | `--profile prod-readonly` still resolves; stderr deprecation banner emitted |
+| Profile name (state-preservation floor) | `prod-readonly` (v1.0-alpha) → `readonly` (v1.0-alpha-2) | `safe-default` (v1.0 launch) | `--profile prod-readonly` and `--profile readonly` both still resolve to `safe-default`; stderr deprecation banner emitted. The architecture also changed (per `safe_default_is_readonly_admin_minus`): `safe-default` uses a `policy_sentry`-backed Read+List allow-baseline + sensitive-Read subtract list, not enumerated destructive verbs. Closes the Opus audit's CRIT gaps (`sts:AssumeRole`, `lambda:InvokeFunction`, `ssm:SendCommand`, `iam:PassRole`, `iam:Attach*Policy`, etc.) that the deny-verb model missed. |
 | Doc file | `docs/IAM-JIT-BOUNCER.md` | `docs/IBOUNCE.md` | `git mv` preserves history |
 | Launch post | `DONT-GIVE-CLAUDE-YOUR-AWS-KEYS.md` | `DONT-GIVE-CLAUDE-FULL-ADMIN.md` | `git mv` preserves history |
 
@@ -160,8 +160,10 @@ happens in v1.1 alongside removal of the deprecation shims). HTTP
 response headers `x-iam-jit-bouncer-*` also retain their old prefix
 for v1.0 to keep agents + tooling that grep on them unchanged. The
 default-active profile remains the passthrough; opt into the
-write-block with `--profile readonly` or
-`export IAM_JIT_BOUNCER_PROFILE=readonly`.
+state-preservation floor with `--profile safe-default` or
+`export IAM_JIT_BOUNCER_PROFILE=safe-default` (`--profile readonly`
+and `--profile prod-readonly` still resolve to `safe-default` in
+v1.0 with a stderr deprecation banner; both aliases removed in v1.1).
 
 **Moved community profiles:** the formerly-built-in `dev-only`,
 `staging-work`, and `incident-response` profiles moved to

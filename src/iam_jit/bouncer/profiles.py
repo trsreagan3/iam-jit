@@ -33,6 +33,8 @@ Honest limitations (must be documented):
 from __future__ import annotations
 
 import dataclasses
+import fnmatch
+import functools
 import os
 import pathlib
 import re
@@ -83,6 +85,41 @@ class Profile:
     # NOT short-circuit profile DENY layers above. Composition order
     # is documented in evaluate_profile / proxy.evaluate_request.
     allow_rules: tuple[ProfileAllowRule, ...] = ()
+    # ----------------------------------------------------------------
+    # Readonly-admin-minus framing (per safe_default_is_readonly_admin_minus
+    # memo, 2026-05-17). The hardened `safe-default` profile uses these
+    # three fields instead of enumerating destructive verbs:
+    #
+    #   - allow_baseline: a NAMED allow-set resolved at evaluation time.
+    #     For v1.0 the supported baselines are:
+    #       * "aws_managed_readonly_access" — every action policy_sentry
+    #         classifies as Read or List access level (matches the AWS
+    #         managed ReadOnlyAccess policy by construction; inherits
+    #         new-service coverage as policy_sentry updates)
+    #       * "*" — sentinel meaning "allow all" (used by `full-user`-
+    #         style profiles that don't want to gate the baseline at all
+    #         but still want to layer deny_actions on top; not used by
+    #         any built-in today, kept for symmetry)
+    #     When the profile's `allow_baseline` is set, the FIRST profile
+    #     check is "is this action IN the baseline." If not, DENY with
+    #     reason "action svc:Action not in allow_baseline X." This is
+    #     the readonly-admin-minus architectural shape.
+    #
+    #   - deny_actions: exact-match `service:action` strings that get
+    #     DENIED even if they're in the allow_baseline. The "subtract"
+    #     half of "allow X minus Y." Used for sensitive-Read carve-outs
+    #     like secretsmanager:GetSecretValue, ssm:GetParameter*, etc.
+    #
+    #   - deny_actions_with_condition: list of `{action, condition}`
+    #     entries. Condition shapes supported in v1.0:
+    #       * {"resource_pattern": "arn:aws:s3:::sensitive-*"} —
+    #         glob-match the request's ARN
+    #       * {"tag/<key>": "<value>"} — best-effort; AWS API does not
+    #         always surface tags so this fails-open (documented).
+    allow_baseline: str | None = None
+    deny_actions: tuple[str, ...] = ()
+    deny_actions_with_condition: tuple[dict[str, Any], ...] = ()
+    # ----------------------------------------------------------------
     # Provenance: where this profile came from. Set to "local" for
     # user-edited profiles, set to a source URL for profiles
     # installed via `profile install --from URL`. Profiles with a
@@ -115,25 +152,86 @@ class ProfileVerdict:
 # absent. Per `feedback_bounce_default_profile_pattern` (2026-05-17):
 # the cross-product (ibounce + kbounce + future) default reduces to
 # TWO general-purpose profiles — `full-user` (passthrough, default
-# active) and `readonly` (block write/destructive verbs). More
-# opinionated profiles (`dev-only`, `staging-work`,
+# active) and `safe-default` (readonly-admin-minus baseline + sensitive
+# carve-outs). More opinionated profiles (`dev-only`, `staging-work`,
 # `incident-response`) moved to `tools/community-profiles/` and are
 # installable via `ibounce profile install --from URL`.
+#
+# safe-default replaces the v1.0-alpha `readonly` deny-verbs shape
+# per `safe_default_is_readonly_admin_minus` (2026-05-17). The Opus
+# AWS-side audit (ibounce-safe-default-audit-2026-05-17) found CRIT
+# gaps in the verb-enumeration model: sts:AssumeRole / lambda:Invoke /
+# ssm:SendCommand / iam:PassRole / iam:Attach*Policy etc all passed.
+# The new model uses policy_sentry's Read+List access-level
+# classification as the baseline (matches AWS managed ReadOnlyAccess,
+# automatically inherits coverage of every AWS service current as of
+# the policy_sentry release we depend on) and subtracts a small list
+# of sensitive Read actions + resource-pattern carve-outs.
 DEFAULT_PROFILES: dict[str, dict[str, Any]] = {
     "full-user": {
         "description": (
             "No profile active; calls forwarded as-is + audit-logged. "
-            "Default; opt into 'readonly' for the cross-product write block."
+            "Default; opt into 'safe-default' for the readonly-admin-minus floor."
         ),
     },
-    "readonly": {
+    "safe-default": {
         "description": (
-            "Cross-product read-only floor: block write + destructive verbs "
-            "regardless of credentials. The general-purpose 'readonly' default."
+            "AWS readonly admin baseline minus sensitive reads. "
+            "BASELINE: allow everything classified as Read+List access level by "
+            "policy_sentry (matches AWS managed policy ReadOnlyAccess; covers "
+            "every AWS service current as of the policy_sentry release we "
+            "depend on; automatically inherits new-service coverage as "
+            "policy_sentry updates). "
+            "SUBTRACT: a small list of sensitive Read actions "
+            "(kms:Decrypt, secretsmanager:GetSecretValue, etc) + "
+            "resource-pattern carve-outs. "
+            "WHAT IT COVERS: state-changing operations (Write + "
+            "Permissions-management + Tagging access levels are NOT in the "
+            "baseline, so they're denied by construction; CRIT primitives "
+            "sts:AssumeRole, lambda:InvokeFunction, ssm:SendCommand, "
+            "iam:PassRole, iam:Attach*Policy etc are all Write-classified "
+            "and thus already denied). "
+            "WHAT IT DOES NOT COVER: this is NOT a confidentiality boundary. "
+            "The baseline allows reads of S3 objects, RDS data, CloudWatch "
+            "logs, IAM user metadata, etc. Pair with column-masking / "
+            "sensitive-bucket policies for confidentiality."
         ),
-        "deny_verbs": [
-            "*:Delete*", "*:Put*", "*:Update*", "*:Create*",
-            "*:Terminate*", "*:Stop*", "*:Reboot*",
+        "allow_baseline": "aws_managed_readonly_access",
+        "deny_actions": [
+            # All of these are sensitive Reads that need explicit subtract.
+            # Some (kms:Decrypt, secretsmanager:GetSecretValue) happen to
+            # be policy_sentry-classified as Write in current data and are
+            # therefore ALREADY excluded by the allow_baseline; keeping
+            # them in deny_actions is defensive belt-and-suspenders so a
+            # future policy_sentry reclassification can't silently make
+            # them flow through.
+            "kms:Decrypt",
+            "secretsmanager:GetSecretValue",
+            "ssm:GetParameter",          # may return SecureString
+            "ssm:GetParameters",          # ditto
+            "ssm:GetParametersByPath",    # ditto
+            "ec2:GetPasswordData",
+            "ec2:GetConsoleScreenshot",
+            "cognito-idp:AdminGetUser",
+            "cognito-idp:AdminListGroupsForUser",
+        ],
+        "deny_actions_with_condition": [
+            {
+                "action": "s3:GetObject",
+                "condition": {"tag/sensitive": "true"},
+            },
+            {
+                "action": "dynamodb:Scan",
+                "condition": {
+                    "resource_pattern": "arn:aws:dynamodb:*:*:table/secrets-*",
+                },
+            },
+            {
+                "action": "dynamodb:Query",
+                "condition": {
+                    "resource_pattern": "arn:aws:dynamodb:*:*:table/secrets-*",
+                },
+            },
         ],
     },
 }
@@ -141,13 +239,16 @@ DEFAULT_PROFILES: dict[str, dict[str, Any]] = {
 
 # Deprecated profile-name aliases. Map old name → new name. Kept
 # working for v1.0; remove in v1.1. Per the rename plan, `none` →
-# `full-user` (rename only) and `prod-readonly` → `readonly` (rename
-# + drop the "prod" connotation). Both old names still resolve via
-# `resolve_active_profile`; resolution emits a one-line stderr
-# deprecation banner.
+# `full-user` (rename only); `prod-readonly` (v1.0-alpha) and
+# `readonly` (v1.0-alpha-2, post-rename batch 47b616a) both map to
+# `safe-default` (v1.0 launch name + new readonly-admin-minus
+# architecture per safe_default_is_readonly_admin_minus memo).
+# Both old names resolve via `resolve_active_profile`; resolution
+# emits a one-line stderr deprecation banner.
 DEPRECATED_PROFILE_ALIASES: dict[str, str] = {
     "none": "full-user",
-    "prod-readonly": "readonly",
+    "prod-readonly": "safe-default",
+    "readonly": "safe-default",
 }
 
 
@@ -250,6 +351,20 @@ def _profile_from_dict(name: str, body: dict[str, Any]) -> Profile:
             f"profile {name!r}: keyword_match must be 'word_boundary' or 'substring'"
         )
     allow_rules = _parse_allow_rules(name, body.get("allow_rules"))
+    allow_baseline = body.get("allow_baseline")
+    if allow_baseline is not None:
+        if not isinstance(allow_baseline, str) or not allow_baseline:
+            raise ValueError(
+                f"profile {name!r}: allow_baseline must be a non-empty string or null"
+            )
+        if allow_baseline not in _SUPPORTED_ALLOW_BASELINES:
+            raise ValueError(
+                f"profile {name!r}: allow_baseline {allow_baseline!r} is not supported; "
+                f"known: {sorted(_SUPPORTED_ALLOW_BASELINES)}"
+            )
+    deny_actions_with_condition = _parse_deny_actions_with_condition(
+        name, body.get("deny_actions_with_condition"),
+    )
     return Profile(
         name=name,
         description=str(body.get("description", "")),
@@ -260,8 +375,59 @@ def _profile_from_dict(name: str, body: dict[str, Any]) -> Profile:
         deny_verbs=_str_tuple("deny_verbs"),
         exceptions=_str_tuple("exceptions"),
         allow_rules=allow_rules,
+        allow_baseline=allow_baseline,
+        deny_actions=_str_tuple("deny_actions"),
+        deny_actions_with_condition=deny_actions_with_condition,
         source=str(body.get("source", "local")),
     )
+
+
+_SUPPORTED_ALLOW_BASELINES: frozenset[str] = frozenset({
+    "aws_managed_readonly_access",
+    "*",
+})
+
+
+def _parse_deny_actions_with_condition(
+    profile_name: str, raw: Any,
+) -> tuple[dict[str, Any], ...]:
+    """Parse the optional `deny_actions_with_condition` list from YAML.
+    Each entry: `{action: "service:Action", condition: {<key>: <val>}}`.
+    Validates shape strictly (the field is security-relevant — a typo
+    that silently no-ops a conditional deny is worse than a crash)."""
+    if raw is None:
+        return ()
+    if not isinstance(raw, list):
+        raise ValueError(
+            f"profile {profile_name!r}: deny_actions_with_condition must be a list"
+        )
+    out: list[dict[str, Any]] = []
+    for i, entry in enumerate(raw):
+        if not isinstance(entry, dict):
+            raise ValueError(
+                f"profile {profile_name!r}: "
+                f"deny_actions_with_condition[{i}] must be an object"
+            )
+        action = entry.get("action")
+        if not isinstance(action, str) or ":" not in action:
+            raise ValueError(
+                f"profile {profile_name!r}: "
+                f"deny_actions_with_condition[{i}].action must be a "
+                f"'service:Action' string"
+            )
+        # condition is OPTIONAL — an entry with no condition reduces to
+        # an unconditional deny of the action (same as putting it in
+        # deny_actions). We allow it for YAML-author convenience but
+        # the resolver below has to handle it.
+        condition = entry.get("condition", {})
+        if not isinstance(condition, dict):
+            raise ValueError(
+                f"profile {profile_name!r}: "
+                f"deny_actions_with_condition[{i}].condition must be an "
+                f"object (or omitted for unconditional deny)"
+            )
+        out.append({"action": action, "condition": dict(condition)})
+    return tuple(out)
 
 
 def _parse_allow_rules(
@@ -342,6 +508,14 @@ def profile_to_yaml_dict(profile: Profile) -> dict[str, Any]:
                 "note": r.note or None,
             }.items() if v is not None}
             for r in profile.allow_rules
+        ]
+    if profile.allow_baseline:
+        body["allow_baseline"] = profile.allow_baseline
+    if profile.deny_actions:
+        body["deny_actions"] = list(profile.deny_actions)
+    if profile.deny_actions_with_condition:
+        body["deny_actions_with_condition"] = [
+            dict(entry) for entry in profile.deny_actions_with_condition
         ]
     if profile.source and profile.source != "local":
         body["source"] = profile.source
@@ -487,6 +661,125 @@ def _glob_match(pattern: str, candidate: str) -> bool:
     return bool(re.match(regex, candidate))
 
 
+# ---------------------------------------------------------------------------
+# allow_baseline resolution — uses policy_sentry for the AWS managed
+# ReadOnlyAccess shape. Per the readonly-admin-minus framing, the
+# baseline is the structural "what reads are even on the table"; the
+# profile's deny_actions + deny_actions_with_condition subtract from it.
+# ---------------------------------------------------------------------------
+
+
+@functools.lru_cache(maxsize=None)
+def _service_read_list_actions(service: str) -> frozenset[str]:
+    """Return the lowercased `service:action` set classified by
+    policy_sentry as Read or List for `service`. Cached per-service so
+    the policy_sentry lookup happens once per process.
+
+    Returns an empty set for services policy_sentry doesn't know
+    (e.g. brand-new AWS services not yet in the data version we depend
+    on). The caller treats "not in baseline" as DENY, so an unknown
+    service fails CLOSED — which is the right safety default: an agent
+    asking for a service the baseline can't classify gets the same
+    treatment as asking for a Write-classified action.
+    """
+    try:
+        from policy_sentry.querying.actions import get_actions_with_access_level
+    except ImportError:
+        # Defensive: if policy_sentry isn't importable, fail closed by
+        # returning the empty set so every action is "not in baseline."
+        return frozenset()
+    out: set[str] = set()
+    for level in ("Read", "List"):
+        try:
+            for action_full in get_actions_with_access_level(service, level) or []:
+                if not isinstance(action_full, str) or ":" not in action_full:
+                    continue
+                out.add(action_full.lower())
+        except Exception:
+            # policy_sentry raises KeyError on unknown services + can
+            # raise on data-shape changes between versions. Swallow +
+            # fall through to next level / return what we have.
+            continue
+    return frozenset(out)
+
+
+def _action_in_baseline(baseline_name: str, service: str, action: str) -> bool:
+    """Resolve whether `service:action` is in the named allow-baseline.
+
+    Supported baselines:
+      - "aws_managed_readonly_access": policy_sentry's Read+List classifications
+      - "*": always True (sentinel — disables baseline gating entirely)
+
+    Unknown baseline names raise ValueError (caught at profile-load
+    time by _SUPPORTED_ALLOW_BASELINES validation; raising here is the
+    last-line defense)."""
+    if baseline_name == "*":
+        return True
+    if baseline_name == "aws_managed_readonly_access":
+        if not service or not action:
+            return False
+        full = f"{service}:{action}".lower()
+        return full in _service_read_list_actions(service)
+    raise ValueError(f"unknown allow_baseline {baseline_name!r}")
+
+
+def _matches_conditional_deny(
+    entry: dict[str, Any],
+    *,
+    service: str | None,
+    action: str | None,
+    arn: str | None,
+) -> bool:
+    """Resolve whether a `deny_actions_with_condition` entry fires for
+    the current request. Returns True → DENY.
+
+    Condition shapes:
+      - {"resource_pattern": "arn:aws:s3:::sensitive-*"} — fnmatch
+        glob against the request ARN (case-insensitive). If no ARN is
+        available on the request, the resource_pattern condition
+        FAILS CLOSED (returns False — caller does not deny), because
+        we can't evaluate the predicate. This is documented as a
+        best-effort condition; high-confidence enforcement requires
+        AWS-side resource policies or IAM Condition keys.
+      - {"tag/<key>": "<value>"} — AWS API does not always surface
+        request tags through the proxy boundary, so we treat tag
+        conditions as best-effort and they currently always evaluate
+        False. Operators relying on tag-based denial should layer an
+        AWS-side IAM policy with `aws:ResourceTag/<key>` Condition.
+      - empty / missing condition: unconditional deny when the action
+        matches (same shape as deny_actions but expressed in the
+        conditional-list YAML for grouping convenience).
+    """
+    if not isinstance(entry, dict):
+        return False
+    entry_action = entry.get("action")
+    if not entry_action or not service or not action:
+        return False
+    if entry_action != f"{service}:{action}":
+        return False
+    cond = entry.get("condition") or {}
+    if not cond:
+        # Unconditional deny shape; action match alone fires it.
+        return True
+    if "resource_pattern" in cond:
+        pattern = cond["resource_pattern"]
+        if not isinstance(pattern, str) or not pattern:
+            return False
+        if not arn:
+            # Can't evaluate — fail open at this condition (caller may
+            # still deny via other layers; this entry abstains).
+            return False
+        return fnmatch.fnmatchcase(arn.lower(), pattern.lower())
+    if any(isinstance(k, str) and k.startswith("tag/") for k in cond):
+        # Tag-based conditions are best-effort + currently always
+        # abstain. Documented above.
+        return False
+    # Unknown condition shape — abstain rather than crash. Profile
+    # validation at load-time is responsible for catching truly
+    # malformed conditions.
+    return False
+
+
 def evaluate_profile(
     profile: Profile,
     *,
@@ -502,18 +795,82 @@ def evaluate_profile(
     no-objection verdict (denied=False).
 
     Composition (within a profile):
-      1. Account-ID restriction (if `only_account_ids` is set and the
-         request's account is not in the list) → DENY
-      2. Keyword denies against `keyword_targets` (with exceptions) → DENY
-      3. Verb denies against `deny_verbs` → DENY
-      4. No objection → allow downstream rules to decide
+      1. allow_baseline gate (if set, action NOT in baseline → DENY)
+      2. deny_actions exact match → DENY (subtracts from baseline)
+      3. deny_actions_with_condition match → DENY (subtracts conditionally)
+      4. Account-ID restriction (only_account_ids) → DENY
+      5. Keyword denies against `keyword_targets` (with exceptions) → DENY
+      6. Verb denies against `deny_verbs` → DENY
+      7. No objection → allow downstream rules to decide
+
+    Layers 1-3 are the readonly-admin-minus framing (per
+    safe_default_is_readonly_admin_minus memo); layers 4-6 are the
+    pre-existing keyword/verb model. Both are supported simultaneously
+    so operator-authored profiles with only `deny_keywords` keep working
+    unchanged (no allow_baseline → layer 1 abstains).
     """
     # Profile 'full-user' (or any empty profile — incl. the legacy
-    # 'none' alias) is a no-op
-    if not profile.deny_keywords and not profile.deny_verbs and not profile.only_account_ids:
+    # 'none' alias) is a no-op. Note we also check the new fields.
+    if (
+        not profile.deny_keywords
+        and not profile.deny_verbs
+        and not profile.only_account_ids
+        and not profile.allow_baseline
+        and not profile.deny_actions
+        and not profile.deny_actions_with_condition
+    ):
         return ProfileVerdict(denied=False)
 
-    # 1. Account-ID lock
+    full_action = (
+        f"{service}:{action}" if (service and action) else None
+    )
+
+    # 1. allow_baseline gate — first thing checked when set. The
+    # readonly-admin-minus shape: "is the requested action even in the
+    # baseline of permitted reads?" An action not in the baseline is
+    # denied here BEFORE we look at any subtract list, so a profile
+    # author who omits a sensitive action from deny_actions still gets
+    # protection via the structural classification (Write-classified
+    # actions never reach the subtract step).
+    if profile.allow_baseline and service and action:
+        if not _action_in_baseline(profile.allow_baseline, service, action):
+            return ProfileVerdict(
+                denied=True,
+                reason=(
+                    f"profile {profile.name!r}: action {full_action} not in "
+                    f"allow_baseline {profile.allow_baseline!r}"
+                ),
+                source="profile",
+            )
+
+    # 2. deny_actions — exact-match subtract list, fires after baseline.
+    if profile.deny_actions and full_action:
+        if full_action in profile.deny_actions:
+            return ProfileVerdict(
+                denied=True,
+                reason=(
+                    f"profile {profile.name!r}: action {full_action} in "
+                    f"deny_actions (subtract list)"
+                ),
+                source="profile",
+            )
+
+    # 3. deny_actions_with_condition — resource-pattern + tag-based.
+    if profile.deny_actions_with_condition and service and action:
+        for entry in profile.deny_actions_with_condition:
+            if _matches_conditional_deny(
+                entry, service=service, action=action, arn=arn,
+            ):
+                return ProfileVerdict(
+                    denied=True,
+                    reason=(
+                        f"profile {profile.name!r}: action {full_action} "
+                        f"matched conditional deny {entry!r}"
+                    ),
+                    source="profile",
+                )
+
+    # 4. Account-ID lock
     if profile.only_account_ids:
         if account_id is None or account_id not in profile.only_account_ids:
             return ProfileVerdict(
@@ -526,7 +883,7 @@ def evaluate_profile(
                 source="profile",
             )
 
-    # 2. Keyword denies
+    # 5. Keyword denies
     if profile.deny_keywords:
         target_values: dict[str, str | None] = {
             "arn": arn,
@@ -553,7 +910,8 @@ def evaluate_profile(
                         source="profile",
                     )
 
-    # 3. Verb denies
+    # 6. Verb denies (legacy shape; safe-default no longer uses these
+    # but operator-authored profiles + community profiles still can)
     if profile.deny_verbs and service and action:
         for verb_pat in profile.deny_verbs:
             if _verb_pattern_matches(verb_pat, service, action):

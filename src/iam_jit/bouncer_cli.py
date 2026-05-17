@@ -972,6 +972,11 @@ def effective_scope_cmd(owner: str | None, db: str | None, as_json: bool) -> Non
                    "synthesized rules as `allow_rules`, so `--profile NAME` "
                    "on future `run` invocations applies them. Refuses to "
                    "overwrite an existing profile sourced from an org URL.")
+# TODO(#226 profile-auto-naming): per the profile-auto-naming memo,
+# NAME should become OPTIONAL — when omitted, the CLI either prompts
+# the user on a TTY or auto-generates from request shape / timestamp.
+# Separate scope; do not implement here. Same TODO for `prompts answer
+# --kind profile --target` below.
 @click.option("--profile-description", default=None,
               help="With --save-as-profile, the description string written "
                    "into the new profile. Falls back to a generated summary.")
@@ -1622,6 +1627,10 @@ def prompts_show_cmd(prompt_id: int, db: str | None) -> None:
                    "mark answered without side effect.")
 @click.option("--target", default=None,
               help="With --kind profile: the profile name to append to.")
+# TODO(#226 profile-auto-naming): per the profile-auto-naming memo,
+# --target should become OPTIONAL — on a TTY prompt the user for a
+# name (default to auto-gen); non-TTY auto-generate from prompt
+# context. Separate scope; do not implement here.
 @click.option("--db", type=click.Path(dir_okay=False), default=None)
 def prompts_answer_cmd(
     prompt_id: int, kind: str, target: str | None, db: str | None,
@@ -2048,11 +2057,32 @@ def run_cmd(
                 err=True,
             )
         if passthrough_default:
+            # Per safe_default_is_readonly_admin_minus (2026-05-17):
+            # the banner explains BOTH what safe-default blocks AND
+            # what it does not block, so an operator who skims past
+            # the recommendation doesn't get a confidentiality
+            # surprise in incident response. Mirrors the README +
+            # docs/IBOUNCE.md callout.
             click.echo(
-                "  No profile selected; calls forwarded as-is + "
-                "audit-logged. To block write/destructive verbs, run "
-                "with `--profile readonly` or "
-                "`export IAM_JIT_BOUNCER_PROFILE=readonly` in your shell rc.",
+                "  No profile selected. Calls forwarded as-is + audit-logged.",
+                err=True,
+            )
+            click.echo(
+                "  For state-preservation safety, run with --profile safe-default.",
+                err=True,
+            )
+            click.echo(
+                "    blocks state-changing AWS operations (writes, privilege "
+                "grants, exfil)",
+                err=True,
+            )
+            click.echo(
+                "    does NOT prevent reads of sensitive data (use S3 bucket "
+                "policies +",
+                err=True,
+            )
+            click.echo(
+                "      KMS grants for confidentiality)",
                 err=True,
             )
         click.echo(
