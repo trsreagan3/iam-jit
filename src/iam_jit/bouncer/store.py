@@ -288,6 +288,38 @@ class BouncerStore:
         )
         return rid
 
+    def rule_exists(self, rule: ProxyRule) -> bool:
+        """WB28 MED-28-02 closure: True iff an identical
+        (pattern, effect, arn_scope, region_scope) row already exists.
+
+        Callers (`bouncer_cli._apply_recommendations_via_cli` and
+        `mcp_server._bouncer_apply_recommendation_for_mcp`) consult this
+        before `add_rule` so re-running `recommend --apply` against
+        unchanged traffic doesn't accumulate duplicate rule rows in
+        the table over time.
+
+        NULL-safe comparison: SQLite `IS` operator handles None
+        (vs `= NULL` which is always-False).
+        """
+        with self._lock:
+            cur = self._conn.execute(
+                """
+                SELECT 1 FROM rules
+                WHERE pattern = ?
+                  AND effect = ?
+                  AND (arn_scope IS ? OR arn_scope = ?)
+                  AND (region_scope IS ? OR region_scope = ?)
+                LIMIT 1
+                """,
+                (
+                    rule.pattern,
+                    rule.effect.value,
+                    rule.arn_scope, rule.arn_scope,
+                    rule.region_scope, rule.region_scope,
+                ),
+            )
+            return cur.fetchone() is not None
+
     def remove_rule(self, rule_id: int, *, actor: str = "cli") -> bool:
         """Delete a rule by id. Returns True if a row was removed.
 

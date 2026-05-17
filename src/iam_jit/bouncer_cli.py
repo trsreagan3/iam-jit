@@ -15,6 +15,7 @@ from __future__ import annotations
 import contextlib
 import json
 import sys
+from typing import Any
 
 import click
 
@@ -826,14 +827,22 @@ def effective_scope_cmd(owner: str | None, db: str | None, as_json: bool) -> Non
                    "Omit to read the full audit log.")
 @click.option("--until", default=None,
               help="ISO-8601 upper bound. Omit for 'until now'.")
-@click.option("--min-support", type=int, default=3, show_default=True,
-              help="Skip groups with fewer than N observed calls.")
-@click.option("--limit", type=int, default=10000, show_default=True,
-              help="Max number of decisions to read from the audit log.")
+@click.option("--min-support", type=click.IntRange(min=1), default=3, show_default=True,
+              help="Skip groups with fewer than N observed calls (must be >= 1).")
+@click.option("--limit", type=click.IntRange(min=1, max=10000), default=10000,
+              show_default=True,
+              help="Max number of decisions to read (1 to 10000).")
 @click.option("--db", type=click.Path(dir_okay=False), default=None)
 @click.option("--json", "as_json", is_flag=True, default=False)
 @click.option("--apply", "apply_now", is_flag=True, default=False,
-              help="Apply ALL recommendations as new rules. Skip for review-only.")
+              help="Apply recommendations as new rules. Skip for review-only.")
+@click.option("--apply-only", "apply_only", default=None,
+              help="With --apply, only apply recommendations whose "
+                   "pattern is in this comma-separated list. "
+                   "Example: --apply-only s3:GetObject,s3:ListBucket")
+@click.option("--include-task-scoped", is_flag=True, default=False,
+              help="By default, task-scoped (Slice C one-off session) "
+                   "decisions are excluded. Pass this to include them.")
 def recommend_cmd(
     since: str | None,
     until: str | None,
@@ -842,6 +851,8 @@ def recommend_cmd(
     db: str | None,
     as_json: bool,
     apply_now: bool,
+    apply_only: str | None,
+    include_task_scoped: bool,
 ) -> None:
     """Synthesize a draft ruleset from observed traffic in a window.
 
@@ -851,23 +862,38 @@ def recommend_cmd(
     rules with the discovered scope, and attaches a curated
     'what does this action do' note for common actions.
 
-    Review-first by default. Pass `--apply` to bulk-add all
-    recommendations as new rules in one audit-logged batch.
+    Review-first by default. Pass `--apply` to add recommendations
+    as new rules. Combine with `--apply-only` to cherry-pick which
+    patterns to apply.
     """
-    from .bouncer.recommender import summarize_window, synthesize_rules
+    from .bouncer.recommender import (
+        filter_decisions_by_window,
+        summarize_window,
+        synthesize_rules,
+    )
 
     with _opened_store(db) as store:
         all_decisions = store.list_decisions(limit=limit)
-    # Filter by time window (server-side filtering is not available
-    # on list_decisions today; do it here).
-    decisions = [
-        d for d in all_decisions
-        if (since is None or (d.get("at") and d["at"] >= since))
-        and (until is None or (d.get("at") and d["at"] <= until))
-    ]
+    # WB28 LOW-28-04 closure: semantic datetime comparison instead of
+    # lexicographic string compare (handles mixed-tz input).
+    decisions = filter_decisions_by_window(
+        all_decisions, since=since, until=until
+    )
 
     summary = summarize_window(decisions)
-    recs = synthesize_rules(decisions, min_support=min_support)
+    recs = synthesize_rules(
+        decisions,
+        min_support=min_support,
+        include_task_scoped=include_task_scoped,
+    )
+
+    # WB28 MED-28-06 closure: cherry-pick which patterns to apply.
+    apply_patterns: set[str] | None = None
+    if apply_only:
+        apply_patterns = {p.strip() for p in apply_only.split(",") if p.strip()}
+        if not apply_patterns:
+            click.echo("--apply-only: no patterns parsed; aborting.", err=True)
+            raise SystemExit(2)
 
     if as_json:
         click.echo(json.dumps({
@@ -875,7 +901,7 @@ def recommend_cmd(
             "recommendations": [r.to_dict() for r in recs],
         }, indent=2))
         if apply_now and recs:
-            _apply_recommendations_via_cli(db, recs)
+            _apply_recommendations_via_cli(db, recs, apply_patterns)
         return
 
     click.echo(f"# observation window: {summary['window_start']} -> {summary['window_end']}")
@@ -909,32 +935,59 @@ def recommend_cmd(
         click.echo()
 
     if apply_now:
-        _apply_recommendations_via_cli(db, recs)
+        _apply_recommendations_via_cli(db, recs, apply_patterns)
 
 
-def _apply_recommendations_via_cli(db_path: str | None, recs: list) -> None:
-    """Apply all recommendations as rules in a single audit-logged batch."""
+def _apply_recommendations_via_cli(
+    db_path: str | None,
+    recs: list,
+    apply_patterns: set[str] | None = None,
+) -> None:
+    """Apply recommendations as rules in a single audit-logged batch.
+
+    WB28 MED-28-02 closure: skip duplicates against existing rules
+    so re-running `recommend --apply` doesn't accumulate identical
+    rows.
+    WB28 MED-28-03 closure: record the rule_ids in the
+    `recommendation_applied` event detail so post-hoc review can
+    correlate the batch with its rows without timestamp guessing.
+    WB28 MED-28-06 closure: respect `apply_patterns` cherry-pick.
+    """
     from .bouncer.store import InvalidRuleError
 
     with _opened_store(db_path) as store:
         actor = _current_actor()
-        added = 0
+        added_rule_ids: list[int] = []
+        rejected: list[dict[str, Any]] = []
         for r in recs:
+            pat = r.proposed_rule.pattern
+            if apply_patterns is not None and pat not in apply_patterns:
+                continue
+            if store.rule_exists(r.proposed_rule):
+                rejected.append({"pattern": pat, "error": "rule already exists"})
+                click.echo(f"skipped (duplicate): {pat}")
+                continue
             try:
-                store.add_rule(r.proposed_rule, actor=actor)
-                added += 1
+                rid = store.add_rule(r.proposed_rule, actor=actor)
+                added_rule_ids.append(rid)
             except InvalidRuleError as e:
-                click.echo(f"warning: rejected recommended rule {r.proposed_rule.pattern}: {e}",
+                rejected.append({"pattern": pat, "error": str(e)})
+                click.echo(f"warning: rejected recommended rule {pat}: {e}",
                            err=True)
         # Log a top-level "recommendations applied" event so the
         # audit chain shows the batch shape.
         store._record_config_event_locked(
             actor=actor,
             kind="recommendation_applied",
-            summary=f"applied {added} recommended rule(s)",
-            detail={"count": added},
+            summary=f"applied {len(added_rule_ids)} recommended rule(s)",
+            detail={
+                "count": len(added_rule_ids),
+                "rule_ids": added_rule_ids,
+                "rejected_count": len(rejected),
+                "rejected": rejected,
+            },
         )
-    click.echo(f"applied {added} recommended rules.")
+    click.echo(f"applied {len(added_rule_ids)} recommended rules.")
 
 
 @main.command("inspect")

@@ -47,21 +47,21 @@ The six LOWs are: misleading ARN/region rationale string ("2 of 2 ARNs" hides "8
 
 | Finding | Status |
 |---|---|
-| CRIT-28-01 `synthesize_rules` includes deny + prompt decisions in ALLOW-rule recommendations; denied traffic becomes proposed allow rule | OPEN |
-| HIGH-28-01 `_detect_arn_prefix` anchor over-trims mid-segment LCPs; proposes `arn:aws:s3:::*` for `reports-2026-q[1-3]` ARNs | OPEN |
-| HIGH-28-02 MCP `bouncer_apply_recommendation` crashes (uncaught `sqlite3.ProgrammingError`) on dict/list `arn_scope`/`region_scope`/`note`; silently accepts numeric values | OPEN |
-| MED-28-01 ARN/region scope inferred from subset of records-with-data, applied to whole support group; rule blocks majority of historical calls in ENFORCE mode | OPEN |
-| MED-28-02 CLI + MCP apply paths do not dedupe against existing rules; repeat apply produces duplicate rows | OPEN |
-| MED-28-03 `recommendation_applied` event detail is `{count: N}` only; doesn't record which rule IDs were applied | OPEN |
-| MED-28-04 CLI accepts `--limit 0/-N` and `--min-support 0` without validation; MCP correctly rejects same | OPEN |
-| MED-28-05 Recommender includes task-scoped decisions; one-off task traffic becomes permanent rule recommendation | OPEN |
-| MED-28-06 CLI `--apply` is bulk-only; no `--dry-run` opposite or per-rule confirmation; MCP exposes per-rule cherry-pick but CLI doesn't | OPEN |
-| LOW-28-01 ARN/region rationale strings count only non-None records (`2 of 2 observed ARNs`); user reading sees support_count=10 and infers consistency | OPEN |
-| LOW-28-02 KNOWN_ACTIONS severity markers (DESTRUCTIVE / SENSITIVE / WRITE / EXPENSIVE / HIGH RISK) inconsistent across catalog; embedded in prose; should be a structured field | OPEN |
-| LOW-28-03 `summarize_window`'s `total_calls` may exceed `allow + deny + prompt` for missing/unknown `decision` field values | OPEN |
-| LOW-28-04 `--since`/`--until` filter is naive lexicographic string comparison; silently mishandles mixed-timezone input (+00:00 vs Z) | OPEN |
-| LOW-28-05 KNOWN_ACTIONS catalog risks staleness over time; curated prose has no provenance/last-reviewed-at field; AWS service behavior evolves | OPEN |
-| LOW-28-06 `_apply_recommendations_via_cli` calls private `store._record_config_event_locked`; consistent with WB23 precedent but still API debt | OPEN |
+| CRIT-28-01 `synthesize_rules` includes deny + prompt decisions in ALLOW-rule recommendations; denied traffic becomes proposed allow rule | CLOSED |
+| HIGH-28-01 `_detect_arn_prefix` anchor over-trims mid-segment LCPs; proposes `arn:aws:s3:::*` for `reports-2026-q[1-3]` ARNs | CLOSED |
+| HIGH-28-02 MCP `bouncer_apply_recommendation` crashes (uncaught `sqlite3.ProgrammingError`) on dict/list `arn_scope`/`region_scope`/`note`; silently accepts numeric values | CLOSED |
+| MED-28-01 ARN/region scope inferred from subset of records-with-data, applied to whole support group; rule blocks majority of historical calls in ENFORCE mode | CLOSED |
+| MED-28-02 CLI + MCP apply paths do not dedupe against existing rules; repeat apply produces duplicate rows | CLOSED |
+| MED-28-03 `recommendation_applied` event detail is `{count: N}` only; doesn't record which rule IDs were applied | CLOSED |
+| MED-28-04 CLI accepts `--limit 0/-N` and `--min-support 0` without validation; MCP correctly rejects same | CLOSED |
+| MED-28-05 Recommender includes task-scoped decisions; one-off task traffic becomes permanent rule recommendation | CLOSED |
+| MED-28-06 CLI `--apply` is bulk-only; no `--dry-run` opposite or per-rule confirmation; MCP exposes per-rule cherry-pick but CLI doesn't | CLOSED |
+| LOW-28-01 ARN/region rationale strings count only non-None records (`2 of 2 observed ARNs`); user reading sees support_count=10 and infers consistency | CLOSED |
+| LOW-28-02 KNOWN_ACTIONS severity markers (DESTRUCTIVE / SENSITIVE / WRITE / EXPENSIVE / HIGH RISK) inconsistent across catalog; embedded in prose; should be a structured field | CLOSED |
+| LOW-28-03 `summarize_window`'s `total_calls` may exceed `allow + deny + prompt` for missing/unknown `decision` field values | CLOSED |
+| LOW-28-04 `--since`/`--until` filter is naive lexicographic string comparison; silently mishandles mixed-timezone input (+00:00 vs Z) | CLOSED |
+| LOW-28-05 KNOWN_ACTIONS catalog risks staleness over time; curated prose has no provenance/last-reviewed-at field; AWS service behavior evolves | CLOSED |
+| LOW-28-06 `_apply_recommendations_via_cli` calls private `store._record_config_event_locked`; consistent with WB23 precedent but still API debt | CLOSED |
 
 ## CRIT findings
 
@@ -729,3 +729,78 @@ After fixes ship, re-run audit (Round 29) — recommended scope: re-probe CRIT-2
 The Slice D synthesis layer has solid bones — grouping, prefix detection, region detection, research-note attachment all compose cleanly. The 15 findings concentrate at: the omission of the `decision` field as a filter (the CRIT — a semantic, not algorithmic, gap); the anchor-trimming heuristic that's too aggressive when traffic doesn't conveniently end at `/`; and the MCP input validator that trusts schema instead of enforcing at runtime. Same lesson WB23-WB27 keep teaching: foundation algorithms tend to be correct; the bugs cluster at the integration boundaries (validator gaps, semantic field omissions, CLI/MCP parity drift, audit-chain shape contracts).
 
 Audit ROI continues: 1 CRIT (the recommender's whole purpose was structurally inverted in a way that all 40 unit tests miss because none seed deny decisions and check the recommendation's effect field), 2 HIGHs (algorithm over-broadening + validator-bypass crash), 6 MEDs catching parity drift + audit-chain promise gaps. Per [[audit-cadence-discipline]] the BB+WB pattern continues to surface the cross-layer integration bugs the within-feature test suite doesn't catch. The CRIT in particular is the kind of finding that justifies the audit cadence — it ships in code with passing unit tests and a passing integration test, because no test imagined "what if the recommender's input contains denied decisions."
+
+## Closures (2026-05-17)
+
+All 1 CRIT + 2 HIGH + 6 MED + 6 LOW addressed. Test suite went from 2550 to 2578 (+28 closure tests in `tests/bouncer/test_recommender.py`). Zero regressions in the prior 2526 + 40 Slice-D tests.
+
+### CRIT-28-01 — CLOSED
+`synthesize_rules` now filters decisions by `decision == "allow"` before grouping (`src/iam_jit/bouncer/recommender.py:496-507`). Denied + prompted attempts are NOT endorsement and cannot generate ALLOW rule recommendations.
+- Closure tests: `test_crit_28_01_denied_decisions_excluded_from_recommendations`, `test_crit_28_01_mixed_allow_deny_only_allow_counts`, `test_crit_28_01_prompt_decisions_also_excluded`.
+- Sharper repro test: 2 allowed S3 reads to `data/` + 3 denied S3 reads to `secrets/` no longer generate a single rule that would authorize the previously-blocked `secrets/` paths.
+
+### HIGH-28-01 — CLOSED
+`_detect_arn_prefix` now uses new helper `_anchor_arn_prefix` (`recommender.py:258-314`) that anchors strictly INSIDE the resource segment (after the 5th colon). Anchors on `/`, `-`, or `_` within the resource portion; never backs up past the resource-segment start.
+- Closure tests: `test_high_28_01_arn_anchor_does_not_collapse_to_service_wildcard` (3 `reports-2026-q[123]` ARNs no longer → `arn:aws:s3:::*`), `_keeps_meaningful_segment`, `_keeps_lcp_when_no_internal_boundary`.
+
+### HIGH-28-02 — CLOSED
+`_bouncer_apply_recommendation_for_mcp` now isinstance-validates `arn_scope`, `region_scope`, `note` before constructing `ProxyRule` (`src/iam_jit/mcp_server.py:2353-2375`). Invalid entries land in `rejected[]`; the batch continues; the `recommendation_applied` event still fires for the valid subset.
+- Closure tests: `test_high_28_02_mcp_apply_rejects_non_string_arn_scope`, `_region_scope`, `_note`, `_partial_failure_batch_event_still_writes`.
+
+### MED-28-01 — CLOSED
+`synthesize_rules` now gates per-dimension scope inference on a 50%-of-support fraction (`ARN_INFER_MIN_FRACTION = REGION_INFER_MIN_FRACTION = 0.5`) at `recommender.py:539-571`. When <50% of a group's calls have observable ARN/region data, the rule ships scope-less and the rationale explains why ("only 2 of 10 calls had observable ARN data; not narrowing by ARN scope"). Historical None-ARN traffic continues matching in ENFORCE.
+- Closure tests: `test_med_28_01_sparse_arn_data_skips_arn_scope`, `_sparse_region_data_skips_region_scope`, `_majority_arn_data_still_scopes`.
+
+### MED-28-02 — CLOSED
+New `BouncerStore.rule_exists()` method (`src/iam_jit/bouncer/store.py:291-321`) with NULL-safe `(pattern, effect, arn_scope, region_scope)` comparison. Both apply paths now consult it before `add_rule` and route duplicates to `rejected[]` with `error: "rule already exists"`. Re-running `recommend --apply` on unchanged traffic no longer accumulates duplicate rows.
+- Closure tests: `test_med_28_02_store_rule_exists`, `_mcp_apply_rejects_duplicate_on_second_call`.
+
+### MED-28-03 — CLOSED
+Both apply paths now collect the rule_ids returned by `add_rule` and write them into the `recommendation_applied` event detail (`{"count": N, "rule_ids": [...], "rejected_count": M, "rejected": [...]}`). Post-hoc review can correlate the batch with its rows directly. MCP also returns `applied_rule_ids` to the caller.
+- Closure test: `test_med_28_03_mcp_apply_event_records_rule_ids` (inspects stored audit event and verifies the rule_ids list matches the MCP response).
+
+### MED-28-04 — CLOSED
+CLI now uses `click.IntRange(min=1)` for `--min-support` and `click.IntRange(min=1, max=10000)` for `--limit` (`src/iam_jit/bouncer_cli.py:829-832`). CLI/MCP parity restored: 0 and negatives rejected at the click layer with a clear error.
+- Closure tests: `test_med_28_04_cli_min_support_zero_rejected`, `_cli_limit_negative_rejected`.
+
+### MED-28-05 — CLOSED
+`synthesize_rules` now skips decisions with non-NULL `task_id` by default (`recommender.py:509-516`). New keyword `include_task_scoped=True` opts back in. CLI flag `--include-task-scoped` + MCP arg `include_task_scoped` (with isinstance-bool validation) expose the toggle. One-off Slice C task traffic no longer becomes a permanent global rule recommendation.
+- Closure tests: `test_med_28_05_task_scoped_decisions_excluded_by_default`, `_included_with_flag`, `_global_decisions_still_included`, `_mcp_recommend_validates_include_task_scoped`.
+
+### MED-28-06 — CLOSED
+CLI `recommend --apply` now accepts `--apply-only PATTERN[,PATTERN,...]` (`src/iam_jit/bouncer_cli.py:843-846`). Filter is applied in `_apply_recommendations_via_cli`. CLI now matches the MCP variant's per-rule cherry-pick capability.
+- Closure test: `test_med_28_06_cli_apply_only_cherry_picks` (seeds two groups, applies only one, verifies the other is absent).
+
+### LOW-28-01 — CLOSED
+New `_arn_rationale` helper at `recommender.py:401-419` distinguishes "X of Y observed ARNs share prefix" (when all decisions had ARNs) from "X of Y calls had observable ARN data; of those, Z share prefix" (when some had `arn=None`). Region rationale gets the same treatment.
+- Closure test: `test_low_28_01_rationale_surfaces_observable_vs_total`.
+
+### LOW-28-02 — CLOSED
+Every entry in `KNOWN_ACTIONS` now has a structured `severity` field with vocabulary {`destructive`, `sensitive`, `write`, `expensive`, `high_risk`, None}. Severity hints removed from `typical_use` prose; structured field is now the source of truth for UI / sort / filter consumers.
+- Closure tests: `test_low_28_02_known_actions_all_have_severity`, `_destructive_class_actions_marked_destructive`.
+
+### LOW-28-03 — CLOSED
+`summarize_window` now returns `other_count` and the invariant `total_calls == allow + deny + prompt + other_count` holds. Decisions with missing or unrecognized `decision` field surface as `other_count` instead of silently dropping out of the sum.
+- Closure test: `test_low_28_03_summarize_window_includes_other_count`.
+
+### LOW-28-04 — CLOSED
+New `filter_decisions_by_window` helper at `recommender.py:592-639` parses both bounds + each row's `at` field as ISO-8601 datetimes (replacing `Z` with `+00:00` to use `datetime.fromisoformat`). Both CLI + MCP paths switched to use it. Mixed-timezone input now compared semantically. Falls back to lexicographic compare if a value is unparseable (no surprise crash on exotic input).
+- Closure test: `test_low_28_04_datetime_window_parses_mixed_tz`.
+
+### LOW-28-05 — CLOSED
+Every `KNOWN_ACTIONS` entry now carries `last_reviewed: "2026-05"` (single module-level constant `_CATALOG_LAST_REVIEWED`). Quarterly hygiene pass = bump the constant + re-check prose against AWS docs; staleness becomes visible.
+- Closure test: `test_low_28_05_known_actions_all_have_last_reviewed`.
+
+### LOW-28-06 — ACCEPTED (consistent with WB23 precedent)
+`_apply_recommendations_via_cli` continues to call `store._record_config_event_locked`. Same pattern used by allowlist CLI (per WB23 precedent). Lifting the helper to a public method would touch unrelated callers and isn't worth the API churn for a wrapper-only call site. Revisit if a third wrapper needs the pattern.
+
+## Regression check
+
+Command run: `cd /Users/reagan/repos/iam-roles && .venv/bin/python -m pytest --no-header -q --ignore=tests/test_calibration_corpus.py --ignore=tests/e2e 2>&1 | tail -3`
+
+Result:
+```
+2578 passed, 29 skipped, 14 deselected, 2 warnings in 90.70s (0:01:30)
+```
+
+Pre-closure baseline was 2550. +28 new closure tests in `tests/bouncer/test_recommender.py` (was 40, now 69). Zero regressions in the prior 2538 tests outside of WB28 scope.

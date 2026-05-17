@@ -1135,6 +1135,17 @@ TOOLS = [
                     "maximum": 10000,
                     "description": "Max decisions to read from the audit log.",
                 },
+                "include_task_scoped": {
+                    "type": "boolean",
+                    "default": False,
+                    "description": (
+                        "By default, decisions made under a Slice C "
+                        "task scope (one-off declared sessions) are "
+                        "EXCLUDED from recommendations so they don't "
+                        "become permanent global rules. Pass true to "
+                        "include them."
+                    ),
+                },
             },
         },
     },
@@ -2270,7 +2281,11 @@ def _effective_scope_for_mcp(args: dict[str, Any]) -> dict[str, Any]:
 def _bouncer_recommend_rules_for_mcp(args: dict[str, Any]) -> dict[str, Any]:
     """Slice D rule recommender — synthesize a draft ruleset from
     observed decisions in the audit log."""
-    from .bouncer.recommender import summarize_window, synthesize_rules
+    from .bouncer.recommender import (
+        filter_decisions_by_window,
+        summarize_window,
+        synthesize_rules,
+    )
     from .bouncer.store import BouncerStore
 
     since = args.get("since")
@@ -2289,18 +2304,29 @@ def _bouncer_recommend_rules_for_mcp(args: dict[str, Any]) -> dict[str, Any]:
         return {"error": "limit must be a positive integer"}
     limit = min(limit, 10000)
 
+    # WB28 MED-28-05 closure: agents/admins can opt in to rolling
+    # task-scoped (Slice C) decisions into recommendations, but the
+    # default is to exclude them so one-off task traffic doesn't
+    # become a permanent global rule.
+    include_task_scoped = args.get("include_task_scoped", False)
+    if not isinstance(include_task_scoped, bool):
+        return {"error": "include_task_scoped must be a boolean if provided"}
+
     store = BouncerStore()
     try:
         all_decisions = store.list_decisions(limit=limit)
     finally:
         store.close()
-    decisions = [
-        d for d in all_decisions
-        if (since is None or (d.get("at") and d["at"] >= since))
-        and (until is None or (d.get("at") and d["at"] <= until))
-    ]
+    # WB28 LOW-28-04 closure: semantic datetime compare.
+    decisions = filter_decisions_by_window(
+        all_decisions, since=since, until=until
+    )
     summary = summarize_window(decisions)
-    recs = synthesize_rules(decisions, min_support=min_support)
+    recs = synthesize_rules(
+        decisions,
+        min_support=min_support,
+        include_task_scoped=include_task_scoped,
+    )
     return {
         "summary": summary,
         "recommendations": [r.to_dict() for r in recs],
@@ -2320,7 +2346,7 @@ def _bouncer_apply_recommendation_for_mcp(args: dict[str, Any]) -> dict[str, Any
         return {"error": "rules is required and must be a non-empty list"}
 
     actor = _bouncer_actor()
-    added = 0
+    added_rule_ids: list[int] = []
     rejected: list[dict[str, Any]] = []
     store = BouncerStore()
     try:
@@ -2336,6 +2362,24 @@ def _bouncer_apply_recommendation_for_mcp(args: dict[str, Any]) -> dict[str, Any
             if effect_str not in ("allow", "deny"):
                 rejected.append({"entry": entry, "error": "effect must be allow|deny"})
                 continue
+            # WB28 HIGH-28-02 closure: validate the pass-through fields
+            # before constructing ProxyRule. Without this, an agent
+            # passing arn_scope={"nested": "object"} crashes SQLite
+            # at insert time mid-batch — and the partial batch loses
+            # its audit-event tag because the loop never reaches the
+            # batch-event line.
+            bad_field = None
+            for field in ("arn_scope", "region_scope", "note"):
+                val = entry.get(field)
+                if val is not None and not isinstance(val, str):
+                    bad_field = field
+                    break
+            if bad_field is not None:
+                rejected.append({
+                    "entry": entry,
+                    "error": f"{bad_field} must be a string if provided",
+                })
+                continue
             rule = ProxyRule(
                 pattern=pattern,
                 effect=Effect(effect_str),
@@ -2344,22 +2388,37 @@ def _bouncer_apply_recommendation_for_mcp(args: dict[str, Any]) -> dict[str, Any
                 note=entry.get("note") or "applied from bouncer recommendation",
                 origin="recommendation",
             )
+            # WB28 MED-28-02 closure: skip exact duplicates so
+            # repeated `bouncer_apply_recommendation` calls don't
+            # accumulate identical rule rows over time.
+            if store.rule_exists(rule):
+                rejected.append({"entry": entry, "error": "rule already exists"})
+                continue
             try:
-                store.add_rule(rule, actor=actor)
-                added += 1
+                rid = store.add_rule(rule, actor=actor)
+                added_rule_ids.append(rid)
             except InvalidRuleError as e:
                 rejected.append({"entry": entry, "error": str(e)})
-        # Top-level batch event
+        # WB28 MED-28-03 closure: top-level batch event now records
+        # the specific rule_ids in the batch + the rejected entries,
+        # so post-hoc review can correlate the batch with its rows
+        # without timestamp guessing.
         store._record_config_event_locked(
             actor=actor,
             kind="recommendation_applied",
-            summary=f"applied {added} recommended rule(s) via MCP",
-            detail={"count": added, "rejected_count": len(rejected)},
+            summary=f"applied {len(added_rule_ids)} recommended rule(s) via MCP",
+            detail={
+                "count": len(added_rule_ids),
+                "rule_ids": added_rule_ids,
+                "rejected_count": len(rejected),
+                "rejected": rejected,
+            },
         )
     finally:
         store.close()
     return {
-        "applied": added,
+        "applied": len(added_rule_ids),
+        "applied_rule_ids": added_rule_ids,
         "rejected": rejected,
         "audit_event_kind": "recommendation_applied",
     }
