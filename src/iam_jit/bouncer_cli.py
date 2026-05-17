@@ -1558,6 +1558,168 @@ def _install_one_profile(profile: "Profile", source_url: str) -> None:
     resolved.write_text(_yaml.safe_dump(existing, sort_keys=False))
 
 
+@main.group("prompts")
+def prompts_group() -> None:
+    """View + answer DENY notifications the proxy queued.
+
+    When the proxy runs with `--prompt-on-deny`, every transparent-
+    mode DENY also writes a row here so the operator can later
+    answer (always-allow / add-to-profile / ignore). The agent has
+    already been denied by the time the prompt appears — answers
+    take effect on the NEXT call of the same shape.
+
+    v1.0 (now): async queue. v1.1 will add a synchronous prompt
+    where the proxy briefly waits for an answer before returning.
+    """
+
+
+@prompts_group.command("list")
+@click.option("--status", default="pending", show_default=True,
+              type=click.Choice(["pending", "answered", "ignored"]))
+@click.option("--limit", type=int, default=20, show_default=True)
+@click.option("--db", type=click.Path(dir_okay=False), default=None)
+def prompts_list_cmd(status: str, limit: int, db: str | None) -> None:
+    """Show prompts in the queue."""
+    with _opened_store(db) as store:
+        rows = store.list_pending_prompts(status=status, limit=limit)
+    if not rows:
+        click.echo(f"(no {status} prompts)")
+        return
+    click.echo(f"{'id':>5}  {'at':<20}  {'service':<10}  action")
+    click.echo("-" * 78)
+    for r in rows:
+        click.echo(
+            f"{r['id']:>5}  {r['created_at']:<20}  "
+            f"{r['service']:<10}  {r['action']}"
+        )
+        if r["arn"]:
+            click.echo(f"        arn: {r['arn']}")
+        click.echo(f"        reason: {r['deny_reason']}")
+
+
+@prompts_group.command("show")
+@click.argument("prompt_id", type=int)
+@click.option("--db", type=click.Path(dir_okay=False), default=None)
+def prompts_show_cmd(prompt_id: int, db: str | None) -> None:
+    """Show one prompt with full detail."""
+    with _opened_store(db) as store:
+        row = store.get_pending_prompt(prompt_id)
+    if row is None:
+        click.secho(f"prompt #{prompt_id} not found", fg="red", err=True)
+        sys.exit(1)
+    click.echo(json.dumps(row, indent=2))
+
+
+@prompts_group.command("answer")
+@click.argument("prompt_id", type=int)
+@click.option("--kind", required=True,
+              type=click.Choice(["always", "profile", "ignore"]),
+              help="always = add a global ALLOW rule for the exact "
+                   "service:action[+arn] of this prompt. profile = "
+                   "append an allow_rule to --target NAME (must be "
+                   "a local profile, not org-distributed). ignore = "
+                   "mark answered without side effect.")
+@click.option("--target", default=None,
+              help="With --kind profile: the profile name to append to.")
+@click.option("--db", type=click.Path(dir_okay=False), default=None)
+def prompts_answer_cmd(
+    prompt_id: int, kind: str, target: str | None, db: str | None,
+) -> None:
+    """Answer a pending prompt + apply the side-effect."""
+    from .bouncer.profiles import (
+        Profile,
+        ProfileAllowRule,
+        load_profiles,
+        upsert_profile,
+    )
+    actor = _current_actor()
+    if kind == "profile" and not target:
+        click.secho("--kind profile requires --target NAME", fg="red", err=True)
+        sys.exit(2)
+
+    with _opened_store(db) as store:
+        prompt = store.get_pending_prompt(prompt_id)
+        if prompt is None:
+            click.secho(f"prompt #{prompt_id} not found", fg="red", err=True)
+            sys.exit(1)
+        if prompt["status"] != "pending":
+            click.secho(
+                f"prompt #{prompt_id} already {prompt['status']!r}; nothing to do",
+                fg="yellow",
+            )
+            return
+
+        # Apply side effect FIRST. If the mutation fails (e.g. profile
+        # is org-distributed and read-only), abort BEFORE marking the
+        # prompt answered. Otherwise we'd lose the prompt + not have
+        # applied the answer.
+        if kind == "always":
+            from .bouncer.rules import Effect, ProxyRule
+            store.add_rule(
+                ProxyRule(
+                    pattern=f"{prompt['service']}:{prompt['action']}",
+                    effect=Effect.ALLOW,
+                    arn_scope=prompt["arn"],
+                    region_scope=None,
+                    note=f"answered prompt #{prompt_id} (always)",
+                    origin="prompt",
+                ),
+                actor=actor,
+            )
+        elif kind == "profile":
+            profs = load_profiles()
+            if target not in profs:
+                click.secho(
+                    f"profile {target!r} not found", fg="red", err=True,
+                )
+                sys.exit(1)
+            prof = profs[target]
+            if prof.source != "local":
+                click.secho(
+                    f"profile {target!r} is sourced from {prof.source!r} "
+                    f"and is read-only", fg="red", err=True,
+                )
+                sys.exit(2)
+            new_rule = ProfileAllowRule(
+                pattern=f"{prompt['service']}:{prompt['action']}",
+                arn_scope=prompt["arn"],
+                note=f"answered prompt #{prompt_id}",
+            )
+            upsert_profile(Profile(
+                name=prof.name,
+                description=prof.description,
+                deny_keywords=prof.deny_keywords,
+                keyword_targets=prof.keyword_targets,
+                keyword_match=prof.keyword_match,
+                only_account_ids=prof.only_account_ids,
+                deny_verbs=prof.deny_verbs,
+                exceptions=prof.exceptions,
+                allow_rules=prof.allow_rules + (new_rule,),
+                source="local",
+            ))
+        # kind=ignore: no side effect
+
+        # Record the answer
+        ok = store.answer_pending_prompt(
+            prompt_id, answer_kind=kind, answer_target=target,
+            answered_by=actor,
+        )
+    if not ok:
+        click.secho(
+            f"prompt #{prompt_id}: answer not recorded (race?)",
+            fg="yellow",
+        )
+        return
+
+    summary = {
+        "always": f"added global ALLOW rule for "
+                  f"{prompt['service']}:{prompt['action']}",
+        "profile": f"appended allow_rule to profile {target!r}",
+        "ignore": "marked answered (no rule change)",
+    }[kind]
+    click.secho(f"prompt #{prompt_id} answered: {summary}", fg="green")
+
+
 @main.group("pause")
 def pause_group() -> None:
     """Timed escape hatch — temporarily demote the proxy to advisory

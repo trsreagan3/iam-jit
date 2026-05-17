@@ -68,7 +68,7 @@ class ActiveTaskExistsError(Exception):
     is already active. Caller decides whether to end the existing
     task first or surface the conflict to the agent."""
 
-SCHEMA_VERSION = 5  # v5: adds pause_events table + decisions.pause_id for #6a timed-bypass audit linkage
+SCHEMA_VERSION = 6  # v6: adds pending_prompts table for #5 async deny-prompt UX (v1.0 subset)
 
 
 def default_db_path() -> pathlib.Path:
@@ -214,6 +214,32 @@ class BouncerStore:
                     end_kind TEXT                 -- 'expired' / 'resumed_early' / NULL while live
                 );
                 CREATE INDEX IF NOT EXISTS idx_pause_events_ends_at ON pause_events(ends_at);
+                -- v6: pending_prompts for #5 async deny-prompt UX.
+                -- When transparent-mode DENY fires and the operator
+                -- opted into prompt_on_deny, the deny is also written
+                -- here so the operator can later answer (allow always
+                -- / add to profile / ignore). The async v1.0 flow:
+                -- agent gets denied immediately; operator sees the
+                -- queue + answers; future calls use the new rule.
+                -- The sync v1.1 flow will REUSE this table by having
+                -- the proxy poll status briefly before returning.
+                CREATE TABLE IF NOT EXISTS pending_prompts (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    created_at TEXT NOT NULL,
+                    decision_id INTEGER NOT NULL,
+                    service TEXT NOT NULL,
+                    action TEXT NOT NULL,
+                    arn TEXT,
+                    region TEXT,
+                    deny_reason TEXT NOT NULL,
+                    status TEXT NOT NULL DEFAULT 'pending',  -- pending|answered|ignored
+                    answer_kind TEXT,                         -- always|profile|ignore
+                    answer_target TEXT,                       -- profile name when kind=profile
+                    answered_by TEXT,
+                    answered_at TEXT
+                );
+                CREATE INDEX IF NOT EXISTS idx_pending_prompts_status ON pending_prompts(status);
+                CREATE INDEX IF NOT EXISTS idx_pending_prompts_created_at ON pending_prompts(created_at);
                 """
             )
             # v3 additive migration: add task_id column to existing
@@ -751,6 +777,119 @@ class BouncerStore:
             }
             for r in rows
         ]
+
+    # -----------------------------------------------------------------
+    # Pending prompts (#5 — async deny-prompt UX, v1.0 subset)
+    # -----------------------------------------------------------------
+
+    def add_pending_prompt(
+        self,
+        *,
+        decision_id: int,
+        service: str,
+        action: str,
+        arn: str | None,
+        region: str | None,
+        deny_reason: str,
+    ) -> int:
+        """Insert a pending-prompt row for a transparent-mode DENY
+        the operator has opted in to be notified about. Returns the
+        new prompt id. Idempotent on (decision_id) — re-calling with
+        the same decision_id is a no-op + returns the existing id."""
+        with self._lock:
+            cur = self._conn.execute(
+                "SELECT id FROM pending_prompts WHERE decision_id = ?",
+                (decision_id,),
+            )
+            prior = cur.fetchone()
+            if prior is not None:
+                return int(prior[0])
+            cur = self._conn.execute(
+                """
+                INSERT INTO pending_prompts(
+                    created_at, decision_id, service, action, arn, region,
+                    deny_reason
+                ) VALUES (?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    _isoformat_z(_dt.datetime.now(_dt.UTC)),
+                    decision_id, service, action, arn, region, deny_reason,
+                ),
+            )
+            return int(cur.lastrowid or 0)
+
+    def list_pending_prompts(self, *, status: str = "pending",
+                              limit: int = 50) -> list[dict[str, Any]]:
+        """Return prompts in the given status; newest first."""
+        with self._lock:
+            cur = self._conn.execute(
+                "SELECT id, created_at, decision_id, service, action, "
+                "arn, region, deny_reason, status, answer_kind, "
+                "answer_target, answered_by, answered_at "
+                "FROM pending_prompts WHERE status = ? "
+                "ORDER BY id DESC LIMIT ?",
+                (status, limit),
+            )
+            rows = cur.fetchall()
+        return [
+            {
+                "id": int(r[0]), "created_at": r[1], "decision_id": int(r[2]),
+                "service": r[3], "action": r[4], "arn": r[5], "region": r[6],
+                "deny_reason": r[7], "status": r[8], "answer_kind": r[9],
+                "answer_target": r[10], "answered_by": r[11], "answered_at": r[12],
+            }
+            for r in rows
+        ]
+
+    def get_pending_prompt(self, prompt_id: int) -> dict[str, Any] | None:
+        with self._lock:
+            cur = self._conn.execute(
+                "SELECT id, created_at, decision_id, service, action, "
+                "arn, region, deny_reason, status, answer_kind, "
+                "answer_target, answered_by, answered_at "
+                "FROM pending_prompts WHERE id = ?",
+                (prompt_id,),
+            )
+            r = cur.fetchone()
+        if r is None:
+            return None
+        return {
+            "id": int(r[0]), "created_at": r[1], "decision_id": int(r[2]),
+            "service": r[3], "action": r[4], "arn": r[5], "region": r[6],
+            "deny_reason": r[7], "status": r[8], "answer_kind": r[9],
+            "answer_target": r[10], "answered_by": r[11], "answered_at": r[12],
+        }
+
+    def answer_pending_prompt(
+        self,
+        prompt_id: int,
+        *,
+        answer_kind: str,
+        answer_target: str | None,
+        answered_by: str,
+    ) -> bool:
+        """Record an answer on a pending prompt. Returns True if the
+        prompt was found + pending; False if it was already answered
+        or doesn't exist. Side-effects (rule add / profile edit) are
+        the CLI's responsibility — store just records intent."""
+        if answer_kind not in ("always", "profile", "ignore"):
+            raise ValueError(
+                f"answer_kind must be one of: always, profile, ignore "
+                f"(got {answer_kind!r})"
+            )
+        with self._lock:
+            cur = self._conn.execute(
+                "UPDATE pending_prompts SET status = 'answered', "
+                "answer_kind = ?, answer_target = ?, answered_by = ?, "
+                "answered_at = ? "
+                "WHERE id = ? AND status = 'pending'",
+                (
+                    answer_kind, answer_target, answered_by,
+                    _isoformat_z(_dt.datetime.now(_dt.UTC)),
+                    prompt_id,
+                ),
+            )
+            return cur.rowcount > 0
 
     def list_decisions(
         self,

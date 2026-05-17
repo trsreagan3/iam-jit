@@ -102,6 +102,14 @@ class ProxyConfig:
     and keyword_targets that include 'account_alias'. Optional;
     profile rules that target these fields simply don't match when
     the values are None."""
+    prompt_on_deny: bool = False
+    """#5 v1.0 (async): when True, transparent-mode DENYs also
+    write a pending_prompts row so the operator can later answer
+    (always-allow / add-to-profile / ignore) via the `bouncer
+    prompts` CLI. Async — the agent gets DENIED immediately; the
+    operator's answer takes effect on the NEXT call of the same
+    shape. v1.1 will add a synchronous mode where the proxy
+    briefly waits for an answer before returning."""
     # Don't bind to 0.0.0.0 by default — proxy is a LOCAL-ONLY
     # thing per the local-only-safety-mode + no-hosted-saas memos.
     # Binding externally would silently expose a credential-handling
@@ -176,6 +184,7 @@ def evaluate_request(
     active_profile=None,  # type: profiles.Profile | None
     account_id: str | None = None,
     account_alias: str | None = None,
+    prompt_on_deny: bool = False,
 ) -> RequestObservation:
     """Pure-function evaluation of one inbound proxy request.
 
@@ -358,8 +367,9 @@ def evaluate_request(
             if r == record.matched_rule:
                 matched_rule_id = rid
                 break
+    decision_id: int = 0
     try:
-        store.record_decision(
+        decision_id = store.record_decision(
             record,
             matched_rule_id=matched_rule_id,
             task_id=active_task.task_id if active_task is not None else None,
@@ -370,6 +380,32 @@ def evaluate_request(
         # don't crash the proxy. (The opt-in-feedback pipeline can
         # report this category when enabled per opt-in-feedback-pipeline.)
         logger.warning("bouncer-proxy audit-write failed: %s", e)
+
+    # #5 v1.0 (async): if operator opted into prompt-on-deny AND
+    # this was a transparent-mode DENY (the only mode where DENY
+    # actually blocks the agent), enqueue a pending prompt so the
+    # operator can later answer (always-allow / add-to-profile /
+    # ignore) via `bouncer prompts`. The agent has already been
+    # denied; the answer takes effect on the NEXT call of the same
+    # shape. v1.1 will add a synchronous flow.
+    if (
+        prompt_on_deny
+        and decision_id > 0
+        and mode == ProxyMode.TRANSPARENT
+        and record.decision.value == "deny"
+        and active_pause is None  # pauses already bypass enforcement
+    ):
+        try:
+            store.add_pending_prompt(
+                decision_id=decision_id,
+                service=parsed.service,
+                action=parsed.action,
+                arn=resolved_arn,
+                region=parsed.region,
+                deny_reason=record.reason,
+            )
+        except Exception as e:
+            logger.warning("bouncer-proxy prompt-enqueue failed: %s", e)
 
     return _build_observation(
         method=method, host=host, path=path,
@@ -498,6 +534,7 @@ async def _handle_request(request, *, store, config: ProxyConfig, session):
         active_profile=config.active_profile,
         account_id=config.account_id,
         account_alias=config.account_alias,
+        prompt_on_deny=config.prompt_on_deny,
     )
 
     if obs.enforced:
