@@ -552,30 +552,31 @@ def check_compatibility(
     # over the curated catalog because the admin knows their org's
     # specific shape; the catalog only knows generic AWS patterns.
     allowlist_rule = None
+    allowlist_load_error: str | None = None
     if allowlist is not None:
         try:
             from .compatibility_allowlist import match_intent
 
             allowlist_rule = match_intent(intent, allowlist)
-        except Exception:
+        except Exception as e:
             # Allowlist failures must not crash the check; degrade
-            # to catalog-only behavior. Logged via audit_sink below
-            # if one is configured.
+            # to catalog-only behavior. WB25 MED-25-04 closure:
+            # record the error in the audit event so admins can spot
+            # silent degradation (previously the check fell through
+            # to catalog with no signal that the allowlist tried + failed).
             allowlist_rule = None
+            allowlist_load_error = f"{type(e).__name__}: {e}"
 
     if allowlist_rule is not None:
         result = allowlist_rule.to_result()
-        # Echo the agent's existing_role_hint if the rule's verdict
-        # is USE_EXISTING and the rule didn't pre-set an ARN
-        # (admin may have intentionally left it for the agent to
-        # supply).
-        if (
-            result.verdict == Compatibility.USE_EXISTING
-            and result.existing_role_arn is None
-            and cleaned_hint is not None
-        ):
-            result = dataclasses.replace(result, existing_role_arn=cleaned_hint)
-        # Surface invalid-hint state regardless of allowlist match
+        # WB25 LOW-25-04 closure: removed dead "echo agent's
+        # existing_role_hint when allowlist USE_EXISTING has no ARN"
+        # branch — `build_rule` rejects USE_EXISTING without ARN, so
+        # this fallback was unreachable for normally-constructed
+        # rules. Slice 3 can deliberately permit USE_EXISTING-
+        # without-ARN if a use case appears; today's contract is
+        # "admin supplies the role or doesn't use USE_EXISTING."
+        # Surface invalid-hint state regardless of allowlist match.
         if hint_was_invalid:
             result = dataclasses.replace(result, existing_role_hint_invalid=True)
 
@@ -661,6 +662,10 @@ def check_compatibility(
                     "existing_role_arn": result.existing_role_arn,
                     "existing_role_hint_invalid": result.existing_role_hint_invalid,
                     "source": "catalog",
+                    # WB25 MED-25-04: surface allowlist degradation
+                    # so admins can spot silent "tried-allowlist-failed"
+                    # cases in the audit chain.
+                    "allowlist_load_error": allowlist_load_error,
                 },
             )
         except Exception:

@@ -58,6 +58,41 @@ from .compatibility import (
 _ACCOUNT_ID_RE = re.compile(r"^\d{12}$")
 
 
+def _default_hint_for_verdict(
+    verdict: Compatibility, existing_role_arn: str | None
+) -> str:
+    """WB25 MED-25-02 closure: default `next_action_hint` so allowlist
+    rules that omit a custom hint still carry a path forward per
+    [[agent-friendly-not-bypassable]] Lens A."""
+    if verdict == Compatibility.PROCEED:
+        return "Proceed with iam-jit. Admin allowlist allows this case."
+    if verdict == Compatibility.USE_EXISTING:
+        if existing_role_arn:
+            return (
+                f"Use the existing role declared in the allowlist rule: "
+                f"{existing_role_arn}"
+            )
+        return (
+            "Use the existing role for this workload (admin allowlist "
+            "deferred to existing; the rule didn't specify which role — "
+            "consult your admin or the workload's deployment metadata)."
+        )
+    if verdict == Compatibility.USE_BOUNCER:
+        return (
+            "Don't request a new role; use the bouncer to gate calls "
+            "against whatever creds the workload already has. Run "
+            "iam-jit-bouncer alongside the workload — see "
+            "docs/IAM-JIT-BOUNCER.md."
+        )
+    if verdict == Compatibility.CANNOT_HELP:
+        return (
+            "iam-jit is explicitly out-of-scope for this case per the "
+            "admin allowlist. Escalate to a human; do not attempt to "
+            "use iam-jit or bypass."
+        )
+    return "Consult docs/AGENTS.md for next steps."
+
+
 class AllowlistError(Exception):
     """Base for allowlist-store errors."""
 
@@ -104,7 +139,17 @@ class AllowlistRule:
         return True
 
     def to_result(self) -> CompatibilityResult:
-        """Build the CompatibilityResult this rule produces."""
+        """Build the CompatibilityResult this rule produces.
+
+        WB25 MED-25-02 closure: when the admin didn't supply a
+        custom next_action_hint on the rule, fall back to a
+        verdict-specific default so the agent always gets a path
+        forward (per [[agent-friendly-not-bypassable]] Lens A —
+        never a vague "denied").
+        """
+        hint = self.next_action_hint or _default_hint_for_verdict(
+            self.verdict, self.existing_role_arn,
+        )
         return CompatibilityResult(
             verdict=self.verdict,
             reasoning=(
@@ -112,7 +157,7 @@ class AllowlistRule:
             ),
             existing_role_arn=self.existing_role_arn,
             matched_pattern=f"allowlist:{self.rule_id}",
-            next_action_hint=self.next_action_hint,
+            next_action_hint=hint,
             bouncer_recommended=(
                 self.verdict == Compatibility.USE_BOUNCER
                 or (self.verdict == Compatibility.USE_EXISTING
@@ -185,10 +230,18 @@ def _validate_verdict_and_arn(
             raise InvalidRule(
                 "verdict=use_existing requires existing_role_arn"
             )
+        # WB25 LOW-25-06 closure: distinguish "blank/whitespace" from
+        # "non-empty-but-invalid" so the error message is useful.
+        if not existing_role_arn.strip():
+            raise InvalidRule(
+                "existing_role_arn is whitespace-only; supply a real "
+                "IAM role ARN like 'arn:aws:iam::111111111111:role/X'"
+            )
         cleaned, invalid = _validate_existing_role_hint(existing_role_arn)
         if invalid or cleaned is None:
             raise InvalidRule(
-                f"existing_role_arn {existing_role_arn!r} is not a valid IAM role ARN"
+                f"existing_role_arn {existing_role_arn!r} is not a valid IAM "
+                "role ARN (expected 'arn:aws[-partition]:iam::<12-digit-acct>:role/<name>')"
             )
         return verdict_enum, cleaned
 
@@ -240,6 +293,16 @@ def build_rule(
     """
     if not reason or not reason.strip():
         raise InvalidRule("reason is required and must be non-empty")
+    # WB25 HIGH-25-01 closure: PyYAML auto-deserializes unquoted
+    # ISO-8601 timestamps to datetime. Build_rule is the central
+    # validator; reject non-string created_at HERE so the bad type
+    # never reaches the dataclass / to_dict / json.dumps chain.
+    if created_at is not None and not isinstance(created_at, str):
+        raise InvalidRule(
+            "created_at must be a string (ISO-8601 UTC); "
+            "if hand-editing YAML, quote the value, e.g. "
+            "'2026-05-17T15:00:00Z'"
+        )
     cleaned_account = _validate_account_id(account_id)
     cleaned_workload = _validate_workload(workload)
     cleaned_verdict, cleaned_arn = _validate_verdict_and_arn(
@@ -326,10 +389,25 @@ class FileAllowlistStore:
         if not isinstance(data, dict):
             return []
         rules_data = data.get("rules") or []
+        if not isinstance(rules_data, list):
+            return []
         out: list[AllowlistRule] = []
         for raw in rules_data:
             if not isinstance(raw, dict):
                 continue
+            # WB25 HIGH-25-01 closure: PyYAML auto-deserializes
+            # unquoted ISO-8601 timestamps to datetime. The docs
+            # invite hand-editing; users can't be expected to always
+            # quote timestamps. Coerce here so build_rule's str-only
+            # contract holds + downstream json.dumps doesn't crash.
+            raw_created_at = raw.get("created_at")
+            if isinstance(raw_created_at, _dt.datetime):
+                raw_created_at = _isoformat_z(raw_created_at)
+            elif isinstance(raw_created_at, _dt.date):
+                # PyYAML also produces date objects for date-only values
+                raw_created_at = raw_created_at.isoformat()
+            elif raw_created_at is not None and not isinstance(raw_created_at, str):
+                raw_created_at = str(raw_created_at)
             try:
                 rule = build_rule(
                     rule_id=raw.get("rule_id"),
@@ -340,7 +418,7 @@ class FileAllowlistStore:
                     reason=raw.get("reason") or "(no reason recorded)",
                     next_action_hint=raw.get("next_action_hint"),
                     created_by=raw.get("created_by") or "unknown",
-                    created_at=raw.get("created_at"),
+                    created_at=raw_created_at,
                 )
             except InvalidRule:
                 # Skip malformed rows; don't crash the whole listing.
@@ -398,20 +476,47 @@ class FileAllowlistStore:
 # ---------------------------------------------------------------------------
 
 
+def _rule_specificity(rule: AllowlistRule) -> int:
+    """WB25 MED-25-03 closure: rules are sorted by specificity (more
+    specific wins) BEFORE insertion order. Without this, a wildcard
+    rule inserted before a specific rule shadows the specific one;
+    remove+re-add silently flips priority. With specificity scoring,
+    admin ordering of equally-specific rules still matters (insertion
+    order is the tiebreaker), but a more-specific rule always wins
+    over a less-specific one regardless of insertion order.
+
+    Score: 2 if both account_id and workload are set (most specific);
+    1 if exactly one is set; 0 if both are wildcards (least specific).
+    Higher score = wins.
+    """
+    score = 0
+    if rule.account_id is not None:
+        score += 1
+    if rule.workload is not None:
+        score += 1
+    return score
+
+
 def match_intent(
     intent: CompatibilityIntent, store: AllowlistStore
 ) -> AllowlistRule | None:
-    """Return the FIRST rule whose criteria match the intent, or None
-    if no rule matches.
+    """Return the rule whose criteria match the intent, ordered by
+    specificity (more specific wins), or None if no rule matches.
 
-    First-match-wins: admins are expected to order rules from specific
-    to general (e.g. account-specific rule before account-wildcard).
-    Tied to LOW-24-03's discipline.
+    WB25 MED-25-03 closure: previously this was insertion-order
+    first-match-wins, which made remove+re-add silently flip priority
+    (the re-added rule went to the END = least priority for shared
+    matches). Now we score by specificity FIRST (account+workload
+    > one-set > both-wildcard) and use insertion order only as a
+    tiebreaker within the same specificity tier.
     """
-    for rule in store.list():
-        if rule.matches(intent):
-            return rule
-    return None
+    candidates = [r for r in store.list() if r.matches(intent)]
+    if not candidates:
+        return None
+    # Sort by specificity DESC, then by insertion order ASC (the
+    # store returns rules in insertion order, so this is stable).
+    candidates.sort(key=_rule_specificity, reverse=True)
+    return candidates[0]
 
 
 # ---------------------------------------------------------------------------

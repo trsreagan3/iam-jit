@@ -286,8 +286,10 @@ def events_group() -> None:
     "--kind",
     type=click.Choice(
         # WB26 LOW-26-05 closure: include task lifecycle kinds.
+        # WB25 LOW-25-01 closure: include allowlist lifecycle kinds.
         ["rule_added", "rule_removed", "mode_changed", "preset_applied",
-         "task_started", "task_ended"],
+         "task_started", "task_ended",
+         "allowlist_rule_added", "allowlist_rule_removed"],
         case_sensitive=False,
     ),
     default=None,

@@ -639,6 +639,262 @@ def test_mcp_check_compatibility_consults_allowlist(cli_env) -> None:
     assert out["matched_pattern"].startswith("allowlist:")
 
 
+# ---------------------------------------------------------------------------
+# WB25 closures
+# ---------------------------------------------------------------------------
+
+
+def test_high_25_01_file_store_handles_yaml_datetime_autodeserialization(tmp_path) -> None:
+    """WB25 HIGH-25-01: PyYAML auto-deserializes unquoted timestamps
+    to datetime. The docs invite hand-editing; admin shouldn't have to
+    quote timestamps. Coerce on read so build_rule's str-only contract
+    + downstream json.dumps don't crash."""
+    import json as _json
+    path = tmp_path / "hand_edited.yaml"
+    path.write_text(
+        "version: 1\nrules:\n"
+        "  - rule_id: abc\n"
+        "    account_id: '111111111111'\n"
+        "    workload: k8s_pod\n"
+        "    verdict: proceed\n"
+        "    reason: hand-edited\n"
+        "    created_by: admin\n"
+        "    created_at: 2026-05-17T15:00:00Z\n"   # unquoted!
+    )
+    s = FileAllowlistStore(path)
+    rules = s.list()
+    assert len(rules) == 1
+    assert isinstance(rules[0].created_at, str)
+    # Must serialize cleanly (this was the original failure):
+    _json.dumps(rules[0].to_dict())
+
+
+def test_high_25_01_build_rule_rejects_datetime_created_at() -> None:
+    """build_rule itself is the central validator; reject non-string
+    created_at to defend against future callers."""
+    import datetime as _dt
+    with pytest.raises(InvalidRule, match="created_at"):
+        build_rule(
+            account_id=None, workload=None, verdict="proceed",
+            reason="x", created_by="admin",
+            created_at=_dt.datetime.now(_dt.UTC),  # type: ignore[arg-type]
+        )
+
+
+def test_med_25_01_submit_policy_rejects_use_bouncer(cli_env) -> None:
+    """WB25 MED-25-01: submit_policy must reject USE_BOUNCER too,
+    not just USE_EXISTING/CANNOT_HELP."""
+    runner = CliRunner()
+    runner.invoke(iam_jit_main, [
+        "allowlist", "add",
+        "--account", "111111111111",
+        "--workload", "agent_local_dev",
+        "--verdict", "use_bouncer",
+        "--reason", "prefer bouncer for this account",
+    ])
+    from iam_jit.mcp_server import _submit_policy_for_mcp
+    out = _submit_policy_for_mcp({
+        "policy": {"Version": "2012-10-17", "Statement": [
+            {"Effect": "Allow", "Action": "s3:GetObject", "Resource": "*"}
+        ]},
+        "description": "x",
+        "accounts": ["111111111111"],
+        "workload": "agent_local_dev",
+    })
+    assert "error" in out
+    assert out["verdict"] == "use_bouncer"
+
+
+def test_med_25_02_cannot_help_rule_gets_default_hint(cli_env) -> None:
+    """Rules without --next-action-hint should still carry a hint per
+    [[agent-friendly-not-bypassable]] Lens A."""
+    runner = CliRunner()
+    runner.invoke(iam_jit_main, [
+        "allowlist", "add",
+        "--account", "111111111111",
+        "--verdict", "cannot_help",
+        "--reason", "out of scope",
+    ])
+    from iam_jit.mcp_server import _check_compatibility_for_mcp
+    out = _check_compatibility_for_mcp({
+        "workload": "agent_local_dev",
+        "target_account_id": "111111111111",
+    })
+    assert out["verdict"] == "cannot_help"
+    assert out["next_action_hint"] is not None
+    assert "Escalate" in out["next_action_hint"] or "iam-jit is explicitly" in out["next_action_hint"]
+
+
+def test_med_25_02_use_bouncer_rule_gets_default_hint(cli_env) -> None:
+    runner = CliRunner()
+    runner.invoke(iam_jit_main, [
+        "allowlist", "add",
+        "--account", "111111111111",
+        "--verdict", "use_bouncer",
+        "--reason", "prefer bouncer",
+    ])
+    from iam_jit.mcp_server import _check_compatibility_for_mcp
+    out = _check_compatibility_for_mcp({
+        "workload": "agent_local_dev",
+        "target_account_id": "111111111111",
+    })
+    assert out["next_action_hint"] is not None
+    assert "bouncer" in out["next_action_hint"].lower()
+
+
+def test_med_25_03_specificity_beats_insertion_order() -> None:
+    """WB25 MED-25-03: remove+re-add silently flipping priority.
+    Specificity is now scored independent of insertion order. A
+    specific rule wins over a wildcard regardless of which was
+    inserted first."""
+    from iam_jit.compatibility_allowlist import (
+        InMemoryAllowlistStore, build_rule, match_intent,
+    )
+    store = InMemoryAllowlistStore()
+    # Insert wildcard FIRST (would have won under insertion order)
+    wild = store.add(build_rule(
+        account_id=None, workload=None, verdict="cannot_help",
+        reason="generic deny", created_by="admin",
+    ))
+    # Insert specific SECOND (would have lost under insertion order)
+    specific = store.add(build_rule(
+        account_id="111111111111", workload="k8s_pod",
+        verdict="use_existing",
+        existing_role_arn="arn:aws:iam::111111111111:role/shared",
+        reason="specific cluster", created_by="admin",
+    ))
+    matched = match_intent(
+        CompatibilityIntent(
+            workload=WorkloadType.K8S_POD,
+            target_account_id="111111111111",
+        ),
+        store,
+    )
+    assert matched is not None
+    # Specific MUST win even though it was inserted second
+    assert matched.rule_id == specific.rule_id
+
+
+def test_med_25_03_remove_and_readd_preserves_priority() -> None:
+    """The canonical workflow: admin updates a rule by remove+re-add.
+    Before this fix, the re-added rule went to the END (least priority
+    among equally-specific matches). After: specificity scoring means
+    the same-specificity ordering is the only thing affected, and
+    even then the re-added rule still wins if it's MORE specific."""
+    from iam_jit.compatibility_allowlist import (
+        InMemoryAllowlistStore, build_rule, match_intent,
+    )
+    store = InMemoryAllowlistStore()
+    store.add(build_rule(
+        account_id=None, workload=None, verdict="cannot_help",
+        reason="generic", created_by="admin",
+    ))
+    target = store.add(build_rule(
+        account_id="111111111111", workload="k8s_pod",
+        verdict="use_existing",
+        existing_role_arn="arn:aws:iam::111111111111:role/A",
+        reason="original specific", created_by="admin",
+    ))
+    # "Update" via remove + re-add
+    store.remove(target.rule_id)
+    updated = store.add(build_rule(
+        account_id="111111111111", workload="k8s_pod",
+        verdict="use_existing",
+        existing_role_arn="arn:aws:iam::111111111111:role/B",
+        reason="updated specific", created_by="admin",
+    ))
+    matched = match_intent(
+        CompatibilityIntent(
+            workload=WorkloadType.K8S_POD, target_account_id="111111111111",
+        ),
+        store,
+    )
+    assert matched is not None
+    # Updated specific wins (same specificity as original; insertion
+    # is the tiebreaker among equally-specific rules — but the
+    # wildcard from earlier in the store is less specific so it
+    # doesn't win).
+    assert matched.rule_id == updated.rule_id
+
+
+def test_med_25_04_allowlist_load_error_surfaced_in_audit() -> None:
+    """If the allowlist store throws on list(), check_compatibility
+    degrades to catalog AND records the error in the audit event."""
+    from iam_jit.compatibility import (
+        CompatibilityIntent, WorkloadType, check_compatibility,
+    )
+
+    class BrokenStore:
+        def list(self):
+            raise RuntimeError("disk failure")
+
+    recorded: list[dict] = []
+
+    class Sink:
+        def record(self, *, kind, actor, summary, detail=None):
+            recorded.append({"kind": kind, "summary": summary, "detail": detail})
+
+    check_compatibility(
+        CompatibilityIntent(workload=WorkloadType.K8S_POD),
+        allowlist=BrokenStore(),
+        audit_sink=Sink(),
+        actor="test",
+    )
+    assert len(recorded) == 1
+    assert "allowlist_load_error" in recorded[0]["detail"]
+    assert "disk failure" in recorded[0]["detail"]["allowlist_load_error"]
+
+
+def test_low_25_05_mcp_listing_paginates(cli_env) -> None:
+    """WB25 LOW-25-05: list_compatibility_overrides has a limit
+    parameter, default 50, hard cap 1000. Response includes total."""
+    runner = CliRunner()
+    # Add a handful of rules
+    for i in range(5):
+        runner.invoke(iam_jit_main, [
+            "allowlist", "add",
+            "--account", "111111111111",
+            "--workload", "k8s_pod",
+            "--verdict", "proceed",
+            "--reason", f"rule-{i}",
+        ])
+    from iam_jit.mcp_server import _list_compatibility_overrides_for_mcp
+    out = _list_compatibility_overrides_for_mcp({"limit": 2})
+    assert out["count"] == 2
+    assert out["total"] == 5
+
+
+def test_low_25_05_mcp_listing_rejects_bad_limit(cli_env) -> None:
+    from iam_jit.mcp_server import _list_compatibility_overrides_for_mcp
+    out = _list_compatibility_overrides_for_mcp({"limit": 0})
+    assert "error" in out
+    out = _list_compatibility_overrides_for_mcp({"limit": "many"})
+    assert "error" in out
+    out = _list_compatibility_overrides_for_mcp({"limit": True})
+    assert "error" in out
+
+
+def test_low_25_06_blank_arn_distinct_error_message() -> None:
+    """WB25 LOW-25-06: distinguish blank/whitespace from invalid-arn
+    so the error tells the admin what to do."""
+    with pytest.raises(InvalidRule, match="whitespace-only"):
+        build_rule(
+            account_id="111111111111", workload="k8s_pod",
+            verdict="use_existing", existing_role_arn="   ",
+            reason="x", created_by="admin",
+        )
+
+
+def test_low_25_06_invalid_arn_format_distinct_message() -> None:
+    """Invalid ARN says 'expected ...' shape."""
+    with pytest.raises(InvalidRule, match="expected"):
+        build_rule(
+            account_id="111111111111", workload="k8s_pod",
+            verdict="use_existing", existing_role_arn="not-an-arn",
+            reason="x", created_by="admin",
+        )
+
+
 def test_mcp_no_mutation_tool_for_allowlist(cli_env) -> None:
     """Per [[agent-friendly-not-bypassable]] Lens B: there's no MCP
     tool that lets agents mutate the allowlist (would let them

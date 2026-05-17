@@ -678,3 +678,46 @@ After fixes ship, re-run audit (Round 26) — recommended scope: the closure com
 The Slice 2 data-model + storage + validation layer is well-shaped (zero findings); the 12 findings concentrate at the integration boundaries (compatibility → submit_policy enforcement, CLI → audit-chain, file format → JSON serialization, CLI → bouncer DB initialization, docs → code-enforced semantics). Same lesson WB21-WB24 keep teaching: the foundation is reliably solid; the cross-tool wiring is where Lens A and Lens B claims diverge. Slice 3 (intake integration with DEFER_TO_EXISTING) will provide another opportunity to test this; the structural-invariant tests (LOW-25-01's `KNOWN_CONFIG_EVENT_KINDS` constant, MED-25-01's "every verdict has a rejection branch") shrink the drift surface so future audits find fewer instances of the same pattern.
 
 Audit ROI continues: 1 HIGH that would have shipped breaking the documented hand-edit workflow, 5 MEDs catching trust-gap continuations the unit-test suite (47 new tests) didn't cover. The structural-invariant gaps are the highest-value learning — per [[audit-cadence-discipline]] the catch rate of pattern-similar bugs (LOW-24-03 → LOW-25-02 → MED-25-01) suggests the next slice should land with the per-verdict-has-rejection-branch test as part of the test scaffolding rather than as audit closure work.
+
+---
+
+## WB25 closures (2026-05-17)
+
+10 of 12 findings addressed; 2 deferred-with-rationale.
+
+### Updated closure table
+
+| Finding | Status | How closed |
+|---|---|---|
+| HIGH-25-01 PyYAML datetime breaks JSON serialization | **CLOSED** | (a) Defensive normalization in `FileAllowlistStore._read_all`: coerce non-string `created_at` to ISO-Z string before calling `build_rule`. Handles `datetime` (PyYAML default for unquoted timestamps), `date` (PyYAML for date-only values), and other non-string types. (b) `build_rule` rejects non-string `created_at` with a clear "quote your timestamp" error. Defense-in-depth. Regression test loads a hand-edited YAML with unquoted timestamp + serializes the result; previously crashed, now passes. |
+| MED-25-01 `submit_policy` doesn't reject `USE_BOUNCER` | **CLOSED** | Extended the rejection set to `{USE_EXISTING, USE_BOUNCER, CANNOT_HELP}`. Now all three non-PROCEED verdicts get refused by `submit_policy` with the same structured response (reasoning + next_action_hint + bouncer_recommended). Regression test starts with an admin-allowlist USE_BOUNCER rule, calls submit_policy, asserts refused. |
+| MED-25-02 `cannot_help`/`use_bouncer` rules return null next_action_hint | **CLOSED** | New `_default_hint_for_verdict()` helper supplies per-verdict default hints when the admin didn't pass `--next-action-hint`. Wired into `AllowlistRule.to_result()`. Per [[agent-friendly-not-bypassable]] Lens A: agents always get a path forward, never a vague "denied." Tests cover both verdicts. |
+| MED-25-03 Remove+re-add flips first-match-wins order | **CLOSED** | New `_rule_specificity()` scoring: rules with both account_id AND workload set score 2; one set scores 1; both wildcards score 0. `match_intent` sorts by specificity DESC, then insertion order ASC (stable). Remove+re-add no longer can shadow a specific rule with a wildcard. Two regression tests cover the canonical workflow + the "specific wins over wildcard regardless of insertion" invariant. |
+| MED-25-04 Broken allowlist degrades silently to catalog | **CLOSED** | `check_compatibility` now captures the exception's repr into `allowlist_load_error` and includes it in the audit event detail. Admins reviewing the audit log see "tried allowlist, failed with: X" rather than a silent catalog fallthrough. Regression test asserts the field is recorded. |
+| MED-25-05 CLI creates bouncer DB on first run with no signal | **DEFERRED** | Touches the bouncer-store init path which is shared with the bouncer's own CLI; cross-product UX work better done as its own change. Banner can land in Slice C of #168 alongside the per-PID work. |
+| LOW-25-01 events filter enum drift | **CLOSED** | Added `allowlist_rule_added` + `allowlist_rule_removed` to both the CLI `events tail --kind` choice and the MCP `bouncer_tail_events` schema enum. (Same shape as WB26 LOW-26-05's `task_started`/`task_ended` addition.) |
+| LOW-25-02 docs say specificity but match_intent didn't sort | **CLOSED** | MED-25-03 fix solves this — specificity is now actually enforced by code, not just documented. |
+| LOW-25-03 `_allowlist_audit_record` swallows exceptions | **DEFERRED** | Intentional best-effort logging (mirrors bouncer's `_record_config_event_locked` pattern). Same shape as WB26 MED-26-05 audit-write best-effort. Documented in the function docstring. Will revisit if telemetry shows admins missing audit events. |
+| LOW-25-04 dead fallback branch | **CLOSED** | Deleted the unreachable USE_EXISTING-without-ARN echo branch in `check_compatibility`. `build_rule` enforces ARN-required-with-USE_EXISTING, so the branch couldn't fire for any normally-constructed rule. Comment explains the deletion + invites Slice 3 to deliberately permit if a use case appears. |
+| LOW-25-05 MCP `list_compatibility_overrides` not paginated | **CLOSED** | Added `limit` parameter (default 50, hard cap 1000) mirroring `bouncer_tail_events` shape. Response includes `total` alongside `count` so callers can detect truncation. Bool/non-int/zero limit rejected. Three regression tests. |
+| LOW-25-06 blank ARN error message confusing | **CLOSED** | Distinguish blank-/whitespace-only `existing_role_arn` from non-empty-but-malformed: first says "is whitespace-only; supply a real IAM role ARN like..."; second says "is not a valid IAM role ARN (expected '...' shape)". Regression tests for both. |
+
+### Verification
+
+- `tests/test_compatibility_allowlist.py`: 47 → 59 tests (+12 closure tests).
+- All 119 allowlist + compatibility tests pass.
+- Broader suite: **2461 passed**, 29 skipped, 14 deselected (was 2449 before WB25 closures; +12 net).
+- Verified end-to-end via the canonical hand-edit scenario from HIGH-25-01 — unquoted timestamps now parse and the result serializes cleanly through MCP.
+
+### What WB25 DID NOT close
+
+- **MED-25-05** (silent bouncer DB creation on first allowlist add): bundled with WB26 / Slice C bouncer work.
+- **LOW-25-03** (silent exception swallow in audit-record): same best-effort pattern as bouncer's config_events writes; intentional + documented.
+
+### Why this round matters
+
+HIGH-25-01 was a real "documented workflow is broken" bug — the COMPATIBILITY-ALLOWLIST.md doc invited hand-editing, and the hand-edited file crashed the JSON serialization. The fix (defensive normalization + defensive validation) honors the doc's contract: hand-editable YAML where bad rows skip but valid rows parse cleanly.
+
+MED-25-03 closed the trust-gap shape: docs promised specificity ordering, code didn't enforce it. The specificity-scoring fix means admins can use the documented "specific rules win over wildcards" pattern without manually re-ordering after every remove+re-add.
+
+Per [[audit-cadence-discipline]]: 0 CRIT + 1 HIGH + 5 MED + 6 LOW in code that had 47 passing unit tests. The pattern continues to pay for itself — HIGH-25-01 specifically would have shipped to launch if not for the audit (unit tests don't typically exercise the YAML-edit → MCP-serialize round trip).

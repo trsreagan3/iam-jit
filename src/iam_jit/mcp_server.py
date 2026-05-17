@@ -949,6 +949,8 @@ TOOLS = [
                         "mode_changed", "preset_applied",
                         # WB26 LOW-26-05: task lifecycle kinds
                         "task_started", "task_ended",
+                        # WB25 LOW-25-01: allowlist lifecycle kinds
+                        "allowlist_rule_added", "allowlist_rule_removed",
                     ],
                     "description": "Optional event-kind filter.",
                 },
@@ -1511,17 +1513,31 @@ def _check_compatibility_for_mcp(args: dict[str, Any]) -> dict[str, Any]:
 def _list_compatibility_overrides_for_mcp(args: dict[str, Any]) -> dict[str, Any]:
     """Read-only view of the admin allowlist. Mutation is admin-only
     via the CLI per [[agent-friendly-not-bypassable]] — agents see
-    what their org has configured but can't grant themselves access."""
+    what their org has configured but can't grant themselves access.
+
+    WB25 LOW-25-05 closure: paginated. Mirrors `bouncer_tail_events`
+    + `bouncer_tail_decisions` shape (limit default 50, hard cap 1000)
+    so admins with very large allowlists don't blow MCP transport
+    line limits."""
     from .compatibility_allowlist import build_default_store
+
+    limit = args.get("limit", 50)
+    if not isinstance(limit, int) or isinstance(limit, bool) or limit < 1:
+        return {"error": "limit must be a positive integer if provided",
+                "rules": [], "count": 0, "total": 0}
+    limit = min(limit, 1000)
 
     try:
         store = build_default_store()
         rules = store.list()
     except Exception as e:
-        return {"error": f"could not load allowlist: {e}", "rules": [], "count": 0}
+        return {"error": f"could not load allowlist: {e}", "rules": [], "count": 0, "total": 0}
+    total = len(rules)
+    paged = rules[:limit]
     return {
-        "rules": [r.to_dict() for r in rules],
-        "count": len(rules),
+        "rules": [r.to_dict() for r in paged],
+        "count": len(paged),
+        "total": total,
     }
 
 
@@ -2180,8 +2196,14 @@ def _submit_policy_for_mcp(args: dict[str, Any]) -> dict[str, Any]:
             audit_sink=_compatibility_audit_sink(),
             actor=_compatibility_actor(),
         )
+        # WB25 MED-25-01 closure: USE_BOUNCER is also a non-PROCEED
+        # verdict; the admin allowlist can return it (and Slice 1's
+        # OTHER catch-all uses bouncer_recommended=True). submit_policy
+        # must refuse all three rather than silently mint a role the
+        # workload won't use.
         if check_result.verdict in (
             Compatibility.USE_EXISTING,
+            Compatibility.USE_BOUNCER,
             Compatibility.CANNOT_HELP,
         ):
             return {
