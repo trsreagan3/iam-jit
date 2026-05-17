@@ -275,7 +275,39 @@ class DynamoDBUserStore:
         return sorted(users, key=lambda u: u.id)
 
     def put(self, user: User) -> None:
+        # #161 + [[user-count-soft-cap]]: gate NEW user creation on
+        # the Free-tier soft cap (default 25; raised by signed
+        # Enterprise license). Updates to existing users are NOT
+        # gated — only new creations. Race-tolerant: this is a soft
+        # cap by design, not an atomic constraint.
+        try:
+            existing = self.table.get_item(Key={"user_id": user.id}).get("Item")
+        except Exception:
+            existing = None
+        if existing is None:
+            from . import license as _license_mod
+            current_count = self._count_users()
+            _license_mod.enforce_user_creation_cap(
+                current_user_count=current_count,
+            )
         self.table.put_item(Item=self._to_item(user))
+
+    def _count_users(self) -> int:
+        """Count users (including disabled). Used by the cap gate.
+        Scan-based — acceptable up to a few thousand users; above
+        that, replace with a maintained counter."""
+        count = 0
+        last_key: dict[str, Any] | None = None
+        while True:
+            kwargs: dict[str, Any] = {"Select": "COUNT"}
+            if last_key is not None:
+                kwargs["ExclusiveStartKey"] = last_key
+            resp = self.table.scan(**kwargs)
+            count += int(resp.get("Count", 0))
+            last_key = resp.get("LastEvaluatedKey")
+            if not last_key:
+                break
+        return count
 
     def delete(self, user_id: str) -> None:
         self.table.delete_item(Key={"user_id": user_id})
