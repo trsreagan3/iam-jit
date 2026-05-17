@@ -232,6 +232,87 @@ shows every gated AWS call regardless of how the workload obtained
 its creds. The audit chain promise holds whether the role was
 issued by iam-jit or assigned by the platform.
 
+## Task scope — agent-declared narrowing
+
+Per [[proxy-smart-defaults-and-task-scope]]: an agent doing a
+discrete task can declare a TASK SCOPE that narrows bouncer
+behavior for the task's duration. Canonical example:
+
+```
+agent: "I'm upgrading the staging EKS cluster control plane
+to 1.30 for the next 60 minutes."
+```
+
+```python
+bouncer_start_task(
+    description="upgrade EKS staging cluster control plane to 1.30",
+    allow_rules=[
+        {"pattern": "eks:*",
+         "arn_scope": "arn:aws:eks:us-east-1:111111111111:cluster/staging"},
+        {"pattern": "ec2:Describe*", "region_scope": "us-east-1"},
+        {"pattern": "iam:GetRole"},
+        {"pattern": "iam:PassRole",
+         "arn_scope": "arn:aws:iam::111111111111:role/eks-*"},
+    ],
+    deny_rules=[
+        # Nothing in the prod account, even though global rules would allow:
+        {"pattern": "*", "arn_scope": "arn:aws:*:*:222222222222:*"},
+    ],
+    duration_minutes=60,
+)
+# → returns task_id; bouncer enforces for 60 min or until bouncer_end_task
+```
+
+### Composition with global rules
+
+| Layer | When it applies | Wins over |
+|---|---|---|
+| Task explicit deny | Active task; matches request | Everything (incl. learn mode) |
+| Global explicit deny | Always | Task allow, default policy |
+| Task allow | Active task; matches request | Default deny (within task) |
+| Global allow | Always | Default policy when no task allow matched |
+| Default policy | No rule matched, no task active | — |
+
+Plain English: an agent's task-deny is the strongest layer (the
+"no prod" must hold even during learn mode). A global-deny baseline
+still wins over a task-allow (admin's `iam:Delete*` deny isn't lifted
+by an agent saying "for this task, allow iam:*"). And calls the
+task didn't declare that GLOBAL rules already allow (`sts:GetCaller
+Identity`, etc.) keep working — task scope NARROWS but doesn't
+require declaring every infrastructure call.
+
+### Lifecycle
+
+- **Start** — `bouncer_start_task` MCP tool OR `iam-jit-bouncer
+  tasks start` CLI.
+- **Active** — every decision during the task references its
+  `task_id` in the decision audit log.
+- **End** — `bouncer_end_task` MCP tool OR `iam-jit-bouncer tasks
+  end <task_id>` OR auto-expiry on the wall-clock duration.
+- **Inspect** — `iam-jit-bouncer tasks active` shows the current
+  task; `tasks list` shows historical tasks; `tasks show <id>`
+  shows full details.
+
+Only ONE task active at a time in Slice B. Slice C may add per-PID
+concurrent tasks.
+
+### Auto-expiry
+
+Tasks auto-expire on the wall-clock duration so a forgotten
+`end_task` call doesn't leave the scope active indefinitely. The
+expiry transition is audit-logged via `config_events`
+(`kind=task_ended, end_reason=timeout`).
+
+### What task scope catches
+
+The staging-EKS-upgrade canonical case: a prompt injection mid-task
+that tells the agent to "also delete the prod cluster while you're
+at it" hits the explicit task-deny on `arn:aws:*:*:222222222222:*`
+and gets blocked. The audit log shows the attempted out-of-scope
+call alongside the task that was active. Without task scope, the
+global rules might have allowed the prod call (especially in
+admin-minus-sensitive's permissive baseline).
+
 ## Agent-friendly, not bypassable
 
 Per [[agent-friendly-not-bypassable]]: the bouncer is configurable

@@ -90,6 +90,7 @@ def decide(
     action: str,
     arn: str | None = None,
     region: str | None = None,
+    active_task: Any | None = None,  # TaskScope; lazy-typed to avoid circ import
 ) -> DecisionRecord:
     """Combine rule evaluation + mode + default-policy into a final
     DecisionRecord. Pure: no I/O, no side effects.
@@ -103,10 +104,45 @@ def decide(
     still records what WOULD have matched in ENFORCE mode, so the
     user can preview "what would my current rules do?" without
     actually breaking anything.
+
+    Slice B of [[proxy-smart-defaults-and-task-scope]]: if an
+    `active_task` is provided, its allow + deny rules layer onto the
+    decision per the composition documented in `tasks.py`:
+    - task-deny match → DENY (the agent's "no prod" wins even if
+      global rules would allow)
+    - task-allow match → ALLOW (with global-deny still able to block)
+    - unmatched-by-task → fall through to global rules
+
+    The result's `reason` includes the active task_id so the audit
+    chain captures task-scope effect.
     """
     matched = ruleset.evaluate(
         service=service, action=action, arn=arn, region=region
     )
+
+    # Slice B: task-deny wins over everything (including LEARN's
+    # no-deny invariant — the agent's explicit "no prod" must hold
+    # even when the operator is in learn mode; otherwise the learn-
+    # mode contract would have agents accidentally write to prod
+    # during a "narrow this task" workflow).
+    if active_task is not None:
+        task_deny = active_task.deny_ruleset().evaluate(
+            service=service, action=action, arn=arn, region=region
+        )
+        if task_deny is not None:
+            _, task_rule = task_deny
+            return DecisionRecord(
+                decision=Decision.DENY,
+                mode=mode,
+                service=service,
+                action=action,
+                arn=arn,
+                region=region,
+                matched_rule=task_rule,
+                reason=(
+                    f"task-explicit-deny rule (task {active_task.task_id})"
+                ),
+            )
 
     if mode == Mode.LEARN:
         # Always allow; preserve the matched rule for review purposes.
@@ -133,19 +169,100 @@ def decide(
             reason="learn-mode (unmatched; recording for later review)",
         )
 
+    # Global explicit-rule decisions come BEFORE task-allow because
+    # the global ruleset can include an explicit DENY (e.g. the
+    # admin-minus-sensitive baseline denies secret reads) and that
+    # must win even if the agent's task-allow says otherwise. Task
+    # scope NARROWS within global guardrails; it doesn't lift them.
     if matched is not None:
         effect, rule = matched
-        # Explicit-rule decisions are the same in ENFORCE and PROMPT.
+        if effect == Effect.DENY:
+            return DecisionRecord(
+                decision=Decision.DENY,
+                mode=mode,
+                service=service,
+                action=action,
+                arn=arn,
+                region=region,
+                matched_rule=rule,
+                reason="explicit-deny rule",
+            )
+        # Global explicit ALLOW; task-allow can still narrow further
+        # below, but if no task is active, this allows.
+        if active_task is None:
+            return DecisionRecord(
+                decision=Decision.ALLOW,
+                mode=mode,
+                service=service,
+                action=action,
+                arn=arn,
+                region=region,
+                matched_rule=rule,
+                reason="explicit-allow rule",
+            )
+
+    # Slice B: with an active task, the task-allow ruleset acts as
+    # a NARROWED positive declaration. If task-allow matches → ALLOW
+    # (no further check needed; global deny was already handled
+    # above). If task-allow does NOT match → fall through to the
+    # next layer (global allow if matched + no task allows declared
+    # cover this; else default).
+    if active_task is not None:
+        task_allow = active_task.allow_ruleset().evaluate(
+            service=service, action=action, arn=arn, region=region
+        )
+        if task_allow is not None:
+            _, task_rule = task_allow
+            return DecisionRecord(
+                decision=Decision.ALLOW,
+                mode=mode,
+                service=service,
+                action=action,
+                arn=arn,
+                region=region,
+                matched_rule=task_rule,
+                reason=(
+                    f"task-allow rule (task {active_task.task_id})"
+                ),
+            )
+        # No task-allow rule matched. Two sub-cases:
+        # (a) Global ALLOW already matched → ALLOW (the global rule's
+        #     decision still holds; task scope didn't add a NEW
+        #     positive rule for this call, but the call was already
+        #     blessed by the operator's global baseline).
+        # (b) Global didn't match either → DENY (task is active; the
+        #     agent's positive declaration is the allowlist for this
+        #     task; unmatched-by-task = "not part of the task; deny").
+        if matched is not None:
+            effect, rule = matched
+            return DecisionRecord(
+                decision=Decision.ALLOW,
+                mode=mode,
+                service=service,
+                action=action,
+                arn=arn,
+                region=region,
+                matched_rule=rule,
+                reason=(
+                    f"explicit-allow rule (global; not declared in task "
+                    f"{active_task.task_id})"
+                ),
+            )
         return DecisionRecord(
-            decision=Decision.DENY if effect == Effect.DENY else Decision.ALLOW,
+            decision=Decision.DENY,
             mode=mode,
             service=service,
             action=action,
             arn=arn,
             region=region,
-            matched_rule=rule,
-            reason=f"explicit-{effect.value} rule",
+            matched_rule=None,
+            reason=(
+                f"out-of-task-scope (task {active_task.task_id} active; "
+                "unmatched by task allow rules)"
+            ),
         )
+
+    # No active task; matched is None here (handled above when present).
 
     # No rule matched.
     if mode == Mode.PROMPT:

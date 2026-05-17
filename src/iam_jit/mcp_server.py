@@ -951,6 +951,122 @@ TOOLS = [
         },
     },
     {
+        "name": "bouncer_start_task",
+        "description": (
+            "Declare a TASK SCOPE that narrows the bouncer's behavior "
+            "for the duration of a discrete task. The canonical use "
+            "case (per [[proxy-smart-defaults-and-task-scope]]): the "
+            "agent is doing X (e.g. 'upgrade EKS staging cluster to "
+            "1.30'); declare the allow rules the task needs + deny "
+            "rules for what the task must NOT touch (e.g. prod); the "
+            "bouncer enforces; the audit chain captures the task "
+            "lifecycle. Only ONE task may be active at a time in "
+            "Slice B — end the previous task before starting a new "
+            "one. Tasks auto-expire on the wall-clock duration so a "
+            "forgotten end_task doesn't leave the scope active "
+            "indefinitely. Per [[agent-friendly-not-bypassable]] "
+            "Lens A: the agent is the one with the context to "
+            "declare scope; the bouncer enforces what the agent "
+            "promised."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "required": ["description"],
+            "properties": {
+                "description": {
+                    "type": "string",
+                    "description": (
+                        "Human-readable description of what the task "
+                        "is doing (audit-logged + shown in CLI)."
+                    ),
+                },
+                "allow_rules": {
+                    "type": "array",
+                    "description": (
+                        "Rules declaring what the task NEEDS. Each: "
+                        "{pattern, arn_scope?, region_scope?, note?}. "
+                        "Pattern is service:action_glob. Effect is "
+                        "forced to ALLOW; don't pass an effect field."
+                    ),
+                    "items": {
+                        "type": "object",
+                        "required": ["pattern"],
+                        "properties": {
+                            "pattern": {"type": "string"},
+                            "arn_scope": {"type": "string"},
+                            "region_scope": {"type": "string"},
+                            "note": {"type": "string"},
+                        },
+                    },
+                },
+                "deny_rules": {
+                    "type": "array",
+                    "description": (
+                        "Explicit denies for the task (e.g. 'no prod' "
+                        "account). Same shape as allow_rules; effect "
+                        "forced to DENY. Task-deny wins over both "
+                        "global allows AND learn-mode."
+                    ),
+                    "items": {
+                        "type": "object",
+                        "required": ["pattern"],
+                        "properties": {
+                            "pattern": {"type": "string"},
+                            "arn_scope": {"type": "string"},
+                            "region_scope": {"type": "string"},
+                            "note": {"type": "string"},
+                        },
+                    },
+                },
+                "duration_minutes": {
+                    "type": "integer",
+                    "default": 30,
+                    "minimum": 1,
+                    "maximum": 1440,
+                    "description": (
+                        "Task duration (auto-expiry); max 24h. "
+                        "Forgotten end_task doesn't keep the scope "
+                        "active forever."
+                    ),
+                },
+            },
+        },
+    },
+    {
+        "name": "bouncer_end_task",
+        "description": (
+            "End an active task scope. The remaining duration is "
+            "discarded; the task moves to status='completed'. The "
+            "end event is audit-logged with the supplied reason. "
+            "Idempotent: calling end_task on a task that's already "
+            "ended is a no-op error (the audit chain isn't double-"
+            "logged)."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "required": ["task_id"],
+            "properties": {
+                "task_id": {"type": "string"},
+                "reason": {
+                    "type": "string",
+                    "description": "Why the task is ending (audit-logged).",
+                },
+            },
+        },
+    },
+    {
+        "name": "bouncer_active_task",
+        "description": (
+            "Return the currently-active task scope, or null if no "
+            "task is active. Auto-expires if the wall-clock expiry "
+            "has passed (the returned value will be null in that "
+            "case, and an audit event records the expiry). Useful "
+            "for agents that want to verify their task is still "
+            "active before continuing work."
+        ),
+        "inputSchema": {"type": "object", "properties": {}},
+    },
+    {
         "name": "bouncer_tail_decisions",
         "description": (
             "Inspect the bouncer's decision audit log (every call "
@@ -1661,6 +1777,104 @@ def _bouncer_tail_decisions_for_mcp(args: dict[str, Any]) -> dict[str, Any]:
     return {"decisions": out, "count": len(out)}
 
 
+# ---------------------------------------------------------------------------
+# Bouncer task-scope MCP tools (Slice B of [[proxy-smart-defaults-and-task-scope]])
+# ---------------------------------------------------------------------------
+
+
+def _bouncer_start_task_for_mcp(args: dict[str, Any]) -> dict[str, Any]:
+    from .bouncer.store import BouncerStore
+    from .bouncer.tasks import TaskValidationError, build_task_scope
+
+    description = args.get("description")
+    if not isinstance(description, str) or not description.strip():
+        return {"error": "description is required and must be a non-empty string"}
+    allow_rules = args.get("allow_rules") or []
+    deny_rules = args.get("deny_rules") or []
+    if not isinstance(allow_rules, list):
+        return {"error": "allow_rules must be a list if provided"}
+    if not isinstance(deny_rules, list):
+        return {"error": "deny_rules must be a list if provided"}
+    duration = args.get("duration_minutes", 30)
+    if not isinstance(duration, int) or isinstance(duration, bool):
+        return {"error": "duration_minutes must be an integer"}
+
+    try:
+        scope = build_task_scope(
+            description=description,
+            allow_rules=allow_rules,
+            deny_rules=deny_rules,
+            duration_minutes=duration,
+            started_by=_bouncer_actor(),
+        )
+    except TaskValidationError as e:
+        return {"error": str(e)}
+
+    store = BouncerStore()
+    try:
+        existing = store.get_active_task()
+        if existing is not None:
+            return {
+                "error": (
+                    f"another task is already active ({existing.task_id}); "
+                    "end it first via bouncer_end_task"
+                ),
+                "active_task_id": existing.task_id,
+            }
+        store.add_task(scope, actor=_bouncer_actor())
+    finally:
+        store.close()
+    return {
+        "task_id": scope.task_id,
+        "expires_at": scope.expires_at,
+        "allow_rule_count": len(scope.allow_rules),
+        "deny_rule_count": len(scope.deny_rules),
+        "audit_event_kind": "task_started",
+    }
+
+
+def _bouncer_end_task_for_mcp(args: dict[str, Any]) -> dict[str, Any]:
+    from .bouncer.store import BouncerStore
+
+    task_id = args.get("task_id")
+    if not isinstance(task_id, str) or not task_id.strip():
+        return {"error": "task_id is required and must be a non-empty string"}
+    reason = args.get("reason") or "ended via MCP"
+    if not isinstance(reason, str):
+        return {"error": "reason must be a string if provided"}
+
+    store = BouncerStore()
+    try:
+        ok = store.end_task(task_id.strip(), actor=_bouncer_actor(), end_reason=reason)
+    finally:
+        store.close()
+    if not ok:
+        return {
+            "error": (
+                f"no active task with id {task_id!r} "
+                "(already ended, or task doesn't exist)"
+            ),
+        }
+    return {
+        "task_id": task_id,
+        "ended": True,
+        "audit_event_kind": "task_ended",
+    }
+
+
+def _bouncer_active_task_for_mcp(args: dict[str, Any]) -> dict[str, Any]:
+    from .bouncer.store import BouncerStore
+
+    store = BouncerStore()
+    try:
+        scope = store.get_active_task()
+    finally:
+        store.close()
+    if scope is None:
+        return {"active": None}
+    return {"active": scope.to_dict()}
+
+
 def _tail_grant_for_mcp(args: dict[str, Any]) -> dict[str, Any]:
     """Return CloudTrail events for the JIT-issued role session of
     a given grant. See the `tail_grant` MCP tool definition for the
@@ -2226,6 +2440,12 @@ def _handle_request(req: dict[str, Any]) -> dict[str, Any] | None:
             result_payload = _bouncer_tail_events_for_mcp(args)
         elif tool_name == "bouncer_tail_decisions":
             result_payload = _bouncer_tail_decisions_for_mcp(args)
+        elif tool_name == "bouncer_start_task":
+            result_payload = _bouncer_start_task_for_mcp(args)
+        elif tool_name == "bouncer_end_task":
+            result_payload = _bouncer_end_task_for_mcp(args)
+        elif tool_name == "bouncer_active_task":
+            result_payload = _bouncer_active_task_for_mcp(args)
         elif tool_name == "check_iam_jit_compatibility":
             result_payload = _check_compatibility_for_mcp(args)
         elif tool_name == "list_compatibility_catalog":

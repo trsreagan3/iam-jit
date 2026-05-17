@@ -62,7 +62,7 @@ class InvalidRuleError(ValueError):
     immediately and isn't confused at decision time.
     """
 
-SCHEMA_VERSION = 2  # v2: adds config_events table for [[agent-friendly-not-bypassable]] Lens B
+SCHEMA_VERSION = 3  # v3: adds tasks table + task_id column on decisions for [[proxy-smart-defaults-and-task-scope]] Slice B
 
 
 def default_db_path() -> pathlib.Path:
@@ -164,8 +164,37 @@ class BouncerStore:
                 );
                 CREATE INDEX IF NOT EXISTS idx_config_events_at ON config_events(at);
                 CREATE INDEX IF NOT EXISTS idx_config_events_kind ON config_events(kind);
+                -- v3: tasks table for [[proxy-smart-defaults-and-task-scope]]
+                -- Slice B. Agent declares a scoped task at start; bouncer
+                -- enforces task allow + task deny rules for the duration;
+                -- task lifecycle audit-logged via config_events too
+                -- (kind=task_started / task_ended). Status moves
+                -- active -> completed / expired / replaced.
+                CREATE TABLE IF NOT EXISTS tasks (
+                    task_id TEXT PRIMARY KEY,
+                    description TEXT NOT NULL,
+                    allow_rules_json TEXT NOT NULL,
+                    deny_rules_json TEXT NOT NULL,
+                    started_at TEXT NOT NULL,
+                    expires_at TEXT NOT NULL,
+                    started_by TEXT NOT NULL,
+                    status TEXT NOT NULL DEFAULT 'active',
+                    ended_at TEXT,
+                    ended_by TEXT,
+                    end_reason TEXT
+                );
+                CREATE INDEX IF NOT EXISTS idx_tasks_status ON tasks(status);
+                CREATE INDEX IF NOT EXISTS idx_tasks_started_at ON tasks(started_at);
                 """
             )
+            # v3 additive migration: add task_id column to existing
+            # decisions table if it's missing. ALTER TABLE ADD COLUMN
+            # is idempotent-safe via try/except (SQLite raises on
+            # duplicate column).
+            try:
+                self._conn.execute("ALTER TABLE decisions ADD COLUMN task_id TEXT")
+            except sqlite3.OperationalError:
+                pass
             cur = self._conn.execute("SELECT version FROM schema_version LIMIT 1")
             row = cur.fetchone()
             if row is None:
@@ -431,12 +460,25 @@ class BouncerStore:
     # Decisions / audit log
     # -----------------------------------------------------------------
 
-    def record_decision(self, dec: DecisionRecord, *, matched_rule_id: int | None = None) -> int:
+    def record_decision(
+        self,
+        dec: DecisionRecord,
+        *,
+        matched_rule_id: int | None = None,
+        task_id: str | None = None,
+    ) -> int:
+        """Persist a decision row.
+
+        `task_id` is the active task at the time of the decision (per
+        Slice B), or None if no task was active. Lets post-incident
+        review answer "during task X, what calls were attempted and
+        what were the outcomes?"
+        """
         with self._lock:
             cur = self._conn.execute(
                 """
-                INSERT INTO decisions(at, decision, mode, service, action, arn, region, matched_rule_id, reason)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                INSERT INTO decisions(at, decision, mode, service, action, arn, region, matched_rule_id, reason, task_id)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     _isoformat_z(_dt.datetime.now(_dt.UTC)),
@@ -448,6 +490,7 @@ class BouncerStore:
                     dec.region,
                     matched_rule_id,
                     dec.reason,
+                    task_id,
                 ),
             )
             return int(cur.lastrowid or 0)
@@ -463,7 +506,7 @@ class BouncerStore:
         capped_limit = max(1, min(int(limit), 10_000))
         sql = (
             "SELECT id, at, decision, mode, service, action, arn, region, "
-            "matched_rule_id, reason FROM decisions"
+            "matched_rule_id, reason, task_id FROM decisions"
         )
         params: tuple[Any, ...]
         if decision_filter is not None:
@@ -478,7 +521,7 @@ class BouncerStore:
             rows = cur.fetchall()
         out: list[dict[str, Any]] = []
         for r in rows:
-            (rid, at, decision, mode, service, action, arn, region, matched_id, reason) = r
+            (rid, at, decision, mode, service, action, arn, region, matched_id, reason, task_id) = r
             out.append({
                 "id": int(rid),
                 "at": at,
@@ -490,6 +533,7 @@ class BouncerStore:
                 "region": region,
                 "matched_rule_id": int(matched_id) if matched_id is not None else None,
                 "reason": reason,
+                "task_id": task_id,
             })
         return out
 
@@ -500,9 +544,238 @@ class BouncerStore:
         return int(row[0] if row else 0)
 
     # -----------------------------------------------------------------
+    # Tasks (Slice B of [[proxy-smart-defaults-and-task-scope]])
+    # -----------------------------------------------------------------
+
+    def add_task(self, scope: Any, *, actor: str | None = None) -> str:
+        """Persist a new task scope as ACTIVE.
+
+        Caller responsibility: end any previously active task before
+        calling add_task — concurrency is single-active-task in Slice B
+        (Slice C may add per-PID concurrent tasks). This method does
+        NOT check for active conflicts; the higher-level
+        `start_task` flow does that.
+
+        Also writes a `task_started` config_event so the audit chain
+        captures the lifecycle.
+        """
+        import json as _json
+
+        with self._lock:
+            self._conn.execute(
+                """
+                INSERT INTO tasks(
+                    task_id, description, allow_rules_json, deny_rules_json,
+                    started_at, expires_at, started_by, status,
+                    ended_at, ended_by, end_reason
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    scope.task_id,
+                    scope.description,
+                    _json.dumps([r.to_dict() for r in scope.allow_rules]),
+                    _json.dumps([r.to_dict() for r in scope.deny_rules]),
+                    scope.started_at,
+                    scope.expires_at,
+                    scope.started_by,
+                    scope.status.value,
+                    scope.ended_at,
+                    scope.ended_by,
+                    scope.end_reason,
+                ),
+            )
+        self._record_config_event_locked(
+            actor=actor or scope.started_by,
+            kind="task_started",
+            target_id=None,
+            summary=f"task {scope.task_id} started: {scope.description[:80]}",
+            detail={
+                "task_id": scope.task_id,
+                "description": scope.description,
+                "duration_until": scope.expires_at,
+                "allow_rule_count": len(scope.allow_rules),
+                "deny_rule_count": len(scope.deny_rules),
+            },
+        )
+        return scope.task_id
+
+    def get_active_task(self) -> Any | None:
+        """Return the currently-active task scope, or None if no task
+        is active. Auto-expires (writes back status='expired' + logs
+        the event) if the wall-clock expiry has passed."""
+        from .tasks import TaskScope, TaskStatus
+
+        with self._lock:
+            cur = self._conn.execute(
+                """
+                SELECT task_id, description, allow_rules_json, deny_rules_json,
+                       started_at, expires_at, started_by, status,
+                       ended_at, ended_by, end_reason
+                FROM tasks
+                WHERE status = 'active'
+                ORDER BY started_at DESC
+                LIMIT 1
+                """
+            )
+            row = cur.fetchone()
+        if row is None:
+            return None
+        scope = _row_to_task_scope(row)
+        if scope.is_expired():
+            # Auto-expire: write back + log + return None (caller sees
+            # "no active task" rather than a stale one). Done OUTSIDE
+            # the lock above so the _record_config_event re-acquires
+            # cleanly.
+            self._end_task_internal(
+                scope.task_id,
+                actor="auto-expire",
+                end_reason="timeout",
+                new_status=TaskStatus.EXPIRED,
+            )
+            return None
+        return scope
+
+    def get_task(self, task_id: str) -> Any | None:
+        with self._lock:
+            cur = self._conn.execute(
+                """
+                SELECT task_id, description, allow_rules_json, deny_rules_json,
+                       started_at, expires_at, started_by, status,
+                       ended_at, ended_by, end_reason
+                FROM tasks WHERE task_id = ?
+                """,
+                (task_id,),
+            )
+            row = cur.fetchone()
+        return _row_to_task_scope(row) if row is not None else None
+
+    def list_tasks(
+        self,
+        *,
+        limit: int = 50,
+        status_filter: str | None = None,
+    ) -> list[Any]:
+        capped_limit = max(1, min(int(limit), 10_000))
+        sql = (
+            "SELECT task_id, description, allow_rules_json, deny_rules_json, "
+            "started_at, expires_at, started_by, status, ended_at, ended_by, "
+            "end_reason FROM tasks"
+        )
+        params: tuple[Any, ...]
+        if status_filter is not None:
+            sql += " WHERE status = ?"
+            params = (status_filter,)
+        else:
+            params = ()
+        sql += " ORDER BY started_at DESC LIMIT ?"
+        params = params + (capped_limit,)
+        with self._lock:
+            cur = self._conn.execute(sql, params)
+            rows = cur.fetchall()
+        return [_row_to_task_scope(r) for r in rows]
+
+    def end_task(
+        self,
+        task_id: str,
+        *,
+        actor: str,
+        end_reason: str | None = None,
+    ) -> bool:
+        """End the named task (status -> completed). Returns True if a
+        row was updated; False if the task didn't exist or was already
+        ended."""
+        from .tasks import TaskStatus
+
+        return self._end_task_internal(
+            task_id, actor=actor, end_reason=end_reason or "completed",
+            new_status=TaskStatus.COMPLETED,
+        )
+
+    def _end_task_internal(
+        self,
+        task_id: str,
+        *,
+        actor: str,
+        end_reason: str,
+        new_status: Any,  # TaskStatus
+    ) -> bool:
+        ended_at = _isoformat_z(_dt.datetime.now(_dt.UTC))
+        with self._lock:
+            cur = self._conn.execute(
+                """
+                UPDATE tasks
+                SET status = ?, ended_at = ?, ended_by = ?, end_reason = ?
+                WHERE task_id = ? AND status = 'active'
+                """,
+                (new_status.value, ended_at, actor, end_reason, task_id),
+            )
+            updated = cur.rowcount > 0
+        if updated:
+            self._record_config_event_locked(
+                actor=actor,
+                kind="task_ended",
+                target_id=None,
+                summary=f"task {task_id} ended: {end_reason}",
+                detail={
+                    "task_id": task_id,
+                    "status": new_status.value,
+                    "end_reason": end_reason,
+                    "ended_at": ended_at,
+                },
+            )
+        return updated
+
+    # -----------------------------------------------------------------
     # Lifecycle
     # -----------------------------------------------------------------
 
     def close(self) -> None:
         with self._lock:
             self._conn.close()
+
+
+def _row_to_task_scope(row) -> Any:
+    """Reconstruct a TaskScope from a SQLite row. Lazy import keeps
+    `tasks.py` and `store.py` independent at module load."""
+    import json as _json
+    from .tasks import TaskScope, TaskStatus
+    from .rules import Effect, ProxyRule
+
+    (
+        task_id, description, allow_json, deny_json,
+        started_at, expires_at, started_by, status,
+        ended_at, ended_by, end_reason,
+    ) = row
+
+    def _decode_rules(blob: str, effect: Effect) -> tuple[ProxyRule, ...]:
+        try:
+            entries = _json.loads(blob) if blob else []
+        except (ValueError, TypeError):
+            return ()
+        out: list[ProxyRule] = []
+        for e in entries:
+            if not isinstance(e, dict):
+                continue
+            out.append(ProxyRule(
+                pattern=str(e.get("pattern") or ""),
+                effect=effect,
+                arn_scope=e.get("arn_scope"),
+                region_scope=e.get("region_scope"),
+                note=e.get("note"),
+                origin=e.get("origin") or "task",
+            ))
+        return tuple(out)
+
+    return TaskScope(
+        task_id=task_id,
+        description=description,
+        allow_rules=_decode_rules(allow_json, Effect.ALLOW),
+        deny_rules=_decode_rules(deny_json, Effect.DENY),
+        started_at=started_at,
+        expires_at=expires_at,
+        started_by=started_by,
+        status=TaskStatus(status),
+        ended_at=ended_at,
+        ended_by=ended_by,
+        end_reason=end_reason,
+    )

@@ -28,6 +28,7 @@ from .bouncer.presets import PRESETS, get_preset, list_preset_names
 from .bouncer.request_parser import parse_request
 from .bouncer.rules import Effect, ProxyRule, RuleSet
 from .bouncer.store import BouncerStore, InvalidRuleError, default_db_path
+from .bouncer.tasks import TaskValidationError, build_task_scope
 
 
 def _current_actor() -> str:
@@ -492,6 +493,9 @@ def decide_cmd(
         # matched_rule_id=NULL even when an explicit rule matched.
         id_tagged = store.list_rules()
         ruleset = RuleSet(rules=[r for _, r in id_tagged])
+        # Slice B: pick up the currently-active task scope (if any)
+        # so decide() applies task allow/deny rules.
+        active_task = store.get_active_task()
         record_obj = decide(
             ruleset,
             mode=Mode(mode.lower()),
@@ -500,6 +504,7 @@ def decide_cmd(
             action=action,
             arn=arn,
             region=region,
+            active_task=active_task,
         )
         matched_rule_id: int | None = None
         if record_obj.matched_rule is not None:
@@ -514,9 +519,202 @@ def decide_cmd(
                 f"rule:     #{matched_rule_id} {record_obj.matched_rule.effect.value} "
                 f"{record_obj.matched_rule.pattern}"
             )
+        if active_task is not None:
+            click.echo(f"active task: {active_task.task_id} ({active_task.description[:60]})")
         if record:
-            store.record_decision(record_obj, matched_rule_id=matched_rule_id)
+            store.record_decision(
+                record_obj,
+                matched_rule_id=matched_rule_id,
+                task_id=active_task.task_id if active_task is not None else None,
+            )
             click.echo("(recorded to audit log)")
+
+
+# ---------------------------------------------------------------------------
+# tasks — agent-declared task scope (Slice B of #168)
+# ---------------------------------------------------------------------------
+
+
+@main.group("tasks")
+def tasks_group() -> None:
+    """Inspect / manage agent-declared task scopes.
+
+    Tasks are typically STARTED by agents via the
+    `bouncer_start_task` MCP tool. Use this CLI group to LIST
+    historical + active tasks, SHOW the rule details of one task,
+    or END the active task manually.
+
+    Per [[proxy-smart-defaults-and-task-scope]]: a task narrows the
+    bouncer's behavior for its duration. The agent declares allow
+    rules (what the task needs) + deny rules (what the task must
+    not touch, e.g. prod). Global rules still apply on top — task
+    deny + global deny both block; global ALLOW that wasn't
+    declared in task allow still goes through (so infrastructure
+    calls keep working).
+    """
+
+
+@tasks_group.command("list")
+@click.option("--status", default=None,
+              type=click.Choice(["active", "completed", "expired", "replaced"]))
+@click.option("--limit", type=int, default=50, show_default=True)
+@click.option("--db", type=click.Path(dir_okay=False), default=None)
+@click.option("--json", "as_json", is_flag=True, default=False)
+def tasks_list(status: str | None, limit: int, db: str | None, as_json: bool) -> None:
+    """List task scopes, newest first."""
+    with _opened_store(db) as store:
+        scopes = store.list_tasks(limit=limit, status_filter=status)
+    if as_json:
+        click.echo(json.dumps([s.to_dict() for s in scopes], indent=2))
+        return
+    if not scopes:
+        click.echo("(no tasks)")
+        return
+    for s in scopes:
+        click.echo(
+            f"{s.task_id}  {s.status.value:>9}  started {s.started_at} "
+            f"by {s.started_by}  --  {s.description[:60]}"
+        )
+
+
+@tasks_group.command("active")
+@click.option("--db", type=click.Path(dir_okay=False), default=None)
+@click.option("--json", "as_json", is_flag=True, default=False)
+def tasks_active(db: str | None, as_json: bool) -> None:
+    """Show the currently-active task (if any). Reports None if
+    no task is active OR the active task has timed out."""
+    with _opened_store(db) as store:
+        active = store.get_active_task()
+    if active is None:
+        if as_json:
+            click.echo(json.dumps({"active": None}))
+        else:
+            click.echo("(no active task)")
+        return
+    if as_json:
+        click.echo(json.dumps(active.to_dict(), indent=2))
+        return
+    click.echo(f"task_id:      {active.task_id}")
+    click.echo(f"description:  {active.description}")
+    click.echo(f"started_at:   {active.started_at}")
+    click.echo(f"expires_at:   {active.expires_at}")
+    click.echo(f"started_by:   {active.started_by}")
+    click.echo(f"allow rules:  {len(active.allow_rules)}")
+    for r in active.allow_rules:
+        scope = ""
+        if r.arn_scope:
+            scope += f" arn={r.arn_scope}"
+        if r.region_scope:
+            scope += f" region={r.region_scope}"
+        click.echo(f"  + {r.pattern}{scope}")
+    click.echo(f"deny rules:   {len(active.deny_rules)}")
+    for r in active.deny_rules:
+        scope = ""
+        if r.arn_scope:
+            scope += f" arn={r.arn_scope}"
+        if r.region_scope:
+            scope += f" region={r.region_scope}"
+        click.echo(f"  - {r.pattern}{scope}")
+
+
+@tasks_group.command("show")
+@click.argument("task_id")
+@click.option("--db", type=click.Path(dir_okay=False), default=None)
+def tasks_show(task_id: str, db: str | None) -> None:
+    """Show full details for one task scope."""
+    with _opened_store(db) as store:
+        scope = store.get_task(task_id)
+    if scope is None:
+        click.echo(f"no task with id {task_id!r}", err=True)
+        sys.exit(1)
+    click.echo(json.dumps(scope.to_dict(), indent=2))
+
+
+@tasks_group.command("end")
+@click.argument("task_id")
+@click.option("--reason", default="manually ended",
+              help="End reason recorded in audit log.")
+@click.option("--db", type=click.Path(dir_okay=False), default=None)
+def tasks_end(task_id: str, reason: str, db: str | None) -> None:
+    """End the named task. The deletion-style audit event is written
+    via config_events (kind=task_ended)."""
+    with _opened_store(db) as store:
+        ok = store.end_task(task_id, actor=_current_actor(), end_reason=reason)
+    if not ok:
+        click.echo(
+            f"no active task with id {task_id!r} "
+            "(already ended, or task doesn't exist)",
+            err=True,
+        )
+        sys.exit(1)
+    click.echo(f"ended task {task_id}")
+
+
+@tasks_group.command("start")
+@click.option("--description", required=True,
+              help="Human-readable task description (recorded in audit log).")
+@click.option("--allow", "allow_rules_raw", multiple=True,
+              help="Allow-rule in 'pattern[@arn][#region]' form. Repeatable.")
+@click.option("--deny", "deny_rules_raw", multiple=True,
+              help="Deny-rule in 'pattern[@arn][#region]' form. Repeatable.")
+@click.option("--duration", "duration_minutes", type=int, default=30,
+              show_default=True, help="Task duration in minutes (1..1440).")
+@click.option("--db", type=click.Path(dir_okay=False), default=None)
+def tasks_start(
+    description: str,
+    allow_rules_raw: tuple[str, ...],
+    deny_rules_raw: tuple[str, ...],
+    duration_minutes: int,
+    db: str | None,
+) -> None:
+    """Manually start a task scope (typically done via MCP from an
+    agent; CLI form is for testing + demo).
+
+    Rule shorthand: `pattern@arn_scope#region_scope` — both scopes
+    optional. Examples:
+
+    \b
+        --allow 'eks:*@arn:aws:eks:us-east-1:111:cluster/staging'
+        --allow 'ec2:Describe*#us-east-1'
+        --deny  '*@arn:aws:*::222:*'
+    """
+    def _parse_shorthand(s: str) -> dict:
+        pattern = s
+        arn = None
+        region = None
+        if "#" in pattern:
+            pattern, region = pattern.split("#", 1)
+        if "@" in pattern:
+            pattern, arn = pattern.split("@", 1)
+        return {
+            "pattern": pattern.strip(),
+            "arn_scope": arn.strip() if arn else None,
+            "region_scope": region.strip() if region else None,
+        }
+
+    try:
+        scope = build_task_scope(
+            description=description,
+            allow_rules=[_parse_shorthand(s) for s in allow_rules_raw],
+            deny_rules=[_parse_shorthand(s) for s in deny_rules_raw],
+            duration_minutes=duration_minutes,
+            started_by=_current_actor(),
+        )
+    except TaskValidationError as e:
+        click.echo(f"rejected: {e}", err=True)
+        sys.exit(2)
+
+    with _opened_store(db) as store:
+        existing = store.get_active_task()
+        if existing is not None:
+            click.echo(
+                f"another task ({existing.task_id}) is already active; "
+                "end it first with `iam-jit-bouncer tasks end <id>`",
+                err=True,
+            )
+            sys.exit(2)
+        store.add_task(scope, actor=_current_actor())
+    click.echo(f"started task {scope.task_id} (expires {scope.expires_at})")
 
 
 # ---------------------------------------------------------------------------
