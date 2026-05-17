@@ -2147,6 +2147,503 @@ def run_cmd(
             click.echo("\nibounce proxy stopped.", err=True)
 
 
+# ---------------------------------------------------------------------------
+# `ibounce mcp ...` — wire the iam-jit/ibounce MCP server into agent runtimes.
+#
+# Task #228 closure (launch-readiness Stage 5 agent-integration unlock).
+# One command from a fresh install to a wired agent for the three most
+# common MCP clients (Claude Code, Cursor, Codex). Mirrors the prior art
+# `iam-jit mcp ...` group in src/iam_jit/cli.py (same JSON shape, same
+# atomic-write semantics) plus per-client config-path detection.
+#
+# Cross-product parity: `kbounce mcp install-*` (sibling Go binary) ships
+# the same subcommand surface + flags. Path detection differs by client;
+# JSON shape is identical except for the server entry's `command`/`args`.
+# See feedback_cross_product_agent_parity.
+#
+# Atomic-write invariant: each install-* command writes to a tempfile in
+# the target's parent dir, then `os.replace`s it onto the target. The
+# replace is atomic on POSIX + Windows; the partial-write window never
+# leaves a half-merged config visible to the agent. No `sudo` required —
+# every default path is user-owned ($HOME/...).
+# ---------------------------------------------------------------------------
+
+
+@main.group("mcp")
+def mcp_group() -> None:
+    """Wire ibounce's MCP server into an agent runtime.
+
+    The bouncer's MCP tools (ibounce_list_rules, ibounce_start_task,
+    ibounce_decide, ...) ship inside the iam-jit MCP server. Any
+    MCP-compatible agent (Claude Code, Cursor, Codex MCP, Devin, custom)
+    can call them once the server entry is registered in the agent's
+    MCP config.
+
+    Subcommands:
+      serve                — run the MCP server on stdio (called by agents)
+      show-config          — print the JSON snippet for any MCP client
+      install-claude-code  — write the snippet into Claude Code's config
+      install-cursor       — write the snippet into Cursor's config
+      install-codex        — print the snippet + the manual-install location
+      list-tools           — list every MCP tool ibounce exposes
+    """
+
+
+@mcp_group.command("serve")
+def mcp_serve_cmd() -> None:
+    """Run the ibounce MCP server on stdio.
+
+    Thin wrapper around the iam-jit MCP server (which already exposes
+    every ibounce_* tool — same binary, both brands). Speaks the open
+    Model Context Protocol over stdin/stdout (line-delimited JSON-RPC).
+
+    Typically NOT invoked by hand — the agent's MCP host launches this
+    process per the config snippet emitted by `ibounce mcp show-config`.
+
+    Equivalent to `iam-jit mcp-server`; both call the same module
+    entrypoint.
+    """
+    from .mcp_server import main as mcp_main
+
+    sys.exit(mcp_main())
+
+
+def _ibounce_mcp_config_dict() -> dict[str, Any]:
+    """Canonical MCP config snippet for ibounce. Centralized so
+    show-config + every install-* command emit IDENTICAL JSON."""
+    return {
+        "mcpServers": {
+            "ibounce": {
+                "command": "ibounce",
+                "args": ["mcp", "serve"],
+                "env": {},
+            },
+        },
+    }
+
+
+def _atomic_write_json(target: "os.PathLike[str] | str", data: dict[str, Any]) -> None:
+    """Atomic JSON write: write to a tempfile in the target's parent
+    dir, fsync, then os.replace onto the target. POSIX + Windows both
+    treat the rename as atomic, so an interrupted run never leaves a
+    half-merged config visible to the agent's MCP host."""
+    import pathlib as _pathlib
+    import tempfile as _tempfile
+
+    target_path = _pathlib.Path(target)
+    target_path.parent.mkdir(parents=True, exist_ok=True)
+    fd, tmp_name = _tempfile.mkstemp(
+        prefix=target_path.name + ".",
+        suffix=".tmp",
+        dir=str(target_path.parent),
+    )
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as fh:
+            fh.write(json.dumps(data, indent=2) + "\n")
+            fh.flush()
+            try:
+                os.fsync(fh.fileno())
+            except OSError:
+                # fsync isn't supported on all filesystems (e.g. some
+                # tmpfs / NFS variants). The atomic rename is still
+                # guaranteed by POSIX; we don't fail the install for a
+                # missing fsync.
+                pass
+        os.replace(tmp_name, target_path)
+    except Exception:
+        try:
+            os.unlink(tmp_name)
+        except OSError:
+            pass
+        raise
+
+
+def _merge_ibounce_entry(
+    target: "os.PathLike[str] | str",
+    *,
+    force: bool,
+) -> tuple[bool, str | None]:
+    """Read the existing JSON config (if any), preserve all other keys
+    + other `mcpServers` entries, and add/update the `ibounce` entry.
+    Returns (overwriting, error_message). On error, the target file is
+    left untouched.
+    """
+    import pathlib as _pathlib
+
+    target_path = _pathlib.Path(target)
+    existing: dict[str, Any] = {}
+    if target_path.exists():
+        try:
+            existing = json.loads(target_path.read_text())
+        except json.JSONDecodeError as e:
+            return False, (
+                f"existing config at {target_path} is not valid JSON ({e}); "
+                "refusing to overwrite. Pass --path to a clean location "
+                "or run `ibounce mcp show-config` and merge by hand."
+            )
+        if not isinstance(existing, dict):
+            return False, (
+                f"existing config at {target_path} is not a JSON object; "
+                "refusing to overwrite. Pass --path to a clean location "
+                "or run `ibounce mcp show-config` and merge by hand."
+            )
+
+    mcp_servers = existing.setdefault("mcpServers", {})
+    if not isinstance(mcp_servers, dict):
+        return False, (
+            f"existing config at {target_path} has a non-object "
+            "`mcpServers` value; refusing to overwrite. Pass --path to "
+            "a clean location or run `ibounce mcp show-config` and "
+            "merge by hand."
+        )
+
+    overwriting = "ibounce" in mcp_servers
+    if overwriting and not force:
+        # Confirm interactively. In non-tty contexts Click's confirm
+        # returns False unless --force is set; we treat that as decline.
+        if not click.confirm(
+            f"`ibounce` MCP entry already exists at {target_path}. Overwrite?",
+            default=False,
+        ):
+            return False, "declined overwrite (pass --force to skip this prompt)"
+
+    snippet = _ibounce_mcp_config_dict()
+    mcp_servers["ibounce"] = snippet["mcpServers"]["ibounce"]
+
+    try:
+        _atomic_write_json(target_path, existing)
+    except OSError as e:
+        return False, f"failed to write {target_path}: {e}"
+    return overwriting, None
+
+
+@mcp_group.command("show-config")
+@click.option(
+    "--shape",
+    type=click.Choice(["json", "yaml"], case_sensitive=False),
+    default="json",
+    show_default=True,
+    help="Output format. JSON is the standard MCP config shape; YAML "
+         "is offered for operators whose agent config is YAML-native.",
+)
+def mcp_show_config_cmd(shape: str) -> None:
+    """Print the MCP server config snippet to stdout.
+
+    Vendor-neutral — paste into any MCP-compatible client. For the
+    three most-common clients there's a one-command installer that
+    does the merge + write for you:
+
+      ibounce mcp install-claude-code
+      ibounce mcp install-cursor
+      ibounce mcp install-codex
+
+    For custom MCP clients, copy the snippet printed above into your
+    client's MCP config (location is client-specific).
+    """
+    cfg = _ibounce_mcp_config_dict()
+    if shape.lower() == "yaml":
+        try:
+            from ruamel.yaml import YAML
+            from io import StringIO
+
+            yaml = YAML(typ="safe")
+            yaml.default_flow_style = False
+            buf = StringIO()
+            yaml.dump(cfg, buf)
+            click.echo(buf.getvalue().rstrip("\n"))
+        except Exception as e:  # pragma: no cover — ruamel.yaml is a hard dep
+            click.secho(
+                f"failed to emit YAML ({e}); falling back to JSON",
+                fg="yellow", err=True,
+            )
+            click.echo(json.dumps(cfg, indent=2))
+    else:
+        click.echo(json.dumps(cfg, indent=2))
+
+    click.echo("")
+    click.echo("Wire it up:")
+    click.echo("  - Claude Code:  ibounce mcp install-claude-code")
+    click.echo("  - Cursor:       ibounce mcp install-cursor")
+    click.echo("  - Codex MCP:    ibounce mcp install-codex")
+    click.echo(
+        "  - Other clients: copy the snippet above into your MCP "
+        "config (location is client-specific)."
+    )
+
+
+def _candidate_claude_code_paths() -> list["os.PathLike[str]"]:
+    """Default Claude Code / Claude Desktop MCP config locations, in
+    detection priority order. We prefer the Claude Code CLI path
+    (`~/.claude.json`) over Claude Desktop because the target audience
+    here is CLI-first developers; Desktop paths fall through for users
+    on the Anthropic Desktop app."""
+    import pathlib as _pathlib
+    import platform as _platform
+
+    home = _pathlib.Path.home()
+    sysname = _platform.system()
+    candidates: list[os.PathLike[str]] = [
+        # Claude Code CLI (cross-platform — preferred for our audience)
+        home / ".claude.json",
+        home / ".config" / "claude-code" / "mcp.json",
+    ]
+    if sysname == "Darwin":
+        candidates.append(
+            home / "Library" / "Application Support" / "Claude" / "claude_desktop_config.json"
+        )
+    elif sysname == "Windows":
+        appdata = os.environ.get("APPDATA")
+        if appdata:
+            candidates.append(
+                _pathlib.Path(appdata) / "Claude" / "claude_desktop_config.json"
+            )
+        candidates.append(
+            home / "AppData" / "Roaming" / "Claude" / "claude_desktop_config.json"
+        )
+    else:
+        candidates.append(
+            home / ".config" / "Claude" / "claude_desktop_config.json"
+        )
+    return candidates
+
+
+def _pick_existing_or_default(candidates: list["os.PathLike[str]"]) -> "os.PathLike[str]":
+    """Return the first candidate path that already exists; fall back
+    to the first candidate (which the install command will create)."""
+    import pathlib as _pathlib
+
+    for c in candidates:
+        if _pathlib.Path(c).exists():
+            return c
+    return candidates[0]
+
+
+@mcp_group.command("install-claude-code")
+@click.option(
+    "--path",
+    "explicit_path",
+    type=click.Path(dir_okay=False),
+    default=None,
+    help="Override the auto-detected Claude Code MCP config path. "
+         "Default detection order: ~/.claude.json, "
+         "~/.config/claude-code/mcp.json, then the Claude Desktop path "
+         "for the host OS.",
+)
+@click.option(
+    "--force",
+    is_flag=True,
+    default=False,
+    help="Overwrite an existing `ibounce` entry without prompting.",
+)
+def mcp_install_claude_code_cmd(explicit_path: str | None, force: bool) -> None:
+    """Wire ibounce into Claude Code (or Claude Desktop) MCP config.
+
+    Detects the platform-appropriate config path, preserves every
+    other server entry + top-level key, and adds (or replaces) the
+    `ibounce` MCP server entry. Atomic write — interrupting the
+    command never leaves a half-merged config behind.
+
+    After install, restart Claude Code; then run `/mcp` in Claude
+    Code to see the ibounce tools listed.
+    """
+    if explicit_path:
+        target = explicit_path
+    else:
+        target = _pick_existing_or_default(_candidate_claude_code_paths())
+
+    click.echo(f"target: {target}")
+    overwriting, err = _merge_ibounce_entry(target, force=force)
+    if err is not None:
+        click.secho(f"ERROR: {err}", fg="red", err=True)
+        sys.exit(1)
+
+    verb = "updated existing" if overwriting else "added"
+    click.secho(f"OK: {verb} `ibounce` MCP entry at {target}", fg="green")
+    click.echo(
+        "Verify: restart Claude Code; then run `/mcp` to confirm the "
+        "ibounce server is listed + tools are discoverable. The agent "
+        "config invokes: `ibounce mcp serve`."
+    )
+
+
+def _candidate_cursor_paths() -> list["os.PathLike[str]"]:
+    """Default Cursor MCP config locations, in detection priority.
+    Cursor's documented user-level path is ~/.cursor/mcp.json; the
+    workspace-level .cursor/mcp.json is also supported but requires
+    --path to opt in (we don't guess the workspace root)."""
+    import pathlib as _pathlib
+
+    home = _pathlib.Path.home()
+    return [home / ".cursor" / "mcp.json"]
+
+
+@mcp_group.command("install-cursor")
+@click.option(
+    "--path",
+    "explicit_path",
+    type=click.Path(dir_okay=False),
+    default=None,
+    help="Override the auto-detected Cursor MCP config path. "
+         "Default: ~/.cursor/mcp.json. For workspace-level "
+         "(<project>/.cursor/mcp.json), pass --path explicitly.",
+)
+@click.option(
+    "--force",
+    is_flag=True,
+    default=False,
+    help="Overwrite an existing `ibounce` entry without prompting.",
+)
+def mcp_install_cursor_cmd(explicit_path: str | None, force: bool) -> None:
+    """Wire ibounce into Cursor's MCP config.
+
+    Default path: ~/.cursor/mcp.json (user-level). For workspace
+    scope, pass --path <project>/.cursor/mcp.json. Atomic write +
+    other servers preserved.
+
+    After install, restart Cursor; then check the MCP tab in Cursor
+    settings to confirm the ibounce server is listed.
+    """
+    if explicit_path:
+        target = explicit_path
+    else:
+        target = _pick_existing_or_default(_candidate_cursor_paths())
+
+    click.echo(f"target: {target}")
+    overwriting, err = _merge_ibounce_entry(target, force=force)
+    if err is not None:
+        click.secho(f"ERROR: {err}", fg="red", err=True)
+        sys.exit(1)
+
+    verb = "updated existing" if overwriting else "added"
+    click.secho(f"OK: {verb} `ibounce` MCP entry at {target}", fg="green")
+    click.echo(
+        "Verify: restart Cursor; then open Settings → MCP to confirm "
+        "the ibounce server is listed. The agent config invokes: "
+        "`ibounce mcp serve`."
+    )
+
+
+@mcp_group.command("install-codex")
+@click.option(
+    "--path",
+    "explicit_path",
+    type=click.Path(dir_okay=False),
+    default=None,
+    help="If you know your Codex MCP config path, pass it here and "
+         "ibounce will write the entry atomically (same merge + "
+         "preserve-existing semantics as the other installers).",
+)
+@click.option(
+    "--force",
+    is_flag=True,
+    default=False,
+    help="Overwrite an existing `ibounce` entry without prompting "
+         "(only meaningful with --path).",
+)
+def mcp_install_codex_cmd(explicit_path: str | None, force: bool) -> None:
+    """Print the snippet + the manual-install location for Codex MCP.
+
+    Codex MCP's config-file location has shifted across releases and
+    isn't stable enough for ibounce to auto-detect without risk of
+    clobbering an unrelated file. We print the JSON snippet + tell
+    you exactly what to do.
+
+    If you know your Codex MCP config path, pass `--path PATH` and
+    ibounce will perform the atomic merge for you (same semantics as
+    install-claude-code / install-cursor).
+    """
+    if explicit_path:
+        click.echo(f"target: {explicit_path}")
+        overwriting, err = _merge_ibounce_entry(explicit_path, force=force)
+        if err is not None:
+            click.secho(f"ERROR: {err}", fg="red", err=True)
+            sys.exit(1)
+        verb = "updated existing" if overwriting else "added"
+        click.secho(
+            f"OK: {verb} `ibounce` MCP entry at {explicit_path}",
+            fg="green",
+        )
+        click.echo(
+            "Verify: restart Codex; consult your Codex client docs "
+            "for MCP-tool discovery."
+        )
+        return
+
+    cfg = _ibounce_mcp_config_dict()
+    click.echo("Codex MCP config locations vary by release; ibounce does")
+    click.echo("not auto-detect (refusing to risk clobbering an unrelated")
+    click.echo("file). Paste the snippet below into your Codex MCP config:")
+    click.echo("")
+    click.echo(json.dumps(cfg, indent=2))
+    click.echo("")
+    click.echo(
+        "If you know the exact path, re-run with `ibounce mcp "
+        "install-codex --path PATH` and ibounce will perform the same "
+        "atomic merge as install-claude-code / install-cursor."
+    )
+
+
+@mcp_group.command("list-tools")
+@click.option(
+    "--json",
+    "as_json",
+    is_flag=True,
+    default=False,
+    help="Emit a JSON array instead of the two-column table.",
+)
+@click.option(
+    "--prefix",
+    type=str,
+    default=None,
+    help="Filter to tools whose name starts with PREFIX (e.g. "
+         "`--prefix ibounce_` to show only the bouncer surface).",
+)
+def mcp_list_tools_cmd(as_json: bool, prefix: str | None) -> None:
+    """List every MCP tool the ibounce MCP server exposes.
+
+    Useful for operators auditing what an agent can do via ibounce
+    BEFORE wiring the server into a client. Reads the live TOOLS
+    list out of the MCP server module so this output never drifts
+    from what the agent actually sees on `tools/list`.
+    """
+    from .mcp_server import TOOLS as _TOOLS
+
+    items: list[dict[str, str]] = []
+    for tool in _TOOLS:
+        name = str(tool.get("name", "")).strip()
+        if not name:
+            continue
+        if prefix and not name.startswith(prefix):
+            continue
+        # Take the first sentence of the description for the table view.
+        desc_full = str(tool.get("description", "")).strip()
+        first = desc_full.split(". ", 1)[0].rstrip(".")
+        # Collapse internal whitespace so the table stays one-line per tool.
+        first = " ".join(first.split())
+        if len(first) > 100:
+            first = first[:97] + "..."
+        items.append({"name": name, "description": first})
+
+    items.sort(key=lambda r: r["name"])
+
+    if as_json:
+        click.echo(json.dumps(items, indent=2))
+        return
+
+    if not items:
+        click.echo("(no tools matched)")
+        return
+
+    name_w = max(len(it["name"]) for it in items)
+    name_w = max(name_w, len("TOOL"))
+    click.secho(f"{'TOOL'.ljust(name_w)}  DESCRIPTION", bold=True)
+    click.echo(f"{'-' * name_w}  {'-' * 11}")
+    for it in items:
+        click.echo(f"{it['name'].ljust(name_w)}  {it['description']}")
+    click.echo("")
+    click.echo(f"{len(items)} tool(s).")
+
+
 def main_deprecated_alias() -> None:
     """Console-script entrypoint for the deprecated `iam-jit-bouncer`
     name. Prints a one-line stderr deprecation warning + forwards to
