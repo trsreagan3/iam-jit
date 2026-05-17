@@ -82,10 +82,11 @@ def main() -> None:
     entirely on your machine — no phone home, no SaaS dependency.
 
     Foundation commands (this slice):
-      init    — initialize SQLite state at ~/.iam-jit/bouncer/
-      rules   — manage rules (add, list, remove)
-      logs    — inspect decision audit log
-      decide  — dry-run: ask "what would the bouncer do for X?"
+      init           — initialize SQLite state at ~/.iam-jit/bouncer/
+      rules          — manage rules (add, list, remove)
+      logs           — inspect decision audit log
+      decide         — dry-run: ask "what would the bouncer do for X?"
+      version-check  — opt-in check for newer GitHub releases (not phone-home)
 
     Coming in Stage 2:
       run     — start the HTTP proxy server (point AWS_ENDPOINT_URL at it)
@@ -2642,6 +2643,333 @@ def mcp_list_tools_cmd(as_json: bool, prefix: str | None) -> None:
         click.echo(f"{it['name'].ljust(name_w)}  {it['description']}")
     click.echo("")
     click.echo(f"{len(items)} tool(s).")
+
+
+# ---------------------------------------------------------------------------
+# version-check (#234 — opt-in, operator-initiated, NOT phone-home)
+# ---------------------------------------------------------------------------
+#
+# Per [[update-release-strategy]] + [[self-host-zero-billing-dependency]]:
+# iam-jit ships with ZERO automatic phone-home / telemetry. This subcommand
+# is the explicit, operator-initiated exception: a one-shot GET to the
+# public GitHub Releases endpoint, result printed locally, no data sent
+# about the install. It NEVER runs as a side-effect of any other
+# subcommand — only on explicit `ibounce version-check` invocation.
+#
+# Env-var opt-out (IBOUNCE_NO_VERSION_CHECK / IAM_JIT_NO_VERSION_CHECK)
+# preserves the airgapped-deployment invariant: an operator can prove the
+# command does not call out by setting the env var, which short-circuits
+# before any urllib call.
+#
+# Cross-product parity ([[feedback_cross_product_agent_parity]]): the
+# kbounce sibling will mirror this shape — same flags, same env vars,
+# same cache layout — so the kbounce port is mechanical translation.
+# ---------------------------------------------------------------------------
+
+VERSION_CHECK_URL = (
+    "https://api.github.com/repos/trsreagan3/iam-jit/releases/latest"
+)
+VERSION_CHECK_OPT_OUT_ENVS = (
+    "IBOUNCE_NO_VERSION_CHECK",
+    "IAM_JIT_NO_VERSION_CHECK",
+)
+VERSION_CHECK_CACHE_TTL_SECONDS = 3600  # 1 hour
+
+
+def _version_check_cache_path() -> "os.PathLike[str]":
+    """`~/.iam-jit/bouncer/version_check.json` unless an env override
+    is set (kept distinct from the SQLite state path so airgapped users
+    can wipe just this file)."""
+    import pathlib as _pathlib
+
+    override = os.environ.get("IBOUNCE_VERSION_CHECK_CACHE")
+    if override:
+        return _pathlib.Path(override)
+    return _pathlib.Path.home() / ".iam-jit" / "bouncer" / "version_check.json"
+
+
+def _sanitize_for_print(s: str, *, max_len: int = 200) -> str:
+    """BB+WB audit (c): a malicious GitHub Releases response could put
+    control chars, ANSI escapes, or very long strings in `tag_name` or
+    `html_url`. We're echoing these to a terminal, so strip control
+    chars + cap length BEFORE handing to click.echo. Defensive even
+    though GitHub validates tag names — we don't trust the network."""
+    if not isinstance(s, str):
+        s = str(s)
+    # Drop ASCII control chars (incl. ESC for ANSI sequences) + DEL,
+    # keep printable ASCII + common Unicode.
+    cleaned = "".join(
+        ch for ch in s if (ord(ch) >= 0x20 and ord(ch) != 0x7F) or ch in ("\t",)
+    )
+    if len(cleaned) > max_len:
+        cleaned = cleaned[: max_len - 3] + "..."
+    return cleaned
+
+
+def _parse_semver_tag(tag: str) -> tuple[int, int, int] | None:
+    """Parse a `vX.Y.Z` or `X.Y.Z` tag into a comparable tuple.
+    Returns None if the tag isn't a clean three-segment semver — in
+    which case the caller falls back to a string-equality check
+    (conservative: a non-semver tag means we just compare literally,
+    we never claim "newer available" without confidence)."""
+    raw = tag.strip()
+    if raw.startswith("v") or raw.startswith("V"):
+        raw = raw[1:]
+    parts = raw.split(".")
+    if len(parts) != 3:
+        return None
+    try:
+        return (int(parts[0]), int(parts[1]), int(parts[2]))
+    except ValueError:
+        return None
+
+
+def _read_version_check_cache(cache_path: "os.PathLike[str]") -> dict[str, Any] | None:
+    """Return cached payload if present + still within TTL, else None.
+    A corrupt cache file is treated as a miss (not an error) — same
+    fail-soft policy as the network branch."""
+    import datetime as _dt
+    import pathlib as _pathlib
+
+    p = _pathlib.Path(cache_path)
+    if not p.exists():
+        return None
+    try:
+        data = json.loads(p.read_text())
+    except (OSError, json.JSONDecodeError):
+        return None
+    if not isinstance(data, dict):
+        return None
+    checked_at_raw = data.get("checked_at")
+    if not isinstance(checked_at_raw, str):
+        return None
+    try:
+        checked_at = _dt.datetime.fromisoformat(checked_at_raw.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    age = (_dt.datetime.now(_dt.UTC) - checked_at).total_seconds()
+    if age < 0 or age > VERSION_CHECK_CACHE_TTL_SECONDS:
+        return None
+    return {
+        "latest": data.get("latest"),
+        "url": data.get("url"),
+        "checked_at": checked_at,
+        "age_seconds": int(age),
+    }
+
+
+def _write_version_check_cache(
+    cache_path: "os.PathLike[str]",
+    *,
+    latest: str,
+    url: str,
+) -> None:
+    """Persist the latest result with 0o600 perms (matches the other
+    bouncer state files; the file contains nothing sensitive but the
+    convention catches future leaks if we ever add fields)."""
+    import datetime as _dt
+    import pathlib as _pathlib
+
+    p = _pathlib.Path(cache_path)
+    p.parent.mkdir(parents=True, exist_ok=True)
+    payload = {
+        "checked_at": _dt.datetime.now(_dt.UTC).strftime("%Y-%m-%dT%H:%M:%SZ"),
+        "latest": latest,
+        "url": url,
+    }
+    # Atomic write so a Ctrl-C mid-write never leaves a corrupt cache.
+    tmp = p.with_suffix(p.suffix + ".tmp")
+    tmp.write_text(json.dumps(payload, indent=2) + "\n")
+    try:
+        os.chmod(tmp, 0o600)
+    except OSError:
+        # Best-effort: some filesystems (e.g. tmpfs/NFS) ignore chmod.
+        pass
+    os.replace(tmp, p)
+
+
+def _format_age(seconds: int) -> str:
+    """Human-readable age suffix for cache hits."""
+    if seconds < 60:
+        return f"{seconds}s ago"
+    if seconds < 3600:
+        return f"{seconds // 60}m ago"
+    return f"{seconds // 3600}h ago"
+
+
+@main.command("version-check")
+@click.option(
+    "--quiet",
+    is_flag=True,
+    default=False,
+    help="Suppress the up-to-date message; only print when a newer "
+         "release is available OR a network error occurred.",
+)
+@click.option(
+    "--timeout",
+    type=float,
+    default=5.0,
+    show_default=True,
+    help="HTTP timeout in seconds for the GitHub Releases GET.",
+)
+@click.option(
+    "--no-cache",
+    is_flag=True,
+    default=False,
+    help="Bypass the 1-hour cache + force a fresh GitHub Releases GET. "
+         "Result is still written to the cache for the next call.",
+)
+def version_check_cmd(quiet: bool, timeout: float, no_cache: bool) -> None:
+    """Check whether a newer ibounce release is published on GitHub.
+
+    Opt-in, operator-initiated — NOT phone-home. Sends one anonymous
+    HTTPS GET to the public GitHub Releases endpoint
+    (api.github.com/repos/trsreagan3/iam-jit/releases/latest). No data
+    about your install is transmitted; the response is parsed +
+    printed locally. Result is cached for 1 hour at
+    `~/.iam-jit/bouncer/version_check.json` so repeated calls don't
+    hammer GitHub.
+
+    Honors IBOUNCE_NO_VERSION_CHECK=1 (and the IAM_JIT_NO_VERSION_CHECK
+    alias) for airgapped deployments — when either is set, the command
+    refuses to call out + prints a one-line acknowledgement. This
+    subcommand NEVER runs as a side-effect of any other ibounce
+    subcommand; it only fires on explicit `ibounce version-check`.
+
+    Exits 0 in every case (informational; a stale install or transient
+    network error should not fail the shell).
+    """
+    import urllib.error
+    import urllib.request
+
+    from . import __version__ as local_version
+
+    # Env-var opt-out: short-circuit BEFORE any urllib import-level
+    # side effects matter; per the [[self-host-zero-billing-dependency]]
+    # invariant, an operator who sets this MUST be able to prove no
+    # outbound call happens.
+    for env_name in VERSION_CHECK_OPT_OUT_ENVS:
+        if os.environ.get(env_name):
+            click.echo(f"version-check disabled by {env_name}")
+            return
+
+    cache_path = _version_check_cache_path()
+
+    # Cache read path — only if --no-cache wasn't passed.
+    if not no_cache:
+        cached = _read_version_check_cache(cache_path)
+        if cached is not None and cached.get("latest"):
+            latest_tag = _sanitize_for_print(str(cached["latest"]))
+            url = _sanitize_for_print(str(cached.get("url") or ""), max_len=300)
+            age_suffix = f" (cached, checked {_format_age(int(cached['age_seconds']))})"
+            _print_version_comparison(
+                local_version=local_version,
+                latest_tag=latest_tag,
+                url=url,
+                quiet=quiet,
+                suffix=age_suffix,
+            )
+            return
+
+    # Network path.
+    req = urllib.request.Request(
+        VERSION_CHECK_URL,
+        headers={
+            "User-Agent": f"ibounce-version-check/{local_version}",
+            "Accept": "application/vnd.github+json",
+        },
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            body = resp.read()
+        data = json.loads(body)
+    except (urllib.error.URLError, TimeoutError, OSError, json.JSONDecodeError) as e:
+        # Network / parsing failure: print a soft error, exit 0.
+        msg = _sanitize_for_print(str(e), max_len=120)
+        click.echo(
+            f"ibounce {local_version} — unable to reach GitHub Releases "
+            f"(network error: {msg}). This is a soft check; not a phone-home."
+        )
+        return
+
+    if not isinstance(data, dict):
+        click.echo(
+            f"ibounce {local_version} — unable to reach GitHub Releases "
+            "(network error: unexpected response shape). This is a soft "
+            "check; not a phone-home."
+        )
+        return
+
+    latest_tag_raw = data.get("tag_name") or ""
+    url_raw = data.get("html_url") or ""
+    latest_tag = _sanitize_for_print(str(latest_tag_raw))
+    url = _sanitize_for_print(str(url_raw), max_len=300)
+
+    if not latest_tag:
+        click.echo(
+            f"ibounce {local_version} — unable to reach GitHub Releases "
+            "(network error: response missing tag_name). This is a soft "
+            "check; not a phone-home."
+        )
+        return
+
+    # Persist to cache regardless of comparison outcome (the call
+    # succeeded — the result is the result).
+    try:
+        _write_version_check_cache(cache_path, latest=latest_tag, url=url)
+    except OSError:
+        # Cache write failure is non-fatal; the comparison still works.
+        pass
+
+    _print_version_comparison(
+        local_version=local_version,
+        latest_tag=latest_tag,
+        url=url,
+        quiet=quiet,
+        suffix="",
+    )
+
+
+def _print_version_comparison(
+    *,
+    local_version: str,
+    latest_tag: str,
+    url: str,
+    quiet: bool,
+    suffix: str,
+) -> None:
+    """Shared comparison + print routine for both the network + cache
+    paths. Keeps the up-to-date / newer / unknown branches in one place
+    so the cache + network branches can never drift on output shape."""
+    local_tuple = _parse_semver_tag(local_version)
+    remote_tuple = _parse_semver_tag(latest_tag)
+
+    if local_tuple is not None and remote_tuple is not None:
+        if remote_tuple > local_tuple:
+            url_part = f" Release notes: {url}" if url else ""
+            click.echo(
+                f"ibounce {local_version} — {latest_tag} available."
+                f"{url_part}{suffix}"
+            )
+            return
+        # equal OR local is newer (dev build): treat as up-to-date.
+        if not quiet:
+            click.echo(f"ibounce {local_version} — up to date.{suffix}")
+        return
+
+    # Fallback: literal string compare when either side isn't clean
+    # semver. Conservative — we only claim "newer available" with
+    # confidence; otherwise print the latest tag for the operator to
+    # judge.
+    if latest_tag.lstrip("vV") == local_version.lstrip("vV"):
+        if not quiet:
+            click.echo(f"ibounce {local_version} — up to date.{suffix}")
+        return
+    url_part = f" Release notes: {url}" if url else ""
+    click.echo(
+        f"ibounce {local_version} — latest published tag is {latest_tag}."
+        f"{url_part}{suffix}"
+    )
 
 
 def main_deprecated_alias() -> None:

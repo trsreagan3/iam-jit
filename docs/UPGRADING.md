@@ -25,6 +25,14 @@ gain a `Scorer version upgrades` section.
 
 ### Self-host (Free OSS or Enterprise self-host)
 
+> **Opt-in version check (not phone-home).** Run `ibounce version-check`
+> to compare your installed version against the latest GitHub release.
+> It is operator-initiated only — never runs as a side-effect of any
+> other subcommand, sends no data about your install, and is short-
+> circuited entirely by `IBOUNCE_NO_VERSION_CHECK=1` (or the
+> `IAM_JIT_NO_VERSION_CHECK` alias) for airgapped deployments. Result
+> is cached for one hour at `~/.iam-jit/bouncer/version_check.json`.
+
 ```bash
 # 1. Subscribe to releases (one-time)
 #    https://github.com/trsreagan3/iam-jit/releases (Watch)
