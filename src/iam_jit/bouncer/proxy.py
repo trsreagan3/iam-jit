@@ -70,6 +70,144 @@ def _reset_pause_lookup_error_counter_for_tests() -> None:
     global _pause_lookup_errors_total
     with _pause_lookup_errors_lock:
         _pause_lookup_errors_total = 0
+
+
+# ---------------------------------------------------------------------------
+# #203 — synchronous deny-prompt wakeup registry.
+#
+# When --sync-prompt-on-deny is set + a transparent-mode DENY fires, the
+# proxy: (1) enqueues a pending_prompts row with a fresh sync_wait_id
+# UUID, (2) registers an asyncio.Event in this in-process dict keyed by
+# that UUID, (3) awaits `event.wait()` with `asyncio.wait_for(...,
+# timeout=sync_prompt_timeout_seconds)`. The CLI `prompts answer` path
+# (or any other answer surface) calls `wake_sync_pending_prompt(...)`
+# which sets the Event + records the decision so the proxy coroutine
+# can resume.
+#
+# Why an in-process registry (vs polling the DB)?
+# - Polling adds latency (operator answers at t=2s, proxy returns at
+#   t=2s + poll-interval). Events are O(microseconds).
+# - SQLite has no NOTIFY/LISTEN. We'd reimplement it badly.
+# - The proxy is single-process by design (per [[local-only-safety-
+#   mode]]); inter-process coordination isn't needed.
+#
+# Crash safety: if the proxy crashes mid-wait, the pending_prompts row
+# stays in the DB with sync_wait_id set, but no Event exists for the
+# next process. The MCP tool `bouncer_pending_sync_prompts` filters to
+# the in-process registered set so stale rows don't appear "waiting"
+# forever. Operator can mark them ignored via the normal answer path.
+# ---------------------------------------------------------------------------
+
+
+@dataclasses.dataclass
+class _SyncWaitSlot:
+    """One waiting request blocked behind a sync deny-prompt.
+
+    `event` is signaled when the answer arrives (or never, in which
+    case asyncio.wait_for raises TimeoutError + the proxy falls
+    through to `sync_prompt_default_decision`).
+
+    `decision` is set to 'allow' or 'deny' by the wake path BEFORE
+    `event.set()`; the awakened proxy coroutine reads it after the
+    wait returns. None means "no answer recorded" (the timeout path
+    leaves this None + the proxy applies the default).
+    """
+    event: Any  # asyncio.Event; typed `Any` to avoid asyncio import at module load
+    decision: str | None = None
+    answered_by: str | None = None
+    answer_kind: str | None = None
+
+
+_sync_wait_registry: dict[str, _SyncWaitSlot] = {}
+_sync_wait_lock = threading.Lock()
+
+
+def register_sync_wait(sync_wait_id: str) -> _SyncWaitSlot:
+    """Create + register a wait slot. Returns the slot so the caller
+    (the proxy coroutine) can `await slot.event.wait()`.
+
+    Idempotent on `sync_wait_id`: re-registering the same id returns
+    the existing slot. This matters because `add_sync_pending_prompt`
+    is idempotent on `decision_id`; a retry of the same denied
+    request returns the SAME sync_wait_id, and we want the second
+    waiter to attach to the same Event as the first (one answer
+    wakes both — though in practice only one proxy coroutine waits
+    at a time per decision_id).
+    """
+    with _sync_wait_lock:
+        prior = _sync_wait_registry.get(sync_wait_id)
+        if prior is not None:
+            return prior
+        slot = _SyncWaitSlot(event=asyncio.Event())
+        _sync_wait_registry[sync_wait_id] = slot
+        return slot
+
+
+def wake_sync_pending_prompt(
+    sync_wait_id: str,
+    *,
+    decision: str,
+    answered_by: str | None = None,
+    answer_kind: str | None = None,
+) -> bool:
+    """Signal the registered Event for `sync_wait_id` with the
+    operator's decision. Returns True iff a slot was found + waked;
+    False when no slot is registered (the typical "answer came in
+    after the proxy already timed out + unregistered" case).
+
+    `decision` must be 'allow' or 'deny'. The proxy coroutine reads
+    this after its wait returns + behaves accordingly:
+      - 'allow' → forward to upstream + return upstream's response
+      - 'deny'  → return the original 403/error
+
+    Thread-safe: takes the registry lock to mutate the slot. The
+    Event.set() call itself is asyncio-thread-safe per CPython
+    docs (set() is callable from any thread that holds the event-
+    loop reference; we rely on the registry lock + the single-loop
+    invariant of the proxy process to keep this simple).
+    """
+    if decision not in ("allow", "deny"):
+        raise ValueError(
+            f"wake_sync_pending_prompt: decision must be 'allow' or "
+            f"'deny' (got {decision!r})"
+        )
+    with _sync_wait_lock:
+        slot = _sync_wait_registry.get(sync_wait_id)
+        if slot is None:
+            return False
+        slot.decision = decision
+        slot.answered_by = answered_by
+        slot.answer_kind = answer_kind
+        # Set OUTSIDE the registry lock would be safer if the event
+        # loop ever held the lock; in practice the lock is held only
+        # for sub-microsecond critical sections + Event.set() is
+        # itself non-blocking, so this is safe.
+        slot.event.set()
+        return True
+
+
+def unregister_sync_wait(sync_wait_id: str) -> None:
+    """Remove the slot. Called by the proxy coroutine in a `finally`
+    so a timed-out wait doesn't leak slot dicts forever. Safe to
+    call on an already-unregistered id."""
+    with _sync_wait_lock:
+        _sync_wait_registry.pop(sync_wait_id, None)
+
+
+def _registered_sync_wait_ids() -> list[str]:
+    """Snapshot of currently-registered ids. Used by the MCP tool
+    `bouncer_pending_sync_prompts` to filter pending_prompts rows to
+    just the ones the LIVE proxy is actually waiting on."""
+    with _sync_wait_lock:
+        return list(_sync_wait_registry.keys())
+
+
+def _reset_sync_wait_registry_for_tests() -> None:
+    """Test hook — clear the registry between tests so a leftover
+    slot from one test doesn't bleed into the next. Not part of the
+    public surface."""
+    with _sync_wait_lock:
+        _sync_wait_registry.clear()
 import datetime as _dt
 import enum
 import logging
@@ -215,8 +353,41 @@ class ProxyConfig:
     (always-allow / add-to-profile / ignore) via the `bouncer
     prompts` CLI. Async — the agent gets DENIED immediately; the
     operator's answer takes effect on the NEXT call of the same
-    shape. v1.1 will add a synchronous mode where the proxy
-    briefly waits for an answer before returning."""
+    shape. v1.1 adds `sync_prompt_on_deny` below for a synchronous
+    mode where the proxy briefly waits for an answer before
+    returning; the two flags are mutually exclusive."""
+    sync_prompt_on_deny: bool = False
+    """#203 v1.1 (sync): when True, transparent-mode DENYs ENQUEUE
+    a pending_prompts row + BLOCK the request for up to
+    `sync_prompt_timeout_seconds` seconds awaiting an operator
+    answer via `ibounce prompts answer`. Answer kind=always|profile
+    → forward to upstream + return upstream's actual response.
+    Answer kind=ignore (DENY) OR timeout → return the original
+    403/error.
+
+    Per [[ibounce-honest-positioning]] this is a DETERRENT UX for
+    legitimate human-in-loop workflows, not adversarial defense —
+    an adversarial agent can detect the blocking + behave
+    differently. Per [[creates-never-mutates]]: nothing AWS-side
+    is mutated; we only append to the audit log + (on allow)
+    forward verbatim. Per [[scorer-is-ground-truth]]: the DENY
+    decision still comes from the same scorer — sync just changes
+    the operator-side UX of how the DENY is handled.
+
+    Mutually exclusive with `prompt_on_deny`; the CLI enforces
+    this at parse time. Only fires in TRANSPARENT mode; pauses
+    supersede (already-bypassed). Cooperative-mode DENYs are
+    advisory + still don't block."""
+    sync_prompt_timeout_seconds: int = 30
+    """How long the proxy will block on a sync deny-prompt before
+    falling through to `sync_prompt_default_decision`. Range
+    5..300 enforced at CLI parse time."""
+    sync_prompt_default_decision: str = "deny"
+    """Decision applied when `sync_prompt_timeout_seconds` elapses
+    with no answer. Either 'allow' (forward to upstream) or 'deny'
+    (return the original 403/error). Default 'deny' matches the
+    safer fail-closed posture; operators who want fail-open can
+    pass --sync-prompt-default=allow."""
     plan_session_id: str | None = None
     """#132 plan-capture: session id every intercepted call is
     bound to for the lifetime of this serve() invocation. None
@@ -277,6 +448,17 @@ class RequestObservation:
     (advisory only). In TRANSPARENT mode, DENY verdicts have
     enforced=True (would 403 the SDK client). Useful for the
     audit-log + the eventual recommender."""
+    decision_id: int = 0
+    """#203 — the decisions table id assigned to this observation
+    (0 when audit-write failed or when the request was so
+    unclassifiable it never reached the decide() call). The sync
+    deny-prompt path uses this to look up the pending_prompts row
+    on wake. Defaults to 0 for backward-compat with callers
+    constructing RequestObservation in tests."""
+    active_pause_id: int | None = None
+    """#203 — id of the pause window active at decision time, or
+    None. Surfaced so the proxy hot-path can apply 'pause supersedes
+    sync prompt' without re-querying the store."""
 
 
 def _build_observation(
@@ -287,6 +469,8 @@ def _build_observation(
     parsed,  # ParsedRequest | None
     record: DecisionRecord,
     mode: ProxyMode,
+    decision_id: int = 0,
+    active_pause_id: int | None = None,
 ) -> RequestObservation:
     """Compose the observation surfaced to callers + audit log."""
     enforced = (
@@ -306,6 +490,8 @@ def _build_observation(
         decision_reason=record.reason,
         mode_at_decision=mode.value,
         enforced=enforced,
+        decision_id=decision_id,
+        active_pause_id=active_pause_id,
     )
 
 
@@ -568,6 +754,8 @@ def evaluate_request(
     return _build_observation(
         method=method, host=host, path=path,
         parsed=parsed, record=record, mode=effective_mode,
+        decision_id=decision_id,
+        active_pause_id=active_pause["id"] if active_pause is not None else None,
     )
 
 
@@ -991,6 +1179,174 @@ async def _plan_capture_response(
     return web.Response(body=synth.body, status=synth.status, headers=out_headers)
 
 
+async def _await_sync_deny_decision(
+    *, obs: RequestObservation, store: BouncerStore, config: ProxyConfig,
+) -> str:
+    """#203 — enqueue a sync pending-prompt row, register an asyncio.Event,
+    and block until either the operator answers via `ibounce prompts
+    answer` or `sync_prompt_timeout_seconds` elapses.
+
+    Returns 'allow' or 'deny' — never raises. On timeout, returns
+    `config.sync_prompt_default_decision`. On enqueue/registration
+    failure (e.g. DB busy), returns 'deny' (fail-closed) + logs;
+    the operator sees nothing in their queue, the agent sees the
+    original 403, and the operator's monitor (via /healthz audit-
+    write counter) flags the underlying DB problem.
+
+    The slot is unregistered in a `finally` so a timed-out wait
+    doesn't leak a dict entry forever.
+
+    Per [[ibounce-honest-positioning]]: this is a DETERRENT UX,
+    not a security boundary. Per [[creates-never-mutates]]:
+    nothing AWS-side is mutated by this path — we only block the
+    proxy + (on allow) forward verbatim.
+    """
+    try:
+        prompt_id, sync_wait_id = store.add_sync_pending_prompt(
+            decision_id=obs.decision_id,
+            service=obs.parsed_service or "",
+            action=obs.parsed_action or "",
+            arn=obs.parsed_arn,
+            region=obs.parsed_region,
+            deny_reason=obs.decision_reason,
+        )
+    except Exception as e:
+        logger.warning(
+            "bouncer-proxy sync-deny-prompt enqueue failed: %s "
+            "(falling back to original 403)", e,
+        )
+        return "deny"
+    slot = register_sync_wait(sync_wait_id)
+    logger.info(
+        "ibounce sync-deny-prompt #%d enqueued (sync_wait_id=%s, "
+        "timeout=%ds, default=%s); waiting for operator answer",
+        prompt_id, sync_wait_id, config.sync_prompt_timeout_seconds,
+        config.sync_prompt_default_decision,
+    )
+    try:
+        try:
+            await asyncio.wait_for(
+                slot.event.wait(),
+                timeout=float(config.sync_prompt_timeout_seconds),
+            )
+        except asyncio.TimeoutError:
+            decision = config.sync_prompt_default_decision
+            logger.info(
+                "ibounce sync-deny-prompt #%d timed out after %ds; "
+                "applying default=%s",
+                prompt_id, config.sync_prompt_timeout_seconds, decision,
+            )
+            return decision if decision in ("allow", "deny") else "deny"
+        decision = slot.decision or "deny"
+        logger.info(
+            "ibounce sync-deny-prompt #%d answered by %s "
+            "(kind=%s) -> %s",
+            prompt_id, slot.answered_by or "unknown",
+            slot.answer_kind or "unknown", decision,
+        )
+        return decision if decision in ("allow", "deny") else "deny"
+    finally:
+        unregister_sync_wait(sync_wait_id)
+
+
+async def _forward_after_sync_allow(
+    *, request, body: bytes, obs: RequestObservation,
+    config: ProxyConfig, session,
+):
+    """Forward to upstream + return upstream's actual response, after
+    a sync deny-prompt was answered ALLOW (or timed out with
+    --sync-prompt-default=allow). Mirrors the ALLOW branch of
+    `_handle_request` but tags the response with an extra
+    `x-iam-jit-bouncer-sync` header so wire-debug shows the
+    sync-allow provenance.
+
+    Reuses `_is_allowed_forward_host` for the CRIT-32-01 outbound
+    host allowlist — operator approval does NOT bypass the
+    exfil-protection check. An ALLOW answer means "let this
+    SigV4-signed request reach the AWS endpoint the client signed
+    for"; it does NOT mean "forward anywhere the inbound Host header
+    points."
+    """
+    from aiohttp import web
+
+    host_header = request.headers.get("host", "")
+    if not host_header:
+        return web.json_response(
+            {
+                "error": "ibounce cannot forward sync-allowed request",
+                "decision_reason": (
+                    "sync deny-prompt answered allow but inbound Host "
+                    "header is missing; can't determine AWS endpoint to "
+                    "forward to."
+                ),
+            },
+            status=400,
+            headers={
+                "x-iam-jit-bouncer-verdict": "allow",
+                "x-iam-jit-bouncer-sync": "allow",
+            },
+        )
+    if not _is_allowed_forward_host(host_header):
+        logger.warning(
+            "ibounce sync-allow refused forward to non-AWS host %r "
+            "(service=%s action=%s)",
+            host_header, obs.parsed_service, obs.parsed_action,
+        )
+        return web.json_response(
+            {
+                "error": "ibounce DENY (forward-host-mismatch)",
+                "decision_reason": (
+                    f"refused to forward to {host_header!r}: not an AWS "
+                    f"endpoint. CRIT-32-01 protection still applies even "
+                    f"to sync-allowed requests."
+                ),
+                "service": obs.parsed_service,
+                "action": obs.parsed_action,
+                "attempted_host": host_header,
+            },
+            status=403,
+            headers={
+                "x-iam-jit-bouncer-verdict": "deny",
+                "x-iam-jit-bouncer-sync": "allow",
+                "x-iam-jit-bouncer-refusal": "forward-host-mismatch",
+            },
+        )
+    try:
+        status, resp_headers, resp_body = await _forward_to_aws(
+            method=request.method,
+            host=host_header,
+            path_qs=request.path_qs,
+            headers=list(request.headers.items()),
+            body=body,
+            forward_scheme=config.forward_scheme,
+            session=session,
+        )
+    except Exception as e:
+        logger.warning("ibounce sync-allow forward failed: %s", e)
+        return web.json_response(
+            {
+                "error": "ibounce forward to AWS failed",
+                "upstream_error": str(e),
+                "service": obs.parsed_service,
+                "action": obs.parsed_action,
+            },
+            status=502,
+            headers={
+                "x-iam-jit-bouncer-verdict": obs.decision_verdict,
+                "x-iam-jit-bouncer-sync": "allow",
+                "x-iam-jit-bouncer-forward-error": "true",
+            },
+        )
+    out_headers = _strip_hop_headers(resp_headers)
+    out_headers["x-iam-jit-bouncer-verdict"] = obs.decision_verdict
+    out_headers["x-iam-jit-bouncer-mode"] = obs.mode_at_decision
+    # Distinguish sync-allow from the cooperative-advisory "would-deny-
+    # in-transparent" header. Both can appear on a forwarded response;
+    # they carry different operator intent.
+    out_headers["x-iam-jit-bouncer-sync"] = "allow"
+    return web.Response(body=resp_body, status=status, headers=out_headers)
+
+
 async def _handle_request(request, *, store, config: ProxyConfig, session):
     """aiohttp handler for inbound proxy requests.
 
@@ -1044,6 +1400,46 @@ async def _handle_request(request, *, store, config: ProxyConfig, session):
         )
 
     if obs.enforced:
+        # #203 — synchronous deny-prompt path. Only fires when:
+        #   - operator opted in via --sync-prompt-on-deny
+        #   - decision is a TRANSPARENT-mode DENY (the only case where
+        #     blocking actually changes anything; cooperative DENYs
+        #     don't 403 anyway, plan-capture short-circuits earlier,
+        #     and pauses already demoted to cooperative above so
+        #     obs.enforced would be False here)
+        #   - no pause is active (defense-in-depth — the
+        #     pause-supersedes check already demoted effective_mode in
+        #     evaluate_request; this is the second gate)
+        #   - the request was classified enough to have a decision_id
+        #     (unclassifiable denies skip the sync path; they always
+        #     return the original 403 because there's no shape to
+        #     act on)
+        # Verdict shapes: 'deny' triggers; 'prompt' does NOT (prompt is
+        # a future Slice 3 concept; sync deny-prompt is verdict=deny only).
+        if (
+            config.sync_prompt_on_deny
+            and obs.decision_verdict == "deny"
+            and obs.active_pause_id is None
+            and obs.decision_id > 0
+            and obs.parsed_service
+            and obs.parsed_action
+        ):
+            sync_decision = await _await_sync_deny_decision(
+                obs=obs, store=store, config=config,
+            )
+            if sync_decision == "allow":
+                # Operator answered allow (or default=allow on timeout).
+                # Fall through to the forwarding path below by setting
+                # a sentinel + breaking out of the if-block — we use
+                # a function-local flag instead of restructuring the
+                # whole handler. The forwarding allowlist + the
+                # _forward_to_aws call execute as normal; the response
+                # surfaces an additional x-iam-jit-bouncer-sync header.
+                return await _forward_after_sync_allow(
+                    request=request, body=body, obs=obs,
+                    config=config, session=session,
+                )
+            # Otherwise fall through to the original 403 below.
         # Transparent + (deny or prompt) → 403 without forwarding.
         # Body is ibounce-shaped JSON the SDK client won't parse as
         # an AWS error — that's intentional; the SDK will surface

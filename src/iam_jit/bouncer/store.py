@@ -68,7 +68,7 @@ class ActiveTaskExistsError(Exception):
     is already active. Caller decides whether to end the existing
     task first or surface the conflict to the agent."""
 
-SCHEMA_VERSION = 8  # v8: adds phase + write-switch columns for #145 plan-capture read->write switch UX
+SCHEMA_VERSION = 9  # v9: adds sync_wait_id to pending_prompts for #203 sync deny-prompt UX
 
 
 def default_db_path() -> pathlib.Path:
@@ -381,6 +381,33 @@ class BouncerStore:
                 self._conn.execute(
                     "CREATE INDEX IF NOT EXISTS idx_pending_prompts_session "
                     "ON pending_prompts(session_id, status)"
+                )
+            except sqlite3.OperationalError:
+                pass
+            # v9 additive migration (#203 — synchronous deny-prompt UX):
+            #
+            # pending_prompts gains a `sync_wait_id` TEXT column. When the
+            # proxy enqueues a deny-prompt in SYNC mode (--sync-prompt-on-
+            # deny), it mints a UUID, stores it on the row, and registers
+            # an in-process asyncio.Event keyed by that UUID before
+            # blocking the request. The `prompts answer` CLI looks up the
+            # sync_wait_id on the row at answer time + signals the Event
+            # so the proxy coroutine wakes up + returns the operator's
+            # decision.
+            #
+            # NULL on every existing row (async deny-prompts + plan-write
+            # prompts never enqueue with a sync_wait_id). The column is
+            # also indexed for the by-id lookup the wake path needs.
+            try:
+                self._conn.execute(
+                    "ALTER TABLE pending_prompts ADD COLUMN sync_wait_id TEXT"
+                )
+            except sqlite3.OperationalError:
+                pass
+            try:
+                self._conn.execute(
+                    "CREATE INDEX IF NOT EXISTS idx_pending_prompts_sync_wait "
+                    "ON pending_prompts(sync_wait_id)"
                 )
             except sqlite3.OperationalError:
                 pass
@@ -939,7 +966,7 @@ class BouncerStore:
                     "SELECT id, created_at, decision_id, service, action, "
                     "arn, region, deny_reason, status, answer_kind, "
                     "answer_target, answered_by, answered_at, "
-                    "kind, session_id "
+                    "kind, session_id, sync_wait_id "
                     "FROM pending_prompts WHERE status = ? "
                     "ORDER BY id DESC LIMIT ?",
                     (status, limit),
@@ -949,7 +976,7 @@ class BouncerStore:
                     "SELECT id, created_at, decision_id, service, action, "
                     "arn, region, deny_reason, status, answer_kind, "
                     "answer_target, answered_by, answered_at, "
-                    "kind, session_id "
+                    "kind, session_id, sync_wait_id "
                     "FROM pending_prompts WHERE status = ? AND kind = ? "
                     "ORDER BY id DESC LIMIT ?",
                     (status, kind, limit),
@@ -962,6 +989,7 @@ class BouncerStore:
                 "deny_reason": r[7], "status": r[8], "answer_kind": r[9],
                 "answer_target": r[10], "answered_by": r[11], "answered_at": r[12],
                 "kind": r[13] or "deny-prompt", "session_id": r[14],
+                "sync_wait_id": r[15],
             }
             for r in rows
         ]
@@ -972,7 +1000,7 @@ class BouncerStore:
                 "SELECT id, created_at, decision_id, service, action, "
                 "arn, region, deny_reason, status, answer_kind, "
                 "answer_target, answered_by, answered_at, "
-                "kind, session_id "
+                "kind, session_id, sync_wait_id "
                 "FROM pending_prompts WHERE id = ?",
                 (prompt_id,),
             )
@@ -985,6 +1013,7 @@ class BouncerStore:
             "deny_reason": r[7], "status": r[8], "answer_kind": r[9],
             "answer_target": r[10], "answered_by": r[11], "answered_at": r[12],
             "kind": r[13] or "deny-prompt", "session_id": r[14],
+            "sync_wait_id": r[15],
         }
 
     def answer_pending_prompt(
@@ -1017,6 +1046,132 @@ class BouncerStore:
                 ),
             )
             return cur.rowcount > 0
+
+    # -----------------------------------------------------------------
+    # Synchronous deny-prompt support (#203 — v1.1)
+    #
+    # When the proxy runs under --sync-prompt-on-deny, each transparent-
+    # mode DENY mints a sync_wait_id UUID, persists it on the
+    # pending_prompts row, and blocks the request on an in-process
+    # asyncio.Event keyed by that UUID (see proxy._sync_wait_registry).
+    # The CLI `prompts answer` path looks up the sync_wait_id at answer
+    # time + wakes the waiter so the proxy can return ALLOW (forward to
+    # upstream) or DENY (return original 403) per the operator's choice.
+    #
+    # Per [[ibounce-honest-positioning]]: this is a DETERRENT UX for
+    # legitimate human-in-loop, not adversarial defense — an
+    # adversarial agent can detect the blocking + behave differently.
+    # Per [[creates-never-mutates]]: this only appends to the audit
+    # tables; never mutates customer-owned IAM.
+    # -----------------------------------------------------------------
+
+    def add_sync_pending_prompt(
+        self,
+        *,
+        decision_id: int,
+        service: str,
+        action: str,
+        arn: str | None,
+        region: str | None,
+        deny_reason: str,
+    ) -> tuple[int, str]:
+        """Insert a SYNC pending-prompt row + return (prompt_id,
+        sync_wait_id). Idempotent per `decision_id` like
+        `add_pending_prompt`: if a prior row exists for this decision,
+        return its id + sync_wait_id (the existing waiter, if any, is
+        the one that wins — we never mint a second sync_wait_id for
+        the same decision).
+
+        Mints a fresh UUID4 sync_wait_id when the row is new. Caller
+        (the proxy) is expected to register that id in
+        `proxy._sync_wait_registry` BEFORE awaiting, so an answer
+        racing in between insert + register doesn't miss the wake.
+        """
+        import uuid
+
+        with self._lock:
+            cur = self._conn.execute(
+                "SELECT id, sync_wait_id FROM pending_prompts "
+                "WHERE decision_id = ?",
+                (decision_id,),
+            )
+            prior = cur.fetchone()
+            if prior is not None:
+                # Existing row may or may not have had a sync_wait_id
+                # (if the original was an async deny-prompt). If it
+                # didn't, mint one in-place so the proxy can register
+                # + wait. If it did, return the existing id verbatim.
+                existing_sync_id = prior[1]
+                if existing_sync_id:
+                    return int(prior[0]), str(existing_sync_id)
+                fresh = uuid.uuid4().hex
+                self._conn.execute(
+                    "UPDATE pending_prompts SET sync_wait_id = ? "
+                    "WHERE id = ?",
+                    (fresh, int(prior[0])),
+                )
+                return int(prior[0]), fresh
+            sync_wait_id = uuid.uuid4().hex
+            cur = self._conn.execute(
+                """
+                INSERT INTO pending_prompts(
+                    created_at, decision_id, service, action, arn, region,
+                    deny_reason, sync_wait_id
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    _isoformat_z(_dt.datetime.now(_dt.UTC)),
+                    decision_id, service, action, arn, region, deny_reason,
+                    sync_wait_id,
+                ),
+            )
+            return int(cur.lastrowid or 0), sync_wait_id
+
+    def list_waiting_sync_prompts(
+        self, *, sync_wait_ids: list[str] | None = None,
+    ) -> list[dict[str, Any]]:
+        """Return the set of currently-PENDING sync-deny prompts.
+
+        DETERMINISTIC: pure SQL — filters pending_prompts rows where
+        sync_wait_id IS NOT NULL AND status = 'pending'. When
+        `sync_wait_ids` is supplied, further restricts to rows whose
+        sync_wait_id is in that set — used by the MCP tool
+        `bouncer_pending_sync_prompts` to return only the prompts the
+        in-process proxy is ACTUALLY waiting on (the union of all
+        registered Events) rather than every sync-prompt-shaped row in
+        the DB. Without that filter, a row left behind by a crashed
+        proxy would appear waiting forever.
+        """
+        sql = (
+            "SELECT id, created_at, decision_id, service, action, "
+            "arn, region, deny_reason, status, answer_kind, "
+            "answer_target, answered_by, answered_at, "
+            "kind, session_id, sync_wait_id "
+            "FROM pending_prompts "
+            "WHERE status = 'pending' AND sync_wait_id IS NOT NULL"
+        )
+        params: tuple[Any, ...] = ()
+        if sync_wait_ids is not None:
+            if not sync_wait_ids:
+                return []
+            placeholders = ",".join(["?"] * len(sync_wait_ids))
+            sql += f" AND sync_wait_id IN ({placeholders})"
+            params = tuple(sync_wait_ids)
+        sql += " ORDER BY id DESC"
+        with self._lock:
+            cur = self._conn.execute(sql, params)
+            rows = cur.fetchall()
+        return [
+            {
+                "id": int(r[0]), "created_at": r[1], "decision_id": int(r[2]),
+                "service": r[3], "action": r[4], "arn": r[5], "region": r[6],
+                "deny_reason": r[7], "status": r[8], "answer_kind": r[9],
+                "answer_target": r[10], "answered_by": r[11], "answered_at": r[12],
+                "kind": r[13] or "deny-prompt", "session_id": r[14],
+                "sync_wait_id": r[15],
+            }
+            for r in rows
+        ]
 
     def list_decisions(
         self,
@@ -1741,7 +1896,8 @@ class BouncerStore:
             cur = self._conn.execute(
                 "SELECT id, created_at, decision_id, service, action, "
                 "arn, region, deny_reason, status, answer_kind, "
-                "answer_target, answered_by, answered_at, kind, session_id "
+                "answer_target, answered_by, answered_at, kind, session_id, "
+                "sync_wait_id "
                 "FROM pending_prompts "
                 "WHERE kind = 'plan-write' AND session_id = ? "
                 "AND status = 'pending' "
@@ -1756,7 +1912,7 @@ class BouncerStore:
             "service": r[3], "action": r[4], "arn": r[5], "region": r[6],
             "deny_reason": r[7], "status": r[8], "answer_kind": r[9],
             "answer_target": r[10], "answered_by": r[11], "answered_at": r[12],
-            "kind": r[13], "session_id": r[14],
+            "kind": r[13], "session_id": r[14], "sync_wait_id": r[15],
         }
 
     def answer_plan_write_prompt(

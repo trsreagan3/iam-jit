@@ -1565,6 +1565,33 @@ TOOLS = [
             },
         },
     },
+    {
+        "name": "bouncer_pending_sync_prompts",
+        "description": (
+            "#203 — return the list of currently-WAITING sync deny-"
+            "prompts (NOT all pending prompts; just the ones that "
+            "have a live proxy request blocked behind them awaiting "
+            "an operator answer via `ibounce prompts answer`). An "
+            "agent integrated with ibounce can poll this to learn "
+            "'the operator hasn't answered yet, my request is still "
+            "blocked' — useful when the agent wants to surface the "
+            "wait to its user, or back off + try a different path. "
+            "DETERMINISTIC: SQL query of pending_prompts filtered to "
+            "rows whose sync_wait_id is currently registered in the "
+            "proxy's in-process wait registry, so a stale row left "
+            "by a crashed proxy doesn't appear waiting forever. Per "
+            "[[ibounce-honest-positioning]] this is a READ-ONLY "
+            "introspection tool — agents cannot answer sync prompts "
+            "via MCP (the operator answers via the CLI). Per "
+            "[[agent-friendly-not-bypassable]]: there is no MCP "
+            "surface that resolves a waiting prompt without operator "
+            "involvement."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {},
+        },
+    },
 ]
 
 
@@ -2552,6 +2579,40 @@ def _bouncer_plan_pending_write_prompt_for_mcp(
         }
     finally:
         store.close()
+
+
+def _bouncer_pending_sync_prompts_for_mcp(
+    args: dict[str, Any],
+) -> dict[str, Any]:
+    """#203 — return the currently-waiting sync deny-prompts.
+
+    Returns a shape like:
+        {"waiting": [<prompt row>, ...], "count": int}
+
+    `waiting` is the list of pending_prompts rows whose sync_wait_id
+    is currently registered in the proxy's in-process wait registry
+    (i.e. the LIVE blocked requests). Rows are filtered server-side
+    by `BouncerStore.list_waiting_sync_prompts(sync_wait_ids=...)` so
+    a row left behind by a crashed proxy doesn't show up.
+
+    `args` is accepted for schema parity but not consulted; the tool
+    has no inputs.
+
+    Per [[agent-friendly-not-bypassable]]: READ-ONLY. There is no
+    MCP-callable way to resolve a waiting prompt — the operator
+    answers via `ibounce prompts answer`.
+    """
+    from .bouncer.proxy import _registered_sync_wait_ids
+    from .bouncer.store import BouncerStore
+
+    _ = args  # explicitly unused
+    registered = _registered_sync_wait_ids()
+    store = BouncerStore()
+    try:
+        rows = store.list_waiting_sync_prompts(sync_wait_ids=registered)
+    finally:
+        store.close()
+    return {"waiting": rows, "count": len(rows)}
 
 
 def _bouncer_active_mode_for_mcp(args: dict[str, Any]) -> dict[str, Any]:
@@ -3566,6 +3627,8 @@ def _handle_request(req: dict[str, Any]) -> dict[str, Any] | None:
             result_payload = _bouncer_plan_session_summary_for_mcp(args)
         elif tool_name == "bouncer_plan_pending_write_prompt":
             result_payload = _bouncer_plan_pending_write_prompt_for_mcp(args)
+        elif tool_name == "bouncer_pending_sync_prompts":
+            result_payload = _bouncer_pending_sync_prompts_for_mcp(args)
         elif tool_name == "bouncer_recommend_mode_for_task":
             result_payload = _bouncer_recommend_mode_for_task_for_mcp(args)
         elif tool_name == "bouncer_task_review":

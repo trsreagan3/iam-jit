@@ -1922,6 +1922,48 @@ def prompts_answer_cmd(
         )
         return
 
+    # #203 — if this was a SYNC deny-prompt (the row carries a
+    # sync_wait_id), wake the registered asyncio.Event so the
+    # blocked proxy coroutine can return its decision. The wake
+    # mapping: kind=always|profile -> 'allow' (forward to upstream),
+    # kind=ignore -> 'deny' (return the original 403/error).
+    #
+    # In the typical single-process deployment (CLI + serve in the
+    # same Python process), wake succeeds + the agent unblocks
+    # synchronously. In a split-process deployment (CLI run from a
+    # different shell than the serve daemon — common for the
+    # bouncer), the registry lives in the serve process; this CLI
+    # call's wake returns False + the proxy times out on its own
+    # per --sync-prompt-timeout / --sync-prompt-default. The DB
+    # row IS marked answered either way, so a future audit query
+    # captures the operator's intent.
+    sync_wait_id = prompt.get("sync_wait_id")
+    if sync_wait_id:
+        from .bouncer.proxy import wake_sync_pending_prompt
+        sync_decision = "allow" if kind in ("always", "profile") else "deny"
+        try:
+            woken = wake_sync_pending_prompt(
+                sync_wait_id,
+                decision=sync_decision,
+                answered_by=actor,
+                answer_kind=kind,
+            )
+        except Exception as e:
+            woken = False
+            click.secho(
+                f"sync-wake failed: {e} (proxy will timeout per its "
+                f"--sync-prompt-default).",
+                fg="yellow", err=True,
+            )
+        if not woken:
+            click.echo(
+                "  (no waiting proxy coroutine for this prompt — either "
+                "the proxy is in a different process, or it already "
+                "timed out. The answer is still recorded in the audit "
+                "log.)",
+                err=True,
+            )
+
     summary = {
         "always": f"added global ALLOW rule for "
                   f"{prompt['service']}:{prompt['action']}",
@@ -2087,7 +2129,37 @@ def _parse_duration(raw: str) -> int:
     help="Enqueue every transparent-mode DENY in the pending-prompts "
          "queue so the operator can later answer via `bouncer prompts "
          "answer ID --kind always|profile|ignore`. Async — agent gets "
-         "denied immediately, answer takes effect on the NEXT call.",
+         "denied immediately, answer takes effect on the NEXT call. "
+         "Mutually exclusive with --sync-prompt-on-deny.",
+)
+@click.option(
+    "--sync-prompt-on-deny", "sync_prompt_on_deny",
+    is_flag=True, default=False,
+    help="#203 v1.1 — synchronous deny-prompt UX. Like "
+         "--prompt-on-deny, except the proxy BLOCKS the request for "
+         "up to --sync-prompt-timeout seconds awaiting the operator's "
+         "answer. Answer kind=always|profile → request is forwarded "
+         "to upstream + upstream's actual response is returned. "
+         "Answer kind=ignore (deny) OR timeout → original 403/error "
+         "is returned. Only fires in --mode transparent + no active "
+         "pause. Mutually exclusive with --prompt-on-deny.",
+)
+@click.option(
+    "--sync-prompt-timeout", "sync_prompt_timeout",
+    type=click.IntRange(5, 300), default=30, show_default=True,
+    help="#203 — seconds the proxy will block on a sync deny-prompt "
+         "before applying --sync-prompt-default. Range 5..300. Only "
+         "meaningful with --sync-prompt-on-deny.",
+)
+@click.option(
+    "--sync-prompt-default", "sync_prompt_default",
+    type=click.Choice(["allow", "deny"], case_sensitive=False),
+    default="deny", show_default=True,
+    help="#203 — decision applied when --sync-prompt-timeout fires "
+         "without an operator answer. `deny` matches the fail-closed "
+         "default; `allow` is fail-open for operators who'd rather "
+         "let the call through than block agent progress when they "
+         "step away from the terminal.",
 )
 @click.option(
     "--mode",
@@ -2172,6 +2244,9 @@ def _parse_duration(raw: str) -> int:
 @click.option("--db", type=click.Path(dir_okay=False), default=None)
 def run_cmd(
     port: int, host: str, force_external_bind: bool, prompt_on_deny: bool,
+    sync_prompt_on_deny: bool,
+    sync_prompt_timeout: int,
+    sync_prompt_default: str,
     mode: str, plan_session_id: str | None,
     write_switch_notify: str,
     default_policy: str,
@@ -2221,6 +2296,24 @@ def run_cmd(
         )
         sys.exit(2)
 
+    # #203 — refuse the mutually-exclusive flag combo at parse time.
+    # Both flags both try to surface DENYs to the operator, but they
+    # have opposite blocking semantics: async returns 403 immediately,
+    # sync blocks. Setting both at once is almost certainly a typo +
+    # would produce confusing behavior (the proxy would block AND
+    # enqueue an async row that the operator might answer separately).
+    if prompt_on_deny and sync_prompt_on_deny:
+        click.secho(
+            "--prompt-on-deny and --sync-prompt-on-deny are mutually "
+            "exclusive — pick one:\n"
+            "  --prompt-on-deny       (async; agent gets 403 immediately, "
+            "operator answers later; #5)\n"
+            "  --sync-prompt-on-deny  (sync;  agent blocks until operator "
+            "answers or timeout fires; #203)",
+            fg="red", err=True,
+        )
+        sys.exit(2)
+
     # Resolve the active profile NOW (CLI flag → env var → 'full-user').
     # If the user passed --profile NAME and NAME doesn't exist,
     # resolve_active_profile raises with the available-names list —
@@ -2246,6 +2339,9 @@ def run_cmd(
         account_id=account_id_flag,
         account_alias=account_alias_flag,
         prompt_on_deny=prompt_on_deny,
+        sync_prompt_on_deny=sync_prompt_on_deny,
+        sync_prompt_timeout_seconds=sync_prompt_timeout,
+        sync_prompt_default_decision=sync_prompt_default.lower(),
         plan_session_id=plan_session_id,
         plan_write_switch_notify=write_switch_notify.lower(),
     )
