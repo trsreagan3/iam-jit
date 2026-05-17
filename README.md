@@ -1,17 +1,17 @@
 # iam-jit · iam-risk-score
 
-> **Don't give Claude your AWS keys.**
-> iam-jit issues narrow, time-bound, audited AWS credentials per task — so your AI agent can do real AWS work without standing access.
+> **Don't give Claude full admin.**
+> iam-jit issues narrow, time-bound, audited AWS credentials per task — and the iam-jit-bouncer gates every AWS API call against a local rule set — so your AI agent can do real infra work without standing admin authority.
 >
 > Works with any MCP-compatible agent: Claude Code, Cursor, Codex MCP, Devin, custom runtimes. The MCP server speaks the open Model Context Protocol — no agent-specific build required.
 
-[![CI](https://img.shields.io/badge/CI-13%20rounds%20BB%2BWB%20audited-brightgreen)](docs/security/) [![Calibration](https://img.shields.io/badge/AWS--managed%20corpus-1489%2F1489-brightgreen)](docs/CONVERGENCE-REPORT-2026-05.md) [![License](https://img.shields.io/badge/license-Apache--2.0-blue)](LICENSE)
+[![CI](https://img.shields.io/badge/CI-19%2B%20rounds%20BB%2BWB%20audited-brightgreen)](docs/security/) [![Calibration](https://img.shields.io/badge/AWS--managed%20corpus-1489%2F1489-brightgreen)](docs/CONVERGENCE-REPORT-2026-05.md) [![License](https://img.shields.io/badge/license-Apache--2.0-blue)](LICENSE)
 
 | Corpus | Pass rate |
 |---|---:|
 | AWS-managed policies (every published one) | **1,489 / 1,489 (100%)** |
 | Documented attack patterns (Bishop Fox / Rhino / HackingTheCloud / MITRE) | **203 / 217 (93.5%)** |
-| Adversarial audit rounds (BB+WB) | **9 shipped** |
+| Adversarial audit rounds (BB+WB) | **19+ shipped** |
 
 Open corpus, open methodology, open commit history.
 
@@ -139,7 +139,7 @@ $ iam-jit-bouncer tasks start \
     --description "staging-eks-upgrade" \
     --allow "eks:*@arn:aws:eks:us-east-1:111:cluster/staging" \
     --deny  "*@arn:aws:*:*:222222222222:*" \
-    --duration-minutes 60
+    --duration 60
 ✓ task abc123 active until 2026-05-17T16:00:00Z
 ```
 
@@ -318,7 +318,7 @@ See [docs/GETTING-STARTED.md](docs/GETTING-STARTED.md) for the full walkthrough 
 - **`creates-never-mutates`** — iam-jit creates new IAM resources; never modifies existing ones the customer owns. Clean CloudTrail attribution.
 - **No phone-home** — self-host customers run iam-jit in a sealed AWS account with no external dependencies.
 
-See [docs/security/](docs/security/) for the BB+WB audit history (13 rounds shipped) and [docs/compliance/](docs/compliance/) for the framework mapping.
+See [docs/security/](docs/security/) for the BB+WB audit history (19+ rounds shipped) and [docs/compliance/](docs/compliance/) for the framework mapping.
 
 ---
 
@@ -364,7 +364,7 @@ For grants currently within their TTL window, Pro+ tier surfaces a live stream o
 
 - **Web UI** — the grant-detail page shows actions as they happen, with `service:Action` + resource ARN per row
 - **Slack DM** — opt-in periodic summaries ("alice's grant has executed 47 API calls in the last 5 min: s3:GetObject ×40, cloudwatch:GetMetricData ×7")
-- **CLI** — `iam-jit grants tail <request-id>` follows the event stream
+- **CLI** — `iam-jit tail <grant-id>` follows the event stream
 
 Requires CloudTrail-read in the customer's account, wired via the standard CFN onboarding (EventBridge rule filtering on `userIdentity.sessionContext.sessionIssuer.arn` matching iam-jit-created roles). Permission is scoped narrowly — iam-jit can only see events about roles iam-jit created.
 
@@ -403,7 +403,7 @@ See [docs/AGENTS.md](docs/AGENTS.md) for the agent-driven reduction-loop pattern
 - **[docs/GETTING-STARTED.md](docs/GETTING-STARTED.md)** — first-time deployment walkthrough
 - **[docs/DEPLOYMENT.md](docs/DEPLOYMENT.md)** — full production-deployment guide; pilot deployment profile; cost-control levers
 - **[docs/recipes/](docs/recipes/)** — patterns + integration recipes (agent + Hoop examples, Slack setup, EKS template roles, terraform workflow)
-- **[docs/security/](docs/security/)** — BB+WB audit history (13 rounds), security policy, vulnerability disclosure
+- **[docs/security/](docs/security/)** — BB+WB audit history (19+ rounds), security policy, vulnerability disclosure
 - **[docs/CONVERGENCE-REPORT-2026-05.md](docs/CONVERGENCE-REPORT-2026-05.md)** — calibration discipline + corpus methodology
 - **[docs/calibration/100-prompt-sufficiency-loop.md](docs/calibration/100-prompt-sufficiency-loop.md)** — the calibration measurement that drove the NL synthesis removal
 - **[docs/calibration/feature-reality-check.md](docs/calibration/feature-reality-check.md)** — feature-by-feature "claim vs. delivery" audit
@@ -414,7 +414,7 @@ See [docs/AGENTS.md](docs/AGENTS.md) for the agent-driven reduction-loop pattern
 ## Status
 
 - **Product 1 — iam-risk-score**: shipped. Stable schema; CLI + API + GitHub Action live. 1,489 / 1,489 AWS-managed-policy corpus pass rate.
-- **Product 2 — iam-jit-bouncer**: v1.0 ships CLI rule/task/audit management + MCP enforcement surface (`iam_jit_scope_self_for_task` composer + `bouncer_*` tools). Transparent HTTP-proxy interception (`iam-jit-bouncer run`) is v1.1.
+- **Product 2 — iam-jit-bouncer**: v1.0 ships everything — CLI rule/task/audit management, MCP enforcement surface (`iam_jit_scope_self_for_task` composer + `bouncer_*` tools), HTTP proxy with cooperative + transparent modes (SigV4-preserving forwarding via `iam-jit-bouncer run`), environment profiles + `--profile` activation + `profile install --from URL` for org-distributed bundles, `bouncer pause --for 30m` timed escape hatch, `bouncer prompts` async deny-notification queue, `/healthz` liveness endpoint. v1.1 follow-ups: synchronous deny-prompts, HTTPS/MITM TLS on the proxy listener itself, plan-capture for IaC workflows.
 - **Product 3 — iam-jit local**: v1.0 ready. `iam-jit serve --local` + read-only-default + region/account scoping + 1h TTL + local SQLite audit.
 - **Product 4 — iam-jit self-host**: v1.0 ready with multi-provider OIDC (Google + Okta), Slack approval bot, template browser, evolving preset library, agent-driven reduction loop, MFA propagation, two safety modes, applicability framework, per-account LLM policy. No multi-tenant hosted SaaS planned; Enterprise customers either self-host or contract for dedicated-managed single-tenant.
 - **MCP server**: v0.4.0 — canonical `list_templates`, `get_template`, `submit_policy`, `score_iam_policy`; plus extended surface `check_iam_jit_compatibility`, `list_compatibility_catalog`, `list_compatibility_overrides`, `save_template`, `list_my_templates`, `get_my_template`, `find_similar_templates`, `reduce_policy`, `get_reduction_checklist`, `apply_reduction_checklist`, `tail_grant`, `iam_jit_scope_self_for_task`, and the `bouncer_*` tool family. Legacy `generate_iam_policy` was removed in 0.4.0 — replaced by the agent-driven workflow per [docs/AGENTS.md](docs/AGENTS.md).

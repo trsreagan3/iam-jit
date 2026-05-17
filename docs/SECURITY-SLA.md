@@ -54,20 +54,17 @@ internal vendor-risk policies.
 - For CRITICAL: we recommend deploying within hours of patch
   release. The 14-day window is a maximum, not a target.
 
-## For hosted SaaS customers (Indie / Pro / Team)
-
-- We auto-apply patches on disclosure day. No customer action
-  required.
-- Status page updates: `status.iam-jit.dev` (when launched).
-- Customer can opt to delay the patch by ≤24 hours via the
-  admin UI if they have a deploy freeze.
-
-## For dedicated managed customers (when offered)
+## For Enterprise dedicated-managed customers
 
 - We coordinate patch deployment with each customer's change
-  window.
+  window per their contract.
 - Default: deployed within the SLA, in a pre-agreed maintenance
   window.
+
+(There is no multi-tenant hosted SaaS tier — iam-jit-the-company
+does not operate shared infrastructure that holds trust roles
+into many customer AWS accounts. See README for the full
+rationale.)
 
 ## Coordinated disclosure
 

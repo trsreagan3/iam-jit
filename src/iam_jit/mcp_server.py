@@ -1365,6 +1365,26 @@ TOOLS = [
         },
     },
     {
+        "name": "bouncer_active_profile",
+        "description": (
+            "Return which environment profile is currently active for "
+            "the bouncer (the value of --profile / IAM_JIT_BOUNCER_PROFILE "
+            "at proxy-start time, or 'none' if no profile was selected). "
+            "Per [[agent-friendly-not-bypassable]]: agents can READ this "
+            "but CANNOT change it — profile switching is a human/admin "
+            "action requiring a proxy restart. Use this to introspect "
+            "whether a hard-floor deny layer is active before recommending "
+            "actions to the operator. Returns profile name + description "
+            "+ counts of deny_keywords / deny_verbs / only_account_ids / "
+            "allow_rules + the profile's source field (\"local\" or the "
+            "URL it was installed from)."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {},
+        },
+    },
+    {
         "name": "bouncer_tail_decisions",
         "description": (
             "Inspect the bouncer's decision audit log (every call "
@@ -2203,6 +2223,36 @@ def _bouncer_active_task_for_mcp(args: dict[str, Any]) -> dict[str, Any]:
     return {"active": scope.to_dict()}
 
 
+def _bouncer_active_profile_for_mcp(args: dict[str, Any]) -> dict[str, Any]:
+    """HIGH-05 closure (claims-audit): docs claim agents can READ the
+    active profile via this tool; the tool now actually exists.
+
+    Resolves the active profile the same way `iam-jit-bouncer run`
+    does: --profile CLI flag (not visible to MCP) → IAM_JIT_BOUNCER_PROFILE
+    env var → 'none'. Returns the profile name + description + counts
+    + source so the agent can introspect whether a hard-floor deny
+    layer is active without inferring from prior failures.
+    """
+    from .bouncer.profiles import load_profiles, resolve_active_profile
+
+    try:
+        profiles_map = load_profiles()
+        profile = resolve_active_profile(cli_flag=None, profiles=profiles_map)
+    except ValueError as e:
+        return {"error": f"profile resolution failed: {e}"}
+    return {
+        "name": profile.name,
+        "description": profile.description,
+        "deny_keyword_count": len(profile.deny_keywords),
+        "deny_verb_count": len(profile.deny_verbs),
+        "only_account_id_count": len(profile.only_account_ids),
+        "allow_rule_count": len(profile.allow_rules),
+        "source": profile.source,
+        "keyword_targets": list(profile.keyword_targets),
+        "keyword_match": profile.keyword_match,
+    }
+
+
 def _scope_self_for_task_for_mcp(args: dict[str, Any]) -> dict[str, Any]:
     """Slice E composer. Validates input + delegates to
     bouncer.self_scoping.scope_self_for_task; returns the unified
@@ -3019,6 +3069,8 @@ def _handle_request(req: dict[str, Any]) -> dict[str, Any] | None:
             result_payload = _bouncer_end_task_for_mcp(args)
         elif tool_name == "bouncer_active_task":
             result_payload = _bouncer_active_task_for_mcp(args)
+        elif tool_name == "bouncer_active_profile":
+            result_payload = _bouncer_active_profile_for_mcp(args)
         elif tool_name == "bouncer_task_review":
             result_payload = _bouncer_task_review_for_mcp(args)
         elif tool_name == "bouncer_recommend_rules":

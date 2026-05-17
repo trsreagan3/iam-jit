@@ -81,7 +81,7 @@ Each destination role's trust policy requires `sts:ExternalId` to be `iam-jit-<d
 
 | Threat | Mitigation |
 |---|---|
-| LLM jailbreak generates malicious actions | LLM is bounded to (services, levels) enums. policy_sentry deterministically expands; no path from LLM output to raw IAM actions. |
+| Agent (under prompt injection) authors a malicious policy | iam-jit does NOT generate policies from natural language (path removed in 0.4.0 per `docs/AGENTS.md`). The agent submits a draft policy (its responsibility); iam-jit scores it (1-10), enforces the auto-approve threshold, routes everything above the threshold to a human reviewer, and writes the full submission + decision to the audit log. The scoring engine itself is deterministic + calibration-corpus-backed (1,489 / 1,489 AWS-managed pass rate). |
 | Requester pastes a wildcard-laden policy | Server-side risk review (1-10) flags it; narrowing flow asks for ARN scoping; human reviewer is the gate. |
 | Compromise of the hub Lambda role | Limited to assume-role into ProvisionerRole — which can only manage `managed-by: iam-jit` resources under `/iam-jit/*`. Cannot escalate to controlling other IAM resources. |
 | Compromise of a ProvisionerRole credential | Same blast radius as the hub Lambda for that destination. ExternalId requirement means the credential is bound to the hub account's principal. |

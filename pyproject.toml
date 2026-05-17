@@ -3,9 +3,9 @@ requires = ["setuptools>=68", "wheel"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "iam-risk-score"
-version = "0.1.0"
-description = "Score AWS IAM policies for risk before granting access. Deterministic + LLM-narrative scoring as an API, CLI, and GitHub Action."
+name = "iam-jit"
+version = "1.0.0"
+description = "Score AWS IAM policies for risk; gate AWS API calls + issue JIT credentials. Deterministic + LLM-augmented scoring as an API, CLI, MCP server, and GitHub Action."
 readme = "README.md"
 license = { text = "Apache-2.0" }
 requires-python = ">=3.10"

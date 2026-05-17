@@ -1,14 +1,16 @@
-# Don't give Claude your AWS keys
+# Don't give Claude full admin
 
-*A draft launch post for iam-jit's agent-safety mode. Target
-audiences: infra engineers, founders running agents in their own
-AWS, security people who saw the Replit / Cursor incidents and
-got nervous.*
+*A draft launch post for the iam-jit + Bounce suite. Target
+audiences: infra engineers, founders running agents in production,
+SecOps reviewing AI-agent rollouts, security people who saw the
+PocketOS / Replit / Cursor / DataTalks.Club incidents and got
+nervous.*
 
 ---
 
-You probably have a `~/.aws/credentials` file. You probably let
-Claude Code read it.
+You probably have a `~/.aws/credentials` file (or an IAM role
+with `*:*`, or a cluster-admin kubeconfig, or a DB user with
+`SUPERUSER`). You probably let Claude Code read it.
 
 This is the part where the security person at your company
 either hasn't noticed yet, or has and is too tired to push back.
@@ -21,8 +23,25 @@ trade is brutal:
   anything you can do, for as long as your session lives,
   audited by exactly nothing.
 
+The credential SHAPE doesn't change the problem. A long-lived
+`AKIA…` key and an assumed IAM role with `Action: *` both grant
+the same blast radius — full admin. A cluster-admin kubeconfig
+is the same shape against your K8s cluster. A DB user with `DROP
+TABLE` rights is the same shape against your database. The
+specific anti-pattern, in plain English, is **handing full admin
+to an LLM-driven loop and hoping nothing goes wrong**.
+
+PocketOS lost their prod DB AND their backups in 9 seconds (April
+2026, Cursor + Claude Opus 4.6). Replit had its DB wiped by an
+agent. The Datadog Security team found a read-only-bypass SQL
+injection in Anthropic's reference Postgres MCP server while it
+was still pulling 21k weekly NPM downloads. These are not edge
+cases. The pattern keeps repeating because the easy path for
+"give the agent infra access" is "give it admin."
+
 Neither of these is what you'd pick if anyone gave you a third
-option. So here's a third option.
+option. So here's a third option — for AWS, for K8s, for your
+database.
 
 ## What iam-jit is
 
@@ -67,7 +86,7 @@ writes is how you make iam-jit not a thing you regret.
 
 ## Three modes, one trust story
 
-iam-jit ships in three shapes:
+iam-jit ships in two shapes:
 
 1. **Local mode** — `pip install iam-jit && iam-jit serve --local`.
    Runs on your laptop, uses your local AWS credentials, audits
@@ -75,16 +94,17 @@ iam-jit ships in three shapes:
    model is "trust the binary," same as `aws-cli` and `kubectl`.
    This is the free tier and the recommended way to start.
 
-2. **Hosted mode** — we run the control plane; you apply a
-   ~90-second CloudFormation that gives iam-jit a narrow trust
-   role. Your permissions boundary is the hard max — iam-jit
-   cannot grant something you didn't already allow it to grant.
-   Indie ($19), Pro ($79), Team ($249) tiers.
+2. **Enterprise self-host** — deploy iam-jit into your own AWS
+   account via SAM. Bedrock/Anthropic/AWS bills route directly
+   to your account. No phone-home. Annual license + support.
+   Dedicated-managed available for customers who'd rather have
+   their managed-services partner run it.
 
-3. **Self-host mode** — deploy iam-jit into your own AWS account
-   via SAM. Bedrock/Anthropic/AWS bills route directly to your
-   account. No phone-home. Annual license + support. For
-   regulated or data-sovereign deployments.
+We deliberately do NOT operate a multi-tenant hosted SaaS.
+Running a tool that holds trust roles into many customer AWS
+accounts would create a SolarWinds-style blast radius we refuse
+to take responsibility for. You either run iam-jit on your own
+infrastructure or you don't run it.
 
 ## The honest list of what it doesn't fix
 

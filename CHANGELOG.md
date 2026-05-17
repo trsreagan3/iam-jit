@@ -1,12 +1,13 @@
 # Changelog
 
-All notable changes to iam-jit + iam-risk-score follow [Keep a
-Changelog](https://keepachangelog.com/en/1.1.0/) and adhere to
-semantic versioning per [docs/UPGRADING.md](docs/UPGRADING.md).
+All notable changes to iam-jit follow [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
+and adhere to semantic versioning per [docs/UPGRADING.md](docs/UPGRADING.md).
 
-Scorer / calibration corpus version is tracked separately from
-software version — see `IAM_JIT_SCORER_VERSION` env var. Major
-scorer updates are noted as `### Scorer` blocks.
+Calibration corpus + scorer rules ship pinned to the wheel
+version in v1.0. A future release may split scorer version
+from software version (see `docs/ROADMAP-V1.1.md`); changes to
+the scorer corpus today are noted as `### Scorer` blocks
+within the same release.
 
 ## Unreleased (2026-05-15)
 

@@ -6,37 +6,28 @@ and the scorer corpus (tracked separately).
 
 ## Versioning model
 
-- **Software version** (PATCH / MINOR / MAJOR): change to code,
-  endpoints, dependencies, schema.
-- **Scorer / corpus version** (separate): the calibrated scoring
-  rules + corpus. Tracked via `IAM_JIT_SCORER_VERSION` env var
-  (`YYYY-MM` format).
-
-You can upgrade software without changing scorer, and vice
-versa. This is critical for compliance — customers can patch
-CVEs without their scoring policy shifting under them.
+The software ships as a single semver-tracked package. The
+calibration corpus + scorer rules ship pinned to the wheel
+version — upgrading the wheel upgrades the scorer too. A
+future release may split scorer version from software version
+(see `docs/ROADMAP-V1.1.md`); when that lands, this doc will
+gain a `Scorer version upgrades` section.
 
 ## Software upgrade types
 
 | Version bump | Means | Required action |
 |---|---|---|
-| PATCH (1.0.X) | Bug fixes, security fixes | `pip install --upgrade` or `sam deploy` — no migration |
+| PATCH (1.0.X) | Bug fixes, security fixes | `pip install --upgrade iam-jit` or `sam deploy` — no migration |
 | MINOR (1.X.0) | New features, backward-compatible | Same as PATCH; read CHANGELOG for new env vars / endpoints |
 | MAJOR (X.0.0) | Breaking changes; possible schema migration | Read `docs/UPGRADING-N-to-N+1.md` for the specific transition |
 
 ## Standard upgrade procedure
 
-### Hosted SaaS (Indie / Pro / Team)
-
-No customer action. We deploy automatically. Admin UI shows the
-current version + last deploy time.
-
-### Self-host (Free / Pro+self-host / Team+self-host / Enterprise)
+### Self-host (Free OSS or Enterprise self-host)
 
 ```bash
 # 1. Subscribe to releases (one-time)
 #    https://github.com/trsreagan3/iam-jit/releases (Watch)
-#    OR email opt-in at releases@iam-jit.dev (when available)
 
 # 2. Pull the new tagged release
 git fetch origin --tags
@@ -52,46 +43,22 @@ sam build && sam deploy
 #    Run any migration scripts; deploy; verify
 
 # 6. Verify the upgrade
-curl https://your-iam-jit/api/v1/health/version
-# Should show the new version
+curl http://127.0.0.1:8765/healthz   # or your deploy URL
+# Returns posture; check the iam-jit Lambda's deployed version
+# via `aws lambda get-function --function-name iam-jit` for the
+# canonical software version.
 ```
 
-### Partner-hosted deployments
+### Enterprise dedicated-managed
 
-Your partner follows the SLA in their contract. iam-jit notifies
-them on disclosure day; they coordinate the patch with your
-change window.
+Your contract specifies the upgrade SLA. iam-jit notifies the
+managing party on disclosure day; they coordinate the patch
+with your change window.
 
-## Scorer version upgrades
-
-The scorer version is INDEPENDENT of the software version. To
-upgrade the scorer:
-
-```bash
-# Set the new scorer version
-export IAM_JIT_SCORER_VERSION=2026-06   # for example
-
-# Restart iam-jit (sam deploy with the new env var)
-```
-
-Each scorer version ships with a **calibration delta report**
-at `docs/scorer-deltas/SCORER-DELTA-{from}-to-{to}.md` showing:
-
-- Rules added / changed / removed
-- Sample policies that scored differently between versions
-- Adversarial-loop convergence numbers for the new version
-
-**Read the delta report before upgrading the scorer.** A policy
-scoring 6/10 today might score 7/10 tomorrow if the scorer
-tightens — that may break your auto-approve threshold without
-warning.
-
-To pin to the current scorer version (for stability):
-
-```bash
-# In your SAM template or Lambda env config
-IAM_JIT_SCORER_VERSION=2026-05  # or whatever was current at v1
-```
+Per `feedback_enterprise_self_host_only`: there is no
+multi-tenant hosted SaaS. Anyone running iam-jit is running it
+on infrastructure they (or their managed-services partner)
+control.
 
 ## Major-version migrations
 

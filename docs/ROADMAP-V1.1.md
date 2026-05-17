@@ -1,11 +1,53 @@
 # iam-jit v1.1 Roadmap
 
-*Last updated 2026-05-16.*
+*Last updated 2026-05-17.*
 
-## Current contents: nothing
+## Deferred to v1.1 (each with a "why deferral is legitimate")
 
-After the 2026-05-16 v1.0-scope alignment, **no features are
-currently deferred to v1.1**.
+Three items are explicitly deferred from v1.0 to v1.1:
+
+### 1. Synchronous deny-prompts (iam-jit-bouncer / ibounce)
+
+**What:** Today's `--prompt-on-deny` is async — agent gets denied
+immediately; operator answers later via `bouncer prompts answer`
+and the rule takes effect on the next call of the same shape.
+v1.1 makes the proxy briefly poll `pending_prompts.status` so the
+agent's CURRENT call can be allowed once the operator answers.
+
+**Why deferred:** Sync requires real concurrency design (lock
+contention with audit writes, pause-state polling, timeout
+policy, operator-side IPC for near-real-time prompt delivery)
+that needs a WB-audit pass before shipping a credential-handling
+proxy with new blocking behavior. v1.0 ships the data-model + UI
+that v1.1 will reuse — shipping async first is the safer
+delivery sequence, not a scope cut.
+
+### 2. HTTPS/MITM TLS handling on the proxy listener (ibounce)
+
+**What:** The proxy listens on plain HTTP for v1.0; kubectl /
+SDK clients can speak to it via `HTTPS_PROXY=http://127.0.0.1:PORT`
+or `--insecure-skip-tls-verify`. v1.1 adds a real TLS listener +
+MITM cert (operator-trusted local CA) so clients can speak HTTPS
+to the proxy without skipping verification.
+
+**Why deferred:** AWS-account-blocked at the time of v1.0 cut
+(no real AWS endpoint to validate against without the verification
+gate per `project_aws_account_verification`). Documenting +
+shipping the workaround (`HTTPS_PROXY` env var) for v1.0; full
+TLS listener lands when the account gate clears.
+
+### 3. Plan-capture proxy for IaC workflows
+
+**What:** A separate proxy mode that consumes `terraform plan`
+output, scores the planned IAM changes, and writes them to the
+audit log with the same shape as live request scoring. Lets the
+JIT/scoring story extend to GitOps-style IaC pipelines.
+
+**Why deferred:** Requires the same HTTPS/MITM layer as #2 to be
+useful in practice (terraform `--proxy` doesn't ship with TLS-
+skip-verify the way kubectl does). Scheduling-bound to #2.
+
+## Bar for legitimate deferral
 
 The earlier draft of this doc deferred ~5 features ("plan-capture
 HTTP producer", "MFA full OAuth proxy", "scoring-feedback

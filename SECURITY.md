@@ -78,8 +78,7 @@ iam-jit's threat model:
 
 | Attacker | What they can do | What iam-jit prevents |
 |---|---|---|
-| Compromised iam-jit-hosted (multi-tenant SaaS) | Issue credentials within customer's trust-role permissions boundary | NEVER hold customer AWS credentials directly; per-customer external-id; permissions boundary as architectural ceiling |
-| Compromised iam-jit Lambda (self-host) | Issue credentials within their AWS account | Bounded by what the Lambda's role can do; audit logs to detect; `creates-never-mutates` invariant means it can't elevate existing roles |
+| Compromised iam-jit Lambda (self-host) | Issue credentials within their AWS account | Bounded by what the Lambda's role can do; audit logs to detect; `creates-never-mutates` invariant means it can't elevate existing roles. There is no multi-tenant hosted SaaS tier, so cross-tenant blast radius does not exist by design. |
 | Compromised customer API token | Submit grant requests; receive credentials within token's scope | Token-bound rate limits + admin revocation + per-token IP allowlist (optional) |
 | Compromised customer AWS principal | Whatever the principal can already do | Out of scope — iam-jit doesn't add powers, just narrows the use of existing ones |
 | Compromised approver Slack account | Approve requests on Slack | Signed-request authentication + workspace pin + channel pin + iam-jit-side role check (approver flag on iam-jit User) |
