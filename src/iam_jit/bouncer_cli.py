@@ -964,6 +964,16 @@ def effective_scope_cmd(owner: str | None, db: str | None, as_json: bool) -> Non
 @click.option("--include-task-scoped", is_flag=True, default=False,
               help="By default, task-scoped (Slice C one-off session) "
                    "decisions are excluded. Pass this to include them.")
+@click.option("--save-as-profile", "save_as_profile", default=None,
+              metavar="NAME",
+              help="Persist the recommendations as a NEW profile named NAME "
+                   "in ~/.iam-jit/bouncer/profiles.yaml. Profile holds the "
+                   "synthesized rules as `allow_rules`, so `--profile NAME` "
+                   "on future `run` invocations applies them. Refuses to "
+                   "overwrite an existing profile sourced from an org URL.")
+@click.option("--profile-description", default=None,
+              help="With --save-as-profile, the description string written "
+                   "into the new profile. Falls back to a generated summary.")
 def recommend_cmd(
     since: str | None,
     until: str | None,
@@ -974,6 +984,8 @@ def recommend_cmd(
     apply_now: bool,
     apply_only: str | None,
     include_task_scoped: bool,
+    save_as_profile: str | None,
+    profile_description: str | None,
 ) -> None:
     """Synthesize a draft ruleset from observed traffic in a window.
 
@@ -1056,6 +1068,119 @@ def recommend_cmd(
 
     if apply_now:
         _apply_recommendations_via_cli(db, recs, apply_patterns)
+
+    if save_as_profile:
+        _save_recommendations_as_profile(
+            recs, save_as_profile,
+            description=profile_description,
+            apply_patterns=apply_patterns,
+        )
+
+
+def _save_recommendations_as_profile(
+    recs: list,
+    profile_name: str,
+    *,
+    description: str | None = None,
+    apply_patterns: set[str] | None = None,
+) -> None:
+    """Persist synthesized recommendations as a NEW profile's allow_rules.
+    The profile lives in ~/.iam-jit/bouncer/profiles.yaml under the
+    given name; future `iam-jit-bouncer run --profile NAME` invocations
+    will load those rules.
+
+    Respects the org-distributed read-only invariant: profiles with
+    source != "local" cannot be overwritten."""
+    from .bouncer.profiles import (
+        Profile,
+        ProfileAllowRule,
+        load_profiles,
+        upsert_profile,
+    )
+
+    # Filter to apply_patterns when set (cherry-pick mirrors --apply-only)
+    chosen = [
+        r for r in recs
+        if apply_patterns is None or r.proposed_rule.pattern in apply_patterns
+    ]
+    if not chosen:
+        click.echo("--save-as-profile: no recommendations matched filters; "
+                   "nothing written.", err=True)
+        raise SystemExit(2)
+
+    # If a local profile of the same name exists, MERGE allow_rules
+    # rather than overwrite (otherwise --save-as-profile becomes a
+    # foot-gun that loses prior saves).
+    existing_rules: list[ProfileAllowRule] = []
+    existing_description = ""
+    try:
+        existing_profiles = load_profiles()
+        if profile_name in existing_profiles:
+            prior = existing_profiles[profile_name]
+            if prior.source != "local":
+                click.echo(
+                    f"profile {profile_name!r} is sourced from "
+                    f"{prior.source!r} and is read-only. Pick a "
+                    f"different name.",
+                    err=True,
+                )
+                raise SystemExit(2)
+            existing_rules = list(prior.allow_rules)
+            existing_description = prior.description
+    except ValueError:
+        # Malformed profiles.yaml — let upsert_profile re-raise.
+        pass
+
+    seen_patterns = {
+        (r.pattern, r.arn_scope, r.region_scope) for r in existing_rules
+    }
+    added: list[ProfileAllowRule] = []
+    for r in chosen:
+        pr = r.proposed_rule
+        key = (pr.pattern, pr.arn_scope, pr.region_scope)
+        if key in seen_patterns:
+            continue
+        added.append(ProfileAllowRule(
+            pattern=pr.pattern,
+            arn_scope=pr.arn_scope,
+            region_scope=pr.region_scope,
+            note=pr.note or f"recommended from session at {_now_iso_no_micros()}",
+        ))
+
+    if not added:
+        click.echo(
+            f"profile {profile_name!r}: all {len(chosen)} recommendations "
+            f"already present; nothing to add."
+        )
+        return
+
+    merged = Profile(
+        name=profile_name,
+        description=description or existing_description or (
+            f"Recommendations captured from session — "
+            f"{len(existing_rules) + len(added)} allow rules."
+        ),
+        allow_rules=tuple(existing_rules + added),
+        source="local",
+    )
+    path = upsert_profile(merged)
+    click.echo(
+        f"wrote {len(added)} new rule(s) to profile {profile_name!r} "
+        f"(total: {len(merged.allow_rules)}) at {path}"
+    )
+    click.echo(
+        f"activate with: iam-jit-bouncer run --profile {profile_name}"
+    )
+
+
+def _now_iso_no_micros() -> str:
+    """Wall-clock ISO timestamp without microseconds. Used in
+    profile-rule notes so the audit trail says when each rule was
+    captured without micro-noise."""
+    import datetime
+    return datetime.datetime.now(datetime.timezone.utc).strftime(
+        "%Y-%m-%dT%H:%M:%SZ"
+    )
 
 
 def _apply_recommendations_via_cli(

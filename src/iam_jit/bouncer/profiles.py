@@ -54,6 +54,19 @@ KeywordMatchMode = Literal["word_boundary", "substring"]
 
 
 @dataclasses.dataclass(frozen=True)
+class ProfileAllowRule:
+    """One ALLOW rule embedded in a profile. Mirrors ProxyRule's shape
+    intentionally so loading + applying is a no-op translation. Kept
+    as a separate dataclass so profiles.py doesn't import rules.py
+    (would create a cycle: rules → store → profiles)."""
+
+    pattern: str
+    arn_scope: str | None = None
+    region_scope: str | None = None
+    note: str = ""
+
+
+@dataclasses.dataclass(frozen=True)
 class Profile:
     """One named profile: a layered rule set keyed on environment."""
 
@@ -65,6 +78,17 @@ class Profile:
     only_account_ids: tuple[str, ...] = ()
     deny_verbs: tuple[str, ...] = ()
     exceptions: tuple[str, ...] = ()
+    # Profile-scoped ALLOW rules. Only consulted when this profile is
+    # active. Merged into the rule engine ALONGSIDE global rules; do
+    # NOT short-circuit profile DENY layers above. Composition order
+    # is documented in evaluate_profile / proxy.evaluate_request.
+    allow_rules: tuple[ProfileAllowRule, ...] = ()
+    # Provenance: where this profile came from. Set to "local" for
+    # user-edited profiles, set to a source URL for profiles
+    # installed via `profile install --from URL`. Profiles with a
+    # non-local source are READ-ONLY at the CLI surface — engineers
+    # can't edit org-distributed profiles to bypass them.
+    source: str = "local"
 
     def matches_exception(self, candidate: str) -> bool:
         """Substring match against the exceptions list. An exception
@@ -197,6 +221,7 @@ def _profile_from_dict(name: str, body: dict[str, Any]) -> Profile:
         raise ValueError(
             f"profile {name!r}: keyword_match must be 'word_boundary' or 'substring'"
         )
+    allow_rules = _parse_allow_rules(name, body.get("allow_rules"))
     return Profile(
         name=name,
         description=str(body.get("description", "")),
@@ -206,7 +231,142 @@ def _profile_from_dict(name: str, body: dict[str, Any]) -> Profile:
         only_account_ids=_str_tuple("only_account_ids"),
         deny_verbs=_str_tuple("deny_verbs"),
         exceptions=_str_tuple("exceptions"),
+        allow_rules=allow_rules,
+        source=str(body.get("source", "local")),
     )
+
+
+def _parse_allow_rules(
+    profile_name: str, raw: Any,
+) -> tuple[ProfileAllowRule, ...]:
+    """Parse the optional `allow_rules` list from YAML. Each entry is
+    a small dict mirroring ProxyRule shape: pattern (required), plus
+    optional arn_scope, region_scope, note. Pattern must be `service:action`
+    glob shape (e.g. `s3:GetObject`, `ec2:Describe*`) — same shape the
+    rule engine validates."""
+    if raw is None:
+        return ()
+    if not isinstance(raw, list):
+        raise ValueError(
+            f"profile {profile_name!r}: allow_rules must be a list of objects"
+        )
+    out: list[ProfileAllowRule] = []
+    for i, entry in enumerate(raw):
+        if not isinstance(entry, dict):
+            raise ValueError(
+                f"profile {profile_name!r}: allow_rules[{i}] must be a dict"
+            )
+        pattern = entry.get("pattern")
+        if not isinstance(pattern, str) or not pattern:
+            raise ValueError(
+                f"profile {profile_name!r}: allow_rules[{i}].pattern is required + must be a string"
+            )
+        arn_scope = entry.get("arn_scope")
+        region_scope = entry.get("region_scope")
+        note = entry.get("note", "")
+        if arn_scope is not None and not isinstance(arn_scope, str):
+            raise ValueError(
+                f"profile {profile_name!r}: allow_rules[{i}].arn_scope must be a string or null"
+            )
+        if region_scope is not None and not isinstance(region_scope, str):
+            raise ValueError(
+                f"profile {profile_name!r}: allow_rules[{i}].region_scope must be a string or null"
+            )
+        if not isinstance(note, str):
+            raise ValueError(
+                f"profile {profile_name!r}: allow_rules[{i}].note must be a string"
+            )
+        out.append(ProfileAllowRule(
+            pattern=pattern,
+            arn_scope=arn_scope,
+            region_scope=region_scope,
+            note=note,
+        ))
+    return tuple(out)
+
+
+def profile_to_yaml_dict(profile: Profile) -> dict[str, Any]:
+    """Inverse of _profile_from_dict — serialize a Profile back to the
+    dict shape stored under `profiles.<name>` in profiles.yaml. Used
+    by `bouncer recommend --save-as-profile` (#6b) + the interactive
+    deny-prompt (#5) when persisting profile mutations."""
+    body: dict[str, Any] = {}
+    if profile.description:
+        body["description"] = profile.description
+    if profile.deny_keywords:
+        body["deny_keywords"] = list(profile.deny_keywords)
+    if profile.keyword_targets and profile.keyword_targets != ("arn", "resource_name"):
+        body["keyword_targets"] = list(profile.keyword_targets)
+    if profile.keyword_match != "word_boundary":
+        body["keyword_match"] = profile.keyword_match
+    if profile.only_account_ids:
+        body["only_account_ids"] = list(profile.only_account_ids)
+    if profile.deny_verbs:
+        body["deny_verbs"] = list(profile.deny_verbs)
+    if profile.exceptions:
+        body["exceptions"] = list(profile.exceptions)
+    if profile.allow_rules:
+        body["allow_rules"] = [
+            {k: v for k, v in {
+                "pattern": r.pattern,
+                "arn_scope": r.arn_scope,
+                "region_scope": r.region_scope,
+                "note": r.note or None,
+            }.items() if v is not None}
+            for r in profile.allow_rules
+        ]
+    if profile.source and profile.source != "local":
+        body["source"] = profile.source
+    return body
+
+
+def upsert_profile(
+    profile: Profile,
+    path: str | pathlib.Path | None = None,
+) -> pathlib.Path:
+    """Persist a single profile to profiles.yaml — insert if absent,
+    replace if present. Returns the resolved file path.
+
+    Refuses to overwrite a profile whose `source` field is anything
+    other than 'local' — org-distributed profiles are read-only at
+    this CLI surface (see [[enterprise-profile-distribution]] memo).
+    If the user wants to override an org profile they must define a
+    new personal profile name.
+
+    Used by `bouncer recommend --save-as-profile NAME`."""
+    resolved = resolve_profiles_path(str(path) if path else None)
+    resolved.parent.mkdir(parents=True, exist_ok=True)
+    if resolved.exists():
+        try:
+            existing = yaml.safe_load(resolved.read_text()) or {}
+        except yaml.YAMLError as e:
+            raise ValueError(
+                f"profiles file at {resolved} is not valid YAML: {e}"
+            ) from e
+        if not isinstance(existing, dict):
+            existing = {}
+        profiles_obj = existing.get("profiles")
+        if not isinstance(profiles_obj, dict):
+            profiles_obj = {}
+            existing["profiles"] = profiles_obj
+    else:
+        existing = {"profiles": {}}
+        profiles_obj = existing["profiles"]
+
+    # READ-ONLY check: refuse to overwrite an org-distributed profile.
+    prior = profiles_obj.get(profile.name)
+    if isinstance(prior, dict):
+        prior_source = prior.get("source", "local")
+        if prior_source != "local":
+            raise ValueError(
+                f"profile {profile.name!r} is sourced from {prior_source!r} "
+                f"and is read-only. Pick a different name for your local "
+                f"override."
+            )
+
+    profiles_obj[profile.name] = profile_to_yaml_dict(profile)
+    resolved.write_text(yaml.safe_dump(existing, sort_keys=False))
+    return resolved
 
 
 def resolve_active_profile(

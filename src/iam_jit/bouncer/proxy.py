@@ -271,9 +271,28 @@ def evaluate_request(
                 parsed=parsed, record=short_circuit, mode=mode,
             )
 
-    # Compose the active ruleset (global rules + active task scope)
+    # Compose the active ruleset (global rules + active profile's
+    # allow_rules + active task scope). Profile allow_rules sit at
+    # the SAME precedence as global rules — they're "global rules
+    # that are gated on this profile being active." They do NOT
+    # bypass profile DENY layers above (already short-circuited by
+    # this point if any fired). The profile-allow rules are appended
+    # AFTER the global ruleset so a global DENY beats a profile
+    # ALLOW (mirrors AWS IAM explicit-deny semantics).
     id_tagged = store.list_rules()
-    ruleset = RuleSet(rules=[r for _, r in id_tagged])
+    composed_rules = [r for _, r in id_tagged]
+    if active_profile is not None and active_profile.allow_rules:
+        from .rules import Effect, ProxyRule
+        for par in active_profile.allow_rules:
+            composed_rules.append(ProxyRule(
+                pattern=par.pattern,
+                effect=Effect.ALLOW,
+                arn_scope=par.arn_scope,
+                region_scope=par.region_scope,
+                note=par.note or f"from profile {active_profile.name}",
+                origin="profile",
+            ))
+    ruleset = RuleSet(rules=composed_rules)
     active_task = store.get_active_task()
 
     # ALWAYS compute the verdict with ENFORCE semantics. The
@@ -290,13 +309,22 @@ def evaluate_request(
     # semantics here, cooperative-mode logs show real deny verdicts
     # the user can act on; the actual forwarding still happens
     # because `enforced` is False.
+    # Resolve the ARN to feed into rule-matching. The request parser
+    # places synthesized AWS ARNs on `resource_hint`; only the
+    # explicit-IAM API parsers set `arn`. Prefer arn when present,
+    # fall back to resource_hint so global rules + profile allow_rules
+    # with arn_scope can actually match against S3/EC2/DynamoDB paths.
+    resolved_arn = (
+        getattr(parsed, "arn", None)
+        or getattr(parsed, "resource_hint", None)
+    )
     record = decide(
         ruleset,
         mode=Mode.ENFORCE,
         default_policy=default_policy,
         service=parsed.service,
         action=parsed.action,
-        arn=getattr(parsed, "arn", None),
+        arn=resolved_arn,
         region=parsed.region,
         active_task=active_task,
     )
