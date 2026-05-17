@@ -1152,5 +1152,83 @@ def inspect_cmd(
     click.echo(json.dumps(parsed.to_dict(), indent=2))
 
 
+@main.command("run")
+@click.option(
+    "--port", type=int, default=8767, show_default=True,
+    help="TCP port to listen on (loopback only).",
+)
+@click.option(
+    "--host", default="127.0.0.1", show_default=True,
+    help="Interface to bind. Defaults to 127.0.0.1 (loopback). "
+         "Binding to anything else exposes a credential-handling "
+         "surface to the network — local-only is the safe default.",
+)
+@click.option(
+    "--mode",
+    type=click.Choice(["cooperative", "transparent"], case_sensitive=False),
+    default="cooperative",
+    show_default=True,
+    help="cooperative: every call is parsed + verdict logged but "
+         "always forwarded (advisory). transparent: DENY verdicts "
+         "return 403 to the SDK client (enforcement). Pick "
+         "cooperative for solo-dev iteration speed; transparent "
+         "for locked-down environments where any call must be "
+         "gated. Switch later by restarting with the other flag.",
+)
+@click.option(
+    "--default-policy",
+    type=click.Choice(["allow", "deny"], case_sensitive=False),
+    default="deny",
+    show_default=True,
+    help="What happens in TRANSPARENT mode when no rule matches.",
+)
+@click.option("--db", type=click.Path(dir_okay=False), default=None)
+def run_cmd(
+    port: int, host: str, mode: str, default_policy: str, db: str | None,
+) -> None:
+    """Start the HTTP proxy server.
+
+    Slice 1 ships the foundation: parsing + verdicts + audit log.
+    Slice 2 will add request forwarding to AWS. Until Slice 2,
+    the proxy is useful as an OBSERVABILITY tool — point an SDK
+    client at it (`AWS_ENDPOINT_URL=http://127.0.0.1:8767`) and
+    see a parsed log of every call your client would make, with
+    the bouncer's verdict for each.
+
+    Examples:
+
+      iam-jit-bouncer run                          # cooperative on :8767
+      iam-jit-bouncer run --mode transparent       # enforcement
+      iam-jit-bouncer run --port 9876              # custom port
+    """
+    import asyncio as _asyncio
+
+    from .bouncer.decisions import DefaultPolicy
+    from .bouncer.proxy import ProxyConfig, ProxyMode, serve
+
+    config = ProxyConfig(
+        host=host,
+        port=port,
+        mode=ProxyMode(mode.lower()),
+        default_policy=DefaultPolicy(default_policy.lower()),
+    )
+
+    with _opened_store(db) as store:
+        click.echo(
+            f"iam-jit-bouncer proxy starting on http://{host}:{port} "
+            f"(mode={mode}, default-policy={default_policy})",
+            err=True,
+        )
+        click.echo(
+            f"Point your SDK: export AWS_ENDPOINT_URL=http://{host}:{port}",
+            err=True,
+        )
+        click.echo("Ctrl+C to stop.", err=True)
+        try:
+            _asyncio.run(serve(config, store=store))
+        except KeyboardInterrupt:
+            click.echo("\nbouncer proxy stopped.", err=True)
+
+
 if __name__ == "__main__":
     main()
