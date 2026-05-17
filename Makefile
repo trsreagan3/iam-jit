@@ -162,6 +162,31 @@ recordings:
 recordings-clean:
 	rm -rf recordings/output/*.webm recordings/output/*.mp4
 
+# ----------------------------------------------------------------------
+# Local integration-test infrastructure (#215, [[local-test-infra-spec]])
+# ----------------------------------------------------------------------
+#
+# Spins LocalStack + Keycloak (real OIDC IdP) via docker compose, runs
+# the build-tagged integration suite, tears down. Integration tests
+# SKIP CLEANLY when their target service isn't reachable, so this
+# Makefile target is the convenient wrapper — the integration suite
+# itself is always safe to run with `pytest tests/integration -v`.
+#
+# Closes the "AWS-account-verify blocked" excuse pattern per
+# [[local-test-infra-unblocks-aws-wait]]. See docs/LOCAL-TEST-INFRA.md
+# for what's covered locally vs what still needs the real AWS account.
+.PHONY: test-integration test-integration-clean
+test-integration:
+	docker compose -f docker-compose.test.yml up -d
+	LOCALSTACK_ENDPOINT=http://127.0.0.1:4566 \
+	IAM_JIT_KEYCLOAK_URL=http://127.0.0.1:8088 \
+	OLLAMA_HOST=$${OLLAMA_HOST:-http://127.0.0.1:11434} \
+	$(PYTEST) tests/integration -v
+	docker compose -f docker-compose.test.yml down
+
+test-integration-clean:
+	docker compose -f docker-compose.test.yml down -v
+
 # Validate templates locally before any AWS write. Catches the
 # majority of "deploy fails at AWS" issues in under 30 seconds.
 # No AWS credentials needed.

@@ -55,6 +55,27 @@ def ollama_endpoint() -> str:
     return url
 
 
+@pytest.fixture(scope="session")
+def keycloak_endpoint() -> str:
+    """URL of a reachable Keycloak instance, or skip the test.
+
+    Brought up by ``docker compose -f docker-compose.test.yml up -d``
+    (the test-integration target in the Makefile starts everything
+    together). Keycloak takes ~30s on first boot; the compose health-
+    check waits for that.
+    """
+    url = os.environ.get("IAM_JIT_KEYCLOAK_URL", "http://localhost:8088")
+    host = url.split("://", 1)[1].split(":")[0]
+    port = int(url.rsplit(":", 1)[1])
+    if not _reachable(host, port):
+        pytest.skip(
+            f"Keycloak not reachable at {url}. "
+            "Start it with `docker compose -f docker-compose.test.yml up -d` "
+            "or `make test-integration`."
+        )
+    return url
+
+
 @pytest.fixture
 def localstack_iam(localstack_endpoint: str, monkeypatch: pytest.MonkeyPatch) -> object:
     """boto3 IAM client pointed at LocalStack."""
