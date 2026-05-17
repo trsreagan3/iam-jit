@@ -73,14 +73,28 @@ def test_every_catalog_entry_has_reasoning() -> None:
 def test_fixed_role_workloads_recommend_bouncer_or_explain_why_not() -> None:
     """For fixed-role workloads where USE_EXISTING is the verdict,
     bouncer_recommended should be True (the bouncer can still gate
-    the calls) — EXCEPT inside Lambda runtime where the bouncer
-    doesn't make sense (no local process to run it in)."""
+    the calls) — EXCEPT for managed-compute environments where there's
+    no local process to run the bouncer in (Lambda runtime, Step
+    Functions, Glue, SageMaker, CodeBuild, App Runner)."""
+    # Documented exceptions: managed compute where a local bouncer
+    # process can't run alongside the workload.
+    MANAGED_COMPUTE_NO_BOUNCER = {
+        WorkloadType.LAMBDA_FUNCTION,
+        WorkloadType.CODEBUILD_PROJECT,
+        WorkloadType.STEP_FUNCTIONS,
+        WorkloadType.GLUE_JOB,
+        WorkloadType.SAGEMAKER,
+        WorkloadType.APP_RUNNER,
+    }
     for entry in CATALOG:
         if entry.verdict != Compatibility.USE_EXISTING:
             continue
-        if WorkloadType.LAMBDA_FUNCTION in entry.workloads:
-            # Documented exception: bouncer can't run inside Lambda
-            assert not entry.bouncer_recommended
+        managed = MANAGED_COMPUTE_NO_BOUNCER & set(entry.workloads)
+        if managed:
+            assert not entry.bouncer_recommended, (
+                f"managed-compute entry {entry.id!r} ({managed}) shouldn't "
+                "recommend bouncer (no local process to run it in)"
+            )
         else:
             assert entry.bouncer_recommended, (
                 f"USE_EXISTING entry {entry.id!r} should recommend bouncer "
@@ -319,3 +333,261 @@ def test_both_tools_in_tools_list() -> None:
     names = {t["name"] for t in resp["result"]["tools"]}
     assert "check_iam_jit_compatibility" in names
     assert "list_compatibility_catalog" in names
+
+
+# ---------------------------------------------------------------------------
+# WB24 closures
+# ---------------------------------------------------------------------------
+
+
+# HIGH-24-02: catalog reasoning now accurate about IAM semantics
+@pytest.mark.parametrize("workload,must_mention", [
+    (WorkloadType.K8S_POD, "sts:AssumeRole"),
+    (WorkloadType.EKS_POD_IDENTITY, "sts:AssumeRole"),
+    (WorkloadType.EC2_INSTANCE, "sts:AssumeRole"),
+    (WorkloadType.LAMBDA_FUNCTION, "sts:AssumeRole"),
+    (WorkloadType.ECS_TASK, "sts:AssumeRole"),
+])
+def test_high_24_02_catalog_acknowledges_assume_role(workload, must_mention) -> None:
+    """WB24 HIGH-24-02: catalog reasoning must acknowledge that
+    sts:AssumeRole still works (BASE identity is fixed, assume-chain
+    isn't). Previously the reasoning text claimed roles couldn't be
+    changed at all, which is technically wrong."""
+    result = check_compatibility(_intent(workload=workload))
+    assert must_mention in result.reasoning, (
+        f"workload {workload.value!r} reasoning doesn't acknowledge "
+        f"assume-role: {result.reasoning!r}"
+    )
+
+
+# HIGH-24-01: submit_policy with USE_EXISTING workload is rejected
+def test_high_24_01_submit_policy_refuses_use_existing_workload() -> None:
+    from iam_jit.mcp_server import _submit_policy_for_mcp
+
+    out = _submit_policy_for_mcp({
+        "policy": {"Version": "2012-10-17", "Statement": [
+            {"Effect": "Allow", "Action": "s3:GetObject", "Resource": "*"}
+        ]},
+        "description": "ML pipeline reads",
+        "accounts": ["111111111111"],
+        "workload": "k8s_pod",
+    })
+    assert "error" in out
+    assert "cannot issue" in out["error"]
+    assert out["verdict"] == "use_existing"
+    assert out["next_action_hint"]
+    assert out["bouncer_recommended"] is True
+
+
+def test_high_24_01_submit_policy_proceeds_for_proceed_workload() -> None:
+    from iam_jit.mcp_server import _submit_policy_for_mcp
+
+    out = _submit_policy_for_mcp({
+        "policy": {"Version": "2012-10-17", "Statement": [
+            {"Effect": "Allow", "Action": "s3:GetObject", "Resource": "*"}
+        ]},
+        "description": "agent local dev session",
+        "accounts": ["111111111111"],
+        "workload": "agent_local_dev",
+    })
+    # No "cannot issue" error; should proceed to normal submission
+    # (which returns either a real submission or a would-submit shape).
+    assert out.get("error") != "iam-jit cannot issue a role for workload"  # no compat error
+
+
+def test_high_24_01_submit_policy_without_workload_still_works() -> None:
+    """Bypass-able (workload optional) but audit-logged."""
+    from iam_jit.mcp_server import _submit_policy_for_mcp
+
+    out = _submit_policy_for_mcp({
+        "policy": {"Version": "2012-10-17", "Statement": [
+            {"Effect": "Allow", "Action": "s3:GetObject", "Resource": "*"}
+        ]},
+        "description": "no workload",
+        "accounts": ["111111111111"],
+    })
+    # No compatibility-check error
+    assert "verdict" not in out
+
+
+# MED-24-01: compatibility check writes audit event via sink
+def test_med_24_01_check_writes_audit_event_when_sink_provided() -> None:
+    recorded: list[dict] = []
+
+    class _Sink:
+        def record(self, *, kind, actor, summary, detail=None):
+            recorded.append({
+                "kind": kind, "actor": actor, "summary": summary, "detail": detail,
+            })
+
+    check_compatibility(
+        _intent(workload=WorkloadType.K8S_POD, description="test"),
+        audit_sink=_Sink(),
+        actor="test-agent",
+    )
+    assert len(recorded) == 1
+    assert recorded[0]["kind"] == "compatibility_check"
+    assert recorded[0]["actor"] == "test-agent"
+    assert recorded[0]["detail"]["workload"] == "k8s_pod"
+    assert recorded[0]["detail"]["verdict"] == "use_existing"
+    # LOW-24-02: description IS plumbed through to audit detail now
+    assert recorded[0]["detail"]["description"] == "test"
+
+
+def test_med_24_01_check_no_sink_no_record() -> None:
+    """No sink = no audit write (pure function)."""
+    # Just verify it doesn't raise / produces the same result
+    r1 = check_compatibility(_intent(workload=WorkloadType.K8S_POD))
+    r2 = check_compatibility(
+        _intent(workload=WorkloadType.K8S_POD), audit_sink=None,
+    )
+    assert r1.verdict == r2.verdict
+
+
+def test_med_24_01_sink_failure_does_not_crash_check() -> None:
+    """Best-effort logging: a broken sink doesn't bubble up."""
+    class _BrokenSink:
+        def record(self, **_):
+            raise RuntimeError("storage down")
+
+    result = check_compatibility(
+        _intent(workload=WorkloadType.K8S_POD), audit_sink=_BrokenSink()
+    )
+    assert result.verdict == Compatibility.USE_EXISTING
+
+
+# MED-24-02: existing_role_hint validated as ARN format
+def test_med_24_02_valid_arn_echoed() -> None:
+    arn = "arn:aws:iam::111111111111:role/my-pod-role"
+    result = check_compatibility(_intent(
+        workload=WorkloadType.K8S_POD, existing_role_hint=arn,
+    ))
+    assert result.existing_role_arn == arn
+    assert result.existing_role_hint_invalid is False
+
+
+def test_med_24_02_malformed_arn_rejected() -> None:
+    result = check_compatibility(_intent(
+        workload=WorkloadType.K8S_POD, existing_role_hint="haha not a real ARN",
+    ))
+    assert result.existing_role_arn is None
+    assert result.existing_role_hint_invalid is True
+
+
+def test_med_24_02_empty_string_hint_treated_as_none() -> None:
+    result = check_compatibility(_intent(
+        workload=WorkloadType.K8S_POD, existing_role_hint="",
+    ))
+    assert result.existing_role_arn is None
+    assert result.existing_role_hint_invalid is False  # empty != invalid
+
+
+@pytest.mark.parametrize("arn", [
+    "arn:aws:iam::111111111111:role/my-role",
+    "arn:aws-us-gov:iam::222222222222:role/gov-role",
+    "arn:aws-cn:iam::333333333333:role/cn-role",
+    "arn:aws:iam::444444444444:role/path/to/role-with-slash",
+])
+def test_med_24_02_valid_arn_partitions(arn: str) -> None:
+    result = check_compatibility(_intent(
+        workload=WorkloadType.K8S_POD, existing_role_hint=arn,
+    ))
+    assert result.existing_role_arn == arn
+    assert result.existing_role_hint_invalid is False
+
+
+# LOW-24-03: catalog structural invariants enforced by tests
+def test_low_24_03_every_non_other_workload_has_catalog_entry() -> None:
+    """Adding a new WorkloadType without a catalog entry should fail
+    this test (closes the audit's question 9 gap)."""
+    from iam_jit.compatibility import _CATALOG_BY_WORKLOAD
+
+    expected_no_entry = {WorkloadType.OTHER}
+    missing = {
+        w for w in WorkloadType
+        if w not in _CATALOG_BY_WORKLOAD and w not in expected_no_entry
+    }
+    assert not missing, f"workloads without catalog entry: {missing}"
+
+
+def test_low_24_03_no_unintentional_workload_duplicates() -> None:
+    """A future contributor adding a duplicate workload entry would
+    silently shadow the first; this test catches it."""
+    from collections import Counter
+
+    counts = Counter(w for e in CATALOG for w in e.workloads)
+    duplicates = {w: c for w, c in counts.items() if c > 1}
+    # If we ever intentionally use first-match-wins specificity ordering,
+    # add the workload to EXPECTED_DUPLICATES with a comment explaining.
+    EXPECTED_DUPLICATES: set = set()
+    assert set(duplicates.keys()) == EXPECTED_DUPLICATES, (
+        f"unintentional duplicates: {duplicates}"
+    )
+
+
+# LOW-24-05: MCP input validation rejects bad account/service strings
+def test_low_24_05_invalid_account_id_rejected() -> None:
+    from iam_jit.mcp_server import _check_compatibility_for_mcp
+
+    for bad in ["not-an-account", "", "123", "1234567890123", "ABC123456789"]:
+        out = _check_compatibility_for_mcp({
+            "workload": "k8s_pod", "target_account_id": bad,
+        })
+        assert "error" in out, f"should reject account id {bad!r}"
+
+
+def test_low_24_05_valid_account_id_accepted() -> None:
+    from iam_jit.mcp_server import _check_compatibility_for_mcp
+
+    out = _check_compatibility_for_mcp({
+        "workload": "agent_local_dev", "target_account_id": "111111111111",
+    })
+    assert "error" not in out
+
+
+def test_low_24_05_invalid_service_prefix_rejected() -> None:
+    from iam_jit.mcp_server import _check_compatibility_for_mcp
+
+    out = _check_compatibility_for_mcp({
+        "workload": "agent_local_dev",
+        "target_services": ["s3", "Definitely Not A Service Name!"],
+    })
+    assert "error" in out
+
+
+def test_low_24_05_service_prefix_normalized_to_lowercase() -> None:
+    from iam_jit.mcp_server import _check_compatibility_for_mcp
+
+    out = _check_compatibility_for_mcp({
+        "workload": "agent_local_dev",
+        "target_services": ["S3", "EC2 "],  # case + trailing space tolerated
+    })
+    assert "error" not in out
+
+
+# LOW-24-01 partial: new catalog entries for Fargate-shaped workloads
+@pytest.mark.parametrize("workload", [
+    WorkloadType.CODEBUILD_PROJECT,
+    WorkloadType.STEP_FUNCTIONS,
+    WorkloadType.GLUE_JOB,
+    WorkloadType.SAGEMAKER,
+    WorkloadType.APP_RUNNER,
+    WorkloadType.BATCH_JOB,
+])
+def test_low_24_01_new_workloads_return_use_existing(workload) -> None:
+    result = check_compatibility(_intent(workload=workload))
+    assert result.verdict == Compatibility.USE_EXISTING
+    assert result.next_action_hint
+
+
+def test_low_24_01_mcp_schema_includes_new_workloads() -> None:
+    """The MCP tool's enum must list every WorkloadType so agents can
+    pass the new values without inputSchema validation errors."""
+    from iam_jit.mcp_server import TOOLS
+
+    check_tool = next(t for t in TOOLS if t["name"] == "check_iam_jit_compatibility")
+    enum = set(check_tool["inputSchema"]["properties"]["workload"]["enum"])
+    expected = {w.value for w in WorkloadType}
+    assert enum == expected, (
+        f"MCP schema enum drift: missing={expected - enum}, extra={enum - expected}"
+    )

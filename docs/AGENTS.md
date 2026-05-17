@@ -28,10 +28,11 @@ When calling `check_iam_jit_compatibility`, classify yourself accurately:
 
 | Workload | Typical verdict | Why |
 |---|---|---|
-| `k8s_pod` / `eks_pod_identity` | `use_existing` | Pod is bound to an IRSA role at pod creation; can't choose another at runtime. |
-| `ec2_instance` | `use_existing` | Code on EC2 uses the instance profile attached at launch; can't swap. |
-| `lambda_function` | `use_existing` | Function uses the execution role pinned at function creation. |
-| `ecs_task` | `use_existing` | ECS task uses the Task Role from the task definition. |
+| `k8s_pod` / `eks_pod_identity` | `use_existing` | Pod's BASE identity (the IRSA role) is fixed at pod creation. Pod code CAN call sts:AssumeRole into a different role, but that adds an explicit hop; using the IRSA role directly is simpler. |
+| `ec2_instance` | `use_existing` | Code on EC2 uses the instance profile role as its BASE identity. sts:AssumeRole into other roles still works; the instance profile is what IMDS hands out by default. |
+| `lambda_function` | `use_existing` | Function's BASE identity is the execution role. Function code can sts:AssumeRole mid-invocation, but the execution role is the default. |
+| `ecs_task` | `use_existing` | Task's BASE identity is the Task Role. Fargate tasks have TWO roles (Task Role + Execution Role); both fixed at task launch. |
+| `codebuild_project` / `step_functions` / `glue_job` / `sagemaker` / `app_runner` / `batch_job` | `use_existing` | Service-managed compute with a per-resource role pinned at resource creation. |
 | `ci_runner` | `proceed` | CI runners are OIDC-federated; iam-jit can issue here. |
 | `agent_local_dev` | `proceed` | Local agent on a dev laptop — iam-jit's primary case. |
 | `human_cli` | `proceed` | Human at a terminal can assume any role they're permitted to. |
@@ -39,9 +40,25 @@ When calling `check_iam_jit_compatibility`, classify yourself accurately:
 
 Pass `target_account_id`, `target_services`, and `existing_role_hint` (if you know the existing role) for a more precise answer.
 
+### Composition: when workloads nest
+
+Real environments compose. Common cases:
+
+| Composed case | Classify as | Why |
+|---|---|---|
+| CI runner running ON EC2 (self-hosted GitHub Actions / Buildkite runner) | `ec2_instance` | The OUTER hosting constraint wins. The runner can't escape the EC2 instance profile without an explicit AssumeRole hop. |
+| Agent (Claude Code / Cursor) running IN a k8s pod | `k8s_pod` | Same rule — the pod's IRSA role is the constraint iam-jit can't change. |
+| Containerized self-hosted runner on ECS / Fargate | `ecs_task` | Outer constraint wins. |
+| CI job on Lambda-based ephemeral runner | `lambda_function` | Same. |
+| Lambda calling another Lambda | `lambda_function` | The calling function's execution role is the constraint. |
+
+**Rule of thumb:** classify by the OUTER hosting environment — that's the constraint iam-jit can't change. When in doubt, pick the workload type that's the BASE identity of the AWS API call (what would show up as `userIdentity.sessionContext.sessionIssuer.userName` in CloudTrail if you made the call right now).
+
 ### Why this matters
 
-iam-jit's whole model is "create a NEW short-lived role" (per [[creates-never-mutates]]). For workloads where the role is fixed at creation time (k8s IRSA, EC2 IP, Lambda exec), there's no point in iam-jit minting a role the workload can't use. Without the compatibility check, you'd waste cycles trying iam-jit, fail mysteriously, and eventually reach for "disable iam-jit, give me admin" — exactly the failure mode iam-jit is designed to prevent. **Always check first.**
+iam-jit's whole model is "create a NEW short-lived role" (per [[creates-never-mutates]]). For workloads where the role is fixed at creation time (k8s IRSA, EC2 IP, Lambda exec, CodeBuild, Glue, etc.), the BASE identity can't be swapped at runtime — though sts:AssumeRole into a different role is technically possible. The practical answer for most workloads is "use the fixed role directly; add an iam-jit hop only when you specifically need scoping the base identity doesn't provide."
+
+Without the compatibility check, an agent would waste cycles trying iam-jit, fail mysteriously, and eventually reach for "disable iam-jit, give me admin" — exactly the failure mode iam-jit is designed to prevent. **Always check first.** If you're also calling `submit_policy`, pass the same `workload` argument — `submit_policy` re-runs the check and refuses USE_EXISTING workloads with a clear redirect (per WB24 HIGH-24-01 closure). Omitting `workload` from `submit_policy` is bypass-able but audit-logged as `submit_without_compatibility_check` so admins can spot it.
 
 ## The four MCP tools
 

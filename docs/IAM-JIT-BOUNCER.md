@@ -200,6 +200,38 @@ only (no Alembic, no ORM). Current schema: `rules` + `decisions`.
 - Anomaly detection (call pattern outliers, off-hours flags)
 - Multi-account aggregation
 
+## Use case: fixed-role workloads (k8s, EC2, ECS, etc.)
+
+The bouncer is the canonical gating answer for workloads where
+iam-jit-the-issuer can't help because the role is baked into the
+workload at creation time (k8s IRSA, EC2 instance profile, ECS Task
+Role, Batch job role, etc.). The pattern:
+
+1. Agent calls `check_iam_jit_compatibility(workload="k8s_pod", ...)`.
+2. Gets back `verdict="use_existing"` + `bouncer_recommended=true`.
+3. The workload's pre-existing role (the IRSA role, the instance
+   profile, etc.) is used for AWS calls — iam-jit doesn't issue
+   anything.
+4. The bouncer runs alongside the workload as the local gate.
+
+Deployment shapes per environment (Stage 2 documents will go deeper):
+
+- **K8s pods** — bouncer as a sidecar container; the application
+  container sets `AWS_ENDPOINT_URL=http://127.0.0.1:8767`.
+- **EC2 instances** — bouncer as a systemd unit on the instance;
+  set `AWS_ENDPOINT_URL` in the application's environment.
+- **ECS tasks / Fargate** — bouncer as a sidecar container in the
+  task definition; same env-var pattern.
+- **Lambda** — bouncer can't run inside the Lambda runtime; the
+  compatibility checker returns `bouncer_recommended=false` for
+  Lambda specifically. Use a Lambda execution-role-scoping flow at
+  deploy time instead of runtime gating.
+
+In all cases, the bouncer's audit log (`iam-jit-bouncer logs tail`)
+shows every gated AWS call regardless of how the workload obtained
+its creds. The audit chain promise holds whether the role was
+issued by iam-jit or assigned by the platform.
+
 ## Agent-friendly, not bypassable
 
 Per [[agent-friendly-not-bypassable]]: the bouncer is configurable

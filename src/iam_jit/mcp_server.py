@@ -629,6 +629,29 @@ TOOLS = [
                     "type": "string",
                     "description": "Optional ticket / change reference.",
                 },
+                "workload": {
+                    "type": "string",
+                    "enum": [
+                        "k8s_pod", "eks_pod_identity", "ec2_instance",
+                        "lambda_function", "ecs_task", "ci_runner",
+                        "agent_local_dev", "human_cli", "other",
+                    ],
+                    "description": (
+                        "What's making the AWS call. Per WB24 HIGH-24-01 "
+                        "closure: when provided, iam-jit runs "
+                        "check_iam_jit_compatibility internally BEFORE "
+                        "issuance and refuses fixed-role workloads "
+                        "(k8s_pod, ec2_instance, lambda_function, "
+                        "ecs_task, eks_pod_identity) with a clear "
+                        "redirect to use the existing role + bouncer. "
+                        "Strongly recommended — saves an MCP round-trip "
+                        "and enforces the 'call check_iam_jit_compatibility "
+                        "FIRST' contract from AGENTS.md. If omitted, "
+                        "submission proceeds but logs a "
+                        "'submit_without_compatibility_check' audit event "
+                        "so admins can spot agents bypassing the check."
+                    ),
+                },
             },
         },
     },
@@ -671,6 +694,12 @@ TOOLS = [
                         "ec2_instance",
                         "lambda_function",
                         "ecs_task",
+                        "codebuild_project",
+                        "step_functions",
+                        "glue_job",
+                        "sagemaker",
+                        "app_runner",
+                        "batch_job",
                         "ci_runner",
                         "agent_local_dev",
                         "human_cli",
@@ -1211,15 +1240,18 @@ def _list_my_templates_for_mcp(args: dict[str, Any]) -> dict[str, Any]:
 # ---------------------------------------------------------------------------
 
 
-def _check_compatibility_for_mcp(args: dict[str, Any]) -> dict[str, Any]:
-    """Run the applicability checker against an agent-provided intent.
-    Returns a self-describing verdict so the agent has a path forward
-    regardless of whether iam-jit can directly help."""
-    from .compatibility import (
-        CompatibilityIntent,
-        WorkloadType,
-        check_compatibility,
-    )
+# WB24 LOW-24-05 closure: semantic validators that match what iam-jit
+# expects elsewhere (mirrors store._validate_request_id pattern shape).
+_ACCOUNT_ID_RE = __import__("re").compile(r"^\d{12}$")
+_SERVICE_PREFIX_RE = __import__("re").compile(r"^[a-z][a-z0-9-]{1,62}$")
+
+
+def _parse_compatibility_intent(args: dict[str, Any]) -> dict[str, Any]:
+    """Parse + validate a compatibility intent from MCP args. Returns
+    either {'error': '...'} or {'intent': CompatibilityIntent}. Shared
+    by `_check_compatibility_for_mcp` and (post-Slice-2) submit_policy
+    enforcement so both validate identically."""
+    from .compatibility import CompatibilityIntent, WorkloadType
 
     workload = args.get("workload")
     if not isinstance(workload, str) or not workload.strip():
@@ -1228,21 +1260,33 @@ def _check_compatibility_for_mcp(args: dict[str, Any]) -> dict[str, Any]:
         workload_enum = WorkloadType(workload.strip())
     except ValueError:
         valid = ", ".join(w.value for w in WorkloadType)
-        return {
-            "error": f"unknown workload {workload!r}; must be one of: {valid}",
-        }
+        return {"error": f"unknown workload {workload!r}; must be one of: {valid}"}
 
     target_account_id = args.get("target_account_id")
-    if target_account_id is not None and not isinstance(target_account_id, str):
-        return {"error": "target_account_id must be a string if provided"}
+    if target_account_id is not None:
+        if not isinstance(target_account_id, str):
+            return {"error": "target_account_id must be a string if provided"}
+        if not _ACCOUNT_ID_RE.match(target_account_id.strip()):
+            return {"error": "target_account_id must be exactly 12 digits"}
+        target_account_id = target_account_id.strip()
 
     target_services_raw = args.get("target_services")
     if target_services_raw is not None and not isinstance(target_services_raw, list):
         return {"error": "target_services must be a list if provided"}
-    target_services = target_services_raw or []
-    for item in target_services:
+    target_services_clean: list[str] = []
+    for item in target_services_raw or []:
         if not isinstance(item, str):
             return {"error": "target_services items must all be strings"}
+        normalized = item.strip().lower()
+        if not _SERVICE_PREFIX_RE.match(normalized):
+            return {
+                "error": (
+                    f"target_services contains invalid service prefix "
+                    f"{item!r}; service prefixes are lowercase, start "
+                    "with a letter, max 63 chars (e.g. 's3', 'ec2', 'iam')"
+                )
+            }
+        target_services_clean.append(normalized)
 
     description = args.get("description")
     if description is not None and not isinstance(description, str):
@@ -1252,14 +1296,63 @@ def _check_compatibility_for_mcp(args: dict[str, Any]) -> dict[str, Any]:
     if existing_role_hint is not None and not isinstance(existing_role_hint, str):
         return {"error": "existing_role_hint must be a string if provided"}
 
-    intent = CompatibilityIntent(
-        workload=workload_enum,
-        target_account_id=target_account_id,
-        target_services=tuple(target_services),
-        description=description,
-        existing_role_hint=existing_role_hint,
+    return {
+        "intent": CompatibilityIntent(
+            workload=workload_enum,
+            target_account_id=target_account_id,
+            target_services=tuple(target_services_clean),
+            description=description,
+            existing_role_hint=existing_role_hint,
+        ),
+    }
+
+
+def _compatibility_audit_sink():
+    """Return the bouncer's config_events table as the compatibility-
+    check audit sink — both are config-shape decisions and live in
+    the same local audit chain. WB24 MED-24-01 closure. Best-effort:
+    on any error (e.g. bouncer state.db not initialized), return None
+    and the checker skips audit-logging without crashing."""
+    try:
+        from .bouncer.store import BouncerStore
+
+        store = BouncerStore()
+
+        class _SinkAdapter:
+            def record(self, *, kind, actor, summary, detail=None):
+                store._record_config_event_locked(
+                    actor=actor,
+                    kind=kind,
+                    summary=summary,
+                    detail=detail,
+                )
+
+        return _SinkAdapter()
+    except Exception:
+        return None
+
+
+def _compatibility_actor() -> str:
+    """Identify the caller for the audit log (mirrors `_bouncer_actor`).
+    Reads IAM_JIT_BOUNCER_ACTOR if set, else 'mcp-agent'."""
+    import os
+    return os.environ.get("IAM_JIT_BOUNCER_ACTOR") or "mcp-agent"
+
+
+def _check_compatibility_for_mcp(args: dict[str, Any]) -> dict[str, Any]:
+    """Run the applicability checker against an agent-provided intent.
+    Returns a self-describing verdict so the agent has a path forward
+    regardless of whether iam-jit can directly help."""
+    from .compatibility import check_compatibility
+
+    parsed = _parse_compatibility_intent(args)
+    if "error" in parsed:
+        return parsed
+    intent = parsed["intent"]
+    sink = _compatibility_audit_sink()
+    result = check_compatibility(
+        intent, audit_sink=sink, actor=_compatibility_actor()
     )
-    result = check_compatibility(intent)
     return result.to_dict()
 
 
@@ -1772,8 +1865,79 @@ def _submit_policy_for_mcp(args: dict[str, Any]) -> dict[str, Any]:
     If IAM_JIT_URL + IAM_JIT_TOKEN env vars are set, POSTs to
     /api/v1/requests; otherwise returns the request shape the user
     can submit themselves via `iam-jit remote submit`.
+
+    WB24 HIGH-24-01 closure: when `workload` is provided, runs the
+    applicability checker BEFORE issuance and refuses fixed-role
+    workloads (k8s_pod, ec2_instance, lambda_function, ecs_task,
+    eks_pod_identity) with a clear redirect to use the existing role
+    + bouncer. When `workload` is omitted, submission proceeds but
+    a `submit_without_compatibility_check` audit event is logged
+    (Lens B: bypass-able but auditable).
     """
     import os
+
+    # WB24 HIGH-24-01 closure: compatibility-check enforcement.
+    workload = args.get("workload")
+    if workload is not None:
+        if not isinstance(workload, str):
+            return {
+                "error": "workload must be a string if provided",
+                "request_id": None,
+            }
+        # Build a minimal intent for the check; reuse the same validator
+        # the standalone tool uses so the contract is identical.
+        accounts_for_intent = args.get("accounts") or []
+        compat_intent_args = {
+            "workload": workload,
+            "target_account_id": (
+                accounts_for_intent[0]
+                if accounts_for_intent and isinstance(accounts_for_intent[0], str)
+                and _ACCOUNT_ID_RE.match(accounts_for_intent[0])
+                else None
+            ),
+            "description": args.get("description") if isinstance(args.get("description"), str) else None,
+        }
+        parsed = _parse_compatibility_intent(compat_intent_args)
+        if "error" in parsed:
+            return {
+                "error": f"workload validation failed: {parsed['error']}",
+                "request_id": None,
+            }
+        from .compatibility import Compatibility, check_compatibility
+
+        check_result = check_compatibility(
+            parsed["intent"],
+            audit_sink=_compatibility_audit_sink(),
+            actor=_compatibility_actor(),
+        )
+        if check_result.verdict in (
+            Compatibility.USE_EXISTING,
+            Compatibility.CANNOT_HELP,
+        ):
+            return {
+                "error": (
+                    f"iam-jit cannot issue a role for workload "
+                    f"{workload!r}: {check_result.reasoning}"
+                ),
+                "next_action_hint": check_result.next_action_hint,
+                "verdict": check_result.verdict.value,
+                "matched_pattern": check_result.matched_pattern,
+                "bouncer_recommended": check_result.bouncer_recommended,
+                "request_id": None,
+            }
+    else:
+        # Workload omitted — log the bypass so admins can audit.
+        sink = _compatibility_audit_sink()
+        if sink is not None:
+            try:
+                sink.record(
+                    kind="submit_without_compatibility_check",
+                    actor=_compatibility_actor(),
+                    summary="submit_policy invoked without a workload arg",
+                    detail={"description_preview": str(args.get("description") or "")[:140]},
+                )
+            except Exception:
+                pass
 
     policy = args.get("policy")
     description = args.get("description")

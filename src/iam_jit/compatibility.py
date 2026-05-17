@@ -41,32 +41,93 @@ can't issue, and what the agent should do INSTEAD — never a vague
 from __future__ import annotations
 
 import dataclasses
+import re
 from enum import Enum
-from typing import Any
+from typing import Any, Protocol
+
+
+# WB24 MED-24-02 closure: IAM role ARN format validator. Covers all
+# four AWS partitions (aws / aws-us-gov / aws-cn / aws-iso/iso-b).
+# Role-name charset per AWS docs: alphanumeric + `_+=,.@/-`.
+_IAM_ROLE_ARN_RE = re.compile(
+    r"^arn:aws(?:-[a-z-]+)?:iam::\d{12}:role/[\w+=,.@/-]+$"
+)
+
+
+def _validate_existing_role_hint(hint: str | None) -> tuple[str | None, bool]:
+    """Return (cleaned_hint_or_None, was_invalid_input). WB24 MED-24-02
+    closure. The cleaned value is the trimmed ARN or None; the flag
+    is True when the caller passed a non-empty string that didn't
+    match the IAM role ARN regex (so the caller can surface
+    'we ignored your hint because it didn't parse')."""
+    if hint is None:
+        return None, False
+    stripped = hint.strip()
+    if not stripped:
+        return None, False
+    if not _IAM_ROLE_ARN_RE.match(stripped):
+        return None, True
+    return stripped, False
+
+
+class ConfigEventSink(Protocol):
+    """WB24 MED-24-01 closure: optional sink that records compatibility-
+    check calls to an audit log. The MCP handler / Slice 3 intake
+    plumb in a real sink (the bouncer's `config_events` table, or a
+    new top-level iam-jit table); the pure `check_compatibility`
+    function takes the sink as a parameter so it stays
+    dependency-free for tests.
+    """
+
+    def record(
+        self,
+        *,
+        kind: str,
+        actor: str,
+        summary: str,
+        detail: dict[str, Any] | None = None,
+    ) -> None: ...
 
 
 class Compatibility(str, Enum):
-    """The four verdicts the checker returns."""
+    """The verdicts the checker returns.
+
+    Slice 1 reachable: PROCEED, USE_EXISTING.
+    Slice 2 will add reachable paths for USE_BOUNCER (admin allowlist
+    can declare "prefer-bouncer-only for this account") and CANNOT_HELP
+    (admin allowlist can declare "iam-jit explicitly not supported for
+    this account/workload — escalate to human"). Per WB24 MED-24-04
+    they're kept in the enum so agent integrations write switch
+    statements over the full surface from day one rather than break
+    when Slice 2 lands.
+    """
 
     PROCEED = "proceed"
     """iam-jit-the-issuer can create + scope a JIT role for this case."""
 
     USE_EXISTING = "use_existing"
-    """A specific pre-existing role MUST be used (k8s IRSA, EC2 instance
-    profile, etc.). iam-jit can't issue; agent assumes the existing role
-    directly."""
+    """A pre-existing role should be used (k8s IRSA, EC2 instance
+    profile, etc.). The workload's BASE identity is the pre-existing
+    role; using iam-jit would require the workload to make an explicit
+    sts:AssumeRole hop, which most workloads don't need. The
+    `existing_role_arn` field carries the role to use; the
+    `bouncer_recommended` flag indicates whether the bouncer can gate
+    calls made under that role."""
 
     USE_BOUNCER = "use_bouncer"
-    """iam-jit-the-issuer can't help (the workload uses a fixed role),
-    but iam-jit-the-bouncer CAN gate the AWS calls regardless of how
-    creds were obtained. Recommended fallback for k8s pods, agent dev
-    workflows, etc."""
+    """[Slice 2 reserved] The workload has a valid role already; the
+    recommendation is "don't issue a new role, just gate the calls
+    via iam-jit-the-bouncer." Slice 2's admin allowlist can declare
+    "for this account / workload, prefer the bouncer over issuing new
+    roles." Slice 1's catalog never returns this; the equivalent is
+    USE_EXISTING + bouncer_recommended=True."""
 
     CANNOT_HELP = "cannot_help"
-    """Neither iam-jit product helps this case. Rare — usually means
-    org-policy prohibits iam:CreateRole AND the workload's existing
-    role is admin-class with no scoping possible. Agent should escalate
-    to the human to handle out-of-band."""
+    """[Slice 2 reserved] Neither iam-jit product helps this case.
+    Slice 2's admin allowlist can mark accounts / workloads as
+    explicitly out-of-scope ("compliance environment; named-role-only;
+    bouncer not deployable"). Agent should escalate to a human.
+    Slice 1's catalog never returns this."""
 
 
 class WorkloadType(str, Enum):
@@ -95,7 +156,33 @@ class WorkloadType(str, Enum):
     execution role; can't swap at runtime."""
 
     ECS_TASK = "ecs_task"
-    """ECS task with a Task Role (similar to IRSA but ECS-shaped)."""
+    """ECS task with a Task Role (similar to IRSA but ECS-shaped).
+    Fargate tasks specifically have BOTH a Task Role (used by container
+    code) AND an Execution Role (used by the Fargate agent to pull
+    images / write logs); both fixed at task launch."""
+
+    CODEBUILD_PROJECT = "codebuild_project"
+    """AWS CodeBuild build executes under the project's service role,
+    set at project creation. WB24 LOW-24-01."""
+
+    STEP_FUNCTIONS = "step_functions"
+    """Step Functions state machine executes under the SM's role.
+    Per-state Task integrations can call AssumeRole but the SM's base
+    identity is fixed."""
+
+    GLUE_JOB = "glue_job"
+    """AWS Glue jobs execute under the IAM role on the job definition."""
+
+    SAGEMAKER = "sagemaker"
+    """SageMaker training jobs / notebook instances / processing jobs
+    execute under their per-resource execution role."""
+
+    APP_RUNNER = "app_runner"
+    """AWS App Runner services use the instance role on the service
+    definition."""
+
+    BATCH_JOB = "batch_job"
+    """AWS Batch jobs execute under the job role on the job definition."""
 
     CI_RUNNER = "ci_runner"
     """CI/CD job (GitHub Actions, GitLab CI, Buildkite, etc.). OIDC-
@@ -146,6 +233,10 @@ class CompatibilityResult:
     matched_pattern: str | None = None  # which catalog entry / allowlist rule fired
     next_action_hint: str | None = None  # what the agent should do INSTEAD
     bouncer_recommended: bool = False  # USE_BOUNCER or USE_EXISTING-with-bouncer-fallback
+    # WB24 MED-24-02 closure: surface when the caller's existing_role_hint
+    # didn't parse as a valid IAM role ARN so the agent learns "we
+    # ignored your hint" rather than silently dropping it.
+    existing_role_hint_invalid: bool = False
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -155,6 +246,7 @@ class CompatibilityResult:
             "matched_pattern": self.matched_pattern,
             "next_action_hint": self.next_action_hint,
             "bouncer_recommended": self.bouncer_recommended,
+            "existing_role_hint_invalid": self.existing_role_hint_invalid,
         }
 
 
@@ -183,8 +275,13 @@ CATALOG: tuple[CatalogEntry, ...] = (
         reasoning=(
             "K8s pods are bound to a specific IAM role at pod creation via "
             "IRSA (the service account's OIDC trust) or EKS Pod Identity. "
-            "The running pod cannot choose a different role at runtime, so "
-            "iam-jit cannot mint a usable JIT role for this workload."
+            "The pod's BASE identity — what the AWS SDK uses when no role "
+            "is explicitly assumed — cannot be swapped at runtime. Pod "
+            "code CAN call sts:AssumeRole into a different role (subject "
+            "to that role's trust policy), but this adds an explicit hop "
+            "that the pod author has to write; iam-jit cannot transparently "
+            "substitute. For most workloads, using the pod's IRSA role "
+            "directly is simpler than wiring an iam-jit AssumeRole step."
         ),
         next_action_hint=(
             "Use the role ARN from the pod's service-account annotation "
@@ -201,10 +298,13 @@ CATALOG: tuple[CatalogEntry, ...] = (
         verdict=Compatibility.USE_EXISTING,
         reasoning=(
             "EC2 instances use the IAM role attached at launch time via "
-            "their instance profile. A running instance cannot swap "
-            "instance profiles for the role it's currently using, so "
-            "iam-jit cannot issue a usable JIT role for code running "
-            "directly on the instance."
+            "their instance profile. The BASE identity for code on the "
+            "instance — what IMDS hands out by default — cannot be "
+            "swapped while the instance is running. Code on the instance "
+            "CAN call sts:AssumeRole into another role (subject to that "
+            "role's trust policy), but the instance profile is fixed. "
+            "For most workloads, using the instance profile role directly "
+            "is simpler than wiring an iam-jit AssumeRole hop."
         ),
         next_action_hint=(
             "Use the existing instance profile role. If you need scoped "
@@ -219,11 +319,14 @@ CATALOG: tuple[CatalogEntry, ...] = (
         verdict=Compatibility.USE_EXISTING,
         reasoning=(
             "AWS Lambda functions use the execution role set at function "
-            "creation. The running function cannot swap roles, so iam-jit "
-            "cannot issue a usable JIT role for code running inside the "
-            "Lambda. (You CAN use iam-jit at function DEPLOY time to scope "
-            "the execution role you create — but not from inside the "
-            "function's runtime.)"
+            "creation. The function's BASE identity is the execution role "
+            "and cannot be changed at runtime. Function code CAN call "
+            "sts:AssumeRole to switch into another role mid-invocation "
+            "(subject to that role's trust policy), but for most "
+            "workloads the execution role is what the function should use "
+            "directly. (You CAN use iam-jit at function DEPLOY time to "
+            "scope the execution role you create — separate flow from "
+            "issuing a role at runtime.)"
         ),
         next_action_hint=(
             "From inside the Lambda runtime: use the existing execution "
@@ -238,12 +341,115 @@ CATALOG: tuple[CatalogEntry, ...] = (
         verdict=Compatibility.USE_EXISTING,
         reasoning=(
             "ECS tasks use the Task Role specified in the task definition. "
-            "A running task cannot swap roles, so iam-jit cannot issue a "
-            "usable JIT role for code running inside an ECS task."
+            "The task's BASE identity is the Task Role and cannot be "
+            "changed mid-task. Task code CAN call sts:AssumeRole into a "
+            "different role (subject to that role's trust policy), but "
+            "for most workloads using the Task Role directly is simpler. "
+            "Note: Fargate tasks have TWO roles — the Task Role (used "
+            "by container code; this entry) and the Execution Role (used "
+            "by the Fargate agent to pull images / write logs); both are "
+            "fixed at task launch."
         ),
         next_action_hint=(
             "Use the existing task role. At task-definition deploy time, "
             "iam-jit can scope the role you set on the definition."
+        ),
+        bouncer_recommended=True,
+    ),
+    CatalogEntry(
+        id="codebuild-service-role-fixed",
+        workloads=(WorkloadType.CODEBUILD_PROJECT,),
+        verdict=Compatibility.USE_EXISTING,
+        reasoning=(
+            "AWS CodeBuild builds run under the project's service role, "
+            "set at project creation. The build's BASE identity is the "
+            "service role and cannot be changed mid-build. Buildspec code "
+            "CAN call sts:AssumeRole to switch into another role, but "
+            "the service role is fixed."
+        ),
+        next_action_hint=(
+            "Use the existing CodeBuild service role. At project-create "
+            "time, iam-jit can scope the service role you set on the "
+            "project definition."
+        ),
+        bouncer_recommended=False,
+    ),
+    CatalogEntry(
+        id="step-functions-role-fixed",
+        workloads=(WorkloadType.STEP_FUNCTIONS,),
+        verdict=Compatibility.USE_EXISTING,
+        reasoning=(
+            "Step Functions state machines execute under the role set on "
+            "the state machine definition. Individual Task states can "
+            "call other services that themselves use roles, but the SM's "
+            "base identity is fixed at SM creation."
+        ),
+        next_action_hint=(
+            "Use the existing state-machine role. At SM-create time, "
+            "iam-jit can scope the role you set on the definition."
+        ),
+        bouncer_recommended=False,
+    ),
+    CatalogEntry(
+        id="glue-job-role-fixed",
+        workloads=(WorkloadType.GLUE_JOB,),
+        verdict=Compatibility.USE_EXISTING,
+        reasoning=(
+            "AWS Glue jobs execute under the IAM role specified on the "
+            "job definition. The job's base identity is fixed; job code "
+            "can call sts:AssumeRole into a different role but the "
+            "assigned role is the default."
+        ),
+        next_action_hint=(
+            "Use the existing Glue job role. At job-create time, "
+            "iam-jit can scope the role you set on the definition."
+        ),
+        bouncer_recommended=False,
+    ),
+    CatalogEntry(
+        id="sagemaker-execution-role-fixed",
+        workloads=(WorkloadType.SAGEMAKER,),
+        verdict=Compatibility.USE_EXISTING,
+        reasoning=(
+            "SageMaker training jobs, processing jobs, and notebook "
+            "instances each have their own execution role set at "
+            "resource creation. Code in the resource can call "
+            "sts:AssumeRole but the execution role is the base identity."
+        ),
+        next_action_hint=(
+            "Use the existing SageMaker execution role. At resource-"
+            "create time, iam-jit can scope the role you set."
+        ),
+        bouncer_recommended=False,
+    ),
+    CatalogEntry(
+        id="app-runner-instance-role-fixed",
+        workloads=(WorkloadType.APP_RUNNER,),
+        verdict=Compatibility.USE_EXISTING,
+        reasoning=(
+            "AWS App Runner services use the instance role configured "
+            "on the service definition. The service's base identity is "
+            "fixed at service-create time."
+        ),
+        next_action_hint=(
+            "Use the existing App Runner instance role. At service-"
+            "create time, iam-jit can scope the role you set."
+        ),
+        bouncer_recommended=False,
+    ),
+    CatalogEntry(
+        id="batch-job-role-fixed",
+        workloads=(WorkloadType.BATCH_JOB,),
+        verdict=Compatibility.USE_EXISTING,
+        reasoning=(
+            "AWS Batch jobs execute under the job role specified on the "
+            "job definition. The job's base identity is fixed; the "
+            "underlying compute (ECS / EKS / Fargate) has its own role "
+            "layer as well."
+        ),
+        next_action_hint=(
+            "Use the existing Batch job role. At job-definition-create "
+            "time, iam-jit can scope the role you set."
         ),
         bouncer_recommended=True,
     ),
@@ -308,7 +514,12 @@ for _entry in CATALOG:
 # ---------------------------------------------------------------------------
 
 
-def check_compatibility(intent: CompatibilityIntent) -> CompatibilityResult:
+def check_compatibility(
+    intent: CompatibilityIntent,
+    *,
+    audit_sink: ConfigEventSink | None = None,
+    actor: str | None = None,
+) -> CompatibilityResult:
     """Pure decision: given an intent, return the verdict + reasoning
     + next-action hint.
 
@@ -316,15 +527,23 @@ def check_compatibility(intent: CompatibilityIntent) -> CompatibilityResult:
     1. Known-incompatible catalog (workload-keyed)
     2. Default: PROCEED with a generic note
 
-    The function is intentionally simple in this slice: every workload
-    has a canonical catalog entry. Admin allowlist + per-account
-    overrides land in Slice 2.
+    The function stays dependency-free for tests; the optional
+    `audit_sink` lets the MCP handler / Slice 3 intake plumb in a real
+    audit-log writer per WB24 MED-24-01 closure. When provided, every
+    check produces a `compatibility_check` event with the workload +
+    verdict + matched_pattern so post-incident review can answer "did
+    the agent know iam-jit said use_existing for this workload?"
     """
+    # WB24 MED-24-02 closure: validate the agent's role-ARN hint
+    # BEFORE the catalog lookup so it surfaces in both PROCEED and
+    # USE_EXISTING paths.
+    cleaned_hint, hint_was_invalid = _validate_existing_role_hint(
+        intent.existing_role_hint
+    )
+
     entry = _CATALOG_BY_WORKLOAD.get(intent.workload)
     if entry is None:
-        # OTHER / unknown workload: degrade to PROCEED but flag that
-        # we couldn't classify.
-        return CompatibilityResult(
+        result = CompatibilityResult(
             verdict=Compatibility.PROCEED,
             reasoning=(
                 f"Workload {intent.workload.value!r} not in the known-"
@@ -339,22 +558,50 @@ def check_compatibility(intent: CompatibilityIntent) -> CompatibilityResult:
                 "existing role + bouncer."
             ),
             bouncer_recommended=True,
+            existing_role_hint_invalid=hint_was_invalid,
+        )
+    else:
+        # Catalog hit. Echo the existing-role hint back to the caller
+        # if they gave us a valid one — saves an MCP round-trip.
+        existing_role_arn: str | None = None
+        if entry.verdict == Compatibility.USE_EXISTING:
+            existing_role_arn = cleaned_hint
+        result = CompatibilityResult(
+            verdict=entry.verdict,
+            reasoning=entry.reasoning,
+            existing_role_arn=existing_role_arn,
+            matched_pattern=entry.id,
+            next_action_hint=entry.next_action_hint,
+            bouncer_recommended=entry.bouncer_recommended,
+            existing_role_hint_invalid=hint_was_invalid,
         )
 
-    # Catalog hit. Echo the existing-role hint back to the caller if
-    # they gave us one — saves an MCP round-trip.
-    existing_role_arn: str | None = None
-    if entry.verdict == Compatibility.USE_EXISTING:
-        existing_role_arn = intent.existing_role_hint
+    if audit_sink is not None:
+        # WB24 MED-24-01 closure: log the call so the audit chain
+        # captures "agent asked iam-jit if it could help; iam-jit
+        # answered X." Best-effort: don't raise if the sink fails.
+        try:
+            audit_sink.record(
+                kind="compatibility_check",
+                actor=actor or "unknown",
+                summary=(
+                    f"workload={intent.workload.value} verdict={result.verdict.value}"
+                ),
+                detail={
+                    "workload": intent.workload.value,
+                    "target_account_id": intent.target_account_id,
+                    "target_services": list(intent.target_services),
+                    "description": intent.description,
+                    "verdict": result.verdict.value,
+                    "matched_pattern": result.matched_pattern,
+                    "existing_role_arn": result.existing_role_arn,
+                    "existing_role_hint_invalid": result.existing_role_hint_invalid,
+                },
+            )
+        except Exception:
+            pass
 
-    return CompatibilityResult(
-        verdict=entry.verdict,
-        reasoning=entry.reasoning,
-        existing_role_arn=existing_role_arn,
-        matched_pattern=entry.id,
-        next_action_hint=entry.next_action_hint,
-        bouncer_recommended=entry.bouncer_recommended,
-    )
+    return result
 
 
 def list_catalog() -> list[dict[str, Any]]:

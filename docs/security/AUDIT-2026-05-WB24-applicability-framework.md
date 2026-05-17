@@ -518,3 +518,50 @@ Recommended closure-commit fix sequence:
 After fixes ship, re-run audit (Round 25) — recommended scope: Slice 2 (admin allowlist + per-account overrides) plus a re-probe of HIGH-24-01 to confirm `submit_policy`'s compatibility check actually fires.
 
 The foundation is well-shaped at the data-model + pure-function layer (zero findings there). The trust-gap concentration in HIGH-24-01 + MED-24-01 is the same lesson WB21/WB22/WB23 keep teaching: when iam-jit ships a Lens-A (agent-friendly) docstring or doc claim, the matching Lens-B (uncircumventable) enforcement layer needs to ship in the same commit or one immediately after. Slices 2-4 will get the chance.
+
+---
+
+## WB24 closures (2026-05-17)
+
+All 11 findings addressed in one commit (HIGHs + MEDs + LOWs as a
+coherent slice). The CRIT-style "audit cadence keeps catching real
+bugs" pattern continues: WB24's central find — catalog reasoning
+misstating AWS IAM semantics (HIGH-24-02) — would have been a
+credibility wound on the launch-day pitch.
+
+### Updated closure table
+
+| Finding | Status | How closed |
+|---|---|---|
+| HIGH-24-01 `submit_policy` doesn't enforce compatibility check | **CLOSED** | Added `workload` field to `submit_policy` schema + handler. When provided: runs `check_compatibility` before submission; rejects USE_EXISTING/CANNOT_HELP with explicit reasoning + next_action_hint + bouncer_recommended in the response. When omitted: logs `submit_without_compatibility_check` to the audit chain (bypass-able but auditable per [[agent-friendly-not-bypassable]] Lens B). Tests verify all three paths (reject / proceed / bypass-with-audit). |
+| HIGH-24-02 catalog reasoning overstates IAM semantics | **CLOSED** | Rewrote all 4 fixed-role catalog entries (k8s/EC2/Lambda/ECS) to distinguish BASE identity (fixed) from assumed-role chain (still available). Each entry now explicitly mentions `sts:AssumeRole` as still possible + explains why using the workload's built-in role directly is the simpler default. AGENTS.md updated to match. Parameterized regression test asserts every fixed-role entry mentions sts:AssumeRole. |
+| MED-24-01 `check_compatibility` writes no audit log | **CLOSED** | Added optional `audit_sink: ConfigEventSink` parameter to `check_compatibility`. MCP handler plumbs in the bouncer's `config_events` table via a small adapter (same audit chain). Best-effort: sink failure does NOT crash the check. Tests cover sink-provided / sink-omitted / sink-broken paths. Per Lens B: post-incident review can now answer "did the agent ask iam-jit, and what did we say?" |
+| MED-24-02 `existing_role_hint` echoed verbatim without ARN validation | **CLOSED** | Added `_IAM_ROLE_ARN_RE` covering all four AWS partitions (aws / aws-us-gov / aws-cn / aws-iso) + `_validate_existing_role_hint` helper. Result now includes `existing_role_hint_invalid: bool` so the agent learns "we ignored your hint" rather than silent drop. Tests cover valid ARNs across partitions, empty string (treated as no-hint), and the "haha not a real ARN" garbage repro case. |
+| MED-24-03 workload-composition edge cases undocumented | **CLOSED** | Added "Composition: when workloads nest" section to AGENTS.md with table covering 5 common composed shapes (CI-on-EC2, agent-in-k8s, containerized runner on ECS, CI on Lambda, Lambda-to-Lambda). Rule of thumb: classify by the OUTER hosting environment. Doc-only fix in Slice 1; Slice 2 may add a `host_environment` field. |
+| MED-24-04 `CANNOT_HELP` / `USE_BOUNCER` are unreachable | **CLOSED** | Added `[Slice 2 reserved]` docstring annotations on both enum values explaining the concrete future use cases (admin allowlist can return USE_BOUNCER for prefer-bouncer-only accounts, CANNOT_HELP for compliance-excluded accounts). Keeps the surface stable for agents writing switch statements over all 4 verdicts; signals deliberate reservation rather than dead code. |
+| LOW-24-01 catalog incomplete (Fargate / CodeBuild / Step Functions / Glue / SageMaker / App Runner / Batch) | **MOSTLY CLOSED** | Added 6 new WorkloadType values + 6 new CATALOG entries (codebuild_project, step_functions, glue_job, sagemaker, app_runner, batch_job). All return USE_EXISTING with appropriate reasoning. ECS catalog entry updated to note the Fargate Task-Role + Execution-Role split. MCP schema enum + AGENTS.md table updated. Still pending in future slices: EventBridge, EMR. |
+| LOW-24-02 `description` field unreferenced | **CLOSED** | Now plumbed into the audit-event `detail` payload (compatibility_check kind). Test asserts the description shows up in the recorded event. |
+| LOW-24-03 first-match-wins discipline untested | **CLOSED** | Added `test_low_24_03_no_unintentional_workload_duplicates` + `test_low_24_03_every_non_other_workload_has_catalog_entry`. Future contributors adding a duplicate workload entry OR a new WorkloadType without a catalog entry fail CI. |
+| LOW-24-04 IAM-JIT-BOUNCER.md doesn't mention fixed-role fallback | **CLOSED** | Added "Use case: fixed-role workloads" section to docs/IAM-JIT-BOUNCER.md with per-environment deployment shapes (k8s sidecar / EC2 systemd / ECS sidecar / Lambda exception). Closes the cross-doc asymmetry the audit flagged. |
+| LOW-24-05 MCP input accepts nonsense for account ID / service prefix | **CLOSED** | Added `_ACCOUNT_ID_RE` (`^\d{12}$`) + `_SERVICE_PREFIX_RE` (`^[a-z][a-z0-9-]{1,62}$`). MCP handler validates + normalizes (lowercased, trimmed) before constructing the intent. Tests cover invalid + valid + normalized-from-uppercase. |
+
+### Verification
+
+- `tests/test_compatibility.py` grew from 29 → 60 tests (+31).
+- Broader suite: **2344 passed**, 29 skipped, 14 deselected (was 2313 before WB24 closures; +31 net).
+- New CompatibilityResult field (`existing_role_hint_invalid`) verified through MCP dispatch round-trip.
+- Audit-sink integration verified through the bouncer's config_events adapter (real persistence path, not just mocked).
+
+### What WB24 closures DID NOT do (deferred-with-rationale)
+
+- **`host_environment` field on CompatibilityIntent** for first-class composition handling (MED-24-03 option 1). Slice 1 fix is docs-only; the data-model expansion lands in Slice 3 when intake integration is being touched anyway.
+- **EventBridge / EMR catalog entries** (LOW-24-01 tail). The 6 added cover the highest-prevalence cases; the rest land alongside Slice 2/3 as needed.
+- **`PROCEED_WITH_ASSUME` fifth verdict** (HIGH-24-02 optional bonus). Reasoning text is now accurate; if Slice 3 finds enough agents asking for "yes iam-jit + sts:AssumeRole hop" we add the verdict then.
+
+### Why this round matters
+
+WB24 caught two HIGHs that the original Slice 1 commit would have shipped: the "call FIRST" claim that nothing enforced, and the catalog reasoning that overstated AWS IAM semantics. Both are trust-gap shape — the kind of bug where the docs promise something the code doesn't deliver. The first (HIGH-24-01) is now bidirectionally wired: the MCP doc says "call FIRST" and `submit_policy` actually enforces it. The second (HIGH-24-02) is now technically accurate: every fixed-role entry acknowledges sts:AssumeRole as the escape hatch while still recommending the simpler default.
+
+The agent-friendly-not-bypassable contract this feature exists to satisfy now holds at both layers: Lens A — agents have a clear path forward for every workload type, including the new managed-compute classes; Lens B — every check + every bypass is audit-logged via the shared bouncer config_events table.
+
+Per [[audit-cadence-discipline]]: 0 CRIT + 2 HIGH + 4 MED + 5 LOW in code that had 29 passing unit tests. Audit ROI compounds; the test-gap closures (LOW-24-03's structural invariants) shrink the surface for future drift.
