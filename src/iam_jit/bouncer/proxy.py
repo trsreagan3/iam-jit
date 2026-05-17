@@ -85,6 +85,71 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 
+# Env var consulted by `resolve_active_mode` to surface the proxy's
+# current effective mode to the agent-facing MCP tool. Lets a user
+# script `IAM_JIT_BOUNCER_MODE=transparent ibounce run …` and have
+# the same value introspectable via `bouncer_active_mode` without
+# the MCP server having to peek at the running proxy's ProxyConfig
+# (which lives in a separate process). Per
+# [[bouncer-mode-selection-for-agents]] this is a READ surface only;
+# agents do not flip it.
+ACTIVE_MODE_ENV = "IAM_JIT_BOUNCER_MODE"
+
+# Per-session override slot. The CLI (or a test) can call
+# `set_session_mode_override("transparent")` to declare "for this
+# Python session, the effective mode is X" — overrides the env var.
+# Wins over the env var because it represents an explicit in-process
+# decision (e.g. `ibounce run --mode transparent` setting the slot
+# at startup), whereas the env var is the user's deployment default.
+_session_mode_override: str | None = None
+
+
+def set_session_mode_override(mode: str | None) -> None:
+    """Set the in-process active-mode override. Pass None to clear.
+
+    Called by `ibounce run` after parsing `--mode` so that any MCP
+    tool spawned by the same process surfaces the same value. Tests
+    use this to exercise the override-wins path without mutating
+    the env.
+    """
+    global _session_mode_override
+    if mode is None:
+        _session_mode_override = None
+        return
+    normalized = str(mode).strip().lower()
+    if normalized not in ("cooperative", "transparent", "off"):
+        raise ValueError(
+            f"set_session_mode_override: invalid mode {mode!r}; "
+            "expected one of cooperative | transparent | off"
+        )
+    _session_mode_override = normalized
+
+
+def resolve_active_mode() -> dict[str, str]:
+    """Return the bouncer's currently effective mode + where it came from.
+
+    Resolution order (highest precedence first):
+      1. Session override (set via `set_session_mode_override`) ->
+         source="session_override"
+      2. `IAM_JIT_BOUNCER_MODE` env var (case-insensitive; accepts
+         cooperative | transparent | off) -> source="env"
+      3. Default = "cooperative" (matches `ProxyConfig.mode` default
+         + the [[safety-mode-lean-permissive]] guidance) ->
+         source="default"
+
+    Unknown env values fall through to the default + source="default"
+    (we don't crash the MCP server on a typo'd env). Returned dict
+    matches the shape `bouncer_active_mode` / `ibounce_active_mode`
+    MCP tools surface to agents.
+    """
+    if _session_mode_override is not None:
+        return {"mode": _session_mode_override, "source": "session_override"}
+    raw = os.environ.get(ACTIVE_MODE_ENV, "").strip().lower()
+    if raw in ("cooperative", "transparent", "off"):
+        return {"mode": raw, "source": "env"}
+    return {"mode": "cooperative", "source": "default"}
+
+
 class ProxyMode(str, enum.Enum):
     """Which kind of guardrail the proxy runs.
 

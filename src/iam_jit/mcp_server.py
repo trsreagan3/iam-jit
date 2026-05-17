@@ -1385,6 +1385,91 @@ TOOLS = [
         },
     },
     {
+        "name": "bouncer_active_mode",
+        "description": (
+            "Return the bouncer's currently effective operating mode "
+            "(cooperative | transparent | off) plus where the value "
+            "came from (session_override | env | default). Resolution "
+            "order: session-override slot set by `ibounce run --mode` "
+            "(highest), then IAM_JIT_BOUNCER_MODE env var, then the "
+            "lean-permissive default `cooperative`. Per [[agent-friendly-"
+            "not-bypassable]] + [[bouncer-mode-selection-for-agents]]: "
+            "agents READ this to decide how to phrase the next request "
+            "(e.g. announce a write before issuing it in transparent "
+            "mode); agents CANNOT flip it — mode changes require a "
+            "proxy restart by the operator. Mirrors kbounce_active_mode "
+            "per [[cross-product-agent-parity]]."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {},
+        },
+    },
+    {
+        "name": "bouncer_recommend_mode_for_task",
+        "description": (
+            "DETERMINISTIC (not LLM) recommendation: given a task "
+            "description and/or a list of AWS actions + a targets_prod "
+            "flag + an audit-only flag, return 'cooperative' or "
+            "'transparent' per the [[bouncer-mode-selection-for-agents]] "
+            "decision matrix. AWS-shape: actions whose service is iam / "
+            "kms / secretsmanager / sts (write verbs) bias toward "
+            "transparent; verbs like delete / destroy / terminate / "
+            "stop / drop / modify / rm classified as writes; verbs like "
+            "list / describe / get / read / show / audit classified as "
+            "reads. Decision matrix (lean-permissive per [[safety-mode-"
+            "lean-permissive]] — unknown/ambiguous tasks LEAN COOPERATIVE, "
+            "matching kbounce): wants_audit_only=true → cooperative; "
+            "targets_prod=true AND has_writes → transparent; high-risk "
+            "service AND has_writes → transparent; reads-only → "
+            "cooperative; ambiguous → cooperative + confidence='low'. "
+            "Use BEFORE starting a task to pick the right --mode flag; "
+            "the agent's own LLM should NOT second-guess this — the "
+            "answer is deterministic by design so the decision is "
+            "auditable. Mirrors kbounce_recommend_mode_for_task per "
+            "[[cross-product-agent-parity]]."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "task_description": {
+                    "type": "string",
+                    "description": (
+                        "Free-text task description (e.g. 'delete the "
+                        "prod-data S3 bucket', 'list buckets in "
+                        "us-east-1'). Keywords are scanned for "
+                        "write/read intent + sensitive-service "
+                        "mentions. Optional if `actions` is given."
+                    ),
+                },
+                "actions": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": (
+                        "AWS actions the task will use, in "
+                        "`service:Action` form (e.g. ['s3:GetObject', "
+                        "'iam:DeleteRole']). Optional if "
+                        "`task_description` is given."
+                    ),
+                },
+                "targets_prod": {
+                    "type": "boolean",
+                    "description": (
+                        "True if the task will touch prod-classified "
+                        "AWS accounts / regions / resources."
+                    ),
+                },
+                "wants_audit_only": {
+                    "type": "boolean",
+                    "description": (
+                        "True if the task is observation-only (no "
+                        "enforcement needed; forces cooperative)."
+                    ),
+                },
+            },
+        },
+    },
+    {
         "name": "bouncer_tail_decisions",
         "description": (
             "Inspect the bouncer's decision audit log (every call "
@@ -2280,6 +2365,188 @@ def _bouncer_active_profile_for_mcp(args: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def _bouncer_active_mode_for_mcp(args: dict[str, Any]) -> dict[str, Any]:
+    """Return the bouncer's currently effective mode + provenance.
+
+    Thin wrapper over `bouncer.proxy.resolve_active_mode`. Mirrors
+    kbounce_active_mode's shape per [[cross-product-agent-parity]];
+    the AWS-side deviation from the K8s shape is that we surface
+    `source` (session_override | env | default) so agents can tell a
+    user-pinned mode from a fall-through default — the K8s proxy
+    binds mode at process start so it doesn't need the provenance.
+    Per [[agent-friendly-not-bypassable]] this is a READ surface; the
+    args dict is accepted for schema parity but ignored.
+    """
+    from .bouncer.proxy import resolve_active_mode
+
+    return resolve_active_mode()
+
+
+# Keywords that classify a task as performing WRITES against AWS.
+# Used by `_bouncer_recommend_mode_for_task_for_mcp`. Mirrors
+# kbounce's containsWriteVerb shape but AWS-shaped (verbs that
+# appear in iam-jit's blacklist + the AWS-managed-policy denylist
+# patterns). All lower-case; matching is case-insensitive substring.
+_WRITE_KEYWORDS: tuple[str, ...] = (
+    "create", "delete", "destroy", "terminate", "stop", "drop",
+    "modify", "update", "put", "remove", "detach", "attach",
+    "rotate", "revoke", "disable", "disassociate", "deregister",
+    "patch", "rm",
+)
+
+# Read-only / observation keywords. Used to detect EXPLICIT read
+# intent in a task description (so we can flag "ambiguous" when
+# neither write nor read keywords appear).
+_READ_KEYWORDS: tuple[str, ...] = (
+    "list", "describe", "get", "read", "show", "audit", "view",
+    "inspect", "check", "find", "search", "head",
+)
+
+# Service prefixes that bias toward transparent mode when paired
+# with WRITE keywords/actions. These are the AWS services where a
+# bad write blast-radius is high: IAM (escalation), KMS (key
+# destruction), Secrets Manager (credential exposure), STS (session
+# escalation). Per [[scorer-is-ground-truth]] this list mirrors the
+# scorer's high-risk-service set; do not add services here without
+# adding them there.
+_HIGH_RISK_SERVICES: tuple[str, ...] = (
+    "iam", "kms", "secretsmanager", "sts",
+)
+
+
+def _bouncer_recommend_mode_for_task_for_mcp(args: dict[str, Any]) -> dict[str, Any]:
+    """DETERMINISTIC mode recommendation for a task.
+
+    AWS-shape of kbounce_recommend_mode_for_task. Inputs:
+      task_description  free-text description; keyword-scanned
+      actions           list of `service:Action` strings
+      targets_prod      bool — prod-classified AWS account/region
+      wants_audit_only  bool — observation-only declared
+
+    Decision matrix (mirrors kbounce; fail-safe direction =
+    COOPERATIVE per [[safety-mode-lean-permissive]]):
+      wants_audit_only=true                          -> cooperative
+      targets_prod=true AND has_writes               -> transparent
+      high_risk_service AND has_writes               -> transparent
+      has_writes only (non-prod, low-risk service)   -> cooperative
+      reads_only on any env                          -> cooperative
+      ambiguous (no signal either way)               -> cooperative
+                                                        (confidence=low)
+
+    Returns: {mode, reason, deterministic, confidence}.
+    `deterministic: true` is a load-bearing signal that no LLM was
+    consulted; callers can rely on the decision being reproducible.
+    """
+    description = args.get("task_description") or ""
+    if not isinstance(description, str):
+        return {"error": "task_description must be a string if provided"}
+
+    actions_raw = args.get("actions") or []
+    if not isinstance(actions_raw, list):
+        return {"error": "actions must be a list if provided"}
+    actions = [a for a in actions_raw if isinstance(a, str) and a.strip()]
+
+    targets_prod = bool(args.get("targets_prod"))
+    wants_audit_only = bool(args.get("wants_audit_only"))
+
+    desc_lower = description.lower()
+    has_write_keyword = any(kw in desc_lower for kw in _WRITE_KEYWORDS)
+    has_read_keyword = any(kw in desc_lower for kw in _READ_KEYWORDS)
+
+    # Action-level classification: an explicit AWS action whose name
+    # part doesn't start with Get/List/Describe is a write.
+    action_writes = False
+    action_high_risk = False
+    for a in actions:
+        svc, _, op = a.partition(":")
+        svc_l = svc.strip().lower()
+        op_l = op.strip().lower()
+        # Empty op (e.g. "s3:") -> can't classify; skip.
+        if not op_l:
+            continue
+        is_read_op = (
+            op_l.startswith("get")
+            or op_l.startswith("list")
+            or op_l.startswith("describe")
+            or op_l.startswith("head")
+            or op_l.startswith("batchget")
+        )
+        if not is_read_op:
+            action_writes = True
+            if svc_l in _HIGH_RISK_SERVICES:
+                action_high_risk = True
+
+    # Description-level high-risk service mention (only counts when
+    # paired with a write keyword; "list iam roles" stays a read).
+    desc_high_risk = (
+        has_write_keyword
+        and any(svc in desc_lower for svc in _HIGH_RISK_SERVICES)
+    )
+
+    has_writes = has_write_keyword or action_writes
+    high_risk = action_high_risk or desc_high_risk
+
+    # Ambiguity: caller gave us nothing classifiable (no actions, no
+    # description keywords either way). Honor lean-permissive default
+    # but surface confidence=low so the caller knows to ask the user.
+    nothing_classifiable = (
+        not actions
+        and not has_write_keyword
+        and not has_read_keyword
+        and not description.strip()
+    )
+
+    confidence = "high"
+    if wants_audit_only:
+        mode = "cooperative"
+        reason = (
+            "cooperative mode: audit-only declared "
+            "(wants_audit_only=true)"
+        )
+    elif targets_prod and has_writes:
+        mode = "transparent"
+        reason = (
+            "transparent mode: prod-targeting write task "
+            "(targets_prod=true AND task includes write actions)"
+        )
+    elif high_risk and has_writes:
+        mode = "transparent"
+        reason = (
+            "transparent mode: write task touches a high-risk AWS "
+            "service (iam / kms / secretsmanager / sts); "
+            "enforcement recommended"
+        )
+    elif has_writes:
+        mode = "cooperative"
+        reason = (
+            "cooperative mode: non-prod writes on low-risk services; "
+            "lean-permissive with audit + admin-pause available"
+        )
+    elif has_read_keyword or actions:
+        mode = "cooperative"
+        reason = "cooperative mode: reads-only; no enforcement needed"
+    else:
+        mode = "cooperative"
+        confidence = "low"
+        reason = (
+            "cooperative mode: task shape unclassifiable "
+            "(no actions + no recognized keywords); lean-permissive "
+            "default per safety-mode-lean-permissive"
+        )
+
+    if nothing_classifiable:
+        # Even if a keyword matched coincidentally above, an empty
+        # input shape MUST surface as low confidence.
+        confidence = "low"
+
+    return {
+        "mode": mode,
+        "reason": reason,
+        "deterministic": True,
+        "confidence": confidence,
+    }
+
+
 def _scope_self_for_task_for_mcp(args: dict[str, Any]) -> dict[str, Any]:
     """Slice E composer. Validates input + delegates to
     bouncer.self_scoping.scope_self_for_task; returns the unified
@@ -3104,6 +3371,10 @@ def _handle_request(req: dict[str, Any]) -> dict[str, Any] | None:
             result_payload = _bouncer_active_task_for_mcp(args)
         elif tool_name == "bouncer_active_profile":
             result_payload = _bouncer_active_profile_for_mcp(args)
+        elif tool_name == "bouncer_active_mode":
+            result_payload = _bouncer_active_mode_for_mcp(args)
+        elif tool_name == "bouncer_recommend_mode_for_task":
+            result_payload = _bouncer_recommend_mode_for_task_for_mcp(args)
         elif tool_name == "bouncer_task_review":
             result_payload = _bouncer_task_review_for_mcp(args)
         elif tool_name == "bouncer_recommend_rules":
