@@ -1018,6 +1018,178 @@ def test_mcp_active_task_with_owner_filter() -> None:
     assert out_b["active"] is None
 
 
+# ---------------------------------------------------------------------------
+# WB27 closures
+# ---------------------------------------------------------------------------
+
+
+def test_high_27_01_owner_index_exists_on_fresh_db(tmp_path) -> None:
+    """WB27 HIGH-27-01: the v4 migration's CREATE INDEX
+    idx_tasks_owner_status must actually run on fresh DBs. Previously
+    a shared try/except swallowed the duplicate-column error from
+    ALTER TABLE alongside the CREATE INDEX, leaving every per-owner
+    lookup as a full table scan."""
+    import sqlite3
+    db = tmp_path / "fresh.db"
+    s = BouncerStore(db_path=db)
+    s.close()
+    conn = sqlite3.connect(str(db))
+    try:
+        indexes = [
+            r[0] for r in conn.execute(
+                "SELECT name FROM sqlite_master WHERE type='index' AND tbl_name='tasks'"
+            )
+        ]
+    finally:
+        conn.close()
+    assert "idx_tasks_owner_status" in indexes, (
+        f"v4 migration's owner index missing on fresh DB; indexes={indexes}"
+    )
+
+
+def test_high_27_02_review_refuses_cross_owner_access(store: BouncerStore) -> None:
+    """WB27 HIGH-27-02: task_review_summary with require_owner_match
+    refuses access if the caller's owner doesn't match the task's."""
+    s = build_task_scope(
+        description="agent A secret task",
+        allow_rules=[{"pattern": "eks:*"}],
+        started_by="agent", owner="agent-A",
+    )
+    store.add_task(s)
+    # Agent B tries to review agent A's task → refused
+    with pytest.raises(PermissionError):
+        store.task_review_summary(
+            s.task_id, requesting_owner="agent-B", require_owner_match=True,
+        )
+    # Agent A can review their own → OK
+    summary = store.task_review_summary(
+        s.task_id, requesting_owner="agent-A", require_owner_match=True,
+    )
+    assert summary["task_id"] == s.task_id
+
+
+def test_high_27_02_end_task_refuses_cross_owner(store: BouncerStore) -> None:
+    s = build_task_scope(
+        description="A's task", allow_rules=[{"pattern": "eks:*"}],
+        started_by="agent", owner="agent-A",
+    )
+    store.add_task(s)
+    with pytest.raises(PermissionError):
+        store.end_task(
+            s.task_id, actor="agent-B",
+            requesting_owner="agent-B", require_owner_match=True,
+        )
+    # Owner can end
+    assert store.end_task(
+        s.task_id, actor="agent-A",
+        requesting_owner="agent-A", require_owner_match=True,
+    )
+
+
+def test_high_27_02_mcp_review_blocks_cross_owner(monkeypatch) -> None:
+    """Full MCP path: agent A starts a task; agent B tries to
+    review it via MCP → permission-denied error."""
+    from iam_jit.mcp_server import (
+        _bouncer_start_task_for_mcp, _bouncer_task_review_for_mcp,
+    )
+
+    monkeypatch.setenv("IAM_JIT_BOUNCER_ACTOR", "agent-A")
+    started = _bouncer_start_task_for_mcp({
+        "description": "A's task",
+        "allow_rules": [{"pattern": "eks:*"}],
+        "owner": "agent-A",
+    })
+    # Agent B reviews
+    monkeypatch.setenv("IAM_JIT_BOUNCER_ACTOR", "agent-B")
+    out = _bouncer_task_review_for_mcp({
+        "task_id": started["task_id"],
+        "owner": "agent-B",
+    })
+    assert "error" in out
+    assert "permission denied" in out["error"]
+
+
+def test_high_27_02_mcp_end_blocks_cross_owner(monkeypatch) -> None:
+    from iam_jit.mcp_server import (
+        _bouncer_end_task_for_mcp, _bouncer_start_task_for_mcp,
+    )
+
+    monkeypatch.setenv("IAM_JIT_BOUNCER_ACTOR", "agent-A")
+    started = _bouncer_start_task_for_mcp({
+        "description": "A's task",
+        "allow_rules": [{"pattern": "eks:*"}],
+        "owner": "agent-A",
+    })
+    monkeypatch.setenv("IAM_JIT_BOUNCER_ACTOR", "agent-B")
+    out = _bouncer_end_task_for_mcp({
+        "task_id": started["task_id"],
+        "owner": "agent-B",
+    })
+    assert "error" in out
+    assert "permission denied" in out["error"]
+
+
+def test_high_27_02_mcp_owner_match_allows_review(monkeypatch) -> None:
+    """Sanity: same-owner review works through MCP."""
+    from iam_jit.mcp_server import (
+        _bouncer_start_task_for_mcp, _bouncer_task_review_for_mcp,
+    )
+
+    monkeypatch.setenv("IAM_JIT_BOUNCER_ACTOR", "agent-A")
+    started = _bouncer_start_task_for_mcp({
+        "description": "A's task",
+        "allow_rules": [{"pattern": "eks:*"}],
+        "owner": "agent-A",
+    })
+    out = _bouncer_task_review_for_mcp({
+        "task_id": started["task_id"],
+        "owner": "agent-A",
+    })
+    assert out["task_id"] == started["task_id"]
+    assert "error" not in out
+
+
+def test_med_27_01_review_caps_denied_calls_list(store: BouncerStore) -> None:
+    """WB27 MED-27-01: denied_calls list is capped; truncated flag
+    surfaces the truncation; total counts stay accurate."""
+    from iam_jit.bouncer.decisions import DecisionRecord
+
+    s = _scope()
+    store.add_task(s)
+    # Generate 1100 denied calls (over the 1000 cap)
+    for i in range(1100):
+        rec = DecisionRecord(
+            decision=Decision.DENY, mode=Mode.ENFORCE,
+            service="eks", action=f"Bad{i}",
+            arn=None, region=None, matched_rule=None,
+            reason=f"test-{i}",
+        )
+        store.record_decision(rec, task_id=s.task_id)
+    summary = store.task_review_summary(s.task_id)
+    # Total count is accurate
+    assert summary["deny_count"] == 1100
+    assert summary["decision_count"] == 1100
+    # But the per-call list is capped + flag set
+    assert len(summary["denied_calls"]) == 1000
+    assert summary["denied_calls_truncated"] is True
+    assert summary["denied_calls_cap"] == 1000
+
+
+def test_med_27_01_review_no_truncation_for_small_task(store: BouncerStore) -> None:
+    from iam_jit.bouncer.decisions import DecisionRecord
+
+    s = _scope()
+    store.add_task(s)
+    rec = DecisionRecord(
+        decision=Decision.DENY, mode=Mode.ENFORCE,
+        service="eks", action="Bad",
+        arn=None, region=None, matched_rule=None, reason="x",
+    )
+    store.record_decision(rec, task_id=s.task_id)
+    summary = store.task_review_summary(s.task_id)
+    assert summary["denied_calls_truncated"] is False
+
+
 def test_mcp_three_task_tools_in_tools_list() -> None:
     from iam_jit.mcp_server import _handle_request
 

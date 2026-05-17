@@ -668,3 +668,38 @@ After fixes ship, re-run audit (Round 28) — recommended scope: re-probe HIGH-2
 The Slice C data layer is solid (per-owner atomicity is the load-bearing claim and it holds under threaded race for both named + default owners). The 13 findings concentrate at the migration-block layer (one try/except wrapping two statements), at the access-surface (review + end forgot to gain the same owner parameter that start + active got), and at the test-coverage drift surface (subset assertions, untested exit codes, stale test names). Same lesson WB23-WB26 keep teaching: foundation is reliably solid; cross-layer wiring is where invariants drift. Slice C compounds Slice B's single-active invariant with multi-owner isolation; the invariant generalization landed cleanly at the data layer but didn't propagate to every access path.
 
 Audit ROI continues: 2 HIGHs (one of which is a migration-failure that the test suite by design doesn't exercise — tests use existing-DB fixtures that hit the v3→v4 path; one of which is a multi-session security gap the Slice C narrative implies isolation for), 5 MEDs catching unbounded-payload + validator-drift continuations. Per [[audit-cadence-discipline]] the BB+WB pattern continues to surface the cross-layer integration bugs the within-feature test suite doesn't catch.
+
+---
+
+## WB27 closures (2026-05-17)
+
+Both HIGHs + the highest-impact MEDs + doc drift closed. A few LOWs
+deferred-with-rationale.
+
+### Updated closure table
+
+| Finding | Status | How closed |
+|---|---|---|
+| HIGH-27-01 owner-index silently never created on fresh DBs | **CLOSED** | Split the `ALTER TABLE / CREATE INDEX` block into two independent try/except blocks. The ALTER's duplicate-column error (raised on fresh DBs where CREATE TABLE already included the owner column) no longer swallows the index creation. Regression test inspects sqlite_master and asserts `idx_tasks_owner_status` exists post-init. |
+| HIGH-27-02 cross-owner review/end access | **CLOSED** | Added `requesting_owner` + `require_owner_match` parameters to both `task_review_summary` and `end_task` in the store; MCP layer always passes `require_owner_match=True` so cross-owner access raises PermissionError. CLI keeps the looser semantics (single-laptop admin flow). Five regression tests: cross-owner review denied, same-owner allowed, end refused for non-owner, full MCP path for both. |
+| MED-27-01 unbounded review aggregation | **CLOSED** | Added `REVIEW_DENIED_CALL_CAP = 1000` class constant. Denied-calls list truncated to that cap; total counts (`deny_count`, `decision_count`) still accurate; new `denied_calls_truncated: bool` + `denied_calls_cap: int` fields surface the truncation. Two regression tests cover the cap-hit + small-task no-truncation paths. |
+| MED-27-02 owner field accepts null bytes / control chars | **DEFERRED** | Owner is opaque; downstream consumers (audit log, MCP JSON response) handle arbitrary strings. Will revisit if telemetry shows odd-charset owners breaking anything. |
+| MED-27-03 owner-doc drift | **CLOSED** | docs/IAM-JIT-BOUNCER.md "Task scope" section updated: removed "Slice B single-active / Slice C per-PID may add" placeholder; now documents per-owner concurrent tasks + post-task review + the owner-match access control. |
+| MED-27-04 same as HIGH-27-02 | **CLOSED** | Folded into HIGH-27-02 closure (end_task got the same owner-match treatment as review). |
+| MED-27-05 (other minor) | **DEFERRED** | Per audit doc — non-blocking. |
+| LOWs (test subset assertion, empty-owner CLI handling, etc.) | **DEFERRED** | Non-blocking; bundle into a hygiene pass when convenient. |
+
+### Verification
+
+- `tests/bouncer/test_tasks.py`: 70 → 78 tests (+8 closure tests).
+- All 268 bouncer tests pass.
+- Broader suite: **2486 passed**, 29 skipped, 14 deselected (was 2478 before WB27 closures; +8 net).
+- Verified the owner-index now exists via direct sqlite_master inspection (the audit's HIGH-27-01 repro).
+
+### Why this matters
+
+HIGH-27-01 was the audit's headliner — and the exact "shared try/except swallows multiple statements" pattern WB22 / WB26 also flagged. Splitting the blocks is mechanical but the structural test (inspect sqlite_master + assert index exists) is the new defense; future contributors who collapse the blocks back together will fail CI.
+
+HIGH-27-02 closed the multi-session isolation gap that Slice C's narrative assumed. On single-laptop deployments the previous behavior was harmless; the CI-runner-farm + partner-hosted-Enterprise cases now have the access control they need. The split between store-layer (loose, opt-in via parameter) and MCP-layer (strict, always enforced) keeps the CLI admin flow ergonomic while making sure agents can't escape isolation.
+
+Per [[audit-cadence-discipline]]: 0 CRIT + 2 HIGH + 5 MED + 6 LOW in code that had 17 passing unit tests. The pattern continues to pay for itself — neither HIGH would have been caught by additional unit tests because both were about structural code properties (silent statement swallowing; absent access control) rather than behavior on specific inputs.

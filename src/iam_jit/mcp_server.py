@@ -963,17 +963,28 @@ TOOLS = [
             "Post-task review summary for a given task_id. Returns "
             "the task's metadata + aggregated decision counts "
             "(total / allow / deny / prompt) + the list of denied "
-            "calls. Slice C of [[proxy-smart-defaults-and-task-scope]]: "
+            "calls (capped at 1000 entries; full counts still "
+            "accurate). Slice C of [[proxy-smart-defaults-and-task-scope]]: "
             "lets admins see what the agent actually attempted "
             "during the task — useful for spotting tasks whose "
             "scope was too narrow (many denies) or too broad "
-            "(broad allow rules but no use)."
+            "(broad allow rules but no use). WB27 HIGH-27-02 "
+            "closure: cross-owner review is refused. Pass `owner` "
+            "matching the task's owner."
         ),
         "inputSchema": {
             "type": "object",
             "required": ["task_id"],
             "properties": {
                 "task_id": {"type": "string"},
+                "owner": {
+                    "type": "string",
+                    "description": (
+                        "Caller's owner identifier; must match the "
+                        "task's owner. Omit for default-owner-slot "
+                        "tasks."
+                    ),
+                },
             },
         },
     },
@@ -1078,7 +1089,9 @@ TOOLS = [
             "end event is audit-logged with the supplied reason. "
             "Idempotent: calling end_task on a task that's already "
             "ended is a no-op error (the audit chain isn't double-"
-            "logged)."
+            "logged). WB27 HIGH-27-02 closure: cross-owner end is "
+            "refused. Pass `owner` matching the task's owner (or "
+            "omit for default-owner-slot tasks)."
         ),
         "inputSchema": {
             "type": "object",
@@ -1088,6 +1101,14 @@ TOOLS = [
                 "reason": {
                     "type": "string",
                     "description": "Why the task is ending (audit-logged).",
+                },
+                "owner": {
+                    "type": "string",
+                    "description": (
+                        "Caller's owner identifier; must match the "
+                        "task's owner. Omit for default-owner-slot "
+                        "tasks (single-laptop case)."
+                    ),
                 },
             },
         },
@@ -1910,10 +1931,26 @@ def _bouncer_end_task_for_mcp(args: dict[str, Any]) -> dict[str, Any]:
     reason = args.get("reason") or "ended via MCP"
     if not isinstance(reason, str):
         return {"error": "reason must be a string if provided"}
+    owner = args.get("owner")
+    if owner is not None and not isinstance(owner, str):
+        return {"error": "owner must be a string if provided"}
 
     store = BouncerStore()
     try:
-        ok = store.end_task(task_id.strip(), actor=_bouncer_actor(), end_reason=reason)
+        # WB27 HIGH-27-02 closure: MCP always enforces owner match.
+        # Cross-owner end is refused. Single-laptop callers omit
+        # owner; they can only end tasks in the default-owner slot
+        # (owner IS NULL).
+        try:
+            ok = store.end_task(
+                task_id.strip(),
+                actor=_bouncer_actor(),
+                end_reason=reason,
+                requesting_owner=owner,
+                require_owner_match=True,
+            )
+        except PermissionError as e:
+            return {"error": f"permission denied: {e}"}
     finally:
         store.close()
     if not ok:
@@ -1948,16 +1985,28 @@ def _bouncer_active_task_for_mcp(args: dict[str, Any]) -> dict[str, Any]:
 
 
 def _bouncer_task_review_for_mcp(args: dict[str, Any]) -> dict[str, Any]:
-    """Slice C per-task review summary."""
+    """Slice C per-task review summary. WB27 HIGH-27-02 closure:
+    enforces owner-match so an agent can't review another agent's
+    task by passing its task_id."""
     from .bouncer.store import BouncerStore
 
     task_id = args.get("task_id")
     if not isinstance(task_id, str) or not task_id.strip():
         return {"error": "task_id is required and must be a non-empty string"}
+    owner = args.get("owner")
+    if owner is not None and not isinstance(owner, str):
+        return {"error": "owner must be a string if provided"}
 
     store = BouncerStore()
     try:
-        summary = store.task_review_summary(task_id.strip())
+        try:
+            summary = store.task_review_summary(
+                task_id.strip(),
+                requesting_owner=owner,
+                require_owner_match=True,
+            )
+        except PermissionError as e:
+            return {"error": f"permission denied: {e}"}
     finally:
         store.close()
     if not summary:

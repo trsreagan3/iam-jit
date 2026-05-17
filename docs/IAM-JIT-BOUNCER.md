@@ -293,8 +293,20 @@ require declaring every infrastructure call.
   task; `tasks list` shows historical tasks; `tasks show <id>`
   shows full details.
 
-Only ONE task active at a time in Slice B. Slice C may add per-PID
-concurrent tasks.
+**Concurrent tasks (Slice C):** multiple agent sessions can each
+have their own active task scope by declaring a distinct `owner`
+identifier at start. Within a single owner, the single-active
+invariant still holds (same owner can't start a second concurrent
+task). Tasks without an explicit owner share the "default-owner
+slot" — useful for the single-laptop case where only one agent is
+running at a time.
+
+**Post-task review:** `iam-jit-bouncer tasks review <id>` (or
+`bouncer_task_review` MCP tool) returns an aggregated summary of
+the task — total decisions, allow/deny breakdown, list of denied
+calls. Useful to see whether the scope was right-sized (lots of
+denies = too narrow; broad allows but no use = too broad). Owner-
+match is enforced via MCP: agents can only review their own tasks.
 
 ### Auto-expiry
 

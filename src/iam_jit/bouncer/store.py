@@ -207,8 +207,19 @@ class BouncerStore:
             # [[proxy-smart-defaults-and-task-scope]]). Existing rows
             # get NULL owner — treated as "default owner" by the
             # match logic for backwards compat.
+            #
+            # WB27 HIGH-27-01 closure: ALTER and CREATE INDEX are in
+            # SEPARATE try/except blocks. On a fresh DB, the inline
+            # CREATE TABLE above already created the owner column;
+            # ALTER then raises `duplicate column name`; if the index
+            # statement were in the same except, the index would
+            # silently never be created and every per-owner lookup
+            # would degrade to a full table scan.
             try:
                 self._conn.execute("ALTER TABLE tasks ADD COLUMN owner TEXT")
+            except sqlite3.OperationalError:
+                pass  # column already exists (fresh DB or re-migration)
+            try:
                 self._conn.execute(
                     "CREATE INDEX IF NOT EXISTS idx_tasks_owner_status ON tasks(owner, status)"
                 )
@@ -776,11 +787,34 @@ class BouncerStore:
         *,
         actor: str,
         end_reason: str | None = None,
+        requesting_owner: str | None = None,
+        require_owner_match: bool = False,
     ) -> bool:
         """End the named task (status -> completed). Returns True if a
-        row was updated; False if the task didn't exist or was already
-        ended."""
+        row was updated; False if the task didn't exist, was already
+        ended, OR `require_owner_match=True` and the task's owner
+        doesn't match `requesting_owner`.
+
+        WB27 HIGH-27-02 closure: when `require_owner_match=True`, the
+        caller (typically MCP, passing the agent's claimed owner)
+        must own the task to end it. Prevents cross-owner end-task
+        in multi-session deployments. Single-laptop deployments
+        keep using require_owner_match=False so the local CLI / admin
+        flow stays simple.
+        """
         from .tasks import TaskStatus
+
+        if require_owner_match:
+            existing = self.get_task(task_id)
+            if existing is None:
+                return False
+            # NULL owner can only be ended by NULL-owner callers
+            # (preserves default-owner slot's Slice B semantics).
+            if existing.owner != requesting_owner:
+                raise PermissionError(
+                    f"task {task_id} is owned by {existing.owner!r}; "
+                    f"caller owner is {requesting_owner!r}"
+                )
 
         return self._end_task_internal(
             task_id, actor=actor, end_reason=end_reason or "completed",
@@ -825,7 +859,15 @@ class BouncerStore:
     # Per-task review (Slice C of [[proxy-smart-defaults-and-task-scope]])
     # -----------------------------------------------------------------
 
-    def task_review_summary(self, task_id: str) -> dict[str, Any]:
+    REVIEW_DENIED_CALL_CAP = 1000  # WB27 MED-27-01: bound the denied-calls list
+
+    def task_review_summary(
+        self,
+        task_id: str,
+        *,
+        requesting_owner: str | None = None,
+        require_owner_match: bool = False,
+    ) -> dict[str, Any]:
         """Aggregate decisions made during a specific task into a
         review summary: total calls, allow/deny breakdown, denied
         action list, time range. Returns {} if the task doesn't
@@ -835,10 +877,27 @@ class BouncerStore:
         post-task to see what the agent actually attempted. This is
         the "after-action report" for a task scope — shows whether
         the scope was right-sized (lots of denies = too narrow; lots
-        of allows but no use = too broad)."""
+        of allows but no use = too broad).
+
+        WB27 HIGH-27-02 closure: when `require_owner_match=True`
+        (MCP path passes the agent's claimed owner), only the task's
+        own owner can review it. Cross-owner access raises
+        PermissionError. Single-laptop / CLI flow keeps False.
+
+        WB27 MED-27-01 closure: the denied_calls list is capped at
+        REVIEW_DENIED_CALL_CAP (1000) entries with a `denied_calls_truncated`
+        flag so a runaway task can't produce a multi-megabyte response.
+        Total counts (allow/deny/prompt) are still accurate; only
+        the per-call detail list is bounded.
+        """
         scope = self.get_task(task_id)
         if scope is None:
             return {}
+        if require_owner_match and scope.owner != requesting_owner:
+            raise PermissionError(
+                f"task {task_id} is owned by {scope.owner!r}; "
+                f"caller owner is {requesting_owner!r}"
+            )
         with self._lock:
             cur = self._conn.execute(
                 "SELECT decision, service, action, arn, reason, at "
@@ -859,6 +918,10 @@ class BouncerStore:
                 })
         first_at = rows[0][5] if rows else None
         last_at = rows[-1][5] if rows else None
+        # WB27 MED-27-01: cap the denied_calls list; preserve total counts.
+        denied_truncated = len(denied) > self.REVIEW_DENIED_CALL_CAP
+        if denied_truncated:
+            denied = denied[: self.REVIEW_DENIED_CALL_CAP]
         return {
             "task_id": task_id,
             "description": scope.description,
@@ -875,6 +938,8 @@ class BouncerStore:
             "first_decision_at": first_at,
             "last_decision_at": last_at,
             "denied_calls": denied,
+            "denied_calls_truncated": denied_truncated,
+            "denied_calls_cap": self.REVIEW_DENIED_CALL_CAP,
         }
 
     # -----------------------------------------------------------------
