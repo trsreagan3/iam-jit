@@ -227,63 +227,6 @@ def test_observation_includes_mode_at_decision(store) -> None:
     assert obs_trans.mode_at_decision == "transparent"
 
 
-# ---------------------------------------------------------------------------
-# aiohttp server integration
-# ---------------------------------------------------------------------------
-
-
-@pytest.mark.asyncio
-async def test_proxy_server_starts_and_responds(tmp_path) -> None:
-    """The proxy server starts on a chosen port, accepts a request,
-    and emits the observation JSON."""
-    import socket
-    # Pick a free ephemeral port
-    s = socket.socket()
-    s.bind(("127.0.0.1", 0))
-    free_port = s.getsockname()[1]
-    s.close()
-
-    store = BouncerStore(db_path=str(tmp_path / "b.db"))
-    config = ProxyConfig(
-        host="127.0.0.1", port=free_port,
-        mode=ProxyMode.COOPERATIVE,
-        default_policy=DefaultPolicy.DENY,
-    )
-
-    server_task = asyncio.create_task(serve(config, store=store))
-    try:
-        # Wait for the server to be listening
-        for _ in range(50):
-            try:
-                reader, writer = await asyncio.open_connection("127.0.0.1", free_port)
-                writer.close()
-                await writer.wait_closed()
-                break
-            except OSError:
-                await asyncio.sleep(0.05)
-        else:
-            pytest.fail("server failed to start")
-
-        # Send a request with SigV4 auth and read the response
-        import aiohttp
-        async with aiohttp.ClientSession() as session:
-            async with session.get(
-                f"http://127.0.0.1:{free_port}/my-bucket/file.txt",
-                headers={
-                    "authorization": _sigv4_auth_header(
-                        service="s3", region="us-east-1",
-                    ),
-                },
-            ) as resp:
-                body = await resp.json()
-        assert "proxy_observation" in body
-        obs = body["proxy_observation"]
-        assert obs["parsed_service"] == "s3"
-        assert obs["mode_at_decision"] == "cooperative"
-    finally:
-        server_task.cancel()
-        try:
-            await server_task
-        except asyncio.CancelledError:
-            pass
-        store.close()
+# NOTE: end-to-end aiohttp server tests moved to test_proxy_slice2.py
+# (Slice 2 wires forwarding; integration tests now need a mock-AWS
+# backend to forward to).

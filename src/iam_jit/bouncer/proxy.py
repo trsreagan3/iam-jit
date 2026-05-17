@@ -1,30 +1,40 @@
 """Bouncer Stage 2 — transparent HTTP proxy that intercepts AWS SDK
 calls via ``AWS_ENDPOINT_URL=http://127.0.0.1:<port>``.
 
-Slice 1 of the proxy work (per http-proxy-pre-launch). This slice
-ships:
-  - the aiohttp-based HTTP server
-  - request parsing via the existing bouncer.request_parser
-  - per-request audit logging (no forwarding yet — Slice 2)
-  - mode enum + advisory-vs-enforce decision shaping
+Slices 1 + 2 of the proxy work (per http-proxy-pre-launch):
+  - Slice 1: aiohttp-based HTTP server, SigV4 request parsing,
+    per-request audit logging, mode enum + advisory-vs-enforce
+    decision shaping
+  - Slice 2: SigV4-preserving forwarding to real AWS endpoints,
+    streaming responses, connection pooling
 
 Per bouncer-both-modes-first-class: the server supports both
 cooperative (advisory) and transparent (enforce) modes as first-
-class user choices. Slice 1 wires the mode plumbing; later slices
-add the forwarding layer + HTTPS + edge cases.
+class user choices. Per `bouncer-mode-selection-for-agents`:
+  - Cooperative + ALLOW: forward; log
+  - Cooperative + DENY:  forward (advisory); log the would-be-deny
+  - Transparent + ALLOW: forward; log
+  - Transparent + DENY:  return 403 with iam-jit reason; don't forward
+
+SigV4 forwarding rules (LOAD-BEARING):
+  - The proxy NEVER re-signs requests. The client already signed
+    with their secret key; we don't have (and don't want) access to
+    that key. We forward the request verbatim, preserving headers,
+    body, and the Authorization header that contains the SigV4
+    signature.
+  - The client signs against the ORIGINAL AWS Host header (e.g.
+    s3.us-east-1.amazonaws.com), even though it connects to the
+    proxy at 127.0.0.1:8767. We forward to the host the client
+    signed against — the SigV4 signature validates correctly at
+    AWS because Host matches.
+  - The proxy listens on plain HTTP (no MITM TLS in Slice 2; that's
+    Slice 4). The OUTBOUND forward is always HTTPS to real AWS.
 
 What this module does NOT do yet (later slices):
-  - Forward allowed requests to real AWS (Slice 2)
-  - HTTPS / MITM cert handling (Slice 4)
-  - Connection pooling + streaming + per-region routing (Slice 5)
+  - MITM TLS for HTTPS-only SDK clients (Slice 4)
+  - Connection-pool tuning + advanced streaming (Slice 5)
   - bouncer_active_mode / bouncer_recommend_mode_for_task MCP
     tools (Slices 3 + 6)
-
-The Slice 1 server is useful on its own as an OBSERVABILITY tool:
-point an SDK client at it and you get a parsed log of every call
-the client would make, complete with the bouncer's verdict for
-each, without actually forwarding. Useful for "what does my
-boto3 script ACTUALLY call?" inspection.
 """
 
 from __future__ import annotations
@@ -78,6 +88,10 @@ class ProxyConfig:
     port: int = 8767
     mode: ProxyMode = ProxyMode.COOPERATIVE
     default_policy: DefaultPolicy = DefaultPolicy.DENY
+    forward_scheme: str = "https"
+    """Outbound scheme for forwarding allowed requests. Defaults to
+    HTTPS (real AWS endpoints). Tests pass "http" to forward to a
+    local mock-AWS server."""
     # Don't bind to 0.0.0.0 by default — proxy is a LOCAL-ONLY
     # thing per the local-only-safety-mode + no-hosted-saas memos.
     # Binding externally would silently expose a credential-handling
@@ -257,11 +271,106 @@ def evaluate_request(
 # ---------------------------------------------------------------------------
 
 
-async def _handle_request(request, *, store, config: ProxyConfig):
-    """aiohttp handler for any inbound request. Slice 1 returns the
-    observation as JSON so the client (and tests) can verify what
-    the proxy saw + decided. Slice 2 will replace the JSON body
-    with the actual forwarded AWS response on ALLOW + advisory."""
+def _forward_url(host: str, path_qs: str, scheme: str = "https") -> str:
+    """Build the outbound URL for forwarding.
+
+    The client's SigV4 signature is over the ORIGINAL AWS Host header
+    (e.g. `s3.us-east-1.amazonaws.com`). The client connects to the
+    proxy at 127.0.0.1:PORT but signed with the AWS host. We forward
+    to the AWS host so the signature validates downstream.
+
+    `scheme` defaults to https because real AWS endpoints are HTTPS.
+    Tests can pass scheme="http" to forward to a local mock-AWS.
+    """
+    # `host` may already include `:port`; preserve as-is.
+    return f"{scheme}://{host}{path_qs}"
+
+
+def _strip_hop_headers(headers: dict[str, str]) -> dict[str, str]:
+    """Remove RFC 7230 hop-by-hop headers + headers the upstream
+    library will recompute. Returns a NEW dict; doesn't mutate input.
+
+    Hop-by-hop headers (RFC 7230 §6.1) must not be forwarded. The
+    Host header is preserved because the client signed against it.
+    Content-Length is dropped because aiohttp recomputes it from
+    the body bytes.
+    """
+    hop_headers = {
+        "connection",
+        "keep-alive",
+        "proxy-authenticate",
+        "proxy-authorization",
+        "te",
+        "trailers",
+        "transfer-encoding",
+        "upgrade",
+        "content-length",
+    }
+    return {
+        k: v for k, v in headers.items()
+        if k.lower() not in hop_headers
+    }
+
+
+async def _forward_to_aws(
+    *,
+    method: str,
+    host: str,
+    path_qs: str,
+    headers: dict[str, str],
+    body: bytes,
+    forward_scheme: str = "https",
+    session,  # aiohttp.ClientSession
+    timeout_s: float = 30.0,
+):
+    """Forward a SigV4-signed request to the real AWS endpoint and
+    return (status, response_headers, response_body_bytes).
+
+    LOAD-BEARING invariants:
+    - Authorization header (SigV4 signature) is forwarded verbatim.
+    - Host header is preserved.
+    - Body bytes are forwarded as-is.
+    - Hop-by-hop headers are stripped per RFC 7230.
+    - Outbound scheme is HTTPS by default; tests override with HTTP.
+    - The proxy NEVER re-signs the request. We don't have the
+      client's secret key + don't want it.
+
+    Returns response data tuple. Slice 2 reads the full response
+    into memory; Slice 5 will add streaming for large objects.
+    """
+    import aiohttp
+
+    forward_headers = _strip_hop_headers(headers)
+    url = _forward_url(host, path_qs, scheme=forward_scheme)
+
+    timeout = aiohttp.ClientTimeout(total=timeout_s)
+    async with session.request(
+        method=method,
+        url=url,
+        headers=forward_headers,
+        data=body,
+        timeout=timeout,
+        allow_redirects=False,
+        # Don't auto-decompress; client expects raw bytes.
+        auto_decompress=False,
+    ) as resp:
+        resp_body = await resp.read()
+        resp_headers = dict(resp.headers)
+    return resp.status, resp_headers, resp_body
+
+
+async def _handle_request(request, *, store, config: ProxyConfig, session):
+    """aiohttp handler for inbound proxy requests.
+
+    Slice 2 behavior:
+      ALLOW (cooperative or transparent) → forward to AWS, return
+        the AWS response verbatim
+      DENY + TRANSPARENT → return 403 with iam-jit reason, no forward
+      DENY + COOPERATIVE → forward anyway (advisory verdict logged,
+        no enforcement at the wire)
+      PROMPT (any mode) → Slice 2 treats as DENY for now; Slice 3
+        will add interactive prompt UX
+    """
     from aiohttp import web
 
     body = await request.read()
@@ -277,35 +386,98 @@ async def _handle_request(request, *, store, config: ProxyConfig):
         default_policy=config.default_policy,
     )
 
-    # Slice 1 behavior: always return the observation as JSON. This
-    # is "advisory" for the SDK client — it will NOT understand the
-    # response and the call will fail at the client. Slice 2 will:
-    #   - On ALLOW (cooperative or transparent): forward + return
-    #     the real AWS response
-    #   - On DENY in transparent: return a 403 with iam-jit reason
-    #   - On DENY in cooperative: forward anyway (advisory verdict
-    #     logged, no enforcement at the wire)
-    status = 403 if obs.enforced else 200
-    return web.json_response(
-        {
-            "proxy_observation": dataclasses.asdict(obs),
-            "_slice1_note": (
-                "Slice 1 returns observations only. Forwarding ships "
-                "in Slice 2; until then the SDK client will see this "
-                "JSON body and fail to parse it as an AWS response."
-            ),
-        },
-        status=status,
-    )
+    if obs.enforced:
+        # Transparent + (deny or prompt) → 403 without forwarding.
+        # Body is iam-jit-shaped JSON the SDK client won't parse as
+        # an AWS error — that's intentional; the SDK will surface
+        # the unparseable response as a client error. Slice 3 will
+        # add an AWS-error-shaped body so SDK clients see a clean
+        # AccessDenied with the iam-jit reason.
+        return web.json_response(
+            {
+                "error": "iam-jit-bouncer DENY",
+                "decision_verdict": obs.decision_verdict,
+                "decision_reason": obs.decision_reason,
+                "service": obs.parsed_service,
+                "action": obs.parsed_action,
+                "arn": obs.parsed_arn,
+                "mode": obs.mode_at_decision,
+            },
+            status=403,
+            headers={"x-iam-jit-bouncer-verdict": obs.decision_verdict},
+        )
+
+    # Unclassifiable + cooperative mode is a tricky case — we can't
+    # forward because we don't know where to forward to (no SigV4
+    # host header to trust). Return 400.
+    host_header = request.headers.get("host", "")
+    if not obs.parsed_service or not host_header:
+        return web.json_response(
+            {
+                "error": "iam-jit-bouncer cannot forward unclassifiable request",
+                "decision_reason": obs.decision_reason,
+                "hint": (
+                    "request has no SigV4 Authorization header or no Host header; "
+                    "the proxy can't determine the AWS endpoint to forward to."
+                ),
+            },
+            status=400,
+            headers={"x-iam-jit-bouncer-verdict": obs.decision_verdict},
+        )
+
+    # ALLOW (either mode) OR cooperative+DENY → forward to AWS
+    try:
+        status, resp_headers, resp_body = await _forward_to_aws(
+            method=request.method,
+            host=host_header,
+            path_qs=request.path_qs,
+            headers=dict(request.headers),
+            body=body,
+            forward_scheme=config.forward_scheme,
+            session=session,
+        )
+    except Exception as e:
+        # Forward failed (timeout, DNS, TLS, etc). Return 502 with
+        # iam-jit-shaped explanation.
+        logger.warning("iam-jit-bouncer forward failed: %s", e)
+        return web.json_response(
+            {
+                "error": "iam-jit-bouncer forward to AWS failed",
+                "upstream_error": str(e),
+                "service": obs.parsed_service,
+                "action": obs.parsed_action,
+            },
+            status=502,
+            headers={
+                "x-iam-jit-bouncer-verdict": obs.decision_verdict,
+                "x-iam-jit-bouncer-forward-error": "true",
+            },
+        )
+
+    # Strip hop-by-hop from the AWS response too (RFC 7230) +
+    # surface the bouncer's verdict in a debug header so users
+    # debugging can see what the bouncer decided.
+    out_headers = _strip_hop_headers(resp_headers)
+    out_headers["x-iam-jit-bouncer-verdict"] = obs.decision_verdict
+    out_headers["x-iam-jit-bouncer-mode"] = obs.mode_at_decision
+    if obs.decision_verdict == "deny" and not obs.enforced:
+        # Cooperative-mode advisory: surface that the bouncer WOULD
+        # have denied this call in transparent mode.
+        out_headers["x-iam-jit-bouncer-advisory"] = "would-deny-in-transparent"
+
+    return web.Response(body=resp_body, status=status, headers=out_headers)
 
 
 async def serve(config: ProxyConfig, *, store: BouncerStore) -> None:
     """Run the proxy server until cancelled.
 
-    Slice 1: aiohttp app with one catch-all handler. Slice 2 will
-    add request forwarding + per-region endpoint resolution.
+    Slices 1 + 2: aiohttp app with one catch-all handler. The
+    handler now FORWARDS allowed requests to real AWS (or to the
+    forward_scheme'd endpoint for tests). A pooled aiohttp
+    ClientSession is created at startup + reused for all forwards.
     """
     try:
+        import aiohttp
         from aiohttp import web
     except ImportError as e:
         raise RuntimeError(
@@ -313,10 +485,17 @@ async def serve(config: ProxyConfig, *, store: BouncerStore) -> None:
             "Install it: pip install 'aiohttp>=3.9'"
         ) from e
 
+    # Pooled session reused for all outbound forwards. Slice 5 will
+    # tune the connector + add streaming response handling for
+    # large objects (S3 GetObject of multi-GB files).
+    connector = aiohttp.TCPConnector(limit=100, ttl_dns_cache=300)
+    session = aiohttp.ClientSession(connector=connector)
     app = web.Application()
 
     async def handler(request):
-        return await _handle_request(request, store=store, config=config)
+        return await _handle_request(
+            request, store=store, config=config, session=session,
+        )
 
     app.router.add_route("*", "/{tail:.*}", handler)
 
@@ -330,7 +509,8 @@ async def serve(config: ProxyConfig, *, store: BouncerStore) -> None:
     )
     logger.info(
         "Point your SDK at it: AWS_ENDPOINT_URL=http://%s:%s "
-        "(Slice 1: returns observations only; forwarding in Slice 2)",
+        "(Slice 2: forwards allowed requests to AWS verbatim; "
+        "SigV4 signatures preserved)",
         config.host, config.port,
     )
 
@@ -338,4 +518,5 @@ async def serve(config: ProxyConfig, *, store: BouncerStore) -> None:
     try:
         await asyncio.Event().wait()
     finally:
+        await session.close()
         await runner.cleanup()
