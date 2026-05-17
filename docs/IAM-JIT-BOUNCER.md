@@ -57,6 +57,10 @@ Multi-machine fleet rules, web UI, anomaly detection.
 
 ## Why a local proxy
 
+Two distinct reasons; both load-bearing.
+
+### Reason 1 — Defense-in-depth over IAM-scoped roles
+
 IAM is coarse. A role granted `s3:GetObject` on bucket `my-data` can
 call `GetObject` on every key in `my-data` for the role's session
 lifetime — even if the prompt-injected agent meant to read one
@@ -68,6 +72,46 @@ creds, with no iam-jit-the-company involvement.
 
 Per creates-never-mutates: the bouncer never modifies IAM. It
 inspects + forwards + denies — that's the entire surface.
+
+### Reason 2 — Gating when you can't (or shouldn't) touch IAM rapidly
+
+Even if your company gives you full IAM authority, IAM has structural
+limits the bouncer doesn't. And many developers don't have full IAM
+authority at all.
+
+- **Rapid iteration.** Bouncer rule changes take effect on the next
+  request — local file edit + reload, no API call. IAM has propagation
+  delays (seconds to minutes for some changes; longer for policy
+  attachments + STS session refreshes) and rate limits if you iterate
+  fast. When you're narrowing scope as you discover a new dangerous
+  call, the bouncer keeps up; IAM doesn't.
+- **You don't need IAM-write permission.** Many companies have SecOps
+  own IAM and won't grant `iam:CreateRole` / `iam:PutRolePolicy` to
+  individual engineers, or only via tickets that take days. The
+  bouncer runs entirely on YOUR laptop using your existing
+  credentials; it adds gating without needing any new IAM authority.
+  You can be productive with iam-jit-bouncer even when your company
+  doesn't let you touch IAM.
+- **Local context in rules.** Bouncer rules can reference your
+  codebase context (`deny anything in the prod-* cluster`, `allow
+  only the staging account`) without coordinating with a central IAM
+  policy. Per-task scopes (`bouncer tasks start ...`) are declared in
+  seconds, used for one job, then ended.
+- **Easy to disable when something breaks.** Need to unblock yourself
+  fast at 2 AM? `iam-jit-bouncer tasks end <id>` or stop the proxy.
+  No central ticket, no SecOps escalation. The bouncer is yours to
+  flip on and off.
+
+This makes the bouncer the natural fit for developers at companies
+with locked-down IAM, contractors operating under read-only-by-
+default credentials, anyone doing rapid iteration where IAM
+propagation would slow them down, and anyone who wants a kill-switch
+they personally control.
+
+The two reasons compose: when you have IAM authority, run both
+layers (narrow the role AND gate calls against task scope). When you
+don't, the bouncer is what you have — and it's often enough on its
+own.
 
 ## Architecture
 

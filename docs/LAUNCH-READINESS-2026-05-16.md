@@ -1,5 +1,14 @@
 # iam-jit launch readiness snapshot (2026-05-16)
 
+> **HISTORICAL SNAPSHOT.** Superseded by
+> [`LAUNCH-READINESS-2026-05-17.md`](LAUNCH-READINESS-2026-05-17.md).
+> Significant work landed in the following day — bouncer product,
+> applicability framework, license-cap, +24 audit rounds, 4 outside-
+> context UAT rounds, doc reframing as 4 products, agent-agnostic
+> positioning, locked-down-IAM positioning, the no-hosted-SaaS
+> decision. Test suite grew 2017 → 2646. This doc is kept for
+> history; use the newer one for current state.
+
 *Concrete, mode-by-mode status. Read this before pilot kickoff.*
 
 The goal of this doc is to be honest about what works, what's
