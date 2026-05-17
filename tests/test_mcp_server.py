@@ -388,3 +388,83 @@ def test_ibounce_recommend_mode_alias_matches_bouncer():
     via_legacy = _call_tool("bouncer_recommend_mode_for_task", args)
     via_canonical = _call_tool("ibounce_recommend_mode_for_task", args)
     assert via_legacy == via_canonical
+
+
+# =====================================================================
+# #145 — bouncer_plan_pending_write_prompt JSON-RPC dispatch
+#
+# Validates the new MCP tool is reachable through the same JSON-RPC
+# pipe agents use (not just the python-level helper). Also confirms
+# the ibounce_-prefixed alias dispatches identically.
+# =====================================================================
+
+
+def test_bouncer_plan_pending_write_prompt_registered_in_tools_list():
+    names = {t["name"] for t in TOOLS}
+    assert "bouncer_plan_pending_write_prompt" in names
+    assert "ibounce_plan_pending_write_prompt" in names  # dual-aliased
+
+
+def test_bouncer_plan_pending_write_prompt_dispatch_returns_error_for_unknown_session(
+    tmp_path, monkeypatch,
+):
+    """JSON-RPC round-trip: pass an unknown session_id, get the
+    `{"error": "..."}` shape back through structuredContent."""
+    monkeypatch.setenv("IAM_JIT_BOUNCER_DB", str(tmp_path / "b.db"))
+    from iam_jit.bouncer.plan_capture import reset_session_for_tests
+    reset_session_for_tests()
+    got = _call_tool(
+        "bouncer_plan_pending_write_prompt",
+        {"session_id": "no-such-session"},
+    )
+    assert "error" in got
+
+
+def test_ibounce_plan_pending_write_prompt_alias_matches_bouncer(
+    tmp_path, monkeypatch,
+):
+    """ibounce_plan_pending_write_prompt alias must dispatch to the
+    same handler — per [[cross-product-agent-parity]] + the existing
+    dual-alias loop."""
+    monkeypatch.setenv("IAM_JIT_BOUNCER_DB", str(tmp_path / "b.db"))
+    from iam_jit.bouncer.plan_capture import reset_session_for_tests
+    reset_session_for_tests()
+    args = {"session_id": "no-such-session"}
+    via_legacy = _call_tool("bouncer_plan_pending_write_prompt", args)
+    via_canonical = _call_tool("ibounce_plan_pending_write_prompt", args)
+    assert via_legacy == via_canonical
+
+
+def test_bouncer_plan_pending_write_prompt_dispatch_returns_pending_when_present(
+    tmp_path, monkeypatch,
+):
+    """When a session has a pending plan-write prompt, the JSON-RPC
+    dispatch surfaces the prompt row + phase context."""
+    monkeypatch.setenv("IAM_JIT_BOUNCER_DB", str(tmp_path / "b.db"))
+    from iam_jit.bouncer.plan_capture import reset_session_for_tests
+    from iam_jit.bouncer.store import BouncerStore
+    reset_session_for_tests()
+    store = BouncerStore(db_path=str(tmp_path / "b.db"))
+    try:
+        sid = "plan-mcp-dispatch-test"
+        store.ensure_plan_session(
+            session_id=sid, started_by="test", note="",
+        )
+        store.transition_plan_session_phase(
+            sid, new_phase="write_pending",
+            first_write_at="2026-05-18T03:04:05Z",
+        )
+        store.add_plan_write_prompt(
+            session_id=sid, service="iam", action="CreateRole",
+            arn=None, region=None,
+        )
+    finally:
+        store.close()
+    got = _call_tool(
+        "bouncer_plan_pending_write_prompt", {"session_id": sid},
+    )
+    assert got["session_id"] == sid
+    assert got["phase"] == "write_pending"
+    assert got["pending"] is not None
+    assert got["pending"]["service"] == "iam"
+    assert got["pending"]["action"] == "CreateRole"

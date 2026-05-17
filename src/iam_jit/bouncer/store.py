@@ -68,7 +68,7 @@ class ActiveTaskExistsError(Exception):
     is already active. Caller decides whether to end the existing
     task first or surface the conflict to the agent."""
 
-SCHEMA_VERSION = 7  # v7: adds plan_sessions + plan_calls tables for #132 plan-capture proxy mode
+SCHEMA_VERSION = 8  # v8: adds phase + write-switch columns for #145 plan-capture read->write switch UX
 
 
 def default_db_path() -> pathlib.Path:
@@ -320,6 +320,67 @@ class BouncerStore:
             try:
                 self._conn.execute(
                     "CREATE INDEX IF NOT EXISTS idx_decisions_pause_id ON decisions(pause_id)"
+                )
+            except sqlite3.OperationalError:
+                pass
+            # v8 additive migrations (#145 plan-capture read->write switch):
+            #
+            # plan_sessions gains a `phase` column tracking the session's
+            # write-switch state machine:
+            #   read_only        — initial state; no write call observed yet
+            #   write_pending    — first write call seen + operator notified
+            #                      (manual mode); awaiting prompt answer
+            #   writes_approved  — operator explicitly approved further writes,
+            #                      OR --write-switch-notify=auto-approve flipped
+            #                      on first write
+            #   writes_rejected  — operator rejected, OR
+            #                      --write-switch-notify=reject flipped
+            #                      on first write
+            # We also persist when the first write was observed (for `plan
+            # show` + JSON export), which notify mode the session uses (so
+            # post-hoc readers can see what UX was active), and the answer
+            # context (decision + answered_at + answered_by).
+            for col_ddl in (
+                "ALTER TABLE plan_sessions ADD COLUMN phase TEXT NOT NULL DEFAULT 'read_only'",
+                "ALTER TABLE plan_sessions ADD COLUMN write_switch_notify TEXT NOT NULL DEFAULT 'manual'",
+                "ALTER TABLE plan_sessions ADD COLUMN first_write_at TEXT",
+                "ALTER TABLE plan_sessions ADD COLUMN write_decision TEXT",
+                "ALTER TABLE plan_sessions ADD COLUMN write_decision_at TEXT",
+                "ALTER TABLE plan_sessions ADD COLUMN write_decision_by TEXT",
+            ):
+                try:
+                    self._conn.execute(col_ddl)
+                except sqlite3.OperationalError:
+                    pass
+            # pending_prompts gains a `kind` discriminator + a `session_id`
+            # so plan-write prompts (#145) share the same queue + answer
+            # surface as deny-prompts (#5) but are distinguishable.
+            # decision_id is nullable for plan-write prompts (they have a
+            # session_id instead of a decision_id) so we relax the schema
+            # on existing DBs by leaving NOT NULL on the column but adding
+            # a soft convention: store the synthetic value -1 when a
+            # plan-write prompt is added (decision_id is still indexed +
+            # used by deny-prompts' idempotency check; for plan-write we
+            # use the session_id + status combination instead).
+            for col_ddl in (
+                "ALTER TABLE pending_prompts ADD COLUMN kind TEXT NOT NULL DEFAULT 'deny-prompt'",
+                "ALTER TABLE pending_prompts ADD COLUMN session_id TEXT",
+            ):
+                try:
+                    self._conn.execute(col_ddl)
+                except sqlite3.OperationalError:
+                    pass
+            try:
+                self._conn.execute(
+                    "CREATE INDEX IF NOT EXISTS idx_pending_prompts_kind "
+                    "ON pending_prompts(kind, status)"
+                )
+            except sqlite3.OperationalError:
+                pass
+            try:
+                self._conn.execute(
+                    "CREATE INDEX IF NOT EXISTS idx_pending_prompts_session "
+                    "ON pending_prompts(session_id, status)"
                 )
             except sqlite3.OperationalError:
                 pass
@@ -863,17 +924,36 @@ class BouncerStore:
             return int(cur.lastrowid or 0)
 
     def list_pending_prompts(self, *, status: str = "pending",
-                              limit: int = 50) -> list[dict[str, Any]]:
-        """Return prompts in the given status; newest first."""
+                              limit: int = 50,
+                              kind: str | None = None) -> list[dict[str, Any]]:
+        """Return prompts in the given status; newest first.
+
+        #145: when `kind` is supplied, filter to that prompt-kind
+        (`deny-prompt` or `plan-write`). Omitting `kind` returns BOTH
+        kinds — `ibounce prompts list` uses this to render a unified
+        queue with kind labels per row.
+        """
         with self._lock:
-            cur = self._conn.execute(
-                "SELECT id, created_at, decision_id, service, action, "
-                "arn, region, deny_reason, status, answer_kind, "
-                "answer_target, answered_by, answered_at "
-                "FROM pending_prompts WHERE status = ? "
-                "ORDER BY id DESC LIMIT ?",
-                (status, limit),
-            )
+            if kind is None:
+                cur = self._conn.execute(
+                    "SELECT id, created_at, decision_id, service, action, "
+                    "arn, region, deny_reason, status, answer_kind, "
+                    "answer_target, answered_by, answered_at, "
+                    "kind, session_id "
+                    "FROM pending_prompts WHERE status = ? "
+                    "ORDER BY id DESC LIMIT ?",
+                    (status, limit),
+                )
+            else:
+                cur = self._conn.execute(
+                    "SELECT id, created_at, decision_id, service, action, "
+                    "arn, region, deny_reason, status, answer_kind, "
+                    "answer_target, answered_by, answered_at, "
+                    "kind, session_id "
+                    "FROM pending_prompts WHERE status = ? AND kind = ? "
+                    "ORDER BY id DESC LIMIT ?",
+                    (status, kind, limit),
+                )
             rows = cur.fetchall()
         return [
             {
@@ -881,6 +961,7 @@ class BouncerStore:
                 "service": r[3], "action": r[4], "arn": r[5], "region": r[6],
                 "deny_reason": r[7], "status": r[8], "answer_kind": r[9],
                 "answer_target": r[10], "answered_by": r[11], "answered_at": r[12],
+                "kind": r[13] or "deny-prompt", "session_id": r[14],
             }
             for r in rows
         ]
@@ -890,7 +971,8 @@ class BouncerStore:
             cur = self._conn.execute(
                 "SELECT id, created_at, decision_id, service, action, "
                 "arn, region, deny_reason, status, answer_kind, "
-                "answer_target, answered_by, answered_at "
+                "answer_target, answered_by, answered_at, "
+                "kind, session_id "
                 "FROM pending_prompts WHERE id = ?",
                 (prompt_id,),
             )
@@ -902,6 +984,7 @@ class BouncerStore:
             "service": r[3], "action": r[4], "arn": r[5], "region": r[6],
             "deny_reason": r[7], "status": r[8], "answer_kind": r[9],
             "answer_target": r[10], "answered_by": r[11], "answered_at": r[12],
+            "kind": r[13] or "deny-prompt", "session_id": r[14],
         }
 
     def answer_pending_prompt(
@@ -1447,14 +1530,307 @@ class BouncerStore:
             )
             return int(cur.lastrowid or 0)
 
+    # -----------------------------------------------------------------
+    # #145 — plan-capture read->write switch UX
+    #
+    # The proxy calls these helpers in `_plan_capture_response` to drive
+    # the per-session phase state machine when a write call is observed.
+    # Phase transitions are deliberate (no side effects on the IAM/AWS
+    # surface per [[creates-never-mutates]]); they only update the
+    # plan_sessions row + may enqueue a plan-write prompt in
+    # pending_prompts. Per [[ibounce-honest-positioning]]: this is a
+    # deterrent UX helper for the operator, NOT a security boundary —
+    # an adversarial agent can call writes WITHOUT preceding reads,
+    # which would still flip the phase but doesn't prevent the
+    # synthetic-success response.
+    # -----------------------------------------------------------------
+
+    _VALID_PLAN_PHASES = (
+        "read_only", "write_pending", "writes_approved", "writes_rejected",
+    )
+    _VALID_WRITE_NOTIFY = ("manual", "auto-approve", "reject")
+
+    def set_plan_session_write_switch_notify(
+        self, session_id: str, notify_mode: str,
+    ) -> bool:
+        """Pin the `--write-switch-notify` mode for a session.
+
+        Called by `serve()` once at startup (before any calls land) so
+        the per-call phase-transition code can read it. Idempotent:
+        re-calling with the same value is a no-op. Returns True if
+        the row was updated.
+
+        We validate the mode here rather than in the proxy so a future
+        new entry point that bypasses the CLI flag can't silently
+        write an invalid value into the DB.
+        """
+        if notify_mode not in self._VALID_WRITE_NOTIFY:
+            raise ValueError(
+                f"set_plan_session_write_switch_notify: notify_mode "
+                f"{notify_mode!r} must be one of "
+                f"{', '.join(self._VALID_WRITE_NOTIFY)}"
+            )
+        if not session_id:
+            raise ValueError(
+                "set_plan_session_write_switch_notify: session_id required"
+            )
+        with self._lock:
+            cur = self._conn.execute(
+                "UPDATE plan_sessions SET write_switch_notify = ? "
+                "WHERE session_id = ?",
+                (notify_mode, session_id),
+            )
+            return cur.rowcount > 0
+
+    def get_plan_session_phase(self, session_id: str) -> dict[str, Any] | None:
+        """Read just the phase fields for a session (no roll-up cost).
+
+        Returns None when the session doesn't exist. Used by the proxy
+        per-call hook because plan_session_summary() walks every call
+        row to compute counts — overkill for the hot path that only
+        needs the current phase + notify mode.
+        """
+        if not session_id:
+            return None
+        with self._lock:
+            cur = self._conn.execute(
+                "SELECT phase, write_switch_notify, first_write_at, "
+                "write_decision, write_decision_at, write_decision_by "
+                "FROM plan_sessions WHERE session_id = ?",
+                (session_id,),
+            )
+            row = cur.fetchone()
+        if row is None:
+            return None
+        return {
+            "phase": row[0] or "read_only",
+            "write_switch_notify": row[1] or "manual",
+            "first_write_at": row[2],
+            "write_decision": row[3],
+            "write_decision_at": row[4],
+            "write_decision_by": row[5],
+        }
+
+    def transition_plan_session_phase(
+        self,
+        session_id: str,
+        *,
+        new_phase: str,
+        decision: str | None = None,
+        decided_by: str | None = None,
+        first_write_at: str | None = None,
+    ) -> bool:
+        """Move the session into a new phase. Validates the new value.
+
+        `decision` is recorded for the writes_approved / writes_rejected
+        terminal phases (caller passes 'approve' or 'reject'). For the
+        write_pending transition we set first_write_at (if not already
+        set) so post-hoc readers can see WHEN the agent crossed the
+        boundary, independent of when the operator answered.
+
+        Returns True if any row changed.
+        """
+        if new_phase not in self._VALID_PLAN_PHASES:
+            raise ValueError(
+                f"transition_plan_session_phase: new_phase {new_phase!r} "
+                f"must be one of {', '.join(self._VALID_PLAN_PHASES)}"
+            )
+        if not session_id:
+            raise ValueError(
+                "transition_plan_session_phase: session_id required"
+            )
+        now = _isoformat_z(_dt.datetime.now(_dt.UTC))
+        # Build the UPDATE dynamically so we don't clobber existing
+        # first_write_at on a phase re-entry (e.g. write_pending ->
+        # writes_approved keeps the original first_write_at).
+        sets: list[str] = ["phase = ?"]
+        params: list[Any] = [new_phase]
+        if first_write_at is not None:
+            # COALESCE preserves the first-write timestamp if the
+            # session already has one — the FIRST write is what matters,
+            # not the most recent.
+            sets.append("first_write_at = COALESCE(first_write_at, ?)")
+            params.append(first_write_at or now)
+        if decision is not None:
+            sets.append("write_decision = ?")
+            params.append(decision)
+            sets.append("write_decision_at = ?")
+            params.append(now)
+            if decided_by is not None:
+                sets.append("write_decision_by = ?")
+                params.append(decided_by)
+        sql = (
+            "UPDATE plan_sessions SET " + ", ".join(sets)
+            + " WHERE session_id = ?"
+        )
+        params.append(session_id)
+        with self._lock:
+            cur = self._conn.execute(sql, tuple(params))
+            return cur.rowcount > 0
+
+    def add_plan_write_prompt(
+        self,
+        *,
+        session_id: str,
+        service: str,
+        action: str,
+        arn: str | None,
+        region: str | None,
+    ) -> int:
+        """Enqueue a plan-write prompt for the operator.
+
+        Plan-write prompts share the pending_prompts table with the
+        existing deny-prompts (#5) so `ibounce prompts list/answer`
+        is one queue. Discriminated by `kind='plan-write'`.
+
+        Idempotent per (session_id) — if there's already a pending
+        plan-write prompt for this session, returns its id rather than
+        enqueuing a second one. A given session has at most ONE
+        pending plan-write prompt at a time (until answered) because
+        we only enqueue on the read_only -> write_pending transition.
+
+        decision_id is set to 0 (synthetic) since plan-write prompts
+        don't link to a single decisions row — they're per-session.
+        """
+        if not session_id:
+            raise ValueError("add_plan_write_prompt: session_id required")
+        with self._lock:
+            cur = self._conn.execute(
+                "SELECT id FROM pending_prompts "
+                "WHERE kind = 'plan-write' AND session_id = ? "
+                "AND status = 'pending'",
+                (session_id,),
+            )
+            prior = cur.fetchone()
+            if prior is not None:
+                return int(prior[0])
+            reason = (
+                f"plan-capture session {session_id!r} agent transitioned "
+                f"from read-only to first write call: {service}:{action}"
+            )
+            cur = self._conn.execute(
+                """
+                INSERT INTO pending_prompts(
+                    created_at, decision_id, service, action, arn, region,
+                    deny_reason, kind, session_id
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    _isoformat_z(_dt.datetime.now(_dt.UTC)),
+                    0,  # synthetic — plan-write prompts have no decisions row
+                    service, action, arn, region, reason,
+                    "plan-write", session_id,
+                ),
+            )
+            return int(cur.lastrowid or 0)
+
+    def get_pending_plan_write_prompt(
+        self, session_id: str,
+    ) -> dict[str, Any] | None:
+        """Return the pending plan-write prompt for a session (if any).
+
+        Used by the proxy hot path + the MCP introspection tool
+        (bouncer_plan_pending_write_prompt) so an agent can check
+        "should I wait for approval before continuing?". Returns None
+        when there is none — either because no write has happened yet,
+        or because the operator already answered.
+        """
+        if not session_id:
+            return None
+        with self._lock:
+            cur = self._conn.execute(
+                "SELECT id, created_at, decision_id, service, action, "
+                "arn, region, deny_reason, status, answer_kind, "
+                "answer_target, answered_by, answered_at, kind, session_id "
+                "FROM pending_prompts "
+                "WHERE kind = 'plan-write' AND session_id = ? "
+                "AND status = 'pending' "
+                "ORDER BY id DESC LIMIT 1",
+                (session_id,),
+            )
+            r = cur.fetchone()
+        if r is None:
+            return None
+        return {
+            "id": int(r[0]), "created_at": r[1], "decision_id": int(r[2]),
+            "service": r[3], "action": r[4], "arn": r[5], "region": r[6],
+            "deny_reason": r[7], "status": r[8], "answer_kind": r[9],
+            "answer_target": r[10], "answered_by": r[11], "answered_at": r[12],
+            "kind": r[13], "session_id": r[14],
+        }
+
+    def answer_plan_write_prompt(
+        self,
+        prompt_id: int,
+        *,
+        decision: str,
+        answered_by: str,
+    ) -> dict[str, Any] | None:
+        """Record an approve/reject answer on a plan-write prompt.
+
+        Returns the answered prompt row on success (so the CLI can
+        transition the session phase from it), or None if the prompt
+        isn't pending / isn't a plan-write prompt / doesn't exist.
+
+        Validates `decision` upfront — only approve/reject are valid
+        here (vs always/profile/ignore on deny-prompts). Mirrors
+        answer_pending_prompt's contract.
+        """
+        if decision not in ("approve", "reject"):
+            raise ValueError(
+                f"answer_plan_write_prompt: decision {decision!r} must be "
+                f"'approve' or 'reject'"
+            )
+        with self._lock:
+            cur = self._conn.execute(
+                "SELECT id, kind, session_id, status FROM pending_prompts "
+                "WHERE id = ?",
+                (prompt_id,),
+            )
+            row = cur.fetchone()
+            if row is None:
+                return None
+            if row[1] != "plan-write":
+                return None
+            if row[3] != "pending":
+                return None
+            session_id = row[2]
+            cur = self._conn.execute(
+                "UPDATE pending_prompts SET status = 'answered', "
+                "answer_kind = ?, answered_by = ?, answered_at = ? "
+                "WHERE id = ? AND status = 'pending'",
+                (
+                    decision, answered_by,
+                    _isoformat_z(_dt.datetime.now(_dt.UTC)),
+                    prompt_id,
+                ),
+            )
+            if cur.rowcount == 0:
+                return None
+        return {
+            "id": prompt_id,
+            "session_id": session_id,
+            "decision": decision,
+            "answered_by": answered_by,
+        }
+
     def list_plan_sessions(self, *, limit: int = 50) -> list[dict[str, Any]]:
         """Return recent plan sessions (newest first) with per-session
-        roll-up counts. Powers `ibounce plan list`."""
+        roll-up counts. Powers `ibounce plan list`.
+
+        #145: also returns the session's write-switch state machine
+        (phase / write_switch_notify / first_write_at / write_decision
+        + answer context) so `plan list` / JSON consumers can render
+        "did this session contain a write transition + how was it
+        handled?" without a second query.
+        """
         capped = max(1, min(int(limit), 10_000))
         with self._lock:
             cur = self._conn.execute(
                 """
                 SELECT ps.session_id, ps.started_at, ps.started_by, ps.note,
+                       ps.phase, ps.write_switch_notify, ps.first_write_at,
+                       ps.write_decision, ps.write_decision_at, ps.write_decision_by,
                        COUNT(pc.id) AS call_count,
                        SUM(CASE WHEN pc.verdict = 'allow' THEN 1 ELSE 0 END) AS allow_count,
                        SUM(CASE WHEN pc.verdict = 'deny' THEN 1 ELSE 0 END) AS deny_count,
@@ -1476,24 +1852,38 @@ class BouncerStore:
                 "started_at": r[1],
                 "started_by": r[2],
                 "note": r[3] or "",
-                "call_count": int(r[4] or 0),
-                "allow_count": int(r[5] or 0),
-                "deny_count": int(r[6] or 0),
-                "prompt_count": int(r[7] or 0),
-                "unsupported_count": int(r[8] or 0),
-                "last_call_at": r[9],
+                "phase": r[4] or "read_only",
+                "write_switch_notify": r[5] or "manual",
+                "first_write_at": r[6],
+                "write_decision": r[7],
+                "write_decision_at": r[8],
+                "write_decision_by": r[9],
+                "call_count": int(r[10] or 0),
+                "allow_count": int(r[11] or 0),
+                "deny_count": int(r[12] or 0),
+                "prompt_count": int(r[13] or 0),
+                "unsupported_count": int(r[14] or 0),
+                "last_call_at": r[15],
             }
             for r in rows
         ]
 
     def get_plan_session(self, session_id: str) -> dict[str, Any] | None:
         """Return the session row + counts for a single session, or
-        None if no such session exists."""
+        None if no such session exists.
+
+        #145: surfaces the phase + write-switch state machine fields
+        (write_switch_notify / first_write_at / write_decision +
+        answer context) alongside the per-verdict roll-up + the
+        read/write split. Plan-show + JSON export read this directly.
+        """
         if not session_id:
             return None
         with self._lock:
             cur = self._conn.execute(
-                "SELECT session_id, started_at, started_by, note "
+                "SELECT session_id, started_at, started_by, note, "
+                "phase, write_switch_notify, first_write_at, "
+                "write_decision, write_decision_at, write_decision_by "
                 "FROM plan_sessions WHERE session_id = ?",
                 (session_id,),
             )
@@ -1506,6 +1896,12 @@ class BouncerStore:
             "started_at": row[1],
             "started_by": row[2],
             "note": row[3] or "",
+            "phase": row[4] or "read_only",
+            "write_switch_notify": row[5] or "manual",
+            "first_write_at": row[6],
+            "write_decision": row[7],
+            "write_decision_at": row[8],
+            "write_decision_by": row[9],
             **summary,
         }
 
@@ -1516,7 +1912,14 @@ class BouncerStore:
         header. Returns zero-count shape (not error) for unknown
         sessions so callers can distinguish 'session exists, no
         calls yet' from 'session id is wrong' via the membership
-        check on `list_plan_sessions`."""
+        check on `list_plan_sessions`.
+
+        #145 also includes a read/write classification roll-up
+        (`read_count` / `write_count`) computed via the same
+        plan_capture.classifier the proxy uses for phase
+        transitions, so post-hoc consumers can answer "did the
+        agent actually try to write anything?" without re-walking
+        the calls."""
         with self._lock:
             cur = self._conn.execute(
                 """
@@ -1557,6 +1960,33 @@ class BouncerStore:
             if key in counts:
                 counts[key] = int(total)
             unsupported_total += int(unsupported or 0)
+        # #145: read/write split. Done outside the SQL above because the
+        # classifier is a Python predicate (policy_sentry-backed +
+        # heuristic fallback), not a single CASE we can express in SQL.
+        # Pull the per-(service,action) frequency so we classify each
+        # unique pair once instead of re-classifying duplicates.
+        with self._lock:
+            cur = self._conn.execute(
+                "SELECT service, action, COUNT(*) FROM plan_calls "
+                "WHERE session_id = ? GROUP BY service, action",
+                (session_id,),
+            )
+            pair_counts = cur.fetchall()
+        # Lazy import to avoid pulling policy_sentry at module load.
+        from .plan_capture.classifier import classify_action
+        read_count = 0
+        write_count = 0
+        for service, action, n in pair_counts:
+            n = int(n or 0)
+            klass = classify_action(service or "", action or "")
+            if klass == "write":
+                write_count += n
+            elif klass == "read":
+                read_count += n
+            # Unknown/unclassifiable calls are intentionally counted in
+            # NEITHER bucket — the operator sees call_count - (read +
+            # write) > 0 as a hint that some calls couldn't be classified
+            # (e.g. unsupported synthetic op, missing service name).
         return {
             "session_id": session_id,
             "call_count": int(mm[2] or 0),
@@ -1565,6 +1995,8 @@ class BouncerStore:
             "services": services,
             "would_have_called": actions,
             "unsupported_total": unsupported_total,
+            "read_count": read_count,
+            "write_count": write_count,
             **counts,
         }
 

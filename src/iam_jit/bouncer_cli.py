@@ -1605,21 +1605,46 @@ def prompts_group() -> None:
 @click.option("--status", default="pending", show_default=True,
               type=click.Choice(["pending", "answered", "ignored"]))
 @click.option("--limit", type=int, default=20, show_default=True)
+@click.option("--kind", default=None,
+              type=click.Choice(["deny-prompt", "plan-write"], case_sensitive=False),
+              help="#145 prompt-kind filter: omit to see BOTH kinds "
+                   "(deny-prompts from --prompt-on-deny + plan-write "
+                   "prompts from --mode plan-capture's read->write "
+                   "switch); pass to filter to one. Kind is shown in "
+                   "the rendered table either way.")
 @click.option("--db", type=click.Path(dir_okay=False), default=None)
-def prompts_list_cmd(status: str, limit: int, db: str | None) -> None:
-    """Show prompts in the queue."""
+def prompts_list_cmd(
+    status: str, limit: int, kind: str | None, db: str | None,
+) -> None:
+    """Show prompts in the queue.
+
+    #145: the queue now contains TWO kinds of prompt:
+      - `deny-prompt` — transparent-mode DENY surfaced via
+        `--prompt-on-deny` (#5); answer with --kind always/profile/ignore
+      - `plan-write` — first write in a plan-capture session under
+        --write-switch-notify=manual (#145); answer with
+        `--kind plan-write --decision approve|reject`
+
+    The kind is rendered per row + can be filtered via `--kind`.
+    """
     with _opened_store(db) as store:
-        rows = store.list_pending_prompts(status=status, limit=limit)
+        rows = store.list_pending_prompts(
+            status=status, limit=limit, kind=kind,
+        )
     if not rows:
-        click.echo(f"(no {status} prompts)")
+        scope = f"{kind} " if kind else ""
+        click.echo(f"(no {status} {scope}prompts)")
         return
-    click.echo(f"{'id':>5}  {'at':<20}  {'service':<10}  action")
-    click.echo("-" * 78)
+    click.echo(f"{'id':>5}  {'kind':<12}  {'at':<20}  {'service':<10}  action")
+    click.echo("-" * 90)
     for r in rows:
         click.echo(
-            f"{r['id']:>5}  {r['created_at']:<20}  "
+            f"{r['id']:>5}  {r.get('kind') or 'deny-prompt':<12}  "
+            f"{r['created_at']:<20}  "
             f"{r['service']:<10}  {r['action']}"
         )
+        if r.get("session_id"):
+            click.echo(f"        session: {r['session_id']}")
         if r["arn"]:
             click.echo(f"        arn: {r['arn']}")
         click.echo(f"        reason: {r['deny_reason']}")
@@ -1641,12 +1666,15 @@ def prompts_show_cmd(prompt_id: int, db: str | None) -> None:
 @prompts_group.command("answer")
 @click.argument("prompt_id", type=int)
 @click.option("--kind", required=True,
-              type=click.Choice(["always", "profile", "ignore"]),
+              type=click.Choice(["always", "profile", "ignore", "plan-write"]),
               help="always = add a global ALLOW rule for the exact "
                    "service:action[+arn] of this prompt. profile = "
                    "append an allow_rule to --target NAME (must be "
                    "a local profile, not org-distributed). ignore = "
-                   "mark answered without side effect.")
+                   "mark answered without side effect. plan-write "
+                   "(#145) = approve/reject the first-write-in-session "
+                   "transition for a plan-capture session; use with "
+                   "--decision approve|reject.")
 @click.option("--target", default=None,
               is_flag=False, flag_value=_AUTO_NAME_SENTINEL,
               metavar="[NAME]",
@@ -1658,9 +1686,18 @@ def prompts_show_cmd(prompt_id: int, db: str | None) -> None:
                    "prints to stderr). If the chosen name doesn't yet "
                    "exist, the profile is created (as a local profile) "
                    "before the allow_rule is appended.")
+@click.option("--decision",
+              type=click.Choice(["approve", "reject"], case_sensitive=False),
+              default=None,
+              help="#145 — required for --kind plan-write. approve = "
+                   "transition session to writes_approved (subsequent "
+                   "writes still get success synthetic). reject = "
+                   "transition to writes_rejected (subsequent writes "
+                   "get PlanCaptureWritesRejected synthetic error).")
 @click.option("--db", type=click.Path(dir_okay=False), default=None)
 def prompts_answer_cmd(
-    prompt_id: int, kind: str, target: str | None, db: str | None,
+    prompt_id: int, kind: str, target: str | None,
+    decision: str | None, db: str | None,
 ) -> None:
     """Answer a pending prompt + apply the side-effect."""
     from .bouncer.profiles import (
@@ -1670,6 +1707,75 @@ def prompts_answer_cmd(
         upsert_profile,
     )
     actor = _current_actor()
+    # #145 — plan-write answer path. Handled BEFORE the deny-prompt
+    # branches because the side effect (session phase transition) is
+    # completely different and the schema we read off the prompt row
+    # is different (session_id vs arn-scope). Validation:
+    #   --decision is required
+    #   --target / --kind=always|profile|ignore are NOT valid here
+    if kind == "plan-write":
+        if not decision:
+            click.secho(
+                "--kind plan-write requires --decision approve|reject",
+                fg="red", err=True,
+            )
+            sys.exit(2)
+        if target is not None:
+            click.secho(
+                "--target is not valid with --kind plan-write "
+                "(plan-write prompts are session-scoped, not "
+                "profile-scoped).",
+                fg="red", err=True,
+            )
+            sys.exit(2)
+        with _opened_store(db) as store:
+            prompt = store.get_pending_prompt(prompt_id)
+            if prompt is None:
+                click.secho(
+                    f"prompt #{prompt_id} not found", fg="red", err=True,
+                )
+                sys.exit(1)
+            if prompt.get("kind") != "plan-write":
+                click.secho(
+                    f"prompt #{prompt_id} is kind={prompt.get('kind')!r}, "
+                    f"not 'plan-write'. Use the appropriate --kind for "
+                    f"deny-prompts (always/profile/ignore).",
+                    fg="red", err=True,
+                )
+                sys.exit(2)
+            if prompt["status"] != "pending":
+                click.secho(
+                    f"prompt #{prompt_id} already {prompt['status']!r}; "
+                    f"nothing to do",
+                    fg="yellow",
+                )
+                return
+            answered = store.answer_plan_write_prompt(
+                prompt_id, decision=decision.lower(), answered_by=actor,
+            )
+            if answered is None:
+                click.secho(
+                    f"prompt #{prompt_id}: answer not recorded (race?)",
+                    fg="yellow",
+                )
+                return
+            target_phase = (
+                "writes_approved" if decision.lower() == "approve"
+                else "writes_rejected"
+            )
+            store.transition_plan_session_phase(
+                answered["session_id"],
+                new_phase=target_phase,
+                decision=decision.lower(),
+                decided_by=actor,
+            )
+        click.secho(
+            f"plan-write prompt #{prompt_id} answered: {decision.lower()} "
+            f"(session {answered['session_id']} -> {target_phase})",
+            fg="green",
+        )
+        return
+
     # #226 profile-auto-naming: `target` is now optional for --kind
     # profile. If the operator passed neither `--target` nor
     # `--target NAME`, that's still an error (need to opt in to the
@@ -1684,12 +1790,32 @@ def prompts_answer_cmd(
             fg="red", err=True,
         )
         sys.exit(2)
+    # Guard against --decision passed without --kind plan-write
+    if decision is not None:
+        click.secho(
+            "--decision is only valid with --kind plan-write",
+            fg="red", err=True,
+        )
+        sys.exit(2)
 
     with _opened_store(db) as store:
         prompt = store.get_pending_prompt(prompt_id)
         if prompt is None:
             click.secho(f"prompt #{prompt_id} not found", fg="red", err=True)
             sys.exit(1)
+        # #145 — refuse to apply a deny-prompt answer-kind to a
+        # plan-write prompt id. Without this, an operator with a
+        # typo'd --kind would silently mark the plan-write row as
+        # answered with the wrong semantics + the session phase
+        # wouldn't transition.
+        if prompt.get("kind") == "plan-write":
+            click.secho(
+                f"prompt #{prompt_id} is a plan-write prompt; use "
+                f"`--kind plan-write --decision approve|reject` "
+                f"instead of --kind {kind!r}.",
+                fg="red", err=True,
+            )
+            sys.exit(2)
         if prompt["status"] != "pending":
             click.secho(
                 f"prompt #{prompt_id} already {prompt['status']!r}; nothing to do",
@@ -1992,6 +2118,25 @@ def _parse_duration(raw: str) -> int:
          "default — every serve() invocation gets its own session).",
 )
 @click.option(
+    "--write-switch-notify",
+    "write_switch_notify",
+    type=click.Choice(["manual", "auto-approve", "reject"], case_sensitive=False),
+    default="manual",
+    show_default=True,
+    help="#145 read->write switch UX (plan-capture mode only). "
+         "Configures what happens on the FIRST write call in the "
+         "session: manual enqueues a plan-write prompt for the "
+         "operator (answer via `ibounce prompts answer ID "
+         "--kind plan-write --decision approve|reject`; write still "
+         "gets synthetic success either way); auto-approve flips "
+         "the session to writes_approved silently; reject flips to "
+         "writes_rejected so subsequent writes get a typed "
+         "PlanCaptureWritesRejected synthetic error. Per "
+         "[[ibounce-honest-positioning]] this is a deterrent UX "
+         "helper; plan-capture's actual safety property "
+         "(never-forward) is identical across the three settings.",
+)
+@click.option(
     "--default-policy",
     type=click.Choice(["allow", "deny"], case_sensitive=False),
     default="deny",
@@ -2027,7 +2172,9 @@ def _parse_duration(raw: str) -> int:
 @click.option("--db", type=click.Path(dir_okay=False), default=None)
 def run_cmd(
     port: int, host: str, force_external_bind: bool, prompt_on_deny: bool,
-    mode: str, plan_session_id: str | None, default_policy: str,
+    mode: str, plan_session_id: str | None,
+    write_switch_notify: str,
+    default_policy: str,
     profile_name: str | None,
     account_id_flag: str | None,
     account_alias_flag: str | None,
@@ -2100,6 +2247,7 @@ def run_cmd(
         account_alias=account_alias_flag,
         prompt_on_deny=prompt_on_deny,
         plan_session_id=plan_session_id,
+        plan_write_switch_notify=write_switch_notify.lower(),
     )
 
     # #132 plan-capture: surface the session id (operator-supplied or
@@ -2118,6 +2266,22 @@ def run_cmd(
         click.echo(
             f"plan-capture session: {resolved_pid}  "
             f"(view: ibounce plan show {resolved_pid})",
+            err=True,
+        )
+        # #145 — surface the write-switch UX up-front so the operator
+        # knows what will happen on the agent's first write call.
+        click.echo(
+            f"  write-switch-notify={write_switch_notify.lower()}  "
+            f"(first write transitions phase: read_only -> "
+            + {
+                "manual": "write_pending + prompt; answer via "
+                          "`ibounce prompts answer ID --kind plan-write "
+                          "--decision approve|reject`",
+                "auto-approve": "writes_approved silently (no prompt)",
+                "reject": "writes_rejected; subsequent writes get a "
+                          "PlanCaptureWritesRejected synthetic error",
+            }[write_switch_notify.lower()]
+            + ")",
             err=True,
         )
 
@@ -2282,6 +2446,26 @@ def plan_show_cmd(session_id: str, db: str | None, as_json: bool) -> None:
         f"deny={session['deny_count']} "
         f"unsupported={session['unsupported_count']}"
     )
+    # #145 — phase + write-switch state. Always shown (even for sessions
+    # that never crossed read->write) so a quick glance at `plan show`
+    # tells the operator exactly which side of the switch this session
+    # ended on + which UX it was configured for.
+    click.echo(
+        f"  phase={session.get('phase', 'read_only')}  "
+        f"write-switch-notify={session.get('write_switch_notify', 'manual')}  "
+        f"reads={session.get('read_count', 0)} "
+        f"writes={session.get('write_count', 0)}"
+    )
+    if session.get("first_write_at"):
+        click.echo(
+            f"  first-write-at: {session['first_write_at']}"
+        )
+    if session.get("write_decision"):
+        click.echo(
+            f"  write-decision: {session['write_decision']} "
+            f"by={session.get('write_decision_by') or 'unknown'} "
+            f"at={session.get('write_decision_at') or ''}"
+        )
     if session["note"]:
         click.echo(f"  note: {session['note']}")
     if not calls:

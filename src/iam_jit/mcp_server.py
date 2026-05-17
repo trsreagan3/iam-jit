@@ -1473,19 +1473,22 @@ TOOLS = [
         "name": "bouncer_plan_session_summary",
         "description": (
             "Return a roll-up of one plan-capture session — counts of "
-            "allows / denies / prompts / unsupported, the services + "
-            "would-have-called actions touched, and first/last call "
-            "timestamps. Plan-capture (#132) is the 4th proxy mode: "
-            "every intercepted SDK call is parsed + audited + returned "
-            "with a synthetic SDK-shaped success — nothing forwards to "
-            "AWS. Per [[ibounce-honest-positioning]] this is operator "
-            "PREVIEW, not a security boundary. Pass `session_id` to "
-            "look up a specific session (from `ibounce plan list`); "
-            "omit to get the session the proxy is CURRENTLY writing "
-            "into (or null if plan-capture isn't running in this "
-            "process). Returns zero-count shape for a known session "
-            "with no calls yet; returns `{\"error\": \"...\"}` for "
-            "unknown session ids."
+            "allows / denies / prompts / unsupported, reads vs writes, "
+            "the services + would-have-called actions touched, "
+            "first/last call timestamps, AND the session's #145 "
+            "write-switch state (phase / write_switch_notify / "
+            "first_write_at / write_decision + answered-by + "
+            "pending_prompt_id if any). Plan-capture (#132) is the "
+            "4th proxy mode: every intercepted SDK call is parsed + "
+            "audited + returned with a synthetic SDK-shaped success — "
+            "nothing forwards to AWS. Per [[ibounce-honest-positioning]] "
+            "this is operator PREVIEW, not a security boundary. Pass "
+            "`session_id` to look up a specific session (from `ibounce "
+            "plan list`); omit to get the session the proxy is "
+            "CURRENTLY writing into (or null if plan-capture isn't "
+            "running in this process). Returns zero-count shape for a "
+            "known session with no calls yet; returns "
+            "`{\"error\": \"...\"}` for unknown session ids."
         ),
         "inputSchema": {
             "type": "object",
@@ -1496,6 +1499,47 @@ TOOLS = [
                         "Plan-capture session id (e.g. "
                         "'plan-20260518T141221Z-a3b4c5'). Omit to "
                         "use the proxy's currently-active session."
+                    ),
+                },
+            },
+        },
+    },
+    {
+        "name": "bouncer_plan_pending_write_prompt",
+        "description": (
+            "#145 — return the current pending plan-write prompt for "
+            "a plan-capture session (if any), so an agent can "
+            "introspect 'should I wait for operator approval before "
+            "continuing?'. Plan-write prompts fire when the agent "
+            "transitions from a sequence of READ calls to its FIRST "
+            "WRITE call in a plan-capture session running under "
+            "--write-switch-notify=manual (the default). The agent's "
+            "write call already got a synthetic-success response back "
+            "(plan-capture never forwards); the prompt is for the "
+            "OPERATOR's decision about subsequent writes (approve "
+            "lets them continue; reject swaps them for a typed "
+            "PlanCaptureWritesRejected synthetic error). DETERMINISTIC "
+            "— pure SQL query, no LLM. Returns null on `pending` field "
+            "when the session has no pending plan-write prompt (i.e. "
+            "the agent is still in read_only, OR the operator already "
+            "answered, OR the session is using auto-approve/reject "
+            "which never enqueue a prompt). Per "
+            "[[ibounce-honest-positioning]] this is a deterrent UX "
+            "helper for the operator; an adversarial agent could "
+            "always ignore the pending prompt and call writes "
+            "anyway — the synthetic-response is identical in either "
+            "case."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "session_id": {
+                    "type": "string",
+                    "description": (
+                        "Plan-capture session id. Omit to use the "
+                        "proxy's currently-active session (the in-"
+                        "process slot set by `ibounce serve --mode "
+                        "plan-capture`)."
                     ),
                 },
             },
@@ -2442,6 +2486,70 @@ def _bouncer_plan_session_summary_for_mcp(args: dict[str, Any]) -> dict[str, Any
         # Surface the merged shape directly — agents get one flat
         # JSON instead of nested {session: ..., summary: ...}.
         return session
+    finally:
+        store.close()
+
+
+def _bouncer_plan_pending_write_prompt_for_mcp(
+    args: dict[str, Any],
+) -> dict[str, Any]:
+    """#145 — return the pending plan-write prompt for a session.
+
+    Resolution order for the target session_id matches
+    `_bouncer_plan_session_summary_for_mcp`:
+      1. `args["session_id"]` (operator-supplied)
+      2. `plan_capture.current_session_id()` (the in-process slot set
+         by `ibounce serve --mode plan-capture`)
+
+    Return shape:
+      - On success with a pending plan-write prompt:
+            {"session_id": str, "phase": str, "pending": {prompt row}}
+      - On success without a pending plan-write prompt:
+            {"session_id": str, "phase": str, "pending": null}
+      - On unresolvable session id:
+            {"error": "..."}
+
+    DETERMINISTIC: pure SQL via the store's `get_pending_plan_write_
+    prompt` + `get_plan_session_phase` helpers. No LLM involvement.
+    Per [[agent-friendly-not-bypassable]] this is READ-ONLY — agents
+    introspect but cannot answer the prompt (the operator answers via
+    `ibounce prompts answer ID --kind plan-write --decision X`).
+    """
+    from .bouncer.plan_capture import current_session_id
+    from .bouncer.store import BouncerStore
+
+    session_id = args.get("session_id")
+    if session_id is not None and not isinstance(session_id, str):
+        return {"error": "session_id must be a string if provided"}
+    if session_id is None:
+        session_id = current_session_id()
+    if not session_id:
+        return {
+            "error": (
+                "no session_id supplied AND no plan-capture session is "
+                "active in this process. Start one via `ibounce serve "
+                "--mode plan-capture` or pass an explicit session_id "
+                "(see `ibounce plan list`)."
+            ),
+        }
+    store = BouncerStore()
+    try:
+        phase_row = store.get_plan_session_phase(session_id)
+        if phase_row is None:
+            return {
+                "error": (
+                    f"no plan-capture session with id {session_id!r}; "
+                    f"run `ibounce plan list` to see available ids"
+                ),
+            }
+        prompt = store.get_pending_plan_write_prompt(session_id)
+        return {
+            "session_id": session_id,
+            "phase": phase_row["phase"],
+            "write_switch_notify": phase_row["write_switch_notify"],
+            "first_write_at": phase_row.get("first_write_at"),
+            "pending": prompt,  # null if no pending plan-write prompt
+        }
     finally:
         store.close()
 
@@ -3456,6 +3564,8 @@ def _handle_request(req: dict[str, Any]) -> dict[str, Any] | None:
             result_payload = _bouncer_active_mode_for_mcp(args)
         elif tool_name == "bouncer_plan_session_summary":
             result_payload = _bouncer_plan_session_summary_for_mcp(args)
+        elif tool_name == "bouncer_plan_pending_write_prompt":
+            result_payload = _bouncer_plan_pending_write_prompt_for_mcp(args)
         elif tool_name == "bouncer_recommend_mode_for_task":
             result_payload = _bouncer_recommend_mode_for_task_for_mcp(args)
         elif tool_name == "bouncer_task_review":

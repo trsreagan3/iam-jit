@@ -134,6 +134,75 @@ def _build_unsupported_response(
 # single import to reference rather than parsing the dataclass.
 UNSUPPORTED_OP_SHAPE = "unsupported"
 
+# #145 — sentinel for the writes-rejected synthetic shape. The proxy
+# calls `build_writes_rejected_response` when the session phase is
+# `writes_rejected` (either via --write-switch-notify=reject, or via
+# an operator's explicit reject on the plan-write prompt).
+WRITES_REJECTED_SHAPE = "writes_rejected"
+
+
+def build_writes_rejected_response(
+    *, service: str, action: str,
+) -> PlanCaptureSynthetic:
+    """Return a synthetic SDK-shaped ERROR response for a write call
+    in a session whose phase is `writes_rejected` (#145).
+
+    Distinct from the unsupported-op response: this is NOT "we don't
+    know how to fake it"; it's "the operator told us to reject any
+    write in this session." Surfaces a typed error code
+    `PlanCaptureWritesRejected` + a clear message so the agent's SDK
+    raises a recognizable client error.
+
+    Stays in the JSON-RPC error envelope (vs an XML-style error)
+    because the SDK clients across the registered services all
+    surface `Error.Code` from JSON bodies, while only a subset rely
+    on XML; the JSON envelope is the broadest-compatible shape. The
+    400 status code matches the `_build_unsupported_response`
+    precedent so callers that already handle "plan-capture
+    advisory error" see this through the same path.
+
+    Per [[creates-never-mutates]]: this response is still a SYNTHETIC.
+    Nothing reaches AWS regardless of the operator's decision.
+    """
+    payload = {
+        "__plan_capture": True,
+        "Error": {
+            "Code": "PlanCaptureWritesRejected",
+            "Message": (
+                f"ibounce plan-capture: operator REJECTED write calls in "
+                f"this session. {service}:{action} was NOT forwarded to "
+                f"AWS (plan-capture never forwards). Re-run with "
+                f"--write-switch-notify=manual + answer 'approve' on "
+                f"the plan-write prompt to allow writes, or switch to "
+                f"--mode transparent / cooperative if you want the call "
+                f"to execute against AWS."
+            ),
+            "Service": service,
+            "Action": action,
+        },
+        "RequestId": _synthetic_request_id(),
+    }
+    body = json.dumps(payload).encode("utf-8")
+    return PlanCaptureSynthetic(
+        status=400,
+        headers={
+            "content-type": "application/x-amz-json-1.1",
+            "x-amzn-requestid": payload["RequestId"],
+            "x-iam-jit-bouncer-plan-capture-writes-rejected": "true",
+        },
+        body=body,
+        would_have_returned={
+            "kind": WRITES_REJECTED_SHAPE,
+            "service": service,
+            "action": action,
+            "note": (
+                "plan-capture session is in writes_rejected phase; the "
+                "operator's reject answer (or --write-switch-notify=reject) "
+                "blocked this write at the proxy"
+            ),
+        },
+    )
+
 
 # ---------------------------------------------------------------------------
 # Per-service synthesizers

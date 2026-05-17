@@ -224,6 +224,31 @@ class ProxyConfig:
     didn't get an explicit --plan-session-id and the serve() entry
     point will mint one at startup." Only consulted when
     `mode == ProxyMode.PLAN_CAPTURE`."""
+    plan_write_switch_notify: str = "manual"
+    """#145 plan-capture read->write switch UX. Configures what
+    happens on the FIRST write call in a plan-capture session
+    (read_only -> write_pending|writes_approved|writes_rejected).
+
+      - 'manual' (default): transition to write_pending + enqueue a
+        plan-write prompt; the operator answers approve/reject via
+        `ibounce prompts answer ID --kind plan-write --decision X`.
+        The write call still gets the synthetic-success response —
+        plan-capture NEVER forwards regardless. The decision controls
+        whether SUBSEQUENT writes get success (approve) or rejection
+        synthetic (reject).
+      - 'auto-approve': transition silently to writes_approved on the
+        first write; no prompt. Operator sees the phase + first_write
+        timestamp on `plan show` at session end.
+      - 'reject': transition straight to writes_rejected on the first
+        write; subsequent writes get a PlanCaptureWritesRejected
+        synthetic error (not a success).
+
+    Per [[ibounce-honest-positioning]]: this is a deterrent UX helper,
+    NOT a security boundary. An adversarial agent can call writes
+    without preceding reads; we still flip the phase + still surface
+    the prompt, but plan-capture's actual safety property is
+    "synthetic responses, never AWS" (which is identical regardless
+    of the write-switch decision)."""
     # Don't bind to 0.0.0.0 by default — proxy is a LOCAL-ONLY
     # thing per the local-only-safety-mode + no-hosted-saas memos.
     # Binding externally would silently expose a credential-handling
@@ -726,6 +751,17 @@ async def _plan_capture_response(
     plan_calls row. Called from `_handle_request` when
     `config.mode == ProxyMode.PLAN_CAPTURE`. Never forwards anything.
 
+    #145 layer: this is also where the read->write switch UX fires.
+    Every plan-capture call is classified read/write via the policy_
+    sentry-backed classifier; the FIRST write in a session transitions
+    the session's phase per --write-switch-notify
+    (manual → write_pending + prompt; auto-approve → writes_approved
+    silently; reject → writes_rejected). Once the session is in
+    writes_rejected, subsequent writes get a PlanCaptureWritesRejected
+    synthetic error instead of a success synthetic. The
+    creates-never-mutates invariant is unchanged: NOTHING reaches AWS
+    in any phase.
+
     Two failure modes are surfaced inline (not raised) so the proxy
     stays alive under malformed inbound traffic:
       - Unclassifiable request (no SigV4) → unsupported-op error
@@ -740,6 +776,8 @@ async def _plan_capture_response(
     from .plan_capture import (
         PlanCaptureSynthetic,
         UNSUPPORTED_OP_SHAPE,
+        build_writes_rejected_response,
+        classify_action,
         current_session_id,
         synthesize_response,
     )
@@ -773,9 +811,44 @@ async def _plan_capture_response(
         # the operator notices the missing transcript and investigates.
         logger.warning("plan-capture ensure_session failed: %s", e)
 
+    # Pin the notify mode for this session if not already set. Idempotent
+    # via the UPDATE — we don't track whether `serve()` set it first.
+    # Catch errors so a transient DB blip doesn't drop the call; the
+    # phase logic below will fall through to the default ('manual')
+    # via get_plan_session_phase()'s defaulting.
+    try:
+        store.set_plan_session_write_switch_notify(
+            session_id, config.plan_write_switch_notify,
+        )
+    except (ValueError, Exception) as e:
+        logger.warning("plan-capture set_write_switch_notify failed: %s", e)
+
     service = obs.parsed_service or ""
     action = obs.parsed_action or ""
     host_header = request.headers.get("host", "")
+
+    # #145 — phase resolution + transition. Done BEFORE building the
+    # synthetic response so the writes_rejected branch can swap in the
+    # rejection synthetic. classify_action is policy_sentry-backed
+    # (Read/List → 'read'; Write/Tagging/Permissions-management →
+    # 'write'); unknown actions classify as 'unknown' which we treat
+    # as write per the conservative-default policy in is_write().
+    action_class = classify_action(service, action) if (service and action) else "unknown"
+    is_write_call = action_class != "read"  # unknown counts as write
+    # Read current phase (or default for fresh sessions).
+    try:
+        phase_row = store.get_plan_session_phase(session_id)
+    except Exception as e:
+        logger.warning("plan-capture get_plan_session_phase failed: %s", e)
+        phase_row = None
+    current_phase = (phase_row or {}).get("phase", "read_only")
+    effective_notify = (
+        (phase_row or {}).get("write_switch_notify")
+        or config.plan_write_switch_notify
+        or "manual"
+    )
+    # Default: build the registered synthetic. Overridden below for the
+    # writes-rejected branch (subsequent writes in a rejected session).
     synth: PlanCaptureSynthetic = synthesize_response(
         service=service,
         action=action,
@@ -784,11 +857,97 @@ async def _plan_capture_response(
         body=body,
         query=dict(request.query),
     )
+    # Phase machine — only writes drive transitions; reads NEVER move
+    # the phase forward. The state diagram:
+    #
+    #   read_only  --write+manual-->       write_pending
+    #   read_only  --write+auto-approve--> writes_approved
+    #   read_only  --write+reject-->       writes_rejected
+    #   write_pending   --write-->         write_pending  (stays)
+    #   writes_approved --write-->         writes_approved (stays)
+    #   writes_rejected --write-->         writes_rejected (subsequent writes
+    #                                       get the rejection synthetic)
+    if is_write_call and service and action:
+        if current_phase == "read_only":
+            if effective_notify == "auto-approve":
+                try:
+                    store.transition_plan_session_phase(
+                        session_id,
+                        new_phase="writes_approved",
+                        decision="approve",
+                        decided_by="auto-approve",
+                        first_write_at=obs.at,
+                    )
+                except Exception as e:
+                    logger.warning(
+                        "plan-capture phase-transition (auto-approve) failed: %s", e,
+                    )
+            elif effective_notify == "reject":
+                try:
+                    store.transition_plan_session_phase(
+                        session_id,
+                        new_phase="writes_rejected",
+                        decision="reject",
+                        decided_by="auto-reject",
+                        first_write_at=obs.at,
+                    )
+                except Exception as e:
+                    logger.warning(
+                        "plan-capture phase-transition (reject) failed: %s", e,
+                    )
+                # Swap to the rejection synthetic so the SDK surfaces a
+                # typed PlanCaptureWritesRejected error.
+                synth = build_writes_rejected_response(
+                    service=service, action=action,
+                )
+            else:  # manual
+                try:
+                    store.transition_plan_session_phase(
+                        session_id,
+                        new_phase="write_pending",
+                        first_write_at=obs.at,
+                    )
+                except Exception as e:
+                    logger.warning(
+                        "plan-capture phase-transition (write_pending) failed: %s", e,
+                    )
+                try:
+                    store.add_plan_write_prompt(
+                        session_id=session_id,
+                        service=service,
+                        action=action,
+                        arn=obs.parsed_arn,
+                        region=obs.parsed_region,
+                    )
+                except Exception as e:
+                    logger.warning(
+                        "plan-capture add_plan_write_prompt failed: %s", e,
+                    )
+        elif current_phase == "writes_rejected":
+            # Subsequent writes in a rejected session get the rejection
+            # synthetic; we don't re-prompt or re-transition.
+            synth = build_writes_rejected_response(
+                service=service, action=action,
+            )
+
     supported = (
-        synth.would_have_returned.get("kind") != UNSUPPORTED_OP_SHAPE
+        synth.would_have_returned.get("kind") not in (
+            UNSUPPORTED_OP_SHAPE, "writes_rejected",
+        )
         and bool(service) and bool(action)
     )
-    verdict = obs.decision_verdict if supported else "unsupported"
+    # Verdict on the plan-call row reflects what happened. We distinguish
+    # 'writes_rejected' from 'unsupported' on the row so post-hoc readers
+    # can see "the operator rejected" vs "the synthetic registry had no
+    # shape." The existing 4-value verdict enum (allow/deny/prompt/
+    # unsupported) gains 'writes_rejected' here without a schema change
+    # (the column is plain TEXT).
+    if synth.would_have_returned.get("kind") == "writes_rejected":
+        verdict = "writes_rejected"
+    elif supported:
+        verdict = obs.decision_verdict
+    else:
+        verdict = "unsupported"
     would_have_called = (
         f"{service}:{action}" if (service or action) else "unknown:unknown"
     )
@@ -818,6 +977,17 @@ async def _plan_capture_response(
     out_headers["x-iam-jit-bouncer-mode"] = ProxyMode.PLAN_CAPTURE.value
     out_headers["x-iam-jit-bouncer-verdict"] = verdict
     out_headers["x-iam-jit-bouncer-plan-session"] = session_id
+    # #145 — surface the phase so operators sniffing wire traffic can
+    # tell at a glance which side of the read->write switch each call
+    # landed on. Re-read after the transition so the header reflects
+    # the POST-transition phase, not the value we read pre-transition.
+    try:
+        post_row = store.get_plan_session_phase(session_id)
+        out_headers["x-iam-jit-bouncer-plan-phase"] = (
+            (post_row or {}).get("phase") or "read_only"
+        )
+    except Exception:
+        out_headers["x-iam-jit-bouncer-plan-phase"] = "read_only"
     return web.Response(body=synth.body, status=synth.status, headers=out_headers)
 
 
@@ -1052,11 +1222,33 @@ async def serve(config: ProxyConfig, *, store: BouncerStore) -> None:
             logger.warning(
                 "plan-capture serve: failed to persist session header: %s", e,
             )
+        # #145 — pin the write-switch notify mode for this session at
+        # startup so per-call code reads the SAME value the operator
+        # configured at process start (resilient to a future hot-reload
+        # of ProxyConfig). Validation lives in
+        # set_plan_session_write_switch_notify; we surface its error
+        # via logger.warning so a typo'd flag (caught by Click's
+        # Choice already, but defense in depth) doesn't crash serve().
+        try:
+            store.set_plan_session_write_switch_notify(
+                resolved_session_id, config.plan_write_switch_notify,
+            )
+        except ValueError as e:
+            logger.warning(
+                "plan-capture serve: invalid write_switch_notify value "
+                "(%s); leaving session at default 'manual'",
+                e,
+            )
+        except Exception as e:
+            logger.warning(
+                "plan-capture serve: failed to pin write_switch_notify: %s", e,
+            )
         logger.info(
             "plan-capture mode active; session_id=%s "
+            "write_switch_notify=%s "
             "(every call is parsed + audited + returned-with-synthetic; "
             "nothing forwards to AWS)",
-            resolved_session_id,
+            resolved_session_id, config.plan_write_switch_notify,
         )
 
     async def handler(request):

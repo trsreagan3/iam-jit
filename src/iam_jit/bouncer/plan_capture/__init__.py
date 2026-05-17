@@ -41,6 +41,7 @@ Public surface (consumed by proxy.py + bouncer_cli.py + mcp_server.py):
 
 from __future__ import annotations
 
+from .classifier import classify_action, is_read, is_write
 from .sessions import (
     current_session_id,
     new_session_id,
@@ -51,6 +52,8 @@ from .synthetics import (
     PlanCaptureSynthetic,
     UNSUPPORTED_OP_SHAPE,
     SUPPORTED_OPERATIONS,
+    WRITES_REJECTED_SHAPE,
+    build_writes_rejected_response,
     is_supported,
     synthesize_response,
 )
@@ -59,8 +62,13 @@ __all__ = [
     "PlanCaptureSynthetic",
     "SUPPORTED_OPERATIONS",
     "UNSUPPORTED_OP_SHAPE",
+    "WRITES_REJECTED_SHAPE",
+    "build_writes_rejected_response",
+    "classify_action",
     "current_session_id",
+    "is_read",
     "is_supported",
+    "is_write",
     "new_session_id",
     "reset_session_for_tests",
     "set_session_id",
