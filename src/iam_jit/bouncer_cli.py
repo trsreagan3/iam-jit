@@ -1558,6 +1558,134 @@ def _install_one_profile(profile: "Profile", source_url: str) -> None:
     resolved.write_text(_yaml.safe_dump(existing, sort_keys=False))
 
 
+@main.group("pause")
+def pause_group() -> None:
+    """Timed escape hatch — temporarily demote the proxy to advisory
+    (cooperative) mode for a window. The proxy keeps observing +
+    logging every call (the decisions audit row links to the pause
+    id so reviewers can ask "what happened inside that window?"),
+    but DENY verdicts no longer return 403 to the client. Auto-
+    reverts at expiry; resume early with `pause stop`.
+
+    Use this when you NEED to do something the rules don't permit
+    and editing rules would take longer than the work. Per the
+    safety-mode-lean-permissive memo: this is the friendlier
+    middle ground between "Ctrl-C the proxy" and "redo my rules."
+    """
+
+
+@pause_group.command("start")
+@click.option("--for", "duration", required=True, metavar="DURATION",
+              help="How long to pause. Format: '30m' / '2h' / '90s'. "
+                   "Max 24h (longer windows are an 'I don't want the "
+                   "proxy' signal — just stop the daemon instead).")
+@click.option("--reason", default="",
+              help="One-line reason recorded in the pause audit row + "
+                   "shown on /healthz. e.g. 'incident response' / "
+                   "'one-off bucket cleanup' / 'cluster migration'.")
+@click.option("--db", type=click.Path(dir_okay=False), default=None)
+def pause_start_cmd(duration: str, reason: str, db: str | None) -> None:
+    """Open a new pause window."""
+    seconds = _parse_duration(duration)
+    actor = _current_actor()
+    with _opened_store(db) as store:
+        try:
+            pid = store.start_pause(
+                duration_seconds=seconds, reason=reason, started_by=actor,
+            )
+        except ValueError as e:
+            click.secho(f"pause refused: {e}", fg="red", err=True)
+            sys.exit(2)
+        active = store.get_active_pause()
+    assert active is not None
+    click.secho(
+        f"pause #{pid} active — proxy is COOPERATIVE for the next "
+        f"{duration} (ends at {active['ends_at']}).",
+        fg="yellow",
+    )
+    click.echo("Every call during this window is still recorded in the "
+               "decisions audit log with pause_id linkage.")
+    click.echo("Run `iam-jit-bouncer pause stop` to end early.")
+
+
+@pause_group.command("stop")
+@click.option("--db", type=click.Path(dir_okay=False), default=None)
+def pause_stop_cmd(db: str | None) -> None:
+    """End the currently-active pause (if any)."""
+    actor = _current_actor()
+    with _opened_store(db) as store:
+        pid = store.end_pause(ended_by=actor)
+    if pid is None:
+        click.echo("no pause is currently active.")
+        return
+    click.secho(f"pause #{pid} ended early.", fg="green")
+
+
+@pause_group.command("status")
+@click.option("--db", type=click.Path(dir_okay=False), default=None)
+def pause_status_cmd(db: str | None) -> None:
+    """Show the current pause window, if any."""
+    with _opened_store(db) as store:
+        active = store.get_active_pause()
+    if active is None:
+        click.echo("no pause active. Proxy enforces per configured mode.")
+        return
+    click.secho(
+        f"pause #{active['id']} ACTIVE "
+        f"(started {active['started_at']}, ends {active['ends_at']}, "
+        f"by {active['started_by']})",
+        fg="yellow",
+    )
+    if active["reason"]:
+        click.echo(f"  reason: {active['reason']}")
+
+
+@pause_group.command("history")
+@click.option("--limit", type=int, default=20, show_default=True)
+@click.option("--db", type=click.Path(dir_okay=False), default=None)
+def pause_history_cmd(limit: int, db: str | None) -> None:
+    """Show recent pause windows for audit review."""
+    with _opened_store(db) as store:
+        rows = store.list_recent_pauses(limit=limit)
+    if not rows:
+        click.echo("(no pauses recorded)")
+        return
+    for r in rows:
+        end_kind = r["end_kind"] or "(still active)"
+        ended = r["ended_at_actual"] or "(open)"
+        click.echo(
+            f"#{r['id']}  started={r['started_at']}  "
+            f"ends_at={r['ends_at']}  actual_end={ended}  "
+            f"kind={end_kind}  by={r['started_by']}"
+        )
+        if r["reason"]:
+            click.echo(f"   reason: {r['reason']}")
+
+
+def _parse_duration(raw: str) -> int:
+    """Parse '30m' / '2h' / '90s' into seconds.
+
+    Picks suffix-based parsing rather than something like ISO 8601
+    durations because operators tend to type `30m`, not `PT30M`."""
+    if not raw:
+        raise click.BadParameter("duration is required")
+    s = raw.strip().lower()
+    suffix_map = {"s": 1, "m": 60, "h": 3600}
+    if s[-1] not in suffix_map:
+        raise click.BadParameter(
+            f"duration {raw!r}: must end in s/m/h (e.g. 30m, 2h, 90s)"
+        )
+    try:
+        n = int(s[:-1])
+    except ValueError as e:
+        raise click.BadParameter(
+            f"duration {raw!r}: prefix must be an integer count"
+        ) from e
+    if n <= 0:
+        raise click.BadParameter(f"duration {raw!r}: must be > 0")
+    return n * suffix_map[s[-1]]
+
+
 @main.command("run")
 @click.option(
     "--port", type=int, default=8767, show_default=True,

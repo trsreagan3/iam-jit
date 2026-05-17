@@ -68,7 +68,7 @@ class ActiveTaskExistsError(Exception):
     is already active. Caller decides whether to end the existing
     task first or surface the conflict to the agent."""
 
-SCHEMA_VERSION = 4  # v4: adds owner column on tasks for Slice C per-owner concurrent task scopes
+SCHEMA_VERSION = 5  # v5: adds pause_events table + decisions.pause_id for #6a timed-bypass audit linkage
 
 
 def default_db_path() -> pathlib.Path:
@@ -192,6 +192,28 @@ class BouncerStore:
                 );
                 CREATE INDEX IF NOT EXISTS idx_tasks_status ON tasks(status);
                 CREATE INDEX IF NOT EXISTS idx_tasks_started_at ON tasks(started_at);
+                -- v5: pause_events table for #6a `bouncer pause --for 30m`.
+                -- Pauses are operator-controlled timed escape hatches that
+                -- demote the proxy to COOPERATIVE mode for a window. Each
+                -- pause is its OWN audit row (intentionally a separate
+                -- table from decisions/config_events so reviewers can
+                -- find "what windows did the operator open" with a
+                -- single query). Per safety-mode-lean-permissive: the
+                -- audit trail is doing the work; the bypass is fine
+                -- precisely because every call during it is logged with
+                -- pause_id linkage.
+                CREATE TABLE IF NOT EXISTS pause_events (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    started_at TEXT NOT NULL,
+                    ends_at TEXT NOT NULL,        -- expiry (UTC ISO)
+                    reason TEXT NOT NULL DEFAULT '',
+                    started_by TEXT NOT NULL,
+                    -- Set when an operator explicitly `resume`s before
+                    -- expiry. NULL until then.
+                    ended_at_actual TEXT,
+                    end_kind TEXT                 -- 'expired' / 'resumed_early' / NULL while live
+                );
+                CREATE INDEX IF NOT EXISTS idx_pause_events_ends_at ON pause_events(ends_at);
                 """
             )
             # v3 additive migration: add task_id column to existing
@@ -222,6 +244,20 @@ class BouncerStore:
             try:
                 self._conn.execute(
                     "CREATE INDEX IF NOT EXISTS idx_tasks_owner_status ON tasks(owner, status)"
+                )
+            except sqlite3.OperationalError:
+                pass
+            # v5 additive migration: link each decision to the pause
+            # event that was active at decision time (if any). Lets
+            # post-hoc review answer "which decisions happened inside
+            # pause N?" with a single JOIN. NULL when no pause active.
+            try:
+                self._conn.execute("ALTER TABLE decisions ADD COLUMN pause_id INTEGER")
+            except sqlite3.OperationalError:
+                pass
+            try:
+                self._conn.execute(
+                    "CREATE INDEX IF NOT EXISTS idx_decisions_pause_id ON decisions(pause_id)"
                 )
             except sqlite3.OperationalError:
                 pass
@@ -528,20 +564,24 @@ class BouncerStore:
         *,
         matched_rule_id: int | None = None,
         task_id: str | None = None,
+        pause_id: int | None = None,
     ) -> int:
         """Persist a decision row.
 
         `task_id` is the active task at the time of the decision (per
-        Slice B), or None if no task was active. Lets post-incident
-        review answer "during task X, what calls were attempted and
-        what were the outcomes?"
+        Slice B), or None if no task was active.
+
+        `pause_id` is the active pause window at decision time, or
+        None if no pause is active. Lets reviewers ask "what calls
+        happened inside the 30-minute pause window the operator
+        opened at 14:32?" with a single SQL filter.
 
         WB26 MED-26-05 closure: if `task_id` is provided, we re-check
         atomically that the task is still status='active' at insert
         time. If it ended between the caller's `get_active_task` and
         this insert, we NULL out the task_id so the audit log doesn't
         falsely claim the call was "during task X" when X had already
-        ended. This loses some context but is honest.
+        ended.
         """
         with self._lock:
             effective_task_id: str | None = task_id
@@ -556,8 +596,8 @@ class BouncerStore:
                     effective_task_id = None
             cur = self._conn.execute(
                 """
-                INSERT INTO decisions(at, decision, mode, service, action, arn, region, matched_rule_id, reason, task_id)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                INSERT INTO decisions(at, decision, mode, service, action, arn, region, matched_rule_id, reason, task_id, pause_id)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     _isoformat_z(_dt.datetime.now(_dt.UTC)),
@@ -570,9 +610,147 @@ class BouncerStore:
                     matched_rule_id,
                     dec.reason,
                     effective_task_id,
+                    pause_id,
                 ),
             )
             return int(cur.lastrowid or 0)
+
+    # -----------------------------------------------------------------
+    # Pauses (#6a — timed bypass / escape hatch)
+    # -----------------------------------------------------------------
+
+    def start_pause(
+        self,
+        *,
+        duration_seconds: int,
+        reason: str,
+        started_by: str,
+    ) -> int:
+        """Open a new pause window. Returns the new pause id.
+
+        Raises ValueError if another pause is already active —
+        nested pauses are deliberately rejected so the audit trail
+        always has a clean "started at X, ended at Y" pairing. To
+        extend, resume + start a new one (each extension is its own
+        row).
+        """
+        if duration_seconds <= 0:
+            raise ValueError("pause duration must be > 0 seconds")
+        if duration_seconds > 24 * 3600:
+            # Cap at 24h. Per safety-mode-lean-permissive: short
+            # windows + audit trail does the work. A 7-day pause is
+            # an "I don't want the proxy" signal — they should
+            # stop it instead.
+            raise ValueError(
+                "pause duration cannot exceed 24h; for longer windows "
+                "stop the proxy and restart later"
+            )
+        now = _dt.datetime.now(_dt.UTC)
+        ends = now + _dt.timedelta(seconds=duration_seconds)
+        with self._lock:
+            active = self._active_pause_locked()
+            if active is not None:
+                raise ValueError(
+                    f"a pause is already active (id={active['id']}, "
+                    f"ends_at={active['ends_at']}); resume first to "
+                    f"start a new one"
+                )
+            cur = self._conn.execute(
+                """
+                INSERT INTO pause_events(started_at, ends_at, reason, started_by)
+                VALUES (?, ?, ?, ?)
+                """,
+                (
+                    _isoformat_z(now),
+                    _isoformat_z(ends),
+                    reason,
+                    started_by,
+                ),
+            )
+            return int(cur.lastrowid or 0)
+
+    def end_pause(self, *, pause_id: int | None = None, ended_by: str = "cli") -> int | None:
+        """Close the currently-active pause (or a specific pause by
+        id if provided). Returns the pause id that was ended, or
+        None if none was active. Sets end_kind = 'resumed_early' so
+        post-hoc review can tell the difference between expirations
+        and operator-initiated ends."""
+        with self._lock:
+            if pause_id is None:
+                row = self._active_pause_locked()
+                if row is None:
+                    return None
+                pause_id = int(row["id"])
+            self._conn.execute(
+                "UPDATE pause_events SET ended_at_actual = ?, end_kind = ? WHERE id = ? "
+                "AND ended_at_actual IS NULL",
+                (
+                    _isoformat_z(_dt.datetime.now(_dt.UTC)),
+                    "resumed_early",
+                    pause_id,
+                ),
+            )
+            return pause_id
+
+    def get_active_pause(self) -> dict[str, Any] | None:
+        """Return the live pause row if one is currently active
+        (started, not yet expired, not yet manually ended). Returns
+        a plain dict so callers don't need to import a dataclass.
+        Also lazily marks expired-but-unended pauses as 'expired'
+        so the audit log accurately records when each pause ended."""
+        with self._lock:
+            return self._active_pause_locked()
+
+    def _active_pause_locked(self) -> dict[str, Any] | None:
+        now_str = _isoformat_z(_dt.datetime.now(_dt.UTC))
+        # Lazy garbage-collect: mark any not-explicitly-ended pause
+        # whose ends_at is past as 'expired'. This is the only
+        # mechanism that fires the auto-revert; no background timer
+        # is required (works in tests, in serverless, anywhere).
+        self._conn.execute(
+            "UPDATE pause_events SET ended_at_actual = ends_at, "
+            "end_kind = 'expired' "
+            "WHERE ended_at_actual IS NULL AND ends_at <= ?",
+            (now_str,),
+        )
+        cur = self._conn.execute(
+            "SELECT id, started_at, ends_at, reason, started_by, "
+            "ended_at_actual, end_kind "
+            "FROM pause_events "
+            "WHERE ended_at_actual IS NULL "
+            "ORDER BY id DESC LIMIT 1"
+        )
+        row = cur.fetchone()
+        if row is None:
+            return None
+        return {
+            "id": int(row[0]),
+            "started_at": row[1],
+            "ends_at": row[2],
+            "reason": row[3],
+            "started_by": row[4],
+            "ended_at_actual": row[5],
+            "end_kind": row[6],
+        }
+
+    def list_recent_pauses(self, *, limit: int = 20) -> list[dict[str, Any]]:
+        """Return the N most recent pause rows for `bouncer pause history`."""
+        with self._lock:
+            cur = self._conn.execute(
+                "SELECT id, started_at, ends_at, reason, started_by, "
+                "ended_at_actual, end_kind "
+                "FROM pause_events ORDER BY id DESC LIMIT ?",
+                (limit,),
+            )
+            rows = cur.fetchall()
+        return [
+            {
+                "id": int(r[0]), "started_at": r[1], "ends_at": r[2],
+                "reason": r[3], "started_by": r[4],
+                "ended_at_actual": r[5], "end_kind": r[6],
+            }
+            for r in rows
+        ]
 
     def list_decisions(
         self,

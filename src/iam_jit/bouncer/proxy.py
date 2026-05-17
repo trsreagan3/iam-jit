@@ -329,6 +329,28 @@ def evaluate_request(
         active_task=active_task,
     )
 
+    # #6a — timed bypass / "pause." If an operator-initiated pause is
+    # active, the proxy demotes effective behavior to COOPERATIVE for
+    # this decision: the verdict text is preserved (so audit reviewers
+    # see what WOULD have been denied) but enforcement is suspended.
+    # The pause_id is recorded on the audit row so reviewers can ask
+    # "what calls happened inside the pause window the operator
+    # opened?" with a single SQL filter.
+    #
+    # Safety-mode-lean-permissive: the audit trail does the work; the
+    # bypass is acceptable precisely because every decision during it
+    # is recorded with pause_id linkage + the pause itself is its own
+    # audit row. There is intentionally no "stealth pause" — every
+    # pause has start/end audit rows.
+    active_pause: dict | None = None
+    try:
+        active_pause = store.get_active_pause()
+    except Exception as e:
+        logger.warning("bouncer-proxy pause-lookup failed: %s", e)
+    effective_mode = mode
+    if active_pause is not None and mode == ProxyMode.TRANSPARENT:
+        effective_mode = ProxyMode.COOPERATIVE
+
     # Audit log every proxy decision (always; both modes).
     matched_rule_id: int | None = None
     if record.matched_rule is not None:
@@ -341,6 +363,7 @@ def evaluate_request(
             record,
             matched_rule_id=matched_rule_id,
             task_id=active_task.task_id if active_task is not None else None,
+            pause_id=active_pause["id"] if active_pause is not None else None,
         )
     except Exception as e:
         # Audit-write failure is a high-priority signal; log it but
@@ -350,7 +373,7 @@ def evaluate_request(
 
     return _build_observation(
         method=method, host=host, path=path,
-        parsed=parsed, record=record, mode=mode,
+        parsed=parsed, record=record, mode=effective_mode,
     )
 
 
@@ -601,12 +624,28 @@ async def serve(config: ProxyConfig, *, store: BouncerStore) -> None:
         except Exception:
             decision_count = 0
             status_str = "degraded"
+        # #6a — surface pause state so monitoring can flag a window
+        # that's still open (e.g. ops left it on overnight by mistake)
+        # without us having to invent a separate probe endpoint.
+        pause_payload = None
+        try:
+            active_pause = store.get_active_pause()
+            if active_pause is not None:
+                pause_payload = {
+                    "id": active_pause["id"],
+                    "started_at": active_pause["started_at"],
+                    "ends_at": active_pause["ends_at"],
+                    "reason": active_pause["reason"],
+                }
+        except Exception:
+            pass
         return web.json_response({
             "status": status_str,
             "mode": config.mode.value,
             "default_policy": config.default_policy.value,
             "active_profile": active_profile.name if active_profile else "",
             "decisions_count": decision_count,
+            "pause": pause_payload,
         })
 
     # /healthz registered BEFORE the catch-all so it wins route
