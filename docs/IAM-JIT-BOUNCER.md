@@ -66,7 +66,7 @@ The bouncer adds an in-process question: **is THIS specific call
 allowed right now?** It runs on your laptop, against your local AWS
 creds, with no iam-jit-the-company involvement.
 
-Per [[creates-never-mutates]]: the bouncer never modifies IAM. It
+Per creates-never-mutates: the bouncer never modifies IAM. It
 inspects + forwards + denies — that's the entire surface.
 
 ## Architecture
@@ -97,7 +97,7 @@ that lives between the SDK and the network.
 | `enforce` | Applies rules. Unmatched calls → `default_policy` (allow/deny). | Production mode after you've built your ruleset. |
 | `prompt` | Applies rules. Unmatched → interactive prompt. | High-touch developer mode for handling one-off calls without writing rules upfront. (Prompt UX in Stage 2.) |
 
-Per [[safety-mode-lean-permissive]]: `learn` is intentionally the
+Per safety-mode-lean-permissive: `learn` is intentionally the
 default. Block-happy tools get uninstalled. The bouncer's first
 action on a fresh install should never be "interrupt your workflow."
 
@@ -212,7 +212,7 @@ iam-jit-bouncer logs tail --json
 
 SQLite at `~/.iam-jit/bouncer/state.db` (override with
 `IAM_JIT_BOUNCER_DB`). Directory created with mode `0o700` per
-[[no-hosted-saas]] + [[local-only-safety-mode]] precedent.
+no-hosted-saas + local-only-safety-mode precedent.
 
 Schema versioned via `schema_version` table; additive migrations
 only (no Alembic, no ORM). Current schema: `rules` + `decisions`.
@@ -267,7 +267,7 @@ issued by iam-jit or assigned by the platform.
 
 ## Task scope — agent-declared narrowing
 
-Per [[proxy-smart-defaults-and-task-scope]]: an agent doing a
+Per proxy-smart-defaults-and-task-scope: an agent doing a
 discrete task can declare a TASK SCOPE that narrows bouncer
 behavior for the task's duration. Canonical example:
 
@@ -360,7 +360,7 @@ admin-minus-sensitive's permissive baseline).
 
 ## Observation-based recommender (Slice D)
 
-Per [[bouncer-learn-then-recommend]] + [[apply-little-snitch-principles]]:
+Per bouncer-learn-then-recommend + apply-little-snitch-principles:
 the bouncer can synthesize a draft ruleset from observed traffic in
 LEARN mode. Closes the loop from "learn-first lean-permissive
 default" to "switch to ENFORCE with a real ruleset" without
@@ -406,7 +406,7 @@ iam-jit-bouncer recommend --since 2026-05-10T00:00:00Z
 
 ### Research Assistant pattern
 
-Per [[apply-little-snitch-principles]]: every recommended rule
+Per apply-little-snitch-principles: every recommended rule
 carries:
 
 - **support** — how many observed calls matched (sort by impact)
@@ -419,7 +419,7 @@ carries:
 
 ### Synthesis algorithm
 
-Deterministic, no LLM ([[scorer-is-ground-truth]]):
+Deterministic, no LLM (scorer-is-ground-truth):
 
 1. Group decisions by `(service, action)`.
 2. Skip groups below `--min-support` (default 3) — sparse traffic
@@ -447,7 +447,7 @@ which batch each rule came from.
 
 ## Agent-friendly, not bypassable
 
-Per [[agent-friendly-not-bypassable]]: the bouncer is configurable
+Per agent-friendly-not-bypassable: the bouncer is configurable
 by agents AND impossible to silently bypass. Both directions are
 load-bearing.
 

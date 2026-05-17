@@ -62,7 +62,7 @@ Your org's admin may have configured per-account / per-workload overrides via th
 
 ### Why this matters
 
-iam-jit's whole model is "create a NEW short-lived role" (per [[creates-never-mutates]]). For workloads where the role is fixed at creation time (k8s IRSA, EC2 IP, Lambda exec, CodeBuild, Glue, etc.), the BASE identity can't be swapped at runtime — though sts:AssumeRole into a different role is technically possible. The practical answer for most workloads is "use the fixed role directly; add an iam-jit hop only when you specifically need scoping the base identity doesn't provide."
+iam-jit's whole model is "create a NEW short-lived role" (per creates-never-mutates). For workloads where the role is fixed at creation time (k8s IRSA, EC2 IP, Lambda exec, CodeBuild, Glue, etc.), the BASE identity can't be swapped at runtime — though sts:AssumeRole into a different role is technically possible. The practical answer for most workloads is "use the fixed role directly; add an iam-jit hop only when you specifically need scoping the base identity doesn't provide."
 
 Without the compatibility check, an agent would waste cycles trying iam-jit, fail mysteriously, and eventually reach for "disable iam-jit, give me admin" — exactly the failure mode iam-jit is designed to prevent. **Always check first.** If you're also calling `submit_policy`, pass the same `workload` argument — `submit_policy` re-runs the check and refuses USE_EXISTING workloads with a clear redirect (per WB24 HIGH-24-01 closure). Omitting `workload` from `submit_policy` is bypass-able but audit-logged as `submit_without_compatibility_check` so admins can spot it.
 
@@ -100,7 +100,7 @@ If you call this before touching AWS:
 
 If you skip it and call AWS with pre-existing creds, you get whatever blast radius you came in with — and a `submit_without_compatibility_check` audit flag if you later call `submit_policy` directly.
 
-Per [[agents-default-to-iam-jit]]: agents SHOULD default to this composer; humans don't need to ask. Per [[recommender-context-boundary]]: the agent (you) supplies the workload + ARN narrowing because the agent has the codebase context iam-jit doesn't.
+Per agents-default-to-iam-jit: agents SHOULD default to this composer; humans don't need to ask. Per recommender-context-boundary: the agent (you) supplies the workload + ARN narrowing because the agent has the codebase context iam-jit doesn't.
 
 When the task is done: `bouncer_end_task(task_id=...)` flips the bouncer back to baseline. `bouncer_task_review(task_id=...)` returns the per-task decision summary for the admin.
 

@@ -16,7 +16,7 @@ shape of [agent self-scoping via iam-jit](../AGENTS.md).
 
 ## Why this default exists
 
-Per [[read-only-default]]: ~80% of agent operations are reads
+Per read-only-default: ~80% of agent operations are reads
 (`Get*`, `List*`, `Describe*`, `Head*`) with near-zero blast
 radius. The remaining ~20% — writes, deletes, role mutations,
 infrastructure provisioning — carry essentially all the risk. A
@@ -50,7 +50,7 @@ log without parsing every grant.
 ## Safety modes that affect this
 
 Two safety modes control how strict the gate is (see
-[[safety-mode-two-modes]] memory + `docs/recipes/IAM-JIT-FOR-ADMIN-
+safety-mode-two-modes memory + `docs/recipes/IAM-JIT-FOR-ADMIN-
 SAFETY.md`):
 
 - **`read_write_swap`** (default): lean-permissive. Reads ship
@@ -116,9 +116,9 @@ should:
 
 ## Related
 
-- [[read-only-default]] — the founding decision memo
-- [[agent-safety-adoption-play]] — bottoms-up adoption channel
-- [[safety-mode-two-modes]] — strict vs lean-permissive modes
+- read-only-default — the founding decision memo
+- agent-safety-adoption-play — bottoms-up adoption channel
+- safety-mode-two-modes — strict vs lean-permissive modes
 - [docs/AGENTS.md](../AGENTS.md) — full agent self-scope flow
 - [docs/recipes/IAM-JIT-FOR-ADMIN-SAFETY.md](IAM-JIT-FOR-ADMIN-SAFETY.md) —
   admin-side safety-mode recipe

@@ -19,7 +19,7 @@ Open corpus, open methodology, open commit history.
 
 ## Four products — pick the one that fits
 
-Per [[four-products-one-brand]]: iam-jit is four separate products that share a scorer + brand, not "four modes of one product." Different audiences, different friction profiles, different monetization. Most users of products 1–3 will never become product-4 customers — that's fine, they're separate markets.
+Per four-products-one-brand: iam-jit is four separate products that share a scorer + brand, not "four modes of one product." Different audiences, different friction profiles, different monetization. Most users of products 1–3 will never become product-4 customers — that's fine, they're separate markets.
 
 | # | Product | What it is | Who it's for | Install | Ships in |
 |---|---|---|---|---|---|
@@ -161,7 +161,7 @@ Two-layer defense; either layer alone leaves the other gap.
 
 ### Trust model
 
-Same as iam-jit local: trust the binary. Zero dependency on iam-jit-the-company's infrastructure — no phone home, no telemetry, no licensing call-back. Per [[self-host-zero-billing-dependency]].
+Same as iam-jit local: trust the binary. Zero dependency on iam-jit-the-company's infrastructure — no phone home, no telemetry, no licensing call-back. Per self-host-zero-billing-dependency.
 
 See [docs/IAM-JIT-BOUNCER.md](docs/IAM-JIT-BOUNCER.md) for full CLI + MCP reference, task-scope composition rules, and the recommender workflow.
 
@@ -385,7 +385,7 @@ See [docs/AGENTS.md](docs/AGENTS.md) for the agent-driven reduction-loop pattern
 - **[docs/CONVERGENCE-REPORT-2026-05.md](docs/CONVERGENCE-REPORT-2026-05.md)** — calibration discipline + corpus methodology
 - **[docs/calibration/100-prompt-sufficiency-loop.md](docs/calibration/100-prompt-sufficiency-loop.md)** — the calibration measurement that drove the NL synthesis removal
 - **[docs/calibration/feature-reality-check.md](docs/calibration/feature-reality-check.md)** — feature-by-feature "claim vs. delivery" audit
-- **[docs/ROADMAP-V1.1.md](docs/ROADMAP-V1.1.md)** — post-launch scope (currently empty per [[v1-scope-bar]])
+- **[docs/ROADMAP-V1.1.md](docs/ROADMAP-V1.1.md)** — post-launch scope (currently empty per v1-scope-bar)
 
 ---
 

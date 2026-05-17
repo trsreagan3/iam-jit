@@ -567,8 +567,8 @@ def tasks_group() -> None:
     historical + active tasks, SHOW the rule details of one task,
     or END the active task manually.
 
-    Per [[proxy-smart-defaults-and-task-scope]]: a task narrows the
-    bouncer's behavior for its duration. The agent declares allow
+    A task narrows the bouncer's behavior for its duration. The
+    agent declares allow
     rules (what the task needs) + deny rules (what the task must
     not touch, e.g. prod). Global rules still apply on top — task
     deny + global deny both block; global ALLOW that wasn't
