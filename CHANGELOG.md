@@ -11,6 +11,16 @@ within the same release.
 
 ## Unreleased — Bounce-suite rename (2026-05-17)
 
+### Docs
+
+- `docs/LOCAL-TEST-INFRA.md` now documents the AWS-SDK
+  HTTPS-default-with-HTTP-endpoint quirk that bites first-time
+  LocalStack users (boto3 ignores the scheme on `AWS_ENDPOINT_URL`
+  for some code paths and tries HTTPS regardless, producing
+  `SSL: WRONG_VERSION_NUMBER`). Documented the three workarounds
+  (`AWS_ENDPOINT_URL_<SERVICE>`, `AWS_USE_SSL=0`, CLI
+  `--no-verify-ssl`).
+
 ### Changed (canonical names; deprecation aliases ship in v1.0)
 
 - **`iam-jit-bouncer` → `ibounce`** — canonical CLI name for the

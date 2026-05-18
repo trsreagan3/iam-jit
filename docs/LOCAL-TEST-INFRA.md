@@ -69,6 +69,26 @@ Each integration test SKIPS CLEANLY (not fails) when its target
 service isn't reachable, so `pytest tests/integration -v` is always
 safe to run.
 
+> **AWS SDK + HTTP-only endpoints (LocalStack quirk).** Even with
+> `AWS_ENDPOINT_URL=http://127.0.0.1:4566` set, some boto3 / botocore
+> code paths still default to HTTPS for the actual connection (the
+> scheme on the env-var URL isn't always honored — particularly for
+> per-service signers and for the bundled `aws` CLI). The symptom is
+> `SSL: WRONG_VERSION_NUMBER` or `EOF occurred in violation of
+> protocol` when ibounce talks to LocalStack. Fixes (any one works):
+>
+> - Set the per-service variant: `AWS_ENDPOINT_URL_S3=http://...`,
+>   `AWS_ENDPOINT_URL_STS=http://...`, etc. — these forms are
+>   respected with their scheme by newer botocore.
+> - Set `AWS_USE_SSL=0` for the affected shell / process.
+> - For `aws` CLI invocations against an HTTP endpoint, add
+>   `--no-verify-ssl --endpoint-url http://...`.
+>
+> `make test-integration` wires these up for you. If you're running
+> bouncer/iam-jit code by hand against LocalStack, the per-service
+> `AWS_ENDPOINT_URL_<SERVICE>` form is the cleanest fix because it
+> leaves real-AWS calls untouched.
+
 ## kbouncer (`kbouncer` repo)
 
 kind cluster (real kube-apiserver in a Docker container).
