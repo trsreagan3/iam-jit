@@ -3211,6 +3211,18 @@ def _parse_duration(raw: str) -> int:
          "(paste into prompt window manually); do NOT put it in env "
          "vars an agent can read.",
 )
+@click.option(
+    "--audit-events-token",
+    "audit_events_token",
+    default=None,
+    help="#271 — bearer token required for GET /audit/events when the "
+         "proxy is bound externally. Empty + loopback bind (the "
+         "default) = no auth required (the loopback bind is the trust "
+         "anchor). Empty + external bind = ibounce refuses to start. "
+         "When set, callers must send `Authorization: Bearer <token>`. "
+         "Powers the cross-bouncer `iam-jit audit query` CLI that fans "
+         "queries across every reachable bouncer in parallel.",
+)
 @click.option("--db", type=click.Path(dir_okay=False), default=None)
 def run_cmd(
     port: int, host: str, force_external_bind: bool, prompt_on_deny: bool,
@@ -3238,6 +3250,7 @@ def run_cmd(
     burst_threshold: int,
     burst_window_seconds: int,
     bulk_answer_mcp_token: str | None,
+    audit_events_token: str | None,
     db: str | None,
 ) -> None:
     """Start the HTTP proxy server.
@@ -3277,6 +3290,18 @@ def run_cmd(
             f"real credentials, network-segmented dev box), re-run with "
             f"--i-know-this-binds-externally AND read docs/SECURITY.md "
             f"first. CRIT-32-02 closure.",
+            fg="red", err=True,
+        )
+        sys.exit(2)
+    # #271 — GET /audit/events lives on the same port; an external
+    # bind without a bearer token would expose recent audit events
+    # (operation/account/region) without auth. Refuse to start in
+    # that shape so the operator picks the explicit token shape.
+    if host not in _LOOPBACK_HOSTS and not audit_events_token:
+        click.secho(
+            f"refusing to bind to {host!r}: --audit-events-token TOKEN is "
+            f"required when --host is non-loopback (GET /audit/events "
+            f"would otherwise be exposed without auth).",
             fg="red", err=True,
         )
         sys.exit(2)
@@ -3409,6 +3434,7 @@ def run_cmd(
         burst_threshold=burst_threshold,
         burst_window_seconds=burst_window_seconds,
         bulk_answer_mcp_token=bulk_answer_mcp_token,
+        audit_events_token=audit_events_token,
     )
 
     # #132 plan-capture: surface the session id (operator-supplied or

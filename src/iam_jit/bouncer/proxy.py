@@ -42,6 +42,7 @@ from __future__ import annotations
 import asyncio
 import dataclasses
 import os
+import pathlib
 import threading
 import time
 
@@ -1040,6 +1041,15 @@ class ProxyConfig:
     This prevents an adversarial agent from bulk-allowing itself out
     of every pending prompt — which would invert the whole point of
     the prompt UX. Per [[bulk-prompt-answer-ux]]'s "Don't" list."""
+
+    audit_events_token: str | None = None
+    """#271 — bearer token required on GET /audit/events when the
+    proxy is bound off-loopback. None + loopback bind = no auth (the
+    loopback bind is itself the trust anchor); None + external bind =
+    the CLI refuses to start. When set, requests must carry
+    `Authorization: Bearer <token>`. Powers the cross-bouncer
+    `iam-jit audit query` CLI that fans queries across every reachable
+    bouncer in parallel."""
 
 
 @dataclasses.dataclass
@@ -2657,6 +2667,22 @@ async def serve(config: ProxyConfig, *, store: BouncerStore) -> None:
     # /healthz registered BEFORE the catch-all so it wins route
     # precedence; aiohttp dispatches in registration order.
     app.router.add_route("GET", "/healthz", healthz_handler)
+    # #271 — GET /audit/events ships the headless audit-tail query
+    # surface. Same filter language as `ibounce audit tail --filter`;
+    # the cross-bouncer `iam-jit audit query` CLI calls this endpoint
+    # in parallel against each reachable bouncer to produce a single
+    # merged stream. Reads the same JSONL file `audit tail` reads, so
+    # the endpoint returns nothing until --audit-log-path is set + the
+    # writer has produced at least one event.
+    from .audit_export.events_endpoint import register_audit_events_route
+    register_audit_events_route(
+        app,
+        audit_log_path=(
+            pathlib.Path(config.audit_log_path)
+            if config.audit_log_path else None
+        ),
+        require_bearer=config.audit_events_token,
+    )
     app.router.add_route("*", "/{tail:.*}", handler)
 
     # #252 Slice 1 — bring up the audit-export channels (if any).

@@ -569,6 +569,55 @@ This is the workflow the memo's "single SIEM dashboard scoped to
 `metadata.product.vendor_name == 'iam-jit'` catches everything"
 contract enables (per [[cross-product-agent-parity]] and #271).
 
+## HTTP `GET /audit/events` endpoint (`#271`)
+
+ibounce exposes the same query surface as a headless HTTP endpoint on
+its existing port (`8767`):
+
+```
+GET /audit/events?since=ISO8601&until=ISO8601&filter=field=value&filter=...&limit=N&format=jsonl|ocsf-bundle
+```
+
+Same filter language as `ibounce audit tail --filter`, same supported
+field catalog. Defaults: `limit=100` (max `1000`), `format=jsonl` (one
+OCSF event per line). Pass `format=ocsf-bundle` for a single OCSF v1.1.0
+class 2004 Detection Finding wrapping the matched events.
+
+The endpoint reads the same JSONL file `ibounce audit tail` reads, so
+it returns nothing until `ibounce run --audit-log-path PATH` has been
+set and the writer has produced at least one event.
+
+### Sample invocations
+
+```bash
+# Loopback bind (default): no auth required.
+curl 'http://127.0.0.1:8767/audit/events?limit=10'
+
+# Filter to one agent + last hour, NDJSON.
+curl 'http://127.0.0.1:8767/audit/events?filter=unmapped.iam_jit.agent.name=claude-code&since=2026-05-18T00:00:00Z'
+
+# OCSF Detection Finding bundle for SIEM batch import.
+curl 'http://127.0.0.1:8767/audit/events?format=ocsf-bundle&limit=100'
+```
+
+### Auth model
+
+- **Loopback bind (default)**: no `Authorization` header required.
+  ibounce refuses to bind off-loopback without
+  `--i-know-this-binds-externally`.
+- **External bind**: `ibounce run --i-know-this-binds-externally
+  --host 0.0.0.0 --audit-events-token <TOKEN>` is required. Requests
+  must carry `Authorization: Bearer <TOKEN>`. Missing header → 401;
+  wrong token → 403. ibounce refuses to start in external-bind mode
+  without `--audit-events-token`.
+
+### Cross-bouncer query
+
+The `iam-jit audit query` CLI calls this endpoint on every reachable
+bouncer (ibounce / kbounce / dbounce / gbounce) in parallel and merges
+the results. See [`docs/IAM-JIT-AUDIT-QUERY.md`](IAM-JIT-AUDIT-QUERY.md)
+for the cross-product correlation workflow.
+
 ## Retention
 
 iam-jit doesn't hold your logs — your collector does. Typical defaults:

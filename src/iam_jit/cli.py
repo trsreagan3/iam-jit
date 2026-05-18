@@ -1693,5 +1693,13 @@ def doctor_compatibility(
     sys.exit(0 if result.verdict == Compatibility.PROCEED else 1)
 
 
+# #271 — register the `iam-jit audit query` cross-bouncer subcommand.
+# Lives in a separate module so the heavy aiohttp / thread-pool /
+# OCSF-bundle code doesn't pull into every CLI surface. The register
+# call wires the subgroup onto the existing `main` Click group.
+from .cli_audit_query import register_audit_query_group  # noqa: E402
+register_audit_query_group(main)
+
+
 if __name__ == "__main__":
     main()

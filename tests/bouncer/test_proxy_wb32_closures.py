@@ -216,7 +216,8 @@ def test_run_accepts_loopback_host_without_ack(tmp_path, host, monkeypatch) -> N
 
 def test_run_accepts_external_host_with_ack(tmp_path, monkeypatch) -> None:
     """--i-know-this-binds-externally bypasses the guard (operator
-    explicitly opted in)."""
+    explicitly opted in). Also requires --audit-events-token per #271
+    so the /audit/events endpoint isn't exposed without auth."""
     sentinel = RuntimeError("REACHED_SERVE")
     def _fake_run(*a, **kw):
         raise sentinel
@@ -227,7 +228,27 @@ def test_run_accepts_external_host_with_ack(tmp_path, monkeypatch) -> None:
         main,
         ["run", "--host", "0.0.0.0",
          "--i-know-this-binds-externally",
+         "--audit-events-token", "test-token",
          "--db", str(tmp_path / "b.db")],
         catch_exceptions=True,
     )
     assert "refusing to bind" not in result.output
+
+
+def test_run_external_bind_without_audit_events_token_rejected(
+    tmp_path, monkeypatch,
+) -> None:
+    """#271 — external bind without --audit-events-token must be
+    rejected so the /audit/events endpoint isn't exposed unauthenticated.
+    The --i-know-this-binds-externally ack doesn't waive the token
+    requirement; it only waives the credential-handling-surface gate."""
+    runner = CliRunner()
+    result = runner.invoke(
+        main,
+        ["run", "--host", "0.0.0.0",
+         "--i-know-this-binds-externally",
+         "--db", str(tmp_path / "b.db")],
+        catch_exceptions=True,
+    )
+    assert result.exit_code == 2
+    assert "--audit-events-token TOKEN is required" in result.output

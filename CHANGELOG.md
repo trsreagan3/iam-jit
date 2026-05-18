@@ -13,6 +13,34 @@ within the same release.
 
 ### Added
 
+- **`iam-jit audit query` cross-bouncer CLI** (#271) — single
+  command that queries the `/audit/events` HTTP endpoint on every
+  reachable Bounce-suite bouncer in parallel and merges results
+  into one OCSF-compliant stream. Defaults probe ibounce (8767) +
+  kbounce (8766) + dbounce (8768) + gbounce (8769); unreachable
+  bouncers skip with a stderr note. Four output formats: `jsonl`
+  (default; merged + sorted NDJSON), `ocsf-bundle` (single OCSF
+  v1.1.0 class 2004 Detection Finding wrapping all events from all
+  bouncers — cross-product correlation in one SIEM-ingestible
+  artifact), `csv` (tabular with the per-bouncer column), `summary`
+  (per-bouncer + total counts). Filters forwarded server-side per
+  [[cross-product-agent-parity]]. Bearer-token auth supported via
+  `--audit-events-token` for externally-bound bouncers.
+  ThreadPoolExecutor fan-out so one slow bouncer doesn't pin the
+  query. New module `iam_jit/cli_audit_query.py`; new doc
+  `docs/IAM-JIT-AUDIT-QUERY.md`. Pairs with the per-product HTTP
+  endpoint (ibounce serves it on port 8767 alongside `/healthz`).
+- **ibounce HTTP `GET /audit/events` endpoint** (#271 A) — headless
+  sibling of `ibounce audit tail --filter ... --export jsonl`.
+  Same filter language, same supported field catalog, same OCSF
+  v1.1.0 wire shape. Query parameters: `since` / `until` (ISO
+  8601), `filter` (repeatable; `field=value` / `field~regex` /
+  `field>=N` / `field<=N`), `limit` (default 100, max 1000),
+  `format` (`jsonl` default | `ocsf-bundle`). Loopback bind needs
+  no auth; external bind requires `--audit-events-token TOKEN`
+  (refuses to start in external-bind mode without it). New module
+  `iam_jit/bouncer/audit_export/events_endpoint.py`. Powers the
+  cross-bouncer query CLI above.
 - **`ibounce investigate` subcommand** (#273) — one-shot helper
   that lands a Claude-ready evidence pack on disk. Composes the
   existing `audit tail --export ocsf-bundle` (#268) and
