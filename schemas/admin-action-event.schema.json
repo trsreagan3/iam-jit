@@ -1,0 +1,94 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://iam-jit.dev/schemas/admin-action-event.v1.json",
+  "title": "iam-jit admin-action audit event (OCSF-shaped)",
+  "description": "Constrained subset of the OCSF v1.1.0 class 6003 audit-event for admin-action records (`unmapped.iam_jit.event_type == \"ADMIN_ACTION\"`). Every operator mutation (profile install/swap, rule add/remove, preset apply, pause start/stop, license install, backup create/restore, diagnostics bundle, config import/export, session kill, alert-rule edit, ...) lands in the audit channel as an OCSF event that ALSO conforms to this admin-action shape so a SIEM dashboard can filter `unmapped.iam_jit.event_type:\"ADMIN_ACTION\"` and get the operator-mutation feed in isolation.\n\nThis schema is `allOf` ocsf-iam-jit-audit-event.schema.json + the admin-action-specific constraints. The base OCSF schema MUST also pass. Per [[security-team-audit-export]] Lens B: admin actions are first-class in the audit stream.\n\nAuthoritative builders: src/iam_jit/bouncer/audit_export/admin_action.py (ibounce), internal/audit/admin_action.go (kbounce, dbounce when added).",
+  "allOf": [
+    {"$ref": "ocsf-iam-jit-audit-event.schema.json"}
+  ],
+  "type": "object",
+  "additionalProperties": true,
+  "required": ["unmapped"],
+  "properties": {
+    "status_id": {
+      "const": 1,
+      "description": "ADMIN_ACTION events always Success — the mutation has already landed by the time the event is built."
+    },
+    "status": {
+      "const": "Success"
+    },
+    "unmapped": {
+      "type": "object",
+      "additionalProperties": true,
+      "required": ["iam_jit"],
+      "properties": {
+        "iam_jit": {
+          "type": "object",
+          "additionalProperties": true,
+          "required": ["event_type", "admin_action"],
+          "properties": {
+            "event_type": {
+              "const": "ADMIN_ACTION",
+              "description": "Discriminator for filtering admin-action records out of the broader audit stream."
+            },
+            "admin_action": {
+              "type": "object",
+              "additionalProperties": true,
+              "required": ["kind", "source", "actor"],
+              "properties": {
+                "kind": {
+                  "type": "string",
+                  "description": "What kind of admin action fired. Documented values cross-product: profile.install, profile.swap, profile.assign, profile.delete, rule.add, rule.remove, pause.start, pause.stop, preset.apply, session.kill, config.import, config.export, license.install, alert-rule.edit, diagnostics.bundle, backup.create, backup.restore. Unknown values are accepted (per [[deliberate-feature-completion]]: never refuse an audit row over a vocabulary mismatch)."
+                },
+                "source": {
+                  "type": "string",
+                  "description": "Where the action originated. cli=operator-typed CLI command; mcp=MCP-tool-invoked; api=admin HTTP API; unknown=fallback for source-resolution failures.",
+                  "enum": ["cli", "mcp", "api", "unknown"]
+                },
+                "actor": {
+                  "type": "string",
+                  "description": "Operator identity (email, username, OIDC sub). Resolved via resolve_operator() when not supplied by the caller."
+                },
+                "target": {
+                  "type": "object",
+                  "additionalProperties": true,
+                  "description": "The entity the action mutated. Empty when the action has no target (e.g. license.install).",
+                  "properties": {
+                    "kind": {
+                      "type": "string",
+                      "description": "profile | rule | pause_window | preset | task | license | backup | bundle | session"
+                    },
+                    "id": {
+                      "type": "string",
+                      "description": "Human-readable identifier (profile name, rule pattern+id, pause id, backup file basename, ...)."
+                    },
+                    "extra": {
+                      "type": "object",
+                      "additionalProperties": true,
+                      "description": "Per-target fields (profile source URL, rule effect, pause duration_seconds). Token-leak keys (token, password, secret, api_key, ...) are stripped before landing on the wire."
+                    }
+                  }
+                },
+                "before_hash": {
+                  "type": "string",
+                  "description": "Optional sha256 of the pre-mutation state. The full snapshot NEVER lands on the wire (could be arbitrarily large + could contain secrets); only the 64-hex digest does.",
+                  "pattern": "^[0-9a-f]{64}$"
+                },
+                "after_hash": {
+                  "type": "string",
+                  "description": "Optional sha256 of the post-mutation state. Same discipline as before_hash.",
+                  "pattern": "^[0-9a-f]{64}$"
+                },
+                "extra": {
+                  "type": "object",
+                  "additionalProperties": true,
+                  "description": "Optional per-event context. Token-leak keys are stripped before landing on the wire."
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+}

@@ -6000,5 +6000,156 @@ def main_deprecated_alias() -> None:
     main()
 
 
+@main.group("audit-webhook")
+def audit_webhook_group() -> None:
+    """#259 — operator commands for the audit-export webhook channel.
+
+    Sibling to `audit-export`. Where `audit-export` is about live
+    status (is the webhook healthy?), `audit-webhook` is about
+    configuration discovery (what preset shapes does this binary
+    speak? what flags does each one need?). Per
+    [[audit-webhook-presets]] + [[cross-product-agent-parity]].
+    """
+
+
+@audit_webhook_group.group("presets")
+def audit_webhook_presets_group() -> None:
+    """Manage / introspect the available audit-webhook preset
+    shapes. Currently ships `list` only — read-only enumeration of
+    the per-vendor adapters the binary knows about."""
+
+
+def audit_webhook_preset_descriptors() -> list[dict[str, object]]:
+    """Single source of truth describing every preset the binary
+    speaks. Consumed by `presets list` (operator-facing) AND the
+    `list_audit_webhook_presets` MCP tool (agent-facing) so a human
+    + an agent see byte-identical preset metadata.
+
+    Per [[audit-webhook-presets]]: this descriptor is GENERIC — it
+    documents the wire shape + required flags + which Bounce product
+    the preset applies to. It does NOT carry vendor secrets, nor any
+    LLM-evaluated text (per [[scorer-is-ground-truth]] + [[don't-
+    tailor-to-lighthouse]]).
+    """
+    return [
+        {
+            "name": "generic",
+            "description": (
+                "Default. Bearer token in Authorization + JSON body. "
+                "Byte-identical to the pre-#257 wire shape; existing "
+                "webhook consumers + custom ingest scripts keep working "
+                "without code changes."
+            ),
+            "auth_header": "Authorization: Bearer <token>",
+            "body_shape": "NDJSON of OCSF v1.1.0 class 6003 events",
+            "required_flags": [
+                "--audit-webhook-url",
+                "--audit-webhook-token",
+            ],
+            "optional_flags": [
+                "--audit-webhook-batch-size",
+            ],
+        },
+        {
+            "name": "datadog",
+            "description": (
+                "Datadog Logs HTTP intake. OCSF event overlaid with "
+                "DD-native fields (ddsource, service, ddtags, status, "
+                "message); the OCSF payload remains queryable as "
+                "nested fields. Vendor-reserved field collisions "
+                "(status, host) preserve the OCSF original under "
+                "ocsf.<name>."
+            ),
+            "auth_header": "DD-API-KEY: <api_key>",
+            "body_shape": (
+                "JSON array of OCSF events, each overlaid with "
+                "Datadog-native overlay fields"
+            ),
+            "required_flags": [
+                "--audit-webhook-url",
+                "--audit-webhook-token",
+            ],
+            "optional_flags": [
+                "--audit-webhook-tags",
+            ],
+        },
+        {
+            "name": "splunk-hec",
+            "description": (
+                "Splunk HTTP Event Collector. NDJSON body where each "
+                "line wraps the OCSF event under HEC's `event` "
+                "envelope; sourcetype + source + host + time are set "
+                "from OCSF metadata."
+            ),
+            "auth_header": "Authorization: Splunk <hec_token>",
+            "body_shape": (
+                "NDJSON; each line is one HEC envelope wrapping one "
+                "OCSF event"
+            ),
+            "required_flags": [
+                "--audit-webhook-url",
+                "--audit-webhook-token",
+            ],
+            "optional_flags": [],
+        },
+        {
+            "name": "sentinel",
+            "description": (
+                "Microsoft Sentinel / Log Analytics Workspace via the "
+                "Data Collector API. HMAC-SHA256-signed SharedKey auth "
+                "computed over the canonical (method, content-length, "
+                "content-type, x-ms-date, resource) string keyed by "
+                "the base64-decoded workspace shared key. The token "
+                "value MUST be the base64-encoded shared key."
+            ),
+            "auth_header": (
+                "Authorization: SharedKey <workspace-id>:<HMAC-SHA256>"
+            ),
+            "body_shape": "JSON array of OCSF events",
+            "required_flags": [
+                "--audit-webhook-url",
+                "--audit-webhook-token",
+            ],
+            "optional_flags": [
+                "--audit-webhook-sentinel-table",
+            ],
+        },
+    ]
+
+
+@audit_webhook_presets_group.command("list")
+@click.option(
+    "--json", "as_json", is_flag=True, default=False,
+    help="Emit the descriptor list as JSON (for agent consumption).",
+)
+def audit_webhook_presets_list_cmd(as_json: bool) -> None:
+    """Print the available audit-webhook preset shapes + their config
+    requirements.
+
+    Cross-product parity per [[cross-product-agent-parity]]:
+    `kbounce audit-webhook presets list` + `dbounce audit-webhook
+    presets list` print the same JSON shape under --json. The
+    human-readable table format may vary by terminal width.
+    """
+    descriptors = audit_webhook_preset_descriptors()
+    if as_json:
+        click.echo(json.dumps(descriptors, indent=2))
+        return
+    # Human-readable two-column-ish table. Keep it terminal-portable
+    # (no fancy box-drawing) so an operator's SSH session reads cleanly.
+    click.echo(
+        f"{'NAME':<12}  {'REQUIRES':<58}  OPTIONAL",
+    )
+    for desc in descriptors:
+        req = ", ".join(desc["required_flags"])
+        opt = ", ".join(desc["optional_flags"]) or "(none)"
+        click.echo(f"{desc['name']:<12}  {req:<58}  {opt}")
+    click.echo()
+    click.echo(
+        "See docs/WEBHOOK-PRESETS.md for the full per-vendor wire "
+        "shape + token-acquisition steps.",
+    )
+
+
 if __name__ == "__main__":
     main()

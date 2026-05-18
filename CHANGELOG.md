@@ -13,6 +13,49 @@ within the same release.
 
 ### Added
 
+- **Cross-product JSON Schema registry** (#276) — published JSON
+  Schemas for the four cross-product audit / artifact wire shapes
+  every Bounce product emits identically: OCSF v1.1.0 class 6003
+  audit event (`schemas/ocsf-iam-jit-audit-event.schema.json`),
+  admin-action event (`schemas/admin-action-event.schema.json`),
+  diagnostics bundle manifest (`schemas/diagnostics-manifest.schema.json`),
+  backup metadata table (`schemas/backup-metadata.schema.json`).
+  Each schema validates against a representative sample in
+  `schemas/testdata/` (CI guard); a triage tool consuming a bundle
+  from any Bounce product can validate identically. New cross-product
+  schema index at `schemas/INDEX.md` lists every per-product config
+  schema + the cross-product common subset (`schema_version` +
+  `product` + `exported_at` + `source_hostname_hash`). Per
+  `[[cross-product-agent-parity]]`.
+- **`GET /schemas/config` HTTP endpoint** (#276) — ibounce's mgmt
+  port serves the embedded `ibounce-config.schema.json` byte-for-byte
+  at `Content-Type: application/schema+json`. An agent that wants to
+  validate a proposed `ibounce config import` payload against the
+  LIVE bouncer's accepted shape fetches this rather than relying on
+  a stale GitHub URL. Read-only; no auth (matches `/healthz`). Per
+  `[[cross-product-agent-parity]]`: kbounce + dbounce + gbounce ship
+  the same endpoint shape with their own product schema.
+- **`ibounce audit-webhook presets list`** (#259) — operator-facing
+  CLI subcommand that prints the four webhook preset shapes the
+  binary speaks (`generic`, `datadog`, `splunk-hec`, `sentinel`) +
+  each preset's required + optional flags + auth header + body
+  shape. `--json` flag emits the structured descriptor list for
+  agent consumption. Mirrors the new `list_audit_webhook_presets`
+  MCP tool. Per `[[audit-webhook-presets]]` + `[[cross-product-agent-parity]]`.
+- **`list_audit_webhook_presets` MCP tool** (#259) — agent-facing
+  surface that returns the same descriptor list `ibounce audit-webhook
+  presets list --json` emits. Read-only; safe for agents to poll;
+  identical JSON shape across `ibounce` / `kbounce` / `dbounce` so
+  cross-product orchestration code can call the matching tool on each
+  bouncer and collate the results uniformly.
+- **`docs/WEBHOOK-PRESETS.md`** (#259) — cross-product reference for
+  the webhook preset framework: what each preset shape is, when to
+  use which, per-vendor token-acquisition steps (Splunk HEC token,
+  Datadog API key, Sentinel shared key), per-preset wire shape
+  (header set + body shape + HMAC signing for Sentinel), cross-links
+  to the #283 marketplace assets (Splunk app + Datadog content pack).
+  Sentinel grep test in `tests/test_webhook_presets_doc.py` keeps the
+  doc in sync with the preset registry.
 - **`iam-jit audit stream` cross-bouncer live TUI** (#272) — k9s-
   style terminal UI that subscribes to every reachable Bounce-suite
   bouncer's `/audit/events` endpoint and renders one merged, sorted,

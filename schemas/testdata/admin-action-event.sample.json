@@ -1,0 +1,55 @@
+{
+  "metadata": {
+    "version": "1.1.0",
+    "product": {
+      "name": "ibounce",
+      "vendor_name": "iam-jit",
+      "version": "1.0.0"
+    }
+  },
+  "time": 1715990050000,
+  "class_uid": 6003,
+  "class_name": "API Activity",
+  "category_uid": 6,
+  "category_name": "Application Activity",
+  "activity_id": 99,
+  "activity_name": "profile.swap",
+  "type_uid": 600399,
+  "type_name": "API Activity: Other",
+  "severity_id": 1,
+  "severity": "Informational",
+  "status_id": 1,
+  "status": "Success",
+  "status_detail": "admin action profile.swap on profile 'analytics-readonly' by alice@example.com",
+  "actor": {
+    "user": {
+      "name": "alice@example.com",
+      "uid": "alice@example.com"
+    }
+  },
+  "api": {
+    "operation": "profile.swap",
+    "service": {"name": "ibounce.profile"},
+    "request": {"uid": "analytics-readonly"}
+  },
+  "resources": [],
+  "src_endpoint": {},
+  "dst_endpoint": {},
+  "unmapped": {
+    "iam_jit": {
+      "event_type": "ADMIN_ACTION",
+      "admin_action": {
+        "kind": "profile.swap",
+        "source": "cli",
+        "actor": "alice@example.com",
+        "target": {
+          "kind": "profile",
+          "id": "analytics-readonly"
+        },
+        "before_hash": "a3b1c2d4e5f60718293a4b5c6d7e8f900112233445566778899aabbccddeeff0",
+        "after_hash": "f0eeddccbbaa9988776655443322110099887766554433221100ffeeddccbbaa"
+      },
+      "ext": {}
+    }
+  }
+}

@@ -1596,6 +1596,27 @@ TOOLS = [
         },
     },
     {
+        "name": "list_audit_webhook_presets",
+        "description": (
+            "#259 — return the cross-product list of audit-webhook "
+            "preset shapes the bouncer speaks, each preset's auth "
+            "header convention + body shape + which CLI flags it "
+            "requires / accepts as optional. Per [[audit-webhook-"
+            "presets]] + [[cross-product-agent-parity]]: identical "
+            "JSON shape across ibounce / kbounce / dbounce so an "
+            "agent that wants to ask 'which webhook shape should "
+            "I configure for this operator's Datadog org?' gets a "
+            "structured answer regardless of which Bounce product "
+            "it's talking to. READ-ONLY; no side effects; safe for "
+            "agents to poll. Returns the SAME descriptor list "
+            "`ibounce audit-webhook presets list --json` emits."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {},
+        },
+    },
+    {
         "name": "bouncer_pending_sync_prompts",
         "description": (
             "#203 — return the list of currently-WAITING sync deny-"
@@ -2985,6 +3006,27 @@ def _bouncer_audit_export_status_for_mcp(
     return audit_export_status()
 
 
+def _list_audit_webhook_presets_for_mcp(
+    args: dict[str, Any],
+) -> dict[str, Any]:
+    """#259 — agent-facing surface mirroring `ibounce audit-webhook
+    presets list --json`. Returns the same descriptor list the CLI
+    emits so an agent can discover the webhook preset shapes the
+    bouncer speaks without invoking a subprocess.
+
+    Per [[cross-product-agent-parity]]: identical JSON shape across
+    ibounce / kbounce / dbounce so cross-product orchestration code
+    can call the matching MCP tool on each bouncer + collate the
+    results uniformly.
+
+    Per [[scorer-is-ground-truth]]: the descriptor list is static
+    (no LLM, no scoring, no runtime introspection). The MCP tool
+    just shells out to the same helper the CLI uses.
+    """
+    from .bouncer_cli import audit_webhook_preset_descriptors
+    return {"presets": audit_webhook_preset_descriptors()}
+
+
 def _bouncer_active_mode_for_mcp(args: dict[str, Any]) -> dict[str, Any]:
     """Return the bouncer's currently effective mode + provenance.
 
@@ -4011,6 +4053,8 @@ def _handle_request(req: dict[str, Any]) -> dict[str, Any] | None:
             result_payload = _bouncer_plan_pending_write_prompt_for_mcp(args)
         elif tool_name == "bouncer_audit_export_status":
             result_payload = _bouncer_audit_export_status_for_mcp(args)
+        elif tool_name == "list_audit_webhook_presets":
+            result_payload = _list_audit_webhook_presets_for_mcp(args)
         elif tool_name == "bouncer_pending_sync_prompts":
             result_payload = _bouncer_pending_sync_prompts_for_mcp(args)
         elif tool_name == "bouncer_prompts_bulk_pending":

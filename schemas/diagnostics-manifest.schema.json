@@ -1,0 +1,82 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://iam-jit.dev/schemas/diagnostics-manifest.v1.json",
+  "title": "iam-jit diagnostics bundle manifest (cross-product)",
+  "description": "The 09-manifest.json file inside every `*bounce diagnostics bundle` ZIP. Pinned cross-product shape so a single triage tool (or LLM-assisted support response) can parse a diagnostics bundle from any Bounce product identically.\n\nThe ZIP itself contains a fixed set of named sections (00-readme.txt, 01-config.yaml, 02-version.txt, 03-startup-banner.txt, 04-recent-decisions.jsonl, 05-healthz.json, 06-system.txt, 07-listener.json, 08-panics.txt, 09-manifest.json). 09-manifest.json describes the other 8 + carries provenance + the redaction marker convention. Authoritative builder: src/iam_jit/bouncer/diagnostics.py (ibounce); internal/cli/diagnostics.go (kbounce, dbounce, gbounce — same shape per [[cross-product-agent-parity]]).\n\nThe manifest is the source of truth for what's IN the bundle — a triage tool MUST iterate `entries[]` rather than hardcoding filenames so the format can grow additively across versions.",
+  "type": "object",
+  "additionalProperties": true,
+  "required": [
+    "bundle_version",
+    "format",
+    "product",
+    "generated_at",
+    "redaction_marker",
+    "entries"
+  ],
+  "properties": {
+    "bundle_version": {
+      "type": "integer",
+      "minimum": 1,
+      "description": "Schema-version of this manifest. Pre-#288 bundles emit int 1; future bumps are integer. Triage tools MUST tolerate higher values (additive evolution)."
+    },
+    "format": {
+      "type": "string",
+      "description": "Per-product format magic. Constrained so a tool that grepped for `format == \"ibounce.diagnostics\"` keeps working.",
+      "enum": [
+        "ibounce.diagnostics",
+        "kbounce.diagnostics",
+        "dbounce.diagnostics",
+        "gbounce.diagnostics"
+      ]
+    },
+    "product": {
+      "type": "string",
+      "description": "Per-product name. Mirrors metadata.product.name in the OCSF audit-event shape.",
+      "enum": ["ibounce", "kbounce", "dbounce", "gbounce"]
+    },
+    "ibounce_version": {
+      "type": "string",
+      "description": "Present in ibounce bundles only. Other products use the matching per-product version field (kbounce_version, dbounce_version, gbounce_version)."
+    },
+    "kbounce_version": {"type": "string"},
+    "dbounce_version": {"type": "string"},
+    "gbounce_version": {"type": "string"},
+    "generated_at": {
+      "type": "string",
+      "description": "RFC3339 UTC timestamp the bundle was assembled. The exact format the diagnostics builder emits is `YYYY-MM-DDTHH:MM:SSZ`."
+    },
+    "redaction_marker": {
+      "type": "string",
+      "description": "The literal string substituted for any redacted secret in the bundle's text sections. Constant across the suite so a triage tool can grep for it uniformly."
+    },
+    "user_id_hash_format": {
+      "type": "string",
+      "description": "Description of how user IDs were hashed before landing in the bundle. Shape: `<prefix><N-hex>` (e.g. `usr_<12hex>`)."
+    },
+    "entries": {
+      "type": "array",
+      "description": "Per-file inventory. The triage tool MUST iterate this list rather than hardcoding filenames.",
+      "items": {
+        "type": "object",
+        "additionalProperties": true,
+        "required": ["name", "size", "sha256"],
+        "properties": {
+          "name": {
+            "type": "string",
+            "description": "Section filename inside the ZIP (e.g. 05-healthz.json)."
+          },
+          "size": {
+            "type": "integer",
+            "minimum": 0,
+            "description": "Section size in bytes (after redaction)."
+          },
+          "sha256": {
+            "type": "string",
+            "description": "Hex sha256 of the section's bytes. Stable across re-zips of the same content; used by support to confirm a customer's bundle hasn't been hand-edited.",
+            "pattern": "^[0-9a-f]{64}$"
+          }
+        }
+      }
+    }
+  }
+}

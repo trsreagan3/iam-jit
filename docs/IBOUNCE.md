@@ -656,6 +656,10 @@ Masked fields:
 
 - Audit-webhook URL + token + Splunk-HEC / Datadog / Sentinel
   per-preset secrets → `"***"` with a hint string.
+  Preset support per [[audit-webhook-presets]] — see
+  [WEBHOOK-PRESETS.md](WEBHOOK-PRESETS.md) for the full per-vendor
+  wire shape + token-acquisition steps + the cross-product
+  `audit-webhook presets list` CLI surface.
 - Token-shaped fields anywhere in the bundle (HEC token, API key,
   integration key, license content/PEM/private key) → `"***"`.
 - Env-var **values** → not projected; the env-var **keys** are

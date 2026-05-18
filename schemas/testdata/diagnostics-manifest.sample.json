@@ -1,0 +1,31 @@
+{
+  "bundle_version": 1,
+  "format": "ibounce.diagnostics",
+  "product": "ibounce",
+  "ibounce_version": "1.0.0",
+  "generated_at": "2026-05-18T12:34:56Z",
+  "redaction_marker": "***REDACTED***",
+  "user_id_hash_format": "usr_<12hex>",
+  "entries": [
+    {
+      "name": "00-readme.txt",
+      "size": 412,
+      "sha256": "a3b1c2d4e5f60718293a4b5c6d7e8f900112233445566778899aabbccddeeff0"
+    },
+    {
+      "name": "01-config.yaml",
+      "size": 2048,
+      "sha256": "b4c2d3e5f60718293a4b5c6d7e8f900112233445566778899aabbccddeeff0a1"
+    },
+    {
+      "name": "05-healthz.json",
+      "size": 612,
+      "sha256": "c5d3e4f60718293a4b5c6d7e8f900112233445566778899aabbccddeeff0a1b2"
+    },
+    {
+      "name": "09-manifest.json",
+      "size": 0,
+      "sha256": "0000000000000000000000000000000000000000000000000000000000000000"
+    }
+  ]
+}

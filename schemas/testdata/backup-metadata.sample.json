@@ -1,0 +1,11 @@
+{
+  "table_name": "kbounce_backup_metadata",
+  "keys": {
+    "kbounce_version": "1.0.0",
+    "created_at": "2026-05-18T12:00:00Z",
+    "source_hostname_hash": "9d4e3c2b1a08",
+    "schema_version": "3",
+    "included_audit": "true",
+    "included_prompts": "false"
+  }
+}

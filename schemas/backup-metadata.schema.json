@@ -1,0 +1,65 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://iam-jit.dev/schemas/backup-metadata.v1.json",
+  "title": "iam-jit backup metadata table (cross-product)",
+  "description": "The `<product>_backup_metadata` SQLite table embedded inside every `*bounce backup` output. Pinned cross-product key set so a single restore-checker tool can validate a backup from any Bounce product identically.\n\nThe table is a key/value store: every row has a `key` TEXT PRIMARY KEY + a `value` TEXT NOT NULL. This schema constrains the canonical key set + the wire shape each value uses. Extra keys are allowed (additive evolution); a restore-checker MUST tolerate them.\n\nAuthoritative writers: internal/store/backup.go (kbounce, dbounce, gbounce — identical key set per [[cross-product-agent-parity]]); src/iam_jit/bouncer/backup.py (ibounce, when the SQLite-backed config-store ships).",
+  "type": "object",
+  "additionalProperties": true,
+  "required": [
+    "table_name",
+    "keys"
+  ],
+  "properties": {
+    "table_name": {
+      "type": "string",
+      "description": "Per-product table name. The presence of the matching table magic confirms a backup file was produced by the corresponding Bounce product.",
+      "enum": [
+        "ibounce_backup_metadata",
+        "kbounce_backup_metadata",
+        "dbounce_backup_metadata",
+        "gbounce_backup_metadata"
+      ]
+    },
+    "keys": {
+      "type": "object",
+      "additionalProperties": true,
+      "description": "Canonical key set. Every backup MUST set the required keys; additional keys are tolerated.",
+      "required": [
+        "created_at",
+        "source_hostname_hash",
+        "schema_version"
+      ],
+      "properties": {
+        "ibounce_version": {
+          "type": "string",
+          "description": "Per-product binary version stamp. Exactly one of {ibounce_version, kbounce_version, dbounce_version, gbounce_version} is present, matching the product."
+        },
+        "kbounce_version": {"type": "string"},
+        "dbounce_version": {"type": "string"},
+        "gbounce_version": {"type": "string"},
+        "created_at": {
+          "type": "string",
+          "description": "RFC3339 UTC timestamp the backup was created."
+        },
+        "source_hostname_hash": {
+          "type": "string",
+          "description": "sha256[:12] of the source host's hostname. Privacy-preserving attribution: a reviewer can tell two backups from different hosts apart without leaking the literal hostname. Matches the convention used in *bounce-config exports + diagnostics manifest provenance."
+        },
+        "schema_version": {
+          "type": "string",
+          "description": "Per-product store-schema version (stringified integer). Equal-or-newer importer schema is always accepted; older importer refuses (older binary cannot read a newer-schema backup). Note: this names the STORE schema version, NOT the wire-format `schema_version` used in *bounce-config exports."
+        },
+        "included_audit": {
+          "type": "string",
+          "description": "Stringified boolean. \"true\"/\"false\" — whether the backup includes the audit table.",
+          "enum": ["true", "false"]
+        },
+        "included_prompts": {
+          "type": "string",
+          "description": "Stringified boolean. Whether the backup includes the sync-prompts table.",
+          "enum": ["true", "false"]
+        }
+      }
+    }
+  }
+}

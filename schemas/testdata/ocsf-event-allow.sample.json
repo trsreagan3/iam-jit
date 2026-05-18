@@ -1,0 +1,59 @@
+{
+  "metadata": {
+    "version": "1.1.0",
+    "product": {
+      "name": "ibounce",
+      "vendor_name": "iam-jit",
+      "version": "1.0.0"
+    }
+  },
+  "time": 1715990000000,
+  "class_uid": 6003,
+  "class_name": "API Activity",
+  "category_uid": 6,
+  "category_name": "Application Activity",
+  "activity_id": 2,
+  "activity_name": "GetObject",
+  "type_uid": 600302,
+  "type_name": "API Activity: Read",
+  "severity_id": 1,
+  "severity": "Informational",
+  "status_id": 1,
+  "status": "Success",
+  "status_detail": "",
+  "actor": {
+    "user": {
+      "name": "alice@example.com",
+      "uid": "alice@example.com"
+    },
+    "session": {
+      "uid": "req-7e0c1f"
+    }
+  },
+  "api": {
+    "operation": "s3:GetObject",
+    "service": {"name": "s3"},
+    "request": {"uid": "42"}
+  },
+  "resources": [
+    {
+      "name": "report.csv",
+      "uid": "arn:aws:s3:::analytics-prod/report.csv",
+      "type": "s3 resource"
+    }
+  ],
+  "src_endpoint": {"ip": "127.0.0.1", "port": 51234},
+  "dst_endpoint": {"hostname": "s3.us-east-1.amazonaws.com"},
+  "unmapped": {
+    "iam_jit": {
+      "mode": "cooperative",
+      "profile": "analytics-readonly",
+      "verdict": "ALLOW",
+      "decision_id": 42,
+      "enforced": false,
+      "ext": {
+        "aws_region": "us-east-1"
+      }
+    }
+  }
+}

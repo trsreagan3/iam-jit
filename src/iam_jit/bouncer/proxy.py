@@ -2697,6 +2697,16 @@ async def serve(config: ProxyConfig, *, store: BouncerStore) -> None:
         bouncer_name="ibounce",
         require_bearer=config.audit_events_token,
     )
+    # #276 — GET /schemas/config serves the embedded
+    # ibounce-config.schema.json. Agents that want to validate a
+    # proposed `ibounce config import` payload against the LIVE
+    # bouncer's accepted shape fetch this rather than relying on a
+    # stale GitHub URL. Per [[cross-product-agent-parity]]: kbounce
+    # + dbounce + gbounce ship the same endpoint with their own
+    # product schema. READ-ONLY; no auth (matches /healthz — the
+    # schema is non-sensitive metadata).
+    from .schema_endpoint import register_config_schema_route
+    register_config_schema_route(app)
     app.router.add_route("*", "/{tail:.*}", handler)
 
     # #252 Slice 1 — bring up the audit-export channels (if any).
