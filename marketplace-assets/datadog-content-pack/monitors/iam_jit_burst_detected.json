@@ -1,0 +1,19 @@
+{
+  "name": "[iam-jit] Burst-pattern alert detected",
+  "type": "log alert",
+  "query": "logs(\"source:iam-jit-bounce @iam_jit.event_type:ANOMALY_DETECTED (@iam_jit.alert_pattern:admin-fallback-burst OR @iam_jit.alert_pattern:high-risk-action-denied)\").index(\"*\").rollup(\"count\").last(\"5m\") >= 1",
+  "message": "An iam-jit Bounce burst-pattern rule fired in the last 5 minutes.\n\nBurst patterns fire when many high-signal events landed in a short window (admin-fallback grants, denies against the high-risk-action watchlist). This is a 'look at this session' prompt — not a 'something bad happened' assertion. The matched rule name is in `@iam_jit.alert_pattern`.\n\nNext step: open Logs view filtered to this session's `agent.session_id` for context.\n\n@your-team-here",
+  "tags": ["source:iam-jit-bounce", "team:security"],
+  "options": {
+    "thresholds": {"critical": 1},
+    "notify_audit": false,
+    "include_tags": true,
+    "new_group_delay": 60,
+    "evaluation_delay": 60,
+    "renotify_interval": 0,
+    "groupby_simple_monitor": false,
+    "silenced": {}
+  },
+  "priority": 2,
+  "restricted_roles": null
+}

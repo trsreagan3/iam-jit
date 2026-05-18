@@ -1,0 +1,20 @@
+{
+  "name": "[iam-jit] Admin-action burst",
+  "type": "log alert",
+  "query": "logs(\"source:iam-jit-bounce @iam_jit.event_type:ADMIN_ACTION\").index(\"*\").rollup(\"count\").last(\"5m\") > 10",
+  "message": "More than 10 ADMIN_ACTION events from the iam-jit Bounce suite fired in the last 5 minutes.\n\nADMIN_ACTION events fire on operator-initiated CLI commands (mode swap, profile install, pause, rule edit). A burst usually means either a config-import script is running, an operator is iterating on a profile, or something is automating ibounce CLI calls. Worth a look either way.\n\nLink to the saved search: https://app.datadoghq.com/logs?query=source%3Aiam-jit-bounce%20%40iam_jit.event_type%3AADMIN_ACTION\n\n@your-team-here",
+  "tags": ["source:iam-jit-bounce", "team:security"],
+  "options": {
+    "thresholds": {"critical": 10},
+    "notify_audit": false,
+    "include_tags": true,
+    "new_group_delay": 60,
+    "evaluation_delay": 60,
+    "renotify_interval": 0,
+    "escalation_message": "",
+    "groupby_simple_monitor": false,
+    "silenced": {}
+  },
+  "priority": 3,
+  "restricted_roles": null
+}

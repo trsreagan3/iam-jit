@@ -1,0 +1,101 @@
+<dashboard version="1.1">
+  <label>iam-jit Bounce Overview</label>
+  <description>
+    Operational overview of iam-jit Bounce activity (ibounce / kbounce / dbounce).
+    Six panels: events per minute, top actors, top operations, denies vs allows trend,
+    alert-rule fires, audit-export health. All panels read from
+    sourcetype="iam_jit:bounce:ocsf". Time range applies to every panel.
+  </description>
+
+  <fieldset submitButton="false">
+    <input type="time" token="tr">
+      <label>Time range</label>
+      <default>
+        <earliest>-24h@h</earliest>
+        <latest>now</latest>
+      </default>
+    </input>
+  </fieldset>
+
+  <row>
+    <panel>
+      <title>Events per minute</title>
+      <chart>
+        <search>
+          <query>`iam_jit_event` | timechart span=1m count</query>
+          <earliest>$tr.earliest$</earliest>
+          <latest>$tr.latest$</latest>
+        </search>
+        <option name="charting.chart">column</option>
+        <option name="charting.legend.placement">none</option>
+      </chart>
+    </panel>
+
+    <panel>
+      <title>Top 10 actors</title>
+      <chart>
+        <search>
+          <query>`iam_jit_event` | stats count by user | sort -count | head 10</query>
+          <earliest>$tr.earliest$</earliest>
+          <latest>$tr.latest$</latest>
+        </search>
+        <option name="charting.chart">bar</option>
+        <option name="charting.legend.placement">none</option>
+      </chart>
+    </panel>
+  </row>
+
+  <row>
+    <panel>
+      <title>Top 10 operations</title>
+      <chart>
+        <search>
+          <query>`iam_jit_event` operation=* | stats count by operation | sort -count | head 10</query>
+          <earliest>$tr.earliest$</earliest>
+          <latest>$tr.latest$</latest>
+        </search>
+        <option name="charting.chart">bar</option>
+        <option name="charting.legend.placement">none</option>
+      </chart>
+    </panel>
+
+    <panel>
+      <title>Denies vs allows trend</title>
+      <chart>
+        <search>
+          <query>`iam_jit_event` verdict=* | timechart span=5m count by verdict</query>
+          <earliest>$tr.earliest$</earliest>
+          <latest>$tr.latest$</latest>
+        </search>
+        <option name="charting.chart">line</option>
+        <option name="charting.legend.placement">bottom</option>
+      </chart>
+    </panel>
+  </row>
+
+  <row>
+    <panel>
+      <title>Alert-rule fires (by pattern)</title>
+      <chart>
+        <search>
+          <query>`iam_jit_anomaly_detected` | stats count by alert_pattern | sort -count</query>
+          <earliest>$tr.earliest$</earliest>
+          <latest>$tr.latest$</latest>
+        </search>
+        <option name="charting.chart">pie</option>
+      </chart>
+    </panel>
+
+    <panel>
+      <title>Audit-export health</title>
+      <table>
+        <search>
+          <query>(`iam_jit_audit_export_degraded` OR `iam_jit_audit_dropped` OR `iam_jit_heartbeat_gap`) | stats count, max(_time) AS latest by event_type, alert_pattern | fieldformat latest=strftime(latest,"%Y-%m-%d %H:%M:%S")</query>
+          <earliest>$tr.earliest$</earliest>
+          <latest>$tr.latest$</latest>
+        </search>
+        <option name="drilldown">none</option>
+      </table>
+    </panel>
+  </row>
+</dashboard>

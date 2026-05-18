@@ -1,0 +1,19 @@
+{
+  "name": "[iam-jit] Unusual high-risk action attempted",
+  "type": "log alert",
+  "query": "logs(\"source:iam-jit-bounce @iam_jit.event_type:ANOMALY_DETECTED @iam_jit.alert_pattern:high-risk-action-denied\").index(\"*\").rollup(\"count\").last(\"10m\") >= 1",
+  "message": "An iam-jit Bounce session attempted an action on the high-risk watchlist in the last 10 minutes.\n\nThe `unusual_high_risk_action` rule (alert pattern `high-risk-action-denied`) fires when a deny landed on an action from the configured high-risk set — IAM creation primitives, KMS Decrypt, SecretsManager Get*, audit-infra destruction. A deny is a 'look at what was tried' signal; in transparent mode the deny was advisory (the call did succeed upstream).\n\nReview the session's full event stream before drawing conclusions; benign agents do occasionally try high-risk reads.\n\n@your-team-here",
+  "tags": ["source:iam-jit-bounce", "team:security", "category:high-risk-action"],
+  "options": {
+    "thresholds": {"critical": 1},
+    "notify_audit": false,
+    "include_tags": true,
+    "new_group_delay": 60,
+    "evaluation_delay": 60,
+    "renotify_interval": 0,
+    "groupby_simple_monitor": false,
+    "silenced": {}
+  },
+  "priority": 2,
+  "restricted_roles": null
+}

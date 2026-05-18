@@ -1,0 +1,58 @@
+# iam-jit Bounce — sample inputs
+#
+# COPY this file to local/inputs.conf and edit. Splunk treats `local/`
+# as operator-owned; `default/` is shipped-by-app and shouldn't be
+# edited (your changes get clobbered on app upgrade).
+#
+# Two ingest shapes are documented below — pick the one that matches
+# how you've wired ibounce's audit-export channel.
+
+# -----------------------------------------------------------------------
+# Shape 1: HEC (HTTP Event Collector)
+# -----------------------------------------------------------------------
+#
+# ibounce's #257 webhook presets include a `splunk-hec` shape that
+# emits OCSF events directly to a Splunk HEC endpoint. On the Splunk
+# side you need an HEC token bound to this app's sourcetype.
+#
+# In Splunk Web: Settings > Data inputs > HTTP Event Collector > New Token
+#   * Source name: iam_jit_bounce
+#   * Sourcetype: iam_jit:bounce:ocsf  (must match props.conf stanza)
+#   * Index: pick an existing index, or create one (e.g. `iam_jit_bounce`)
+#   * Indexer acknowledgement: off (ibounce doesn't retry on indexer
+#     acks; it relies on its own queue + retry)
+#
+# Then point ibounce at the HEC URL:
+#
+#   ibounce audit-export configure \
+#       --webhook-url https://splunk.example.com:8088/services/collector/event \
+#       --webhook-preset splunk-hec \
+#       --webhook-auth-header "Authorization: Splunk <YOUR-HEC-TOKEN>"
+#
+# No [http://] stanza is needed in this file — HEC is configured in
+# Splunk Web, not via inputs.conf.
+
+# -----------------------------------------------------------------------
+# Shape 2: JSONL log file
+# -----------------------------------------------------------------------
+#
+# ibounce writes every event to a JSONL log on the same machine the
+# bouncer runs on. If you've co-located a Splunk Universal Forwarder
+# or Splunk Enterprise on that machine, monitor the file directly:
+
+#[monitor:///var/log/ibounce/audit.jsonl]
+#sourcetype = iam_jit:bounce:ocsf
+#index = iam_jit_bounce
+#disabled = 0
+
+# -----------------------------------------------------------------------
+# Shape 3: TCP/UDP from a forwarder
+# -----------------------------------------------------------------------
+#
+# If you forward events from a separate collector, terminate them on
+# a TCP input bound to this app's sourcetype:
+
+#[tcp://9514]
+#sourcetype = iam_jit:bounce:ocsf
+#index = iam_jit_bounce
+#disabled = 0

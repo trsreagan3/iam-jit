@@ -1,0 +1,73 @@
+{
+  "description": "Tag-extraction rules for iam-jit Bounce OCSF events. Surfaces the operationally useful OCSF fields as Datadog tags so dashboards + monitors + log search can facet on them. Applies to logs matching source:iam-jit-bounce.",
+  "filter": {
+    "query": "source:iam-jit-bounce"
+  },
+  "tag_rules": [
+    {
+      "source_attribute": "metadata.product.name",
+      "tag_key": "iam_jit_product",
+      "description": "ibounce / kbounce / dbounce"
+    },
+    {
+      "source_attribute": "metadata.product.vendor_name",
+      "tag_key": "iam_jit_vendor",
+      "description": "Always 'iam-jit' across the suite"
+    },
+    {
+      "source_attribute": "metadata.product.version",
+      "tag_key": "iam_jit_version",
+      "description": "Wire version of the emitting bouncer"
+    },
+    {
+      "source_attribute": "unmapped.iam_jit.mode",
+      "tag_key": "iam_jit_mode",
+      "description": "transparent | cooperative | bypass"
+    },
+    {
+      "source_attribute": "unmapped.iam_jit.profile",
+      "tag_key": "iam_jit_profile",
+      "description": "Active profile name"
+    },
+    {
+      "source_attribute": "unmapped.iam_jit.verdict",
+      "tag_key": "iam_jit_verdict",
+      "description": "allow | deny | bypass | prompt"
+    },
+    {
+      "source_attribute": "unmapped.iam_jit.enforced",
+      "tag_key": "iam_jit_enforced",
+      "description": "true if the deny was enforced; false for cooperative advisories"
+    },
+    {
+      "source_attribute": "unmapped.iam_jit.event_type",
+      "tag_key": "iam_jit_event_type",
+      "description": "Synthetic event type (ADMIN_ACTION, HEARTBEAT, ANOMALY_DETECTED, etc.)"
+    },
+    {
+      "source_attribute": "unmapped.iam_jit.pattern",
+      "tag_key": "iam_jit_alert_pattern",
+      "description": "Alert-rule pattern name (e.g. bouncer-uptime-gap, high-risk-action-denied)"
+    },
+    {
+      "source_attribute": "unmapped.iam_jit.agent.name",
+      "tag_key": "iam_jit_agent",
+      "description": "AI agent (claude-code, codex, cursor, ...)"
+    },
+    {
+      "source_attribute": "unmapped.iam_jit.agent.session_id",
+      "tag_key": "iam_jit_session",
+      "description": "Cross-bouncer session correlation key"
+    },
+    {
+      "source_attribute": "unmapped.iam_jit.ext.aws_region",
+      "tag_key": "aws_region",
+      "description": "AWS region the API call targeted (ibounce only)"
+    },
+    {
+      "source_attribute": "api.service.name",
+      "tag_key": "service_name",
+      "description": "Target service of the API call"
+    }
+  ]
+}

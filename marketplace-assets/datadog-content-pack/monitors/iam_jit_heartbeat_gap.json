@@ -1,0 +1,20 @@
+{
+  "name": "[iam-jit] Heartbeat gap (audit pipeline went silent)",
+  "type": "log alert",
+  "query": "logs(\"source:iam-jit-bounce @iam_jit.alert_pattern:bouncer-uptime-gap\").index(\"*\").rollup(\"count\").last(\"15m\") >= 1",
+  "message": "The iam-jit Bounce audit-export channel went silent — the `heartbeat_gap` rule (issue #264) fired.\n\nA heartbeat gap means the bouncer process may have been killed mid-session, OR the webhook target was unreachable for longer than the configured `heartbeat_missing_count` threshold. The SIEM view of bouncer activity is incomplete until the gap is resolved.\n\nInvestigate: process status on the bouncer host, webhook target reachability, recent admin-action events for context.\n\n@your-team-here",
+  "tags": ["source:iam-jit-bounce", "team:security", "severity:high"],
+  "options": {
+    "thresholds": {"critical": 1},
+    "notify_audit": false,
+    "include_tags": true,
+    "new_group_delay": 0,
+    "evaluation_delay": 60,
+    "renotify_interval": 60,
+    "escalation_message": "Heartbeat gap still active. The bouncer audit channel is silent.",
+    "groupby_simple_monitor": false,
+    "silenced": {}
+  },
+  "priority": 1,
+  "restricted_roles": null
+}

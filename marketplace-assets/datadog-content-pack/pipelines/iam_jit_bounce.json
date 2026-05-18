@@ -1,0 +1,189 @@
+{
+  "type": "pipeline",
+  "name": "iam-jit Bounce",
+  "description": "Parses OCSF v1.1.0 class 6003 events emitted by the iam-jit Bounce suite (ibounce / kbounce / dbounce). Filters by `source:iam-jit-bounce`. Surfaces nested OCSF fields as flat top-level attributes so dashboards + monitors in this content pack can reference them directly.",
+  "is_enabled": true,
+  "filter": {
+    "query": "source:iam-jit-bounce"
+  },
+  "processors": [
+    {
+      "type": "grok-parser",
+      "name": "OCSF JSON is already structured; no-op grok to mark the pipeline entry",
+      "is_enabled": true,
+      "source": "message",
+      "samples": [],
+      "grok": {
+        "support_rules": "",
+        "match_rules": "_passthrough .*"
+      }
+    },
+    {
+      "type": "attribute-remapper",
+      "name": "Remap actor.user.name to usr.id",
+      "is_enabled": true,
+      "sources": ["actor.user.name"],
+      "source_type": "attribute",
+      "target": "usr.id",
+      "target_type": "attribute",
+      "preserve_source": true,
+      "override_on_conflict": false
+    },
+    {
+      "type": "attribute-remapper",
+      "name": "Remap actor.user.name to usr.name",
+      "is_enabled": true,
+      "sources": ["actor.user.name"],
+      "source_type": "attribute",
+      "target": "usr.name",
+      "target_type": "attribute",
+      "preserve_source": true,
+      "override_on_conflict": false
+    },
+    {
+      "type": "attribute-remapper",
+      "name": "Remap api.operation to evt.name",
+      "is_enabled": true,
+      "sources": ["api.operation"],
+      "source_type": "attribute",
+      "target": "evt.name",
+      "target_type": "attribute",
+      "preserve_source": true,
+      "override_on_conflict": false
+    },
+    {
+      "type": "attribute-remapper",
+      "name": "Remap unmapped.iam_jit.event_type to evt.outcome",
+      "is_enabled": true,
+      "sources": ["unmapped.iam_jit.event_type"],
+      "source_type": "attribute",
+      "target": "iam_jit.event_type",
+      "target_type": "attribute",
+      "preserve_source": true,
+      "override_on_conflict": false
+    },
+    {
+      "type": "attribute-remapper",
+      "name": "Flatten unmapped.iam_jit.verdict",
+      "is_enabled": true,
+      "sources": ["unmapped.iam_jit.verdict"],
+      "source_type": "attribute",
+      "target": "iam_jit.verdict",
+      "target_type": "attribute",
+      "preserve_source": true,
+      "override_on_conflict": false
+    },
+    {
+      "type": "attribute-remapper",
+      "name": "Flatten unmapped.iam_jit.mode",
+      "is_enabled": true,
+      "sources": ["unmapped.iam_jit.mode"],
+      "source_type": "attribute",
+      "target": "iam_jit.mode",
+      "target_type": "attribute",
+      "preserve_source": true,
+      "override_on_conflict": false
+    },
+    {
+      "type": "attribute-remapper",
+      "name": "Flatten unmapped.iam_jit.profile",
+      "is_enabled": true,
+      "sources": ["unmapped.iam_jit.profile"],
+      "source_type": "attribute",
+      "target": "iam_jit.profile",
+      "target_type": "attribute",
+      "preserve_source": true,
+      "override_on_conflict": false
+    },
+    {
+      "type": "attribute-remapper",
+      "name": "Flatten unmapped.iam_jit.enforced",
+      "is_enabled": true,
+      "sources": ["unmapped.iam_jit.enforced"],
+      "source_type": "attribute",
+      "target": "iam_jit.enforced",
+      "target_type": "attribute",
+      "preserve_source": true,
+      "override_on_conflict": false
+    },
+    {
+      "type": "attribute-remapper",
+      "name": "Flatten unmapped.iam_jit.pattern (alert pattern name)",
+      "is_enabled": true,
+      "sources": ["unmapped.iam_jit.pattern"],
+      "source_type": "attribute",
+      "target": "iam_jit.alert_pattern",
+      "target_type": "attribute",
+      "preserve_source": true,
+      "override_on_conflict": false
+    },
+    {
+      "type": "attribute-remapper",
+      "name": "Flatten unmapped.iam_jit.agent.name",
+      "is_enabled": true,
+      "sources": ["unmapped.iam_jit.agent.name"],
+      "source_type": "attribute",
+      "target": "iam_jit.agent.name",
+      "target_type": "attribute",
+      "preserve_source": true,
+      "override_on_conflict": false
+    },
+    {
+      "type": "attribute-remapper",
+      "name": "Flatten unmapped.iam_jit.agent.session_id",
+      "is_enabled": true,
+      "sources": ["unmapped.iam_jit.agent.session_id"],
+      "source_type": "attribute",
+      "target": "iam_jit.agent.session_id",
+      "target_type": "attribute",
+      "preserve_source": true,
+      "override_on_conflict": false
+    },
+    {
+      "type": "attribute-remapper",
+      "name": "Flatten metadata.product.name",
+      "is_enabled": true,
+      "sources": ["metadata.product.name"],
+      "source_type": "attribute",
+      "target": "iam_jit.product",
+      "target_type": "attribute",
+      "preserve_source": true,
+      "override_on_conflict": false
+    },
+    {
+      "type": "status-remapper",
+      "name": "Map OCSF severity_id to Datadog log status",
+      "is_enabled": true,
+      "sources": ["severity_id"]
+    },
+    {
+      "type": "date-remapper",
+      "name": "Use OCSF time as the log timestamp",
+      "is_enabled": true,
+      "sources": ["time"]
+    },
+    {
+      "type": "service-remapper",
+      "name": "Service = iam-jit product (ibounce / kbounce / dbounce)",
+      "is_enabled": true,
+      "sources": ["metadata.product.name"]
+    },
+    {
+      "type": "category-processor",
+      "name": "Category by event_type",
+      "is_enabled": true,
+      "categories": [
+        {"filter": {"query": "@iam_jit.event_type:ADMIN_ACTION"}, "name": "admin_action"},
+        {"filter": {"query": "@iam_jit.event_type:HEARTBEAT"}, "name": "heartbeat"},
+        {"filter": {"query": "@iam_jit.event_type:ANOMALY_DETECTED"}, "name": "anomaly"},
+        {"filter": {"query": "@iam_jit.event_type:AUDIT_DROPPED"}, "name": "audit_dropped"},
+        {"filter": {"query": "@iam_jit.event_type:PAUSE_END"}, "name": "pause"},
+        {"filter": {"query": "@iam_jit.event_type:PROFILE_INSTALL"}, "name": "profile_install"},
+        {"filter": {"query": "@iam_jit.event_type:SESSION_ENDED"}, "name": "session_ended"},
+        {"filter": {"query": "@iam_jit.verdict:deny"}, "name": "decision_deny"},
+        {"filter": {"query": "@iam_jit.verdict:allow"}, "name": "decision_allow"}
+      ],
+      "target": "iam_jit.category"
+    }
+  ]
+}

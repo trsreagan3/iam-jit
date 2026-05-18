@@ -1,0 +1,47 @@
+{
+  "schemaVersion": "2.0.0",
+  "info": {
+    "title": "iam-jit Bounce",
+    "id": {
+      "group": null,
+      "name": "iam_jit_bounce",
+      "version": "1.0.0"
+    },
+    "author": [
+      {
+        "name": "iam-jit",
+        "email": "support@iam-jit.com",
+        "company": "iam-jit"
+      }
+    ],
+    "releaseDate": "2026-05-18",
+    "description": "Dashboards, saved searches, and parsers for OCSF v1.1.0 class 6003 events emitted by the iam-jit Bounce suite (ibounce / kbounce / dbounce). Drop-in install — no proprietary fields, no phone-home.",
+    "classification": {
+      "intendedAudience": "Security",
+      "categories": ["Security", "IT Operations"],
+      "developmentStatus": "Production/Stable"
+    },
+    "commonInformationModels": null,
+    "license": {
+      "name": "MIT",
+      "uri": "https://opensource.org/licenses/MIT"
+    },
+    "privacyPolicy": null,
+    "releaseNotes": {
+      "name": "v1.0.0",
+      "text": "Initial Splunkbase release.",
+      "uri": null
+    }
+  },
+  "dependencies": null,
+  "tasks": null,
+  "inputGroups": null,
+  "incompatibleApps": null,
+  "platformRequirements": {
+    "splunk": {
+      "Enterprise": "*"
+    }
+  },
+  "supportedDeployments": ["_standalone", "_distributed", "_search_head_clustering"],
+  "targetWorkloads": ["_search_heads"]
+}

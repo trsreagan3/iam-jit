@@ -1,0 +1,70 @@
+{
+  "manifest_version": "2.0.0",
+  "app_uuid": "iam-jit-bounce-content-pack",
+  "app_id": "iam_jit_bounce",
+  "display_on_public_website": true,
+  "tile": {
+    "overview": "README.md#overview",
+    "configuration": "README.md#configuration",
+    "support": "README.md#support",
+    "changelog": "CHANGELOG.md",
+    "description": "Pipelines, dashboards, monitors, and tag rules for OCSF v1.1.0 class 6003 events emitted by the iam-jit Bounce suite (ibounce / kbounce / dbounce). Drop-in install — no proprietary fields, no phone-home.",
+    "title": "iam-jit Bounce",
+    "media": [],
+    "classifier_tags": [
+      "Category::Security",
+      "Category::Log Collection",
+      "Submitted Data Type::Logs",
+      "Submitted Data Type::Events",
+      "Offering::Integration",
+      "Supported OS::Linux",
+      "Supported OS::macOS",
+      "Supported OS::Windows"
+    ]
+  },
+  "author": {
+    "support_email": "support@iam-jit.com",
+    "name": "iam-jit",
+    "homepage": "https://iam-jit.com",
+    "sales_email": "sales@iam-jit.com",
+    "vendor_id": "iam-jit"
+  },
+  "assets": {
+    "integration": {
+      "auto_install": true,
+      "source_type_id": 19370001,
+      "source_type_name": "iam_jit_bounce",
+      "configuration": {
+        "spec": "assets/configuration/spec.yaml"
+      },
+      "events": {
+        "creates_events": false
+      },
+      "metrics": {
+        "prefix": "iam_jit_bounce.",
+        "check": "",
+        "metadata_path": "metadata.csv"
+      },
+      "service_checks": {
+        "metadata_path": "assets/service_checks.json"
+      }
+    },
+    "dashboards": {
+      "iam-jit Bounce Overview": "dashboards/iam_jit_overview.json"
+    },
+    "monitors": {
+      "iam-jit admin-action burst": "monitors/iam_jit_admin_action_burst.json",
+      "iam-jit heartbeat gap": "monitors/iam_jit_heartbeat_gap.json",
+      "iam-jit burst detected": "monitors/iam_jit_burst_detected.json",
+      "iam-jit audit-export failure": "monitors/iam_jit_audit_export_failure.json",
+      "iam-jit unusual high-risk action": "monitors/iam_jit_unusual_high_risk.json"
+    },
+    "logs": {
+      "source": "iam-jit-bounce"
+    }
+  },
+  "pack_version": "1.0.0",
+  "version": "1.0.0",
+  "name": "iam_jit_bounce",
+  "description": "iam-jit Bounce content pack — OCSF v1.1.0 class 6003 events from ibounce / kbounce / dbounce."
+}

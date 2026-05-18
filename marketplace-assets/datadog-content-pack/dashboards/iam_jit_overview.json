@@ -1,0 +1,196 @@
+{
+  "title": "iam-jit Bounce Overview",
+  "description": "Operational overview of iam-jit Bounce activity (ibounce / kbounce / dbounce). All widgets read from logs tagged `source:iam-jit-bounce`. Time range applies to every widget.",
+  "widgets": [
+    {
+      "id": 1,
+      "definition": {
+        "type": "timeseries",
+        "title": "Events per minute",
+        "requests": [
+          {
+            "response_format": "timeseries",
+            "queries": [
+              {
+                "data_source": "logs",
+                "name": "events_per_min",
+                "indexes": ["*"],
+                "compute": {"aggregation": "count"},
+                "search": {"query": "source:iam-jit-bounce"},
+                "group_by": []
+              }
+            ],
+            "style": {"palette": "dog_classic", "line_type": "solid", "line_width": "normal"}
+          }
+        ],
+        "show_legend": false
+      }
+    },
+    {
+      "id": 2,
+      "definition": {
+        "type": "toplist",
+        "title": "Top 10 actors",
+        "requests": [
+          {
+            "response_format": "scalar",
+            "queries": [
+              {
+                "data_source": "logs",
+                "name": "top_actors",
+                "indexes": ["*"],
+                "compute": {"aggregation": "count"},
+                "search": {"query": "source:iam-jit-bounce"},
+                "group_by": [{"facet": "@usr.name", "limit": 10, "sort": {"order": "desc", "aggregation": "count"}}]
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "id": 3,
+      "definition": {
+        "type": "toplist",
+        "title": "Top 10 operations",
+        "requests": [
+          {
+            "response_format": "scalar",
+            "queries": [
+              {
+                "data_source": "logs",
+                "name": "top_operations",
+                "indexes": ["*"],
+                "compute": {"aggregation": "count"},
+                "search": {"query": "source:iam-jit-bounce @evt.name:*"},
+                "group_by": [{"facet": "@evt.name", "limit": 10, "sort": {"order": "desc", "aggregation": "count"}}]
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "id": 4,
+      "definition": {
+        "type": "timeseries",
+        "title": "Denies vs allows trend",
+        "requests": [
+          {
+            "response_format": "timeseries",
+            "queries": [
+              {
+                "data_source": "logs",
+                "name": "verdicts",
+                "indexes": ["*"],
+                "compute": {"aggregation": "count"},
+                "search": {"query": "source:iam-jit-bounce @iam_jit.verdict:*"},
+                "group_by": [{"facet": "@iam_jit.verdict", "limit": 5, "sort": {"order": "desc", "aggregation": "count"}}]
+              }
+            ],
+            "style": {"palette": "dog_classic", "line_type": "solid", "line_width": "normal"}
+          }
+        ],
+        "show_legend": true
+      }
+    },
+    {
+      "id": 5,
+      "definition": {
+        "type": "query_value",
+        "title": "Heartbeat-gap events (24h)",
+        "requests": [
+          {
+            "response_format": "scalar",
+            "queries": [
+              {
+                "data_source": "logs",
+                "name": "heartbeat_gap_count",
+                "indexes": ["*"],
+                "compute": {"aggregation": "count"},
+                "search": {"query": "source:iam-jit-bounce @iam_jit.alert_pattern:bouncer-uptime-gap"}
+              }
+            ]
+          }
+        ],
+        "autoscale": true,
+        "precision": 0
+      }
+    },
+    {
+      "id": 6,
+      "definition": {
+        "type": "query_value",
+        "title": "Burst-detected events (24h)",
+        "requests": [
+          {
+            "response_format": "scalar",
+            "queries": [
+              {
+                "data_source": "logs",
+                "name": "burst_count",
+                "indexes": ["*"],
+                "compute": {"aggregation": "count"},
+                "search": {"query": "source:iam-jit-bounce (@iam_jit.alert_pattern:admin-fallback-burst OR @iam_jit.alert_pattern:high-risk-action-denied)"}
+              }
+            ]
+          }
+        ],
+        "autoscale": true,
+        "precision": 0
+      }
+    },
+    {
+      "id": 7,
+      "definition": {
+        "type": "toplist",
+        "title": "Alert-rule fires by pattern",
+        "requests": [
+          {
+            "response_format": "scalar",
+            "queries": [
+              {
+                "data_source": "logs",
+                "name": "alert_patterns",
+                "indexes": ["*"],
+                "compute": {"aggregation": "count"},
+                "search": {"query": "source:iam-jit-bounce @iam_jit.event_type:ANOMALY_DETECTED"},
+                "group_by": [{"facet": "@iam_jit.alert_pattern", "limit": 10, "sort": {"order": "desc", "aggregation": "count"}}]
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "id": 8,
+      "definition": {
+        "type": "query_table",
+        "title": "Audit-export health",
+        "requests": [
+          {
+            "response_format": "scalar",
+            "queries": [
+              {
+                "data_source": "logs",
+                "name": "audit_health",
+                "indexes": ["*"],
+                "compute": {"aggregation": "count"},
+                "search": {"query": "source:iam-jit-bounce (@iam_jit.alert_pattern:audit-export-degraded OR @iam_jit.event_type:AUDIT_DROPPED OR @iam_jit.alert_pattern:bouncer-uptime-gap)"},
+                "group_by": [
+                  {"facet": "@iam_jit.event_type", "limit": 10, "sort": {"order": "desc", "aggregation": "count"}},
+                  {"facet": "@iam_jit.alert_pattern", "limit": 10, "sort": {"order": "desc", "aggregation": "count"}}
+                ]
+              }
+            ]
+          }
+        ]
+      }
+    }
+  ],
+  "template_variables": [],
+  "layout_type": "ordered",
+  "is_read_only": false,
+  "notify_list": [],
+  "reflow_type": "auto"
+}

@@ -1,0 +1,19 @@
+{
+  "name": "[iam-jit] Audit-export channel degraded",
+  "type": "log alert",
+  "query": "logs(\"source:iam-jit-bounce (@iam_jit.alert_pattern:audit-export-degraded OR @iam_jit.event_type:AUDIT_DROPPED)\").index(\"*\").rollup(\"count\").last(\"15m\") >= 1",
+  "message": "The iam-jit Bounce audit-export channel reported a failure in the last 15 minutes.\n\nFires on either:\n  * `audit-export-degraded` rule (issue #267) — webhook backpressure, dropped events, or log write failures exceeded the configured threshold.\n  * `AUDIT_DROPPED` synthetic event — the webhook pusher's bounded queue overflowed and dropped one or more events.\n\nEither means the SIEM view of bouncer activity is incomplete. Operator action: check webhook reachability + auth token validity, check disk space on the bouncer host, then restart the export channel.\n\n@your-team-here",
+  "tags": ["source:iam-jit-bounce", "team:security", "category:audit-channel-health"],
+  "options": {
+    "thresholds": {"critical": 1},
+    "notify_audit": false,
+    "include_tags": true,
+    "new_group_delay": 0,
+    "evaluation_delay": 60,
+    "renotify_interval": 60,
+    "groupby_simple_monitor": false,
+    "silenced": {}
+  },
+  "priority": 2,
+  "restricted_roles": null
+}

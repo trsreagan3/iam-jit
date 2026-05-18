@@ -1,0 +1,24 @@
+# iam-jit Bounce — default metadata
+#
+# All objects default to global scope + read for everyone, write for
+# admin. Operators can override per-object in metadata/local.meta
+# (Splunk auto-creates that file on first edit through the UI).
+
+[]
+access = read : [ * ], write : [ admin, power, sc_admin ]
+export = system
+
+[eventtypes]
+export = system
+
+[savedsearches]
+export = system
+
+[props]
+export = system
+
+[transforms]
+export = system
+
+[views]
+export = system
