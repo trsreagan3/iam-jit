@@ -55,13 +55,19 @@ Edge cases:
 
 from __future__ import annotations
 
+import json
+import logging
 import os
+import pathlib
 import subprocess
 import sys
+import tempfile
 import threading
 import uuid
 from dataclasses import dataclass
 from typing import Any
+
+logger = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
 # UUID v7 (fallback to UUID v4 on Python < 3.14)
@@ -380,6 +386,11 @@ def begin_mcp_session(client_info: dict[str, Any] | None) -> AgentSession:
     )
     with _LOCK:
         _ACTIVE = session
+    # #287 — persist to disk so the AWS-API proxy process (typically a
+    # SEPARATE process) can pick up the same session_id + stamp it on
+    # every decision's `unmapped.iam_jit.agent` block. Fail-soft inside
+    # _persist_disk_session; never breaks the MCP handshake.
+    _persist_disk_session(session)
     return session
 
 
@@ -391,6 +402,11 @@ def end_mcp_session() -> AgentSession | None:
     with _LOCK:
         prior = _ACTIVE
         _ACTIVE = None
+    # Remove the cross-process state file too so the proxy stops
+    # stamping this session_id on subsequent AWS-API calls. Stale-PID
+    # cleanup in `_load_disk_session` is the fallback; this is the
+    # happy-path cleanup.
+    _clear_disk_session()
     return prior
 
 
@@ -402,10 +418,172 @@ def active_agent_session() -> AgentSession | None:
 
 def reset_for_tests() -> None:
     """Drop the active session — test-only reset hook so tests don't
-    leak state across each other."""
+    leak state across each other. Also removes any on-disk session file
+    so a leaked file from a prior test doesn't bleed into the next."""
     global _ACTIVE
     with _LOCK:
         _ACTIVE = None
+    _clear_disk_session()
+
+
+# ---------------------------------------------------------------------------
+# Cross-process MCP session pickup (#287 — AWS-API path)
+# ---------------------------------------------------------------------------
+#
+# The MCP server and the AWS-API proxy commonly run in DIFFERENT processes
+# (MCP is launched by the agent over stdio; the proxy is `ibounce serve`
+# in a long-running terminal). The module-level `_ACTIVE` slot above is
+# process-scoped — perfect for the MCP-internal path, useless for the
+# proxy process which never calls `begin_mcp_session`.
+#
+# This block persists the active MCP session to a small on-disk file
+# (atomic write) so the proxy process can pick the same session_id up
+# and stamp it on every AWS-API decision's `unmapped.iam_jit.agent` block.
+#
+# Per [[scorer-is-ground-truth]] this is honest-effort: we record the
+# writer's PID + skip the file when that PID is no longer alive (the
+# MCP session ended ungracefully). Cross-machine deployments would
+# need a different strategy; iam-jit's local-only deployment model
+# (per [[local-only-safety-mode]]) means same-host always holds for
+# the supported configurations.
+#
+# Per [[self-host-zero-billing-dependency]] this is purely local file IO
+# — no phone-home, no shared service.
+
+
+def _session_state_path() -> pathlib.Path:
+    """Return the path to the cross-process MCP-session state file.
+
+    Defaults to `~/.iam-jit/bouncer/active-mcp-session.json`; the
+    `IAM_JIT_BOUNCER_AGENT_SESSION_FILE` env var overrides for tests +
+    operators who keep state under a non-default home.
+    """
+    override = os.environ.get("IAM_JIT_BOUNCER_AGENT_SESSION_FILE")
+    if override:
+        return pathlib.Path(override)
+    return (
+        pathlib.Path.home() / ".iam-jit" / "bouncer" / "active-mcp-session.json"
+    )
+
+
+def _pid_is_alive(pid: int) -> bool:
+    """True iff `pid` names a live process. Signal 0 is the kernel-
+    cheap liveness probe (POSIX). Best-effort; on permission errors
+    treat as alive (a sibling under a different uid can still be a
+    real MCP process)."""
+    if pid <= 0:
+        return False
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    except OSError:
+        return False
+    return True
+
+
+def _persist_disk_session(session: AgentSession) -> None:
+    """Atomically write `session` to the on-disk state file. Fail-soft:
+    a write failure NEVER breaks the MCP handshake; the AWS-API path
+    just won't see the session until the next initialize."""
+    path = _session_state_path()
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        payload = {
+            "session_id": session.session_id,
+            "name": session.name,
+            "version": session.version,
+            "detected_from": session.detected_from,
+            "pid": os.getpid(),
+        }
+        # Atomic write via temp + rename so a concurrent reader never
+        # sees a half-written JSON blob.
+        fd, tmp_name = tempfile.mkstemp(
+            prefix=".active-mcp-session.",
+            suffix=".json",
+            dir=str(path.parent),
+        )
+        try:
+            with os.fdopen(fd, "w") as fh:
+                json.dump(payload, fh)
+            os.replace(tmp_name, str(path))
+        except Exception:
+            # Clean up the temp file on any error so we don't leak
+            # `.active-mcp-session.*.json` debris in the state dir.
+            try:
+                os.unlink(tmp_name)
+            except OSError:
+                pass
+            raise
+    except Exception as e:
+        logger.debug(
+            "agent_context: persist-disk-session failed (%s); "
+            "AWS-API path will report session_id=None until next "
+            "MCP initialize", e,
+        )
+
+
+def _clear_disk_session() -> None:
+    """Remove the on-disk session file. Used by `end_mcp_session` +
+    `reset_for_tests`. Fail-soft."""
+    path = _session_state_path()
+    try:
+        path.unlink()
+    except FileNotFoundError:
+        pass
+    except OSError as e:
+        logger.debug("agent_context: clear-disk-session failed: %s", e)
+
+
+def _load_disk_session() -> AgentSession | None:
+    """Read the on-disk session file. Returns None when:
+      - file missing (no MCP session anywhere on this host)
+      - file unreadable / malformed (fail-soft)
+      - the writing PID is no longer alive (stale state — the MCP
+        process exited without cleanup)
+    """
+    path = _session_state_path()
+    try:
+        with open(path) as fh:
+            payload = json.load(fh)
+    except FileNotFoundError:
+        return None
+    except (OSError, json.JSONDecodeError) as e:
+        logger.debug("agent_context: load-disk-session failed: %s", e)
+        return None
+    pid = payload.get("pid")
+    if isinstance(pid, int) and not _pid_is_alive(pid):
+        # Stale file — the MCP server crashed without calling
+        # `end_mcp_session`. Don't stamp stale identity onto fresh
+        # AWS-API decisions; clear + return None.
+        _clear_disk_session()
+        return None
+    session_id = payload.get("session_id")
+    name = payload.get("name")
+    detected_from = payload.get("detected_from")
+    if not session_id or not name or not detected_from:
+        return None
+    version = payload.get("version")
+    if version is not None and not isinstance(version, str):
+        version = str(version)
+    return AgentSession(
+        session_id=str(session_id),
+        name=str(name),
+        version=version,
+        detected_from=str(detected_from),
+    )
+
+
+def active_or_disk_agent_session() -> AgentSession | None:
+    """Resolve the active MCP session, preferring the in-process slot
+    + falling back to the on-disk state file when no in-process session
+    is bound (cross-process pickup for the AWS-API proxy path)."""
+    in_proc = active_agent_session()
+    if in_proc is not None:
+        return in_proc
+    return _load_disk_session()
 
 
 # ---------------------------------------------------------------------------
@@ -438,8 +616,12 @@ def resolve_agent_block(
     on the dict. When User-Agent or process-tree wins, session_id
     is None — those calls have no persistent agent session.
     """
-    # 1. MCP clientInfo — highest fidelity.
-    mcp = active_agent_session()
+    # 1. MCP clientInfo — highest fidelity. Falls back to the on-disk
+    # state file (#287) so the AWS-API proxy process picks up the same
+    # session_id the in-process MCP server minted; without this the
+    # AWS-API path always emitted `session_id=null` even though an
+    # MCP session was live on the host.
+    mcp = active_or_disk_agent_session()
     if mcp is not None:
         block: dict[str, Any] = {
             "name": mcp.name,

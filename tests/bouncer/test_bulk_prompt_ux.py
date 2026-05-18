@@ -759,6 +759,136 @@ def test_bulk_allow_rule_lets_subsequent_call_through(store):
     assert rec.decision == Decision.ALLOW
 
 
+# ---------------------------------------------------------------------------
+# #287 — burst detector fires from raw DENY decisions even when
+# --prompt-on-deny is NOT set (regression for dogfood round-2 finding).
+# ---------------------------------------------------------------------------
+
+
+def _sigv4(*, service: str, region: str) -> str:
+    return (
+        "AWS4-HMAC-SHA256 "
+        f"Credential=AKIAEXAMPLE/20260517/{region}/{service}/aws4_request, "
+        "SignedHeaders=host;x-amz-date, "
+        "Signature=fake"
+    )
+
+
+def test_burst_detector_fires_on_transparent_deny_without_prompt_on_deny(
+    tmp_path,
+):
+    """Reproducer for the #287 dogfood-round-2 finding:
+
+    Pre-fix: the BurstDetector's `observe()` lived INSIDE the
+    `if prompt_on_deny:` branch of `evaluate_request`. An operator
+    running ibounce without `--prompt-on-deny` (the default-deny
+    transparent shape) saw 6 denies in 30s but NO BURST_DETECTED
+    event because the detector was never observing.
+
+    Post-fix: the detector observes every transparent-mode DENY +
+    fires the BURST_DETECTED event regardless of --prompt-on-deny.
+    """
+    from iam_jit.bouncer.decisions import DefaultPolicy
+    from iam_jit.bouncer.proxy import ProxyMode, evaluate_request
+
+    s = BouncerStore(db_path=str(tmp_path / "burst.db"))
+    try:
+        emitted: list[dict] = []
+        d = BurstDetector(
+            threshold=3, window_seconds=60, emit=emitted.append,
+        )
+        register_burst_detector(d)
+        try:
+            # Six DENYs in transparent mode with prompt_on_deny=False
+            # (the default). Default-deny + no rules => every call is
+            # a DENY. Threshold=3 should fire on the third call; the
+            # remaining three are suppressed by the cool-down.
+            for i in range(6):
+                obs = evaluate_request(
+                    method="GET",
+                    host="s3.us-east-1.amazonaws.com",
+                    path=f"/bucket/key-{i}",
+                    headers={
+                        "host": "s3.us-east-1.amazonaws.com",
+                        "authorization": _sigv4(
+                            service="s3", region="us-east-1",
+                        ),
+                    },
+                    body=None, query=None,
+                    store=s,
+                    mode=ProxyMode.TRANSPARENT,
+                    default_policy=DefaultPolicy.DENY,
+                    prompt_on_deny=False,  # explicit: this is the bug path
+                )
+                assert obs.decision_verdict == "deny"
+            # BURST_DETECTED fired exactly once across the six denies.
+            assert len(emitted) == 1, (
+                f"expected exactly one BURST_DETECTED across 6 denies; "
+                f"got {len(emitted)}"
+            )
+            event = emitted[0]
+            assert (
+                event["unmapped"]["iam_jit"]["event_type"]
+                == EVENT_TYPE_BURST_DETECTED
+            )
+            assert event["activity_name"] == "prompt_burst_detected"
+            # No pending_prompts rows were enqueued — confirms the path
+            # under test does NOT depend on the pending_prompts table.
+            pending = s.list_pending_prompts(
+                status="pending", kind="deny-prompt",
+            )
+            assert pending == []
+        finally:
+            register_burst_detector(None)
+    finally:
+        s.close()
+
+
+def test_burst_observe_does_not_fire_on_cooperative_deny(tmp_path):
+    """Cooperative-mode denies are advisory (audit-only; the proxy
+    still forwards). A wall of cooperative-mode denies is not a
+    "block-happy uninstall risk" — it's the operator running the
+    observability shape. We only fire the burst on TRANSPARENT denies
+    (the mode that actually blocks the agent)."""
+    from iam_jit.bouncer.decisions import DefaultPolicy
+    from iam_jit.bouncer.proxy import ProxyMode, evaluate_request
+
+    s = BouncerStore(db_path=str(tmp_path / "burst-coop.db"))
+    try:
+        emitted: list[dict] = []
+        d = BurstDetector(
+            threshold=3, window_seconds=60, emit=emitted.append,
+        )
+        register_burst_detector(d)
+        try:
+            for i in range(5):
+                evaluate_request(
+                    method="GET",
+                    host="s3.us-east-1.amazonaws.com",
+                    path=f"/bucket/key-{i}",
+                    headers={
+                        "host": "s3.us-east-1.amazonaws.com",
+                        "authorization": _sigv4(
+                            service="s3", region="us-east-1",
+                        ),
+                    },
+                    body=None, query=None,
+                    store=s,
+                    mode=ProxyMode.COOPERATIVE,
+                    default_policy=DefaultPolicy.DENY,
+                    prompt_on_deny=False,
+                )
+            # COOPERATIVE mode → no BURST_DETECTED (denies are advisory).
+            assert emitted == [], (
+                "burst detector must not fire on cooperative-mode denies; "
+                f"got {len(emitted)} events"
+            )
+        finally:
+            register_burst_detector(None)
+    finally:
+        s.close()
+
+
 def test_expired_bulk_rule_does_not_let_subsequent_call_through(store):
     """After an expired bulk-allow rule, decide() falls back to DENY."""
     from iam_jit.bouncer.decisions import (

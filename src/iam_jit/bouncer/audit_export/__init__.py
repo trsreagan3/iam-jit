@@ -44,6 +44,7 @@ from __future__ import annotations
 from .agent_context import (
     AgentSession,
     active_agent_session,
+    active_or_disk_agent_session,
     begin_mcp_session,
     detect_from_process_tree,
     detect_from_user_agent,
@@ -114,6 +115,7 @@ __all__ = [
     "WebhookLicenseError",
     "WebhookPusher",
     "active_agent_session",
+    "active_or_disk_agent_session",
     "audit_dropped_event",
     "audit_event_from_decision",
     "audit_export_degraded_stderr_message",

@@ -1326,6 +1326,30 @@ def evaluate_request(
     except Exception as e:
         logger.warning("audit-export emit (decision) failed: %s", e)
 
+    # #287 — burst detector observes EVERY transparent-mode DENY,
+    # not just the prompt-on-deny path. Pre-fix the burst detector only
+    # fired when `--prompt-on-deny` was set (its observe() lived inside
+    # the add_pending_prompt branch below). That made the BURST_DETECTED
+    # event invisible to operators running ibounce in plain transparent
+    # mode (no prompt-on-deny flag), which is the default for the
+    # safety-mode-lean-permissive deployment shape. Per
+    # [[scorer-is-ground-truth]] the user-facing intent of "burst = lots
+    # of denies" must hold REGARDLESS of which prompt-flag the operator
+    # picked.
+    if (
+        decision_id > 0
+        and mode == ProxyMode.TRANSPARENT
+        and record.decision.value == "deny"
+        and active_pause is None  # pauses already bypass enforcement
+    ):
+        try:
+            from .burst import active_burst_detector
+            _detector = active_burst_detector()
+            if _detector is not None:
+                _detector.observe()
+        except Exception as e:
+            logger.warning("bouncer-proxy burst-detector observe failed: %s", e)
+
     # #5 v1.0 (async): if operator opted into prompt-on-deny AND
     # this was a transparent-mode DENY (the only mode where DENY
     # actually blocks the agent), enqueue a pending prompt so the
@@ -1349,17 +1373,6 @@ def evaluate_request(
                 region=parsed.region,
                 deny_reason=record.reason,
             )
-            # #253 — feed the burst detector. The detector is the
-            # process-wide singleton installed by serve(); when no
-            # detector is installed (unit tests calling evaluate_request
-            # directly), this is a harmless no-op. Threshold-crossing
-            # emits the BURST_DETECTED OCSF event on the audit-export
-            # channels; the operator sees the pre-burst hint on next
-            # CLI invocation.
-            from .burst import active_burst_detector
-            _detector = active_burst_detector()
-            if _detector is not None:
-                _detector.observe()
         except Exception as e:
             logger.warning("bouncer-proxy prompt-enqueue failed: %s", e)
 

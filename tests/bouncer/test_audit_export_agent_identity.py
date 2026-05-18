@@ -39,9 +39,18 @@ from iam_jit.bouncer.audit_export import agent_context as _agent_context
 
 
 @pytest.fixture(autouse=True)
-def _reset_agent_context():
+def _reset_agent_context(tmp_path, monkeypatch):
     """Each test gets a clean module-level slot; the MCP session store
-    is process-global by design (one stdio process = one session)."""
+    is process-global by design (one stdio process = one session).
+
+    Per #287: also redirect the on-disk session-state file under tmp_path
+    so tests don't pollute the operator's real `~/.iam-jit/` and so the
+    cross-process pickup path can be exercised deterministically.
+    """
+    monkeypatch.setenv(
+        "IAM_JIT_BOUNCER_AGENT_SESSION_FILE",
+        str(tmp_path / "active-mcp-session.json"),
+    )
     reset_for_tests()
     yield
     reset_for_tests()
@@ -463,3 +472,100 @@ def test_mcp_initialize_with_no_clientinfo_still_binds_session():
     assert active is not None
     assert active.name == "unknown"
     assert active.session_id
+
+
+# ---------------------------------------------------------------------------
+# #287 — AWS-API path (cross-process) carries the MCP session_id
+# ---------------------------------------------------------------------------
+
+
+def test_aws_api_path_picks_up_session_id_from_disk_after_initialize():
+    """Reproducer for the #287 dogfood-round-2 finding:
+
+    Process A: MCP server gets `initialize` -> `begin_mcp_session`.
+    Process B: AWS-API proxy builds an OCSF event via
+               `audit_event_from_decision`.
+
+    Pre-fix: process B's `_ACTIVE` slot was empty because the slot is
+    module-global PER PROCESS, so the AWS-API path emitted
+    `unmapped.iam_jit.agent.session_id == None` on every decision even
+    when an MCP session was live elsewhere on the host.
+
+    Post-fix: `begin_mcp_session` persists to a small on-disk state
+    file; `resolve_agent_block` reads the file as a fallback when the
+    in-process slot is empty. We simulate the cross-process case by
+    clearing the in-process slot (without removing the file).
+    """
+    session = begin_mcp_session(
+        {"name": "claude-code", "version": "1.7.0"},
+    )
+    # Simulate the "proxy is a separate process" reality: that process
+    # never called begin_mcp_session, so its in-process slot is None.
+    _agent_context._ACTIVE = None
+    assert _agent_context.active_agent_session() is None
+
+    # Disk fallback fires; AWS-API decision carries the session_id.
+    event = audit_event_from_decision(
+        decision_id=287,
+        mode="transparent",
+        profile=None,
+        verdict="deny",
+        reason="rule#1",
+        service="s3",
+        action="DeleteObject",
+        arn="arn:aws:s3:::secret-bucket/key",
+        region="us-east-1",
+        host="s3.us-east-1.amazonaws.com",
+        user_agent="Boto3/1.34.5 Python/3.12",
+        enforced=True,
+    )
+    agent = event["unmapped"]["iam_jit"]["agent"]
+    assert agent["session_id"] == session.session_id
+    assert agent["name"] == "claude-code"
+    assert agent["detected_from"] == "mcp_clientinfo"
+
+
+def test_disk_session_pickup_ignores_stale_pid(tmp_path, monkeypatch):
+    """If the MCP server crashed (didn't call end_mcp_session) the
+    state file would point at a dead PID. We must NOT stamp a stale
+    session_id onto fresh AWS-API decisions in that case."""
+    state_path = tmp_path / "stale-mcp-session.json"
+    monkeypatch.setenv(
+        "IAM_JIT_BOUNCER_AGENT_SESSION_FILE", str(state_path),
+    )
+    # Write a stale state file by hand: a PID that's almost certainly
+    # not running (very high number; the kernel reserves PIDs from low
+    # numbers up). If it happens to be live we accept that as a flake
+    # of the host (extremely unlikely; PIDs are recycled but the upper
+    # range is sparse).
+    state_path.write_text(json.dumps({
+        "session_id": "stale-uuid",
+        "name": "claude-code",
+        "version": "0.0",
+        "detected_from": "mcp_clientinfo",
+        "pid": 2_000_000,
+    }))
+    block = _agent_context.resolve_agent_block(
+        user_agent="Boto3/1.34.5 Python/3.12",
+    )
+    # No MCP-session stamp: stale file was skipped; the UA path took
+    # over and assigned an aws-sdk-python identity with session_id=None.
+    assert block is not None
+    assert block["name"] == "aws-sdk-python"
+    assert block["session_id"] is None
+    # And the stale file was cleaned up by the loader.
+    assert not state_path.exists()
+
+
+def test_end_mcp_session_removes_disk_state(tmp_path, monkeypatch):
+    """After end_mcp_session the cross-process state file must be
+    removed so the proxy stops attributing AWS calls to the just-ended
+    agent session."""
+    state_path = tmp_path / "ending-mcp-session.json"
+    monkeypatch.setenv(
+        "IAM_JIT_BOUNCER_AGENT_SESSION_FILE", str(state_path),
+    )
+    begin_mcp_session({"name": "cursor", "version": "0.45.0"})
+    assert state_path.exists()
+    end_mcp_session()
+    assert not state_path.exists()
