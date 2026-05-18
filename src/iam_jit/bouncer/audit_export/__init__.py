@@ -41,6 +41,17 @@ billing dependency; the customer owns the endpoint + the bandwidth.
 
 from __future__ import annotations
 
+from .agent_context import (
+    AgentSession,
+    active_agent_session,
+    begin_mcp_session,
+    detect_from_process_tree,
+    detect_from_user_agent,
+    end_mcp_session,
+    reset_for_tests,
+    resolve_agent_block,
+    session_ended_event,
+)
 from .alerts import (
     BUILTIN_RULES,
     FORBIDDEN_ALERT_WORDS,
@@ -71,6 +82,7 @@ from .webhook import (
 
 __all__ = [
     "AUDIT_EVENT_SCHEMA_VERSION",
+    "AgentSession",
     "AlertRule",
     "AlertsConfig",
     "AlertsLicenseError",
@@ -83,13 +95,21 @@ __all__ = [
     "SSRFRejectedError",
     "WebhookLicenseError",
     "WebhookPusher",
+    "active_agent_session",
     "audit_dropped_event",
     "audit_event_from_decision",
+    "begin_mcp_session",
     "build_request",
+    "detect_from_process_tree",
+    "detect_from_user_agent",
+    "end_mcp_session",
     "gate_alerts_license",
     "load_alerts_config",
     "make_admin_fallback_grant_event",
     "make_pause_end_event",
     "make_profile_install_event",
+    "reset_for_tests",
+    "resolve_agent_block",
+    "session_ended_event",
     "validate_webhook_url",
 ]

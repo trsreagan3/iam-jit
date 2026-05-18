@@ -720,6 +720,18 @@ def evaluate_request(
     account_alias: str | None = None,
     prompt_on_deny: bool = False,
 ) -> RequestObservation:
+    # #266 — agent identity. The User-Agent header (case-insensitive)
+    # feeds the per-call detection path in the audit-export event
+    # builder. Extracted here once so every audit_event_from_decision
+    # call below threads the same value through (MCP-session detection
+    # at the same level is module-global state inside agent_context
+    # so doesn't need a parameter).
+    user_agent = None
+    if headers:
+        for k, v in headers.items():
+            if k.lower() == "user-agent":
+                user_agent = v
+                break
     """Pure-function evaluation of one inbound proxy request.
 
     Slice 1's core unit: given the HTTP request parts, parse it,
@@ -797,6 +809,7 @@ def evaluate_request(
                 host=host,
                 upstream=None,
                 enforced=(mode == ProxyMode.TRANSPARENT),
+                user_agent=user_agent,
             ))
         except Exception as e:
             logger.warning("audit-export emit (unclassifiable) failed: %s", e)
@@ -870,6 +883,7 @@ def evaluate_request(
                     upstream=None,
                     enforced=(mode == ProxyMode.TRANSPARENT),
                     extra={"decision_source": "profile"},
+                    user_agent=user_agent,
                 ))
             except Exception as e:
                 logger.warning("audit-export emit (profile-deny) failed: %s", e)
@@ -1020,6 +1034,7 @@ def evaluate_request(
                     active_task.task_id if active_task is not None else None
                 ),
             },
+            user_agent=user_agent,
         ))
     except Exception as e:
         logger.warning("audit-export emit (decision) failed: %s", e)

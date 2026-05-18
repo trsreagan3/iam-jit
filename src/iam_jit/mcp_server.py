@@ -3591,6 +3591,18 @@ def _handle_request(req: dict[str, Any]) -> dict[str, Any] | None:
     params = req.get("params") or {}
 
     if method == "initialize":
+        # #266 — capture clientInfo + mint an agent session ID per
+        # [[agent-identity-in-audit]]. The MCP spec carries
+        # `clientInfo: {name, version}` in initialize params; we
+        # bind it to a fresh UUID-v7 session so every subsequent
+        # OCSF audit event from this stdio process carries the
+        # same session_id. Fail-soft: a bug in agent_context never
+        # breaks the MCP handshake.
+        try:
+            from .bouncer.audit_export.agent_context import begin_mcp_session
+            begin_mcp_session(params.get("clientInfo"))
+        except Exception:
+            pass
         return _ok(rid, {
             "protocolVersion": MCP_PROTOCOL_VERSION,
             "capabilities": {"tools": {}},
@@ -3723,6 +3735,42 @@ def _err(rid: object, code: int, message: str) -> dict[str, Any]:
     }
 
 
+def _emit_session_ended_on_close() -> None:
+    """#266 — when the MCP stdio loop exits (EOF on stdin = agent
+    disconnect), retire the active agent session and emit a
+    SESSION_ENDED OCSF event to whatever audit-export channels are
+    configured. Fail-soft: a missing audit channel / unconfigured
+    log writer must not raise out of the server's exit path.
+
+    The event is bookend-only — it carries the session_id that was
+    active so a SIEM filter on
+    `unmapped.iam_jit.agent.session_id == "..."`
+    sees a clean open->close pair. Per [[security-team-positioning-
+    safety-not-surveillance]] severity is Informational; this isn't
+    an alert, it's a forensic marker.
+    """
+    try:
+        from .bouncer.audit_export.agent_context import (
+            end_mcp_session,
+            session_ended_event,
+        )
+        from .bouncer.proxy import _emit_audit_event
+    except Exception:
+        return
+    try:
+        prior = end_mcp_session()
+    except Exception:
+        return
+    if prior is None:
+        return
+    try:
+        _emit_audit_event(session_ended_event(prior))
+    except Exception:
+        # Audit-export channel may not be configured (common — the
+        # MCP server runs everywhere, audit-export is opt-in).
+        return
+
+
 def main() -> int:
     """Read JSON-RPC requests from stdin; write responses to stdout.
 
@@ -3730,31 +3778,37 @@ def main() -> int:
     line-delimited JSON (no Content-Length headers). Errors during
     request processing are returned as JSON-RPC error responses, not
     raised — the MCP host expects the server to stay alive.
+
+    On EOF (client disconnect) or KeyboardInterrupt we emit a #266
+    SESSION_ENDED event so audit consumers see a clean session bookend.
     """
-    for line in sys.stdin:
-        line = line.strip()
-        if not line:
-            continue
-        try:
-            req = json.loads(line)
-        except json.JSONDecodeError as e:
-            # Can't return a structured error because we don't have an id;
-            # write a parse-error response with id=null per JSON-RPC.
-            resp = {
-                "jsonrpc": "2.0",
-                "id": None,
-                "error": {"code": -32700, "message": f"parse error: {e}"},
-            }
-            sys.stdout.write(json.dumps(resp) + "\n")
-            sys.stdout.flush()
-            continue
-        try:
-            resp = _handle_request(req)
-        except Exception as e:  # defensive — never crash the server
-            resp = _err(req.get("id"), -32603, f"internal error: {e}")
-        if resp is not None:
-            sys.stdout.write(json.dumps(resp) + "\n")
-            sys.stdout.flush()
+    try:
+        for line in sys.stdin:
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                req = json.loads(line)
+            except json.JSONDecodeError as e:
+                # Can't return a structured error because we don't have an id;
+                # write a parse-error response with id=null per JSON-RPC.
+                resp = {
+                    "jsonrpc": "2.0",
+                    "id": None,
+                    "error": {"code": -32700, "message": f"parse error: {e}"},
+                }
+                sys.stdout.write(json.dumps(resp) + "\n")
+                sys.stdout.flush()
+                continue
+            try:
+                resp = _handle_request(req)
+            except Exception as e:  # defensive — never crash the server
+                resp = _err(req.get("id"), -32603, f"internal error: {e}")
+            if resp is not None:
+                sys.stdout.write(json.dumps(resp) + "\n")
+                sys.stdout.flush()
+    finally:
+        _emit_session_ended_on_close()
     return 0
 
 

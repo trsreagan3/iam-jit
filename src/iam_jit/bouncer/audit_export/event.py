@@ -428,6 +428,15 @@ def audit_event_from_decision(
     dst_port: int | None = None,
     sigv4_credential_kid: str | None = None,
     extra: dict[str, Any] | None = None,
+    # #266 — agent identity inputs. Defaults preserve the pre-#266
+    # behaviour for callers (and tests) that don't supply any
+    # agent-identity context — no agent block lands on the event in
+    # that case. Per [[agent-identity-in-audit]] the resolver inside
+    # agent_context handles the priority chain
+    # (mcp_clientinfo > user_agent > process_tree).
+    user_agent: str | None = None,
+    peer_pid: int | None = None,
+    include_process_tree: bool = True,
 ) -> dict[str, Any]:
     """Build the OCSF v1.1.0 class 6003 event for one proxy decision.
 
@@ -516,6 +525,30 @@ def audit_event_from_decision(
         # event from one logical session.
         actor["session"] = {"uid": request_id}
 
+    # #266 — agent identity block. Fail-soft so an agent_context
+    # detection bug never breaks the audit channel.
+    agent_block: dict[str, Any] | None = None
+    try:
+        from .agent_context import resolve_agent_block
+        agent_block = resolve_agent_block(
+            user_agent=user_agent,
+            peer_pid=peer_pid,
+            include_process_tree=include_process_tree,
+        )
+    except Exception:
+        agent_block = None
+
+    iam_jit_block: dict[str, Any] = {
+        "mode": mode,
+        "profile": profile,
+        "verdict": verdict,
+        "decision_id": decision_id,
+        "enforced": bool(enforced),
+        "ext": ext,
+    }
+    if agent_block is not None:
+        iam_jit_block["agent"] = agent_block
+
     event: dict[str, Any] = {
         "metadata": {
             "version": OCSF_SCHEMA_VERSION,
@@ -549,14 +582,7 @@ def audit_event_from_decision(
         "src_endpoint": src_endpoint,
         "dst_endpoint": dst_endpoint,
         "unmapped": {
-            "iam_jit": {
-                "mode": mode,
-                "profile": profile,
-                "verdict": verdict,
-                "decision_id": decision_id,
-                "enforced": bool(enforced),
-                "ext": ext,
-            },
+            "iam_jit": iam_jit_block,
         },
     }
     return event
