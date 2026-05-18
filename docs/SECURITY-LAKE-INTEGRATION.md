@@ -174,6 +174,10 @@ GROUP BY api_operation, unmapped_iam_jit_verdict
 ORDER BY n DESC;
 ```
 
+(The same query works against ibounce, kbounce, dbounce partitions
+unchanged — the column set is byte-identical across all three
+products. Pivot on `metadata_product_name` to distinguish.)
+
 ## Partition layout
 
 Every parquet file lands at:
@@ -213,47 +217,51 @@ The cross-product test fixture
 byte-for-byte in every product's test suite — a stray addition in
 any one product fails the test until all three are updated together.
 
-| Column                        | Type    | OCSF source                            |
-|-------------------------------|---------|----------------------------------------|
-| `metadata.version`            | string  | `metadata.version`                     |
-| `metadata.product.name`       | string  | `metadata.product.name`                |
-| `metadata.product.vendor_name`| string  | `metadata.product.vendor_name`         |
-| `metadata.product.version`    | string  | `metadata.product.version`             |
-| `time`                        | int64   | `time`                                 |
-| `class_uid`                   | int32   | `class_uid`                            |
-| `class_name`                  | string  | `class_name`                           |
-| `category_uid`                | int32   | `category_uid`                         |
-| `category_name`               | string  | `category_name`                        |
-| `activity_id`                 | int32   | `activity_id`                          |
-| `activity_name`               | string  | `activity_name`                        |
-| `type_uid`                    | int32   | `type_uid`                             |
-| `type_name`                   | string  | `type_name`                            |
-| `severity_id`                 | int32   | `severity_id`                          |
-| `severity`                    | string  | `severity`                             |
-| `status_id`                   | int32   | `status_id`                            |
-| `status`                      | string  | `status`                               |
-| `status_detail`               | string  | `status_detail`                        |
-| `actor.user.name`             | string  | `actor.user.name`                      |
-| `actor.user.uid`              | string  | `actor.user.uid`                       |
-| `actor.session.uid`           | string  | `actor.session.uid`                    |
-| `api.operation`               | string  | `api.operation`                        |
-| `api.service.name`            | string  | `api.service.name`                     |
-| `api.request.uid`             | string  | `api.request.uid`                      |
-| `resources_json`              | string  | `json_encode(resources)`               |
-| `src_endpoint.hostname`       | string  | `src_endpoint.hostname`                |
-| `src_endpoint.ip`             | string  | `src_endpoint.ip`                      |
-| `src_endpoint.port`           | int32   | `src_endpoint.port`                    |
-| `dst_endpoint.hostname`       | string  | `dst_endpoint.hostname`                |
-| `dst_endpoint.ip`             | string  | `dst_endpoint.ip`                      |
-| `dst_endpoint.port`           | int32   | `dst_endpoint.port`                    |
-| `unmapped.iam_jit.mode`       | string  | `unmapped.iam_jit.mode`                |
-| `unmapped.iam_jit.profile`    | string  | `unmapped.iam_jit.profile`             |
-| `unmapped.iam_jit.verdict`    | string  | `unmapped.iam_jit.verdict`             |
-| `unmapped.iam_jit.decision_id`| int64   | `unmapped.iam_jit.decision_id`         |
-| `unmapped.iam_jit.enforced`   | bool    | `unmapped.iam_jit.enforced`            |
-| `unmapped.iam_jit.event_type` | string  | `unmapped.iam_jit.event_type`          |
-| `unmapped.iam_jit.ext_json`   | string  | `json_encode(unmapped.iam_jit.ext)`    |
-| `unmapped.iam_jit.agent_json` | string  | `json_encode(unmapped.iam_jit.agent)`  |
+Column naming convention: dots in OCSF dot-paths become
+underscores in parquet column names (matches AWS Glue's auto-crawl
+convention + Athena's idiomatic flat-column shape).
+
+| Column                          | Type    | OCSF source                            |
+|---------------------------------|---------|----------------------------------------|
+| `metadata_version`              | string  | `metadata.version`                     |
+| `metadata_product_name`         | string  | `metadata.product.name`                |
+| `metadata_product_vendor_name`  | string  | `metadata.product.vendor_name`         |
+| `metadata_product_version`      | string  | `metadata.product.version`             |
+| `time`                          | int64   | `time`                                 |
+| `class_uid`                     | int32   | `class_uid`                            |
+| `class_name`                    | string  | `class_name`                           |
+| `category_uid`                  | int32   | `category_uid`                         |
+| `category_name`                 | string  | `category_name`                        |
+| `activity_id`                   | int32   | `activity_id`                          |
+| `activity_name`                 | string  | `activity_name`                        |
+| `type_uid`                      | int32   | `type_uid`                             |
+| `type_name`                     | string  | `type_name`                            |
+| `severity_id`                   | int32   | `severity_id`                          |
+| `severity`                      | string  | `severity`                             |
+| `status_id`                     | int32   | `status_id`                            |
+| `status`                        | string  | `status`                               |
+| `status_detail`                 | string  | `status_detail`                        |
+| `actor_user_name`               | string  | `actor.user.name`                      |
+| `actor_user_uid`                | string  | `actor.user.uid`                       |
+| `actor_session_uid`             | string  | `actor.session.uid`                    |
+| `api_operation`                 | string  | `api.operation`                        |
+| `api_service_name`              | string  | `api.service.name`                     |
+| `api_request_uid`               | string  | `api.request.uid`                      |
+| `resources_json`                | string  | `json_encode(resources)`               |
+| `src_endpoint_hostname`         | string  | `src_endpoint.hostname`                |
+| `src_endpoint_ip`               | string  | `src_endpoint.ip`                      |
+| `src_endpoint_port`             | int32   | `src_endpoint.port`                    |
+| `dst_endpoint_hostname`         | string  | `dst_endpoint.hostname`                |
+| `dst_endpoint_ip`               | string  | `dst_endpoint.ip`                      |
+| `dst_endpoint_port`             | int32   | `dst_endpoint.port`                    |
+| `unmapped_iam_jit_mode`         | string  | `unmapped.iam_jit.mode`                |
+| `unmapped_iam_jit_profile`      | string  | `unmapped.iam_jit.profile`             |
+| `unmapped_iam_jit_verdict`      | string  | `unmapped.iam_jit.verdict`             |
+| `unmapped_iam_jit_decision_id`  | int64   | `unmapped.iam_jit.decision_id`         |
+| `unmapped_iam_jit_enforced`     | bool    | `unmapped.iam_jit.enforced`            |
+| `unmapped_iam_jit_event_type`   | string  | `unmapped.iam_jit.event_type`          |
+| `unmapped_iam_jit_ext_json`     | string  | `json_encode(unmapped.iam_jit.ext)`    |
+| `unmapped_iam_jit_agent_json`   | string  | `json_encode(unmapped.iam_jit.agent)`  |
 
 Snappy compression (Security Lake default; auto-supported by Athena
 + Spark + Glue without extra codec installs).

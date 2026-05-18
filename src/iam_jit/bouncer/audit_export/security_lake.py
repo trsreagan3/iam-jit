@@ -87,12 +87,18 @@ DEFAULT_MAX_PENDING_ROWS = 100_000
 #   1. the cross-product test can assert it byte-for-byte
 #   2. the docs runbook can render the column list without importing
 #      pyarrow (no pyarrow dep in `iam-jit-the-cli`).
+#
+# Naming convention: dot-paths in the source OCSF event become
+# underscore-separated column names (`metadata.product.name` ->
+# `metadata_product_name`). This matches AWS Glue's auto-crawl
+# convention for parquet files + keeps Athena queries idiomatic
+# (Athena treats dots in column names as struct-member access).
 OCSF_PARQUET_COLUMNS: tuple[tuple[str, str], ...] = (
     # (column_name, pyarrow_logical_type_name)
-    ("metadata.version", "string"),
-    ("metadata.product.name", "string"),
-    ("metadata.product.vendor_name", "string"),
-    ("metadata.product.version", "string"),
+    ("metadata_version", "string"),
+    ("metadata_product_name", "string"),
+    ("metadata_product_vendor_name", "string"),
+    ("metadata_product_version", "string"),
     ("time", "int64"),
     ("class_uid", "int32"),
     ("class_name", "string"),
@@ -107,34 +113,34 @@ OCSF_PARQUET_COLUMNS: tuple[tuple[str, str], ...] = (
     ("status_id", "int32"),
     ("status", "string"),
     ("status_detail", "string"),
-    ("actor.user.name", "string"),
-    ("actor.user.uid", "string"),
-    ("actor.session.uid", "string"),
-    ("api.operation", "string"),
-    ("api.service.name", "string"),
-    ("api.request.uid", "string"),
+    ("actor_user_name", "string"),
+    ("actor_user_uid", "string"),
+    ("actor_session_uid", "string"),
+    ("api_operation", "string"),
+    ("api_service_name", "string"),
+    ("api_request_uid", "string"),
     # OCSF resources[] is JSON-encoded into a single column. parquet-go +
     # pyarrow both handle nested-list types natively, but flattening
     # to a JSON string keeps the Athena-side schema trivial + avoids
     # the cross-product struct-shape divergence risk.
     ("resources_json", "string"),
-    ("src_endpoint.hostname", "string"),
-    ("src_endpoint.ip", "string"),
-    ("src_endpoint.port", "int32"),
-    ("dst_endpoint.hostname", "string"),
-    ("dst_endpoint.ip", "string"),
-    ("dst_endpoint.port", "int32"),
-    ("unmapped.iam_jit.mode", "string"),
-    ("unmapped.iam_jit.profile", "string"),
-    ("unmapped.iam_jit.verdict", "string"),
-    ("unmapped.iam_jit.decision_id", "int64"),
-    ("unmapped.iam_jit.enforced", "bool"),
-    ("unmapped.iam_jit.event_type", "string"),
+    ("src_endpoint_hostname", "string"),
+    ("src_endpoint_ip", "string"),
+    ("src_endpoint_port", "int32"),
+    ("dst_endpoint_hostname", "string"),
+    ("dst_endpoint_ip", "string"),
+    ("dst_endpoint_port", "int32"),
+    ("unmapped_iam_jit_mode", "string"),
+    ("unmapped_iam_jit_profile", "string"),
+    ("unmapped_iam_jit_verdict", "string"),
+    ("unmapped_iam_jit_decision_id", "int64"),
+    ("unmapped_iam_jit_enforced", "bool"),
+    ("unmapped_iam_jit_event_type", "string"),
     # The remaining iam-jit extension fields collapse into a single
     # JSON string column so SIEM queries stay forward-compatible when
     # new ext fields are added by later issues.
-    ("unmapped.iam_jit.ext_json", "string"),
-    ("unmapped.iam_jit.agent_json", "string"),
+    ("unmapped_iam_jit_ext_json", "string"),
+    ("unmapped_iam_jit_agent_json", "string"),
 )
 
 
@@ -212,10 +218,10 @@ def _flatten_event_to_row(event: dict[str, Any]) -> dict[str, Any]:
     agent = iam_jit.get("agent")
 
     return {
-        "metadata.version": metadata.get("version"),
-        "metadata.product.name": product.get("name"),
-        "metadata.product.vendor_name": product.get("vendor_name"),
-        "metadata.product.version": product.get("version"),
+        "metadata_version": metadata.get("version"),
+        "metadata_product_name": product.get("name"),
+        "metadata_product_vendor_name": product.get("vendor_name"),
+        "metadata_product_version": product.get("version"),
         "time": event.get("time"),
         "class_uid": event.get("class_uid"),
         "class_name": event.get("class_name"),
@@ -230,29 +236,29 @@ def _flatten_event_to_row(event: dict[str, Any]) -> dict[str, Any]:
         "status_id": event.get("status_id"),
         "status": event.get("status"),
         "status_detail": event.get("status_detail"),
-        "actor.user.name": user.get("name") if isinstance(user, dict) else None,
-        "actor.user.uid": user.get("uid") if isinstance(user, dict) else None,
-        "actor.session.uid": (
+        "actor_user_name": user.get("name") if isinstance(user, dict) else None,
+        "actor_user_uid": user.get("uid") if isinstance(user, dict) else None,
+        "actor_session_uid": (
             session.get("uid") if isinstance(session, dict) else None
         ),
-        "api.operation": api.get("operation"),
-        "api.service.name": api_service.get("name"),
-        "api.request.uid": api_request.get("uid"),
+        "api_operation": api.get("operation"),
+        "api_service_name": api_service.get("name"),
+        "api_request_uid": api_request.get("uid"),
         "resources_json": _json.dumps(resources, ensure_ascii=False),
-        "src_endpoint.hostname": src.get("hostname"),
-        "src_endpoint.ip": src.get("ip"),
-        "src_endpoint.port": src.get("port"),
-        "dst_endpoint.hostname": dst.get("hostname"),
-        "dst_endpoint.ip": dst.get("ip"),
-        "dst_endpoint.port": dst.get("port"),
-        "unmapped.iam_jit.mode": iam_jit.get("mode"),
-        "unmapped.iam_jit.profile": iam_jit.get("profile"),
-        "unmapped.iam_jit.verdict": iam_jit.get("verdict"),
-        "unmapped.iam_jit.decision_id": iam_jit.get("decision_id"),
-        "unmapped.iam_jit.enforced": iam_jit.get("enforced"),
-        "unmapped.iam_jit.event_type": iam_jit.get("event_type"),
-        "unmapped.iam_jit.ext_json": _json.dumps(ext, ensure_ascii=False),
-        "unmapped.iam_jit.agent_json": (
+        "src_endpoint_hostname": src.get("hostname"),
+        "src_endpoint_ip": src.get("ip"),
+        "src_endpoint_port": src.get("port"),
+        "dst_endpoint_hostname": dst.get("hostname"),
+        "dst_endpoint_ip": dst.get("ip"),
+        "dst_endpoint_port": dst.get("port"),
+        "unmapped_iam_jit_mode": iam_jit.get("mode"),
+        "unmapped_iam_jit_profile": iam_jit.get("profile"),
+        "unmapped_iam_jit_verdict": iam_jit.get("verdict"),
+        "unmapped_iam_jit_decision_id": iam_jit.get("decision_id"),
+        "unmapped_iam_jit_enforced": iam_jit.get("enforced"),
+        "unmapped_iam_jit_event_type": iam_jit.get("event_type"),
+        "unmapped_iam_jit_ext_json": _json.dumps(ext, ensure_ascii=False),
+        "unmapped_iam_jit_agent_json": (
             _json.dumps(agent, ensure_ascii=False) if agent is not None else None
         ),
     }

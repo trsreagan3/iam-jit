@@ -76,12 +76,12 @@ def test_canonical_ocsf_columns_locked_in() -> None:
     changing all three products together."""
     names = [name for name, _ in OCSF_PARQUET_COLUMNS]
     # Spot-check the load-bearing fields.
-    assert names[0] == "metadata.version"
+    assert names[0] == "metadata_version"
     assert "class_uid" in names
     assert "activity_id" in names
-    assert "unmapped.iam_jit.verdict" in names
-    assert "unmapped.iam_jit.decision_id" in names
-    assert "unmapped.iam_jit.ext_json" in names
+    assert "unmapped_iam_jit_verdict" in names
+    assert "unmapped_iam_jit_decision_id" in names
+    assert "unmapped_iam_jit_ext_json" in names
     assert "resources_json" in names
     # The full count is locked so a stray addition fails the test
     # (forces the author to update kbouncer + dbounce in lockstep).
@@ -110,16 +110,16 @@ def test_flatten_event_to_row_drops_into_columns() -> None:
     for name, _ in OCSF_PARQUET_COLUMNS:
         assert name in row, f"column {name} missing from flattened row"
     # Load-bearing fields land in the right cells.
-    assert row["metadata.version"] == "1.1.0"
-    assert row["metadata.product.name"] == "ibounce"
-    assert row["metadata.product.vendor_name"] == "iam-jit"
+    assert row["metadata_version"] == "1.1.0"
+    assert row["metadata_product_name"] == "ibounce"
+    assert row["metadata_product_vendor_name"] == "iam-jit"
     assert row["class_uid"] == 6003
     assert row["activity_id"] == 4  # Delete
-    assert row["unmapped.iam_jit.verdict"] == "deny"
-    assert row["unmapped.iam_jit.decision_id"] == 7
-    assert row["unmapped.iam_jit.enforced"] is True
-    assert row["actor.user.name"] == "alice@example.com"
-    assert row["api.operation"] == "s3:DeleteBucket"
+    assert row["unmapped_iam_jit_verdict"] == "deny"
+    assert row["unmapped_iam_jit_decision_id"] == 7
+    assert row["unmapped_iam_jit_enforced"] is True
+    assert row["actor_user_name"] == "alice@example.com"
+    assert row["api_operation"] == "s3:DeleteBucket"
     # resources_json round-trips back to the ARN.
     resources = json.loads(row["resources_json"])
     assert resources[0]["uid"] == "arn:aws:s3:::secret-bucket"
@@ -158,8 +158,8 @@ def test_rows_to_parquet_round_trip() -> None:
     pdf = table.to_pylist()
     assert len(pdf) == 1
     assert pdf[0]["class_uid"] == 6003
-    assert pdf[0]["api.operation"] == "ec2:DescribeInstances"
-    assert pdf[0]["unmapped.iam_jit.verdict"] == "allow"
+    assert pdf[0]["api_operation"] == "ec2:DescribeInstances"
+    assert pdf[0]["unmapped_iam_jit_verdict"] == "allow"
 
 
 # ---------------------------------------------------------------------------
@@ -402,10 +402,10 @@ def test_writer_parquet_readable_after_flush(s3_bucket: str) -> None:
     table = pq.read_table(io.BytesIO(body))
     row = table.to_pylist()[0]
     assert row["class_uid"] == 6003
-    assert row["api.operation"] == "iam:CreateAccessKey"
-    assert row["unmapped.iam_jit.verdict"] == "deny"
-    assert row["unmapped.iam_jit.enforced"] is True
-    assert row["actor.user.name"] == "bot@example.com"
+    assert row["api_operation"] == "iam:CreateAccessKey"
+    assert row["unmapped_iam_jit_verdict"] == "deny"
+    assert row["unmapped_iam_jit_enforced"] is True
+    assert row["actor_user_name"] == "bot@example.com"
     # resources_json contains the ARN.
     res = json.loads(row["resources_json"])
     assert res[0]["uid"] == "arn:aws:iam::111111111111:user/bot"
