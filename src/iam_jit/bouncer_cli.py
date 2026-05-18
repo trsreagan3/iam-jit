@@ -5506,6 +5506,201 @@ _add_diagnostics_subcommands(diag_group)
 
 
 # ---------------------------------------------------------------------------
+# investigate (#273) — one-shot "give me a Claude-ready evidence pack"
+#
+# Composes the existing #268 audit-tail OCSF export + #277 diagnostics
+# bundle into a single subcommand. The operator drops both artifacts
+# into THEIR Claude session (Claude Code / Cursor / desktop / console)
+# and runs an investigative prompt. ibounce never calls Anthropic —
+# per [[self-host-zero-billing-dependency]] this is a strictly LOCAL
+# workflow; per [[creates-never-mutates]] it's read-only.
+#
+# Cross-product alignment per [[cross-product-agent-parity]]: the same
+# subcommand name + flag shape lives in kbounce / dbounce / gbounce
+# so an operator running multiple bouncers learns ONE muscle-memory
+# pattern.
+# ---------------------------------------------------------------------------
+
+
+@main.command("investigate")
+@click.option(
+    "--out-dir", "out_dir",
+    type=click.Path(file_okay=False, dir_okay=True),
+    default=None,
+    help="Directory to write the two artifact files into. Default: a "
+         "per-invocation tmpdir at "
+         "$TMPDIR/ibounce-investigate-{UTC-timestamp}. Created on "
+         "demand; existing same-named files are overwritten so a "
+         "follow-up run inside the same --out-dir refreshes the "
+         "pack without leaving stale copies.",
+)
+@click.option(
+    "--time-range", "time_range",
+    default=None,
+    metavar="EXPR",
+    help="Filter the audit-tail evidence to events from the last "
+         "<N>{h,d,w} (e.g. '24h', '7d', '4w'). Default: no time "
+         "filter (all events in the log). Translates to "
+         "`time>=<unix-ms>` against the OCSF wire shape.",
+)
+@click.option(
+    "--filter", "filter_exprs",
+    multiple=True,
+    metavar="EXPR",
+    help="Extra filter expression(s) forwarded to the audit-tail "
+         "layer. Same grammar as `ibounce audit tail --filter`: "
+         "field=value / field~regex / field>=N / field<=N. "
+         "Repeatable; AND-combined.",
+)
+@click.option(
+    "--print-prompts", "print_prompts",
+    is_flag=True,
+    default=False,
+    help="Print the 10 starter investigative prompts as a "
+         "paste-able block and exit WITHOUT writing artifact files. "
+         "Useful for refreshing a runbook or scripting a "
+         "non-interactive Claude pipeline.",
+)
+@click.option(
+    "--audit-log", "audit_log_path",
+    type=click.Path(dir_okay=False),
+    default=None,
+    help="Path to the JSONL audit log to read. Defaults to "
+         "$IAM_JIT_BOUNCER_AUDIT_LOG or ~/.iam-jit/audit.jsonl. "
+         "Must match the running `ibounce run --audit-log-path` "
+         "value — the read side has no IPC to discover the writer's "
+         "path otherwise.",
+)
+@click.option(
+    "--db", type=click.Path(dir_okay=False), default=None,
+    help="Override the SQLite store path consulted by the embedded "
+         "diagnostics bundle (default ~/.iam-jit/bouncer/state.db).",
+)
+@click.option(
+    "--profiles", "profiles_path",
+    type=click.Path(dir_okay=False), default=None,
+    help="Override the profiles.yaml path consulted by the embedded "
+         "diagnostics bundle (default ~/.iam-jit/bouncer/profiles.yaml).",
+)
+@click.option(
+    "--healthz-url", "healthz_url",
+    default=None,
+    help="URL of the running ibounce proxy's /healthz endpoint. "
+         "Defaults to http://127.0.0.1:8767/healthz. The context "
+         "bundle records 'unreachable' + the error reason if the "
+         "GET fails; the command does NOT abort.",
+)
+def investigate_cmd(
+    out_dir: str | None,
+    time_range: str | None,
+    filter_exprs: tuple[str, ...],
+    print_prompts: bool,
+    audit_log_path: str | None,
+    db: str | None,
+    profiles_path: str | None,
+    healthz_url: str | None,
+) -> None:
+    """Land a Claude-ready evidence pack for local investigation.
+
+    \b
+    Two files are written into --out-dir:
+      ibounce-investigation.ndjson           OCSF Detection Finding
+                                              wrapping the filtered
+                                              audit-tail events
+      ibounce-investigation-context.zip      redacted diagnostics
+                                              bundle (config /
+                                              profile / healthz /
+                                              system info)
+
+    \b
+    The subcommand does NOT call Claude. Open your local Claude
+    client (Claude Code, Cursor's Claude integration, the desktop
+    app — whichever you use), drop both files into the
+    conversation, then ask an investigative question. See
+    docs/INVESTIGATE-WITH-CLAUDE.md for the full workflow.
+
+    \b
+    Per [[self-host-zero-billing-dependency]] the subcommand never
+    calls Anthropic — the only network call is a single LOCAL
+    /healthz GET on loopback (same as `diagnostics bundle`).
+    Per [[creates-never-mutates]] it is read-only against the store,
+    the profiles file, and the audit log.
+
+    \b
+    Examples:
+      # Default: write to a per-invocation tmpdir
+      ibounce investigate
+
+      # Last 24h into a stable directory
+      ibounce investigate --time-range 24h --out-dir ./out
+
+      # Filter to one agent's denies, last 7d
+      ibounce investigate --time-range 7d \\
+          --filter unmapped.iam_jit.agent.name=claude-code \\
+          --filter unmapped.iam_jit.verdict=deny
+
+      # Refresh the runbook's prompt list
+      ibounce investigate --print-prompts
+    """
+    import pathlib as _pathlib
+
+    from .bouncer.audit_export.tail import (
+        FilterParseError,
+        default_audit_log_path,
+        parse_filter_expr,
+    )
+    from .bouncer.investigate import (
+        TimeRangeParseError,
+        default_out_dir,
+        parse_time_range,
+        prepare_investigation,
+        render_now_what_block,
+        render_print_prompts_block,
+    )
+
+    if print_prompts:
+        click.echo(render_print_prompts_block())
+        return
+
+    # Validate filters + time-range up front so a typo fails before
+    # we touch the disk — same UX pattern as `audit tail`.
+    for raw in filter_exprs:
+        try:
+            parse_filter_expr(raw)
+        except FilterParseError as e:
+            click.secho(f"ERROR: {e}", fg="red", err=True)
+            sys.exit(2)
+
+    window = None
+    if time_range:
+        try:
+            window = parse_time_range(time_range)
+        except TimeRangeParseError as e:
+            click.secho(f"ERROR: {e}", fg="red", err=True)
+            sys.exit(2)
+
+    resolved_audit = (
+        _pathlib.Path(audit_log_path) if audit_log_path
+        else default_audit_log_path()
+    )
+    resolved_out_dir = (
+        _pathlib.Path(out_dir) if out_dir else default_out_dir()
+    )
+
+    artifacts = prepare_investigation(
+        out_dir=resolved_out_dir,
+        audit_path=resolved_audit,
+        extra_filters=tuple(filter_exprs),
+        window=window,
+        db_path=db,
+        profiles_path=profiles_path,
+        healthz_url=healthz_url,
+    )
+
+    click.echo(render_now_what_block(artifacts))
+
+
+# ---------------------------------------------------------------------------
 # backup + restore (#279) — SQLite snapshot + DR restore
 #
 # Two top-level subcommands matching the kbounce + dbounce sibling

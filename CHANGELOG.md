@@ -11,6 +11,30 @@ within the same release.
 
 ## Unreleased — Bounce-suite rename (2026-05-17)
 
+### Added
+
+- **`ibounce investigate` subcommand** (#273) — one-shot helper
+  that lands a Claude-ready evidence pack on disk. Composes the
+  existing `audit tail --export ocsf-bundle` (#268) and
+  `diagnostics bundle` (#277) into a single command: writes
+  `ibounce-investigation.ndjson` (OCSF Detection Finding wrapping
+  filtered events) and `ibounce-investigation-context.zip`
+  (redacted diagnostics bundle with `--no-audit`) into `--out-dir`,
+  then prints a "now what" block with three starter prompts.
+  Flags: `--out-dir`, `--time-range` (e.g. `24h`/`7d`/`4w`),
+  `--filter` (forwarded to the audit-tail filter grammar),
+  `--print-prompts` (lists the 10 starter prompts without writing
+  files). Cross-product alignment per [[cross-product-agent-
+  parity]] — `kbounce` / `dbounce` / `gbounce` ship the same
+  subcommand shape. Per [[self-host-zero-billing-dependency]] the
+  command never calls Anthropic; the operator opens THEIR Claude
+  session and drops both files in. Per [[creates-never-mutates]]
+  it's strictly read-only.
+- **`docs/INVESTIGATE-WITH-CLAUDE.md`** — workflow walkthrough,
+  the 10 starter prompts, privacy story, and cross-product
+  parity notes. Cross-linked from `DIAGNOSTICS.md` +
+  `QUERYING-AUDIT-LOGS.md`.
+
 ### Docs
 
 - `docs/LOCAL-TEST-INFRA.md` now documents the AWS-SDK
