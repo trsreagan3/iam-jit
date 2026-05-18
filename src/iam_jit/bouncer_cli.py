@@ -2346,15 +2346,42 @@ def _parse_duration(raw: str) -> int:
     type=click.Path(dir_okay=False),
     default=None,
     help="#262 Slice 2 (ENTERPRISE tier — license-gated) — YAML file "
-         "configuring the suspicious-activity alert engine. Ships 4 "
+         "configuring the suspicious-activity alert engine. Ships 5 "
          "built-in deterministic rules (admin_fallback_burst, "
          "pause_long, non_org_profile_install, "
-         "unusual_high_risk_action) over the existing audit-export "
-         "transport (JSONL + webhook). Pass the literal string "
-         "'defaults' (or an empty path string) to enable all four "
-         "built-ins with sensible thresholds. Per "
+         "unusual_high_risk_action, heartbeat_gap) over the existing "
+         "audit-export transport (JSONL + webhook). Pass the literal "
+         "string 'defaults' (or an empty path string) to enable all "
+         "five built-ins with sensible thresholds. Per "
          "[[security-team-positioning-safety-not-surveillance]] alerts "
          "use NEUTRAL language; never frames a match as a violation.",
+)
+@click.option(
+    "--heartbeat-interval",
+    "heartbeat_interval_seconds",
+    type=click.IntRange(0, 3600), default=0, show_default=True,
+    help="#264 — emit an OCSF activity_id=99 'heartbeat' event every "
+         "N seconds through the audit-export channels (JSONL + "
+         "webhook). 0 = OFF (default; zero phone-home preserved). "
+         "Recommended 30 for Enterprise deployments. Per "
+         "[[prompt-injection-disable-bouncer-threat]]: a prompt-"
+         "injected agent can `pkill ibounce` to disable the proxy; "
+         "heartbeats make that DETECTABLE downstream (a SIEM watching "
+         "the audit stream sees the silence). Heartbeats themselves "
+         "ship on every tier; the heartbeat_gap rule that fires on "
+         "missed beats rides the Enterprise-gated alert engine.",
+)
+@click.option(
+    "--alert-heartbeat-missing-count",
+    "alert_heartbeat_missing_count",
+    type=click.IntRange(1, 100), default=2, show_default=True,
+    help="#264 — heartbeat_gap rule threshold. Fire after this many "
+         "consecutive missed heartbeats (where 'missed' = elapsed "
+         "time since last heartbeat > interval * count). Default 2 "
+         "catches one missed beat + the detection scan that follows. "
+         "Raise for noisy networks where the occasional missed beat "
+         "is normal. Only meaningful when --heartbeat-interval > 0; "
+         "/healthz uses the same threshold to flip to 503.",
 )
 @click.option("--db", type=click.Path(dir_okay=False), default=None)
 def run_cmd(
@@ -2378,6 +2405,8 @@ def run_cmd(
     audit_webhook_tags: str,
     audit_webhook_sentinel_table: str,
     alert_rules_path: str | None,
+    heartbeat_interval_seconds: int,
+    alert_heartbeat_missing_count: int,
     db: str | None,
 ) -> None:
     """Start the HTTP proxy server.
@@ -2544,6 +2573,8 @@ def run_cmd(
         audit_webhook_tags=audit_webhook_tags,
         audit_webhook_sentinel_table=audit_webhook_sentinel_table,
         alert_rules_path=alert_rules_path,
+        heartbeat_interval_seconds=heartbeat_interval_seconds,
+        alert_heartbeat_missing_count=alert_heartbeat_missing_count,
     )
 
     # #132 plan-capture: surface the session id (operator-supplied or
@@ -2659,6 +2690,19 @@ def run_cmd(
                 + preset_extra
                 + (", allow-internal=on" if audit_webhook_allow_internal else "")
                 + ")",
+                err=True,
+            )
+        # #264 — surface heartbeat state in startup banner. Default is
+        # OFF (zero phone-home preserved per
+        # [[security-team-positioning-safety-not-surveillance]]); only
+        # mention it when the operator opted in so the banner stays
+        # quiet by default.
+        if heartbeat_interval_seconds > 0:
+            click.echo(
+                f"audit-export heartbeat: every "
+                f"{heartbeat_interval_seconds}s "
+                f"(gap-threshold={alert_heartbeat_missing_count} "
+                f"consecutive misses)",
                 err=True,
             )
         click.echo(

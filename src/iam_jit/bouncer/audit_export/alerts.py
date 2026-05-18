@@ -109,6 +109,11 @@ EVENT_TYPE_ADMIN_FALLBACK_GRANT = "ADMIN_FALLBACK_GRANT"
 EVENT_TYPE_PAUSE_END = "PAUSE_END"
 EVENT_TYPE_PROFILE_INSTALL = "PROFILE_INSTALL"
 EVENT_TYPE_ANOMALY_DETECTED = "ANOMALY_DETECTED"
+# #264 — heartbeat event-type marker. The HeartbeatEmitter in
+# heartbeat.py sets this on every tick; the heartbeat_gap rule
+# below watches for the ABSENCE of these (per-rule tick scan, not
+# per-event).
+EVENT_TYPE_HEARTBEAT = "HEARTBEAT"
 
 
 # ---------------------------------------------------------------------------
@@ -133,6 +138,17 @@ DEFAULT_PAUSE_LONG_THRESHOLD_SECONDS = 30 * 60  # 30 minutes
 # on every profile install from a URL." Operators populate the YAML
 # allowlist with their org's curated profile URLs.
 DEFAULT_PROFILE_INSTALL_ALLOWLIST: tuple[str, ...] = ()
+
+# heartbeat_gap defaults: alert after 2 consecutive missing heartbeats.
+# Re-exported from heartbeat.py so config + CLI consumers have a
+# single import path (this module is the public alerts surface).
+from .heartbeat import (  # noqa: E402  — intentional mid-file import
+    DEFAULT_HEARTBEAT_MISSING_COUNT,
+    heartbeat_status as _heartbeat_status,
+    mark_gap_detected as _mark_heartbeat_gap_detected,
+    write_heartbeat_gap_stderr as _write_heartbeat_gap_stderr,
+)
+
 
 # unusual-high-risk-action defaults: the watchlist of action patterns
 # that are sensitive enough to alert on every transparent-mode deny.
@@ -192,12 +208,18 @@ class AlertsConfig:
     pause_long_threshold_seconds: int = DEFAULT_PAUSE_LONG_THRESHOLD_SECONDS
     profile_install_allowlist: tuple[str, ...] = DEFAULT_PROFILE_INSTALL_ALLOWLIST
     high_risk_actions: tuple[str, ...] = DEFAULT_HIGH_RISK_ACTIONS
+    # #264 — heartbeat_gap rule: fire after this many consecutive
+    # missed heartbeats. Default 2 catches one missed beat + the
+    # detection scan that follows. Operators raise this for noisy
+    # network paths where the occasional missed beat is normal.
+    heartbeat_missing_count: int = DEFAULT_HEARTBEAT_MISSING_COUNT
 
     @classmethod
     def default(cls) -> "AlertsConfig":
-        """Built-in defaults: all four rules enabled, conservative
-        thresholds. This is what the engine uses when --alert-rules
-        is absent (per spec)."""
+        """Built-in defaults: all five rules enabled (admin_fallback_burst,
+        pause_long, non_org_profile_install, unusual_high_risk_action,
+        heartbeat_gap), conservative thresholds. This is what the engine
+        uses when --alert-rules is absent (per spec)."""
         return cls(enabled_rules=None)
 
 
@@ -343,6 +365,8 @@ def load_alerts_config(path: str) -> AlertsConfig:
         "pause_long_threshold_seconds",
         "profile_install_allowlist",
         "high_risk_actions",
+        # #264 — heartbeat_gap rule threshold.
+        "heartbeat_missing_count",
         "custom_rules",
     }
     for k in raw:
@@ -379,6 +403,12 @@ def load_alerts_config(path: str) -> AlertsConfig:
         ),
         profile_install_allowlist=tuple(str(x) for x in allowlist_raw),
         high_risk_actions=high_risk,
+        heartbeat_missing_count=int(
+            raw.get(
+                "heartbeat_missing_count",
+                DEFAULT_HEARTBEAT_MISSING_COUNT,
+            )
+        ),
     )
 
 
@@ -640,6 +670,87 @@ def _pattern_non_org_profile_install(
     }
 
 
+def _pattern_heartbeat_gap(
+    event: dict, window: deque, config: AlertsConfig,
+) -> dict | None:
+    """#264 — fire when `heartbeat_missing_count` or more consecutive
+    heartbeats have been missed.
+
+    Evaluation:
+      * Heartbeats are tracked via the heartbeat module's state
+        (last_emit timestamp). When the elapsed time since the last
+        heartbeat exceeds `interval * missing_count`, the rule fires.
+      * The rule debounces by checking `heartbeat_gap_detected` —
+        once it has fired, it does NOT fire again until a fresh
+        heartbeat lands (the emitter calls `_record_emit` which clears
+        the flag). This keeps a long outage from producing a fire-per-
+        event storm in the audit channel.
+      * When heartbeats are not enabled (the emitter never started),
+        the rule is a no-op. Operators who haven't opted into
+        heartbeats don't need the gap rule firing on the silence.
+      * When the rule fires, it ALSO:
+          - flips the module-level `heartbeat_gap_detected` flag the
+            proxy's /healthz reads to return 503 (per spec)
+          - writes a neutral-language message to stderr (per spec:
+            the audit channel itself may be why heartbeats stopped,
+            so alerting through the same channel isn't reliable —
+            stderr is the supervisor-captured fallback)
+
+    Per [[security-team-positioning-safety-not-surveillance]]: the
+    suggestion frames this as "look at process status," not "someone
+    killed your bouncer."
+    """
+    hb = _heartbeat_status()
+    if not hb["heartbeat_enabled"]:
+        # Operator hasn't opted into heartbeats; rule is dormant.
+        return None
+    if hb["heartbeat_gap_detected"]:
+        # Already fired; wait for a fresh heartbeat to clear the
+        # flag before considering a re-fire.
+        return None
+    interval = hb["heartbeat_interval_seconds"]
+    if interval <= 0:
+        # Defensive: a misconfigured emitter (interval=0) wouldn't
+        # ever produce a meaningful gap calculation.
+        return None
+    last_seconds_ago = hb["heartbeat_last_emit_seconds_ago"]
+    if last_seconds_ago is None:
+        # No heartbeat has been recorded yet. The emitter writes its
+        # first heartbeat on start(); a None here means start() hasn't
+        # completed its first emit yet. Don't false-fire during the
+        # brief boot window.
+        return None
+    threshold_seconds = interval * config.heartbeat_missing_count
+    if last_seconds_ago < threshold_seconds:
+        return None
+    # Gap detected. Flip the /healthz flag + write to stderr, THEN
+    # return the alert dict so the rule engine emits the OCSF event
+    # through the normal alert path too.
+    _mark_heartbeat_gap_detected()
+    _write_heartbeat_gap_stderr(
+        missing_count=config.heartbeat_missing_count,
+        last_emit_seconds_ago=last_seconds_ago,
+        interval_seconds=interval,
+    )
+    return {
+        "matched_event_count": config.heartbeat_missing_count,
+        "window_seconds": last_seconds_ago,
+        "status_detail": (
+            f"Pattern bouncer-uptime-gap fired: "
+            f"{config.heartbeat_missing_count} consecutive heartbeats "
+            f"missing (interval={interval}s, last emit "
+            f"{last_seconds_ago}s ago)"
+        ),
+        "suggestion": (
+            "bouncer may have been killed; investigate process status "
+            "+ recent admin-action events. The audit-export channel "
+            "may itself be the cause if the webhook collector is down "
+            "or the JSONL path is unwritable; check stderr for a "
+            "parallel notice the alert path did not depend on."
+        ),
+    }
+
+
 def _pattern_unusual_high_risk_action(
     event: dict, window: deque, config: AlertsConfig,
 ) -> dict | None:
@@ -730,6 +841,18 @@ BUILTIN_RULES: tuple[AlertRule, ...] = (
             "signal."
         ),
     ),
+    AlertRule(
+        name="heartbeat_gap",
+        pattern=_pattern_heartbeat_gap,
+        severity=4,
+        description=(
+            "#264 — heartbeat_missing_count or more consecutive heartbeats "
+            "missing from the audit stream. The bouncer may have been "
+            "killed while a session was active; investigate process "
+            "status + recent admin-action events. Also flips /healthz "
+            "to 503 + writes to stderr for supervisor capture."
+        ),
+    ),
 )
 
 
@@ -740,6 +863,7 @@ _PATTERN_NAME_BY_RULE = {
     "pause_long": "long-pause",
     "non_org_profile_install": "non-org-profile-install",
     "unusual_high_risk_action": "high-risk-action-denied",
+    "heartbeat_gap": "bouncer-uptime-gap",
 }
 
 

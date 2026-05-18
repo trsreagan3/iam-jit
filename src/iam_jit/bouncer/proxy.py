@@ -369,6 +369,12 @@ def audit_export_status() -> dict[str, Any]:
             "last_alert_at_unix": None,
             "active_rules": [],
         }
+    # #264 — heartbeat state. Always queryable (the heartbeat module's
+    # status snapshot returns a stable shape even when the emitter
+    # isn't installed) so MCP consumers can branch on the
+    # `heartbeat_enabled` bool rather than KeyError-ing.
+    from .audit_export.heartbeat import heartbeat_status as _heartbeat_status
+    hb_status = _heartbeat_status()
     return {
         "log": log_status,
         "webhook": webhook_status,
@@ -392,6 +398,17 @@ def audit_export_status() -> dict[str, Any]:
         "alerts_fired_count": engine_status.get("alerts_fired_count", 0),
         "last_alert_pattern": engine_status.get("last_alert_pattern"),
         "alerts": engine_status,
+        # #264 — heartbeat surface. Top-level so an agent can answer
+        # "is the bouncer-availability check working?" with a single
+        # field read. `heartbeat_gap_detected` is the load-bearing
+        # bool external monitoring polls (matches what /healthz uses
+        # to flip to 503).
+        "heartbeat_enabled": hb_status["heartbeat_enabled"],
+        "heartbeat_interval_seconds": hb_status["heartbeat_interval_seconds"],
+        "heartbeat_last_emit_seconds_ago": (
+            hb_status["heartbeat_last_emit_seconds_ago"]
+        ),
+        "heartbeat_gap_detected": hb_status["heartbeat_gap_detected"],
     }
 
 
@@ -633,6 +650,26 @@ class ProxyConfig:
     via gate_alerts_license (per [[enterprise-self-host-only]]).
     See `audit_export.alerts.load_alerts_config` for the YAML
     schema."""
+
+    # #264 — heartbeat events for prompt-injection-disable-bouncer-threat.
+    heartbeat_interval_seconds: int = 0
+    """How often (in seconds) the heartbeat emitter publishes an OCSF
+    activity_id=99 'heartbeat' event through the audit-export channels.
+    0 = OFF (default; zero phone-home preserved per
+    [[security-team-positioning-safety-not-surveillance]]). Recommended
+    30 for Enterprise deployments where the SIEM can watch for gaps.
+    The heartbeat itself ships on every tier; the heartbeat_gap rule
+    that fires on missed heartbeats rides the Enterprise-gated alert
+    engine (see alert_heartbeat_missing_count)."""
+    alert_heartbeat_missing_count: int = 2
+    """#264 — heartbeat_gap rule threshold. Fire after this many
+    consecutive missed heartbeats (where 'missed' = elapsed time since
+    last heartbeat > interval * count). Default 2 catches one missed
+    beat + the detection scan that follows. Surfaced as a separate
+    flag so operators can raise it for noisy networks without editing
+    the --alert-rules YAML. Operationally meaningful only when both
+    heartbeat_interval_seconds > 0 AND alert_rules_path is not None
+    (otherwise nothing reads it)."""
 
 
 @dataclasses.dataclass
@@ -2090,6 +2127,47 @@ async def serve(config: ProxyConfig, *, store: BouncerStore) -> None:
             # alert before the operator wonders why their pause "isn't
             # working."
             status_str = "degraded"
+        # #264 — heartbeat state + gap detection. When heartbeats are
+        # enabled, /healthz mirrors the heartbeat module's snapshot
+        # under a top-level `heartbeat` block AND flips response to
+        # 503 when the gap flag is set OR the elapsed time since the
+        # last heartbeat exceeds the gap threshold. The independent
+        # /healthz check (NOT just the rule-firing path) closes the
+        # case where the audit-export channel itself is broken — the
+        # rule may not even get an event to observe; an external
+        # monitor polling /healthz still sees the gap.
+        from .audit_export.heartbeat import heartbeat_status as _hb_status
+        hb = _hb_status()
+        heartbeat_payload = None
+        http_status_code = 200
+        if hb["heartbeat_enabled"]:
+            interval = hb["heartbeat_interval_seconds"]
+            last_ago = hb["heartbeat_last_emit_seconds_ago"]
+            gap_threshold = interval * getattr(
+                config, "alert_heartbeat_missing_count", 2,
+            )
+            # Compute gap state from BOTH the rule-set flag (fired
+            # via the alert engine) AND the elapsed-time direct check
+            # (catches the case where the alert engine isn't installed
+            # — e.g. Free tier with heartbeats on for self-monitoring).
+            gap_now = bool(hb["heartbeat_gap_detected"])
+            if not gap_now and last_ago is not None and gap_threshold > 0:
+                gap_now = last_ago >= gap_threshold
+            heartbeat_payload = {
+                "enabled": True,
+                "interval_seconds": interval,
+                "last_emit_seconds_ago": last_ago,
+                "gap_detected": gap_now,
+            }
+            if gap_now:
+                # 503 Service Unavailable — operator's monitoring
+                # treats this as an alert that the proxy is not
+                # healthy even if process-level liveness looks fine.
+                # Status string also flips so a human reading the body
+                # sees the condition without parsing the HTTP code.
+                http_status_code = 503
+                if status_str == "ok":
+                    status_str = "degraded"
         return web.json_response({
             "status": status_str,
             "mode": config.mode.value,
@@ -2098,7 +2176,8 @@ async def serve(config: ProxyConfig, *, store: BouncerStore) -> None:
             "decisions_count": decision_count,
             "pause": pause_payload,
             "pause_lookup_errors_total": pause_errs,
-        })
+            "heartbeat": heartbeat_payload,
+        }, status=http_status_code)
 
     # /healthz registered BEFORE the catch-all so it wins route
     # precedence; aiohttp dispatches in registration order.
@@ -2158,6 +2237,8 @@ async def serve(config: ProxyConfig, *, store: BouncerStore) -> None:
     # --alert-rules path is configured, the engine doesn't load at
     # all; the transport still works (Slice 1 unchanged).
     if config.alert_rules_path is not None:
+        import dataclasses as _dc
+
         from .audit_export import (
             AlertsConfig,
             AlertsLicenseError,
@@ -2178,6 +2259,16 @@ async def serve(config: ProxyConfig, *, store: BouncerStore) -> None:
             alerts_config = AlertsConfig.default()
         else:
             alerts_config = load_alerts_config(config.alert_rules_path)
+        # #264 — propagate the CLI's --alert-heartbeat-missing-count
+        # into the engine config. The YAML loader honours the same
+        # key under `heartbeat_missing_count`; the CLI flag wins so
+        # an operator who doesn't curate YAML can still tune the
+        # gap threshold from the command line.
+        if config.alert_heartbeat_missing_count != alerts_config.heartbeat_missing_count:
+            alerts_config = _dc.replace(
+                alerts_config,
+                heartbeat_missing_count=config.alert_heartbeat_missing_count,
+            )
         audit_rule_engine = RuleEngine(
             config=alerts_config,
             emit=_emit_audit_event_raw,
@@ -2186,6 +2277,29 @@ async def serve(config: ProxyConfig, *, store: BouncerStore) -> None:
         logger.info(
             "audit-export alert engine enabled: rules=%s",
             audit_rule_engine.status()["active_rules"],
+        )
+
+    # #264 — heartbeat emitter. Default OFF (interval_seconds=0); the
+    # operator opts in via --heartbeat-interval. Runs on every tier
+    # (Free + Pro + Enterprise); the gap-detection rule that watches
+    # for missed heartbeats is Enterprise-gated (via the alert engine
+    # block above) but the EMITTER itself is unrestricted because the
+    # /healthz handler does its own gap check independent of the rule
+    # engine (so a Free-tier operator can still detect their own
+    # bouncer dying).
+    audit_heartbeat_emitter = None
+    if config.heartbeat_interval_seconds > 0:
+        from .audit_export import HeartbeatEmitter
+        audit_heartbeat_emitter = HeartbeatEmitter(
+            interval_seconds=config.heartbeat_interval_seconds,
+            emit=_emit_audit_event_raw,
+        )
+        await audit_heartbeat_emitter.start()
+        logger.info(
+            "audit-export heartbeat enabled: interval=%ss "
+            "gap-threshold=%s consecutive misses",
+            config.heartbeat_interval_seconds,
+            config.alert_heartbeat_missing_count,
         )
 
     runner = web.AppRunner(app)
@@ -2213,6 +2327,14 @@ async def serve(config: ProxyConfig, *, store: BouncerStore) -> None:
         # an in-flight webhook send drains before the log writer's fd
         # closes. We catch + log here so a worker that exits with an
         # exception doesn't mask the original cancellation.
+        # #264 — heartbeat emitter teardown. Stop BEFORE the alert
+        # engine / transport channels close so a final emit doesn't
+        # try to push through a torn-down pusher.
+        if audit_heartbeat_emitter is not None:
+            try:
+                await audit_heartbeat_emitter.stop()
+            except Exception as e:
+                logger.warning("audit-heartbeat emitter stop failed: %s", e)
         if audit_rule_engine is not None:
             # #262 Slice 2 — engine has no async worker (observe is
             # synchronous), so teardown is just clearing the

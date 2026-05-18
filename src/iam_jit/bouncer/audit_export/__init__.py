@@ -71,6 +71,13 @@ from .event import (
     audit_dropped_event,
     audit_event_from_decision,
 )
+from .heartbeat import (
+    DEFAULT_HEARTBEAT_MISSING_COUNT,
+    EVENT_TYPE_HEARTBEAT,
+    HeartbeatEmitter,
+    heartbeat_status,
+    make_heartbeat_event,
+)
 from .log import AuditLogWriter
 from .presets import Preset, build_request
 from .webhook import (
@@ -88,7 +95,10 @@ __all__ = [
     "AlertsLicenseError",
     "AuditLogWriter",
     "BUILTIN_RULES",
+    "DEFAULT_HEARTBEAT_MISSING_COUNT",
+    "EVENT_TYPE_HEARTBEAT",
     "FORBIDDEN_ALERT_WORDS",
+    "HeartbeatEmitter",
     "OCSF_SCHEMA_VERSION",
     "Preset",
     "RuleEngine",
@@ -104,8 +114,10 @@ __all__ = [
     "detect_from_user_agent",
     "end_mcp_session",
     "gate_alerts_license",
+    "heartbeat_status",
     "load_alerts_config",
     "make_admin_fallback_grant_event",
+    "make_heartbeat_event",
     "make_pause_end_event",
     "make_profile_install_event",
     "reset_for_tests",

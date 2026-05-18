@@ -637,7 +637,11 @@ def test_empty_enabled_rules_disables_everything(fake_clock) -> None:
 
 
 def test_engine_status_default_shape() -> None:
-    """status() returns the spec's 3 Slice 2 fields + active_rules."""
+    """status() returns the spec's 3 Slice 2 fields + active_rules.
+
+    #264 added `heartbeat_gap` to BUILTIN_RULES; the default config
+    enables it alongside the original four rules.
+    """
     engine = RuleEngine(config=AlertsConfig.default(), emit=lambda _: None)
     snap = engine.status()
     assert snap["alerts_enabled"] is True
@@ -648,6 +652,7 @@ def test_engine_status_default_shape() -> None:
         "pause_long",
         "non_org_profile_install",
         "unusual_high_risk_action",
+        "heartbeat_gap",
     }
 
 
