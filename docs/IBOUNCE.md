@@ -603,6 +603,213 @@ no-hosted-saas + local-only-safety-mode precedent.
 Schema versioned via `schema_version` table; additive migrations
 only (no Alembic, no ORM). Current schema: `rules` + `decisions`.
 
+## Config export / import
+
+`ibounce config export | import` round-trips the operator's full
+config surface as a single redacted JSON file so you can back up
+before a risky change, migrate a hand-tuned config across machines, or
+feed a diff into change-management review without scraping `state.db`
+by hand.
+
+```
+ibounce config export --out PATH [--redact-secrets] [--include-audit] [--include-prompts]
+ibounce config import --in PATH [--merge | --replace] [--dry-run]
+```
+
+### What ships in the bundle
+
+`schemas/ibounce-config.schema.json` is the authoritative shape. Top-
+level fields:
+
+- `schema_version` (string; currently `"1.0"`) + `product` (always
+  `"ibounce"`) — load-bearing for cross-product reject (a kbounce
+  bundle bounces with `value 'kbounce' not in enum ['ibounce']`).
+- `ibounce_version`, `exported_at` (RFC3339 UTC), `source_hostname_hash`
+  (sha256[:12] of the source hostname — stable but non-revealing).
+- `profiles`: every profile in `profiles.yaml` + the active selection.
+- `rules`: every row in the rules table (pattern + effect + scope +
+  origin + expires_at).
+- `tasks`: active + recent task scopes — INFORMATIONAL only; tasks are
+  NEVER replayed on import (time-bounded; replay would be a no-op).
+- `presets`: applied-preset history from `config_events`.
+- `audit_webhook`: JSONL log path + env-key presence + redacted
+  webhook URL/token.
+- `alert_rules`: pointer + inlined YAML content when
+  `--alert-rules PATH` was set.
+- `mcp_install_history`: which MCP host config files contain an
+  `ibounce` server entry.
+- `license`: `license_id` + `expires_at`; the signed payload is NEVER
+  carried (separate bytes belong in the SQLite-backup channel #279).
+
+The export file lives at the operator-chosen `--out` path; mode `0600`,
+atomic write (temp file + rename) so an interrupted run never leaves a
+half-written file.
+
+### Redaction defaults
+
+Redaction is ON by default and ibounce **refuses** the
+`--no-redact-secrets` opt-out — backups with live tokens belong in the
+SQLite-backup channel (#279), not in a human-reviewable JSON file
+checkable into a config repo.
+
+Masked fields:
+
+- Audit-webhook URL + token + Splunk-HEC / Datadog / Sentinel
+  per-preset secrets → `"***"` with a hint string.
+- Token-shaped fields anywhere in the bundle (HEC token, API key,
+  integration key, license content/PEM/private key) → `"***"`.
+- Env-var **values** → not projected; the env-var **keys** are
+  recorded so a reviewer sees which channels the source host had
+  configured.
+- License content → masked, but `license_id` + `expires_at` are
+  retained so the importer knows whether the destination needs its
+  own license install.
+
+### Cross-product semantics
+
+Each Bounce product (`ibounce`, `kbounce`, `dbounce`) ships the same
+bundle skeleton under its own `product` magic. Imports across the
+suite are refused: each product owns its own rule + profile semantics,
+and a kbounce profile YAML wouldn't pass ibounce's `_profile_from_dict`
+validator anyway.
+
+The error message matches the sibling products exactly so a customer
+authoring one generic backup workflow sees uniform output:
+
+```
+value 'kbounce' not in enum ['ibounce']; this bundle was produced by
+a different product (kbounce / dbounce / unknown). Imports across the
+Bounce suite are not allowed: each product owns its own rule + profile
+semantics.
+```
+
+### Import modes
+
+- `--merge` (default; safer) — union by stable key (profile.name,
+  rule fingerprint = effect+pattern+arn_scope+region_scope). On
+  collision: keep the EXISTING value + log a collision note.
+- `--replace` — clear the importing categories first, then load the
+  bundle wholesale. Existing rules are `remove_rule`'d so the audit
+  trail in `config_events` preserves what was wiped.
+- `--dry-run` — print what would happen (counts per section + the
+  collision list) and exit without mutating. Still emits a
+  `config.import` admin-action OCSF row with `result=noop` so SIEM
+  dashboards see the planning activity.
+
+The default (no flag) is `--merge`.
+
+### Refuse-if-running
+
+`config import` probes `127.0.0.1:8767` (the default `ibounce run`
+loopback port; override via `IBOUNCE_PROBE_PORT`). If the probe
+succeeds, import refuses with:
+
+```
+ERROR: ibounce appears to be running (loopback probe on
+127.0.0.1:8767 succeeded). Stop ibounce first — importing while the
+proxy holds an open SQLite connection would race on the rules / tasks
+tables.
+```
+
+Importing while the live proxy holds an open SQLite connection would
+race on the rules / tasks tables; the refuse-first posture is cheaper
+than recovering a half-imported config.
+
+### Admin-action audit emission
+
+Every export AND every import enqueues exactly one ADMIN_ACTION OCSF
+row (`kind = config.export` / `config.import`) via the queue stub
+wired in #278. The serve process's drainer picks it up + emits through
+the configured audit channels — so a security team watching the
+audit-export stream sees the lifecycle event for every backup /
+restore action, including `--dry-run` plans.
+
+### Sample export
+
+```bash
+$ ibounce config export --out /tmp/ibounce-backup.json
+exported /tmp/ibounce-backup.json
+  profiles: 2, rules: 12, tasks: 1, presets: 1
+  webhook tokens + license content are redacted by default.
+```
+
+Sample (redacted) export file:
+
+```json
+{
+  "schema_version": "1.0",
+  "product": "ibounce",
+  "ibounce_version": "1.0.0",
+  "exported_at": "2026-05-18T10:14:22Z",
+  "source_hostname_hash": "9c8b7a6d5e4f",
+  "profiles": {"active": "full-user", "items": [...]},
+  "rules": [
+    {"id": 1, "pattern": "s3:GetObject", "effect": "allow",
+     "arn_scope": "arn:aws:s3:::demo-bucket/*", "origin": "user"},
+    {"id": 2, "pattern": "iam:DeleteRole", "effect": "deny"}
+  ],
+  "tasks": [...],
+  "presets": [{"preset_name": "admin-minus-sensitive", "rules_added": 12, ...}],
+  "audit_webhook": {
+    "log_path": "/var/log/ibounce/audit.jsonl",
+    "webhook_url": "***",
+    "webhook_token": "***",
+    "redaction_hint": "redacted by default; live values stay on the source host",
+    "env_keys_present": ["IAM_JIT_BOUNCER_AUDIT_WEBHOOK_TOKEN", "..."]
+  },
+  "alert_rules": {"path": "/etc/ibounce/alerts.yaml", "content": {...}},
+  "mcp_install_history": [{"client": "claude-code", "path": "~/.claude.json"}],
+  "license": {"license_id": "lic_abc123", "expires_at": "2027-05-17T00:00:00Z", "content": null}
+}
+```
+
+### Sample import session
+
+```bash
+# Stop the live proxy first.
+$ pkill ibounce
+
+# Preview what would land.
+$ ibounce config import --in /tmp/ibounce-backup.json --dry-run
+import mode: dry-run
+  profiles: added=2 collided=0 replaced=0
+  rules: added=12 collided=0 replaced=0
+  tasks: 1 carried (informational; tasks are NOT replayed)
+  presets: 1 preset-apply events carried (informational; rules already landed in store)
+
+# Looks right — apply it.
+$ ibounce config import --in /tmp/ibounce-backup.json --merge
+import mode: merge
+  profiles: added=2 collided=0 replaced=0
+  rules: added=12 collided=0 replaced=0
+```
+
+### Relation to #279 SQLite backup
+
+`config export` is the human-reviewable, redacted, check-into-config-
+repo channel. Sibling slice **#279 SQLite backup** is the
+trusted-channel, byte-for-byte backup (preserves audit trail, decision
+log, live tokens, license payload). The two are complementary:
+
+- Reach for `config export` when you want a diff-able artefact, when
+  you're migrating between machines, or when the bundle goes through a
+  security-review pipeline.
+- Reach for the #279 SQLite backup when you need byte-identical
+  restore of the operational state (including audit history + live
+  tokens) and the backup target is itself trusted.
+
+### Cross-links
+
+- Sibling Go implementation in **kbounce**: commit `6e5a678`
+  (`internal/cli/config.go` + `schemas/kbounce-config.schema.json`).
+- Sibling Go implementation in **dbounce**: commit `9608b14`
+  (`internal/cli/config.go` + `schemas/dbounce-config.schema.json`).
+
+Per [[cross-product-agent-parity]] the wire shape + CLI flags + admin-
+action kinds match across the three products so one cross-product SIEM
+correlation rule on `action="config.import"` catches the lifecycle
+event regardless of which Bounce fired it.
+
 ## What's deferred to Stage 2
 
 - HTTP proxy server itself (uvicorn-based)

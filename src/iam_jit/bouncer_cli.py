@@ -4751,6 +4751,275 @@ def _print_version_comparison(
     )
 
 
+# ---------------------------------------------------------------------------
+# config export / import (#275) — cross-product Tier-1 hygiene
+#
+# Per [[cross-product-agent-parity]] the CLI shape MUST match kbounce +
+# dbounce verbatim:
+#
+#   ibounce config export --out PATH [--redact-secrets] [--include-audit] [--include-prompts]
+#   ibounce config import --in PATH [--merge | --replace] [--dry-run]
+#
+# Both commands fan out to `bouncer.config_io`. Admin-action emission +
+# the redaction defaults live there; this file holds only the Click
+# wiring + the operator-facing print surface.
+# ---------------------------------------------------------------------------
+
+
+@main.group("config")
+def config_group() -> None:
+    """Backup, restore, and migrate the ibounce configuration surface.
+
+    Round-trips profiles + rules + tasks + presets + audit-export
+    pointers + alert-rules + MCP-install history + license-pointer to
+    a single JSON file so an operator can back up before an upgrade,
+    move a deployment, or feed a change-management diff.
+
+    Tokens / URLs / env-var values / license content are MASKED in the
+    export by default (per [[push-policy-public-repo]]); live secrets
+    belong in #279 SQLite backup.
+    """
+
+
+@config_group.command("export")
+@click.option(
+    "--out", "out_path", type=click.Path(dir_okay=False), required=True,
+    help="Destination JSON file. Created with mode 0600.",
+)
+@click.option(
+    "--redact-secrets/--no-redact-secrets", default=True, show_default=True,
+    help="Redact webhook tokens, license content, env-var values. "
+         "Default on; ibounce REFUSES to disable it — backups with "
+         "live tokens belong in the SQLite-backup channel (#279).",
+)
+@click.option(
+    "--include-audit", is_flag=True, default=True, show_default=True,
+    help="Include the audit-webhook channel pointer + alert-rules YAML. "
+         "Default on; the contents are still redacted per --redact-secrets.",
+)
+@click.option(
+    "--include-prompts", is_flag=True, default=False, show_default=True,
+    help="Reserved for future use. v1.0 always excludes pending prompts "
+         "from the bundle (they are transient queue state per the "
+         "dbounce-9608b14 'what does NOT ship' list).",
+)
+@click.option(
+    "--db", type=click.Path(dir_okay=False), default=None,
+    help="Override the SQLite store path (default ~/.iam-jit/bouncer/state.db).",
+)
+@click.option(
+    "--profiles", "profiles_path",
+    type=click.Path(dir_okay=False), default=None,
+    help="Override the profiles.yaml path (default "
+         "~/.iam-jit/bouncer/profiles.yaml).",
+)
+@click.option(
+    "--alert-rules", "alert_rules_path",
+    type=click.Path(dir_okay=False), default=None,
+    help="Path of the configured --alert-rules YAML to inline into "
+         "the bundle. Empty / omitted = section emitted with null body.",
+)
+@click.option(
+    "--active-profile", "active_profile", default=None,
+    help="Record this profile name as the active selection. Defaults "
+         "to $IAM_JIT_BOUNCER_PROFILE.",
+)
+def config_export_cmd(
+    out_path: str,
+    redact_secrets: bool,
+    include_audit: bool,
+    include_prompts: bool,
+    db: str | None,
+    profiles_path: str | None,
+    alert_rules_path: str | None,
+    active_profile: str | None,
+) -> None:
+    """Export ibounce configuration to a redacted JSON bundle.
+
+    The bundle is portable across the Bounce suite — kbounce + dbounce
+    ship the same skeleton with their own `product` field. The wire
+    shape lets you author one cross-product backup workflow.
+    """
+    # The --redact-secrets / --no-redact-secrets flag is wired only so
+    # operators discovering it via --help see WHY redaction is locked
+    # on. Per the brief: "If the export needs to NOT be redacted (rare;
+    # for trusted-channel backup): refuse — the only path is the
+    # redacted file. Backups with live tokens belong in #279."
+    if not redact_secrets:
+        click.echo(
+            "ERROR: ibounce config export does not support unredacted "
+            "bundles. Live tokens belong in the SQLite-backup channel "
+            "(#279). The redacted bundle is checkable into a config "
+            "repo without further sanitisation.",
+            err=True,
+        )
+        sys.exit(2)
+    # --include-prompts is reserved; today's behavior is to ignore it.
+    _ = include_prompts
+    from .bouncer.config_io import (
+        build_export,
+        emit_export_admin_action,
+        write_export,
+    )
+
+    bundle = build_export(
+        db_path=db,
+        profiles_path=profiles_path,
+        alert_rules_path=alert_rules_path if include_audit else None,
+        active_profile=active_profile,
+    )
+    if not include_audit:
+        # Caller opted out of the audit-webhook + alert-rules sections.
+        bundle["audit_webhook"] = {
+            "log_path": "",
+            "webhook_url": "***",
+            "webhook_token": "***",
+            "redaction_hint": "section omitted via --include-audit=false",
+            "env_keys_present": [],
+        }
+        bundle["alert_rules"] = {"path": "", "content": None}
+    target = write_export(bundle, out_path)
+    with _opened_store(db) as store:
+        emit_export_admin_action(
+            store, out_path=target, actor=_current_actor(),
+            extra={"profiles": len(bundle.get("profiles", {}).get("items") or []),
+                   "rules": len(bundle.get("rules") or [])},
+        )
+    click.echo(f"exported {target}")
+    click.echo(
+        f"  profiles: {len(bundle.get('profiles', {}).get('items') or [])}, "
+        f"rules: {len(bundle.get('rules') or [])}, "
+        f"tasks: {len(bundle.get('tasks') or [])}, "
+        f"presets: {len(bundle.get('presets') or [])}"
+    )
+    click.echo("  webhook tokens + license content are redacted by default.")
+
+
+@config_group.command("import")
+@click.option(
+    "--in", "in_path", type=click.Path(dir_okay=False), required=True,
+    help="Source JSON bundle.",
+)
+@click.option(
+    "--merge", "merge_flag", is_flag=True, default=False,
+    help="Union with the existing config; collisions keep the existing "
+         "value + emit a note. Default when neither flag is passed.",
+)
+@click.option(
+    "--replace", "replace_flag", is_flag=True, default=False,
+    help="Clear the importing categories first, then load the bundle "
+         "wholesale. Removes existing rules + overwrites profiles.yaml.",
+)
+@click.option(
+    "--dry-run", "dry_run", is_flag=True, default=False,
+    help="Print what would change (counts per section + collision "
+         "list) and exit without mutating. Still emits a config.import "
+         "admin-action row with result=noop so SIEM dashboards see the "
+         "planning activity.",
+)
+@click.option(
+    "--db", type=click.Path(dir_okay=False), default=None,
+    help="Override the SQLite store path (default ~/.iam-jit/bouncer/state.db).",
+)
+@click.option(
+    "--profiles", "profiles_path",
+    type=click.Path(dir_okay=False), default=None,
+    help="Override the profiles.yaml path (default "
+         "~/.iam-jit/bouncer/profiles.yaml).",
+)
+def config_import_cmd(
+    in_path: str,
+    merge_flag: bool,
+    replace_flag: bool,
+    dry_run: bool,
+    db: str | None,
+    profiles_path: str | None,
+) -> None:
+    """Import a previously-exported ibounce config bundle.
+
+    Refuses cross-product imports (kbounce / dbounce bundles bounce
+    with a "value X not in enum [ibounce]" error). Refuses unsupported
+    schema_version with a "this binary supports versions X, Y, Z"
+    message. Refuses if `ibounce run` is live on the loopback probe
+    port — stop the proxy first.
+    """
+    if merge_flag and replace_flag:
+        click.echo(
+            "ERROR: --merge and --replace are mutually exclusive.",
+            err=True,
+        )
+        sys.exit(2)
+    if dry_run:
+        mode = "dry-run"
+    elif replace_flag:
+        mode = "replace"
+    else:
+        mode = "merge"
+
+    from .bouncer.config_io import (
+        ConfigBundleError,
+        apply_import,
+        emit_import_admin_action,
+        is_ibounce_running,
+        load_bundle,
+    )
+
+    if not dry_run and is_ibounce_running():
+        click.echo(
+            "ERROR: ibounce appears to be running (loopback probe on "
+            "127.0.0.1:8767 succeeded). Stop ibounce first — importing "
+            "while the proxy holds an open SQLite connection would race "
+            "on the rules / tasks tables. Re-run after `pkill ibounce` "
+            "or set IBOUNCE_PROBE_PORT to the actual port if you "
+            "moved off the default.",
+            err=True,
+        )
+        sys.exit(2)
+
+    try:
+        bundle = load_bundle(in_path)
+    except ConfigBundleError as e:
+        click.echo(f"ERROR: {e}", err=True)
+        sys.exit(2)
+
+    summary = apply_import(
+        bundle,
+        mode=mode,
+        db_path=db,
+        profiles_path=profiles_path,
+        actor=_current_actor(),
+    )
+    with _opened_store(db) as store:
+        emit_import_admin_action(
+            store, in_path=in_path, summary=summary, actor=_current_actor(),
+        )
+    click.echo(f"import mode: {summary.mode}")
+    click.echo(
+        f"  profiles: added={summary.profiles_added} "
+        f"collided={summary.profiles_collided} "
+        f"replaced={summary.profiles_replaced}"
+    )
+    click.echo(
+        f"  rules: added={summary.rules_added} "
+        f"collided={summary.rules_collided} "
+        f"replaced={summary.rules_replaced}"
+    )
+    if summary.tasks_carried:
+        click.echo(
+            f"  tasks: {summary.tasks_carried} carried (informational; "
+            "tasks are NOT replayed)"
+        )
+    if summary.presets_carried:
+        click.echo(
+            f"  presets: {summary.presets_carried} preset-apply events "
+            "carried (informational; rules already landed in store)"
+        )
+    if summary.collision_notes:
+        click.echo("  notes:")
+        for note in summary.collision_notes:
+            click.echo(f"    - {note}")
+
+
 def main_deprecated_alias() -> None:
     """Console-script entrypoint for the deprecated `iam-jit-bouncer`
     name. Prints a one-line stderr deprecation warning + forwards to
