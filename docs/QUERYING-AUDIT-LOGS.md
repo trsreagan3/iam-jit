@@ -202,6 +202,134 @@ WHERE status_id = 2
 ORDER BY time DESC;"
 ```
 
+## Admin actions (who changed what, when)
+
+The audit-export channel also carries **admin-action events**: a
+distinct OCSF v1.1.0 class 6003 event every time an operator changes
+ibounce's enforcement posture. Decisions answer "what did the agent
+try to do"; admin-action events answer "who installed this profile /
+swapped this rule in / paused enforcement", from the same stream.
+
+Every admin action carries `unmapped.iam_jit.event_type ==
+"ADMIN_ACTION"` plus an `unmapped.iam_jit.admin_action` block:
+
+```json
+{
+  "metadata": {
+    "version": "1.1.0",
+    "product": {"name": "ibounce", "vendor_name": "iam-jit"}
+  },
+  "time": 1716163200000,
+  "class_uid": 6003,
+  "activity_id": 1,                   // 1=Create 3=Update 4=Delete 99=Other
+  "activity_name": "profile.install",
+  "severity_id": 1,                   // 1=Informational; 4=High for license.install / profile.assign
+  "status_id": 1,
+  "status_detail": "admin action profile.install on profile 'team-staging' by frank@example.com",
+  "actor": {"user": {"name": "frank@example.com", "uid": "frank@example.com"}},
+  "unmapped": {
+    "iam_jit": {
+      "event_type": "ADMIN_ACTION",
+      "admin_action": {
+        "kind": "profile.install",
+        "source": "cli",
+        "actor": "frank@example.com",
+        "target": {
+          "kind": "profile",
+          "id": "team-staging",
+          "extra": {
+            "source_url": "https://internal.example.com/profiles/staging.yaml",
+            "sha256": "a3f5...c812"
+          }
+        },
+        "after_hash": "9b2a...d3f1"
+      }
+    }
+  }
+}
+```
+
+### Canonical action list
+
+| `kind`              | `activity_id` | Touchpoint                                       |
+|---------------------|---------------|--------------------------------------------------|
+| `profile.install`   | 1 Create      | `ibounce profile install --from URL`             |
+| `profile.swap`      | 3 Update      | `ibounce prompts bulk-answer` option 1 (hot-swap)|
+| `rule.add`          | 1 Create      | `ibounce rules add ...`                          |
+| `rule.remove`       | 4 Delete      | `ibounce rules remove <id>`                      |
+| `pause.start`       | 3 Update      | `ibounce pause start --for ...`                  |
+| `pause.stop`        | 3 Update      | `ibounce pause stop` (no-op when no pause active)|
+| `preset.apply`      | 1 Create      | `ibounce presets apply <name>`                   |
+| `session.kill`      | 4 Delete      | `ibounce tasks end <selector>`                   |
+| `config.import`     | 1 Create      | reserved; emit-helper ships, surface TBD         |
+| `config.export`     | 99 Other      | reserved; emit-helper ships, surface TBD         |
+| `license.install`   | 1 Create      | reserved; severity 4 High                        |
+| `profile.assign`    | 3 Update      | reserved; severity 4 High                        |
+
+### Operator identity
+
+The `actor.user.name` field is discovered in this order:
+
+1. **`IAM_JIT_BOUNCER_ACTOR` env var** — agents / CI runners / wrappers
+   identify themselves explicitly. Set this in the agent's launcher
+   so the audit row carries the agent's identity, not the OS user
+   the agent's container happens to run as.
+2. **OS username** via `getpass.getuser()` — the default for a
+   developer running `ibounce` from their shell.
+3. **`local-operator`** — honest fallback when neither signal fires
+   (e.g. a container with no `/etc/passwd` entry for the runtime UID).
+   Every admin-action event carries a non-empty actor; there is no
+   "anonymous admin action" path.
+
+### Querying
+
+The same SIEM queries that pivot on decision events work on admin-
+action events; filter by `event_type` to scope:
+
+```spl
+# Splunk — every config change in the last 24h
+index=iam_jit_bouncer
+  unmapped.iam_jit.event_type="ADMIN_ACTION"
+  _time>=relative_time(now(), "-24h")
+| table _time actor.user.name unmapped.iam_jit.admin_action.kind
+        unmapped.iam_jit.admin_action.target.id
+| sort _time desc
+
+# Datadog — admin actions by a specific operator
+service:ibounce
+  @unmapped.iam_jit.event_type:ADMIN_ACTION
+  @actor.user.name:"frank@example.com"
+
+# Athena (AWS Security Lake) — who installed each profile
+SELECT time, actor.user.name AS who,
+       unmapped.iam_jit.admin_action.target.id AS profile_name,
+       unmapped.iam_jit.admin_action.target.extra.source_url AS source
+FROM ocsf_iam_jit_bouncer
+WHERE unmapped.iam_jit.admin_action.kind = 'profile.install'
+ORDER BY time DESC;
+```
+
+### Cross-product parity
+
+kbounce + dbounce ship the same admin-action shape — same
+`event_type == "ADMIN_ACTION"` marker, same `kind` vocabulary, same
+`actor.user` layout. A single SIEM rule keyed on
+`unmapped.iam_jit.event_type == "ADMIN_ACTION"` across all three
+products catches every config change without per-product mapping:
+
+```spl
+# Splunk — every config change across the whole Bounce suite
+index=iam_jit_bouncer
+  unmapped.iam_jit.event_type="ADMIN_ACTION"
+  metadata.product.vendor_name="iam-jit"
+| stats count by metadata.product.name
+                 unmapped.iam_jit.admin_action.kind
+                 actor.user.name
+```
+
+The shared shape lives at kbounce commit `55e364d` and dbounce commit
+`1200a8a`; ibounce wires it under issue #278.
+
 ## Cross-bouncer filtering
 
 When kbounce (K8s admission) and dbounce (SQL gateway) ship alongside

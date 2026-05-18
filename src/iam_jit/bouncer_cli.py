@@ -71,6 +71,62 @@ def _opened_store(db_path: str | None):
         store.close()
 
 
+def _enqueue_admin_action(
+    store: BouncerStore,
+    *,
+    kind: str,
+    target_kind: str = "",
+    target_id: str = "",
+    target_extra: dict[str, Any] | None = None,
+    before: Any = None,
+    after: Any = None,
+    extra: dict[str, Any] | None = None,
+) -> None:
+    """#278 — best-effort admin-action OCSF event enqueue from a CLI
+    subcommand.
+
+    Wires every CLI touchpoint that MUTATES ibounce's gating surface
+    (rule add/remove, pause start/stop, preset apply, profile install,
+    profile hot-swap, session kill) into the ADMIN_ACTION OCSF stream
+    so a security team can answer "who changed what, when, why"
+    directly from the audit-export channel.
+
+    Best-effort posture per the existing PROFILE_INSTALL pattern in
+    `profile install --from URL`: a queue-write failure surfaces on
+    stderr but NEVER fails the user-facing op (the mutation has
+    already landed; rolling back for an audit-row failure would
+    itself be an unaudited mutation per [[creates-never-mutates]]).
+
+    The serve process's pending_audit_events drainer picks the row up
+    on the next 1s tick + materialises the OCSF event via
+    `admin_action_event_from_payload`. CLI runs in a SEPARATE process
+    from `ibounce run`, so the SQLite queue is the only emit path
+    that crosses the process boundary.
+    """
+    try:
+        from .bouncer.audit_export import enqueue_admin_action
+
+        enqueue_admin_action(
+            store,
+            kind=kind,
+            actor=_current_actor(),
+            target_kind=target_kind,
+            target_id=target_id,
+            target_extra=target_extra,
+            before=before,
+            after=after,
+            extra=extra,
+        )
+    except Exception as e:
+        # Visible to the operator so a quiet emit failure surfaces
+        # immediately, but not exit-1: the mutation IS done.
+        click.echo(
+            f"warning: admin-action audit-event enqueue failed "
+            f"(the action itself succeeded): {e}",
+            err=True,
+        )
+
+
 # ---------------------------------------------------------------------------
 # #253 — pre-burst hint surface
 #
@@ -403,6 +459,23 @@ def presets_apply(preset_name: str, db: str | None) -> None:
         store.record_preset_applied(
             preset_name=preset.name, rules_added=added, actor=actor
         )
+        # #278 — admin-action OCSF emit. After-state captures the
+        # added-rule count so a SIEM dashboard can correlate "preset
+        # X applied + N rules added" against the per-rule.add stream.
+        _enqueue_admin_action(
+            store,
+            kind="preset.apply",
+            target_kind="preset",
+            target_id=preset.name,
+            target_extra={
+                "rules_added": added,
+                "rules_offered": len(preset.rules),
+            },
+            after={
+                "preset_name": preset.name,
+                "rules_added": added,
+            },
+        )
     click.echo(f"applied preset '{preset.name}': {added} rules added")
 
 
@@ -526,6 +599,29 @@ def rules_add(
             # time rather than letting a never-matches rule enter the DB.
             click.echo(f"rejected: {e}", err=True)
             sys.exit(2)
+        # #278 — admin-action OCSF emit. After-state is the rule shape
+        # (no full ruleset snapshot — large + adds nothing the SIEM
+        # can't reconstruct from the rule.add stream itself).
+        _enqueue_admin_action(
+            store,
+            kind="rule.add",
+            target_kind="rule",
+            target_id=f"#{rid}",
+            target_extra={
+                "pattern": rule.pattern,
+                "effect": rule.effect.value,
+                "arn_scope": rule.arn_scope or "",
+                "region_scope": rule.region_scope or "",
+            },
+            after={
+                "id": rid,
+                "pattern": rule.pattern,
+                "effect": rule.effect.value,
+                "arn_scope": rule.arn_scope,
+                "region_scope": rule.region_scope,
+                "note": rule.note,
+            },
+        )
     click.echo(f"added rule #{rid}: {rule.effect.value} {rule.pattern}")
 
 
@@ -537,7 +633,39 @@ def rules_remove(rule_id: int, db: str | None) -> None:
     post-incident review can answer 'what rule existed at time T'
     (per [[agent-friendly-not-bypassable]] Lens B)."""
     with _opened_store(db) as store:
+        # Capture before-state by id-tagged list so the admin-action
+        # event records WHAT was removed (pattern + effect + scopes),
+        # not just the id. Fail-soft: missing pre-snapshot still
+        # emits the event with a None before-hash.
+        before_rule: dict[str, Any] | None = None
+        try:
+            for rid, r in store.list_rules():
+                if rid == rule_id:
+                    before_rule = {
+                        "id": rid,
+                        "pattern": r.pattern,
+                        "effect": r.effect.value,
+                        "arn_scope": r.arn_scope,
+                        "region_scope": r.region_scope,
+                        "note": r.note,
+                    }
+                    break
+        except Exception:
+            before_rule = None
         removed = store.remove_rule(rule_id, actor=_current_actor())
+        if removed:
+            _enqueue_admin_action(
+                store,
+                kind="rule.remove",
+                target_kind="rule",
+                target_id=f"#{rule_id}",
+                target_extra={
+                    "pattern": (before_rule or {}).get("pattern", ""),
+                    "effect": (before_rule or {}).get("effect", ""),
+                },
+                before=before_rule,
+                after=None,
+            )
     if removed:
         click.echo(f"removed rule #{rule_id}")
     else:
@@ -940,6 +1068,21 @@ def tasks_end(selector: str, reason: str, db: str | None) -> None:
     with _opened_store(db) as store:
         task_id = _resolve_or_die(store, selector)
         ok = store.end_task(task_id, actor=_current_actor(), end_reason=reason)
+        if ok:
+            # #278 — admin-action OCSF emit. Ending a task ends its
+            # scoped allow/deny rules (a session-kill in the sense
+            # that the agent's elevated scope evaporates), so this
+            # is the security-relevant config-change row for "who
+            # closed the session."
+            _enqueue_admin_action(
+                store,
+                kind="session.kill",
+                target_kind="task",
+                target_id=task_id,
+                target_extra={"end_reason": reason or ""},
+                before={"task_id": task_id, "status": "active"},
+                after={"task_id": task_id, "status": "ended"},
+            )
     if not ok:
         click.echo(
             f"no active task with id {task_id!r} "
@@ -1675,6 +1818,28 @@ def profile_install_cmd(
                         "sha256": actual_sha256,
                     }),
                 )
+                # #278 — additionally enqueue an ADMIN_ACTION row so a
+                # SIEM dashboard keyed on the cross-product
+                # `event_type == "ADMIN_ACTION"` filter catches profile
+                # installs alongside rule edits / pauses / preset
+                # applies. The dedicated PROFILE_INSTALL synthetic
+                # stays for the non_org_profile_install alert rule
+                # (which keys on its richer payload).
+                _enqueue_admin_action(
+                    audit_store,
+                    kind="profile.install",
+                    target_kind="profile",
+                    target_id=name,
+                    target_extra={
+                        "source_url": from_url,
+                        "sha256": actual_sha256,
+                    },
+                    after={
+                        "profile_name": name,
+                        "source_url": from_url,
+                        "sha256": actual_sha256,
+                    },
+                )
     except Exception as e:
         # Visible to the operator so a quiet drain failure surfaces
         # immediately, but not exit-1: the install IS done.
@@ -2330,6 +2495,21 @@ def _apply_bulk_profile_switch(
     # for the local-only deployment shape; cross-process flip is out
     # of scope for v1.0.
     set_session_profile_override(profile_obj)
+    # #278 — admin-action OCSF emit. Hot-swaps are security-relevant
+    # because they change the active guardrail for every subsequent
+    # request without touching the on-disk profiles. The audit event
+    # records BOTH the new profile name AND the actor so a security
+    # team can answer "who switched us off the staging profile."
+    _enqueue_admin_action(
+        store,
+        kind="profile.swap",
+        target_kind="profile",
+        target_id=profile_name,
+        target_extra={
+            "pending_prompts_at_swap": len(pending_rows),
+        },
+        after={"profile_name": profile_name},
+    )
     prompts_answered = 0
     for r in pending_rows:
         if r.get("status") != "pending":
@@ -2592,6 +2772,26 @@ def pause_start_cmd(duration: str, reason: str, db: str | None) -> None:
             click.secho(f"pause refused: {e}", fg="red", err=True)
             sys.exit(2)
         active = store.get_active_pause()
+        # #278 — admin-action OCSF emit. The reason field is included
+        # under target_extra because a security team that sees
+        # "pause.start fired with reason=incident-response" can decide
+        # whether to dig in vs. ignore.
+        _enqueue_admin_action(
+            store,
+            kind="pause.start",
+            target_kind="pause_window",
+            target_id=f"#{pid}",
+            target_extra={
+                "duration_seconds": seconds,
+                "reason": reason or "",
+            },
+            after={
+                "pause_id": pid,
+                "duration_seconds": seconds,
+                "reason": reason,
+                "started_by": actor,
+            },
+        )
     assert active is not None
     click.secho(
         f"pause #{pid} active — proxy is COOPERATIVE for the next "
@@ -2610,6 +2810,20 @@ def pause_stop_cmd(db: str | None) -> None:
     actor = _current_actor()
     with _opened_store(db) as store:
         pid = store.end_pause(ended_by=actor)
+        if pid is not None:
+            # #278 — admin-action OCSF emit. Distinct from the
+            # existing PAUSE_END synthetic (which drives the pause_long
+            # alert): this one is the "who closed the pause window"
+            # config-change row.
+            _enqueue_admin_action(
+                store,
+                kind="pause.stop",
+                target_kind="pause_window",
+                target_id=f"#{pid}",
+                target_extra={"ended_by": actor},
+                before={"pause_id": pid},
+                after=None,
+            )
     if pid is None:
         click.echo("no pause is currently active.")
         return

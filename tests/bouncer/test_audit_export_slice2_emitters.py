@@ -494,13 +494,19 @@ def test_profile_install_enqueues_pending_audit_event(
     # serve process would open (env-var-resolved path).
     s = BouncerStore(db_path=str(db_path))
     try:
-        assert s.count_pending_audit_events() == 1
+        # #278 — profile install now enqueues BOTH the PROFILE_INSTALL
+        # synthetic (for the non_org_profile_install alert rule) and
+        # an ADMIN_ACTION row (for the cross-product config-change
+        # audit stream). Both must land; the test scopes to the
+        # PROFILE_INSTALL row that this test was originally pinning.
+        assert s.count_pending_audit_events() == 2
         rows = s.drain_pending_audit_events(limit=100)
     finally:
         s.close()
-    assert len(rows) == 1
-    row = rows[0]
-    assert row["event_type"] == EVENT_TYPE_PROFILE_INSTALL
+    assert len(rows) == 2
+    install_rows = [r for r in rows if r["event_type"] == EVENT_TYPE_PROFILE_INSTALL]
+    assert len(install_rows) == 1
+    row = install_rows[0]
     payload_back = json.loads(row["payload_json"])
     assert payload_back["profile_name"] == "team-staging"
     assert payload_back["source_url"] == url

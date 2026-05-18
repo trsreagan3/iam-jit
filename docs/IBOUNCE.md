@@ -26,6 +26,13 @@ default enforcement surface today. Below is the full v1.0 shape.
 - **Dry-run decision evaluator** (`ibounce decide`)
 - **Audit chain** (`ibounce logs tail` + per-task review +
   per-pause review) — SQLite-backed local-only
+- **Admin-action OCSF events** (#278) — every config change
+  (`profile install`, profile hot-swap, `rules add/remove`,
+  `pause start/stop`, `presets apply`, `tasks end`) emits a distinct
+  OCSF v1.1.0 class 6003 event with `unmapped.iam_jit.event_type ==
+  "ADMIN_ACTION"` so security teams can answer "who changed what,
+  when" from the audit-export stream. Same wire shape as kbounce +
+  dbounce. See [QUERYING-AUDIT-LOGS.md](QUERYING-AUDIT-LOGS.md#admin-actions-who-changed-what-when).
 - **Compatibility allowlist** (`iam-jit allowlist`) for per-account /
   per-workload overrides
 

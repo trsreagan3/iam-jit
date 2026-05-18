@@ -2856,11 +2856,36 @@ async def serve(config: ProxyConfig, *, store: BouncerStore) -> None:
                 # ever land — matches the lazy-import pattern used in
                 # evaluate_request for audit_event_from_decision.
                 import json as _json_local
-                from .audit_export import make_profile_install_event
+                from .audit_export import (
+                    EVENT_TYPE_ADMIN_ACTION,
+                    admin_action_event_from_payload,
+                    make_profile_install_event,
+                )
                 from .audit_export.alerts import EVENT_TYPE_PROFILE_INSTALL
                 for row in rows:
                     try:
-                        if row["event_type"] != EVENT_TYPE_PROFILE_INSTALL:
+                        evt_type = row["event_type"]
+                        if evt_type == EVENT_TYPE_PROFILE_INSTALL:
+                            payload = _json_local.loads(row["payload_json"])
+                            evt = make_profile_install_event(
+                                profile_name=str(payload.get("profile_name") or ""),
+                                source_url=str(payload.get("source_url") or ""),
+                                installed_by=str(payload.get("installed_by") or ""),
+                            )
+                            _emit_audit_event(evt)
+                        elif evt_type == EVENT_TYPE_ADMIN_ACTION:
+                            # #278 — admin-action drain. Materialise
+                            # the OCSF event from the JSON payload
+                            # enqueued by a CLI subcommand and push
+                            # it through the same emit channel as
+                            # decisions + the existing synthetics so
+                            # JSONL log + webhook + rule engine all
+                            # see one canonical shape.
+                            evt = admin_action_event_from_payload(
+                                row["payload_json"]
+                            )
+                            _emit_audit_event(evt)
+                        else:
                             # Unknown event_type — log + skip. The
                             # row is already deleted (drain pops),
                             # so we don't loop on a malformed row
@@ -2870,16 +2895,9 @@ async def serve(config: ProxyConfig, *, store: BouncerStore) -> None:
                                 "ibounce pending-audit-events drain: "
                                 "unknown event_type %r; skipping "
                                 "(row id=%s)",
-                                row["event_type"], row["id"],
+                                evt_type, row["id"],
                             )
                             continue
-                        payload = _json_local.loads(row["payload_json"])
-                        evt = make_profile_install_event(
-                            profile_name=str(payload.get("profile_name") or ""),
-                            source_url=str(payload.get("source_url") or ""),
-                            installed_by=str(payload.get("installed_by") or ""),
-                        )
-                        _emit_audit_event(evt)
                     except Exception as e:
                         logger.warning(
                             "ibounce pending-audit-events drain delivery "
