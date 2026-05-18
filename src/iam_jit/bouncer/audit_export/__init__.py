@@ -54,16 +54,21 @@ from .agent_context import (
 )
 from .alerts import (
     BUILTIN_RULES,
+    DEFAULT_AUDIT_EXPORT_DEGRADED_DROP_THRESHOLD,
+    DEFAULT_AUDIT_EXPORT_DEGRADED_DROP_WINDOW_SECONDS,
+    DEFAULT_AUDIT_EXPORT_DEGRADED_FAILURE_THRESHOLD,
     FORBIDDEN_ALERT_WORDS,
     AlertRule,
     AlertsConfig,
     AlertsLicenseError,
     RuleEngine,
+    audit_export_degraded_stderr_message,
     gate_alerts_license,
     load_alerts_config,
     make_admin_fallback_grant_event,
     make_pause_end_event,
     make_profile_install_event,
+    write_audit_export_degraded_stderr,
 )
 from .event import (
     AUDIT_EVENT_SCHEMA_VERSION,
@@ -95,6 +100,9 @@ __all__ = [
     "AlertsLicenseError",
     "AuditLogWriter",
     "BUILTIN_RULES",
+    "DEFAULT_AUDIT_EXPORT_DEGRADED_DROP_THRESHOLD",
+    "DEFAULT_AUDIT_EXPORT_DEGRADED_DROP_WINDOW_SECONDS",
+    "DEFAULT_AUDIT_EXPORT_DEGRADED_FAILURE_THRESHOLD",
     "DEFAULT_HEARTBEAT_MISSING_COUNT",
     "EVENT_TYPE_HEARTBEAT",
     "FORBIDDEN_ALERT_WORDS",
@@ -108,6 +116,7 @@ __all__ = [
     "active_agent_session",
     "audit_dropped_event",
     "audit_event_from_decision",
+    "audit_export_degraded_stderr_message",
     "begin_mcp_session",
     "build_request",
     "detect_from_process_tree",
@@ -124,4 +133,5 @@ __all__ = [
     "resolve_agent_block",
     "session_ended_event",
     "validate_webhook_url",
+    "write_audit_export_degraded_stderr",
 ]

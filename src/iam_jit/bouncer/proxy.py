@@ -270,6 +270,42 @@ _audit_webhook_pusher: Any | None = None
 # via gate_alerts_license at CLI parse + serve() start (defense in
 # depth, matches the webhook gate).
 _audit_rule_engine: Any | None = None
+# #267 — audit_export_degraded /healthz flag. Mirrors the heartbeat
+# pattern: when the audit_export_degraded rule fires it flips this
+# bool, which /healthz reads to return 503. Independent of the
+# heartbeat-gap flag; either-or causes the 503 (per spec).
+_audit_export_degraded_lock = threading.Lock()
+_audit_export_degraded_detected: bool = False
+
+
+def mark_audit_export_degraded() -> None:
+    """#267 — set the /healthz audit_export degraded flag. Called by
+    the audit_export_degraded alert rule when it fires; /healthz reads
+    the flag via `is_audit_export_degraded()` and returns 503 when set.
+
+    Public so the alert rule (in audit_export.alerts) can import +
+    call it without a circular import."""
+    global _audit_export_degraded_detected
+    with _audit_export_degraded_lock:
+        _audit_export_degraded_detected = True
+
+
+def clear_audit_export_degraded() -> None:
+    """#267 — reset the /healthz audit_export degraded flag. Called
+    when the underlying health-section computation shows everything
+    is healthy again (writes_ok + consecutive_failures back below
+    threshold + drops cleared). Same self-clearing pattern as the
+    heartbeat-gap flag (cleared on a fresh successful heartbeat)."""
+    global _audit_export_degraded_detected
+    with _audit_export_degraded_lock:
+        _audit_export_degraded_detected = False
+
+
+def is_audit_export_degraded() -> bool:
+    """#267 — read the /healthz audit_export degraded flag. Public
+    so /healthz + tests can introspect without a circular import."""
+    with _audit_export_degraded_lock:
+        return _audit_export_degraded_detected
 
 
 def register_audit_log_writer(writer: Any | None) -> None:
@@ -410,6 +446,158 @@ def audit_export_status() -> dict[str, Any]:
         ),
         "heartbeat_gap_detected": hb_status["heartbeat_gap_detected"],
     }
+
+
+# #267 — /healthz 503-trigger thresholds for the audit_export section.
+# Spec'd in the [[audit-export-failure-visibility]] memo:
+#   * log_writes_ok == False               → 503
+#   * webhook_consecutive_failures > 3     → 503
+#   * webhook_last_success_seconds_ago > 5min (webhook configured but
+#     silent) → 503
+# The audit_export_degraded alert rule uses LOOSER thresholds (>5
+# consecutive / drops>10 in 5min / writes_ok=False) — the rule is
+# operator-action signal, /healthz is the more aggressive monitoring
+# probe.
+HEALTHZ_AUDIT_WEBHOOK_CONSECUTIVE_FAILURE_THRESHOLD = 3
+HEALTHZ_AUDIT_WEBHOOK_SILENCE_SECONDS_THRESHOLD = 300
+
+
+def audit_export_health_section() -> dict[str, Any]:
+    """#267 — assemble the /healthz `audit_export` block + compute
+    the boolean degradation signal external monitoring polls.
+
+    Returns a dict with the spec-shaped fields plus a derived
+    `degraded` bool the /healthz handler reads to decide 503 vs 200.
+    Re-used by the `ibounce audit-export health` CLI subcommand so
+    both surfaces report identical values (no divergence between
+    "what the probe sees" and "what the operator sees on the CLI").
+
+    Per [[security-team-positioning-safety-not-surveillance]]: the
+    webhook URL is MASKED via the existing mask_url_userinfo helper
+    (token-in-userinfo is the load-bearing exfil case); the bearer
+    token NEVER appears anywhere in this output (we don't even read
+    it — the pusher's status() returns mask_token() already).
+    """
+    import time as _time
+
+    # Log channel — convert the writer's stats into the spec-shape.
+    if _audit_log_writer is not None:
+        log_stats = _audit_log_writer.status()
+        log_section = {
+            "configured": True,
+            "log_writes_ok": bool(log_stats.get("writes_ok", True)),
+            "log_path": log_stats.get("path", ""),
+            "log_last_error": log_stats.get("last_error"),
+            "log_last_error_at_unix": log_stats.get("last_error_at_unix"),
+            "log_total_events": log_stats.get("total_events", 0),
+            "log_dropped_events": log_stats.get("dropped_events", 0),
+        }
+    else:
+        log_section = {
+            "configured": False,
+            "log_writes_ok": True,  # not configured = nothing failing
+            "log_path": None,
+            "log_last_error": None,
+            "log_last_error_at_unix": None,
+            "log_total_events": 0,
+            "log_dropped_events": 0,
+        }
+
+    # Webhook channel — convert the pusher's stats into the spec-shape.
+    now = _time.time()
+    if _audit_webhook_pusher is not None:
+        webhook_stats = _audit_webhook_pusher.status()
+        last_success_unix = webhook_stats.get("last_success_unix")
+        last_attempt_unix = webhook_stats.get("last_attempt_unix")
+        last_success_seconds_ago = (
+            int(now - last_success_unix)
+            if last_success_unix is not None
+            else None
+        )
+        last_attempt_seconds_ago = (
+            int(now - last_attempt_unix)
+            if last_attempt_unix is not None
+            else None
+        )
+        webhook_section = {
+            "webhook_configured": True,
+            "webhook_url_masked": webhook_stats.get("url", ""),
+            "webhook_last_success_seconds_ago": last_success_seconds_ago,
+            "webhook_last_attempt_seconds_ago": last_attempt_seconds_ago,
+            "webhook_last_status_code": webhook_stats.get("last_status_code"),
+            "webhook_consecutive_failures": webhook_stats.get(
+                "consecutive_failures", 0,
+            ),
+            "webhook_last_error": webhook_stats.get("last_error"),
+            "webhook_last_error_at_unix": webhook_stats.get(
+                "last_error_at_unix",
+            ),
+            "queue_depth": webhook_stats.get("queue_depth", 0),
+            "queue_capacity": webhook_stats.get("queue_maxsize", 0),
+            "dropped_count_since_start": webhook_stats.get(
+                "dropped_events", 0,
+            ),
+        }
+    else:
+        webhook_section = {
+            "webhook_configured": False,
+            "webhook_url_masked": None,
+            "webhook_last_success_seconds_ago": None,
+            "webhook_last_attempt_seconds_ago": None,
+            "webhook_last_status_code": None,
+            "webhook_consecutive_failures": 0,
+            "webhook_last_error": None,
+            "webhook_last_error_at_unix": None,
+            "queue_depth": 0,
+            "queue_capacity": 0,
+            "dropped_count_since_start": 0,
+        }
+
+    section: dict[str, Any] = {}
+    section.update(log_section)
+    section.update(webhook_section)
+
+    # Compute degraded bool. ANY of the three spec conditions trips it.
+    # We DELIBERATELY OR the conditions so an operator dashboard can
+    # check `degraded` as a single field but still surface the
+    # individual signals for "why is this degraded?" forensics.
+    degraded_reasons: list[str] = []
+    if log_section["configured"] and not log_section["log_writes_ok"]:
+        degraded_reasons.append("log_writes_ok=false")
+    if webhook_section["webhook_configured"]:
+        if (
+            webhook_section["webhook_consecutive_failures"]
+            > HEALTHZ_AUDIT_WEBHOOK_CONSECUTIVE_FAILURE_THRESHOLD
+        ):
+            degraded_reasons.append(
+                f"webhook_consecutive_failures="
+                f"{webhook_section['webhook_consecutive_failures']}"
+                f" (threshold "
+                f"{HEALTHZ_AUDIT_WEBHOOK_CONSECUTIVE_FAILURE_THRESHOLD})"
+            )
+        last_ok = webhook_section["webhook_last_success_seconds_ago"]
+        # "Configured but silent": if last_success_seconds_ago > 5min
+        # AND we've actually attempted something (last_attempt is not
+        # None). A pristine boot before the first send shouldn't fire
+        # this — that's covered by the "last_attempt is not None"
+        # guard. After the first attempt, last_ok==None means we
+        # never succeeded which IS the failure mode.
+        last_attempt = webhook_section["webhook_last_attempt_seconds_ago"]
+        if last_attempt is not None:
+            if (
+                last_ok is None
+                or last_ok > HEALTHZ_AUDIT_WEBHOOK_SILENCE_SECONDS_THRESHOLD
+            ):
+                degraded_reasons.append(
+                    "webhook_last_success_seconds_ago="
+                    f"{last_ok} "
+                    f"(threshold "
+                    f"{HEALTHZ_AUDIT_WEBHOOK_SILENCE_SECONDS_THRESHOLD})"
+                )
+
+    section["degraded"] = bool(degraded_reasons)
+    section["degraded_reasons"] = degraded_reasons
+    return section
 
 
 def set_session_mode_override(mode: str | None) -> None:
@@ -2168,6 +2356,27 @@ async def serve(config: ProxyConfig, *, store: BouncerStore) -> None:
                 http_status_code = 503
                 if status_str == "ok":
                     status_str = "degraded"
+        # #267 — audit_export failure-visibility block. Independent of
+        # the heartbeat 503 trigger above; either-or causes 503 (per
+        # [[audit-export-failure-visibility]]). The audit_export block
+        # ALWAYS appears (configured or not), so external monitoring
+        # parsers can branch on `audit_export.degraded` as a single
+        # bool without branching on "is the audit channel set up?"
+        # first.
+        audit_export_section = audit_export_health_section()
+        if audit_export_section["degraded"]:
+            http_status_code = 503
+            if status_str == "ok":
+                status_str = "degraded"
+        else:
+            # Self-clear the persistent rule-set flag when conditions
+            # are healthy again. Without this, a degradation that
+            # fired the alert rule + then healed (e.g. webhook
+            # collector came back up) would leave /healthz stuck at
+            # 503 until the next observe() runs the rule's clear
+            # branch.
+            if is_audit_export_degraded():
+                clear_audit_export_degraded()
         return web.json_response({
             "status": status_str,
             "mode": config.mode.value,
@@ -2177,6 +2386,7 @@ async def serve(config: ProxyConfig, *, store: BouncerStore) -> None:
             "pause": pause_payload,
             "pause_lookup_errors_total": pause_errs,
             "heartbeat": heartbeat_payload,
+            "audit_export": audit_export_section,
         }, status=http_status_code)
 
     # /healthz registered BEFORE the catch-all so it wins route

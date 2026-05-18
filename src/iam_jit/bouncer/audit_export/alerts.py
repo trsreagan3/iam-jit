@@ -47,6 +47,7 @@ from __future__ import annotations
 import dataclasses
 import datetime as _dt
 import logging
+import sys
 import threading
 import time
 from collections import deque
@@ -149,6 +150,17 @@ from .heartbeat import (  # noqa: E402  — intentional mid-file import
     write_heartbeat_gap_stderr as _write_heartbeat_gap_stderr,
 )
 
+# audit_export_degraded defaults (#267). Looser thresholds than the
+# /healthz 503 triggers because the rule is operator-action signal
+# (rotate token / check disk / restart collector) whereas /healthz
+# is the more aggressive monitoring probe. Spec table:
+#   * webhook_consecutive_failures > 5
+#   * dropped_count in last 5min > 10
+#   * log_writes_ok == False
+DEFAULT_AUDIT_EXPORT_DEGRADED_FAILURE_THRESHOLD = 5
+DEFAULT_AUDIT_EXPORT_DEGRADED_DROP_THRESHOLD = 10
+DEFAULT_AUDIT_EXPORT_DEGRADED_DROP_WINDOW_SECONDS = 5 * 60  # 5 minutes
+
 
 # unusual-high-risk-action defaults: the watchlist of action patterns
 # that are sensitive enough to alert on every transparent-mode deny.
@@ -213,13 +225,26 @@ class AlertsConfig:
     # detection scan that follows. Operators raise this for noisy
     # network paths where the occasional missed beat is normal.
     heartbeat_missing_count: int = DEFAULT_HEARTBEAT_MISSING_COUNT
+    # #267 — audit_export_degraded rule thresholds. Loosen these for
+    # high-volume environments where the occasional 5xx burst doesn't
+    # warrant operator paging.
+    audit_export_failure_threshold: int = (
+        DEFAULT_AUDIT_EXPORT_DEGRADED_FAILURE_THRESHOLD
+    )
+    audit_export_drop_threshold: int = (
+        DEFAULT_AUDIT_EXPORT_DEGRADED_DROP_THRESHOLD
+    )
+    audit_export_drop_window_seconds: int = (
+        DEFAULT_AUDIT_EXPORT_DEGRADED_DROP_WINDOW_SECONDS
+    )
 
     @classmethod
     def default(cls) -> "AlertsConfig":
-        """Built-in defaults: all five rules enabled (admin_fallback_burst,
+        """Built-in defaults: all six rules enabled (admin_fallback_burst,
         pause_long, non_org_profile_install, unusual_high_risk_action,
-        heartbeat_gap), conservative thresholds. This is what the engine
-        uses when --alert-rules is absent (per spec)."""
+        heartbeat_gap, audit_export_degraded), conservative thresholds.
+        This is what the engine uses when --alert-rules is absent (per
+        spec)."""
         return cls(enabled_rules=None)
 
 
@@ -367,6 +392,10 @@ def load_alerts_config(path: str) -> AlertsConfig:
         "high_risk_actions",
         # #264 — heartbeat_gap rule threshold.
         "heartbeat_missing_count",
+        # #267 — audit_export_degraded rule thresholds.
+        "audit_export_failure_threshold",
+        "audit_export_drop_threshold",
+        "audit_export_drop_window_seconds",
         "custom_rules",
     }
     for k in raw:
@@ -407,6 +436,24 @@ def load_alerts_config(path: str) -> AlertsConfig:
             raw.get(
                 "heartbeat_missing_count",
                 DEFAULT_HEARTBEAT_MISSING_COUNT,
+            )
+        ),
+        audit_export_failure_threshold=int(
+            raw.get(
+                "audit_export_failure_threshold",
+                DEFAULT_AUDIT_EXPORT_DEGRADED_FAILURE_THRESHOLD,
+            )
+        ),
+        audit_export_drop_threshold=int(
+            raw.get(
+                "audit_export_drop_threshold",
+                DEFAULT_AUDIT_EXPORT_DEGRADED_DROP_THRESHOLD,
+            )
+        ),
+        audit_export_drop_window_seconds=int(
+            raw.get(
+                "audit_export_drop_window_seconds",
+                DEFAULT_AUDIT_EXPORT_DEGRADED_DROP_WINDOW_SECONDS,
             )
         ),
     )
@@ -751,6 +798,188 @@ def _pattern_heartbeat_gap(
     }
 
 
+def audit_export_degraded_stderr_message(
+    *,
+    reasons: list[str],
+) -> str:
+    """#267 — neutral-language stderr message the audit_export_degraded
+    rule writes when it fires. Exported so the alert pattern + tests
+    can import the canonical string.
+
+    Per [[security-team-positioning-safety-not-surveillance]]: no
+    forbidden words. Frames the degradation as "channel needs
+    attention" not "someone did something."
+    """
+    if reasons:
+        reasons_str = "; ".join(reasons)
+    else:
+        reasons_str = "no specific reason captured"
+    return (
+        f"ibounce audit-export channel degraded: {reasons_str}. "
+        f"check webhook reachability + disk space + token validity. "
+        f"the bouncer hot-path is still serving requests; this is a "
+        f"visibility-channel notice, not a request-handling failure."
+    )
+
+
+def write_audit_export_degraded_stderr(reasons: list[str]) -> None:
+    """#267 — write the degradation notice to stderr. The
+    audit_export_degraded rule calls this IN ADDITION to its normal
+    alert-channel emit because the audit-export channel itself IS the
+    failure source we're alerting on — the alert event we just emitted
+    may have been dropped by the broken transport. stderr is the
+    always-available channel a supervisord / systemd / docker logs
+    setup will capture even when the structured audit channel is
+    broken. Mirrors the heartbeat_gap stderr pattern (#264).
+
+    Per [[audit-export-failure-visibility]]: stderr is the load-bearing
+    fallback channel; it's the reason this rule is special-cased among
+    the six built-ins.
+    """
+    msg = audit_export_degraded_stderr_message(reasons=reasons)
+    try:
+        # Direct stderr write so the message lands even if the
+        # logging module's handlers have been mis-configured.
+        sys.stderr.write(msg + "\n")
+        sys.stderr.flush()
+    except Exception:
+        # Last resort — never raise out of a fail-soft alert path.
+        pass
+
+
+def _evaluate_audit_export_degraded(
+    config: AlertsConfig,
+) -> tuple[bool, list[str]]:
+    """#267 — compute (is_degraded, reasons) for the
+    audit_export_degraded rule. Pulled into a helper so /healthz can
+    re-use the SAME thresholds + reason strings the rule consults (no
+    divergence between probe + rule).
+
+    Reads the registered channels via a lazy import of proxy.py (the
+    module that owns the registry singletons) — lazy to avoid the
+    circular alerts<->proxy import at module load.
+    """
+    reasons: list[str] = []
+    # Lazy import to break the alerts<->proxy circular at module load.
+    try:
+        from .. import proxy as _proxy_mod
+    except Exception:
+        # If proxy can't be imported (unit test on alerts in isolation),
+        # the rule is silently dormant — there's nothing to observe.
+        return False, reasons
+    log_writer = getattr(_proxy_mod, "_audit_log_writer", None)
+    webhook = getattr(_proxy_mod, "_audit_webhook_pusher", None)
+    # Log channel: writes_ok=False is the operator-action signal
+    # (disk full, permission denied, broken filesystem).
+    if log_writer is not None:
+        try:
+            log_stats = log_writer.status()
+        except Exception:
+            log_stats = {}
+        if not bool(log_stats.get("writes_ok", True)):
+            reasons.append("log_writes_ok=false")
+    # Webhook channel: consecutive_failures over the rule threshold
+    # OR drops-in-last-window over the rule threshold.
+    if webhook is not None:
+        try:
+            wh_stats = webhook.status()
+        except Exception:
+            wh_stats = {}
+        cf = int(wh_stats.get("consecutive_failures", 0))
+        if cf > config.audit_export_failure_threshold:
+            reasons.append(
+                f"webhook_consecutive_failures={cf} "
+                f"(threshold {config.audit_export_failure_threshold})"
+            )
+        try:
+            drops_in_window = int(
+                webhook.dropped_in_last_seconds(
+                    config.audit_export_drop_window_seconds,
+                )
+            )
+        except Exception:
+            drops_in_window = 0
+        if drops_in_window > config.audit_export_drop_threshold:
+            reasons.append(
+                f"dropped_events_in_last_{config.audit_export_drop_window_seconds}s"
+                f"={drops_in_window} "
+                f"(threshold {config.audit_export_drop_threshold})"
+            )
+    return bool(reasons), reasons
+
+
+def _pattern_audit_export_degraded(
+    event: dict, window: deque, config: AlertsConfig,
+) -> dict | None:
+    """#267 — fire when the audit-export channel itself is degraded.
+
+    Evaluation:
+      * Pulls the current health-section reasons via
+        `_evaluate_audit_export_degraded(config)`.
+      * Debounces via the module-level /healthz degraded flag the
+        same way heartbeat_gap debounces via its own flag — once
+        fired, doesn't re-fire until the underlying conditions are
+        no longer met (which clears the flag).
+      * When fired, ALSO:
+          - flips the proxy's `_audit_export_degraded_detected` flag
+            so /healthz returns 503 (mirrors heartbeat_gap pattern)
+          - writes to stderr (because the audit-export channel itself
+            is the failure; alerting through the same channel isn't
+            reliable)
+
+    Per [[security-team-positioning-safety-not-surveillance]]: the
+    suggestion frames this as "investigate the visibility channel,"
+    not "someone disabled audit."
+    """
+    # Lazy import for the same reason _evaluate_audit_export_degraded
+    # is lazy: alerts is imported by proxy at boot.
+    try:
+        from .. import proxy as _proxy_mod
+    except Exception:
+        return None
+    is_degraded, reasons = _evaluate_audit_export_degraded(config)
+    if not is_degraded:
+        # Conditions are healthy. Clear the flag so a fresh
+        # degradation later can re-fire (self-clearing pattern).
+        try:
+            _proxy_mod.clear_audit_export_degraded()
+        except Exception:
+            pass
+        return None
+    # Debounce: if already marked degraded, don't re-fire until
+    # conditions clear.
+    try:
+        already_marked = _proxy_mod.is_audit_export_degraded()
+    except Exception:
+        already_marked = False
+    if already_marked:
+        return None
+    # Mark the flag + write to stderr BEFORE returning the alert dict
+    # so even if the audit transport drops the alert, the operator
+    # has the stderr breadcrumb + the /healthz signal.
+    try:
+        _proxy_mod.mark_audit_export_degraded()
+    except Exception:
+        pass
+    write_audit_export_degraded_stderr(reasons)
+    return {
+        "matched_event_count": len(reasons),
+        "window_seconds": config.audit_export_drop_window_seconds,
+        "status_detail": (
+            f"Pattern audit-export-degraded fired: "
+            f"{'; '.join(reasons)}"
+        ),
+        "suggestion": (
+            "check webhook reachability + disk space + token validity. "
+            "the audit-export channel is the visibility surface security "
+            "teams depend on; while it is degraded, decision events may "
+            "still be missing from the SIEM. parallel notice has been "
+            "written to stderr (supervisor-captured) since alerting "
+            "through the same broken channel is not reliable."
+        ),
+    }
+
+
 def _pattern_unusual_high_risk_action(
     event: dict, window: deque, config: AlertsConfig,
 ) -> dict | None:
@@ -853,6 +1082,20 @@ BUILTIN_RULES: tuple[AlertRule, ...] = (
             "to 503 + writes to stderr for supervisor capture."
         ),
     ),
+    AlertRule(
+        name="audit_export_degraded",
+        pattern=_pattern_audit_export_degraded,
+        severity=3,
+        description=(
+            "#267 — the audit-export channel itself is degraded: "
+            "log writes failing, webhook consecutive failures over "
+            "threshold, or dropped events in last 5 minutes over "
+            "threshold. Operator action: check webhook reachability, "
+            "disk space, and token validity. Also flips /healthz to "
+            "503 + writes to stderr (alerting through the same broken "
+            "channel is unreliable)."
+        ),
+    ),
 )
 
 
@@ -864,6 +1107,7 @@ _PATTERN_NAME_BY_RULE = {
     "non_org_profile_install": "non-org-profile-install",
     "unusual_high_risk_action": "high-risk-action-denied",
     "heartbeat_gap": "bouncer-uptime-gap",
+    "audit_export_degraded": "audit-export-degraded",
 }
 
 

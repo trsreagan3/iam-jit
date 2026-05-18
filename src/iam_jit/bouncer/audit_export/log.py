@@ -31,6 +31,7 @@ import logging
 import os
 import pathlib
 import threading
+import time
 from typing import Any
 
 logger = logging.getLogger(__name__)
@@ -81,6 +82,15 @@ class AuditLogWriter:
         self._total_events = 0
         self._dropped_events = 0
         self._last_error: str | None = None
+        # #267 — failure-visibility surface read by /healthz + the
+        # audit_export_degraded alert rule. `_writes_ok` flips to False
+        # on the first write error after a successful write (or on the
+        # first error if no successful write has happened yet) and
+        # flips back to True on the next successful write. The
+        # timestamp companion makes "how long has this been broken?"
+        # an O(1) check for the operator dashboard.
+        self._writes_ok: bool = True
+        self._last_error_at_unix: float | None = None
         self._started = False
 
     async def start(self) -> None:
@@ -194,6 +204,11 @@ class AuditLogWriter:
                         self._record_error(f"fsync: {e}")
                 with self._stats_lock:
                     self._total_events += 1
+                    # #267 — a successful write clears the writes_ok
+                    # alert flag. Previous transient errors (last_error
+                    # / last_error_at) are retained for forensics; the
+                    # bool reflects the CURRENT health of the channel.
+                    self._writes_ok = True
             except Exception as e:
                 # Any write failure (disk full, permission flipped at
                 # runtime, fd closed underneath us) — record + carry
@@ -205,6 +220,12 @@ class AuditLogWriter:
     def _record_error(self, msg: str) -> None:
         with self._stats_lock:
             self._last_error = msg
+            # #267 — also flip writes_ok + capture wall-clock for the
+            # failure-visibility surface. The companion timestamp lets
+            # /healthz answer "how long has this been broken?" without
+            # the operator having to grep logs for the first failure.
+            self._writes_ok = False
+            self._last_error_at_unix = time.time()
         logger.warning("audit-log writer error: %s", msg)
 
     def status(self) -> dict[str, Any]:
@@ -219,4 +240,9 @@ class AuditLogWriter:
                 "total_events": self._total_events,
                 "dropped_events": self._dropped_events,
                 "last_error": self._last_error,
+                # #267 — failure-visibility surface fields. The bool
+                # is the load-bearing one /healthz consults to flip
+                # 503; the timestamp is for forensics.
+                "writes_ok": self._writes_ok,
+                "last_error_at_unix": self._last_error_at_unix,
             }

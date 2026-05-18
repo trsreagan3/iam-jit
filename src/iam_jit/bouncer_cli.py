@@ -3537,6 +3537,212 @@ def _format_age(seconds: int) -> str:
     return f"{seconds // 3600}h ago"
 
 
+@main.group("audit-export")
+def audit_export_group() -> None:
+    """#267 — operator commands for the audit-export channel.
+
+    Wraps the same /healthz audit_export block external monitoring
+    polls — the CLI is the human-friendly view for "did the
+    visibility channel break overnight?" The subcommands hit a
+    running bouncer over HTTP so the values reflect the live process
+    state (not a stale config dump).
+
+    Per [[audit-export-failure-visibility]]: keep the channel
+    OBSERVABLE — every degraded condition should be ONE command
+    away from the operator, not buried in a SIEM dashboard the
+    on-call engineer doesn't have access to.
+    """
+
+
+def _audit_export_default_url() -> str:
+    """Default `ibounce run` healthz URL — loopback + the port the
+    `run` subcommand listens on. Operators override with --url for
+    non-default deployments."""
+    return "http://127.0.0.1:8767/healthz"
+
+
+def _format_seconds_ago(seconds: int | None) -> str:
+    """Human-readable 'how long ago' for the CLI table. None means
+    'never happened yet' (e.g. webhook configured but no send attempt
+    has fired yet)."""
+    if seconds is None:
+        return "never"
+    if seconds < 60:
+        return f"{seconds}s ago"
+    if seconds < 3600:
+        return f"{seconds // 60}m ago"
+    return f"{seconds // 3600}h ago"
+
+
+def _print_audit_export_health_table(section: dict) -> None:
+    """Pretty-print the /healthz audit_export section as a two-column
+    table. Format spec'd in the [[audit-export-failure-visibility]]
+    memo. Token + URL userinfo are NEVER printed in the raw — we
+    surface what /healthz emits (already masked by the pusher's
+    status()).
+    """
+    rows: list[tuple[str, str]] = []
+    rows.append(("Log channel configured", str(section.get("configured", False))))
+    rows.append(("Log writes OK", str(section.get("log_writes_ok", True))))
+    rows.append(("Log path", str(section.get("log_path") or "—")))
+    log_err = section.get("log_last_error")
+    rows.append(("Log last error", str(log_err) if log_err else "—"))
+    rows.append((
+        "Webhook configured",
+        str(section.get("webhook_configured", False)),
+    ))
+    rows.append((
+        "Webhook URL (masked)",
+        str(section.get("webhook_url_masked") or "—"),
+    ))
+    rows.append((
+        "Webhook last success",
+        _format_seconds_ago(section.get("webhook_last_success_seconds_ago")),
+    ))
+    rows.append((
+        "Webhook last attempt",
+        _format_seconds_ago(section.get("webhook_last_attempt_seconds_ago")),
+    ))
+    code = section.get("webhook_last_status_code")
+    rows.append((
+        "Webhook last status code",
+        str(code) if code is not None else "—",
+    ))
+    rows.append((
+        "Webhook consecutive failures",
+        str(section.get("webhook_consecutive_failures", 0)),
+    ))
+    wh_err = section.get("webhook_last_error")
+    rows.append(("Webhook last error", str(wh_err) if wh_err else "—"))
+    rows.append((
+        "Dropped events (since start)",
+        str(section.get("dropped_count_since_start", 0)),
+    ))
+    rows.append((
+        "Queue depth / capacity",
+        f"{section.get('queue_depth', 0)} / {section.get('queue_capacity', 0)}",
+    ))
+    rows.append(("Degraded", str(section.get("degraded", False))))
+    reasons = section.get("degraded_reasons") or []
+    if reasons:
+        rows.append(("Degraded reasons", "; ".join(reasons)))
+    # Compute column widths; cap value width so a long URL doesn't
+    # break the table.
+    label_w = max(len(r[0]) for r in rows)
+    for label, value in rows:
+        # Don't truncate — the operator wants to see the full reason
+        # string when something is broken.
+        click.echo(f"  {label:<{label_w}}  {value}")
+
+
+@audit_export_group.command("health")
+@click.option(
+    "--url",
+    default=None,
+    help="HTTP /healthz URL of the running ibounce proxy. Defaults to "
+         "http://127.0.0.1:8767/healthz (the loopback port `ibounce "
+         "run` binds by default).",
+)
+@click.option(
+    "--timeout",
+    type=float,
+    default=5.0,
+    show_default=True,
+    help="HTTP timeout in seconds for the /healthz GET.",
+)
+@click.option(
+    "--json",
+    "as_json",
+    is_flag=True,
+    default=False,
+    help="Emit the raw audit_export block as JSON instead of a "
+         "pretty-printed table. Useful in scripts / monitoring "
+         "wrappers; the exit code still reflects the degraded "
+         "verdict.",
+)
+def audit_export_health_cmd(
+    url: str | None, timeout: float, as_json: bool,
+) -> None:
+    """#267 — explicit health check of the audit-export channel.
+
+    Hits the running ibounce proxy's /healthz endpoint, extracts the
+    audit_export block, prints it as a table (or JSON), and exits
+    non-zero when the channel is degraded so monitoring scripts can
+    chain on the exit code.
+
+    Exit codes:
+      0 — channel healthy (or not configured, which means nothing
+          can fail)
+      2 — channel degraded (one of: log_writes_ok=false, webhook
+          consecutive_failures > 3, webhook silent > 5min)
+      3 — could not reach /healthz (proxy not running, wrong URL,
+          network error) — operator should investigate as a separate
+          failure mode from a degraded channel
+
+    Re-uses the same logic as /healthz on purpose: the CLI + the
+    probe report identical values. No divergence between "what the
+    monitor sees" and "what the operator sees."
+    """
+    import urllib.error
+    import urllib.request
+
+    target = url or _audit_export_default_url()
+    req = urllib.request.Request(
+        target,
+        headers={"Accept": "application/json"},
+    )
+    body: dict | None = None
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            raw = resp.read()
+        body = json.loads(raw)
+    except urllib.error.HTTPError as e:
+        # /healthz flips to 503 when degraded; the body is still a
+        # valid JSON document we want to surface. Other 4xx/5xx
+        # codes are unexpected here but we still try to parse the
+        # body before giving up.
+        try:
+            raw = e.read()
+            body = json.loads(raw)
+        except Exception:
+            click.secho(
+                f"audit-export health: /healthz at {target} returned "
+                f"HTTP {e.code} with unparseable body: {e}",
+                fg="red", err=True,
+            )
+            sys.exit(3)
+    except (urllib.error.URLError, TimeoutError, OSError, json.JSONDecodeError) as e:
+        click.secho(
+            f"audit-export health: could not reach {target}: {e}",
+            fg="red", err=True,
+        )
+        click.echo(
+            "  is the bouncer running? "
+            "start it with `ibounce run` (or pass --url for a "
+            "non-default deployment).",
+            err=True,
+        )
+        sys.exit(3)
+    assert body is not None
+    section = body.get("audit_export")
+    if not isinstance(section, dict):
+        click.secho(
+            f"audit-export health: /healthz at {target} returned no "
+            f"audit_export block. Is this an older bouncer build "
+            f"(pre-#267)?",
+            fg="red", err=True,
+        )
+        sys.exit(3)
+    if as_json:
+        click.echo(json.dumps(section, indent=2, default=str))
+    else:
+        click.echo("audit-export channel health:")
+        _print_audit_export_health_table(section)
+    if bool(section.get("degraded", False)):
+        # Non-zero exit so monitoring wrappers can chain on $?.
+        sys.exit(2)
+
+
 @main.command("version-check")
 @click.option(
     "--quiet",

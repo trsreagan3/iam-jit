@@ -28,10 +28,12 @@ webhook; the customer's URL only.
 from __future__ import annotations
 
 import asyncio
+import collections
 import ipaddress
 import logging
 import socket
 import threading
+import time
 import urllib.parse
 from typing import Any
 
@@ -329,6 +331,34 @@ class WebhookPusher:
         self._dropped_since_last_synthetic = 0
         self._in_flight = 0
         self._last_error: str | None = None
+        # #267 — failure-visibility counters surfaced via /healthz +
+        # the audit_export_degraded alert rule. Definitions:
+        #   * consecutive_failures: bumped on every send failure
+        #     (transient OR 4xx); reset to 0 on first success after.
+        #     /healthz flips to 503 at >3 (per spec).
+        #   * last_success_unix / last_attempt_unix: wall-clock of the
+        #     most-recent successful send / most-recent attempt. The
+        #     attempt timestamp covers "we tried, the upstream timed
+        #     out" so a silent collector shows up as last_attempt >>
+        #     last_success.
+        #   * last_status_code: numeric HTTP status of the last
+        #     response (None if the last attempt was a connection
+        #     error / DNS / TLS / timeout that never got a response).
+        #   * last_error_at_unix: wall-clock companion to last_error
+        #     so the operator dashboard can answer "how long has this
+        #     been failing?" without grepping logs.
+        #   * dropped_history: bounded deque of unix-seconds floats,
+        #     one per dropped event. The audit_export_degraded rule
+        #     reads the count-in-last-5-minutes against this. Bounded
+        #     at 10k entries so a runaway producer can't OOM us.
+        self._consecutive_failures: int = 0
+        self._last_success_unix: float | None = None
+        self._last_attempt_unix: float | None = None
+        self._last_status_code: int | None = None
+        self._last_error_at_unix: float | None = None
+        self._dropped_history: collections.deque[float] = collections.deque(
+            maxlen=10_000,
+        )
         self._started = False
 
     def __repr__(self) -> str:
@@ -404,6 +434,10 @@ class WebhookPusher:
             with self._stats_lock:
                 self._dropped_events += 1
                 self._dropped_since_last_synthetic += 1
+                # #267 — timestamped drop. The audit_export_degraded
+                # rule counts entries in the last 5min against the
+                # spec threshold (>10).
+                self._dropped_history.append(time.time())
                 self._last_error = (
                     f"webhook queue full at {self.queue_maxsize}; dropped event"
                 )
@@ -473,6 +507,13 @@ class WebhookPusher:
                 with self._stats_lock:
                     self._dropped_events += len(batch)
                     self._dropped_since_last_synthetic += len(batch)
+                    # #267 — final-failure means every item in the
+                    # batch was dropped; record one timestamp per
+                    # dropped event so the 5-minute window count is
+                    # accurate.
+                    now = time.time()
+                    for _ in range(len(batch)):
+                        self._dropped_history.append(now)
 
     async def _send_with_retry(self, batch: list[dict[str, Any]]) -> None:
         """One send attempt + retry loop. Retries on 5xx + network
@@ -489,20 +530,57 @@ class WebhookPusher:
         for attempt in range(self.max_attempts):
             with self._stats_lock:
                 self._in_flight = len(batch)
+                # #267 — every send attempt updates last_attempt_unix
+                # so /healthz can compute "configured but silent" via
+                # last_attempt vs last_success (both move on success;
+                # only attempt moves on failure).
+                self._last_attempt_unix = time.time()
             try:
                 await self._send_once(batch)
+                # #267 — success: clear consecutive_failures, set
+                # last_success_unix, last_status_code was set by
+                # _send_once on the 2xx path.
                 with self._stats_lock:
                     self._in_flight = 0
+                    self._consecutive_failures = 0
+                    self._last_success_unix = time.time()
                 return  # success
             except _NonRetryableHTTPError as e:
-                # 4xx — don't retry; this is a config bug.
+                # 4xx — don't retry; this is a config bug. Track as
+                # a consecutive failure + record the status code so
+                # operator dashboards can spot 401/403 immediately.
+                with self._stats_lock:
+                    self._consecutive_failures += 1
+                    self._last_status_code = e.status
                 masked_url = mask_url_userinfo(self.url)
+                # Per [[security-team-positioning-safety-not-surveillance]]:
+                # name common-cause status codes neutrally so the
+                # operator sees the likely root cause without us
+                # implying blame.
+                if e.status == 401:
+                    detail = "auth failed (HTTP 401); check Bearer token"
+                elif e.status == 403:
+                    detail = (
+                        "auth refused (HTTP 403); check token + collector "
+                        "ACL"
+                    )
+                else:
+                    detail = (
+                        f"non-retryable HTTP {e.status}; check token + URL"
+                    )
                 raise RuntimeError(
-                    f"webhook {masked_url} returned non-retryable HTTP "
-                    f"{e.status}; check token + URL"
+                    f"webhook {masked_url} returned {detail}"
                 ) from None
             except Exception as e:
                 last_exc = e
+                # #267 — count every transient failure too (network
+                # error, timeout, 5xx). On final-failure the outer
+                # _worker bumps dropped + records the error; here we
+                # accumulate the consecutive-failure count so the
+                # /healthz 503 trigger (>3) fires even when retries
+                # are still in flight.
+                with self._stats_lock:
+                    self._consecutive_failures += 1
                 if attempt + 1 >= self.max_attempts:
                     break
                 # Sleep according to the schedule (capped at the last
@@ -543,6 +621,12 @@ class WebhookPusher:
                 timeout=self.timeout_seconds,
             ) as resp:
                 status = resp.status
+                # #267 — record last_status_code on EVERY response so
+                # /healthz reports the most-recent observation (success
+                # or failure) and dashboards can spot a stuck 5xx /
+                # 401 immediately.
+                with self._stats_lock:
+                    self._last_status_code = status
                 if 200 <= status < 300:
                     # Drain to be a good HTTP citizen.
                     await resp.read()
@@ -567,11 +651,46 @@ class WebhookPusher:
     def _record_error(self, msg: str) -> None:
         with self._stats_lock:
             self._last_error = msg
+            # #267 — wall-clock companion for the failure-visibility
+            # surface. /healthz uses this only for display; the 503
+            # decision is driven by last_success vs now + consecutive
+            # failures (both more reliable than last_error_at, which
+            # is also bumped on operator-initiated drops).
+            self._last_error_at_unix = time.time()
         # The masked URL is the only thing that surfaces here.
         logger.warning("webhook pusher error: %s", msg)
 
+    def dropped_in_last_seconds(self, window_seconds: int) -> int:
+        """#267 — count of dropped events in the most-recent
+        `window_seconds` seconds. Used by the audit_export_degraded
+        rule (window=300) + the /healthz audit_export section.
+
+        Walks the bounded `_dropped_history` deque under the stats
+        lock. O(n) on the deque length but n is bounded at 10k +
+        these calls happen at /healthz cadence (seconds), not the
+        proxy hot-path.
+        """
+        if window_seconds <= 0:
+            return 0
+        cutoff = time.time() - window_seconds
+        with self._stats_lock:
+            return sum(1 for ts in self._dropped_history if ts >= cutoff)
+
+    def queue_depth(self) -> int:
+        """#267 — current number of in-flight events in the bounded
+        send queue. Surfaced on /healthz alongside queue_capacity so
+        operators can spot a queue approaching its bound (which
+        precedes overflow drops)."""
+        if self._queue is None:
+            return 0
+        try:
+            return self._queue.qsize()
+        except Exception:
+            return 0
+
     def status(self) -> dict[str, Any]:
         """Snapshot for the MCP status tool. NEVER includes the token."""
+        depth = self.queue_depth()
         with self._stats_lock:
             return {
                 "configured": True,
@@ -580,12 +699,21 @@ class WebhookPusher:
                 "preset": self.preset.value,
                 "batch_size": self.batch_size,
                 "queue_maxsize": self.queue_maxsize,
+                "queue_depth": depth,
                 "allow_internal": self.allow_internal,
                 "max_attempts": self.max_attempts,
                 "total_events": self._total_events,
                 "dropped_events": self._dropped_events,
                 "webhook_in_flight": self._in_flight,
                 "last_error": self._last_error,
+                # #267 — failure-visibility surface fields. The
+                # /healthz handler + the audit_export_degraded rule
+                # both read these.
+                "consecutive_failures": self._consecutive_failures,
+                "last_success_unix": self._last_success_unix,
+                "last_attempt_unix": self._last_attempt_unix,
+                "last_status_code": self._last_status_code,
+                "last_error_at_unix": self._last_error_at_unix,
             }
 
 
