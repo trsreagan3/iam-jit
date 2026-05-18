@@ -2340,6 +2340,22 @@ def _parse_duration(raw: str) -> int:
          "header on the Sentinel ingest request. Ignored by other "
          "presets.",
 )
+@click.option(
+    "--alert-rules",
+    "alert_rules_path",
+    type=click.Path(dir_okay=False),
+    default=None,
+    help="#262 Slice 2 (ENTERPRISE tier — license-gated) — YAML file "
+         "configuring the suspicious-activity alert engine. Ships 4 "
+         "built-in deterministic rules (admin_fallback_burst, "
+         "pause_long, non_org_profile_install, "
+         "unusual_high_risk_action) over the existing audit-export "
+         "transport (JSONL + webhook). Pass the literal string "
+         "'defaults' (or an empty path string) to enable all four "
+         "built-ins with sensible thresholds. Per "
+         "[[security-team-positioning-safety-not-surveillance]] alerts "
+         "use NEUTRAL language; never frames a match as a violation.",
+)
 @click.option("--db", type=click.Path(dir_okay=False), default=None)
 def run_cmd(
     port: int, host: str, force_external_bind: bool, prompt_on_deny: bool,
@@ -2361,6 +2377,7 @@ def run_cmd(
     audit_webhook_preset: str,
     audit_webhook_tags: str,
     audit_webhook_sentinel_table: str,
+    alert_rules_path: str | None,
     db: str | None,
 ) -> None:
     """Start the HTTP proxy server.
@@ -2448,6 +2465,27 @@ def run_cmd(
             click.secho(f"audit webhook refused: {e}", fg="red", err=True)
             sys.exit(2)
 
+    # #262 Slice 2 — alert-rules license gate fires at CLI parse so
+    # the operator sees "Enterprise required" immediately, not deep
+    # in startup. serve() gates again (defense in depth, same
+    # posture as the webhook gate above).
+    if alert_rules_path is not None:
+        from .bouncer.audit_export.alerts import (
+            AlertsLicenseError, gate_alerts_license,
+        )
+        try:
+            gate_alerts_license(None)
+        except AlertsLicenseError as e:
+            click.secho(
+                f"audit-export alerts refused: {e}", fg="red", err=True,
+            )
+            sys.exit(2)
+        # Normalize the magic "defaults" / "" / "<path>" surface so
+        # ProxyConfig sees one of two shapes: None (no engine) or
+        # str (engine; "" = built-in defaults, "<path>" = load YAML).
+        if alert_rules_path.lower() == "defaults":
+            alert_rules_path = ""
+
     # #203 — refuse the mutually-exclusive flag combo at parse time.
     # Both flags both try to surface DENYs to the operator, but they
     # have opposite blocking semantics: async returns 403 immediately,
@@ -2505,6 +2543,7 @@ def run_cmd(
         audit_webhook_preset=audit_webhook_preset.lower(),
         audit_webhook_tags=audit_webhook_tags,
         audit_webhook_sentinel_table=audit_webhook_sentinel_table,
+        alert_rules_path=alert_rules_path,
     )
 
     # #132 plan-capture: surface the session id (operator-supplied or

@@ -41,6 +41,19 @@ billing dependency; the customer owns the endpoint + the bandwidth.
 
 from __future__ import annotations
 
+from .alerts import (
+    BUILTIN_RULES,
+    FORBIDDEN_ALERT_WORDS,
+    AlertRule,
+    AlertsConfig,
+    AlertsLicenseError,
+    RuleEngine,
+    gate_alerts_license,
+    load_alerts_config,
+    make_admin_fallback_grant_event,
+    make_pause_end_event,
+    make_profile_install_event,
+)
 from .event import (
     AUDIT_EVENT_SCHEMA_VERSION,
     OCSF_SCHEMA_VERSION,
@@ -58,14 +71,25 @@ from .webhook import (
 
 __all__ = [
     "AUDIT_EVENT_SCHEMA_VERSION",
+    "AlertRule",
+    "AlertsConfig",
+    "AlertsLicenseError",
     "AuditLogWriter",
+    "BUILTIN_RULES",
+    "FORBIDDEN_ALERT_WORDS",
     "OCSF_SCHEMA_VERSION",
     "Preset",
+    "RuleEngine",
     "SSRFRejectedError",
     "WebhookLicenseError",
     "WebhookPusher",
     "audit_dropped_event",
     "audit_event_from_decision",
     "build_request",
+    "gate_alerts_license",
+    "load_alerts_config",
+    "make_admin_fallback_grant_event",
+    "make_pause_end_event",
+    "make_profile_install_event",
     "validate_webhook_url",
 ]

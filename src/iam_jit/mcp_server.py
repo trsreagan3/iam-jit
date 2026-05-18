@@ -1568,16 +1568,21 @@ TOOLS = [
     {
         "name": "bouncer_audit_export_status",
         "description": (
-            "#252 Slice 1 — return the live status of the two audit-"
-            "export channels (JSONL log file + HTTPS webhook). Per "
+            "#252 Slice 1 + #262 Slice 2 — return the live status of "
+            "the audit-export transport (JSONL log + HTTPS webhook) "
+            "AND the suspicious-activity alert engine. Per "
             "[[security-team-audit-export]] this is the operator-"
             "visibility surface that lets a security team confirm "
-            "'is iam-jit actually shipping decisions to my collector?' "
-            "without grepping logs. Returns per-channel `configured` "
-            "flag, `total_events`, `dropped_events`, "
-            "`webhook_in_flight`, `last_error`. The webhook token "
-            "is NEVER returned (masked as '***'). Read-only. Safe "
-            "for agents to poll; no side effects."
+            "'is iam-jit shipping decisions to my collector?' + "
+            "'has the alert engine fired anything?' without grepping "
+            "logs. Returns per-channel `configured` flag, "
+            "`total_events`, `dropped_events`, `webhook_in_flight`, "
+            "`last_error`, plus alert-engine fields: `alerts_enabled` "
+            "(bool), `alerts_fired_count` (int; since process start), "
+            "`last_alert_pattern` (str | null; the most recent rule "
+            "name that fired). The webhook token is NEVER returned "
+            "(masked as '***'). Read-only. Safe for agents to poll; "
+            "no side effects."
         ),
         "inputSchema": {
             "type": "object",

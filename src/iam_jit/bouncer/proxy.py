@@ -264,6 +264,12 @@ _session_mode_override: str | None = None
 # ---------------------------------------------------------------------------
 _audit_log_writer: Any | None = None
 _audit_webhook_pusher: Any | None = None
+# #262 Slice 2 — alert rule engine. Same module-level registry shape
+# as the two transport channels above so evaluate_request feeds it
+# without threading args through every call site. Enterprise-gated
+# via gate_alerts_license at CLI parse + serve() start (defense in
+# depth, matches the webhook gate).
+_audit_rule_engine: Any | None = None
 
 
 def register_audit_log_writer(writer: Any | None) -> None:
@@ -280,12 +286,26 @@ def register_audit_webhook_pusher(pusher: Any | None) -> None:
     _audit_webhook_pusher = pusher
 
 
-def _emit_audit_event(event: dict) -> None:
-    """Hand `event` to both audit channels if configured. Both calls
-    are non-blocking enqueues (the channels own their own worker
-    tasks). Exceptions are swallowed + logged — the audit channel is
-    a feature, not a hard dependency of correctness; a broken disk
-    should not turn the proxy into a 500-machine.
+def register_audit_rule_engine(engine: Any | None) -> None:
+    """#262 Slice 2 — install the suspicious-activity alert engine.
+    Pass None to clear. The engine's `emit` callback should point at
+    `_emit_audit_event_raw` so fired alerts ride the same transport
+    as decision events. Re-entry guard in `RuleEngine.observe` keeps
+    the engine from firing on its own output."""
+    global _audit_rule_engine
+    _audit_rule_engine = engine
+
+
+def _emit_audit_event_raw(event: dict) -> None:
+    """Push `event` to BOTH transport channels (JSONL + webhook) and
+    NOTHING else. The rule engine's emit callback points here so
+    fired alerts ride the existing transport without re-entering the
+    engine — RuleEngine's re-entry guard handles the case where an
+    alert event would otherwise trigger another rule.
+
+    Split out from `_emit_audit_event` so the rule engine + the
+    decision path both call it without the engine observing its own
+    output via the public emitter.
     """
     if _audit_log_writer is not None:
         try:
@@ -299,12 +319,37 @@ def _emit_audit_event(event: dict) -> None:
             logger.warning("audit webhook pusher enqueue failed: %s", e)
 
 
+def _emit_audit_event(event: dict) -> None:
+    """Hand `event` to both audit channels if configured AND to the
+    rule engine (if installed). Both calls are non-blocking
+    enqueues; exceptions are swallowed + logged — the audit channel
+    is a feature, not a hard dependency of correctness; a broken
+    disk should not turn the proxy into a 500-machine.
+
+    #262 Slice 2: when an alert engine is installed, observe() is
+    called AFTER the transport enqueue. The engine's emit callback
+    pushes any fired alerts back through `_emit_audit_event_raw`
+    (NOT this function) so the engine doesn't see its own output.
+    """
+    _emit_audit_event_raw(event)
+    if _audit_rule_engine is not None:
+        try:
+            _audit_rule_engine.observe(event)
+        except Exception as e:
+            logger.warning("audit rule engine observe failed: %s", e)
+
+
 def audit_export_status() -> dict[str, Any]:
     """Snapshot of both audit-export channels for the MCP status tool.
 
     Returns a stable shape regardless of which channels are installed
     so the agent's structured-content consumer can branch on the
     `configured` flags rather than `KeyError`-ing on missing fields.
+
+    #262 Slice 2: also surfaces the alert-engine status fields
+    (`alerts_enabled`, `alerts_fired_count`, `last_alert_pattern`)
+    at the top level so an agent can answer "did the alert engine
+    fire anything?" with a single field read.
     """
     if _audit_log_writer is not None:
         log_status = _audit_log_writer.status()
@@ -314,6 +359,16 @@ def audit_export_status() -> dict[str, Any]:
         webhook_status = _audit_webhook_pusher.status()
     else:
         webhook_status = {"configured": False}
+    if _audit_rule_engine is not None:
+        engine_status = _audit_rule_engine.status()
+    else:
+        engine_status = {
+            "alerts_enabled": False,
+            "alerts_fired_count": 0,
+            "last_alert_pattern": None,
+            "last_alert_at_unix": None,
+            "active_rules": [],
+        }
     return {
         "log": log_status,
         "webhook": webhook_status,
@@ -331,6 +386,12 @@ def audit_export_status() -> dict[str, Any]:
             webhook_status.get("last_error")
             or log_status.get("last_error")
         ),
+        # #262 Slice 2 — alert engine surface. Top-level so agents
+        # don't need a nested `alerts.alerts_enabled` lookup.
+        "alerts_enabled": engine_status.get("alerts_enabled", False),
+        "alerts_fired_count": engine_status.get("alerts_fired_count", 0),
+        "last_alert_pattern": engine_status.get("last_alert_pattern"),
+        "alerts": engine_status,
     }
 
 
@@ -563,6 +624,15 @@ class ProxyConfig:
     """#257 — name of the Microsoft Sentinel Log Analytics custom
     table this data lands in. Sent as the `Log-Type` header. Ignored
     by other presets."""
+
+    # #262 Slice 2 — suspicious-activity alert rule engine.
+    alert_rules_path: str | None = None
+    """Path to the --alert-rules YAML file. None = no alert engine.
+    Empty string = engine with all built-in defaults (no YAML to
+    load). Enterprise license-gated at CLI parse + serve() start
+    via gate_alerts_license (per [[enterprise-self-host-only]]).
+    See `audit_export.alerts.load_alerts_config` for the YAML
+    schema."""
 
 
 @dataclasses.dataclass
@@ -2031,6 +2101,7 @@ async def serve(config: ProxyConfig, *, store: BouncerStore) -> None:
     # running without the channel.
     audit_log_writer = None
     audit_webhook_pusher = None
+    audit_rule_engine = None
     if config.audit_log_path:
         from .audit_export import AuditLogWriter
         audit_log_writer = AuditLogWriter(
@@ -2066,6 +2137,41 @@ async def serve(config: ProxyConfig, *, store: BouncerStore) -> None:
             config.audit_webhook_batch_size,
             config.audit_webhook_allow_internal,
         )
+    # #262 Slice 2 — alert rule engine. License gate fires here AGAIN
+    # (defense in depth — CLI already gated at parse time, but the
+    # license file could have rotated between parse + start). When no
+    # --alert-rules path is configured, the engine doesn't load at
+    # all; the transport still works (Slice 1 unchanged).
+    if config.alert_rules_path is not None:
+        from .audit_export import (
+            AlertsConfig,
+            AlertsLicenseError,
+            RuleEngine,
+            gate_alerts_license,
+            load_alerts_config,
+        )
+        try:
+            gate_alerts_license(None)
+        except AlertsLicenseError:
+            # Fatal at serve() time — operator asked for alerts + we
+            # can't honor it; refusing is safer than silent no-op.
+            # The CLI parse-time gate already prints a friendly error
+            # message; here we just let the exception propagate so
+            # serve() refuses to start.
+            raise
+        if config.alert_rules_path == "":
+            alerts_config = AlertsConfig.default()
+        else:
+            alerts_config = load_alerts_config(config.alert_rules_path)
+        audit_rule_engine = RuleEngine(
+            config=alerts_config,
+            emit=_emit_audit_event_raw,
+        )
+        register_audit_rule_engine(audit_rule_engine)
+        logger.info(
+            "audit-export alert engine enabled: rules=%s",
+            audit_rule_engine.status()["active_rules"],
+        )
 
     runner = web.AppRunner(app)
     await runner.setup()
@@ -2092,6 +2198,12 @@ async def serve(config: ProxyConfig, *, store: BouncerStore) -> None:
         # an in-flight webhook send drains before the log writer's fd
         # closes. We catch + log here so a worker that exits with an
         # exception doesn't mask the original cancellation.
+        if audit_rule_engine is not None:
+            # #262 Slice 2 — engine has no async worker (observe is
+            # synchronous), so teardown is just clearing the
+            # registry slot so the next process doesn't see a stale
+            # reference.
+            register_audit_rule_engine(None)
         if audit_webhook_pusher is not None:
             try:
                 await audit_webhook_pusher.stop()
