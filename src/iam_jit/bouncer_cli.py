@@ -5020,6 +5020,215 @@ def config_import_cmd(
             click.echo(f"    - {note}")
 
 
+# ---------------------------------------------------------------------------
+# diagnostics bundle (#277) — cross-product Tier-1 support-package ZIP
+#
+# Per [[cross-product-agent-parity]] the CLI shape matches kbounce +
+# dbounce verbatim:
+#
+#   ibounce diagnostics bundle [--out PATH] [--include-audit-tail N]
+#                              [--no-audit] [--panic-log PATH]
+#                              [--insecure-skip-verify]
+#   ibounce diag bundle ...    (alias matching kbounce + dbounce)
+#
+# The bundle is the operator's to share with support OR a Claude
+# agent. Strictly READ-ONLY per [[creates-never-mutates]]; only
+# network call is a single LOCAL /healthz GET per
+# [[self-host-zero-billing-dependency]].
+# ---------------------------------------------------------------------------
+
+
+def _add_diagnostics_subcommands(group: click.Group) -> None:
+    """Attach the `bundle` subcommand under whichever parent group
+    is passed. Shared between `ibounce diagnostics` + `ibounce diag`
+    so the alias resolves to the same Click command object — no
+    duplicate flag-definition site."""
+
+    @group.command("bundle")
+    @click.option(
+        "--out", "out_path", type=click.Path(dir_okay=False), default=None,
+        help="Output ZIP path. Default: "
+             "./ibounce-diagnostics-{UTC-timestamp}.zip. Parent dirs are "
+             "created on demand.",
+    )
+    @click.option(
+        "--include-audit-tail", "include_audit_tail",
+        type=int, default=200, show_default=True,
+        help="Include the last N audit-log events (REDACTED — user "
+             "identifiers stably hashed, URLs / tokens masked). "
+             "Default 200.",
+    )
+    @click.option(
+        "--no-audit", is_flag=True, default=False,
+        help="Suppress the audit-tail section entirely. Use when the "
+             "audit log itself is the surface you don't want to share "
+             "(regulated environments where even hashed-id events "
+             "are sensitive).",
+    )
+    @click.option(
+        "--panic-log", "panic_log_path",
+        type=click.Path(dir_okay=False), default=None,
+        help="Path to a captured stderr / panic file to include "
+             "(REDACTED via regex pass). Optional — bundle works "
+             "without it.",
+    )
+    @click.option(
+        "--insecure-skip-verify", "insecure_skip_verify",
+        is_flag=True, default=False,
+        help="Skip TLS verification on the /healthz GET. Useful for "
+             "dev-cert deployments.",
+    )
+    @click.option(
+        "--healthz-url", "healthz_url", default=None,
+        help="URL of the running ibounce proxy's /healthz. Defaults "
+             "to http://127.0.0.1:8767/healthz (the loopback port "
+             "`ibounce run` binds by default). Bundle records "
+             "'unreachable' + the error reason when the GET fails — "
+             "the command does NOT abort.",
+    )
+    @click.option(
+        "--audit-log", "audit_log_path",
+        type=click.Path(dir_okay=False), default=None,
+        help="Path to the JSONL audit log to tail. Defaults to "
+             "$IAM_JIT_BOUNCER_AUDIT_LOG_PATH.",
+    )
+    @click.option(
+        "--db", type=click.Path(dir_okay=False), default=None,
+        help="Override the SQLite store path (default "
+             "~/.iam-jit/bouncer/state.db).",
+    )
+    @click.option(
+        "--profiles", "profiles_path",
+        type=click.Path(dir_okay=False), default=None,
+        help="Override the profiles.yaml path (default "
+             "~/.iam-jit/bouncer/profiles.yaml).",
+    )
+    @click.option(
+        "--alert-rules", "alert_rules_path",
+        type=click.Path(dir_okay=False), default=None,
+        help="Path of the configured --alert-rules YAML to inline "
+             "into the config section. Empty = section emitted with "
+             "null body.",
+    )
+    def diagnostics_bundle_cmd(
+        out_path: str | None,
+        include_audit_tail: int,
+        no_audit: bool,
+        panic_log_path: str | None,
+        insecure_skip_verify: bool,
+        healthz_url: str | None,
+        audit_log_path: str | None,
+        db: str | None,
+        profiles_path: str | None,
+        alert_rules_path: str | None,
+    ) -> None:
+        """Produce a redacted diagnostics ZIP for sharing with support.
+
+        Contents: ibounce version, redacted config, active profile
+        pointer + sha256, last N audit events (user identifiers
+        hashed), local /healthz snapshot, OS / Python metadata,
+        listener pointers, optional panic-log capture, and a sha256
+        manifest. Every section is redacted on the way in — the
+        resulting ZIP is safe to share with support or paste to a
+        Claude agent.
+
+        Per [[creates-never-mutates]]: read-only. Per
+        [[self-host-zero-billing-dependency]]: no network calls
+        except a local /healthz GET on the loopback port.
+        """
+        import pathlib as _pathlib
+
+        from .bouncer.diagnostics import (
+            DEFAULT_HEALTHZ_URL,
+            BundleOptions,
+            default_bundle_path,
+            emit_diagnostics_bundle_admin_action,
+            write_diagnostics_bundle,
+        )
+
+        if include_audit_tail < 0:
+            click.echo(
+                "ERROR: --include-audit-tail must be >= 0.", err=True,
+            )
+            sys.exit(2)
+
+        resolved_out = (
+            _pathlib.Path(out_path) if out_path else default_bundle_path()
+        )
+
+        opts = BundleOptions(
+            out_path=resolved_out,
+            include_audit_tail=include_audit_tail,
+            no_audit=no_audit,
+            db_path=db,
+            profiles_path=profiles_path,
+            alert_rules_path=alert_rules_path,
+            audit_log_path=audit_log_path,
+            healthz_url=healthz_url or DEFAULT_HEALTHZ_URL,
+            insecure_skip_verify=insecure_skip_verify,
+            panic_log_path=panic_log_path,
+        )
+        summary = write_diagnostics_bundle(opts)
+
+        # Emit the admin-action OCSF row so a security team has a
+        # witness for "who pulled diagnostics + when?" The store
+        # write is best-effort — a queue failure never fails the
+        # user-facing bundle (the file has already landed).
+        with _opened_store(db) as store:
+            emit_diagnostics_bundle_admin_action(
+                store, summary=summary, no_audit=no_audit,
+                actor=_current_actor(),
+            )
+
+        click.echo(f"wrote {summary.out_path}")
+        click.echo(
+            f"  files: {summary.file_count}  "
+            f"bytes: {summary.total_bytes}  "
+            f"audit lines: {summary.audit_lines}  "
+            f"healthz ok: {summary.healthz_ok}"
+        )
+        click.echo(
+            "  contents are redacted by default; safe to share with "
+            "support or paste to a Claude agent for analysis."
+        )
+
+
+@main.group("diagnostics")
+def diagnostics_group() -> None:
+    """Produce a redacted ZIP bundle for sharing with support.
+
+    Subcommands:
+
+      bundle    Write a redacted diagnostics ZIP to disk.
+
+    The bundle contains everything needed to debug an ibounce
+    deployment WITHOUT containing secrets: ibounce version, a
+    redacted config snapshot, a tail of the audit log with user
+    identifiers hashed, the local /healthz snapshot, OS / env
+    metadata (KEY names only), and a sha256 manifest of every file.
+
+    Sibling agents in kbounce + dbounce ship the same subcommand
+    shape + flag names per [[cross-product-agent-parity]]:
+    `{product} diag bundle --out ./bundle.zip` works against any
+    Bounce.
+    """
+
+
+_add_diagnostics_subcommands(diagnostics_group)
+
+
+@main.group("diag")
+def diag_group() -> None:
+    """Alias for `ibounce diagnostics`. Subcommands match verbatim.
+
+    Operators learn one mnemonic — `{product} diag bundle` — across
+    kbounce + ibounce + dbounce.
+    """
+
+
+_add_diagnostics_subcommands(diag_group)
+
+
 def main_deprecated_alias() -> None:
     """Console-script entrypoint for the deprecated `iam-jit-bouncer`
     name. Prints a one-line stderr deprecation warning + forwards to

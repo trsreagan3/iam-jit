@@ -171,6 +171,13 @@ ADMIN_ACTION_PROFILE_ASSIGN = "profile.assign"
 ADMIN_ACTION_PROFILE_DELETE = "profile.delete"
 ADMIN_ACTION_ALERT_RULE_EDIT = "alert-rule.edit"
 
+# Wired in #277 — `ibounce diagnostics bundle` emits this on every
+# bundle creation so a security team can answer "who pulled
+# diagnostics + when?" from the audit-export channel. Matches the
+# kbounce + dbounce sibling action ids verbatim per
+# [[cross-product-agent-parity]].
+ADMIN_ACTION_DIAGNOSTICS_BUNDLE = "diagnostics.bundle"
+
 
 # Set of every known kind. Used by the dispatch in the proxy's
 # pending-audit-events drainer to route ADMIN_ACTION payloads back
@@ -190,6 +197,7 @@ KNOWN_ADMIN_ACTION_KINDS: frozenset[str] = frozenset({
     ADMIN_ACTION_PROFILE_ASSIGN,
     ADMIN_ACTION_PROFILE_DELETE,
     ADMIN_ACTION_ALERT_RULE_EDIT,
+    ADMIN_ACTION_DIAGNOSTICS_BUNDLE,
 })
 
 
