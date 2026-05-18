@@ -15,6 +15,7 @@ from __future__ import annotations
 import contextlib
 import json
 import os
+import pathlib
 import sys
 from typing import Any
 
@@ -4368,6 +4369,281 @@ def _format_age(seconds: int) -> str:
     if seconds < 3600:
         return f"{seconds // 60}m ago"
     return f"{seconds // 3600}h ago"
+
+
+@main.group("audit")
+def audit_group() -> None:
+    """#268 — local-operator audit UX (read-only over the JSONL log).
+
+    Sibling subcommand-set to `audit-export` (which checks the export
+    channel's health). `audit` is the read surface: tail the JSONL
+    log, filter to one agent / severity / operation, summarise it,
+    or export the filtered view for incident review.
+
+    Per [[cross-product-agent-parity]] the flag shape + supported
+    field set match the kbounce + dbounce equivalents; muscle memory
+    transfers across the Bounce suite. Per [[self-host-zero-billing-
+    dependency]] no network calls; everything runs on the local file.
+    Per [[creates-never-mutates]] read-only — the command never
+    edits or rotates the log.
+    """
+
+
+@audit_group.command("tail")
+@click.option(
+    "--path",
+    "audit_path",
+    type=click.Path(dir_okay=False),
+    default=None,
+    help="Path to the JSONL audit log to read. Defaults to "
+         "$IAM_JIT_BOUNCER_AUDIT_LOG or ~/.iam-jit/audit.jsonl. The "
+         "path must match the `ibounce run --audit-log-path` value "
+         "used when the bouncer was started; the read side has no "
+         "way to discover the writer's path otherwise.",
+)
+@click.option(
+    "--follow", "-f",
+    "follow",
+    is_flag=True,
+    default=False,
+    help="Live-tail the log: poll every 500ms, print new rows as they "
+         "arrive. Exit cleanly on SIGINT (Ctrl-C). Equivalent to "
+         "`tail -F` over a JSONL file with OCSF parsing applied.",
+)
+@click.option(
+    "--filter", "filter_exprs",
+    multiple=True,
+    metavar="EXPR",
+    help="Filter expressions, repeatable; AND-combined. Forms: "
+         "`field=value` (string equality), `field~regex` "
+         "(re.search), `field>=N` / `field<=N` (numeric). Fields "
+         "use OCSF dotted paths: e.g. `severity_id`, "
+         "`actor.user.name`, `api.operation`, "
+         "`unmapped.iam_jit.agent.name`, "
+         "`unmapped.iam_jit.event_type`. Shortcut: `event_type` "
+         "alone resolves to `unmapped.iam_jit.event_type` (with "
+         "`DECISION` as the implicit value for plain decisions).",
+)
+@click.option(
+    "--summary",
+    is_flag=True,
+    default=False,
+    help="Emit a count-summary table instead of individual rows. "
+         "Default groupings: event_type, severity_id, "
+         "actor.user.name, api.operation. Combine with --filter to "
+         "summarise a subset.",
+)
+@click.option(
+    "--export",
+    "export_format",
+    type=click.Choice(["jsonl", "csv", "ocsf-bundle"], case_sensitive=False),
+    default=None,
+    help="Export the current view (after --filter) to a file. `jsonl` "
+         "= one OCSF event per line; `csv` = tabular (see "
+         "--csv-columns); `ocsf-bundle` = single OCSF v1.1.0 class "
+         "2004 Detection Finding wrapping the events for SIEM batch "
+         "import. Requires --out.",
+)
+@click.option(
+    "--out",
+    "out_path",
+    type=click.Path(dir_okay=False),
+    default=None,
+    help="Destination path for --export. Parent directories are "
+         "created on demand.",
+)
+@click.option(
+    "--csv-columns",
+    "csv_columns_raw",
+    default=None,
+    help="Override the CSV default column set. Comma-separated dotted "
+         "paths, e.g. `time,actor.user.name,api.operation`. The "
+         "default set omits PII-shaped fields (email, phone, "
+         "credentials); opt in explicitly by naming them here.",
+)
+@click.option(
+    "--limit",
+    type=int,
+    default=None,
+    help="Read at most LIMIT events (newest filtered set). Default: "
+         "no limit (entire file). Ignored with --follow.",
+)
+def audit_tail_cmd(
+    audit_path: str | None,
+    follow: bool,
+    filter_exprs: tuple[str, ...],
+    summary: bool,
+    export_format: str | None,
+    out_path: str | None,
+    csv_columns_raw: str | None,
+    limit: int | None,
+) -> None:
+    """Tail / filter / summarise / export the audit JSONL log.
+
+    \b
+    Examples:
+      # All events, newest 200 first
+      ibounce audit tail --limit 200
+
+      # Live-tail new events from claude-code, severity >= 3
+      ibounce audit tail --follow \\
+          --filter unmapped.iam_jit.agent.name=claude-code \\
+          --filter severity_id>=3
+
+      # Per-event-type / severity / actor / operation breakdown
+      ibounce audit tail --summary
+
+      # Export filtered view for incident review
+      ibounce audit tail \\
+          --filter unmapped.iam_jit.agent.session_id=01968d6a-... \\
+          --export ocsf-bundle --out /tmp/finding.json
+    """
+    from .bouncer.audit_export.tail import (
+        FilterParseError,
+        build_ocsf_bundle,
+        default_audit_log_path,
+        export_csv,
+        export_jsonl,
+        export_ocsf_bundle,
+        follow_audit_file,
+        iter_audit_file,
+        parse_filter_expr,
+        render_event_row,
+        render_summary,
+        resolve_csv_columns,
+        summarize_events,
+    )
+
+    # --follow and --summary are conceptually opposed (one streams
+    # row by row; the other aggregates a closed set). Surface the
+    # clash early with an actionable message rather than silently
+    # picking one — per the spec's clash test.
+    if follow and summary:
+        click.secho(
+            "ERROR: --follow streams individual events; --summary "
+            "aggregates a closed set. Pick one.",
+            fg="red", err=True,
+        )
+        sys.exit(2)
+    if export_format and not out_path:
+        click.secho(
+            "ERROR: --export requires --out PATH.",
+            fg="red", err=True,
+        )
+        sys.exit(2)
+    if out_path and not export_format:
+        click.secho(
+            "ERROR: --out requires --export FORMAT.",
+            fg="red", err=True,
+        )
+        sys.exit(2)
+
+    # Parse filters first so a bad expression fails before we touch
+    # the disk. The error message names the offending expression.
+    parsed_filters = []
+    for raw in filter_exprs:
+        try:
+            parsed_filters.append(parse_filter_expr(raw))
+        except FilterParseError as e:
+            click.secho(f"ERROR: {e}", fg="red", err=True)
+            sys.exit(2)
+
+    path = pathlib.Path(audit_path) if audit_path else default_audit_log_path()
+
+    # --follow path: stream + filter live; exit on SIGINT. Cannot be
+    # combined with --export (the export needs a closed input set;
+    # the spec's --filter+--export composition test exercises the
+    # non-follow path).
+    if follow:
+        import signal
+
+        stop_flag = {"stop": False}
+
+        def _handler(signum, frame):  # noqa: ARG001
+            stop_flag["stop"] = True
+
+        prev_int = signal.signal(signal.SIGINT, _handler)
+        try:
+            try:
+                for event in follow_audit_file(
+                    path, stop_flag=stop_flag,
+                ):
+                    if parsed_filters and not all(
+                        f.matches(event) for f in parsed_filters
+                    ):
+                        continue
+                    click.echo(render_event_row(event))
+            except KeyboardInterrupt:
+                # Defensive: the signal handler should have flipped
+                # stop_flag and the generator returned, but cover the
+                # case where the OS delivers the interrupt at an
+                # unfortunate moment.
+                pass
+        finally:
+            signal.signal(signal.SIGINT, prev_int)
+        return
+
+    # Non-follow path: read whole file, filter, optionally limit.
+    def _read_events():
+        for ev in iter_audit_file(path):
+            if parsed_filters and not all(
+                f.matches(ev) for f in parsed_filters
+            ):
+                continue
+            yield ev
+
+    events: list[dict[str, Any]] = list(_read_events())
+    if limit is not None and limit >= 0:
+        # Newest-first: keep the tail end of the list since the JSONL
+        # writer appends, so the file is oldest-first on disk. The
+        # final printed order is still oldest-first within the slice
+        # (matches `tail -n N` semantics).
+        events = events[-limit:]
+
+    if export_format:
+        out_pth = pathlib.Path(out_path)  # type: ignore[arg-type]
+        fmt = export_format.lower()
+        if fmt == "jsonl":
+            n = export_jsonl(events, out_pth)
+            click.echo(f"wrote {n} event(s) as JSONL to {out_pth}")
+        elif fmt == "csv":
+            cols_explicit = None
+            if csv_columns_raw:
+                cols_explicit = [c.strip() for c in csv_columns_raw.split(",")]
+            cols, warnings = resolve_csv_columns(cols_explicit)
+            if warnings:
+                # Surface PII opt-in to stderr — the operator chose
+                # to include the column, so we don't refuse; we just
+                # make the choice visible in the run log.
+                click.secho(
+                    "note: --csv-columns includes PII-shaped field(s): "
+                    + ", ".join(warnings)
+                    + " — these are not in the default column set.",
+                    fg="yellow", err=True,
+                )
+            n = export_csv(events, out_pth, columns=cols)
+            click.echo(f"wrote {n} event(s) as CSV to {out_pth}")
+        elif fmt == "ocsf-bundle":
+            n = export_ocsf_bundle(events, out_pth)
+            click.echo(
+                f"wrote OCSF Detection Finding bundling {n} event(s) "
+                f"to {out_pth}"
+            )
+        # `build_ocsf_bundle` is referenced via export_ocsf_bundle; the
+        # import above keeps it available for direct callers.
+        _ = build_ocsf_bundle  # silence "imported but unused" linters
+        return
+
+    if summary:
+        out_struct = summarize_events(events)
+        click.echo(render_summary(out_struct))
+        return
+
+    if not events:
+        click.echo("(no events in audit log)")
+        return
+    for ev in events:
+        click.echo(render_event_row(ev))
 
 
 @main.group("audit-export")

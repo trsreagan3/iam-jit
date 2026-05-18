@@ -6,6 +6,12 @@ made the call (#266). This doc shows worked examples per SIEM for the
 question security teams actually ask: **"which agent did this, months
 later?"**
 
+For the local-operator workflow — no SIEM in the loop, just an
+operator at a terminal — jump to **[Live tail + filtering + summary +
+export](#live-tail--filtering--summary--export)** below. That section
+documents `ibounce audit tail`, the read surface the FREE tier ships
+out of the box.
+
 ## What's in every event
 
 Every event ibounce emits carries the standard OCSF v1.1.0 class 6003
@@ -201,6 +207,208 @@ WHERE status_id = 2
   AND json_extract(unmapped, '\$.iam_jit.agent') IS NULL
 ORDER BY time DESC;"
 ```
+
+## Live tail + filtering + summary + export
+
+For local-operator workflows (no SIEM, no central collector — the FREE
+tier per [[local-only-safety-mode]]), `ibounce audit tail` is the
+read surface. Same JSONL log the DuckDB recipes above read from, just
+wrapped in a terminal-friendly CLI with filtering, summary, and
+export.
+
+The flag shape is shared with `kbounce audit tail` + `dbounce audit
+tail` per [[cross-product-agent-parity]]; muscle memory transfers
+across the Bounce suite.
+
+```
+ibounce audit tail [--path PATH] [--follow] [--filter EXPR ...]
+                   [--summary] [--export FORMAT --out PATH]
+                   [--csv-columns "a,b,c"] [--limit N]
+```
+
+### Default behaviour
+
+```bash
+# Print every event in the audit log, oldest first
+ibounce audit tail
+# 2026-05-18T00:00:00+00:00  sev=1  DECISION  alice@example.com  s3:GetObject  allow
+# 2026-05-18T00:00:01+00:00  sev=1  DECISION  alice@example.com  s3:GetObject  allow
+# 2026-05-18T00:00:02+00:00  sev=3  DECISION  bob@example.com    s3:PutObject  deny
+# 2026-05-18T00:00:03+00:00  sev=1  HEARTBEAT -                  s3:GetObject
+
+# Newest N events
+ibounce audit tail --limit 200
+```
+
+The audit log path defaults to `$IAM_JIT_BOUNCER_AUDIT_LOG` or
+`~/.iam-jit/audit.jsonl`. Pass `--path /custom/path.jsonl` to override
+(use the same value you passed to `ibounce run --audit-log-path`).
+
+### Live tail (`--follow`)
+
+```bash
+# Stream new events as they arrive; Ctrl-C to exit
+ibounce audit tail --follow
+
+# Live-tail one agent at severity >= 3
+ibounce audit tail --follow \
+    --filter unmapped.iam_jit.agent.name=claude-code \
+    --filter severity_id>=3
+```
+
+Polls the JSONL log every 500ms. Survives log rotation (re-opens on
+inode change or truncate, matches `tail -F` semantics). Exits cleanly
+on SIGINT.
+
+### Filters (`--filter`, repeatable; AND-combined)
+
+Four operators against any OCSF dotted-path field:
+
+| Form               | Meaning                                          |
+|--------------------|--------------------------------------------------|
+| `field=value`      | String equality                                  |
+| `field~regex`      | Regex (Python `re.search`)                       |
+| `field>=N`         | Numeric greater-or-equal                         |
+| `field<=N`         | Numeric less-or-equal                            |
+
+Supported fields (cross-product subset — same across ibounce, kbounce,
+dbounce):
+
+- `severity_id` — OCSF severity (1=Informational, 3=Medium, 4=High, ...)
+- `activity_id` — OCSF CRUD class (1=Create, 2=Read, 3=Update, 4=Delete, 99=Other)
+- `status_id`   — 1=Success, 2=Failure, 99=Other
+- `actor.user.name`
+- `api.operation`
+- `unmapped.iam_jit.agent.name`
+- `unmapped.iam_jit.agent.session_id`
+- `unmapped.iam_jit.event_type` (or `event_type` shortcut; `DECISION`
+  is the implicit value for plain decision events)
+
+ibounce-specific fields (also filterable; not present on kbounce / dbounce):
+
+- `unmapped.iam_jit.ext.aws_region`
+- `unmapped.iam_jit.ext.sigv4_credential_kid`
+
+Examples:
+
+```bash
+# Every claude-code event in the log
+ibounce audit tail --filter unmapped.iam_jit.agent.name=claude-code
+
+# Every DENY for an S3 write
+ibounce audit tail \
+    --filter api.operation~^s3:Delete \
+    --filter verdict=deny
+
+# Everything from one session
+ibounce audit tail \
+    --filter unmapped.iam_jit.agent.session_id=01968d6a-2a4f-7d1e-...
+```
+
+### Summary (`--summary`)
+
+Replaces the row-by-row view with a count-summary by event_type,
+severity, actor, and operation:
+
+```bash
+ibounce audit tail --summary
+# event_type counts:
+#   DECISION                  142
+#   ADMIN_ACTION                8
+#   HEARTBEAT                  60
+# severity_id counts:
+#   1 (Informational)         200
+#   3 (Medium)                  6
+#   4 (High)                    4
+# actor counts:
+#   alice@example.com         180
+#   bob@example.com            30
+# operation counts:
+#   s3:GetObject              140
+#   s3:PutObject               40
+#   iam:ListRoles              30
+```
+
+Combine with `--filter` to summarise a subset (e.g. "what did
+claude-code do today?").
+
+`--follow` + `--summary` is a clash; pick one (one streams, the other
+aggregates a closed set).
+
+### Export (`--export FORMAT --out PATH`)
+
+Materialise the current view (after `--filter`) to a file. Three
+formats:
+
+| `--export` value | Output shape                                          |
+|------------------|-------------------------------------------------------|
+| `jsonl`          | One OCSF event per line (matches the audit log shape) |
+| `csv`            | Tabular; default columns omit PII-shaped fields       |
+| `ocsf-bundle`    | Single OCSF v1.1.0 class 2004 Detection Finding       |
+
+Examples:
+
+```bash
+# JSONL for jq / DuckDB pipelines
+ibounce audit tail \
+    --filter unmapped.iam_jit.agent.name=claude-code \
+    --export jsonl --out claude-code.jsonl
+jq -c '.api.operation' claude-code.jsonl | sort | uniq -c
+
+# CSV for a spreadsheet (default columns; PII excluded)
+ibounce audit tail \
+    --filter severity_id>=3 \
+    --export csv --out incidents.csv
+
+# CSV with custom columns (opt in to PII explicitly)
+ibounce audit tail \
+    --export csv --out export.csv \
+    --csv-columns "time,actor.user.name,api.operation,verdict"
+
+# Detection Finding bundle for SIEM batch import
+ibounce audit tail \
+    --filter unmapped.iam_jit.agent.session_id=01968d6a-... \
+    --export ocsf-bundle --out finding.json
+```
+
+The Detection Finding bundle's `severity_id` is the MAX severity
+across the wrapped events; the events themselves stay verbatim under
+`finding.evidence.events`. A SIEM that already speaks OCSF class 2004
+ingests it as one investigation.
+
+### PII guard for `--export csv`
+
+The default CSV column set deliberately excludes PII-shaped fields
+(anything containing `email`, `phone`, `address`, `credential`,
+`secret`, `token` in its dotted path). To include a PII-shaped
+field, name it in `--csv-columns`:
+
+```bash
+# Opt-in: the CLI prints a stderr note when --csv-columns includes
+# a PII-shaped field, so the choice shows up in the run log.
+ibounce audit tail \
+    --export csv --out export.csv \
+    --csv-columns "time,actor.user.name,actor.user.email"
+# note: --csv-columns includes PII-shaped field(s): actor.user.email
+#       — these are not in the default column set.
+```
+
+### Cross-product muscle memory
+
+The same flag set + supported fields + summary groupings ship in
+`kbounce audit tail` (K8s admission) and `dbounce audit tail` (SQL
+gateway). A customer scanning the audit shape across the suite uses
+identical recipes:
+
+```bash
+# Same recipe across three products
+ibounce  audit tail --filter unmapped.iam_jit.agent.name=claude-code --summary
+kbounce  audit tail --filter unmapped.iam_jit.agent.name=claude-code --summary
+dbounce  audit tail --filter unmapped.iam_jit.agent.name=claude-code --summary
+```
+
+See the equivalent docs in the kbounce + dbounce repos
+(`docs/QUERYING-AUDIT-LOGS.md` in each).
 
 ## Admin actions (who changed what, when)
 
