@@ -1622,6 +1622,90 @@ TOOLS = [
             "properties": {},
         },
     },
+    {
+        "name": "bouncer_prompts_bulk_pending",
+        "description": (
+            "#253 — return a structured summary of the burst-of-denies "
+            "state + the 5 bulk-answer options so an agent can render "
+            "the prompt inline in its UI. READ-ONLY; no side effects. "
+            "Returns: pending_count (int), window_seconds (int), "
+            "oldest_pending_seconds_ago (int), burst_firing (bool), "
+            "options (array of {key, label, kind}). DETERMINISTIC — "
+            "the count is a sliding-window query of pending_prompts; "
+            "no LLM, no fuzzy match. Per [[bulk-prompt-answer-ux]] + "
+            "[[safety-mode-lean-permissive]]: this is the safety-valve "
+            "UX for the 'wall of denies' failure mode. Per "
+            "[[security-team-positioning-safety-not-surveillance]] the "
+            "language is neutral (the option labels frame the burst as "
+            "'your task probably needs a broader scope,' NOT as a "
+            "'violation' or 'unauthorized access')."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {},
+        },
+    },
+    {
+        "name": "bouncer_prompts_bulk_answer",
+        "description": (
+            "#253 — apply a bulk decision over every currently-pending "
+            "deny-prompt. GATED BY OPERATOR-SET TOKEN: default disabled. "
+            "When `--bulk-answer-mcp-token` is unset on `ibounce run`, "
+            "every call returns "
+            "`{error: 'bulk-answer via MCP is disabled by default; "
+            "operator must enable with --bulk-answer-mcp-token to allow "
+            "agent-driven bulk-answer'}`. When enabled, the agent must "
+            "echo the exact operator-set token on every call "
+            "(constant-time compare; the operator shares the token "
+            "out-of-band — do not store it in env vars an agent can "
+            "read). This prevents an adversarial agent from bulk-"
+            "allowing itself out of every pending prompt per the "
+            "[[bulk-prompt-answer-ux]] 'Don't' list. "
+            "\n\n"
+            "Inputs: `decision` ∈ {profile, session, 3h, 10min, none} "
+            "+ optional `profile` (required when decision=profile) + "
+            "required `token`. `session`/`3h`/`10min` create a TIME-"
+            "BOUNDED ALLOW rule (expires_at column; swept on 30s tick; "
+            "row preserved in DB for audit per [[creates-never-mutates]]). "
+            "`profile` hot-swaps the active profile. `none` is a no-op "
+            "(but still resets the burst detector). Returns a structured "
+            "summary the agent can echo to its user."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "required": ["decision", "token"],
+            "properties": {
+                "decision": {
+                    "type": "string",
+                    "enum": ["profile", "session", "3h", "10min", "none"],
+                    "description": (
+                        "Which bulk decision to apply. `session` = 60 "
+                        "min inactivity / until restart. `3h` / `10min` "
+                        "= wall-clock TTL. `profile` = hot-swap active "
+                        "profile (requires `profile` arg). `none` = no-op."
+                    ),
+                },
+                "profile": {
+                    "type": "string",
+                    "description": (
+                        "Profile name to switch to when decision=profile. "
+                        "Use `bouncer_active_profile` / "
+                        "`bouncer_list_presets` to discover names."
+                    ),
+                },
+                "token": {
+                    "type": "string",
+                    "description": (
+                        "Operator-set token from --bulk-answer-mcp-"
+                        "token on `ibounce run`. Constant-time compared "
+                        "against the configured value. Required; the "
+                        "tool errors if missing OR mismatched OR not "
+                        "enabled (default)."
+                    ),
+                },
+            },
+        },
+    },
 ]
 
 
@@ -2643,6 +2727,246 @@ def _bouncer_pending_sync_prompts_for_mcp(
     finally:
         store.close()
     return {"waiting": rows, "count": len(rows)}
+
+
+# ---------------------------------------------------------------------------
+# #253 — bulk-prompt-answer MCP tools.
+#
+# The READ tool (`bouncer_prompts_bulk_pending`) is unrestricted: agents
+# can poll it to discover that a burst is firing + show the 5 options
+# inline. Read-only; no side effects.
+#
+# The WRITE tool (`bouncer_prompts_bulk_answer`) is GATED BY DEFAULT.
+# Without --bulk-answer-mcp-token on `ibounce run`, every call returns
+# the documented disabled-error message. When the operator opts in,
+# the agent must echo the token on every call (constant-time compare
+# via `verify_bulk_answer_mcp_token` in burst.py).
+#
+# Both tools dispatch to the SAME helpers (`_apply_bulk_time_bounded`,
+# `_apply_bulk_profile_switch`) that the CLI subcommand uses, so the
+# behavior is identical regardless of surface.
+# ---------------------------------------------------------------------------
+
+
+# Mirrors the labels in bouncer_cli for cross-surface consistency.
+_BULK_OPTION_LABELS = {
+    "profile": "Switch profile to one with broader scope",
+    "session": "Allow ALL of these (and similar) for this session",
+    "3h": "Allow ALL for the next 3 hours",
+    "10min": "Allow ALL for the next 10 minutes",
+    "none": "Leave pending; answer individually",
+}
+
+
+def _bouncer_prompts_bulk_pending_for_mcp(
+    args: dict[str, Any],
+) -> dict[str, Any]:
+    """#253 — burst summary + 5 bulk-answer options.
+
+    Returns:
+      {
+        "pending_count": int,        # total currently-pending deny-prompts
+        "window_seconds": int,       # burst detector window
+        "oldest_pending_seconds_ago": int,
+        "burst_firing": bool,        # True iff threshold has crossed
+        "options": [
+          {"key": "profile", "label": "...", "kind": "profile-switch"},
+          {"key": "session", "label": "...", "kind": "bulk-allow-time-bounded"},
+          {"key": "3h",      "label": "...", "kind": "bulk-allow-time-bounded"},
+          {"key": "10min",   "label": "...", "kind": "bulk-allow-time-bounded"},
+          {"key": "none",    "label": "...", "kind": "noop"},
+        ],
+        "language_note": "Neutral framing per security-team-positioning-...",
+      }
+
+    Per [[security-team-positioning-safety-not-surveillance]]: the
+    `language_note` field is a contract reminder to agents that may be
+    paraphrasing for their user — do not introduce "violation" /
+    "unauthorized" / "infraction" language when echoing.
+    """
+    from .bouncer.burst import (
+        DEFAULT_BURST_WINDOW_SECONDS,
+        active_burst_detector,
+    )
+    from .bouncer.store import BouncerStore
+
+    _ = args
+    store = BouncerStore()
+    try:
+        rows = store.list_pending_prompts(
+            status="pending", kind="deny-prompt", limit=500,
+        )
+    finally:
+        store.close()
+    pending_count = len(rows)
+    window_seconds = DEFAULT_BURST_WINDOW_SECONDS
+    burst_firing = False
+    oldest_ago = 0
+    detector = active_burst_detector()
+    if detector is not None:
+        hint = detector.pending_hint()
+        if hint is not None:
+            burst_firing = True
+            window_seconds = int(hint["window_seconds"])
+            oldest_ago = int(hint["oldest_pending_seconds_ago"])
+    if not burst_firing and rows:
+        # Compute oldest from DB (the detector may be in a different
+        # process — e.g. the agent is calling this from a separate
+        # MCP-server process than `ibounce serve`).
+        import datetime as _dt
+        oldest_row = rows[-1].get("created_at") or ""
+        try:
+            oldest_dt = _dt.datetime.strptime(
+                oldest_row, "%Y-%m-%dT%H:%M:%SZ",
+            ).replace(tzinfo=_dt.UTC)
+            oldest_ago = max(0, int(
+                (_dt.datetime.now(_dt.UTC) - oldest_dt).total_seconds()
+            ))
+        except Exception:
+            oldest_ago = 0
+    options = [
+        {"key": k, "label": v, "kind": (
+            "profile-switch" if k == "profile"
+            else "noop" if k == "none"
+            else "bulk-allow-time-bounded"
+        )}
+        for k, v in _BULK_OPTION_LABELS.items()
+    ]
+    return {
+        "pending_count": pending_count,
+        "window_seconds": window_seconds,
+        "oldest_pending_seconds_ago": oldest_ago,
+        "burst_firing": burst_firing,
+        "options": options,
+        "language_note": (
+            "Per security-team-positioning-safety-not-surveillance: "
+            "frame the burst as 'your task probably needs a broader "
+            "scope,' NOT as a policy violation / unauthorized access."
+        ),
+    }
+
+
+def _bouncer_prompts_bulk_answer_for_mcp(
+    args: dict[str, Any],
+) -> dict[str, Any]:
+    """#253 — apply a bulk decision over all currently-pending deny-
+    prompts. Gated by the operator-set MCP token.
+
+    Returns one of:
+      - {"error": "...disabled by default..."}  when no token configured
+      - {"error": "invalid token"}              when configured + mismatch
+      - {"error": "..."}                        on bad inputs
+      - {"applied": "session"|"3h"|...,
+         "rules_added": int,
+         "prompts_answered": int,
+         "expires_at": str (ISO),
+         "profile": str (only on profile-switch)}
+
+    Per [[bulk-prompt-answer-ux]] 'Don't' list: this is the path that
+    MUST NOT let an adversarial agent bulk-allow itself. Default
+    DISABLED is the load-bearing default.
+    """
+    from .bouncer.burst import (
+        active_burst_detector,
+        bulk_answer_mcp_token_configured,
+        verify_bulk_answer_mcp_token,
+    )
+    from .bouncer.store import BouncerStore
+
+    # Gate: operator must have set --bulk-answer-mcp-token on serve()
+    if not bulk_answer_mcp_token_configured():
+        return {
+            "error": (
+                "bulk-answer via MCP is disabled by default; operator "
+                "must enable with --bulk-answer-mcp-token to allow "
+                "agent-driven bulk-answer"
+            ),
+        }
+    supplied_token = args.get("token")
+    if not isinstance(supplied_token, str) or not supplied_token:
+        return {"error": "missing or empty 'token' argument"}
+    if not verify_bulk_answer_mcp_token(supplied_token):
+        return {"error": "invalid token"}
+
+    decision = args.get("decision")
+    if not isinstance(decision, str):
+        return {"error": "missing 'decision' argument"}
+    decision = decision.lower().strip()
+    if decision not in {"profile", "session", "3h", "10min", "none"}:
+        return {
+            "error": (
+                f"unknown decision {decision!r}; expected one of: "
+                "profile | session | 3h | 10min | none"
+            ),
+        }
+    # Use the same actor convention as the CLI: env var override or
+    # 'mcp-agent' fallback (agents don't have an OS user; mark
+    # explicitly so the audit chain shows the surface).
+    import os as _os
+    actor = _os.environ.get("IAM_JIT_BOUNCER_ACTOR") or "mcp-agent"
+
+    store = BouncerStore()
+    try:
+        pending = store.list_pending_prompts(
+            status="pending", kind="deny-prompt", limit=500,
+        )
+        if decision == "none":
+            detector = active_burst_detector()
+            if detector is not None:
+                detector.reset()
+            return {
+                "applied": "none",
+                "rules_added": 0,
+                "prompts_answered": 0,
+                "expires_at": None,
+                "pending_remaining": len(pending),
+            }
+        if decision == "profile":
+            profile_name = args.get("profile")
+            if not isinstance(profile_name, str) or not profile_name:
+                return {
+                    "error": (
+                        "decision='profile' requires the 'profile' arg "
+                        "(name of an installed profile)"
+                    ),
+                }
+            # Defer to the same helper the CLI uses to keep behavior in
+            # lockstep across surfaces.
+            from .bouncer_cli import _apply_bulk_profile_switch
+            try:
+                profile_obj, answered = _apply_bulk_profile_switch(
+                    store=store, pending_rows=pending,
+                    profile_name=profile_name, actor=actor,
+                )
+            except ValueError as e:
+                return {"error": str(e)}
+            detector = active_burst_detector()
+            if detector is not None:
+                detector.reset()
+            return {
+                "applied": "profile",
+                "profile": profile_obj.name,
+                "rules_added": 0,
+                "prompts_answered": answered,
+                "expires_at": None,
+            }
+        # Time-bounded bulk allow.
+        from .bouncer_cli import _apply_bulk_time_bounded
+        rules_added, answered, expires_at = _apply_bulk_time_bounded(
+            store=store, pending_rows=pending,
+            duration_key=decision, actor=actor,
+        )
+        detector = active_burst_detector()
+        if detector is not None:
+            detector.reset()
+        return {
+            "applied": decision,
+            "rules_added": rules_added,
+            "prompts_answered": answered,
+            "expires_at": expires_at,
+        }
+    finally:
+        store.close()
 
 
 def _bouncer_audit_export_status_for_mcp(
@@ -3689,6 +4013,10 @@ def _handle_request(req: dict[str, Any]) -> dict[str, Any] | None:
             result_payload = _bouncer_audit_export_status_for_mcp(args)
         elif tool_name == "bouncer_pending_sync_prompts":
             result_payload = _bouncer_pending_sync_prompts_for_mcp(args)
+        elif tool_name == "bouncer_prompts_bulk_pending":
+            result_payload = _bouncer_prompts_bulk_pending_for_mcp(args)
+        elif tool_name == "bouncer_prompts_bulk_answer":
+            result_payload = _bouncer_prompts_bulk_answer_for_mcp(args)
         elif tool_name == "bouncer_recommend_mode_for_task":
             result_payload = _bouncer_recommend_mode_for_task_for_mcp(args)
         elif tool_name == "bouncer_task_review":

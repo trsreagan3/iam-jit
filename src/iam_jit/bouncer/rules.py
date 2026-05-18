@@ -53,8 +53,22 @@ class ProxyRule:
     # Optional human note (why this rule exists, who added it).
     note: str | None = None
     # Origin: "user" (added explicitly) / "learn" (auto-captured in
-    # learn mode) / "default" (built-in baseline).
+    # learn mode) / "default" (built-in baseline) / "bulk-allow-time-
+    # bounded" (#253 — operator picked options 2/3/4 in `prompts
+    # bulk-answer`) / "prompt" (#5 — answered a single deny-prompt).
     origin: str = "user"
+    # #253 (bulk-prompt-answer-ux): optional wall-clock UTC expiry as
+    # an ISO-8601 Z-suffixed string. None means the rule lives forever
+    # (matches pre-#253 behavior; the vast majority of rules). When
+    # set, the sweeper (`expire_rules_at`) filters this rule out of
+    # the active RuleSet as soon as `now >= expires_at` — without
+    # deleting the row, so the audit chain keeps a complete record of
+    # what the rule WAS per [[creates-never-mutates]] spirit.
+    #
+    # Stored as a string (not datetime) because the store layer's
+    # other timestamp columns (created_at, etc.) are also string-ISO;
+    # keeps SQLite comparison + JSON serialisation uniform.
+    expires_at: str | None = None
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -64,6 +78,7 @@ class ProxyRule:
             "region_scope": self.region_scope,
             "note": self.note,
             "origin": self.origin,
+            "expires_at": self.expires_at,
         }
 
 

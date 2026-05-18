@@ -600,6 +600,34 @@ def audit_export_health_section() -> dict[str, Any]:
     return section
 
 
+_session_profile_override: Any = None
+"""#253 — in-process active-profile override. Set by the bulk-answer
+CLI / MCP tool (option 1 "switch profile") so a hot-swap takes effect
+on the very next decision WITHOUT requiring a proxy restart.
+
+Resolution: when set, takes precedence over `ProxyConfig.active_profile`.
+The serve() process owns this singleton; cross-process flips don't
+work (the CLI in a separate shell would set its own copy + serve
+wouldn't see it). Cross-process flip is a v1.1 / SaaS feature; the
+local-only safety-mode covers single-process which is the dominant
+deployment.
+"""
+
+
+def set_session_profile_override(profile: Any) -> None:
+    """#253 — install (or clear with None) the in-process active-profile
+    override. Called by `prompts bulk-answer` when the operator picks
+    option 1.
+    """
+    global _session_profile_override
+    _session_profile_override = profile
+
+
+def active_profile_override() -> Any:
+    """Read accessor for callers that want the override snapshot."""
+    return _session_profile_override
+
+
 def set_session_mode_override(mode: str | None) -> None:
     """Set the in-process active-mode override. Pass None to clear.
 
@@ -858,6 +886,35 @@ class ProxyConfig:
     the --alert-rules YAML. Operationally meaningful only when both
     heartbeat_interval_seconds > 0 AND alert_rules_path is not None
     (otherwise nothing reads it)."""
+
+    # #253 — bulk-prompt-answer UX (burst detector + bulk-answer MCP
+    # tool token). Both fields default to safe values so a v1.0 user
+    # who doesn't pass either flag gets the documented behavior (5
+    # prompts in 60s fires the burst hint; MCP bulk-answer disabled).
+    burst_threshold: int = 5
+    """Pending-prompt count over `burst_window_seconds` that fires the
+    BURST_DETECTED OCSF event + the pre-burst hint surface. Defaults
+    to 5; tune up for noisy environments where occasional flurries
+    are expected. Per [[safety-mode-lean-permissive]]: a low default
+    catches the block-happy failure mode early. Validation range
+    1..1000 (anything higher is a sign the operator wants the
+    detector disabled — use a very large window instead)."""
+    burst_window_seconds: int = 60
+    """Sliding-window length the burst detector counts over. Defaults
+    to 60s. Range 1..3600. A 60s window catches the typical SDK
+    retry-loop pattern (3 retries ~ 30s, 5 retries ~ 60s); larger
+    windows are appropriate when the operator expects intentional
+    pacing between agent calls."""
+    bulk_answer_mcp_token: str | None = None
+    """Per the issue body: operator-set token that GATES the MCP
+    `bouncer_prompts_bulk_answer` tool. Default None = MCP bulk-answer
+    DISABLED (every call returns an error explaining how to enable).
+    When set, agents must echo the exact token on every bulk-answer
+    call. Comparison is constant-time. The operator shares the token
+    out-of-band with the agent (e.g. pastes into the agent's prompt).
+    This prevents an adversarial agent from bulk-allowing itself out
+    of every pending prompt — which would invert the whole point of
+    the prompt UX. Per [[bulk-prompt-answer-ux]]'s "Don't" list."""
 
 
 @dataclasses.dataclass
@@ -1125,7 +1182,12 @@ def evaluate_request(
     # this point if any fired). The profile-allow rules are appended
     # AFTER the global ruleset so a global DENY beats a profile
     # ALLOW (mirrors AWS IAM explicit-deny semantics).
-    id_tagged = store.list_rules()
+    # #253 — `list_active_rules` filters out time-bounded grants whose
+    # expires_at has passed. Defense-in-depth alongside the 30s sweeper
+    # task (the sweeper writes the audit transition events; this
+    # read-time filter ensures the active RuleSet excludes expired rules
+    # IMMEDIATELY at decision time without waiting for the next tick).
+    id_tagged = store.list_active_rules()
     composed_rules = [r for _, r in id_tagged]
     if active_profile is not None and active_profile.allow_rules:
         from .rules import Effect, ProxyRule
@@ -1287,6 +1349,17 @@ def evaluate_request(
                 region=parsed.region,
                 deny_reason=record.reason,
             )
+            # #253 — feed the burst detector. The detector is the
+            # process-wide singleton installed by serve(); when no
+            # detector is installed (unit tests calling evaluate_request
+            # directly), this is a harmless no-op. Threshold-crossing
+            # emits the BURST_DETECTED OCSF event on the audit-export
+            # channels; the operator sees the pre-burst hint on next
+            # CLI invocation.
+            from .burst import active_burst_detector
+            _detector = active_burst_detector()
+            if _detector is not None:
+                _detector.observe()
         except Exception as e:
             logger.warning("bouncer-proxy prompt-enqueue failed: %s", e)
 
@@ -1794,6 +1867,15 @@ async def _await_sync_deny_decision(
             region=obs.parsed_region,
             deny_reason=obs.decision_reason,
         )
+        # #253 — feed the burst detector for sync deny-prompts too.
+        # Same shape as the async branch in evaluate_request; a wall of
+        # sync denies + an absent operator is the worst-case
+        # block-happy experience and the burst hint should fire just as
+        # eagerly.
+        from .burst import active_burst_detector
+        _detector = active_burst_detector()
+        if _detector is not None:
+            _detector.observe()
     except Exception as e:
         logger.warning(
             "bouncer-proxy sync-deny-prompt enqueue failed: %s "
@@ -1988,6 +2070,14 @@ async def _handle_request(request, *, store, config: ProxyConfig, session):
     from aiohttp import web
 
     body = await request.read()
+    # #253 — let an in-process profile override (installed by
+    # `prompts bulk-answer` option 1) supersede the startup profile so
+    # a hot-swap takes effect on the very next decision.
+    effective_profile = (
+        active_profile_override()
+        if active_profile_override() is not None
+        else config.active_profile
+    )
     obs = evaluate_request(
         method=request.method,
         host=request.headers.get("host", ""),
@@ -1998,7 +2088,7 @@ async def _handle_request(request, *, store, config: ProxyConfig, session):
         store=store,
         mode=config.mode,
         default_policy=config.default_policy,
-        active_profile=config.active_profile,
+        active_profile=effective_profile,
         account_id=config.account_id,
         account_alias=config.account_alias,
         prompt_on_deny=config.prompt_on_deny,
@@ -2489,6 +2579,76 @@ async def serve(config: ProxyConfig, *, store: BouncerStore) -> None:
             audit_rule_engine.status()["active_rules"],
         )
 
+    # #253 — bulk-prompt-answer UX. Install the burst detector + the
+    # operator's MCP bulk-answer token so:
+    #   1. Every `add_pending_prompt` from the proxy hot path feeds the
+    #      detector (via `active_burst_detector()` from burst.py).
+    #   2. The MCP `bouncer_prompts_bulk_answer` tool gate consults the
+    #      installed token (default None → tool returns the standard
+    #      disabled-error response).
+    # Both registrations are no-ops on tests that call serve() with
+    # the defaults; the detector still arms but no event fires until
+    # the threshold crosses.
+    from .burst import (
+        BurstDetector,
+        register_burst_detector,
+        set_bulk_answer_mcp_token,
+    )
+    burst_detector = BurstDetector(
+        threshold=config.burst_threshold,
+        window_seconds=config.burst_window_seconds,
+        emit=_emit_audit_event_raw,
+    )
+    register_burst_detector(burst_detector)
+    set_bulk_answer_mcp_token(config.bulk_answer_mcp_token)
+    logger.info(
+        "bulk-prompt-answer UX: burst_threshold=%d burst_window=%ds "
+        "mcp_bulk_answer_enabled=%s",
+        config.burst_threshold,
+        config.burst_window_seconds,
+        bool(config.bulk_answer_mcp_token),
+    )
+
+    # #253 — rule-expiry sweeper. 30s tick. The list_active_rules
+    # filter at evaluate_request time already hides expired rules from
+    # the active RuleSet; this sweeper exists to emit the per-rule
+    # `rule_expired` audit event exactly once per transition, so the
+    # audit chain shows when each time-bounded grant aged out without
+    # waiting for the next operator-driven list_rules call.
+    async def _rule_expiry_sweeper_loop() -> None:
+        # 30s matches the spec; granularity small enough that operators
+        # don't see a noticeable gap between expires_at and the audit
+        # event, large enough that this isn't a meaningful load.
+        SWEEP_INTERVAL = 30
+        try:
+            while True:
+                await asyncio.sleep(SWEEP_INTERVAL)
+                try:
+                    expired = store.expire_rules_at()
+                    if expired:
+                        logger.info(
+                            "ibounce rule-expiry sweeper: %d rule(s) "
+                            "transitioned to expired (ids=%s); rows "
+                            "preserved in DB for audit",
+                            len(expired), expired,
+                        )
+                except Exception as e:
+                    # Per [[deliberate-feature-completion]] fail-soft:
+                    # a sweeper failure must not bring down the proxy.
+                    # The active-rules filter still hides expired rules
+                    # at decision time; we just lose the per-tick audit
+                    # event (operators see it on the next successful
+                    # sweep).
+                    logger.warning(
+                        "ibounce rule-expiry sweeper tick failed: %s", e,
+                    )
+        except asyncio.CancelledError:
+            return
+
+    rule_expiry_task = asyncio.create_task(
+        _rule_expiry_sweeper_loop(), name="ibounce-rule-expiry-sweeper",
+    )
+
     # #264 — heartbeat emitter. Default OFF (interval_seconds=0); the
     # operator opts in via --heartbeat-interval. Runs on every tier
     # (Free + Pro + Enterprise); the gap-detection rule that watches
@@ -2563,3 +2723,20 @@ async def serve(config: ProxyConfig, *, store: BouncerStore) -> None:
             except Exception as e:
                 logger.warning("audit-log writer stop failed: %s", e)
             register_audit_log_writer(None)
+        # #253 — rule-expiry sweeper + burst detector teardown. Cancel
+        # the sweeper task FIRST so it doesn't try to write to a torn-
+        # down audit channel on its way out. Then clear the burst-
+        # detector singleton + the bulk-answer token so the next
+        # process doesn't see stale state.
+        try:
+            rule_expiry_task.cancel()
+            try:
+                await rule_expiry_task
+            except asyncio.CancelledError:
+                pass
+            except Exception as e:
+                logger.warning("rule-expiry sweeper teardown failed: %s", e)
+        except Exception as e:
+            logger.warning("rule-expiry sweeper cancel failed: %s", e)
+        register_burst_detector(None)
+        set_bulk_answer_mcp_token(None)

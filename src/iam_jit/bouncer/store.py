@@ -68,7 +68,7 @@ class ActiveTaskExistsError(Exception):
     is already active. Caller decides whether to end the existing
     task first or surface the conflict to the agent."""
 
-SCHEMA_VERSION = 9  # v9: adds sync_wait_id to pending_prompts for #203 sync deny-prompt UX
+SCHEMA_VERSION = 10  # v10: #253 — adds expires_at to rules for bulk-prompt-answer time-bounded grants
 
 
 def default_db_path() -> pathlib.Path:
@@ -116,6 +116,12 @@ class BouncerStore:
         )
         self._conn.execute("PRAGMA journal_mode=WAL")
         self._conn.execute("PRAGMA foreign_keys=OFF")  # soft FKs only
+        # #253 — sweeper de-dup set. Tracks which rule ids have already
+        # had their `rule_expired` config_event emitted in THIS process
+        # lifetime. Cleared on restart by design (per the docstring on
+        # `expire_rules_at` — at worst one duplicate event per restart,
+        # which is far better than rebuilding the set at startup).
+        self._expired_rule_ids_seen: set[int] = set()
         self._migrate()
 
     # -----------------------------------------------------------------
@@ -411,6 +417,36 @@ class BouncerStore:
                 )
             except sqlite3.OperationalError:
                 pass
+            # v10 additive migration (#253 — bulk-prompt-answer UX):
+            #
+            # `rules` gains an `expires_at TEXT` column. NULL on every
+            # pre-#253 row (and every newly-added rule that doesn't pass
+            # a time-bound), which preserves the "rules live forever"
+            # behavior the v1.0 store contracted on. When set, the
+            # sweeper (`expire_rules_at`) filters the rule out of
+            # `list_rules` so the active RuleSet never sees an expired
+            # rule — but the row is NEVER deleted (per
+            # [[creates-never-mutates]] spirit + so the audit chain has
+            # a complete record of what was active when).
+            #
+            # Indexed because the sweeper + every list_rules call has to
+            # filter on `expires_at IS NULL OR expires_at > now`; a
+            # partial index would be slightly smaller but SQLite's
+            # partial-index syntax varies between releases — full index
+            # is safer + cheap at our row counts.
+            try:
+                self._conn.execute(
+                    "ALTER TABLE rules ADD COLUMN expires_at TEXT"
+                )
+            except sqlite3.OperationalError:
+                pass
+            try:
+                self._conn.execute(
+                    "CREATE INDEX IF NOT EXISTS idx_rules_expires_at "
+                    "ON rules(expires_at)"
+                )
+            except sqlite3.OperationalError:
+                pass
             cur = self._conn.execute("SELECT version FROM schema_version LIMIT 1")
             row = cur.fetchone()
             if row is None:
@@ -451,8 +487,8 @@ class BouncerStore:
         with self._lock:
             cur = self._conn.execute(
                 """
-                INSERT INTO rules(pattern, effect, arn_scope, region_scope, note, origin, created_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?)
+                INSERT INTO rules(pattern, effect, arn_scope, region_scope, note, origin, created_at, expires_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     rule.pattern,
@@ -462,14 +498,24 @@ class BouncerStore:
                     rule.note,
                     rule.origin,
                     _isoformat_z(_dt.datetime.now(_dt.UTC)),
+                    rule.expires_at,
                 ),
             )
             rid = int(cur.lastrowid or 0)
+        # #253 — surface expires_at in the audit summary so a SIEM
+        # consumer + the operator's `events tail` sees that the rule is
+        # bounded without joining back to the rules table.
+        expiry_suffix = (
+            f" (expires_at={rule.expires_at})" if rule.expires_at else ""
+        )
         self._record_config_event_locked(
             actor=actor,
             kind="rule_added",
             target_id=rid,
-            summary=f"added rule #{rid}: {rule.effect.value} {rule.pattern}",
+            summary=(
+                f"added rule #{rid}: {rule.effect.value} {rule.pattern}"
+                f"{expiry_suffix}"
+            ),
             detail=rule.to_dict(),
         )
         return rid
@@ -655,13 +701,14 @@ class BouncerStore:
 
         with self._lock:
             cur = self._conn.execute(
-                "SELECT id, pattern, effect, arn_scope, region_scope, note, origin "
+                "SELECT id, pattern, effect, arn_scope, region_scope, note, "
+                "origin, expires_at "
                 "FROM rules ORDER BY id"
             )
             rows = cur.fetchall()
         out: list[tuple[int, ProxyRule]] = []
         for r in rows:
-            rid, pattern, effect, arn_scope, region_scope, note, origin = r
+            rid, pattern, effect, arn_scope, region_scope, note, origin, expires_at = r
             try:
                 effect_enum = Effect(effect)
             except ValueError:
@@ -680,21 +727,111 @@ class BouncerStore:
                     region_scope=region_scope,
                     note=note,
                     origin=origin or "user",
+                    expires_at=expires_at,
                 ),
             ))
         return out
 
+    def list_active_rules(
+        self, *, now: _dt.datetime | None = None,
+    ) -> list[tuple[int, ProxyRule]]:
+        """#253 — return only rules that are NOT yet expired at `now`.
+
+        Used by the proxy's hot path so the active RuleSet automatically
+        excludes time-bounded grants that have aged out, without
+        requiring the sweeper to have run (the sweeper does run on a
+        30s tick; this filter is the defense-in-depth synchronous check
+        every list call performs).
+
+        Per [[creates-never-mutates]] spirit: expired rules are NEVER
+        deleted from the DB. They're hidden from the active ruleset
+        (so `decide()` doesn't honor them), but `list_rules()` still
+        returns them (so the operator + the audit chain can see what
+        was active when). Callers that want "what's the active scope
+        RIGHT NOW" should use this method; callers that want "what's
+        the full rule history" should use `list_rules()`.
+
+        Comparison is done in Python (not SQL) so we don't have to
+        push `now` into the query; saves one round-trip + works
+        identically whether the row has expires_at=NULL (never
+        expires) or a future ISO timestamp.
+        """
+        now_str = _isoformat_z(now or _dt.datetime.now(_dt.UTC))
+        out: list[tuple[int, ProxyRule]] = []
+        for rid, rule in self.list_rules():
+            if rule.expires_at is not None and rule.expires_at <= now_str:
+                continue
+            out.append((rid, rule))
+        return out
+
+    def expire_rules_at(
+        self, *, now: _dt.datetime | None = None,
+    ) -> list[int]:
+        """#253 — background-sweeper hook.
+
+        The sweeper task (`RuleExpirySweeper` in proxy.py) calls this
+        on a 30s tick. The actual filtering is done at READ time via
+        `list_active_rules` — this method exists to write a config_event
+        the first time each rule "transitions" to expired, so the audit
+        chain captures "rule N expired at time T" exactly once rather
+        than every 30s.
+
+        Returns the list of rule ids that JUST transitioned to expired
+        on this call. Idempotent: a rule that was already past-expiry
+        on a previous call won't appear in the returned list.
+
+        Tracking is by-rule-id in an in-memory set (NOT the DB) because:
+          - The DB column already records expires_at; the transition
+            audit-event is purely informational.
+          - Restarting the process replays the "just expired" set from
+            empty — at worst, the operator sees a duplicate audit event
+            once per restart, which is far better than scanning the
+            entire rule table at startup to rebuild the set.
+          - Per [[security-team-positioning-safety-not-surveillance]]:
+            rule auto-expiry is EXPECTED behavior (not an anomaly), so
+            the audit event's severity stays Informational + it does
+            NOT fire any alert rule.
+        """
+        now_str = _isoformat_z(now or _dt.datetime.now(_dt.UTC))
+        with self._lock:
+            cur = self._conn.execute(
+                "SELECT id, pattern, effect FROM rules "
+                "WHERE expires_at IS NOT NULL AND expires_at <= ?",
+                (now_str,),
+            )
+            expired_rows = cur.fetchall()
+        newly_expired: list[int] = []
+        for r in expired_rows:
+            rid = int(r[0])
+            if rid in self._expired_rule_ids_seen:
+                continue
+            self._expired_rule_ids_seen.add(rid)
+            newly_expired.append(rid)
+            self._record_config_event_locked(
+                actor="auto-expire",
+                kind="rule_expired",
+                target_id=rid,
+                summary=(
+                    f"rule #{rid} expired: {r[2]} {r[1]} "
+                    f"(time-bounded grant aged out; row preserved in "
+                    f"DB for audit per creates-never-mutates spirit)"
+                ),
+                detail={"rule_id": rid, "expired_at": now_str},
+            )
+        return newly_expired
+
     def get_rule(self, rule_id: int) -> ProxyRule | None:
         with self._lock:
             cur = self._conn.execute(
-                "SELECT pattern, effect, arn_scope, region_scope, note, origin "
+                "SELECT pattern, effect, arn_scope, region_scope, note, "
+                "origin, expires_at "
                 "FROM rules WHERE id = ?",
                 (rule_id,),
             )
             row = cur.fetchone()
         if row is None:
             return None
-        pattern, effect, arn_scope, region_scope, note, origin = row
+        pattern, effect, arn_scope, region_scope, note, origin, expires_at = row
         return ProxyRule(
             pattern=pattern,
             effect=Effect(effect),
@@ -702,6 +839,7 @@ class BouncerStore:
             region_scope=region_scope,
             note=note,
             origin=origin or "user",
+            expires_at=expires_at,
         )
 
     # -----------------------------------------------------------------

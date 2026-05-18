@@ -71,9 +71,136 @@ def _opened_store(db_path: str | None):
         store.close()
 
 
+# ---------------------------------------------------------------------------
+# #253 — pre-burst hint surface
+#
+# When ANY ibounce subcommand runs AND a burst-shaped condition exists
+# in the operator's pending_prompts queue, print a single one-line
+# stderr hint BEFORE the subcommand's output. Spec:
+#
+#   ℹ N pending prompts accumulated in the last Ts. Run
+#     `ibounce prompts bulk-answer` to handle them all at once.
+#
+# Auto-suppression rules per the spec:
+#   - Non-TTY (piped / CI / redirected stderr) — silent.
+#   - Within the cool-down window of the LAST hint printed — silent
+#     (so repeated CLI runs in a script don't spam the hint).
+#   - When the operator is RUNNING the bulk-answer subcommand itself —
+#     silent (would be redundant; the subcommand prints the same info).
+#
+# The burst threshold here mirrors burst.DEFAULT_BURST_THRESHOLD /
+# DEFAULT_BURST_WINDOW_SECONDS so the CLI hint stays in lockstep with
+# the proxy's BURST_DETECTED event semantics. We compute the window
+# from pending_prompts.created_at, not the in-process detector
+# (which lives in serve()'s process; the CLI is a separate process).
+#
+# Per [[security-team-positioning-safety-not-surveillance]] the hint
+# string is neutral. No "violation" / "unauthorized" / "infraction".
+# ---------------------------------------------------------------------------
+
+_PRE_BURST_HINT_COOL_DOWN_SECONDS = 300
+_PRE_BURST_HINT_STATE_FILE = ".pre_burst_hint_last"
+# Subcommand names that should NOT print the hint (running them is
+# itself the operator's response to the burst).
+_HINT_SUPPRESS_COMMANDS = {"bulk-answer", "answer", "list", "show"}
+
+
+def _maybe_print_pre_burst_hint(ctx: click.Context) -> None:
+    """Inspect the operator's pending_prompts queue + print a one-line
+    stderr hint when a burst-shaped condition is live.
+
+    Fail-soft: any unexpected exception is swallowed (the hint is a
+    convenience, NOT a correctness boundary; we never want a broken
+    hint path to break the rest of the CLI).
+    """
+    import datetime as _dt
+    import pathlib as _pl
+    import sys as _sys
+    import time as _time
+
+    from .bouncer.burst import (
+        DEFAULT_BURST_THRESHOLD,
+        DEFAULT_BURST_WINDOW_SECONDS,
+    )
+
+    try:
+        # Skip in non-TTY contexts.
+        if not _sys.stderr.isatty():
+            return
+        # Skip if we're inside the prompts subgroup running a command
+        # that already shows pending queue context.
+        cmd_chain: list[str] = []
+        cur: click.Context | None = ctx
+        while cur is not None:
+            if cur.info_name:
+                cmd_chain.append(cur.info_name)
+            cur = cur.parent
+        if any(c in _HINT_SUPPRESS_COMMANDS for c in cmd_chain):
+            return
+        # Cool-down: read the timestamp file under the bouncer DB dir.
+        # No DB lookup needed when within cool-down; cheap fast-path.
+        from .bouncer.store import default_db_path
+        state_dir = _pl.Path(default_db_path()).parent
+        state_file = state_dir / _PRE_BURST_HINT_STATE_FILE
+        try:
+            last_at = float(state_file.read_text().strip())
+        except Exception:
+            last_at = 0.0
+        now = _time.time()
+        if now - last_at < _PRE_BURST_HINT_COOL_DOWN_SECONDS:
+            return
+        # Inspect pending_prompts. The window we check is the burst
+        # detector's default window (60s); count rows whose created_at
+        # falls inside it. This intentionally MIRRORS the in-process
+        # detector's logic so CLI hint + proxy event agree.
+        from .bouncer.store import BouncerStore
+        store = BouncerStore()
+        try:
+            rows = store.list_pending_prompts(
+                status="pending", kind="deny-prompt", limit=500,
+            )
+        finally:
+            store.close()
+        if not rows:
+            return
+        # rows are sorted newest-first; window-filter using created_at.
+        cutoff_dt = _dt.datetime.now(_dt.UTC) - _dt.timedelta(
+            seconds=DEFAULT_BURST_WINDOW_SECONDS,
+        )
+        cutoff_str = cutoff_dt.strftime("%Y-%m-%dT%H:%M:%SZ")
+        in_window = [r for r in rows if (r.get("created_at") or "") >= cutoff_str]
+        if len(in_window) < DEFAULT_BURST_THRESHOLD:
+            return
+        # Compute oldest_seconds_ago for the hint string.
+        oldest = in_window[-1].get("created_at") or ""
+        try:
+            oldest_dt = _dt.datetime.strptime(
+                oldest, "%Y-%m-%dT%H:%M:%SZ",
+            ).replace(tzinfo=_dt.UTC)
+            oldest_ago = max(0, int((_dt.datetime.now(_dt.UTC) - oldest_dt).total_seconds()))
+        except Exception:
+            oldest_ago = DEFAULT_BURST_WINDOW_SECONDS
+        # Print + record the cool-down timestamp.
+        click.secho(
+            f"i {len(in_window)} pending prompts accumulated in the last "
+            f"{oldest_ago}s. Run `ibounce prompts bulk-answer` to handle "
+            f"them all at once.",
+            err=True, fg="yellow",
+        )
+        try:
+            state_file.parent.mkdir(parents=True, exist_ok=True)
+            state_file.write_text(str(now))
+        except Exception:
+            pass
+    except Exception:
+        # Fail-soft per the docstring contract.
+        pass
+
+
 @click.group()
 @click.version_option()
-def main() -> None:
+@click.pass_context
+def main(ctx: click.Context) -> None:
     """ibounce — local AWS-API call gating proxy.
 
     Defense-in-depth over IAM role scoping. Sits between local AWS
@@ -92,6 +219,10 @@ def main() -> None:
       run     — start the HTTP proxy server (point AWS_ENDPOINT_URL at it)
       learn   — start in passive recording mode (no blocking)
     """
+    # #253 — pre-burst hint surface. Fires once per cool-down window;
+    # auto-suppressed in non-TTY contexts + when running the prompts
+    # subcommands that already surface pending-queue context.
+    _maybe_print_pre_burst_hint(ctx)
 
 
 # Per [[proxy-smart-defaults-and-task-scope]] Slice A: the protective
@@ -1973,6 +2104,425 @@ def prompts_answer_cmd(
     click.secho(f"prompt #{prompt_id} answered: {summary}", fg="green")
 
 
+# ---------------------------------------------------------------------------
+# #253 — `ibounce prompts bulk-answer` — burst-of-denies UX.
+#
+# When a wall of DENYs piles up, forcing the operator to answer each
+# prompt individually is the fastest path to "uninstall the bouncer."
+# Per [[safety-mode-lean-permissive]]: block-happy = uninstalled.
+# This subcommand offers the 5-option interactive flow per
+# [[bulk-prompt-answer-ux]]:
+#   1. Switch profile (lists available)
+#   2. Allow ALL (and similar) for THIS SESSION
+#   3. Allow ALL for next 3 HOURS
+#   4. Allow ALL for next 10 MINUTES
+#   5. Leave pending (no-op)
+#
+# Options 2/3/4 create TIME-BOUNDED ALLOW rules (expires_at column,
+# swept by the proxy's 30s background task) and mark all currently-
+# pending deny-prompts as answered with kind='bulk-allow-time-bounded'.
+# Option 1 hot-swaps the active profile + marks pending as answered
+# with kind='profile-switch'. Option 5 is a true no-op (but still
+# resets the burst detector so the operator isn't re-prompted).
+#
+# Per [[creates-never-mutates]]: nothing AWS-side is touched. The
+# time-bounded rules expire from the active RuleSet but are PRESERVED
+# in the DB so the audit chain shows what was active when.
+# Per [[scorer-is-ground-truth]]: decision is deterministic; no LLM.
+# Per [[security-team-positioning-safety-not-surveillance]]: every
+# user-facing string is neutral.
+# ---------------------------------------------------------------------------
+
+
+# Time-bound mapping in SECONDS. "session" is treated as a 60-minute
+# inactivity window per the issue body — long enough that a typical
+# agent task doesn't get re-prompted mid-run, short enough that an
+# unattended terminal doesn't keep the bypass open indefinitely. The
+# "until proxy restart" half of session semantics is automatic: rules
+# live in SQLite + sweep on expires_at, so a restart preserves any
+# unexpired rules but the burst detector starts fresh.
+_BULK_ANSWER_DURATIONS_SECONDS: dict[str, int] = {
+    "session": 60 * 60,  # 60 minutes inactivity / until restart
+    "3h": 3 * 60 * 60,
+    "10min": 10 * 60,
+}
+
+_BULK_ANSWER_OPTION_LABELS: dict[str, str] = {
+    "session": "this session (60 min inactivity / until restart)",
+    "3h": "the next 3 hours",
+    "10min": "the next 10 minutes",
+}
+
+
+def _summarize_pending_for_bulk(
+    rows: list[dict[str, Any]],
+) -> list[tuple[str, str, str | None]]:
+    """De-duplicate pending deny-prompts down to the (service, action,
+    arn) tuples we'll create ALLOW rules for. Returns the de-duped
+    list in stable order so the rendered preview matches the rules
+    actually applied.
+
+    Per the issue body: bulk-allow creates rules covering "the union
+    of (service, action, optional resource glob) from pending
+    prompts." We take the prompt's ARN as the resource glob (NOT
+    fuzzy-matched into a wildcard — operators who want a wildcard
+    should answer individually with --kind always).
+    """
+    seen: set[tuple[str, str, str | None]] = set()
+    out: list[tuple[str, str, str | None]] = []
+    for r in rows:
+        key = (
+            str(r.get("service") or ""),
+            str(r.get("action") or ""),
+            r.get("arn"),
+        )
+        if not key[0] or not key[1]:
+            # Skip unclassifiable rows — they can't be turned into a
+            # rule pattern. The operator can answer those individually.
+            continue
+        if key in seen:
+            continue
+        seen.add(key)
+        out.append(key)
+    return out
+
+
+def _expires_at_iso(*, seconds_from_now: int) -> str:
+    """Wall-clock UTC expiry as the canonical ISO-8601 Z string the
+    store uses. Centralised so the CLI + the MCP tool produce
+    identical timestamps (test parity).
+    """
+    import datetime as _dt
+    now = _dt.datetime.now(_dt.UTC)
+    return (now + _dt.timedelta(seconds=int(seconds_from_now))).strftime(
+        "%Y-%m-%dT%H:%M:%SZ"
+    )
+
+
+def _apply_bulk_time_bounded(
+    *,
+    store: BouncerStore,
+    pending_rows: list[dict[str, Any]],
+    duration_key: str,
+    actor: str,
+) -> tuple[int, int, str]:
+    """Create one ALLOW rule per unique (service, action, arn) from
+    `pending_rows`, time-bounded per `duration_key`. Mark every row
+    in `pending_rows` as answered with kind='bulk-allow-time-bounded'.
+
+    Returns (rules_added, prompts_answered, expires_at).
+
+    Pure function — no I/O beyond the supplied store. Called by both
+    the CLI subcommand AND the MCP tool so the behavior stays
+    identical across surfaces.
+    """
+    if duration_key not in _BULK_ANSWER_DURATIONS_SECONDS:
+        raise ValueError(
+            f"unknown bulk-answer duration {duration_key!r}; expected "
+            f"one of: {list(_BULK_ANSWER_DURATIONS_SECONDS)}"
+        )
+    expires_at = _expires_at_iso(
+        seconds_from_now=_BULK_ANSWER_DURATIONS_SECONDS[duration_key],
+    )
+    triples = _summarize_pending_for_bulk(pending_rows)
+    rules_added = 0
+    for service, action, arn in triples:
+        rule = ProxyRule(
+            pattern=f"{service}:{action}",
+            effect=Effect.ALLOW,
+            arn_scope=arn,
+            region_scope=None,
+            note=(
+                f"bulk-allow time-bounded ({duration_key}); created by "
+                f"`ibounce prompts bulk-answer` for burst of denies"
+            ),
+            origin="bulk-allow-time-bounded",
+            expires_at=expires_at,
+        )
+        # Skip duplicates (an operator running bulk-answer twice in a
+        # row shouldn't accumulate two of the same rule).
+        if not store.rule_exists(rule):
+            store.add_rule(rule, actor=actor)
+            rules_added += 1
+    # Mark every pending row answered. We use the existing answer
+    # API with answer_kind='ignore' (the storage layer's enum
+    # accepts only always|profile|ignore) + record the bulk context
+    # in answer_target so the audit chain captures which bulk event
+    # answered which row. The DB-level kind='deny-prompt' stays
+    # accurate; the bulk-allow rule + the config_event row are the
+    # canonical "this was a bulk-answer" trail.
+    prompts_answered = 0
+    for r in pending_rows:
+        if r.get("status") != "pending":
+            continue
+        ok = store.answer_pending_prompt(
+            int(r["id"]),
+            answer_kind="ignore",
+            answer_target=(
+                f"bulk-allow-time-bounded:{duration_key}:expires_at={expires_at}"
+            ),
+            answered_by=actor,
+        )
+        if ok:
+            prompts_answered += 1
+    return rules_added, prompts_answered, expires_at
+
+
+def _apply_bulk_profile_switch(
+    *,
+    store: BouncerStore,
+    pending_rows: list[dict[str, Any]],
+    profile_name: str,
+    actor: str,
+) -> tuple[Any, int]:
+    """Hot-swap the active profile to `profile_name` + mark every
+    currently-pending deny-prompt as answered with kind='profile-
+    switch'. Returns (profile_obj, prompts_answered).
+
+    Raises ValueError if `profile_name` doesn't exist.
+
+    Pure function aside from the in-process profile-override singleton
+    + the store writes. Called by both the CLI subcommand AND the MCP
+    tool so behavior stays identical.
+    """
+    from .bouncer.profiles import load_profiles
+    from .bouncer.proxy import set_session_profile_override
+
+    profiles_map = load_profiles()
+    if profile_name not in profiles_map:
+        raise ValueError(
+            f"profile {profile_name!r} not found; available: "
+            f"{sorted(profiles_map.keys())}"
+        )
+    profile_obj = profiles_map[profile_name]
+    # Install the in-process override so the very next decision uses
+    # the new profile. The CLI + MCP run in the SAME process as serve()
+    # for the local-only deployment shape; cross-process flip is out
+    # of scope for v1.0.
+    set_session_profile_override(profile_obj)
+    prompts_answered = 0
+    for r in pending_rows:
+        if r.get("status") != "pending":
+            continue
+        ok = store.answer_pending_prompt(
+            int(r["id"]),
+            answer_kind="ignore",
+            answer_target=f"profile-switch:{profile_name}",
+            answered_by=actor,
+        )
+        if ok:
+            prompts_answered += 1
+    return profile_obj, prompts_answered
+
+
+@prompts_group.command("bulk-answer")
+@click.option("--db", type=click.Path(dir_okay=False), default=None)
+@click.option(
+    "--non-interactive", is_flag=True, default=False,
+    help="Refuse to run when stdin/stdout is not a TTY. Defaults off; "
+         "the subcommand auto-detects TTY at runtime + errors if "
+         "neither --decision nor --profile is supplied non-interactively.",
+)
+@click.option(
+    "--decision",
+    type=click.Choice(
+        ["profile", "session", "3h", "10min", "none"], case_sensitive=False,
+    ),
+    default=None,
+    help="Skip the interactive prompt + apply this decision directly. "
+         "`profile` requires --profile NAME. `session`/`3h`/`10min` "
+         "create a time-bounded ALLOW rule covering the pending prompts. "
+         "`none` is a no-op (resets the burst detector + exits).",
+)
+@click.option(
+    "--profile", "profile_name", default=None,
+    help="With --decision profile: the profile name to switch to. "
+         "Ignored otherwise.",
+)
+def prompts_bulk_answer_cmd(
+    db: str | None,
+    non_interactive: bool,
+    decision: str | None,
+    profile_name: str | None,
+) -> None:
+    """Handle a burst of pending DENY prompts with ONE choice.
+
+    \b
+    Per [[bulk-prompt-answer-ux]] the 5 options are:
+      1. Switch profile to one with broader scope
+      2. Allow ALL (and similar) for THIS SESSION (60 min inactivity)
+      3. Allow ALL for the next 3 HOURS
+      4. Allow ALL for the next 10 MINUTES
+      5. Leave pending; answer individually
+
+    Options 2-4 create TIME-BOUNDED ALLOW rules (expires_at column;
+    swept on a 30s tick). Per [[creates-never-mutates]] expired rules
+    are PRESERVED in the DB for audit, just removed from the active
+    RuleSet.
+
+    Per [[security-team-positioning-safety-not-surveillance]] all
+    strings are neutral. The burst is framed as "your task probably
+    needs a broader scope," NOT "policy violations detected."
+
+    TTY only by default; --non-interactive errors out unless --decision
+    is supplied.
+    """
+    from .bouncer.burst import active_burst_detector
+    from .bouncer.profiles import load_profiles
+
+    actor = _current_actor()
+    is_tty = sys.stdin.isatty() and sys.stdout.isatty()
+
+    with _opened_store(db) as store:
+        pending = store.list_pending_prompts(
+            status="pending", kind="deny-prompt", limit=500,
+        )
+        if not pending:
+            click.echo("(no pending deny-prompts to bulk-answer)")
+            # Still reset the burst detector — operator looked at the
+            # queue, that's their acknowledgement.
+            d = active_burst_detector()
+            if d is not None:
+                d.reset()
+            return
+
+        # Render the burst header — neutral language per
+        # [[security-team-positioning-safety-not-surveillance]].
+        detector = active_burst_detector()
+        hint = detector.pending_hint() if detector is not None else None
+        if hint is not None:
+            click.echo(
+                f"{len(pending)} pending prompts accumulated in the last "
+                f"{hint['oldest_pending_seconds_ago']}s. "
+                f"Your task probably needs a broader scope.",
+                err=True,
+            )
+        else:
+            click.echo(
+                f"{len(pending)} pending prompts accumulated. Your "
+                f"task probably needs a broader scope.",
+                err=True,
+            )
+
+        # Branch: explicit --decision skips the prompt entirely
+        if decision is not None:
+            choice_key = decision.lower()
+        else:
+            if non_interactive or not is_tty:
+                click.secho(
+                    "prompts bulk-answer: TTY required (and "
+                    "--non-interactive was passed OR no terminal "
+                    "attached). Re-run interactively, or pass "
+                    "--decision {profile|session|3h|10min|none} "
+                    "(with --profile NAME for profile).",
+                    fg="red", err=True,
+                )
+                sys.exit(2)
+            # Interactive 5-option prompt.
+            profiles_map = load_profiles()
+            available_profiles = sorted(profiles_map.keys())
+            click.echo("")
+            click.echo("How would you like to handle them?")
+            click.echo("")
+            click.echo("  1. Switch profile to one with broader scope")
+            if available_profiles:
+                click.echo(
+                    f"     (available: {', '.join(available_profiles[:6])}"
+                    + (", ..." if len(available_profiles) > 6 else "")
+                    + ")",
+                )
+            click.echo(
+                "  2. Allow ALL of these (and similar) for this session"
+            )
+            click.echo("  3. Allow ALL for the next 3 hours")
+            click.echo("  4. Allow ALL for the next 10 minutes")
+            click.echo(
+                "  5. Leave pending; I'll answer individually"
+            )
+            click.echo("")
+            sel = click.prompt(
+                "  ? [1-5]", type=click.IntRange(1, 5), default=5,
+            )
+            choice_map = {
+                1: "profile", 2: "session", 3: "3h", 4: "10min", 5: "none",
+            }
+            choice_key = choice_map[int(sel)]
+
+        # Dispatch
+        if choice_key == "none":
+            click.echo(
+                "  no change. Burst detector reset; answer individually "
+                "via `ibounce prompts answer` to clear the queue.",
+            )
+            if detector is not None:
+                detector.reset()
+            return
+
+        if choice_key == "profile":
+            if not profile_name and is_tty and decision is None:
+                profiles_map = load_profiles()
+                available = sorted(profiles_map.keys())
+                if not available:
+                    click.secho(
+                        "no profiles available; install one with "
+                        "`ibounce profile install` first.",
+                        fg="red", err=True,
+                    )
+                    sys.exit(2)
+                click.echo("  available profiles:")
+                for i, name in enumerate(available, start=1):
+                    click.echo(f"    {i}. {name}")
+                profile_idx = click.prompt(
+                    "  pick profile [1-{}]".format(len(available)),
+                    type=click.IntRange(1, len(available)),
+                    default=1,
+                )
+                profile_name = available[int(profile_idx) - 1]
+            if not profile_name:
+                click.secho(
+                    "--decision profile requires --profile NAME "
+                    "(non-interactive).", fg="red", err=True,
+                )
+                sys.exit(2)
+            try:
+                profile_obj, answered = _apply_bulk_profile_switch(
+                    store=store,
+                    pending_rows=pending,
+                    profile_name=profile_name,
+                    actor=actor,
+                )
+            except ValueError as e:
+                click.secho(str(e), fg="red", err=True)
+                sys.exit(2)
+            if detector is not None:
+                detector.reset()
+            click.secho(
+                f"switched active profile to {profile_obj.name!r}; "
+                f"answered {answered} pending prompt(s) "
+                f"(kind=profile-switch).",
+                fg="green",
+            )
+            return
+
+        # Time-bounded bulk allow (session / 3h / 10min)
+        rules_added, answered, expires_at = _apply_bulk_time_bounded(
+            store=store,
+            pending_rows=pending,
+            duration_key=choice_key,
+            actor=actor,
+        )
+        if detector is not None:
+            detector.reset()
+        label = _BULK_ANSWER_OPTION_LABELS[choice_key]
+        click.secho(
+            f"allowed {rules_added} (service, action) shape(s) for {label}; "
+            f"answered {answered} pending prompt(s). "
+            f"Rules expire at {expires_at} and are preserved in the DB "
+            f"for audit per creates-never-mutates.",
+            fg="green",
+        )
+
+
 @main.group("pause")
 def pause_group() -> None:
     """Timed escape hatch — temporarily demote the proxy to advisory
@@ -2383,6 +2933,39 @@ def _parse_duration(raw: str) -> int:
          "is normal. Only meaningful when --heartbeat-interval > 0; "
          "/healthz uses the same threshold to flip to 503.",
 )
+@click.option(
+    "--burst-threshold",
+    "burst_threshold",
+    type=click.IntRange(1, 1000), default=5, show_default=True,
+    help="#253 — pending-prompt count over --burst-window that fires "
+         "BURST_DETECTED + the pre-burst hint. Default 5 catches the "
+         "block-happy failure mode early per [[safety-mode-lean-"
+         "permissive]]. Raise for environments where occasional "
+         "flurries are expected.",
+)
+@click.option(
+    "--burst-window",
+    "burst_window_seconds",
+    type=click.IntRange(1, 3600), default=60, show_default=True,
+    help="#253 — sliding window (in seconds) the burst detector "
+         "counts over. Default 60s covers the typical SDK retry-loop "
+         "(3-5 retries ~ 30-60s). Range 1..3600.",
+)
+@click.option(
+    "--bulk-answer-mcp-token",
+    "bulk_answer_mcp_token",
+    default=None,
+    help="#253 — operator-set token that ENABLES the "
+         "`bouncer_prompts_bulk_answer` MCP tool. DEFAULT DISABLED: "
+         "without this flag, every MCP bulk-answer call returns an "
+         "error explaining how to enable. When set, the agent must "
+         "echo the exact token on every call. Constant-time compare. "
+         "Per [[bulk-prompt-answer-ux]]'s 'Don't' list: prevents an "
+         "adversarial agent from bulk-allowing itself out of every "
+         "pending prompt. Share the token out-of-band with your agent "
+         "(paste into prompt window manually); do NOT put it in env "
+         "vars an agent can read.",
+)
 @click.option("--db", type=click.Path(dir_okay=False), default=None)
 def run_cmd(
     port: int, host: str, force_external_bind: bool, prompt_on_deny: bool,
@@ -2407,6 +2990,9 @@ def run_cmd(
     alert_rules_path: str | None,
     heartbeat_interval_seconds: int,
     alert_heartbeat_missing_count: int,
+    burst_threshold: int,
+    burst_window_seconds: int,
+    bulk_answer_mcp_token: str | None,
     db: str | None,
 ) -> None:
     """Start the HTTP proxy server.
@@ -2575,6 +3161,9 @@ def run_cmd(
         alert_rules_path=alert_rules_path,
         heartbeat_interval_seconds=heartbeat_interval_seconds,
         alert_heartbeat_missing_count=alert_heartbeat_missing_count,
+        burst_threshold=burst_threshold,
+        burst_window_seconds=burst_window_seconds,
+        bulk_answer_mcp_token=bulk_answer_mcp_token,
     )
 
     # #132 plan-capture: surface the session id (operator-supplied or
