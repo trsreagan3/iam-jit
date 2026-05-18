@@ -3151,6 +3151,49 @@ def _parse_duration(raw: str) -> int:
          "presets.",
 )
 @click.option(
+    "--security-lake-bucket",
+    "security_lake_bucket",
+    default=None,
+    help="#258 — name of the operator-owned S3 bucket that AWS "
+         "Security Lake auto-ingests from. When set, every OCSF event "
+         "is also written as a parquet file at "
+         "`s3://<bucket>/region=<r>/eventday=<YYYYMMDD>/eventhour=<HH>/"
+         "api_activity-<unix-ms>.parquet`. Per [[no-hosted-saas]] the "
+         "bucket lives in the operator's AWS account; iam-jit-the-"
+         "company never receives the data. Requires "
+         "--security-lake-region; honours --security-lake-role-arn if "
+         "set otherwise uses the default AWS credential chain.",
+)
+@click.option(
+    "--security-lake-region",
+    "security_lake_region",
+    default=None,
+    help="#258 — AWS region the Security Lake bucket lives in. Required "
+         "when --security-lake-bucket is set. Becomes the `region=<r>` "
+         "partition key on every parquet file.",
+)
+@click.option(
+    "--security-lake-role-arn",
+    "security_lake_role_arn",
+    default=None,
+    help="#258 — optional IAM role to assume for Security Lake writes "
+         "(STS AssumeRole). When unset the default boto3 credential "
+         "chain is used (env / shared-config / instance role). "
+         "Recommended for cross-account Security Lake deployments where "
+         "the bucket lives in a dedicated security account.",
+)
+@click.option(
+    "--security-lake-rotation-seconds",
+    "security_lake_rotation_seconds",
+    type=click.IntRange(1, 3600), default=300, show_default=True,
+    help="#258 — how often the in-memory parquet batch flushes to S3. "
+         "Default 300 (5 minutes) matches the Security Lake custom-"
+         "source ingest cadence. Lower values mean smaller files + "
+         "faster Security Lake visibility; higher values mean fewer / "
+         "larger files (better Athena scan efficiency). A 10 MiB size "
+         "cap also forces a flush, whichever fires first.",
+)
+@click.option(
     "--alert-rules",
     "alert_rules_path",
     type=click.Path(dir_okay=False),
@@ -3278,6 +3321,10 @@ def run_cmd(
     audit_webhook_preset: str,
     audit_webhook_tags: str,
     audit_webhook_sentinel_table: str,
+    security_lake_bucket: str | None,
+    security_lake_region: str | None,
+    security_lake_role_arn: str | None,
+    security_lake_rotation_seconds: int,
     alert_rules_path: str | None,
     heartbeat_interval_seconds: int,
     alert_heartbeat_missing_count: int,
@@ -3429,6 +3476,25 @@ def run_cmd(
         )
         sys.exit(2)
 
+    # #258 — Security Lake parse-time validation. Bucket without region
+    # is a misconfiguration; fail-fast so the operator fixes it once
+    # rather than seeing a credential probe failure deep in startup.
+    if security_lake_bucket and not security_lake_region:
+        click.secho(
+            "--security-lake-bucket requires --security-lake-region "
+            "(the region becomes the `region=<r>` partition key on every "
+            "parquet file Security Lake ingests).",
+            fg="red", err=True,
+        )
+        sys.exit(2)
+    if security_lake_region and not security_lake_bucket:
+        click.secho(
+            "--security-lake-region requires --security-lake-bucket "
+            "(passing region without a target bucket has no effect).",
+            fg="red", err=True,
+        )
+        sys.exit(2)
+
     # #252 — license + SSRF gates fire HERE (at CLI parse), not in
     # serve(), so the operator sees the error immediately rather than
     # finding it deep in startup logs. Both gates re-validate at
@@ -3532,6 +3598,10 @@ def run_cmd(
         audit_webhook_preset=audit_webhook_preset.lower(),
         audit_webhook_tags=audit_webhook_tags,
         audit_webhook_sentinel_table=audit_webhook_sentinel_table,
+        security_lake_bucket=security_lake_bucket,
+        security_lake_region=security_lake_region,
+        security_lake_role_arn=security_lake_role_arn,
+        security_lake_rotation_seconds=security_lake_rotation_seconds,
         alert_rules_path=alert_rules_path,
         heartbeat_interval_seconds=heartbeat_interval_seconds,
         alert_heartbeat_missing_count=alert_heartbeat_missing_count,
@@ -3671,6 +3741,19 @@ def run_cmd(
                 + preset_extra
                 + (", allow-internal=on" if audit_webhook_allow_internal else "")
                 + ")",
+                err=True,
+            )
+        if security_lake_bucket:
+            # #258 — Security Lake banner. AWS account + caller arn
+            # come from sts:GetCallerIdentity at writer.start(); the
+            # serve() startup logs them again so the operator sees
+            # which identity wrote to S3 (matches the "log AWS account
+            # + role at startup banner" requirement).
+            click.echo(
+                f"audit-export Security Lake: s3://{security_lake_bucket}/ "
+                f"(region={security_lake_region}, "
+                f"role={security_lake_role_arn or '(default-chain)'}, "
+                f"rotation={security_lake_rotation_seconds}s)",
                 err=True,
             )
         # #264 — surface heartbeat state in startup banner. Default is

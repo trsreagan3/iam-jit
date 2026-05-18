@@ -13,6 +13,27 @@ within the same release.
 
 ### Added
 
+- **AWS Security Lake audit-export adapter** (#258) — new
+  `--security-lake-bucket BUCKET --security-lake-region REGION
+  [--security-lake-role-arn ARN] [--security-lake-rotation-seconds N]`
+  flags on `ibounce run` write OCSF v1.1.0 class 6003 events as
+  parquet files into a Security-Lake-compatible S3 bucket layout
+  (`region=<r>/eventday=<YYYYMMDD>/eventhour=<HH>/api_activity-
+  <unix-ms>.parquet`). Per-class in-memory batching with rotation on
+  the configured interval (default 300s) OR a 10 MiB size cap,
+  whichever fires first; `stop()` flushes pending batches
+  synchronously. Credentials via STS AssumeRole when
+  `--security-lake-role-arn` is set, otherwise the default boto3
+  credential chain; refuses to start with a clear error if no
+  credentials are reachable. New `pip install iam-jit[security-lake]`
+  extra brings pyarrow in only when needed. Per
+  `[[cross-product-agent-parity]]` kbouncer + dbounce ship the
+  matching adapter (Go) with byte-identical column set + partition
+  layout. Per `[[no-hosted-saas]]` + `[[self-host-zero-billing-
+  dependency]]` the bucket lives in the operator's AWS account; no
+  iam-jit-the-company traffic. Per `[[creates-never-mutates]]` every
+  S3 operation is `PutObject` only. Documented in
+  `docs/SECURITY-LAKE-INTEGRATION.md`.
 - **Per-session recording + cross-product replay CLI** (#285) — new
   `--record-sessions-dir PATH` flag on `ibounce run` tees every
   audit event into a per-session NDJSON file at

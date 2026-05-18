@@ -294,6 +294,12 @@ _session_mode_override: str | None = None
 # ---------------------------------------------------------------------------
 _audit_log_writer: Any | None = None
 _audit_webhook_pusher: Any | None = None
+# #258 — AWS Security Lake adapter. Same module-level registry shape
+# as the JSONL log + webhook channels above so evaluate_request feeds
+# every wired channel without threading args through every call site.
+# Per [[no-hosted-saas]] the bucket is the operator's; iam-jit-the-
+# company never receives the data.
+_audit_security_lake_writer: Any | None = None
 # #285 — per-session NDJSON tee. Default OFF; the operator opts in via
 # `--record-sessions-dir PATH` on `ibounce run`. When wired, every
 # event the bouncer emits is additionally appended to the per-session
@@ -358,6 +364,14 @@ def register_audit_webhook_pusher(pusher: Any | None) -> None:
     _audit_webhook_pusher = pusher
 
 
+def register_audit_security_lake_writer(writer: Any | None) -> None:
+    """#258 — install the AWS Security Lake parquet writer. Pass None
+    to clear. The writer must already be `writer.start()`-ed before
+    registration so the first event's batch doesn't no-op."""
+    global _audit_security_lake_writer
+    _audit_security_lake_writer = writer
+
+
 def register_session_recorder(recorder: Any | None) -> None:
     """#285 — install the per-session NDJSON recorder. Pass None to
     clear. The recorder must already be `recorder.start()`-ed before
@@ -397,6 +411,15 @@ def _emit_audit_event_raw(event: dict) -> None:
             _audit_webhook_pusher.push(event)
         except Exception as e:
             logger.warning("audit webhook pusher enqueue failed: %s", e)
+    # #258 — AWS Security Lake parquet writer. In-memory append; the
+    # background rotator flushes per the rotation interval / size cap.
+    # Fail-soft so a credential rotation failure on the writer's worker
+    # never raises into the proxy hot path.
+    if _audit_security_lake_writer is not None:
+        try:
+            _audit_security_lake_writer.write(event)
+        except Exception as e:
+            logger.warning("audit security-lake writer enqueue failed: %s", e)
     # #285 — per-session NDJSON tee. Synchronous (one append + no
     # network); fail-soft like every other emitter so a disk-full state
     # never raises into the proxy hot path.
@@ -543,6 +566,10 @@ def audit_export_status() -> dict[str, Any]:
         webhook_status = _audit_webhook_pusher.status()
     else:
         webhook_status = {"configured": False}
+    if _audit_security_lake_writer is not None:
+        security_lake_status = _audit_security_lake_writer.status()
+    else:
+        security_lake_status = {"configured": False}
     if _audit_rule_engine is not None:
         engine_status = _audit_rule_engine.status()
     else:
@@ -562,6 +589,7 @@ def audit_export_status() -> dict[str, Any]:
     return {
         "log": log_status,
         "webhook": webhook_status,
+        "security_lake": security_lake_status,
         # Convenience aggregates so an agent can answer "are we losing
         # events?" with a single field read instead of summing two.
         "total_events": (
@@ -1069,6 +1097,19 @@ class ProxyConfig:
     This prevents an adversarial agent from bulk-allowing itself out
     of every pending prompt — which would invert the whole point of
     the prompt UX. Per [[bulk-prompt-answer-ux]]'s "Don't" list."""
+
+    # #258 — AWS Security Lake adapter (Channel 4). All fields OFF
+    # by default. Per [[no-hosted-saas]] + [[self-host-zero-billing-
+    # dependency]] the bucket lives in the operator's AWS account;
+    # iam-jit-the-company never receives the data. The adapter
+    # writes OCSF events as parquet files into the Security-Lake-
+    # compatible S3 layout (region=<r>/eventday=<YYYYMMDD>/
+    # eventhour=<HH>/api_activity-<unix-ms>.parquet); Security Lake
+    # auto-ingests via its custom-source crawler.
+    security_lake_bucket: str | None = None
+    security_lake_region: str | None = None
+    security_lake_role_arn: str | None = None
+    security_lake_rotation_seconds: int = 300
 
     audit_events_token: str | None = None
     """#271 — bearer token required on GET /audit/events when the
@@ -2750,6 +2791,7 @@ async def serve(config: ProxyConfig, *, store: BouncerStore) -> None:
     audit_webhook_pusher = None
     audit_rule_engine = None
     session_recorder = None
+    audit_security_lake_writer = None
     # #285 — per-session NDJSON recording. Default OFF; only initialised
     # when the operator passed `--record-sessions-dir`. start() is
     # synchronous (matches the recorder's synchronous record() path).
@@ -2779,6 +2821,34 @@ async def serve(config: ProxyConfig, *, store: BouncerStore) -> None:
             "audit-export JSONL log enabled: path=%s fsync=%s",
             config.audit_log_path, config.audit_log_fsync,
         )
+    # #258 — Security Lake adapter. Default OFF; only constructed when
+    # the operator passed --security-lake-bucket. start() probes
+    # credentials (default chain or AssumeRole if --security-lake-role-
+    # arn is set) and refuses to start with a clear error if none are
+    # reachable. Per [[no-hosted-saas]] the bucket lives in the
+    # operator's AWS account; iam-jit-the-company never sees the data.
+    if config.security_lake_bucket:
+        from .audit_export import SecurityLakeWriter
+        audit_security_lake_writer = SecurityLakeWriter(
+            bucket=config.security_lake_bucket,
+            region=config.security_lake_region or "us-east-1",
+            role_arn=config.security_lake_role_arn,
+            rotation_seconds=config.security_lake_rotation_seconds,
+        )
+        audit_security_lake_writer.start()
+        register_audit_security_lake_writer(audit_security_lake_writer)
+        sl_status = audit_security_lake_writer.status()
+        logger.info(
+            "audit-export Security Lake enabled: bucket=%s region=%s "
+            "account=%s caller=%s role_arn=%s rotation=%ss",
+            config.security_lake_bucket,
+            config.security_lake_region,
+            sl_status.get("account_id", ""),
+            sl_status.get("caller_arn", ""),
+            config.security_lake_role_arn or "(default-chain)",
+            config.security_lake_rotation_seconds,
+        )
+
     if config.audit_webhook_url and config.audit_webhook_token:
         from .audit_export import Preset, WebhookPusher
         audit_webhook_pusher = WebhookPusher(
@@ -3076,6 +3146,17 @@ async def serve(config: ProxyConfig, *, store: BouncerStore) -> None:
             except Exception as e:
                 logger.warning("audit-webhook pusher stop failed: %s", e)
             register_audit_webhook_pusher(None)
+        # #258 — Security Lake teardown flushes every pending parquet
+        # batch synchronously (per the spec) so a shutdown doesn't
+        # drop in-memory rows.
+        if audit_security_lake_writer is not None:
+            try:
+                audit_security_lake_writer.stop()
+            except Exception as e:
+                logger.warning(
+                    "audit-export Security Lake writer stop failed: %s", e,
+                )
+            register_audit_security_lake_writer(None)
         if audit_log_writer is not None:
             try:
                 await audit_log_writer.stop()

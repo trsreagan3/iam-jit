@@ -216,6 +216,10 @@ What each setting buys you:
 - `--audit-webhook-url` + `--audit-webhook-token` (different SIEM
   endpoint per deployment; set via flag, env var
   `IAM_JIT_BOUNCER_AUDIT_WEBHOOK_TOKEN`, or `ibounce config import`)
+- `--security-lake-bucket` + `--security-lake-region` (AWS Security
+  Lake target bucket per deployment; see
+  [`SECURITY-LAKE-INTEGRATION.md`](SECURITY-LAKE-INTEGRATION.md) for
+  the cross-product runbook)
 
 **Startup banner** announces the preset + every derived setting so
 the operator sees exactly what changed:
