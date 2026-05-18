@@ -73,6 +73,35 @@ def _reset_pause_lookup_error_counter_for_tests() -> None:
         _pause_lookup_errors_total = 0
 
 
+# #270 Slice 2 — pause-end transition detection. Mirrors the kbounce
+# hot-path observation pattern (commit 82a8ef2): each pause lookup
+# compares the currently-seen pause-id against the LAST id observed.
+# On a transition (last_seen present + current is None OR a different
+# id), the previous pause has just closed (either via `ibounce pause
+# stop` OR via the lazy auto-expiry in _active_pause_locked). We emit
+# a synthetic PAUSE_END event into the rule engine so the pause_long
+# alert rule can evaluate `ext.duration_seconds` against its threshold.
+#
+# Why hot-path detection rather than an explicit emit in `end_pause`?
+# Two reasons:
+#   1. Auto-expiry has no explicit call site — the lazy GC inside
+#      _active_pause_locked is what flips end_kind='expired'. A
+#      hot-path detector catches BOTH explicit stop AND auto-expiry
+#      with one mechanism.
+#   2. The dbounce + kbounce siblings landed this shape (the
+#      observation pattern from the spec) so cross-product behavior
+#      stays parallel — same audit events on the same triggers.
+_last_seen_pause_id_lock = threading.Lock()
+_last_seen_pause: dict[str, Any] | None = None
+
+
+def _reset_last_seen_pause_for_tests() -> None:
+    """Reset hook for tests. Not part of the public surface."""
+    global _last_seen_pause
+    with _last_seen_pause_id_lock:
+        _last_seen_pause = None
+
+
 # ---------------------------------------------------------------------------
 # #203 — synchronous deny-prompt wakeup registry.
 #
@@ -373,6 +402,102 @@ def _emit_audit_event(event: dict) -> None:
             _audit_rule_engine.observe(event)
         except Exception as e:
             logger.warning("audit rule engine observe failed: %s", e)
+
+
+def _observe_pause_transition(current_pause: dict | None) -> None:
+    """#270 Slice 2 — detect a pause-window close (explicit `pause
+    stop` OR auto-expiry detected on a `_active_pause_locked` call)
+    and emit a synthetic PAUSE_END event so the pause_long alert rule
+    can evaluate the closed window's duration against its threshold.
+
+    Compares `current_pause` (what the proxy just looked up) against
+    `_last_seen_pause` (what the previous lookup saw). A close is
+    detected when:
+      * last_seen present AND (current is None OR a different id)
+
+    The pause's duration_seconds is computed from `started_at` to NOW
+    (wall-clock) rather than from `started_at` to `ends_at`. Reason:
+    `ends_at` is the planned expiry; the actual window may have been
+    cut short by an explicit stop. The wall-clock distance from
+    started_at to the detection moment matches the operator's
+    intuition of "how long was the proxy permissive."
+
+    end_kind is derived from the same row when available so the
+    downstream alert event carries the kind the operator's audit log
+    will show (`expired` vs `resumed_early`).
+
+    Fail-soft: any exception inside the emit path is logged + swallowed
+    (same posture as `_emit_audit_event`). The rule engine's re-entry
+    guard handles the case where the emitted event would re-enter
+    observe().
+    """
+    global _last_seen_pause
+    with _last_seen_pause_id_lock:
+        prior = _last_seen_pause
+        # Decide if we observed a close: prior present + (current is
+        # None OR a different id).
+        prior_id = prior.get("id") if isinstance(prior, dict) else None
+        current_id = (
+            current_pause.get("id") if isinstance(current_pause, dict) else None
+        )
+        closed = prior_id is not None and (
+            current_id is None or current_id != prior_id
+        )
+        # Update last-seen BEFORE emitting so a slow / crashing emit
+        # path doesn't cause repeated re-fires on the next lookup.
+        # If we just observed a close + a new pause is now active,
+        # the new pause becomes the next "last seen" — we'll fire
+        # the close detection for IT when IT later closes.
+        _last_seen_pause = current_pause if current_id is not None else None
+        if not closed or not isinstance(prior, dict):
+            return
+        closed_pause = prior
+    # Outside the lock: compute duration + build + emit. Lazy import
+    # keeps the alerts module out of proxy's eager import set (matches
+    # the existing pattern for audit_event_from_decision).
+    try:
+        from .audit_export import make_pause_end_event
+        started_at = closed_pause.get("started_at")
+        try:
+            started_dt = _dt.datetime.fromisoformat(
+                str(started_at).replace("Z", "+00:00")
+            )
+            duration_seconds = int(
+                (_dt.datetime.now(_dt.UTC) - started_dt).total_seconds()
+            )
+            if duration_seconds < 0:
+                duration_seconds = 0
+        except Exception:
+            # Malformed timestamp: fall back to 0 so the event still
+            # emits + the operator sees the close in the audit chain;
+            # pause_long won't fire on duration=0 (which is the
+            # correct outcome on a malformed row).
+            duration_seconds = 0
+        # Re-read the row to pick up end_kind written by either
+        # `end_pause` (resumed_early) OR the lazy GC in
+        # `_active_pause_locked` (expired). We don't have a store
+        # handle here, so we read what we cached at observation time
+        # plus a best-effort post-read; if neither is available we
+        # default to 'resumed_early' as the safer label (an explicit
+        # stop is the more common path).
+        end_kind = str(closed_pause.get("end_kind") or "resumed_early")
+        started_by = str(closed_pause.get("started_by") or "")
+        evt = make_pause_end_event(
+            pause_id=closed_pause.get("id"),
+            duration_seconds=duration_seconds,
+            end_kind=end_kind,
+            started_by=started_by,
+        )
+        _emit_audit_event(evt)
+    except Exception as e:
+        logger.warning("pause-end synthetic emit failed: %s", e)
+
+
+# Imported lazily inside _observe_pause_transition; declared at module
+# scope so the proxy file doesn't pay the import cost when no pause
+# is ever opened. Kept here as a comment so the dependency is visible
+# to grep + greppable in audits.
+# from .audit_export import make_pause_end_event  # noqa
 
 
 def audit_export_status() -> dict[str, Any]:
@@ -1261,6 +1386,13 @@ def evaluate_request(
         # they had opened.
         _bump_pause_lookup_error_counter()
         logger.warning("bouncer-proxy pause-lookup failed: %s", e)
+    # #270 Slice 2 — observe pause-window transitions on every
+    # lookup so the pause_long alert rule sees the close (auto-expiry
+    # OR explicit `pause stop`). No-op when no transition occurred.
+    # Keep this BEFORE the effective-mode demotion below so the
+    # detection sees the same `active_pause` value the rest of the
+    # function consumes.
+    _observe_pause_transition(active_pause)
     effective_mode = mode
     if active_pause is not None and mode == ProxyMode.TRANSPARENT:
         effective_mode = ProxyMode.COOPERATIVE
@@ -1325,6 +1457,36 @@ def evaluate_request(
         ))
     except Exception as e:
         logger.warning("audit-export emit (decision) failed: %s", e)
+
+    # #270 Slice 2 — admin-fallback synthetic. Fires when a request
+    # would have been DENIED in transparent mode but a pause window
+    # is open, so the proxy demoted it to COOPERATIVE + the call
+    # proceeds. The admin_fallback_burst rule counts these in a 5-min
+    # window so the operator sees "your pauses are routinely needed"
+    # as a signal to ship a broader profile rather than rely on the
+    # fallback. Kept here AFTER the decision-event emit so the
+    # decision_id is populated + the alert event can reference it
+    # via the source_decision_id linkage in the rule engine.
+    if (
+        active_pause is not None
+        and mode == ProxyMode.TRANSPARENT
+        and record.decision.value in ("deny", "prompt")
+    ):
+        try:
+            from .audit_export import make_admin_fallback_grant_event
+            # Principal identity is the pause initiator — that's the
+            # operator whose decision (open the window) is being
+            # exercised. Matches the kbounce sibling's actor shape.
+            principal = str(active_pause.get("started_by") or "")
+            _emit_audit_event(make_admin_fallback_grant_event(
+                principal=principal,
+                grant_id=decision_id,
+                mode=mode.value,
+            ))
+        except Exception as e:
+            logger.warning(
+                "audit-export emit (admin_fallback_grant) failed: %s", e,
+            )
 
     # #287 — burst detector observes EVERY transparent-mode DENY,
     # not just the prompt-on-deny path. Pre-fix the burst detector only
@@ -2662,6 +2824,76 @@ async def serve(config: ProxyConfig, *, store: BouncerStore) -> None:
         _rule_expiry_sweeper_loop(), name="ibounce-rule-expiry-sweeper",
     )
 
+    # #270 Slice 2 — pending-audit-events drainer. Profile-install
+    # synthetics enqueue from a separate process (the `ibounce profile
+    # install` CLI invocation has its OWN BouncerStore handle, then
+    # exits); this loop in the serve process picks them up + delivers
+    # them to the rule engine + the JSONL/webhook transports so the
+    # non_org_profile_install rule can fire. Mirrors the dbounce
+    # 24eca0c SQLite-queue pattern. 1s cadence matches the spec.
+    #
+    # No-op when the rule engine is not installed (the drainer still
+    # runs, but observe() is a no-op without a registered engine — the
+    # event still rides the transports if those are wired). Fail-soft:
+    # any error in a single iteration is logged + the loop continues.
+    async def _pending_audit_events_drain_loop() -> None:
+        DRAIN_INTERVAL = 1.0
+        try:
+            while True:
+                await asyncio.sleep(DRAIN_INTERVAL)
+                try:
+                    rows = store.drain_pending_audit_events(limit=100)
+                except Exception as e:
+                    logger.warning(
+                        "ibounce pending-audit-events drain query "
+                        "failed: %s", e,
+                    )
+                    continue
+                if not rows:
+                    continue
+                # Import inside the loop to keep the alerts module
+                # out of serve()'s eager-import set when no events
+                # ever land — matches the lazy-import pattern used in
+                # evaluate_request for audit_event_from_decision.
+                import json as _json_local
+                from .audit_export import make_profile_install_event
+                from .audit_export.alerts import EVENT_TYPE_PROFILE_INSTALL
+                for row in rows:
+                    try:
+                        if row["event_type"] != EVENT_TYPE_PROFILE_INSTALL:
+                            # Unknown event_type — log + skip. The
+                            # row is already deleted (drain pops),
+                            # so we don't loop on a malformed row
+                            # forever; the operator just sees the
+                            # warning.
+                            logger.warning(
+                                "ibounce pending-audit-events drain: "
+                                "unknown event_type %r; skipping "
+                                "(row id=%s)",
+                                row["event_type"], row["id"],
+                            )
+                            continue
+                        payload = _json_local.loads(row["payload_json"])
+                        evt = make_profile_install_event(
+                            profile_name=str(payload.get("profile_name") or ""),
+                            source_url=str(payload.get("source_url") or ""),
+                            installed_by=str(payload.get("installed_by") or ""),
+                        )
+                        _emit_audit_event(evt)
+                    except Exception as e:
+                        logger.warning(
+                            "ibounce pending-audit-events drain delivery "
+                            "failed for row id=%s: %s",
+                            row.get("id"), e,
+                        )
+        except asyncio.CancelledError:
+            return
+
+    pending_audit_drain_task = asyncio.create_task(
+        _pending_audit_events_drain_loop(),
+        name="ibounce-pending-audit-events-drain",
+    )
+
     # #264 — heartbeat emitter. Default OFF (interval_seconds=0); the
     # operator opts in via --heartbeat-interval. Runs on every tier
     # (Free + Pro + Enterprise); the gap-detection rule that watches
@@ -2751,5 +2983,23 @@ async def serve(config: ProxyConfig, *, store: BouncerStore) -> None:
                 logger.warning("rule-expiry sweeper teardown failed: %s", e)
         except Exception as e:
             logger.warning("rule-expiry sweeper cancel failed: %s", e)
+        # #270 Slice 2 — pending-audit-events drainer teardown. Cancel
+        # AFTER the rule-expiry sweeper for symmetry with the start
+        # order; both are independent and cancelling either first is
+        # safe (no shared state between them).
+        try:
+            pending_audit_drain_task.cancel()
+            try:
+                await pending_audit_drain_task
+            except asyncio.CancelledError:
+                pass
+            except Exception as e:
+                logger.warning(
+                    "pending-audit-events drain teardown failed: %s", e,
+                )
+        except Exception as e:
+            logger.warning(
+                "pending-audit-events drain cancel failed: %s", e,
+            )
         register_burst_detector(None)
         set_bulk_answer_mcp_token(None)

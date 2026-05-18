@@ -68,7 +68,7 @@ class ActiveTaskExistsError(Exception):
     is already active. Caller decides whether to end the existing
     task first or surface the conflict to the agent."""
 
-SCHEMA_VERSION = 10  # v10: #253 — adds expires_at to rules for bulk-prompt-answer time-bounded grants
+SCHEMA_VERSION = 11  # v11: #270 — adds pending_audit_events for cross-process synthetic-event delivery (profile install)
 
 
 def default_db_path() -> pathlib.Path:
@@ -447,6 +447,44 @@ class BouncerStore:
                 )
             except sqlite3.OperationalError:
                 pass
+            # v11 additive migration (#270 — Slice 2 synthetic-event
+            # emitters, profile-install path):
+            #
+            # `ibounce profile install --from URL` runs in a SEPARATE
+            # process from `ibounce serve` (no shared in-process
+            # registry). To get the synthetic PROFILE_INSTALL event
+            # through the rule engine, the install command enqueues a
+            # row here + the serve process drains it on a 1s tick.
+            #
+            # Mirrors the dbounce SQLite-queue pattern (commit 24eca0c).
+            # Additive: existing rows in other tables untouched; FREE-
+            # tier deployments that never use --alert-rules simply leave
+            # this table empty (no drainer registered = no observation).
+            #
+            # `payload_json` carries the OCSF event dict. The drainer
+            # reconstructs it via make_profile_install_event(...) rather
+            # than json-loading the full event so the wire format stays
+            # under the alerts module's control (NOT the install
+            # command's; the install command only knows what it has,
+            # never what an alert event LOOKS like). Each row has the
+            # minimum fields the builder needs.
+            #
+            # Indexed by id (PRIMARY KEY) so the drainer's "next batch"
+            # query is O(log n). No additional index needed — the
+            # drainer is FIFO + cleans rows as it goes, so the table
+            # stays tiny in normal operation.
+            self._conn.executescript(
+                """
+                CREATE TABLE IF NOT EXISTS pending_audit_events (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    enqueued_at TEXT NOT NULL,
+                    event_type TEXT NOT NULL,
+                    payload_json TEXT NOT NULL
+                );
+                CREATE INDEX IF NOT EXISTS idx_pending_audit_events_enqueued_at
+                    ON pending_audit_events(enqueued_at);
+                """
+            )
             cur = self._conn.execute("SELECT version FROM schema_version LIMIT 1")
             row = cur.fetchone()
             if row is None:
@@ -1047,6 +1085,107 @@ class BouncerStore:
             }
             for r in rows
         ]
+
+    # -----------------------------------------------------------------
+    # Pending audit events (#270 Slice 2 — cross-process synthetic-event
+    # queue used by `ibounce profile install` to hand a PROFILE_INSTALL
+    # event off to the `ibounce serve` process's rule engine).
+    #
+    # Mirrors the dbounce SQLite-queue pattern (commit 24eca0c). The
+    # install command (separate process) enqueues; serve's 1s drainer
+    # picks up + delivers to RuleEngine.observe + deletes the row.
+    # -----------------------------------------------------------------
+
+    def enqueue_pending_audit_event(
+        self,
+        *,
+        event_type: str,
+        payload_json: str,
+    ) -> int:
+        """Append a synthetic audit event for the serve process's
+        drainer to pick up. `payload_json` carries the minimum fields
+        the alert-event builder needs (e.g. profile_name + source_url
+        + installed_by for PROFILE_INSTALL) — NOT the full OCSF event
+        (that's the alerts module's job to construct, so the wire
+        format stays under one module's control).
+
+        Returns the new row id. Idempotent only by enqueue-time —
+        same caller running twice produces two rows (which is the
+        right behavior: installing the SAME profile twice IS two
+        events).
+        """
+        with self._lock:
+            cur = self._conn.execute(
+                """
+                INSERT INTO pending_audit_events(
+                    enqueued_at, event_type, payload_json
+                ) VALUES (?, ?, ?)
+                """,
+                (
+                    _isoformat_z(_dt.datetime.now(_dt.UTC)),
+                    event_type,
+                    payload_json,
+                ),
+            )
+            return int(cur.lastrowid or 0)
+
+    def drain_pending_audit_events(
+        self, *, limit: int = 100,
+    ) -> list[dict[str, Any]]:
+        """Atomically pop up to `limit` oldest rows + return them as
+        a list of dicts (`{id, enqueued_at, event_type, payload_json}`).
+        Used by the serve process's 1s drainer loop.
+
+        The SELECT + DELETE happen inside the same lock so two
+        concurrent drainers (shouldn't happen in normal operation, but
+        defensive) can't deliver the same event twice. SQLite is
+        isolation_level=None (autocommit) so we issue an explicit
+        BEGIN IMMEDIATE to take the write lock for the whole txn.
+        """
+        with self._lock:
+            self._conn.execute("BEGIN IMMEDIATE")
+            try:
+                cur = self._conn.execute(
+                    "SELECT id, enqueued_at, event_type, payload_json "
+                    "FROM pending_audit_events "
+                    "ORDER BY id ASC LIMIT ?",
+                    (int(limit),),
+                )
+                rows = cur.fetchall()
+                if not rows:
+                    self._conn.execute("COMMIT")
+                    return []
+                ids = [int(r[0]) for r in rows]
+                # Delete the picked-up rows in one statement so a
+                # crash between SELECT + DELETE doesn't re-deliver.
+                placeholders = ",".join("?" for _ in ids)
+                self._conn.execute(
+                    f"DELETE FROM pending_audit_events WHERE id IN ({placeholders})",
+                    tuple(ids),
+                )
+                self._conn.execute("COMMIT")
+            except Exception:
+                self._conn.execute("ROLLBACK")
+                raise
+        return [
+            {
+                "id": int(r[0]),
+                "enqueued_at": r[1],
+                "event_type": r[2],
+                "payload_json": r[3],
+            }
+            for r in rows
+        ]
+
+    def count_pending_audit_events(self) -> int:
+        """Diagnostic: how many synthetic events are waiting for the
+        drainer? Exposed for tests + /healthz-style introspection."""
+        with self._lock:
+            cur = self._conn.execute(
+                "SELECT COUNT(*) FROM pending_audit_events"
+            )
+            row = cur.fetchone()
+        return int(row[0]) if row is not None else 0
 
     # -----------------------------------------------------------------
     # Pending prompts (#5 — async deny-prompt UX, v1.0 subset)

@@ -1654,6 +1654,36 @@ def profile_install_cmd(
         _install_one_profile(p, from_url)
         written.append(p.name)
 
+    # #270 Slice 2 — enqueue one PROFILE_INSTALL synthetic per
+    # installed profile so the `ibounce serve` process's drainer
+    # picks them up + the non_org_profile_install alert rule sees
+    # them. Best-effort: a store error here does NOT fail the
+    # install (the profile is already on disk; the audit event is
+    # a visibility-channel feature, per [[audit-export-failure-
+    # visibility]]). Cross-process pattern from dbounce 24eca0c.
+    try:
+        from .bouncer.audit_export.alerts import EVENT_TYPE_PROFILE_INSTALL
+        installer = _current_actor()
+        with _opened_store(None) as audit_store:
+            for name in written:
+                audit_store.enqueue_pending_audit_event(
+                    event_type=EVENT_TYPE_PROFILE_INSTALL,
+                    payload_json=json.dumps({
+                        "profile_name": name,
+                        "source_url": from_url,
+                        "installed_by": installer,
+                        "sha256": actual_sha256,
+                    }),
+                )
+    except Exception as e:
+        # Visible to the operator so a quiet drain failure surfaces
+        # immediately, but not exit-1: the install IS done.
+        click.secho(
+            f"warning: audit-event enqueue failed (the install itself "
+            f"succeeded): {e}",
+            fg="yellow", err=True,
+        )
+
     target = resolve_profiles_path()
     click.secho(
         f"installed {len(written)} profile(s) into {target}:",
