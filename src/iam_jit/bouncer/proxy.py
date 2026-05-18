@@ -549,6 +549,20 @@ class ProxyConfig:
     loopback / link-local IP. Off by default; flipping this is a
     deliberate operator decision for an intranet collector on a
     trusted network segment."""
+    audit_webhook_preset: str = "generic"
+    """#257 — webhook body/headers shape. `generic` (default) is
+    byte-identical to the pre-#257 wire format (Bearer token + NDJSON).
+    `datadog` / `splunk-hec` / `sentinel` are vendor-shaped for
+    one-click SIEM ingest. Same Enterprise license gate fires
+    regardless of preset (per [[audit-webhook-presets]])."""
+    audit_webhook_tags: str = ""
+    """#257 — free-form tag string appended to Datadog `ddtags`.
+    Format: `key:value,key:value`. Ignored by other presets but
+    surfaced in the startup banner for operator clarity."""
+    audit_webhook_sentinel_table: str = "IamJitBouncer"
+    """#257 — name of the Microsoft Sentinel Log Analytics custom
+    table this data lands in. Sent as the `Log-Type` header. Ignored
+    by other presets."""
 
 
 @dataclasses.dataclass
@@ -2030,21 +2044,25 @@ async def serve(config: ProxyConfig, *, store: BouncerStore) -> None:
             config.audit_log_path, config.audit_log_fsync,
         )
     if config.audit_webhook_url and config.audit_webhook_token:
-        from .audit_export import WebhookPusher
+        from .audit_export import Preset, WebhookPusher
         audit_webhook_pusher = WebhookPusher(
             url=config.audit_webhook_url,
             token=config.audit_webhook_token,
             batch_size=config.audit_webhook_batch_size,
             allow_internal=config.audit_webhook_allow_internal,
+            preset=Preset(config.audit_webhook_preset),
+            tags=config.audit_webhook_tags,
+            sentinel_table=config.audit_webhook_sentinel_table,
         )
         await audit_webhook_pusher.start()
         register_audit_webhook_pusher(audit_webhook_pusher)
         # NEVER log the token. Use the masked URL helper.
         from .audit_export.webhook import mask_url_userinfo
         logger.info(
-            "audit-export HTTPS webhook enabled: url=%s batch=%s "
+            "audit-export HTTPS webhook enabled: url=%s preset=%s batch=%s "
             "allow_internal=%s",
             mask_url_userinfo(config.audit_webhook_url),
+            config.audit_webhook_preset,
             config.audit_webhook_batch_size,
             config.audit_webhook_allow_internal,
         )

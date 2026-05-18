@@ -36,6 +36,7 @@ import urllib.parse
 from typing import Any
 
 from .event import audit_dropped_event
+from .presets import Preset, build_request
 
 logger = logging.getLogger(__name__)
 
@@ -284,6 +285,13 @@ class WebhookPusher:
         allow_internal: bool = False,
         max_attempts: int = DEFAULT_MAX_ATTEMPTS,
         timeout_seconds: float = 10.0,
+        # #257 — webhook body/headers shape. `generic` (default) is
+        # byte-identical to the pre-#257 wire format; the other three
+        # presets transform the body for one-click Datadog / Splunk
+        # HEC / Microsoft Sentinel ingest.
+        preset: Preset = Preset.GENERIC,
+        tags: str = "",
+        sentinel_table: str = "IamJitBouncer",
         # For tests: inject a fake aiohttp session. Production callers
         # leave this None + the worker builds its own pooled session.
         _session_factory: Any | None = None,
@@ -303,6 +311,9 @@ class WebhookPusher:
         self.allow_internal = allow_internal
         self.max_attempts = max_attempts
         self.timeout_seconds = timeout_seconds
+        self.preset = preset if isinstance(preset, Preset) else Preset(preset)
+        self.tags = tags
+        self.sentinel_table = sentinel_table
         self._session_factory = _session_factory
         self._sleep = _sleep or asyncio.sleep
         self._queue: asyncio.Queue[dict[str, Any] | None] | None = None
@@ -511,23 +522,24 @@ class WebhookPusher:
         + any other Exception on a transient (5xx, timeout, network)
         for the retry loop to consume."""
         assert self._session is not None
-        # The bearer token lives in the Authorization header. We do
-        # NOT log this header anywhere; the masked-URL is the only
-        # thing that surfaces in error messages.
-        headers = {
-            "Authorization": f"Bearer {self._token}",
-            "Content-Type": "application/json",
-            "User-Agent": "ibounce-audit-export/1.0",
-        }
-        # Wire format: NDJSON (one JSON object per line). Matches the
-        # JSONL log channel so a collector that ingests both can
-        # share a parser. batch_size=1 effectively emits one object
-        # per request.
-        import json as _json
-        body = "\n".join(_json.dumps(e, ensure_ascii=False) for e in batch)
+        # #257 — the preset adapter owns the body + auth-header shape.
+        # The bearer token NEVER appears in any other surface; the
+        # adapter sticks it into exactly the right vendor header
+        # (Authorization Bearer for generic, DD-API-KEY for Datadog,
+        # Authorization Splunk for HEC, Authorization SharedKey for
+        # Sentinel) and nowhere else.
+        url, headers, body = build_request(
+            self.preset,
+            self.url,
+            self._token,
+            batch,
+            tags=self.tags,
+            sentinel_table=self.sentinel_table,
+            product="ibounce",
+        )
         try:
             async with self._session.post(
-                self.url, data=body, headers=headers,
+                url, data=body, headers=headers,
                 timeout=self.timeout_seconds,
             ) as resp:
                 status = resp.status
@@ -565,6 +577,7 @@ class WebhookPusher:
                 "configured": True,
                 "url": mask_url_userinfo(self.url),
                 "token": mask_token(self._token),
+                "preset": self.preset.value,
                 "batch_size": self.batch_size,
                 "queue_maxsize": self.queue_maxsize,
                 "allow_internal": self.allow_internal,

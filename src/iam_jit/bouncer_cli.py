@@ -2304,6 +2304,42 @@ def _parse_duration(raw: str) -> int:
          "network segment. The token is still sent — make sure the "
          "segment is trusted.",
 )
+@click.option(
+    "--audit-webhook-preset",
+    "audit_webhook_preset",
+    type=click.Choice(
+        ["generic", "datadog", "splunk-hec", "sentinel"],
+        case_sensitive=False,
+    ),
+    default="generic", show_default=True,
+    help="#257 — webhook body/headers shape. `generic` (default) is "
+         "byte-identical to the pre-#257 wire format (Bearer + NDJSON). "
+         "`datadog` uses DD-API-KEY + Datadog-overlay fields (service, "
+         "ddsource, ddtags, status, message). `splunk-hec` uses "
+         "`Authorization: Splunk <token>` + event-wrapped NDJSON. "
+         "`sentinel` uses HMAC-SHA256 SharedKey auth for Microsoft "
+         "Sentinel / Log Analytics Workspace ingest. Operator picks "
+         "explicitly — no autodetection from URL (per "
+         "[[audit-webhook-presets]]: silent miswires cause incidents).",
+)
+@click.option(
+    "--audit-webhook-tags",
+    "audit_webhook_tags",
+    default="", show_default=False,
+    help="#257 — extra tags appended to Datadog `ddtags` "
+         "(format: `key:value,key:value`). The default tags "
+         "`product:iam-jit,bouncer:ibounce` are always sent. Ignored "
+         "by `generic` / `splunk-hec` / `sentinel` presets.",
+)
+@click.option(
+    "--audit-webhook-sentinel-table",
+    "audit_webhook_sentinel_table",
+    default="IamJitBouncer", show_default=True,
+    help="#257 — name of the Microsoft Sentinel Log Analytics custom "
+         "table that the events land in. Sent as the `Log-Type` "
+         "header on the Sentinel ingest request. Ignored by other "
+         "presets.",
+)
 @click.option("--db", type=click.Path(dir_okay=False), default=None)
 def run_cmd(
     port: int, host: str, force_external_bind: bool, prompt_on_deny: bool,
@@ -2322,6 +2358,9 @@ def run_cmd(
     audit_webhook_token: str | None,
     audit_webhook_batch_size: int,
     audit_webhook_allow_internal: bool,
+    audit_webhook_preset: str,
+    audit_webhook_tags: str,
+    audit_webhook_sentinel_table: str,
     db: str | None,
 ) -> None:
     """Start the HTTP proxy server.
@@ -2463,6 +2502,9 @@ def run_cmd(
         audit_webhook_token=audit_webhook_token,
         audit_webhook_batch_size=audit_webhook_batch_size,
         audit_webhook_allow_internal=audit_webhook_allow_internal,
+        audit_webhook_preset=audit_webhook_preset.lower(),
+        audit_webhook_tags=audit_webhook_tags,
+        audit_webhook_sentinel_table=audit_webhook_sentinel_table,
     )
 
     # #132 plan-capture: surface the session id (operator-supplied or
@@ -2565,10 +2607,17 @@ def run_cmd(
             )
         if audit_webhook_url:
             from .bouncer.audit_export.webhook import mask_url_userinfo
+            preset_extra = ""
+            if audit_webhook_preset == "datadog" and audit_webhook_tags:
+                preset_extra = f", tags={audit_webhook_tags}"
+            elif audit_webhook_preset == "sentinel":
+                preset_extra = f", table={audit_webhook_sentinel_table}"
             click.echo(
                 f"audit-export HTTPS webhook: "
                 f"{mask_url_userinfo(audit_webhook_url)} "
-                f"(token=***, batch={audit_webhook_batch_size}"
+                f"(preset={audit_webhook_preset}, token=***, "
+                f"batch={audit_webhook_batch_size}"
+                + preset_extra
                 + (", allow-internal=on" if audit_webhook_allow_internal else "")
                 + ")",
                 err=True,

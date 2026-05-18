@@ -48,6 +48,7 @@ from .event import (
     audit_event_from_decision,
 )
 from .log import AuditLogWriter
+from .presets import Preset, build_request
 from .webhook import (
     SSRFRejectedError,
     WebhookLicenseError,
@@ -59,10 +60,12 @@ __all__ = [
     "AUDIT_EVENT_SCHEMA_VERSION",
     "AuditLogWriter",
     "OCSF_SCHEMA_VERSION",
+    "Preset",
     "SSRFRejectedError",
     "WebhookLicenseError",
     "WebhookPusher",
     "audit_dropped_event",
     "audit_event_from_decision",
+    "build_request",
     "validate_webhook_url",
 ]

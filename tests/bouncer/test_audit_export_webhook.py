@@ -433,7 +433,10 @@ async def test_pusher_drops_on_overflow_and_emits_audit_dropped() -> None:
 
     assert session.posts, "worker never POSTed"
     body = session.posts[0]["data"]
+    # #257 — body is now bytes (per the preset adapter contract).
     # NDJSON: split on newline.
+    if isinstance(body, bytes):
+        body = body.decode("utf-8")
     lines = body.split("\n")
     payloads = [json.loads(line) for line in lines]
     # First line is the AUDIT_DROPPED synthetic, OCSF-shaped per
