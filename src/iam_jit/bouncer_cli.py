@@ -2241,6 +2241,69 @@ def _parse_duration(raw: str) -> int:
     help="Override the account-alias surfaced to profile rules. "
          "Keyword targets that include 'account_alias' match this.",
 )
+@click.option(
+    "--audit-log-path",
+    "audit_log_path",
+    type=click.Path(dir_okay=False),
+    default=None,
+    help="#252 Slice 1 (FREE tier) — JSONL audit log destination. One "
+         "JSON object per line; append-only (no rotation built-in — "
+         "point logrotate / Fluent Bit / Vector at the file). Every "
+         "proxy decision is mirrored here in addition to the existing "
+         "SQLite audit log. Unset = no JSONL export.",
+)
+@click.option(
+    "--audit-log-fsync",
+    "audit_log_fsync",
+    is_flag=True, default=False,
+    help="#252 — fsync the JSONL log after every write. Off by default "
+         "for throughput (events sit in the page cache + survive a "
+         "process crash but NOT a kernel/host crash). On for compliance-"
+         "grade durability where every event must hit disk before the "
+         "next decision is recorded. Trade-off: ~10x slower per write "
+         "on rotational media; ~2x on consumer SSD.",
+)
+@click.option(
+    "--audit-webhook-url",
+    "audit_webhook_url",
+    default=None,
+    help="#252 Slice 1 (ENTERPRISE tier — license-gated) — HTTPS URL of "
+         "your audit collector. Every proxy decision is POSTed as NDJSON "
+         "(matches the JSONL log channel). Bounded queue (1000); "
+         "exponential-backoff retry (1s -> 32s, max 5 attempts); "
+         "drop + AUDIT_DROPPED synthetic event on overflow. Per "
+         "[[no-hosted-saas]] iam-jit-the-company NEVER receives this "
+         "traffic; the customer's URL only. Requires --audit-webhook-token.",
+)
+@click.option(
+    "--audit-webhook-token",
+    "audit_webhook_token",
+    default=None,
+    help="#252 — Bearer token sent as 'Authorization: Bearer <token>'. "
+         "NEVER logged. Masked as '***' in /healthz, startup banner, and "
+         "error messages. Set via env var (IAM_JIT_BOUNCER_AUDIT_WEBHOOK_"
+         "TOKEN) or a shell-escaped flag value; avoid putting the literal "
+         "in shell history.",
+)
+@click.option(
+    "--audit-webhook-batch-size",
+    "audit_webhook_batch_size",
+    type=click.IntRange(1, 1000), default=1, show_default=True,
+    help="#252 — events per HTTP POST. Default 1 sends every decision "
+         "individually (lowest latency, highest request rate). Raise for "
+         "high-throughput orgs that prefer fewer, larger requests against "
+         "the collector.",
+)
+@click.option(
+    "--allow-internal-webhook",
+    "audit_webhook_allow_internal",
+    is_flag=True, default=False,
+    help="#252 — opt-out of the SSRF gate that refuses webhook URLs "
+         "resolving to RFC1918 / loopback / .internal / .local hosts. "
+         "Required when shipping to an intranet collector on a trusted "
+         "network segment. The token is still sent — make sure the "
+         "segment is trusted.",
+)
 @click.option("--db", type=click.Path(dir_okay=False), default=None)
 def run_cmd(
     port: int, host: str, force_external_bind: bool, prompt_on_deny: bool,
@@ -2253,6 +2316,12 @@ def run_cmd(
     profile_name: str | None,
     account_id_flag: str | None,
     account_alias_flag: str | None,
+    audit_log_path: str | None,
+    audit_log_fsync: bool,
+    audit_webhook_url: str | None,
+    audit_webhook_token: str | None,
+    audit_webhook_batch_size: int,
+    audit_webhook_allow_internal: bool,
     db: str | None,
 ) -> None:
     """Start the HTTP proxy server.
@@ -2295,6 +2364,50 @@ def run_cmd(
             fg="red", err=True,
         )
         sys.exit(2)
+
+    # #252 Slice 1 — env-var fallback for the webhook token so the
+    # secret never has to appear on the command line / in shell
+    # history. Operators almost always set this via env in real
+    # deployments; the flag exists for tests + one-off scripts.
+    if not audit_webhook_token:
+        audit_webhook_token = os.environ.get(
+            "IAM_JIT_BOUNCER_AUDIT_WEBHOOK_TOKEN", "",
+        ) or None
+
+    # #252 — bail early on contradictory webhook flags. URL without
+    # token (or vice versa) is almost certainly a misconfiguration.
+    if bool(audit_webhook_url) != bool(audit_webhook_token):
+        click.secho(
+            "--audit-webhook-url and --audit-webhook-token must be set "
+            "together (or both unset). Token can also come from "
+            "IAM_JIT_BOUNCER_AUDIT_WEBHOOK_TOKEN env var.",
+            fg="red", err=True,
+        )
+        sys.exit(2)
+
+    # #252 — license + SSRF gates fire HERE (at CLI parse), not in
+    # serve(), so the operator sees the error immediately rather than
+    # finding it deep in startup logs. Both gates re-validate at
+    # serve() time too (defense in depth + handles deployments where
+    # the license file was added between parse and start).
+    if audit_webhook_url:
+        from .bouncer.audit_export.webhook import (
+            SSRFRejectedError, WebhookLicenseError,
+            gate_webhook_license, validate_webhook_url,
+        )
+        try:
+            gate_webhook_license(None)
+        except WebhookLicenseError as e:
+            click.secho(f"audit webhook refused: {e}", fg="red", err=True)
+            sys.exit(2)
+        try:
+            validate_webhook_url(
+                audit_webhook_url,
+                allow_internal=audit_webhook_allow_internal,
+            )
+        except SSRFRejectedError as e:
+            click.secho(f"audit webhook refused: {e}", fg="red", err=True)
+            sys.exit(2)
 
     # #203 — refuse the mutually-exclusive flag combo at parse time.
     # Both flags both try to surface DENYs to the operator, but they
@@ -2344,6 +2457,12 @@ def run_cmd(
         sync_prompt_default_decision=sync_prompt_default.lower(),
         plan_session_id=plan_session_id,
         plan_write_switch_notify=write_switch_notify.lower(),
+        audit_log_path=audit_log_path,
+        audit_log_fsync=audit_log_fsync,
+        audit_webhook_url=audit_webhook_url,
+        audit_webhook_token=audit_webhook_token,
+        audit_webhook_batch_size=audit_webhook_batch_size,
+        audit_webhook_allow_internal=audit_webhook_allow_internal,
     )
 
     # #132 plan-capture: surface the session id (operator-supplied or
@@ -2431,6 +2550,27 @@ def run_cmd(
             )
             click.echo(
                 "      KMS grants for confidentiality)",
+                err=True,
+            )
+        # #252 — surface audit-export channels in the startup banner
+        # so the operator immediately sees that decisions are being
+        # mirrored. The webhook token is MASKED as '***' (per
+        # [[security-team-audit-export]]: the token NEVER appears in
+        # banner / /healthz / log / errors).
+        if audit_log_path:
+            click.echo(
+                f"audit-export JSONL log: {audit_log_path}"
+                + (" (fsync=on)" if audit_log_fsync else ""),
+                err=True,
+            )
+        if audit_webhook_url:
+            from .bouncer.audit_export.webhook import mask_url_userinfo
+            click.echo(
+                f"audit-export HTTPS webhook: "
+                f"{mask_url_userinfo(audit_webhook_url)} "
+                f"(token=***, batch={audit_webhook_batch_size}"
+                + (", allow-internal=on" if audit_webhook_allow_internal else "")
+                + ")",
                 err=True,
             )
         click.echo(

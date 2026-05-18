@@ -243,6 +243,97 @@ ACTIVE_MODE_ENV = "IAM_JIT_BOUNCER_MODE"
 _session_mode_override: str | None = None
 
 
+# ---------------------------------------------------------------------------
+# #252 Slice 1 — audit-export channel registry.
+#
+# Per [[security-team-audit-export]]: every proxy decision is mirrored
+# to one or both of (a) a JSONL log file and (b) an HTTPS webhook.
+# Both channels are async-queued so the proxy hot-path never blocks.
+#
+# This module-level registry lets evaluate_request() emit the event
+# WITHOUT every test having to wire two extra args through (matches
+# the `_session_mode_override` pattern above). The CLI's serve()
+# instantiates the channels at startup and calls register_audit_*();
+# unit tests that exercise evaluate_request directly inject a fake
+# via the same hooks.
+#
+# Per [[ibounce-honest-positioning]]: the audit channel is operator-
+# visibility, NOT adversary defense. An adversarial agent can still
+# bypass the bouncer entirely (per [[bouncer-positioning-locked-iam]]);
+# the audit catches the post-hoc + the BYPASS events.
+# ---------------------------------------------------------------------------
+_audit_log_writer: Any | None = None
+_audit_webhook_pusher: Any | None = None
+
+
+def register_audit_log_writer(writer: Any | None) -> None:
+    """Install the JSONL audit-log writer. Pass None to clear.
+    The writer must already be `await writer.start()`-ed before
+    registration so writes don't silently no-op."""
+    global _audit_log_writer
+    _audit_log_writer = writer
+
+
+def register_audit_webhook_pusher(pusher: Any | None) -> None:
+    """Install the HTTPS audit-webhook pusher. Pass None to clear."""
+    global _audit_webhook_pusher
+    _audit_webhook_pusher = pusher
+
+
+def _emit_audit_event(event: dict) -> None:
+    """Hand `event` to both audit channels if configured. Both calls
+    are non-blocking enqueues (the channels own their own worker
+    tasks). Exceptions are swallowed + logged — the audit channel is
+    a feature, not a hard dependency of correctness; a broken disk
+    should not turn the proxy into a 500-machine.
+    """
+    if _audit_log_writer is not None:
+        try:
+            _audit_log_writer.write(event)
+        except Exception as e:
+            logger.warning("audit log writer enqueue failed: %s", e)
+    if _audit_webhook_pusher is not None:
+        try:
+            _audit_webhook_pusher.push(event)
+        except Exception as e:
+            logger.warning("audit webhook pusher enqueue failed: %s", e)
+
+
+def audit_export_status() -> dict[str, Any]:
+    """Snapshot of both audit-export channels for the MCP status tool.
+
+    Returns a stable shape regardless of which channels are installed
+    so the agent's structured-content consumer can branch on the
+    `configured` flags rather than `KeyError`-ing on missing fields.
+    """
+    if _audit_log_writer is not None:
+        log_status = _audit_log_writer.status()
+    else:
+        log_status = {"configured": False}
+    if _audit_webhook_pusher is not None:
+        webhook_status = _audit_webhook_pusher.status()
+    else:
+        webhook_status = {"configured": False}
+    return {
+        "log": log_status,
+        "webhook": webhook_status,
+        # Convenience aggregates so an agent can answer "are we losing
+        # events?" with a single field read instead of summing two.
+        "total_events": (
+            log_status.get("total_events", 0)
+            + webhook_status.get("total_events", 0)
+        ),
+        "dropped_events": (
+            log_status.get("dropped_events", 0)
+            + webhook_status.get("dropped_events", 0)
+        ),
+        "last_error": (
+            webhook_status.get("last_error")
+            or log_status.get("last_error")
+        ),
+    }
+
+
 def set_session_mode_override(mode: str | None) -> None:
     """Set the in-process active-mode override. Pass None to clear.
 
@@ -426,6 +517,39 @@ class ProxyConfig:
     # Binding externally would silently expose a credential-handling
     # surface to the network.
 
+    # #252 Slice 1 — security-team audit-export transport.
+    # Both channels are OFF by default; the operator opts in via the
+    # CLI flags. The webhook channel is also license-gated at CLI
+    # parse time (see `gate_webhook_license` in audit_export.webhook).
+    audit_log_path: str | None = None
+    """Filesystem path for the JSONL audit log. None disables the
+    channel. Per [[security-team-audit-export]]: append-only; no
+    rotation built in — operators point logrotate / Fluent Bit /
+    Vector at the path."""
+    audit_log_fsync: bool = False
+    """Opt-in fsync after every JSONL write. Off by default for
+    throughput; on for compliance-grade durability. The trade-off is
+    documented in the CLI --help text."""
+    audit_webhook_url: str | None = None
+    """HTTPS URL of the operator's audit collector. None disables
+    the channel. SSRF-gated at start (RFC1918 / loopback /
+    .internal / .local denylist unless --allow-internal-webhook
+    is set)."""
+    audit_webhook_token: str | None = None
+    """Bearer token sent in the Authorization header. NEVER appears
+    in the startup banner / /healthz / log file / error messages —
+    masked as '***' wherever a value would otherwise leak."""
+    audit_webhook_batch_size: int = 1
+    """Number of events per HTTP POST. Default 1 (every-decision);
+    set higher for high-throughput orgs that prefer fewer, larger
+    requests."""
+    audit_webhook_allow_internal: bool = False
+    """Opt-out of the SSRF gate. Required to ship to a hostname
+    that matches an intranet suffix OR resolves to an RFC1918 /
+    loopback / link-local IP. Off by default; flipping this is a
+    deliberate operator decision for an intranet collector on a
+    trusted network segment."""
+
 
 @dataclasses.dataclass
 class RequestObservation:
@@ -567,6 +691,31 @@ def evaluate_request(
             logger.warning(
                 "bouncer-proxy unclassifiable audit-write failed: %s", e,
             )
+        # #252 Slice 1 — mirror the unclassifiable-deny to the
+        # audit-export channels (if configured). Operators want to see
+        # probe/scanner traffic in the audit stream as much as the
+        # SQLite log, since a sudden burst of unclassifiable requests
+        # is a useful signal (port-scan, mis-signed agent, etc).
+        try:
+            from .audit_export import audit_event_from_decision
+            _emit_audit_event(audit_event_from_decision(
+                decision_id=0,
+                mode=mode.value,
+                profile=(
+                    active_profile.name if active_profile is not None else None
+                ),
+                verdict=synthetic.decision.value,
+                reason=synthetic.reason,
+                service="",
+                action="",
+                arn=None,
+                region=None,
+                host=host,
+                upstream=None,
+                enforced=(mode == ProxyMode.TRANSPARENT),
+            ))
+        except Exception as e:
+            logger.warning("audit-export emit (unclassifiable) failed: %s", e)
         return _build_observation(
             method=method, host=host, path=path,
             parsed=None, record=synthetic, mode=mode,
@@ -610,10 +759,36 @@ def evaluate_request(
                 matched_rule=None,
                 reason=prof_verdict.reason,
             )
+            short_circuit_decision_id = 0
             try:
-                store.record_decision(short_circuit, matched_rule_id=None, task_id=None)
+                short_circuit_decision_id = store.record_decision(
+                    short_circuit, matched_rule_id=None, task_id=None,
+                )
             except Exception as e:
                 logger.warning("bouncer-proxy audit-write failed: %s", e)
+            # #252 Slice 1 — mirror profile-fired denies to the
+            # audit-export channels. Profile denies are the operator's
+            # hard floor; security teams especially want these visible
+            # in the audit stream.
+            try:
+                from .audit_export import audit_event_from_decision
+                _emit_audit_event(audit_event_from_decision(
+                    decision_id=short_circuit_decision_id,
+                    mode=mode.value,
+                    profile=active_profile.name,
+                    verdict=short_circuit.decision.value,
+                    reason=short_circuit.reason,
+                    service=parsed.service,
+                    action=parsed.action,
+                    arn=getattr(parsed, "arn", None),
+                    region=parsed.region,
+                    host=host,
+                    upstream=None,
+                    enforced=(mode == ProxyMode.TRANSPARENT),
+                    extra={"decision_source": "profile"},
+                ))
+            except Exception as e:
+                logger.warning("audit-export emit (profile-deny) failed: %s", e)
             return _build_observation(
                 method=method, host=host, path=path,
                 parsed=parsed, record=short_circuit, mode=mode,
@@ -725,6 +900,45 @@ def evaluate_request(
         # don't crash the proxy. (The opt-in-feedback pipeline can
         # report this category when enabled per opt-in-feedback-pipeline.)
         logger.warning("bouncer-proxy audit-write failed: %s", e)
+
+    # #252 Slice 1 — mirror the decision to the audit-export channels
+    # AFTER the SQLite write (so decision_id is populated) and AFTER
+    # the pause-demotion logic (so `enforced` reflects the actual
+    # behavior, not what would have happened without the pause).
+    # Per [[scorer-is-ground-truth]]: NO LLM-derived risk scores get
+    # smuggled into Slice 1 events; the scorer can flag separately.
+    try:
+        from .audit_export import audit_event_from_decision
+        _emit_audit_event(audit_event_from_decision(
+            decision_id=decision_id,
+            mode=effective_mode.value,
+            profile=(
+                active_profile.name if active_profile is not None else None
+            ),
+            verdict=record.decision.value,
+            reason=record.reason,
+            service=parsed.service,
+            action=parsed.action,
+            arn=resolved_arn,
+            region=parsed.region,
+            host=host,
+            upstream=None,
+            enforced=(
+                effective_mode == ProxyMode.TRANSPARENT
+                and record.decision.value in ("deny", "prompt")
+            ),
+            active_pause_id=(
+                active_pause["id"] if active_pause is not None else None
+            ),
+            extra={
+                "matched_rule_id": matched_rule_id,
+                "active_task_id": (
+                    active_task.task_id if active_task is not None else None
+                ),
+            },
+        ))
+    except Exception as e:
+        logger.warning("audit-export emit (decision) failed: %s", e)
 
     # #5 v1.0 (async): if operator opted into prompt-on-deny AND
     # this was a transparent-mode DENY (the only mode where DENY
@@ -1792,6 +2006,49 @@ async def serve(config: ProxyConfig, *, store: BouncerStore) -> None:
     app.router.add_route("GET", "/healthz", healthz_handler)
     app.router.add_route("*", "/{tail:.*}", handler)
 
+    # #252 Slice 1 — bring up the audit-export channels (if any).
+    # Both channels run as background asyncio tasks owned by serve();
+    # the registry hooks (register_audit_log_writer /
+    # register_audit_webhook_pusher) plug them into evaluate_request
+    # without threading args through every callsite. Failures here
+    # are FATAL — if the operator asked for an audit channel and we
+    # can't bring it up (SSRF rejection, license refusal, unwritable
+    # path), serve() should refuse to start rather than silently
+    # running without the channel.
+    audit_log_writer = None
+    audit_webhook_pusher = None
+    if config.audit_log_path:
+        from .audit_export import AuditLogWriter
+        audit_log_writer = AuditLogWriter(
+            path=config.audit_log_path,
+            fsync=config.audit_log_fsync,
+        )
+        await audit_log_writer.start()
+        register_audit_log_writer(audit_log_writer)
+        logger.info(
+            "audit-export JSONL log enabled: path=%s fsync=%s",
+            config.audit_log_path, config.audit_log_fsync,
+        )
+    if config.audit_webhook_url and config.audit_webhook_token:
+        from .audit_export import WebhookPusher
+        audit_webhook_pusher = WebhookPusher(
+            url=config.audit_webhook_url,
+            token=config.audit_webhook_token,
+            batch_size=config.audit_webhook_batch_size,
+            allow_internal=config.audit_webhook_allow_internal,
+        )
+        await audit_webhook_pusher.start()
+        register_audit_webhook_pusher(audit_webhook_pusher)
+        # NEVER log the token. Use the masked URL helper.
+        from .audit_export.webhook import mask_url_userinfo
+        logger.info(
+            "audit-export HTTPS webhook enabled: url=%s batch=%s "
+            "allow_internal=%s",
+            mask_url_userinfo(config.audit_webhook_url),
+            config.audit_webhook_batch_size,
+            config.audit_webhook_allow_internal,
+        )
+
     runner = web.AppRunner(app)
     await runner.setup()
     site = web.TCPSite(runner, config.host, config.port)
@@ -1813,3 +2070,19 @@ async def serve(config: ProxyConfig, *, store: BouncerStore) -> None:
     finally:
         await session.close()
         await runner.cleanup()
+        # Tear down audit-export channels in reverse-install order so
+        # an in-flight webhook send drains before the log writer's fd
+        # closes. We catch + log here so a worker that exits with an
+        # exception doesn't mask the original cancellation.
+        if audit_webhook_pusher is not None:
+            try:
+                await audit_webhook_pusher.stop()
+            except Exception as e:
+                logger.warning("audit-webhook pusher stop failed: %s", e)
+            register_audit_webhook_pusher(None)
+        if audit_log_writer is not None:
+            try:
+                await audit_log_writer.stop()
+            except Exception as e:
+                logger.warning("audit-log writer stop failed: %s", e)
+            register_audit_log_writer(None)

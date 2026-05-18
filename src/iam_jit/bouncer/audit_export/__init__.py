@@ -1,0 +1,64 @@
+"""Security-team audit-export transport (Slice 1 of #252).
+
+Per the `security-team-audit-export` memo: each Bounce product
+gains an audit-export layer that emits every proxy decision to one
+or both of:
+
+  Channel 1 — JSONL log file (FREE; all tiers)
+    `AuditLogWriter` — append-only `O_APPEND|O_CREAT|O_WRONLY`,
+    async-queued, optional fsync. No rotation built-in (operators
+    point logrotate / Fluent Bit / Vector at the file).
+
+  Channel 2 — HTTPS webhook push (ENTERPRISE; license-gated)
+    `WebhookPusher` — bounded queue (default 1000), exponential
+    backoff (1s -> 32s, max 5 attempts), drop + emit synthetic
+    `AUDIT_DROPPED` event on overflow. SSRF gate via
+    `socket.gethostbyname_ex()` + RFC1918/loopback/.internal
+    denylist (mirrors dbounce MED-D8-06 closure). Bearer token
+    auth via `Authorization: Bearer <token>`. The token NEVER
+    appears in startup banner / /healthz / log file / error
+    messages.
+
+The two channels read from the SAME helper (`audit_event_from_decision`
+in `event.py`) so the schema stays in lockstep across the products.
+
+Slice 2 (alerting rules) rides on the same transport — alerts get
+serialized as events with `event_type: SECURITY_ALERT` on the same
+two channels.
+
+Per `ibounce-honest-positioning`: this is operator-visibility for
+security teams, not adversary-defense. An adversarial agent can
+still bypass the bouncer entirely (per `bouncer-positioning-locked-
+iam`); the audit catches the post-hoc + the BYPASS events.
+
+Per `no-hosted-saas`: iam-jit-the-company NEVER receives the
+webhook. The operator points the URL at their own collector
+(Splunk / Datadog / S3 / a custom HTTP sink).
+
+Per `self-host-zero-billing-dependency`: webhook adds no iam-jit
+billing dependency; the customer owns the endpoint + the bandwidth.
+"""
+
+from __future__ import annotations
+
+from .event import (
+    AUDIT_EVENT_SCHEMA_VERSION,
+    audit_event_from_decision,
+)
+from .log import AuditLogWriter
+from .webhook import (
+    SSRFRejectedError,
+    WebhookLicenseError,
+    WebhookPusher,
+    validate_webhook_url,
+)
+
+__all__ = [
+    "AUDIT_EVENT_SCHEMA_VERSION",
+    "AuditLogWriter",
+    "SSRFRejectedError",
+    "WebhookLicenseError",
+    "WebhookPusher",
+    "audit_event_from_decision",
+    "validate_webhook_url",
+]

@@ -1566,6 +1566,25 @@ TOOLS = [
         },
     },
     {
+        "name": "bouncer_audit_export_status",
+        "description": (
+            "#252 Slice 1 — return the live status of the two audit-"
+            "export channels (JSONL log file + HTTPS webhook). Per "
+            "[[security-team-audit-export]] this is the operator-"
+            "visibility surface that lets a security team confirm "
+            "'is iam-jit actually shipping decisions to my collector?' "
+            "without grepping logs. Returns per-channel `configured` "
+            "flag, `total_events`, `dropped_events`, "
+            "`webhook_in_flight`, `last_error`. The webhook token "
+            "is NEVER returned (masked as '***'). Read-only. Safe "
+            "for agents to poll; no side effects."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {},
+        },
+    },
+    {
         "name": "bouncer_pending_sync_prompts",
         "description": (
             "#203 — return the list of currently-WAITING sync deny-"
@@ -2615,6 +2634,22 @@ def _bouncer_pending_sync_prompts_for_mcp(
     return {"waiting": rows, "count": len(rows)}
 
 
+def _bouncer_audit_export_status_for_mcp(
+    args: dict[str, Any],
+) -> dict[str, Any]:
+    """#252 Slice 1 — return the live status of the audit-export
+    channels. Reads the module-level registry on `proxy`; if no
+    channel is configured, the corresponding `configured` flag is
+    False + the counters are zero.
+
+    Per [[security-team-audit-export]]: webhook token NEVER appears
+    in the response — masked as '***' at the source. The masked
+    URL is the only thing that surfaces.
+    """
+    from .bouncer.proxy import audit_export_status
+    return audit_export_status()
+
+
 def _bouncer_active_mode_for_mcp(args: dict[str, Any]) -> dict[str, Any]:
     """Return the bouncer's currently effective mode + provenance.
 
@@ -3627,6 +3662,8 @@ def _handle_request(req: dict[str, Any]) -> dict[str, Any] | None:
             result_payload = _bouncer_plan_session_summary_for_mcp(args)
         elif tool_name == "bouncer_plan_pending_write_prompt":
             result_payload = _bouncer_plan_pending_write_prompt_for_mcp(args)
+        elif tool_name == "bouncer_audit_export_status":
+            result_payload = _bouncer_audit_export_status_for_mcp(args)
         elif tool_name == "bouncer_pending_sync_prompts":
             result_payload = _bouncer_pending_sync_prompts_for_mcp(args)
         elif tool_name == "bouncer_recommend_mode_for_task":
