@@ -1228,14 +1228,18 @@ def test_recommend_save_as_profile_without_name_uses_suggested(
     )
     assert result.exit_code == 0, result.output
     # Audit-cadence: the chosen name was printed to stderr (mixed into
-    # result.output by CliRunner's default mix-stderr).
-    assert "auto-2026-05-17" in result.output
+    # result.output by CliRunner's default mix-stderr). The suggested
+    # name uses TODAY's date (not the seeded decision's date), so
+    # derive it dynamically to stay green across day-rollover in CI.
+    import datetime as _dt
+    today_prefix = f"auto-{_dt.date.today().isoformat()}"
+    assert today_prefix in result.output
     assert "s3" in result.output
     # The profile actually landed in the YAML.
     from iam_jit.bouncer.profiles import load_profiles
     profs = load_profiles()
     auto_named = [
-        n for n in profs if n.startswith("auto-2026-05-17") and "s3" in n
+        n for n in profs if n.startswith(today_prefix) and "s3" in n
     ]
     assert auto_named, f"expected an auto-named profile, got: {list(profs)}"
     chosen_name = auto_named[0]
