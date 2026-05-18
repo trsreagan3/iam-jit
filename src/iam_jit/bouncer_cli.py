@@ -2873,17 +2873,20 @@ def pause_history_cmd(limit: int, db: str | None) -> None:
 
 
 def _parse_duration(raw: str) -> int:
-    """Parse '30m' / '2h' / '90s' into seconds.
+    """Parse '30m' / '2h' / '90s' / '30d' into seconds.
 
     Picks suffix-based parsing rather than something like ISO 8601
-    durations because operators tend to type `30m`, not `PT30M`."""
+    durations because operators tend to type `30m`, not `PT30M`. The
+    `d` suffix is here because #285 session-recording retention runs in
+    days, not hours; we expose it here so every duration-taking surface
+    shares the same parser."""
     if not raw:
         raise click.BadParameter("duration is required")
     s = raw.strip().lower()
-    suffix_map = {"s": 1, "m": 60, "h": 3600}
+    suffix_map = {"s": 1, "m": 60, "h": 3600, "d": 86400}
     if s[-1] not in suffix_map:
         raise click.BadParameter(
-            f"duration {raw!r}: must end in s/m/h (e.g. 30m, 2h, 90s)"
+            f"duration {raw!r}: must end in s/m/h/d (e.g. 30m, 2h, 90s, 7d)"
         )
     try:
         n = int(s[:-1])
@@ -3057,6 +3060,18 @@ def _parse_duration(raw: str) -> int:
          "grade durability where every event must hit disk before the "
          "next decision is recorded. Trade-off: ~10x slower per write "
          "on rotational media; ~2x on consumer SSD.",
+)
+@click.option(
+    "--record-sessions-dir",
+    "record_sessions_dir",
+    type=click.Path(file_okay=False),
+    default=None,
+    help="#285 — per-session NDJSON recording directory. When set, "
+         "every audit event is also written to "
+         "`{dir}/{agent.session_id}.ndjson` (one file per agent "
+         "session). Replayable via `iam-jit session replay <FILE>`. "
+         "File mode 0o600. Default off; the recorder captures agent "
+         "identity + operation details so it ships opt-in.",
 )
 @click.option(
     "--audit-webhook-url",
@@ -3255,6 +3270,7 @@ def run_cmd(
     account_alias_flag: str | None,
     audit_log_path: str | None,
     audit_log_fsync: bool,
+    record_sessions_dir: str | None,
     audit_webhook_url: str | None,
     audit_webhook_token: str | None,
     audit_webhook_batch_size: int,
@@ -3508,6 +3524,7 @@ def run_cmd(
         plan_write_switch_notify=write_switch_notify.lower(),
         audit_log_path=audit_log_path,
         audit_log_fsync=audit_log_fsync,
+        record_sessions_dir=record_sessions_dir,
         audit_webhook_url=audit_webhook_url,
         audit_webhook_token=audit_webhook_token,
         audit_webhook_batch_size=audit_webhook_batch_size,
@@ -3627,6 +3644,16 @@ def run_cmd(
             click.echo(
                 f"audit-export JSONL log: {audit_log_path}"
                 + (" (fsync=on)" if audit_log_fsync else ""),
+                err=True,
+            )
+        # #285 — surface session-recorder state in the startup banner.
+        # Default OFF; only mention when opted in (matches the webhook +
+        # heartbeat banner posture).
+        if record_sessions_dir:
+            click.echo(
+                f"session recorder: {record_sessions_dir} "
+                f"(one .ndjson per agent session; replay via "
+                f"`iam-jit session replay`)",
                 err=True,
             )
         if audit_webhook_url:

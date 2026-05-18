@@ -19,8 +19,18 @@ or both of:
     appears in startup banner / /healthz / log file / error
     messages.
 
-The two channels read from the SAME helper (`audit_event_from_decision`
-in `event.py`) so the schema stays in lockstep across the products.
+  Channel 3 — per-session NDJSON recording (#285; FREE; opt-in)
+    `SessionRecorder` — tees every event into
+    `{dir}/{agent.session_id}.ndjson` so the full per-session
+    transcript is portable + replayable via the cross-product
+    `iam-jit session replay <FILE>` CLI. Files are 0o600;
+    sessions older than the heartbeat threshold (default 5min)
+    are finalised atomically (`.partial` -> `.ndjson`).
+
+The two transport channels (1 + 2) read from the SAME helper
+(`audit_event_from_decision` in `event.py`) so the schema stays in
+lockstep across the products. The recorder consumes those same events
+via the proxy's `_emit_audit_event_raw` tee.
 
 Slice 2 (alerting rules) rides on the same transport — alerts get
 serialized as events with `event_type: SECURITY_ALERT` on the same
@@ -37,6 +47,7 @@ webhook. The operator points the URL at their own collector
 
 Per `self-host-zero-billing-dependency`: webhook adds no iam-jit
 billing dependency; the customer owns the endpoint + the bandwidth.
+The recorder is purely local filesystem; same posture.
 """
 
 from __future__ import annotations
@@ -119,6 +130,21 @@ from .heartbeat import (
 )
 from .log import AuditLogWriter
 from .presets import Preset, build_request
+from .recorder import (
+    DEFAULT_HEARTBEAT_TIMEOUT_SECONDS as RECORDER_HEARTBEAT_TIMEOUT_SECONDS,
+    PARTIAL_SUFFIX as RECORDING_PARTIAL_SUFFIX,
+    RECORDING_FILE_MODE,
+    RECORDING_SCHEMA_VERSION,
+    SessionRecorder,
+    detection_finding_from_session,
+    event_count_by_type,
+    extract_session_id,
+    is_valid_session_id,
+    list_sessions,
+    purge_older_than,
+    read_session,
+    read_session_file,
+)
 from .webhook import (
     SSRFRejectedError,
     WebhookLicenseError,
@@ -167,8 +193,13 @@ __all__ = [
     "KNOWN_ADMIN_ACTION_KINDS",
     "OCSF_SCHEMA_VERSION",
     "Preset",
+    "RECORDER_HEARTBEAT_TIMEOUT_SECONDS",
+    "RECORDING_FILE_MODE",
+    "RECORDING_PARTIAL_SUFFIX",
+    "RECORDING_SCHEMA_VERSION",
     "RuleEngine",
     "SSRFRejectedError",
+    "SessionRecorder",
     "WebhookLicenseError",
     "WebhookPusher",
     "active_agent_session",
@@ -182,18 +213,26 @@ __all__ = [
     "build_request",
     "detect_from_process_tree",
     "detect_from_user_agent",
+    "detection_finding_from_session",
     "emit_admin_action_direct",
     "end_mcp_session",
     "enqueue_admin_action",
+    "event_count_by_type",
+    "extract_session_id",
     "gate_alerts_license",
     "hash_state",
     "heartbeat_status",
+    "is_valid_session_id",
+    "list_sessions",
     "load_alerts_config",
     "make_admin_action_event",
     "make_admin_fallback_grant_event",
     "make_heartbeat_event",
     "make_pause_end_event",
     "make_profile_install_event",
+    "purge_older_than",
+    "read_session",
+    "read_session_file",
     "reset_for_tests",
     "resolve_agent_block",
     "resolve_operator",

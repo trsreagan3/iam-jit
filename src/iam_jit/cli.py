@@ -1706,6 +1706,13 @@ audit_group = register_audit_query_group(main)
 from .cli_audit_stream import register_audit_stream_command  # noqa: E402
 register_audit_stream_command(audit_group)
 
+# #285 — register `iam-jit session replay <FILE>` (cross-product session
+# replay). Lives in its own module so the (small) profile-evaluator
+# imports don't pull into every CLI surface. Mounts under a fresh
+# `session` group sibling to `audit` per the spec.
+from .cli_session_replay import register_session_replay_group  # noqa: E402
+register_session_replay_group(main)
+
 
 if __name__ == "__main__":
     main()

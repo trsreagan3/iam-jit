@@ -294,6 +294,12 @@ _session_mode_override: str | None = None
 # ---------------------------------------------------------------------------
 _audit_log_writer: Any | None = None
 _audit_webhook_pusher: Any | None = None
+# #285 — per-session NDJSON tee. Default OFF; the operator opts in via
+# `--record-sessions-dir PATH` on `ibounce run`. When wired, every
+# event the bouncer emits is additionally appended to the per-session
+# file at `{dir}/{agent.session_id}.ndjson`. Events without a resolvable
+# session_id are silently dropped by the recorder itself.
+_session_recorder: Any | None = None
 # #262 Slice 2 — alert rule engine. Same module-level registry shape
 # as the two transport channels above so evaluate_request feeds it
 # without threading args through every call site. Enterprise-gated
@@ -352,6 +358,14 @@ def register_audit_webhook_pusher(pusher: Any | None) -> None:
     _audit_webhook_pusher = pusher
 
 
+def register_session_recorder(recorder: Any | None) -> None:
+    """#285 — install the per-session NDJSON recorder. Pass None to
+    clear. The recorder must already be `recorder.start()`-ed before
+    registration so the first event's open doesn't no-op."""
+    global _session_recorder
+    _session_recorder = recorder
+
+
 def register_audit_rule_engine(engine: Any | None) -> None:
     """#262 Slice 2 — install the suspicious-activity alert engine.
     Pass None to clear. The engine's `emit` callback should point at
@@ -383,6 +397,14 @@ def _emit_audit_event_raw(event: dict) -> None:
             _audit_webhook_pusher.push(event)
         except Exception as e:
             logger.warning("audit webhook pusher enqueue failed: %s", e)
+    # #285 — per-session NDJSON tee. Synchronous (one append + no
+    # network); fail-soft like every other emitter so a disk-full state
+    # never raises into the proxy hot path.
+    if _session_recorder is not None:
+        try:
+            _session_recorder.record(event)
+        except Exception as e:
+            logger.warning("session recorder enqueue failed: %s", e)
 
 
 def _emit_audit_event(event: dict) -> None:
@@ -946,6 +968,12 @@ class ProxyConfig:
     channel. Per [[security-team-audit-export]]: append-only; no
     rotation built in — operators point logrotate / Fluent Bit /
     Vector at the path."""
+    record_sessions_dir: str | None = None
+    """#285 — per-session NDJSON recording directory. When set, the
+    proxy additionally tees every event into
+    `{dir}/{agent.session_id}.ndjson`. Replayable via the cross-
+    product `iam-jit session replay <FILE>`. Default None = recorder
+    disabled (zero overhead on the hot path)."""
     audit_log_fsync: bool = False
     """Opt-in fsync after every JSONL write. Off by default for
     throughput; on for compliance-grade durability. The trade-off is
@@ -2721,6 +2749,24 @@ async def serve(config: ProxyConfig, *, store: BouncerStore) -> None:
     audit_log_writer = None
     audit_webhook_pusher = None
     audit_rule_engine = None
+    session_recorder = None
+    # #285 — per-session NDJSON recording. Default OFF; only initialised
+    # when the operator passed `--record-sessions-dir`. start() is
+    # synchronous (matches the recorder's synchronous record() path).
+    # Failure is fatal so an operator who asked for recordings sees the
+    # unwritable-dir error immediately rather than post-incident.
+    if config.record_sessions_dir:
+        from .audit_export import SessionRecorder
+        session_recorder = SessionRecorder(
+            dir=config.record_sessions_dir,
+            bouncer_product="ibounce",
+        )
+        session_recorder.start()
+        register_session_recorder(session_recorder)
+        logger.info(
+            "session recorder enabled: dir=%s",
+            config.record_sessions_dir,
+        )
     if config.audit_log_path:
         from .audit_export import AuditLogWriter
         audit_log_writer = AuditLogWriter(
@@ -3036,6 +3082,16 @@ async def serve(config: ProxyConfig, *, store: BouncerStore) -> None:
             except Exception as e:
                 logger.warning("audit-log writer stop failed: %s", e)
             register_audit_log_writer(None)
+        # #285 — session recorder teardown drops the .partial suffix on
+        # every still-open session via atomic rename. Catch + log so a
+        # fd-close failure never masks the cancellation that brought us
+        # here.
+        if session_recorder is not None:
+            try:
+                session_recorder.stop()
+            except Exception as e:
+                logger.warning("session recorder stop failed: %s", e)
+            register_session_recorder(None)
         # #253 — rule-expiry sweeper + burst detector teardown. Cancel
         # the sweeper task FIRST so it doesn't try to write to a torn-
         # down audit channel on its way out. Then clear the burst-

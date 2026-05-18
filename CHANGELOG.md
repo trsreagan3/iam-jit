@@ -13,6 +13,26 @@ within the same release.
 
 ### Added
 
+- **Per-session recording + cross-product replay CLI** (#285) — new
+  `--record-sessions-dir PATH` flag on `ibounce run` tees every
+  audit event into a per-session NDJSON file at
+  `{dir}/{agent.session_id}.ndjson`. Each file carries a `_meta`
+  header (recording_schema_version, session_id, agent_name,
+  bouncer_product, recording_started_at) followed by one OCSF event
+  per line; `.partial` suffix while in-flight, atomically renamed on
+  clean shutdown or heartbeat-timeout finalisation. File mode 0o600.
+  New `ibounce session` subcommand group (`list / show / export /
+  purge`) inspects recordings; new cross-product `iam-jit session
+  replay <FILE>` CLI walks any product's recording with optional
+  `--realtime` timing preservation, `--filter EXPR` (same grammar
+  as #268), `--max-events N`, and `--what-if-profile NAME` that
+  re-evaluates each event against an alternate profile and reports
+  the diff. Documented in `docs/SESSION-REPLAY.md`. Per
+  `[[cross-product-agent-parity]]` kbouncer / dbounce / gbounce
+  ship the matching recorder + subcommands with the same on-disk
+  shape. Per `[[creates-never-mutates]]` the recorder is additive
+  (tees existing events); per `[[self-host-zero-billing-dependency]]`
+  entirely local filesystem.
 - **`ibounce run --preset security-observe`** (#254) — single-flag
   shortcut for the canonical security-team observation deployment
   shape. Equivalent to `--mode transparent --default-policy allow
