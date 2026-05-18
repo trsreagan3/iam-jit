@@ -3223,8 +3223,26 @@ def _parse_duration(raw: str) -> int:
          "Powers the cross-bouncer `iam-jit audit query` CLI that fans "
          "queries across every reachable bouncer in parallel.",
 )
+@click.option(
+    "--preset",
+    "deployment_preset",
+    type=click.Choice(["security-observe"], case_sensitive=False),
+    default=None,
+    help="#254 — single-flag shortcut for a common deployment shape. "
+         "security-observe = transparent mode + JSONL audit + alert rules "
+         "(defaults) + 30s heartbeat. Designed for the security-team "
+         "'gather data first; author profile second' starting shape per "
+         "[[bouncer-mode-selection-for-agents]]. Some preset values are "
+         "HARD (e.g. --mode for security-observe — the entire point of "
+         "the preset is transparent); passing them with a different value "
+         "is an error. Others are SOFT (e.g. --audit-log-path); the "
+         "operator's value wins. Startup banner shows which settings are "
+         "derived from the preset.",
+)
 @click.option("--db", type=click.Path(dir_okay=False), default=None)
+@click.pass_context
 def run_cmd(
+    ctx: click.Context,
     port: int, host: str, force_external_bind: bool, prompt_on_deny: bool,
     sync_prompt_on_deny: bool,
     sync_prompt_timeout: int,
@@ -3251,6 +3269,7 @@ def run_cmd(
     burst_window_seconds: int,
     bulk_answer_mcp_token: str | None,
     audit_events_token: str | None,
+    deployment_preset: str | None,
     db: str | None,
 ) -> None:
     """Start the HTTP proxy server.
@@ -3271,8 +3290,76 @@ def run_cmd(
     import asyncio as _asyncio
 
     from .bouncer.decisions import DefaultPolicy
+    from .bouncer.deployment_presets import (
+        PresetOverrideError, apply_preset, format_banner, get_preset,
+    )
     from .bouncer.profiles import load_profiles, resolve_active_profile
     from .bouncer.proxy import ProxyConfig, ProxyMode, serve
+
+    # #254 — deployment preset resolution. Runs FIRST so the downstream
+    # validation gates see the preset-resolved values, not the raw
+    # operator input. HARD-override conflicts (e.g. --preset security-
+    # observe --mode cooperative) fail-fast here with a clear "drop one
+    # OR the other" message. SOFT overrides flow through: the operator's
+    # value wins. The preset's BANNER lines are stashed for later
+    # printing so they appear after the standard "starting on
+    # http://..." line.
+    preset_banner_lines: list[str] = []
+    if deployment_preset:
+        _preset = get_preset(deployment_preset.lower(), product="ibounce")
+        if _preset is None:
+            click.secho(
+                f"unknown --preset {deployment_preset!r}; "
+                f"available: security-observe",
+                fg="red", err=True,
+            )
+            sys.exit(2)
+        # Detect which flags the operator explicitly supplied (vs left
+        # at default). Click 8+ exposes parameter sources; sources of
+        # COMMANDLINE / ENVIRONMENT / PROMPT all mean "operator-
+        # supplied" — only DEFAULT / DEFAULT_MAP mean "left at default".
+        from click.core import ParameterSource as _PSource
+        _operator_supplied: dict[str, object] = {}
+        _current_values = {
+            "mode": mode,
+            "default_policy": default_policy,
+            "audit_log_path": audit_log_path,
+            "alert_rules_path": alert_rules_path,
+            "heartbeat_interval_seconds": heartbeat_interval_seconds,
+        }
+        for _k in _current_values:
+            _src = ctx.get_parameter_source(_k)
+            if _src not in (None, _PSource.DEFAULT, _PSource.DEFAULT_MAP):
+                _operator_supplied[_k] = _current_values[_k]
+        try:
+            resolved, derived, skipped = apply_preset(
+                preset=_preset,
+                operator_supplied=_operator_supplied,
+                flag_defaults=_current_values,
+            )
+        except PresetOverrideError as _e:
+            click.secho(str(_e), fg="red", err=True)
+            sys.exit(2)
+        # Rebind the locals that downstream code reads.
+        mode = resolved["mode"]
+        default_policy = resolved["default_policy"]
+        audit_log_path = resolved["audit_log_path"]
+        alert_rules_path = resolved["alert_rules_path"]
+        heartbeat_interval_seconds = resolved["heartbeat_interval_seconds"]
+        # Make sure the preset's default audit-log directory exists
+        # before the audit-export wiring tries to open() the file —
+        # avoids a confusing 'No such file or directory' on first run.
+        if audit_log_path:
+            try:
+                os.makedirs(os.path.dirname(audit_log_path), exist_ok=True)
+            except OSError:
+                # Non-fatal: if the dir is unwritable the JSONL writer
+                # surfaces the error with its own context. We just
+                # didn't pre-create it.
+                pass
+        preset_banner_lines = format_banner(
+            _preset, derived_keys=derived, skipped_keys=skipped,
+        )
 
     # CRIT-32-02 closure: refuse externally-bindable hosts unless the
     # operator explicitly acknowledged. The proxy holds AWS SigV4
@@ -3490,6 +3577,13 @@ def run_cmd(
             f"profile={active_profile.name})",
             err=True,
         )
+        # #254 — preset-derivation banner sits RIGHT AFTER the address
+        # line so the operator immediately sees which settings came
+        # from the preset (vs. their own flags / env). Same format
+        # across all four Bounce products per [[cross-product-agent-
+        # parity]].
+        for _line in preset_banner_lines:
+            click.echo(_line, err=True)
         if active_profile.name not in ("full-user", "none"):
             click.echo(
                 f"  profile: {active_profile.description}",
@@ -5980,6 +6074,230 @@ def restore_cmd(
         click.echo("  row counts:")
         for name in sorted(result.row_counts):
             click.echo(f"    {name:32s} {result.row_counts[name]} rows")
+
+
+# ---------------------------------------------------------------------------
+# `ibounce session ...` — #285 session recording / playback.
+# ---------------------------------------------------------------------------
+
+
+def _default_sessions_dir() -> pathlib.Path:
+    return pathlib.Path.home() / ".iam-jit" / "bouncer" / "sessions"
+
+
+def _format_ts_ms(ms: int | None) -> str:
+    if ms is None:
+        return "-"
+    import datetime as _dt
+
+    try:
+        return (
+            _dt.datetime.fromtimestamp(ms / 1000, tz=_dt.timezone.utc)
+            .replace(microsecond=0)
+            .isoformat()
+            .replace("+00:00", "Z")
+        )
+    except (OverflowError, OSError, ValueError):
+        return "-"
+
+
+@main.group("session")
+def session_group() -> None:
+    """Per-session recording + replay (#285).
+
+    Sessions are recorded into NDJSON files (one per agent session) when
+    the proxy runs with `--record-sessions-dir`. Files are portable +
+    replayable via the cross-product `iam-jit session replay <FILE>`
+    command.
+
+    Per [[creates-never-mutates]]: recording is additive (it tees the
+    existing event stream); these subcommands are read-only over the
+    recording files.
+
+    Per [[self-host-zero-billing-dependency]]: entirely local
+    filesystem; no phone-home.
+
+    File permissions on recording files are 0o600 (owner-read-only) —
+    recordings contain agent identity + operation details.
+    """
+
+
+@session_group.command("list")
+@click.option(
+    "--dir", "dir_path",
+    type=click.Path(file_okay=False), default=None,
+    help="Recordings dir. Defaults to ~/.iam-jit/bouncer/sessions/.",
+)
+@click.option("--json", "as_json", is_flag=True, default=False)
+def session_list_cmd(dir_path: str | None, as_json: bool) -> None:
+    """List recorded sessions with event counts + timestamps."""
+    from .bouncer.audit_export import list_sessions
+
+    target = pathlib.Path(dir_path) if dir_path else _default_sessions_dir()
+    rows = list_sessions(target)
+    if as_json:
+        click.echo(json.dumps(rows, indent=2))
+        return
+    if not rows:
+        click.echo(f"no recordings in {target}")
+        return
+    click.echo(
+        f"{'SESSION_ID':40s} {'AGENT':14s} {'EVENTS':>7s} "
+        f"{'START':22s} {'END':22s}"
+    )
+    for r in rows:
+        sid = r["session_id"]
+        if r.get("is_partial"):
+            sid = sid + " (partial)"
+        click.echo(
+            f"{sid:40s} {r['agent_name']:14s} {r['event_count']:>7d} "
+            f"{_format_ts_ms(r['start_ms']):22s} "
+            f"{_format_ts_ms(r['end_ms']):22s}"
+        )
+
+
+@session_group.command("show")
+@click.argument("session_id")
+@click.option(
+    "--dir", "dir_path",
+    type=click.Path(file_okay=False), default=None,
+)
+@click.option("--json", "as_json", is_flag=True, default=False)
+def session_show_cmd(
+    session_id: str, dir_path: str | None, as_json: bool,
+) -> None:
+    """Print a summary + event-count-by-type for one recording."""
+    from .bouncer.audit_export import (
+        event_count_by_type,
+        read_session,
+    )
+
+    target = pathlib.Path(dir_path) if dir_path else _default_sessions_dir()
+    try:
+        meta, events = read_session(target, session_id)
+    except FileNotFoundError as e:
+        click.secho(str(e), fg="red", err=True)
+        sys.exit(2)
+    except ValueError as e:
+        click.secho(str(e), fg="red", err=True)
+        sys.exit(2)
+    counts = event_count_by_type(events)
+    summary = {
+        "session_id": meta.get("session_id", session_id),
+        "agent_name": meta.get("agent_name"),
+        "bouncer_product": meta.get("bouncer_product"),
+        "recording_schema_version": meta.get("recording_schema_version"),
+        "recording_started_at": meta.get("recording_started_at"),
+        "event_count": len(events),
+        "events_by_activity": counts,
+    }
+    if as_json:
+        click.echo(json.dumps(summary, indent=2))
+        return
+    click.echo(f"session_id:        {summary['session_id']}")
+    click.echo(f"agent_name:        {summary['agent_name']}")
+    click.echo(f"bouncer_product:   {summary['bouncer_product']}")
+    click.echo(f"started_at:        {summary['recording_started_at']}")
+    click.echo(f"schema_version:    {summary['recording_schema_version']}")
+    click.echo(f"event_count:       {summary['event_count']}")
+    if counts:
+        click.echo("events by activity:")
+        for k in sorted(counts):
+            click.echo(f"  {k:32s} {counts[k]}")
+
+
+@session_group.command("export")
+@click.argument("session_id")
+@click.option(
+    "--dir", "dir_path",
+    type=click.Path(file_okay=False), default=None,
+)
+@click.option(
+    "--out", "out_path",
+    type=click.Path(dir_okay=False), required=True,
+    help="Output file. The session is wrapped in an OCSF Detection "
+         "Finding envelope (matches #273 investigate-with-claude "
+         "evidence shape).",
+)
+def session_export_cmd(
+    session_id: str, dir_path: str | None, out_path: str,
+) -> None:
+    """Export a session as an OCSF Detection Finding JSON document."""
+    from .bouncer.audit_export import (
+        detection_finding_from_session,
+        read_session,
+    )
+
+    target = pathlib.Path(dir_path) if dir_path else _default_sessions_dir()
+    try:
+        meta, events = read_session(target, session_id)
+    except FileNotFoundError as e:
+        click.secho(str(e), fg="red", err=True)
+        sys.exit(2)
+    except ValueError as e:
+        click.secho(str(e), fg="red", err=True)
+        sys.exit(2)
+    finding = detection_finding_from_session(meta, events)
+    out = pathlib.Path(out_path)
+    out.parent.mkdir(parents=True, exist_ok=True)
+    out.write_text(json.dumps(finding, indent=2))
+    try:
+        os.chmod(out, 0o600)
+    except OSError:
+        pass
+    click.echo(f"exported session {session_id} -> {out}")
+
+
+@session_group.command("purge")
+@click.option(
+    "--dir", "dir_path",
+    type=click.Path(file_okay=False), default=None,
+)
+@click.option(
+    "--older-than", "older_than", required=True,
+    help="Age threshold (e.g. '30d', '7d', '12h').",
+)
+@click.option(
+    "--dry-run", is_flag=True, default=False,
+    help="List files that would be removed without deleting.",
+)
+def session_purge_cmd(
+    dir_path: str | None, older_than: str, dry_run: bool,
+) -> None:
+    """Remove recordings older than a threshold."""
+    from .bouncer.audit_export import list_sessions, purge_older_than
+
+    seconds = _parse_duration(older_than)
+    target = pathlib.Path(dir_path) if dir_path else _default_sessions_dir()
+    if dry_run:
+        import time as _t
+
+        threshold = _t.time() - seconds
+        rows = list_sessions(target)
+        to_remove = []
+        for r in rows:
+            if r.get("is_partial"):
+                continue
+            try:
+                mtime = pathlib.Path(r["path"]).stat().st_mtime
+            except OSError:
+                continue
+            if mtime < threshold:
+                to_remove.append(r["path"])
+        if not to_remove:
+            click.echo(f"no recordings older than {older_than} in {target}")
+            return
+        click.echo(
+            f"would remove {len(to_remove)} recording(s) older than "
+            f"{older_than}:"
+        )
+        for p in to_remove:
+            click.echo(f"  {p}")
+        return
+    removed = purge_older_than(target, older_than_seconds=seconds)
+    click.echo(f"removed {len(removed)} recording(s) from {target}")
+    for p in removed:
+        click.echo(f"  {p}")
 
 
 def main_deprecated_alias() -> None:

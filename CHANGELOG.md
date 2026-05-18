@@ -13,6 +13,27 @@ within the same release.
 
 ### Added
 
+- **`ibounce run --preset security-observe`** (#254) — single-flag
+  shortcut for the canonical security-team observation deployment
+  shape. Equivalent to `--mode transparent --default-policy allow
+  --audit-log-path ~/.iam-jit/audit/ibounce.jsonl --alert-rules
+  defaults --heartbeat-interval 30`. Designed for the
+  "gather data first; author profile second" starting position per
+  `[[bouncer-mode-selection-for-agents]]` + the cross-product
+  `docs/SECURITY-TEAM-AUDIT-EXPORT.md` memo. HARD override on
+  `--mode` (the entire point of the preset is transparent);
+  passing `--preset security-observe --mode cooperative` errors
+  fast with a clear "drop the preset OR drop the explicit flag"
+  message. SOFT overrides on the audit-log-path / alert-rules /
+  heartbeat-interval / default-policy (operators have different
+  SIEM destinations + tunings). Startup banner names the preset +
+  every derived setting (with hard/soft annotation). Same preset
+  name + same override semantics ships across `kbounce` /
+  `dbounce` / `gbounce` per `[[cross-product-agent-parity]]`.
+  Framework docs at `docs/DEPLOYMENT-PRESETS.md`; the post-v1.0
+  roadmap (`dev-loop`, `production-strict`, `compliance-audit`)
+  is documented but explicitly NOT shipped in this slice per
+  `[[deliberate-feature-completion]]`.
 - **Cross-product JSON Schema registry** (#276) — published JSON
   Schemas for the four cross-product audit / artifact wire shapes
   every Bounce product emits identically: OCSF v1.1.0 class 6003

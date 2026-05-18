@@ -163,6 +163,76 @@ that call `iam_jit_scope_self_for_task` before touching AWS get
 scoped credentials + an audit log. Agents that bypass the MCP
 composer go through the HTTP proxy instead.
 
+### Security-team observation preset (`--preset security-observe`)
+
+A single-flag shortcut for the canonical "security-team gathering
+data" deployment shape. Designed for the starting position the
+security team takes BEFORE deciding which agent calls to gate (per
+`docs/SECURITY-TEAM-AUDIT-EXPORT.md` + `[[bouncer-mode-selection-
+for-agents]]`).
+
+```
+ibounce run --preset security-observe
+```
+
+is equivalent to the explicit flag bundle:
+
+```
+ibounce run \
+  --mode transparent \
+  --default-policy allow \
+  --audit-log-path ~/.iam-jit/audit/ibounce.jsonl \
+  --alert-rules defaults \
+  --heartbeat-interval 30
+```
+
+What each setting buys you:
+
+| Setting | Why |
+|---|---|
+| `--mode transparent` | Observe + audit; do not enforce rules the team has not yet authored. |
+| `--default-policy allow` | Transparent observation; do not surprise the operator with denies. |
+| `--audit-log-path <default>` | Per-product JSONL stream the security team can ship to a SIEM. |
+| `--alert-rules defaults` | Surfaces the six built-in deterministic alerts (admin_fallback_burst, pause_long, non_org_profile_install, unusual_high_risk_action, heartbeat_gap, audit_export_degraded) on top of the audit stream. |
+| `--heartbeat-interval 30` | Liveness signal so the SIEM detects when the proxy is killed/silenced. |
+
+**Override semantics** (per `[[cross-product-agent-parity]]`):
+
+- **HARD overrides** (preset value cannot be overridden — passing a
+  different value errors with "drop the preset OR drop the explicit
+  flag"):
+  - `--mode` (the entire point of `security-observe` is transparent)
+- **SOFT overrides** (operator's value wins; preset value is the
+  default-only):
+  - `--audit-log-path` (operators have different SIEM destinations)
+  - `--alert-rules` (operators may layer a custom YAML over the
+    built-in defaults)
+  - `--heartbeat-interval` (tune to your SIEM's absence-window)
+  - `--default-policy` (a security team that wants default-deny
+    from day 1 overrides this)
+
+**What the preset does NOT set** (operator wires explicitly):
+
+- `--audit-webhook-url` + `--audit-webhook-token` (different SIEM
+  endpoint per deployment; set via flag, env var
+  `IAM_JIT_BOUNCER_AUDIT_WEBHOOK_TOKEN`, or `ibounce config import`)
+
+**Startup banner** announces the preset + every derived setting so
+the operator sees exactly what changed:
+
+```
+ibounce proxy starting on http://127.0.0.1:8767 (mode=transparent, default-policy=allow, profile=full-user)
+deployment preset: security-observe
+  --mode = 'transparent' (from preset; hard)
+  --audit-log-path = '/Users/<you>/.iam-jit/audit/ibounce.jsonl' (from preset; soft)
+  --alert-rules-path = '' (from preset; soft)
+  --heartbeat-interval-seconds = 30 (from preset; soft)
+  --default-policy = 'allow' (from preset; soft)
+```
+
+See `docs/DEPLOYMENT-PRESETS.md` for the preset framework + the
+roadmap (`dev-loop`, `production-strict`, `compliance-audit`).
+
 ## What's coming in v1.1
 
 - **Synchronous deny prompts** — proxy briefly waits for an
