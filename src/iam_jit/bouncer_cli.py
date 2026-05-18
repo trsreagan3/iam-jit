@@ -5229,6 +5229,262 @@ def diag_group() -> None:
 _add_diagnostics_subcommands(diag_group)
 
 
+# ---------------------------------------------------------------------------
+# backup + restore (#279) — SQLite snapshot + DR restore
+#
+# Two top-level subcommands matching the kbounce + dbounce sibling
+# CLI shape per [[cross-product-agent-parity]]:
+#
+#   ibounce backup --out PATH [--include-audit] [--include-prompts]
+#   ibounce restore --in PATH [--force]
+#
+# Backup is online (`VACUUM INTO` — no shutdown needed). Restore is
+# destructive: gated on schema_version match (HARD), ibounce_version
+# match (soft; --force overrides with warning), destination-empty
+# (unless --force), and a TCP probe of the loopback management port
+# to refuse if `ibounce run` is alive. Both commands emit
+# `backup.create` / `backup.restore` ADMIN_ACTION OCSF rows so a
+# SIEM dashboard sees the snapshot + DR lifecycle.
+# ---------------------------------------------------------------------------
+
+
+@main.command("backup")
+@click.option(
+    "--out", "out_path", type=click.Path(dir_okay=False), default=None,
+    help="Output file path. Default: "
+         "./ibounce-backup-{UTC-timestamp}.db. Parent dirs are "
+         "created on demand.",
+)
+@click.option(
+    "--include-audit", "include_audit", is_flag=True, default=False,
+    help="Include the decisions + config_events + pending_audit_events "
+         "tables in the backup (default: excluded — bulky + often "
+         "redundant after a rotation policy fires).",
+)
+@click.option(
+    "--include-prompts", "include_prompts", is_flag=True, default=False,
+    help="Include the pending_prompts table in the backup (default: "
+         "excluded — prompts are runtime state bound to in-flight "
+         "proxy waiters that won't survive a restore anyway).",
+)
+@click.option(
+    "--db", type=click.Path(dir_okay=False), default=None,
+    help="SQLite source DB path. Default: ~/.iam-jit/bouncer/state.db "
+         "(or $IAM_JIT_BOUNCER_DB).",
+)
+def backup_cmd(
+    out_path: str | None,
+    include_audit: bool,
+    include_prompts: bool,
+    db: str | None,
+) -> None:
+    """Write an online SQLite backup of the ibounce state DB to a file.
+
+    Uses SQLite's VACUUM INTO primitive: the source database is NOT
+    locked, concurrent writers continue uninterrupted, and the
+    destination is an atomic single-file snapshot.
+
+    Default contents EXCLUDE the audit-firehose tables (decisions,
+    config_events, pending_audit_events) and the runtime
+    pending_prompts table — these are bulky / runtime-bound. Pass
+    `--include-audit` or `--include-prompts` to opt in.
+
+    The backup file embeds an ibounce_backup_metadata table carrying:
+    ibounce_version, created_at (RFC3339 UTC), source_hostname_hash
+    (sha256[:12] of the source host's hostname), schema_version,
+    included_audit / included_prompts flags. `ibounce restore` reads
+    this metadata to validate cross-version + cross-schema restores.
+
+    Sibling commands `kbounce backup` (kbouncer) + `dbounce backup`
+    (dbounce) ship the same CLI shape + metadata-table format per
+    [[cross-product-agent-parity]] so one shared tooling layer can
+    target every Bounce.
+
+    Per [[creates-never-mutates]]: backup is READ-ONLY against the
+    source database. Per [[self-host-zero-billing-dependency]]: no
+    network calls.
+    """
+    import pathlib as _pathlib
+
+    from .bouncer.backup import (
+        BackupError,
+        BackupOptions,
+        default_backup_path,
+        emit_backup_create_admin_action,
+        write_backup,
+    )
+
+    resolved_out = (
+        _pathlib.Path(out_path) if out_path else default_backup_path()
+    )
+
+    opts = BackupOptions(
+        out_path=resolved_out,
+        include_audit=include_audit,
+        include_prompts=include_prompts,
+        db_path=db,
+    )
+    try:
+        result = write_backup(opts)
+    except BackupError as e:
+        click.echo(f"ERROR: {e}", err=True)
+        sys.exit(1)
+
+    # Emit the admin-action OCSF row so a security team has a
+    # witness for "who snapshotted state + when?" The store write
+    # is best-effort — a queue failure never fails the user-facing
+    # backup (the file has already landed).
+    with _opened_store(db) as store:
+        emit_backup_create_admin_action(
+            store, result=result, actor=_current_actor(),
+        )
+
+    click.echo(
+        f"wrote ibounce backup to {result.out_path} "
+        f"({result.size_bytes} bytes, sha256={result.sha256})"
+    )
+    click.echo(
+        f"  schema_version={result.schema_version}  "
+        f"ibounce_version={result.ibounce_version}  "
+        f"created_at={result.created_at}"
+    )
+    click.echo(
+        f"  source_hostname_hash={result.source_hostname_hash}  "
+        f"included_audit={result.included_audit}  "
+        f"included_prompts={result.included_prompts}"
+    )
+    if result.row_counts:
+        click.echo("  tables:")
+        for name in sorted(result.row_counts):
+            click.echo(f"    {name:32s} {result.row_counts[name]} rows")
+
+
+@main.command("restore")
+@click.option(
+    "--in", "in_path", type=click.Path(dir_okay=False), required=True,
+    help="Path to the ibounce backup file to restore. Required.",
+)
+@click.option(
+    "--force", is_flag=True, default=False,
+    help="Override the non-empty-destination refusal + the "
+         "ibounce_version-mismatch warning. Does NOT override "
+         "schema_version mismatch (cross-schema migration is the "
+         "future `ibounce migrate` story).",
+)
+@click.option(
+    "--db", type=click.Path(dir_okay=False), default=None,
+    help="Destination SQLite DB path. Default: "
+         "~/.iam-jit/bouncer/state.db (or $IAM_JIT_BOUNCER_DB).",
+)
+@click.option(
+    "--probe-skip", "probe_skip", is_flag=True, default=False,
+    help="Skip the running-process TCP probe. Use only when the "
+         "probe port is held by an unrelated process and you've "
+         "manually verified ibounce is down.",
+)
+@click.option(
+    "--probe-port", "probe_port", type=int, default=None,
+    help="Override the loopback management port the probe dials "
+         "(default 8767 — matches `ibounce run`'s default port).",
+)
+def restore_cmd(
+    in_path: str,
+    force: bool,
+    db: str | None,
+    probe_skip: bool,
+    probe_port: int | None,
+) -> None:
+    """Replace ibounce's state DB with the contents of a backup file.
+
+    Validation gates (all checked BEFORE the destructive copy):
+
+    \b
+      1. Source file exists + opens as a SQLite DB.
+      2. Source carries the ibounce_backup_metadata table.
+      3. schema_version match (HARD; --force does NOT override).
+      4. ibounce_version match (soft; --force overrides with warning).
+      5. Destination database must be empty OR --force.
+      6. ibounce must not be running (TCP probe of loopback port
+         8767). Pass --probe-skip if the port is held by an
+         unrelated process and you've manually verified ibounce
+         is down.
+
+    On success, prints the per-table row counts of the restored
+    database + its sha256 fingerprint.
+
+    Per [[creates-never-mutates]]: restore is the one CLI surface
+    that DOES mutate an existing DB; the destructive verb is gated
+    by the explicit subcommand name + the --force semantics + the
+    running-process probe.
+
+    Cross-product-aligned with kbounce + dbounce per
+    [[cross-product-agent-parity]]: same flag names, same
+    refuse-without-force semantics, same metadata-table shape.
+    """
+    import pathlib as _pathlib
+
+    from .bouncer.backup import (
+        BackupError,
+        DEFAULT_PROBE_PORT,
+        DEFAULT_PROBE_TIMEOUT_SECONDS,
+        IbounceVersionMismatchError,
+        RestoreOptions,
+        emit_backup_restore_admin_action,
+        restore_from,
+    )
+
+    opts = RestoreOptions(
+        in_path=_pathlib.Path(in_path),
+        dest_db_path=db,
+        force=force,
+        probe_port=probe_port if probe_port is not None else DEFAULT_PROBE_PORT,
+        probe_skip=probe_skip,
+        probe_timeout_seconds=DEFAULT_PROBE_TIMEOUT_SECONDS,
+    )
+    try:
+        result = restore_from(opts)
+    except IbounceVersionMismatchError as e:
+        # Specific class so the operator sees the actionable
+        # "pass --force" hint clearly. The exception message already
+        # carries the hint; surface it on stderr with exit 1.
+        click.echo(f"ERROR: {e}", err=True)
+        sys.exit(1)
+    except BackupError as e:
+        click.echo(f"ERROR: {e}", err=True)
+        sys.exit(1)
+
+    if result.version_mismatch:
+        # Soft-mismatch surfaced under --force. Honest WARNING shape
+        # (no "violation" framing per security-team-positioning).
+        click.echo(
+            f"WARNING: ibounce_version mismatch — backup was created by "
+            f"ibounce {result.backup_ibounce_version!r}, running binary "
+            f"is the current build. Continuing under --force.",
+            err=True,
+        )
+
+    # Emit admin-action OCSF row. If ibounce was down at restore
+    # time (the spec REQUIRES it), the running process picks the row
+    # up from the freshly-restored DB on next start.
+    with _opened_store(db) as store:
+        emit_backup_restore_admin_action(
+            store,
+            in_path=_pathlib.Path(in_path),
+            result=result,
+            force=force,
+            probe_skip=probe_skip,
+            actor=_current_actor(),
+        )
+
+    click.echo(f"restored ibounce state.db from {in_path}")
+    click.echo(f"  destination: {result.dest_path}")
+    click.echo(f"  sha256: {result.sha256}")
+    if result.row_counts:
+        click.echo("  row counts:")
+        for name in sorted(result.row_counts):
+            click.echo(f"    {name:32s} {result.row_counts[name]} rows")
+
+
 def main_deprecated_alias() -> None:
     """Console-script entrypoint for the deprecated `iam-jit-bouncer`
     name. Prints a one-line stderr deprecation warning + forwards to

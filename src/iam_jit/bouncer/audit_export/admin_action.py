@@ -178,6 +178,17 @@ ADMIN_ACTION_ALERT_RULE_EDIT = "alert-rule.edit"
 # [[cross-product-agent-parity]].
 ADMIN_ACTION_DIAGNOSTICS_BUNDLE = "diagnostics.bundle"
 
+# Wired in #279 — `ibounce backup` + `ibounce restore` emit these so
+# a security team can answer "who snapshotted state + when, who
+# restored a snapshot + which one?" from the audit-export channel.
+# Cross-product-aligned with kbounce + dbounce per
+# [[cross-product-agent-parity]]; the wire field values
+# ("backup.create" / "backup.restore") match the sibling products
+# verbatim so one SIEM rule keyed on `action == "backup.restore"`
+# catches the DR-lifecycle event across the three.
+ADMIN_ACTION_BACKUP_CREATE = "backup.create"
+ADMIN_ACTION_BACKUP_RESTORE = "backup.restore"
+
 
 # Set of every known kind. Used by the dispatch in the proxy's
 # pending-audit-events drainer to route ADMIN_ACTION payloads back
@@ -198,6 +209,8 @@ KNOWN_ADMIN_ACTION_KINDS: frozenset[str] = frozenset({
     ADMIN_ACTION_PROFILE_DELETE,
     ADMIN_ACTION_ALERT_RULE_EDIT,
     ADMIN_ACTION_DIAGNOSTICS_BUNDLE,
+    ADMIN_ACTION_BACKUP_CREATE,
+    ADMIN_ACTION_BACKUP_RESTORE,
 })
 
 
@@ -214,6 +227,7 @@ def admin_action_activity_id(kind: str) -> int:
         ADMIN_ACTION_PRESET_APPLY,
         ADMIN_ACTION_CONFIG_IMPORT,
         ADMIN_ACTION_LICENSE_INSTALL,
+        ADMIN_ACTION_BACKUP_CREATE,
     ):
         return ACTIVITY_CREATE
     if kind in (
@@ -222,6 +236,7 @@ def admin_action_activity_id(kind: str) -> int:
         ADMIN_ACTION_PAUSE_STOP,
         ADMIN_ACTION_ALERT_RULE_EDIT,
         ADMIN_ACTION_PROFILE_ASSIGN,
+        ADMIN_ACTION_BACKUP_RESTORE,
     ):
         return ACTIVITY_UPDATE
     if kind in (
@@ -805,6 +820,8 @@ __all__ = [
     "ACTIVITY_UNKNOWN",
     "ACTIVITY_UPDATE",
     "ADMIN_ACTION_ALERT_RULE_EDIT",
+    "ADMIN_ACTION_BACKUP_CREATE",
+    "ADMIN_ACTION_BACKUP_RESTORE",
     "ADMIN_ACTION_CONFIG_EXPORT",
     "ADMIN_ACTION_CONFIG_IMPORT",
     "ADMIN_ACTION_LICENSE_INSTALL",
