@@ -1698,7 +1698,13 @@ def doctor_compatibility(
 # OCSF-bundle code doesn't pull into every CLI surface. The register
 # call wires the subgroup onto the existing `main` Click group.
 from .cli_audit_query import register_audit_query_group  # noqa: E402
-register_audit_query_group(main)
+audit_group = register_audit_query_group(main)
+
+# #272 — register `iam-jit audit stream` (live cross-bouncer TUI).
+# Hung off the same `audit` group so the operator's mental model is
+# "audit query is a one-shot; audit stream is the live tail".
+from .cli_audit_stream import register_audit_stream_command  # noqa: E402
+register_audit_stream_command(audit_group)
 
 
 if __name__ == "__main__":

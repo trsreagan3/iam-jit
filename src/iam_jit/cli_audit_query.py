@@ -366,21 +366,26 @@ def _resolve_bouncer_set(
     return out
 
 
-def register_audit_query_group(parent_group: click.Group) -> None:
+def register_audit_query_group(parent_group: click.Group) -> click.Group:
     """Register the `audit` subcommand-group on the iam-jit CLI.
 
     Called from :func:`iam_jit.cli.main` at import time so the existing
     ``iam-jit`` CLI surfaces ``iam-jit audit query`` without disturbing
     the existing top-level commands.
+
+    Returns the newly-registered ``audit`` Click group so callers
+    (e.g. ``register_audit_stream_command`` from #272) can hang
+    additional subcommands off it without re-declaring the parent
+    group.
     """
 
     @parent_group.group("audit")
     def audit_group() -> None:
-        """Cross-bouncer audit queries (#271).
+        """Cross-bouncer audit queries + live streaming (#271, #272).
 
         Composes per-bouncer GET /audit/events endpoints into one
         merged + sorted stream. See :doc:`docs/IAM-JIT-AUDIT-QUERY.md`
-        for the full guide.
+        and :doc:`docs/AUDIT-STREAM-TUI.md` for the full guides.
         """
 
     @audit_group.command("query")
@@ -556,6 +561,8 @@ def register_audit_query_group(parent_group: click.Group) -> None:
             return
         # jsonl (default).
         click.echo(_format_jsonl(merged), nl=False)
+
+    return audit_group
 
 
 # Silence "imported but unused" warnings when `sys` is only used at

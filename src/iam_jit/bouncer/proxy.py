@@ -2683,6 +2683,20 @@ async def serve(config: ProxyConfig, *, store: BouncerStore) -> None:
         ),
         require_bearer=config.audit_events_token,
     )
+    # #272 — GET / serves the minimal live audit-stream web UI. The
+    # page polls /audit/events every 2 s; it shares the same auth
+    # model as that endpoint (loopback → no auth; external bind →
+    # bearer token, supplied via `#token=...` URL fragment). The
+    # rendered HTML never embeds the token, matching the no-secret-
+    # shape constraint from the spec. Registered alongside /healthz
+    # + /audit/events so the catch-all "/{tail:.*}" below doesn't
+    # swallow the root path.
+    from .audit_export.events_ui import register_audit_events_ui_route
+    register_audit_events_ui_route(
+        app,
+        bouncer_name="ibounce",
+        require_bearer=config.audit_events_token,
+    )
     app.router.add_route("*", "/{tail:.*}", handler)
 
     # #252 Slice 1 — bring up the audit-export channels (if any).

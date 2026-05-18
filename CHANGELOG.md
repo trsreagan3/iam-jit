@@ -13,6 +13,35 @@ within the same release.
 
 ### Added
 
+- **`iam-jit audit stream` cross-bouncer live TUI** (#272) — k9s-
+  style terminal UI that subscribes to every reachable Bounce-suite
+  bouncer's `/audit/events` endpoint and renders one merged, sorted,
+  colourised table that updates live. Title-bar carries total + per-
+  bouncer counts (with `(skip)` next to unreachable bouncers, matching
+  `iam-jit audit query`). Keyboard shortcuts: `/` filter (forwarded
+  server-side), `p` pause/resume, `t` toggle per-bouncer column,
+  `c` clear, `q` quit. Row colours follow SIEM convention (red=deny,
+  green=allow, blue=admin, grey=heartbeat). Built on `rich.live`
+  rather than `textual` so iam-roles takes no new direct dependency
+  (rich ships transitively via click). Per `[[creates-never-mutates]]`
+  the TUI is read-only — no keystroke mutates bouncer state. New
+  module `iam_jit/cli_audit_stream.py`; new doc
+  `docs/AUDIT-STREAM-TUI.md`.
+- **ibounce live web UI at `GET /`** (#272 A) — minimal vanilla-JS
+  page on ibounce's mgmt port (8767) alongside `/healthz` and
+  `/audit/events`. Single self-contained HTML+CSS+JS file (no build
+  step, no CDN, no Google Fonts, no analytics), under 500 lines.
+  Long-polls `/audit/events?since=<cursor>` every two seconds and
+  renders a colour-coded table with top-bar event counters, filter
+  input (same syntax as `/audit/events?filter=`), pause + clear
+  controls, mobile-responsive layout. Same auth model as the
+  endpoint: loopback no auth; external bind takes the bearer token
+  through the URL `#token=...` fragment so the HTML body never
+  embeds the secret. Per `[[creates-never-mutates]]` the UI is
+  read-only; strict CSP headers; cross-product-identical HTML
+  shape with kbounce / dbounce / gbounce. New module
+  `iam_jit/bouncer/audit_export/events_ui.py`; new doc section in
+  `docs/QUERYING-AUDIT-LOGS.md`.
 - **`iam-jit audit query` cross-bouncer CLI** (#271) — single
   command that queries the `/audit/events` HTTP endpoint on every
   reachable Bounce-suite bouncer in parallel and merges results
