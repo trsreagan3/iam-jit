@@ -428,9 +428,13 @@ class WebhookPusher:
             with self._stats_lock:
                 pending_drops = self._dropped_since_last_synthetic
             if pending_drops > 0:
+                # Per [[ocsf-audit-schema]] the AUDIT_DROPPED synthetic
+                # is OCSF-shaped (activity_id=99, severity_id=3,
+                # status_id=99). The builder lives in event.py.
                 synthetic = audit_dropped_event(
                     dropped_count=pending_drops,
                     reason="webhook-queue-overflow",
+                    queue_size=self.queue_maxsize,
                 )
                 batch.insert(0, synthetic)
 

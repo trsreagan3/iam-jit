@@ -436,9 +436,13 @@ async def test_pusher_drops_on_overflow_and_emits_audit_dropped() -> None:
     # NDJSON: split on newline.
     lines = body.split("\n")
     payloads = [json.loads(line) for line in lines]
-    # First line is the AUDIT_DROPPED synthetic.
-    assert payloads[0]["event_type"] == "AUDIT_DROPPED"
-    assert payloads[0]["dropped_count"] == 3
+    # First line is the AUDIT_DROPPED synthetic, OCSF-shaped per
+    # [[ocsf-audit-schema]] (event_type tag preserved under
+    # unmapped.iam_jit so legacy filters still fire).
+    assert payloads[0]["class_uid"] == 6003
+    assert payloads[0]["activity_id"] == 99
+    assert payloads[0]["unmapped"]["iam_jit"]["event_type"] == "AUDIT_DROPPED"
+    assert payloads[0]["unmapped"]["iam_jit"]["dropped_count"] == 3
     # Followed by the two events that DID make it into the queue.
     assert payloads[1]["event"] == "a"
     assert payloads[2]["event"] == "b"

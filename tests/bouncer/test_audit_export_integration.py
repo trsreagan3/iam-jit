@@ -124,17 +124,28 @@ async def test_evaluate_request_mirrors_to_both_channels_in_shared_schema(
     assert len(session.posts) == 1
     webhook_event = json.loads(session.posts[0]["data"])
 
-    # The two channels emit the SAME event (`ts` will be identical
+    # The two channels emit the SAME event (`time` will be identical
     # because audit_event_from_decision is called ONCE per decision).
     assert log_event == webhook_event
 
-    # Shape checks against the shared schema.
-    assert log_event["product"] == "ibounce"
-    assert log_event["event_type"] == "proxy.decision"
-    assert log_event["verdict"] == "deny"
-    assert log_event["service"] == "s3"
-    assert log_event["mode"] == "transparent"
-    assert log_event["ext"]["enforced"] is True
+    # Shape checks against the OCSF v1.1.0 class 6003 contract from
+    # [[ocsf-audit-schema]]. iam-jit-native fields live under
+    # `unmapped.iam_jit`; cross-product invariants live at top level.
+    assert log_event["class_uid"] == 6003
+    assert log_event["class_name"] == "API Activity"
+    assert log_event["metadata"]["version"] == "1.1.0"
+    assert log_event["metadata"]["product"]["name"] == "ibounce"
+    assert log_event["metadata"]["product"]["vendor_name"] == "iam-jit"
+    # Verdict was DENY in transparent mode -> OCSF Failure.
+    assert log_event["status_id"] == 2
+    assert log_event["status"] == "Failure"
+    # api.service.name = the AWS service.
+    assert log_event["api"]["service"]["name"] == "s3"
+    # iam-jit-native semantics preserved under unmapped.
+    jit = log_event["unmapped"]["iam_jit"]
+    assert jit["verdict"] == "deny"
+    assert jit["mode"] == "transparent"
+    assert jit["enforced"] is True
 
 
 @pytest.mark.asyncio

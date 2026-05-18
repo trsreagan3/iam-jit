@@ -43,6 +43,8 @@ from __future__ import annotations
 
 from .event import (
     AUDIT_EVENT_SCHEMA_VERSION,
+    OCSF_SCHEMA_VERSION,
+    audit_dropped_event,
     audit_event_from_decision,
 )
 from .log import AuditLogWriter
@@ -56,9 +58,11 @@ from .webhook import (
 __all__ = [
     "AUDIT_EVENT_SCHEMA_VERSION",
     "AuditLogWriter",
+    "OCSF_SCHEMA_VERSION",
     "SSRFRejectedError",
     "WebhookLicenseError",
     "WebhookPusher",
+    "audit_dropped_event",
     "audit_event_from_decision",
     "validate_webhook_url",
 ]
