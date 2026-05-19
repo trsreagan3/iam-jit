@@ -533,11 +533,31 @@ footer {
 """
 
 
+def _looks_like_browser_visit(request) -> bool:
+    """Return True when the request shape matches a browser visiting
+    the UI, i.e. ``Accept: text/html`` is present.
+
+    The proxy and the audit-stream UI share GET / on a single port
+    (per the #272 design comment that originally assumed a dedicated
+    mgmt port). AWS S3 ListBuckets + several other root-level AWS
+    operations also hit GET /, and so do unclassifiable inbound
+    requests the cooperative-mode proxy needs to 400 on. Serving HTML
+    to either of those cases is wrong, so we narrow "render the UI"
+    to requests that explicitly advertise an HTML preference. SDK
+    clients send ``Accept: */*``; browsers send
+    ``Accept: text/html,application/xhtml+xml,...``. The check is
+    case-insensitive substring on the Accept header.
+    """
+    accept = request.headers.get("Accept", "") or request.headers.get("accept", "")
+    return "text/html" in accept.lower()
+
+
 def register_audit_events_ui_route(
     app,
     *,
     bouncer_name: str = BOUNCER_NAME,
     require_bearer: str | None = None,
+    proxy_fallback=None,
 ) -> None:
     """Register GET / on the aiohttp app to serve the audit-stream UI.
 
@@ -551,6 +571,15 @@ def register_audit_events_ui_route(
     the HTML page itself when set so an operator who visits without a
     token doesn't get an empty / confusing page. The HTML body never
     contains the token regardless.
+
+    ``proxy_fallback`` is the AWS-proxy handler used when an AWS SDK
+    request arrives at GET / (e.g. S3 ListBuckets). The UI route is
+    registered ahead of the catch-all "/{tail:.*}" handler so the
+    proxy can never see those requests via normal routing; this
+    callable is the explicit hand-off path. Passing ``None`` (the
+    default) preserves the original UI-only behaviour for callers
+    outside the bouncer ``serve()`` lifecycle (the cross-bouncer
+    parity ports + standalone unit tests of the UI itself).
     """
     try:
         from aiohttp import web
@@ -562,6 +591,17 @@ def register_audit_events_ui_route(
     body = render_audit_events_ui(bouncer_name=bouncer_name)
 
     async def handler(request):
+        # Non-browser requests at GET / (S3 ListBuckets, unclassifiable
+        # proxy traffic, opaque SDK calls) must reach the proxy
+        # handler — not the operator UI. We narrow the UI to requests
+        # that explicitly advertise ``Accept: text/html`` so browser
+        # visits keep landing on the page while anything else flows to
+        # the proxy verdict path. Per [[creates-never-mutates]] the
+        # delegation is one-way (UI never mutates proxy state); per
+        # [[scorer-is-ground-truth]] the delegated request retains
+        # its full verdict path.
+        if proxy_fallback is not None and not _looks_like_browser_visit(request):
+            return await proxy_fallback(request)
         if request.method != "GET":
             return web.json_response(
                 {"error": "only GET is supported"}, status=405,

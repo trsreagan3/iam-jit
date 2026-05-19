@@ -2795,10 +2795,17 @@ async def serve(config: ProxyConfig, *, store: BouncerStore) -> None:
     # + /audit/events so the catch-all "/{tail:.*}" below doesn't
     # swallow the root path.
     from .audit_export.events_ui import register_audit_events_ui_route
+    # AWS SDK calls at GET / (e.g. S3 ListBuckets) MUST reach the
+    # proxy handler instead of the operator UI. The UI route still
+    # wins for browser visits; AWS-shaped requests delegate to
+    # `handler` defined above so the proxy verdict + plan-capture
+    # synthetic response paths run unchanged. Without this, the UI
+    # silently shadows root-path AWS operations.
     register_audit_events_ui_route(
         app,
         bouncer_name="ibounce",
         require_bearer=config.audit_events_token,
+        proxy_fallback=handler,
     )
     # #276 — GET /schemas/config serves the embedded
     # ibounce-config.schema.json. Agents that want to validate a
