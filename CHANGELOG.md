@@ -223,6 +223,30 @@ within the same release.
   parity notes. Cross-linked from `DIAGNOSTICS.md` +
   `QUERYING-AUDIT-LOGS.md`.
 
+### Fixed
+
+- **#272 regression — audit-stream UI shadowed root-path AWS
+  operations on the proxy port.** The `GET /` route registered for the
+  live audit UI was unconditionally matching every request to `/`,
+  which silently swallowed S3 ListBuckets (the most common root-path
+  AWS API call) plus unclassifiable proxy traffic and presigned-URL
+  redirects. The UI now defers to the proxy handler whenever the
+  request does not advertise `Accept: text/html`, so browser visits
+  still land on the UI while SDK + curl + agent traffic flows through
+  the normal verdict path. Resolves 5 pre-existing test failures
+  surfaced across multiple ship-reports
+  (`test_proxy_plan_capture.py::test_plan_capture_never_forwards_to_backend`
+  + four `test_proxy_slice2.py` cases). Files touched:
+  `src/iam_jit/bouncer/audit_export/events_ui.py`,
+  `src/iam_jit/bouncer/proxy.py`.
+- **`test_parse_duration_rejects_garbage` stale expectation** — the
+  test predated #285's addition of the `d` (days) suffix for
+  session-recording retention; it asserted `30d` should raise
+  `BadParameter`. Updated to assert the suffix set the parser
+  actually accepts today (`s/m/h/d`) and switched the
+  unsupported-suffix probe to `30y`. Files touched:
+  `tests/bouncer/test_pause_for.py`.
+
 ### Docs
 
 - `docs/LOCAL-TEST-INFRA.md` now documents the AWS-SDK
