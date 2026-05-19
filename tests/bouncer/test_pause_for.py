@@ -272,6 +272,10 @@ def test_parse_duration_accepts_canonical_forms() -> None:
     assert _parse_duration("30m") == 30 * 60
     assert _parse_duration("2h") == 2 * 3600
     assert _parse_duration(" 90s ") == 90
+    # `d` suffix added in #285 (session-recording retention runs in days);
+    # the shared duration parser exposes it on every duration-taking
+    # surface so operators can `pause-for 7d` symmetrically.
+    assert _parse_duration("7d") == 7 * 86400
 
 
 def test_parse_duration_rejects_garbage() -> None:
@@ -283,7 +287,7 @@ def test_parse_duration_rejects_garbage() -> None:
     with pytest.raises(BadParameter):
         _parse_duration("xx")
     with pytest.raises(BadParameter):
-        _parse_duration("30d")  # day not supported
+        _parse_duration("30y")  # year not supported (only s/m/h/d)
     with pytest.raises(BadParameter):
         _parse_duration("0m")
     with pytest.raises(BadParameter):
