@@ -13,6 +13,32 @@ within the same release.
 
 ### Added
 
+- **Per-org notification routing engine** (#280; ENTERPRISE tier) — new
+  `--alert-routes ROUTES.yaml` flag on `ibounce run` activates the
+  multi-destination routing engine. Each event is matched against the
+  YAML's `routes:` list (per-route `match` block with `equals` /
+  `gte` / `lte` / `gt` / `lt` / `in` / `match` (regex) / `glob`
+  operators; AND-within / OR-across); matching routes dispatch the
+  event to their declared `destinations:` (`webhook` per #257 preset,
+  `pagerduty` via the Events API v2, `slack` via incoming-webhook).
+  `on_match: stop` (default) short-circuits subsequent routes;
+  `on_match: continue` enables fan-out (e.g. "all-events archive"
+  alongside team-scoped routes). Secrets live in env vars via
+  `${ENV_VAR}` interpolation; literal tokens in the YAML are refused
+  at parse time. Startup banner reports each resolved secret as
+  `ENV_NAME (first-8-char-prefix***)`; tokens NEVER appear in logs,
+  status surfaces, or routing-error messages. New `ibounce config
+  preview-routes --routes ROUTES.yaml --event sample.json` subcommand
+  dry-runs a sample event against the file and prints matched routes
+  + masked destinations without sending any HTTP. When `--alert-routes`
+  is set, the legacy `--audit-webhook-url` flag is ignored (with a
+  warning at parse time + at startup); the JSONL log + Security Lake
+  adapters stay independent. Enterprise-tier feature; license gate
+  fires at CLI parse AND serve() start (defense in depth). Per
+  `[[creates-never-mutates]]` the engine never mutates the event it
+  routes. Per `[[no-hosted-saas]]` + `[[self-host-zero-billing-
+  dependency]]` every destination is operator-configured (no phone-
+  home). Documented in `docs/PER-ORG-NOTIFICATION-ROUTING.md`.
 - **AWS Security Lake audit-export adapter** (#258) — new
   `--security-lake-bucket BUCKET --security-lake-region REGION
   [--security-lake-role-arn ARN] [--security-lake-rotation-seconds N]`

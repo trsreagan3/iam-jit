@@ -3210,6 +3210,23 @@ def _parse_duration(raw: str) -> int:
          "use NEUTRAL language; never frames a match as a violation.",
 )
 @click.option(
+    "--alert-routes",
+    "alert_routes_path",
+    type=click.Path(dir_okay=False),
+    default=None,
+    help="#280 (ENTERPRISE tier — license-gated) — YAML file describing "
+         "per-org notification routing. When set, the multi-destination "
+         "routing engine activates: each event is matched against the "
+         "configured routes' match blocks + dispatched to the route's "
+         "destinations (webhook / pagerduty / slack). When unset, the "
+         "existing single-webhook --audit-webhook-url path stays exactly "
+         "as today (zero regression). Secrets must use ${ENV_VAR} "
+         "interpolation; literal tokens in the YAML are refused. Use "
+         "`ibounce config preview-routes` to dry-run a sample event "
+         "against the file before deploying. Setting BOTH --alert-routes "
+         "and --audit-webhook-url ignores the latter (with a warning).",
+)
+@click.option(
     "--heartbeat-interval",
     "heartbeat_interval_seconds",
     type=click.IntRange(0, 3600), default=0, show_default=True,
@@ -3326,6 +3343,7 @@ def run_cmd(
     security_lake_role_arn: str | None,
     security_lake_rotation_seconds: int,
     alert_rules_path: str | None,
+    alert_routes_path: str | None,
     heartbeat_interval_seconds: int,
     alert_heartbeat_missing_count: int,
     burst_threshold: int,
@@ -3540,6 +3558,42 @@ def run_cmd(
         if alert_rules_path.lower() == "defaults":
             alert_rules_path = ""
 
+    # #280 — per-org notification routing. License gate + YAML load
+    # both fire at CLI parse so the operator sees structure / secret
+    # errors immediately. serve() re-validates the license (defense in
+    # depth) and re-loads the YAML (handles rotated env-var secrets).
+    if alert_routes_path is not None:
+        from .bouncer.audit_export.routes import (
+            RoutesConfigError, RoutesLicenseError,
+            gate_routes_license, load_routes_config,
+        )
+        try:
+            gate_routes_license(None)
+        except RoutesLicenseError as e:
+            click.secho(
+                f"--alert-routes refused: {e}", fg="red", err=True,
+            )
+            sys.exit(2)
+        try:
+            # Validate eagerly so a bad YAML / unresolved ${ENV} surfaces
+            # at parse time. serve() reloads to pick up rotated values.
+            load_routes_config(alert_routes_path, product="ibounce")
+        except RoutesConfigError as e:
+            click.secho(
+                f"--alert-routes config error: {e}", fg="red", err=True,
+            )
+            sys.exit(2)
+        # Backward-compat warning when both single-webhook + multi-route
+        # are set (per the memo: routes engine wins; single-webhook is
+        # ignored).
+        if audit_webhook_url:
+            click.secho(
+                "--alert-routes is set; --audit-webhook-url will be "
+                "ignored (the multi-destination routing engine handles "
+                "all dispatch when --alert-routes is configured).",
+                fg="yellow", err=True,
+            )
+
     # #203 — refuse the mutually-exclusive flag combo at parse time.
     # Both flags both try to surface DENYs to the operator, but they
     # have opposite blocking semantics: async returns 403 immediately,
@@ -3603,6 +3657,7 @@ def run_cmd(
         security_lake_role_arn=security_lake_role_arn,
         security_lake_rotation_seconds=security_lake_rotation_seconds,
         alert_rules_path=alert_rules_path,
+        alert_routes_path=alert_routes_path,
         heartbeat_interval_seconds=heartbeat_interval_seconds,
         alert_heartbeat_missing_count=alert_heartbeat_missing_count,
         burst_threshold=burst_threshold,
@@ -5399,6 +5454,89 @@ def config_export_cmd(
         f"presets: {len(bundle.get('presets') or [])}"
     )
     click.echo("  webhook tokens + license content are redacted by default.")
+
+
+@config_group.command("preview-routes")
+@click.option(
+    "--routes", "routes_path",
+    type=click.Path(dir_okay=False, exists=True), required=True,
+    help="#280 — path to the --alert-routes YAML to evaluate.",
+)
+@click.option(
+    "--event", "event_path",
+    type=click.Path(dir_okay=False, exists=True), required=True,
+    help="#280 — path to a JSON file containing one OCSF event "
+         "(decision, anomaly, heartbeat, etc.) to evaluate against "
+         "the routes.",
+)
+def config_preview_routes_cmd(routes_path: str, event_path: str) -> None:
+    """Dry-run a sample event against an --alert-routes YAML file.
+
+    Loads the routes config + evaluates a single OCSF event against
+    every route, printing which routes matched + the masked
+    destinations each match would have dispatched to. No HTTP traffic
+    is sent. Per [[per-org-notification-routing]] this is mandatory
+    pre-deploy validation — YAML routing is dense + error-prone.
+
+    Example:
+
+        $ export SOC_SPLUNK_HEC_TOKEN=abc12345secret
+        $ ibounce config preview-routes \\
+              --routes ~/.iam-jit/ibounce-routes.yaml \\
+              --event sample-event.json
+
+    The output never prints any secret value; tokens render as
+    `eight-char-prefix***`.
+    """
+    import json as _json
+
+    from .bouncer.audit_export import (
+        RoutesConfigError,
+        load_routes_config,
+        select_routes,
+    )
+
+    try:
+        cfg = load_routes_config(routes_path, product="ibounce")
+    except RoutesConfigError as e:
+        click.secho(f"routes config error: {e}", fg="red", err=True)
+        sys.exit(2)
+    try:
+        with open(event_path, encoding="utf-8") as f:
+            event = _json.load(f)
+    except (OSError, _json.JSONDecodeError) as e:
+        click.secho(
+            f"could not read --event JSON file {event_path!r}: {e}",
+            fg="red", err=True,
+        )
+        sys.exit(2)
+    if not isinstance(event, dict):
+        click.secho(
+            f"--event file must contain a JSON object; got "
+            f"{type(event).__name__}",
+            fg="red", err=True,
+        )
+        sys.exit(2)
+
+    click.echo(f"routes config: {routes_path}")
+    click.echo(f"event: {event_path}")
+    click.echo(f"total routes defined: {len(cfg.routes)}")
+    secrets = cfg.secrets_used()
+    if secrets:
+        click.echo("secrets resolved (env-var name + masked prefix):")
+        for env_name, masked in secrets:
+            click.echo(f"  {env_name} ({masked})")
+    hits = select_routes(event, cfg.routes)
+    if not hits:
+        click.echo("no routes matched this event.")
+        return
+    click.echo(f"matched {len(hits)} route(s):")
+    for route in hits:
+        click.echo(f"  - {route.name} (on_match={route.on_match})")
+        for dest in route.destinations:
+            masked = dest.masked()
+            details = ", ".join(f"{k}={v}" for k, v in masked.items())
+            click.echo(f"      destination: {details}")
 
 
 @config_group.command("import")

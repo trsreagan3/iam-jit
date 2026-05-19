@@ -294,6 +294,12 @@ _session_mode_override: str | None = None
 # ---------------------------------------------------------------------------
 _audit_log_writer: Any | None = None
 _audit_webhook_pusher: Any | None = None
+# #280 — per-org notification routing engine. Same registry pattern as
+# the single-webhook pusher above. When set, the engine handles all
+# webhook dispatch + the single-webhook pusher is left unwired (per
+# the memo's "existing --audit-webhook-url ignored when --alert-routes
+# is set"). The JSONL log + Security Lake adapters stay independent.
+_audit_routes_engine: Any | None = None
 # #258 — AWS Security Lake adapter. Same module-level registry shape
 # as the JSONL log + webhook channels above so evaluate_request feeds
 # every wired channel without threading args through every call site.
@@ -364,6 +370,15 @@ def register_audit_webhook_pusher(pusher: Any | None) -> None:
     _audit_webhook_pusher = pusher
 
 
+def register_audit_routes_engine(engine: Any | None) -> None:
+    """#280 — install the per-org notification routing engine. Pass
+    None to clear. When set, the single-webhook pusher is ignored on
+    every emit (the routing engine is the multi-destination
+    replacement)."""
+    global _audit_routes_engine
+    _audit_routes_engine = engine
+
+
 def register_audit_security_lake_writer(writer: Any | None) -> None:
     """#258 — install the AWS Security Lake parquet writer. Pass None
     to clear. The writer must already be `writer.start()`-ed before
@@ -406,7 +421,16 @@ def _emit_audit_event_raw(event: dict) -> None:
             _audit_log_writer.write(event)
         except Exception as e:
             logger.warning("audit log writer enqueue failed: %s", e)
-    if _audit_webhook_pusher is not None:
+    # #280 — per-org routing engine takes precedence over the single-
+    # webhook pusher. The CLI parse-time gate refuses both being wired
+    # simultaneously to avoid surprise; the registration paths in
+    # serve() also enforce mutual exclusion.
+    if _audit_routes_engine is not None:
+        try:
+            _audit_routes_engine.push(event)
+        except Exception as e:
+            logger.warning("audit routes engine enqueue failed: %s", e)
+    elif _audit_webhook_pusher is not None:
         try:
             _audit_webhook_pusher.push(event)
         except Exception as e:
@@ -1048,6 +1072,16 @@ class ProxyConfig:
     via gate_alerts_license (per [[enterprise-self-host-only]]).
     See `audit_export.alerts.load_alerts_config` for the YAML
     schema."""
+
+    # #280 — per-org notification routing.
+    alert_routes_path: str | None = None
+    """Path to the --alert-routes YAML file. None = single-webhook
+    backward-compat path (the existing audit_webhook_* fields). Set
+    to a YAML path = multi-destination routing engine activates;
+    single-webhook is ignored. Enterprise license-gated at CLI parse
+    + serve() start via gate_routes_license (per
+    [[enterprise-self-host-only]]). See `audit_export.routes.
+    load_routes_config` for the YAML schema."""
 
     # #264 — heartbeat events for prompt-injection-disable-bouncer-threat.
     heartbeat_interval_seconds: int = 0
@@ -2789,6 +2823,7 @@ async def serve(config: ProxyConfig, *, store: BouncerStore) -> None:
     # running without the channel.
     audit_log_writer = None
     audit_webhook_pusher = None
+    audit_routes_engine = None  # #280 — per-org routing engine.
     audit_rule_engine = None
     session_recorder = None
     audit_security_lake_writer = None
@@ -2849,7 +2884,53 @@ async def serve(config: ProxyConfig, *, store: BouncerStore) -> None:
             config.security_lake_rotation_seconds,
         )
 
-    if config.audit_webhook_url and config.audit_webhook_token:
+    # #280 — per-org notification routing engine. When configured, the
+    # routing engine handles all webhook dispatch + the single-webhook
+    # pusher block below is skipped (the CLI parse-time gate already
+    # warned the operator if both were set). Defense in depth: the
+    # license gate fires here AGAIN so a license file that disappeared
+    # between parse + start doesn't quietly grant routing capability.
+    if config.alert_routes_path is not None:
+        from .audit_export import (
+            RoutesConfigError,
+            RoutesEngine,
+            RoutesLicenseError,
+            gate_routes_license,
+            load_routes_config,
+        )
+        try:
+            gate_routes_license(None)
+        except RoutesLicenseError:
+            # Fatal at serve() time. The CLI parse-time gate has
+            # already printed the friendly error message; here we let
+            # serve() refuse to start.
+            raise
+        try:
+            routes_config = load_routes_config(
+                config.alert_routes_path, product="ibounce",
+            )
+        except RoutesConfigError:
+            raise
+        _engine = RoutesEngine(
+            config=routes_config, product="ibounce",
+        )
+        await _engine.start()
+        register_audit_routes_engine(_engine)
+        audit_routes_engine = _engine
+        # Startup banner — masked secrets only. The operator sees which
+        # env vars were resolved + the first-8-char prefix of each so
+        # they can confirm "yes, the right secret is loaded" without the
+        # value ever appearing in logs.
+        secrets = routes_config.secrets_used()
+        logger.info(
+            "audit-export per-org routing engine enabled: routes=%d "
+            "destinations=%d",
+            len(routes_config.routes),
+            sum(len(r.destinations) for r in routes_config.routes),
+        )
+        for env_name, masked in secrets:
+            logger.info("  secret %s (%s)", env_name, masked)
+    elif config.audit_webhook_url and config.audit_webhook_token:
         from .audit_export import Preset, WebhookPusher
         audit_webhook_pusher = WebhookPusher(
             url=config.audit_webhook_url,
@@ -3140,6 +3221,15 @@ async def serve(config: ProxyConfig, *, store: BouncerStore) -> None:
             # registry slot so the next process doesn't see a stale
             # reference.
             register_audit_rule_engine(None)
+        # #280 — routes engine teardown drains its bounded queue + closes
+        # the shared aiohttp session. Mirrors the single-webhook teardown
+        # pattern above.
+        if audit_routes_engine is not None:
+            try:
+                await audit_routes_engine.stop()
+            except Exception as e:
+                logger.warning("audit-routes engine stop failed: %s", e)
+            register_audit_routes_engine(None)
         if audit_webhook_pusher is not None:
             try:
                 await audit_webhook_pusher.stop()
