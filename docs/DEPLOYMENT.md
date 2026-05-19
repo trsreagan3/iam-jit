@@ -163,34 +163,53 @@ aws dynamodb put-item \
 
 The full list of supported principal ARN shapes (IAM users, IAM roles, Identity Center sessions) is in [PERMISSIONS-MODEL.md](./PERMISSIONS-MODEL.md#two-auth-modes).
 
-## Step 5 — pick an LLM tier and configure it
+## Step 5 — pick an LLM backend and configure it
 
-**Recommendation: use Bedrock with Claude Sonnet 4.6.** It handles the
-multi-rule prompt + org-context grounding cleanly, costs roughly $0.013
-per intake turn (~$10-50/month at typical volume), runs inside your AWS
-account, and adds zero hosting overhead. Haiku 4.5 is a reasonable
-budget alternative (~3x cheaper, similar quality to a self-hosted 8B
-model) — flip `BedrockModelId` to swap.
+**iam-jit's LLM backend is your choice.** Pro/Team/Enterprise tiers
+use an LLM to score policy proposals against the LLM-graded calibration
+corpus; pick whichever LLM your org already pays for. Four backends
+ship in v1.0 with equal first-class support — pick the one that fits
+your org's existing billing + perimeter posture:
+
+| Backend           | Setup                                       | Cost per 1k scores | Notes                                                                                  |
+|-------------------|---------------------------------------------|--------------------|----------------------------------------------------------------------------------------|
+| **Anthropic API** | `anthropic` SDK + API key in Secrets Manager | ~$3                | Fastest activation; no AWS dependency; bill lands on your Anthropic account            |
+| **OpenAI API**    | `openai` SDK + API key in Secrets Manager    | ~$2                | Largest deployed install base; useful when your org already standardizes on OpenAI     |
+| **Bedrock**       | AWS account + Bedrock model access enabled   | ~$3                | Pick this if you want the LLM in your AWS perimeter; requires one-time Bedrock model-access approval (see below) |
+| **Ollama (local)** | `ollama` + model download (e.g. `qwen2.5:14b`) | $0                 | Slowest; private; great for evaluation, regulated air-gap, or zero-spend pilots        |
 
 | Tier | Backend | When to use | Notes |
 |---|---|---|---|
 | 0 | `none` | air-gapped or evaluation-only deployments | paste mode works fully; chat surface is hidden |
-| **2 (recommended)** | **`bedrock` with Claude Sonnet 4.6** | **production default** | re-deploy with `LLMBackend=bedrock`, `BedrockModelId=anthropic.claude-sonnet-4-6-20251001-v1:0` |
-| 2 (budget) | `bedrock` with Claude Haiku 4.5 | high-volume, cost-sensitive | `BedrockModelId=anthropic.claude-haiku-4-5-20251001-v1:0` |
-| 2 (alt) | `anthropic` (direct) | when you have an existing API key and don't want Bedrock | API key in Secrets Manager → `AnthropicApiKeySecret=arn:...` |
+| 2 | `anthropic` (direct) | you have an Anthropic API key and want zero AWS-side dependency | API key in Secrets Manager → `AnthropicApiKeySecret=arn:...` |
+| 2 | `openai` (direct) | you have an OpenAI API key and want zero AWS-side dependency | API key in Secrets Manager → `OpenAIApiKeySecret=arn:...` |
+| 2 | `bedrock` with Claude Sonnet 4.6 | you want the LLM call to stay inside your AWS perimeter | re-deploy with `LLMBackend=bedrock`, `BedrockModelId=anthropic.claude-sonnet-4-6-20251001-v1:0`. Requires Bedrock model access (see below). Haiku 4.5 is a ~3× cheaper alternative — flip `BedrockModelId=anthropic.claude-haiku-4-5-20251001-v1:0` |
 | 1 | `ollama` | self-hosted requirements (regulatory, air-gap variants) | run Ollama in ECS/EKS, point `OllamaHost=http://...` at it. Use `qwen2.5:14b` (or larger) — `llama3.1:8b` struggles with the multi-rule prompt; see [TESTING.md](./TESTING.md#tier-25--llm-behavioral-tests-opt-in-three-sub-modes) for the comparison data |
+
+**Picking between Bedrock and direct API access:** functionally
+equivalent for iam-jit's scoring path. The two real decision points
+are (a) which bill do you want the spend on (Bedrock → AWS bill;
+direct API → Anthropic / OpenAI bill) and (b) does your org require
+the LLM call to stay inside your AWS perimeter. Bedrock additionally
+requires a one-time per-account model-access approval (see the
+[Bedrock model access](#bedrock-model-access--your-customer-side-prerequisite-only-if-you-pick-bedrock)
+section below); the direct APIs and Ollama do not.
 
 **Cost comparison at typical volume** (~50 intake turns/day):
 
 | Backend | ~$/month |
 |---|---|
+| Anthropic API (Sonnet 4.6) | ~$20 |
+| OpenAI API (comparable tier) | ~$15 |
 | Bedrock Sonnet 4.6 | ~$20 |
 | Bedrock Haiku 4.5 | ~$7 |
 | Self-hosted llama3.1:8b on EC2 Spot | ~$44 |
 | Self-hosted llama3.1:8b on Fargate 24/7 | ~$170 |
 
-Bedrock crosses over self-hosted around 100+ requests/day; below that
-it's both cheaper *and* better-quality.
+Hosted backends (Bedrock / Anthropic / OpenAI) cross over self-hosted
+around 100+ requests/day; below that they're both cheaper *and*
+better-quality. Ollama is the right pick when zero per-call spend
+matters more than throughput.
 
 For self-hosted Ollama, see [the LLM hosting Terraform modules](../infrastructure/terraform/) (ships in a follow-up phase) or run Ollama in your own ECS/EKS cluster.
 
@@ -202,11 +221,18 @@ enforced by the deployment shape:
 
 - The Lambda runs in your account → Lambda costs on your bill
 - DynamoDB tables are in your account → DDB costs on your bill
-- Bedrock calls use the Lambda's local execution role → **Bedrock
-  costs billed to your AWS account directly**
+- Bedrock calls (if you chose `LLMBackend=bedrock`) use the Lambda's
+  local execution role → **Bedrock costs billed to your AWS account
+  directly**
 - Anthropic-API calls (if you chose `LLMBackend=anthropic`) use the
   API key in *your* Secrets Manager secret → billed to your
   Anthropic account
+- OpenAI-API calls (if you chose `LLMBackend=openai`) use the API
+  key in *your* Secrets Manager secret → billed to your OpenAI
+  account
+- Ollama calls (if you chose `LLMBackend=ollama`) hit your own
+  Ollama host → $0 per-call; you pay the compute cost of whatever
+  runs the model
 - iam-jit phones home for nothing — no telemetry, no usage reports,
   no licensing call-back. You can deploy in a sealed account with
   no egress to anything outside AWS APIs
@@ -234,7 +260,13 @@ sam deploy ... --parameter-overrides \
 Accepted values for the `LLMBudget*` parameters: `unlimited`,
 `none`, `-1`, or any positive integer (monthly call cap).
 
-### AWS Budget alarm (recommended)
+### AWS Budget alarm (recommended — Bedrock backend only)
+
+> This section is Bedrock-specific because AWS Budgets only knows
+> about AWS-billed services. If you picked `anthropic` or `openai`,
+> set up the equivalent spend alarm in the Anthropic / OpenAI
+> console. If you picked `ollama`, there is no per-call spend to
+> alarm on.
 
 Add an account-level Budget alarm scoped to Bedrock so AWS notifies
 you before you spend more than expected:
@@ -282,17 +314,24 @@ Sized starting points (Bedrock Sonnet 4.6, no caps):
 
 Multiply by ~5x for Opus, divide by ~3x for Haiku.
 
-### Bedrock model access — your customer-side prerequisite
+### Bedrock model access — your customer-side prerequisite (only if you pick Bedrock)
+
+> Skip this section if you picked the `anthropic`, `openai`, or
+> `ollama` backend — they have no AWS-side approval gate.
 
 Before iam-jit's Bedrock backend will work in your account, you
 must enable Anthropic model access in the Bedrock console for the
 deployment region. AWS gates this per-account via a one-time
 verification (typically a short questionnaire about intended use).
+Lead time can vary — AWS has been known to take 30-60 days for
+new accounts in some regions. If that's a blocker for your
+timeline, the `anthropic` or `openai` backend gives you the same
+scoring quality with no AWS-side approval gate.
 
 1. Open the Bedrock console in your deployment region
 2. Go to **Model access**
 3. Request access for the Anthropic Claude models you'll use
-4. Wait for approval (usually under 30 minutes; sometimes a day)
+4. Wait for approval (usually under 30 minutes; sometimes a day; occasionally weeks)
 
 You only do this once per account / region. iam-jit can't do this
 on your behalf — Bedrock model access is account-scoped, and the
@@ -317,9 +356,18 @@ architectural choice.
 
 If you are evaluating iam-jit as a design partner — full
 Enterprise-tier feature set on, but with hard cost ceilings so the
-trial cannot accidentally generate substantial Bedrock spend — use
+trial cannot accidentally generate substantial LLM spend — use
 this parameter set. It's intentionally conservative on cost while
 leaving every feature exercisable.
+
+> The parameter set below uses the **Bedrock** backend as a worked
+> example because that's where AWS Budgets gives you a native
+> per-service spend alarm. To run the same pilot against
+> `anthropic` / `openai` / `ollama`, swap `LLMBackend=...`
+> + the model-id parameters per the [Step 5](#step-5--pick-an-llm-backend-and-configure-it)
+> table, drop the `BedrockBudgetAlarm` block, and configure the
+> equivalent spend alarm in your Anthropic / OpenAI console
+> (Ollama has no per-call spend to cap).
 
 ### What this profile does
 
@@ -495,8 +543,8 @@ them without redeploying:
 | ---------------------------------------- | ------------------------- | ---------------------- |
 | Monthly LLM-call cap per tier            | 5,000 (Pro/Team), 10,000 (Enterprise) | Falls back to deterministic-only scoring; logs a `LLM_BUDGET_EXCEEDED` event |
 | Per-request LLM token cap                | 4,096 output tokens       | Truncates the response; flagged in audit log |
-| Bedrock model whitelist                  | Sonnet only               | Other model IDs rejected at boot — prevents accidental Opus usage |
-| AWS Budget alarm (operator-installed)    | $50 / $200 / $500         | Notification only — does not block (iam-jit cannot enforce AWS-side billing) |
+| LLM model whitelist (per backend)        | Sonnet-class / equivalent only | Other model IDs rejected at boot — prevents accidental Opus / GPT-4-class usage |
+| AWS Budget alarm (operator-installed)    | $50 / $200 / $500         | Notification only — does not block (iam-jit cannot enforce AWS-side billing). Bedrock-only; equivalent alarms live in the Anthropic / OpenAI console for those backends |
 
 ### Recommended pilot success metrics
 
@@ -505,7 +553,7 @@ Collect these during the pilot so the post-trial readout is concrete:
 - **Time-to-grant** (request submitted → credentials issued)
 - **Auto-approve rate** (grants below threshold / total grants)
 - **Approver burden** (admin Slack interactions per business day)
-- **Bedrock spend per business day** (from the AWS Budget metric)
+- **LLM spend per business day** (from the AWS Budget metric on Bedrock, or the equivalent dashboard on the Anthropic / OpenAI side)
 - **Blast-radius reduction** (average grant TTL vs prior 8-hour
   Hoop session)
 - **False-positive auto-approvals** (grants that, on retrospective

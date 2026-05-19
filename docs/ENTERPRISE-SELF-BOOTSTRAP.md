@@ -35,7 +35,7 @@ admin session. Calls:
 | STS            | `GetCallerIdentity`                | Resolve caller account + ARN (gate)          |
 | Organizations  | `ListAccounts`, `ListTagsForResource` | Enumerate sibling accounts + their tags |
 | IAM            | `ListRoles`                        | Filter for OIDC-anchored roles               |
-| Bedrock        | `ListFoundationModels` (Anthropic) | Probe LLM availability per region            |
+| Bedrock        | `ListFoundationModels` (Anthropic) | Probe Bedrock LLM availability per region (skipped if you've already chosen Anthropic / OpenAI / Ollama as your backend) |
 | EKS            | `ListClusters`, `DescribeCluster`  | Cluster ARN inventory                        |
 | ECS            | `ListClusters`                     | Cluster ARN inventory                        |
 
@@ -55,9 +55,9 @@ v1.1 "deeper scan" follow-up.
 ### Phase 2 — Proposal (LLM-augmented, customer's tier)
 
 Feeds the discovery summary + your free-text `--prompt` to the
-customer's own LLM backend (Bedrock / Anthropic key / Ollama per
-the customer's `IAM_JIT_LLM` configuration). The model returns a
-proposed configuration with these top-level keys:
+customer's own LLM backend (Bedrock / Anthropic API / OpenAI API /
+Ollama per the customer's `IAM_JIT_LLM` configuration). The model
+returns a proposed configuration with these top-level keys:
 
 | Key                                       | Purpose                                                                        |
 | ----------------------------------------- | ------------------------------------------------------------------------------ |
@@ -106,7 +106,7 @@ sparingly; the review step is the safety net.
 | Concern                            | How bootstrap handles it                                                                                       |
 | ---------------------------------- | -------------------------------------------------------------------------------------------------------------- |
 | AWS credentials                    | Read from the operator's current shell (boto3 default chain). Never leave the machine.                          |
-| LLM traffic                        | Routed through the customer's own Bedrock / Anthropic / Ollama backend. Never touches iam-jit-the-company.      |
+| LLM traffic                        | Routed through the customer's own Bedrock / Anthropic / OpenAI / Ollama backend. Never touches iam-jit-the-company. |
 | Source code                        | **Never read.** Per `[[recommender-context-boundary]]`, iam-jit consumes exactly two context channels — AWS state + operator config/prompt. |
 | Existing IAM resources             | **Never mutated.** Per `[[creates-never-mutates]]`, bootstrap only CREATES the iam-jit config file + audit row. |
 | Network egress to iam-jit-the-company | None. No phone home, no license callback, no telemetry. Per `[[self-host-zero-billing-dependency]]`.           |
@@ -142,7 +142,7 @@ Environment variables consulted:
 - `IAM_JIT_CONFIG_FILE` — default output config path
 - `IAM_JIT_BOOTSTRAP_AUDIT_FILE` — default audit log path
 - `IAM_JIT_BOOTSTRAP_ACTOR` — overrides the actor name in the audit row
-- `IAM_JIT_LLM` / `IAM_JIT_BEDROCK_MODEL` / `ANTHROPIC_API_KEY` / `OLLAMA_HOST` — LLM backend selection (same precedence as the rest of iam-jit, see `src/iam_jit/llm.py`)
+- `IAM_JIT_LLM` / `IAM_JIT_BEDROCK_MODEL` / `ANTHROPIC_API_KEY` / `OPENAI_API_KEY` / `OLLAMA_HOST` — LLM backend selection (same precedence as the rest of iam-jit, see `src/iam_jit/llm.py`)
 - `EDITOR` — used when the operator picks `edit` at the review prompt
 
 ## Composition with other features
