@@ -520,7 +520,7 @@ def _register_context_fingerprints() -> None:
       - llm.backend       — backend name + model (drift = silent swap)
       - llm.org_context   — admin-provided org-context.yaml (if configured)
     """
-    from . import audit
+    from .. import audit
 
     audit.record_boot_fingerprint("llm.system_prompt", audit.fingerprint(SYSTEM_PROMPT))
 
@@ -546,7 +546,11 @@ def _register_context_fingerprints() -> None:
             pass
 
 
-def get_backend_for_tier(tier: str) -> LLMBackend:
+def get_backend_for_tier(
+    tier: str,
+    *,
+    preferred_backend: str | None = None,
+) -> LLMBackend:
     """Return an LLM backend configured for the caller's billing
     tier. Picks the backend MODE (Bedrock / Anthropic / Ollama)
     from deployment-wide config exactly the same way `get_backend`
@@ -557,14 +561,44 @@ def get_backend_for_tier(tier: str) -> LLMBackend:
     (Sonnet for Pro, Opus for Team / Enterprise). Free/Indie
     callers receive a NoOpBackend regardless of deployment config
     — those tiers are deterministic-only by design.
+
+    `preferred_backend` (from per-account `llm_policy.preferred_backend`)
+    overrides the deployment-wide IAM_JIT_LLM env. Unknown name or
+    "noop" returns a NoOpBackend. This keeps the per-account override
+    contract: never crash a scoring call because of a bad config — fall
+    back gracefully so the deterministic floor still ships.
     """
-    from . import llm_budget
+    from .. import llm_budget
 
     tier_norm = (tier or "free").lower().strip()
     if tier_norm in {"free", "indie"}:
         return NoOpBackend()
 
     model_for_tier = llm_budget.model_for_tier(tier_norm)
+
+    # Per-account override (pluggable-backend slice 2026-05-19).
+    preferred = (preferred_backend or "").lower().strip()
+    if preferred:
+        if preferred in {"none", "noop"}:
+            return NoOpBackend()
+        if preferred == "ollama":
+            return OllamaBackend(
+                host=os.environ.get("OLLAMA_HOST") or "http://localhost:11434",
+                model=model_for_tier,
+            )
+        if preferred == "anthropic":
+            return AnthropicBackend(model=model_for_tier)
+        if preferred == "bedrock":
+            return BedrockBackend(
+                model_id=model_for_tier,
+                region=os.environ.get("IAM_JIT_BEDROCK_REGION") or os.environ.get("AWS_REGION"),
+            )
+        # `openai` is a score-path-only backend (it has no `refine`
+        # implementation in _core). For the chat/refine entry point
+        # we fall through to the env-driven selection rather than
+        # raising — the score-policy registry will use openai
+        # directly via `default_score_backend(preferred=...)`.
+
     explicit = os.environ.get("IAM_JIT_LLM", "").lower()
     if explicit == "none":
         return NoOpBackend()

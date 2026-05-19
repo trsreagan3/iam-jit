@@ -60,6 +60,13 @@ class LLMDecision:
     """Human-readable detail. For account policy, this is the
     admin's `llm_policy_reason` if they set one. For deployment
     default, the env-var name. None when use_llm=True."""
+    preferred_backend: str | None = None
+    """Per-account preferred LLM backend name (e.g. 'anthropic',
+    'bedrock', 'openai', 'ollama'). When set AND `use_llm` is True,
+    the score path passes this through to the backend registry so
+    high-stakes accounts can be routed to a specific provider.
+    Unknown / unavailable backend → registry falls back to the
+    deployment default (no scoring failure)."""
 
 
 class _AccountsView(Protocol):
@@ -104,6 +111,7 @@ def decide(
 
     if account is not None:
         policy = getattr(account, "llm_policy", None)
+        preferred_backend = getattr(account, "llm_preferred_backend", None) or None
         if policy in _VALID_POLICIES:
             reason = getattr(account, "llm_policy_reason", None) or None
             if policy == "use_llm":
@@ -112,6 +120,7 @@ def decide(
                     source="account_policy",
                     skip_reason=None,
                     skip_detail=None,
+                    preferred_backend=preferred_backend,
                 )
             else:  # deterministic_only
                 return LLMDecision(
@@ -119,6 +128,7 @@ def decide(
                     source="account_policy",
                     skip_reason="account_policy:deterministic_only",
                     skip_detail=reason,
+                    preferred_backend=None,
                 )
 
     # No explicit account policy → consult the deployment default.

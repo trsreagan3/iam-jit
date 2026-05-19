@@ -55,6 +55,12 @@ class Account:
     # Values: "use_llm" | "deterministic_only" | None (= deployment default)
     llm_policy: str | None = None
     llm_policy_reason: str | None = None
+    # Per-account LLM-backend preference (pluggable-backend slice
+    # 2026-05-19). When set AND llm_policy='use_llm', the score path
+    # routes through this backend instead of the deployment default.
+    # Unknown / unavailable backend → registry falls back to default.
+    # Values: 'bedrock' | 'anthropic' | 'openai' | 'ollama' | None.
+    llm_preferred_backend: str | None = None
     # Per-account safety-mode override (per [[safety-mode-two-modes]]).
     # When set, overrides the deployment-default IAM_JIT_SAFETY_MODE.
     # Typical: deployment default read_write_swap, prod accounts
@@ -121,6 +127,7 @@ def _account_from_dict(d: dict[str, Any]) -> Account:
         enabled=bool(d.get("enabled", True)),
         llm_policy=d.get("llm_policy"),
         llm_policy_reason=d.get("llm_policy_reason"),
+        llm_preferred_backend=d.get("llm_preferred_backend"),
         safety_mode_override=d.get("safety_mode_override"),
     )
 
@@ -151,6 +158,8 @@ def _account_to_dict(a: Account) -> dict[str, Any]:
         out["llm_policy"] = a.llm_policy
     if a.llm_policy_reason:
         out["llm_policy_reason"] = a.llm_policy_reason
+    if a.llm_preferred_backend:
+        out["llm_preferred_backend"] = a.llm_preferred_backend
     if a.safety_mode_override:
         out["safety_mode_override"] = a.safety_mode_override
     return out

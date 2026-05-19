@@ -28,6 +28,27 @@ within the same release.
 
 ### Added
 
+- **Pluggable LLM-backend abstraction** (`src/iam_jit/llm/`) — the
+  Pro-tier LLM call is now a 4-way choice (Bedrock / Anthropic API /
+  OpenAI API / Ollama) selected by `IAM_JIT_LLM_BACKEND` env or
+  per-account `llm_preferred_backend`. Backs the doc claims that
+  shipped in `d31d8e4`. Old single-file `src/iam_jit/llm.py` is now
+  a package; every back-compat import path (`NoOpBackend`,
+  `OllamaBackend`, `AnthropicBackend`, `BedrockBackend`,
+  `RecordingBackend`, `CassetteMiss`, `wrap_with_cassette`, `_parse`,
+  `_cassette_key`, `get_backend`, `get_backend_for_tier`,
+  `LLMBackend`, `SYSTEM_PROMPT`) is preserved verbatim. New public
+  surface: `score_policy()`, `default_score_backend()`,
+  `get_score_backend()`, `available_backends()`, `ScoreContext`,
+  `ScoreResponse`. Per-account `LLMDecision` now carries
+  `preferred_backend` so the score route can route prod accounts to
+  a specific provider. `pyproject.toml` adds per-backend extras
+  (`[bedrock]`, `[anthropic]`, `[openai]`, `[ollama]`,
+  `[all-llm-backends]`); the legacy `[llm]` extra keeps mapping to
+  Anthropic for back-compat. New ops doc at `docs/LLM-BACKENDS.md`.
+  Closes the doc/code gap from `d31d8e4` (Bedrock 30-60 day approval
+  lead time, see `[aws-account-verification]`).
+
 - **AWS-usage builder cron** (`scripts/aws_usage_builder.py`) — tiny
   operator-side daily job that warms an AWS account with three cheap
   no-op calls per day (`s3:PutObject` of a 1-byte file,

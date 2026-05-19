@@ -51,6 +51,11 @@
           "type": ["string", "null"],
           "maxLength": 500
         },
+        "llm_preferred_backend": {
+          "description": "Per-account preferred LLM backend name. When set AND llm_policy='use_llm', the score path routes through this backend; unknown/unavailable falls back to the deployment default.",
+          "type": ["string", "null"],
+          "enum": ["bedrock", "anthropic", "openai", "ollama", null]
+        },
         "safety_mode_override": {
           "description": "Per-account safety-mode override. When set, overrides deployment-default IAM_JIT_SAFETY_MODE. Typical: deployment default read_write_swap, prod accounts opt up to strict.",
           "type": ["string", "null"],

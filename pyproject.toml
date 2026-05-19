@@ -50,7 +50,18 @@ Source = "https://github.com/trsreagan3/iam-jit"
 Issues = "https://github.com/trsreagan3/iam-jit/issues"
 
 [project.optional-dependencies]
+# Legacy alias — kept for back-compat with deployment docs / pip
+# instructions that predate the pluggable-backend slice. Maps to
+# the Anthropic-API backend.
 llm = ["anthropic>=0.34"]
+# Per-backend extras (pluggable-backend slice 2026-05-19). Operators
+# install only the providers their deployment uses; defaults to
+# zero extra deps. See docs/LLM-BACKENDS.md for the matrix.
+bedrock = []          # boto3 is a base dep; no extra wheel needed
+anthropic = ["anthropic>=0.34"]
+openai = ["openai>=1.40"]
+ollama = []           # httpx is a base dep; Ollama is local + zero-cost
+all-llm-backends = ["anthropic>=0.34", "openai>=1.40"]
 # #258 — AWS Security Lake audit-export adapter. pyarrow is heavy
 # (~30 MB wheel) so we keep it out of the base install; operators
 # who enable --security-lake-bucket pip-install the extra.

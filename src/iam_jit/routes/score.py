@@ -674,7 +674,10 @@ def score_policy(
             if budget_store.consume_or_reject(customer_id, caller_tier):
                 try:
                     from ..llm import get_backend_for_tier
-                    llm_backend = get_backend_for_tier(caller_tier)
+                    llm_backend = get_backend_for_tier(
+                        caller_tier,
+                        preferred_backend=decision.preferred_backend,
+                    )
                     llm_used = True
                 except Exception:
                     # Backend init failed (e.g. boto3 missing, Bedrock
