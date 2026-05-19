@@ -11,7 +11,41 @@ within the same release.
 
 ## Unreleased — Bounce-suite rename (2026-05-17)
 
+### Docs
+
+- **LLM-backend reframe in `docs/DEPLOYMENT.md`** — Step 5 now
+  presents the four supported LLM backends (Bedrock / Anthropic
+  API / OpenAI API / Ollama) as equal first-class choices with a
+  per-backend cost-per-1k-scores table, instead of recommending
+  Bedrock as the default. Notes that Bedrock requires a one-time
+  per-account model-access approval (with variable lead time) and
+  that the other three backends have no AWS-side approval gate.
+  Bedrock-specific sections (AWS Budget alarm, model-access
+  prerequisite, pilot parameter set) now carry "Bedrock-only"
+  banners pointing operators at the equivalent path for the other
+  backends. Companion polish in `docs/ENTERPRISE-SELF-BOOTSTRAP.md`
+  to add OpenAI to the LLM-backend list. No code changes.
+
 ### Added
+
+- **AWS-usage builder cron** (`scripts/aws_usage_builder.py`) — tiny
+  operator-side daily job that warms an AWS account with three cheap
+  no-op calls per day (`s3:PutObject` of a 1-byte file,
+  `cloudwatch:PutMetricData` against namespace `iam-jit/usage-builder`,
+  and `ec2:DescribeRegions`) to build usage + billing history per
+  Amazon's 2026-05-19 Bedrock denial-email guidance ("Continue to
+  actively use other AWS services on your account to build Usage and
+  billing history"). Refuses to run without `IAM_JIT_USAGE_BUCKET` or
+  configured credentials; partial failures don't abort the run; exits
+  non-zero only when ALL three calls fail (cron-friendly). Logs to
+  `~/.iam-jit/aws-usage-builder.log`. Cost: well under $1/month at
+  one tick per day. Per `[[creates-never-mutates]]` read-only on the
+  operator's machine outside the log file + the 1-byte S3 object. Per
+  `[[self-host-zero-billing-dependency]]` talks only to the operator's
+  own AWS account; no phone-home. Crontab template
+  (`scripts/aws_usage_builder.crontab.example`) + setup README
+  (`scripts/README.md`) included. 6 moto-mocked tests in
+  `tests/scripts/test_aws_usage_builder.py`.
 
 - **Per-org notification routing engine** (#280; ENTERPRISE tier) — new
   `--alert-routes ROUTES.yaml` flag on `ibounce run` activates the

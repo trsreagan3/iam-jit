@@ -1,0 +1,19 @@
+# aws_usage_builder.crontab.example
+#
+# Install with:
+#     crontab scripts/aws_usage_builder.crontab.example
+#
+# Or, to keep existing entries:
+#     (crontab -l 2>/dev/null; cat scripts/aws_usage_builder.crontab.example) | crontab -
+#
+# IMPORTANT: edit the absolute paths below before installing. cron does NOT
+# expand `~` and runs with a near-empty PATH, so we use /usr/bin/python3
+# and an absolute cd. Adjust if you use pyenv / asdf / a project venv.
+#
+# Required env vars (export inline so cron sees them):
+#   IAM_JIT_USAGE_BUCKET     — private S3 bucket you own (operator-configured)
+#   AWS_PROFILE              — recommended; minimal-permission profile
+#   AWS_REGION               — optional; defaults to the profile's region
+
+# Run daily at 07:00 local time
+0 7 * * * cd "$HOME/repos/iam-roles" && IAM_JIT_USAGE_BUCKET=CHANGE_ME AWS_PROFILE=iam-jit-usage /usr/bin/python3 scripts/aws_usage_builder.py >> /tmp/aws-usage-builder.cron.log 2>&1
