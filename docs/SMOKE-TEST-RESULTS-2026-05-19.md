@@ -439,3 +439,95 @@ SHA-bump). Until that lands, the pre-launch README annotation
 proposed above is the right interim mitigation — it converts a
 silent 401/404 into a working source-build path that succeeds in
 under 70 seconds on all three distros.
+
+---
+
+## Re-run 2026-05-21: post-publicization completion
+
+Continuing from 2026-05-20 partial data (ibounce 3/3 PASS, kbounce
+2/3 PASS confirmed). The repos are now public on GitHub, so Phase A
+`go install <module>/cmd/<bin>@main` is anonymously fetchable from
+the Go proxy. This re-run completes the remaining cells of the
+Phase A canonical-install matrix for the source-via-`go install`
+path. PyPI / GHCR / Homebrew remain unpublished (gated on #235
+v1.0.0 tag).
+
+### New cells exercised this re-run
+
+| Product | Distro | Status | Time | Install path | Notes |
+|---|---|---|---|---|---|
+| gbounce | ubuntu24.04 | PASS | 91s | apt + go.dev tarball (1.26.0) + `go install github.com/trsreagan3/gbounce/cmd/gbounce@main` | clean; `gbounce --version` reports `dev (commit none, built unknown)` |
+| dbounce | ubuntu24.04 | PASS | 156s | apt + libpq-dev + go.dev tarball (1.25.4) + `CGO_ENABLED=1 go install github.com/trsreagan3/dbounce/cmd/dbounce@main` | CGo build of `pg_query_go` adds ~60s vs pure-Go siblings |
+| kbounce | alpine3.20  | PASS | 156s | `apk add build-base go` + `GOTOOLCHAIN=go1.26.0+auto` + `go install github.com/trsreagan3/kbouncer/cmd/kbounce@main` | apk's go 1.22.10 < required 1.26; toolchain auto-downloaded the matching version |
+| gbounce | debian12-slim | PASS | 84s | apt + go.dev tarball (1.26.0) + `go install github.com/trsreagan3/gbounce/cmd/gbounce@main` | clean |
+| gbounce | alpine3.20  | PASS | 84s | `apk add build-base go` + `GOTOOLCHAIN=go1.26.0+auto` + `go install github.com/trsreagan3/gbounce/cmd/gbounce@main` | clean; toolchain bootstrap same as kbounce |
+| dbounce | debian12-slim | PASS | 168s | apt + libpq-dev + go.dev tarball (1.25.4) + `CGO_ENABLED=1 go install github.com/trsreagan3/dbounce/cmd/dbounce@main` | same CGo cost; clean |
+| dbounce | alpine3.20  | PASS | 203s | `apk add build-base musl-dev linux-headers postgresql-dev pkgconfig go` + `GOTOOLCHAIN=go1.25.4+auto` + `CGO_ENABLED=1 go install github.com/trsreagan3/dbounce/cmd/dbounce@main` | slowest cell; musl rebuild of libpg_query + toolchain bootstrap stack |
+
+### Completed matrix (Phase A — `go install ...@main` / `pip install git+...`)
+
+| Product | Ubuntu 24.04 | Debian 12 | Alpine 3.20 |
+|---|---|---|---|
+| ibounce | PASS (76s)  | PASS (57s)  | PASS (91s)  |
+| kbounce | PASS (241s) | PASS (306s) | PASS (156s) |
+| dbounce | PASS (156s) | PASS (168s) | PASS (203s) |
+| gbounce | PASS (91s)  | PASS (84s)  | PASS (84s)  |
+
+**Phase A post-publicization pass rate: 12 / 12** — every product
+installs anonymously on every distro via the source-build canonical
+path now that the repos are public. The 0/12 result in the original
+2026-05-19 run reflected the privacy of the repos at that time,
+not a product defect.
+
+**Median time-to-first-`--version` across this re-run's 7 new
+cells: 156s.** Median across all 12 Phase A cells (combining prior
++ this re-run): **120s** — meaningfully above the 60s target. The
+two cost centers are (a) downloading the Go toolchain tarball
+(~10s) + dep tree (5–30s), and (b) CGo compilation for dbounce
+(adds ~60–90s on every distro). Publishing prebuilt binaries
+(GHCR, Homebrew bottles, PyPI wheels) is what drops these to <15s.
+
+### Notes on Alpine specifics
+
+- Alpine 3.20's `apk add go` ships Go 1.22.10. Both kbounce
+  (`go 1.26.0`) and dbounce (`go 1.25.4`) require newer toolchains
+  via their `go.mod`. Setting `GOTOOLCHAIN=<version>+auto` cleanly
+  triggers Go's built-in toolchain auto-download, so we did NOT
+  need to install the official go.dev tarball on Alpine. The musl
+  vs glibc concern documented in the brief did not materialize for
+  the toolchain itself — Go's auto-download knows about musl.
+- For dbounce on Alpine specifically, libpg_query needs
+  `musl-dev linux-headers postgresql-dev` to compile under CGo
+  with musl. Once those are in, the build proceeds identically to
+  glibc-based distros.
+
+### Remaining gaps (all gated on #235 v1.0.0)
+
+- **PyPI:** `pip install iam-jit` still 404s; only
+  `pip install git+https://github.com/trsreagan3/iam-jit` works.
+- **GHCR :latest:** `docker pull ghcr.io/trsreagan3/kbounce:latest`,
+  `:gbounce:latest`, `:dbounce:latest` still return 401/404; the
+  GHCR-image path is not yet a working first-line install.
+- **Homebrew tap formula SHAs:** still placeholder zeros pointing
+  at the nonexistent `v1.0.0` archive tag (see "Top 3 doc gaps"
+  item 3 above).
+- **`gbounce --version` output:** every Go binary built via
+  `go install ...@main` reports `dev (commit none, built unknown)`
+  because the ldflags-injected version metadata only fires under
+  the products' Goreleaser/Dockerfile build paths, not under
+  bare `go install`. Cosmetic; not a smoke-test failure.
+
+### Constraints respected (this re-run)
+
+- **push-policy-public-repo:** only this report file modified; diff
+  scanned for secrets before commit (none present; no env vars,
+  tokens, or absolute home paths leaked into the report).
+- **creates-never-mutates:** every container ran with `--rm`; no
+  persistent state on host.
+- **self-host-zero-billing-dependency:** all outbound network was
+  to GitHub, the Go module proxy (`proxy.golang.org`), and the
+  Alpine/Debian/Ubuntu package mirrors. No phone-home to
+  iam-jit-the-company.
+- **deliberate-feature-completion:** the 12/12 Phase A post-
+  publicization matrix is now whole; reporting it. PyPI / GHCR /
+  Homebrew gaps continue to be tracked separately under #235.
