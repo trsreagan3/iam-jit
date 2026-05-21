@@ -41,6 +41,7 @@ dependencies = [
   "mangum>=0.17",
   "python-multipart>=0.0.9",
   "PyJWT[crypto]>=2.8",
+  "rich>=13",
 ]
 
 [project.urls]
@@ -87,6 +88,11 @@ dev = [
   "ruff>=0.4",
   "cfn-lint>=1.0",
   "pyarrow>=14",
+  # LLM backend deps (pluggable-backend slice #291). Tests in tests/llm/
+  # exercise per-backend adapters; CI must install both so the
+  # 16-test backend suite runs.
+  "anthropic>=0.34",
+  "openai>=1.40",
 ]
 
 [project.scripts]
