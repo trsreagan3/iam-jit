@@ -334,6 +334,15 @@ Each bouncer prompts independently. v1.1 brings unified prompt-inbox UI.
 ## B16. Cross-product: only gbounce reads `X-Agent-Session-Id` header in v1.0 (GAP — v1.1)
 Tested 2026-05-22 against the simulation harness at `tests/integration/nanoclaw_paths/`. gbounce reads `X-Agent-Session-Id` + `X-Agent-Name` headers and populates `unmapped.iam_jit.agent.session_id` on every event (#308). ibounce / kbounce / dbounce do NOT read the header today — they derive `agent.name` from `User-Agent` (or process-tree for ibounce) and leave `agent.session_id` null. Effect: cross-bouncer correlation by `agent.session_id` works for HTTPS-via-gbounce traffic only; AWS / K8s / SQL traffic isn't yet correlatable on session_id. Workaround until v1.1: filter by `agent.name` + time window across products. The kbouncer / dbounce schemas already have the column (#289 / #266 plumbing); the missing piece is reading the header on inbound. Fix is the same shape across all three: mirror gbounce's `buildAgentBlock` from `internal/audit/event.go`. Per `[[don't-tailor-to-lighthouse]]`: the generic-header surface is already documented; closing this is product polish, not lighthouse-bespoke work.
 
+## B17. LLM-generated profiles: non-deterministic output (DESIGN per `[[ibounce-honest-positioning]]`)
+**Task #326** ships `iam-jit profile generate-from-audit` + `iam-jit profile generate`. Two design caveats baked into the output:
+
+1. **Non-determinism.** Two runs of the same input on the same LLM may produce slightly different YAML (different patterns, different reasons strings). This is INTENTIONAL — the operator-review step is the determinism gate, not the synthesis step. We do NOT cassette / pin LLM responses across runs because that would conflict with the operator-configurable `--preferred-backend`.
+2. **Wildcard inference is best-effort.** When the LLM emits a broad glob (`*-staging-*`, `arn:aws:s3:::*-prod-*`) the generator auto-adds it to `flagged_for_review` regardless of whether the LLM flagged it. The operator must confirm broad patterns explicitly before installing.
+3. **Deterministic fallback is event-literal.** If the LLM is unavailable / returns junk, the fallback emits an exact-match allow for every observed resource (no wildcards inferred) — better to be too narrow than silently too broad. The `flagged_for_review` block carries the "LLM unavailable" note.
+
+Workaround: operators who want determinism set `--preferred-backend ollama` (locally-hosted) + pin the model via `IAM_JIT_LLM_MODEL`. Hosted-API runs (Anthropic / Bedrock / OpenAI) are inherently sampling-non-deterministic; review the bundle before installing. See [docs/PROFILE-GENERATION.md](PROFILE-GENERATION.md) for the full guide.
+
 ---
 
 # Discoverability surfaces

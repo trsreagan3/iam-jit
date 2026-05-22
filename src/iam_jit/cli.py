@@ -1721,6 +1721,14 @@ register_session_replay_group(main)
 from .cli_deny import register_deny_group  # noqa: E402
 register_deny_group(main)
 
+# #326 — register `iam-jit profile generate-from-audit` + siblings.
+# LLM-generated bounce profiles. Lives in its own module so the LLM
+# import surface (+ recommender) doesn't load on every CLI surface.
+# Distinct from `[[no-nl-synthesis]]` which forbids NL->IAM-policy;
+# bounce profiles are operator-reviewable config artifacts.
+from .cli_profile_generate import register_profile_group  # noqa: E402
+register_profile_group(main)
+
 
 if __name__ == "__main__":
     main()

@@ -439,6 +439,20 @@ A typical bundle is **mostly a denylist** (per [[discovery-first-default]] the b
 
 See [docs/ORG-PROFILE-DISTRIBUTION.md](docs/ORG-PROFILE-DISTRIBUTION.md) for the full runbook + [docs/examples/profiles/](docs/examples/profiles/) for five starter example profiles (`org-base`, `prod-deny`, `pci-compliance`, `data-team`, `ci-runner`) + an `index.yaml.template`. The shipped behavior referenced (`profile install --from URL`, SHA pinning, ETag sync, read-only-installed-from-URL semantics) is per task #4 / the #233 bounce-profiles repo work.
 
+#### LLM-generated profiles from observed audit events (#326)
+
+Per [[discovery-first-default]] + [[ibounce-honest-positioning]], once you've run a legitimate task in discovery mode the next question is *"how do I pin a profile from what just worked?"* `iam-jit profile generate-from-audit` is the headline post-pivot UX: agent reads the last hour of OCSF audit events across every reachable bouncer, asks the LLM to synthesize an allow-set narrowed to exactly the observed resources + layers the safety floor on top, returns a STARTING-POINT bundle (one YAML per bouncer + an index.yaml) with `flagged_for_review` for broad globs + `skipped` for ambiguous one-offs. The operator reviews + `bounce profile install --from <dir>`.
+
+```bash
+iam-jit profile generate-from-audit \
+    --time-range 1h --add-safety-denies \
+    --name "post-migration" --output ./profiles/
+
+bounce profile install --from ./profiles/
+```
+
+Distinct from `[[no-nl-synthesis]]` (IAM-policy NL synthesis remains forbidden) — bounce profiles are operator-reviewable config artifacts, not security-boundary policies. See [docs/PROFILE-GENERATION.md](docs/PROFILE-GENERATION.md) for the full agent + operator guide.
+
 ---
 
 ## How it works (60 seconds)

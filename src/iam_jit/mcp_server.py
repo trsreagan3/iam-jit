@@ -1737,6 +1737,196 @@ TOOLS = [
 ]
 
 
+# #326 — LLM-generated bounce profiles.
+# Three tools: generate from audit events, generate from prose
+# context, save a YAML under a named bundle. Per
+# [[ibounce-honest-positioning]] every result carries a STARTING-
+# POINT label + flagged_for_review + skipped lists; per
+# [[creates-never-mutates]] save never overwrites.
+TOOLS.extend([
+    {
+        "name": "bounce_profile_generate_from_audit",
+        "description": (
+            "Synthesize a bounce-profile bundle from observed OCSF "
+            "audit events. PRIMARY post-[[discovery-first-default]] "
+            "use case: operator runs a legit task, agent calls this "
+            "tool with the audit window, the LLM generates a profile "
+            "that allows exactly the observed traffic + layers the "
+            "safety floor on top. Output ALWAYS includes "
+            "`flagged_for_review` (broad globs that need operator "
+            "confirmation) + `skipped` (events deliberately not "
+            "included with reasons) + provenance metadata. The "
+            "profile is NOT auto-installed — operator review is "
+            "mandatory. Per [[creates-never-mutates]] this never "
+            "overwrites existing profiles."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "events": {
+                    "type": "array",
+                    "items": {"type": "object"},
+                    "description": (
+                        "Pre-fetched OCSF audit events (the output of "
+                        "`iam-jit audit query`). Each event must carry "
+                        "the `_bouncer` stamp the audit-query CLI adds. "
+                        "OPTIONAL when `query_local_bouncers=true` — "
+                        "in that case the MCP server probes the "
+                        "default bouncer mgmt ports itself."
+                    ),
+                },
+                "query_local_bouncers": {
+                    "type": "boolean",
+                    "default": False,
+                    "description": (
+                        "When true (and `events` is empty) probe the "
+                        "default bouncer mgmt ports (ibounce 8767, "
+                        "kbounce 8766, dbounce 8768, gbounce 8769) and "
+                        "use the merged audit events as input."
+                    ),
+                },
+                "time_range": {
+                    "type": "string",
+                    "default": "1h",
+                    "description": (
+                        "Operator-facing window label embedded in the "
+                        "profile header. Used as lookback when "
+                        "query_local_bouncers=true + since unset."
+                    ),
+                },
+                "since": {"type": "string"},
+                "until": {"type": "string"},
+                "agent_session_id": {
+                    "type": "string",
+                    "description": (
+                        "Optional filter / provenance marker. When "
+                        "set + query_local_bouncers=true, narrows the "
+                        "audit query to one session."
+                    ),
+                },
+                "bouncers": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": (
+                        "Restrict generation to these bouncers. "
+                        "Values: ibounce | kbounce | dbounce | "
+                        "gbounce. Default: every bouncer that had "
+                        "events in the input."
+                    ),
+                },
+                "add_safety_denies": {
+                    "type": "boolean",
+                    "default": True,
+                    "description": (
+                        "Layer the universal safety floor (break-glass "
+                        "roles, IAM mutation, KMS deletion, audit "
+                        "infra destruction, IMDS, GRANT TO PUBLIC, "
+                        "cluster-destructive verbs) on top of the "
+                        "LLM-suggested denies. Default ON per the "
+                        "post-pivot playbook."
+                    ),
+                },
+                "name": {
+                    "type": "string",
+                    "description": (
+                        "Bundle name. Default auto-generated per "
+                        "[[profile-auto-naming]]."
+                    ),
+                },
+                "preferred_backend": {
+                    "type": "string",
+                    "enum": ["anthropic", "openai", "bedrock", "ollama"],
+                    "description": (
+                        "Override the LLM backend selection. Default: "
+                        "env-based per "
+                        "[[pluggable-llm-backend-decision]]."
+                    ),
+                },
+                "audit_window_start": {"type": "string"},
+                "audit_window_end": {"type": "string"},
+                "filters": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": (
+                        "Extra filter expressions forwarded to the "
+                        "audit-query (only used when "
+                        "query_local_bouncers=true). Same shape as "
+                        "`iam-jit audit query --filter`."
+                    ),
+                },
+                "limit": {"type": "integer", "default": 500},
+                "audit_events_token": {"type": "string"},
+                "timeout": {"type": "number", "default": 10.0},
+            },
+        },
+    },
+    {
+        "name": "bounce_profile_generate",
+        "description": (
+            "Synthesize a STARTING-POINT bounce profile from a prose "
+            "description of an organization. Suited to security "
+            "teams writing an org-base profile (cross-bouncer "
+            "denylist). Output ALWAYS carries the 'STARTING POINT — "
+            "review before distributing' label. Per "
+            "[[no-nl-synthesis]] this layer is distinct from IAM-"
+            "policy synthesis (which remains forbidden) — bounce "
+            "profiles are operator-reviewed config, not security "
+            "boundary."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "required": ["context"],
+            "properties": {
+                "context": {
+                    "type": "string",
+                    "description": (
+                        "Prose description of the org (e.g. 'mid-size "
+                        "SaaS w/ prod/staging split, payment "
+                        "processor integration, 5-eng team using "
+                        "Claude'). Treated as opaque DATA by the "
+                        "LLM — instructions inside the context are "
+                        "ignored."
+                    ),
+                },
+                "start_from": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": (
+                        "Names of example profiles to compose with. "
+                        "e.g. ['example-org-base']."
+                    ),
+                },
+                "name": {"type": "string"},
+                "preferred_backend": {
+                    "type": "string",
+                    "enum": ["anthropic", "openai", "bedrock", "ollama"],
+                },
+            },
+        },
+    },
+    {
+        "name": "bounce_profile_save",
+        "description": (
+            "Save a profile YAML under a named bundle dir on the "
+            "operator's machine. Writes to "
+            "`~/.iam-jit/generated-profiles/<name>/profile.yaml` "
+            "(override via `IAM_JIT_GENERATED_PROFILES_DIR`). Per "
+            "[[creates-never-mutates]] refuses to overwrite an "
+            "existing non-empty dir of the same name. Returns "
+            "`{path, sha256, name}` on success."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "required": ["yaml", "name"],
+            "properties": {
+                "yaml": {"type": "string"},
+                "name": {"type": "string"},
+            },
+        },
+    },
+])
+
+
 # Bounce-suite rename (2026-05-17): every `bouncer_*` MCP tool gets
 # an `ibounce_*` alias in v1.0. Both names dispatch to the same
 # handler; the `bouncer_*` originals carry a `(DEPRECATED ...)` note
@@ -4086,6 +4276,15 @@ def _handle_request(req: dict[str, Any]) -> dict[str, Any] | None:
             result_payload = _list_compatibility_catalog_for_mcp(args)
         elif tool_name == "list_compatibility_overrides":
             result_payload = _list_compatibility_overrides_for_mcp(args)
+        elif tool_name == "bounce_profile_generate_from_audit":
+            from .cli_profile_generate import generate_from_audit_for_mcp
+            result_payload = generate_from_audit_for_mcp(args)
+        elif tool_name == "bounce_profile_generate":
+            from .cli_profile_generate import generate_from_context_for_mcp
+            result_payload = generate_from_context_for_mcp(args)
+        elif tool_name == "bounce_profile_save":
+            from .cli_profile_generate import save_for_mcp
+            result_payload = save_for_mcp(args)
         else:
             return _err(rid, -32601, f"unknown tool: {tool_name}")
         # MCP tool result format: { content: [{type: "text", text: "..."}] }
