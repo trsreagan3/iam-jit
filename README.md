@@ -149,6 +149,15 @@ $ ibounce tasks start \
 
 Then the agent (Claude Code, Cursor, etc.) calls `iam_jit_scope_self_for_task` via MCP and gets scoped STS credentials gated by the task scope above.
 
+### After upgrade: `ibounce profile doctor` (one-time)
+
+ibounce never overwrites `~/.iam-jit/bouncer/profiles.yaml` (your
+edits survive upgrades). After upgrading the binary, run
+`ibounce profile doctor` to surface any safety floors added to
+embedded defaults since your file was written, then opt in with
+`--apply`. See [docs/PROFILE-UPGRADE.md](docs/PROFILE-UPGRADE.md)
+for the full runbook (task #321 / KNOWN-CAVEATS §A19).
+
 ### Why this exists separately from `iam-jit local`
 
 IAM is coarse. A role granted `s3:GetObject` on `bucket/*` can call `GetObject` on every key in the bucket for the session's lifetime — even when the prompt-injected agent meant to read ONE file. The bouncer adds an in-process question: **is THIS specific call allowed right now?**

@@ -2233,6 +2233,137 @@ def _install_one_profile(profile: "Profile", source_url: str) -> None:
     resolved.write_text(_yaml.safe_dump(existing, sort_keys=False))
 
 
+@profile_group.command("doctor")
+@click.option(
+    "--profiles-path", default=None,
+    help="Path to profiles.yaml (default: ~/.iam-jit/bouncer/profiles.yaml). "
+         "Honors IAM_JIT_BOUNCER_PROFILES_FILE env var if unset.",
+)
+@click.option(
+    "--apply", "apply_changes", is_flag=True, default=False,
+    help="Additively merge missing default fields into profiles.yaml + "
+         "back up prior file. Per [[creates-never-mutates]]: only ADDS "
+         "absent fields; never overwrites operator-customized values.",
+)
+@click.option(
+    "--acknowledge", is_flag=True, default=False,
+    help="Record the current shipped-defaults version as acknowledged. "
+         "Future `ibounce run` startup banners skip the §A19 warning "
+         "until a new version bumps the stamp.",
+)
+@click.option(
+    "--diff", "show_diff", is_flag=True, default=False,
+    help="Print the YAML fragment that --apply would add.",
+)
+@click.option(
+    "--check", "check_only", is_flag=True, default=False,
+    help="Silent mode: exit 0 if profile is current, exit 2 if gaps found. "
+         "For scripted use (CI / install hooks).",
+)
+@click.option(
+    "--json", "json_out", is_flag=True, default=False,
+    help="Emit machine-readable JSON. Exit 2 if gaps found.",
+)
+def profile_doctor_cmd(
+    profiles_path: str | None,
+    apply_changes: bool,
+    acknowledge: bool,
+    show_diff: bool,
+    check_only: bool,
+    json_out: bool,
+) -> None:
+    """Diff installed profile against shipped defaults + report missing fields.
+
+    Compares ~/.iam-jit/bouncer/profiles.yaml against the shipped defaults
+    and reports any fields the operator's local file is missing.
+    ibounce NEVER auto-overwrites profiles.yaml — operator edits survive
+    upgrades — but that means a new safety floor (e.g. an additional
+    deny_actions entry, or allow_baseline gating) added to embedded
+    defaults AFTER your file was written goes unnoticed.
+
+      ibounce profile doctor              # report missing fields (no write)
+      ibounce profile doctor --apply      # additively merge + back up prior file
+      ibounce profile doctor --acknowledge # silence the warning for this version
+      ibounce profile doctor --diff       # show the YAML delta --apply would write
+      ibounce profile doctor --check      # silent; exit 2 if gaps found (CI-friendly)
+
+    Per [[creates-never-mutates]]: --apply is ADDITIVE only.
+
+    Per [[security-team-positioning-safety-not-surveillance]]: framed
+    as "your profile is behind" not "you are non-compliant."
+
+    Per task #321 / KNOWN-CAVEATS §A19.
+    """
+    from .bouncer import profile_doctor as _doctor
+
+    if apply_changes and acknowledge:
+        click.secho(
+            "--apply and --acknowledge are mutually exclusive",
+            fg="red", err=True,
+        )
+        sys.exit(2)
+
+    if apply_changes:
+        try:
+            result = _doctor.apply(profiles_path)
+        except FileNotFoundError as e:
+            click.secho(str(e), fg="red", err=True)
+            click.echo(
+                "Run `ibounce profile install-defaults` first to materialize "
+                "the embedded defaults on disk.",
+                err=True,
+            )
+            sys.exit(1)
+        if not result.applied_fields:
+            click.echo(
+                f"ibounce: profile doctor — nothing to apply; installed "
+                f"profile matches shipped defaults "
+                f"(version {_doctor.SHIPPED_DEFAULTS_VERSION})."
+            )
+            return
+        click.echo(
+            f"ibounce: profile doctor --apply — added "
+            f"{len(result.applied_fields)} field(s); backup at "
+            f"{result.backup_path}"
+        )
+        for g in result.applied_fields:
+            click.echo(
+                f"  + {g.profile_name}.{g.field} = {g.default_value!r}   "
+                f"[{g.category.value}] {g.added_in}"
+            )
+        return
+
+    if acknowledge:
+        path = _doctor.acknowledge(profiles_path)
+        click.echo(
+            f"ibounce: profile doctor --acknowledge — recorded "
+            f"{_doctor.SHIPPED_DEFAULTS_VERSION} at {path}"
+        )
+        click.echo(
+            "future `ibounce run` startup banners will skip the §A19 "
+            "warning until a new shipped-defaults version bumps the stamp."
+        )
+        return
+
+    report = _doctor.check(profiles_path)
+    if check_only:
+        if report.missing_fields:
+            sys.exit(2)
+        return
+    if json_out:
+        click.echo(_doctor.report_to_json_str(report))
+        if report.missing_fields:
+            sys.exit(2)
+        return
+    click.echo(_doctor.format_report(report), nl=False)
+    if show_diff and report.missing_fields:
+        click.echo("--- YAML that --apply would add ---")
+        for g in report.missing_fields:
+            click.echo(f"profiles.{g.profile_name}.{g.field}: {g.default_value!r}")
+    if report.missing_fields:
+        sys.exit(2)
+
+
 @main.group("prompts")
 def prompts_group() -> None:
     """View + answer DENY notifications the proxy queued.
@@ -4399,6 +4530,16 @@ def run_cmd(
         )
         for _line in _caveats.banner_lines(_trigger):
             click.echo(_line, err=True)
+        # §A19 profile-upgrade-blindness banner (#321). Only fires
+        # when the operator's installed profile is missing a safety-
+        # floor field AND they haven't acknowledged the current
+        # shipped-defaults version. Convenience / detection / audit
+        # misses don't trigger the startup line — operators see those
+        # on explicit `ibounce profile doctor`.
+        from .bouncer import profile_doctor as _profile_doctor
+        _doctor_line = _profile_doctor.startup_banner_line(product="ibounce")
+        if _doctor_line:
+            click.echo(_doctor_line, err=True)
         click.echo("Ctrl+C to stop.", err=True)
         try:
             _asyncio.run(serve(config, store=store))

@@ -13,6 +13,43 @@ within the same release.
 
 ### Added
 
+- **#321 / §A19 — `ibounce profile doctor` + cross-product upgrade-blindness fix** (2026-05-22) —
+  Closes the D3 launch-blocker surfaced by the role-effectiveness eval
+  2026-05-22 (a dbounce operator who installed pre-#302 was silently
+  running without `deny_dcl_targets_public`; ibounce + kbouncer share
+  the same "never-overwrite-once-exists" architecture and were
+  vulnerable to the same pattern).
+  - **ibounce** — new `src/iam_jit/bouncer/profile_doctor.py` module
+    with `check()` / `apply()` / `acknowledge()` / `is_acknowledged()`
+    / `startup_banner_line()` / `format_report()` /
+    `report_to_json_str()`. `apply()` additively merges missing
+    default fields + backs up the prior file before write per
+    [[creates-never-mutates]] — operator-customized field values are
+    NEVER overwritten. `bouncer_cli.py` gains `ibounce profile
+    doctor` subcommand with `--apply` / `--acknowledge` / `--diff`
+    / `--check` / `--json` flags (same shape across all 4 Bounce
+    products per [[cross-product-agent-parity]]). `ibounce run`
+    emits a §A19 startup-banner caveat when a safety-floor field is
+    missing AND the operator hasn't acknowledged the current
+    shipped-defaults version. Per
+    [[security-team-positioning-safety-not-surveillance]]: framed as
+    "your profile is behind" not "you are non-compliant."
+  - **Cross-product integration test** —
+    `tests/integration/profile_upgrade_doctor_test.py` boots each of
+    the 4 bouncer binaries, seeds a pre-floor profile shape, asserts
+    `profile doctor` reports the missing safety-floor field with the
+    correct category, asserts `--apply` merges + writes a timestamped
+    backup, asserts post-apply state is current. The D3 role-
+    effectiveness scenario now grades MEANINGFUL not PARTIAL after
+    `--apply`.
+  - **Docs** — new `docs/PROFILE-UPGRADE.md` operator-facing runbook.
+    `docs/KNOWN-CAVEATS.md` adds §A19 entry between §A18 and the
+    next section.
+  - **Per-product slices** — see `dbounce/CHANGELOG.md`,
+    `kbouncer/CHANGELOG.md`, `gbounce/CHANGELOG.md` for the per-
+    product portions. All 4 ship together per
+    [[deliberate-feature-completion]].
+
 - **#320 / §A18 — `/audit/events` wire-shape parity fix** (2026-05-22) —
   closes a UAT-discovered CRIT: the HTTP `/audit/events` endpoint
   that powers `iam-jit audit query` was emitting an empty agent
