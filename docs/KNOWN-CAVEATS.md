@@ -90,16 +90,21 @@ Tracking: every BUG entry has a task number (e.g., #299). v1.0 release gate: eve
 - **Fix:** ships [docs/PRODUCTION-LOG-STORAGE.md](PRODUCTION-LOG-STORAGE.md) — operator decision tree organised by deployment context (single-host dev, multi-host on-prem, AWS-heavy, AWS+S3, GCP, Azure, CI/CD ephemeral, Enterprise fan-out), full per-context setup snippets, sample Lambda receiver for "dump to S3", honest gaps section (no GCS / Azure-Blob / Kafka / syslog / Elasticsearch / ClickHouse native sinks — operator chains a thin shim or Vector / Fluent Bit / Cribl per `[[self-host-zero-billing-dependency]]`), per-product flag-parity matrix, three-layer validation guide (bouncer-side `audit tail`, `/healthz.audit_export` block, SIEM-side SPL / KQL / SQL queries). Linked from the main README "Documentation" section + each bouncer README. Doc framed per `[[security-team-positioning-safety-not-surveillance]]` (safety + investigation, not surveillance) and `[[don't-tailor-to-lighthouse]]` (no customer-specific recommendation).
 - **Task:** #316 — completed 2026-05-22.
 
-## A16. Cross-bouncer X-Agent-Session-Id header parity — `STATUS: QUEUED`
-- **Severity:** HIGH (breaks the headline cross-bouncer correlation claim if not fixed)
-- **Surfaced by:** #312 NanoClaw integration test 2026-05-22 — all 3 paths pass functionally, but only gbounce reads `X-Agent-Session-Id` on inbound. ibounce / kbounce / dbounce emit `session_id=null` even when the header is present.
-- **Effect:** `iam-jit audit query --filter agent.session_id=X` returns gbounce events only. Investigations across AWS + K8s + SQL miss correlation. `docs/INTEGRATION-OPENCLAW-NANOCLAW.md` + `[[audit-layer-complement-to-agent-harnesses]]` positioning both promise this works; today it doesn't.
-- **What ships (3 parallel slices, all reference #308's gbounce buildAgentBlock pattern):**
-  - **ibounce**: `src/iam_jit/bouncer/audit_export/agent_context.py` reads `X-Agent-Session-Id` + `X-Agent-Name` headers as `detected_from="http_header"` with highest precedence; falls through to User-Agent / MCP / process tree if absent
-  - **kbounce**: `internal/proxy/proxy.go` near existing agent_name / agent_session_id column writes
-  - **dbounce**: thread `sessionID` from `internal/proxy/forward.go`'s per-connection registry into OCSF event builder; schema column exists (#289) but emitter doesn't surface it
-- **Engineering scope:** ~1-2 days per bouncer = 3-5 days total; gbounce buildAgentBlock pattern is the reference
-- **Task:** #318. Depends on #308 (gbounce reference implementation).
+## A16. Cross-bouncer X-Agent-Session-Id header parity — `STATUS: FIXED 2026-05-22`
+- **Severity:** HIGH (broke the headline cross-bouncer correlation claim — now closed)
+- **Surfaced by:** #312 NanoClaw integration test 2026-05-22 — all 3 paths pass functionally, but only gbounce read `X-Agent-Session-Id` on inbound. ibounce / kbounce / dbounce emitted `session_id=null` even when the header was present.
+- **Effect (historical):** `iam-jit audit query --filter agent.session_id=X` returned gbounce events only. Investigations across AWS + K8s + SQL missed correlation. `docs/INTEGRATION-OPENCLAW-NANOCLAW.md` + `[[audit-layer-complement-to-agent-harnesses]]` positioning both promised this worked; before #318 it didn't.
+- **What shipped (3 parallel slices, all mirror #308's gbounce buildAgentBlock pattern):**
+  - **ibounce**: `src/iam_jit/bouncer/audit_export/agent_context.py` now exposes `extract_agent_headers()` + `is_valid_agent_name()` + `is_valid_agent_session_id()` + `total_agent_headers_rejected()`. `resolve_agent_block()` accepts `header_agent_name` + `header_agent_session_id` kwargs at HIGHEST precedence (above MCP / User-Agent / process tree). `audit_event_from_decision()` threads the same kwargs through to the OCSF event. `proxy.py:evaluate_request` extracts the headers once + threads them through all 3 audit-event call sites. Invalid headers are dropped (audited as anonymous) + counted under `audit_export.total_agent_headers_rejected` on `/healthz`. `detected_from` is `"http_header"` when both headers parse cleanly, `"http_header_name_only"` when only the name validates, and falls through to the existing detection chain otherwise.
+  - **kbounce**: `internal/proxy/proxy.go:resolveAgentInfo` reads the canonical `X-Agent-Name` + `X-Agent-Session-Id` headers at HIGHEST precedence (before the existing `X-Kbouncer-Session-Id` MCP registry lookup + the User-Agent fingerprint fallback). `internal/audit/agent_context.go` gains `IsValidAgentName()` mirroring gbounce's regex; existing `IsValidSessionID()` is reused. Rejection counter `totalAgentHeadersRejected` lives on the proxy `Server` struct + surfaces via `/healthz.total_agent_headers_rejected`.
+  - **dbounce**: `internal/audit/agent_context.go:ParsePGStartupAppName` now recognises the canonical `iam-jit-agent:NAME:SESSIONID` shape in `application_name` (in addition to the existing direct app-name → agent-name table). `internal/proxy/proxy.go:registerPGAgentFromBody` validates the parsed pieces via the shared regex + bumps a per-Server rejection counter for malformed values. SQL connections set `application_name=iam-jit-agent:claude-code:01968d6a-9c12-7a4b-b6f8-3b8e4c0d1aef` to thread session id through PG wire (documented in `docs/AGENT-ATTRIBUTION.md` §SQL).
+- **Cross-product test:** `tests/integration/cross_bouncer_session_id_parity_test.py` (iam-roles) starts all four bouncers on free ports, fires one request through each with the same `X-Agent-Session-Id`, then runs `iam-jit audit query --filter agent.session_id=<UUID>` + asserts 4 events (one per bouncer) come back.
+- **Regression tests:**
+  - ibounce: `tests/bouncer/test_agent_headers_318.py` — happy path + no-headers fallback + invalid-name rejection + name-only partial detection + validator parity with gbounce regex.
+  - kbouncer: `internal/proxy/agent_headers_318_test.go` — same canonical names: `TestAgentHeaders_HappyPath` + `TestAgentHeaders_NoHeaders_FallbackToUserAgent` + `TestAgentHeaders_InvalidName_Rejected` + `TestAgentHeaders_NameOnly_PartialDetection`.
+  - dbounce: `internal/proxy/agent_headers_318_test.go` — `TestApplicationName_AgentParsing_HappyPath` + `TestApplicationName_NoAgentTag_FallbackToUA` + the canonical 4 above.
+- **Docs:** `docs/AGENT-ATTRIBUTION.md` extended with the dbounce `application_name` convention. `docs/INTEGRATION-OPENCLAW-NANOCLAW.md` §B16 entry removed (no longer a v1.1 gap).
+- **Task:** #318 — completed 2026-05-22. Depends on #308 (gbounce reference implementation).
 
 ## A15. Cloud-neutral object-storage NDJSON sink (S3-compatible) — `STATUS: QUEUED`
 - **Severity:** HIGH (per founder direction 2026-05-22: bouncers other than ibounce are cloud-neutral; AWS-only Security Lake adapter alone isn't enough)
@@ -119,7 +124,23 @@ Tracking: every BUG entry has a task number (e.g., #299). v1.0 release gate: eve
 - **Engineering scope:** ~3-4 days cross-product
 - **Task:** #317.
 
-## A12. gbounce: no domain blacklist + wildcard support — `STATUS: FIXED 2026-05-22`
+## A17. UAT findings cluster — cross-product CLI parity + doc-truth-up gaps — `STATUS: QUEUED`
+- **Severity:** CRIT + HIGH (per `[[uat-findings-2026-05-22]]`; 1 CRIT + 5 HIGH launch-blockers)
+- **Surfaced by:** dogfood UAT loop 2026-05-22 — perpetual UAT agent exercised the 6 recent slices as a brand-new operator. The cross-product slices (#311 retention, #304 caveats, #316 runbook) shipped on ibounce + gbounce but didn't carry kbounce + dbounce CLI wiring despite specs saying "cross-product parity." The Go impl shipped in shared library code; CLI subcommand registration on each bouncer was a separate step that got missed.
+- **Findings to fix:**
+  - **F-316-1 CRIT** — `ibounce audit-export flush --wait DUR` referenced in `docs/PRODUCTION-LOG-STORAGE.md` §2.7 doesn't exist. CI/CD operators following the recipe lose every queued event on SIGTERM. **Fix:** either ship `*bounce audit-export flush --wait DUR` cross-product OR rewrite §2.7 to use the actual graceful-shutdown path.
+  - **F-311-3 HIGH** — `kbounce logs` + `dbounce logs` subcommands don't exist. LOG-RETENTION.md claims cross-product parity. Impl exists in shared lib; only the cobra command registration is missing. **Fix:** wire `kbounce logs {archive,purge,verify}` + `dbounce logs {archive,purge,verify}` mirroring gbounce.
+  - **F-311-4 HIGH** — `--audit-log-max-size-mb` / `--audit-log-max-age-days` / `--audit-db-retention-days` flags absent from all four `*bounce run` surfaces. **Fix:** add the flag trio + env-var overrides to each `run` command.
+  - **F-304-1 HIGH** — `kbounce doctor caveats` + `dbounce doctor caveats` don't exist (neither has a `doctor` group at all). #304 spec said "across all 4 products." **Fix:** ship `*bounce doctor caveats` on kbounce + dbounce mirroring gbounce.
+  - **F-304-2 HIGH** — kbounce + dbounce startup banners emit zero `caveat:` lines (ibounce + gbounce do). **Fix:** wire `kbounce run` + `dbounce run` startup banners to emit applicable §B entries.
+  - **F-316-2 HIGH** — gbounce has no `--audit-webhook-url` (G-Slice 6 unshipped). PRODUCTION-LOG-STORAGE.md §2.7 says "same shape works for kbounce / dbounce / gbounce." **Fix:** scope the doc to call out "webhook export is G-Slice 6 / v1.1 for gbounce; use JSONL + Fluent Bit/Vector intermediary for v1.0."
+- **Medium follow-ups (do for v1.0 if cheap):**
+  - F-311-1: `gbounce logs archive` produces empty tar.gz for non-`audit*` filenames (filename-prefix bug at `internal/audit/rotation.go:266`).
+  - F-311-2: `gbounce logs verify` false-positive green when `files_checked == 0`.
+  - F-304-3: `gbounce doctor --help` lists only `caveats` but `gbounce doctor logs` actually works.
+  - F-308-1: invalid `X-Agent-Name` silently swapped to anonymous; no event-side `rejected_reason` breadcrumb.
+- **Engineering scope:** ~3-5 days cross-product (CLI wiring exists; doctor + banner mirror existing impls; runbook doc-fix is small).
+- **Task:** #319.
 - **Severity:** HIGH (pre-launch feature gap; operators needed to block specific domains without MITM)
 - **Symptom (historical):** gbounce could audit-log every CONNECT, but couldn't REFUSE one based on destination host. Operators who wanted "block this agent from calling api.openai.com" had no way to do it.
 - **Fix (#314, gbounce commit `39afcf1`):**
