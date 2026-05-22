@@ -587,3 +587,161 @@ def test_wb29_med_02_target_services_lowercase_normalized(
     payload["metadata"] = md
     resp = as_dev.post("/api/v1/requests", json=payload)
     assert resp.status_code == 201
+
+
+# ---------------------------------------------------------------------------
+# Solo-mode self-approve-reductions UX fix (Variant B UAT finding #2).
+#
+# Pre-fix: `IAM_JIT_DEPLOYMENT_MODE=solo` set the SAR gate to "enabled" but
+# the auto-approve route returned `feature_disabled` (no
+# `auto_approve_risk_below` configured by default in solo deployments).
+# The override in `_apply_mfa_and_self_approve_enforcement` ONLY fired on
+# `above_threshold`, so the request landed in pending → four-eyes check
+# refused approver==owner → deadlock with no way out via the API.
+#
+# Fix: extend override-eligible reasons to include `feature_disabled` so
+# the solo admin's reduction short-circuits cleanly. Strict-mode, toggle,
+# blocklist, and quota denials remain non-overrideable (platform floors).
+# ---------------------------------------------------------------------------
+
+
+def test_solo_admin_reduction_auto_approves(
+    monkeypatch: pytest.MonkeyPatch,
+    as_admin: TestClient,
+    request_payload: dict,
+) -> None:
+    """Test 1: solo mode + admin reduction → auto-approved without
+    routing to human review. This is the case that previously
+    deadlocked in Variant B UAT step 4 (ssm:PutParameter, score=5).
+    """
+    monkeypatch.setenv("IAM_JIT_DEPLOYMENT_MODE", "solo")
+    resp = as_admin.post("/api/v1/requests", json=request_payload)
+    assert resp.status_code == 201, resp.text
+    body = resp.json()
+    assert body["auto_approve_decision"]["auto_approve"] is True, (
+        "solo admin reduction must auto-approve; got "
+        f"{body['auto_approve_decision']}"
+    )
+    assert body["auto_approve_decision"]["reason"] == "self_approve_reduction"
+    # Request must have transitioned past pending (no four-eyes deadlock).
+    assert body["request"]["status"]["state"] != "pending", (
+        f"state still pending — deadlock not fixed: {body['request']['status']}"
+    )
+    # The audit actor for the auto_approve transition is the
+    # self_approve_reduction one (not system:auto-approver).
+    history = body["request"]["status"].get("history") or []
+    auto_entries = [h for h in history if h.get("action") == "auto_approve"]
+    assert auto_entries, f"missing auto_approve history entry: {history}"
+    assert auto_entries[-1]["actor"].startswith("self_approve_reduction:"), (
+        f"audit actor wrong: {auto_entries[-1]['actor']}"
+    )
+
+
+def test_solo_admin_expansion_blocked_by_floor_routes_to_review(
+    monkeypatch: pytest.MonkeyPatch,
+    as_admin: TestClient,
+    request_payload: dict,
+) -> None:
+    """Test 2: solo mode + a request hitting the service-blocklist
+    floor → routes to human review (no auto-approval).
+
+    The platform-team service blocklist (`never_auto_approve_services`)
+    defaults to {iam, organizations, sts, kms, secretsmanager}. A
+    request touching one of these is a hard floor the self-approve
+    gate honors — even an admin in solo mode cannot short-circuit it
+    without a real reviewer's signature. This stands in for the
+    "expansion" concept: an admin reaching beyond what self-approve
+    is permitted to short-circuit.
+    """
+    monkeypatch.setenv("IAM_JIT_DEPLOYMENT_MODE", "solo")
+    payload = dict(request_payload)
+    spec = dict(payload["spec"])
+    spec["policy"] = {
+        "Version": "2012-10-17",
+        "Statement": [
+            {
+                "Effect": "Allow",
+                # iam:* is on the never_auto_approve_services blocklist.
+                "Action": ["iam:CreateRole"],
+                "Resource": "*",
+            }
+        ],
+    }
+    payload["spec"] = spec
+    resp = as_admin.post("/api/v1/requests", json=payload)
+    assert resp.status_code == 201, resp.text
+    body = resp.json()
+    assert body["auto_approve_decision"]["auto_approve"] is False, (
+        "blocklist floor must hold even for solo admin; got "
+        f"{body['auto_approve_decision']}"
+    )
+    # Reason is NOT self_approve_reduction — the floor held.
+    assert body["auto_approve_decision"]["reason"] != "self_approve_reduction"
+    # State stays pending — request routes to human review.
+    assert body["request"]["status"]["state"] == "pending"
+
+
+def test_non_solo_mode_does_not_self_approve(
+    monkeypatch: pytest.MonkeyPatch,
+    as_admin: TestClient,
+    request_payload: dict,
+) -> None:
+    """Test 3: non-solo mode + admin reduction → routes to human
+    review (no special handling). The SAR gate is enabled either by
+    `IAM_JIT_DEPLOYMENT_MODE=solo` OR a per-user opt-in flag; outside
+    those, an admin's request flows through the normal pipeline.
+    """
+    monkeypatch.delenv("IAM_JIT_DEPLOYMENT_MODE", raising=False)
+    resp = as_admin.post("/api/v1/requests", json=request_payload)
+    assert resp.status_code == 201, resp.text
+    body = resp.json()
+    assert body["auto_approve_decision"]["auto_approve"] is False
+    assert body["auto_approve_decision"]["reason"] != "self_approve_reduction"
+    assert body["request"]["status"]["state"] == "pending"
+
+
+def test_solo_self_approve_still_emits_audit(
+    monkeypatch: pytest.MonkeyPatch,
+    as_admin: TestClient,
+    request_payload: dict,
+) -> None:
+    """Test 4: solo self-approve skips APPROVAL, not AUDIT. The audit
+    chain must still record the auto-approve decision with the
+    distinguishable self-approve actor, per the [[self-approve-
+    reductions]] memo: the skip is APPROVAL, not AUDIT.
+    """
+    monkeypatch.setenv("IAM_JIT_DEPLOYMENT_MODE", "solo")
+    from iam_jit import audit as audit_mod
+
+    captured: list[dict] = []
+    real_emit = audit_mod.emit
+
+    def _capture(**kwargs):
+        captured.append(dict(kwargs))
+        return real_emit(**kwargs)
+
+    monkeypatch.setattr(audit_mod, "emit", _capture)
+
+    resp = as_admin.post("/api/v1/requests", json=request_payload)
+    assert resp.status_code == 201, resp.text
+
+    # An auto-approve audit event MUST have been emitted with the
+    # self-approve actor. Filter by kind to keep the test stable
+    # against unrelated audit emissions the route may make.
+    auto_events = [
+        e for e in captured
+        if e.get("kind") == "request.auto_approved"
+    ]
+    assert auto_events, (
+        f"no request.auto_approved audit event emitted; captured kinds: "
+        f"{[e.get('kind') for e in captured]}"
+    )
+    last = auto_events[-1]
+    assert last["actor"].startswith("self_approve_reduction:"), (
+        f"audit actor must be self_approve_reduction; got {last['actor']!r}"
+    )
+    # Details preserve the SAR audit annotations the auditor needs.
+    details = last.get("details") or {}
+    assert details.get("self_approve_evaluated") is True
+    assert details.get("self_approve_eligible") is True
+    assert details.get("self_approve_reason") == "self_approved"

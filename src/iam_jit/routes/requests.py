@@ -101,11 +101,20 @@ def _apply_mfa_and_self_approve_enforcement(
     audit_actor = "system:auto-approver"
 
     # ------------------------------------------------------------------
-    # STAGE 1: Self-approve override. If the score gate said
-    # above_threshold AND the user qualifies as an admin doing a
-    # reduction, flip to approve here. The MFA gate (stage 2) will
-    # then run against this FLIPPED decision so a self-approved
-    # high-risk request still requires fresh MFA.
+    # STAGE 1: Self-approve override. If the user qualifies as an admin
+    # doing a reduction of their OWN authority, flip to approve here.
+    # The MFA gate (stage 2) will then run against this FLIPPED decision
+    # so a self-approved high-risk request still requires fresh MFA.
+    #
+    # Override-eligible auto_approve reasons (the cases where the user
+    # would otherwise be deadlocked into human review):
+    #   - "above_threshold"  — score-gate denial; self-approve flips it
+    #   - "feature_disabled" — auto-approve disabled or unconfigured
+    #     (the solo-mode default: `auto_approve_risk_below` is None).
+    #     Without this, the solo-founder UX deadlocks: admin submits
+    #     reduction, lands in pending, four-eyes refuses approver==
+    #     owner. The self-approve gate's whole purpose is to short-
+    #     circuit that case for admins reducing their own authority.
     #
     # WB13-08 closure: previously MFA ran first and only fired when
     # auto_decision.auto_approve was originally True. Score-gate
@@ -114,16 +123,26 @@ def _apply_mfa_and_self_approve_enforcement(
     # a high-risk role. Reordering self-approve → MFA closes that
     # gap so MFA is the final word regardless of intermediate flips.
     #
-    # NOTE: strict-mode-blocked reasons (strict_mode_action_wildcard,
-    # strict_mode_admin_fallback) are NOT eligible for self-approve.
-    # Strict mode is a deploy-time policy ceiling that admins cannot
-    # individually override — by design. WB12-08.
+    # NOT override-eligible (platform-team floors / explicit denies):
+    #   - strict_mode_action_wildcard, strict_mode_admin_fallback —
+    #     deploy-time policy ceiling admins cannot individually override
+    #     (per WB12-08).
+    #   - toggle_force_review — admin-curated "always send to review"
+    #     toggle; flipping would defeat its purpose.
+    #   - service_blocked, account_blocked — blocklist floors. The SAR
+    #     gate already enforces service_blocked (returns not-eligible);
+    #     account_blocked is enforced here.
+    #   - over_quota — anti-composability defense; chained low-risk
+    #     reductions should still surface at the cap.
+    #   - no_policy — nothing to grant; not actionable.
     # ------------------------------------------------------------------
+    _override_eligible_reasons = ("above_threshold", "feature_disabled")
     if (
         not bool(getattr(effective_decision, "auto_approve", False))
-        and getattr(effective_decision, "reason", "") == "above_threshold"
+        and getattr(effective_decision, "reason", "") in _override_eligible_reasons
         and _self_approve_eligible
     ):
+        _original_reason = getattr(effective_decision, "reason", "")
         from ..auto_approve import AutoApproveDecision
         from .. import self_approve_reductions as _sar_mod
         effective_decision = AutoApproveDecision(
@@ -131,7 +150,7 @@ def _apply_mfa_and_self_approve_enforcement(
             reason="self_approve_reduction",
             details={
                 "score": analysis_score,
-                "original_reason": "above_threshold",
+                "original_reason": _original_reason,
                 "self_approve_reason": self_approve_audit.get("self_approve_reason"),
                 "details_pre_override": dict(getattr(auto_decision, "details", {}) or {}),
             },

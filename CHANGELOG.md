@@ -11,6 +11,31 @@ within the same release.
 
 ## Unreleased — Bounce-suite rename (2026-05-17)
 
+### Fixed
+
+- **Solo-mode self-approve deadlock** (Variant B UAT finding #2,
+  `src/iam_jit/routes/requests.py`) — `IAM_JIT_DEPLOYMENT_MODE=solo`
+  enabled the self-approve-reductions gate but the auto-approve
+  override in `_apply_mfa_and_self_approve_enforcement` only fired
+  on `auto_decision.reason == "above_threshold"`. Solo deployments
+  default to `auto_approve_risk_below=None` so the route returned
+  `feature_disabled` instead — the override never had a chance and
+  the admin's own reduction landed in `pending`, where the
+  four-eyes check in `lifecycle.py` refused approver==owner. Net
+  effect: every solo founder ran into a deadlock on their first
+  request. Fix extends override-eligible reasons to include
+  `feature_disabled`. Strict-mode, toggle, blocklist, and quota
+  denials remain non-overrideable (platform floors). Per the
+  [[self-approve-reductions]] memo the skip is APPROVAL, not
+  AUDIT — the `request.auto_approved` audit event still emits
+  with actor `self_approve_reduction:<user.id>`, and the
+  `original_reason` field on the override now carries through the
+  pre-override reason (`feature_disabled` or `above_threshold`)
+  for the audit trail. Adds 4 route-level regression tests in
+  `tests/test_routes_requests.py` and 4 helper-level tests in
+  `tests/test_mfa_self_approve_enforcement.py` covering the
+  override-eligible vs floor-protected reasons.
+
 ### Docs
 
 - **LLM-backend reframe in `docs/DEPLOYMENT.md`** — Step 5 now

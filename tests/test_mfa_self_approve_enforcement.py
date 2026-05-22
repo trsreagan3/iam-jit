@@ -303,6 +303,99 @@ def test_self_approve_low_risk_stale_mfa_passes() -> None:
 
 
 # ---------------------------------------------------------------------------
+# Solo-mode UX bug: auto-approve is disabled by default in solo deployments
+# (no `auto_approve_risk_below` configured), so the score-gate denial reason
+# is `feature_disabled` rather than `above_threshold`. Pre-fix, the self-
+# approve override only fired on `above_threshold`, leaving solo founders
+# deadlocked: admin submits reduction → lands in pending → four-eyes refuses
+# approver==owner → no way out via the API. The fix adds `feature_disabled`
+# to the override-eligible reasons. Variant B UAT finding #2.
+# ---------------------------------------------------------------------------
+
+
+def test_self_approve_overrides_feature_disabled_for_admin() -> None:
+    """Solo-mode default: auto-approve disabled, but admin self-approve
+    of a reduction still flips through. Previously deadlocked."""
+    decision, actor, block = _apply_mfa_and_self_approve_enforcement(
+        _deny("feature_disabled", score=5),
+        mfa_audit={
+            "mfa_gate_evaluated": True,
+            "would_require_mfa": False,
+            "mfa_present": True,
+        },
+        self_approve_audit={
+            "self_approve_evaluated": True,
+            "self_approve_eligible": True,
+            "self_approve_reason": "self_approved",
+        },
+        analysis_score=5,
+        user_id="email:admin@example.com",
+    )
+    assert decision.auto_approve is True
+    assert decision.reason == "self_approve_reduction"
+    assert decision.details["original_reason"] == "feature_disabled"
+    assert decision.details["self_approve_reason"] == "self_approved"
+    assert actor == "self_approve_reduction:email:admin@example.com"
+    assert block is None
+
+
+def test_self_approve_does_not_override_toggle_force_review() -> None:
+    """Admin-curated force-review toggle wins over self-approve. The
+    toggle is the admin saying 'always route this shape through review';
+    flipping it via self-approve would defeat its purpose."""
+    original = _deny("toggle_force_review", score=2)
+    decision, actor, block = _apply_mfa_and_self_approve_enforcement(
+        original,
+        mfa_audit={"mfa_gate_evaluated": True, "would_require_mfa": False, "mfa_present": True},
+        self_approve_audit={
+            "self_approve_evaluated": True,
+            "self_approve_eligible": True,
+        },
+        analysis_score=2,
+        user_id="email:admin@example.com",
+    )
+    assert decision is original
+    assert actor == "system:auto-approver"
+
+
+def test_self_approve_does_not_override_over_quota() -> None:
+    """Quota cap is the anti-composability defense. Chained low-risk
+    reductions should still surface at the cap, even for admins."""
+    original = _deny("over_quota", score=2)
+    decision, actor, block = _apply_mfa_and_self_approve_enforcement(
+        original,
+        mfa_audit={"mfa_gate_evaluated": True, "would_require_mfa": False, "mfa_present": True},
+        self_approve_audit={
+            "self_approve_evaluated": True,
+            "self_approve_eligible": True,
+        },
+        analysis_score=2,
+        user_id="email:admin@example.com",
+    )
+    assert decision is original
+    assert actor == "system:auto-approver"
+
+
+def test_self_approve_does_not_override_strict_mode_block() -> None:
+    """Strict-mode is the deploy-time policy ceiling admins cannot
+    individually override. Confirmed for both strict-mode reasons."""
+    for reason in ("strict_mode_action_wildcard", "strict_mode_admin_fallback"):
+        original = _deny(reason, score=2)
+        decision, actor, block = _apply_mfa_and_self_approve_enforcement(
+            original,
+            mfa_audit={"mfa_gate_evaluated": True, "would_require_mfa": False, "mfa_present": True},
+            self_approve_audit={
+                "self_approve_evaluated": True,
+                "self_approve_eligible": True,
+            },
+            analysis_score=2,
+            user_id="email:admin@example.com",
+        )
+        assert decision is original, f"strict-mode reason {reason!r} must not override"
+        assert actor == "system:auto-approver"
+
+
+# ---------------------------------------------------------------------------
 # Slack-optional invariant: MFA-block response must always include
 # the structured `mfa_step_up` hint so non-Slack clients (CLI / dashboard
 # / agents) still know how to re-authenticate.
