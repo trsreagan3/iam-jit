@@ -5,6 +5,38 @@ Status: SHIPPED 2026-05-22 (task #321 / KNOWN-CAVEATS §A19).
 Applies to: ibounce, kbouncer, dbounce, gbounce (v1.0 doctor is a no-op
 on gbounce per the architectural-honesty note below).
 
+## Updated 2026-05-22 — DEFAULT MODE FLIPPED TO DISCOVERY
+
+Per `[[discovery-first-default]]` (founder direction 2026-05-22) +
+KNOWN-CAVEATS §A21 (BREAKING-CHANGE), all 4 bouncers now default to
+**discovery mode** (observe + audit + pass-through). The `safe-default`
+profile remains first-class but is OPT-IN only.
+
+What this means for the upgrade path:
+
+- **Fresh installs land in discovery mode.** The doctor still ships the
+  `safe-default` profile to disk via `EnsureDefaultProfilesFile`, so
+  `safe-default` is available to opt into immediately — but no profile
+  is auto-applied at runtime.
+- **Pre-pivot operators on a build that auto-applied `safe-default`
+  silently must explicitly opt in** to keep that behavior post-upgrade:
+  - ibounce: `ibounce run --profile safe-default` OR
+    `export IAM_JIT_BOUNCER_PROFILE=safe-default`
+  - kbouncer: `kbounce run --profile safe-default` OR
+    `export KBOUNCER_PROFILE=safe-default`
+  - dbounce: `dbounce run --profile safe-default` OR
+    `export DBOUNCE_PROFILE=safe-default`
+  - gbounce: discovery has always been the default; no migration needed.
+    Layer `--deny-host` / `--profile-rules-file` for opt-in denies.
+- **The doctor's safety-floor field catalog is unchanged.** Whether or
+  not the operator opts into the profile, the doctor still surfaces
+  missing fields in `safe-default` so when the operator DOES pin
+  `--profile safe-default`, they get the full floor.
+
+`docs/role-effectiveness-grades-post-pivot.md` (under `tests/dogfood/`)
+captures the re-grade. The pre-pivot grades remain at
+`tests/dogfood/role-effectiveness-grades.md` for historical comparison.
+
 ## What this is
 
 Every Bounce product ships a curated `safe-default` profile that

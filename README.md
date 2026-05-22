@@ -125,6 +125,26 @@ Honest answer: **complementary, not a replacement.** They solve adjacent problem
 >
 > **In v1.0**: full HTTP-proxy interception via `AWS_ENDPOINT_URL` (both cooperative + transparent modes, SigV4-preserving forwarding) + agent-cooperative MCP enforcement + CLI rule/task/audit management + environment profiles (built-in defaults reduced to `full-user` + `safe-default`; `safe-default` is a `policy_sentry`-backed readonly-admin-minus baseline with sensitive-read carve-outs; community profiles installable from URL) + timed pause + async deny prompts + HTTPS install of org-distributed profiles. See [docs/IBOUNCE.md](docs/IBOUNCE.md).
 
+### First 60 seconds with ibounce (discovery mode default)
+
+Per `[[discovery-first-default]]` (2026-05-22) the default shape is **discovery mode** — observe + audit + pass-through. Named profiles (e.g. `safe-default`) are first-class opt-in via `--profile <name>`. This matches the gbounce reference model + closes the NEGATIVE-VALUE over-blocking that the pre-pivot safe-default-as-default caused on legit DevOps workflows (see KNOWN-CAVEATS §A21 + the role-effectiveness re-grade at `tests/dogfood/role-effectiveness-grades-post-pivot.md`).
+
+```bash
+$ pip install iam-jit
+$ ibounce run          # default: discovery mode (no profile applied)
+ibounce proxy starting on http://127.0.0.1:8767 (mode=cooperative, default-policy=deny, profile=full-user, default_mode=discovery)
+  default mode: discovery — observing all requests, denying none.
+    every call is parsed, audit-logged, and forwarded verbatim to AWS.
+    To opt into the readonly-admin-minus floor, run with --profile safe-default.
+
+# In a separate terminal, point your SDK at the proxy:
+$ export AWS_ENDPOINT_URL=http://127.0.0.1:8767
+$ aws s3 ls
+# ... your buckets, forwarded verbatim; the bouncer logs every call to ~/.iam-jit/state.db + the configured OCSF channels.
+```
+
+To pin pre-pivot behavior (the readonly-admin-minus floor): `ibounce run --profile safe-default`.
+
 ### 30-second example (v1.0 — MCP path)
 
 ```bash

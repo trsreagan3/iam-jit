@@ -4373,10 +4373,16 @@ def run_cmd(
     )
 
     with _opened_store(db) as store:
+        # Per [[discovery-first-default]] (2026-05-22): include the
+        # default_mode (discovery|profile) in the headline banner so the
+        # operator immediately sees the operating shape on every start.
+        # Cross-product parity with kbouncer + dbounce + gbounce per
+        # [[cross-product-agent-parity]].
         click.echo(
             f"ibounce proxy starting on http://{host}:{port} "
             f"(mode={mode}, default-policy={default_policy}, "
-            f"profile={active_profile.name})",
+            f"profile={active_profile.name}, "
+            f"default_mode={config.default_mode})",
             err=True,
         )
         # #300 — surface --upstream resolution in the startup banner so
@@ -4404,32 +4410,45 @@ def run_cmd(
                 err=True,
             )
         if passthrough_default:
-            # Per safe_default_is_readonly_admin_minus (2026-05-17):
-            # the banner explains BOTH what safe-default blocks AND
-            # what it does not block, so an operator who skims past
-            # the recommendation doesn't get a confidentiality
-            # surprise in incident response. Mirrors the README +
-            # docs/IBOUNCE.md callout.
+            # Per [[discovery-first-default]] (2026-05-22): banner copy
+            # explicitly names this DISCOVERY MODE (the canonical term
+            # cross-product) — observe + audit + pass-through. Named
+            # profiles (e.g. safe-default) stay first-class via
+            # `--profile NAME` opt-in. Per [[security-team-positioning-
+            # safety-not-surveillance]]: framed as "audit transparency"
+            # NOT "we're not enforcing anything."
             click.echo(
-                "  No profile selected. Calls forwarded as-is + audit-logged.",
+                "  default mode: discovery — observing all requests, "
+                "denying none.",
                 err=True,
             )
             click.echo(
-                "  For state-preservation safety, run with --profile safe-default.",
+                "    every call is parsed, audit-logged, and forwarded "
+                "verbatim to AWS.",
                 err=True,
             )
             click.echo(
-                "    blocks state-changing AWS operations (writes, privilege "
-                "grants, exfil)",
+                "    full OCSF event stream + plan-capture + recommender "
+                "operate as usual.",
                 err=True,
             )
             click.echo(
-                "    does NOT prevent reads of sensitive data (use S3 bucket "
-                "policies +",
+                "    To opt into the readonly-admin-minus floor, run with "
+                "--profile safe-default.",
                 err=True,
             )
             click.echo(
-                "      KMS grants for confidentiality)",
+                "      blocks state-changing AWS operations (writes, "
+                "privilege grants, exfil)",
+                err=True,
+            )
+            click.echo(
+                "      does NOT prevent reads of sensitive data (use S3 "
+                "bucket policies +",
+                err=True,
+            )
+            click.echo(
+                "        KMS grants for confidentiality; see KNOWN-CAVEATS §B3)",
                 err=True,
             )
         # #252 — surface audit-export channels in the startup banner

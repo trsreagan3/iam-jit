@@ -11,6 +11,50 @@ within the same release.
 
 ## Unreleased — Bounce-suite rename (2026-05-17)
 
+### Changed
+
+- **BREAKING — §A21 / [[discovery-first-default]] — ibounce default flips to DISCOVERY MODE** (2026-05-22) —
+  Per the role-effectiveness eval at `tests/dogfood/role-effectiveness-grades.md`
+  the v1.0 safe-default profile landed at 23.1% hit-rate vs the 50% launch bar:
+  NEGATIVE-VALUE over-blocking (K1/K3/D2) + THEATER under-scoping on reads
+  (I1/I4/K2/D1) dominated. gbounce alone hit 66.7% because its primitives
+  (deny_hosts + MITM URL+method) are operator-set OPT-IN denies, not blanket
+  safe-defaults. The pivot flips ibounce to match gbounce's shape: default
+  behavior is observe + audit + pass-through (the `full-user` profile), with
+  named profiles (safe-default, plus any operator-curated profile) as
+  OPT-IN via `--profile <name>` or `IAM_JIT_BOUNCER_PROFILE`.
+  - **`ProxyConfig.default_mode` (new property):** surfaces `"discovery"` |
+    `"profile"` for cross-product symmetry + agent introspection. `discovery`
+    fires when `active_profile` is None or resolves to `full-user`/`none`;
+    `profile` fires when the operator explicitly picked a named profile.
+    Per [[cross-product-agent-parity]]: same semantic shape across kbouncer +
+    dbounce + gbounce.
+  - **Startup banner (refreshed):** explicitly names the operating shape
+    ("default mode: discovery — observing all requests, denying none.") +
+    surfaces `default_mode=discovery|profile` on the headline `ibounce
+    proxy starting on ...` line. Per [[security-team-positioning-safety-
+    not-surveillance]]: framed as audit transparency, NOT "we're not
+    enforcing anything." Named-profile opt-in instructions stay one line
+    away.
+  - **Named profiles preserved:** `safe-default` (readonly-admin-minus
+    floor) + any custom profile in `~/.iam-jit/bouncer/profiles.yaml`
+    continue to work exactly as before; operators who want pre-pivot
+    behavior pin `ibounce run --profile safe-default` or `export
+    IAM_JIT_BOUNCER_PROFILE=safe-default` in their shell rc.
+  - **No code path lost:** the recommender (#173), plan-capture (#132),
+    OCSF audit pipeline, agent attribution (#318/#320), and the entire
+    enforcement stack still fire; the change is which DEFAULT rule layer
+    is active out of the box.
+
+  **BREAKING-CHANGE:** operators upgrading from pre-pivot v1.0 builds
+  where ibounce auto-applied the safe-default profile would see writes
+  unconditionally blocked. After this change, fresh installs and
+  upgrades land in discovery mode by default; existing operators must
+  explicitly pin `--profile safe-default` to keep the pre-pivot behavior.
+  See `docs/PROFILE-UPGRADE.md` + KNOWN-CAVEATS §A21 for the upgrade
+  path; the re-graded corpus lives at `tests/dogfood/
+  role-effectiveness-grades-post-pivot.md`.
+
 ### Fixed
 
 - **§A20 R3-01 — `ibounce run` crashed on `--audit-log-max-size-mb` / `--audit-log-max-age-days` / `--audit-db-retention-days`** (2026-05-22) —

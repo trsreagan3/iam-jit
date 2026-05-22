@@ -979,7 +979,44 @@ class ProxyConfig:
     hard floor above task/global rules. None or `Profile(name='full-user')`
     means no profile-level rules fire (existing behavior; `none` also
     resolves here for v1.0 backward-compat — see DEPRECATED_PROFILE_ALIASES
-    in profiles.py)."""
+    in profiles.py).
+
+    Per [[discovery-first-default]] (2026-05-22): when `active_profile`
+    is None or `full-user`, the bouncer is in DISCOVERY MODE — the
+    canonical pre-launch default per the founder-direction pivot. All
+    requests are observed + audit-logged + pass through; deny floors
+    are operator-set OPT-IN via `--profile <name>` (e.g. safe-default,
+    or any named profile in profiles.yaml). This mirrors the gbounce
+    discovery shape that scored 66.7% in the role-effectiveness eval
+    while ibounce/kbouncer/dbounce safe-defaults landed at 0%/0%/25%
+    via NEGATIVE-VALUE over-blocking. The flip preserves named profiles
+    as opt-in (operators who want pre-pivot behavior pin
+    `--profile safe-default`)."""
+
+    @property
+    def default_mode(self) -> str:
+        """Per [[discovery-first-default]]: surface the bouncer's
+        operating mode as a single string for cross-product symmetry +
+        agent introspection. Values:
+
+          - "discovery" (default) — no profile selected; observe + audit +
+            pass-through. The canonical default per the 2026-05-22 pivot.
+          - "profile" — an operator opted into a named profile via
+            `--profile <name>` or `IAM_JIT_BOUNCER_PROFILE`. Profile
+            denies act as a hard floor (the pre-pivot behavior, now
+            opt-in).
+
+        Cross-product parity with kbouncer + dbounce + gbounce: the same
+        semantic distinction surfaces under the same name everywhere per
+        [[cross-product-agent-parity]]. Agents calling
+        `bouncer_active_mode` see this value alongside the ProxyMode
+        (cooperative/transparent/plan-capture)."""
+        if self.active_profile is None:
+            return "discovery"
+        name = getattr(self.active_profile, "name", None)
+        if name in (None, "", "full-user", "none"):
+            return "discovery"
+        return "profile"
     account_id: str | None = None
     account_alias: str | None = None
     """Account-id / alias used by profile.only_account_ids checks
