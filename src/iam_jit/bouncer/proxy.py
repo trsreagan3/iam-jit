@@ -1285,6 +1285,32 @@ class ProxyConfig:
     `iam-jit audit query` CLI that fans queries across every reachable
     bouncer in parallel."""
 
+    # #324a — dynamic-deny rules (cross-product opt-in deny ergonomics).
+    # The cross-product canonical design lives at
+    # `docs/DYNAMIC-DENY-RULES.md`; the on-disk YAML at
+    # `~/.iam-jit/dynamic-denies.yaml` (override via
+    # IAM_JIT_DYNAMIC_DENIES_PATH). When `dynamic_denies_enabled` is
+    # True (the default — the watcher is a no-op when the file doesn't
+    # exist, so enabling-by-default is zero-cost for operators who don't
+    # use the feature), serve() initialises a watcher that hot-reloads
+    # the YAML on disk changes + a matcher that fires BEFORE the
+    # existing profile + rule evaluation in evaluate_request() per the
+    # design doc's Conflict-resolution rule 1 (dynamic deny always wins).
+    dynamic_denies_enabled: bool = True
+    """Master switch for the dynamic-deny pipeline. Defaults to True
+    because the loader treats a missing file as "no rules" + the
+    watcher is a no-op until a file is written; the operator opts-IN
+    by running `iam-jit deny add ...` (#324e). Setting False skips
+    loader+watcher initialisation entirely — used by operators who
+    explicitly don't want the file consulted (e.g. a hardened
+    deployment that ships dynamic-deny via a different transport)."""
+
+    dynamic_denies_path: str | None = None
+    """File path the watcher consults. None = use
+    `resolve_default_path()` which honors `$IAM_JIT_DYNAMIC_DENIES_PATH`
+    then falls back to `~/.iam-jit/dynamic-denies.yaml`. Explicit
+    path overrides both."""
+
 
 @dataclasses.dataclass
 class RequestObservation:
@@ -1319,6 +1345,56 @@ class RequestObservation:
     """#203 — id of the pause window active at decision time, or
     None. Surfaced so the proxy hot-path can apply 'pause supersedes
     sync prompt' without re-querying the store."""
+    deny_source: str | None = None
+    """#324a — when verdict is DENY, names the layer that fired:
+    `profile`, `dynamic`, `rule`, `task`, or `default`. None for ALLOW
+    verdicts + for unclassifiable-DENY synthetics. Surfaces in the
+    audit event so analysts can filter by enforcement layer."""
+    dynamic_deny_rule_id: str | None = None
+    """#324a — when `deny_source == 'dynamic'`, the id of the
+    dynamic-deny rule that fired (`dd_<ULID>`). None otherwise."""
+    dynamic_deny_pattern: str | None = None
+    """#324a — when `deny_source == 'dynamic'`, the specific target
+    pattern within the rule that matched the request's resource ARN.
+    Separate field from `dynamic_deny_rule_id` so the audit event can
+    surface both `which rule` + `which of its targets`."""
+
+
+# ---------------------------------------------------------------------------
+# #324a — dynamic-deny snapshot accessor.
+#
+# Module-level registry mirrors the audit-export channels (above) so
+# evaluate_request() can consult the active rule set without threading
+# a watcher argument through every call site. serve() installs the
+# watcher at startup; tests inject a static snapshot via
+# register_dynamic_deny_snapshot().
+# ---------------------------------------------------------------------------
+_dynamic_deny_snapshot_provider: Any | None = None
+
+
+def register_dynamic_deny_snapshot_provider(
+    provider: Any | None,
+) -> None:
+    """Install the dynamic-deny snapshot provider. ``provider`` is a
+    no-arg callable returning the current
+    :class:`iam_jit.dynamic_denies.types.RuleSet`. Pass None to clear
+    (used by tests that want the dynamic-deny path skipped)."""
+    global _dynamic_deny_snapshot_provider
+    _dynamic_deny_snapshot_provider = provider
+
+
+def _current_dynamic_deny_ruleset():
+    """Return the current snapshot or None when the provider is
+    unset (the default). Hot-path-friendly: the provider call is a
+    single function dereference."""
+    provider = _dynamic_deny_snapshot_provider
+    if provider is None:
+        return None
+    try:
+        return provider()
+    except Exception as e:
+        logger.warning("dynamic-deny snapshot provider failed: %s", e)
+        return None
 
 
 def _build_observation(
@@ -1331,6 +1407,9 @@ def _build_observation(
     mode: ProxyMode,
     decision_id: int = 0,
     active_pause_id: int | None = None,
+    deny_source: str | None = None,
+    dynamic_deny_rule_id: str | None = None,
+    dynamic_deny_pattern: str | None = None,
 ) -> RequestObservation:
     """Compose the observation surfaced to callers + audit log."""
     enforced = (
@@ -1352,6 +1431,9 @@ def _build_observation(
         enforced=enforced,
         decision_id=decision_id,
         active_pause_id=active_pause_id,
+        deny_source=deny_source,
+        dynamic_deny_rule_id=dynamic_deny_rule_id,
+        dynamic_deny_pattern=dynamic_deny_pattern,
     )
 
 
@@ -1567,6 +1649,87 @@ def evaluate_request(
             return _build_observation(
                 method=method, host=host, path=path,
                 parsed=parsed, record=short_circuit, mode=mode,
+                deny_source="profile",
+            )
+
+    # #324a — Dynamic-deny match. Per the cross-product design
+    # (docs/DYNAMIC-DENY-RULES.md, "Conflict resolution"):
+    #   1. Static profile-DENY already fired above; that wins.
+    #   2. Dynamic-deny wins over profile-ALLOW + global-rule-ALLOW +
+    #      task-scope (this block).
+    #   3. Static rule-DENY + task-deny still apply below for any
+    #      request the dynamic-deny doesn't match.
+    # Per [[ibounce-honest-positioning]]: the dynamic-deny match runs
+    # in the proxy hot path; a stale snapshot (mid-watcher-reload) is
+    # acceptable because the snapshot is immutable + atomic-swapped.
+    dynamic_arn = (
+        getattr(parsed, "arn", None)
+        or getattr(parsed, "resource_hint", None)
+    )
+    dynamic_ruleset = _current_dynamic_deny_ruleset()
+    if dynamic_ruleset is not None and dynamic_arn:
+        from ..dynamic_denies.matcher import match_arn as _dyn_match_arn
+        dyn_match = _dyn_match_arn(dynamic_ruleset, dynamic_arn)
+        if dyn_match is not None:
+            from .decisions import Decision as _DDDecision  # local import to avoid cycle
+            dyn_reason = (
+                f"matched dynamic-deny rule {dyn_match.rule_id} "
+                f"({dyn_match.target_pattern}): {dyn_match.reason}"
+            )
+            dyn_record = DecisionRecord(
+                decision=_DDDecision.DENY,
+                mode=Mode.ENFORCE,
+                service=parsed.service,
+                action=parsed.action,
+                arn=getattr(parsed, "arn", None),
+                region=parsed.region,
+                matched_rule=None,
+                reason=dyn_reason,
+            )
+            dyn_decision_id = 0
+            try:
+                dyn_decision_id = store.record_decision(
+                    dyn_record, matched_rule_id=None, task_id=None,
+                )
+            except Exception as e:
+                logger.warning("bouncer-proxy audit-write failed: %s", e)
+            try:
+                from .audit_export import audit_event_from_decision
+                _emit_audit_event(audit_event_from_decision(
+                    decision_id=dyn_decision_id,
+                    mode=mode.value,
+                    profile=(
+                        active_profile.name if active_profile is not None else None
+                    ),
+                    verdict=dyn_record.decision.value,
+                    reason=dyn_record.reason,
+                    service=parsed.service,
+                    action=parsed.action,
+                    arn=dynamic_arn,
+                    region=parsed.region,
+                    host=host,
+                    upstream=None,
+                    enforced=(mode == ProxyMode.TRANSPARENT),
+                    extra={
+                        "decision_source": "dynamic",
+                        "dynamic_deny_rule_id": dyn_match.rule_id,
+                        "dynamic_deny_pattern": dyn_match.target_pattern,
+                        "dynamic_deny_source": dyn_match.rule.source,
+                    },
+                    user_agent=user_agent,
+                    header_agent_name=header_agent_name,
+                    header_agent_session_id=header_agent_session_id,
+                    agent_header_rejections=agent_header_rejections,
+                ))
+            except Exception as e:
+                logger.warning("audit-export emit (dynamic-deny) failed: %s", e)
+            return _build_observation(
+                method=method, host=host, path=path,
+                parsed=parsed, record=dyn_record, mode=mode,
+                decision_id=dyn_decision_id,
+                deny_source="dynamic",
+                dynamic_deny_rule_id=dyn_match.rule_id,
+                dynamic_deny_pattern=dyn_match.target_pattern,
             )
 
     # Compose the active ruleset (global rules + active profile's
@@ -2826,6 +2989,58 @@ async def serve(config: ProxyConfig, *, store: BouncerStore) -> None:
     session = aiohttp.ClientSession(connector=connector)
     app = web.Application()
 
+    # #324a — dynamic-deny watcher. Disabled when
+    # `dynamic_denies_enabled=False`; otherwise resolves the YAML
+    # path (config override > env var > ~/.iam-jit default), loads
+    # the initial snapshot synchronously (so the startup banner +
+    # first request both see real data), and starts the fsevents /
+    # inotify observer. The watcher's emit callback is wired into
+    # the existing OCSF admin-action queue so reload + parse-error
+    # events fan out to the JSONL log + webhook + Security Lake
+    # channels alongside profile-install / rule-add / pause events.
+    dynamic_deny_watcher: Any | None = None
+    if config.dynamic_denies_enabled:
+        from ..dynamic_denies import (
+            DynamicDenyWatcher,
+            make_admin_action_emitter,
+            resolve_default_path,
+        )
+
+        dd_path = (
+            config.dynamic_denies_path
+            or resolve_default_path()
+        )
+        dynamic_deny_watcher = DynamicDenyWatcher(
+            dd_path,
+            emit=make_admin_action_emitter(store),
+        )
+        # Surface initial-load errors in the log so an operator who
+        # hand-edited the file sees the parse error at startup time
+        # rather than wondering why the matcher isn't firing.
+        init_err = dynamic_deny_watcher.initial_load_error()
+        if init_err is not None:
+            logger.warning(
+                "dynamic-denies: initial load of %s failed at %s stage: %s "
+                "(fail-CLOSED: no rules active until the next successful reload)",
+                dd_path, init_err.stage, init_err,
+            )
+        # Register a snapshot provider so evaluate_request() can
+        # consult the watcher's atomic in-memory snapshot.
+        register_dynamic_deny_snapshot_provider(dynamic_deny_watcher.snapshot)
+        # Spin up the fsevents/inotify observer. start() is a no-op
+        # when the path is empty or watchdog is missing — the loader
+        # still served the initial snapshot, so the proxy keeps the
+        # frozen rules until restart.
+        dynamic_deny_watcher.start()
+        snap = dynamic_deny_watcher.snapshot()
+        logger.info(
+            "dynamic-denies enabled: path=%s rules_loaded=%d "
+            "rules_applied_to_ibounce=%d (watching for changes)",
+            dd_path or "(no path configured)",
+            snap.total_rules_in_file,
+            len(snap.rules),
+        )
+
     # #132 plan-capture: ensure the in-process session slot is set so
     # every intercepted call records into the same logical transcript.
     # If the operator passed --plan-session-id we honour that;
@@ -3001,6 +3216,32 @@ async def serve(config: ProxyConfig, *, store: BouncerStore) -> None:
             # branch.
             if is_audit_export_degraded():
                 clear_audit_export_degraded()
+        # #324a — dynamic-deny status block. Always present (matches
+        # `audit_export` shape: external monitoring branches on
+        # `dynamic_denies.enabled` / `.rules_count` without first
+        # checking for the key).
+        dynamic_denies_block: dict[str, Any] = {
+            "enabled": bool(config.dynamic_denies_enabled),
+            "rules_count": 0,
+            "rules_in_file": 0,
+            "source_path": "",
+            "total_reloads": 0,
+            "total_parse_errors": 0,
+            "initial_load_error": None,
+        }
+        if dynamic_deny_watcher is not None:
+            _snap = dynamic_deny_watcher.snapshot()
+            _init_err = dynamic_deny_watcher.initial_load_error()
+            dynamic_denies_block.update({
+                "rules_count": len(_snap.rules),
+                "rules_in_file": _snap.total_rules_in_file,
+                "source_path": _snap.source_path,
+                "total_reloads": dynamic_deny_watcher.total_reloads(),
+                "total_parse_errors": dynamic_deny_watcher.total_parse_errors(),
+                "initial_load_error": (
+                    str(_init_err) if _init_err is not None else None
+                ),
+            })
         return web.json_response({
             "status": status_str,
             "mode": config.mode.value,
@@ -3011,7 +3252,57 @@ async def serve(config: ProxyConfig, *, store: BouncerStore) -> None:
             "pause_lookup_errors_total": pause_errs,
             "heartbeat": heartbeat_payload,
             "audit_export": audit_export_section,
+            "dynamic_denies": dynamic_denies_block,
         }, status=http_status_code)
+
+    # #324a — POST /admin/dynamic-denies/reload triggers an immediate
+    # rule-file reload + returns the new snapshot count. Mirrors
+    # gbounce's mgmt-port endpoint shape from #324d so a cross-product
+    # operator script can target the same path on every bouncer. The
+    # endpoint is registered on the SAME aiohttp app as /healthz and
+    # the proxy catch-all; per
+    # [[cross-product-agent-parity]] the wire shape matches gbounce's
+    # `{"reloaded": true, "rules_count": N, "rules_applied_to_ibounce": M}`
+    # response byte-for-byte (with `ibounce` substituted for `gbounce`
+    # in the field name).
+    async def dynamic_denies_reload_handler(request):
+        if dynamic_deny_watcher is None:
+            return web.json_response(
+                {
+                    "error": "dynamic_denies_disabled",
+                    "detail": (
+                        "dynamic-deny watcher is not active; start the proxy "
+                        "without --disable-dynamic-denies to enable."
+                    ),
+                },
+                status=409,
+            )
+        from ..dynamic_denies.watcher import RELOAD_REQUESTED
+        rs, err = dynamic_deny_watcher.reload_now(RELOAD_REQUESTED)
+        if err is not None:
+            return web.json_response(
+                {
+                    "reloaded": False,
+                    "error": "parse_error",
+                    "error_stage": err.stage,
+                    "detail": str(err),
+                    "rules_count": rs.total_rules_in_file,
+                    "rules_applied_to_ibounce": len(rs.rules),
+                    "source_path": rs.source_path,
+                },
+                status=400,
+            )
+        return web.json_response({
+            "reloaded": True,
+            "rules_count": rs.total_rules_in_file,
+            "rules_applied_to_ibounce": len(rs.rules),
+            "source_path": rs.source_path,
+            "loaded_at": (
+                rs.loaded_at.isoformat().replace("+00:00", "Z")
+                if rs.loaded_at else None
+            ),
+            "rule_ids": [r.id for r in rs.rules],
+        })
 
     # /healthz registered BEFORE the catch-all so it wins route
     # precedence; aiohttp dispatches in registration order.
@@ -3063,6 +3354,19 @@ async def serve(config: ProxyConfig, *, store: BouncerStore) -> None:
     # schema is non-sensitive metadata).
     from .schema_endpoint import register_config_schema_route
     register_config_schema_route(app)
+    # #324a — POST /admin/dynamic-denies/reload — mgmt-port endpoint
+    # registered BEFORE the proxy catch-all so the path doesn't get
+    # swallowed by `/{tail:.*}`. No auth on loopback (matches /healthz
+    # + /audit/events); when the operator binds off-loopback the same
+    # bearer-token gate that protects /audit/events applies (via the
+    # require_bearer flow registered above — TODO: wire the same bearer
+    # check into this endpoint when an off-loopback bind is permitted;
+    # for now the CLI gates non-loopback binds entirely via the
+    # _LOOPBACK_HOSTS check + audit-events-token requirement).
+    app.router.add_route(
+        "POST", "/admin/dynamic-denies/reload",
+        dynamic_denies_reload_handler,
+    )
     app.router.add_route("*", "/{tail:.*}", handler)
 
     # #252 Slice 1 — bring up the audit-export channels (if any).
@@ -3523,6 +3827,17 @@ async def serve(config: ProxyConfig, *, store: BouncerStore) -> None:
     finally:
         await session.close()
         await runner.cleanup()
+        # #324a — dynamic-deny watcher teardown. Stop BEFORE the
+        # audit-export channels close so the watcher's last emit
+        # (if any) still has a live admin-action queue. Clear the
+        # snapshot provider so the next serve() invocation in the same
+        # process (test reuse pattern) starts clean.
+        if dynamic_deny_watcher is not None:
+            try:
+                dynamic_deny_watcher.stop()
+            except Exception as e:
+                logger.warning("dynamic-deny watcher stop failed: %s", e)
+            register_dynamic_deny_snapshot_provider(None)
         # Tear down audit-export channels in reverse-install order so
         # an in-flight webhook send drains before the log writer's fd
         # closes. We catch + log here so a worker that exits with an

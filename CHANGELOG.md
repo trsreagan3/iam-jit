@@ -11,6 +11,72 @@ within the same release.
 
 ## Unreleased — Bounce-suite rename (2026-05-17)
 
+### Added
+
+- **#324a — ibounce dynamic-deny core (loader + watcher + matcher + mgmt endpoint)** (2026-05-22) —
+  First implementation slice of the cross-product dynamic-deny rules
+  surface (`docs/DYNAMIC-DENY-RULES.md`). ibounce now reads
+  `~/.iam-jit/dynamic-denies.yaml` (override via
+  `$IAM_JIT_DYNAMIC_DENIES_PATH` or `--dynamic-denies-path`), validates
+  it against `docs/schemas/dynamic-denies-v1.json`, filters down to
+  rules whose `applied_to` list contains `ibounce`, and matches each
+  inbound request's resource ARN against the active rule set BEFORE
+  the existing profile + global + task evaluation. A matching rule
+  produces a DENY observation annotated with `deny_source="dynamic"`
+  + `dynamic_deny_rule_id="dd_<ULID>"` + `dynamic_deny_pattern=<glob>`;
+  the verdict reason surfaces both the rule id + the operator-supplied
+  reason verbatim. Per the cross-product design's Conflict-resolution
+  rules: static profile-DENY still wins (it short-circuits earlier);
+  dynamic-deny beats every other ALLOW layer.
+  - **New package `src/iam_jit/dynamic_denies/`** (`loader.py`,
+    `matcher.py`, `watcher.py`, `types.py`) — JSON-schema-validated
+    YAML loader; fsevents/inotify-driven hot reload via `watchdog`;
+    AWS-IAM-style glob matcher (same grammar as
+    `bouncer/rules.py`); cross-partition ARN support
+    (`arn:aws:*`, `arn:aws-cn:*`, `arn:aws-us-gov:*`); `secret:NAME`
+    shorthand for the common "lock out a specific secret" case.
+  - **`ProxyConfig.dynamic_denies_enabled` + `.dynamic_denies_path`**
+    fields plumb through `bouncer_cli.run_cmd`'s
+    `--dynamic-denies-path` + `--disable-dynamic-denies` flags. Default
+    enabled (no-op when the file is absent).
+  - **`/admin/dynamic-denies/reload` mgmt-port endpoint** triggers an
+    explicit reload, bypasses the 100ms debounce window, returns
+    `{reloaded, rules_count, rules_applied_to_ibounce, rule_ids,
+    source_path, loaded_at}`. Mirrors gbounce's #324d endpoint shape
+    per `[[cross-product-agent-parity]]`.
+  - **`/healthz` `dynamic_denies` block** surfaces
+    `enabled / rules_count / rules_in_file / source_path /
+    total_reloads / total_parse_errors / initial_load_error` so
+    external monitoring detects stale snapshots without grep'ing the
+    audit log.
+  - **OCSF admin-action events** `dynamic_deny.reloaded` +
+    `dynamic_deny.parse_error` ride the existing `#278` admin-action
+    queue + `audit_export.admin_action.enqueue_admin_action`. The
+    verdict-side `dynamic_deny_rule_id` annotation lands at
+    `unmapped.iam_jit.ext.dynamic_deny_rule_id`.
+  - **Tests**: `tests/dynamic_denies/test_loader.py` (41 cases —
+    schema validation, partition coverage, glob matching, secret
+    shorthand, filter behavior, expiry), `tests/dynamic_denies/
+    test_watcher.py` (12 cases — initial load, file create / modify,
+    debounce, parse-error retention, mgmt-endpoint reload),
+    `tests/bouncer/test_dynamic_deny_integration.py` (9 cases —
+    end-to-end evaluate_request + serve() + mgmt endpoint).
+  - **Out of scope for this slice** (tracked separately): unified
+    `iam-jit deny add | list | remove | show` CLI replacing the
+    skeleton (#324e); MCP fan-out (#324e); recommender `Deny`-injection
+    + role-effectiveness re-grade (#324f); kbouncer (#324b) /
+    dbounce (#324c) parallel slices (live in their own repos).
+
+  **Honest caveats:** the dynamic-deny match runs in the proxy hot
+  path; a stale snapshot mid-watcher-reload is acceptable because the
+  in-memory `RuleSet` is immutable + atomic-swapped, so concurrent
+  reads never tear. On parse error the watcher retains the previous
+  snapshot AND emits a `dynamic_deny.parse_error` admin-action event
+  (fail-CLOSED per `[[ibounce-honest-positioning]]`). The dynamic-deny
+  path is bypassable by an agent that calls AWS directly without
+  routing through ibounce; defense-in-depth via role-issuance
+  embedding ships in #324f.
+
 ### Changed
 
 - **BREAKING — §A21 / [[discovery-first-default]] — ibounce default flips to DISCOVERY MODE** (2026-05-22) —

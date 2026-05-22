@@ -42,6 +42,12 @@ dependencies = [
   "python-multipart>=0.0.9",
   "PyJWT[crypto]>=2.8",
   "rich>=13",
+  # #324a — dynamic-deny YAML watcher. fsevents/inotify cross-platform
+  # backend used by `iam_jit.dynamic_denies.watcher`. Optional at import
+  # time (the loader falls back to mtime polling when watchdog is absent
+  # — see `_load_observer()`); declared as a runtime dep so a pip-installed
+  # build gets fsevents/inotify out of the box.
+  "watchdog>=4.0",
 ]
 
 [project.urls]

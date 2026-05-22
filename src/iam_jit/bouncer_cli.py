@@ -3906,6 +3906,34 @@ def _parse_duration(raw: str) -> int:
          "operator's value wins. Startup banner shows which settings are "
          "derived from the preset.",
 )
+@click.option(
+    "--dynamic-denies-path",
+    "dynamic_denies_path",
+    type=click.Path(dir_okay=False),
+    default=None,
+    envvar="IAM_JIT_DYNAMIC_DENIES_PATH",
+    help="#324a — path to the cross-product dynamic-deny YAML file. "
+         "Default: $IAM_JIT_DYNAMIC_DENIES_PATH if set, otherwise "
+         "~/.iam-jit/dynamic-denies.yaml. The file is operator-managed "
+         "via `iam-jit deny add` (#324e); a missing file is treated as "
+         "'no rules' so the proxy starts cleanly even when no dynamic "
+         "denies have been installed. fsevents/inotify watcher hot-"
+         "reloads the file on every change. See "
+         "docs/DYNAMIC-DENY-RULES.md for the cross-product design.",
+)
+@click.option(
+    "--disable-dynamic-denies",
+    "disable_dynamic_denies",
+    is_flag=True,
+    default=False,
+    help="#324a — skip dynamic-deny watcher initialisation entirely. "
+         "Use this when the operator's deployment ships dynamic-deny "
+         "rules via a different transport (e.g. a centrally-managed "
+         "IAM permissions boundary) + wants to make sure the YAML "
+         "file is not consulted. Default OFF: the watcher loads + "
+         "applies any rules in the file (no-op when the file is "
+         "absent).",
+)
 @click.option("--db", type=click.Path(dir_okay=False), default=None)
 @click.pass_context
 def run_cmd(
@@ -3956,6 +3984,8 @@ def run_cmd(
     bulk_answer_mcp_token: str | None,
     audit_events_token: str | None,
     deployment_preset: str | None,
+    dynamic_denies_path: str | None,
+    disable_dynamic_denies: bool,
     db: str | None,
 ) -> None:
     """Start the HTTP proxy server.
@@ -4324,6 +4354,8 @@ def run_cmd(
         burst_window_seconds=burst_window_seconds,
         bulk_answer_mcp_token=bulk_answer_mcp_token,
         audit_events_token=audit_events_token,
+        dynamic_denies_enabled=not disable_dynamic_denies,
+        dynamic_denies_path=dynamic_denies_path,
     )
 
     # #132 plan-capture: surface the session id (operator-supplied or
@@ -4530,6 +4562,48 @@ def run_cmd(
                 f"consecutive misses)",
                 err=True,
             )
+        # #324a — dynamic-deny banner line. Quiet when the watcher is
+        # disabled OR when the file is missing AND empty (the common
+        # case for a fresh install). Surfaces:
+        #   * total rules in the file
+        #   * how many of those routed to ibounce
+        #   * the resolved file path (so an operator with a non-
+        #     default IAM_JIT_DYNAMIC_DENIES_PATH sees it confirmed)
+        # Mirrors gbounce's #324d banner shape per
+        # [[cross-product-agent-parity]].
+        if not disable_dynamic_denies:
+            from .dynamic_denies import (
+                DynamicDenyLoadError,
+                load_file,
+                resolve_default_path,
+            )
+            _dd_path = dynamic_denies_path or resolve_default_path()
+            try:
+                _dd_snapshot = load_file(_dd_path) if _dd_path else None
+            except DynamicDenyLoadError as _e:
+                click.echo(
+                    f"dynamic-denies: parse error at {_dd_path} "
+                    f"({_e.stage}): {_e} "
+                    f"(fail-CLOSED: 0 rules active; fix + restart OR "
+                    f"POST /admin/dynamic-denies/reload)",
+                    err=True,
+                )
+                _dd_snapshot = None
+            if _dd_snapshot is None:
+                click.echo(
+                    f"dynamic-denies: 0 rules loaded from "
+                    f"{_dd_path or '(no path configured)'} "
+                    f"(0 applied to ibounce; watching for changes)",
+                    err=True,
+                )
+            else:
+                click.echo(
+                    f"dynamic-denies: {_dd_snapshot.total_rules_in_file} "
+                    f"rules loaded from {_dd_snapshot.source_path or _dd_path} "
+                    f"({len(_dd_snapshot.rules)} applied to ibounce; "
+                    f"watching for changes)",
+                    err=True,
+                )
         click.echo(
             f"Point your SDK: export AWS_ENDPOINT_URL=http://{host}:{port}",
             err=True,
