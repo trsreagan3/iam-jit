@@ -13,6 +13,73 @@ within the same release.
 
 ### Added
 
+- **#317 / §A15 — cloud-neutral S3-compatible NDJSON object-storage sink** (2026-05-22) —
+  closes the headline cloud-neutrality gap surfaced by founder
+  direction 2026-05-22: bouncers other than ibounce are
+  cloud-neutral; the AWS-only Security Lake adapter (#258) alone
+  doesn't serve operators on GCS / Azure Blob / MinIO / R2 / B2 /
+  DigitalOcean Spaces. ibounce ships the new sink alongside the
+  existing JSONL + webhook + Security Lake transports per
+  [[creates-never-mutates]] (additive composition).
+  - `ibounce run --audit-object-storage-endpoint URL
+    --audit-object-storage-bucket NAME
+    --audit-object-storage-prefix PREFIX
+    --audit-object-storage-region REGION
+    --audit-object-storage-credentials-file PATH
+    --audit-object-storage-rotation-minutes N
+    --audit-object-storage-max-size-mb N
+    --audit-object-storage-instance-id ID` — generic S3-compat sink.
+    Same flag shape ships on kbouncer + dbounce + gbounce per
+    [[cross-product-agent-parity]].
+  - New module: `src/iam_jit/bouncer/audit_export/object_storage.py`
+    — `ObjectStorageWriter` (background-rotated; refuse-to-start
+    HeadBucket probe; fail-soft Write; synchronous flush on stop) +
+    `ObjectStorageCredentials` + `LoadObjectStorageCredentials`
+    (env-var precedence; YAML / INI credentials file overrides).
+  - Output layout: NDJSON (one OCSF event per line),
+    gzip-compressed, Hive-partitioned at
+    `{prefix}/year=YYYY/month=MM/day=DD/hour=HH/{product}-{instance_id}-{timestamp}.jsonl.gz`.
+    Athena / BigQuery / Spark / Trino auto-discover the partitions;
+    SIEM collectors `LIST + GET` against the prefix.
+  - Per-instance file naming derives `instance_id` from
+    `hostname-pid` (override with `--audit-object-storage-instance-id`)
+    so multiple bouncer instances writing the same bucket get
+    collision-free paths.
+  - `bouncer/proxy.py` wires the writer through the existing
+    `_emit_audit_event_raw` fan-out alongside the JSONL + webhook +
+    Security Lake channels. Default OFF; only constructed when
+    `--audit-object-storage-bucket` is set. `Start()` issues a
+    HeadBucket probe so credential / endpoint / bucket-name
+    misconfigurations surface immediately rather than at first
+    flush.
+  - Per [[self-host-zero-billing-dependency]]: destination is
+    operator-owned (operator creates the bucket; bouncer never
+    creates buckets). Per [[don't-tailor-to-lighthouse]]: generic
+    S3-compat; works with AWS S3 (native), GCS (S3 interop / HMAC),
+    Azure Blob (S3-compat layer), MinIO, Cloudflare R2, Backblaze
+    B2, DigitalOcean Spaces.
+  - Cross-product wire-format invariants (partition path, file
+    naming, gzip-NDJSON shape) fixed in
+    `tests/integration/object_storage_sink_test.py`.
+- **What does NOT ship in v1.0** (deferred to v1.1 per
+  [[don't-tailor-to-lighthouse]]): native GCS auth (Workload
+  Identity / Service Account) + native Azure Blob auth (Managed
+  Identity). S3 interop covers ~95% of operators today.
+- **Regression tests:** `tests/bouncer/test_audit_export_object_storage.py`
+  — 27 tests cover defaults, credentials resolution (env + YAML +
+  INI), partition path format, construction refusal, write/flush
+  happy path, status surface, size-cap synchronous flush,
+  drop-on-buffer-full, write-before-start no-op,
+  stop-flushes-pending, put_object failure -> writes_ok=false, and
+  the rotation timer triggering a background flush.
+- **Docs:**
+  - `docs/PRODUCTION-LOG-STORAGE.md` — new "Cloud-neutral S3-compat"
+    row in the §1 decision table; new §2.4b section detailing the
+    sink with a multi-cloud endpoint reference; §2.5 GCP +
+    §2.6 Azure updated to recommend the new sink as the preferred
+    path for cold-storage / archive.
+  - `docs/KNOWN-CAVEATS.md` §A15 → `STATUS: FIXED 2026-05-22`.
+- **Task:** #317 — completed 2026-05-22.
 - **#318 / §A16 — cross-bouncer X-Agent-Session-Id header parity** (2026-05-22) —
   closes the headline cross-bouncer correlation gap surfaced by the
   #312 NanoClaw integration test. ibounce now reads inbound
@@ -190,6 +257,16 @@ within the same release.
   every composite).
 
 ### Fixed
+
+- **#319 / §A17 — UAT findings cluster: cross-product CLI parity + doc-truth-up gaps** (2026-05-22) —
+  Closes the 1 CRIT + 5 HIGH + 4 MED launch-blockers surfaced by the
+  dogfood UAT loop on 2026-05-22. The ibounce + iam-roles slice:
+  - **F-316-1 (CRIT)** — `docs/PRODUCTION-LOG-STORAGE.md` §2.7 rewritten to use the actual graceful-shutdown drain (SIGTERM → audit-channel `.stop()` chain in `bouncer/proxy.py`'s shutdown finalizer drains in-flight webhook + JSONL + SQLite writes before returning) instead of the nonexistent `ibounce audit-export flush --wait DUR` subcommand. Belt-and-braces: §2.7 also recommends pairing `--audit-webhook-url` with `--audit-log-path` so a webhook outage during shutdown still leaves a local file for post-job upload. The "Why not `flush --wait`?" sub-section names the engineering reason (the signal handler IS the drain; a duplicate flush RPC would introduce a new failure mode).
+  - **F-311-4 (HIGH)** — added `--audit-log-max-size-mb` + `--audit-log-max-age-days` + `--audit-db-retention-days` click options on `ibounce run` with matching `IBOUNCE_AUDIT_LOG_MAX_SIZE_MB` / `_MAX_AGE_DAYS` / `_DB_RETENTION_DAYS` env-var overrides. Wired into `AuditLogWriter.__init__(max_size_mb=..., max_age_days=...)` so the live writer rotates per the cross-product LOG-RETENTION.md spec. New fields on `ProxyConfig` (`audit_log_max_size_mb`, `audit_log_max_age_days`, `audit_db_retention_days`) preserve `None`-means-default semantics; `0` explicitly disables a trigger.
+  - **F-316-2 (HIGH)** — `docs/PRODUCTION-LOG-STORAGE.md` TL;DR table swaps the gbounce GCP row to ibounce + adds an explicit "(gbounce v1.0: use JSONL + Fluent Bit / Vector — see §3 gap)" annotation. The per-product parity matrix already correctly scoped webhook export to G-Slice 6 / v1.1; the TL;DR row was the remaining inconsistency.
+  - **`docs/LOG-RETENTION.md` updated** — CLI flags section now documents the env-var override shape across all four products + the per-product writer-level wiring matrix (ibounce / kbounce / dbounce: live writer; gbounce: flag accepted + on-demand purge path, writer-level rotation deferred per the existing parity matrix).
+  - **§A17 in `docs/KNOWN-CAVEATS.md` flipped to `STATUS: FIXED 2026-05-22`** with per-finding closure notes documenting which findings were real-and-fixed vs already-fixed-and-the-doc-was-stale.
+  Regression coverage: `test_run_help_documents_rotation_flags` in `tests/bouncer/test_proxy_wb32_closures.py` asserts all three flags + all three env-var names surface in `ibounce run --help`. Full ibounce regression suite (1421 tests) continues to pass.
 
 - **ibounce hardcoded HTTPS upstream scheme** (UAT 2026-05-22
   Variant A + C, KNOWN-CAVEATS A3, task #300,

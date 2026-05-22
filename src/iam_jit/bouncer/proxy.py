@@ -306,6 +306,13 @@ _audit_routes_engine: Any | None = None
 # Per [[no-hosted-saas]] the bucket is the operator's; iam-jit-the-
 # company never receives the data.
 _audit_security_lake_writer: Any | None = None
+# #317 — cloud-neutral S3-compatible NDJSON object-storage writer.
+# Same module-level registry shape as the other channels above so
+# evaluate_request feeds the writer without threading args through
+# every call site. Per [[self-host-zero-billing-dependency]] the
+# destination is the operator's bucket; iam-jit-the-company never
+# receives the data.
+_audit_object_storage_writer: Any | None = None
 # #285 — per-session NDJSON tee. Default OFF; the operator opts in via
 # `--record-sessions-dir PATH` on `ibounce run`. When wired, every
 # event the bouncer emits is additionally appended to the per-session
@@ -387,6 +394,15 @@ def register_audit_security_lake_writer(writer: Any | None) -> None:
     _audit_security_lake_writer = writer
 
 
+def register_audit_object_storage_writer(writer: Any | None) -> None:
+    """#317 — install the cloud-neutral S3-compat NDJSON object-
+    storage writer. Pass None to clear. The writer must already be
+    `writer.start()`-ed before registration so the first event's
+    buffer doesn't no-op."""
+    global _audit_object_storage_writer
+    _audit_object_storage_writer = writer
+
+
 def register_session_recorder(recorder: Any | None) -> None:
     """#285 — install the per-session NDJSON recorder. Pass None to
     clear. The recorder must already be `recorder.start()`-ed before
@@ -444,6 +460,16 @@ def _emit_audit_event_raw(event: dict) -> None:
             _audit_security_lake_writer.write(event)
         except Exception as e:
             logger.warning("audit security-lake writer enqueue failed: %s", e)
+    # #317 — cloud-neutral S3-compatible NDJSON object-storage writer.
+    # In-memory append; the background rotator flushes on
+    # `--audit-object-storage-rotation-minutes` interval OR size cap,
+    # whichever fires first. Fail-soft so a bucket-side outage on the
+    # writer's worker never raises into the proxy hot path.
+    if _audit_object_storage_writer is not None:
+        try:
+            _audit_object_storage_writer.write(event)
+        except Exception as e:
+            logger.warning("audit object-storage writer enqueue failed: %s", e)
     # #285 — per-session NDJSON tee. Synchronous (one append + no
     # network); fail-soft like every other emitter so a disk-full state
     # never raises into the proxy hot path.

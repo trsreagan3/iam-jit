@@ -175,6 +175,37 @@ def test_run_help_documents_external_bind_acknowledgement() -> None:
     assert "--i-know-this-binds-externally" in result.output
 
 
+def test_run_help_documents_rotation_flags() -> None:
+    """#319 / §A17 (F-311-4) regression: the cross-product audit-log
+    rotation trio MUST be registered on `ibounce run`. Same names +
+    env-var override shape across kbounce / dbounce / gbounce per
+    [[cross-product-agent-parity]]; LOG-RETENTION.md is the source of
+    truth.
+    """
+    result = _invoke_run_help()
+    assert result.exit_code == 0
+    for flag in (
+        "--audit-log-max-size-mb",
+        "--audit-log-max-age-days",
+        "--audit-db-retention-days",
+    ):
+        assert flag in result.output, (
+            f"rotation flag {flag!r} missing from `ibounce run --help`; "
+            "F-311-4 regression — cross-product LOG-RETENTION.md surface broken"
+        )
+    # Env-var override shape (the spec lists IBOUNCE_AUDIT_LOG_MAX_SIZE_MB
+    # etc. — the click `envvar=` plumbing must surface it in --help).
+    for env in (
+        "IBOUNCE_AUDIT_LOG_MAX_SIZE_MB",
+        "IBOUNCE_AUDIT_LOG_MAX_AGE_DAYS",
+        "IBOUNCE_AUDIT_DB_RETENTION_DAYS",
+    ):
+        assert env in result.output, (
+            f"env-var override {env!r} missing from `ibounce run --help`; "
+            "deployments that fix the CLI invocation + tune via env need this"
+        )
+
+
 @pytest.mark.parametrize("host", ["0.0.0.0", "192.168.1.10", "10.0.0.5"])
 def test_run_refuses_external_host_without_ack(tmp_path, host) -> None:
     """`iam-jit-bouncer run --host 0.0.0.0` must exit 2 with a clear

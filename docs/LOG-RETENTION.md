@@ -31,12 +31,33 @@ never destroyed by any automatic path; only `*bounce logs purge` can.
 Each product accepts the same flag names on its `run` subcommand:
 
 ```
---audit-log-max-size-mb     N    # 0 disables size trigger
---audit-log-max-age-days    N    # 0 disables age trigger
---audit-db-retention-days   N    # 0 disables DB retention
+--audit-log-max-size-mb     N    # 0 disables size trigger;  default 100
+--audit-log-max-age-days    N    # 0 disables age trigger;   default 7
+--audit-db-retention-days   N    # 0 disables DB retention;  default 30
 ```
 
 Same names, same defaults across products per [[cross-product-agent-parity]].
+Each flag also accepts a matching env-var override (CLI flag wins when
+explicitly set; env var fills in otherwise; audit-pkg defaults win
+last):
+
+```
+IBOUNCE_AUDIT_LOG_MAX_SIZE_MB   /   KBOUNCE_AUDIT_LOG_MAX_SIZE_MB
+DBOUNCE_AUDIT_LOG_MAX_SIZE_MB   /   GBOUNCE_AUDIT_LOG_MAX_SIZE_MB
+```
+
+…and equivalents for `_MAX_AGE_DAYS` + `_DB_RETENTION_DAYS`. Useful in
+container deployments where the `*bounce run` invocation is a fixed
+image entrypoint + per-env tuning lives in the env-var layer.
+
+**Writer-level wiring status (#319 / §A17 closure 2026-05-22):**
+
+| Product | Size trigger | Age trigger | DB retention |
+|---|---|---|---|
+| ibounce | live writer (`AuditLogWriter.max_size_mb`) | live writer (`AuditLogWriter.max_age_days`) | on-demand via `ibounce logs purge --older-than Nd` |
+| kbounce | live writer (`audit.LogWriter.MaxSizeMB`) | live writer (`audit.LogWriter.MaxAgeDays`) | on-demand via `kbounce logs purge --older-than Nd` |
+| dbounce | live writer (`audit.LogWriter.MaxSizeMB`) | live writer (`audit.LogWriter.MaxAgeDays`) | on-demand via `dbounce logs purge --older-than Nd` |
+| gbounce | **flag accepted**, writer-level rotation deferred (see parity matrix below) | **flag accepted**, writer-level rotation deferred | on-demand via `gbounce logs purge --older-than Nd` |
 
 ## CLI: `*bounce logs` subcommands
 

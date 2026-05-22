@@ -32,9 +32,10 @@ row that matches your context.
 | Multi-host on-prem (Splunk / Datadog / Sentinel) | HTTPS webhook with preset (`--audit-webhook-preset`) | `kbounce run --audit-webhook-url https://splunk.internal:8088/services/collector/event --audit-webhook-token $HEC_TOKEN --audit-webhook-preset splunk-hec`     |
 | AWS-heavy traffic (SDK / kubectl / SQL all in AWS) | AWS Security Lake (parquet on S3 + Athena)         | `ibounce run --security-lake-bucket iam-jit-bounce-lake --security-lake-region us-east-1`                                                                       |
 | AWS deployment, simple "dump to S3"         | Webhook → operator-owned Lambda → S3 PutObject     | `dbounce run --audit-webhook-url https://api.execute-api.us-east-1.amazonaws.com/prod/audit --audit-webhook-token $LAMBDA_BEARER`                               |
-| GCP deployment                              | Webhook → operator's collector (Pub/Sub / Cloud Run shim) | `gbounce run --audit-webhook-url https://collector-xyz-uc.a.run.app/audit --audit-webhook-token $BEARER`                                                        |
+| Cloud-neutral S3-compat (GCS/R2/B2/MinIO/Azure-via-S3-compat) | Native NDJSON sink (`--audit-object-storage-*`, #317) | `kbounce run --audit-object-storage-endpoint https://<id>.r2.cloudflarestorage.com --audit-object-storage-bucket bounce-audit --audit-object-storage-prefix prod --audit-object-storage-region auto` |
+| GCP deployment                              | NDJSON sink against GCS S3-interop OR webhook → Cloud Run shim | `gbounce run --audit-object-storage-endpoint https://storage.googleapis.com --audit-object-storage-bucket gs-bounce-audit --audit-object-storage-region us-central1` |
 | Azure deployment                            | Webhook with `sentinel` preset OR operator-owned Function | `ibounce run --audit-webhook-url https://workspace.ods.opinsights.azure.com/api/logs?api-version=2016-04-01 --audit-webhook-token $SHARED_KEY --audit-webhook-preset sentinel` |
-| CI/CD ephemeral runner                      | Webhook with sync-flush on exit                    | `kbounce run --audit-webhook-url $SIEM_URL --audit-webhook-token $TOKEN --audit-webhook-batch-size 1`                                                            |
+| CI/CD ephemeral runner                      | Webhook + SIGTERM-triggered graceful drain         | `kbounce run --audit-webhook-url $SIEM_URL --audit-webhook-token $TOKEN --audit-webhook-batch-size 1`                                                            |
 | Enterprise fan-out (multi-destination)      | `--alert-routes` YAML (per `[[per-org-notification-routing]]`, #280) | `ibounce run --alert-routes ~/.iam-jit/ibounce-routes.yaml`                                                                                                     |
 
 All exporters can be **combined**. The JSONL hot path is always
@@ -225,19 +226,147 @@ ibounce run \
     --audit-webhook-batch-size 50
 ```
 
+**Even simpler (recommended for new deployments, #317):** skip the
+Lambda entirely; use the cloud-neutral S3-compat NDJSON sink to
+write directly to your S3 bucket. Same Hive-partitioned NDJSON.gz
+shape, no API Gateway / Lambda IAM to maintain.
+
+```bash
+export AWS_ACCESS_KEY_ID=...
+export AWS_SECRET_ACCESS_KEY=...
+ibounce run \
+    --audit-object-storage-endpoint https://s3.us-east-1.amazonaws.com \
+    --audit-object-storage-bucket bounce-audit-cold \
+    --audit-object-storage-prefix prod \
+    --audit-object-storage-region us-east-1
+```
+
+When to keep the Lambda shape: HMAC-based path is fine, but if your
+security policy requires API Gateway-fronted ingestion (e.g. for
+WAF integration, custom auth, or downstream Lambda-routed
+fan-out), the Lambda recipe stays valid.
+
+### 2.4b Cloud-neutral S3-compatible NDJSON sink (#317)
+
+**Recommended:** every cloud-neutral deployment (GCS / Azure
+Blob-S3-compat / MinIO / R2 / B2 / DigitalOcean Spaces). Also the
+simplest path for AWS-only deployments not already using Security
+Lake.
+
+**Why:** Direct write from the bouncer to any S3-compatible bucket.
+No intermediary Lambda / Cloud Function / Vector to maintain. Per
+[[don't-tailor-to-lighthouse]] the same flag shape works across
+every vendor. Per [[self-host-zero-billing-dependency]] the bucket
+is operator-owned; iam-jit-the-company never receives the data.
+
+**Output layout:** NDJSON (one OCSF event per line), gzip-compressed,
+Hive-partitioned:
+
+```
+s3://<bucket>/<prefix>/year=YYYY/month=MM/day=DD/hour=HH/
+    {product}-{instance_id}-{timestamp}.jsonl.gz
+```
+
+Athena / BigQuery / Spark / Trino auto-discover the partitions.
+SIEM collectors `LIST + GET` against the prefix.
+
+**Rotation:** files rotate every
+`--audit-object-storage-rotation-minutes` (default 5) OR
+`--audit-object-storage-max-size-mb` (default 16), whichever caps
+first. Lower values mean smaller files + faster collector
+visibility; higher values mean fewer / larger files (better
+Athena / BigQuery scan efficiency).
+
+**Authentication:** AWS-style env vars or explicit credentials
+file:
+
+```bash
+# Option 1: env vars (works for AWS S3 directly OR via the
+# vendor's S3-interop key pair — GCS HMAC keys, R2 API tokens,
+# etc.)
+export AWS_ACCESS_KEY_ID=...
+export AWS_SECRET_ACCESS_KEY=...
+
+# Option 2: explicit file (YAML or INI; file overrides env when both set)
+cat > ~/.iam-jit/object-storage-creds.yaml <<'EOF'
+access_key_id: AKIA...
+secret_access_key: ...
+session_token: ...    # optional
+EOF
+chmod 0600 ~/.iam-jit/object-storage-creds.yaml
+
+kbounce run \
+    --audit-object-storage-endpoint https://<id>.r2.cloudflarestorage.com \
+    --audit-object-storage-bucket bounce-audit \
+    --audit-object-storage-prefix prod \
+    --audit-object-storage-region auto \
+    --audit-object-storage-credentials-file ~/.iam-jit/object-storage-creds.yaml
+```
+
+**Multi-cloud endpoint reference:**
+
+| Vendor                  | `--audit-object-storage-endpoint`                       | `--audit-object-storage-region` |
+|-------------------------|---------------------------------------------------------|---------------------------------|
+| AWS S3                  | `https://s3.us-east-1.amazonaws.com` (region-specific)  | real region                     |
+| Cloudflare R2           | `https://<account-id>.r2.cloudflarestorage.com`         | `auto`                          |
+| Backblaze B2            | `https://s3.us-west-002.backblazeb2.com`                | vendor region                   |
+| DigitalOcean Spaces     | `https://nyc3.digitaloceanspaces.com` (datacenter)      | datacenter id                   |
+| MinIO                   | `https://minio.internal:9000` (your install)            | any (must match server config)  |
+| Google Cloud Storage    | `https://storage.googleapis.com` (S3 interop / HMAC)    | GCS region                      |
+| Azure Blob (S3 compat)  | `https://<account>.blob.core.windows.net` (via S3-compat layer) | Azure region            |
+
+**Refuse-to-start:** `Start()` issues a HeadBucket probe against the
+endpoint + bucket so credential / endpoint / bucket-name
+misconfigurations surface at startup, not deep in the proxy hot
+path. Same posture as the Security Lake adapter.
+
+**Composability:** works alongside JSONL + webhook + Security Lake.
+Per [[creates-never-mutates]] the sinks are additive; an operator
+can run all four simultaneously.
+
+**Per-instance file naming:** the `instance_id` segment is auto-
+generated from `hostname-pid` so multiple bouncer instances writing
+the same bucket get collision-free paths. Override with
+`--audit-object-storage-instance-id ID` for ephemeral-hostname
+deployments (containers / k8s pods) where you want the path stable
+across restarts.
+
+**v1.1 deferred:** native GCS auth (Workload Identity) + native
+Azure Blob auth (Managed Identity). S3 interop covers ~95% of
+operators today; the friction-reducing native paths land post-v1.0.
+
 ### 2.5 GCP deployment
 
-**Recommended:** Webhook → operator's collector. We do not ship a
-GCS-native sink.
+**Recommended (preferred, #317):** Cloud-neutral S3-compat NDJSON
+sink targeting GCS via the S3-interop endpoint.
 
-**Why:** Per `[[self-host-zero-billing-dependency]]` we don't operate
-destinations. GCS upload is a 20-line Cloud Run / Cloud Functions
-shim you write once. The chain is the same shape as the AWS-Lambda
-recipe in §2.4, swapping S3 for GCS.
+**Why:** Direct write to GCS — no Cloud Run / Cloud Functions shim
+to maintain. Per [[self-host-zero-billing-dependency]] the bucket
+is operator-owned; per [[don't-tailor-to-lighthouse]] the sink is
+generic S3-compat so the same flag shape works for GCS, R2, B2,
+MinIO, etc.
 
-**Cloud Run receiver outline:** `POST /audit` → validate bearer →
-parse NDJSON → write to `gs://<your-bucket>/year=.../month=.../day=...`
-via the google-cloud-storage client.
+**Setup:** Enable S3 interop on your GCS project (Cloud Storage
+Settings → Interoperability → Create HMAC key). Export the HMAC
+access-key + secret-key as `AWS_ACCESS_KEY_ID` /
+`AWS_SECRET_ACCESS_KEY`. Then:
+
+```bash
+export AWS_ACCESS_KEY_ID=GOOGTS...    # GCS HMAC access key
+export AWS_SECRET_ACCESS_KEY=...      # GCS HMAC secret
+gbounce run \
+    --audit-object-storage-endpoint https://storage.googleapis.com \
+    --audit-object-storage-bucket gs-bounce-audit \
+    --audit-object-storage-prefix prod \
+    --audit-object-storage-region us-central1
+```
+
+NDJSON.gz files land at `gs://gs-bounce-audit/prod/year=YYYY/month=MM/day=DD/hour=HH/gbounce-{instance_id}-{timestamp}.jsonl.gz`. BigQuery + Dataproc + Athena-via-Federated-Query auto-discover the Hive partitions.
+
+**Pub/Sub fan-out (alternative):** for multi-subscriber pipelines,
+point the webhook at a Cloud Run shim that publishes to a Pub/Sub
+topic. Subscribers (BigQuery, Cloud Logging, third-party SIEMs)
+attach to the topic.
 
 ```bash
 gbounce run \
@@ -245,21 +374,26 @@ gbounce run \
     --audit-webhook-token $BEARER
 ```
 
-For Pub/Sub fan-out (multiple consumers), point the webhook at a Cloud
-Run shim that publishes to a Pub/Sub topic instead of writing to GCS;
-subscribers (BigQuery, Cloud Logging, third-party SIEMs) attach to the
-topic.
+**v1.1 deferred:** native GCS auth (Workload Identity / Service
+Account) per [[don't-tailor-to-lighthouse]]; S3 interop covers
+~95% of operators today.
 
 ### 2.6 Azure deployment
 
-**Recommended:** `sentinel` preset (for Log Analytics Workspace) OR a
-webhook into an operator-owned Function for Azure Blob. We do not
-ship an Azure-Blob-native sink.
+**Recommended (search + dashboards):** `sentinel` preset (for Log
+Analytics Workspace).
 
-**Why:** Same shape as GCP. Sentinel's HTTP Data Collector is a
-first-class supported preset (per [WEBHOOK-PRESETS.md](WEBHOOK-PRESETS.md));
-Blob Storage upload is a thin Function you write once if you need it
-separately from Sentinel.
+**Recommended (cold-store / Blob archive):** Cloud-neutral S3-compat
+NDJSON sink (#317) targeting Blob via an S3-compat layer (e.g.
+[MinIO Gateway for Azure Blob](https://min.io/docs/minio/linux/integrations/aws-cli-with-minio.html)
+or Azure's S3 Protocol preview). The same flag shape that works for
+AWS S3 + GCS interop + R2 + B2 works against the operator-fronted
+Blob endpoint.
+
+**Why:** Sentinel's HTTP Data Collector is a first-class supported
+preset (per [WEBHOOK-PRESETS.md](WEBHOOK-PRESETS.md)); Blob Storage
+cold-archive uses the same generic S3-compat sink as every other
+cloud-neutral target — no Azure Function shim to maintain.
 
 **Sentinel path:**
 
@@ -285,13 +419,24 @@ substitutes for boto3.
 
 ### 2.7 CI/CD ephemeral runners
 
-**Recommended:** Webhook with `--audit-webhook-batch-size 1` and an
-explicit sync flush before the runner exits.
+**Recommended:** Webhook with `--audit-webhook-batch-size 1` + the
+bouncer's graceful-shutdown drain on `SIGTERM`. NO explicit `flush`
+subcommand is needed (or available) — the bouncer drains the audit
+pipeline automatically when it receives SIGTERM.
 
 **Why:** Ephemeral runners die. Any events buffered in the bouncer at
 exit are lost unless flushed. Batch-size-1 reduces (but does not
-eliminate) the window. The bouncer's `audit-export flush` subcommand
-forces a sync drain.
+eliminate) the window. The bouncer's signal handler (Python: aiohttp
+`runner.cleanup()` → audit-channel `.stop()` chain; Go: cobra
+`signal.NotifyContext` → `s.Shutdown(ctx)` → audit-channel close)
+drains every in-flight webhook send, in-memory NDJSON queue, and
+SQLite write before returning. The `wait $PID` line below blocks
+until the drain finishes; nothing else is needed.
+
+Per `[[creates-never-mutates]]`: the drain is naturally graceful — no
+audit event is ever destroyed during shutdown; the bouncer waits for
+each channel's worker to finish in-flight work, then closes the file
+descriptor / HTTP session cleanly.
 
 **Setup:**
 
@@ -300,20 +445,35 @@ forces a sync drain.
 ibounce run \
     --audit-webhook-url $SIEM_URL \
     --audit-webhook-token $TOKEN \
-    --audit-webhook-batch-size 1 &
+    --audit-webhook-batch-size 1 \
+    --audit-log-path /tmp/ibounce-fallback.jsonl &
 IBOUNCE_PID=$!
 
 # ... do agent work that routes through ibounce ...
 
-# Before the runner exits, flush any pending events.
-ibounce audit-export flush --wait 10s
+# Trigger the graceful drain. SIGTERM (default kill signal) walks the
+# audit-channel teardown chain: pending webhook sends complete or
+# error-out via the existing retry/backoff path; in-memory NDJSON
+# queue drains to disk; SQLite checkpoint flushes; file descriptors
+# close. `wait` blocks until the drain finishes.
 kill -TERM $IBOUNCE_PID
 wait $IBOUNCE_PID
 ```
 
 Same shape works for kbounce / dbounce / gbounce. In GitHub Actions /
-GitLab CI, wrap the `flush` + `kill` in an `always()` / `after_script`
-block so it runs even on test failure.
+GitLab CI, wrap the `kill -TERM` + `wait` in an `always()` /
+`after_script` block so it runs even on test failure. Belt-and-braces:
+set `--audit-log-path` in addition to the webhook so a webhook outage
+during shutdown still leaves a local file the post-job step can
+upload as an artifact.
+
+**Why not `flush --wait`?** No bouncer ships an explicit `audit-export
+flush` subcommand: the drain ALREADY happens on SIGTERM (the
+graceful-shutdown handler is the implementation). An explicit flush
+RPC would duplicate the signal-handler logic with a new failure mode
+(an HTTP call to the bouncer's mgmt port that might itself fail
+mid-CI). Per `[[deliberate-feature-completion]]` we keep the existing
+signal-handler drain as the single source of truth.
 
 ### 2.8 Enterprise fan-out (multi-destination per severity)
 
@@ -569,7 +729,11 @@ Same flag names + same semantics across all four bouncers per
 | Flag                           | ibounce | kbounce | dbounce | gbounce |
 |--------------------------------|---------|---------|---------|---------|
 | `--audit-log-path`             | ✓       | ✓       | ✓       | ✓       |
-| `--audit-webhook-url`          | ✓       | ✓       | ✓       | G-Slice 6 |
+| `--audit-log-fsync`            | ✓       | ✓       | ✓       | ✓       |
+| `--audit-log-max-size-mb` (#311) | ✓       | ✓       | ✓       | ✓ (flag accepted; writer-level rotation deferred per LOG-RETENTION.md parity matrix) |
+| `--audit-log-max-age-days` (#311) | ✓       | ✓       | ✓       | ✓ (same caveat) |
+| `--audit-db-retention-days` (#311) | ✓       | ✓       | ✓       | ✓ (purge-only path; same caveat) |
+| `--audit-webhook-url`          | ✓       | ✓       | ✓       | G-Slice 6 (v1.1; use JSONL + Fluent Bit/Vector for v1.0) |
 | `--audit-webhook-token`        | ✓       | ✓       | ✓       | G-Slice 6 |
 | `--audit-webhook-preset`       | ✓       | ✓       | ✓       | G-Slice 6 |
 | `--audit-webhook-batch-size`   | ✓       | ✓       | ✓       | G-Slice 6 |

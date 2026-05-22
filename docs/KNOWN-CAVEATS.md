@@ -106,41 +106,50 @@ Tracking: every BUG entry has a task number (e.g., #299). v1.0 release gate: eve
 - **Docs:** `docs/AGENT-ATTRIBUTION.md` extended with the dbounce `application_name` convention. `docs/INTEGRATION-OPENCLAW-NANOCLAW.md` §B16 entry removed (no longer a v1.1 gap).
 - **Task:** #318 — completed 2026-05-22. Depends on #308 (gbounce reference implementation).
 
-## A15. Cloud-neutral object-storage NDJSON sink (S3-compatible) — `STATUS: QUEUED`
+## A15. Cloud-neutral object-storage NDJSON sink (S3-compatible) — `STATUS: FIXED 2026-05-22`
 - **Severity:** HIGH (per founder direction 2026-05-22: bouncers other than ibounce are cloud-neutral; AWS-only Security Lake adapter alone isn't enough)
-- **Why pre-launch:** operators need their SIEM/security-tool to collect bouncer logs from a bucket. Today: HTTPS webhook (synchronous push) + Security Lake (AWS-only parquet). Operators on GCS / Azure / MinIO / R2 / B2 have no pull-based collection path.
-- **What ships:**
-  - New exporter: `--audit-object-storage-endpoint URL --audit-object-storage-bucket NAME --audit-object-storage-prefix PREFIX --audit-object-storage-region REGION`
-  - Uses S3-compatible API; works with AWS S3, GCS (via S3 interop), Azure Blob (via S3-compat layer), MinIO, Cloudflare R2, Backblaze B2, DigitalOcean Spaces, etc.
-  - Authentication: standard AWS-style env vars (AWS_ACCESS_KEY_ID / AWS_SECRET_ACCESS_KEY) OR explicit `--audit-object-storage-credentials-file`
-  - Output format: NDJSON (one OCSF event per line, gzip-compressed); files rotated every `--audit-object-storage-rotation-minutes` (default 5) OR size cap
-  - Path convention: `{prefix}/year=YYYY/month=MM/day=DD/hour=HH/{product}-{instance_id}-{timestamp}.jsonl.gz`
-  - SIEM-pull-friendly: collectors do `LIST + GET` against the prefix; new files appear at predictable cadence
-  - Works ALONGSIDE existing webhook / Security Lake adapters (operator can run multiple sinks simultaneously)
-- **What does NOT ship in v1.0** (deferred to v1.1 per `[[don't-tailor-to-lighthouse]]`):
+- **Why pre-launch:** operators need their SIEM/security-tool to collect bouncer logs from a bucket. Pre-#317: HTTPS webhook (synchronous push) + Security Lake (AWS-only parquet). Operators on GCS / Azure / MinIO / R2 / B2 had no pull-based collection path.
+- **What shipped (#317, 2026-05-22):**
+  - New exporter on every Bounce product: `--audit-object-storage-endpoint URL --audit-object-storage-bucket NAME --audit-object-storage-prefix PREFIX --audit-object-storage-region REGION --audit-object-storage-credentials-file PATH --audit-object-storage-rotation-minutes N --audit-object-storage-max-size-mb N --audit-object-storage-instance-id ID`
+  - Per [[cross-product-agent-parity]]: identical flag shape on ibounce + kbounce + dbounce + gbounce.
+  - Uses S3-compatible API via boto3 (ibounce, Python) + aws-sdk-go-v2 (kbouncer + dbounce + gbounce, Go); works with AWS S3 (native), GCS (S3 interop / HMAC keys), Azure Blob (S3-compat layer), MinIO, Cloudflare R2, Backblaze B2, DigitalOcean Spaces.
+  - Authentication: standard AWS-style env vars (AWS_ACCESS_KEY_ID / AWS_SECRET_ACCESS_KEY / AWS_SESSION_TOKEN) OR explicit `--audit-object-storage-credentials-file` (YAML or INI; file overrides env vars when both are present).
+  - Output format: NDJSON (one OCSF event per line, gzip-compressed); files rotated every `--audit-object-storage-rotation-minutes` (default 5) OR `--audit-object-storage-max-size-mb` (default 16), whichever fires first.
+  - Path convention: `{prefix}/year=YYYY/month=MM/day=DD/hour=HH/{product}-{instance_id}-{timestamp}.jsonl.gz` — Hive-style partitioning. Athena / BigQuery / Spark / Trino auto-discover partitions from this layout.
+  - SIEM-pull-friendly: collectors do `LIST + GET` against the prefix; new files land at predictable cadence.
+  - Works ALONGSIDE existing webhook / Security Lake adapters per [[creates-never-mutates]] — additive composition; the operator can run multiple sinks simultaneously.
+  - Per [[self-host-zero-billing-dependency]]: operator owns the bucket; iam-jit-the-company never receives the data.
+  - Refuse-to-start posture: `Start()` issues HeadBucket on each writer so credential / endpoint / bucket-name misconfigurations surface immediately, not at first flush.
+  - On shutdown: pending NDJSON buffer finalized synchronously (matches the Security Lake adapter's flush-on-stop posture) so a clean restart doesn't drop in-memory rows.
+- **What does NOT ship in v1.0** (deferred to v1.1 per [[don't-tailor-to-lighthouse]]):
   - Native GCS auth (Workload Identity / Service Account)
   - Native Azure Blob auth (Managed Identity)
   - Reason: S3-compatible covers ~95% of "drop logs in a bucket" via interop; native auth is friction-reducer for v1.1
-- **Engineering scope:** ~3-4 days cross-product
-- **Task:** #317.
+- **Verification:**
+  - **ibounce:** `tests/bouncer/test_audit_export_object_storage.py` — 27 tests cover defaults, credentials resolution (env + YAML + INI), partition path format, construction refusal, write/flush happy path, status surface, size-cap synchronous flush, drop-on-buffer-full, write-before-start no-op, stop-flushes-pending, put_object failure -> writes_ok=false, and the rotation timer triggering a background flush.
+  - **kbouncer:** `internal/audit/object_storage_test.go` — same 19 test surface (Go).
+  - **dbounce:** `internal/audit/object_storage_test.go` — same 19 test surface (Go).
+  - **gbounce:** `internal/audit/object_storage_test.go` — same 19 test surface (Go).
+- **Task:** #317 — completed 2026-05-22.
 
-## A17. UAT findings cluster — cross-product CLI parity + doc-truth-up gaps — `STATUS: QUEUED`
+## A17. UAT findings cluster — cross-product CLI parity + doc-truth-up gaps — `STATUS: FIXED 2026-05-22`
 - **Severity:** CRIT + HIGH (per `[[uat-findings-2026-05-22]]`; 1 CRIT + 5 HIGH launch-blockers)
 - **Surfaced by:** dogfood UAT loop 2026-05-22 — perpetual UAT agent exercised the 6 recent slices as a brand-new operator. The cross-product slices (#311 retention, #304 caveats, #316 runbook) shipped on ibounce + gbounce but didn't carry kbounce + dbounce CLI wiring despite specs saying "cross-product parity." The Go impl shipped in shared library code; CLI subcommand registration on each bouncer was a separate step that got missed.
-- **Findings to fix:**
-  - **F-316-1 CRIT** — `ibounce audit-export flush --wait DUR` referenced in `docs/PRODUCTION-LOG-STORAGE.md` §2.7 doesn't exist. CI/CD operators following the recipe lose every queued event on SIGTERM. **Fix:** either ship `*bounce audit-export flush --wait DUR` cross-product OR rewrite §2.7 to use the actual graceful-shutdown path.
-  - **F-311-3 HIGH** — `kbounce logs` + `dbounce logs` subcommands don't exist. LOG-RETENTION.md claims cross-product parity. Impl exists in shared lib; only the cobra command registration is missing. **Fix:** wire `kbounce logs {archive,purge,verify}` + `dbounce logs {archive,purge,verify}` mirroring gbounce.
-  - **F-311-4 HIGH** — `--audit-log-max-size-mb` / `--audit-log-max-age-days` / `--audit-db-retention-days` flags absent from all four `*bounce run` surfaces. **Fix:** add the flag trio + env-var overrides to each `run` command.
-  - **F-304-1 HIGH** — `kbounce doctor caveats` + `dbounce doctor caveats` don't exist (neither has a `doctor` group at all). #304 spec said "across all 4 products." **Fix:** ship `*bounce doctor caveats` on kbounce + dbounce mirroring gbounce.
-  - **F-304-2 HIGH** — kbounce + dbounce startup banners emit zero `caveat:` lines (ibounce + gbounce do). **Fix:** wire `kbounce run` + `dbounce run` startup banners to emit applicable §B entries.
-  - **F-316-2 HIGH** — gbounce has no `--audit-webhook-url` (G-Slice 6 unshipped). PRODUCTION-LOG-STORAGE.md §2.7 says "same shape works for kbounce / dbounce / gbounce." **Fix:** scope the doc to call out "webhook export is G-Slice 6 / v1.1 for gbounce; use JSONL + Fluent Bit/Vector intermediary for v1.0."
-- **Medium follow-ups (do for v1.0 if cheap):**
-  - F-311-1: `gbounce logs archive` produces empty tar.gz for non-`audit*` filenames (filename-prefix bug at `internal/audit/rotation.go:266`).
-  - F-311-2: `gbounce logs verify` false-positive green when `files_checked == 0`.
-  - F-304-3: `gbounce doctor --help` lists only `caveats` but `gbounce doctor logs` actually works.
-  - F-308-1: invalid `X-Agent-Name` silently swapped to anonymous; no event-side `rejected_reason` breadcrumb.
-- **Engineering scope:** ~3-5 days cross-product (CLI wiring exists; doctor + banner mirror existing impls; runbook doc-fix is small).
+- **Findings (closed in #319, 2026-05-22):**
+  - **F-316-1 CRIT — FIXED** — PRODUCTION-LOG-STORAGE.md §2.7 rewritten to use the actual graceful-shutdown path (SIGTERM → audit-channel teardown drains in-flight sends + flushes queues before close). No `audit-export flush --wait DUR` subcommand ships; the bouncer's existing signal handler IS the drain (Python: aiohttp `runner.cleanup()` → audit-channel `.stop()` chain; Go: cobra `signal.NotifyContext` → `s.Shutdown(ctx)` → audit-channel close). Belt-and-braces: §2.7 also recommends setting `--audit-log-path` alongside the webhook so a webhook outage during shutdown still leaves a local file for post-job upload.
+  - **F-311-3 HIGH — already FIXED** — verified 2026-05-22 that `kbounce logs {archive,purge,verify}` + `dbounce logs {archive,purge,verify}` + `kbounce doctor {caveats,logs}` + `dbounce doctor {caveats,logs}` all ship + work via `/tmp/kbounce --help` + `/tmp/dbounce --help`. The findings doc was stale.
+  - **F-311-4 HIGH — FIXED** — added `--audit-log-max-size-mb` + `--audit-log-max-age-days` + `--audit-db-retention-days` flags + matching env-var overrides (`<PRODUCT>_AUDIT_LOG_MAX_SIZE_MB`, etc.) to all four `*bounce run` surfaces. ibounce wires the size + age values into the live `AuditLogWriter`; kbounce + dbounce wire both into the live `audit.LogWriter`; gbounce accepts the flags + surfaces resolved values but the writer-level rotation hook is deferred (per the LOG-RETENTION.md parity-matrix gbounce row — concurrent-agent work on `internal/audit/log.go`). DB-retention is consumed by the on-demand `*bounce logs purge` path across all four products.
+  - **F-304-1 HIGH — already FIXED** — see F-311-3 verification.
+  - **F-304-2 HIGH — FIXED** — `dbounce run` now calls `caveats.BannerLines(caveats.Trigger{...})` after the preset banner + before the `signal.NotifyContext` install, on stderr, gated by `--quiet-banner`. kbounce already had the equivalent (verified). ibounce + gbounce unchanged.
+  - **F-316-2 HIGH — FIXED** — PRODUCTION-LOG-STORAGE.md TL;DR table swapped the gbounce GCP row to ibounce + added explicit "(gbounce v1.0: use JSONL + Fluent Bit / Vector — see §3 gap)" annotation. The per-product parity matrix at the bottom of the doc + the cross-product line in §2.7 already correctly scoped webhook to G-Slice 6.
+- **Medium follow-ups — FIXED:**
+  - F-311-1 — `gbounce logs archive` now errors loudly when the directory contains zero audit-shaped files (filename-prefix `audit*` + suffix `.jsonl{,.gz}`/`.db{,.gz}` filter) so the operator sees the empty-tar case immediately instead of silently producing a 50-byte gzip trailer.
+  - F-311-2 — `gbounce logs verify` now flips `OK=false` + returns a non-zero exit when `files_checked == 0`, with a clear stderr message naming the dir + the three likely root causes (writer never started / wrong dir / `--audit-log` pointed at a sibling path). JSON output also reflects the corrected `ok=false`.
+  - F-304-3 — `gbounce doctor --help` Long help now lists both `caveats` AND `logs` subcommands + the `RunE` error message points at both.
+  - F-308-1 — invalid `X-Agent-Name` / `X-Agent-Session-Id` headers now land in the audit event at `unmapped.iam_jit.ext.agent_rejected_reason` as bounded enum strings (`session_id:invalid_charset_or_length`, `agent_name:invalid_charset_or_length`, semicolon-joined when both fail). Raw header values are NEVER included (the truncated stderr line emitted by `logAgentHeaderRejected` remains the only place the raw value surfaces, with control-char filtering).
+- **Engineering scope:** ~3-5 days cross-product (closed in 1 working session 2026-05-22).
 - **Task:** #319.
+- **Verification:** dogfood UAT loop re-run against each repo confirms the original CRIT + 5 HIGH gaps no longer reproduce; med follow-ups verified via path-targeted manual smoke + the existing regression-test suite continues to pass.
 - **Severity:** HIGH (pre-launch feature gap; operators needed to block specific domains without MITM)
 - **Symptom (historical):** gbounce could audit-log every CONNECT, but couldn't REFUSE one based on destination host. Operators who wanted "block this agent from calling api.openai.com" had no way to do it.
 - **Fix (#314, gbounce commit `39afcf1`):**

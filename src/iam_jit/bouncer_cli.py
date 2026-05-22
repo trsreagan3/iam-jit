@@ -3396,6 +3396,45 @@ def _parse_duration(raw: str) -> int:
          "on rotational media; ~2x on consumer SSD.",
 )
 @click.option(
+    "--audit-log-max-size-mb",
+    "audit_log_max_size_mb",
+    type=click.IntRange(0, 100_000),
+    default=None,
+    envvar="IBOUNCE_AUDIT_LOG_MAX_SIZE_MB",
+    help="#311 / §A10 — rotate the JSONL audit log when it exceeds N MB. "
+         "0 disables size-triggered rotation. Default 100 (matches the "
+         "cross-product LOG-RETENTION.md spec). Rotated files are gzip'd "
+         "into the same dir with a timestamp suffix and remain until an "
+         "explicit `ibounce logs purge` reaps them (per [[creates-never-"
+         "mutates]] the active log is never destroyed by automatic paths). "
+         "Honors $IBOUNCE_AUDIT_LOG_MAX_SIZE_MB for non-flag overrides.",
+)
+@click.option(
+    "--audit-log-max-age-days",
+    "audit_log_max_age_days",
+    type=click.IntRange(0, 36_500),
+    default=None,
+    envvar="IBOUNCE_AUDIT_LOG_MAX_AGE_DAYS",
+    help="#311 / §A10 — rotate the JSONL audit log when its mtime is "
+         "older than N days. 0 disables age-triggered rotation. Default 7 "
+         "(matches the cross-product LOG-RETENTION.md spec). Pairs with "
+         "--audit-log-max-size-mb; whichever trigger fires first wins. "
+         "Honors $IBOUNCE_AUDIT_LOG_MAX_AGE_DAYS for non-flag overrides.",
+)
+@click.option(
+    "--audit-db-retention-days",
+    "audit_db_retention_days",
+    type=click.IntRange(0, 36_500),
+    default=None,
+    envvar="IBOUNCE_AUDIT_DB_RETENTION_DAYS",
+    help="#311 / §A10 — purge rotated SQLite audit DB archives older "
+         "than N days. 0 disables DB retention. Default 30 (matches the "
+         "cross-product LOG-RETENTION.md spec). Active `audit.db` is "
+         "NEVER deleted by this path; only rotated `audit-*.db.gz` "
+         "archives are eligible. Honors $IBOUNCE_AUDIT_DB_RETENTION_DAYS "
+         "for non-flag overrides.",
+)
+@click.option(
     "--record-sessions-dir",
     "record_sessions_dir",
     type=click.Path(file_okay=False),
@@ -3526,6 +3565,94 @@ def _parse_duration(raw: str) -> int:
          "faster Security Lake visibility; higher values mean fewer / "
          "larger files (better Athena scan efficiency). A 10 MiB size "
          "cap also forces a flush, whichever fires first.",
+)
+# #317 — cloud-neutral S3-compatible NDJSON object-storage sink.
+# All fields OFF by default. Per [[self-host-zero-billing-dependency]]
+# the bucket is operator-owned; iam-jit-the-company never receives
+# the data. Per [[don't-tailor-to-lighthouse]]: generic S3-compat;
+# works with AWS S3, GCS interop, Azure Blob S3-compat layer, MinIO,
+# R2, B2, DigitalOcean Spaces, etc.
+@click.option(
+    "--audit-object-storage-endpoint",
+    "audit_object_storage_endpoint",
+    default=None,
+    help="#317 — S3 API endpoint URL. Required when "
+         "--audit-object-storage-bucket is set. Examples: "
+         "https://s3.us-east-1.amazonaws.com (AWS S3); "
+         "https://<accountid>.r2.cloudflarestorage.com (Cloudflare R2); "
+         "https://minio.internal:9000 (MinIO); "
+         "https://storage.googleapis.com (GCS interop with HMAC keys); "
+         "https://s3.us-west-002.backblazeb2.com (Backblaze B2); "
+         "https://nyc3.digitaloceanspaces.com (DigitalOcean Spaces).",
+)
+@click.option(
+    "--audit-object-storage-bucket",
+    "audit_object_storage_bucket",
+    default=None,
+    help="#317 — name of the operator-owned bucket the writer appends "
+         "NDJSON files into. Operator creates the bucket; ibounce "
+         "NEVER creates buckets. When set, every OCSF event is also "
+         "written as a gzip-compressed NDJSON line into "
+         "`{prefix}/year=YYYY/month=MM/day=DD/hour=HH/"
+         "ibounce-{instance_id}-{timestamp}.jsonl.gz`. Hive-style "
+         "partitioning lets Athena / BigQuery / Spark / Trino query "
+         "the bucket directly; collectors do LIST + GET against the "
+         "prefix at predictable cadence.",
+)
+@click.option(
+    "--audit-object-storage-prefix",
+    "audit_object_storage_prefix",
+    default="", show_default=True,
+    help="#317 — key prefix inside the bucket (e.g. "
+         "`bounce-audit/prod`). Empty = bucket root. Hive partition "
+         "directories are appended under the prefix.",
+)
+@click.option(
+    "--audit-object-storage-region",
+    "audit_object_storage_region",
+    default="us-east-1", show_default=True,
+    help="#317 — region for the SigV4 signature. AWS S3: real region "
+         "(`us-east-1`, `eu-west-1`, ...). Cloudflare R2: `auto`. "
+         "MinIO / vendor-specific: pick whatever the vendor docs say.",
+)
+@click.option(
+    "--audit-object-storage-credentials-file",
+    "audit_object_storage_credentials_file",
+    type=click.Path(dir_okay=False),
+    default=None,
+    help="#317 — optional explicit credentials file (overrides env "
+         "vars). YAML or INI shape with keys `access_key_id`, "
+         "`secret_access_key`, optional `session_token`. When absent, "
+         "reads AWS_ACCESS_KEY_ID / AWS_SECRET_ACCESS_KEY / "
+         "AWS_SESSION_TOKEN env vars.",
+)
+@click.option(
+    "--audit-object-storage-rotation-minutes",
+    "audit_object_storage_rotation_minutes",
+    type=click.IntRange(1, 1440), default=5, show_default=True,
+    help="#317 — rotate the active NDJSON file when N minutes elapse "
+         "OR --audit-object-storage-max-size-mb fires, whichever "
+         "first. Lower values mean smaller files + faster collector "
+         "visibility; higher values mean fewer / larger files (better "
+         "scan efficiency for Athena / BigQuery).",
+)
+@click.option(
+    "--audit-object-storage-max-size-mb",
+    "audit_object_storage_max_size_mb",
+    type=click.IntRange(1, 1024), default=16, show_default=True,
+    help="#317 — rotate the active NDJSON file when its in-memory "
+         "size estimate crosses N megabytes. Default 16. Works "
+         "together with --audit-object-storage-rotation-minutes; "
+         "whichever cap fires first triggers a flush.",
+)
+@click.option(
+    "--audit-object-storage-instance-id",
+    "audit_object_storage_instance_id",
+    default=None,
+    help="#317 — override the auto-generated instance identifier "
+         "(hostname-pid) used in the object key. Useful for "
+         "operators with ephemeral hostnames (containers / k8s "
+         "pods) who want the path stable across restarts.",
 )
 @click.option(
     "--alert-rules",
@@ -3666,6 +3793,9 @@ def run_cmd(
     account_alias_flag: str | None,
     audit_log_path: str | None,
     audit_log_fsync: bool,
+    audit_log_max_size_mb: int | None,
+    audit_log_max_age_days: int | None,
+    audit_db_retention_days: int | None,
     record_sessions_dir: str | None,
     audit_webhook_url: str | None,
     audit_webhook_token: str | None,
@@ -3678,6 +3808,14 @@ def run_cmd(
     security_lake_region: str | None,
     security_lake_role_arn: str | None,
     security_lake_rotation_seconds: int,
+    audit_object_storage_endpoint: str | None,
+    audit_object_storage_bucket: str | None,
+    audit_object_storage_prefix: str,
+    audit_object_storage_region: str,
+    audit_object_storage_credentials_file: str | None,
+    audit_object_storage_rotation_minutes: int,
+    audit_object_storage_max_size_mb: int,
+    audit_object_storage_instance_id: str | None,
     alert_rules_path: str | None,
     alert_routes_path: str | None,
     heartbeat_interval_seconds: int,
@@ -3866,6 +4004,31 @@ def run_cmd(
         )
         sys.exit(2)
 
+    # #317 — object-storage parse-time validation. Bucket without
+    # endpoint (or vice versa) is a misconfiguration; fail-fast so the
+    # operator fixes it once rather than seeing a bucket probe failure
+    # deep in startup.
+    if audit_object_storage_bucket and not audit_object_storage_endpoint:
+        click.secho(
+            "--audit-object-storage-bucket requires "
+            "--audit-object-storage-endpoint (the S3 API endpoint URL "
+            "for the operator's cloud provider — examples: "
+            "https://s3.us-east-1.amazonaws.com for AWS S3; "
+            "https://<accountid>.r2.cloudflarestorage.com for "
+            "Cloudflare R2; https://storage.googleapis.com for GCS "
+            "interop).",
+            fg="red", err=True,
+        )
+        sys.exit(2)
+    if audit_object_storage_endpoint and not audit_object_storage_bucket:
+        click.secho(
+            "--audit-object-storage-endpoint requires "
+            "--audit-object-storage-bucket (passing an endpoint "
+            "without a target bucket has no effect).",
+            fg="red", err=True,
+        )
+        sys.exit(2)
+
     # #252 — license + SSRF gates fire HERE (at CLI parse), not in
     # serve(), so the operator sees the error immediately rather than
     # finding it deep in startup logs. Both gates re-validate at
@@ -3999,6 +4162,9 @@ def run_cmd(
         plan_write_switch_notify=write_switch_notify.lower(),
         audit_log_path=audit_log_path,
         audit_log_fsync=audit_log_fsync,
+        audit_log_max_size_mb=audit_log_max_size_mb,
+        audit_log_max_age_days=audit_log_max_age_days,
+        audit_db_retention_days=audit_db_retention_days,
         record_sessions_dir=record_sessions_dir,
         audit_webhook_url=audit_webhook_url,
         audit_webhook_token=audit_webhook_token,
@@ -4011,6 +4177,14 @@ def run_cmd(
         security_lake_region=security_lake_region,
         security_lake_role_arn=security_lake_role_arn,
         security_lake_rotation_seconds=security_lake_rotation_seconds,
+        audit_object_storage_endpoint=audit_object_storage_endpoint,
+        audit_object_storage_bucket=audit_object_storage_bucket,
+        audit_object_storage_prefix=audit_object_storage_prefix,
+        audit_object_storage_region=audit_object_storage_region,
+        audit_object_storage_credentials_file=audit_object_storage_credentials_file,
+        audit_object_storage_rotation_minutes=audit_object_storage_rotation_minutes,
+        audit_object_storage_max_size_mb=audit_object_storage_max_size_mb,
+        audit_object_storage_instance_id=audit_object_storage_instance_id,
         alert_rules_path=alert_rules_path,
         alert_routes_path=alert_routes_path,
         heartbeat_interval_seconds=heartbeat_interval_seconds,
@@ -4178,6 +4352,21 @@ def run_cmd(
                 f"rotation={security_lake_rotation_seconds}s)",
                 err=True,
             )
+        if audit_object_storage_bucket:
+            # #317 — object-storage banner. Cloud-neutral S3-compatible
+            # NDJSON sink. Per [[self-host-zero-billing-dependency]]
+            # the destination is operator-owned; iam-jit-the-company
+            # never receives the data.
+            click.echo(
+                f"audit-export object-storage: "
+                f"s3://{audit_object_storage_bucket}/"
+                f"{audit_object_storage_prefix} "
+                f"(endpoint={audit_object_storage_endpoint}, "
+                f"region={audit_object_storage_region}, "
+                f"rotation={audit_object_storage_rotation_minutes}m, "
+                f"max-size={audit_object_storage_max_size_mb}MB)",
+                err=True,
+            )
         # #264 — surface heartbeat state in startup banner. Default is
         # OFF (zero phone-home preserved per
         # [[security-team-positioning-safety-not-surveillance]]); only
@@ -4195,6 +4384,21 @@ def run_cmd(
             f"Point your SDK: export AWS_ENDPOINT_URL=http://{host}:{port}",
             err=True,
         )
+        # #304 — known-caveats banner. Emits one line per triggered
+        # §B entry. §B1 (SigV4-only) is structural — every ibounce
+        # instance has this shape, so it always fires. §B3
+        # (safe-default = readonly-admin-minus) fires only when the
+        # active profile is safe-default. Per the founder direction
+        # "the signal should be useful, not noise" — we don't surface
+        # every §B entry here; `iam-jit doctor caveats` is the full
+        # list.
+        from .bouncer import caveats as _caveats
+        _trigger = _caveats.Trigger(
+            always_sigv4_only=True,
+            safe_default_profile=active_profile.name == "safe-default",
+        )
+        for _line in _caveats.banner_lines(_trigger):
+            click.echo(_line, err=True)
         click.echo("Ctrl+C to stop.", err=True)
         try:
             _asyncio.run(serve(config, store=store))
@@ -4435,15 +4639,40 @@ def mcp_serve_cmd() -> None:
     sys.exit(mcp_main())
 
 
-def _ibounce_mcp_config_dict() -> dict[str, Any]:
+def _ibounce_mcp_config_dict(*, agent_name_default: str = "claude-code") -> dict[str, Any]:
     """Canonical MCP config snippet for ibounce. Centralized so
-    show-config + every install-* command emit IDENTICAL JSON."""
+    show-config + every install-* command emit IDENTICAL JSON.
+
+    Per #308 + ``[[agent-identity-in-audit]]`` (#266) the snippet
+    surfaces the ``X-Agent-Name`` + ``X-Agent-Session-Id`` header
+    convention through env vars the agent's HTTP client reads.
+    Defaults to ``claude-code``; ``install-cursor`` + ``install-codex``
+    pass their own agent name so the canned config matches the agent
+    that's about to consume it. The session id is deliberately left
+    EMPTY in the static snippet — the agent runtime mints a fresh
+    UUID v7 on each connection (see ``docs/AGENT-ATTRIBUTION.md``)
+    and the env var serves as the carry-channel into the agent's HTTP
+    headers. ibounce itself never reads these env vars — they're a
+    hint to the AGENT runtime, not a configuration ibounce consumes.
+    """
     return {
         "mcpServers": {
             "ibounce": {
                 "command": "ibounce",
                 "args": ["mcp", "serve"],
-                "env": {},
+                "env": {
+                    # #308 — header-injection hints. The agent's MCP
+                    # host inherits these into the child process; the
+                    # agent's HTTP client stamps them as
+                    # X-Agent-Name + X-Agent-Session-Id on every
+                    # outbound call back through the Bouncers'
+                    # HTTP-shaped surfaces (gbounce; ibounce's
+                    # AWS-API proxy mode). See
+                    # docs/AGENT-ATTRIBUTION.md for the per-runtime
+                    # patterns + the validation rules.
+                    "IBOUNCE_AGENT_NAME": agent_name_default,
+                    "IBOUNCE_AGENT_SESSION_ID": "",
+                },
             },
         },
     }
@@ -4489,11 +4718,18 @@ def _merge_ibounce_entry(
     target: "os.PathLike[str] | str",
     *,
     force: bool,
+    agent_name_default: str = "claude-code",
 ) -> tuple[bool, str | None]:
     """Read the existing JSON config (if any), preserve all other keys
     + other `mcpServers` entries, and add/update the `ibounce` entry.
     Returns (overwriting, error_message). On error, the target file is
     left untouched.
+
+    ``agent_name_default`` (#308) feeds the ``IBOUNCE_AGENT_NAME`` env
+    var on the generated entry so the agent runtime stamps the right
+    ``X-Agent-Name`` header on outbound HTTP traffic. Defaults to
+    ``claude-code``; ``install-cursor`` + ``install-codex`` pass
+    ``cursor`` + ``openai-codex`` respectively.
     """
     import pathlib as _pathlib
 
@@ -4534,7 +4770,7 @@ def _merge_ibounce_entry(
         ):
             return False, "declined overwrite (pass --force to skip this prompt)"
 
-    snippet = _ibounce_mcp_config_dict()
+    snippet = _ibounce_mcp_config_dict(agent_name_default=agent_name_default)
     mcp_servers["ibounce"] = snippet["mcpServers"]["ibounce"]
 
     try:
@@ -4595,6 +4831,18 @@ def mcp_show_config_cmd(shape: str) -> None:
     click.echo(
         "  - Other clients: copy the snippet above into your MCP "
         "config (location is client-specific)."
+    )
+    # #308 — point operators at the agent-attribution doc so they
+    # understand the IBOUNCE_AGENT_NAME + IBOUNCE_AGENT_SESSION_ID
+    # env vars in the snippet + the corresponding X-Agent-* header
+    # convention.
+    click.echo("")
+    click.echo(
+        "Agent attribution: the IBOUNCE_AGENT_NAME + "
+        "IBOUNCE_AGENT_SESSION_ID env vars wire the agent's "
+        "X-Agent-Name + X-Agent-Session-Id HTTP headers. See "
+        "docs/AGENT-ATTRIBUTION.md for the per-runtime patterns "
+        "(Claude Code / Cursor / Codex / Devin / OpenClaw / custom)."
     )
 
 
@@ -4736,7 +4984,11 @@ def mcp_install_cursor_cmd(explicit_path: str | None, force: bool) -> None:
         target = _pick_existing_or_default(_candidate_cursor_paths())
 
     click.echo(f"target: {target}")
-    overwriting, err = _merge_ibounce_entry(target, force=force)
+    # #308 — Cursor's runtime stamps X-Agent-Name="cursor" via the
+    # IBOUNCE_AGENT_NAME env var on the spawned MCP server process.
+    overwriting, err = _merge_ibounce_entry(
+        target, force=force, agent_name_default="cursor",
+    )
     if err is not None:
         click.secho(f"ERROR: {err}", fg="red", err=True)
         sys.exit(1)
@@ -4781,7 +5033,10 @@ def mcp_install_codex_cmd(explicit_path: str | None, force: bool) -> None:
     """
     if explicit_path:
         click.echo(f"target: {explicit_path}")
-        overwriting, err = _merge_ibounce_entry(explicit_path, force=force)
+        # #308 — Codex stamps X-Agent-Name="openai-codex".
+        overwriting, err = _merge_ibounce_entry(
+            explicit_path, force=force, agent_name_default="openai-codex",
+        )
         if err is not None:
             click.secho(f"ERROR: {err}", fg="red", err=True)
             sys.exit(1)
@@ -4796,7 +5051,7 @@ def mcp_install_codex_cmd(explicit_path: str | None, force: bool) -> None:
         )
         return
 
-    cfg = _ibounce_mcp_config_dict()
+    cfg = _ibounce_mcp_config_dict(agent_name_default="openai-codex")
     click.echo("Codex MCP config locations vary by release; ibounce does")
     click.echo("not auto-detect (refusing to risk clobbering an unrelated")
     click.echo("file). Paste the snippet below into your Codex MCP config:")
