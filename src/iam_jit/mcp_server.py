@@ -1398,7 +1398,14 @@ TOOLS = [
             "(e.g. announce a write before issuing it in transparent "
             "mode); agents CANNOT flip it — mode changes require a "
             "proxy restart by the operator. Mirrors kbounce_active_mode "
-            "per [[cross-product-agent-parity]]."
+            "per [[cross-product-agent-parity]]. "
+            "Note (#304 — KNOWN-CAVEATS §B4): ibounce's safe-default "
+            "catches are VERB-level by default. Scoped `iam:CreateRole` "
+            "and wildcard `iam:*` are denied by the same rule — pair "
+            "with iam-jit for content-aware risk scoring when verb-"
+            "level granularity isn't enough. See "
+            "https://github.com/trsreagan3/iam-jit/blob/main/docs/"
+            "KNOWN-CAVEATS.md#b4-ibounce-safe-default-catches-are-verb-level-not-content-aware-design--v11-enhancement"
         ),
         "inputSchema": {
             "type": "object",

@@ -2520,15 +2520,25 @@ async def _handle_request(request, *, store, config: ProxyConfig, session):
         # the unparseable response as a client error. Slice 3 will
         # add an AWS-error-shaped body so SDK clients see a clean
         # AccessDenied with the iam-jit reason.
+        # #304 — link to KNOWN-CAVEATS §B4 so an operator hitting a
+        # safe-default verb-level deny sees the canonical explanation
+        # + the recommendation to pair with iam-jit for content-aware
+        # risk scoring. Per
+        # [[security-team-positioning-safety-not-surveillance]] this
+        # is helpful framing ("here's how to evolve the catch") not
+        # accusatory.
+        from . import caveats as _caveats
+        _b4 = _caveats.by_id("B4")
         return web.json_response(
             {
                 "error": "ibounce DENY",
                 "decision_verdict": obs.decision_verdict,
-                "decision_reason": obs.decision_reason,
+                "decision_reason": obs.decision_reason + _caveats.link_suffix("B4"),
                 "service": obs.parsed_service,
                 "action": obs.parsed_action,
                 "arn": obs.parsed_arn,
                 "mode": obs.mode_at_decision,
+                "caveat_url": _b4.url if _b4 else "",
             },
             status=403,
             # Wire-protocol response headers retain the
@@ -2543,6 +2553,11 @@ async def _handle_request(request, *, store, config: ProxyConfig, session):
     # host header to trust). Return 400.
     host_header = request.headers.get("host", "")
     if not obs.parsed_service or not host_header:
+        # #304 — link to KNOWN-CAVEATS §B1 so an operator hitting the
+        # "no SigV4" deny sees the canonical explanation immediately.
+        # Per [[security-team-positioning-safety-not-surveillance]] the
+        # link is helpful framing, not accusatory.
+        from . import caveats as _caveats
         return web.json_response(
             {
                 "error": "ibounce cannot forward unclassifiable request",
@@ -2550,7 +2565,9 @@ async def _handle_request(request, *, store, config: ProxyConfig, session):
                 "hint": (
                     "request has no SigV4 Authorization header or no Host header; "
                     "the proxy can't determine the AWS endpoint to forward to."
+                    + _caveats.link_suffix("B1")
                 ),
+                "caveat_url": _caveats.by_id("B1").url if _caveats.by_id("B1") else "",
             },
             status=400,
             headers={"x-iam-jit-bouncer-verdict": obs.decision_verdict},
