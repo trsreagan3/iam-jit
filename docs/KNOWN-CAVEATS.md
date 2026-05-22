@@ -37,11 +37,11 @@ Tracking: every BUG entry has a task number (e.g., #299). v1.0 release gate: eve
 - **Fix:** added `ibounce run --upstream URL` flag. New `parse_upstream_url(url)` helper extracts scheme + `host:port`; validates scheme ∈ {http, https} (rejects `ftp://`, `file://`, schemeless URLs with a clear error); threads `forward_scheme` + new `forward_host_override` field through `ProxyConfig` into the two `_forward_to_aws` call sites. CRIT-32-01 outbound-host allowlist still gates the override target (loopback / `.amazonaws.com` / operator EXTRA_HOSTS). Regression coverage: `tests/bouncer/test_proxy_upstream_scheme.py` (14 tests: unit parser + CLI-startup-rejection + end-to-end against a mock-LocalStack aiohttp app proving the override target receives the call). End-to-end verified against LocalStack 3.8: `list_buckets / create_bucket / put_object / get_object` all 200 through `ibounce --upstream http://127.0.0.1:4566 --mode transparent` with audit log showing `allow` verdicts.
 - **Task:** #300 — completed 2026-05-22.
 
-## A4. kbounce: kubectl OpenAPI discovery classified as "unclassifiable" — `STATUS: IN FLIGHT`
+## A4. kbounce: kubectl OpenAPI discovery classified as "unclassifiable" — `STATUS: FIXED 2026-05-22`
 - **Severity:** CRITICAL
 - **Symptom:** Every kubectl invocation fails. First call kubectl makes is `GET /openapi/v3/<group>` → kbounce parser → unclassifiable → safe-default denies.
-- **Workaround until fix:** use `--profile full-user` OR allowlist `/openapi/v3/*` in custom profile.
-- **Task:** #301 — agent spawned 2026-05-22 (in flight).
+- **Fix shipped (kbouncer #301):** parser-side recognition of apiserver meta/discovery URL shapes (`/openapi/v2`, `/openapi/v3[/...]`, `/api`, `/apis`, `/api/{version}`, `/apis/{group}[/{version}]`, `/version`, `/healthz[/...]`, `/readyz[/...]`, `/livez[/...]`, `/metrics`) as `IsMetaRead=true`, `verb=get`, `resource=meta:<kind>`. The proxy short-circuits them to `VerdictAllow` with `decision_source=meta-discovery`. Writes on the same prefixes stay unclassifiable (apiserver 405s them; per `[[creates-never-mutates]]` we refuse to widen). New regression tests in `internal/parser/parser_test.go` (`TestParse_MetaDiscoveryPaths`, `TestParse_ResourceTailNotMistakenForMeta`) + `internal/proxy/proxy_test.go` (`TestEvaluateRequest_MetaDiscoveryAllowedUnderSafeDefault`, `TestEvaluateRequest_MetaDiscoveryWritesStillDenied`, `TestEvaluateRequest_RealResourceCallStillFlowsThroughProfile`). End-to-end verified with kbounce against the dogfood kind cluster — all 12 canonical meta paths returned `verdict=allow source=meta-discovery`. Ships in kbouncer v1.0.
+- **Task:** #301 — completed 2026-05-22. See kbouncer CHANGELOG "Unreleased / #301" for the full design rationale.
 
 ## A5. dbounce: GRANT / REVOKE / DCL classified as `unknown` → default-allow — `STATUS: QUEUED`
 - **Severity:** HIGH
