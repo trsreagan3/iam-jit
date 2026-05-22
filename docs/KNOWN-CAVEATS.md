@@ -68,21 +68,21 @@ Tracking: every BUG entry has a task number (e.g., #299). v1.0 release gate: eve
 - **Workaround until fix:** none — gbounce stashed the agent id under `unmapped.iam_jit.ext.agent_session_id` (flat), so the recorder routed events into the right per-session NDJSON file, but the canonical `unmapped.iam_jit.agent.session_id` filter never matched.
 - **Task:** #308 — fixed 2026-05-22. gbounce's OCSF event builder (`internal/audit/event.go`) now always populates `unmapped.iam_jit.agent` with `{name, session_id, detected_from}`. Headers `X-Agent-Session-Id` + `X-Agent-Name` are extracted from inbound requests + validated (alphanumeric + `_`/`-`/`.`; max 64-128 chars); invalid headers are dropped (audited as anonymous) + counted under `/healthz.total_agent_headers_rejected`. The SQLite store gains `agent_name` + `agent_session_id` columns (schema v2) so the HTTP `/audit/events` endpoint + `gbounce audit tail` CLI surface the same agent block as the JSONL hot path. Regression tests: `TestProxy_AgentHeadersThreadedIntoOCSF` + `TestProxy_NoAgentHeadersGracefulFallback` + `TestProxy_InvalidAgentHeaders_Rejected` in `internal/proxy/proxy_test.go`; `TestFromRequest_AgentBlockAlwaysPopulated` + `TestIsValidAgentName` in `internal/audit/event_test.go`. Header convention documented at [AGENT-ATTRIBUTION.md](AGENT-ATTRIBUTION.md). MCP install commands (`ibounce mcp install-*` + `kbounce mcp install-*`) inject the env-var hints that wire the headers automatically for Claude Code / Cursor / Codex.
 
-## A10. Local audit-log retention is not robust — `STATUS: QUEUED`
+## A10. Local audit-log retention is not robust — `STATUS: FIXED 2026-05-22`
 - **Severity:** HIGH (would surprise operators after 30-60 days of use)
-- **Symptom:** JSONL audit files grow forever; SQLite audit DB grows forever. No automatic rotation, compression, retention enforcement, or disk-space monitoring. After weeks of use, operators discover their disk filling silently.
+- **Symptom (pre-fix):** JSONL audit files grew forever; SQLite audit DB grew forever. No automatic rotation, compression, retention enforcement, or disk-space monitoring. After weeks of use, operators discovered their disk filling silently.
 - **Why this matters:** Per `[[self-host-zero-billing-dependency]]` everything is local. The audit log IS the compliance value — if it silently corrupts or fills disk + drops events, the compliance claim fails.
-- **What "robust" needs:**
-  1. Automatic JSONL rotation (size + age thresholds, gzip on rotate)
-  2. SQLite audit DB partitioning OR archive-rotate-replace
-  3. `/healthz` reports degraded when disk usage > configurable threshold (default 85%)
-  4. Admin-action audit event on rotation + write-failure + retention-purge
-  5. `*bounce logs {tail|purge|archive|verify}` subcommand surface
-  6. Crash recovery: detect partial-write JSONL tail on next startup; truncate cleanly
-  7. `*bounce doctor logs` checks integrity + freshness + retention
-  8. `docs/LOG-RETENTION.md` with defaults + admin-override
-- **Workaround until fix:** operator-side cron + manual `*bounce diagnostics bundle` (#277)
-- **Task:** #311.
+- **Fix:** ships [docs/LOG-RETENTION.md](LOG-RETENTION.md) + cross-product rotation across ibounce / kbounce / dbounce / gbounce:
+  1. Automatic JSONL rotation (size 100 MB OR age 7 d, gzip on rotate → `audit-{YYYY-MM-DD-HHMMSS}.jsonl.gz`)
+  2. SQLite audit DB daily archive-rotate-replace (`audit-{YYYY-MM-DD}.db.gz`) + 30-day retention
+  3. `/healthz` `audit_log.status` reports `degraded` at >85 % disk, `critical` at >95 %; optional `--stop-on-disk-critical`
+  4. Admin-action audit events: `audit.log.rotated`, `audit.log.rotation_failed`, `audit.log.recovered_partial`, `audit.log.purged`, `audit.log.archived`
+  5. `*bounce logs {tail|purge|archive|verify}` subcommand surface — same flag names across products
+  6. Crash recovery: `RecoverPartialTail` on startup truncates a partial trailing JSONL line; emits `audit.log.recovered_partial`
+  7. `*bounce doctor logs` integrity + freshness + retention + disk checks; exits non-zero on any failure
+  8. Cross-product runbook at [docs/LOG-RETENTION.md](LOG-RETENTION.md)
+- **Known gap:** gbounce LogWriter-level rotation wiring is deferred — a parallel agent's work on `gbounce/internal/audit/log.go` reverted the integration as this slice landed. The rotation primitives + CLI + `doctor logs` surface all ship on gbounce; the writer-level guard ports cleanly from the dbounce reference once the parallel work settles (see the LOG-RETENTION.md "Cross-product parity matrix").
+- **Task:** #311 — completed 2026-05-22.
 
 ## A14. No production log-storage runbook — `STATUS: FIXED 2026-05-22`
 - **Severity:** HIGH (operators picking up the suite couldn't tell where their audit events should land in production without reading three different doc pages — webhook presets, Security Lake adapter, alert-routes — and synthesising a decision tree themselves)

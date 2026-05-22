@@ -191,6 +191,16 @@ Same as iam-jit local: trust the binary. Zero dependency on iam-jit-the-company'
 
 See [docs/IBOUNCE.md](docs/IBOUNCE.md) for full CLI + MCP reference, task-scope composition rules, and the recommender workflow.
 
+### Known limitations
+
+Read before you install — knowing the boundaries up-front saves debugging time. The canonical list lives at [`docs/KNOWN-CAVEATS.md`](docs/KNOWN-CAVEATS.md); the top three for ibounce are:
+
+- **§B1 — SigV4-only request classification.** ibounce gates SDK calls; AWS SDKs always sign SigV4. A bare GET returns 403 "no SigV4 header." Browsers get the UI via Accept-header content negotiation.
+- **§B3 — `safe-default` = `readonly-admin-minus`.** First-time profile is reads allowed except sensitive prefixes (KMS / SecretsManager / IAM creds); writes prompt. Use `--profile strict-admin` for stricter.
+- **§B4 — `safe-default` catches are VERB-level, not CONTENT-aware.** Scoped `iam:CreateRole` + wildcard `iam:*` produce the same deny. For content-aware decisions, pair with iam-jit's risk scorer (v1.1 inlines this).
+
+`iam-jit doctor caveats` prints the full applicable list (including cross-product entries B13/B14/B15).
+
 ---
 
 ## `iam-jit local`
@@ -348,6 +358,10 @@ Every deployment writes a structured, queryable audit log. The exact storage bac
 | **Dedicated Enterprise** | Same as self-host (customer's dedicated AWS account) | Per customer's contract | Same as self-host |
 
 All modes additionally emit structured logs to stdout/CloudWatch (one-line JSON per event) so existing SIEM pipelines (Datadog, Splunk, Sumo, Wiz) can ingest in real time. No proprietary format.
+
+### Log retention + rotation
+
+`ibounce` automatically rotates `audit.jsonl` at 100 MB or 7 days (whichever first), gzips the archive, and tracks freshness + disk usage. See [LOG-RETENTION.md](docs/LOG-RETENTION.md) for the cross-product runbook covering `ibounce logs purge / archive / verify`, `ibounce doctor logs`, the `/healthz` disk-degraded signal, and the operator runbook for "audit log degraded" alerts. The same surface ships on kbounce / dbounce / gbounce.
 
 ### Compliance attestation drops out for free
 

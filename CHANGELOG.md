@@ -13,6 +13,107 @@ within the same release.
 
 ### Added
 
+- **#311 / §A10 — robust local audit-log retention** (2026-05-22) —
+  cross-product launch-blocker resolved. Ships
+  `docs/LOG-RETENTION.md` (cross-product runbook with defaults table,
+  CLI flags, `/healthz` shape, "audit log degraded" operator runbook,
+  parity matrix). On the `ibounce`/`AuditLogWriter` side:
+  - New `src/iam_jit/bouncer/audit_export/rotation.py` with `rotate`,
+    `recover_partial_tail`, `purge_older_than`, `archive_logs`,
+    `verify_integrity`, `disk_status`, `rotate_db_daily`,
+    `should_rotate_by_{size,age}`
+  - `AuditLogWriter` extended with `max_size_mb` (default 100) +
+    `max_age_days` (default 7) + rotation/recovery callbacks; status
+    payload now includes `rotations`, `rotation_failures`,
+    `last_rotation_at_unix`, `last_rotation_path`,
+    `partial_bytes_recovered`
+  - Startup partial-tail recovery: corrupt trailing JSONL line
+    truncated automatically; emits `audit.log.recovered_partial`
+    admin-action
+  - Five new admin-action kinds: `audit.log.rotated`,
+    `audit.log.rotation_failed`, `audit.log.recovered_partial`,
+    `audit.log.purged`, `audit.log.archived` (all five
+    registered in `KNOWN_ADMIN_ACTION_KINDS` so the dispatcher
+    routes them correctly)
+  - New `ibounce logs purge --older-than DURATION --yes` /
+    `ibounce logs archive --out FILE [--exclude-active]` /
+    `ibounce logs verify [--json]` CLI subcommands
+  - New `ibounce doctor logs` health check: integrity + freshness
+    + retention + disk; exits non-zero on any failure
+  - 30 new tests in `tests/bouncer/test_audit_export_rotation.py`
+    covering rotation, recovery, purge, archive, integrity, disk
+    classification, and AuditLogWriter integration
+  - `docs/KNOWN-CAVEATS.md` §A10 marked `STATUS: FIXED 2026-05-22`
+  - Sibling Bounce products (kbounce / dbounce / gbounce) ship the
+    same surface; see their respective `CHANGELOG.md` entries.
+
+- **#308 — gbounce agent-identity attribution + cross-bouncer doc**
+  (2026-05-22) — closes the last `[[agent-identity-in-audit]]`
+  (#266) parity gap. gbounce events now carry the same
+  `unmapped.iam_jit.agent.{name,session_id,detected_from}` block as
+  ibounce + kbounce + dbounce, so `iam-jit audit query --filter
+  unmapped.iam_jit.agent.session_id=...` resolves gbounce events the
+  same way it resolves the other three products. iam-roles-side
+  artifacts:
+  - **`docs/AGENT-ATTRIBUTION.md`** — new cross-suite doc: the two
+    HTTP headers (`X-Agent-Session-Id` + `X-Agent-Name`),
+    validation rules, per-runtime setup (Claude Code / Cursor /
+    Codex / Devin / OpenClaw / custom), the
+    `[[security-team-positioning-safety-not-surveillance]]`
+    framing, anonymous-fallback semantics, failure modes.
+  - **`docs/KNOWN-CAVEATS.md` §A9** — new entry documents the
+    pre-#308 gap + the post-fix invariant + the regression-test
+    pointers.
+  - **`ibounce mcp show-config` / `install-*`** — the canonical
+    snippet now stamps `IBOUNCE_AGENT_NAME` +
+    `IBOUNCE_AGENT_SESSION_ID` env vars on the generated MCP server
+    entry. `install-claude-code` defaults to `claude-code`;
+    `install-cursor` to `cursor`; `install-codex` to `openai-codex`.
+    The footer now points operators at `docs/AGENT-ATTRIBUTION.md`
+    for per-runtime patterns. Regression test:
+    `test_show_config_mentions_agent_attribution_doc` +
+    updated `test_show_config_emits_valid_json_with_ibounce_entry` in
+    `tests/bouncer/test_mcp_install.py`.
+  - **Cross-bouncer query test** —
+    `test_query_filter_by_agent_session_id_resolves_gbounce_events`
+    in `tests/test_cli_audit_query.py` verifies the `iam-jit audit
+    query --filter unmapped.iam_jit.agent.session_id=...` flow
+    against a gbounce-shaped mock bouncer end-to-end.
+
+- **#304 — KNOWN-CAVEATS discoverability surfaces** (2026-05-22) —
+  per founder direction, caveats are now surfaced at five sites
+  instead of being buried in `docs/KNOWN-CAVEATS.md`:
+  - `src/iam_jit/bouncer/caveats.py` — new module centralizes the
+    ibounce-relevant §B entries (B1, B2, B3, B4, B10, B11, B12
+    product-related; B13, B14, B15 cross-product) + their canonical-
+    doc anchors. `caveats.banner_lines(Trigger)` returns the runtime-
+    triggered banner output; `caveats.doctor_entries()` returns the
+    full applicable list; `caveats.link_suffix(id)` produces the
+    inline `(see KNOWN-CAVEATS §X: <URL>)` suffix for error responses.
+    Mirrors the Go `internal/caveats` packages in gbounce / kbounce /
+    dbounce per `[[cross-product-agent-parity]]`.
+  - **README "Known limitations" section** — top 3 ibounce-relevant
+    §B entries (B1 / B3 / B4) linked to the canonical doc; sits under
+    the existing ibounce-product section.
+  - **Startup banner** — `ibounce run` emits the §B1 line on every
+    startup (the SigV4-only shape is structural) + the §B3 line when
+    `--profile safe-default` is active. Quiet otherwise.
+  - **`iam-jit doctor caveats`** — new subcommand under the existing
+    `bouncer_cli` doctor group (same group that hosts `doctor logs`
+    + `doctor compatibility`). Matches the `*bounce doctor caveats`
+    shape sibling products ship.
+  - **MCP tool descriptions** — `bouncer_active_mode` description
+    now embeds a §B4 reference + link (agents reading `tools/list`
+    see the verb-level / content-aware caveat at registration time,
+    before the first tool call).
+  - **Error message links** — the cooperative-mode "unclassifiable
+    request" 400 body appends `(see KNOWN-CAVEATS §B1: <URL>)` to
+    the hint string + emits a `caveat_url` field; the transparent-
+    mode 403 DENY body appends `(see KNOWN-CAVEATS §B4: <URL>)` to
+    the decision_reason + emits a `caveat_url` field. Per
+    `[[security-team-positioning-safety-not-surveillance]]` the link
+    is helpful framing, not accusatory.
+
 - **random-policy fuzz methodology** (founder direction
   2026-05-22, `scripts/random_policy_fuzz.py` +
   `scripts/random_policy_fuzz_oracle_prompt.md` +

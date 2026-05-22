@@ -188,6 +188,18 @@ ADMIN_ACTION_DIAGNOSTICS_BUNDLE = "diagnostics.bundle"
 # catches the DR-lifecycle event across the three.
 ADMIN_ACTION_BACKUP_CREATE = "backup.create"
 ADMIN_ACTION_BACKUP_RESTORE = "backup.restore"
+# #311 / §A10 — audit-log lifecycle admin-actions. Fired by the
+# writer / rotation guard so operators see WHY their log directory
+# changed (rotation), WHEN data was reaped (purge), or WHETHER a
+# crash left a partial line behind (recovery). Same wire-name
+# convention as the sibling products (kbounce / dbounce / gbounce)
+# so a SIEM rule keyed on `action == "audit.log.rotated"` catches
+# the lifecycle event across all four.
+ADMIN_ACTION_AUDIT_LOG_ROTATED = "audit.log.rotated"
+ADMIN_ACTION_AUDIT_LOG_ROTATION_FAILED = "audit.log.rotation_failed"
+ADMIN_ACTION_AUDIT_LOG_RECOVERED_PARTIAL = "audit.log.recovered_partial"
+ADMIN_ACTION_AUDIT_LOG_PURGED = "audit.log.purged"
+ADMIN_ACTION_AUDIT_LOG_ARCHIVED = "audit.log.archived"
 
 
 # Set of every known kind. Used by the dispatch in the proxy's
@@ -211,6 +223,11 @@ KNOWN_ADMIN_ACTION_KINDS: frozenset[str] = frozenset({
     ADMIN_ACTION_DIAGNOSTICS_BUNDLE,
     ADMIN_ACTION_BACKUP_CREATE,
     ADMIN_ACTION_BACKUP_RESTORE,
+    ADMIN_ACTION_AUDIT_LOG_ROTATED,
+    ADMIN_ACTION_AUDIT_LOG_ROTATION_FAILED,
+    ADMIN_ACTION_AUDIT_LOG_RECOVERED_PARTIAL,
+    ADMIN_ACTION_AUDIT_LOG_PURGED,
+    ADMIN_ACTION_AUDIT_LOG_ARCHIVED,
 })
 
 

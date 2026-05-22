@@ -719,6 +719,326 @@ def logs_tail(limit: int, decision: str | None, db: str | None, as_json: bool) -
 
 
 # ---------------------------------------------------------------------------
+# logs purge / archive / verify — #311 / §A10 retention surface
+# ---------------------------------------------------------------------------
+
+
+def _resolve_log_dir(audit_log: str | None) -> pathlib.Path:
+    """Resolve the log directory for `logs {purge,archive,verify}`.
+
+    Mirrors the `ibounce run --audit-log-path` resolution: the
+    CLI flag wins; otherwise we fall back to the default
+    `~/.iam-jit/audit/audit.jsonl` location. The returned path is
+    the DIRECTORY containing the active log + rotated archives.
+    """
+    from .bouncer.audit_export.tail import default_audit_log_path
+
+    if audit_log:
+        return pathlib.Path(audit_log).expanduser().parent
+    return default_audit_log_path().parent
+
+
+def _parse_duration(s: str) -> int:
+    """Parse a human duration ('7d', '24h', '30m') to seconds.
+
+    Mirrors the cross-product flag style used by `kbounce logs
+    purge --older-than`. Plain integers are treated as days for
+    operator convenience (the most common audit-retention unit).
+    """
+    s = s.strip().lower()
+    if s.endswith("d"):
+        return int(s[:-1]) * 86400
+    if s.endswith("h"):
+        return int(s[:-1]) * 3600
+    if s.endswith("m"):
+        return int(s[:-1]) * 60
+    if s.endswith("s"):
+        return int(s[:-1])
+    # Bare integer == days.
+    return int(s) * 86400
+
+
+@logs_group.command("purge")
+@click.option(
+    "--audit-log",
+    type=click.Path(dir_okay=False),
+    default=None,
+    help="Path to the active audit.jsonl (rotated archives live next to it).",
+)
+@click.option(
+    "--older-than",
+    type=str,
+    required=True,
+    help="Duration threshold (7d, 24h, 30m). Bare integer = days.",
+)
+@click.option(
+    "--yes",
+    is_flag=True,
+    default=False,
+    help="Skip the confirmation prompt (required for non-interactive use).",
+)
+def logs_purge(audit_log: str | None, older_than: str, yes: bool) -> None:
+    """Delete rotated audit archives older than DURATION.
+
+    Touches only rotated `audit-*.jsonl.gz` / `audit-*.db.gz`
+    archives — the active `audit.jsonl` + `audit.db` are never
+    removed (per [[creates-never-mutates]]: only an explicit
+    `logs purge` invocation reaps audit data, and it can't touch
+    the live file).
+    """
+    import time as _time
+
+    from .bouncer.audit_export import rotation_purge_older_than
+
+    log_dir = _resolve_log_dir(audit_log)
+    seconds = _parse_duration(older_than)
+    if not log_dir.is_dir():
+        click.echo(f"(no audit dir at {log_dir})", err=True)
+        sys.exit(1)
+    if not yes:
+        click.echo(
+            f"About to purge rotated archives older than {older_than} in {log_dir}.",
+            err=True,
+        )
+        click.echo("Pass --yes to confirm.", err=True)
+        sys.exit(2)
+    # `rotation_purge_older_than` takes days; we convert via the
+    # ratio so the operator's `--older-than 12h` is honoured. Per-
+    # type cutoffs both use the same threshold here (the cross-
+    # product runbook spells this out).
+    days_eq = max(1, seconds // 86400) if seconds >= 86400 else 0
+    removed = rotation_purge_older_than(
+        log_dir,
+        jsonl_max_age_days=days_eq,
+        db_max_age_days=days_eq,
+        now=_time.time(),
+    )
+    if not removed:
+        click.echo("(no archives matched)")
+        return
+    for p in removed:
+        click.echo(str(p))
+    click.echo(f"-- removed {len(removed)} file(s)", err=True)
+
+
+@logs_group.command("archive")
+@click.option(
+    "--audit-log",
+    type=click.Path(dir_okay=False),
+    default=None,
+    help="Path to the active audit.jsonl (rotated archives live next to it).",
+)
+@click.option(
+    "--out",
+    type=click.Path(dir_okay=False, writable=True),
+    required=True,
+    help="Destination tar.gz path.",
+)
+@click.option(
+    "--exclude-active",
+    is_flag=True,
+    default=False,
+    help="Skip the live audit.jsonl/audit.db (avoid an inconsistent tail).",
+)
+def logs_archive(audit_log: str | None, out: str, exclude_active: bool) -> None:
+    """Bundle all audit files into a tar.gz at OUT."""
+    from .bouncer.audit_export import archive_logs
+
+    log_dir = _resolve_log_dir(audit_log)
+    if not log_dir.is_dir():
+        click.echo(f"(no audit dir at {log_dir})", err=True)
+        sys.exit(1)
+    archive = archive_logs(log_dir, out, include_active=not exclude_active)
+    click.echo(str(archive))
+
+
+@logs_group.command("verify")
+@click.option(
+    "--audit-log",
+    type=click.Path(dir_okay=False),
+    default=None,
+    help="Path to the active audit.jsonl (rotated archives live next to it).",
+)
+@click.option("--json", "as_json", is_flag=True, default=False)
+def logs_verify(audit_log: str | None, as_json: bool) -> None:
+    """Per-file integrity check — gzip decompresses + JSONL parses."""
+    from .bouncer.audit_export import verify_integrity
+
+    log_dir = _resolve_log_dir(audit_log)
+    res = verify_integrity(log_dir)
+    if as_json:
+        click.echo(json.dumps(res.to_dict(), indent=2))
+    else:
+        click.echo(f"checked {res.files_checked} file(s) in {log_dir}")
+        if res.ok:
+            click.echo("OK")
+        else:
+            click.echo("FAILURES:")
+            for path, reason in res.failures:
+                click.echo(f"  {path}: {reason}")
+    if not res.ok:
+        sys.exit(1)
+
+
+# ---------------------------------------------------------------------------
+# doctor — #311 / §A10 health-check subcommand group
+# ---------------------------------------------------------------------------
+
+
+@main.group("doctor")
+def doctor_group() -> None:
+    """Health-check subcommands; exit non-zero on any failure."""
+
+
+@doctor_group.command("logs")
+@click.option(
+    "--audit-log",
+    type=click.Path(dir_okay=False),
+    default=None,
+    help="Path to the active audit.jsonl (rotated archives live next to it).",
+)
+@click.option(
+    "--max-age-days",
+    type=int,
+    default=7,
+    show_default=True,
+    help="Freshness threshold; the most recent rotated archive must be newer.",
+)
+@click.option(
+    "--warn-pct",
+    type=int,
+    default=85,
+    show_default=True,
+)
+@click.option(
+    "--crit-pct",
+    type=int,
+    default=95,
+    show_default=True,
+)
+@click.option("--json", "as_json", is_flag=True, default=False)
+def doctor_logs(
+    audit_log: str | None,
+    max_age_days: int,
+    warn_pct: int,
+    crit_pct: int,
+    as_json: bool,
+) -> None:
+    """Run integrity + freshness + retention + disk checks.
+
+    Exits 0 when every check is green, 1 when any fails. The output
+    shape (sectioned by check) matches the cross-product `doctor
+    logs` surface so an operator one runbook covers all four
+    products.
+    """
+    import time as _time
+
+    from .bouncer.audit_export import disk_status, verify_integrity
+
+    log_dir = _resolve_log_dir(audit_log)
+    report: dict[str, Any] = {"log_dir": str(log_dir), "checks": {}}
+    overall_ok = True
+
+    # Integrity check
+    if log_dir.is_dir():
+        integ = verify_integrity(log_dir)
+        report["checks"]["integrity"] = integ.to_dict()
+        if not integ.ok:
+            overall_ok = False
+    else:
+        report["checks"]["integrity"] = {
+            "ok": False,
+            "reason": f"audit dir {log_dir} does not exist",
+        }
+        overall_ok = False
+
+    # Freshness check — most recent rotated archive newer than threshold
+    if log_dir.is_dir():
+        archives = sorted(
+            (p for p in log_dir.iterdir()
+             if p.name.startswith("audit-") and p.name.endswith(".jsonl.gz")),
+            key=lambda p: p.stat().st_mtime,
+            reverse=True,
+        )
+        if archives:
+            age_days = (_time.time() - archives[0].stat().st_mtime) / 86400
+            fresh_ok = age_days <= max_age_days
+            report["checks"]["freshness"] = {
+                "ok": fresh_ok,
+                "most_recent": str(archives[0]),
+                "age_days": round(age_days, 2),
+                "threshold_days": max_age_days,
+            }
+            if not fresh_ok:
+                overall_ok = False
+        else:
+            # No rotated archives yet — only a concern if the
+            # active file itself is older than the threshold.
+            active = log_dir / "audit.jsonl"
+            if active.exists():
+                age_days = (_time.time() - active.stat().st_mtime) / 86400
+                report["checks"]["freshness"] = {
+                    "ok": True,
+                    "most_recent": str(active),
+                    "age_days": round(age_days, 2),
+                    "threshold_days": max_age_days,
+                    "note": "no rotated archives yet (active file present)",
+                }
+            else:
+                report["checks"]["freshness"] = {
+                    "ok": False,
+                    "reason": "no audit files present",
+                }
+                overall_ok = False
+
+    # Disk check
+    disk = disk_status(log_dir, warn_pct=warn_pct, crit_pct=crit_pct)
+    report["checks"]["disk"] = disk.to_dict()
+    if disk.status == "critical":
+        overall_ok = False
+
+    report["ok"] = overall_ok
+
+    if as_json:
+        click.echo(json.dumps(report, indent=2))
+    else:
+        click.echo(f"doctor logs — {log_dir}")
+        click.echo("=" * 40)
+        for name, payload in report["checks"].items():
+            status = "OK" if payload.get("ok", True) else "FAIL"
+            if name == "disk":
+                status = payload.get("status", "?").upper()
+            click.echo(f"  [{status:>8}] {name}: {json.dumps(payload)}")
+        click.echo("=" * 40)
+        click.echo("OVERALL: " + ("OK" if overall_ok else "FAIL"))
+    if not overall_ok:
+        sys.exit(1)
+
+
+@doctor_group.command("caveats")
+def doctor_caveats() -> None:
+    """Print KNOWN-CAVEATS §B entries that apply to ibounce.
+
+    Per #304 — caveats must be easily discoverable. Sibling Bounce
+    products ship the same ``*bounce doctor caveats`` shape per
+    [[cross-product-agent-parity]]. Full canonical doc:
+    https://github.com/trsreagan3/iam-jit/blob/main/docs/KNOWN-CAVEATS.md
+
+    Per [[creates-never-mutates]]: read-only.
+    """
+    from .bouncer import caveats as _caveats
+
+    click.echo("ibounce: KNOWN-CAVEATS §B entries that apply to this product")
+    click.echo(f"Full canonical doc: {_caveats.CANONICAL_DOC_URL}")
+    click.echo()
+    for entry in _caveats.doctor_entries():
+        click.echo(f"§{entry.id}")
+        click.echo(f"  {entry.doctor_blurb}")
+        click.echo(f"  link: {entry.url}")
+        click.echo()
+
+
+# ---------------------------------------------------------------------------
 # decide (dry-run)
 # ---------------------------------------------------------------------------
 

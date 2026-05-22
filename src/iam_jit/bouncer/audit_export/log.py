@@ -32,7 +32,9 @@ import os
 import pathlib
 import threading
 import time
-from typing import Any
+from typing import Any, Callable
+
+from . import rotation as _rotation
 
 logger = logging.getLogger(__name__)
 
@@ -68,10 +70,31 @@ class AuditLogWriter:
         path: str | pathlib.Path,
         fsync: bool = False,
         queue_maxsize: int = _DEFAULT_LOG_QUEUE_MAXSIZE,
+        max_size_mb: int = _rotation.DEFAULT_MAX_SIZE_MB,
+        max_age_days: int = _rotation.DEFAULT_MAX_AGE_DAYS,
+        on_rotation: Callable[[pathlib.Path], None] | None = None,
+        on_rotation_failure: Callable[[str], None] | None = None,
+        on_recovery: Callable[[int], None] | None = None,
     ) -> None:
         self.path = pathlib.Path(path)
         self.fsync = fsync
         self.queue_maxsize = queue_maxsize
+        # #311 / §A10 rotation knobs. Zero disables the respective
+        # trigger; the writer never destroys data on its own (rotated
+        # files are always gzip'd into the same dir and kept until an
+        # explicit `ibounce logs purge` reaps them).
+        self.max_size_mb = max_size_mb
+        self.max_age_days = max_age_days
+        # Optional callbacks the proxy wires to emit admin-action
+        # events on rotation success / failure / recovery. The
+        # writer's worker can't synthesise audit events itself (would
+        # create a recursion with the event channel it's draining);
+        # the caller passes a recorder-bound emitter that converts
+        # the call into an `audit.log.rotated` / `.rotation_failed` /
+        # `.recovered_partial` admin-action.
+        self._on_rotation = on_rotation
+        self._on_rotation_failure = on_rotation_failure
+        self._on_recovery = on_recovery
         self._queue: asyncio.Queue[dict[str, Any] | None] | None = None
         self._worker_task: asyncio.Task | None = None
         self._fd: int | None = None
@@ -91,6 +114,14 @@ class AuditLogWriter:
         # an O(1) check for the operator dashboard.
         self._writes_ok: bool = True
         self._last_error_at_unix: float | None = None
+        # #311 / §A10 rotation telemetry. Counters are surfaced via
+        # `status()` so operators can confirm rotation is firing
+        # without grepping for the admin-action.
+        self._rotations = 0
+        self._last_rotation_at_unix: float | None = None
+        self._last_rotation_path: str | None = None
+        self._rotation_failures = 0
+        self._partial_bytes_recovered = 0
         self._started = False
 
     async def start(self) -> None:
@@ -116,6 +147,27 @@ class AuditLogWriter:
             # isn't producing rows.
             self._record_error(f"mkdir parent {self.path.parent}: {e}")
             raise
+        # #311 / §A10 — crash recovery: if the previous process died
+        # mid-write, the final JSONL line may be partial. Truncate to
+        # the previous newline before opening for append so the next
+        # write doesn't produce a corrupt mixed line. The trimmed
+        # byte count is surfaced as an admin-action so the operator
+        # sees the partial-write happened (vital for compliance).
+        try:
+            recovered = _rotation.recover_partial_tail(self.path)
+        except OSError as e:
+            recovered = 0
+            self._record_error(f"recover partial tail: {e}")
+        if recovered > 0:
+            with self._stats_lock:
+                self._partial_bytes_recovered += recovered
+            if self._on_recovery is not None:
+                try:
+                    self._on_recovery(recovered)
+                except Exception as cb_err:
+                    logger.warning(
+                        "audit-log recovery callback raised: %s", cb_err
+                    )
         # O_APPEND|O_CREAT|O_WRONLY — never truncate. 0o600 by default
         # because audit logs commonly contain sensitive metadata (the
         # operator can chmod it wider explicitly if their setup needs
@@ -209,6 +261,12 @@ class AuditLogWriter:
                     # / last_error_at) are retained for forensics; the
                     # bool reflects the CURRENT health of the channel.
                     self._writes_ok = True
+                # #311 / §A10 — rotation guard runs after every
+                # successful write. Cheap: a single stat() unless one
+                # of the thresholds fires. We check on the worker
+                # task (not the hot-path `write()`) so the actual
+                # rename + gzip cost is paid off the request path.
+                self._maybe_rotate()
             except Exception as e:
                 # Any write failure (disk full, permission flipped at
                 # runtime, fd closed underneath us) — record + carry
@@ -216,6 +274,85 @@ class AuditLogWriter:
                 # raising kills the task + every subsequent write()
                 # would silently no-op without a counter.
                 self._record_error(f"write: {e}")
+
+    def _maybe_rotate(self) -> None:
+        """#311 / §A10 — size + age rotation guard.
+
+        Called by the worker after each successful write. Performs at
+        most one stat() per call when no rotation is needed. On a
+        rotation trigger we:
+          1. fsync + close the current fd so the bytes are durable.
+          2. Atomically rename + gzip via `rotation.rotate`.
+          3. Re-open a fresh `audit.jsonl` at the same path with the
+             same O_APPEND|O_CREAT|O_WRONLY mode + 0o600 perm.
+          4. Fire the operator's `on_rotation` callback so an
+             `audit.log.rotated` admin-action emits.
+
+        Failures are recorded but do NOT raise into the worker loop
+        (a rotation failure must not stop the audit channel — the
+        active file keeps growing and the operator can act on the
+        admin-action alert).
+        """
+        if self._fd is None:
+            return
+        if not (
+            _rotation.should_rotate_by_size(self.path, self.max_size_mb)
+            or _rotation.should_rotate_by_age(self.path, self.max_age_days)
+        ):
+            return
+        # Best-effort fsync before rotating so the rotated archive
+        # contains every byte the worker has accepted. A sync error
+        # here is logged but doesn't block the rotation — the bytes
+        # are at minimum in the OS page cache which is what `copy
+        # fileobj` will read from anyway.
+        try:
+            os.fsync(self._fd)
+        except OSError as e:
+            logger.warning("audit-log fsync before rotate: %s", e)
+        try:
+            os.close(self._fd)
+        finally:
+            self._fd = None
+        archive: pathlib.Path | None = None
+        try:
+            archive = _rotation.rotate(self.path)
+        except OSError as e:
+            with self._stats_lock:
+                self._rotation_failures += 1
+                self._last_error = f"rotate: {e}"
+                self._writes_ok = False
+                self._last_error_at_unix = time.time()
+            if self._on_rotation_failure is not None:
+                try:
+                    self._on_rotation_failure(str(e))
+                except Exception as cb_err:
+                    logger.warning(
+                        "audit-log rotation-failure callback raised: %s",
+                        cb_err,
+                    )
+        # Re-open the active file regardless of rotation success — a
+        # missing fd would silently drop every subsequent event.
+        try:
+            self._fd = os.open(
+                str(self.path),
+                os.O_APPEND | os.O_CREAT | os.O_WRONLY,
+                0o600,
+            )
+        except OSError as e:
+            self._record_error(f"reopen after rotate: {e}")
+            return
+        if archive is not None:
+            with self._stats_lock:
+                self._rotations += 1
+                self._last_rotation_at_unix = time.time()
+                self._last_rotation_path = str(archive)
+            if self._on_rotation is not None:
+                try:
+                    self._on_rotation(archive)
+                except Exception as cb_err:
+                    logger.warning(
+                        "audit-log rotation callback raised: %s", cb_err
+                    )
 
     def _record_error(self, msg: str) -> None:
         with self._stats_lock:
@@ -245,4 +382,14 @@ class AuditLogWriter:
                 # 503; the timestamp is for forensics.
                 "writes_ok": self._writes_ok,
                 "last_error_at_unix": self._last_error_at_unix,
+                # #311 / §A10 rotation telemetry. Operators tail
+                # `bouncer_audit_export_status` to confirm rotation
+                # is firing on the cadence they expect.
+                "max_size_mb": self.max_size_mb,
+                "max_age_days": self.max_age_days,
+                "rotations": self._rotations,
+                "last_rotation_at_unix": self._last_rotation_at_unix,
+                "last_rotation_path": self._last_rotation_path,
+                "rotation_failures": self._rotation_failures,
+                "partial_bytes_recovered": self._partial_bytes_recovered,
             }
