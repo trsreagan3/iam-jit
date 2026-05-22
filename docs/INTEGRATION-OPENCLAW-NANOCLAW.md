@@ -119,19 +119,39 @@ Each refreshes every 2s. Color-coded by verdict. Filter + pause controls. As you
 
 ### NanoClaw
 
-NanoClaw runs in Docker per its architecture. Pass the proxy env vars at container start:
+**Positioning**: NanoClaw uses [OneCLI Agent Vault](https://onecli.sh) as its credential gateway — it stores Slack/WhatsApp/Telegram/Gmail/etc. tokens and injects them at network boundary. **We are not a credential vault and do not compete with OneCLI on that axis.** Instead, we add the protocol-aware audit + risk-scoring layer for cloud + DB + general HTTPS — where OneCLI doesn't have coverage. Two complementary integration paths:
+
+**Path A — Chain (zero NanoClaw-side changes):**
+
+Configure OneCLI's upstream HTTP proxy to point at gbounce. OneCLI handles credential injection first; gbounce audits + risk-scores the post-injection request. Each tool plays its native role.
+
+```yaml
+# OneCLI config (operator-side; refer to OneCLI docs for exact syntax)
+upstream_proxy: http://host.docker.internal:8080  # gbounce
+```
+
+**Path B — Parallel (recommended for cloud + messaging mix):**
+
+Different protocols route to different gates: OneCLI for its native scope (messaging credentials); our bouncers for cloud + DB + general HTTPS. Pass these env vars at container start:
 
 ```bash
-docker run -e HTTPS_PROXY=http://host.docker.internal:8080 \
-           -e AWS_ENDPOINT_URL=http://host.docker.internal:8767 \
-           -e X_AGENT_NAME=nanoclaw \
-           -e X_AGENT_SESSION_ID="$(uuidgen)" \
-           nanoclaw:latest
+docker run \
+  -e HTTPS_PROXY=http://host.docker.internal:8080 \
+  -e AWS_ENDPOINT_URL=http://host.docker.internal:8767 \
+  -e KUBECONFIG=/path/to/kbounce-routed-config \
+  -e DATABASE_URL=postgresql://user@host.docker.internal:5433/db \
+  -e X_AGENT_NAME=nanoclaw \
+  -e X_AGENT_SESSION_ID="$(uuidgen)" \
+  nanoclaw:latest
 ```
 
 (`host.docker.internal` is Docker Desktop's way to reach the host from inside a container.)
 
-Note: NanoClaw's existing dashboard at port 7890 (per [qwibitai/nanoclaw-dashboard](https://github.com/qwibitai/nanoclaw-dashboard)) shows agent INTERNAL state. iam-jit's bouncer UIs show OUTBOUND calls. Run both side-by-side for full visibility.
+For each protocol, NanoClaw's container honors the standard system env var → traffic routes to OUR bouncer for that protocol. OneCLI keeps handling messaging app credentials as designed.
+
+**What we don't claim:** we don't replace OneCLI's credential vault. We don't store your Slack/Gmail/WhatsApp tokens. NanoClaw + OneCLI keep their full role for messaging APIs; we add audit + risk scoring where they don't have coverage.
+
+**Complementary dashboards:** NanoClaw's existing dashboard at port 7890 (per [qwibitai/nanoclaw-dashboard](https://github.com/qwibitai/nanoclaw-dashboard)) shows agent INTERNAL state (sessions, tokens, memory). Our bouncer UIs (8767, 8766, 8768, 8769) show OUTBOUND protocol calls. Run both side-by-side for full visibility.
 
 ### OpenClaw
 
