@@ -61,6 +61,22 @@ Tracking: every BUG entry has a task number (e.g., #299). v1.0 release gate: eve
 - **Workaround until fix:** none — gbounce is HTTPS-CONNECT-only in v1.0.
 - **Task:** #305 — needs creation (added below).
 
+## A10. Local audit-log retention is not robust — `STATUS: QUEUED`
+- **Severity:** HIGH (would surprise operators after 30-60 days of use)
+- **Symptom:** JSONL audit files grow forever; SQLite audit DB grows forever. No automatic rotation, compression, retention enforcement, or disk-space monitoring. After weeks of use, operators discover their disk filling silently.
+- **Why this matters:** Per `[[self-host-zero-billing-dependency]]` everything is local. The audit log IS the compliance value — if it silently corrupts or fills disk + drops events, the compliance claim fails.
+- **What "robust" needs:**
+  1. Automatic JSONL rotation (size + age thresholds, gzip on rotate)
+  2. SQLite audit DB partitioning OR archive-rotate-replace
+  3. `/healthz` reports degraded when disk usage > configurable threshold (default 85%)
+  4. Admin-action audit event on rotation + write-failure + retention-purge
+  5. `*bounce logs {tail|purge|archive|verify}` subcommand surface
+  6. Crash recovery: detect partial-write JSONL tail on next startup; truncate cleanly
+  7. `*bounce doctor logs` checks integrity + freshness + retention
+  8. `docs/LOG-RETENTION.md` with defaults + admin-override
+- **Workaround until fix:** operator-side cron + manual `*bounce diagnostics bundle` (#277)
+- **Task:** #311.
+
 ## A8. kbouncer + dbouncer: stale `bin/` binaries in repos — `STATUS: FIXED (2026-05-22)`
 - **Severity:** HIGH
 - **Symptom (historical):** README led with `go build ./cmd/<binary>` followed by `./<binary> run`, encouraging a workflow where someone could commit a pre-built binary that lags source by days. Users picking up the repo and running the stale `./bin/<binary>` silently missed recent features (UI, audit endpoints, agent identity, etc.).
