@@ -40,6 +40,64 @@ within the same release.
 
 ### Added
 
+- **#324e — iam-jit unified `deny` CLI + `bounce_deny_*` MCP tools + cross-bouncer fan-out** (2026-05-22) —
+  Replaces the design-stage skeleton at `src/iam_jit/cli_deny.py`
+  with the live implementation. With #324a/b/c/d already shipping the
+  per-bouncer enforcement, this slice ships what operators actually
+  type day-to-day:
+  - **CLI:** `iam-jit deny add | list | remove | show` now reads +
+    atomically writes `~/.iam-jit/dynamic-denies.yaml` (write-temp +
+    rename + 0600) and POSTs each affected bouncer's
+    `/admin/dynamic-denies/reload` endpoint. The flag shape mirrors
+    the skeleton; success exits 0, operator-fixable errors exit 1.
+  - **Cross-protocol target resolver
+    (`src/iam_jit/dynamic_denies/resolver.py`):** ARN ->
+    ibounce; `namespace:` / `cluster:` / k8s GVR shapes -> kbouncer;
+    `rds:` / RDS-endpoint / DB-shaped hostnames -> dbounce + gbounce;
+    URL / IP / CIDR / bare hostname -> gbounce. Unclassifiable
+    targets are rejected at add-time with a structured error pointing
+    to `--bouncer NAME` overrides per the design doc.
+  - **Atomic writer (`src/iam_jit/dynamic_denies/store.py`):** ULID
+    generator (`dd_<26-char-Crockford>`), Go-style duration parser
+    (`30m`/`3h`/`7d`/`permanent`), `expires_at` computed at write
+    time (no clock-drift extension on remote hosts), `ruamel.yaml`
+    round-tripper preserves operator comments for hand-edited files.
+  - **Fan-out (`src/iam_jit/dynamic_denies/fanout.py`):** POSTs each
+    bouncer's reload endpoint with a 5s timeout. Unreachable bouncers
+    are surfaced honestly (`[WARN] ibounce ... unreachable: ...`
+    plus a `curl -XPOST ...` retry hint) but the CLI still exits 0 —
+    the YAML file IS the source of truth, per
+    `[[ibounce-honest-positioning]]`. `--bouncer-url NAME=URL`
+    (repeatable) overrides the default 127.0.0.1 mgmt ports.
+  - **MCP tools (`src/iam_jit/mcp_server.py`):** `bounce_deny_add`,
+    `bounce_deny_list`, `bounce_deny_remove` share the operations
+    backend with the CLI per `[[cross-product-agent-parity]]`.
+    Each response carries both a structured payload + a human-
+    readable `summary` so Claude can quote routing/expiry back to
+    the operator.
+  - **Audit:** best-effort `dynamic_deny.added` /
+    `dynamic_deny.removed` admin-action OCSF events fire when the
+    CLI/MCP runs inside a proxy emit context; honest no-op out of
+    process.
+  - **Tests:** `tests/cli/test_deny_real.py` (40 cases — resolver
+    matrix, CLI happy + JSON + multi-target + remove + reason-match
+    + unreachable-bouncer paths + MCP shape);
+    `tests/integration/dynamic_deny_cross_product_test.py` (10 cases
+    — boots 4 in-process HTTP fakes per the bouncer mgmt-port reload
+    contract, walks the 9 brief scenarios + an honest-failure path).
+  - **`[[creates-never-mutates]]`:** the original skeleton tests at
+    `tests/cli/test_deny_skeleton.py` are preserved + skip-marked so
+    the skeleton -> real-impl transition remains visible in history.
+
+  **Honest caveats:** the per-bouncer reload endpoint is best-effort;
+  if a bouncer is down, the rule lands in YAML but isn't live until
+  the bouncer's watcher picks it up on next start. Org-distributed
+  denies (`source: "org-distributed"`) cannot be loosened by a
+  personal `iam-jit deny remove` — the request is refused with a
+  structured pointer to the rule's `org_distributed_url`. Recommender
+  Deny-injection (defense-in-depth in iam-jit-issued roles) lands in
+  #324f.
+
 - **#324a — ibounce dynamic-deny core (loader + watcher + matcher + mgmt endpoint)** (2026-05-22) —
   First implementation slice of the cross-product dynamic-deny rules
   surface (`docs/DYNAMIC-DENY-RULES.md`). ibounce now reads

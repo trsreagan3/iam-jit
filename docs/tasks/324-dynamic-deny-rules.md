@@ -1,7 +1,10 @@
 # #324 — Dynamic deny rules: sub-task tracking
 
-> **Status:** DESIGN shipped (this commit) — six implementation slices
-> open. The canonical design + wire shapes live in
+> **Status:** 5 of 6 slices SHIPPED. #324a (ibounce), #324b (kbouncer),
+> #324c (dbounce), #324d (gbounce), and #324e (unified `iam-jit deny`
+> CLI + MCP fan-out + cross-product e2e) are LIVE; #324f (recommender
+> `Deny`-injection + role-effectiveness re-grade) remains. The
+> canonical design + wire shapes live in
 > [`../DYNAMIC-DENY-RULES.md`](../DYNAMIC-DENY-RULES.md); the on-disk
 > YAML schema in
 > [`../schemas/dynamic-denies-v1.json`](../schemas/dynamic-denies-v1.json).
@@ -127,37 +130,49 @@ additional source of glob entries layered on top.
 
 ---
 
-## #324e — iam-jit unified CLI + MCP + cross-bouncer fan-out
+## #324e — iam-jit unified CLI + MCP + cross-bouncer fan-out — SHIPPED
 
 **Repo:** `iam-roles` (this repo).
 
-**Scope:** REPLACES the skeleton at `src/iam_jit/cli_deny.py`. This
+**Scope:** REPLACED the skeleton at `src/iam_jit/cli_deny.py`. This
 is the headline slice — what an operator actually USES day-to-day.
 
-**Surface:**
+**What landed:**
 
-- Replace each `_emit_not_implemented` body with the real impl per
-  the design doc's CLI surface section.
-- Cross-protocol target resolver in
-  `src/iam_jit/dynamic_denies/resolver.py` per the design doc's table.
-- Atomic write of `~/.iam-jit/dynamic-denies.yaml` (write-temp +
-  rename + 0600 perms) so the per-bouncer watchers always see a
-  complete + valid file.
-- MCP tools `bounce_deny_add` / `bounce_deny_list` /
-  `bounce_deny_remove` in `src/iam_jit/mcp_server.py` per the
-  design doc's MCP surface section.
-- Cross-bouncer integration test:
-  `tests/integration/test_dynamic_deny_cross_bouncer.py` — spin up
-  ibounce + kbouncer-stub + dbounce-stub + gbounce-stub; add a deny;
-  verify each bouncer's `/healthz` increments `dynamic_denies_count`;
-  send a matching request to each; verify the 403; remove the deny;
-  verify counters tick back down.
+- `src/iam_jit/cli_deny.py` — real impl. Same flag shape as the
+  skeleton; the four subcommands now read + write the YAML + fan out
+  reloads.
+- `src/iam_jit/dynamic_denies/resolver.py` — cross-protocol target
+  resolver (ARN -> ibounce, namespace:/cluster: -> kbouncer, rds:/
+  hostname-DB-shape -> dbounce+gbounce, URL/hostname -> gbounce).
+- `src/iam_jit/dynamic_denies/store.py` — atomic 0600 writer +
+  ULID generator + duration parser.
+- `src/iam_jit/dynamic_denies/fanout.py` — POST each affected
+  bouncer's `/admin/dynamic-denies/reload`; honest unreachable
+  surface (warn + retry hint, exit 0 — YAML is source of truth per
+  `[[ibounce-honest-positioning]]`).
+- `src/iam_jit/dynamic_denies/operations.py` — shared add/list/
+  remove/show backend for both CLI + MCP per
+  `[[cross-product-agent-parity]]`.
+- `src/iam_jit/mcp_server.py` — `bounce_deny_add` /
+  `bounce_deny_list` / `bounce_deny_remove` MCP tools wired to the
+  same operations backend.
+- `tests/cli/test_deny_real.py` — 40 real-impl tests covering
+  resolver matrix + CLI happy + JSON + fan-out + remove +
+  unreachable-bouncer paths + MCP shape.
+- `tests/integration/dynamic_deny_cross_product_test.py` — 10
+  end-to-end scenarios (the 9 from the brief + an
+  unreachable-bouncer path); uses 4 in-process HTTP fakes per the
+  bouncer mgmt-port reload contract.
+- `tests/cli/test_deny_skeleton.py` — preserved + skip-marked per
+  `[[creates-never-mutates]]` so the skeleton -> real-impl
+  transition stays visible in history.
 
-**Acceptance:** the four skeleton subcommands swap to real impl with
-ZERO surface change (same flag names, same JSON shape, same exit
-codes on success/error). The `test_deny_skeleton.py` tests in this
-commit get REPLACED by the real impl tests; the skeleton tests
-exist precisely to make the swap mechanical.
+**Acceptance (met):** the four skeleton subcommands swapped to real
+impl with ZERO surface change (same flag names, same JSON shape,
+the only exit-code change is intentional: success is now 0
+(formerly 2), and operator-fixable errors are 1). Every cross-
+product scenario in the brief passes.
 
 ---
 

@@ -1,21 +1,14 @@
-"""#324 — `iam-jit deny` skeleton tests.
+"""#324 — `iam-jit deny` SKELETON tests (RETIRED in #324e).
 
-Verifies the SKELETON contract per the design doc:
+Pinned the SKELETON contract (every subcommand exits 2 with a
+structured "not implemented yet" payload). #324e replaced the
+skeleton with the real implementation; these tests would now fail
+because the commands exit 0/1 (success/error) instead of 2.
 
-  * Every subcommand (`add`, `list`, `remove`, `show`) exits 2.
-  * Every subcommand emits a structured "not implemented yet"
-    payload that names: the subcommand, the design-doc path, the
-    schema path, the slice that will replace it, AND the tracking
-    refs (#324a-f).
-  * `--json` toggles the payload to machine-parseable JSON on
-    stderr.
-  * The deny group is mounted on the top-level `iam-jit` CLI so
-    `iam-jit deny --help` surfaces the planned shape.
-
-Per ``[[ibounce-honest-positioning]]``: the skeleton is supposed to
-fail honestly. These tests pin the failure SHAPE so a future
-implementation slice (#324e) can replace the bodies without
-disturbing the contract.
+Per ``[[creates-never-mutates]]`` the file is kept in place +
+skip-marked rather than deleted so the git history of the
+skeleton -> real-impl transition is visible. The replacement tests
+live alongside in ``test_deny_real.py``.
 """
 
 from __future__ import annotations
@@ -24,6 +17,14 @@ import json
 
 import pytest
 from click.testing import CliRunner
+
+# Skip the entire module — the skeleton is gone in #324e.
+pytestmark = pytest.mark.skip(
+    reason=(
+        "#324e replaced the cli_deny skeleton with the real implementation; "
+        "see tests/cli/test_deny_real.py for the live coverage."
+    ),
+)
 
 from iam_jit.cli import main
 from iam_jit.cli_deny import (

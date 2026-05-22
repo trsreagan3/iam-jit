@@ -1,11 +1,11 @@
 # Dynamic Deny Rules (#324) — Design
 
-> **Status:** DESIGN — coming. The CLI + MCP surfaces are skeleton-only
-> at the time of writing (`iam-jit deny --help` lists the commands; each
-> command exits 2 with a "not implemented yet" structured payload that
-> points back to this document). Six follow-on tracking items
-> (#324a-f) carry the per-bouncer + cross-bouncer implementation
-> slices. This doc is the canonical contract those slices converge
+> **Status:** SHIPPED (5 of 6 slices) — #324a (ibounce), #324b (kbouncer),
+> #324c (dbounce), #324d (gbounce), and #324e (unified `iam-jit deny`
+> CLI + MCP fan-out) are LIVE; #324f (recommender Deny-injection +
+> role-effectiveness re-grade) remains. The CLI + MCP tools call
+> through to the live YAML store + per-bouncer reload endpoints; this
+> document is the canonical contract those implementations converge
 > against — DO NOT diverge from the wire shapes below without updating
 > this doc first.
 
@@ -54,26 +54,31 @@ that gbounce ergonomic across the suite:
 
 ## What ships in #324
 
-| Slice  | Scope                                                                                  | Tracking         |
+| Slice  | Scope                                                                                  | Status           |
 |--------|----------------------------------------------------------------------------------------|------------------|
-| #324a  | **ibounce** — ARN-target matcher + YAML watcher + decision-pipeline wiring + OCSF      | open             |
-| #324b  | **kbouncer** — namespace/cluster matcher + YAML watcher + parity with #324a            | open             |
-| #324c  | **dbounce** — hostname / RDS endpoint matcher + YAML watcher                           | open             |
-| #324d  | **gbounce** — URL/hostname glob matcher (reuses #314 `deny_hosts` shape) + YAML watcher| open             |
-| #324e  | **iam-jit** — unified CLI + MCP fan-out (replaces this skeleton) + cross-bouncer e2e   | open             |
+| #324a  | **ibounce** — ARN-target matcher + YAML watcher + decision-pipeline wiring + OCSF      | shipped          |
+| #324b  | **kbouncer** — namespace/cluster matcher + YAML watcher + parity with #324a            | shipped          |
+| #324c  | **dbounce** — hostname / RDS endpoint matcher + YAML watcher                           | shipped          |
+| #324d  | **gbounce** — URL/hostname glob matcher (reuses #314 `deny_hosts` shape) + YAML watcher| shipped          |
+| #324e  | **iam-jit** — unified CLI + MCP fan-out + cross-bouncer e2e                            | shipped          |
 | #324f  | **iam-jit recommender** — `Deny`-injection at role-issuance + role-effectiveness re-grade | open          |
 
-THIS commit ships:
+The unified CLI shipped with #324e replaces the skeleton — `iam-jit
+deny add | list | remove | show` now:
 
-- The design doc you are reading.
-- The JSON Schema at [`schemas/dynamic-denies-v1.json`](schemas/dynamic-denies-v1.json)
-  describing the on-disk YAML shape every future slice validates
-  against.
-- A CLI skeleton group (`iam-jit deny add | list | remove | show`)
-  that surfaces the planned command shape on the operator's `--help`
-  output but exits 2 with a structured "not implemented yet" payload
-  pointing back here. Honest per `[[ibounce-honest-positioning]]`.
-- Six follow-on tracking items.
+- Reads + atomically rewrites `~/.iam-jit/dynamic-denies.yaml`
+  (write-temp + rename + 0600).
+- Resolves each target pattern via
+  [`src/iam_jit/dynamic_denies/resolver.py`](../src/iam_jit/dynamic_denies/resolver.py)
+  (shipped with #324e) and routes the rule to the right bouncer(s).
+- POSTs each affected bouncer's `/admin/dynamic-denies/reload`
+  endpoint so the rule is enforced immediately.
+- Surfaces unreachable bouncers honestly (warning + retry hint) but
+  exits 0 — the YAML file IS the source of truth per
+  `[[ibounce-honest-positioning]]`.
+
+The MCP tool surface ships alongside in the same slice: `bounce_deny_add`,
+`bounce_deny_list`, `bounce_deny_remove` (see the MCP section below).
 
 ## CLI surface
 

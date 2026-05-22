@@ -1924,6 +1924,156 @@ TOOLS.extend([
             },
         },
     },
+    # ---------------------------------------------------------------
+    # #324e — Dynamic deny rules (cross-product Bounce suite).
+    # ---------------------------------------------------------------
+    # Conversational add / list / remove for ~/.iam-jit/dynamic-denies.yaml,
+    # the cross-product opt-in deny pool. Targets are auto-routed by
+    # shape to the right bouncer(s); the writer fans out reloads to
+    # each affected bouncer. See docs/DYNAMIC-DENY-RULES.md for the
+    # canonical design.
+    {
+        "name": "bounce_deny_add",
+        "description": (
+            "Install a deny rule across the Bounce suite. Targets are "
+            "AUTO-ROUTED by shape: AWS ARN globs land on ibounce, "
+            "namespace:/cluster: shorthands on kbouncer, RDS endpoints "
+            "on dbounce + gbounce, URLs / hostnames on gbounce. The "
+            "rule is written to ~/.iam-jit/dynamic-denies.yaml AND each "
+            "affected bouncer's reload endpoint is POSTed so the rule "
+            "is enforced immediately. Surfaces in the bouncer's 403 "
+            "deny_reason + the admin-action OCSF audit event. Use this "
+            "for short-lived denies an operator (or agent on their "
+            "behalf) wants to install conversationally — 'lock out prod "
+            "buckets for 3 hours while we triage incident #4711'. Per "
+            "[[creates-never-mutates]] no existing principal is "
+            "modified; bouncers gate at request time and (#324f) "
+            "iam-jit-issued roles embed the same Deny."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "required": ["targets", "reason", "duration"],
+            "properties": {
+                "targets": {
+                    "type": "array",
+                    "items": {"type": "string", "minLength": 1},
+                    "minItems": 1,
+                    "description": (
+                        "One or more target patterns. Examples: "
+                        "'arn:aws:s3:::prod-*', 'namespace:prod', "
+                        "'rds:payments-db-prod', "
+                        "'api.openai.com', 'https://api.prod.example.com'."
+                    ),
+                },
+                "reason": {
+                    "type": "string",
+                    "minLength": 1,
+                    "description": (
+                        "Operator-supplied free-text. Surfaces verbatim "
+                        "in the bouncer's 403 + the OCSF audit event."
+                    ),
+                },
+                "duration": {
+                    "type": "string",
+                    "pattern": "^(permanent|[0-9]+(s|m|h|d|w))$",
+                    "description": (
+                        "Go-style duration ('30m', '3h', '7d') or "
+                        "'permanent'."
+                    ),
+                },
+                "applies_to_recommender": {
+                    "type": "boolean",
+                    "default": True,
+                    "description": (
+                        "When true (default; per #324f): the "
+                        "iam-jit recommender embeds an explicit Deny "
+                        "matching the targets into any role issued "
+                        "during the deny window."
+                    ),
+                },
+                "bouncer_override": {
+                    "type": "array",
+                    "items": {
+                        "type": "string",
+                        "enum": ["ibounce", "kbouncer", "kbounce",
+                                 "dbounce", "gbounce"],
+                    },
+                    "description": (
+                        "Force routing to specific bouncer(s) when the "
+                        "resolver can't classify a target by shape."
+                    ),
+                },
+            },
+        },
+    },
+    {
+        "name": "bounce_deny_list",
+        "description": (
+            "Read the cross-product dynamic-deny YAML and return every "
+            "active rule. Each entry carries id / targets / reason / "
+            "applied_to / expires_in_seconds / age_seconds. Use this "
+            "before a `remove` so you can confirm the id you intend to "
+            "lift. Read-only; no audit row."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "include_expired": {
+                    "type": "boolean",
+                    "default": False,
+                    "description": (
+                        "Include rules whose expires_at is in the past "
+                        "(useful for audit reconciliation)."
+                    ),
+                },
+                "bouncer_filter": {
+                    "type": "array",
+                    "items": {
+                        "type": "string",
+                        "enum": ["ibounce", "kbouncer", "kbounce",
+                                 "dbounce", "gbounce"],
+                    },
+                    "description": (
+                        "Filter to rules whose `applied_to` includes "
+                        "the named bouncer(s)."
+                    ),
+                },
+            },
+        },
+    },
+    {
+        "name": "bounce_deny_remove",
+        "description": (
+            "Remove a dynamic deny rule by id. The YAML is rewritten "
+            "atomically and each previously-affected bouncer's reload "
+            "endpoint is POSTed so the deny lifts immediately. "
+            "Org-distributed rules cannot be loosened by a personal "
+            "remove (refused with a structured warning pointing at "
+            "the rule's org_distributed_url). Emits a "
+            "`dynamic_deny.removed` admin-action OCSF audit event."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "required": ["id"],
+            "properties": {
+                "id": {
+                    "type": "string",
+                    "pattern": "^dd_[0-9A-HJKMNP-TV-Z]{26}$",
+                    "description": (
+                        "The `dd_<ULID>` id of the rule to remove. "
+                        "Use `bounce_deny_list` to enumerate."
+                    ),
+                },
+                "reason": {
+                    "type": "string",
+                    "description": (
+                        "Optional audit-trail metadata; surfaces in the "
+                        "dynamic_deny.removed event."
+                    ),
+                },
+            },
+        },
+    },
 ])
 
 
@@ -4285,6 +4435,12 @@ def _handle_request(req: dict[str, Any]) -> dict[str, Any] | None:
         elif tool_name == "bounce_profile_save":
             from .cli_profile_generate import save_for_mcp
             result_payload = save_for_mcp(args)
+        elif tool_name == "bounce_deny_add":
+            result_payload = _bounce_deny_add_for_mcp(args)
+        elif tool_name == "bounce_deny_list":
+            result_payload = _bounce_deny_list_for_mcp(args)
+        elif tool_name == "bounce_deny_remove":
+            result_payload = _bounce_deny_remove_for_mcp(args)
         else:
             return _err(rid, -32601, f"unknown tool: {tool_name}")
         # MCP tool result format: { content: [{type: "text", text: "..."}] }
@@ -4316,6 +4472,268 @@ def _err(rid: object, code: int, message: str) -> dict[str, Any]:
         "jsonrpc": "2.0",
         "id": rid,
         "error": {"code": code, "message": message},
+    }
+
+
+# ---------------------------------------------------------------------------
+# #324e — Dynamic deny rules (bounce_deny_*) MCP handlers.
+# ---------------------------------------------------------------------------
+# Shared backend with the `iam-jit deny` CLI per [[cross-product-agent-parity]].
+# Each handler returns a structured dict the MCP layer renders as both
+# JSON `structuredContent` AND a human-readable `text` block so Claude
+# (or another agent) gets context-rich output it can quote back to the
+# user.
+
+
+def _bounce_deny_add_for_mcp(args: dict[str, Any]) -> dict[str, Any]:
+    """MCP backend for `bounce_deny_add`. Mirrors `iam-jit deny add`."""
+    from .dynamic_denies.operations import DenyOperationError, add_rule
+    from .dynamic_denies.store import DynamicDenyWriteError
+
+    targets = args.get("targets")
+    if not isinstance(targets, list) or not targets:
+        return {
+            "status": "error",
+            "code": "missing_targets",
+            "message": "`targets` must be a non-empty array of strings",
+        }
+    reason = args.get("reason") or ""
+    duration = args.get("duration") or ""
+    applies_to_recommender = bool(args.get("applies_to_recommender", True))
+    bouncer_overrides = args.get("bouncer_override") or []
+    if not isinstance(bouncer_overrides, list):
+        bouncer_overrides = []
+
+    try:
+        result = add_rule(
+            targets=[str(t) for t in targets],
+            reason=str(reason),
+            duration=str(duration),
+            applies_to_recommender=applies_to_recommender,
+            bouncer_overrides=[str(b) for b in bouncer_overrides],
+            source="mcp",
+        )
+    except DenyOperationError as e:
+        return {
+            "status": "error",
+            "code": e.code,
+            "message": str(e),
+            "details": e.details,
+        }
+    except DynamicDenyWriteError as e:
+        return {
+            "status": "error",
+            "code": f"write.{e.stage}",
+            "message": str(e),
+            "path": e.path,
+        }
+    except (ValueError, TypeError) as e:
+        return {
+            "status": "error",
+            "code": "bad_input",
+            "message": str(e),
+        }
+
+    # Best-effort admin-action audit emit.
+    try:
+        rule = result["rule"]
+        from .bouncer.audit_export.admin_action import emit_admin_action_direct
+        from .bouncer.proxy import _emit_audit_event
+        emit_admin_action_direct(
+            _emit_audit_event,
+            kind="dynamic_deny.added",
+            actor=rule.get("added_by"),
+            target_kind="dynamic_deny_rule",
+            target_id=rule["id"],
+            source="mcp",
+            extra={
+                "targets": rule.get("targets"),
+                "applied_to": rule.get("applied_to"),
+                "reason": rule.get("reason"),
+                "duration": rule.get("duration"),
+                "expires_at": rule.get("expires_at"),
+                "applies_to_recommender": rule.get("applies_to_recommender"),
+            },
+        )
+    except Exception:
+        # Out-of-process; emit hook isn't wired. Honest no-op.
+        pass
+
+    rule = result["rule"]
+    summary = (
+        f"Added {rule['id']}. "
+        f"targets={', '.join(rule.get('targets') or [])}. "
+        f"applied_to={', '.join(rule.get('applied_to') or [])}. "
+        f"expires_at={rule.get('expires_at') or '(permanent)'}. "
+        f"Recommender Deny-injection: "
+        f"{'on' if rule.get('applies_to_recommender') else 'off'}."
+    )
+    fanout_summary = []
+    for r in result.get("fanout", []):
+        if r.get("reloaded"):
+            fanout_summary.append(
+                f"{r['bouncer']} reloaded ({r.get('rules_applied_to_self')} "
+                f"applied / {r.get('rules_count')} total)"
+            )
+        else:
+            fanout_summary.append(
+                f"{r['bouncer']} unreachable ({r.get('error')}); rule is in "
+                f"YAML — watcher will pick it up"
+            )
+
+    return {
+        "status": "ok",
+        "id": rule["id"],
+        "rule": rule,
+        "applied_to": result.get("applied_to", []),
+        "routing_explanation": result.get("routing_explanation"),
+        "per_target_rationale": result.get("per_target_rationale", []),
+        "fanout": result.get("fanout", []),
+        "summary": summary,
+        "fanout_summary": fanout_summary,
+        "written_to": result.get("written_to"),
+    }
+
+
+def _bounce_deny_list_for_mcp(args: dict[str, Any]) -> dict[str, Any]:
+    """MCP backend for `bounce_deny_list`. Mirrors `iam-jit deny list`."""
+    from .dynamic_denies.operations import DenyOperationError, list_rules
+    from .dynamic_denies.store import DynamicDenyWriteError
+
+    include_expired = bool(args.get("include_expired", False))
+    raw_filter = args.get("bouncer_filter") or []
+    if not isinstance(raw_filter, list):
+        raw_filter = []
+
+    try:
+        result = list_rules(
+            include_expired=include_expired,
+            bouncer_filter=[str(b) for b in raw_filter],
+        )
+    except DenyOperationError as e:
+        return {
+            "status": "error",
+            "code": e.code,
+            "message": str(e),
+            "details": e.details,
+        }
+    except DynamicDenyWriteError as e:
+        return {
+            "status": "error",
+            "code": f"read.{e.stage}",
+            "message": str(e),
+            "path": e.path,
+        }
+
+    rules = result.get("rules", [])
+    summary_lines = [
+        f"{len(rules)} active deny rule(s); path: "
+        f"{result.get('path') or '(none)'}"
+    ]
+    for r in rules:
+        applied = ",".join(r.get("applied_to") or [])
+        targets = ",".join(r.get("targets") or [])
+        summary_lines.append(
+            f"  {r.get('id')}: targets={targets} applied={applied} "
+            f"expires_in_s={r.get('_expires_in_seconds')}"
+        )
+
+    return {
+        "status": "ok",
+        "path": result.get("path"),
+        "count": len(rules),
+        "rules": rules,
+        "summary": "\n".join(summary_lines),
+    }
+
+
+def _bounce_deny_remove_for_mcp(args: dict[str, Any]) -> dict[str, Any]:
+    """MCP backend for `bounce_deny_remove`. Mirrors `iam-jit deny remove`."""
+    from .dynamic_denies.operations import DenyOperationError, remove_rules
+    from .dynamic_denies.store import DynamicDenyWriteError
+
+    rule_id = args.get("id")
+    if not isinstance(rule_id, str) or not rule_id.strip():
+        return {
+            "status": "error",
+            "code": "missing_id",
+            "message": "`id` is required (the dd_<ULID> rule id)",
+        }
+    reason = args.get("reason")
+
+    try:
+        result = remove_rules(
+            rule_ids=[rule_id.strip()],
+            actor_reason=str(reason) if reason else None,
+        )
+    except DenyOperationError as e:
+        return {
+            "status": "error",
+            "code": e.code,
+            "message": str(e),
+            "details": e.details,
+        }
+    except DynamicDenyWriteError as e:
+        return {
+            "status": "error",
+            "code": f"write.{e.stage}",
+            "message": str(e),
+            "path": e.path,
+        }
+
+    removed = result.get("removed_count", 0) > 0
+    # Best-effort admin-action emit per removed rule.
+    if removed:
+        try:
+            from .bouncer.audit_export.admin_action import emit_admin_action_direct
+            from .bouncer.proxy import _emit_audit_event
+            for rule in result.get("removed_rules", []):
+                emit_admin_action_direct(
+                    _emit_audit_event,
+                    kind="dynamic_deny.removed",
+                    target_kind="dynamic_deny_rule",
+                    target_id=rule.get("id", ""),
+                    source="mcp",
+                    extra={
+                        "removed_by_reason": reason,
+                        "targets": rule.get("targets"),
+                        "applied_to": rule.get("applied_to"),
+                    },
+                )
+        except Exception:
+            pass
+
+    if result.get("refused_org_distributed"):
+        return {
+            "status": "refused",
+            "code": "org_distributed",
+            "message": (
+                "rule is org-distributed; personal `bounce_deny_remove` "
+                "is refused. Lift via the org's distribution channel."
+            ),
+            "refused_org_distributed": result.get("refused_org_distributed"),
+        }
+    if not removed:
+        return {
+            "status": "not_found",
+            "removed": False,
+            "id": rule_id,
+            "message": f"no rule with id {rule_id!r}",
+            "not_found": result.get("not_found", []),
+        }
+
+    return {
+        "status": "ok",
+        "removed": True,
+        "removed_count": result.get("removed_count"),
+        "removed_ids": result.get("removed_ids", []),
+        "fanout": result.get("fanout", []),
+        "written_to": result.get("written_to"),
+        "summary": (
+            f"Removed {result.get('removed_count')} rule(s). "
+            f"Bouncers reloaded: "
+            f"{', '.join(r['bouncer'] for r in result.get('fanout', []) if r.get('reloaded')) or '(none)'}."
+        ),
     }
 
 
