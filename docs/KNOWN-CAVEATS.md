@@ -122,7 +122,7 @@ Tracking: every BUG entry has a task number (e.g., #299). v1.0 release gate: eve
 ## A12. gbounce: no domain blacklist + wildcard support — `STATUS: FIXED 2026-05-22`
 - **Severity:** HIGH (pre-launch feature gap; operators needed to block specific domains without MITM)
 - **Symptom (historical):** gbounce could audit-log every CONNECT, but couldn't REFUSE one based on destination host. Operators who wanted "block this agent from calling api.openai.com" had no way to do it.
-- **Fix (#314, gbounce commit `<SHA>`):**
+- **Fix (#314, gbounce commit `39afcf1`):**
   - `--deny-host <entry>` CLI flag (repeatable; union with `--deny-hosts-file`).
   - `--deny-hosts-file PATH` flag accepting newline-delimited entries OR the YAML-list shape the future profile-mode YAML will use (`deny_hosts:` key + `- entry` lines + inline `deny_hosts: [a, b]`). Forward-compatible with G-Slice 2 profile YAML.
   - Wildcard semantics: `*.example.com` matches `api.example.com`, `foo.bar.example.com`, AND bare `example.com` (operator-friendly; documented in `internal/proxy/deny_hosts.go` header).
@@ -135,6 +135,34 @@ Tracking: every BUG entry has a task number (e.g., #299). v1.0 release gate: eve
   - `/healthz` surfaces `deny_hosts_count` + `total_deny_host_matches` for liveness-probe visibility.
 - **Verification:** 11 regression tests in `gbounce/internal/proxy/deny_hosts_test.go` cover exact match, wildcard subdomain, wildcard-matches-bare-domain, wildcard-does-NOT-match-unrelated, not-in-list-allows, bare-`*`-rejected-at-parse, multi-level-wildcard-rejected-at-parse, audit-event-shape (verdict + status_id + deny_reason + dst_endpoint + activity_id=Connect), deny-wins-over-allow, CLI+profile merge, and the /healthz counter surface. E2E sanity-run on a free port (8081 + mgmt 8770) with `--deny-host '*.openai.com' --deny-host 169.254.169.254`: `curl -x http://127.0.0.1:8081 https://api.openai.com/v1/models` → 403; `curl -x http://127.0.0.1:8081 https://openai.com/` → 403 (wildcard bare-domain); `curl -x http://127.0.0.1:8081 https://169.254.169.254/...` → 403; allowed hosts flow through. Audit log carries the documented OCSF deny shape.
 - **Task:** #314.
+
+## A13. gbounce: MITM mode v1.0 BETA (default-off, PII/PCI leak risk) — `STATUS: QUEUED`
+- **Severity:** HIGH (pre-launch feature; ships v1.0 but flagged BETA + default-off because terminated TLS exposes bodies to every persistence sink — `[[mitm-beta-pii-pci-concern]]`)
+- **Why pre-launch:** founder direction 2026-05-22 — security teams in early sales conversations ask "can you see inside TLS?" Without MITM at all, the answer "no, by design" kills some deals. BETA pre-launch flips the answer to "yes, opt-in; here are the constraints."
+- **Why BETA (not GA) in v1.0:** when MITM terminates TLS, request/response bodies flow plaintext through gbounce. Every persistence sink then receives those bodies unless redacted:
+  - Local JSONL audit log (`--audit-log-path`)
+  - SQLite audit DB (`*bounce audit query`)
+  - HTTPS webhook sinks (#257 — Splunk / Datadog / Sentinel)
+  - AWS Security Lake parquet (#258)
+  - S3-compat NDJSON sink (#317, queued)
+  - Diagnostics bundle (`*bounce diagnostics`)
+
+  Default-on redaction strips CREDENTIAL-shaped fields (Authorization, Cookie, x-api-key, *_token, *_secret, password, api_key). It does NOT strip PII (emails, SSNs, addresses) or PCI (PAN, CVV, expiry) or PHI (patient name + DOB) — those need operator-configured redaction policy. For HIPAA / PCI-DSS / GDPR workloads, operators MUST configure their own redaction before enabling MITM, or stay on default CONNECT mode (never sees bodies).
+- **What ships v1.0 BETA:**
+  - `gbounce ca install` / `gbounce ca uninstall` / `gbounce ca info` — CA cert lifecycle, ~/.iam-jit/gbounce/ca/
+  - `gbounce run --mode mitm` — opt-in flag; refuses to start if CA isn't installed
+  - Per-host cert generation (signed by our CA) with brief LRU cache
+  - Default-on credential redaction (Authorization / Cookie / x-api-key / *_token / *_secret / JSON fields)
+  - `--audit-log-include-bodies` flag OFF by default; loud warning if enabled
+  - BETA stderr banner at MITM startup: "BETA: bodies may contain PII/PCI; default redaction strips credentials only — configure your own pattern for PII/PCI workloads"
+  - Per-runtime warning in `gbounce ca install` output: "Beta. If you handle PHI / PCI / PII, configure operator-side redaction before enabling MITM"
+  - Audit event extensions: URL path + method + response status visible (none of these are PII per se)
+  - Profile rules extended: match on method + path + query_param.NAME
+  - docs/MITM-MODE.md leads with BETA + PII/PCI warning in §1
+- **v1.1 GA criterion (NOT pre-launch):** pluggable PII/PCI redaction policy (regex packs for PAN/CVV/SSN/email/etc., structured field detectors, operator-configurable on-detection-action). Until that ships, MITM stays BETA.
+- **Honest framing:** cert-pinning SDKs (most modern AWS SDKs, banking SDKs, some mobile SDKs) WILL break under MITM; documented explicitly.
+- **Engineering scope:** ~7-10 days (CA lifecycle + per-host cert gen + TLS interception + redaction + audit + tests + docs + BETA wiring).
+- **Task:** #315. Composes with `[[mitm-beta-pii-pci-concern]]`, `[[ibounce-honest-positioning]]`.
 
 ## A8. kbouncer + dbouncer: stale `bin/` binaries in repos — `STATUS: FIXED (2026-05-22)`
 - **Severity:** HIGH
