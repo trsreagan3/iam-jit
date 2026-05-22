@@ -90,6 +90,17 @@ Tracking: every BUG entry has a task number (e.g., #299). v1.0 release gate: eve
 - **Fix:** ships [docs/PRODUCTION-LOG-STORAGE.md](PRODUCTION-LOG-STORAGE.md) — operator decision tree organised by deployment context (single-host dev, multi-host on-prem, AWS-heavy, AWS+S3, GCP, Azure, CI/CD ephemeral, Enterprise fan-out), full per-context setup snippets, sample Lambda receiver for "dump to S3", honest gaps section (no GCS / Azure-Blob / Kafka / syslog / Elasticsearch / ClickHouse native sinks — operator chains a thin shim or Vector / Fluent Bit / Cribl per `[[self-host-zero-billing-dependency]]`), per-product flag-parity matrix, three-layer validation guide (bouncer-side `audit tail`, `/healthz.audit_export` block, SIEM-side SPL / KQL / SQL queries). Linked from the main README "Documentation" section + each bouncer README. Doc framed per `[[security-team-positioning-safety-not-surveillance]]` (safety + investigation, not surveillance) and `[[don't-tailor-to-lighthouse]]` (no customer-specific recommendation).
 - **Task:** #316 — completed 2026-05-22.
 
+## A16. Cross-bouncer X-Agent-Session-Id header parity — `STATUS: QUEUED`
+- **Severity:** HIGH (breaks the headline cross-bouncer correlation claim if not fixed)
+- **Surfaced by:** #312 NanoClaw integration test 2026-05-22 — all 3 paths pass functionally, but only gbounce reads `X-Agent-Session-Id` on inbound. ibounce / kbounce / dbounce emit `session_id=null` even when the header is present.
+- **Effect:** `iam-jit audit query --filter agent.session_id=X` returns gbounce events only. Investigations across AWS + K8s + SQL miss correlation. `docs/INTEGRATION-OPENCLAW-NANOCLAW.md` + `[[audit-layer-complement-to-agent-harnesses]]` positioning both promise this works; today it doesn't.
+- **What ships (3 parallel slices, all reference #308's gbounce buildAgentBlock pattern):**
+  - **ibounce**: `src/iam_jit/bouncer/audit_export/agent_context.py` reads `X-Agent-Session-Id` + `X-Agent-Name` headers as `detected_from="http_header"` with highest precedence; falls through to User-Agent / MCP / process tree if absent
+  - **kbounce**: `internal/proxy/proxy.go` near existing agent_name / agent_session_id column writes
+  - **dbounce**: thread `sessionID` from `internal/proxy/forward.go`'s per-connection registry into OCSF event builder; schema column exists (#289) but emitter doesn't surface it
+- **Engineering scope:** ~1-2 days per bouncer = 3-5 days total; gbounce buildAgentBlock pattern is the reference
+- **Task:** #318. Depends on #308 (gbounce reference implementation).
+
 ## A15. Cloud-neutral object-storage NDJSON sink (S3-compatible) — `STATUS: QUEUED`
 - **Severity:** HIGH (per founder direction 2026-05-22: bouncers other than ibounce are cloud-neutral; AWS-only Security Lake adapter alone isn't enough)
 - **Why pre-launch:** operators need their SIEM/security-tool to collect bouncer logs from a bucket. Today: HTTPS webhook (synchronous push) + Security Lake (AWS-only parquet). Operators on GCS / Azure / MinIO / R2 / B2 have no pull-based collection path.
