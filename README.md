@@ -388,6 +388,18 @@ Requires CloudTrail-read in the customer's account, wired via the standard CFN o
 
 The standard post-grant audit log already satisfies most compliance asks ("what did alice's agent do during that 1-hour window?" — answer: query the log later). The live tail is a UX win for the "I want to watch in real time" case, not a compliance prerequisite. See [docs/ROADMAP-V1.1.md](docs/ROADMAP-V1.1.md) for prioritization status.
 
+### Suite dashboard
+
+When you run more than one Bounce product on the same host, open `http://127.0.0.1:8769/suite` (served by `gbounce`) for an at-a-glance deployment-status page. Each card links out to that bouncer's own mgmt UI; status pills come from client-side `/healthz` polls every 5 s.
+
+The page is intentionally a **link page**, not a single-pane-of-glass aggregator. Filters, search, and live audit tails belong to each bouncer's own UI (`ibounce` 8767, `kbouncer` 8766, `dbounce` 8768, `gbounce` 8769). Bouncers stay autonomous — the suite page works even if half the deployment is down (the unreachable cards just show gray pills). Operator port overrides land in `localStorage` via the "configure ports" link.
+
+For cross-bouncer investigation across products use the CLI:
+
+```bash
+iam-jit audit query --filter agent.session_id=<UUID>
+```
+
 ---
 
 ## How it works (60 seconds)
