@@ -30,11 +30,12 @@ Tracking: every BUG entry has a task number (e.g., #299). v1.0 release gate: eve
 - **Fix:** dbounce — introduced `authRequestExpectsClientResponse(uint32) bool` enumerating which PG protocol auth sub-codes trigger a client follow-up. Sub-codes 0, 2, 6, 12 (and any unknown code) fall through to the next upstream read instead of blocking on the client. Wire-protocol pass-through invariants preserved (no SCRAM bytes inspected/named). Regression coverage: `TestForward_SCRAMSHA256HandshakeCompletes` + `TestAuthRequestExpectsClientResponse` (unit) + `TestIntegration_SCRAMAuthThroughProxy` (build tag `integration`). End-to-end: psycopg2 through dbounce against PG 16 with `scram-sha-256` now succeeds in ~95ms.
 - **Task:** #299 — completed 2026-05-22.
 
-## A3. ibounce: hardcoded HTTPS upstream scheme — `STATUS: IN FLIGHT`
+## A3. ibounce: hardcoded HTTPS upstream scheme — `STATUS: FIXED` ✓
 - **Severity:** CRITICAL
-- **Symptom:** ibounce proxy.py internally uses `https://` regardless of `--upstream` URL scheme. Plain-HTTP upstreams (LocalStack) fail entirely.
-- **Workaround until fix:** point only at HTTPS upstreams OR patch proxy.py.
-- **Task:** #300 — agent spawned 2026-05-22 (in flight).
+- **Was:** ibounce `proxy.py` hard-coded `https://` for the outbound forward + always forwarded to the inbound SigV4-signed Host header. Pointing it at a plain-HTTP upstream (LocalStack at `http://127.0.0.1:4566`) failed entirely — UAT 2026-05-22 had to bypass ibounce for all writes (Variants A + C).
+- **Root cause:** `ProxyConfig.forward_scheme` had a `"https"` default but no CLI surface to override it; the forward target was always `host_header` (the inbound SigV4-signed Host), which for a `boto3 + AWS_ENDPOINT_URL=http://127.0.0.1:8770` flow is the proxy's OWN port — loops without an explicit upstream override.
+- **Fix:** added `ibounce run --upstream URL` flag. New `parse_upstream_url(url)` helper extracts scheme + `host:port`; validates scheme ∈ {http, https} (rejects `ftp://`, `file://`, schemeless URLs with a clear error); threads `forward_scheme` + new `forward_host_override` field through `ProxyConfig` into the two `_forward_to_aws` call sites. CRIT-32-01 outbound-host allowlist still gates the override target (loopback / `.amazonaws.com` / operator EXTRA_HOSTS). Regression coverage: `tests/bouncer/test_proxy_upstream_scheme.py` (14 tests: unit parser + CLI-startup-rejection + end-to-end against a mock-LocalStack aiohttp app proving the override target receives the call). End-to-end verified against LocalStack 3.8: `list_buckets / create_bucket / put_object / get_object` all 200 through `ibounce --upstream http://127.0.0.1:4566 --mode transparent` with audit log showing `allow` verdicts.
+- **Task:** #300 — completed 2026-05-22.
 
 ## A4. kbounce: kubectl OpenAPI discovery classified as "unclassifiable" — `STATUS: IN FLIGHT`
 - **Severity:** CRITICAL
