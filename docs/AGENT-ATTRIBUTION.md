@@ -106,6 +106,90 @@ iam-jit audit query \
 supplied — JSON consumers can distinguish "we don't know" from "we
 saw a session_id of empty-string".
 
+### Header-rejection breadcrumb (`agent_header_rejection`)
+
+When an inbound `X-Agent-Name` or `X-Agent-Session-Id` header fails
+validation (shell-injection charset, length over cap, malformed
+session-id format), the audit event surfaces a structured breadcrumb
+under `unmapped.iam_jit.ext.agent_header_rejection`. SOC analysts use
+this to diagnose "which agent's collector is misconfigured?" —
+pre-§A18 the only signal was the `/healthz` counter
+`total_agent_headers_rejected` (too coarse) + the truncated-stderr
+line `gbounce/kbouncer/dbounce/ibounce: rejected invalid X-Agent-...
+header (value=<truncated>) — request will be audited as anonymous`
+(not queryable from the audit log).
+
+**Wire shape — one header failed:**
+
+```json
+{
+  "unmapped": {
+    "iam_jit": {
+      "agent": {
+        "name": "anonymous",
+        "detected_from": "unknown"
+      },
+      "ext": {
+        "agent_header_rejection": {
+          "field": "X-Agent-Name",
+          "reason": "invalid_name_charset",
+          "value_redacted_length": 17
+        }
+      }
+    }
+  }
+}
+```
+
+**Wire shape — both headers failed (list):**
+
+```json
+{
+  "unmapped": {
+    "iam_jit": {
+      "ext": {
+        "agent_header_rejection": [
+          { "field": "X-Agent-Name",       "reason": "invalid_name_charset",    "value_redacted_length": 17 },
+          { "field": "X-Agent-Session-Id", "reason": "invalid_session_id_format", "value_redacted_length": 22 }
+        ]
+      }
+    }
+  }
+}
+```
+
+**Bounded enum of reasons** (consistent across all four Bounce
+products per `[[cross-product-agent-parity]]`):
+
+| Reason                          | Meaning                                                                           |
+|---------------------------------|-----------------------------------------------------------------------------------|
+| `invalid_name_charset`          | `X-Agent-Name` contained chars outside `[A-Za-z0-9._-]` (most often shell-injection-shaped payloads) |
+| `invalid_name_length`           | `X-Agent-Name` charset OK but exceeded the 64-char cap                            |
+| `invalid_session_id_format`     | `X-Agent-Session-Id` contained chars outside `[A-Za-z0-9_-]` (non-UUID-shaped)    |
+| `invalid_session_id_length`     | `X-Agent-Session-Id` charset OK but exceeded the 128-char cap                     |
+| `application_name_unparseable`  | dbounce-only — `iam-jit-agent:` prefix matched but the tag body wasn't `NAME:SESSIONID` |
+
+**Safe-forensics invariant:** `value_redacted_length` records the
+rejected value's byte length, NEVER the value itself. The truncated
+stderr line (with control-char filtering) is the only sink that ever
+sees the raw value, per
+`[[security-team-positioning-safety-not-surveillance]]`. A malicious
+agent that sends a shell-injection-shaped payload can't pivot through
+the audit log.
+
+**SIEM-query example — find every request from a misconfigured agent:**
+
+```bash
+iam-jit audit query \
+  --filter unmapped.iam_jit.ext.agent_header_rejection.reason=invalid_name_charset \
+  --since 2026-05-22T00:00:00Z
+```
+
+The §A17 string field `unmapped.iam_jit.ext.agent_rejected_reason`
+(semicolon-joined enum like `agent_name:invalid_charset_or_length`)
+stays alongside the structured breadcrumb for backward compatibility
+— a query against either field works.
+
 ## SQL connections (dbounce) — `application_name` convention
 
 dbounce sees the PostgreSQL / MySQL wire protocol, not HTTP — there's

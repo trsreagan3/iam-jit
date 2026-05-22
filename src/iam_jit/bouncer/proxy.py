@@ -1330,9 +1330,15 @@ def evaluate_request(
     # `unmapped.iam_jit.agent.session_id` resolves across all four
     # Bounce products. See [[cross-product-agent-parity]] +
     # `docs/AGENT-ATTRIBUTION.md`.
-    from .audit_export.agent_context import extract_agent_headers
-    header_agent_name, header_agent_session_id = extract_agent_headers(
-        headers or {},
+    # #320 / §A18: also collect the structured rejection breadcrumb
+    # list so it can land at `unmapped.iam_jit.ext.agent_header_rejection`
+    # via audit_event_from_decision. Backward-compatible —
+    # extract_agent_headers (the 2-tuple variant) still ships.
+    from .audit_export.agent_context import (
+        extract_agent_headers_with_rejections,
+    )
+    header_agent_name, header_agent_session_id, agent_header_rejections = (
+        extract_agent_headers_with_rejections(headers or {})
     )
     """Pure-function evaluation of one inbound proxy request.
 
@@ -1414,6 +1420,7 @@ def evaluate_request(
                 user_agent=user_agent,
                 header_agent_name=header_agent_name,
                 header_agent_session_id=header_agent_session_id,
+                agent_header_rejections=agent_header_rejections,
             ))
         except Exception as e:
             logger.warning("audit-export emit (unclassifiable) failed: %s", e)
@@ -1490,6 +1497,7 @@ def evaluate_request(
                     user_agent=user_agent,
                     header_agent_name=header_agent_name,
                     header_agent_session_id=header_agent_session_id,
+                    agent_header_rejections=agent_header_rejections,
                 ))
             except Exception as e:
                 logger.warning("audit-export emit (profile-deny) failed: %s", e)
@@ -1655,6 +1663,7 @@ def evaluate_request(
             user_agent=user_agent,
             header_agent_name=header_agent_name,
             header_agent_session_id=header_agent_session_id,
+            agent_header_rejections=agent_header_rejections,
         ))
     except Exception as e:
         logger.warning("audit-export emit (decision) failed: %s", e)

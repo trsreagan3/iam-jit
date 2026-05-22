@@ -283,8 +283,8 @@ Verified by `tests/integration/nanoclaw_paths/test_path_c_parallel`:
 Three product gaps were surfaced during integration testing; all three CLOSED 2026-05-22 in #318 (cross-bouncer X-Agent-* header parity):
 
 - ibounce, kbounce, and dbounce now read inbound X-Agent-Name + X-Agent-Session-Id (dbounce uses `application_name=iam-jit-agent:NAME:SESSIONID` per [`docs/AGENT-ATTRIBUTION.md`](AGENT-ATTRIBUTION.md) §SQL since it sees the SQL wire protocol, not HTTP).
-- All four bouncers now populate `unmapped.iam_jit.agent.{name, session_id, detected_from}` on every OCSF event.
-- `iam-jit audit query --filter agent.session_id=<UUID>` returns one event per bouncer; the integration test at `tests/integration/cross_bouncer_session_id_parity_test.py` is the regression guard.
+- All four bouncers now populate `unmapped.iam_jit.agent.{name, session_id, detected_from}` on every OCSF event — including the HTTP `/audit/events` endpoint that powers `iam-jit audit query` (closed via #320 / §A18 on 2026-05-22; pre-§A18 dbounce events were missing the agent block + kbouncer events mis-labelled `detected_from` for HTTP-header-detected requests).
+- `iam-jit audit query --filter agent.session_id=<UUID>` returns one event per bouncer. As of #320 / §A18 the SHORT-FORM filter alias (`agent.session_id=X`) is supported alongside the canonical long form (`unmapped.iam_jit.agent.session_id=X`); the CLI expands the short form client-side before forwarding so each bouncer's filter parser still sees the canonical OCSF path. The integration tests at `tests/integration/cross_bouncer_session_id_parity_test.py` (JSONL-side, #318) + `tests/integration/audit_events_wire_parity_test.py` (HTTP `/audit/events`-side, #320) are the regression guards.
 
 A fourth honest-positioning note: operational gbounce binaries pre-#308 emit `unmapped.iam_jit.ext.agent_session_id` instead of `unmapped.iam_jit.agent.session_id`. Rebuild gbounce against post-#308 source (which the smoke test confirmed works) so the cross-bouncer correlation query path matches.
 

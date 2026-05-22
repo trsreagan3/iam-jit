@@ -338,3 +338,120 @@ def test_AgentHeaders_NameOnly_PartialDetection():
     assert block["name"] == "parity-test"
     assert block["session_id"] is None
     assert block["detected_from"] == "http_header_name_only"
+
+
+# ---------------------------------------------------------------------------
+# #320 / §A18 — structured agent-header rejection breadcrumb
+# ---------------------------------------------------------------------------
+
+
+def test_320_extract_agent_headers_with_rejections_charset_failure():
+    """Invalid name (charset) → rejection breadcrumb names the field +
+    reason `invalid_name_charset` + length."""
+    _agent_context.reset_agent_headers_rejected_for_tests()
+    raw = "bad agent; rm -rf /"
+    name, sid, rejections = (
+        _agent_context.extract_agent_headers_with_rejections({
+            "X-Agent-Name": raw,
+        })
+    )
+    assert name is None
+    assert sid is None
+    assert len(rejections) == 1
+    assert rejections[0]["field"] == "X-Agent-Name"
+    assert rejections[0]["reason"] == "invalid_name_charset"
+    assert rejections[0]["value_redacted_length"] == len(raw)
+    # Raw value NEVER appears in the breadcrumb.
+    assert raw not in str(rejections[0])
+
+
+def test_320_extract_agent_headers_with_rejections_length_failure():
+    """Over-length session_id (charset OK) → `invalid_session_id_length`."""
+    _agent_context.reset_agent_headers_rejected_for_tests()
+    over = "a" * 129  # 129 > 128 cap
+    name, sid, rejections = (
+        _agent_context.extract_agent_headers_with_rejections({
+            "X-Agent-Session-Id": over,
+        })
+    )
+    assert sid is None
+    assert len(rejections) == 1
+    assert rejections[0]["field"] == "X-Agent-Session-Id"
+    assert rejections[0]["reason"] == "invalid_session_id_length"
+    assert rejections[0]["value_redacted_length"] == 129
+
+
+def test_320_extract_agent_headers_with_rejections_both_failed():
+    """Both headers invalid → two breadcrumbs, each with its own reason."""
+    _agent_context.reset_agent_headers_rejected_for_tests()
+    _, _, rejections = (
+        _agent_context.extract_agent_headers_with_rejections({
+            "X-Agent-Name": "$shell injection`",
+            "X-Agent-Session-Id": "also; bad spaces",
+        })
+    )
+    assert len(rejections) == 2
+    fields = {r["field"] for r in rejections}
+    assert fields == {"X-Agent-Name", "X-Agent-Session-Id"}
+
+
+def test_320_audit_event_carries_rejection_breadcrumb():
+    """audit_event_from_decision plumbs `agent_header_rejections` into
+    `unmapped.iam_jit.ext.agent_header_rejection`. Single dict shape
+    when one header failed."""
+    from iam_jit.bouncer.audit_export.event import audit_event_from_decision
+    raw = "$bad`name"
+    _, _, rejections = (
+        _agent_context.extract_agent_headers_with_rejections({
+            "X-Agent-Name": raw,
+        })
+    )
+    ev = audit_event_from_decision(
+        decision_id=1,
+        mode="enforce",
+        profile=None,
+        verdict="allow",
+        reason="",
+        service="s3",
+        action="GetObject",
+        arn=None,
+        region="us-east-1",
+        host="s3.amazonaws.com",
+        agent_header_rejections=rejections,
+    )
+    breadcrumb = ev["unmapped"]["iam_jit"]["ext"]["agent_header_rejection"]
+    # Single-failure shape: dict (not list).
+    assert isinstance(breadcrumb, dict)
+    assert breadcrumb["field"] == "X-Agent-Name"
+    assert breadcrumb["reason"] == "invalid_name_charset"
+    assert breadcrumb["value_redacted_length"] == len(raw)
+    # Raw value MUST NOT appear anywhere in the event JSON.
+    import json
+    assert raw not in json.dumps(ev)
+
+
+def test_320_audit_event_carries_multiple_rejection_breadcrumbs():
+    """Both headers invalid → `agent_header_rejection` is a LIST."""
+    from iam_jit.bouncer.audit_export.event import audit_event_from_decision
+    _, _, rejections = (
+        _agent_context.extract_agent_headers_with_rejections({
+            "X-Agent-Name": "bad name with spaces",
+            "X-Agent-Session-Id": "also bad",
+        })
+    )
+    ev = audit_event_from_decision(
+        decision_id=1,
+        mode="enforce",
+        profile=None,
+        verdict="allow",
+        reason="",
+        service="s3",
+        action="GetObject",
+        arn=None,
+        region="us-east-1",
+        host="s3.amazonaws.com",
+        agent_header_rejections=rejections,
+    )
+    breadcrumb = ev["unmapped"]["iam_jit"]["ext"]["agent_header_rejection"]
+    assert isinstance(breadcrumb, list)
+    assert len(breadcrumb) == 2

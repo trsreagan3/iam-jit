@@ -346,6 +346,109 @@ def test_query_auth_token_missing_surfaces_401_in_stderr(four_mock_bouncers):
     assert len(lines) == 4
 
 
+def test_query_filter_by_agent_session_id_resolves_gbounce_events():
+    """#308 — gbounce events now carry unmapped.iam_jit.agent.session_id
+    so the cross-bouncer audit query can filter on it. Before #308
+    gbounce was the lone outlier in the cross-bouncer correlation
+    matrix; this test locks in the parity invariant from the consumer
+    (`iam-jit audit query --filter`) side.
+
+    The mock bouncer here simulates a #308-shaped gbounce: every event
+    carries the unmapped.iam_jit.agent block + the legacy flat ext keys
+    (recorder back-compat). The CLI forwards the filter as a query
+    parameter; the test asserts the result set is filtered correctly.
+    """
+    target_session = "01968d6a-9c12-7a4b-b6f8-3b8e4c0d1aef"
+    other_session = "01968d6a-aaaa-bbbb-cccc-dddddddddddd"
+
+    def _gbounce_event_with_agent(session_id: str, name: str, op: str) -> dict[str, Any]:
+        ev = _ocsf_event(bouncer_name="gbounce", operation=op, seconds_ago=10)
+        ev["unmapped"]["iam_jit"]["agent"] = {
+            "name": name,
+            "session_id": session_id,
+            "detected_from": "http_header",
+        }
+        # Legacy flat keys (recorder route)
+        ev["unmapped"]["iam_jit"]["ext"] = {
+            "agent_session_id": session_id,
+            "agent_name": name,
+        }
+        return ev
+
+    gbounce_events = [
+        _gbounce_event_with_agent(target_session, "claude-code", "GET /repos/acme/api/issues"),
+        _gbounce_event_with_agent(target_session, "claude-code", "POST /repos/acme/api/issues"),
+        _gbounce_event_with_agent(other_session, "cursor",      "GET /repos/acme/api/pulls"),
+        _ocsf_event(bouncer_name="gbounce", operation="GET /robots.txt", seconds_ago=10),  # anonymous
+    ]
+
+    # Mock-bouncer side-filter: surface agent.session_id-based filters
+    # the same way a real gbounce /audit/events endpoint would (the
+    # production handler walks the OCSF Event struct via the
+    # audit.MatchAll path).
+    class _AgentFilteringHandler:
+        pass
+
+    bouncer = _MockBouncer("gbounce", gbounce_events)
+
+    # Patch the in-memory filter to recognise agent.session_id.
+    # Tests don't exercise the full grammar — we add just the one rule
+    # this test needs (mirrors the gbounce-side filter resolver).
+    outer = bouncer
+
+    class _Handler(BaseHTTPRequestHandler):
+        def log_message(self, format, *args):
+            return
+        def do_GET(self):
+            from urllib.parse import urlparse, parse_qs
+            parsed = urlparse(self.path)
+            events = list(outer.events)
+            for raw in parse_qs(parsed.query).get("filter", []):
+                if raw.startswith("unmapped.iam_jit.agent.session_id="):
+                    want = raw.split("=", 1)[1]
+                    events = [
+                        e for e in events
+                        if (e.get("unmapped", {})
+                              .get("iam_jit", {})
+                              .get("agent", {})
+                              .get("session_id") == want)
+                    ]
+            self.send_response(200)
+            self.send_header("Content-Type", "application/x-ndjson")
+            self.end_headers()
+            body = "".join(json.dumps(e) + "\n" for e in events)
+            self.wfile.write(body.encode("utf-8"))
+
+    server = HTTPServer(("127.0.0.1", 0), _Handler)
+    port = server.server_address[1]
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        runner = CliRunner()
+        result = runner.invoke(
+            iam_jit_main,
+            [
+                "audit", "query",
+                "--bouncer", f"gbounce=http://127.0.0.1:{port}",
+                "--filter", f"unmapped.iam_jit.agent.session_id={target_session}",
+            ],
+            catch_exceptions=False,
+        )
+        assert result.exit_code == 0, result.output
+        lines = [line for line in result.output.split("\n") if line.strip()]
+        # Exactly 2 events match the target session (claude-code).
+        assert len(lines) == 2, f"want 2 events for target session, got {len(lines)}\noutput={result.output}"
+        for line in lines:
+            ev = json.loads(line)
+            agent = ev["unmapped"]["iam_jit"]["agent"]
+            assert agent["session_id"] == target_session, agent
+            assert agent["name"] == "claude-code"
+            assert agent["detected_from"] == "http_header"
+    finally:
+        server.shutdown()
+        server.server_close()
+
+
 def test_query_csv_format_produces_header_and_rows(four_mock_bouncers):
     result = _run_query(
         *_bouncer_args(four_mock_bouncers),
@@ -356,3 +459,69 @@ def test_query_csv_format_produces_header_and_rows(four_mock_bouncers):
     # 1 header + 5 events
     assert len(lines) == 6
     assert lines[0].startswith("bouncer,time,severity_id,")
+
+
+# ---------------------------------------------------------------------------
+# #320 / §A18 — short-form filter alias expansion
+# ---------------------------------------------------------------------------
+
+
+def test_320_short_form_filter_expanded_before_forwarding(four_mock_bouncers):
+    """The spec example `--filter agent.session_id=X` must expand to
+    the canonical `unmapped.iam_jit.agent.session_id=X` before each
+    bouncer sees it. UAT 2026-05-22 caught the per-bouncer parsers
+    returning HTTP 400 on the short form; client-side expansion
+    closes the gap without per-bouncer changes."""
+    result = _run_query(
+        *_bouncer_args(four_mock_bouncers),
+        "--filter", "agent.session_id=parity-test",
+    )
+    assert result.exit_code == 0, result.output
+    for b in four_mock_bouncers.values():
+        assert b.inbound_queries, f"{b.bouncer_name} not called"
+        last = b.inbound_queries[-1]
+        # The expanded canonical form is what each bouncer received,
+        # NOT the short form the operator typed.
+        assert last.get("filter") == [
+            "unmapped.iam_jit.agent.session_id=parity-test"
+        ], f"{b.bouncer_name} got filter={last.get('filter')}"
+
+
+def test_320_short_form_agent_name_expanded():
+    """Same expansion mechanism for `agent.name=X` short-form."""
+    from iam_jit.cli_audit_query import _expand_short_form_filter
+    assert _expand_short_form_filter("agent.name=psql") == (
+        "unmapped.iam_jit.agent.name=psql"
+    )
+    assert _expand_short_form_filter("agent.detected_from=http_header") == (
+        "unmapped.iam_jit.agent.detected_from=http_header"
+    )
+
+
+def test_320_long_form_passes_through_unchanged():
+    """Canonical long form MUST pass through verbatim — operators
+    who already use the long form (or who have automation written
+    against it) keep working."""
+    from iam_jit.cli_audit_query import _expand_short_form_filter
+    expr = "unmapped.iam_jit.agent.session_id=X"
+    assert _expand_short_form_filter(expr) == expr
+
+
+def test_320_unrelated_filter_passes_through():
+    """Filters whose field isn't in the short-form map MUST pass
+    through verbatim (the per-bouncer parser handles them)."""
+    from iam_jit.cli_audit_query import _expand_short_form_filter
+    for expr in (
+        "api.operation=SELECT",
+        "severity_id>=3",
+        "actor.user.name=claude-code",
+    ):
+        assert _expand_short_form_filter(expr) == expr, expr
+
+
+def test_320_short_form_with_regex_operator():
+    """Regex operator (`~`) also supported on the short form."""
+    from iam_jit.cli_audit_query import _expand_short_form_filter
+    assert _expand_short_form_filter("agent.name~claude.*") == (
+        "unmapped.iam_jit.agent.name~claude.*"
+    )

@@ -445,6 +445,14 @@ def audit_event_from_decision(
     # resolve across all four products.
     header_agent_name: str | None = None,
     header_agent_session_id: str | None = None,
+    # #320 / §A18 — structured rejection breadcrumb list. Each entry
+    # has {field, reason, value_redacted_length}. Lands at
+    # `unmapped.iam_jit.ext.agent_header_rejection` (single dict when
+    # one header failed, list when both failed). NEVER includes the
+    # raw value — only its length, for safe forensics per
+    # [[security-team-positioning-safety-not-surveillance]]. Caller
+    # populates via agent_context.extract_agent_headers_with_rejections.
+    agent_header_rejections: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     """Build the OCSF v1.1.0 class 6003 event for one proxy decision.
 
@@ -499,6 +507,15 @@ def audit_event_from_decision(
     # in OCSF terms.
     if extra:
         ext.update(extra)
+
+    # #320 / §A18: structured rejection breadcrumb. Single dict shape
+    # when one header failed; list shape when both failed. Cross-
+    # product invariant per [[cross-product-agent-parity]].
+    if agent_header_rejections:
+        if len(agent_header_rejections) == 1:
+            ext["agent_header_rejection"] = agent_header_rejections[0]
+        else:
+            ext["agent_header_rejection"] = list(agent_header_rejections)
 
     # src_endpoint / dst_endpoint. We emit them only when we have at
     # least one populated field — an all-None endpoint is worse than

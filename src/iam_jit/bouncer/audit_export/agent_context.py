@@ -189,8 +189,88 @@ def extract_agent_headers(
     present (or both are invalid) the caller's existing User-Agent /
     MCP / process-tree fallbacks fire unchanged.
     """
+    validated_name, validated_session_id, _ = (
+        extract_agent_headers_with_rejections(headers)
+    )
+    return validated_name, validated_session_id
+
+
+# ---------------------------------------------------------------------------
+# #320 / §A18 — structured agent-header rejection breadcrumb
+# ---------------------------------------------------------------------------
+#
+# Cross-product invariant per [[cross-product-agent-parity]]: when an
+# inbound X-Agent-* header fails validation, the audit event surfaces
+# a structured breadcrumb at
+# `unmapped.iam_jit.ext.agent_header_rejection` so a SOC analyst can
+# tell which header failed + why + the rejected value's LENGTH (NEVER
+# the value itself — that lives only in the truncated stderr line
+# emitted above, with control-char filtering, so a malicious header
+# value can't pollute the audit log). Same enum + field shape across
+# ibounce / kbouncer / dbounce / gbounce.
+
+# Bounded enum of rejection reasons. New reasons land here when the
+# validation regex evolves.
+AGENT_HEADER_REJECTION_INVALID_NAME_CHARSET = "invalid_name_charset"
+AGENT_HEADER_REJECTION_INVALID_NAME_LENGTH = "invalid_name_length"
+AGENT_HEADER_REJECTION_INVALID_SESSION_ID_FORMAT = "invalid_session_id_format"
+AGENT_HEADER_REJECTION_INVALID_SESSION_ID_LENGTH = "invalid_session_id_length"
+# Defined for cross-product enum parity; ibounce doesn't observe SQL
+# `application_name` tags directly (that's dbounce's domain).
+AGENT_HEADER_REJECTION_APPLICATION_NAME_UNPARSEABLE = "application_name_unparseable"
+
+# Canonical field-name constants matching gbounce's
+# `AgentNameField` / `AgentSessionIDField` Go constants byte-for-byte.
+AGENT_NAME_FIELD = "X-Agent-Name"
+AGENT_SESSION_ID_FIELD = "X-Agent-Session-Id"
+
+
+def _classify_agent_name_rejection(raw: str) -> str:
+    """Return the rejection reason for a raw X-Agent-Name value that
+    already failed `is_valid_agent_name`. Splits charset vs length so
+    SOC analysts can distinguish "agent SDK sending shell-injection-
+    shaped payloads" from "agent picked an overly-verbose canonical
+    name."
+    """
+    if len(raw) > 64:
+        return AGENT_HEADER_REJECTION_INVALID_NAME_LENGTH
+    return AGENT_HEADER_REJECTION_INVALID_NAME_CHARSET
+
+
+def _classify_session_id_rejection(raw: str) -> str:
+    """Return the rejection reason for a raw X-Agent-Session-Id value
+    that already failed `is_valid_agent_session_id`."""
+    if len(raw) > 128:
+        return AGENT_HEADER_REJECTION_INVALID_SESSION_ID_LENGTH
+    return AGENT_HEADER_REJECTION_INVALID_SESSION_ID_FORMAT
+
+
+def build_agent_header_rejection_breadcrumb(
+    field: str, reason: str, raw_value_length: int,
+) -> dict[str, Any]:
+    """Produce the per-rejection entry shape that lands at
+    `unmapped.iam_jit.ext.agent_header_rejection`. NEVER include the
+    raw value — only its length, for safe forensics per
+    [[security-team-positioning-safety-not-surveillance]].
+    """
+    return {
+        "field": field,
+        "reason": reason,
+        "value_redacted_length": raw_value_length,
+    }
+
+
+def extract_agent_headers_with_rejections(
+    headers: dict[str, str] | None,
+) -> tuple[str | None, str | None, list[dict[str, Any]]]:
+    """Same as `extract_agent_headers` but also returns the list of
+    structured rejection breadcrumbs (#320 / §A18). Empty list when
+    every supplied header passed validation. Per
+    [[cross-product-agent-parity]] the breadcrumb shape matches
+    gbounce + kbouncer + dbounce byte-for-byte.
+    """
     if not headers:
-        return None, None
+        return None, None, []
     raw_name = None
     raw_session_id = None
     for k, v in headers.items():
@@ -203,11 +283,17 @@ def extract_agent_headers(
             raw_session_id = v
     validated_name = None
     validated_session_id = None
+    rejections: list[dict[str, Any]] = []
     if raw_name:
         if is_valid_agent_name(raw_name):
             validated_name = raw_name
         else:
             _log_agent_header_rejected("X-Agent-Name", str(raw_name))
+            rejections.append(build_agent_header_rejection_breadcrumb(
+                AGENT_NAME_FIELD,
+                _classify_agent_name_rejection(str(raw_name)),
+                len(str(raw_name)),
+            ))
     if raw_session_id:
         if is_valid_agent_session_id(raw_session_id):
             validated_session_id = raw_session_id
@@ -215,7 +301,12 @@ def extract_agent_headers(
             _log_agent_header_rejected(
                 "X-Agent-Session-Id", str(raw_session_id),
             )
-    return validated_name, validated_session_id
+            rejections.append(build_agent_header_rejection_breadcrumb(
+                AGENT_SESSION_ID_FIELD,
+                _classify_session_id_rejection(str(raw_session_id)),
+                len(str(raw_session_id)),
+            ))
+    return validated_name, validated_session_id, rejections
 
 # ---------------------------------------------------------------------------
 # UUID v7 (fallback to UUID v4 on Python < 3.14)

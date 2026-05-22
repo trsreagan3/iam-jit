@@ -13,6 +13,45 @@ within the same release.
 
 ### Added
 
+- **#320 / §A18 — `/audit/events` wire-shape parity fix** (2026-05-22) —
+  closes a UAT-discovered CRIT: the HTTP `/audit/events` endpoint
+  that powers `iam-jit audit query` was emitting an empty agent
+  block on dbounce events + mis-labelling `detected_from` on
+  kbouncer events. The cross-bouncer "query by agent.session_id"
+  claim from §A16 was wire-protocol false for SOC analysts.
+  - **iam-jit CLI** — `cli_audit_query.py` gains
+    `_expand_short_form_filter` + `_expand_short_form_filters`
+    helpers that translate `agent.session_id=X` /
+    `agent.name=X` / `agent.detected_from=X` to their canonical
+    `unmapped.iam_jit.agent.*` long forms client-side before
+    forwarding. Closes the UAT-surfaced "spec example returns
+    HTTP 400" gap — operators copy-pasting from the docs now
+    just work.
+  - **ibounce audit_export** —
+    `extract_agent_headers_with_rejections` (additive sibling to
+    the existing 2-tuple `extract_agent_headers`) returns the
+    structured rejection breadcrumb list. New cross-product
+    bounded enum constants
+    (`AGENT_HEADER_REJECTION_INVALID_NAME_CHARSET` etc.) +
+    `build_agent_header_rejection_breadcrumb` helper. Lands at
+    `unmapped.iam_jit.ext.agent_header_rejection` via
+    `audit_event_from_decision(agent_header_rejections=...)`.
+  - **Cross-product test** —
+    `tests/integration/audit_events_wire_parity_test.py` brings
+    up all four bouncers, fires one request per bouncer with a
+    shared session id, hits each `/audit/events` endpoint
+    directly, asserts the agent block lands with the correct
+    `detected_from` per transport, AND runs
+    `iam-jit audit query --filter agent.session_id=X` (short
+    form) + asserts 4 events back.
+  - **Docs:** `docs/KNOWN-CAVEATS.md` §A18 entry between §A16 +
+    §A17 mirroring the §A16/§A17 diagnostic + fix shape.
+    `docs/AGENT-ATTRIBUTION.md` gains the
+    `agent_header_rejection` breadcrumb wire-shape section with
+    the bounded enum table + SIEM-query example.
+  - Closes `[[cross-product-agent-parity]]` for the audit-events
+    wire-protocol surface.
+
 - **#317 / §A15 — cloud-neutral S3-compatible NDJSON object-storage sink** (2026-05-22) —
   closes the headline cloud-neutrality gap surfaced by founder
   direction 2026-05-22: bouncers other than ibounce are

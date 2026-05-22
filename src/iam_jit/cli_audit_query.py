@@ -87,6 +87,66 @@ network case (a remote bouncer over a VPN, say) and short enough that
 one unreachable bouncer doesn't pin the cross-bouncer query."""
 
 
+# #320 / §A18 — short-form filter alias map. UAT 2026-05-22 surfaced
+# that the headline cross-bouncer query example uses the short form
+# `agent.session_id=X` (copy-pasted from the IAM-JIT-AUDIT-QUERY.md
+# spec) but the per-bouncer parsers only accept the canonical long
+# form `unmapped.iam_jit.agent.session_id=X` — every copy-paste
+# returned HTTP 400. The fix is to expand short forms to their
+# canonical long forms CLIENT-SIDE before forwarding so each bouncer
+# still sees a fully-qualified field path. Documented in CLI help +
+# docs/INTEGRATION-OPENCLAW-NANOCLAW.md.
+#
+# Per [[cross-product-agent-parity]] the canonical fields are the
+# same across all four bouncers — the short-form alias map is one
+# shared catalog. Future short-forms (verdict, severity, etc.) land
+# here.
+_SHORT_FORM_ALIASES: dict[str, str] = {
+    "agent.session_id": "unmapped.iam_jit.agent.session_id",
+    "agent.name": "unmapped.iam_jit.agent.name",
+    "agent.detected_from": "unmapped.iam_jit.agent.detected_from",
+}
+
+
+def _expand_short_form_filter(expr: str) -> str:
+    """Expand a short-form filter expression to its canonical OCSF
+    long form. Pass-through for anything that doesn't match a known
+    short-form prefix — preserves the existing exact-match behavior
+    for callers that already pass the canonical path.
+
+    Supports the four filter operators the per-bouncer parsers
+    accept: `=`, `~`, `>=`, `<=`. The split is on the FIRST operator
+    occurrence so a value containing `=` (e.g. base64) round-trips
+    correctly.
+
+    Examples:
+        agent.session_id=01968d6a-...     → unmapped.iam_jit.agent.session_id=01968d6a-...
+        agent.name~claude                  → unmapped.iam_jit.agent.name~claude
+        unmapped.iam_jit.agent.name=psql  → unmapped.iam_jit.agent.name=psql   (no change)
+        api.service.name=mysql             → api.service.name=mysql             (no change)
+    """
+    # Order matters: `>=` and `<=` are 2-char operators; split on them
+    # first so the single-char `=` / `~` don't false-match.
+    for op in (">=", "<=", "=", "~"):
+        idx = expr.find(op)
+        if idx <= 0:
+            continue
+        field = expr[:idx]
+        rest = expr[idx:]
+        canonical = _SHORT_FORM_ALIASES.get(field)
+        if canonical is None:
+            return expr
+        return canonical + rest
+    return expr
+
+
+def _expand_short_form_filters(filters: tuple[str, ...]) -> tuple[str, ...]:
+    """Apply _expand_short_form_filter to every entry in a tuple of
+    filter expressions. Tuple-in / tuple-out so the call site can
+    swap the click multi-option output directly."""
+    return tuple(_expand_short_form_filter(f) for f in filters)
+
+
 class _BouncerQueryResult(NamedTuple):
     """One bouncer's result of the parallel fan-out. Either ``events``
     is populated (success) or ``error`` is non-empty (probe-failed /
@@ -416,10 +476,14 @@ def register_audit_query_group(parent_group: click.Group) -> click.Group:
         metavar="EXPR",
         help="Filter expression (repeatable; AND semantics). Forms: "
              "field=value | field~regex | field>=N | field<=N. "
-             "Forwarded to each bouncer's /audit/events?filter= so the "
-             "filter runs server-side. See each product's "
-             "docs/QUERYING-AUDIT-LOGS.md for the supported field "
-             "catalog.",
+             "Short-form aliases for the agent block (#320 / §A18): "
+             "`agent.session_id=X` / `agent.name=X` / "
+             "`agent.detected_from=X` expand to their canonical "
+             "`unmapped.iam_jit.agent.*` paths client-side before "
+             "forwarding. Forwarded to each bouncer's "
+             "/audit/events?filter= so the filter runs server-side. "
+             "See each product's docs/QUERYING-AUDIT-LOGS.md for the "
+             "full supported field catalog.",
     )
     @click.option(
         "--limit",
@@ -484,10 +548,16 @@ def register_audit_query_group(parent_group: click.Group) -> click.Group:
           # Latest 50 events across all four default bouncers.
           iam-jit audit query --limit 50
 
-          # Cross-product correlation for one agent session.
+          # Cross-product correlation for one agent session (short form;
+          # the CLI expands `agent.session_id` to the canonical
+          # `unmapped.iam_jit.agent.session_id` before forwarding).
           iam-jit audit query \\
-              --filter unmapped.iam_jit.agent.session_id=019687ef-... \\
+              --filter agent.session_id=019687ef-... \\
               --format ocsf-bundle > session-bundle.json
+
+          # Same query in canonical long form (always supported).
+          iam-jit audit query \\
+              --filter unmapped.iam_jit.agent.session_id=019687ef-...
 
           # Counts only.
           iam-jit audit query --format summary
@@ -497,6 +567,15 @@ def register_audit_query_group(parent_group: click.Group) -> click.Group:
         """
         if limit < 1 or limit > 10_000:
             raise click.BadParameter("--limit must be in 1..10000")
+
+        # #320 / §A18: expand short-form filter aliases (e.g.
+        # `agent.session_id=X` → `unmapped.iam_jit.agent.session_id=X`)
+        # CLIENT-SIDE before forwarding so each bouncer's per-product
+        # filter parser still sees the canonical OCSF long-form path.
+        # UAT verified the spec-example copy-pasted short-form crashed
+        # per-bouncer parsers with HTTP 400; this expansion closes the
+        # gap without requiring per-bouncer changes.
+        filter_exprs = _expand_short_form_filters(filter_exprs)
 
         bouncers = _resolve_bouncer_set(bouncers_raw)
         if not bouncers:
