@@ -13,6 +13,30 @@ within the same release.
 
 ### Fixed
 
+- **ibounce hardcoded HTTPS upstream scheme** (UAT 2026-05-22
+  Variant A + C, KNOWN-CAVEATS A3, task #300,
+  `src/iam_jit/bouncer/proxy.py` + `src/iam_jit/bouncer_cli.py`) —
+  the bouncer always forwarded over HTTPS to the inbound SigV4-
+  signed Host header, so pointing it at LocalStack
+  (`http://127.0.0.1:4566`) failed and UAT had to bypass ibounce
+  for every write. CRITICAL launch-blocker. Adds `ibounce run
+  --upstream URL` flag with new `parse_upstream_url(url)` helper
+  that extracts scheme + host:port + validates scheme ∈ {http,
+  https} (rejects `ftp://`, `file://`, schemeless URLs at startup
+  with a clear error). New `ProxyConfig.forward_host_override`
+  field threads the parsed host through both `_forward_to_aws`
+  call sites; existing CRIT-32-01 outbound-host allowlist still
+  gates the override target. Default behaviour unchanged when
+  `--upstream` is unset (forward to signed Host over HTTPS — the
+  real-AWS shape). Regression coverage in
+  `tests/bouncer/test_proxy_upstream_scheme.py` (14 tests: parser
+  unit + CLI-startup-rejection + end-to-end mock-LocalStack +
+  no-override regression-guard). End-to-end verified against
+  LocalStack 3.8 on 2026-05-22:
+  `list_buckets / create_bucket / put_object / get_object` all
+  200 through `ibounce --upstream http://127.0.0.1:4566 --mode
+  transparent`, audit log shows `allow` verdicts on each call.
+
 - **Solo-mode self-approve deadlock** (Variant B UAT finding #2,
   `src/iam_jit/routes/requests.py`) — `IAM_JIT_DEPLOYMENT_MODE=solo`
   enabled the self-approve-reductions gate but the auto-approve

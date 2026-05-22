@@ -920,7 +920,20 @@ class ProxyConfig:
     forward_scheme: str = "https"
     """Outbound scheme for forwarding allowed requests. Defaults to
     HTTPS (real AWS endpoints). Tests pass "http" to forward to a
-    local mock-AWS server."""
+    local mock-AWS server. #300 — also set from the scheme of the
+    operator's --upstream URL when that flag is passed."""
+    forward_host_override: str | None = None
+    """#300 — when set, the outbound forward goes to THIS host:port
+    instead of the inbound Host header. Used to point ibounce at a
+    LocalStack / mock-AWS endpoint (e.g. `127.0.0.1:4566`) without
+    requiring the SDK client to set a non-AWS Host header. The
+    SigV4 signature is over the inbound Host (which boto3 derives
+    from AWS_ENDPOINT_URL), so this override + LocalStack's lax
+    signature validation is the standard LocalStack flow. The
+    CRIT-32-01 outbound-host allowlist still gates the override
+    target (loopback / .amazonaws.com / operator-supplied
+    EXTRA_HOSTS). Default None = forward to the signed Host
+    (existing real-AWS behaviour)."""
     active_profile: Any = None
     """Slice 7: the resolved Profile object whose denies act as a
     hard floor above task/global rules. None or `Profile(name='full-user')`
@@ -1664,6 +1677,67 @@ def evaluate_request(
 # ---------------------------------------------------------------------------
 
 
+class UpstreamUrlError(ValueError):
+    """#300 — raised when the operator's --upstream URL can't be
+    parsed into a scheme + host:port. The CLI catches + surfaces
+    this to the operator at startup so a misconfigured upstream
+    fails fast (before any agent traffic lands)."""
+
+
+def parse_upstream_url(url: str) -> tuple[str, str]:
+    """#300 — parse an operator-supplied upstream URL into
+    (scheme, host_with_optional_port).
+
+    Validates:
+      - URL is non-empty
+      - Scheme is one of {http, https} (rejects ftp://, file://,
+        bare hostnames without a scheme, etc.)
+      - Host component is non-empty
+
+    Returns a tuple ready to plug into ProxyConfig.forward_scheme +
+    ProxyConfig.forward_host_override. Raises UpstreamUrlError with
+    a human-readable message on any validation failure — the CLI
+    surfaces this verbatim so the operator fixes the flag once.
+
+    Examples:
+      parse_upstream_url("http://127.0.0.1:4566")  -> ("http", "127.0.0.1:4566")
+      parse_upstream_url("https://api.example.com") -> ("https", "api.example.com")
+      parse_upstream_url("ftp://invalid")           -> UpstreamUrlError
+      parse_upstream_url("127.0.0.1:4566")          -> UpstreamUrlError (no scheme)
+    """
+    if not url or not isinstance(url, str):
+        raise UpstreamUrlError(
+            "upstream URL is empty; pass a URL like "
+            "'http://127.0.0.1:4566' (LocalStack) or "
+            "'https://s3.us-east-1.amazonaws.com'."
+        )
+    from urllib.parse import urlparse
+    parsed = urlparse(url)
+    scheme = (parsed.scheme or "").lower()
+    if scheme not in ("http", "https"):
+        # Cover both the no-scheme case (urlparse stuffs the whole
+        # thing into `.path` when there's no `://`) and the wrong-
+        # scheme case (ftp, file, ws, etc.).
+        if not scheme:
+            raise UpstreamUrlError(
+                f"upstream URL {url!r} has no scheme; expected "
+                f"'http://...' or 'https://...'. Refusing to default "
+                f"to https because the operator likely meant http (the "
+                f"common LocalStack mistake). #300."
+            )
+        raise UpstreamUrlError(
+            f"upstream URL {url!r} has unsupported scheme {scheme!r}; "
+            f"ibounce only forwards http or https. #300."
+        )
+    # urlparse handles `host:port` correctly inside netloc.
+    if not parsed.netloc:
+        raise UpstreamUrlError(
+            f"upstream URL {url!r} has no host; expected something "
+            f"like 'http://127.0.0.1:4566' (host:port required)."
+        )
+    return scheme, parsed.netloc
+
+
 def _forward_url(host: str, path_qs: str, scheme: str = "https") -> str:
     """Build the outbound URL for forwarding.
 
@@ -2299,10 +2373,14 @@ async def _forward_after_sync_allow(
                 "x-iam-jit-bouncer-refusal": "forward-host-mismatch",
             },
         )
+    # #300 — operator-supplied upstream host override (e.g.
+    # `--upstream http://127.0.0.1:4566` for LocalStack). When unset,
+    # forward to the SigV4-signed Host header (real-AWS behaviour).
+    forward_target_host = config.forward_host_override or host_header
     try:
         status, resp_headers, resp_body = await _forward_to_aws(
             method=request.method,
-            host=host_header,
+            host=forward_target_host,
             path_qs=request.path_qs,
             headers=list(request.headers.items()),
             body=body,
@@ -2514,10 +2592,14 @@ async def _handle_request(request, *, store, config: ProxyConfig, session):
     # value, which can break legitimate clients sending multi-value
     # headers (e.g. multiple `Forwarded:` headers via a proxy chain).
     # Pass as list-of-tuples instead so multi-values round-trip.
+    # #300 — operator-supplied upstream host override (e.g.
+    # `--upstream http://127.0.0.1:4566` for LocalStack). When unset,
+    # forward to the SigV4-signed Host header (real-AWS behaviour).
+    forward_target_host = config.forward_host_override or host_header
     try:
         status, resp_headers, resp_body = await _forward_to_aws(
             method=request.method,
-            host=host_header,
+            host=forward_target_host,
             path_qs=request.path_qs,
             headers=list(request.headers.items()),
             body=body,

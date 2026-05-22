@@ -2923,6 +2923,20 @@ def _parse_duration(raw: str) -> int:
          "real credentials).",
 )
 @click.option(
+    "--upstream",
+    "upstream_url",
+    default=None,
+    help="#300 — point ibounce at a non-AWS upstream (LocalStack, "
+         "moto, custom mock-AWS). Format: 'http://HOST:PORT' or "
+         "'https://HOST:PORT'. The scheme of this URL drives outbound "
+         "TLS choice (http vs https); the host:port becomes the "
+         "forward target instead of the inbound SigV4-signed Host "
+         "header. Example: --upstream http://127.0.0.1:4566 (LocalStack "
+         "default). Schemeless URLs + non-http(s) schemes (ftp://, "
+         "file://) are rejected at startup. Leave unset to forward to "
+         "real AWS (the SigV4-signed Host header, https).",
+)
+@click.option(
     "--prompt-on-deny", is_flag=True, default=False,
     help="Enqueue every transparent-mode DENY in the pending-prompts "
          "queue so the operator can later answer via `bouncer prompts "
@@ -3318,7 +3332,9 @@ def _parse_duration(raw: str) -> int:
 @click.pass_context
 def run_cmd(
     ctx: click.Context,
-    port: int, host: str, force_external_bind: bool, prompt_on_deny: bool,
+    port: int, host: str, force_external_bind: bool,
+    upstream_url: str | None,
+    prompt_on_deny: bool,
     sync_prompt_on_deny: bool,
     sync_prompt_timeout: int,
     sync_prompt_default: str,
@@ -3441,6 +3457,23 @@ def run_cmd(
         preset_banner_lines = format_banner(
             _preset, derived_keys=derived, skipped_keys=skipped,
         )
+
+    # #300 — parse the operator's --upstream URL up-front so a bad
+    # value (schemeless, ftp://, etc.) fails fast with a clear
+    # message BEFORE we touch the DB, validate licenses, or start
+    # serve(). The parser validates scheme ∈ {http, https} + host
+    # non-empty.
+    from .bouncer.proxy import UpstreamUrlError, parse_upstream_url
+    forward_scheme_resolved = "https"
+    forward_host_override_resolved: str | None = None
+    if upstream_url:
+        try:
+            forward_scheme_resolved, forward_host_override_resolved = (
+                parse_upstream_url(upstream_url)
+            )
+        except UpstreamUrlError as _e:
+            click.secho(f"--upstream error: {_e}", fg="red", err=True)
+            sys.exit(2)
 
     # CRIT-32-02 closure: refuse externally-bindable hosts unless the
     # operator explicitly acknowledged. The proxy holds AWS SigV4
@@ -3633,6 +3666,8 @@ def run_cmd(
         port=port,
         mode=ProxyMode(mode.lower()),
         default_policy=DefaultPolicy(default_policy.lower()),
+        forward_scheme=forward_scheme_resolved,
+        forward_host_override=forward_host_override_resolved,
         active_profile=active_profile,
         account_id=account_id_flag,
         account_alias=account_alias_flag,
@@ -3719,6 +3754,18 @@ def run_cmd(
             f"profile={active_profile.name})",
             err=True,
         )
+        # #300 — surface --upstream resolution in the startup banner so
+        # the operator sees the override before any traffic lands. Quiet
+        # when --upstream is unset (default real-AWS / signed-Host
+        # behaviour); only mentioned on opt-in.
+        if upstream_url:
+            click.echo(
+                f"  upstream override: {forward_scheme_resolved}://"
+                f"{forward_host_override_resolved} "
+                f"(forwarding bypasses inbound Host header; CRIT-32-01 "
+                f"allowlist still applies)",
+                err=True,
+            )
         # #254 — preset-derivation banner sits RIGHT AFTER the address
         # line so the operator immediately sees which settings came
         # from the preset (vs. their own flags / env). Same format
