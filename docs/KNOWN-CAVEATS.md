@@ -61,11 +61,12 @@ Tracking: every BUG entry has a task number (e.g., #299). v1.0 release gate: eve
 - **Workaround until fix:** none — gbounce is HTTPS-CONNECT-only in v1.0.
 - **Task:** #305 — needs creation (added below).
 
-## A8. kbouncer + dbouncer: stale `bin/` binaries in repos — `STATUS: QUEUED`
+## A8. kbouncer + dbouncer: stale `bin/` binaries in repos — `STATUS: FIXED (2026-05-22)`
 - **Severity:** HIGH
-- **Symptom:** Checked-in `bin/kbounce` and `bin/dbounce` may lag source by days. Users running the pre-built binary miss recent features (UI, audit endpoints, agent identity, etc.).
-- **Workaround until fix:** always `go build -o bin/kbounce ./cmd/kbounce` (and same for dbounce) before first use.
-- **Tasks:** #306 + #307 — need creation. Remove pre-built `bin/` from repos; only `go install` supported.
+- **Symptom (historical):** README led with `go build ./cmd/<binary>` followed by `./<binary> run`, encouraging a workflow where someone could commit a pre-built binary that lags source by days. Users picking up the repo and running the stale `./bin/<binary>` silently missed recent features (UI, audit endpoints, agent identity, etc.).
+- **Fix:** Both repos canonicalize `go install` as THE install path. The README "Install" section now leads with `go install github.com/trsreagan3/<repo>/cmd/<binary>@latest`, which builds fresh from source every time — no stale binary surface possible. Local-dev iteration uses `make build` (writes to gitignored `./bin/`) or `make install` (writes to `$GOPATH/bin`). `bin/` was already gitignored in both repos; this slice locks in the documentation + Makefile shape to keep it that way.
+- **Verification:** `go install github.com/trsreagan3/kbouncer/cmd/kbounce@latest` and `go install github.com/trsreagan3/dbounce/cmd/dbounce@latest` both succeed against the public module proxy (gbounce-routed run on 2026-05-22 — kbounce v0.0.0-20260522064802-131bcaca7334, dbounce v0.0.0-20260522064202-a7a8a2d49a4d).
+- **Tasks closed:** #306 + #307. ibounce (Python; iam-roles repo) ships via `pip install`; gbounce ships via the same `go install` shape as kbounce/dbounce and is unaffected by this caveat.
 
 ---
 
