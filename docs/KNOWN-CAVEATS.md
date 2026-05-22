@@ -49,17 +49,17 @@ Tracking: every BUG entry has a task number (e.g., #299). v1.0 release gate: eve
 - **Fix shipped (dbounce #302, commit `d0dccff`):** parser now dispatches on `pg_query.Node_GrantStmt` / `Node_GrantRoleStmt` / `Node_AlterDefaultPrivilegesStmt` and surfaces three new statement types (`StmtGrant` / `StmtRevoke` / `StmtAlterPrivileges`) + two new predicates (`IsDCL` + `DCLTargetsPublic`). The walker sets `DCLTargetsPublic=true` when any grantee resolves to PG's `PUBLIC` pseudo-role; REVOKE direction never sets the predicate (revoking FROM PUBLIC is cleanup). A new `Profile.DenyDCLTargetsPublic` field fires at Order 2.5 in the composition (after deny_keywords / deny_actions, BEFORE allow_baseline) so a permissive sql_read_only baseline can't let a PUBLIC-targeting grant through. The `safe-default` profile in `internal/profile/defaults.yaml` now ships with `deny_dcl_targets_public: true` on by default. Regression coverage: `TestParse_GrantAllPrivilegesToPublic`, `TestParse_GrantSelectOnTableToSpecificUser`, `TestParse_GrantCaseInsensitivePublic`, `TestParse_RevokeFromPublic`, `TestParse_RevokeFromSpecificUser`, `TestParse_AlterDefaultPrivilegesGrantToPublic`, `TestParse_AlterDefaultPrivilegesGrantToSpecificUser`, `TestParse_GrantRoleToUser`, `TestParse_GrantMultipleGranteesIncludesPublic`, `TestEvaluate_SafeDefault_DeniesGrantAllToPublic`, `TestEvaluate_SafeDefault_DeniesAlterDefaultPrivilegesGrantToPublic`, `TestEvaluate_SafeDefault_AllowsGrantToSpecificUser`, `TestEvaluate_SafeDefault_AllowsRevokeFromPublic`, `TestEvaluate_DCLFloor_NotConsultedWhenDisabled`, `TestEvaluate_DCLFloor_FiresBeforeAllowBaseline`. End-to-end verified with psycopg2 against the dogfood Postgres (4 task-spec scenarios + baseline SELECT all returned expected verdicts). See dbounce CHANGELOG "Unreleased / #302" for the full design rationale.
 - **Task:** #302 — completed 2026-05-22.
 
-## A6. gbounce: unreachable-host CONNECTs not logged — `STATUS: QUEUED`
+## A6. gbounce: unreachable-host CONNECTs not logged — `STATUS: FIXED`
 - **Severity:** HIGH
 - **Symptom:** SSRF probes against private IPs (e.g., `169.254.169.254`) are INVISIBLE. gbounce only audits successful CONNECTs.
 - **Workaround until fix:** monitor stdout log for connection errors.
-- **Task:** #303 — queued.
+- **Task:** #303 — fixed 2026-05-22. Failed CONNECT attempts now emit OCSF events with `activity_id=6 (Connect)`, `status_id=2 (Failure)`, `verdict=ALLOW`, `unmapped.iam_jit.ext.connect_refused=true` + `connect_error=<dial-err>`. Same `host:port` extraction as successful-CONNECT happy path, so SIEM pivot on `dst_endpoint.hostname` correlates failures with successes. Regression test: `TestProxy_UnreachableHostCONNECTLogged` + `TestProxy_DNSFailureCONNECTLogged` in `internal/proxy/proxy_test.go`.
 
-## A7. gbounce: non-CONNECT requests rejected with no audit — `STATUS: QUEUED`
+## A7. gbounce: non-CONNECT requests rejected with no audit — `STATUS: FIXED`
 - **Severity:** HIGH
 - **Symptom:** Plain HTTP requests get 421 "only CONNECT accepted" → silently dropped, no audit event. IMDS attacks (plain HTTP) invisible.
 - **Workaround until fix:** none — gbounce is HTTPS-CONNECT-only in v1.0.
-- **Task:** #305 — needs creation (added below).
+- **Task:** #305 — fixed 2026-05-22. Rejected non-CONNECT requests now emit OCSF events with `activity_id` derived from method, `status_id=4 (Denied)`, `verdict=DENY`, `unmapped.iam_jit.ext.deny_reason="non-CONNECT method on CONNECT-only listener"`. Method + host + path captured pre-TLS so IMDS probes (`GET http://169.254.169.254/latest/meta-data/...`) land in the audit row with their target host + path visible. Regression test: `TestProxy_NonCONNECTRequestLogged` in `internal/proxy/proxy_test.go`.
 
 ## A10. Local audit-log retention is not robust — `STATUS: QUEUED`
 - **Severity:** HIGH (would surprise operators after 30-60 days of use)
@@ -76,6 +76,19 @@ Tracking: every BUG entry has a task number (e.g., #299). v1.0 release gate: eve
   8. `docs/LOG-RETENTION.md` with defaults + admin-override
 - **Workaround until fix:** operator-side cron + manual `*bounce diagnostics bundle` (#277)
 - **Task:** #311.
+
+## A12. gbounce: no domain blacklist + wildcard support — `STATUS: QUEUED`
+- **Severity:** HIGH (pre-launch feature gap; operators need to block specific domains without MITM)
+- **Symptom:** gbounce can audit-log every CONNECT, but it can't REFUSE one based on destination host. Operators who want "block this agent from calling api.openai.com" have no way to do it.
+- **What ships:**
+  - Profile YAML: `deny_hosts: [...]` list with exact + wildcard entries (`*.openai.com`, `evil.example.com`, `169.254.169.254`)
+  - CLI: `--deny-host` flag (repeatable) for ad-hoc deny rules
+  - Wildcard semantics: `*.example.com` matches `api.example.com`, `foo.bar.example.com`, AND bare `example.com` (operators usually mean "this org and all subdomains"; document the choice)
+  - Multi-level wildcards (`*.foo.*.bar.com`) rejected at config-parse time with clear error
+  - On CONNECT deny: emit OCSF event `verdict=deny`, `status_id=4 (Denied)`, `ext.deny_reason="matched deny_hosts: *.openai.com"`
+  - Order of evaluation: deny_hosts wins over any allow_hosts list
+- **Engineering scope:** ~1-2 days; matches existing kbounce/dbounce profile deny-list patterns
+- **Task:** #314.
 
 ## A8. kbouncer + dbouncer: stale `bin/` binaries in repos — `STATUS: FIXED (2026-05-22)`
 - **Severity:** HIGH
