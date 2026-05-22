@@ -1,0 +1,124 @@
+# example-data-team.yaml — analyst / data-engineering persona
+#
+# Read-only on the data warehouse + denies on customer-PII-tagged
+# resources. Use as the per-team profile for data engineering /
+# analytics / BI agents. Pair with example-org-base.yaml as the
+# universal floor.
+#
+# Status: POST-PIVOT PREVIEW for the cross-bouncer `bouncer:` field;
+# canonical once task #323 lands.
+
+schema_version: 1
+profile_name: data-team
+description: |
+  Data team persona — wide read access to warehouses + lake +
+  notebooks; writes denied; customer-PII reads denied regardless.
+  Use as the per-team profile for data engineering and analytics
+  agents.
+
+denies:
+
+  # ----- AWS (ibounce) -----
+
+  # Universal write-block for the data-team persona. Reads through
+  # the readonly-baseline are fine; writes are denied. (The org-base
+  # already denies destructive verbs; this is the broader
+  # write-block specific to the data-team's permission boundary.)
+  - bouncer: ibounce
+    deny_verbs:
+      - "*:Put*"
+      - "*:Delete*"
+      - "*:Update*"
+      - "*:Modify*"
+      - "*:Create*"
+      - "*:Terminate*"
+    exceptions:
+      # Reasonable analyst write surfaces — Athena query history,
+      # query result S3 staging, CloudWatch dashboard saves.
+      - "athena:CreateNamedQuery"
+      - "athena:UpdateNamedQuery"
+      - "athena:StartQueryExecution"
+      - "s3:PutObject@arn:aws:s3:::*-athena-query-results/*"
+      - "cloudwatch:PutDashboard"
+    reason: "data-team agents are read-mostly; writes through narrow exceptions only"
+
+  # PII-tagged S3 reads. Even reads are denied — analysts who need
+  # PII go through a separate per-task scope with human approval.
+  - bouncer: ibounce
+    target: "arn:aws:s3:::*"
+    actions: ["s3:GetObject", "s3:ListBucket"]
+    condition:
+      "s3:ExistingObjectTag/data_classification": "PII"
+    reason: "customer-PII reads require named per-task approval"
+
+  # Glue catalog mutations. Reads of the catalog (table schemas)
+  # are fine; mutating the catalog requires admin approval.
+  - bouncer: ibounce
+    target: "arn:aws:glue:*:*:*"
+    actions:
+      - "glue:CreateDatabase"
+      - "glue:DeleteDatabase"
+      - "glue:CreateTable"
+      - "glue:DeleteTable"
+      - "glue:UpdateTable"
+    reason: "data catalog mutations are not in the data-team agent scope"
+
+  # ----- Databases (dbounce) -----
+
+  # SQL writes — same shape as the AWS write block, applied at
+  # the database layer. Data team's agent gets SELECT but not
+  # INSERT / UPDATE / DELETE / DDL.
+  - bouncer: dbounce
+    sql_statement_types: ["INSERT", "UPDATE", "DELETE", "TRUNCATE", "DROP", "ALTER", "CREATE"]
+    reason: "data-team agents are read-mostly at the database layer"
+
+  # Customer-PII tables. Same boundary as the S3 PII deny —
+  # PII reads require named per-task approval, not the default
+  # data-team profile.
+  - bouncer: dbounce
+    deny_keywords: ["customer_pii", "customer_secrets", "customer_addresses", "ssn", "tax_id"]
+    keyword_targets: ["table_name", "column_name"]
+    keyword_match: "word_boundary"
+    sql_statement_types: ["SELECT"]
+    reason: "customer-PII tables require named per-task approval"
+
+  # System-catalog reads. pg_catalog / information_schema /
+  # mysql.* reads are not part of an analyst workload. The
+  # exception is documented per-DB-engine system tables that
+  # are commonly needed for diagnostics.
+  - bouncer: dbounce
+    deny_keywords: ["pg_authid", "mysql.user", "sys.server_principals"]
+    keyword_targets: ["table_name"]
+    keyword_match: "exact"
+    reason: "user/role catalog reads are scope creep for the data-team profile"
+
+  # ----- Kubernetes (kbouncer) -----
+
+  # Notebook + Spark workloads run in known namespaces; agent gets
+  # read on pods/services but no write. (No data-team agent needs
+  # to exec into notebook pods directly.)
+  - bouncer: kbouncer
+    namespaces: ["jupyterhub", "spark", "airflow", "data-platform"]
+    verbs: ["create", "update", "patch", "delete", "deletecollection", "exec"]
+    resources: ["*"]
+    reason: "data-team agents are read-mostly on the data platform namespaces"
+
+  # All other namespaces — no access. The data-team persona
+  # doesn't reach into platform / payments / app namespaces.
+  - bouncer: kbouncer
+    namespaces: ["*"]
+    exclude_namespaces: ["jupyterhub", "spark", "airflow", "data-platform", "default"]
+    verbs: ["*"]
+    resources: ["*"]
+    reason: "data-team agents stay in the data platform namespaces"
+
+# This profile is opt-in per team via the index.yaml's
+# applies_to_teams field. Engineers on the data-engineering /
+# analytics teams get this profile + org-base + (optionally)
+# pci-compliance, depending on the index routing.
+
+# Minimum-TTL caps — analyst sessions are typically longer; allow
+# up to 4 hours but no more. Override on a per-task basis if a
+# long-running data backfill genuinely needs longer.
+min_ttl_caps:
+  default_max_minutes: 240    # 4 hours

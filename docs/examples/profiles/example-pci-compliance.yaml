@@ -1,0 +1,132 @@
+# example-pci-compliance.yaml — payment-systems off-limits to agents
+#
+# For fintech / e-commerce / any business that handles cardholder
+# data. Denies reads + writes against card-data systems across all
+# four bouncers. Pair with example-org-base.yaml + example-prod-deny.yaml.
+#
+# IMPORTANT HONEST CAVEAT — per [[ibounce-honest-positioning]]:
+# This profile is a TOOL that makes a PCI / HIPAA / SOC 2 audit
+# easier. It is NOT a "PCI-certified" artifact and the Bounce suite
+# is NOT a certified compliance product. Use this alongside your
+# real compliance program (cardholder-data-environment scoping,
+# vulnerability management, access logging review, etc.). The
+# bouncer enforces what your security team writes; it does not
+# substitute for the policy work.
+#
+# Status: POST-PIVOT PREVIEW for the cross-bouncer `bouncer:` field;
+# canonical once task #323 lands.
+
+schema_version: 1
+profile_name: pci-compliance
+description: |
+  Deny agent access to payment systems, cardholder-data buckets /
+  tables, and payment-processor integrations. Tooling support for
+  a PCI-scoped CDE boundary, NOT a compliance certification.
+
+denies:
+
+  # ----- AWS (ibounce) -----
+
+  # S3 buckets tagged as cardholder data. The data_classification
+  # tag is set by your data-governance team; the bouncer reads it
+  # at request time. Untagged buckets are not matched — tag hygiene
+  # is part of your CDE inventory work.
+  - bouncer: ibounce
+    target: "arn:aws:s3:::*"
+    actions: ["s3:GetObject", "s3:PutObject", "s3:DeleteObject", "s3:ListBucket"]
+    condition:
+      "s3:ExistingObjectTag/data_classification": "PCI"
+    reason: "agents must not touch PCI-tagged S3 objects"
+
+  # RDS / DynamoDB clusters by name pattern. Card-data tables
+  # typically follow a consistent naming convention; if yours
+  # doesn't, get it consistent before relying on this match.
+  - bouncer: ibounce
+    target: "arn:aws:rds:*:*:cluster:*card-data*"
+    actions: ["rds:*"]
+    reason: "card-data RDS clusters are out-of-bounds for agents"
+
+  - bouncer: ibounce
+    target: "arn:aws:dynamodb:*:*:table/*card*"
+    actions: ["dynamodb:*"]
+    reason: "card-data DynamoDB tables are out-of-bounds for agents"
+
+  # KMS keys used for cardholder-data encryption. Even Encrypt
+  # without Decrypt leaks a copy of plaintext through audit logs;
+  # block both ways unless the agent's task explicitly needs it.
+  - bouncer: ibounce
+    target: "arn:aws:kms:*:*:alias/cardholder-*"
+    actions: ["kms:Decrypt", "kms:Encrypt", "kms:GenerateDataKey", "kms:ReEncrypt*"]
+    reason: "cardholder-data KMS keys require human approval"
+
+  # Payment-processor secrets in Secrets Manager. Naming
+  # convention varies; tune this to your shop. Use a prefix
+  # convention so new secrets are caught automatically.
+  - bouncer: ibounce
+    target: "arn:aws:secretsmanager:*:*:secret:payment-processor/*"
+    actions: ["secretsmanager:GetSecretValue", "secretsmanager:DescribeSecret"]
+    reason: "payment-processor credentials are out-of-bounds for agents"
+
+  # ----- Kubernetes (kbouncer) -----
+
+  # Pods + services in the CDE namespace. If your CDE runs in a
+  # dedicated namespace (it should), block all agent verbs there.
+  - bouncer: kbouncer
+    namespaces: ["payments-cde", "card-processing", "card-vault"]
+    verbs: ["*"]
+    resources: ["*"]
+    reason: "CDE namespaces are out-of-bounds for agents"
+
+  # ----- Databases (dbounce) -----
+
+  # Card-data tables across schema + table name. Reads + writes
+  # both blocked; this is a confidentiality boundary.
+  - bouncer: dbounce
+    deny_keywords: ["card", "cardholder", "pan", "payment_method", "credit_cards"]
+    keyword_targets: ["table_name", "column_name", "schema_name"]
+    keyword_match: "word_boundary"
+    sql_statement_types: ["SELECT", "INSERT", "UPDATE", "DELETE"]
+    reason: "card-data tables off-limits to agents"
+
+  # PAN-shaped data in literals. dbounce can match on argument
+  # content shape; a 13-19 digit literal in a query is suspicious.
+  # NOTE: regex matching on literals is BEST-EFFORT and bypass-able
+  # by encoded values — see KNOWN-CAVEATS.md §dbounce SQL redaction
+  # gaps for the precise limitations.
+  - bouncer: dbounce
+    sql_literal_patterns:
+      - "\\b4[0-9]{12}(?:[0-9]{3})?\\b"     # Visa-shape
+      - "\\b5[1-5][0-9]{14}\\b"              # MC-shape
+      - "\\b3[47][0-9]{13}\\b"               # AmEx-shape
+    reason: "literal PAN-shaped values must not appear in agent queries"
+
+  # ----- HTTP (gbounce) -----
+
+  # Payment-processor API endpoints. Block the common ones; add
+  # the specific processor URLs your shop uses.
+  - bouncer: gbounce
+    deny_hostname_patterns:
+      - "*.stripe.com"
+      - "*.adyen.com"
+      - "*.braintreepayments.com"
+      - "*.checkout.com"
+      - "api.example-payment-processor.com"
+    reason: "agents must not call payment-processor APIs directly"
+
+# Audit-export — PCI requires audit-trail of all access attempts to
+# CDE resources. The webhook env vars below should point at your
+# PCI-scoped log destination (typically a separate Splunk index
+# with longer retention).
+audit_export:
+  webhook_url_env: ORG_PCI_SIEM_WEBHOOK_URL
+  webhook_token_env: ORG_PCI_SIEM_WEBHOOK_TOKEN
+  preset: splunk-hec
+  retention_hint_days: 365   # advisory only; actual retention is your SIEM's setting
+
+# Alert routes — denies in this profile are by definition
+# high-severity; route everything to PagerDuty.
+alert_routes:
+  - match: { profile_name: pci-compliance }
+    destination: pagerduty
+    routing_key_env: ORG_PAGERDUTY_PCI_KEY
+    severity_override: critical

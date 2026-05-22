@@ -1,0 +1,144 @@
+# example-ci-runner.yaml — CI/CD bot configuration
+#
+# For CI/CD agents (GitHub Actions, GitLab CI, Buildkite, etc.).
+# CI runners are the highest-leverage attack surface in most orgs —
+# long-lived credentials, no human in the loop, often broad-by-
+# default permissions. This profile clamps a CI agent hard:
+#
+#   - No production writes (use example-prod-deny.yaml's keyword
+#     match across all dimensions)
+#   - No IAM mutations of any kind
+#   - 5-minute TTL ceiling on per-task scopes
+#   - Audit-export to the org's SIEM mandatory; degraded export
+#     stops the runner instead of falling back to local JSONL
+#
+# Status: POST-PIVOT PREVIEW for the cross-bouncer `bouncer:` field;
+# canonical once task #323 lands.
+
+schema_version: 1
+profile_name: ci-runner
+description: |
+  CI/CD bot profile — clamps a CI agent to a known-narrow surface
+  with mandatory audit-export and a 5-minute TTL ceiling.
+
+denies:
+
+  # ----- AWS (ibounce) -----
+
+  # No IAM mutations at all from CI. Even
+  # `iam:PassRole` (commonly needed for app deploy) goes through
+  # a separately-named CI deploy profile, not this one.
+  - bouncer: ibounce
+    actions:
+      - "iam:*"
+    reason: "no IAM mutations from CI; use a dedicated deploy profile"
+
+  # CI agents must not stop / pause the bouncer itself. Any
+  # attempt to call `bouncer pause` from a CI runner is a red flag.
+  - bouncer: ibounce
+    actions:
+      - "ibounce:Pause"
+      - "ibounce:UpdateProfile"
+      - "ibounce:DeleteProfile"
+    reason: "CI agents must not modify the bouncer's own state"
+
+  # Common destructive verbs across all services.
+  - bouncer: ibounce
+    deny_verbs:
+      - "*:Delete*"
+      - "*:Terminate*"
+      - "*:Reboot*"
+      - "*:Stop*"
+    exceptions:
+      # Reasonable test-tier cleanup
+      - "s3:DeleteObject@arn:aws:s3:::*-ci-artifacts/*"
+      - "ecr:BatchDeleteImage@arn:aws:ecr:*:*:repository/*-ci-*"
+    reason: "CI agents should not destroy resources outside CI-tagged scope"
+
+  # ----- Kubernetes (kbouncer) -----
+
+  # CI agents only touch namespaces tagged for CI use.
+  - bouncer: kbouncer
+    namespaces: ["*"]
+    exclude_namespaces: ["ci", "ci-tests", "ci-staging", "test-fixtures"]
+    verbs: ["create", "update", "patch", "delete", "deletecollection", "exec"]
+    resources: ["*"]
+    reason: "CI agents stay in CI-tagged namespaces"
+
+  # ----- Databases (dbounce) -----
+
+  # CI agents should never touch production databases. Test
+  # databases (ci_*, test_*) only.
+  - bouncer: dbounce
+    deny_keywords: ["prod", "production", "live"]
+    keyword_targets: ["database_name", "schema_name", "table_name"]
+    keyword_match: "word_boundary"
+    reason: "CI agents must not reach production databases"
+
+  # ----- HTTP (gbounce) -----
+
+  # External-network egress. CI agents typically need npm /
+  # PyPI / package-registry reads but nothing else outbound.
+  # Allow a narrow set of registries; deny everything else.
+  - bouncer: gbounce
+    deny_hostname_patterns:
+      - "*"
+    allow_hostname_patterns:
+      - "registry.npmjs.org"
+      - "pypi.org"
+      - "*.pypi.org"
+      - "files.pythonhosted.org"
+      - "proxy.golang.org"
+      - "sum.golang.org"
+      - "rubygems.org"
+      - "registry.hub.docker.com"
+      - "*.docker.io"
+      - "ghcr.io"
+      - "github.com"
+      - "api.github.com"
+      - "objects.githubusercontent.com"
+      - "raw.githubusercontent.com"
+    reason: "CI egress restricted to known package registries + GitHub"
+
+# ---------------------------------------------------------------------
+# Audit-export — CI runs are inherently auditable and the export is
+# mandatory. on_export_failure: fail-closed means the proxy
+# REFUSES requests if it cannot reach the SIEM webhook. This is
+# the right default for CI; an agent running unobserved is exactly
+# the failure mode CI bouncers exist to prevent.
+# ---------------------------------------------------------------------
+audit_export:
+  webhook_url_env: ORG_SIEM_WEBHOOK_URL
+  webhook_token_env: ORG_SIEM_WEBHOOK_TOKEN
+  preset: splunk-hec
+  on_export_failure: fail-closed   # CI-specific: no fallback-to-local
+
+# Alert routes — CI alerts go to the platform on-call rotation, not
+# secops, because most CI failures are operational not security.
+# Critical denies (IAM mutations, prod attempts) still page secops.
+alert_routes:
+  - match: { severity: critical }
+    destination: pagerduty
+    routing_key_env: ORG_PAGERDUTY_SECOPS_KEY
+
+  - match: { profile_name: ci-runner }
+    destination: slack
+    webhook_env: ORG_SLACK_CI_WEBHOOK
+    channel: "#ci-alerts"
+
+# Minimum-TTL caps — 5 minutes is the hard ceiling. CI tasks that
+# need longer should be split into smaller named tasks, each with
+# its own scope and TTL. (Long-running CI jobs that genuinely need
+# credentials for the full duration are usually a sign the job
+# should be re-architected.)
+min_ttl_caps:
+  default_max_minutes: 5
+  hard_ceiling_minutes: 5
+
+# Recommended CI runner invocation:
+#
+#   # In your CI job:
+#   pip install iam-jit
+#   bounce init --org-url ${ORG_BOUNCE_URL}
+#   ibounce run --profile ci-runner --background
+#   # ... agent runs here, every AWS call gated by this profile

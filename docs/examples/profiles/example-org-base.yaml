@@ -1,0 +1,170 @@
+# example-org-base.yaml — minimal org-wide deny floor
+#
+# This is the 80%-case starter profile every org should ship. Drop
+# it in your bundle and every engineer's agent inherits these denies
+# regardless of the task. Engineers can ADD task-specific denies on
+# top; they cannot REMOVE these (see the override-semantics section
+# of docs/ORG-PROFILE-DISTRIBUTION.md).
+#
+# Status: POST-PIVOT PREVIEW — the cross-bouncer `bouncer:` annotation
+# is canonical once task #323 lands. Until then, ibounce reads the
+# `denies` block under its own schema (deny_actions / deny_keywords);
+# kbouncer + dbounce + gbounce do the same against their schemas.
+# The bundle index controls fan-out.
+#
+# Validate this file locally before publishing:
+#   bounce profile validate docs/examples/profiles/example-org-base.yaml
+
+schema_version: 1
+profile_name: org-base
+description: |
+  Universal denies applied to every agent across the org. Encodes
+  the safety floor your security team agreed on. Engineers compose
+  with their own task-specific denies; they cannot peel these back.
+
+# ---------------------------------------------------------------------
+# Denies — what the proxy refuses on every agent's behalf.
+#
+# Each entry declares which bouncer it targets. A single org-base
+# profile fans out across all four products; the bouncer that
+# matches the call applies the deny.
+# ---------------------------------------------------------------------
+denies:
+
+  # ----- AWS (ibounce) -----
+
+  # Break-glass roles require human approval. An agent must never
+  # be able to assume a role marked for emergency human use.
+  - target: "arn:aws:iam::*:role/break-glass-*"
+    bouncer: ibounce
+    actions: ["sts:AssumeRole"]
+    reason: "break-glass roles require human approval"
+
+  # Credential minting + privilege escalation. Agents must not
+  # create users, generate access keys, or attach policies that
+  # widen their own permissions.
+  - target: "arn:aws:iam::*:*"
+    bouncer: ibounce
+    actions:
+      - "iam:CreateAccessKey"
+      - "iam:CreateUser"
+      - "iam:CreateLoginProfile"
+      - "iam:UpdateLoginProfile"
+      - "iam:AttachUserPolicy"
+      - "iam:AttachRolePolicy"
+      - "iam:PutUserPolicy"
+      - "iam:PutRolePolicy"
+    reason: "agents must not create credentials or escalate privileges"
+
+  # KMS deletion is irreversible. Even with a 7-30 day waiting
+  # window, scheduling deletion is a destructive admin action.
+  - target: "arn:aws:kms:*:*:key/*"
+    bouncer: ibounce
+    actions: ["kms:ScheduleKeyDeletion", "kms:DisableKey", "kms:DeleteAlias"]
+    reason: "KMS deletion is irreversible at credential-use time"
+
+  # CloudTrail / Config destruction = the audit chain's worst case.
+  # An attacker who can stop the trail removes their own visibility.
+  - target: "*"
+    bouncer: ibounce
+    actions:
+      - "cloudtrail:StopLogging"
+      - "cloudtrail:DeleteTrail"
+      - "cloudtrail:UpdateTrail"
+      - "config:DeleteConfigurationRecorder"
+      - "config:StopConfigurationRecorder"
+    reason: "audit-infrastructure destruction is always an admin action"
+
+  # ----- Kubernetes (kbouncer) -----
+
+  # Cluster-scoped destructive verbs. Namespace-scoped writes are
+  # allowed via per-task scopes; cluster-scoped is admin-only.
+  - target: "cluster"
+    bouncer: kbouncer
+    verbs: ["delete", "deletecollection"]
+    resources: ["namespaces", "nodes", "clusterroles", "clusterrolebindings"]
+    reason: "cluster-scoped destruction requires human approval"
+
+  # Secrets reads at large scope. Per-secret reads via per-task
+  # scopes are fine; `get secrets -A` is the canonical scope-pivot.
+  - target: "cluster"
+    bouncer: kbouncer
+    verbs: ["get", "list", "watch"]
+    resources: ["secrets"]
+    scope: "all-namespaces"
+    reason: "agents must not exfiltrate cluster-wide secrets"
+
+  # ----- Databases (dbounce) -----
+
+  # GRANT ... TO PUBLIC = silent privilege escalation. dbounce ships
+  # this as a built-in safety floor in 0.6+; profiles older than that
+  # version will surface a doctor warning.
+  - bouncer: dbounce
+    sql_patterns: ["GRANT * TO PUBLIC", "GRANT ALL PRIVILEGES TO PUBLIC"]
+    reason: "GRANT TO PUBLIC is silent privilege escalation"
+
+  # DDL on system schemas. App-layer DDL is normal; touching
+  # pg_catalog / information_schema / mysql.* is not.
+  - bouncer: dbounce
+    sql_patterns:
+      - "DROP SCHEMA pg_catalog*"
+      - "ALTER SCHEMA pg_catalog*"
+      - "DROP DATABASE mysql"
+      - "DROP DATABASE information_schema"
+    reason: "system-catalog DDL is destructive admin action"
+
+  # ----- Generic HTTP (gbounce) -----
+
+  # Cloud metadata services. An agent reaching the IMDS endpoint
+  # from inside a container is exfiltrating instance credentials.
+  - target: "169.254.169.254"
+    bouncer: gbounce
+    reason: "IMDS access from agent context is credential exfiltration"
+
+  # Public DNS-over-HTTPS providers. Bypass channel for filtered
+  # egress when other proxy rules deny direct connections.
+  - target: "dns.google"
+    bouncer: gbounce
+    reason: "DNS-over-HTTPS bypasses egress filtering"
+
+# ---------------------------------------------------------------------
+# Audit-export — every decision the bouncer makes flows here.
+#
+# These env vars are read at proxy startup; the bouncer never holds
+# the webhook URL or token in profile state. Rotate the secret in
+# your secret manager + restart the proxy.
+# ---------------------------------------------------------------------
+audit_export:
+  webhook_url_env: ORG_SIEM_WEBHOOK_URL
+  webhook_token_env: ORG_SIEM_WEBHOOK_TOKEN
+  preset: splunk-hec        # or: datadog, elastic — see docs/WEBHOOK-PRESETS.md
+  on_export_failure: degrade-to-local-jsonl
+
+# ---------------------------------------------------------------------
+# Alert routes — conditional notification routing for high-severity
+# decisions. PagerDuty for critical, Slack for everything else.
+# ---------------------------------------------------------------------
+alert_routes:
+  - match: { severity: critical }
+    destination: pagerduty
+    routing_key_env: ORG_PAGERDUTY_KEY
+
+  - match: { severity: high }
+    destination: slack
+    webhook_env: ORG_SLACK_SECOPS_WEBHOOK
+    channel: "#secops-alerts"
+
+# ---------------------------------------------------------------------
+# Minimum-TTL caps — the bouncer issues TTLs shorter than the cap;
+# never longer. Agents that ask for "1 hour" get clamped to 30 min.
+# ---------------------------------------------------------------------
+min_ttl_caps:
+  default_max_minutes: 30
+  ci_runner_max_minutes: 5
+
+# ---------------------------------------------------------------------
+# This profile contributes safety-floor fields tracked by
+# `bounce profile doctor` (see docs/PROFILE-UPGRADE.md). Engineers
+# running an outdated copy of the bundle will see a one-line startup
+# banner on `*bounce run` until they re-sync.
+# ---------------------------------------------------------------------

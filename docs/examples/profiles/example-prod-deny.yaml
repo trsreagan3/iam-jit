@@ -1,0 +1,80 @@
+# example-prod-deny.yaml — production isolation
+#
+# For orgs with a prod/staging split. Denies anything matching the
+# `prod-*` keyword family across ARN + account-alias + Kubernetes
+# namespace + database name dimensions. Compose this with
+# example-org-base.yaml; this profile addresses the "agents must
+# never touch prod from a dev/staging context" boundary.
+#
+# Tune the keyword list (`prod`, `production`, `live`, `customer`)
+# to your shop's naming convention. The default list catches the
+# 80% case; reviewing your AWS Organizations + EKS cluster + RDS
+# cluster naming patterns before publishing is worth ~10 minutes.
+#
+# Status: POST-PIVOT PREVIEW for the cross-bouncer `bouncer:` field;
+# canonical once task #323 lands.
+
+schema_version: 1
+profile_name: prod-deny
+description: |
+  Deny anything matching the prod-* keyword family. Pair with
+  example-org-base.yaml; this profile is the prod/staging boundary.
+
+denies:
+
+  # ----- AWS (ibounce) -----
+  # Keyword-match across ARN + account-alias. word_boundary mode
+  # means `prod-bucket` matches; `productivity-tools` does not.
+  - bouncer: ibounce
+    deny_keywords: ["prod", "production", "live", "customer-data"]
+    keyword_targets: ["arn", "account_alias", "resource_name"]
+    keyword_match: "word_boundary"
+    reason: "isolate prod from staging/dev agent context"
+
+  # Production AWS accounts by ID. Tighter than keyword match;
+  # use only_account_ids if your AWS Organizations alias scheme
+  # is inconsistent.
+  - bouncer: ibounce
+    deny_account_ids:
+      - "111111111111"   # example: prod-us-east-1
+      - "222222222222"   # example: prod-eu-west-1
+    reason: "explicit prod account ID denylist"
+
+  # ----- Kubernetes (kbouncer) -----
+  # Namespace + cluster name match. Block any non-readonly verb
+  # on namespaces matching the prod keyword family.
+  - bouncer: kbouncer
+    deny_keywords: ["prod", "production", "live"]
+    keyword_targets: ["namespace", "cluster_name"]
+    keyword_match: "word_boundary"
+    verbs: ["create", "update", "patch", "delete", "deletecollection"]
+    reason: "no writes to prod namespaces from agent context"
+
+  # ----- Databases (dbounce) -----
+  # Database / schema / table name match. Reads remain allowed;
+  # writes against prod_* tables are blocked. Use this in
+  # combination with example-pci-compliance.yaml if you have
+  # specifically-tagged sensitive data.
+  - bouncer: dbounce
+    deny_keywords: ["prod", "production", "live"]
+    keyword_targets: ["database_name", "schema_name", "table_name"]
+    keyword_match: "word_boundary"
+    sql_statement_types: ["INSERT", "UPDATE", "DELETE", "DROP", "ALTER", "TRUNCATE"]
+    reason: "no writes to prod tables from agent context"
+
+  # ----- HTTP (gbounce) -----
+  # Hostnames matching prod-*. Use only if your internal services
+  # follow a consistent hostname convention.
+  - bouncer: gbounce
+    deny_hostname_patterns:
+      - "prod-*.internal.example.com"
+      - "*.prod.example.com"
+      - "live-*.internal.example.com"
+    reason: "block agent traffic to production internal services"
+
+# Exceptions — known false-positives. Add legitimate ARNs / names
+# that contain the keyword but shouldn't be denied. Review this
+# list quarterly; exceptions are how scope creep enters profiles.
+exceptions:
+  - "arn:aws:s3:::eng-productivity-shared-*"   # `productivity` collides on substring; word_boundary catches it but documented anyway
+  - "production-readme-mirror"                  # internal doc-search index

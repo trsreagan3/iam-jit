@@ -1,0 +1,110 @@
+# index.yaml.template — bundle-index format for org profile
+# distribution.
+#
+# This is the file your engineers point `bounce init --org-url ...`
+# at. The bouncer fetches this index first, then walks the
+# `profiles:` list and fetches each referenced YAML.
+#
+# Hosting: put this file + the referenced profile YAMLs at the same
+# HTTPS-served path. The bouncer resolves `file:` entries relative
+# to the index's URL.
+#
+#   https://internal.example.com/bounce-profiles/index.yaml
+#   https://internal.example.com/bounce-profiles/example-org-base.yaml
+#   https://internal.example.com/bounce-profiles/example-prod-deny.yaml
+#   ...
+#
+# Status: POST-PIVOT PREVIEW — the `applies_to_teams` + `applies_to_contexts`
+# fan-out fields are canonical once task #323 lands. v1.0 ships
+# `profile install --from URL` for single-profile installs; the
+# multi-profile bundle shape described here is the documented
+# direction.
+
+schema_version: 1
+bundle_name: "example-org-bouncer-profiles"
+bundle_version: "1.0.0"
+bundle_sha256: "<computed-at-publish-time>"
+# ↑ Compute with:
+#   sha256sum example-org-base.yaml example-prod-deny.yaml example-pci-compliance.yaml example-data-team.yaml example-ci-runner.yaml | sha256sum
+# Ship the hash in onboarding docs; engineers pin with
+#   bounce init --org-url <url> --sha256 <hash>
+
+# Optional human-readable metadata. Surfaces in `bounce profile show`.
+maintainer: "security@example.com"
+published_at: "2026-05-22T00:00:00Z"
+homepage: "https://internal.example.com/security/bounce-profiles"
+
+profiles:
+
+  # Required — universal floor. Every engineer + CI runner gets this.
+  - name: org-base
+    file: example-org-base.yaml
+    required: true
+
+  # Required — prod/staging isolation. Drop this if your org doesn't
+  # have a prod/staging split.
+  - name: prod-deny
+    file: example-prod-deny.yaml
+    required: true
+
+  # Optional — PCI compliance scoping. Apply to all teams if you
+  # handle cardholder data anywhere; otherwise apply only to the
+  # teams whose workloads touch the CDE.
+  - name: pci-compliance
+    file: example-pci-compliance.yaml
+    required: false
+    applies_to_teams: ["payments", "billing", "finance-eng"]
+
+  # Optional — data-team persona.
+  - name: data-team
+    file: example-data-team.yaml
+    required: false
+    applies_to_teams: ["data-engineering", "analytics", "data-science"]
+
+  # Optional — CI runner persona. The `applies_to_contexts` field
+  # routes by deployment context, not by team membership. CI jobs
+  # invoke `bounce init --org-url ... --context ci`.
+  - name: ci-runner
+    file: example-ci-runner.yaml
+    required: false
+    applies_to_contexts: ["ci", "build-runner"]
+
+# ---------------------------------------------------------------------
+# Engineer install (no team / context flags) — gets required profiles
+# only:
+#
+#   bounce init --org-url https://internal.example.com/bounce-profiles/index.yaml
+#   # → installs: org-base, prod-deny
+#
+# Data-team engineer:
+#
+#   bounce init --org-url <...> --team data-engineering
+#   # → installs: org-base, prod-deny, data-team
+#
+# CI runner:
+#
+#   bounce init --org-url <...> --context ci
+#   # → installs: org-base, prod-deny, ci-runner
+#
+# Multi-context (a release-CI job that touches payment data):
+#
+#   bounce init --org-url <...> --context ci --team payments
+#   # → installs: org-base, prod-deny, ci-runner, pci-compliance
+# ---------------------------------------------------------------------
+
+# ---------------------------------------------------------------------
+# Re-sync interval — advisory for `bounce profile sync` cadence.
+# The bouncer respects ETag / Last-Modified headers regardless;
+# this is a hint for when an automated `sync` should re-check.
+# ---------------------------------------------------------------------
+sync_interval_seconds: 3600    # 1 hour
+
+# ---------------------------------------------------------------------
+# Bundle-level audit-export — events emitted at install / sync /
+# pause time. Per-profile `audit_export` blocks apply to agent-call
+# decisions; this block applies to bundle-lifecycle admin events.
+# ---------------------------------------------------------------------
+bundle_audit_export:
+  webhook_url_env: ORG_SIEM_WEBHOOK_URL
+  webhook_token_env: ORG_SIEM_WEBHOOK_TOKEN
+  preset: splunk-hec

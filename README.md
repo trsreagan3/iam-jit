@@ -409,6 +409,14 @@ For cross-bouncer investigation across products use the CLI:
 iam-jit audit query --filter agent.session_id=<UUID>
 ```
 
+### Distributing safety policy across your org
+
+Once you've shipped bouncers to engineers' laptops + CI runners, the next question is *"how do I keep the safety policy consistent across the fleet?"* The Bounce suite ships a pull-based distribution model: your security team publishes a YAML bundle at an HTTPS URL your org controls; every engineer's `bounce init --org-url ...` fetches it on day 1; `bounce profile sync` pulls updates as you publish them. Installed-from-URL profiles are read-only at the CLI surface — engineers can add denies on top but cannot peel back the org floor.
+
+A typical bundle is **mostly a denylist** (per [[discovery-first-default]] the bouncer passes traffic through by default; the org profile encodes what NOT to touch) plus audit-export config + alert routes + minimum-TTL caps. Post-pivot framing makes this a much easier enterprise sell than the pre-pivot "draft exhaustive allow baselines."
+
+See [docs/ORG-PROFILE-DISTRIBUTION.md](docs/ORG-PROFILE-DISTRIBUTION.md) for the full runbook + [docs/examples/profiles/](docs/examples/profiles/) for five starter example profiles (`org-base`, `prod-deny`, `pci-compliance`, `data-team`, `ci-runner`) + an `index.yaml.template`. The shipped behavior referenced (`profile install --from URL`, SHA pinning, ETag sync, read-only-installed-from-URL semantics) is per task #4 / the #233 bounce-profiles repo work.
+
 ---
 
 ## How it works (60 seconds)
@@ -442,6 +450,7 @@ See [docs/AGENTS.md](docs/AGENTS.md) for the agent-driven reduction-loop pattern
 - **[docs/GETTING-STARTED.md](docs/GETTING-STARTED.md)** — first-time deployment walkthrough
 - **[docs/DEPLOYMENT.md](docs/DEPLOYMENT.md)** — full production-deployment guide; pilot deployment profile; cost-control levers
 - **[docs/PRODUCTION-LOG-STORAGE.md](docs/PRODUCTION-LOG-STORAGE.md)** — operator decision tree for "where do my audit logs go" by deployment context (single-host, on-prem, AWS, GCP, Azure, CI/CD, Enterprise fan-out); cross-product
+- **[docs/ORG-PROFILE-DISTRIBUTION.md](docs/ORG-PROFILE-DISTRIBUTION.md)** — distribute safety policy across your org via `bounce init --org-url ...`; bundle index format, engineer onboarding, override semantics, CI/CD integration. Pairs with five starter profiles under `docs/examples/profiles/`
 - **[docs/recipes/](docs/recipes/)** — patterns + integration recipes (agent + Hoop examples, Slack setup, EKS template roles, terraform workflow)
 - **[docs/security/](docs/security/)** — BB+WB audit history (19+ rounds), security policy, vulnerability disclosure
 - **[docs/CONVERGENCE-REPORT-2026-05.md](docs/CONVERGENCE-REPORT-2026-05.md)** — calibration discipline + corpus methodology
