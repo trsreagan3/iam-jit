@@ -11,6 +11,33 @@ within the same release.
 
 ## Unreleased — Bounce-suite rename (2026-05-17)
 
+### Fixed
+
+- **§A20 R3-01 — `ibounce run` crashed on `--audit-log-max-size-mb` / `--audit-log-max-age-days` / `--audit-db-retention-days`** (2026-05-22) —
+  `src/iam_jit/bouncer_cli.py` declared the three rotation click options
+  (per the §A10 LOG-RETENTION cross-product spec) + passed them as
+  kwargs into `ProxyConfig(...)`, but `src/iam_jit/bouncer/proxy.py`'s
+  dataclass didn't declare the fields. Result: every `ibounce run`
+  invocation that passed any rotation flag crashed immediately with
+  `TypeError: ProxyConfig.__init__() got an unexpected keyword
+  argument 'audit_log_max_size_mb'`. The flags were advertised in
+  `--help` + `docs/LOG-RETENTION.md`; both said "works"; neither did.
+  Surfaced by UAT round 3 (`tests/dogfood/findings-2026-05-22-round-3.md`).
+  Fix: `ProxyConfig` gains three `int | None = None` fields with
+  documented "None = shipped default; 0 = explicitly disabled"
+  semantics (per the Go bouncer convention documented in
+  [[cross-product-agent-parity]]). `serve()` threads
+  `audit_log_max_size_mb` + `audit_log_max_age_days` into
+  `AuditLogWriter(max_size_mb=..., max_age_days=...)` at startup;
+  the startup log line now surfaces all three effective values.
+  New regression suite `tests/bouncer/test_ibounce_run_smoke.py`
+  (7 cases) covers dataclass acceptance, None/0 semantics, CliRunner
+  end-to-end `run --audit-log-max-size-mb ...` no longer raising
+  TypeError, AuditLogWriter receiving the threaded values, and a
+  source-level guard that the writer init mentions both rotation
+  kwargs (defensive against a refactor that adds fields but forgets
+  to wire them). KNOWN-CAVEATS §A20.
+
 ### Added
 
 - **#321 / §A19 — `ibounce profile doctor` + cross-product upgrade-blindness fix** (2026-05-22) —

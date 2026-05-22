@@ -1083,6 +1083,32 @@ class ProxyConfig:
     """Opt-in fsync after every JSONL write. Off by default for
     throughput; on for compliance-grade durability. The trade-off is
     documented in the CLI --help text."""
+    # #311 / §A10 / §A20 (R3-01) — rotation knobs threaded from the
+    # CLI flags into AuditLogWriter. None = "use the shipped default
+    # from audit_export.rotation" (100 MB / 7 days / 30 days); 0 =
+    # explicitly disabled (per the Go bouncer convention documented
+    # in [[cross-product-agent-parity]]). The CLI options that drive
+    # these fields are declared in bouncer_cli.run_cmd (~line 3530).
+    audit_log_max_size_mb: int | None = None
+    """#311 / §A10 — rotate the active JSONL audit log when it
+    exceeds N MB. None = default 100 MB; 0 = size-trigger disabled.
+    Wired into `AuditLogWriter(max_size_mb=...)` at serve() start;
+    falls through to the rotation module's DEFAULT_MAX_SIZE_MB when
+    None."""
+    audit_log_max_age_days: int | None = None
+    """#311 / §A10 — rotate the active JSONL audit log when its
+    mtime is older than N days. None = default 7 days; 0 = age-
+    trigger disabled. Wired into `AuditLogWriter(max_age_days=...)`
+    at serve() start; falls through to the rotation module's
+    DEFAULT_MAX_AGE_DAYS when None."""
+    audit_db_retention_days: int | None = None
+    """#311 / §A10 — purge rotated SQLite audit DB archives older
+    than N days. None = default 30 days; 0 = DB retention disabled.
+    Surfaced for the operator-invoked `ibounce logs purge` path
+    (per [[creates-never-mutates]]: the writer itself NEVER
+    destroys data; only the explicit logs-purge command does).
+    Plumbed through ProxyConfig so MCP `bouncer_audit_export_status`
+    can report the effective value."""
     audit_webhook_url: str | None = None
     """HTTPS URL of the operator's audit collector. None disables
     the channel. SSRF-gated at start (RFC1918 / loopback /
@@ -3036,16 +3062,40 @@ async def serve(config: ProxyConfig, *, store: BouncerStore) -> None:
             config.record_sessions_dir,
         )
     if config.audit_log_path:
-        from .audit_export import AuditLogWriter
+        from .audit_export import (
+            DEFAULT_MAX_AGE_DAYS,
+            DEFAULT_MAX_SIZE_MB,
+            AuditLogWriter,
+        )
+        # #311 / §A20 (R3-01): None on the ProxyConfig field means
+        # "use the shipped default"; an explicit 0 means "operator
+        # disabled the trigger". Don't conflate the two — passing
+        # None to AuditLogWriter would crash (int parameter); passing
+        # the default keeps the documented behaviour.
+        _max_size_mb = (
+            DEFAULT_MAX_SIZE_MB
+            if config.audit_log_max_size_mb is None
+            else config.audit_log_max_size_mb
+        )
+        _max_age_days = (
+            DEFAULT_MAX_AGE_DAYS
+            if config.audit_log_max_age_days is None
+            else config.audit_log_max_age_days
+        )
         audit_log_writer = AuditLogWriter(
             path=config.audit_log_path,
             fsync=config.audit_log_fsync,
+            max_size_mb=_max_size_mb,
+            max_age_days=_max_age_days,
         )
         await audit_log_writer.start()
         register_audit_log_writer(audit_log_writer)
         logger.info(
-            "audit-export JSONL log enabled: path=%s fsync=%s",
+            "audit-export JSONL log enabled: path=%s fsync=%s "
+            "max_size_mb=%s max_age_days=%s db_retention_days=%s",
             config.audit_log_path, config.audit_log_fsync,
+            _max_size_mb, _max_age_days,
+            config.audit_db_retention_days,
         )
     # #258 — Security Lake adapter. Default OFF; only constructed when
     # the operator passed --security-lake-bucket. start() probes
