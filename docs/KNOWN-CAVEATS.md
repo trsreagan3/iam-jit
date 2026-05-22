@@ -84,6 +84,12 @@ Tracking: every BUG entry has a task number (e.g., #299). v1.0 release gate: eve
 - **Workaround until fix:** operator-side cron + manual `*bounce diagnostics bundle` (#277)
 - **Task:** #311.
 
+## A14. No production log-storage runbook — `STATUS: FIXED 2026-05-22`
+- **Severity:** HIGH (operators picking up the suite couldn't tell where their audit events should land in production without reading three different doc pages — webhook presets, Security Lake adapter, alert-routes — and synthesising a decision tree themselves)
+- **Symptom:** A new operator deploying ibounce + kbounce + dbounce + gbounce together would hit the `--audit-log-path` flag in each bouncer's README, see scattered references to "webhook preset" + "Security Lake adapter" + "alert routes" in separate docs, and have no single "where do my logs go" decision tree by deployment context. Result: either everything stays JSONL (loses SIEM correlation) or the operator builds a one-off pipeline per product (loses cross-product parity).
+- **Fix:** ships [docs/PRODUCTION-LOG-STORAGE.md](PRODUCTION-LOG-STORAGE.md) — operator decision tree organised by deployment context (single-host dev, multi-host on-prem, AWS-heavy, AWS+S3, GCP, Azure, CI/CD ephemeral, Enterprise fan-out), full per-context setup snippets, sample Lambda receiver for "dump to S3", honest gaps section (no GCS / Azure-Blob / Kafka / syslog / Elasticsearch / ClickHouse native sinks — operator chains a thin shim or Vector / Fluent Bit / Cribl per `[[self-host-zero-billing-dependency]]`), per-product flag-parity matrix, three-layer validation guide (bouncer-side `audit tail`, `/healthz.audit_export` block, SIEM-side SPL / KQL / SQL queries). Linked from the main README "Documentation" section + each bouncer README. Doc framed per `[[security-team-positioning-safety-not-surveillance]]` (safety + investigation, not surveillance) and `[[don't-tailor-to-lighthouse]]` (no customer-specific recommendation).
+- **Task:** #316 — completed 2026-05-22.
+
 ## A15. Cloud-neutral object-storage NDJSON sink (S3-compatible) — `STATUS: QUEUED`
 - **Severity:** HIGH (per founder direction 2026-05-22: bouncers other than ibounce are cloud-neutral; AWS-only Security Lake adapter alone isn't enough)
 - **Why pre-launch:** operators need their SIEM/security-tool to collect bouncer logs from a bucket. Today: HTTPS webhook (synchronous push) + Security Lake (AWS-only parquet). Operators on GCS / Azure / MinIO / R2 / B2 have no pull-based collection path.

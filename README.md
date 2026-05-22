@@ -406,6 +406,7 @@ See [docs/AGENTS.md](docs/AGENTS.md) for the agent-driven reduction-loop pattern
 - **[docs/recipes/agent-safety-mode.md](docs/recipes/agent-safety-mode.md)** — read-only-default contract for agents
 - **[docs/GETTING-STARTED.md](docs/GETTING-STARTED.md)** — first-time deployment walkthrough
 - **[docs/DEPLOYMENT.md](docs/DEPLOYMENT.md)** — full production-deployment guide; pilot deployment profile; cost-control levers
+- **[docs/PRODUCTION-LOG-STORAGE.md](docs/PRODUCTION-LOG-STORAGE.md)** — operator decision tree for "where do my audit logs go" by deployment context (single-host, on-prem, AWS, GCP, Azure, CI/CD, Enterprise fan-out); cross-product
 - **[docs/recipes/](docs/recipes/)** — patterns + integration recipes (agent + Hoop examples, Slack setup, EKS template roles, terraform workflow)
 - **[docs/security/](docs/security/)** — BB+WB audit history (19+ rounds), security policy, vulnerability disclosure
 - **[docs/CONVERGENCE-REPORT-2026-05.md](docs/CONVERGENCE-REPORT-2026-05.md)** — calibration discipline + corpus methodology

@@ -626,6 +626,11 @@ ibounce logs tail --decision deny --limit 20
 ibounce logs tail --json
 ```
 
+For the full "where do my audit logs go in production" decision tree
+across all four bouncers (JSONL / webhook + presets / Security Lake /
+Lambda → S3 / GCP / Azure / CI runners / Enterprise fan-out) see
+[PRODUCTION-LOG-STORAGE.md](PRODUCTION-LOG-STORAGE.md).
+
 ### Pause (timed escape hatch)
 
 ```bash
