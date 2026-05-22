@@ -11,6 +11,33 @@ within the same release.
 
 ## Unreleased — Bounce-suite rename (2026-05-17)
 
+### Changed
+
+- **#296 / §A22 — Cross-product concurrent-terminal ceiling lifted (audit-write hardening)** (2026-05-22) —
+  Closes the cross-product launch-blocker that §B13 had documented as
+  "1-3 concurrent terminals in v1.0; 10+ produces session-attribution
+  issues." Diagnosis under a 20-session × 600-call SQLite load probe:
+    - **ibounce (Python):** ALREADY passing — `BouncerStore.record_decision`
+      under a global `threading.Lock` + PRAGMA `journal_mode=WAL` (set at
+      Open) handles 20 concurrent writers at p99 = 10ms with 0 errors;
+      end-to-end HTTP-level test (50 sessions × 10 RPS × 60s = 30,000
+      reqs through the live aiohttp proxy) passes at p99 = 85.5ms with
+      50/50 distinct session-id attribution intact. No ibounce code
+      change shipped under §A22.
+    - **kbouncer (Go):** CRITICAL — lost 11,791/12,000 audit rows to
+      `SQLITE_BUSY`. Fixed by adding WAL + busy_timeout + synchronous=
+      NORMAL PRAGMAs via DSN. Details in `kbouncer/CHANGELOG.md`.
+    - **gbounce (Go):** CRITICAL — lost 11,804/12,000 audit rows.
+      Same DSN PRAGMA fix. Details in `gbounce/CHANGELOG.md`.
+    - **dbounce (Go):** functional but slow — p99 = 86ms, max = 1.4s
+      tail. Fixed by ADDING WAL to the existing PRAGMA triple. The
+      LOW-D8-12 `synchronous=FULL` durability posture is preserved
+      (FULL is WAL-compatible). Details in `dbounce/CHANGELOG.md`.
+  Verified ceiling after-fix: **30+ concurrent agent sessions on one
+  machine, 0 errors, p99 < 50ms, 100% session-id attribution per
+  bouncer.** `docs/KNOWN-CAVEATS.md` §A22 records the full diagnosis
+  + verification matrix; §B13 marked RESOLVED.
+
 ### Added
 
 - **#324a — ibounce dynamic-deny core (loader + watcher + matcher + mgmt endpoint)** (2026-05-22) —
