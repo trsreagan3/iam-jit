@@ -59,6 +59,7 @@ import json
 import logging
 import os
 import pathlib
+import re
 import subprocess
 import sys
 import tempfile
@@ -68,6 +69,153 @@ from dataclasses import dataclass
 from typing import Any
 
 logger = logging.getLogger(__name__)
+
+# ---------------------------------------------------------------------------
+# #318 / §A16 — X-Agent-* header validators + rejection counter
+# ---------------------------------------------------------------------------
+#
+# Bounce-suite-wide convention per [[cross-product-agent-parity]] +
+# `docs/AGENT-ATTRIBUTION.md`:
+#
+#   X-Agent-Name        validation: [A-Za-z0-9._-]{1,64}
+#   X-Agent-Session-Id  validation: [A-Za-z0-9_-]{1,128}
+#
+# Mirrors gbounce's `IsValidAgentName` / `IsValidSessionID` (Go regex)
+# byte-for-byte so a SIEM query on `unmapped.iam_jit.agent.session_id=X`
+# matches across all four products. An inbound header that fails
+# validation is treated as ABSENT (the value is NEVER written into the
+# audit event — shell-injection payloads can't pivot through the audit
+# log) and the rejection is logged to stderr with a truncated raw value
+# + the `total_agent_headers_rejected` counter is bumped so an operator
+# debugging "why is my session id missing?" sees the rejection on
+# /healthz. Per [[security-team-positioning-safety-not-surveillance]]:
+# the rejection log + counter are SAFETY (operator visibility); the
+# truncation + control-char stripping are privacy-shaped (a malicious
+# header value can't reposition the operator's terminal cursor).
+
+_AGENT_NAME_RE = re.compile(r"^[A-Za-z0-9._-]{1,64}$")
+_AGENT_SESSION_ID_RE = re.compile(r"^[A-Za-z0-9_-]{1,128}$")
+
+
+def is_valid_agent_name(s: str | None) -> bool:
+    """Return True iff `s` matches the canonical X-Agent-Name shape.
+
+    Mirrors gbounce's `IsValidAgentName` Go regex so a SIEM filter on
+    `unmapped.iam_jit.agent.name=X` is byte-for-byte consistent across
+    the Bounce suite.
+    """
+    if not s:
+        return False
+    return bool(_AGENT_NAME_RE.match(s))
+
+
+def is_valid_agent_session_id(s: str | None) -> bool:
+    """Return True iff `s` matches the canonical X-Agent-Session-Id shape.
+
+    Mirrors gbounce's `IsValidSessionID` Go regex; UUIDs (v4 + v7 + v6)
+    all fit. Operators may use any UUID flavor — we don't enforce v7
+    strictly because some agents still emit v4.
+    """
+    if not s:
+        return False
+    return bool(_AGENT_SESSION_ID_RE.match(s))
+
+
+# Cross-process counter: bumped each time an inbound X-Agent-* header
+# fails validation. Surfaced via /healthz so operators see agent-config
+# drift (e.g. a misconfigured agent setting the header to a shell-
+# injection payload) without grepping stderr. Atomic increment under the
+# module lock since the proxy is async — only one event loop thread
+# increments at a time in practice, but the lock guards against future
+# multi-worker shapes.
+_AGENT_HEADERS_REJECTED_COUNTER = 0
+_AGENT_HEADERS_REJECTED_LOCK = threading.Lock()
+
+
+def total_agent_headers_rejected() -> int:
+    """Return the running total of invalid X-Agent-* headers rejected
+    since process start. Read by the /healthz handler."""
+    with _AGENT_HEADERS_REJECTED_LOCK:
+        return _AGENT_HEADERS_REJECTED_COUNTER
+
+
+def _log_agent_header_rejected(header_name: str, raw_value: str) -> None:
+    """Emit one stderr line + bump the rejection counter. Bounded log
+    shape: header name + truncated raw value (first 32 chars). Control
+    characters are replaced with '?' so a malicious header value can't
+    reposition the operator's terminal cursor. Mirror of gbounce's
+    `logAgentHeaderRejected` Go function.
+    """
+    global _AGENT_HEADERS_REJECTED_COUNTER
+    with _AGENT_HEADERS_REJECTED_LOCK:
+        _AGENT_HEADERS_REJECTED_COUNTER += 1
+    truncated = raw_value[:32]
+    if len(raw_value) > 32:
+        truncated = truncated + "..."
+    clean_chars = []
+    for ch in truncated:
+        code = ord(ch)
+        if 0x20 <= code <= 0x7E:
+            clean_chars.append(ch)
+        else:
+            clean_chars.append("?")
+    clean = "".join(clean_chars)
+    print(
+        f"ibounce: rejected invalid {header_name} header (value={clean!r}) — "
+        f"request will be audited as anonymous",
+        file=sys.stderr,
+    )
+
+
+def reset_agent_headers_rejected_for_tests() -> None:
+    """Test-only reset for the rejection counter."""
+    global _AGENT_HEADERS_REJECTED_COUNTER
+    with _AGENT_HEADERS_REJECTED_LOCK:
+        _AGENT_HEADERS_REJECTED_COUNTER = 0
+
+
+def extract_agent_headers(
+    headers: dict[str, str] | None,
+) -> tuple[str | None, str | None]:
+    """Return `(validated_name, validated_session_id)` from request
+    headers. Performs case-insensitive lookup of `X-Agent-Name` +
+    `X-Agent-Session-Id`, validates each, logs + counts rejections.
+    Either or both may come back as None.
+
+    Mirrors gbounce's pattern: an invalid header is treated as if the
+    header were never sent (value is NEVER written into the audit
+    event); a valid header passes through verbatim. Per
+    [[creates-never-mutates]] this is additive — when neither header is
+    present (or both are invalid) the caller's existing User-Agent /
+    MCP / process-tree fallbacks fire unchanged.
+    """
+    if not headers:
+        return None, None
+    raw_name = None
+    raw_session_id = None
+    for k, v in headers.items():
+        if not isinstance(k, str):
+            continue
+        kl = k.lower()
+        if kl == "x-agent-name" and raw_name is None:
+            raw_name = v
+        elif kl == "x-agent-session-id" and raw_session_id is None:
+            raw_session_id = v
+    validated_name = None
+    validated_session_id = None
+    if raw_name:
+        if is_valid_agent_name(raw_name):
+            validated_name = raw_name
+        else:
+            _log_agent_header_rejected("X-Agent-Name", str(raw_name))
+    if raw_session_id:
+        if is_valid_agent_session_id(raw_session_id):
+            validated_session_id = raw_session_id
+        else:
+            _log_agent_header_rejected(
+                "X-Agent-Session-Id", str(raw_session_id),
+            )
+    return validated_name, validated_session_id
 
 # ---------------------------------------------------------------------------
 # UUID v7 (fallback to UUID v4 on Python < 3.14)
@@ -596,37 +744,76 @@ def resolve_agent_block(
     user_agent: str | None = None,
     peer_pid: int | None = None,
     include_process_tree: bool = True,
+    header_agent_name: str | None = None,
+    header_agent_session_id: str | None = None,
 ) -> dict[str, Any] | None:
     """Build the agent dict to land under `unmapped.iam_jit.agent`.
 
-    Resolution order per [[agent-identity-in-audit]]:
-      1. Active MCP session (mcp_clientinfo)
-      2. User-Agent header (user_agent or user_agent_raw)
-      3. Process-tree walk (process_tree) — only when
+    Resolution order per [[agent-identity-in-audit]] +
+    [[cross-product-agent-parity]]:
+      1. **HTTP headers** — `X-Agent-Name` + `X-Agent-Session-Id`
+         (#318 / §A16). Highest precedence: when the agent explicitly
+         declares itself via headers, that always wins over heuristic
+         detection. Mirrors gbounce's `buildAgentBlock` pattern so
+         cross-bouncer correlation by `agent.session_id` resolves
+         across ibounce + kbounce + dbounce + gbounce. Caller must
+         pre-validate the header values via
+         `extract_agent_headers()` — this function trusts its inputs.
+         Either-or-both headers populate the block; absence of
+         either field falls back to the next detection source for
+         the missing piece.
+      2. Active MCP session (mcp_clientinfo)
+      3. User-Agent header (user_agent or user_agent_raw)
+      4. Process-tree walk (process_tree) — only when
          include_process_tree is True; lets the webhook caller
          strip this branch per
          [[security-team-positioning-safety-not-surveillance]]
 
-    Returns None when none of the three paths produced anything —
+    Returns None when none of the four paths produced anything —
     the OCSF event builder omits the agent block in that case so a
     raw boto3 script with no MCP and no User-Agent doesn't fabricate
     fake identity.
 
-    When MCP is the source, the session_id from that session lands
-    on the dict. When User-Agent or process-tree wins, session_id
-    is None — those calls have no persistent agent session.
+    When HTTP headers are the source, the `detected_from` field is:
+      - `"http_header"` when BOTH name + session_id parsed cleanly
+      - `"http_header_name_only"` when only name passed validation
+        (session_id absent or invalid)
+    Session-id-only (no name) does NOT short-circuit to header
+    detection — without a name the row's investigation value is too
+    thin to override richer downstream sources. The session_id still
+    lands on whatever block the next source produces (preserving
+    cross-bouncer correlation) and `detected_from` reflects that
+    source.
     """
-    # 1. MCP clientInfo — highest fidelity. Falls back to the on-disk
-    # state file (#287) so the AWS-API proxy process picks up the same
-    # session_id the in-process MCP server minted; without this the
-    # AWS-API path always emitted `session_id=null` even though an
-    # MCP session was live on the host.
+    # 1. HTTP headers — explicit declaration always wins. #318 / §A16.
+    # Caller pre-validates via extract_agent_headers(); we just check
+    # presence here.
+    if header_agent_name:
+        block: dict[str, Any] = {
+            "name": header_agent_name,
+            "version": None,
+            "session_id": header_agent_session_id,
+            "detected_from": (
+                "http_header"
+                if header_agent_session_id
+                else "http_header_name_only"
+            ),
+        }
+        return block
+    # 2. MCP clientInfo — highest fidelity heuristic. Falls back to
+    # the on-disk state file (#287) so the AWS-API proxy process picks
+    # up the same session_id the in-process MCP server minted; without
+    # this the AWS-API path always emitted `session_id=null` even
+    # though an MCP session was live on the host.
     mcp = active_or_disk_agent_session()
     if mcp is not None:
-        block: dict[str, Any] = {
+        block_mcp: dict[str, Any] = {
             "name": mcp.name,
             "version": mcp.version,
-            "session_id": mcp.session_id,
+            # Prefer the explicit X-Agent-Session-Id when an agent
+            # supplied one — even though the name fell through to MCP,
+            # the explicit session id still correlates across products.
+            "session_id": header_agent_session_id or mcp.session_id,
             "detected_from": "mcp_clientinfo",
         }
         # If we ALSO have a User-Agent that says something different,
@@ -635,19 +822,35 @@ def resolve_agent_block(
         # actually coming from somewhere else.
         ua = detect_from_user_agent(user_agent)
         if ua is not None and ua["name"] != mcp.name and ua["name"] != "unknown":
-            block["user_agent_name"] = ua["name"]
-        return block
-    # 2. User-Agent — proxy-side primary path.
+            block_mcp["user_agent_name"] = ua["name"]
+        return block_mcp
+    # 3. User-Agent — proxy-side primary path.
     ua_block = detect_from_user_agent(user_agent)
     if ua_block is not None:
-        ua_block["session_id"] = None
+        # Explicit X-Agent-Session-Id (when present without a name)
+        # overlays so cross-bouncer correlation works even when the
+        # name fell through to UA detection.
+        ua_block["session_id"] = header_agent_session_id
         return ua_block
-    # 3. Process-tree fallback (when enabled).
+    # 4. Process-tree fallback (when enabled).
     if include_process_tree:
         pt_block = detect_from_process_tree(peer_pid)
         if pt_block is not None:
-            pt_block["session_id"] = None
+            pt_block["session_id"] = header_agent_session_id
             return pt_block
+    # Final fallback: when no detection source fired but the caller
+    # supplied a session_id header, surface a minimal anonymous block
+    # so the session_id still threads through for correlation. Without
+    # this an agent that sent only X-Agent-Session-Id (no name, no UA,
+    # no MCP, no PID) would land at None + the audit event would omit
+    # the agent block entirely — losing the cross-bouncer pivot.
+    if header_agent_session_id:
+        return {
+            "name": "anonymous",
+            "version": None,
+            "session_id": header_agent_session_id,
+            "detected_from": "unknown",
+        }
     return None
 
 

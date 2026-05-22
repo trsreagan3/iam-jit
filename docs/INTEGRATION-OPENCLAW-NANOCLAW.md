@@ -247,7 +247,7 @@ Verified by `tests/integration/nanoclaw_paths/test_path_b_replace`:
 - HTTPS / AWS / K8s / SQL each land in the **right** bouncer
 - No cross-contamination (AWS-shaped traffic does NOT show up in gbounce; HTTPS does NOT appear in ibounce)
 - gbounce preserves `agent.session_id` end-to-end via `X-Agent-Session-Id` header
-- ibounce / kbounce / dbounce events carry `agent.name` from User-Agent today; `agent.session_id` is NOT yet read from header (see [Surfaced gaps](#surfaced-gaps-2026-05-22))
+- ibounce / kbounce / dbounce events ALSO populate `agent.session_id` from the same headers (#318 closed cross-bouncer parity 2026-05-22); for dbounce the agent supplies `application_name=iam-jit-agent:NAME:SESSIONID` instead of an HTTP header — see `docs/AGENT-ATTRIBUTION.md` §SQL
 
 ##### Path C — Parallel (defense in depth)
 
@@ -280,17 +280,13 @@ Verified by `tests/integration/nanoclaw_paths/test_path_c_parallel`:
 
 #### Surfaced gaps (2026-05-22)
 
-Three product gaps were surfaced during integration testing. None are launch-blocking; each is captured here for separate work:
+Three product gaps were surfaced during integration testing; all three CLOSED 2026-05-22 in #318 (cross-bouncer X-Agent-* header parity):
 
-| Gap | Where | Effect | Fix |
-|---|---|---|---|
-| `ibounce` does not read `X-Agent-Session-Id` header | AWS calls via Path B/C | `agent.session_id` is `null` on ibounce events; cross-bouncer correlation by session_id misses AWS traffic | Read inbound header + populate `unmapped.iam_jit.agent.session_id` (mirror gbounce's #308 pattern) |
-| `kbounce` does not read `X-Agent-Session-Id` header | K8s calls via Path B/C | Same gap — correlation misses K8s traffic | Mirror gbounce's #308 pattern |
-| `dbounce` does not surface agent-identity to wire-protocol audit events | SQL via Path B | Per-connection agent identity exists in dbounce internal state (#289) but isn't yet wired to OCSF audit events | Wire the existing `agent_session_id` column into the OCSF emitter |
+- ibounce, kbounce, and dbounce now read inbound X-Agent-Name + X-Agent-Session-Id (dbounce uses `application_name=iam-jit-agent:NAME:SESSIONID` per [`docs/AGENT-ATTRIBUTION.md`](AGENT-ATTRIBUTION.md) §SQL since it sees the SQL wire protocol, not HTTP).
+- All four bouncers now populate `unmapped.iam_jit.agent.{name, session_id, detected_from}` on every OCSF event.
+- `iam-jit audit query --filter agent.session_id=<UUID>` returns one event per bouncer; the integration test at `tests/integration/cross_bouncer_session_id_parity_test.py` is the regression guard.
 
 A fourth honest-positioning note: operational gbounce binaries pre-#308 emit `unmapped.iam_jit.ext.agent_session_id` instead of `unmapped.iam_jit.agent.session_id`. Rebuild gbounce against post-#308 source (which the smoke test confirmed works) so the cross-bouncer correlation query path matches.
-
-Tracker numbers: TBD — surface for separate task per `[[deliberate-feature-completion]]`.
 
 ### OpenClaw
 

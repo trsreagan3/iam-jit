@@ -433,10 +433,18 @@ def audit_event_from_decision(
     # agent-identity context — no agent block lands on the event in
     # that case. Per [[agent-identity-in-audit]] the resolver inside
     # agent_context handles the priority chain
-    # (mcp_clientinfo > user_agent > process_tree).
+    # (header > mcp_clientinfo > user_agent > process_tree).
     user_agent: str | None = None,
     peer_pid: int | None = None,
     include_process_tree: bool = True,
+    # #318 / §A16 — explicit X-Agent-* headers, pre-validated by the
+    # caller via agent_context.extract_agent_headers. Highest-precedence
+    # detection source: when an agent declares itself via header, that
+    # always wins over heuristic detection. Mirrors gbounce's pattern so
+    # cross-bouncer queries on `unmapped.iam_jit.agent.session_id`
+    # resolve across all four products.
+    header_agent_name: str | None = None,
+    header_agent_session_id: str | None = None,
 ) -> dict[str, Any]:
     """Build the OCSF v1.1.0 class 6003 event for one proxy decision.
 
@@ -526,7 +534,9 @@ def audit_event_from_decision(
         actor["session"] = {"uid": request_id}
 
     # #266 — agent identity block. Fail-soft so an agent_context
-    # detection bug never breaks the audit channel.
+    # detection bug never breaks the audit channel. #318 / §A16 —
+    # explicit X-Agent-* headers feed the resolver at highest
+    # precedence so cross-bouncer correlation works.
     agent_block: dict[str, Any] | None = None
     try:
         from .agent_context import resolve_agent_block
@@ -534,6 +544,8 @@ def audit_event_from_decision(
             user_agent=user_agent,
             peer_pid=peer_pid,
             include_process_tree=include_process_tree,
+            header_agent_name=header_agent_name,
+            header_agent_session_id=header_agent_session_id,
         )
     except Exception:
         agent_block = None

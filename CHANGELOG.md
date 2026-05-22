@@ -13,6 +13,53 @@ within the same release.
 
 ### Added
 
+- **#318 / §A16 — cross-bouncer X-Agent-Session-Id header parity** (2026-05-22) —
+  closes the headline cross-bouncer correlation gap surfaced by the
+  #312 NanoClaw integration test. ibounce now reads inbound
+  `X-Agent-Name` + `X-Agent-Session-Id` headers at HIGHEST detection
+  precedence (above MCP / User-Agent / process-tree). Cross-product
+  invariants mirrored from gbounce's #308 reference:
+  - `src/iam_jit/bouncer/audit_export/agent_context.py` gains
+    `extract_agent_headers()` + `is_valid_agent_name()` +
+    `is_valid_agent_session_id()` + `total_agent_headers_rejected()` +
+    `reset_agent_headers_rejected_for_tests()`. Header validators
+    match gbounce's regexes byte-for-byte (`[A-Za-z0-9._-]{1,64}` for
+    name, `[A-Za-z0-9_-]{1,128}` for session_id) so a SIEM query on
+    `unmapped.iam_jit.agent.session_id=X` is portable across products.
+  - `resolve_agent_block()` accepts `header_agent_name` +
+    `header_agent_session_id` kwargs; populates `detected_from=
+    "http_header"` when both validate, `"http_header_name_only"` when
+    only the name validates, and overlays the explicit session_id
+    onto downstream detection sources (MCP / UA / process-tree) so
+    cross-bouncer correlation works even when the name fell through.
+  - `audit_event_from_decision()` threads the new kwargs through to
+    the OCSF event.
+  - `bouncer/proxy.py:evaluate_request` extracts the headers once +
+    threads them through all three `audit_event_from_decision` call
+    sites (unclassifiable-deny, profile-deny, normal decision).
+  - Invalid headers are dropped (audited as anonymous) with one
+    stderr log line + the `audit_export.total_agent_headers_rejected`
+    counter on `/healthz` bumped. Header values are truncated + have
+    control characters stripped before logging so a malicious header
+    can't reposition the operator's terminal cursor.
+  - 47 new regression tests in
+    `tests/bouncer/test_agent_headers_318.py` covering validator
+    regex parity, extract / rejection counter, resolver precedence
+    (header > MCP > UA > PID), partial-detection shape, and the
+    canonical cross-product test names
+    (`test_AgentHeaders_HappyPath` etc).
+  - `docs/AGENT-ATTRIBUTION.md` extended with the dbounce SQL
+    `application_name=iam-jit-agent:NAME:SESSIONID` convention.
+  - `docs/KNOWN-CAVEATS.md` §A16 marked `STATUS: FIXED 2026-05-22`.
+  - `docs/INTEGRATION-OPENCLAW-NANOCLAW.md` §B16 (gbounce-only gap
+    note) updated — parity now ships pre-launch.
+  - Sibling Bounce products (kbouncer / dbounce) ship the same
+    surface; see their respective `CHANGELOG.md` entries.
+  - Cross-product integration test at
+    `tests/integration/cross_bouncer_session_id_parity_test.py`
+    asserts a single `iam-jit audit query --filter agent.session_id=
+    <UUID>` returns one event per bouncer.
+
 - **#311 / §A10 — robust local audit-log retention** (2026-05-22) —
   cross-product launch-blocker resolved. Ships
   `docs/LOG-RETENTION.md` (cross-product runbook with defaults table,

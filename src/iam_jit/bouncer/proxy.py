@@ -757,6 +757,20 @@ def audit_export_health_section() -> dict[str, Any]:
     section.update(log_section)
     section.update(webhook_section)
 
+    # #318 / §A16 — cross-bouncer X-Agent-* header rejection counter.
+    # Mirrors gbounce's /healthz field of the same name so operators
+    # see agent-config drift (e.g. a misconfigured agent setting the
+    # header to a shell-injection payload) the same way across the
+    # Bounce suite. Never trips degraded (rejections are operator-info
+    # signal, not an audit-channel failure).
+    try:
+        from .audit_export.agent_context import (
+            total_agent_headers_rejected as _tahr,
+        )
+        section["total_agent_headers_rejected"] = _tahr()
+    except Exception:
+        section["total_agent_headers_rejected"] = 0
+
     # Compute degraded bool. ANY of the three spec conditions trips it.
     # We DELIBERATELY OR the conditions so an operator dashboard can
     # check `degraded` as a single field but still surface the
@@ -1265,6 +1279,20 @@ def evaluate_request(
             if k.lower() == "user-agent":
                 user_agent = v
                 break
+    # #318 / §A16 — cross-bouncer X-Agent-* header parity. Extract +
+    # validate the canonical agent-attribution headers BEFORE any
+    # audit_event_from_decision call below. Invalid headers are treated
+    # as absent (the value is NEVER written into the event) and a
+    # rejection is logged to stderr + the `total_agent_headers_rejected`
+    # counter is bumped (surfaces via /healthz). Mirrors gbounce's
+    # pattern byte-for-byte so cross-bouncer correlation by
+    # `unmapped.iam_jit.agent.session_id` resolves across all four
+    # Bounce products. See [[cross-product-agent-parity]] +
+    # `docs/AGENT-ATTRIBUTION.md`.
+    from .audit_export.agent_context import extract_agent_headers
+    header_agent_name, header_agent_session_id = extract_agent_headers(
+        headers or {},
+    )
     """Pure-function evaluation of one inbound proxy request.
 
     Slice 1's core unit: given the HTTP request parts, parse it,
@@ -1343,6 +1371,8 @@ def evaluate_request(
                 upstream=None,
                 enforced=(mode == ProxyMode.TRANSPARENT),
                 user_agent=user_agent,
+                header_agent_name=header_agent_name,
+                header_agent_session_id=header_agent_session_id,
             ))
         except Exception as e:
             logger.warning("audit-export emit (unclassifiable) failed: %s", e)
@@ -1417,6 +1447,8 @@ def evaluate_request(
                     enforced=(mode == ProxyMode.TRANSPARENT),
                     extra={"decision_source": "profile"},
                     user_agent=user_agent,
+                    header_agent_name=header_agent_name,
+                    header_agent_session_id=header_agent_session_id,
                 ))
             except Exception as e:
                 logger.warning("audit-export emit (profile-deny) failed: %s", e)
@@ -1580,6 +1612,8 @@ def evaluate_request(
                 ),
             },
             user_agent=user_agent,
+            header_agent_name=header_agent_name,
+            header_agent_session_id=header_agent_session_id,
         ))
     except Exception as e:
         logger.warning("audit-export emit (decision) failed: %s", e)
