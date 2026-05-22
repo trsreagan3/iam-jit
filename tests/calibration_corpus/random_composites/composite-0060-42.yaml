@@ -1,0 +1,81 @@
+name: composite-0060-42
+source_policies:
+- aws_managed/AWSElasticDisasterRecoveryFailbackPolicy.yaml
+- aws_managed/AmazonAPIGatewayInvokeFullAccess.yaml
+- aws_managed/AWSCloudHSMFullAccess.yaml
+source_hash: b490d14f14cda51a
+policy:
+  Version: '2012-10-17'
+  Statement:
+  - Sid: DRSFailbackPolicy1
+    Effect: Allow
+    Action:
+    - drs:SendClientMetricsForDrs
+    - drs:SendClientLogsForDrs
+    Resource: '*'
+  - Sid: DRSFailbackPolicy2
+    Effect: Allow
+    Action:
+    - drs:GetChannelCommandsForDrs
+    - drs:SendChannelCommandResultForDrs
+    Resource: '*'
+  - Sid: DRSFailbackPolicy3
+    Effect: Allow
+    Action:
+    - drs:DescribeReplicationServerAssociationsForDrs
+    - drs:DescribeRecoveryInstances
+    Resource: '*'
+  - Sid: DRSFailbackPolicy4
+    Effect: Allow
+    Action:
+    - drs:GetFailbackCommandForDrs
+    - drs:UpdateFailbackClientLastSeenForDrs
+    - drs:NotifyAgentAuthenticationForDrs
+    - drs:UpdateAgentReplicationProcessStateForDrs
+    - drs:NotifyAgentReplicationProgressForDrs
+    - drs:NotifyAgentConnectedForDrs
+    - drs:NotifyAgentDisconnectedForDrs
+    - drs:NotifyConsistencyAttainedForDrs
+    - drs:GetFailbackLaunchRequestedForDrs
+    - drs:IssueAgentCertificateForDrs
+    Resource: arn:aws:drs:*:*:recovery-instance/${aws:SourceIdentity}
+  - Effect: Allow
+    Action:
+    - execute-api:Invoke
+    - execute-api:ManageConnections
+    Resource: arn:aws:execute-api:*:*:*
+  - Effect: Allow
+    Action: cloudhsm:*
+    Resource: '*'
+request:
+  spec:
+    access_type: read-write
+    duration:
+      duration_hours: 1
+    resource_constraints: []
+  user: dev-bob
+  justification: 'reproduce customer ticket #4422 locally'
+scores:
+  det_score: 8
+  det_factors:
+  - 'State-changing action `drs:SendClientMetricsForDrs` on Resource: `*` (IAM access level: Write)'
+  - 'State-changing action `drs:SendClientLogsForDrs` on Resource: `*` (IAM access level: Write)'
+  - 'Resource: `*` for drs (broad cross-resource read/access)'
+  - 'State-changing action `drs:SendChannelCommandResultForDrs` on Resource: `*` (IAM access level: Write)'
+  - 'State-changing action `drs:UpdateFailbackClientLastSeenForDrs` on Resource: `*` (IAM access level: Write)'
+  - 'State-changing action `drs:NotifyAgentAuthenticationForDrs` on Resource: `*` (IAM access level: Write)'
+  - 'State-changing action `drs:UpdateAgentReplicationProcessStateForDrs` on Resource: `*` (IAM access level: Write)'
+  - 'State-changing action `drs:NotifyAgentReplicationProgressForDrs` on Resource: `*` (IAM access level: Write)'
+  - 'State-changing action `drs:NotifyAgentConnectedForDrs` on Resource: `*` (IAM access level: Write)'
+  - 'State-changing action `drs:NotifyAgentDisconnectedForDrs` on Resource: `*` (IAM access level: Write)'
+  - 'State-changing action `drs:NotifyConsistencyAttainedForDrs` on Resource: `*` (IAM access level: Write)'
+  - 'State-changing action `drs:IssueAgentCertificateForDrs` on Resource: `*` (IAM access level: Write)'
+  - 'State-changing action `execute-api:Invoke` on Resource: `*` (IAM access level: Write)'
+  - 'State-changing action `execute-api:ManageConnections` on Resource: `*` (IAM access level: Write)'
+  - 'Resource: `*` for execute-api (broad cross-resource read/access)'
+  - '`cloudhsm:*` grants every action in `cloudhsm`'
+  - 'Resource: `*` for cloudhsm (broad cross-resource read/access)'
+  opus_score: null
+  opus_factors: null
+  opus_reasoning: null
+  gap_classification: pending

@@ -1,0 +1,36 @@
+name: composite-0043-42
+source_policies:
+- aws_managed/AWSXrayFullAccess.yaml
+- aws_managed/AWSDenyAll.yaml
+source_hash: c607374983b417cb
+policy:
+  Version: '2012-10-17'
+  Statement:
+  - Sid: AWSXrayFullAccess
+    Effect: Allow
+    Action:
+    - xray:*
+    Resource:
+    - '*'
+  - Sid: DenyAll
+    Effect: Deny
+    Action:
+    - '*'
+    Resource: '*'
+request:
+  spec:
+    access_type: read-write
+    duration:
+      duration_hours: 1
+    resource_constraints: []
+  user: dev-bob
+  justification: 'reproduce customer ticket #4422 locally'
+scores:
+  det_score: 8
+  det_factors:
+  - '`xray:*` grants every action in `xray`'
+  - 'Resource: `*` for xray (broad cross-resource read/access)'
+  opus_score: null
+  opus_factors: null
+  opus_reasoning: null
+  gap_classification: pending

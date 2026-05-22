@@ -1,0 +1,245 @@
+name: composite-0068-42
+source_policies:
+- aws_managed/AmazonSSMMaintenanceWindowRole.yaml
+- aws_managed/SageMakerStudioDomainServiceRolePolicy.yaml
+- aws_managed/AmazonEMRFullAccessPolicy_v2.yaml
+source_hash: e0b4c9b8d6e2dd20
+policy:
+  Version: '2012-10-17'
+  Statement:
+  - Effect: Allow
+    Action:
+    - ssm:GetAutomationExecution
+    - ssm:GetParameters
+    - ssm:ListCommands
+    - ssm:SendCommand
+    - ssm:StartAutomationExecution
+    Resource:
+    - '*'
+  - Effect: Allow
+    Action:
+    - lambda:InvokeFunction
+    Resource:
+    - arn:aws:lambda:*:*:function:SSM*
+    - arn:aws:lambda:*:*:function:*:SSM*
+  - Effect: Allow
+    Action:
+    - states:DescribeExecution
+    - states:StartExecution
+    Resource:
+    - arn:aws:states:*:*:stateMachine:SSM*
+    - arn:aws:states:*:*:execution:SSM*
+  - Effect: Allow
+    Action:
+    - resource-groups:ListGroups
+    - resource-groups:ListGroupResources
+    Resource:
+    - '*'
+  - Effect: Allow
+    Action:
+    - tag:GetResources
+    Resource:
+    - '*'
+  - Sid: SSMGetParameterStatement
+    Effect: Allow
+    Action:
+    - ssm:GetParameter
+    Resource:
+    - arn:aws:ssm:*:*:parameter/amazon/datazone/profiles/*
+  - Sid: UseKMSKeyPermissionsStatement
+    Effect: Allow
+    Action:
+    - kms:Decrypt
+    Resource: '*'
+    Condition:
+      StringEquals:
+        aws:ResourceTag/EnableKeyForAmazonDataZone: 'true'
+      'Null':
+        aws:ResourceTag/EnableKeyForAmazonDataZone: 'false'
+      StringLike:
+        kms:ViaService: ssm.*.amazonaws.com
+        kms:EncryptionContext:PARAMETER_ARN: arn:aws:ssm:*:*:parameter/amazon/datazone/profiles*
+  - Sid: RunJobFlowExplicitlyWithEMRManagedTag
+    Effect: Allow
+    Action:
+    - elasticmapreduce:RunJobFlow
+    Resource: '*'
+    Condition:
+      StringEquals:
+        aws:RequestTag/for-use-with-amazon-emr-managed-policies: 'true'
+  - Sid: ElasticMapReduceActions
+    Effect: Allow
+    Action:
+    - elasticmapreduce:AddInstanceFleet
+    - elasticmapreduce:AddInstanceGroups
+    - elasticmapreduce:AddJobFlowSteps
+    - elasticmapreduce:AddTags
+    - elasticmapreduce:CancelSteps
+    - elasticmapreduce:CreateEditor
+    - elasticmapreduce:CreatePersistentAppUI
+    - elasticmapreduce:CreateSecurityConfiguration
+    - elasticmapreduce:DeleteEditor
+    - elasticmapreduce:DeleteSecurityConfiguration
+    - elasticmapreduce:DescribeCluster
+    - elasticmapreduce:DescribeEditor
+    - elasticmapreduce:DescribeJobFlows
+    - elasticmapreduce:DescribePersistentAppUI
+    - elasticmapreduce:DescribeSecurityConfiguration
+    - elasticmapreduce:DescribeStep
+    - elasticmapreduce:DescribeReleaseLabel
+    - elasticmapreduce:GetBlockPublicAccessConfiguration
+    - elasticmapreduce:GetManagedScalingPolicy
+    - elasticmapreduce:GetAutoTerminationPolicy
+    - elasticmapreduce:GetPersistentAppUIPresignedURL
+    - elasticmapreduce:ListBootstrapActions
+    - elasticmapreduce:ListClusters
+    - elasticmapreduce:ListEditors
+    - elasticmapreduce:ListInstanceFleets
+    - elasticmapreduce:ListInstanceGroups
+    - elasticmapreduce:ListInstances
+    - elasticmapreduce:ListSecurityConfigurations
+    - elasticmapreduce:ListSteps
+    - elasticmapreduce:ListSupportedInstanceTypes
+    - elasticmapreduce:ModifyCluster
+    - elasticmapreduce:ModifyInstanceFleet
+    - elasticmapreduce:ModifyInstanceGroups
+    - elasticmapreduce:OpenEditorInConsole
+    - elasticmapreduce:PutAutoScalingPolicy
+    - elasticmapreduce:PutBlockPublicAccessConfiguration
+    - elasticmapreduce:PutManagedScalingPolicy
+    - elasticmapreduce:RemoveAutoScalingPolicy
+    - elasticmapreduce:RemoveManagedScalingPolicy
+    - elasticmapreduce:RemoveTags
+    - elasticmapreduce:SetTerminationProtection
+    - elasticmapreduce:StartEditor
+    - elasticmapreduce:StopEditor
+    - elasticmapreduce:TerminateJobFlows
+    - elasticmapreduce:ViewEventsFromAllClustersInConsole
+    Resource: '*'
+  - Sid: ViewMetricsInEMRConsole
+    Effect: Allow
+    Action:
+    - cloudwatch:GetMetricStatistics
+    Resource: '*'
+  - Sid: PassRoleForElasticMapReduce
+    Effect: Allow
+    Action: iam:PassRole
+    Resource: arn:aws:iam::*:role/EMR_DefaultRole_V2
+    Condition:
+      StringLike:
+        iam:PassedToService: elasticmapreduce.amazonaws.com*
+  - Sid: PassRoleForEC2
+    Effect: Allow
+    Action: iam:PassRole
+    Resource: arn:aws:iam::*:role/EMR_EC2_DefaultRole
+    Condition:
+      StringLike:
+        iam:PassedToService: ec2.amazonaws.com*
+  - Sid: PassRoleForAutoScaling
+    Effect: Allow
+    Action: iam:PassRole
+    Resource: arn:aws:iam::*:role/EMR_AutoScaling_DefaultRole
+    Condition:
+      StringLike:
+        iam:PassedToService: application-autoscaling.amazonaws.com*
+  - Sid: ElasticMapReduceServiceLinkedRole
+    Effect: Allow
+    Action: iam:CreateServiceLinkedRole
+    Resource: arn:aws:iam::*:role/aws-service-role/elasticmapreduce.amazonaws.com*/AWSServiceRoleForEMRCleanup*
+    Condition:
+      StringEquals:
+        iam:AWSServiceName:
+        - elasticmapreduce.amazonaws.com
+        - elasticmapreduce.amazonaws.com.cn
+  - Sid: ConsoleUIActions
+    Effect: Allow
+    Action:
+    - ec2:DescribeAccountAttributes
+    - ec2:DescribeAvailabilityZones
+    - ec2:DescribeImages
+    - ec2:DescribeKeyPairs
+    - ec2:DescribeNatGateways
+    - ec2:DescribeRouteTables
+    - ec2:DescribeSecurityGroups
+    - ec2:DescribeSubnets
+    - ec2:DescribeVpcs
+    - ec2:DescribeVpcEndpoints
+    - s3:ListAllMyBuckets
+    - iam:ListRoles
+    Resource: '*'
+request:
+  spec:
+    access_type: read-write
+    duration:
+      duration_hours: 1
+    resource_constraints: []
+  user: auditor-erin
+  justification: SOC 2 controls evidence collection
+scores:
+  det_score: 9
+  det_factors:
+  - '`ssm:GetAutomationExecution` on Resource: `*` touches sensitive service `ssm`'
+  - '`ssm:GetParameters` on Resource: `*` (broad access to sensitive resource)'
+  - '`ssm:ListCommands` on Resource: `*` touches sensitive service `ssm`'
+  - '`ssm:SendCommand` on Resource: `*` touches sensitive service `ssm`'
+  - '`ssm:StartAutomationExecution` on Resource: `*` touches sensitive service `ssm`'
+  - 'State-changing action `ssm:SendCommand` on Resource: `*` (IAM access level: Write)'
+  - 'State-changing action `ssm:StartAutomationExecution` on Resource: `*` (IAM access level: Write)'
+  - "`ssm:SendCommand` is a high-impact mutation on broad resource \u2014 single API call can rewrite every matching resource\
+    \ in the account."
+  - '`ssm:SendCommand` is catastrophic in blast radius (account governance / IAM total compromise / evidence destruction).
+    Always route to human review.'
+  - 'State-changing action `lambda:InvokeFunction` on Resource: `*` (IAM access level: Write)'
+  - 'Resource: `*` for lambda (broad cross-resource read/access)'
+  - 'State-changing action `states:StartExecution` on Resource: `*` (IAM access level: Write)'
+  - 'Resource: `*` for states (broad cross-resource read/access)'
+  - 'Resource: `*` for tag (broad cross-resource read/access)'
+  - '`ssm:GetParameter` on Resource: `*` (broad access to sensitive resource)'
+  - '`kms:Decrypt` on Resource: `*` (broad access to sensitive resource)'
+  - 'State-changing action `kms:Decrypt` on Resource: `*` (IAM access level: Write)'
+  - 'State-changing action `elasticmapreduce:RunJobFlow` on Resource: `*` (IAM access level: Write)'
+  - 'Resource: `*` for elasticmapreduce (broad cross-resource read/access)'
+  - 'State-changing action `elasticmapreduce:AddInstanceFleet` on Resource: `*` (IAM access level: Write)'
+  - 'State-changing action `elasticmapreduce:AddInstanceGroups` on Resource: `*` (IAM access level: Write)'
+  - 'State-changing action `elasticmapreduce:AddJobFlowSteps` on Resource: `*` (IAM access level: Write)'
+  - 'State-changing action `elasticmapreduce:AddTags` on Resource: `*` (IAM access level: Tagging)'
+  - 'Destructive action `elasticmapreduce:CancelSteps` on Resource: `*` (blast radius = every resource in this account)'
+  - 'State-changing action `elasticmapreduce:CreateEditor` on Resource: `*` (IAM access level: Write)'
+  - 'State-changing action `elasticmapreduce:CreatePersistentAppUI` on Resource: `*` (IAM access level: Write)'
+  - 'State-changing action `elasticmapreduce:CreateSecurityConfiguration` on Resource: `*` (IAM access level: Write)'
+  - 'Destructive action `elasticmapreduce:DeleteEditor` on Resource: `*` (blast radius = every resource in this account)'
+  - 'Destructive action `elasticmapreduce:DeleteSecurityConfiguration` on Resource: `*` (blast radius = every resource in
+    this account)'
+  - 'State-changing action `elasticmapreduce:GetPersistentAppUIPresignedURL` on Resource: `*` (IAM access level: Write)'
+  - 'State-changing action `elasticmapreduce:ModifyCluster` on Resource: `*` (IAM access level: Write)'
+  - 'State-changing action `elasticmapreduce:ModifyInstanceFleet` on Resource: `*` (IAM access level: Write)'
+  - 'State-changing action `elasticmapreduce:ModifyInstanceGroups` on Resource: `*` (IAM access level: Write)'
+  - 'State-changing action `elasticmapreduce:OpenEditorInConsole` on Resource: `*` (IAM access level: Write)'
+  - 'State-changing action `elasticmapreduce:PutAutoScalingPolicy` on Resource: `*` (IAM access level: Write)'
+  - 'State-changing action `elasticmapreduce:PutBlockPublicAccessConfiguration` on Resource: `*` (IAM access level: Permissions
+    management)'
+  - 'State-changing action `elasticmapreduce:PutManagedScalingPolicy` on Resource: `*` (IAM access level: Write)'
+  - 'Destructive action `elasticmapreduce:RemoveAutoScalingPolicy` on Resource: `*` (blast radius = every resource in this
+    account)'
+  - 'Destructive action `elasticmapreduce:RemoveManagedScalingPolicy` on Resource: `*` (blast radius = every resource in this
+    account)'
+  - 'Destructive action `elasticmapreduce:RemoveTags` on Resource: `*` (blast radius = every resource in this account)'
+  - 'State-changing action `elasticmapreduce:SetTerminationProtection` on Resource: `*` (IAM access level: Write)'
+  - 'State-changing action `elasticmapreduce:StartEditor` on Resource: `*` (IAM access level: Write)'
+  - 'Destructive action `elasticmapreduce:StopEditor` on Resource: `*` (blast radius = every resource in this account)'
+  - 'Destructive action `elasticmapreduce:TerminateJobFlows` on Resource: `*` (blast radius = every resource in this account)'
+  - 'Resource: `*` for cloudwatch (broad cross-resource read/access)'
+  - '`iam:PassRole` on Resource: `*` is a privilege-escalation path'
+  - 'State-changing action `iam:PassRole` on Resource: `*` (IAM access level: Permissions management)'
+  - '`iam:CreateServiceLinkedRole` on Resource: `*` touches sensitive service `iam`'
+  - 'State-changing action `iam:CreateServiceLinkedRole` on Resource: `*` (IAM access level: Permissions management)'
+  - '`iam:ListRoles` on Resource: `*` touches sensitive service `iam`'
+  - 'Code-execution primitive on broad resource: elasticmapreduce:AddJobFlowSteps, elasticmapreduce:RunJobFlow. Deploys attacker-controlled
+    code that runs under whatever role the matched resources use. Even without explicit PassRole, the existing roles of matched
+    resources become the attack target.'
+  - 'Code-execution-via-role composition: elasticmapreduce:AddJobFlowSteps (+ 1 more) combined with iam:PassRole = RCE as
+    the passed role. Single-statement scoring underweights this; the composition is full account-compromise tier.'
+  opus_score: null
+  opus_factors: null
+  opus_reasoning: null
+  gap_classification: pending

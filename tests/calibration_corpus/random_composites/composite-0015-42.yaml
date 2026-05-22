@@ -1,0 +1,435 @@
+name: composite-0015-42
+source_policies:
+- aws_managed/AWSMigrationHubOrchestratorConsoleFullAccess.yaml
+- aws_managed/QBusinessServiceRolePolicy.yaml
+- aws_managed/AWSTransformApplicationDeploymentPolicy.yaml
+source_hash: a333de58e596827e
+policy:
+  Version: '2012-10-17'
+  Statement:
+  - Sid: MHO
+    Effect: Allow
+    Action:
+    - migrationhub-orchestrator:*
+    Resource: '*'
+  - Sid: ListAllMyBuckets
+    Effect: Allow
+    Action:
+    - s3:ListAllMyBuckets
+    Resource: arn:aws:s3:::*
+  - Sid: S3MHO
+    Effect: Allow
+    Action:
+    - s3:GetObject
+    - s3:GetBucketAcl
+    - s3:GetBucketLocation
+    - s3:ListBucket
+    - s3:ListBucketVersions
+    - s3:PutObject
+    Resource:
+    - arn:aws:s3:::migrationhub-orchestrator-*
+    - arn:aws:s3:::migrationhub-orchestrator-*/*
+  - Sid: ListSecrets
+    Effect: Allow
+    Action:
+    - secretsmanager:ListSecrets
+    Resource: '*'
+  - Sid: Configuration
+    Effect: Allow
+    Action:
+    - discovery:DescribeConfigurations
+    - discovery:ListConfigurations
+    - discovery:GetDiscoverySummary
+    Resource: '*'
+  - Sid: GetHomeRegion
+    Effect: Allow
+    Action:
+    - mgh:GetHomeRegion
+    Resource: '*'
+  - Sid: EC2Describe
+    Effect: Allow
+    Action:
+    - ec2:DescribeInstances
+    - ec2:DescribeVpcs
+    Resource: '*'
+  - Sid: KMS
+    Effect: Allow
+    Action:
+    - kms:ListKeys
+    - kms:ListAliases
+    Resource: '*'
+  - Sid: IAMListProfileRole
+    Effect: Allow
+    Action:
+    - iam:ListInstanceProfiles
+    - iam:ListRoles
+    Resource: '*'
+  - Sid: ECS
+    Effect: Allow
+    Action:
+    - ecs:ListClusters
+    Resource: '*'
+  - Sid: Account
+    Effect: Allow
+    Action:
+    - account:ListRegions
+    Resource: '*'
+  - Sid: CreateServiceRole
+    Effect: Allow
+    Action:
+    - iam:CreateServiceLinkedRole
+    Resource: '*'
+    Condition:
+      StringEquals:
+        iam:AWSServiceName: migrationhub-orchestrator.amazonaws.com
+  - Sid: GetRole
+    Effect: Allow
+    Action:
+    - iam:GetRole
+    Resource: arn:aws:iam::*:role/aws-service-role/migrationhub-orchestrator.amazonaws.com/AWSServiceRoleForMigrationHubOrchestrator*
+  - Sid: QBusinessPutMetricDataPermission
+    Effect: Allow
+    Action:
+    - cloudwatch:PutMetricData
+    Resource: '*'
+    Condition:
+      StringEquals:
+        cloudwatch:namespace: AWS/QBusiness
+  - Sid: QBusinessCreateLogGroupPermission
+    Effect: Allow
+    Action:
+    - logs:CreateLogGroup
+    Resource:
+    - arn:aws:logs:*:*:log-group:/aws/qbusiness/*
+    Condition:
+      StringEquals:
+        aws:ResourceAccount: ${aws:PrincipalAccount}
+  - Sid: QBusinessDescribeLogGroupsPermission
+    Effect: Allow
+    Action:
+    - logs:DescribeLogGroups
+    Resource: '*'
+    Condition:
+      StringEquals:
+        aws:ResourceAccount: ${aws:PrincipalAccount}
+  - Sid: QBusinessLogStreamPermission
+    Effect: Allow
+    Action:
+    - logs:DescribeLogStreams
+    - logs:CreateLogStream
+    - logs:PutLogEvents
+    Resource:
+    - arn:aws:logs:*:*:log-group:/aws/qbusiness/*:log-stream:*
+    Condition:
+      StringEquals:
+        aws:ResourceAccount: ${aws:PrincipalAccount}
+  - Effect: Allow
+    Action:
+    - cloudformation:DescribeStacks
+    - cloudformation:DescribeStackEvents
+    Condition:
+      StringEquals:
+        aws:ResourceAccount: ${aws:PrincipalAccount}
+    Resource:
+    - arn:aws:cloudformation:*:*:stack/AWSTransform*
+  - Effect: Allow
+    Action:
+    - cloudformation:CreateStack
+    Condition:
+      StringEquals:
+        aws:RequestTag/CreatedBy: AWSTransform
+        aws:ResourceAccount: ${aws:PrincipalAccount}
+    Resource: arn:aws:cloudformation:*:*:stack/AWSTransform*
+  - Effect: Allow
+    Action:
+    - cloudformation:DeleteStack
+    Condition:
+      StringEquals:
+        aws:ResourceTag/CreatedBy: AWSTransform
+        aws:ResourceAccount: ${aws:PrincipalAccount}
+    Resource: arn:aws:cloudformation:*:*:stack/AWSTransform*
+  - Effect: Allow
+    Action:
+    - cloudformation:UpdateStack
+    Condition:
+      StringEquals:
+        aws:RequestTag/CreatedBy: AWSTransform
+        aws:ResourceTag/CreatedBy: AWSTransform
+        aws:ResourceAccount: ${aws:PrincipalAccount}
+    Resource: arn:aws:cloudformation:*:*:stack/AWSTransform*
+  - Effect: Allow
+    Action:
+    - ec2:DescribeVpcs
+    - ec2:DescribeSubnets
+    - ec2:DescribeSecurityGroups
+    - ec2:DescribeImages
+    - ec2:DescribeInstances
+    - ec2:DescribeRouteTables
+    - ec2:DescribeInternetGateways
+    Resource: '*'
+  - Effect: Deny
+    Action:
+    - ec2:CreateTags
+    - ec2:DeleteTags
+    Resource: arn:aws:ec2:*:*:instance/*
+    Condition:
+      ForAnyValue:StringNotEquals:
+        aws:TagKeys:
+        - Name
+        - CreatedBy
+        - ApplicationName
+        - TransformationType
+        - aws:cloudformation:stack-name
+        - aws:cloudformation:logical-id
+        - aws:cloudformation:stack-id
+  - Effect: Allow
+    Action:
+    - ec2:CreateTags
+    - ec2:DeleteTags
+    Condition:
+      ForAnyValue:StringEquals:
+        aws:CalledVia: cloudformation.amazonaws.com
+      StringEquals:
+        aws:ResourceAccount: ${aws:PrincipalAccount}
+    Resource: arn:aws:ec2:*:*:instance/*
+  - Effect: Allow
+    Action:
+    - ec2:RunInstances
+    Condition:
+      ForAnyValue:StringEquals:
+        aws:CalledVia: cloudformation.amazonaws.com
+    Resource:
+    - arn:aws:ec2:*::image/*
+  - Effect: Allow
+    Action:
+    - ec2:RunInstances
+    Condition:
+      ForAnyValue:StringEquals:
+        aws:CalledVia: cloudformation.amazonaws.com
+      StringEquals:
+        aws:ResourceAccount: ${aws:PrincipalAccount}
+    Resource:
+    - arn:aws:ec2:*:*:subnet/*
+    - arn:aws:ec2:*:*:security-group/*
+    - arn:aws:ec2:*:*:network-interface/*
+    - arn:aws:ec2:*:*:instance/*
+    - arn:aws:ec2:*:*:volume/*
+  - Effect: Allow
+    Action:
+    - iam:GetRole
+    - iam:GetInstanceProfile
+    - iam:GetRolePolicy
+    - iam:ListRolePolicies
+    - iam:ListAttachedRolePolicies
+    Condition:
+      StringEquals:
+        aws:ResourceAccount: ${aws:PrincipalAccount}
+    Resource:
+    - arn:aws:iam::*:role/AWSTransform-Deploy-Builder-Instance-Role
+    - arn:aws:iam::*:instance-profile/AWSTransform-Deploy-Builder-Instance-Role
+    - arn:aws:iam::*:role/AWSTransform-Deploy-App-Instance-Role
+    - arn:aws:iam::*:instance-profile/AWSTransform-Deploy-App-Instance-Role
+  - Effect: Allow
+    Action:
+    - iam:PassRole
+    Condition:
+      StringEquals:
+        iam:PassedToService: ec2.amazonaws.com
+        aws:ResourceAccount: ${aws:PrincipalAccount}
+    Resource:
+    - arn:aws:iam::*:role/AWSTransform-Deploy-Builder-Instance-Role
+    - arn:aws:iam::*:role/AWSTransform-Deploy-App-Instance-Role
+  - Effect: Allow
+    Action:
+    - ssm:GetParameters
+    Resource: arn:aws:ssm:*::parameter/aws/service/ami-amazon-linux-latest*
+  - Effect: Allow
+    Action:
+    - ec2:TerminateInstances
+    - ec2:StopInstances
+    - ec2:StartInstances
+    - ec2:ModifyInstanceAttribute
+    Condition:
+      StringEquals:
+        aws:ResourceTag/CreatedBy: AWSTransform
+        aws:ResourceAccount: ${aws:PrincipalAccount}
+      ForAnyValue:StringEquals:
+        aws:CalledVia: cloudformation.amazonaws.com
+    Resource: arn:aws:ec2:*:*:instance/*
+  - Effect: Allow
+    Action:
+    - ssm:SendCommand
+    Resource:
+    - arn:aws:ssm:*:*:document/AWS-RunRemoteScript
+  - Effect: Allow
+    Action:
+    - ssm:SendCommand
+    Resource: arn:aws:ec2:*:*:instance/*
+    Condition:
+      StringEquals:
+        aws:ResourceTag/CreatedBy: AWSTransform
+  - Effect: Allow
+    Action:
+    - ssm:DescribeInstanceInformation
+    - ssm:GetCommandInvocation
+    Resource:
+    - arn:aws:ssm:*:*:*
+    - arn:aws:ec2:*:*:instance/*
+  - Effect: Allow
+    Action:
+    - s3:GetBucketLocation
+    - s3:PutObject
+    - s3:ListMultipartUploadParts
+    - s3:ListBucketMultipartUploads
+    - s3:AbortMultipartUpload
+    - s3:PutBucketTagging
+    Resource:
+    - arn:aws:s3:::aws-transform-deployment-bucket-*
+    - arn:aws:s3:::aws-transform-deployment-bucket-*/*
+    Condition:
+      StringEquals:
+        aws:ResourceAccount: ${aws:PrincipalAccount}
+  - Effect: Allow
+    Action:
+    - s3:ListAllMyBuckets
+    Resource: '*'
+    Condition:
+      StringEquals:
+        aws:ResourceAccount: ${aws:PrincipalAccount}
+  - Effect: Allow
+    Action:
+    - kms:Decrypt
+    - kms:GenerateDataKey
+    Resource: arn:aws:kms:*:*:key/*
+    Condition:
+      StringEquals:
+        aws:ResourceTag/CreatedFor: AWSTransform
+        aws:ResourceAccount: ${aws:PrincipalAccount}
+      StringLike:
+        kms:EncryptionContext:aws-transform: '*'
+        kms:ViaService: s3.*.amazonaws.com
+  - Effect: Allow
+    Action:
+    - kms:CreateGrant
+    Resource: arn:aws:kms:*:*:key/*
+    Condition:
+      Bool:
+        kms:GrantIsForAWSResource: 'true'
+      StringLike:
+        kms:ViaService:
+        - ec2.*.amazonaws.com
+        kms:EncryptionContext:aws:ebs:id: '*'
+      StringEquals:
+        aws:ResourceAccount: ${aws:PrincipalAccount}
+        kms:GrantConstraintType: EncryptionContextSubset
+      ForAllValues:StringEquals:
+        kms:GrantOperations:
+        - Decrypt
+  - Effect: Allow
+    Action:
+    - kms:GenerateDataKeyWithoutPlaintext
+    Resource: arn:aws:kms:*:*:key/*
+    Condition:
+      StringLike:
+        kms:ViaService: ec2.*.amazonaws.com
+        kms:EncryptionContext:aws:ebs:id: '*'
+  - Effect: Allow
+    Action:
+    - kms:DescribeKey
+    Resource: arn:aws:kms:*:*:key/*
+    Condition:
+      StringEquals:
+        aws:ResourceAccount: ${aws:PrincipalAccount}
+request:
+  spec:
+    access_type: read-write
+    duration:
+      duration_hours: 1
+    resource_constraints: []
+  user: ci-bot
+  justification: deploy via terraform-cloud agent
+scores:
+  det_score: 9
+  det_factors:
+  - '`migrationhub-orchestrator:*` grants every action in `migrationhub-orchestrator`'
+  - 'Resource: `*` for migrationhub-orchestrator (broad cross-resource read/access)'
+  - 'State-changing action `s3:PutObject` on Resource: `*` (IAM access level: Write)'
+  - 'Resource: `*` for s3 (broad cross-resource read/access)'
+  - '`secretsmanager:ListSecrets` on Resource: `*` touches sensitive service `secretsmanager`'
+  - 'Resource: `*` for discovery (broad cross-resource read/access)'
+  - 'Resource: `*` for mgh (broad cross-resource read/access)'
+  - '`kms:ListKeys` on Resource: `*` touches sensitive service `kms`'
+  - '`kms:ListAliases` on Resource: `*` touches sensitive service `kms`'
+  - '`iam:ListInstanceProfiles` on Resource: `*` touches sensitive service `iam`'
+  - '`iam:ListRoles` on Resource: `*` touches sensitive service `iam`'
+  - '`iam:CreateServiceLinkedRole` on Resource: `*` touches sensitive service `iam`'
+  - 'State-changing action `iam:CreateServiceLinkedRole` on Resource: `*` (IAM access level: Permissions management)'
+  - '`iam:GetRole` on Resource: `*` touches sensitive service `iam`'
+  - 'State-changing action `cloudwatch:PutMetricData` on Resource: `*` (IAM access level: Write)'
+  - 'Resource: `*` for cloudwatch (broad cross-resource read/access)'
+  - 'State-changing action `logs:CreateLogGroup` on Resource: `*` (IAM access level: Write)'
+  - 'Resource: `*` for logs (broad cross-resource read/access)'
+  - 'State-changing action `logs:CreateLogStream` on Resource: `*` (IAM access level: Write)'
+  - 'State-changing action `logs:PutLogEvents` on Resource: `*` (IAM access level: Write)'
+  - 'State-changing action `cloudformation:CreateStack` on Resource: `*` (IAM access level: Write)'
+  - 'Resource: `*` for cloudformation (broad cross-resource read/access)'
+  - "`cloudformation:CreateStack` is a high-impact mutation on broad resource \u2014 single API call can rewrite every matching\
+    \ resource in the account."
+  - 'Destructive action `cloudformation:DeleteStack` on Resource: `*` (blast radius = every resource in this account)'
+  - 'State-changing action `cloudformation:UpdateStack` on Resource: `*` (IAM access level: Write)'
+  - "`cloudformation:UpdateStack` is a high-impact mutation on broad resource \u2014 single API call can rewrite every matching\
+    \ resource in the account."
+  - 'State-changing action `ec2:CreateTags` on Resource: `*` (IAM access level: Tagging)'
+  - 'Destructive action `ec2:DeleteTags` on Resource: `*` (blast radius = every resource in this account)'
+  - 'Resource: `*` for ec2 (broad cross-resource read/access)'
+  - 'State-changing action `ec2:RunInstances` on Resource: `*` (IAM access level: Write)'
+  - '`iam:GetInstanceProfile` on Resource: `*` touches sensitive service `iam`'
+  - '`iam:GetRolePolicy` on Resource: `*` touches sensitive service `iam`'
+  - '`iam:ListRolePolicies` on Resource: `*` touches sensitive service `iam`'
+  - '`iam:ListAttachedRolePolicies` on Resource: `*` touches sensitive service `iam`'
+  - '`iam:PassRole` on Resource: `*` is a privilege-escalation path'
+  - 'State-changing action `iam:PassRole` on Resource: `*` (IAM access level: Permissions management)'
+  - 'Destructive action `ec2:TerminateInstances` on Resource: `*` (blast radius = every resource in this account)'
+  - 'Destructive action `ec2:StopInstances` on Resource: `*` (blast radius = every resource in this account)'
+  - 'State-changing action `ec2:StartInstances` on Resource: `*` (IAM access level: Write)'
+  - 'State-changing action `ec2:ModifyInstanceAttribute` on Resource: `*` (IAM access level: Write)'
+  - "`ec2:ModifyInstanceAttribute` is a high-impact mutation on broad resource \u2014 single API call can rewrite every matching\
+    \ resource in the account."
+  - '`ec2:ModifyInstanceAttribute` is catastrophic in blast radius (account governance / IAM total compromise / evidence destruction).
+    Always route to human review.'
+  - '`ssm:SendCommand` on Resource: `*` touches sensitive service `ssm`'
+  - 'State-changing action `ssm:SendCommand` on Resource: `*` (IAM access level: Write)'
+  - "`ssm:SendCommand` is a high-impact mutation on broad resource \u2014 single API call can rewrite every matching resource\
+    \ in the account."
+  - '`ssm:SendCommand` is catastrophic in blast radius (account governance / IAM total compromise / evidence destruction).
+    Always route to human review.'
+  - '`ssm:DescribeInstanceInformation` on Resource: `*` touches sensitive service `ssm`'
+  - '`ssm:GetCommandInvocation` on Resource: `*` touches sensitive service `ssm`'
+  - 'Destructive action `s3:AbortMultipartUpload` on Resource: `*` (blast radius = every resource in this account)'
+  - 'State-changing action `s3:PutBucketTagging` on Resource: `*` (IAM access level: Tagging)'
+  - "`Condition.StringLike.kms:EncryptionContext:aws-transform` value is `\"*\"` \u2014 degenerate wildcard; the condition\
+    \ imposes no actual constraint."
+  - '`kms:Decrypt` on Resource: `*` (broad access to sensitive resource)'
+  - '`kms:GenerateDataKey` on Resource: `*` (broad access to sensitive resource)'
+  - 'State-changing action `kms:Decrypt` on Resource: `*` (IAM access level: Write)'
+  - 'State-changing action `kms:GenerateDataKey` on Resource: `*` (IAM access level: Write)'
+  - "`Condition.StringLike.kms:EncryptionContext:aws:ebs:id` value is `\"*\"` \u2014 degenerate wildcard; the condition imposes\
+    \ no actual constraint."
+  - '`kms:CreateGrant` on Resource: `*` touches sensitive service `kms`'
+  - 'State-changing action `kms:CreateGrant` on Resource: `*` (IAM access level: Permissions management)'
+  - '`kms:GenerateDataKeyWithoutPlaintext` on Resource: `*` touches sensitive service `kms`'
+  - 'State-changing action `kms:GenerateDataKeyWithoutPlaintext` on Resource: `*` (IAM access level: Write)'
+  - '`kms:DescribeKey` on Resource: `*` touches sensitive service `kms`'
+  - 'Code-execution primitive on broad resource: cloudformation:CreateStack, cloudformation:UpdateStack, ec2:RunInstances.
+    Deploys attacker-controlled code that runs under whatever role the matched resources use. Even without explicit PassRole,
+    the existing roles of matched resources become the attack target.'
+  - 'Code-execution-via-role composition: cloudformation:CreateStack (+ 2 more) combined with iam:PassRole = RCE as the passed
+    role. Single-statement scoring underweights this; the composition is full account-compromise tier.'
+  - '`s3:GetObject` on broad resource reads content that frequently contains secrets / sensitive data (boot logs, command
+    output, log streams, message bodies).'
+  - '`kms:CreateGrant` sets up ongoing cross-account / persistent exfiltration in a single call. The blast is ''everything
+    that flows through this resource from now on,'' not just what exists today.'
+  opus_score: null
+  opus_factors: null
+  opus_reasoning: null
+  gap_classification: pending

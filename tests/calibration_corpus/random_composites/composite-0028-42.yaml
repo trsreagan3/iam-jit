@@ -1,0 +1,242 @@
+name: composite-0028-42
+source_policies:
+- aws_managed/AmazonRoute53DomainsReadOnlyAccess.yaml
+- aws_managed/AIDevOpsAgentFullAccess.yaml
+- aws_managed/AppIntegrationsServiceLinkedRolePolicy.yaml
+- aws_managed/AWSTransferReadOnlyAccess.yaml
+- aws_managed/AmazonMachineLearningManageRealTimeEndpointOnlyAccess.yaml
+source_hash: 8fe53eb6c9dbfc44
+policy:
+  Version: '2012-10-17'
+  Statement:
+  - Effect: Allow
+    Action:
+    - route53domains:Get*
+    - route53domains:List*
+    Resource:
+    - '*'
+  - Sid: AIDevOpsAgentSpaceAccess
+    Effect: Allow
+    Action:
+    - aidevops:CreateAgentSpace
+    - aidevops:DeleteAgentSpace
+    - aidevops:GetAgentSpace
+    - aidevops:ListAgentSpaces
+    - aidevops:UpdateAgentSpace
+    Resource: '*'
+  - Sid: AIDevOpsServiceAccess
+    Effect: Allow
+    Action:
+    - aidevops:DeregisterService
+    - aidevops:GetService
+    - aidevops:ListServices
+    - aidevops:RegisterService
+    - aidevops:SearchServiceAccessibleResource
+    Resource: '*'
+  - Sid: AIDevOpsAssociationAccess
+    Effect: Allow
+    Action:
+    - aidevops:AssociateService
+    - aidevops:DisassociateService
+    - aidevops:GetAssociation
+    - aidevops:ListAssociations
+    - aidevops:UpdateAssociation
+    - aidevops:ValidateAwsAssociations
+    Resource: '*'
+  - Sid: AIDevOpsWebhookAccess
+    Effect: Allow
+    Action:
+    - aidevops:ListWebhooks
+    Resource: '*'
+  - Sid: AIDevOpsOperatorAppAccess
+    Effect: Allow
+    Action:
+    - aidevops:DisableOperatorApp
+    - aidevops:EnableOperatorApp
+    - aidevops:GetOperatorApp
+    - aidevops:UpdateOperatorAppIdpConfig
+    Resource: '*'
+  - Sid: AIDevOpsKnowledgeAccess
+    Effect: Allow
+    Action:
+    - aidevops:CreateKnowledgeItem
+    - aidevops:DeleteKnowledgeItem
+    - aidevops:GetKnowledgeItem
+    - aidevops:ListKnowledgeItems
+    - aidevops:ListKnowledgeItemVersions
+    - aidevops:UpdateKnowledgeItem
+    Resource: '*'
+  - Sid: AIDevOpsBacklogAccess
+    Effect: Allow
+    Action:
+    - aidevops:CreateBacklogTask
+    - aidevops:GetBacklogTask
+    - aidevops:ListBacklogTasks
+    - aidevops:ListGoals
+    - aidevops:UpdateBacklogTask
+    - aidevops:UpdateGoal
+    Resource: '*'
+  - Sid: AIDevOpsRecommendationAccess
+    Effect: Allow
+    Action:
+    - aidevops:GetRecommendation
+    - aidevops:ListRecommendations
+    - aidevops:UpdateRecommendation
+    Resource: '*'
+  - Sid: AIDevOpsAgentChatAccess
+    Effect: Allow
+    Action:
+    - aidevops:CreateChat
+    - aidevops:ListChats
+    - aidevops:ListPendingMessages
+    - aidevops:SendMessage
+    Resource: '*'
+  - Sid: AIDevOpsJournalAccess
+    Effect: Allow
+    Action:
+    - aidevops:ListExecutions
+    - aidevops:ListJournalRecords
+    Resource: '*'
+  - Sid: AIDevOpsTopologyAccess
+    Effect: Allow
+    Action:
+    - aidevops:DiscoverTopology
+    Resource: '*'
+  - Sid: AIDevOpsSupportAccess
+    Effect: Allow
+    Action:
+    - aidevops:DescribeServices
+    - aidevops:DescribeSupportLevel
+    - aidevops:EndChatForCase
+    - aidevops:InitiateChatForCase
+    Resource: '*'
+  - Sid: AIDevOpsUsageAccess
+    Effect: Allow
+    Action:
+    - aidevops:GetAccountUsage
+    Resource: '*'
+  - Sid: AIDevOpsTaggingAccess
+    Effect: Allow
+    Action:
+    - aidevops:ListTagsForResource
+    - aidevops:TagResource
+    - aidevops:UntagResource
+    Resource: '*'
+  - Sid: AIDevOpsVendedLogs
+    Effect: Allow
+    Action:
+    - aidevops:AllowVendedLogDeliveryForResource
+    Resource: '*'
+  - Effect: Allow
+    Action:
+    - cloudwatch:PutMetricData
+    Resource: '*'
+    Condition:
+      StringEquals:
+        cloudwatch:namespace: AWS/AppIntegrations
+  - Effect: Allow
+    Action:
+    - appflow:DescribeConnectorEntity
+    - appflow:ListConnectorEntities
+    Resource: '*'
+  - Effect: Allow
+    Action:
+    - appflow:DescribeConnectorProfiles
+    - appflow:UseConnectorProfile
+    Resource: arn:aws:appflow:*:*:connector-profile/*
+  - Effect: Allow
+    Action:
+    - appflow:DeleteFlow
+    - appflow:DescribeFlow
+    - appflow:DescribeFlowExecutionRecords
+    - appflow:StartFlow
+    - appflow:StopFlow
+    - appflow:UpdateFlow
+    Condition:
+      StringEquals:
+        aws:ResourceTag/AppIntegrationsManaged: 'true'
+    Resource: arn:aws:appflow:*:*:flow/FlowCreatedByAppIntegrations-*
+  - Effect: Allow
+    Action:
+    - appflow:TagResource
+    Condition:
+      ForAllValues:StringEquals:
+        aws:TagKeys:
+        - AppIntegrationsManaged
+    Resource: arn:aws:appflow:*:*:flow/FlowCreatedByAppIntegrations-*
+  - Effect: Allow
+    Action:
+    - transfer:DescribeUser
+    - transfer:DescribeServer
+    - transfer:ListUsers
+    - transfer:ListServers
+    - transfer:TestIdentityProvider
+    - transfer:ListTagsForResource
+    Resource: '*'
+  - Effect: Allow
+    Action:
+    - machinelearning:CreateRealtimeEndpoint
+    - machinelearning:DeleteRealtimeEndpoint
+    Resource: '*'
+request:
+  spec:
+    access_type: read-write
+    duration:
+      duration_hours: 1
+    resource_constraints: []
+  user: ci-bot
+  justification: deploy via terraform-cloud agent
+scores:
+  det_score: 8
+  det_factors:
+  - "Action-name wildcard `route53domains:Get*` on broad resource \u2014 matches multiple route53domains APIs at once"
+  - "Action-name wildcard `route53domains:List*` on broad resource \u2014 matches multiple route53domains APIs at once"
+  - 'Resource: `*` for route53domains (broad cross-resource read/access)'
+  - 'State-changing action `aidevops:CreateAgentSpace` on Resource: `*` (IAM access level: Write)'
+  - 'Destructive action `aidevops:DeleteAgentSpace` on Resource: `*` (blast radius = every resource in this account)'
+  - 'State-changing action `aidevops:UpdateAgentSpace` on Resource: `*` (IAM access level: Write)'
+  - 'Resource: `*` for aidevops (broad cross-resource read/access)'
+  - 'State-changing action `aidevops:DeregisterService` on Resource: `*` (IAM access level: Write)'
+  - 'State-changing action `aidevops:RegisterService` on Resource: `*` (IAM access level: Write)'
+  - 'State-changing action `aidevops:AssociateService` on Resource: `*` (IAM access level: Write)'
+  - 'Destructive action `aidevops:DisassociateService` on Resource: `*` (blast radius = every resource in this account)'
+  - 'State-changing action `aidevops:UpdateAssociation` on Resource: `*` (IAM access level: Write)'
+  - 'State-changing action `aidevops:ValidateAwsAssociations` on Resource: `*` (IAM access level: Write)'
+  - 'Destructive action `aidevops:DisableOperatorApp` on Resource: `*` (blast radius = every resource in this account)'
+  - 'State-changing action `aidevops:EnableOperatorApp` on Resource: `*` (IAM access level: Write)'
+  - 'State-changing action `aidevops:UpdateOperatorAppIdpConfig` on Resource: `*` (IAM access level: Write)'
+  - 'State-changing action `aidevops:CreateKnowledgeItem` on Resource: `*` (IAM access level: Write)'
+  - 'Destructive action `aidevops:DeleteKnowledgeItem` on Resource: `*` (blast radius = every resource in this account)'
+  - 'State-changing action `aidevops:UpdateKnowledgeItem` on Resource: `*` (IAM access level: Write)'
+  - 'State-changing action `aidevops:CreateBacklogTask` on Resource: `*` (IAM access level: Write)'
+  - 'State-changing action `aidevops:UpdateBacklogTask` on Resource: `*` (IAM access level: Write)'
+  - 'State-changing action `aidevops:UpdateGoal` on Resource: `*` (IAM access level: Write)'
+  - 'State-changing action `aidevops:UpdateRecommendation` on Resource: `*` (IAM access level: Write)'
+  - 'State-changing action `aidevops:CreateChat` on Resource: `*` (IAM access level: Write)'
+  - 'State-changing action `aidevops:SendMessage` on Resource: `*` (IAM access level: Write)'
+  - 'State-changing action `aidevops:DiscoverTopology` on Resource: `*` (IAM access level: Write)'
+  - 'State-changing action `aidevops:DescribeSupportLevel` on Resource: `*` (IAM access level: Write)'
+  - 'State-changing action `aidevops:EndChatForCase` on Resource: `*` (IAM access level: Write)'
+  - 'State-changing action `aidevops:InitiateChatForCase` on Resource: `*` (IAM access level: Write)'
+  - 'State-changing action `aidevops:TagResource` on Resource: `*` (IAM access level: Tagging)'
+  - 'State-changing action `aidevops:UntagResource` on Resource: `*` (IAM access level: Tagging)'
+  - 'State-changing action `aidevops:AllowVendedLogDeliveryForResource` on Resource: `*` (IAM access level: Permissions management)'
+  - 'State-changing action `cloudwatch:PutMetricData` on Resource: `*` (IAM access level: Write)'
+  - 'Resource: `*` for cloudwatch (broad cross-resource read/access)'
+  - 'State-changing action `appflow:UseConnectorProfile` on Resource: `*` (IAM access level: Write)'
+  - 'Resource: `*` for appflow (broad cross-resource read/access)'
+  - 'Destructive action `appflow:DeleteFlow` on Resource: `*` (blast radius = every resource in this account)'
+  - 'State-changing action `appflow:StartFlow` on Resource: `*` (IAM access level: Write)'
+  - 'Destructive action `appflow:StopFlow` on Resource: `*` (blast radius = every resource in this account)'
+  - 'State-changing action `appflow:UpdateFlow` on Resource: `*` (IAM access level: Write)'
+  - 'State-changing action `appflow:TagResource` on Resource: `*` (IAM access level: Tagging)'
+  - 'Resource: `*` for transfer (broad cross-resource read/access)'
+  - 'State-changing action `machinelearning:CreateRealtimeEndpoint` on Resource: `*` (IAM access level: Write)'
+  - 'Destructive action `machinelearning:DeleteRealtimeEndpoint` on Resource: `*` (blast radius = every resource in this account)'
+  - 'Resource: `*` for machinelearning (broad cross-resource read/access)'
+  - '`appflow:StartFlow` sets up ongoing cross-account / persistent exfiltration in a single call. The blast is ''everything
+    that flows through this resource from now on,'' not just what exists today.'
+  opus_score: null
+  opus_factors: null
+  opus_reasoning: null
+  gap_classification: pending

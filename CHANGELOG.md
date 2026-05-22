@@ -11,6 +11,36 @@ within the same release.
 
 ## Unreleased — Bounce-suite rename (2026-05-17)
 
+### Added
+
+- **random-policy fuzz methodology** (founder direction
+  2026-05-22, `scripts/random_policy_fuzz.py` +
+  `scripts/random_policy_fuzz_oracle_prompt.md` +
+  `scripts/random_policy_fuzz_compare.py` +
+  `docs/RANDOM-FUZZ-METHODOLOGY-2026-05-22.md`) — generator
+  samples 2-5 AWS-managed policies uniformly at random (50%
+  pairs / 30% triples / 15% quads / 5% pentuples), concatenates
+  their `Statement` blocks (with statement-level dedupe), and
+  scores each composite LOCALLY via `iam_jit.review.analyze_policy`
+  — no LLM calls in any iam-jit script. Initial 100-composite
+  batch at `seed=42` lands in
+  `tests/calibration_corpus/random_composites/` and is content-
+  hashed for cross-run dedupe. The oracle phase (Opus judgment)
+  is a separate manual step using the documented prompt; the
+  comparison script classifies each composite per the rubric
+  (CALIBRATED / DRIFT / UNDER_FLAG / OVER_FLAG / LIKELY_BUG) +
+  emits `docs/RANDOM-FUZZ-RESULTS-{date}.md`. Per
+  `[[scorer-is-ground-truth]]` the scorer is NOT auto-tuned to
+  match Opus; promotion of LIKELY_BUG cases to
+  `bug_regressions/` is a deliberate manual step. Calibration
+  loader (`tests/test_calibration_corpus.py`) explicitly skips
+  the `random_composites/` subdir because composites carry a
+  `scores`-style schema (not the `expected`-assertion schema).
+  Regression coverage in
+  `tests/scripts/test_random_policy_fuzz.py` (3 tests:
+  determinism + content-hash dedupe + det_score populated on
+  every composite).
+
 ### Fixed
 
 - **ibounce hardcoded HTTPS upstream scheme** (UAT 2026-05-22

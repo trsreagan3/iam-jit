@@ -1,0 +1,268 @@
+name: composite-0056-42
+source_policies:
+- aws_managed/AmazonRedshiftFullAccess.yaml
+- aws_managed/AWSSystemsManagerJustInTimeAccessTokenPolicy.yaml
+- aws_managed/AWSQuickSetupStartStopInstancesExecutionPolicy.yaml
+source_hash: fb6425a0c9d657f8
+policy:
+  Version: '2012-10-17'
+  Statement:
+  - Action:
+    - redshift:*
+    - redshift-serverless:*
+    - ec2:DescribeAccountAttributes
+    - ec2:DescribeAddresses
+    - ec2:DescribeAvailabilityZones
+    - ec2:DescribeSecurityGroups
+    - ec2:DescribeSubnets
+    - ec2:DescribeVpcs
+    - ec2:DescribeInternetGateways
+    - sns:CreateTopic
+    - sns:Get*
+    - sns:List*
+    - cloudwatch:Describe*
+    - cloudwatch:Get*
+    - cloudwatch:List*
+    - cloudwatch:PutMetricAlarm
+    - cloudwatch:EnableAlarmActions
+    - cloudwatch:DisableAlarmActions
+    - tag:GetResources
+    - tag:UntagResources
+    - tag:GetTagValues
+    - tag:GetTagKeys
+    - tag:TagResources
+    Effect: Allow
+    Resource: '*'
+  - Effect: Allow
+    Action: iam:CreateServiceLinkedRole
+    Resource: arn:aws:iam::*:role/aws-service-role/redshift.amazonaws.com/AWSServiceRoleForRedshift
+    Condition:
+      StringLike:
+        iam:AWSServiceName: redshift.amazonaws.com
+  - Sid: DataAPIPermissions
+    Action:
+    - redshift-data:ExecuteStatement
+    - redshift-data:CancelStatement
+    - redshift-data:ListStatements
+    - redshift-data:GetStatementResult
+    - redshift-data:DescribeStatement
+    - redshift-data:ListDatabases
+    - redshift-data:ListSchemas
+    - redshift-data:ListTables
+    - redshift-data:DescribeTable
+    Effect: Allow
+    Resource: '*'
+  - Sid: SecretsManagerListPermissions
+    Action:
+    - secretsmanager:ListSecrets
+    Effect: Allow
+    Resource: '*'
+  - Sid: SecretsManagerCreateGetPermissions
+    Action:
+    - secretsmanager:CreateSecret
+    - secretsmanager:GetSecretValue
+    - secretsmanager:TagResource
+    Effect: Allow
+    Resource: '*'
+    Condition:
+      StringLike:
+        secretsmanager:ResourceTag/RedshiftDataFullAccess: '*'
+  - Sid: SsmStartSession
+    Effect: Allow
+    Action:
+    - ssm:StartSession
+    Resource:
+    - arn:aws:ec2:*:*:instance/*
+    - arn:aws:ssm:*:*:managed-instance/*
+    - arn:aws:ssm:*:*:document/SSM-SessionManagerRunShell
+  - Sid: TerminateAndResumeSessionAndOpenDataChannel
+    Effect: Allow
+    Action:
+    - ssm:TerminateSession
+    - ssm:ResumeSession
+    - ssmmessages:OpenDataChannel
+    Resource: arn:aws:ssm:*:*:session/*
+  - Sid: GuiConnect
+    Effect: Allow
+    Action:
+    - ssm-guiconnect:CancelConnection
+    - ssm-guiconnect:GetConnection
+    - ssm-guiconnect:StartConnection
+    Resource: '*'
+  - Sid: SessionManagerKmsPermission
+    Effect: Allow
+    Action:
+    - kms:GenerateDataKey
+    Resource: arn:aws:kms:*:*:key/*
+    Condition:
+      StringEquals:
+        aws:ResourceTag/SystemsManagerJustInTimeNodeAccessManaged: 'true'
+  - Sid: RdpKmsPermission
+    Effect: Allow
+    Action:
+    - kms:CreateGrant
+    Resource: arn:aws:kms:*:*:key/*
+    Condition:
+      StringEquals:
+        aws:ResourceTag/SystemsManagerJustInTimeNodeAccessManaged: 'true'
+      StringLike:
+        kms:ViaService: ssm-guiconnect.*.amazonaws.com
+      Bool:
+        aws:ViaAWSService: 'true'
+  - Sid: RdpStartSession
+    Effect: Allow
+    Action:
+    - ssm:StartSession
+    Resource:
+    - arn:aws:ec2:*:*:instance/*
+    - arn:aws:ssm:*:*:managed-instance/*
+    - arn:aws:ssm:*:*:document/AWS-StartPortForwardingSession
+    Condition:
+      StringEquals:
+        aws:CalledViaFirst: ssm-guiconnect.amazonaws.com
+  - Sid: SsmRdpSsoSetup
+    Effect: Allow
+    Action:
+    - sso:ListDirectoryAssociations*
+    - identitystore:DescribeUser
+    - ssm:GetCommandInvocation
+    Resource: '*'
+    Condition:
+      StringEquals:
+        aws:CalledViaFirst: ssm-guiconnect.amazonaws.com
+  - Sid: SsmRdpSsoSetupSendCommand
+    Effect: Allow
+    Action:
+    - ssm:SendCommand
+    Resource:
+    - arn:aws:ec2:*:*:instance/*
+    - arn:aws:ssm:*:*:managed-instance/*
+    - arn:aws:ssm:*:*:document/AWSSSO-CreateSSOUser
+    Condition:
+      StringEquals:
+        aws:CalledViaFirst: ssm-guiconnect.amazonaws.com
+  - Effect: Allow
+    Action:
+    - ec2:DescribeInstances
+    - ec2:DescribeInstanceStatus
+    - ec2:DescribeRegions
+    - ec2:DescribeTags
+    Resource: '*'
+  - Effect: Allow
+    Action:
+    - ec2:StartInstances
+    - ec2:StopInstances
+    Resource: arn:aws:ec2:*:*:instance/*
+  - Effect: Allow
+    Action:
+    - ssm:GetCalendarState
+    Resource: arn:aws:ssm:*:*:document/AWSQuickSetup-ChangeCalendar*
+  - Effect: Allow
+    Action:
+    - ssm:StartAssociationsOnce
+    - ssm:StartAutomationExecution
+    Resource:
+    - arn:aws:ssm:*:*:association/*
+    - arn:aws:ssm:*:*:document/AWSQuickSetupType-Scheduler-ApplyInstanceState
+    - arn:aws:ssm:*:*:automation-execution/*
+    - arn:aws:ssm:*:*:automation-definition/AWSQuickSetupType-Scheduler-ApplyInstanceState*
+  - Effect: Allow
+    Action: iam:PassRole
+    Resource:
+    - arn:aws:iam::*:role/AWS-QuickSetup*
+    Condition:
+      StringEquals:
+        iam:PassedToService:
+        - ssm.amazonaws.com
+      ArnLike:
+        iam:AssociatedResourceARN:
+        - arn:aws:ssm:*::document/AWSQuickSetupType-Scheduler-ApplyInstanceState
+        - arn:aws:ssm:*:*:association/*
+request:
+  spec:
+    access_type: read-write
+    duration:
+      duration_hours: 8
+    resource_constraints: []
+  user: dev-bob
+  justification: 'reproduce customer ticket #4422 locally'
+scores:
+  det_score: 9
+  det_factors:
+  - '`redshift:*` grants every action in `redshift`'
+  - '`redshift-serverless:*` grants every action in `redshift-serverless`'
+  - "Action-name wildcard `sns:Get*` on broad resource \u2014 matches multiple sns APIs at once"
+  - "Action-name wildcard `sns:List*` on broad resource \u2014 matches multiple sns APIs at once"
+  - "Action-name wildcard `cloudwatch:Describe*` on broad resource \u2014 matches multiple cloudwatch APIs at once"
+  - "Action-name wildcard `cloudwatch:Get*` on broad resource \u2014 matches multiple cloudwatch APIs at once"
+  - "Action-name wildcard `cloudwatch:List*` on broad resource \u2014 matches multiple cloudwatch APIs at once"
+  - 'State-changing action `sns:CreateTopic` on Resource: `*` (IAM access level: Permissions management)'
+  - 'State-changing action `cloudwatch:PutMetricAlarm` on Resource: `*` (IAM access level: Write)'
+  - 'State-changing action `cloudwatch:EnableAlarmActions` on Resource: `*` (IAM access level: Write)'
+  - 'Destructive action `cloudwatch:DisableAlarmActions` on Resource: `*` (blast radius = every resource in this account)'
+  - 'State-changing action `tag:UntagResources` on Resource: `*` (IAM access level: Tagging)'
+  - 'State-changing action `tag:TagResources` on Resource: `*` (IAM access level: Tagging)'
+  - 'Resource: `*` for cloudwatch, ec2, redshift, redshift-serverless, sns, tag (broad cross-resource read/access)'
+  - "`redshift:*` is a high-impact mutation on broad resource \u2014 single API call can rewrite every matching resource in\
+    \ the account."
+  - '`iam:CreateServiceLinkedRole` on Resource: `*` touches sensitive service `iam`'
+  - 'State-changing action `iam:CreateServiceLinkedRole` on Resource: `*` (IAM access level: Permissions management)'
+  - 'State-changing action `redshift-data:ExecuteStatement` on Resource: `*` (IAM access level: Write)'
+  - 'Destructive action `redshift-data:CancelStatement` on Resource: `*` (blast radius = every resource in this account)'
+  - 'Resource: `*` for redshift-data (broad cross-resource read/access)'
+  - '`secretsmanager:ListSecrets` on Resource: `*` touches sensitive service `secretsmanager`'
+  - "`Condition.StringLike.secretsmanager:ResourceTag/RedshiftDataFullAccess` value is `\"*\"` \u2014 degenerate wildcard;\
+    \ the condition imposes no actual constraint."
+  - '`secretsmanager:CreateSecret` on Resource: `*` touches sensitive service `secretsmanager`'
+  - '`secretsmanager:GetSecretValue` on Resource: `*` (broad access to secrets)'
+  - '`secretsmanager:TagResource` on Resource: `*` touches sensitive service `secretsmanager`'
+  - 'State-changing action `secretsmanager:CreateSecret` on Resource: `*` (IAM access level: Write)'
+  - 'State-changing action `secretsmanager:TagResource` on Resource: `*` (IAM access level: Tagging)'
+  - '`ssm:StartSession` on Resource: `*` touches sensitive service `ssm`'
+  - 'State-changing action `ssm:StartSession` on Resource: `*` (IAM access level: Write)'
+  - "`ssm:StartSession` is a high-impact mutation on broad resource \u2014 single API call can rewrite every matching resource\
+    \ in the account."
+  - '`ssm:StartSession` is catastrophic in blast radius (account governance / IAM total compromise / evidence destruction).
+    Always route to human review.'
+  - '`ssm:TerminateSession` on Resource: `*` touches sensitive service `ssm`'
+  - '`ssm:ResumeSession` on Resource: `*` touches sensitive service `ssm`'
+  - 'Destructive action `ssm:TerminateSession` on Resource: `*` (blast radius = every resource in this account)'
+  - 'State-changing action `ssm:ResumeSession` on Resource: `*` (IAM access level: Write)'
+  - 'State-changing action `ssmmessages:OpenDataChannel` on Resource: `*` (IAM access level: Write)'
+  - 'Destructive action `ssm-guiconnect:CancelConnection` on Resource: `*` (blast radius = every resource in this account)'
+  - 'State-changing action `ssm-guiconnect:StartConnection` on Resource: `*` (IAM access level: Write)'
+  - 'Resource: `*` for ssm-guiconnect (broad cross-resource read/access)'
+  - '`kms:GenerateDataKey` on Resource: `*` (broad access to sensitive resource)'
+  - 'State-changing action `kms:GenerateDataKey` on Resource: `*` (IAM access level: Write)'
+  - '`kms:CreateGrant` on Resource: `*` touches sensitive service `kms`'
+  - 'State-changing action `kms:CreateGrant` on Resource: `*` (IAM access level: Permissions management)'
+  - "Action-name wildcard `sso:ListDirectoryAssociations*` on broad resource \u2014 matches multiple sso APIs at once"
+  - '`identitystore:DescribeUser` on Resource: `*` touches sensitive service `identitystore`'
+  - '`ssm:GetCommandInvocation` on Resource: `*` touches sensitive service `ssm`'
+  - '`ssm:SendCommand` on Resource: `*` touches sensitive service `ssm`'
+  - 'State-changing action `ssm:SendCommand` on Resource: `*` (IAM access level: Write)'
+  - "`ssm:SendCommand` is a high-impact mutation on broad resource \u2014 single API call can rewrite every matching resource\
+    \ in the account."
+  - '`ssm:SendCommand` is catastrophic in blast radius (account governance / IAM total compromise / evidence destruction).
+    Always route to human review.'
+  - 'State-changing action `ec2:StartInstances` on Resource: `*` (IAM access level: Write)'
+  - 'Destructive action `ec2:StopInstances` on Resource: `*` (blast radius = every resource in this account)'
+  - 'Resource: `*` for ec2 (broad cross-resource read/access)'
+  - '`ssm:GetCalendarState` on Resource: `*` touches sensitive service `ssm`'
+  - '`ssm:StartAssociationsOnce` on Resource: `*` touches sensitive service `ssm`'
+  - '`ssm:StartAutomationExecution` on Resource: `*` touches sensitive service `ssm`'
+  - 'State-changing action `ssm:StartAssociationsOnce` on Resource: `*` (IAM access level: Write)'
+  - 'State-changing action `ssm:StartAutomationExecution` on Resource: `*` (IAM access level: Write)'
+  - '`Condition.ArnLike.iam:AssociatedResourceARN: arn:aws:ssm:*::document/AWSQuickSetupType-Scheduler-ApplyInstanceState`
+    matches the named principal in EVERY AWS account (account segment wildcarded). The literal resource-name portion doesn''t
+    narrow the scope cross-account.'
+  - '`iam:PassRole` on Resource: `*` is a privilege-escalation path'
+  - 'State-changing action `iam:PassRole` on Resource: `*` (IAM access level: Permissions management)'
+  - '`ssm:GetCommandInvocation` on broad resource reads content that frequently contains secrets / sensitive data (boot logs,
+    command output, log streams, message bodies).'
+  - '`kms:CreateGrant` sets up ongoing cross-account / persistent exfiltration in a single call. The blast is ''everything
+    that flows through this resource from now on,'' not just what exists today.'
+  opus_score: null
+  opus_factors: null
+  opus_reasoning: null
+  gap_classification: pending

@@ -1,0 +1,86 @@
+name: composite-0018-42
+source_policies:
+- aws_managed/AWSQuickSightSageMakerPolicy.yaml
+- aws_managed/AWSElementalMediaConnectDeleteFlow.yaml
+source_hash: c54abbdee94a5d00
+policy:
+  Version: '2012-10-17'
+  Statement:
+  - Sid: SageMakerTransformJobAccess
+    Effect: Allow
+    Action:
+    - sagemaker:DescribeTransformJob
+    - sagemaker:StopTransformJob
+    - sagemaker:CreateTransformJob
+    Resource: arn:aws:sagemaker:*:*:transform-job/quicksight-auto-generated-*
+  - Sid: SageMakerModelReadAccess
+    Effect: Allow
+    Action:
+    - sagemaker:ListModels
+    - sagemaker:DescribeModel
+    Resource: '*'
+  - Sid: S3ObjectReadAccess
+    Effect: Allow
+    Action: s3:GetObject
+    Resource:
+    - arn:aws:s3:::quicksight-ml.*
+    - arn:aws:s3:::sagemaker*
+  - Sid: S3ObjectUpdateAccess
+    Effect: Allow
+    Action: s3:PutObject
+    Resource: arn:aws:s3:::sagemaker*
+    Condition:
+      StringEquals:
+        aws:ResourceAccount: ${aws:PrincipalAccount}
+  - Sid: S3BucketReadAccess
+    Effect: Allow
+    Action: s3:ListBucket
+    Resource: arn:aws:s3:::sagemaker*
+  - Effect: Allow
+    Action:
+    - mediaconnect:DeleteFlow
+    - mediaconnect:RemoveFlowSource
+    - mediaconnect:RemoveFlowOutput
+    - mediaconnect:RevokeFlowEntitlement
+    - mediaconnect:RemoveFlowMediaStream
+    - mediaconnect:RemoveFlowVpcInterface
+    Resource:
+    - arn:aws:mediaconnect:*:*:flow:*:*
+    - arn:aws:mediaconnect:*:*:source:*:*
+    - arn:aws:mediaconnect:*:*:output:*:*
+    - arn:aws:mediaconnect:*:*:entitlement:*:*
+    - arn:aws:mediaconnect:*:*:flow:*:*/vpcInterface/*
+    - arn:aws:mediaconnect:*:*:flow:*:*/mediaStream/*
+request:
+  spec:
+    access_type: read-write
+    duration:
+      duration_hours: 8
+    resource_constraints: []
+  user: dev-bob
+  justification: 'reproduce customer ticket #4422 locally'
+scores:
+  det_score: 8
+  det_factors:
+  - '`sagemaker:DescribeTransformJob` on Resource: `*` touches sensitive service `sagemaker`'
+  - '`sagemaker:StopTransformJob` on Resource: `*` touches sensitive service `sagemaker`'
+  - '`sagemaker:CreateTransformJob` on Resource: `*` touches sensitive service `sagemaker`'
+  - 'Destructive action `sagemaker:StopTransformJob` on Resource: `*` (blast radius = every resource in this account)'
+  - 'State-changing action `sagemaker:CreateTransformJob` on Resource: `*` (IAM access level: Write)'
+  - '`sagemaker:ListModels` on Resource: `*` touches sensitive service `sagemaker`'
+  - '`sagemaker:DescribeModel` on Resource: `*` touches sensitive service `sagemaker`'
+  - 'Resource: `*` for s3 (broad cross-resource read/access)'
+  - 'State-changing action `s3:PutObject` on Resource: `*` (IAM access level: Write)'
+  - 'Destructive action `mediaconnect:DeleteFlow` on Resource: `*` (blast radius = every resource in this account)'
+  - 'Destructive action `mediaconnect:RemoveFlowSource` on Resource: `*` (blast radius = every resource in this account)'
+  - 'Destructive action `mediaconnect:RemoveFlowOutput` on Resource: `*` (blast radius = every resource in this account)'
+  - 'Destructive action `mediaconnect:RevokeFlowEntitlement` on Resource: `*` (blast radius = every resource in this account)'
+  - 'Destructive action `mediaconnect:RemoveFlowMediaStream` on Resource: `*` (blast radius = every resource in this account)'
+  - 'Destructive action `mediaconnect:RemoveFlowVpcInterface` on Resource: `*` (blast radius = every resource in this account)'
+  - 'Resource: `*` for mediaconnect (broad cross-resource read/access)'
+  - '`s3:GetObject` on broad resource reads content that frequently contains secrets / sensitive data (boot logs, command
+    output, log streams, message bodies).'
+  opus_score: null
+  opus_factors: null
+  opus_reasoning: null
+  gap_classification: pending

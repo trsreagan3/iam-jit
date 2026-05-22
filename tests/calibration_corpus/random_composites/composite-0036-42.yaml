@@ -1,0 +1,413 @@
+name: composite-0036-42
+source_policies:
+- aws_managed/SageMakerStudioFullAccess.yaml
+- aws_managed/CloudWatchNetworkFlowMonitorTopologyServiceRolePolicy.yaml
+source_hash: 34dde4e63387dc82
+policy:
+  Version: '2012-10-17'
+  Statement:
+  - Sid: AmazonDataZoneStatement
+    Effect: Allow
+    Action:
+    - datazone:*
+    Resource:
+    - '*'
+  - Sid: ReadOnlyStatement
+    Effect: Allow
+    Action:
+    - kms:DescribeKey
+    - kms:ListAliases
+    - iam:ListRoles
+    - iam:ListPolicies
+    - sso:DescribeRegisteredRegions
+    - s3:ListAllMyBuckets
+    - redshift:DescribeClusters
+    - redshift-serverless:ListWorkgroups
+    - ec2:DescribeSecurityGroups
+    - ec2:DescribeSubnets
+    - ec2:DescribeVpcs
+    - secretsmanager:ListSecrets
+    - iam:ListUsers
+    - glue:GetDatabases
+    - codeconnections:ListConnections
+    - codeconnections:ListTagsForResource
+    - codewhisperer:ListProfiles
+    - bedrock:ListInferenceProfiles
+    - bedrock:ListFoundationModels
+    - bedrock:ListTagsForResource
+    - aoss:ListSecurityPolicies
+    - quicksight:DescribeAccountSubscription
+    - cloudformation:ValidateTemplate
+    Resource:
+    - '*'
+  - Sid: BucketReadOnlyStatement
+    Effect: Allow
+    Action:
+    - s3:ListBucket
+    - s3:GetBucketLocation
+    - s3:ListBucketVersions
+    Resource: arn:aws:s3:::*
+  - Sid: ReadManagedBlueprintTemplatesStatement
+    Effect: Allow
+    Action: s3:GetObject
+    Resource:
+    - arn:aws:s3:::default-env-blueprint-*/*
+    - arn:aws:s3:*:*:accesspoint/env-blueprint-accesspoint*
+    Condition:
+      ArnLike:
+        s3:DataAccessPointArn: arn:aws:s3:*:*:accesspoint/env-blueprint-accesspoint
+      StringNotEquals:
+        aws:ResourceAccount: ${aws:PrincipalAccount}
+  - Sid: CreateBucketStatement
+    Effect: Allow
+    Action:
+    - s3:CreateBucket
+    Resource:
+    - arn:aws:s3:::amazon-datazone*
+    - arn:aws:s3:::amazon-sagemaker*
+  - Sid: ConfigureBucketStatement
+    Effect: Allow
+    Action:
+    - s3:PutBucketCORS
+    - s3:PutBucketPolicy
+    - s3:PutBucketVersioning
+    Resource:
+    - arn:aws:s3:::amazon-sagemaker*
+    Condition:
+      StringEquals:
+        aws:ResourceAccount: ${aws:PrincipalAccount}
+  - Sid: PutObjectStatement
+    Effect: Allow
+    Action:
+    - s3:PutObject
+    - s3:GetObject
+    Resource:
+    - arn:aws:s3:::amazon-sagemaker*/*
+    Condition:
+      StringEquals:
+        aws:ResourceAccount: ${aws:PrincipalAccount}
+  - Sid: RamCreateResourceStatement
+    Effect: Allow
+    Action:
+    - ram:CreateResourceShare
+    Resource: '*'
+    Condition:
+      StringEqualsIfExists:
+        ram:RequestedResourceType: datazone:Domain
+  - Sid: RamResourceStatement
+    Effect: Allow
+    Action:
+    - ram:DeleteResourceShare
+    - ram:AssociateResourceShare
+    - ram:DisassociateResourceShare
+    - ram:RejectResourceShareInvitation
+    Resource: '*'
+    Condition:
+      StringLike:
+        ram:ResourceShareName:
+        - DataZone*
+  - Sid: RamResourceReadOnlyStatement
+    Effect: Allow
+    Action:
+    - ram:GetResourceShares
+    - ram:GetResourceShareInvitations
+    - ram:GetResourceShareAssociations
+    - ram:ListResourceSharePermissions
+    Resource: '*'
+  - Sid: RamAssociateResourceSharePermissionStatement
+    Effect: Allow
+    Action: ram:AssociateResourceSharePermission
+    Resource: '*'
+    Condition:
+      StringEquals:
+        ram:PermissionArn:
+        - arn:aws:ram::aws:permission/AWSRAMDefaultPermissionAmazonDataZoneDomain
+        - arn:aws:ram::aws:permission/AWSRAMPermissionAmazonDataZoneDomainFullAccessWithPortalAccess
+        - arn:aws:ram::aws:permission/AWSRAMPermissionsAmazonDatazoneDomainExtendedServiceAccess
+        - arn:aws:ram::aws:permission/AWSRAMPermissionsAmazonDatazoneDomainExtendedServiceWithPortalAccess
+  - Sid: IAMPassRoleStatement
+    Effect: Allow
+    Action: iam:PassRole
+    Resource:
+    - arn:aws:iam::*:role/AmazonDataZone*
+    - arn:aws:iam::*:role/service-role/AmazonDataZone*
+    - arn:aws:iam::*:role/service-role/AmazonSageMaker*
+    Condition:
+      StringEquals:
+        iam:passedToService: datazone.amazonaws.com
+  - Sid: IAMGetPolicyStatement
+    Effect: Allow
+    Action: iam:GetPolicy
+    Resource:
+    - arn:aws:iam::*:policy/service-role/AmazonDataZoneRedshiftAccessPolicy*
+  - Sid: DataZoneTagOnCreateDomainProjectTags
+    Effect: Allow
+    Action:
+    - secretsmanager:TagResource
+    Resource: arn:aws:secretsmanager:*:*:secret:AmazonDataZone-*
+    Condition:
+      ForAllValues:StringEquals:
+        aws:TagKeys:
+        - AmazonDataZoneDomain
+        - AmazonDataZoneProject
+      StringLike:
+        aws:RequestTag/AmazonDataZoneDomain: dzd*
+        aws:ResourceTag/AmazonDataZoneDomain: dzd*
+  - Sid: DataZoneTagOnCreate
+    Effect: Allow
+    Action:
+    - secretsmanager:TagResource
+    Resource: arn:aws:secretsmanager:*:*:secret:AmazonDataZone-*
+    Condition:
+      ForAllValues:StringEquals:
+        aws:TagKeys:
+        - AmazonDataZoneDomain
+      StringLike:
+        aws:RequestTag/AmazonDataZoneDomain: dzd*
+        aws:ResourceTag/AmazonDataZoneDomain: dzd*
+  - Sid: CreateSecretStatement
+    Effect: Allow
+    Action:
+    - secretsmanager:CreateSecret
+    Resource: arn:aws:secretsmanager:*:*:secret:AmazonDataZone-*
+    Condition:
+      StringLike:
+        aws:RequestTag/AmazonDataZoneDomain: dzd*
+  - Sid: ConnectionStatement
+    Effect: Allow
+    Action:
+    - codeconnections:GetConnection
+    Resource:
+    - arn:aws:codeconnections:*:*:connection/*
+  - Sid: TagCodeConnectionsStatement
+    Effect: Allow
+    Action:
+    - codeconnections:TagResource
+    Resource:
+    - arn:aws:codeconnections:*:*:connection/*
+    - arn:aws:codeconnections:*:*:host/*
+    Condition:
+      ForAllValues:StringEquals:
+        aws:TagKeys:
+        - for-use-with-all-datazone-projects
+      StringEquals:
+        aws:RequestTag/for-use-with-all-datazone-projects: 'true'
+  - Sid: UntagCodeConnectionsStatement
+    Effect: Allow
+    Action:
+    - codeconnections:UntagResource
+    Resource:
+    - arn:aws:codeconnections:*:*:connection/*
+    - arn:aws:codeconnections:*:*:host/*
+    Condition:
+      ForAllValues:StringEquals:
+        aws:TagKeys: for-use-with-all-datazone-projects
+  - Sid: SSMParameterStatement
+    Effect: Allow
+    Action:
+    - ssm:GetParameter
+    - ssm:GetParametersByPath
+    - ssm:PutParameter
+    - ssm:DeleteParameter
+    Resource:
+    - arn:aws:ssm:*:*:parameter/amazon/datazone/q*
+    - arn:aws:ssm:*:*:parameter/amazon/datazone/genAI*
+    - arn:aws:ssm:*:*:parameter/amazon/datazone/profiles*
+  - Sid: UseKMSKeyPermissionsStatement
+    Effect: Allow
+    Action:
+    - kms:Decrypt
+    Resource:
+    - '*'
+    Condition:
+      StringEquals:
+        aws:ResourceTag/EnableKeyForAmazonDataZone: 'true'
+      'Null':
+        aws:ResourceTag/EnableKeyForAmazonDataZone: 'false'
+      StringLike:
+        kms:ViaService: ssm.*.amazonaws.com
+  - Sid: SecurityPolicyStatement
+    Effect: Allow
+    Action:
+    - aoss:GetSecurityPolicy
+    - aoss:CreateSecurityPolicy
+    Resource:
+    - '*'
+    Condition:
+      StringLike:
+        aoss:collection: bedrock-ide-*
+  - Sid: GetFoundationModelStatement
+    Effect: Allow
+    Action:
+    - bedrock:GetFoundationModel
+    - bedrock:GetFoundationModelAvailability
+    Resource:
+    - arn:aws:bedrock:*::foundation-model/*
+  - Sid: GetInferenceProfileStatement
+    Effect: Allow
+    Action:
+    - bedrock:GetInferenceProfile
+    Resource:
+    - arn:aws:bedrock:*:*:inference-profile/*
+    - arn:aws:bedrock:*:*:application-inference-profile/*
+  - Sid: ApplicationInferenceProfileStatement
+    Effect: Allow
+    Action:
+    - bedrock:CreateInferenceProfile
+    Resource:
+    - arn:aws:bedrock:*:*:application-inference-profile/*
+    Condition:
+      'Null':
+        aws:RequestTag/AmazonDataZoneProject: 'true'
+        aws:RequestTag/AmazonDataZoneDomain: 'false'
+  - Sid: TagApplicationInferenceProfileStatement
+    Effect: Allow
+    Action:
+    - bedrock:TagResource
+    Resource:
+    - arn:aws:bedrock:*:*:application-inference-profile/*
+    Condition:
+      'Null':
+        aws:ResourceTag/AmazonDataZoneProject: 'true'
+        aws:RequestTag/AmazonDataZoneProject: 'true'
+        aws:ResourceTag/AmazonDataZoneDomain: 'false'
+        aws:RequestTag/AmazonDataZoneDomain: 'false'
+  - Sid: DeleteApplicationInferenceProfileStatement
+    Effect: Allow
+    Action:
+    - bedrock:DeleteInferenceProfile
+    Resource:
+    - arn:aws:bedrock:*:*:application-inference-profile/*
+    Condition:
+      'Null':
+        aws:ResourceTag/AmazonDataZoneProject: 'true'
+        aws:ResourceTag/AmazonDataZoneDomain: 'false'
+  - Sid: ModelAccessUseCaseStatement
+    Effect: Allow
+    Action:
+    - bedrock:GetUseCaseForModelAccess
+    - bedrock:PutUseCaseForModelAccess
+    Resource:
+    - '*'
+  - Effect: Allow
+    Action:
+    - ec2:DescribeTransitGatewayAttachments
+    - ec2:DescribeTransitGatewayConnects
+    - ec2:DescribeTransitGatewayPeeringAttachments
+    - ec2:DescribeTransitGatewayRouteTables
+    - ec2:DescribeTransitGateways
+    - ec2:DescribeTransitGatewayVpcAttachments
+    - ec2:DescribeVpnConnections
+    - ec2:DescribeCustomerGateways
+    - ec2:GetTransitGatewayRouteTableAssociations
+    - ec2:GetTransitGatewayRouteTablePropagations
+    - ec2:SearchTransitGatewayRoutes
+    Resource: '*'
+  - Sid: PrefixListStatement
+    Effect: Allow
+    Action:
+    - ec2:DescribeManagedPrefixLists
+    - ec2:GetManagedPrefixListEntries
+    Resource: '*'
+  - Sid: VPCEndpointStatement
+    Effect: Allow
+    Action:
+    - ec2:DescribeVpcEndpoints
+    - ec2:DescribeVpcEndpointServiceConfigurations
+    Resource: '*'
+request:
+  spec:
+    access_type: read-write
+    duration:
+      duration_hours: 1
+    resource_constraints: []
+  user: ci-bot
+  justification: deploy via terraform-cloud agent
+scores:
+  det_score: 9
+  det_factors:
+  - '`datazone:*` grants every action in `datazone`'
+  - 'Resource: `*` for datazone (broad cross-resource read/access)'
+  - "`datazone:*` is a high-impact mutation on broad resource \u2014 single API call can rewrite every matching resource in\
+    \ the account."
+  - '`kms:DescribeKey` on Resource: `*` touches sensitive service `kms`'
+  - '`kms:ListAliases` on Resource: `*` touches sensitive service `kms`'
+  - '`iam:ListRoles` on Resource: `*` touches sensitive service `iam`'
+  - '`iam:ListPolicies` on Resource: `*` touches sensitive service `iam`'
+  - '`secretsmanager:ListSecrets` on Resource: `*` touches sensitive service `secretsmanager`'
+  - '`iam:ListUsers` on Resource: `*` touches sensitive service `iam`'
+  - '`glue:GetDatabases` on Resource: `*` touches sensitive service `glue`'
+  - '`bedrock:ListInferenceProfiles` on Resource: `*` touches sensitive service `bedrock`'
+  - '`bedrock:ListFoundationModels` on Resource: `*` touches sensitive service `bedrock`'
+  - '`bedrock:ListTagsForResource` on Resource: `*` touches sensitive service `bedrock`'
+  - 'Resource: `*` for s3 (broad cross-resource read/access)'
+  - "`Condition.StringNotEquals.aws:ResourceAccount` uses StringNotEquals on an identity-narrowing key. The condition grants\
+    \ access to EVERY value EXCEPT the listed one \u2014 the opposite of typical scope-in intent. Author probably meant `StringEquals`\
+    \ (scope-in)."
+  - 'State-changing action `s3:CreateBucket` on Resource: `*` (IAM access level: Write)'
+  - 'State-changing action `s3:PutBucketCORS` on Resource: `*` (IAM access level: Write)'
+  - 'State-changing action `s3:PutBucketPolicy` on Resource: `*` (IAM access level: Permissions management)'
+  - 'State-changing action `s3:PutBucketVersioning` on Resource: `*` (IAM access level: Write)'
+  - "`s3:PutBucketPolicy` is a high-impact mutation on broad resource \u2014 single API call can rewrite every matching resource\
+    \ in the account."
+  - '`s3:PutBucketPolicy` is catastrophic in blast radius (account governance / IAM total compromise / evidence destruction).
+    Always route to human review.'
+  - 'State-changing action `s3:PutObject` on Resource: `*` (IAM access level: Write)'
+  - 'State-changing action `ram:CreateResourceShare` on Resource: `*` (IAM access level: Permissions management)'
+  - 'Resource: `*` for ram (broad cross-resource read/access)'
+  - "`ram:CreateResourceShare` is a high-impact mutation on broad resource \u2014 single API call can rewrite every matching\
+    \ resource in the account."
+  - 'Destructive action `ram:DeleteResourceShare` on Resource: `*` (blast radius = every resource in this account)'
+  - 'State-changing action `ram:AssociateResourceShare` on Resource: `*` (IAM access level: Permissions management)'
+  - 'Destructive action `ram:DisassociateResourceShare` on Resource: `*` (blast radius = every resource in this account)'
+  - 'State-changing action `ram:RejectResourceShareInvitation` on Resource: `*` (IAM access level: Permissions management)'
+  - "`ram:AssociateResourceShare` is a high-impact mutation on broad resource \u2014 single API call can rewrite every matching\
+    \ resource in the account."
+  - 'State-changing action `ram:AssociateResourceSharePermission` on Resource: `*` (IAM access level: Write)'
+  - '`iam:PassRole` on Resource: `*` is a privilege-escalation path'
+  - 'State-changing action `iam:PassRole` on Resource: `*` (IAM access level: Permissions management)'
+  - '`iam:GetPolicy` on Resource: `*` touches sensitive service `iam`'
+  - '`secretsmanager:TagResource` on Resource: `*` touches sensitive service `secretsmanager`'
+  - 'State-changing action `secretsmanager:TagResource` on Resource: `*` (IAM access level: Tagging)'
+  - '`secretsmanager:CreateSecret` on Resource: `*` touches sensitive service `secretsmanager`'
+  - 'State-changing action `secretsmanager:CreateSecret` on Resource: `*` (IAM access level: Write)'
+  - 'Resource: `*` for codeconnections (broad cross-resource read/access)'
+  - 'State-changing action `codeconnections:TagResource` on Resource: `*` (IAM access level: Tagging)'
+  - 'State-changing action `codeconnections:UntagResource` on Resource: `*` (IAM access level: Tagging)'
+  - '`ssm:GetParameter` on Resource: `*` (broad access to sensitive resource)'
+  - '`ssm:GetParametersByPath` on Resource: `*` (broad access to sensitive resource)'
+  - '`ssm:PutParameter` on Resource: `*` touches sensitive service `ssm`'
+  - '`ssm:DeleteParameter` on Resource: `*` touches sensitive service `ssm`'
+  - 'State-changing action `ssm:PutParameter` on Resource: `*` (IAM access level: Write)'
+  - 'Destructive action `ssm:DeleteParameter` on Resource: `*` (blast radius = every resource in this account)'
+  - "`ssm:PutParameter` is a high-impact mutation on broad resource \u2014 single API call can rewrite every matching resource\
+    \ in the account."
+  - '`kms:Decrypt` on Resource: `*` (broad access to sensitive resource)'
+  - 'State-changing action `kms:Decrypt` on Resource: `*` (IAM access level: Write)'
+  - 'State-changing action `aoss:CreateSecurityPolicy` on Resource: `*` (IAM access level: Write)'
+  - 'Resource: `*` for aoss (broad cross-resource read/access)'
+  - '`bedrock:GetInferenceProfile` on Resource: `*` touches sensitive service `bedrock`'
+  - "`Condition.Null.aws:RequestTag/AmazonDataZoneProject: \"true\"` means \"the key MUST BE ABSENT\" \u2014 opposite of the\
+    \ typical \"require this key\" intent. Often misread by reviewers."
+  - '`bedrock:CreateInferenceProfile` on Resource: `*` touches sensitive service `bedrock`'
+  - 'State-changing action `bedrock:CreateInferenceProfile` on Resource: `*` (IAM access level: Write)'
+  - "`bedrock:CreateInferenceProfile` is a high-impact mutation on broad resource \u2014 single API call can rewrite every\
+    \ matching resource in the account."
+  - "`Condition.Null.aws:ResourceTag/AmazonDataZoneProject: \"true\"` means \"the key MUST BE ABSENT\" \u2014 opposite of\
+    \ the typical \"require this key\" intent. Often misread by reviewers."
+  - '`bedrock:TagResource` on Resource: `*` touches sensitive service `bedrock`'
+  - 'State-changing action `bedrock:TagResource` on Resource: `*` (IAM access level: Tagging)'
+  - '`bedrock:DeleteInferenceProfile` on Resource: `*` touches sensitive service `bedrock`'
+  - 'Destructive action `bedrock:DeleteInferenceProfile` on Resource: `*` (blast radius = every resource in this account)'
+  - '`bedrock:GetUseCaseForModelAccess` on Resource: `*` touches sensitive service `bedrock`'
+  - '`bedrock:PutUseCaseForModelAccess` on Resource: `*` touches sensitive service `bedrock`'
+  - 'State-changing action `bedrock:PutUseCaseForModelAccess` on Resource: `*` (IAM access level: Write)'
+  - "`bedrock:PutUseCaseForModelAccess` is a high-impact mutation on broad resource \u2014 single API call can rewrite every\
+    \ matching resource in the account."
+  - 'Resource: `*` for ec2 (broad cross-resource read/access)'
+  - '`s3:GetObject` on broad resource reads content that frequently contains secrets / sensitive data (boot logs, command
+    output, log streams, message bodies).'
+  opus_score: null
+  opus_factors: null
+  opus_reasoning: null
+  gap_classification: pending

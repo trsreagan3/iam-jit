@@ -1,0 +1,623 @@
+name: composite-0035-42
+source_policies:
+- aws_managed/AmazonSSMServiceRolePolicy.yaml
+- aws_managed/AWSObservabilityAdminTelemetryEnablementServiceRolePolicy.yaml
+source_hash: efa9dce497570489
+policy:
+  Version: '2012-10-17'
+  Statement:
+  - Effect: Allow
+    Action:
+    - ssm:CancelCommand
+    - ssm:GetCommandInvocation
+    - ssm:ListCommandInvocations
+    - ssm:ListCommands
+    - ssm:SendCommand
+    - ssm:GetAutomationExecution
+    - ssm:GetParameters
+    - ssm:StartAutomationExecution
+    - ssm:StopAutomationExecution
+    - ssm:ListTagsForResource
+    - ssm:GetCalendarState
+    Resource:
+    - '*'
+  - Effect: Allow
+    Action:
+    - ssm:PutInventory
+    Resource:
+    - '*'
+    Condition:
+      ForAllValues:StringEquals:
+        ssm:InventoryTypeName:
+        - AWS:ComplianceItem
+        - AWS:PatchSummary
+  - Effect: Allow
+    Action:
+    - ssm:UpdateServiceSetting
+    - ssm:GetServiceSetting
+    Resource:
+    - arn:aws:ssm:*:*:servicesetting/ssm/opsitem/*
+    - arn:aws:ssm:*:*:servicesetting/ssm/opsdata/*
+  - Effect: Allow
+    Action:
+    - ec2:DescribeInstanceAttribute
+    - ec2:DescribeInstanceStatus
+    - ec2:DescribeInstances
+    Resource:
+    - '*'
+  - Effect: Allow
+    Action:
+    - lambda:InvokeFunction
+    Resource:
+    - arn:aws:lambda:*:*:function:SSM*
+    - arn:aws:lambda:*:*:function:*:SSM*
+  - Effect: Allow
+    Action:
+    - states:DescribeExecution
+    - states:StartExecution
+    Resource:
+    - arn:aws:states:*:*:stateMachine:SSM*
+    - arn:aws:states:*:*:execution:SSM*
+  - Effect: Allow
+    Action:
+    - resource-groups:ListGroups
+    - resource-groups:ListGroupResources
+    - resource-groups:GetGroupQuery
+    Resource:
+    - '*'
+  - Effect: Allow
+    Action:
+    - cloudformation:DescribeStacks
+    - cloudformation:ListStackResources
+    Resource:
+    - '*'
+  - Effect: Allow
+    Action:
+    - tag:GetResources
+    Resource:
+    - '*'
+  - Effect: Allow
+    Action:
+    - config:SelectResourceConfig
+    Resource:
+    - '*'
+  - Effect: Allow
+    Action:
+    - compute-optimizer:GetEC2InstanceRecommendations
+    - compute-optimizer:GetEnrollmentStatus
+    Resource:
+    - '*'
+  - Effect: Allow
+    Action:
+    - support:DescribeTrustedAdvisorChecks
+    - support:DescribeTrustedAdvisorCheckSummaries
+    - support:DescribeTrustedAdvisorCheckResult
+    - support:DescribeCases
+    Resource:
+    - '*'
+  - Effect: Allow
+    Action:
+    - config:DescribeComplianceByConfigRule
+    - config:DescribeComplianceByResource
+    - config:DescribeRemediationConfigurations
+    - config:DescribeConfigurationRecorders
+    Resource:
+    - '*'
+  - Effect: Allow
+    Action: cloudwatch:DescribeAlarms
+    Resource: '*'
+  - Effect: Allow
+    Action: iam:PassRole
+    Resource: '*'
+    Condition:
+      StringEquals:
+        iam:PassedToService:
+        - ssm.amazonaws.com
+  - Effect: Allow
+    Action: organizations:DescribeOrganization
+    Resource: '*'
+  - Effect: Allow
+    Action: cloudformation:ListStackSets
+    Resource: '*'
+  - Effect: Allow
+    Action:
+    - cloudformation:ListStackInstances
+    - cloudformation:DescribeStackSetOperation
+    - cloudformation:DeleteStackSet
+    Resource: arn:aws:cloudformation:*:*:stackset/AWS-QuickSetup-SSM*:*
+  - Effect: Allow
+    Action: cloudformation:DeleteStackInstances
+    Resource:
+    - arn:aws:cloudformation:*:*:stackset/AWS-QuickSetup-SSM*:*
+    - arn:aws:cloudformation:*:*:stackset-target/AWS-QuickSetup-SSM*:*
+    - arn:aws:cloudformation:*:*:type/resource/*
+  - Effect: Allow
+    Action:
+    - events:PutRule
+    - events:PutTargets
+    Resource: '*'
+    Condition:
+      StringEquals:
+        events:ManagedBy: ssm.amazonaws.com
+  - Effect: Allow
+    Action:
+    - events:RemoveTargets
+    - events:DeleteRule
+    Resource:
+    - arn:aws:events:*:*:rule/SSMExplorerManagedRule
+  - Effect: Allow
+    Action: events:DescribeRule
+    Resource: '*'
+  - Effect: Allow
+    Action: securityhub:DescribeHub
+    Resource: '*'
+  - Effect: Allow
+    Action: resource-explorer-2:CreateManagedView
+    Resource: arn:aws:resource-explorer-2:*:*:managed-view/AWSManagedViewForSSM*
+  - Sid: TelemetryOperations
+    Effect: Allow
+    Action:
+    - ec2:DescribeFlowLogs
+    - ec2:DescribeVpcs
+    - logs:DescribeLogGroups
+    - logs:DescribeResourcePolicies
+    - logs:ListLogGroups
+    - ec2:MonitorInstances
+    - logs:DescribeDeliverySources
+    Resource: '*'
+    Condition:
+      StringEquals:
+        aws:ResourceAccount: ${aws:PrincipalAccount}
+  - Sid: TagOperationForEC2
+    Effect: Allow
+    Action:
+    - ec2:CreateTags
+    Resource: '*'
+    Condition:
+      ForAllValues:StringEquals:
+        aws:TagKeys: CloudWatchTelemetryRuleManaged
+      StringEquals:
+        aws:RequestTag/CloudWatchTelemetryRuleManaged: 'true'
+        aws:ResourceAccount: ${aws:PrincipalAccount}
+        ec2:CreateAction: CreateFlowLogs
+  - Sid: TagOperationForLogs
+    Effect: Allow
+    Action:
+    - logs:TagResource
+    Resource: '*'
+    Condition:
+      ForAllValues:StringEquals:
+        aws:TagKeys: CloudWatchTelemetryRuleManaged
+      StringEquals:
+        aws:ResourceAccount: ${aws:PrincipalAccount}
+        aws:ResourceTag/CloudWatchTelemetryRuleManaged: 'true'
+  - Sid: TelemetryOperationsForVPCLogs
+    Effect: Allow
+    Action:
+    - ec2:CreateFlowLogs
+    Resource: arn:aws:ec2:*:*:vpc/*
+    Condition:
+      StringEquals:
+        aws:ResourceAccount: ${aws:PrincipalAccount}
+  - Sid: TelemetryOperationsForVPCFlowLogs
+    Effect: Allow
+    Action:
+    - ec2:CreateFlowLogs
+    Resource: arn:aws:ec2:*:*:vpc-flow-log/*
+    Condition:
+      ForAllValues:StringEquals:
+        aws:TagKeys: CloudWatchTelemetryRuleManaged
+      StringEquals:
+        aws:RequestTag/CloudWatchTelemetryRuleManaged: 'true'
+        aws:ResourceAccount: ${aws:PrincipalAccount}
+  - Sid: TelemetryOperationsForLogs
+    Effect: Allow
+    Action:
+    - ec2:DeleteFlowLogs
+    - logs:CreateDelivery
+    - logs:CreateLogGroup
+    - logs:PutResourcePolicy
+    - logs:PutRetentionPolicy
+    - logs:PutDeliveryDestination
+    - logs:PutDeliverySource
+    - logs:CreateLogStream
+    - logs:DescribeLogGroups
+    Resource: '*'
+    Condition:
+      StringEquals:
+        aws:ResourceAccount: ${aws:PrincipalAccount}
+        aws:ResourceTag/CloudWatchTelemetryRuleManaged: 'true'
+  - Sid: TelemetryOperationsForEKSApiLogs
+    Effect: Allow
+    Action:
+    - eks:UpdateClusterConfig
+    Resource: arn:aws:eks:*:*:cluster/*
+    Condition:
+      Bool:
+        eks:loggingType/api: 'true'
+      StringEquals:
+        aws:ResourceAccount: ${aws:PrincipalAccount}
+  - Sid: TelemetryOperationsForEKSAuditLogs
+    Effect: Allow
+    Action:
+    - eks:UpdateClusterConfig
+    Resource: arn:aws:eks:*:*:cluster/*
+    Condition:
+      Bool:
+        eks:loggingType/audit: 'true'
+      StringEquals:
+        aws:ResourceAccount: ${aws:PrincipalAccount}
+  - Sid: TelemetryOperationsForEKSAuthenticatorLogs
+    Effect: Allow
+    Action:
+    - eks:UpdateClusterConfig
+    Resource: arn:aws:eks:*:*:cluster/*
+    Condition:
+      Bool:
+        eks:loggingType/authenticator: 'true'
+      StringEquals:
+        aws:ResourceAccount: ${aws:PrincipalAccount}
+  - Sid: TelemetryOperationsForEKSControllerManagerLogs
+    Effect: Allow
+    Action:
+    - eks:UpdateClusterConfig
+    Resource: arn:aws:eks:*:*:cluster/*
+    Condition:
+      Bool:
+        eks:loggingType/controllerManager: 'true'
+      StringEquals:
+        aws:ResourceAccount: ${aws:PrincipalAccount}
+  - Sid: TelemetryOperationsForEKSSchedulerLogs
+    Effect: Allow
+    Action:
+    - eks:UpdateClusterConfig
+    Resource: arn:aws:eks:*:*:cluster/*
+    Condition:
+      Bool:
+        eks:loggingType/scheduler: 'true'
+      StringEquals:
+        aws:ResourceAccount: ${aws:PrincipalAccount}
+  - Sid: TelemetryOperationsForWafLoggingConfigurations
+    Effect: Allow
+    Action:
+    - wafv2:PutLoggingConfiguration
+    Resource: arn:aws:wafv2:*:*:*/webacl/*
+    Condition:
+      ArnLike:
+        wafv2:LogDestinationResource: arn:aws:logs:*:*:log-group:*
+      StringEquals:
+        aws:ResourceAccount: ${aws:PrincipalAccount}
+        wafv2:LogScope: CloudwatchTelemetryRuleManaged
+  - Sid: TelemetryOperationsForWafLogDelivery
+    Effect: Allow
+    Action:
+    - logs:CreateLogDelivery
+    Resource: '*'
+    Condition:
+      ForAnyValue:StringEquals:
+        aws:CalledVia:
+        - wafv2.amazonaws.com
+      StringEquals:
+        aws:ResourceAccount: ${aws:PrincipalAccount}
+  - Sid: TelemetryOperationsForELB
+    Effect: Allow
+    Action:
+    - elasticloadbalancing:AllowVendedLogDeliveryForResource
+    Resource: '*'
+    Condition:
+      StringEquals:
+        aws:ResourceAccount: ${aws:PrincipalAccount}
+  - Sid: TelemetryOperationsForBedrock
+    Effect: Allow
+    Action:
+    - bedrock-agentcore:AllowVendedLogDeliveryForResource
+    Resource: '*'
+    Condition:
+      StringEquals:
+        aws:ResourceAccount: ${aws:PrincipalAccount}
+  - Sid: TelemetryOperationsForSecurityHub
+    Effect: Allow
+    Action:
+    - securityhub:AllowVendedLogDeliveryForResource
+    - securityhub:DescribeHub
+    - securityhub:DescribeSecurityHubV2
+    Resource: '*'
+    Condition:
+      StringEquals:
+        aws:ResourceAccount: ${aws:PrincipalAccount}
+  - Sid: TelemetryOperationsForCloudfront
+    Effect: Allow
+    Action:
+    - cloudfront:AllowVendedLogDeliveryForResource
+    Resource: '*'
+    Condition:
+      StringEquals:
+        aws:ResourceAccount: ${aws:PrincipalAccount}
+  - Sid: TelemetryOperationsForCloudTrailLogs
+    Effect: Allow
+    Action:
+    - cloudtrail:CreateServiceLinkedChannel
+    - cloudtrail:UpdateServiceLinkedChannel
+    - cloudtrail:DeleteServiceLinkedChannel
+    Resource: arn:aws:cloudtrail:*:*:channel/aws-service-channel/cloudwatch/*
+    Condition:
+      StringEquals:
+        aws:ResourceAccount: ${aws:PrincipalAccount}
+  - Sid: TelemetryOperationsForManagedLogs
+    Effect: Allow
+    Action:
+    - logs:CreateLogGroup
+    - logs:PutResourcePolicy
+    - logs:PutRetentionPolicy
+    Resource:
+    - arn:aws:logs:*:*:log-group:aws/cloudtrail
+    - arn:aws:logs:*:*:log-group:aws/cloudtrail/*
+    Condition:
+      StringEquals:
+        aws:ResourceAccount: ${aws:PrincipalAccount}
+  - Sid: Route53QueryLoggingListOperations
+    Effect: Allow
+    Action:
+    - route53resolver:ListResolverQueryLogConfigs
+    - route53resolver:ListResolverQueryLogConfigAssociations
+    Resource: '*'
+    Condition:
+      StringEquals:
+        aws:ResourceAccount: ${aws:PrincipalAccount}
+  - Sid: Route53QueryLoggingGetOperations
+    Effect: Allow
+    Action:
+    - route53resolver:GetResolverQueryLogConfig
+    - route53resolver:ListTagsForResource
+    Resource: '*'
+    Condition:
+      StringEquals:
+        aws:ResourceAccount: ${aws:PrincipalAccount}
+        aws:ResourceTag/CloudWatchTelemetryRuleManaged: 'true'
+  - Sid: Route53QueryLoggingConfigCreation
+    Effect: Allow
+    Action:
+    - route53resolver:CreateResolverQueryLogConfig
+    - route53resolver:TagResource
+    Resource: arn:aws:route53resolver:*:*:resolver-query-log-config/*
+    Condition:
+      StringEquals:
+        aws:RequestTag/CloudWatchTelemetryRuleManaged: 'true'
+        aws:ResourceAccount: ${aws:PrincipalAccount}
+  - Sid: Route53QueryLoggingConfigAssociation
+    Effect: Allow
+    Action:
+    - route53resolver:AssociateResolverQueryLogConfig
+    Resource: '*'
+    Condition:
+      StringEquals:
+        aws:ResourceAccount: ${aws:PrincipalAccount}
+        aws:ResourceTag/CloudWatchTelemetryRuleManaged: 'true'
+  - Sid: TelemetryOperationsForRoute53LogDeliverySLR
+    Effect: Allow
+    Action:
+    - iam:CreateServiceLinkedRole
+    Resource: arn:*:iam::*:role/aws-service-role/route53resolver.amazonaws.com/AWSServiceRoleForRoute53Resolver
+    Condition:
+      BoolIfExists:
+        aws:ViaAWSService: 'true'
+      StringEquals:
+        aws:ResourceAccount: ${aws:PrincipalAccount}
+        iam:AWSServiceName:
+        - route53resolver.amazonaws.com
+  - Sid: TelemetryOperationsForRoute53LogDelivery
+    Effect: Allow
+    Action:
+    - logs:CreateLogDelivery
+    Resource: '*'
+  - Sid: IAMOperationsForConfigServiceLinkedRecorder
+    Effect: Allow
+    Action:
+    - iam:CreateServiceLinkedRole
+    Resource:
+    - arn:aws:iam::*:role/aws-service-role/config.amazonaws.com/AWSServiceRoleForConfig
+    Condition:
+      BoolIfExists:
+        aws:ViaAWSService: 'true'
+      StringEquals:
+        aws:ResourceAccount: ${aws:PrincipalAccount}
+        iam:AWSServiceName:
+        - config.amazonaws.com
+  - Sid: ManagementOperationsForServiceLinkedRecorder
+    Effect: Allow
+    Action:
+    - config:PutServiceLinkedConfigurationRecorder
+    - config:DeleteServiceLinkedConfigurationRecorder
+    - config:AssociateResourceTypes
+    - config:DisassociateResourceTypes
+    Resource:
+    - arn:aws:config:*:*:configuration-recorder/AWSConfigurationRecorderForObservabilityAdmin_TelemetryEnablement/*
+    Condition:
+      StringEquals:
+        aws:ResourceAccount: ${aws:PrincipalAccount}
+  - Sid: ReadOperationsForServiceLinkedRecorder
+    Effect: Allow
+    Action:
+    - config:DescribeConfigurationRecorders
+    Resource:
+    - '*'
+    Condition:
+      StringEquals:
+        aws:ResourceAccount: ${aws:PrincipalAccount}
+        config:ConfigurationRecorderServicePrincipal:
+        - telemetry-enablement.observabilityadmin.amazonaws.com
+  - Sid: TelemetryOperationsForKafka
+    Effect: Allow
+    Action:
+    - kafka:UpdateMonitoring
+    - kafka:DescribeCluster
+    Resource: '*'
+    Condition:
+      StringEquals:
+        aws:ResourceAccount: ${aws:PrincipalAccount}
+  - Sid: TelemetryOperationsForOTelEnrichmentSimba
+    Effect: Allow
+    Action:
+    - observabilityadmin:GetTelemetryEnrichmentStatus
+    - observabilityadmin:StartTelemetryEnrichment
+    - observabilityadmin:StopTelemetryEnrichment
+    Resource: '*'
+    Condition:
+      StringEquals:
+        aws:ResourceAccount: ${aws:PrincipalAccount}
+  - Sid: TelemetryOperationsForOTelEnrichmentResourceExplorer
+    Effect: Allow
+    Action:
+    - resource-explorer-2:CreateIndex
+    - resource-explorer-2:CreateManagedView
+    - resource-explorer-2:CreateStreamingAccessForService
+    - resource-explorer-2:DeleteStreamingAccessForService
+    Resource: '*'
+    Condition:
+      Bool:
+        aws:ViaAWSService: 'true'
+      StringEquals:
+        aws:ResourceAccount: ${aws:PrincipalAccount}
+  - Sid: TelemetryOperationsForOTelEnrichmentCloudWatch
+    Effect: Allow
+    Action:
+    - cloudwatch:GetOTelEnrichment
+    - cloudwatch:StartOTelEnrichment
+    Resource: '*'
+    Condition:
+      StringEquals:
+        aws:ResourceAccount: ${aws:PrincipalAccount}
+  - Sid: TelemetryOperationsForOTelEnrichmentSLR
+    Effect: Allow
+    Action:
+    - iam:CreateServiceLinkedRole
+    Resource: arn:aws:iam::*:role/aws-service-role/resource-explorer-2.amazonaws.com/*
+    Condition:
+      Bool:
+        aws:ViaAWSService: 'true'
+      StringEquals:
+        iam:AWSServiceName: resource-explorer-2.amazonaws.com
+request:
+  spec:
+    access_type: read-write
+    duration:
+      duration_hours: 1
+    resource_constraints: []
+  user: contractor-frank
+  justification: 60-day integration project read access
+scores:
+  det_score: 9
+  det_factors:
+  - '`ssm:CancelCommand` on Resource: `*` touches sensitive service `ssm`'
+  - '`ssm:GetCommandInvocation` on Resource: `*` touches sensitive service `ssm`'
+  - '`ssm:ListCommandInvocations` on Resource: `*` touches sensitive service `ssm`'
+  - '`ssm:ListCommands` on Resource: `*` touches sensitive service `ssm`'
+  - '`ssm:SendCommand` on Resource: `*` touches sensitive service `ssm`'
+  - '`ssm:GetAutomationExecution` on Resource: `*` touches sensitive service `ssm`'
+  - '`ssm:GetParameters` on Resource: `*` (broad access to sensitive resource)'
+  - '`ssm:StartAutomationExecution` on Resource: `*` touches sensitive service `ssm`'
+  - '`ssm:StopAutomationExecution` on Resource: `*` touches sensitive service `ssm`'
+  - '`ssm:ListTagsForResource` on Resource: `*` touches sensitive service `ssm`'
+  - '`ssm:GetCalendarState` on Resource: `*` touches sensitive service `ssm`'
+  - 'Destructive action `ssm:CancelCommand` on Resource: `*` (blast radius = every resource in this account)'
+  - 'State-changing action `ssm:SendCommand` on Resource: `*` (IAM access level: Write)'
+  - 'State-changing action `ssm:StartAutomationExecution` on Resource: `*` (IAM access level: Write)'
+  - 'Destructive action `ssm:StopAutomationExecution` on Resource: `*` (blast radius = every resource in this account)'
+  - "`ssm:SendCommand` is a high-impact mutation on broad resource \u2014 single API call can rewrite every matching resource\
+    \ in the account."
+  - '`ssm:SendCommand` is catastrophic in blast radius (account governance / IAM total compromise / evidence destruction).
+    Always route to human review.'
+  - '`ssm:PutInventory` on Resource: `*` touches sensitive service `ssm`'
+  - 'State-changing action `ssm:PutInventory` on Resource: `*` (IAM access level: Write)'
+  - '`ssm:UpdateServiceSetting` on Resource: `*` touches sensitive service `ssm`'
+  - '`ssm:GetServiceSetting` on Resource: `*` touches sensitive service `ssm`'
+  - 'State-changing action `ssm:UpdateServiceSetting` on Resource: `*` (IAM access level: Write)'
+  - 'State-changing action `lambda:InvokeFunction` on Resource: `*` (IAM access level: Write)'
+  - 'Resource: `*` for lambda (broad cross-resource read/access)'
+  - 'State-changing action `states:StartExecution` on Resource: `*` (IAM access level: Write)'
+  - 'Resource: `*` for states (broad cross-resource read/access)'
+  - 'Resource: `*` for resource-groups (broad cross-resource read/access)'
+  - 'Resource: `*` for tag (broad cross-resource read/access)'
+  - 'Resource: `*` for config (broad cross-resource read/access)'
+  - 'Resource: `*` for compute-optimizer (broad cross-resource read/access)'
+  - '`iam:PassRole` on Resource: `*` is a privilege-escalation path'
+  - 'State-changing action `iam:PassRole` on Resource: `*` (IAM access level: Permissions management)'
+  - '`organizations:DescribeOrganization` on Resource: `*` touches sensitive service `organizations`'
+  - 'Destructive action `cloudformation:DeleteStackSet` on Resource: `*` (blast radius = every resource in this account)'
+  - 'Resource: `*` for cloudformation (broad cross-resource read/access)'
+  - 'Destructive action `cloudformation:DeleteStackInstances` on Resource: `*` (blast radius = every resource in this account)'
+  - 'State-changing action `events:PutRule` on Resource: `*` (IAM access level: Write)'
+  - 'State-changing action `events:PutTargets` on Resource: `*` (IAM access level: Write)'
+  - 'Resource: `*` for events (broad cross-resource read/access)'
+  - 'Destructive action `events:RemoveTargets` on Resource: `*` (blast radius = every resource in this account)'
+  - 'Destructive action `events:DeleteRule` on Resource: `*` (blast radius = every resource in this account)'
+  - 'State-changing action `resource-explorer-2:CreateManagedView` on Resource: `*` (IAM access level: Write)'
+  - 'Resource: `*` for resource-explorer-2 (broad cross-resource read/access)'
+  - 'State-changing action `ec2:MonitorInstances` on Resource: `*` (IAM access level: Write)'
+  - 'Resource: `*` for ec2, logs (broad cross-resource read/access)'
+  - 'State-changing action `ec2:CreateTags` on Resource: `*` (IAM access level: Tagging)'
+  - 'Resource: `*` for ec2 (broad cross-resource read/access)'
+  - 'State-changing action `logs:TagResource` on Resource: `*` (IAM access level: Tagging)'
+  - 'Resource: `*` for logs (broad cross-resource read/access)'
+  - 'State-changing action `ec2:CreateFlowLogs` on Resource: `*` (IAM access level: Write)'
+  - 'Destructive action `ec2:DeleteFlowLogs` on Resource: `*` (blast radius = every resource in this account)'
+  - 'State-changing action `logs:CreateDelivery` on Resource: `*` (IAM access level: Write)'
+  - 'State-changing action `logs:CreateLogGroup` on Resource: `*` (IAM access level: Write)'
+  - 'State-changing action `logs:PutResourcePolicy` on Resource: `*` (IAM access level: Permissions management)'
+  - 'State-changing action `logs:PutRetentionPolicy` on Resource: `*` (IAM access level: Write)'
+  - 'State-changing action `logs:PutDeliveryDestination` on Resource: `*` (IAM access level: Write)'
+  - 'State-changing action `logs:PutDeliverySource` on Resource: `*` (IAM access level: Write)'
+  - 'State-changing action `logs:CreateLogStream` on Resource: `*` (IAM access level: Write)'
+  - '`ec2:DeleteFlowLogs` is catastrophic in blast radius (account governance / IAM total compromise / evidence destruction).
+    Always route to human review.'
+  - 'State-changing action `eks:UpdateClusterConfig` on Resource: `*` (IAM access level: Write)'
+  - 'Resource: `*` for eks (broad cross-resource read/access)'
+  - "`eks:UpdateClusterConfig` is a high-impact mutation on broad resource \u2014 single API call can rewrite every matching\
+    \ resource in the account."
+  - 'State-changing action `wafv2:PutLoggingConfiguration` on Resource: `*` (IAM access level: Write)'
+  - 'Resource: `*` for wafv2 (broad cross-resource read/access)'
+  - 'State-changing action `logs:CreateLogDelivery` on Resource: `*` (IAM access level: Write)'
+  - 'State-changing action `elasticloadbalancing:AllowVendedLogDeliveryForResource` on Resource: `*` (IAM access level: Permissions
+    management)'
+  - 'Resource: `*` for elasticloadbalancing (broad cross-resource read/access)'
+  - 'State-changing action `bedrock-agentcore:AllowVendedLogDeliveryForResource` on Resource: `*` (IAM access level: Permissions
+    management)'
+  - 'Resource: `*` for bedrock-agentcore (broad cross-resource read/access)'
+  - 'State-changing action `securityhub:AllowVendedLogDeliveryForResource` on Resource: `*` (IAM access level: Permissions
+    management)'
+  - 'Resource: `*` for securityhub (broad cross-resource read/access)'
+  - 'State-changing action `cloudfront:AllowVendedLogDeliveryForResource` on Resource: `*` (IAM access level: Permissions
+    management)'
+  - 'Resource: `*` for cloudfront (broad cross-resource read/access)'
+  - 'State-changing action `cloudtrail:CreateServiceLinkedChannel` on Resource: `*` (IAM access level: Write)'
+  - 'State-changing action `cloudtrail:UpdateServiceLinkedChannel` on Resource: `*` (IAM access level: Write)'
+  - 'Destructive action `cloudtrail:DeleteServiceLinkedChannel` on Resource: `*` (blast radius = every resource in this account)'
+  - 'Resource: `*` for cloudtrail (broad cross-resource read/access)'
+  - 'Resource: `*` for route53resolver (broad cross-resource read/access)'
+  - 'State-changing action `route53resolver:CreateResolverQueryLogConfig` on Resource: `*` (IAM access level: Write)'
+  - 'State-changing action `route53resolver:TagResource` on Resource: `*` (IAM access level: Tagging)'
+  - 'State-changing action `route53resolver:AssociateResolverQueryLogConfig` on Resource: `*` (IAM access level: Write)'
+  - '`iam:CreateServiceLinkedRole` on Resource: `*` touches sensitive service `iam`'
+  - 'State-changing action `iam:CreateServiceLinkedRole` on Resource: `*` (IAM access level: Permissions management)'
+  - 'State-changing action `config:PutServiceLinkedConfigurationRecorder` on Resource: `*` (IAM access level: Write)'
+  - 'Destructive action `config:DeleteServiceLinkedConfigurationRecorder` on Resource: `*` (blast radius = every resource
+    in this account)'
+  - 'State-changing action `config:AssociateResourceTypes` on Resource: `*` (IAM access level: Write)'
+  - 'Destructive action `config:DisassociateResourceTypes` on Resource: `*` (blast radius = every resource in this account)'
+  - 'State-changing action `kafka:UpdateMonitoring` on Resource: `*` (IAM access level: Write)'
+  - 'Resource: `*` for kafka (broad cross-resource read/access)'
+  - 'State-changing action `observabilityadmin:StartTelemetryEnrichment` on Resource: `*` (IAM access level: Write)'
+  - 'Destructive action `observabilityadmin:StopTelemetryEnrichment` on Resource: `*` (blast radius = every resource in this
+    account)'
+  - 'Resource: `*` for observabilityadmin (broad cross-resource read/access)'
+  - 'State-changing action `resource-explorer-2:CreateIndex` on Resource: `*` (IAM access level: Write)'
+  - 'State-changing action `resource-explorer-2:CreateStreamingAccessForService` on Resource: `*` (IAM access level: Write)'
+  - 'Destructive action `resource-explorer-2:DeleteStreamingAccessForService` on Resource: `*` (blast radius = every resource
+    in this account)'
+  - 'Resource: `*` for cloudwatch (broad cross-resource read/access)'
+  - '`ssm:GetCommandInvocation` on broad resource reads content that frequently contains secrets / sensitive data (boot logs,
+    command output, log streams, message bodies).'
+  opus_score: null
+  opus_factors: null
+  opus_reasoning: null
+  gap_classification: pending

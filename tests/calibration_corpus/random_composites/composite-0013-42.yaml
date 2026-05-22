@@ -1,0 +1,125 @@
+name: composite-0013-42
+source_policies:
+- aws_managed/EC2FleetTimeShiftableServiceRolePolicy.yaml
+- aws_managed/AWSCloudMapRegisterInstanceAccess.yaml
+- aws_managed/BedrockAgentCoreRuntimeIdentityServiceRolePolicy.yaml
+- aws_managed/ComprehendDataAccessRolePolicy.yaml
+source_hash: dcb2556899551db1
+policy:
+  Version: '2012-10-17'
+  Statement:
+  - Effect: Allow
+    Action:
+    - ec2:DescribeImages
+    - ec2:DescribeSubnets
+    - ec2:DescribeInstances
+    - ec2:RunInstances
+    - ec2:CreateFleet
+    Resource:
+    - '*'
+  - Effect: Allow
+    Action:
+    - iam:PassRole
+    Resource:
+    - '*'
+    Condition:
+      StringEquals:
+        iam:PassedToService:
+        - ec2.amazonaws.com
+        - ec2.amazonaws.com.cn
+  - Effect: Allow
+    Action:
+    - ec2:CreateTags
+    Resource:
+    - arn:aws:ec2:*:*:instance/*
+    - arn:aws:ec2:*:*:spot-instances-request/*
+  - Effect: Allow
+    Action:
+    - ec2:TerminateInstances
+    Resource: '*'
+    Condition:
+      StringLike:
+        ec2:ResourceTag/aws:ec2:fleet-id: '*'
+  - Effect: Allow
+    Action:
+    - route53:GetHostedZone
+    - route53:ListHostedZonesByName
+    - route53:ChangeResourceRecordSets
+    - route53:CreateHealthCheck
+    - route53:GetHealthCheck
+    - route53:DeleteHealthCheck
+    - route53:UpdateHealthCheck
+    - servicediscovery:Get*
+    - servicediscovery:List*
+    - servicediscovery:RegisterInstance
+    - servicediscovery:DeregisterInstance
+    - servicediscovery:DiscoverInstances
+    - servicediscovery:DiscoverInstancesRevision
+    - ec2:DescribeInstances
+    Resource:
+    - '*'
+  - Sid: AllowWorkloadIdentityAccess
+    Effect: Allow
+    Action:
+    - bedrock-agentcore:GetWorkloadAccessToken
+    - bedrock-agentcore:GetWorkloadAccessTokenForJWT
+    - bedrock-agentcore:GetWorkloadAccessTokenForUserId
+    Resource:
+    - arn:aws:bedrock-agentcore:*:*:workload-identity-directory/default
+    - arn:aws:bedrock-agentcore:*:*:workload-identity-directory/default/workload-identity/*
+  - Effect: Allow
+    Action:
+    - s3:GetObject
+    - s3:ListBucket
+    - s3:PutObject
+    Resource:
+    - arn:aws:s3:::*Comprehend*
+    - arn:aws:s3:::*comprehend*
+request:
+  spec:
+    access_type: read-write
+    duration:
+      duration_hours: 4
+    resource_constraints: []
+  user: dev-alice
+  justification: debug staging incident PROD-1417
+scores:
+  det_score: 9
+  det_factors:
+  - 'State-changing action `ec2:RunInstances` on Resource: `*` (IAM access level: Write)'
+  - 'State-changing action `ec2:CreateFleet` on Resource: `*` (IAM access level: Write)'
+  - 'Resource: `*` for ec2 (broad cross-resource read/access)'
+  - '`iam:PassRole` on Resource: `*` is a privilege-escalation path'
+  - 'State-changing action `iam:PassRole` on Resource: `*` (IAM access level: Permissions management)'
+  - 'State-changing action `ec2:CreateTags` on Resource: `*` (IAM access level: Tagging)'
+  - "`Condition.StringLike.ec2:ResourceTag/aws:ec2:fleet-id` value is `\"*\"` \u2014 degenerate wildcard; the condition imposes\
+    \ no actual constraint."
+  - 'Destructive action `ec2:TerminateInstances` on Resource: `*` (blast radius = every resource in this account)'
+  - "Action-name wildcard `servicediscovery:Get*` on broad resource \u2014 matches multiple servicediscovery APIs at once"
+  - "Action-name wildcard `servicediscovery:List*` on broad resource \u2014 matches multiple servicediscovery APIs at once"
+  - 'State-changing action `route53:ChangeResourceRecordSets` on Resource: `*` (IAM access level: Write)'
+  - 'State-changing action `route53:CreateHealthCheck` on Resource: `*` (IAM access level: Write)'
+  - 'Destructive action `route53:DeleteHealthCheck` on Resource: `*` (blast radius = every resource in this account)'
+  - 'State-changing action `route53:UpdateHealthCheck` on Resource: `*` (IAM access level: Write)'
+  - 'State-changing action `servicediscovery:RegisterInstance` on Resource: `*` (IAM access level: Write)'
+  - 'State-changing action `servicediscovery:DeregisterInstance` on Resource: `*` (IAM access level: Write)'
+  - 'Resource: `*` for ec2, route53, servicediscovery (broad cross-resource read/access)'
+  - "`route53:ChangeResourceRecordSets` is a high-impact mutation on broad resource \u2014 single API call can rewrite every\
+    \ matching resource in the account."
+  - 'State-changing action `bedrock-agentcore:GetWorkloadAccessToken` on Resource: `*` (IAM access level: Write)'
+  - 'State-changing action `bedrock-agentcore:GetWorkloadAccessTokenForJWT` on Resource: `*` (IAM access level: Write)'
+  - 'State-changing action `bedrock-agentcore:GetWorkloadAccessTokenForUserId` on Resource: `*` (IAM access level: Write)'
+  - 'Resource: `*` for bedrock-agentcore (broad cross-resource read/access)'
+  - 'State-changing action `s3:PutObject` on Resource: `*` (IAM access level: Write)'
+  - 'Resource: `*` for s3 (broad cross-resource read/access)'
+  - 'Code-execution primitive on broad resource: ec2:RunInstances. Deploys attacker-controlled code that runs under whatever
+    role the matched resources use. Even without explicit PassRole, the existing roles of matched resources become the attack
+    target.'
+  - 'Code-execution-via-role composition: ec2:RunInstances combined with iam:PassRole = RCE as the passed role. Single-statement
+    scoring underweights this; the composition is full account-compromise tier.'
+  - '`s3:GetObject` on broad resource reads content that frequently contains secrets / sensitive data (boot logs, command
+    output, log streams, message bodies).'
+  opus_score: null
+  opus_factors: null
+  opus_reasoning: null
+  gap_classification: pending

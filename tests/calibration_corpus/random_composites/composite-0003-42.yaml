@@ -1,0 +1,152 @@
+name: composite-0003-42
+source_policies:
+- aws_managed/AWSDMSServerlessServiceRolePolicy.yaml
+- aws_managed/AWSMigrationHubDiscoveryAccess.yaml
+source_hash: 53d32fac9000e3c3
+policy:
+  Version: '2012-10-17'
+  Statement:
+  - Sid: id0
+    Effect: Allow
+    Action:
+    - dms:CreateReplicationInstance
+    - dms:CreateReplicationTask
+    Resource: '*'
+    Condition:
+      StringEquals:
+        dms:req-tag/ResourceCreatedBy: DMSServerless
+  - Sid: id1
+    Effect: Allow
+    Action:
+    - dms:DescribeReplicationInstances
+    - dms:DescribeReplicationTasks
+    Resource: '*'
+  - Sid: id2
+    Effect: Allow
+    Action:
+    - dms:StartReplicationTask
+    - dms:StopReplicationTask
+    - dms:ModifyReplicationTask
+    - dms:DeleteReplicationTask
+    - dms:ModifyReplicationInstance
+    - dms:DeleteReplicationInstance
+    Resource:
+    - arn:aws:dms:*:*:rep:*
+    - arn:aws:dms:*:*:task:*
+    Condition:
+      StringEqualsIgnoreCase:
+        aws:ResourceTag/ResourceCreatedBy: DMSServerless
+  - Sid: id3
+    Effect: Allow
+    Action:
+    - dms:TestConnection
+    - dms:DeleteConnection
+    Resource:
+    - arn:aws:dms:*:*:rep:*
+    - arn:aws:dms:*:*:endpoint:*
+  - Sid: id4
+    Effect: Allow
+    Action:
+    - s3:PutObject
+    - s3:DeleteObject
+    - s3:GetObject
+    - s3:PutObjectTagging
+    Resource:
+    - arn:aws:s3:::dms-serverless-premigration-results-*
+    - arn:aws:s3:::dms-premigration-results-*
+    Condition:
+      StringEquals:
+        s3:ResourceAccount: ${aws:PrincipalAccount}
+  - Sid: id5
+    Effect: Allow
+    Action:
+    - s3:PutBucketPolicy
+    - s3:ListBucket
+    - s3:GetBucketLocation
+    - s3:CreateBucket
+    Resource:
+    - arn:aws:s3:::dms-serverless-premigration-results-*
+    - arn:aws:s3:::dms-premigration-results-*
+    Condition:
+      StringEquals:
+        s3:ResourceAccount: ${aws:PrincipalAccount}
+  - Sid: id6
+    Effect: Allow
+    Action:
+    - dms:StartReplicationTaskAssessmentRun
+    Resource:
+    - arn:aws:dms:*:*:task:*
+    Condition:
+      StringEquals:
+        aws:ResourceAccount: ${aws:PrincipalAccount}
+  - Effect: Allow
+    Action:
+    - discovery:ListConfigurations
+    - discovery:DescribeConfigurations
+    Resource:
+    - '*'
+  - Effect: Allow
+    Action: ec2:CreateTags
+    Resource:
+    - arn:aws:ec2:*:*:instance/*
+    - arn:aws:ec2:*:*:image/*
+    - arn:aws:ec2:*:*:volume/*
+    Condition:
+      ForAllValues:StringEquals:
+        aws:TagKeys: aws:migrationhub:source-id
+  - Effect: Allow
+    Action: dms:AddTagsToResource
+    Resource:
+    - arn:aws:dms:*:*:endpoint:*
+    Condition:
+      ForAllValues:StringEquals:
+        aws:TagKeys: aws:migrationhub:source-id
+  - Effect: Allow
+    Action:
+    - ec2:DescribeInstanceAttribute
+    Resource:
+    - '*'
+request:
+  spec:
+    access_type: read-write
+    duration:
+      duration_hours: 4
+    resource_constraints: []
+  user: dev-bob
+  justification: 'reproduce customer ticket #4422 locally'
+scores:
+  det_score: 9
+  det_factors:
+  - 'State-changing action `dms:CreateReplicationInstance` on Resource: `*` (IAM access level: Write)'
+  - 'State-changing action `dms:CreateReplicationTask` on Resource: `*` (IAM access level: Write)'
+  - 'Resource: `*` for dms (broad cross-resource read/access)'
+  - 'State-changing action `dms:StartReplicationTask` on Resource: `*` (IAM access level: Write)'
+  - 'Destructive action `dms:StopReplicationTask` on Resource: `*` (blast radius = every resource in this account)'
+  - 'State-changing action `dms:ModifyReplicationTask` on Resource: `*` (IAM access level: Write)'
+  - 'Destructive action `dms:DeleteReplicationTask` on Resource: `*` (blast radius = every resource in this account)'
+  - 'State-changing action `dms:ModifyReplicationInstance` on Resource: `*` (IAM access level: Write)'
+  - 'Destructive action `dms:DeleteReplicationInstance` on Resource: `*` (blast radius = every resource in this account)'
+  - 'Destructive action `dms:DeleteConnection` on Resource: `*` (blast radius = every resource in this account)'
+  - 'State-changing action `s3:PutObject` on Resource: `*` (IAM access level: Write)'
+  - 'Destructive action `s3:DeleteObject` on Resource: `*` (blast radius = every resource in this account)'
+  - 'State-changing action `s3:PutObjectTagging` on Resource: `*` (IAM access level: Tagging)'
+  - 'Resource: `*` for s3 (broad cross-resource read/access)'
+  - 'State-changing action `s3:PutBucketPolicy` on Resource: `*` (IAM access level: Permissions management)'
+  - 'State-changing action `s3:CreateBucket` on Resource: `*` (IAM access level: Write)'
+  - "`s3:PutBucketPolicy` is a high-impact mutation on broad resource \u2014 single API call can rewrite every matching resource\
+    \ in the account."
+  - '`s3:PutBucketPolicy` is catastrophic in blast radius (account governance / IAM total compromise / evidence destruction).
+    Always route to human review.'
+  - 'State-changing action `dms:StartReplicationTaskAssessmentRun` on Resource: `*` (IAM access level: Write)'
+  - 'State-changing action `ec2:CreateTags` on Resource: `*` (IAM access level: Tagging)'
+  - 'Resource: `*` for ec2 (broad cross-resource read/access)'
+  - 'State-changing action `dms:AddTagsToResource` on Resource: `*` (IAM access level: Tagging)'
+  - 'Code-execution primitive on broad resource: dms:CreateReplicationInstance, dms:CreateReplicationTask. Deploys attacker-controlled
+    code that runs under whatever role the matched resources use. Even without explicit PassRole, the existing roles of matched
+    resources become the attack target.'
+  - '`s3:GetObject` on broad resource reads content that frequently contains secrets / sensitive data (boot logs, command
+    output, log streams, message bodies).'
+  opus_score: null
+  opus_factors: null
+  opus_reasoning: null
+  gap_classification: pending

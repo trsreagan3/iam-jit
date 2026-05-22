@@ -1,0 +1,114 @@
+name: composite-0034-42
+source_policies:
+- aws_managed/AmazonForecastFullAccess.yaml
+- aws_managed/AWSElasticBeanstalkEnhancedHealth.yaml
+- aws_managed/AWSProtonCodeBuildProvisioningBasicAccess.yaml
+- aws_managed/AWSMigrationHubStrategyServiceRolePolicy.yaml
+source_hash: eded5e76ff5ad737
+policy:
+  Version: '2012-10-17'
+  Statement:
+  - Effect: Allow
+    Action:
+    - forecast:*
+    Resource: '*'
+  - Effect: Allow
+    Action:
+    - iam:PassRole
+    Resource: '*'
+    Condition:
+      StringEquals:
+        iam:PassedToService: forecast.amazonaws.com
+  - Effect: Allow
+    Action:
+    - elasticloadbalancing:DescribeInstanceHealth
+    - elasticloadbalancing:DescribeLoadBalancers
+    - elasticloadbalancing:DescribeTargetHealth
+    - ec2:DescribeInstances
+    - ec2:DescribeInstanceStatus
+    - ec2:GetConsoleOutput
+    - ec2:AssociateAddress
+    - ec2:DescribeAddresses
+    - ec2:DescribeSecurityGroups
+    - sqs:GetQueueAttributes
+    - sqs:GetQueueUrl
+    - autoscaling:DescribeAutoScalingGroups
+    - autoscaling:DescribeAutoScalingInstances
+    - autoscaling:DescribeScalingActivities
+    - autoscaling:DescribeNotificationConfigurations
+    - sns:Publish
+    Resource:
+    - '*'
+  - Effect: Allow
+    Action:
+    - logs:DescribeLogStreams
+    - logs:CreateLogStream
+    - logs:PutLogEvents
+    Resource: arn:aws:logs:*:*:log-group:/aws/elasticbeanstalk/*:log-stream:*
+  - Effect: Allow
+    Action:
+    - logs:CreateLogStream
+    - logs:CreateLogGroup
+    - logs:PutLogEvents
+    Resource:
+    - arn:aws:logs:*:*:log-group:/aws/codebuild/AWSProton-*
+  - Effect: Allow
+    Action: proton:NotifyResourceDeploymentStatusChange
+    Resource: arn:aws:proton:*:*:*
+  - Sid: permissionsForAds
+    Effect: Allow
+    Action:
+    - discovery:ListConfigurations
+    - discovery:DescribeConfigurations
+    - mgh:GetHomeRegion
+    Resource: '*'
+  - Effect: Allow
+    Action:
+    - s3:ListAllMyBuckets
+    Resource: arn:aws:s3:::*
+  - Sid: permissionsForS3
+    Effect: Allow
+    Action:
+    - s3:GetBucketAcl
+    - s3:GetBucketLocation
+    - s3:GetObject
+    - s3:ListBucket
+    - s3:PutObject
+    - s3:PutObjectAcl
+    Resource: arn:aws:s3:::migrationhub-strategy-*
+request:
+  spec:
+    access_type: read-write
+    duration:
+      duration_hours: 1
+    resource_constraints: []
+  user: ci-bot
+  justification: rotate signing key via CI pipeline
+scores:
+  det_score: 9
+  det_factors:
+  - '`forecast:*` grants every action in `forecast`'
+  - 'Resource: `*` for forecast (broad cross-resource read/access)'
+  - '`iam:PassRole` on Resource: `*` is a privilege-escalation path'
+  - 'State-changing action `iam:PassRole` on Resource: `*` (IAM access level: Permissions management)'
+  - 'State-changing action `ec2:AssociateAddress` on Resource: `*` (IAM access level: Write)'
+  - 'State-changing action `sns:Publish` on Resource: `*` (IAM access level: Write)'
+  - 'Resource: `*` for autoscaling, ec2, elasticloadbalancing, sns, sqs (broad cross-resource read/access)'
+  - 'State-changing action `logs:CreateLogStream` on Resource: `*` (IAM access level: Write)'
+  - 'State-changing action `logs:PutLogEvents` on Resource: `*` (IAM access level: Write)'
+  - 'Resource: `*` for logs (broad cross-resource read/access)'
+  - 'State-changing action `logs:CreateLogGroup` on Resource: `*` (IAM access level: Write)'
+  - 'State-changing action `proton:NotifyResourceDeploymentStatusChange` on Resource: `*` (IAM access level: Write)'
+  - 'Resource: `*` for proton (broad cross-resource read/access)'
+  - 'Resource: `*` for discovery, mgh (broad cross-resource read/access)'
+  - 'State-changing action `s3:PutObject` on Resource: `*` (IAM access level: Write)'
+  - 'State-changing action `s3:PutObjectAcl` on Resource: `*` (IAM access level: Permissions management)'
+  - 'Resource: `*` for s3 (broad cross-resource read/access)'
+  - "`s3:PutObjectAcl` is a high-impact mutation on broad resource \u2014 single API call can rewrite every matching resource\
+    \ in the account."
+  - '`ec2:GetConsoleOutput` on broad resource reads content that frequently contains secrets / sensitive data (boot logs,
+    command output, log streams, message bodies).'
+  opus_score: null
+  opus_factors: null
+  opus_reasoning: null
+  gap_classification: pending

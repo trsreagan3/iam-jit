@@ -1,0 +1,164 @@
+name: composite-0099-42
+source_policies:
+- aws_managed/AWSElasticBeanstalkMaintenance.yaml
+- aws_managed/AmazonGuardDutyFullAccess_v2.yaml
+- aws_managed/AWSElasticDisasterRecoveryNetworkReplicationPolicy.yaml
+- aws_managed/AmazonInspector2ManagedTelemetryPolicy.yaml
+source_hash: 79b7891fd7b4406d
+policy:
+  Version: '2012-10-17'
+  Statement:
+  - Sid: AllowCloudformationChangeSetOperationsOnElasticBeanstalkStacks
+    Effect: Allow
+    Action:
+    - cloudformation:CreateChangeSet
+    - cloudformation:DescribeChangeSet
+    - cloudformation:ExecuteChangeSet
+    - cloudformation:DeleteChangeSet
+    - cloudformation:ListChangeSets
+    - cloudformation:DescribeStacks
+    - cloudformation:TagResource
+    - cloudformation:UntagResource
+    Resource:
+    - arn:aws:cloudformation:*:*:stack/awseb-*
+    - arn:aws:cloudformation:*:*:stack/eb-*
+  - Sid: AllowElasticBeanstalkStacksUpdateExecuteSuccessfully
+    Effect: Allow
+    Action: elasticloadbalancing:DescribeLoadBalancers
+    Resource: '*'
+  - Sid: GuardDutyFullAccess
+    Effect: Allow
+    Action: guardduty:*
+    Resource: '*'
+  - Sid: CreateGuardDutyServiceLinkedRole
+    Effect: Allow
+    Action: iam:CreateServiceLinkedRole
+    Resource: '*'
+    Condition:
+      StringEquals:
+        iam:AWSServiceName:
+        - guardduty.amazonaws.com
+        - malware-protection.guardduty.amazonaws.com
+  - Sid: GuardDutyOrganizationsReadOnly
+    Effect: Allow
+    Action:
+    - organizations:ListAWSServiceAccessForOrganization
+    - organizations:DescribeOrganizationalUnit
+    - organizations:DescribeAccount
+    - organizations:DescribeOrganization
+    - organizations:ListAccounts
+    Resource: '*'
+  - Sid: GuardDutyOrganizationsAdminAccess
+    Effect: Allow
+    Action:
+    - organizations:EnableAWSServiceAccess
+    - organizations:DisableAWSServiceAccess
+    - organizations:RegisterDelegatedAdministrator
+    - organizations:DeregisterDelegatedAdministrator
+    - organizations:ListDelegatedAdministrators
+    Resource: '*'
+    Condition:
+      StringEquals:
+        organizations:ServicePrincipal:
+        - guardduty.amazonaws.com
+        - malware-protection.guardduty.amazonaws.com
+  - Sid: GuardDutyIamRoleAccess
+    Effect: Allow
+    Action: iam:GetRole
+    Resource: arn:aws:iam::*:role/*AWSServiceRoleForAmazonGuardDutyMalwareProtection
+  - Sid: AllowPassRoleToMalwareProtection
+    Effect: Allow
+    Action:
+    - iam:PassRole
+    Resource: arn:aws:iam::*:role/*
+    Condition:
+      StringEquals:
+        iam:PassedToService:
+        - malware-protection-plan.guardduty.amazonaws.com
+        - malware-protection.guardduty.amazonaws.com
+  - Sid: DRSNetworkReplicationPolicy1
+    Effect: Allow
+    Action:
+    - ec2:DescribeVpcAttribute
+    - ec2:DescribeInternetGateways
+    - ec2:DescribeVpcs
+    - ec2:DescribeSubnets
+    - ec2:DescribeNetworkAcls
+    - ec2:DescribeSecurityGroups
+    - ec2:DescribeRouteTables
+    - ec2:DescribeAvailabilityZones
+    - ec2:DescribeDhcpOptions
+    - ec2:DescribeInstances
+    - ec2:DescribeManagedPrefixLists
+    - ec2:GetManagedPrefixListEntries
+    - ec2:GetManagedPrefixListAssociations
+    Resource: '*'
+  - Sid: PermissionsForInspector2Telemetry
+    Effect: Allow
+    Action:
+    - inspector2-telemetry:StartSession
+    - inspector2-telemetry:StopSession
+    - inspector2-telemetry:SendTelemetry
+    - inspector2-telemetry:NotifyHeartbeat
+    Resource: '*'
+request:
+  spec:
+    access_type: read-write
+    duration:
+      duration_hours: 4
+    resource_constraints: []
+  user: auditor-erin
+  justification: SOC 2 controls evidence collection
+scores:
+  det_score: 9
+  det_factors:
+  - 'State-changing action `cloudformation:CreateChangeSet` on Resource: `*` (IAM access level: Write)'
+  - 'State-changing action `cloudformation:ExecuteChangeSet` on Resource: `*` (IAM access level: Write)'
+  - 'Destructive action `cloudformation:DeleteChangeSet` on Resource: `*` (blast radius = every resource in this account)'
+  - 'State-changing action `cloudformation:TagResource` on Resource: `*` (IAM access level: Tagging)'
+  - 'State-changing action `cloudformation:UntagResource` on Resource: `*` (IAM access level: Tagging)'
+  - 'Resource: `*` for cloudformation (broad cross-resource read/access)'
+  - "`cloudformation:CreateChangeSet` is a high-impact mutation on broad resource \u2014 single API call can rewrite every\
+    \ matching resource in the account."
+  - "`cloudformation:ExecuteChangeSet` is a high-impact mutation on broad resource \u2014 single API call can rewrite every\
+    \ matching resource in the account."
+  - '`guardduty:*` grants every action in `guardduty`'
+  - 'Resource: `*` for guardduty (broad cross-resource read/access)'
+  - '`guardduty:*` is catastrophic in blast radius (account governance / IAM total compromise / evidence destruction). Always
+    route to human review.'
+  - '`iam:CreateServiceLinkedRole` on Resource: `*` touches sensitive service `iam`'
+  - 'State-changing action `iam:CreateServiceLinkedRole` on Resource: `*` (IAM access level: Permissions management)'
+  - '`organizations:ListAWSServiceAccessForOrganization` on Resource: `*` touches sensitive service `organizations`'
+  - '`organizations:DescribeOrganizationalUnit` on Resource: `*` touches sensitive service `organizations`'
+  - '`organizations:DescribeAccount` on Resource: `*` touches sensitive service `organizations`'
+  - '`organizations:DescribeOrganization` on Resource: `*` touches sensitive service `organizations`'
+  - '`organizations:ListAccounts` on Resource: `*` touches sensitive service `organizations`'
+  - '`organizations:EnableAWSServiceAccess` on Resource: `*` touches sensitive service `organizations`'
+  - '`organizations:DisableAWSServiceAccess` on Resource: `*` touches sensitive service `organizations`'
+  - '`organizations:RegisterDelegatedAdministrator` on Resource: `*` touches sensitive service `organizations`'
+  - '`organizations:DeregisterDelegatedAdministrator` on Resource: `*` touches sensitive service `organizations`'
+  - '`organizations:ListDelegatedAdministrators` on Resource: `*` touches sensitive service `organizations`'
+  - 'State-changing action `organizations:EnableAWSServiceAccess` on Resource: `*` (IAM access level: Write)'
+  - 'Destructive action `organizations:DisableAWSServiceAccess` on Resource: `*` (blast radius = every resource in this account)'
+  - 'State-changing action `organizations:RegisterDelegatedAdministrator` on Resource: `*` (IAM access level: Write)'
+  - 'State-changing action `organizations:DeregisterDelegatedAdministrator` on Resource: `*` (IAM access level: Write)'
+  - '`organizations:RegisterDelegatedAdministrator` is catastrophic in blast radius (account governance / IAM total compromise
+    / evidence destruction). Always route to human review.'
+  - '`iam:GetRole` on Resource: `*` touches sensitive service `iam`'
+  - '`iam:PassRole` on Resource: `*` is a privilege-escalation path'
+  - 'State-changing action `iam:PassRole` on Resource: `*` (IAM access level: Permissions management)'
+  - 'Resource: `*` for ec2 (broad cross-resource read/access)'
+  - 'State-changing action `inspector2-telemetry:StartSession` on Resource: `*` (IAM access level: Write)'
+  - 'Destructive action `inspector2-telemetry:StopSession` on Resource: `*` (blast radius = every resource in this account)'
+  - 'State-changing action `inspector2-telemetry:SendTelemetry` on Resource: `*` (IAM access level: Write)'
+  - 'State-changing action `inspector2-telemetry:NotifyHeartbeat` on Resource: `*` (IAM access level: Write)'
+  - 'Resource: `*` for inspector2-telemetry (broad cross-resource read/access)'
+  - 'Code-execution primitive on broad resource: cloudformation:CreateChangeSet, cloudformation:ExecuteChangeSet. Deploys
+    attacker-controlled code that runs under whatever role the matched resources use. Even without explicit PassRole, the
+    existing roles of matched resources become the attack target.'
+  - 'Code-execution-via-role composition: cloudformation:CreateChangeSet (+ 1 more) combined with iam:PassRole = RCE as the
+    passed role. Single-statement scoring underweights this; the composition is full account-compromise tier.'
+  opus_score: null
+  opus_factors: null
+  opus_reasoning: null
+  gap_classification: pending

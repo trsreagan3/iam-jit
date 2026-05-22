@@ -1,0 +1,86 @@
+name: composite-0053-42
+source_policies:
+- aws_managed/AWSIoTSiteWiseReadOnlyAccess.yaml
+- aws_managed/AWSCloudHSMFullAccess.yaml
+source_hash: 14d7fc1a6a3110b3
+policy:
+  Version: '2012-10-17'
+  Statement:
+  - Effect: Allow
+    Action:
+    - iotsitewise:BatchGetAssetPropertyAggregates
+    - iotsitewise:BatchGetAssetPropertyValue
+    - iotsitewise:BatchGetAssetPropertyValueHistory
+    - iotsitewise:DescribeAccessPolicy
+    - iotsitewise:DescribeAction
+    - iotsitewise:DescribeAsset
+    - iotsitewise:DescribeAssetCompositeModel
+    - iotsitewise:DescribeAssetModel
+    - iotsitewise:DescribeAssetModelCompositeModel
+    - iotsitewise:DescribeAssetModelInterfaceRelationship
+    - iotsitewise:DescribeAssetProperty
+    - iotsitewise:DescribeBulkImportJob
+    - iotsitewise:DescribeComputationModel
+    - iotsitewise:DescribeComputationModelExecutionSummary
+    - iotsitewise:DescribeDashboard
+    - iotsitewise:DescribeDataset
+    - iotsitewise:DescribeDefaultEncryptionConfiguration
+    - iotsitewise:DescribeExecution
+    - iotsitewise:DescribeGateway
+    - iotsitewise:DescribeGatewayCapabilityConfiguration
+    - iotsitewise:DescribeLoggingOptions
+    - iotsitewise:DescribePortal
+    - iotsitewise:DescribeProject
+    - iotsitewise:DescribeStorageConfiguration
+    - iotsitewise:DescribeTimeSeries
+    - iotsitewise:ExecuteQuery
+    - iotsitewise:GetAssetPropertyAggregates
+    - iotsitewise:GetAssetPropertyValue
+    - iotsitewise:GetAssetPropertyValueHistory
+    - iotsitewise:GetInterpolatedAssetPropertyValues
+    - iotsitewise:ListAccessPolicies
+    - iotsitewise:ListActions
+    - iotsitewise:ListAssetModelCompositeModels
+    - iotsitewise:ListAssetModelProperties
+    - iotsitewise:ListAssetModels
+    - iotsitewise:ListAssetProperties
+    - iotsitewise:ListAssetRelationships
+    - iotsitewise:ListAssets
+    - iotsitewise:ListAssociatedAssets
+    - iotsitewise:ListBulkImportJobs
+    - iotsitewise:ListCompositionRelationships
+    - iotsitewise:ListComputationModelDataBindingUsages
+    - iotsitewise:ListComputationModelResolveToResources
+    - iotsitewise:ListComputationModels
+    - iotsitewise:ListDashboards
+    - iotsitewise:ListDatasets
+    - iotsitewise:ListExecutions
+    - iotsitewise:ListGateways
+    - iotsitewise:ListInterfaceRelationships
+    - iotsitewise:ListPortals
+    - iotsitewise:ListProjectAssets
+    - iotsitewise:ListProjects
+    - iotsitewise:ListTagsForResource
+    - iotsitewise:ListTimeSeries
+    Resource: '*'
+  - Effect: Allow
+    Action: cloudhsm:*
+    Resource: '*'
+request:
+  spec:
+    access_type: read-write
+    duration:
+      duration_hours: 1
+    resource_constraints: []
+  user: contractor-frank
+  justification: 60-day integration project read access
+scores:
+  det_score: 8
+  det_factors:
+  - 'Resource: `*` for iotsitewise (broad cross-resource read/access)'
+  - '`cloudhsm:*` grants every action in `cloudhsm`'
+  - 'Resource: `*` for cloudhsm (broad cross-resource read/access)'
+  opus_score: null
+  opus_factors: null
+  opus_reasoning: null
+  gap_classification: pending

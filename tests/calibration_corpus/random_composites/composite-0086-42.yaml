@@ -1,0 +1,113 @@
+name: composite-0086-42
+source_policies:
+- aws_managed/AWSTransformCustomManageTransformations.yaml
+- aws_managed/AmazonEC2ContainerRegistryPowerUser.yaml
+- aws_managed/S3StorageLensServiceRolePolicy.yaml
+source_hash: a4b8f0b71b377679
+policy:
+  Version: '2012-10-17'
+  Statement:
+  - Sid: AWSTransformCustomManageTransformations
+    Effect: Allow
+    Action:
+    - transform-custom:ConverseStream
+    - transform-custom:CreateTransformationPackageUrl
+    - transform-custom:CompleteTransformationPackageUpload
+    - transform-custom:DeleteTransformationPackage
+    - transform-custom:GetTransformationPackageUrl
+    - transform-custom:ListTransformationPackageMetadata
+    - transform-custom:ExecuteTransformation
+    - transform-custom:ListKnowledgeItems
+    - transform-custom:GetKnowledgeItem
+    - transform-custom:DeleteKnowledgeItem
+    - transform-custom:UpdateKnowledgeItemConfiguration
+    - transform-custom:UpdateKnowledgeItemStatus
+    - transform-custom:GetCampaign
+    - transform-custom:UpdateCampaignRepositoryStatus
+    - transform-custom:UpdateCampaign
+    - transform-custom:ListTagsForResource
+    - transform-custom:TagResource
+    - transform-custom:UntagResource
+    Resource:
+    - '*'
+  - Sid: AllowCreateServiceLinkedRole
+    Effect: Allow
+    Action:
+    - iam:CreateServiceLinkedRole
+    Resource:
+    - arn:aws:iam::*:role/aws-service-role/transform-custom.amazonaws.com/AWSServiceRoleForAWSTransformCustom
+    Condition:
+      StringEquals:
+        iam:AWSServiceName: transform-custom.amazonaws.com
+  - Effect: Allow
+    Action:
+    - ecr:GetAuthorizationToken
+    - ecr:BatchCheckLayerAvailability
+    - ecr:GetDownloadUrlForLayer
+    - ecr:GetRepositoryPolicy
+    - ecr:DescribeRepositories
+    - ecr:ListImages
+    - ecr:DescribeImages
+    - ecr:BatchGetImage
+    - ecr:GetLifecyclePolicy
+    - ecr:GetLifecyclePolicyPreview
+    - ecr:ListTagsForResource
+    - ecr:DescribeImageScanFindings
+    - ecr:InitiateLayerUpload
+    - ecr:UploadLayerPart
+    - ecr:CompleteLayerUpload
+    - ecr:PutImage
+    Resource: '*'
+  - Sid: AwsOrgsAccess
+    Effect: Allow
+    Action:
+    - organizations:DescribeOrganization
+    - organizations:ListAccounts
+    - organizations:ListAWSServiceAccessForOrganization
+    - organizations:ListDelegatedAdministrators
+    Resource:
+    - '*'
+request:
+  spec:
+    access_type: read-write
+    duration:
+      duration_hours: 4
+    resource_constraints: []
+  user: sre-carol
+  justification: scale-out emergency for us-east-1 outage
+scores:
+  det_score: 8
+  det_factors:
+  - 'State-changing action `transform-custom:ConverseStream` on Resource: `*` (IAM access level: Write)'
+  - 'State-changing action `transform-custom:CreateTransformationPackageUrl` on Resource: `*` (IAM access level: Write)'
+  - 'State-changing action `transform-custom:CompleteTransformationPackageUpload` on Resource: `*` (IAM access level: Write)'
+  - 'Destructive action `transform-custom:DeleteTransformationPackage` on Resource: `*` (blast radius = every resource in
+    this account)'
+  - 'State-changing action `transform-custom:ExecuteTransformation` on Resource: `*` (IAM access level: Write)'
+  - 'Destructive action `transform-custom:DeleteKnowledgeItem` on Resource: `*` (blast radius = every resource in this account)'
+  - 'State-changing action `transform-custom:UpdateKnowledgeItemConfiguration` on Resource: `*` (IAM access level: Write)'
+  - 'State-changing action `transform-custom:UpdateKnowledgeItemStatus` on Resource: `*` (IAM access level: Write)'
+  - 'State-changing action `transform-custom:UpdateCampaignRepositoryStatus` on Resource: `*` (IAM access level: Write)'
+  - 'State-changing action `transform-custom:UpdateCampaign` on Resource: `*` (IAM access level: Write)'
+  - 'State-changing action `transform-custom:TagResource` on Resource: `*` (IAM access level: Tagging)'
+  - 'State-changing action `transform-custom:UntagResource` on Resource: `*` (IAM access level: Tagging)'
+  - 'Resource: `*` for transform-custom (broad cross-resource read/access)'
+  - '`iam:CreateServiceLinkedRole` on Resource: `*` touches sensitive service `iam`'
+  - 'State-changing action `iam:CreateServiceLinkedRole` on Resource: `*` (IAM access level: Permissions management)'
+  - 'State-changing action `ecr:InitiateLayerUpload` on Resource: `*` (IAM access level: Write)'
+  - 'State-changing action `ecr:UploadLayerPart` on Resource: `*` (IAM access level: Write)'
+  - 'State-changing action `ecr:CompleteLayerUpload` on Resource: `*` (IAM access level: Write)'
+  - 'State-changing action `ecr:PutImage` on Resource: `*` (IAM access level: Write)'
+  - 'Resource: `*` for ecr (broad cross-resource read/access)'
+  - "`ecr:PutImage` is a high-impact mutation on broad resource \u2014 single API call can rewrite every matching resource\
+    \ in the account."
+  - '`organizations:DescribeOrganization` on Resource: `*` touches sensitive service `organizations`'
+  - '`organizations:ListAccounts` on Resource: `*` touches sensitive service `organizations`'
+  - '`organizations:ListAWSServiceAccessForOrganization` on Resource: `*` touches sensitive service `organizations`'
+  - '`organizations:ListDelegatedAdministrators` on Resource: `*` touches sensitive service `organizations`'
+  - '`ecr:PutImage` sets up ongoing cross-account / persistent exfiltration in a single call. The blast is ''everything that
+    flows through this resource from now on,'' not just what exists today.'
+  opus_score: null
+  opus_factors: null
+  opus_reasoning: null
+  gap_classification: pending

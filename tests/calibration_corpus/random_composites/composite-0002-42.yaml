@@ -1,0 +1,162 @@
+name: composite-0002-42
+source_policies:
+- aws_managed/MultiPartyApprovalFullAccess.yaml
+- aws_managed/AmazonS3TablesReadOnlyAccess.yaml
+- aws_managed/AWSConfigMultiAccountSetupPolicy.yaml
+source_hash: 834b6c0ff360769d
+policy:
+  Version: '2012-10-17'
+  Statement:
+  - Sid: MpaFullAccess
+    Effect: Allow
+    Action:
+    - mpa:*
+    Resource: '*'
+  - Sid: OrganizationsAccess
+    Effect: Allow
+    Action:
+    - organizations:ListDelegatedAdministrators
+    - organizations:DescribeOrganization
+    Resource: '*'
+  - Sid: SSOCreateApplication
+    Effect: Allow
+    Action:
+    - sso:CreateApplication
+    Resource:
+    - arn:aws:sso:::instance/*
+    - arn:aws:sso::aws:applicationProvider/mpa
+  - Sid: SSOApplicationManagement
+    Effect: Allow
+    Action:
+    - sso:DescribeApplication
+    - sso:PutApplicationAssignmentConfiguration
+    - sso:PutApplicationGrant
+    - sso:PutApplicationAuthenticationMethod
+    - sso:PutApplicationAccessScope
+    - sso:DeleteApplication
+    Resource: '*'
+    Condition:
+      StringEqualsIfExists:
+        aws:CalledViaLast: mpa.amazonaws.com
+  - Sid: SSOManagementAccess
+    Effect: Allow
+    Action:
+    - sso:DescribeInstance
+    - sso:DescribeRegisteredRegions
+    - sso:GetSharedSsoConfiguration
+    - sso-directory:DescribeUsers
+    - sso-directory:SearchUsers
+    - sso:ListInstances
+    Resource: '*'
+  - Sid: AllowKmsAccessViaIdentityCenter
+    Effect: Allow
+    Action:
+    - kms:Decrypt
+    Resource: '*'
+    Condition:
+      ArnLike:
+        kms:EncryptionContext:aws:sso:instance-arn: arn:*:sso:::instance/*
+      StringLike:
+        kms:ViaService: sso.*.amazonaws.com
+  - Sid: AllowKmsAccessViaIdentityStore
+    Effect: Allow
+    Action:
+    - kms:Decrypt
+    Resource: '*'
+    Condition:
+      ArnLike:
+        kms:EncryptionContext:aws:identitystore:identitystore-arn: arn:*:identitystore::*:identitystore/*
+      StringLike:
+        kms:ViaService: identitystore.*.amazonaws.com
+  - Effect: Allow
+    Action:
+    - s3tables:Get*
+    - s3tables:List*
+    Resource: '*'
+  - Effect: Allow
+    Action:
+    - config:PutConfigRule
+    - config:DeleteConfigRule
+    Resource: arn:aws:config:*:*:config-rule/aws-service-rule/config-multiaccountsetup.amazonaws.com/*
+  - Effect: Allow
+    Action:
+    - config:DescribeConfigurationRecorders
+    Resource: '*'
+  - Effect: Allow
+    Action:
+    - organizations:ListAccounts
+    - organizations:DescribeOrganization
+    - organizations:ListAWSServiceAccessForOrganization
+    - organizations:DescribeAccount
+    Resource: '*'
+  - Effect: Allow
+    Action:
+    - config:PutConformancePack
+    - config:DeleteConformancePack
+    Resource: arn:aws:config:*:*:conformance-pack/aws-service-conformance-pack/config-multiaccountsetup.amazonaws.com/*
+  - Effect: Allow
+    Action:
+    - config:DescribeConformancePackStatus
+    Resource: '*'
+  - Effect: Allow
+    Action:
+    - iam:GetRole
+    Resource: arn:aws:iam::*:role/aws-service-role/config-conforms.amazonaws.com/AWSServiceRoleForConfigConforms
+  - Effect: Allow
+    Action:
+    - iam:CreateServiceLinkedRole
+    Resource: arn:aws:iam::*:role/aws-service-role/config-conforms.amazonaws.com/AWSServiceRoleForConfigConforms
+    Condition:
+      StringLike:
+        iam:AWSServiceName: config-conforms.amazonaws.com
+  - Action: iam:PassRole
+    Resource: '*'
+    Effect: Allow
+    Condition:
+      StringEquals:
+        iam:PassedToService: ssm.amazonaws.com
+request:
+  spec:
+    access_type: read-write
+    duration:
+      duration_hours: 2
+    resource_constraints: []
+  user: contractor-frank
+  justification: 60-day integration project read access
+scores:
+  det_score: 9
+  det_factors:
+  - '`mpa:*` grants every action in `mpa`'
+  - 'Resource: `*` for mpa (broad cross-resource read/access)'
+  - '`organizations:ListDelegatedAdministrators` on Resource: `*` touches sensitive service `organizations`'
+  - '`organizations:DescribeOrganization` on Resource: `*` touches sensitive service `organizations`'
+  - 'State-changing action `sso:CreateApplication` on Resource: `*` (IAM access level: Write)'
+  - 'State-changing action `sso:PutApplicationAssignmentConfiguration` on Resource: `*` (IAM access level: Write)'
+  - 'State-changing action `sso:PutApplicationGrant` on Resource: `*` (IAM access level: Write)'
+  - 'State-changing action `sso:PutApplicationAuthenticationMethod` on Resource: `*` (IAM access level: Write)'
+  - 'State-changing action `sso:PutApplicationAccessScope` on Resource: `*` (IAM access level: Write)'
+  - 'Destructive action `sso:DeleteApplication` on Resource: `*` (blast radius = every resource in this account)'
+  - 'Resource: `*` for sso (broad cross-resource read/access)'
+  - 'Resource: `*` for sso, sso-directory (broad cross-resource read/access)'
+  - '`kms:Decrypt` on Resource: `*` (broad access to sensitive resource)'
+  - 'State-changing action `kms:Decrypt` on Resource: `*` (IAM access level: Write)'
+  - "Action-name wildcard `s3tables:Get*` on broad resource \u2014 matches multiple s3tables APIs at once"
+  - "Action-name wildcard `s3tables:List*` on broad resource \u2014 matches multiple s3tables APIs at once"
+  - 'Resource: `*` for s3tables (broad cross-resource read/access)'
+  - 'State-changing action `config:PutConfigRule` on Resource: `*` (IAM access level: Write)'
+  - 'Destructive action `config:DeleteConfigRule` on Resource: `*` (blast radius = every resource in this account)'
+  - 'Resource: `*` for config (broad cross-resource read/access)'
+  - '`organizations:ListAccounts` on Resource: `*` touches sensitive service `organizations`'
+  - '`organizations:ListAWSServiceAccessForOrganization` on Resource: `*` touches sensitive service `organizations`'
+  - '`organizations:DescribeAccount` on Resource: `*` touches sensitive service `organizations`'
+  - 'State-changing action `config:PutConformancePack` on Resource: `*` (IAM access level: Write)'
+  - 'Destructive action `config:DeleteConformancePack` on Resource: `*` (blast radius = every resource in this account)'
+  - '`iam:GetRole` on Resource: `*` touches sensitive service `iam`'
+  - '`iam:CreateServiceLinkedRole` on Resource: `*` touches sensitive service `iam`'
+  - 'State-changing action `iam:CreateServiceLinkedRole` on Resource: `*` (IAM access level: Permissions management)'
+  - '`iam:PassRole` on Resource: `*` is a privilege-escalation path'
+  - 'State-changing action `iam:PassRole` on Resource: `*` (IAM access level: Permissions management)'
+  opus_score: null
+  opus_factors: null
+  opus_reasoning: null
+  gap_classification: pending

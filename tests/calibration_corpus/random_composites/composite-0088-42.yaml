@@ -1,0 +1,100 @@
+name: composite-0088-42
+source_policies:
+- aws_managed/AWSIoTDataAccess.yaml
+- aws_managed/CloudTrailEventContext.yaml
+- aws_managed/AmazonSageMakerPartnerServiceCatalogProductsLambdaServiceRolePolicy.yaml
+source_hash: 0eeaa4745e748918
+policy:
+  Version: '2012-10-17'
+  Statement:
+  - Effect: Allow
+    Action:
+    - iot:Connect
+    - iot:Publish
+    - iot:Subscribe
+    - iot:Receive
+    - iot:GetThingShadow
+    - iot:UpdateThingShadow
+    - iot:DeleteThingShadow
+    - iot:ListNamedShadowsForThing
+    Resource: '*'
+  - Sid: CloudTrailEventContextPermissionForTag
+    Effect: Allow
+    Action: tag:GetResources
+    Resource: '*'
+    Condition:
+      StringEquals:
+        aws:ResourceAccount: ${aws:PrincipalAccount}
+  - Sid: AllowEventBridgeRuleCreation
+    Effect: Allow
+    Action: events:PutRule
+    Resource: arn:aws:events:*:*:rule/CloudTrailEventContext*
+    Condition:
+      ForAllValues:StringEquals:
+        events:source: aws.tag
+      StringEquals:
+        events:creatorAccount: ${aws:PrincipalAccount}
+        events:detail-type: Tag Change on Resource
+        events:ManagedBy: context.cloudtrail.amazonaws.com
+  - Sid: AllowEventBridgeRuleWrite
+    Effect: Allow
+    Action:
+    - events:PutTargets
+    - events:DeleteRule
+    - events:RemoveTargets
+    Resource: arn:aws:events:*:*:rule/CloudTrailEventContext*
+    Condition:
+      StringEquals:
+        events:creatorAccount: ${aws:PrincipalAccount}
+        events:ManagedBy: context.cloudtrail.amazonaws.com
+  - Sid: AllowEventBridgeRuleRead
+    Effect: Allow
+    Action:
+    - events:DescribeRule
+    - events:ListTargetsByRule
+    Condition:
+      StringEquals:
+        events:creatorAccount: ${aws:PrincipalAccount}
+    Resource: arn:aws:events:*:*:rule/CloudTrailEventContext*
+  - Sid: AllowEventBridgeRuleList
+    Effect: Allow
+    Action:
+    - events:ListRules
+    Resource: '*'
+  - Effect: Allow
+    Action: secretsmanager:GetSecretValue
+    Resource: arn:aws:secretsmanager:*:*:secret:*
+    Condition:
+      'Null':
+        aws:ResourceTag/sagemaker:partner: false
+      StringEquals:
+        aws:ResourceAccount: ${aws:PrincipalAccount}
+request:
+  spec:
+    access_type: read-write
+    duration:
+      duration_hours: 2
+    resource_constraints: []
+  user: sre-carol
+  justification: scale-out emergency for us-east-1 outage
+scores:
+  det_score: 8
+  det_factors:
+  - 'State-changing action `iot:Connect` on Resource: `*` (IAM access level: Write)'
+  - 'State-changing action `iot:Publish` on Resource: `*` (IAM access level: Write)'
+  - 'State-changing action `iot:Subscribe` on Resource: `*` (IAM access level: Write)'
+  - 'State-changing action `iot:Receive` on Resource: `*` (IAM access level: Write)'
+  - 'State-changing action `iot:UpdateThingShadow` on Resource: `*` (IAM access level: Write)'
+  - 'Destructive action `iot:DeleteThingShadow` on Resource: `*` (blast radius = every resource in this account)'
+  - 'Resource: `*` for iot (broad cross-resource read/access)'
+  - 'Resource: `*` for tag (broad cross-resource read/access)'
+  - 'State-changing action `events:PutRule` on Resource: `*` (IAM access level: Write)'
+  - 'Resource: `*` for events (broad cross-resource read/access)'
+  - 'State-changing action `events:PutTargets` on Resource: `*` (IAM access level: Write)'
+  - 'Destructive action `events:DeleteRule` on Resource: `*` (blast radius = every resource in this account)'
+  - 'Destructive action `events:RemoveTargets` on Resource: `*` (blast radius = every resource in this account)'
+  - '`secretsmanager:GetSecretValue` on Resource: `*` (broad access to secrets)'
+  opus_score: null
+  opus_factors: null
+  opus_reasoning: null
+  gap_classification: pending

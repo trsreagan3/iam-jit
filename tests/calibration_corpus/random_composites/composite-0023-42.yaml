@@ -1,0 +1,101 @@
+name: composite-0023-42
+source_policies:
+- aws_managed/AmazonRoute53AutoNamingReadOnlyAccess.yaml
+- aws_managed/AWSPurchaseOrdersServiceRolePolicy.yaml
+- aws_managed/AmazonSSMReadOnlyAccess.yaml
+- aws_managed/AWSAppConfigServiceRolePolicy.yaml
+- aws_managed/NovaActServiceRolePolicy.yaml
+source_hash: 88341996e2b08448
+policy:
+  Version: '2012-10-17'
+  Statement:
+  - Effect: Allow
+    Action:
+    - servicediscovery:Get*
+    - servicediscovery:List*
+    Resource:
+    - '*'
+  - Effect: Allow
+    Action:
+    - account:GetAccountInformation
+    - account:GetContactInformation
+    - aws-portal:*Billing
+    - consolidatedbilling:GetAccountBillingRole
+    - invoicing:GetInvoicePDF
+    - invoicing:ListInvoiceUnits
+    - payments:GetPaymentInstrument
+    - payments:ListPaymentPreferences
+    - purchase-orders:AddPurchaseOrder
+    - purchase-orders:DeletePurchaseOrder
+    - purchase-orders:GetPurchaseOrder
+    - purchase-orders:ListPurchaseOrderInvoices
+    - purchase-orders:ListPurchaseOrders
+    - purchase-orders:ListTagsForResource
+    - purchase-orders:ModifyPurchaseOrders
+    - purchase-orders:TagResource
+    - purchase-orders:UntagResource
+    - purchase-orders:UpdatePurchaseOrder
+    - purchase-orders:UpdatePurchaseOrderStatus
+    - purchase-orders:ViewPurchaseOrders
+    - tax:ListTaxRegistrations
+    Resource: '*'
+  - Effect: Allow
+    Action:
+    - ssm:Describe*
+    - ssm:Get*
+    - ssm:List*
+    Resource: '*'
+  - Sid: CloudWatchPutExperimentMetrics
+    Effect: Allow
+    Action:
+    - cloudwatch:PutMetricData
+    Resource: '*'
+    Condition:
+      StringEquals:
+        cloudwatch:namespace: AWS/AppConfig
+  - Sid: AllowPublishCloudWatchMetrics
+    Effect: Allow
+    Action:
+    - cloudwatch:PutMetricData
+    Resource: '*'
+    Condition:
+      StringEquals:
+        cloudwatch:namespace: AWS/NovaAct
+request:
+  spec:
+    access_type: read-write
+    duration:
+      duration_hours: 8
+    resource_constraints: []
+  user: ci-bot
+  justification: rotate signing key via CI pipeline
+scores:
+  det_score: 8
+  det_factors:
+  - "Action-name wildcard `servicediscovery:Get*` on broad resource \u2014 matches multiple servicediscovery APIs at once"
+  - "Action-name wildcard `servicediscovery:List*` on broad resource \u2014 matches multiple servicediscovery APIs at once"
+  - 'Resource: `*` for servicediscovery (broad cross-resource read/access)'
+  - "Action-name wildcard `aws-portal:*Billing` on broad resource \u2014 matches multiple aws-portal APIs at once"
+  - 'State-changing action `purchase-orders:AddPurchaseOrder` on Resource: `*` (IAM access level: Write)'
+  - 'Destructive action `purchase-orders:DeletePurchaseOrder` on Resource: `*` (blast radius = every resource in this account)'
+  - 'State-changing action `purchase-orders:ModifyPurchaseOrders` on Resource: `*` (IAM access level: Write)'
+  - 'State-changing action `purchase-orders:TagResource` on Resource: `*` (IAM access level: Tagging)'
+  - 'State-changing action `purchase-orders:UntagResource` on Resource: `*` (IAM access level: Tagging)'
+  - 'State-changing action `purchase-orders:UpdatePurchaseOrder` on Resource: `*` (IAM access level: Write)'
+  - 'State-changing action `purchase-orders:UpdatePurchaseOrderStatus` on Resource: `*` (IAM access level: Write)'
+  - 'Resource: `*` for account, aws-portal, consolidatedbilling, invoicing, payments, purchase-orders, tax (broad cross-resource
+    read/access)'
+  - 'Wildcard within sensitive service action: `ssm:Describe*`'
+  - '`ssm:Describe*` on Resource: `*` touches sensitive service `ssm`'
+  - 'Wildcard within sensitive service action: `ssm:Get*`'
+  - '`ssm:Get*` on Resource: `*` touches sensitive service `ssm`'
+  - 'Wildcard within sensitive service action: `ssm:List*`'
+  - '`ssm:List*` on Resource: `*` touches sensitive service `ssm`'
+  - 'State-changing action `cloudwatch:PutMetricData` on Resource: `*` (IAM access level: Write)'
+  - 'Resource: `*` for cloudwatch (broad cross-resource read/access)'
+  - '`ssm:Get*` on broad resource reads content that frequently contains secrets / sensitive data (boot logs, command output,
+    log streams, message bodies).'
+  opus_score: null
+  opus_factors: null
+  opus_reasoning: null
+  gap_classification: pending

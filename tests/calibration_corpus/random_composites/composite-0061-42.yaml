@@ -1,0 +1,67 @@
+name: composite-0061-42
+source_policies:
+- aws_managed/AmazonElasticMapReducePlacementGroupPolicy.yaml
+- aws_managed/AmazonS3OutpostsReadOnlyAccess.yaml
+source_hash: c31fc686e1041752
+policy:
+  Version: '2012-10-17'
+  Statement:
+  - Resource: '*'
+    Effect: Allow
+    Action:
+    - ec2:DeletePlacementGroup
+    - ec2:DescribePlacementGroups
+  - Resource: arn:aws:ec2:*:*:placement-group/EMR_*
+    Effect: Allow
+    Action:
+    - ec2:CreatePlacementGroup
+  - Effect: Allow
+    Action:
+    - s3-outposts:Get*
+    - s3-outposts:List*
+    Resource: '*'
+  - Effect: Allow
+    Action:
+    - datasync:ListTasks
+    - datasync:ListLocations
+    - datasync:DescribeTask
+    - datasync:DescribeLocation*
+    Resource: '*'
+  - Effect: Allow
+    Action:
+    - ec2:DescribeVpcs
+    - ec2:DescribeSubnets
+    - ec2:DescribeSecurityGroups
+    - ec2:DescribeNetworkInterfaces
+    Resource: '*'
+  - Effect: Allow
+    Action:
+    - outposts:ListOutposts
+    - outposts:GetOutpost
+    Resource: '*'
+request:
+  spec:
+    access_type: read-write
+    duration:
+      duration_hours: 4
+    resource_constraints: []
+  user: sre-carol
+  justification: scale-out emergency for us-east-1 outage
+scores:
+  det_score: 8
+  det_factors:
+  - 'Destructive action `ec2:DeletePlacementGroup` on Resource: `*` (blast radius = every resource in this account)'
+  - 'Resource: `*` for ec2 (broad cross-resource read/access)'
+  - 'State-changing action `ec2:CreatePlacementGroup` on Resource: `*` (IAM access level: Write)'
+  - "Action-name wildcard `s3-outposts:Get*` on broad resource \u2014 matches multiple s3-outposts APIs at once"
+  - "Action-name wildcard `s3-outposts:List*` on broad resource \u2014 matches multiple s3-outposts APIs at once"
+  - 'Resource: `*` for s3-outposts (broad cross-resource read/access)'
+  - "Action-name wildcard `datasync:DescribeLocation*` on broad resource \u2014 matches multiple datasync APIs at once"
+  - 'Resource: `*` for datasync (broad cross-resource read/access)'
+  - 'Resource: `*` for outposts (broad cross-resource read/access)'
+  - '`s3-outposts:Get*` on broad resource reads content that frequently contains secrets / sensitive data (boot logs, command
+    output, log streams, message bodies).'
+  opus_score: null
+  opus_factors: null
+  opus_reasoning: null
+  gap_classification: pending

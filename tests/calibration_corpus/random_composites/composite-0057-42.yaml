@@ -1,0 +1,201 @@
+name: composite-0057-42
+source_policies:
+- aws_managed/AWSPartnerCentralFullAccess.yaml
+- aws_managed/AWSQuickSightSecretsManagerWriteAccess.yaml
+- aws_managed/AmazonDocDB-ElasticServiceRolePolicy.yaml
+source_hash: 732297a503753b0c
+policy:
+  Version: '2012-10-17'
+  Statement:
+  - Sid: PassAWSPartnerCentralRole
+    Effect: Allow
+    Action:
+    - iam:PassRole
+    Resource: arn:aws:iam::*:role/PartnerCentralRoleFor*
+    Condition:
+      StringEquals:
+        iam:PassedToService: partnercentral-account-management.amazonaws.com
+  - Sid: PartnerUserRoleAssociation
+    Effect: Allow
+    Action:
+    - iam:ListRoles
+    - Partnercentral-account-management:AssociatePartnerUser
+    - Partnercentral-account-management:DisassociatePartnerUser
+    Resource: '*'
+  - Sid: AWSPartnerCentralAccess
+    Effect: Allow
+    Action:
+    - partnercentral:*
+    Resource: '*'
+    Condition:
+      StringEquals:
+        partnercentral:Catalog:
+        - AWS
+        - Sandbox
+  - Sid: VerificationAccess
+    Effect: Allow
+    Action:
+    - partnercentral:StartVerification
+    - partnercentral:GetVerification
+    Resource: '*'
+  - Sid: PassAWSPartnerCentralSnapshotJobRole
+    Effect: Allow
+    Action:
+    - iam:PassRole
+    Resource:
+    - arn:aws:iam::*:role/*
+    Condition:
+      StringEquals:
+        iam:PassedToService: resource-snapshot-job.partnercentral-selling.amazonaws.com
+  - Sid: LegacyPartnerCentralAccess
+    Effect: Allow
+    Action:
+    - partnercentral-account-management:AccessLegacyPartnerCentral
+    Resource: '*'
+  - Sid: PartnerCentralMarketingAccess
+    Effect: Allow
+    Action:
+    - partnercentral-account-management:AccessMarketingCentral
+    Resource: '*'
+  - Sid: ChannelBillingTransferRoleAccess
+    Effect: Allow
+    Action:
+    - sts:AssumeRole
+    Resource:
+    - arn:aws:iam::*:role/PartnerCentralChannelBillingTransferManagement
+    - arn:aws:iam::*:role/PartnerCentralChannelBillingTransferReadOnly
+  - Sid: PartnerCentralEphemeralWriteS3Access
+    Effect: Allow
+    Action:
+    - s3:PutObject
+    Resource: arn:aws:s3:::aws-partner-central-marketplace-ephemeral-writeonly-files/${aws:PrincipalAccount}/*
+  - Sid: SupportAccess
+    Effect: Allow
+    Action:
+    - support:CreateCase
+    - support:DescribeCases
+    - support:AddCommunicationToCase
+    - support:ResolveCase
+    - support:AddAttachmentsToSet
+    - support:DescribeCommunications
+    Resource: '*'
+  - Sid: ListEntitiesAccess
+    Effect: Allow
+    Action:
+    - aws-marketplace:ListEntities
+    Resource: '*'
+  - Sid: DescribeEntityAccess
+    Effect: Allow
+    Action:
+    - aws-marketplace:DescribeEntity
+    Resource:
+    - arn:aws:aws-marketplace:*:*:AWSMarketplace*/Solution/*
+    - arn:aws:aws-marketplace:*:*:AWSMarketplace*/OfferSet/*
+    - arn:aws:aws-marketplace:*:*:AWSMarketplace*/Offer/*
+  - Sid: AWSMarketplaceAgreementsReadAccess
+    Effect: Allow
+    Action:
+    - aws-marketplace:SearchAgreements
+    - aws-marketplace:DescribeAgreement
+    Resource: '*'
+    Condition:
+      ForAllValues:StringEquals:
+        aws-marketplace:AgreementType:
+        - PurchaseAgreement
+  - Sid: AmazonQPartnerAssistantAccess
+    Effect: Allow
+    Action:
+    - q:StartConversation
+    - q:SendMessage
+    - q:GetConversation
+    - q:ListConversations
+    - q:PassRequest
+    Resource: '*'
+  - Sid: PartnerCentralAgentsSessionAccess
+    Effect: Allow
+    Action:
+    - partnercentral:UseSession
+    Resource: '*'
+    Condition:
+      StringEquals:
+        partnercentral:Catalog:
+        - AWS
+        - Sandbox
+      Bool:
+        aws:IsMcpServiceAction: 'true'
+  - Effect: Allow
+    Action:
+    - secretsmanager:PutResourcePolicy
+    Resource: arn:aws:secretsmanager:*:*:secret:quicksight!*
+    Condition:
+      StringEquals:
+        secretsmanager:ResourceTag/aws:secretsmanager:owningService: quicksight
+        aws:ResourceAccount: ${aws:PrincipalAccount}
+  - Effect: Allow
+    Action:
+    - secretsmanager:CreateSecret
+    Resource: arn:aws:secretsmanager:*:*:secret:quicksight!*
+    Condition:
+      StringEquals:
+        aws:ResourceAccount: ${aws:PrincipalAccount}
+      StringLike:
+        secretsmanager:Name: quicksight!*
+  - Effect: Allow
+    Action:
+    - cloudwatch:PutMetricData
+    Resource: '*'
+    Condition:
+      StringEquals:
+        cloudwatch:namespace:
+        - AWS/DocDB-Elastic
+request:
+  spec:
+    access_type: read-write
+    duration:
+      duration_hours: 8
+    resource_constraints: []
+  user: dev-alice
+  justification: debug staging incident PROD-1417
+scores:
+  det_score: 9
+  det_factors:
+  - '`iam:PassRole` on Resource: `*` is a privilege-escalation path'
+  - 'State-changing action `iam:PassRole` on Resource: `*` (IAM access level: Permissions management)'
+  - '`iam:ListRoles` on Resource: `*` touches sensitive service `iam`'
+  - 'Destructive action `Partnercentral-account-management:DisassociatePartnerUser` on Resource: `*` (blast radius = every
+    resource in this account)'
+  - '`partnercentral:*` grants every action in `partnercentral`'
+  - 'Resource: `*` for partnercentral (broad cross-resource read/access)'
+  - 'State-changing action `partnercentral:StartVerification` on Resource: `*` (IAM access level: Write)'
+  - 'State-changing action `partnercentral-account-management:AccessLegacyPartnerCentral` on Resource: `*` (IAM access level:
+    Write)'
+  - 'Resource: `*` for partnercentral-account-management (broad cross-resource read/access)'
+  - 'State-changing action `partnercentral-account-management:AccessMarketingCentral` on Resource: `*` (IAM access level:
+    Write)'
+  - '`sts:AssumeRole` on Resource: `*` (broad access to sensitive resource)'
+  - 'State-changing action `sts:AssumeRole` on Resource: `*` (IAM access level: Write)'
+  - 'State-changing action `support:CreateCase` on Resource: `*` (IAM access level: Write)'
+  - 'State-changing action `support:AddCommunicationToCase` on Resource: `*` (IAM access level: Write)'
+  - 'State-changing action `support:ResolveCase` on Resource: `*` (IAM access level: Write)'
+  - 'State-changing action `support:AddAttachmentsToSet` on Resource: `*` (IAM access level: Write)'
+  - 'Resource: `*` for support (broad cross-resource read/access)'
+  - 'Resource: `*` for aws-marketplace (broad cross-resource read/access)'
+  - 'State-changing action `q:StartConversation` on Resource: `*` (IAM access level: Write)'
+  - 'State-changing action `q:SendMessage` on Resource: `*` (IAM access level: Write)'
+  - 'State-changing action `q:PassRequest` on Resource: `*` (IAM access level: Write)'
+  - 'Resource: `*` for q (broad cross-resource read/access)'
+  - 'State-changing action `partnercentral:UseSession` on Resource: `*` (IAM access level: Write)'
+  - '`secretsmanager:PutResourcePolicy` on Resource: `*` touches sensitive service `secretsmanager`'
+  - 'State-changing action `secretsmanager:PutResourcePolicy` on Resource: `*` (IAM access level: Permissions management)'
+  - '`secretsmanager:CreateSecret` on Resource: `*` touches sensitive service `secretsmanager`'
+  - 'State-changing action `secretsmanager:CreateSecret` on Resource: `*` (IAM access level: Write)'
+  - 'State-changing action `cloudwatch:PutMetricData` on Resource: `*` (IAM access level: Write)'
+  - 'Resource: `*` for cloudwatch (broad cross-resource read/access)'
+  - "IAM-recon + broad sts:AssumeRole composition \u2014 enumerate roles then assume any of them. Textbook lateral-movement\
+    \ primitive; the per-statement view misses it."
+  - '`secretsmanager:PutResourcePolicy` sets up ongoing cross-account / persistent exfiltration in a single call. The blast
+    is ''everything that flows through this resource from now on,'' not just what exists today.'
+  opus_score: null
+  opus_factors: null
+  opus_reasoning: null
+  gap_classification: pending

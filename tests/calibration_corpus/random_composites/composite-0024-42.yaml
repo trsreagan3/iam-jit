@@ -1,0 +1,203 @@
+name: composite-0024-42
+source_policies:
+- aws_managed/AWSQuicksightAthenaAccess.yaml
+- aws_managed/CostOptimizationHubServiceRolePolicy.yaml
+- aws_managed/AWSXrayWriteOnlyAccess.yaml
+- aws_managed/AWSDirectConnectReadOnlyAccess.yaml
+source_hash: 72d9bef533a75d71
+policy:
+  Version: '2012-10-17'
+  Statement:
+  - Effect: Allow
+    Action:
+    - athena:BatchGetQueryExecution
+    - athena:CancelQueryExecution
+    - athena:GetCatalogs
+    - athena:GetExecutionEngine
+    - athena:GetExecutionEngines
+    - athena:GetNamespace
+    - athena:GetNamespaces
+    - athena:GetQueryExecution
+    - athena:GetQueryExecutions
+    - athena:GetQueryResults
+    - athena:GetQueryResultsStream
+    - athena:GetTable
+    - athena:GetTables
+    - athena:ListQueryExecutions
+    - athena:RunQuery
+    - athena:StartQueryExecution
+    - athena:StopQueryExecution
+    - athena:ListWorkGroups
+    - athena:ListEngineVersions
+    - athena:GetWorkGroup
+    - athena:GetDataCatalog
+    - athena:GetDatabase
+    - athena:GetTableMetadata
+    - athena:ListDataCatalogs
+    - athena:ListDatabases
+    - athena:ListTableMetadata
+    Resource:
+    - '*'
+  - Effect: Allow
+    Action:
+    - glue:CreateDatabase
+    - glue:DeleteDatabase
+    - glue:GetCatalog
+    - glue:GetCatalogs
+    - glue:GetDatabase
+    - glue:GetDatabases
+    - glue:UpdateDatabase
+    - glue:CreateTable
+    - glue:DeleteTable
+    - glue:BatchDeleteTable
+    - glue:UpdateTable
+    - glue:GetTable
+    - glue:GetTables
+    - glue:BatchCreatePartition
+    - glue:CreatePartition
+    - glue:DeletePartition
+    - glue:BatchDeletePartition
+    - glue:UpdatePartition
+    - glue:GetPartition
+    - glue:GetPartitions
+    - glue:BatchGetPartition
+    Resource:
+    - '*'
+  - Effect: Allow
+    Action:
+    - s3:GetBucketLocation
+    - s3:GetObject
+    - s3:ListBucket
+    - s3:ListBucketMultipartUploads
+    - s3:ListMultipartUploadParts
+    - s3:AbortMultipartUpload
+    - s3:CreateBucket
+    - s3:PutObject
+    - s3:PutBucketPublicAccessBlock
+    Resource:
+    - arn:aws:s3:::aws-athena-query-results-*
+  - Effect: Allow
+    Action:
+    - lakeformation:GetDataAccess
+    Resource:
+    - '*'
+  - Sid: AwsOrgsAccess
+    Effect: Allow
+    Action:
+    - organizations:DescribeOrganization
+    - organizations:ListAccounts
+    - organizations:ListAWSServiceAccessForOrganization
+    - organizations:ListParents
+    - organizations:DescribeOrganizationalUnit
+    Resource:
+    - '*'
+  - Sid: AwsOrgsScopedAccess
+    Effect: Allow
+    Action:
+    - organizations:ListDelegatedAdministrators
+    Resource: '*'
+    Condition:
+      StringLikeIfExists:
+        organizations:ServicePrincipal:
+        - cost-optimization-hub.bcm.amazonaws.com
+  - Sid: CostExplorerAccess
+    Effect: Allow
+    Action:
+    - ce:ListCostAllocationTags
+    - ce:GetCostAndUsage
+    - ce:GetDimensionValues
+    Resource:
+    - '*'
+  - Effect: Allow
+    Action:
+    - xray:PutTraceSegments
+    - xray:PutTelemetryRecords
+    - xray:GetSamplingRules
+    - xray:GetSamplingTargets
+    - xray:GetSamplingStatisticSummaries
+    Resource:
+    - '*'
+  - Effect: Allow
+    Action:
+    - directconnect:Describe*
+    - directconnect:List*
+    - ec2:DescribeVpnGateways
+    - ec2:DescribeTransitGateways
+    Resource: '*'
+request:
+  spec:
+    access_type: read-write
+    duration:
+      duration_hours: 2
+    resource_constraints: []
+  user: sre-carol
+  justification: scale-out emergency for us-east-1 outage
+scores:
+  det_score: 8
+  det_factors:
+  - 'Destructive action `athena:CancelQueryExecution` on Resource: `*` (blast radius = every resource in this account)'
+  - 'State-changing action `athena:RunQuery` on Resource: `*` (IAM access level: Write)'
+  - 'State-changing action `athena:StartQueryExecution` on Resource: `*` (IAM access level: Write)'
+  - 'Destructive action `athena:StopQueryExecution` on Resource: `*` (blast radius = every resource in this account)'
+  - 'Resource: `*` for athena (broad cross-resource read/access)'
+  - '`glue:CreateDatabase` on Resource: `*` touches sensitive service `glue`'
+  - '`glue:DeleteDatabase` on Resource: `*` touches sensitive service `glue`'
+  - '`glue:GetCatalog` on Resource: `*` touches sensitive service `glue`'
+  - '`glue:GetCatalogs` on Resource: `*` touches sensitive service `glue`'
+  - '`glue:GetDatabase` on Resource: `*` touches sensitive service `glue`'
+  - '`glue:GetDatabases` on Resource: `*` touches sensitive service `glue`'
+  - '`glue:UpdateDatabase` on Resource: `*` touches sensitive service `glue`'
+  - '`glue:CreateTable` on Resource: `*` touches sensitive service `glue`'
+  - '`glue:DeleteTable` on Resource: `*` touches sensitive service `glue`'
+  - '`glue:BatchDeleteTable` on Resource: `*` touches sensitive service `glue`'
+  - '`glue:UpdateTable` on Resource: `*` touches sensitive service `glue`'
+  - '`glue:GetTable` on Resource: `*` touches sensitive service `glue`'
+  - '`glue:GetTables` on Resource: `*` touches sensitive service `glue`'
+  - '`glue:BatchCreatePartition` on Resource: `*` touches sensitive service `glue`'
+  - '`glue:CreatePartition` on Resource: `*` touches sensitive service `glue`'
+  - '`glue:DeletePartition` on Resource: `*` touches sensitive service `glue`'
+  - '`glue:BatchDeletePartition` on Resource: `*` touches sensitive service `glue`'
+  - '`glue:UpdatePartition` on Resource: `*` touches sensitive service `glue`'
+  - '`glue:GetPartition` on Resource: `*` touches sensitive service `glue`'
+  - '`glue:GetPartitions` on Resource: `*` touches sensitive service `glue`'
+  - '`glue:BatchGetPartition` on Resource: `*` touches sensitive service `glue`'
+  - 'State-changing action `glue:CreateDatabase` on Resource: `*` (IAM access level: Write)'
+  - 'Destructive action `glue:DeleteDatabase` on Resource: `*` (blast radius = every resource in this account)'
+  - 'State-changing action `glue:UpdateDatabase` on Resource: `*` (IAM access level: Write)'
+  - 'State-changing action `glue:CreateTable` on Resource: `*` (IAM access level: Write)'
+  - 'Destructive action `glue:DeleteTable` on Resource: `*` (blast radius = every resource in this account)'
+  - 'State-changing action `glue:BatchDeleteTable` on Resource: `*` (IAM access level: Write)'
+  - 'State-changing action `glue:UpdateTable` on Resource: `*` (IAM access level: Write)'
+  - 'State-changing action `glue:BatchCreatePartition` on Resource: `*` (IAM access level: Write)'
+  - 'State-changing action `glue:CreatePartition` on Resource: `*` (IAM access level: Write)'
+  - 'Destructive action `glue:DeletePartition` on Resource: `*` (blast radius = every resource in this account)'
+  - 'State-changing action `glue:BatchDeletePartition` on Resource: `*` (IAM access level: Write)'
+  - 'State-changing action `glue:UpdatePartition` on Resource: `*` (IAM access level: Write)'
+  - 'Destructive action `s3:AbortMultipartUpload` on Resource: `*` (blast radius = every resource in this account)'
+  - 'State-changing action `s3:CreateBucket` on Resource: `*` (IAM access level: Write)'
+  - 'State-changing action `s3:PutObject` on Resource: `*` (IAM access level: Write)'
+  - 'State-changing action `s3:PutBucketPublicAccessBlock` on Resource: `*` (IAM access level: Permissions management)'
+  - 'Resource: `*` for s3 (broad cross-resource read/access)'
+  - 'State-changing action `lakeformation:GetDataAccess` on Resource: `*` (IAM access level: Write)'
+  - 'Resource: `*` for lakeformation (broad cross-resource read/access)'
+  - "`lakeformation:GetDataAccess` is a high-impact mutation on broad resource \u2014 single API call can rewrite every matching\
+    \ resource in the account."
+  - '`organizations:DescribeOrganization` on Resource: `*` touches sensitive service `organizations`'
+  - '`organizations:ListAccounts` on Resource: `*` touches sensitive service `organizations`'
+  - '`organizations:ListAWSServiceAccessForOrganization` on Resource: `*` touches sensitive service `organizations`'
+  - '`organizations:ListParents` on Resource: `*` touches sensitive service `organizations`'
+  - '`organizations:DescribeOrganizationalUnit` on Resource: `*` touches sensitive service `organizations`'
+  - '`organizations:ListDelegatedAdministrators` on Resource: `*` touches sensitive service `organizations`'
+  - 'Resource: `*` for ce (broad cross-resource read/access)'
+  - 'State-changing action `xray:PutTraceSegments` on Resource: `*` (IAM access level: Write)'
+  - 'State-changing action `xray:PutTelemetryRecords` on Resource: `*` (IAM access level: Write)'
+  - 'Resource: `*` for xray (broad cross-resource read/access)'
+  - "Action-name wildcard `directconnect:Describe*` on broad resource \u2014 matches multiple directconnect APIs at once"
+  - "Action-name wildcard `directconnect:List*` on broad resource \u2014 matches multiple directconnect APIs at once"
+  - 'Resource: `*` for directconnect, ec2 (broad cross-resource read/access)'
+  - '`s3:GetObject` on broad resource reads content that frequently contains secrets / sensitive data (boot logs, command
+    output, log streams, message bodies).'
+  opus_score: null
+  opus_factors: null
+  opus_reasoning: null
+  gap_classification: pending

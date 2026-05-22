@@ -1,0 +1,156 @@
+name: composite-0052-42
+source_policies:
+- aws_managed/AmazonOneEnterpriseInstallerAccess.yaml
+- aws_managed/AmazonRoute53FullAccess.yaml
+- aws_managed/AWSGlueServiceRole.yaml
+source_hash: aec413a6877ce598
+policy:
+  Version: '2012-10-17'
+  Statement:
+  - Sid: InstallerAccessStatementID
+    Effect: Allow
+    Action:
+    - one:CreateDeviceActivationQrCode
+    - one:GetDeviceInstance
+    - one:GetSite
+    - one:GetSiteAddress
+    - one:ListDeviceInstances
+    - one:ListSites
+    Resource: '*'
+  - Effect: Allow
+    Action:
+    - route53:*
+    - route53domains:*
+    - cloudfront:ListDistributions
+    - cloudfront:GetDistributionTenantByDomain
+    - cloudfront:GetConnectionGroup
+    - cloudwatch:DescribeAlarms
+    - cloudwatch:GetMetricStatistics
+    - cloudwatch:GetMetricData
+    - ec2:DescribeVpcs
+    - ec2:DescribeVpcEndpoints
+    - ec2:DescribeRegions
+    - elasticloadbalancing:DescribeLoadBalancers
+    - elasticbeanstalk:DescribeEnvironments
+    - es:ListDomainNames
+    - es:DescribeDomains
+    - lightsail:GetContainerServices
+    - s3:ListBucket
+    - s3:GetBucketLocation
+    - s3:GetBucketWebsite
+    - sns:ListTopics
+    - sns:ListSubscriptionsByTopic
+    - tag:GetResources
+    Resource: '*'
+  - Effect: Allow
+    Action: apigateway:GET
+    Resource: arn:aws:apigateway:*::/domainnames
+  - Effect: Allow
+    Action:
+    - glue:*
+    - s3:GetBucketLocation
+    - s3:ListBucket
+    - s3:ListAllMyBuckets
+    - s3:GetBucketAcl
+    - ec2:DescribeVpcEndpoints
+    - ec2:DescribeRouteTables
+    - ec2:CreateNetworkInterface
+    - ec2:DeleteNetworkInterface
+    - ec2:DescribeNetworkInterfaces
+    - ec2:DescribeSecurityGroups
+    - ec2:DescribeSubnets
+    - ec2:DescribeVpcAttribute
+    - iam:ListRolePolicies
+    - iam:GetRole
+    - iam:GetRolePolicy
+    - cloudwatch:PutMetricData
+    Resource:
+    - '*'
+  - Effect: Allow
+    Action:
+    - s3:CreateBucket
+    Resource:
+    - arn:aws:s3:::aws-glue-*
+  - Effect: Allow
+    Action:
+    - s3:GetObject
+    - s3:PutObject
+    - s3:DeleteObject
+    Resource:
+    - arn:aws:s3:::aws-glue-*/*
+    - arn:aws:s3:::*/*aws-glue-*/*
+  - Effect: Allow
+    Action:
+    - s3:GetObject
+    Resource:
+    - arn:aws:s3:::crawler-public*
+    - arn:aws:s3:::aws-glue-*
+  - Effect: Allow
+    Action:
+    - logs:CreateLogGroup
+    - logs:CreateLogStream
+    - logs:PutLogEvents
+    Resource:
+    - arn:aws:logs:*:*:*:/aws-glue/*
+  - Effect: Allow
+    Action:
+    - ec2:CreateTags
+    - ec2:DeleteTags
+    Condition:
+      ForAllValues:StringEquals:
+        aws:TagKeys:
+        - aws-glue-service-resource
+    Resource:
+    - arn:aws:ec2:*:*:network-interface/*
+    - arn:aws:ec2:*:*:security-group/*
+    - arn:aws:ec2:*:*:instance/*
+request:
+  spec:
+    access_type: read-write
+    duration:
+      duration_hours: 4
+    resource_constraints: []
+  user: ci-bot
+  justification: deploy via terraform-cloud agent
+scores:
+  det_score: 9
+  det_factors:
+  - 'State-changing action `one:CreateDeviceActivationQrCode` on Resource: `*` (IAM access level: Write)'
+  - 'Resource: `*` for one (broad cross-resource read/access)'
+  - '`route53:*` grants every action in `route53`'
+  - '`route53domains:*` grants every action in `route53domains`'
+  - 'Resource: `*` for cloudfront, cloudwatch, ec2, elasticbeanstalk, elasticloadbalancing, es, lightsail, route53, route53domains,
+    s3, sns, tag (broad cross-resource read/access)'
+  - "`route53:*` is a high-impact mutation on broad resource \u2014 single API call can rewrite every matching resource in\
+    \ the account."
+  - '`route53:*` is catastrophic in blast radius (account governance / IAM total compromise / evidence destruction). Always
+    route to human review.'
+  - '`glue:*` grants every action in sensitive service `glue`'
+  - '`glue:*` on Resource: `*` touches sensitive service `glue`'
+  - '`iam:ListRolePolicies` on Resource: `*` touches sensitive service `iam`'
+  - '`iam:GetRole` on Resource: `*` touches sensitive service `iam`'
+  - '`iam:GetRolePolicy` on Resource: `*` touches sensitive service `iam`'
+  - 'State-changing action `ec2:CreateNetworkInterface` on Resource: `*` (IAM access level: Write)'
+  - 'Destructive action `ec2:DeleteNetworkInterface` on Resource: `*` (blast radius = every resource in this account)'
+  - 'State-changing action `cloudwatch:PutMetricData` on Resource: `*` (IAM access level: Write)'
+  - "`ec2:CreateNetworkInterface` is a high-impact mutation on broad resource \u2014 single API call can rewrite every matching\
+    \ resource in the account."
+  - 'State-changing action `s3:CreateBucket` on Resource: `*` (IAM access level: Write)'
+  - 'Resource: `*` for s3 (broad cross-resource read/access)'
+  - 'State-changing action `s3:PutObject` on Resource: `*` (IAM access level: Write)'
+  - 'Destructive action `s3:DeleteObject` on Resource: `*` (blast radius = every resource in this account)'
+  - 'State-changing action `logs:CreateLogGroup` on Resource: `*` (IAM access level: Write)'
+  - 'State-changing action `logs:CreateLogStream` on Resource: `*` (IAM access level: Write)'
+  - 'State-changing action `logs:PutLogEvents` on Resource: `*` (IAM access level: Write)'
+  - 'Resource: `*` for logs (broad cross-resource read/access)'
+  - 'State-changing action `ec2:CreateTags` on Resource: `*` (IAM access level: Tagging)'
+  - 'Destructive action `ec2:DeleteTags` on Resource: `*` (blast radius = every resource in this account)'
+  - 'Resource: `*` for ec2 (broad cross-resource read/access)'
+  - '`s3:GetObject` on broad resource reads content that frequently contains secrets / sensitive data (boot logs, command
+    output, log streams, message bodies).'
+  - '`elasticbeanstalk:DescribeEnvironments` sets up ongoing cross-account / persistent exfiltration in a single call. The
+    blast is ''everything that flows through this resource from now on,'' not just what exists today.'
+  opus_score: null
+  opus_factors: null
+  opus_reasoning: null
+  gap_classification: pending

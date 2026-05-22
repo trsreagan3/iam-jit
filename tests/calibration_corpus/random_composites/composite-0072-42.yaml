@@ -1,0 +1,249 @@
+name: composite-0072-42
+source_policies:
+- aws_managed/AWSDeadlineCloud-UserAccessFarms.yaml
+- aws_managed/AmazonAthenaServiceRolePolicy.yaml
+source_hash: 01d145cfecbb48df
+policy:
+  Version: '2012-10-17'
+  Statement:
+  - Sid: AdditionalPermissions
+    Effect: Allow
+    Action:
+    - identitystore:DescribeGroup
+    - identitystore:DescribeUser
+    - identitystore:ListGroupMembershipsForMember
+    - deadline:GetApplicationVersion
+    - ec2:DescribeInstanceTypes
+    - identitystore:ListUsers
+    - deadline:GetMonitorSettings
+    Resource:
+    - '*'
+  - Sid: OwnerLevelPermissions
+    Effect: Allow
+    Action:
+    - deadline:AssociateMemberToFarm
+    - deadline:AssociateMemberToFleet
+    - deadline:AssociateMemberToJob
+    - deadline:AssociateMemberToQueue
+    - deadline:CreateBudget
+    - deadline:DeleteBudget
+    - deadline:DisassociateMemberFromFarm
+    - deadline:DisassociateMemberFromFleet
+    - deadline:DisassociateMemberFromJob
+    - deadline:DisassociateMemberFromQueue
+    - deadline:GetBudget
+    - deadline:GetSessionsStatisticsAggregation
+    - deadline:ListBudgets
+    - deadline:StartSessionsStatisticsAggregation
+    - deadline:UpdateBudget
+    Resource:
+    - '*'
+    Condition:
+      ForAnyValue:StringEquals:
+        deadline:FarmMembershipLevels:
+        - OWNER
+  - Sid: ManagerLevelMemberAssociation
+    Effect: Allow
+    Action:
+    - deadline:AssociateMemberToFarm
+    - deadline:AssociateMemberToFleet
+    - deadline:AssociateMemberToJob
+    - deadline:AssociateMemberToQueue
+    Resource:
+    - '*'
+    Condition:
+      ForAnyValue:StringEquals:
+        deadline:FarmMembershipLevels:
+        - MANAGER
+      StringEquals:
+        deadline:AssociatedMembershipLevel:
+        - MANAGER
+        - CONTRIBUTOR
+        - VIEWER
+        - ''
+        deadline:MembershipLevel:
+        - MANAGER
+        - CONTRIBUTOR
+        - VIEWER
+  - Sid: ManagerLevelMemberDisassociation
+    Effect: Allow
+    Action:
+    - deadline:DisassociateMemberFromFarm
+    - deadline:DisassociateMemberFromFleet
+    - deadline:DisassociateMemberFromJob
+    - deadline:DisassociateMemberFromQueue
+    Resource:
+    - '*'
+    Condition:
+      ForAnyValue:StringEquals:
+        deadline:FarmMembershipLevels:
+        - MANAGER
+      StringEquals:
+        deadline:AssociatedMembershipLevel:
+        - MANAGER
+        - CONTRIBUTOR
+        - VIEWER
+        - ''
+  - Sid: OwnerManagerPermissions
+    Effect: Allow
+    Action:
+    - deadline:ListFarmMembers
+    - deadline:ListFleetMembers
+    - deadline:ListJobMembers
+    - deadline:ListQueueMembers
+    - deadline:UpdateJob
+    - deadline:UpdateSession
+    - deadline:UpdateStep
+    - deadline:UpdateTask
+    Resource:
+    - '*'
+    Condition:
+      ForAnyValue:StringEquals:
+        deadline:FarmMembershipLevels:
+        - OWNER
+        - MANAGER
+  - Sid: OwnerManagerContributorPermissions
+    Effect: Allow
+    Action:
+    - deadline:AssumeQueueRoleForUser
+    - deadline:CreateJob
+    Resource:
+    - '*'
+    Condition:
+      ForAnyValue:StringEquals:
+        deadline:FarmMembershipLevels:
+        - OWNER
+        - MANAGER
+        - CONTRIBUTOR
+  - Sid: AllLevelsPermissions
+    Effect: Allow
+    Action:
+    - deadline:AssumeFleetRoleForRead
+    - deadline:AssumeQueueRoleForRead
+    - deadline:GetFarm
+    - deadline:GetFleet
+    - deadline:GetJob
+    - deadline:GetJobTemplate
+    - deadline:GetQueue
+    - deadline:GetQueueEnvironment
+    - deadline:GetQueueFleetAssociation
+    - deadline:GetSession
+    - deadline:GetSessionAction
+    - deadline:GetStep
+    - deadline:GetStorageProfile
+    - deadline:GetStorageProfileForQueue
+    - deadline:GetTask
+    - deadline:GetWorker
+    - deadline:ListJobParameterDefinitions
+    - deadline:ListQueueEnvironments
+    - deadline:ListQueueFleetAssociations
+    - deadline:ListSessionActions
+    - deadline:ListSessions
+    - deadline:ListSessionsForWorker
+    - deadline:ListStepConsumers
+    - deadline:ListStepDependencies
+    - deadline:ListSteps
+    - deadline:ListStorageProfiles
+    - deadline:ListStorageProfilesForQueue
+    - deadline:ListTasks
+    - deadline:ListWorkers
+    - deadline:SearchJobs
+    - deadline:SearchSteps
+    - deadline:SearchTasks
+    - deadline:SearchWorkers
+    Resource:
+    - '*'
+    Condition:
+      ForAnyValue:StringEquals:
+        deadline:FarmMembershipLevels:
+        - OWNER
+        - MANAGER
+        - CONTRIBUTOR
+        - VIEWER
+  - Sid: ListBasedOnMembership
+    Effect: Allow
+    Action:
+    - deadline:ListFarms
+    - deadline:ListFleets
+    - deadline:ListJobs
+    - deadline:ListQueues
+    Resource:
+    - '*'
+    Condition:
+      StringEquals:
+        deadline:RequesterPrincipalId: ${deadline:PrincipalId}
+  - Sid: AllowKmsAccessViaIdentityCenter
+    Effect: Allow
+    Action:
+    - kms:Decrypt
+    Resource:
+    - '*'
+    Condition:
+      ArnLike:
+        kms:EncryptionContext:aws:sso:instance-arn: arn:*:sso:::instance/*
+      StringLike:
+        kms:ViaService: sso.*.amazonaws.com
+  - Sid: AllowKmsAccessViaIdentityStore
+    Effect: Allow
+    Action:
+    - kms:Decrypt
+    Resource:
+    - '*'
+    Condition:
+      ArnLike:
+        kms:EncryptionContext:aws:identitystore:identitystore-arn: arn:*:identitystore::*:identitystore/*
+      StringLike:
+        kms:ViaService: identitystore.*.amazonaws.com
+  - Sid: CloudWatchPolicyStatement
+    Effect: Allow
+    Action:
+    - cloudwatch:PutMetricData
+    Resource: '*'
+    Condition:
+      StringEquals:
+        cloudwatch:namespace:
+        - AWS/Athena
+        - AWS/Usage
+request:
+  spec:
+    access_type: read-write
+    duration:
+      duration_hours: 2
+    resource_constraints: []
+  user: auditor-erin
+  justification: SOC 2 controls evidence collection
+scores:
+  det_score: 8
+  det_factors:
+  - '`identitystore:DescribeGroup` on Resource: `*` touches sensitive service `identitystore`'
+  - '`identitystore:DescribeUser` on Resource: `*` touches sensitive service `identitystore`'
+  - '`identitystore:ListGroupMembershipsForMember` on Resource: `*` touches sensitive service `identitystore`'
+  - '`identitystore:ListUsers` on Resource: `*` touches sensitive service `identitystore`'
+  - 'State-changing action `deadline:AssociateMemberToFarm` on Resource: `*` (IAM access level: Permissions management)'
+  - 'State-changing action `deadline:AssociateMemberToFleet` on Resource: `*` (IAM access level: Permissions management)'
+  - 'State-changing action `deadline:AssociateMemberToJob` on Resource: `*` (IAM access level: Permissions management)'
+  - 'State-changing action `deadline:AssociateMemberToQueue` on Resource: `*` (IAM access level: Permissions management)'
+  - 'State-changing action `deadline:CreateBudget` on Resource: `*` (IAM access level: Write)'
+  - 'Destructive action `deadline:DeleteBudget` on Resource: `*` (blast radius = every resource in this account)'
+  - 'Destructive action `deadline:DisassociateMemberFromFarm` on Resource: `*` (blast radius = every resource in this account)'
+  - 'Destructive action `deadline:DisassociateMemberFromFleet` on Resource: `*` (blast radius = every resource in this account)'
+  - 'Destructive action `deadline:DisassociateMemberFromJob` on Resource: `*` (blast radius = every resource in this account)'
+  - 'Destructive action `deadline:DisassociateMemberFromQueue` on Resource: `*` (blast radius = every resource in this account)'
+  - 'State-changing action `deadline:UpdateBudget` on Resource: `*` (IAM access level: Write)'
+  - 'Resource: `*` for deadline (broad cross-resource read/access)'
+  - 'State-changing action `deadline:UpdateJob` on Resource: `*` (IAM access level: Write)'
+  - 'State-changing action `deadline:UpdateSession` on Resource: `*` (IAM access level: Write)'
+  - 'State-changing action `deadline:UpdateStep` on Resource: `*` (IAM access level: Write)'
+  - 'State-changing action `deadline:UpdateTask` on Resource: `*` (IAM access level: Write)'
+  - 'State-changing action `deadline:AssumeQueueRoleForUser` on Resource: `*` (IAM access level: Write)'
+  - 'State-changing action `deadline:CreateJob` on Resource: `*` (IAM access level: Write)'
+  - 'State-changing action `deadline:AssumeFleetRoleForRead` on Resource: `*` (IAM access level: Write)'
+  - 'State-changing action `deadline:AssumeQueueRoleForRead` on Resource: `*` (IAM access level: Write)'
+  - '`kms:Decrypt` on Resource: `*` (broad access to sensitive resource)'
+  - 'State-changing action `kms:Decrypt` on Resource: `*` (IAM access level: Write)'
+  - 'State-changing action `cloudwatch:PutMetricData` on Resource: `*` (IAM access level: Write)'
+  - 'Resource: `*` for cloudwatch (broad cross-resource read/access)'
+  opus_score: null
+  opus_factors: null
+  opus_reasoning: null
+  gap_classification: pending

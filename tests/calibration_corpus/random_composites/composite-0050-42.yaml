@@ -1,0 +1,252 @@
+name: composite-0050-42
+source_policies:
+- aws_managed/AWSGlueConsoleSageMakerNotebookFullAccess.yaml
+- aws_managed/AWSIoTWirelessReadOnlyAccess.yaml
+- aws_managed/AWSServiceRoleForCloudWatchMetrics_DbPerfInsightsServiceRolePolicy.yaml
+source_hash: 10ac8caf20e956cf
+policy:
+  Version: '2012-10-17'
+  Statement:
+  - Effect: Allow
+    Action:
+    - glue:*
+    - redshift:DescribeClusters
+    - redshift:DescribeClusterSubnetGroups
+    - iam:ListRoles
+    - iam:ListRolePolicies
+    - iam:GetRole
+    - iam:GetRolePolicy
+    - iam:ListAttachedRolePolicies
+    - ec2:DescribeSecurityGroups
+    - ec2:DescribeSubnets
+    - ec2:DescribeVpcs
+    - ec2:DescribeVpcEndpoints
+    - ec2:DescribeRouteTables
+    - ec2:DescribeVpcAttribute
+    - ec2:DescribeKeyPairs
+    - ec2:DescribeInstances
+    - ec2:DescribeImages
+    - ec2:CreateNetworkInterface
+    - ec2:AttachNetworkInterface
+    - ec2:ModifyNetworkInterfaceAttribute
+    - ec2:DeleteNetworkInterface
+    - ec2:DescribeAvailabilityZones
+    - ec2:DescribeInternetGateways
+    - ec2:DescribeNetworkInterfaces
+    - rds:DescribeDBInstances
+    - s3:ListAllMyBuckets
+    - s3:ListBucket
+    - s3:GetBucketAcl
+    - s3:GetBucketLocation
+    - cloudformation:DescribeStacks
+    - cloudformation:GetTemplateSummary
+    - dynamodb:ListTables
+    - kms:ListAliases
+    - kms:DescribeKey
+    - sagemaker:ListNotebookInstances
+    - cloudformation:ListStacks
+    - cloudwatch:GetMetricData
+    - cloudwatch:ListDashboards
+    Resource:
+    - '*'
+  - Effect: Allow
+    Action:
+    - s3:GetObject
+    - s3:PutObject
+    Resource:
+    - arn:aws:s3:::*/*aws-glue-*/*
+    - arn:aws:s3:::aws-glue-*
+  - Effect: Allow
+    Action:
+    - s3:CreateBucket
+    Resource:
+    - arn:aws:s3:::aws-glue-*
+  - Effect: Allow
+    Action:
+    - logs:GetLogEvents
+    Resource:
+    - arn:aws:logs:*:*:/aws-glue/*
+  - Effect: Allow
+    Action:
+    - cloudformation:CreateStack
+    - cloudformation:DeleteStack
+    Resource: arn:aws:cloudformation:*:*:stack/aws-glue*/*
+  - Effect: Allow
+    Action:
+    - sagemaker:CreatePresignedNotebookInstanceUrl
+    - sagemaker:CreateNotebookInstance
+    - sagemaker:DeleteNotebookInstance
+    - sagemaker:DescribeNotebookInstance
+    - sagemaker:StartNotebookInstance
+    - sagemaker:StopNotebookInstance
+    - sagemaker:UpdateNotebookInstance
+    - sagemaker:ListTags
+    Resource: arn:aws:sagemaker:*:*:notebook-instance/aws-glue-*
+  - Effect: Allow
+    Action:
+    - sagemaker:DescribeNotebookInstanceLifecycleConfig
+    - sagemaker:CreateNotebookInstanceLifecycleConfig
+    - sagemaker:DeleteNotebookInstanceLifecycleConfig
+    - sagemaker:ListNotebookInstanceLifecycleConfigs
+    Resource: arn:aws:sagemaker:*:*:notebook-instance-lifecycle-config/aws-glue-*
+  - Effect: Allow
+    Action:
+    - ec2:RunInstances
+    Resource:
+    - arn:aws:ec2:*:*:instance/*
+    - arn:aws:ec2:*:*:key-pair/*
+    - arn:aws:ec2:*:*:image/*
+    - arn:aws:ec2:*:*:security-group/*
+    - arn:aws:ec2:*:*:network-interface/*
+    - arn:aws:ec2:*:*:subnet/*
+    - arn:aws:ec2:*:*:volume/*
+  - Effect: Allow
+    Action:
+    - ec2:TerminateInstances
+    - ec2:CreateTags
+    - ec2:DeleteTags
+    Resource:
+    - arn:aws:ec2:*:*:instance/*
+    Condition:
+      StringLike:
+        ec2:ResourceTag/aws:cloudformation:stack-id: arn:aws:cloudformation:*:*:stack/aws-glue-*/*
+      StringEquals:
+        ec2:ResourceTag/aws:cloudformation:logical-id: ZeppelinInstance
+  - Effect: Allow
+    Action:
+    - tag:GetResources
+    Resource:
+    - '*'
+    Condition:
+      ForAllValues:StringLike:
+        aws:TagKeys:
+        - aws-glue-*
+  - Action:
+    - iam:PassRole
+    Effect: Allow
+    Resource: arn:aws:iam::*:role/AWSGlueServiceRole*
+    Condition:
+      StringLike:
+        iam:PassedToService:
+        - glue.amazonaws.com
+  - Action:
+    - iam:PassRole
+    Effect: Allow
+    Resource: arn:aws:iam::*:role/AWSGlueServiceNotebookRole*
+    Condition:
+      StringLike:
+        iam:PassedToService:
+        - ec2.amazonaws.com
+  - Action:
+    - iam:PassRole
+    Effect: Allow
+    Resource: arn:aws:iam::*:role/AWSGlueServiceSageMakerNotebookRole*
+    Condition:
+      StringLike:
+        iam:PassedToService:
+        - sagemaker.amazonaws.com
+  - Action:
+    - iam:PassRole
+    Effect: Allow
+    Resource:
+    - arn:aws:iam::*:role/service-role/AWSGlueServiceRole*
+    Condition:
+      StringLike:
+        iam:PassedToService:
+        - glue.amazonaws.com
+  - Effect: Allow
+    Action:
+    - iotwireless:List*
+    - iotwireless:Get*
+    Resource: '*'
+  - Effect: Allow
+    Action:
+    - pi:GetResourceMetrics
+    Resource: '*'
+    Condition:
+      StringEquals:
+        aws:ResourceAccount: ${aws:PrincipalAccount}
+request:
+  spec:
+    access_type: read-write
+    duration:
+      duration_hours: 1
+    resource_constraints: []
+  user: dev-bob
+  justification: 'reproduce customer ticket #4422 locally'
+scores:
+  det_score: 9
+  det_factors:
+  - '`glue:*` grants every action in sensitive service `glue`'
+  - '`glue:*` on Resource: `*` touches sensitive service `glue`'
+  - '`iam:ListRoles` on Resource: `*` touches sensitive service `iam`'
+  - '`iam:ListRolePolicies` on Resource: `*` touches sensitive service `iam`'
+  - '`iam:GetRole` on Resource: `*` touches sensitive service `iam`'
+  - '`iam:GetRolePolicy` on Resource: `*` touches sensitive service `iam`'
+  - '`iam:ListAttachedRolePolicies` on Resource: `*` touches sensitive service `iam`'
+  - '`kms:ListAliases` on Resource: `*` touches sensitive service `kms`'
+  - '`kms:DescribeKey` on Resource: `*` touches sensitive service `kms`'
+  - '`sagemaker:ListNotebookInstances` on Resource: `*` touches sensitive service `sagemaker`'
+  - 'State-changing action `ec2:CreateNetworkInterface` on Resource: `*` (IAM access level: Write)'
+  - 'State-changing action `ec2:AttachNetworkInterface` on Resource: `*` (IAM access level: Write)'
+  - 'State-changing action `ec2:ModifyNetworkInterfaceAttribute` on Resource: `*` (IAM access level: Write)'
+  - 'Destructive action `ec2:DeleteNetworkInterface` on Resource: `*` (blast radius = every resource in this account)'
+  - "`ec2:CreateNetworkInterface` is a high-impact mutation on broad resource \u2014 single API call can rewrite every matching\
+    \ resource in the account."
+  - "`ec2:AttachNetworkInterface` is a high-impact mutation on broad resource \u2014 single API call can rewrite every matching\
+    \ resource in the account."
+  - 'State-changing action `s3:PutObject` on Resource: `*` (IAM access level: Write)'
+  - 'Resource: `*` for s3 (broad cross-resource read/access)'
+  - 'State-changing action `s3:CreateBucket` on Resource: `*` (IAM access level: Write)'
+  - 'Resource: `*` for logs (broad cross-resource read/access)'
+  - 'State-changing action `cloudformation:CreateStack` on Resource: `*` (IAM access level: Write)'
+  - 'Destructive action `cloudformation:DeleteStack` on Resource: `*` (blast radius = every resource in this account)'
+  - 'Resource: `*` for cloudformation (broad cross-resource read/access)'
+  - "`cloudformation:CreateStack` is a high-impact mutation on broad resource \u2014 single API call can rewrite every matching\
+    \ resource in the account."
+  - '`sagemaker:CreatePresignedNotebookInstanceUrl` on Resource: `*` touches sensitive service `sagemaker`'
+  - '`sagemaker:CreateNotebookInstance` on Resource: `*` touches sensitive service `sagemaker`'
+  - '`sagemaker:DeleteNotebookInstance` on Resource: `*` touches sensitive service `sagemaker`'
+  - '`sagemaker:DescribeNotebookInstance` on Resource: `*` touches sensitive service `sagemaker`'
+  - '`sagemaker:StartNotebookInstance` on Resource: `*` touches sensitive service `sagemaker`'
+  - '`sagemaker:StopNotebookInstance` on Resource: `*` touches sensitive service `sagemaker`'
+  - '`sagemaker:UpdateNotebookInstance` on Resource: `*` touches sensitive service `sagemaker`'
+  - '`sagemaker:ListTags` on Resource: `*` touches sensitive service `sagemaker`'
+  - 'State-changing action `sagemaker:CreatePresignedNotebookInstanceUrl` on Resource: `*` (IAM access level: Write)'
+  - 'State-changing action `sagemaker:CreateNotebookInstance` on Resource: `*` (IAM access level: Write)'
+  - 'Destructive action `sagemaker:DeleteNotebookInstance` on Resource: `*` (blast radius = every resource in this account)'
+  - 'State-changing action `sagemaker:StartNotebookInstance` on Resource: `*` (IAM access level: Write)'
+  - 'Destructive action `sagemaker:StopNotebookInstance` on Resource: `*` (blast radius = every resource in this account)'
+  - 'State-changing action `sagemaker:UpdateNotebookInstance` on Resource: `*` (IAM access level: Write)'
+  - '`sagemaker:DescribeNotebookInstanceLifecycleConfig` on Resource: `*` touches sensitive service `sagemaker`'
+  - '`sagemaker:CreateNotebookInstanceLifecycleConfig` on Resource: `*` touches sensitive service `sagemaker`'
+  - '`sagemaker:DeleteNotebookInstanceLifecycleConfig` on Resource: `*` touches sensitive service `sagemaker`'
+  - '`sagemaker:ListNotebookInstanceLifecycleConfigs` on Resource: `*` touches sensitive service `sagemaker`'
+  - 'State-changing action `sagemaker:CreateNotebookInstanceLifecycleConfig` on Resource: `*` (IAM access level: Write)'
+  - 'Destructive action `sagemaker:DeleteNotebookInstanceLifecycleConfig` on Resource: `*` (blast radius = every resource
+    in this account)'
+  - 'State-changing action `ec2:RunInstances` on Resource: `*` (IAM access level: Write)'
+  - 'Resource: `*` for ec2 (broad cross-resource read/access)'
+  - 'Destructive action `ec2:TerminateInstances` on Resource: `*` (blast radius = every resource in this account)'
+  - 'State-changing action `ec2:CreateTags` on Resource: `*` (IAM access level: Tagging)'
+  - 'Destructive action `ec2:DeleteTags` on Resource: `*` (blast radius = every resource in this account)'
+  - 'Resource: `*` for tag (broad cross-resource read/access)'
+  - '`iam:PassRole` on Resource: `*` is a privilege-escalation path'
+  - 'State-changing action `iam:PassRole` on Resource: `*` (IAM access level: Permissions management)'
+  - "Action-name wildcard `iotwireless:List*` on broad resource \u2014 matches multiple iotwireless APIs at once"
+  - "Action-name wildcard `iotwireless:Get*` on broad resource \u2014 matches multiple iotwireless APIs at once"
+  - 'Resource: `*` for iotwireless (broad cross-resource read/access)'
+  - 'Resource: `*` for pi (broad cross-resource read/access)'
+  - 'Code-execution primitive on broad resource: cloudformation:CreateStack, ec2:RunInstances, sagemaker:CreateNotebookInstance.
+    Deploys attacker-controlled code that runs under whatever role the matched resources use. Even without explicit PassRole,
+    the existing roles of matched resources become the attack target.'
+  - 'Code-execution-via-role composition: cloudformation:CreateStack (+ 2 more) combined with iam:PassRole = RCE as the passed
+    role. Single-statement scoring underweights this; the composition is full account-compromise tier.'
+  - '`s3:GetObject` on broad resource reads content that frequently contains secrets / sensitive data (boot logs, command
+    output, log streams, message bodies).'
+  - '`glue:*` sets up ongoing cross-account / persistent exfiltration in a single call. The blast is ''everything that flows
+    through this resource from now on,'' not just what exists today.'
+  opus_score: null
+  opus_factors: null
+  opus_reasoning: null
+  gap_classification: pending

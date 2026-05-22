@@ -1,0 +1,865 @@
+name: composite-0004-42
+source_policies:
+- aws_managed/AmazonSageMakerFullAccess.yaml
+- aws_managed/AWSLambdaVPCAccessExecutionRole.yaml
+- aws_managed/ServerMigrationServiceLaunchRole.yaml
+source_hash: 185721af343a83df
+policy:
+  Version: '2012-10-17'
+  Statement:
+  - Sid: AllowAllNonAdminSageMakerActions
+    Effect: Allow
+    Action:
+    - sagemaker:*
+    - sagemaker-geospatial:*
+    NotResource:
+    - arn:aws:sagemaker:*:*:domain/*
+    - arn:aws:sagemaker:*:*:user-profile/*
+    - arn:aws:sagemaker:*:*:app/*
+    - arn:aws:sagemaker:*:*:space/*
+    - arn:aws:sagemaker:*:*:partner-app/*
+    - arn:aws:sagemaker:*:*:flow-definition/*
+    - arn:aws:sagemaker:*:*:training-plan/*
+    - arn:aws:sagemaker:*:*:reserved-capacity/*
+  - Sid: AllowAddTagsForSpace
+    Effect: Allow
+    Action:
+    - sagemaker:AddTags
+    Resource:
+    - arn:aws:sagemaker:*:*:space/*
+    Condition:
+      StringEquals:
+        sagemaker:TaggingAction: CreateSpace
+  - Sid: AllowAddTagsForApp
+    Effect: Allow
+    Action:
+    - sagemaker:AddTags
+    Resource:
+    - arn:aws:sagemaker:*:*:app/*
+  - Sid: AllowUseOfTrainingPlanResources
+    Effect: Allow
+    Action:
+    - sagemaker:CreateTrainingJob
+    - sagemaker:CreateCluster
+    - sagemaker:UpdateCluster
+    - sagemaker:DescribeTrainingPlan
+    Resource:
+    - arn:aws:sagemaker:*:*:training-plan/*
+    - arn:aws:sagemaker:*:*:reserved-capacity/*
+  - Sid: AllowStudioActions
+    Effect: Allow
+    Action:
+    - sagemaker:CreatePresignedDomainUrl
+    - sagemaker:DescribeDomain
+    - sagemaker:ListDomains
+    - sagemaker:DescribeUserProfile
+    - sagemaker:ListUserProfiles
+    - sagemaker:DescribeSpace
+    - sagemaker:ListSpaces
+    - sagemaker:DescribeApp
+    - sagemaker:ListApps
+    Resource: '*'
+  - Sid: AllowAppActionsForUserProfile
+    Effect: Allow
+    Action:
+    - sagemaker:CreateApp
+    - sagemaker:DeleteApp
+    Resource: arn:aws:sagemaker:*:*:app/*/*/*/*
+    Condition:
+      'Null':
+        sagemaker:OwnerUserProfileArn: 'true'
+  - Sid: AllowAppActionsForSharedSpaces
+    Effect: Allow
+    Action:
+    - sagemaker:CreateApp
+    - sagemaker:DeleteApp
+    Resource: arn:aws:sagemaker:*:*:app/${sagemaker:DomainId}/*/*/*
+    Condition:
+      StringEquals:
+        sagemaker:SpaceSharingType:
+        - Shared
+  - Sid: AllowMutatingActionsOnSharedSpacesWithoutOwner
+    Effect: Allow
+    Action:
+    - sagemaker:CreateSpace
+    - sagemaker:UpdateSpace
+    - sagemaker:DeleteSpace
+    Resource: arn:aws:sagemaker:*:*:space/${sagemaker:DomainId}/*
+    Condition:
+      'Null':
+        sagemaker:OwnerUserProfileArn: 'true'
+  - Sid: RestrictMutatingActionsOnSpacesToOwnerUserProfile
+    Effect: Allow
+    Action:
+    - sagemaker:CreateSpace
+    - sagemaker:UpdateSpace
+    - sagemaker:DeleteSpace
+    Resource: arn:aws:sagemaker:*:*:space/${sagemaker:DomainId}/*
+    Condition:
+      ArnLike:
+        sagemaker:OwnerUserProfileArn: arn:aws:sagemaker:*:*:user-profile/${sagemaker:DomainId}/${sagemaker:UserProfileName}
+      StringEquals:
+        sagemaker:SpaceSharingType:
+        - Private
+        - Shared
+  - Sid: RestrictMutatingActionsOnPrivateSpaceAppsToOwnerUserProfile
+    Effect: Allow
+    Action:
+    - sagemaker:CreateApp
+    - sagemaker:DeleteApp
+    Resource: arn:aws:sagemaker:*:*:app/${sagemaker:DomainId}/*/*/*
+    Condition:
+      ArnLike:
+        sagemaker:OwnerUserProfileArn: arn:aws:sagemaker:*:*:user-profile/${sagemaker:DomainId}/${sagemaker:UserProfileName}
+      StringEquals:
+        sagemaker:SpaceSharingType:
+        - Private
+  - Sid: AllowFlowDefinitionActions
+    Effect: Allow
+    Action: sagemaker:*
+    Resource:
+    - arn:aws:sagemaker:*:*:flow-definition/*
+    Condition:
+      StringEqualsIfExists:
+        sagemaker:WorkteamType:
+        - private-crowd
+        - vendor-crowd
+  - Sid: AllowAWSServiceActions
+    Effect: Allow
+    Action:
+    - application-autoscaling:DeleteScalingPolicy
+    - application-autoscaling:DeleteScheduledAction
+    - application-autoscaling:DeregisterScalableTarget
+    - application-autoscaling:DescribeScalableTargets
+    - application-autoscaling:DescribeScalingActivities
+    - application-autoscaling:DescribeScalingPolicies
+    - application-autoscaling:DescribeScheduledActions
+    - application-autoscaling:PutScalingPolicy
+    - application-autoscaling:PutScheduledAction
+    - application-autoscaling:RegisterScalableTarget
+    - aws-marketplace:ViewSubscriptions
+    - cloudformation:GetTemplateSummary
+    - cloudwatch:DeleteAlarms
+    - cloudwatch:DescribeAlarms
+    - cloudwatch:GetMetricData
+    - cloudwatch:GetMetricStatistics
+    - cloudwatch:ListMetrics
+    - cloudwatch:PutMetricAlarm
+    - cloudwatch:PutMetricData
+    - codecommit:BatchGetRepositories
+    - codecommit:CreateRepository
+    - codecommit:GetRepository
+    - codecommit:List*
+    - cognito-idp:AdminAddUserToGroup
+    - cognito-idp:AdminCreateUser
+    - cognito-idp:AdminDeleteUser
+    - cognito-idp:AdminDisableUser
+    - cognito-idp:AdminEnableUser
+    - cognito-idp:AdminRemoveUserFromGroup
+    - cognito-idp:CreateGroup
+    - cognito-idp:CreateUserPool
+    - cognito-idp:CreateUserPoolClient
+    - cognito-idp:CreateUserPoolDomain
+    - cognito-idp:DescribeUserPool
+    - cognito-idp:DescribeUserPoolClient
+    - cognito-idp:List*
+    - cognito-idp:UpdateUserPool
+    - cognito-idp:UpdateUserPoolClient
+    - ec2:CreateNetworkInterface
+    - ec2:CreateNetworkInterfacePermission
+    - ec2:CreateVpcEndpoint
+    - ec2:DeleteNetworkInterface
+    - ec2:DeleteNetworkInterfacePermission
+    - ec2:DescribeDhcpOptions
+    - ec2:DescribeNetworkInterfaces
+    - ec2:DescribeRouteTables
+    - ec2:DescribeSecurityGroups
+    - ec2:DescribeSubnets
+    - ec2:DescribeVpcEndpoints
+    - ec2:DescribeVpcs
+    - ecr:BatchCheckLayerAvailability
+    - ecr:BatchGetImage
+    - ecr:CreateRepository
+    - ecr:Describe*
+    - ecr:GetAuthorizationToken
+    - ecr:GetDownloadUrlForLayer
+    - ecr:StartImageScan
+    - elastic-inference:Connect
+    - elasticfilesystem:DescribeFileSystems
+    - elasticfilesystem:DescribeMountTargets
+    - fsx:DescribeFileSystems
+    - glue:CreateJob
+    - glue:DeleteJob
+    - glue:GetJob*
+    - glue:GetTable*
+    - glue:GetWorkflowRun
+    - glue:ResetJobBookmark
+    - glue:StartJobRun
+    - glue:StartWorkflowRun
+    - glue:UpdateJob
+    - groundtruthlabeling:*
+    - iam:ListRoles
+    - kms:DescribeKey
+    - kms:ListAliases
+    - lambda:ListFunctions
+    - logs:CreateLogDelivery
+    - logs:CreateLogGroup
+    - logs:CreateLogStream
+    - logs:DeleteLogDelivery
+    - logs:Describe*
+    - logs:GetLogDelivery
+    - logs:GetLogEvents
+    - logs:ListLogDeliveries
+    - logs:PutLogEvents
+    - logs:PutResourcePolicy
+    - logs:UpdateLogDelivery
+    - robomaker:CreateSimulationApplication
+    - robomaker:DescribeSimulationApplication
+    - robomaker:DeleteSimulationApplication
+    - robomaker:CreateSimulationJob
+    - robomaker:DescribeSimulationJob
+    - robomaker:CancelSimulationJob
+    - secretsmanager:ListSecrets
+    - servicecatalog:Describe*
+    - servicecatalog:List*
+    - servicecatalog:ScanProvisionedProducts
+    - servicecatalog:SearchProducts
+    - servicecatalog:SearchProvisionedProducts
+    - sns:ListTopics
+    - tag:GetResources
+    Resource: '*'
+  - Sid: AllowECRActions
+    Effect: Allow
+    Action:
+    - ecr:SetRepositoryPolicy
+    - ecr:CompleteLayerUpload
+    - ecr:BatchDeleteImage
+    - ecr:UploadLayerPart
+    - ecr:DeleteRepositoryPolicy
+    - ecr:InitiateLayerUpload
+    - ecr:DeleteRepository
+    - ecr:PutImage
+    Resource:
+    - arn:aws:ecr:*:*:repository/*sagemaker*
+  - Sid: AllowCodeCommitActions
+    Effect: Allow
+    Action:
+    - codecommit:GitPull
+    - codecommit:GitPush
+    Resource:
+    - arn:aws:codecommit:*:*:*sagemaker*
+    - arn:aws:codecommit:*:*:*SageMaker*
+    - arn:aws:codecommit:*:*:*Sagemaker*
+  - Sid: AllowCodeBuildActions
+    Action:
+    - codebuild:BatchGetBuilds
+    - codebuild:StartBuild
+    Resource:
+    - arn:aws:codebuild:*:*:project/sagemaker*
+    - arn:aws:codebuild:*:*:build/*
+    Effect: Allow
+  - Sid: AllowStepFunctionsActions
+    Action:
+    - states:DescribeExecution
+    - states:GetExecutionHistory
+    - states:StartExecution
+    - states:StopExecution
+    - states:UpdateStateMachine
+    Resource:
+    - arn:aws:states:*:*:statemachine:*sagemaker*
+    - arn:aws:states:*:*:execution:*sagemaker*:*
+    Effect: Allow
+  - Sid: AllowSecretManagerActions
+    Effect: Allow
+    Action:
+    - secretsmanager:DescribeSecret
+    - secretsmanager:GetSecretValue
+    - secretsmanager:CreateSecret
+    Resource:
+    - arn:aws:secretsmanager:*:*:secret:AmazonSageMaker-*
+  - Sid: AllowReadOnlySecretManagerActions
+    Effect: Allow
+    Action:
+    - secretsmanager:DescribeSecret
+    - secretsmanager:GetSecretValue
+    Resource: '*'
+    Condition:
+      StringEquals:
+        secretsmanager:ResourceTag/SageMaker: 'true'
+  - Sid: AllowServiceCatalogProvisionProduct
+    Effect: Allow
+    Action:
+    - servicecatalog:ProvisionProduct
+    Resource: '*'
+  - Sid: AllowServiceCatalogTerminateUpdateProvisionProduct
+    Effect: Allow
+    Action:
+    - servicecatalog:TerminateProvisionedProduct
+    - servicecatalog:UpdateProvisionedProduct
+    Resource: '*'
+    Condition:
+      StringEquals:
+        servicecatalog:userLevel: self
+  - Sid: AllowS3ObjectActions
+    Effect: Allow
+    Action:
+    - s3:GetObject
+    - s3:PutObject
+    - s3:DeleteObject
+    - s3:AbortMultipartUpload
+    Resource:
+    - arn:aws:s3:::*SageMaker*
+    - arn:aws:s3:::*Sagemaker*
+    - arn:aws:s3:::*sagemaker*
+    - arn:aws:s3:::*aws-glue*
+  - Sid: AllowS3GetObjectWithSageMakerExistingObjectTag
+    Effect: Allow
+    Action:
+    - s3:GetObject
+    Resource:
+    - arn:aws:s3:::*
+    Condition:
+      StringEqualsIgnoreCase:
+        s3:ExistingObjectTag/SageMaker: 'true'
+  - Sid: AllowS3GetObjectWithServiceCatalogProvisioningExistingObjectTag
+    Effect: Allow
+    Action:
+    - s3:GetObject
+    Resource:
+    - arn:aws:s3:::*
+    Condition:
+      StringEquals:
+        s3:ExistingObjectTag/servicecatalog:provisioning: 'true'
+  - Sid: AllowS3BucketActions
+    Effect: Allow
+    Action:
+    - s3:CreateBucket
+    - s3:GetBucketLocation
+    - s3:ListBucket
+    - s3:ListAllMyBuckets
+    - s3:GetBucketCors
+    - s3:PutBucketCors
+    Resource: '*'
+  - Sid: AllowS3BucketACL
+    Effect: Allow
+    Action:
+    - s3:GetBucketAcl
+    - s3:PutObjectAcl
+    Resource:
+    - arn:aws:s3:::*SageMaker*
+    - arn:aws:s3:::*Sagemaker*
+    - arn:aws:s3:::*sagemaker*
+  - Sid: AllowLambdaInvokeFunction
+    Effect: Allow
+    Action:
+    - lambda:InvokeFunction
+    Resource:
+    - arn:aws:lambda:*:*:function:*SageMaker*
+    - arn:aws:lambda:*:*:function:*sagemaker*
+    - arn:aws:lambda:*:*:function:*Sagemaker*
+    - arn:aws:lambda:*:*:function:*LabelingFunction*
+  - Sid: AllowCreateServiceLinkedRoleForSageMakerApplicationAutoscaling
+    Action: iam:CreateServiceLinkedRole
+    Effect: Allow
+    Resource: arn:aws:iam::*:role/aws-service-role/sagemaker.application-autoscaling.amazonaws.com/AWSServiceRoleForApplicationAutoScaling_SageMakerEndpoint
+    Condition:
+      StringLike:
+        iam:AWSServiceName: sagemaker.application-autoscaling.amazonaws.com
+  - Sid: AllowCreateServiceLinkedRoleForRobomaker
+    Effect: Allow
+    Action: iam:CreateServiceLinkedRole
+    Resource: '*'
+    Condition:
+      StringEquals:
+        iam:AWSServiceName: robomaker.amazonaws.com
+  - Sid: AllowSNSActions
+    Effect: Allow
+    Action:
+    - sns:Subscribe
+    - sns:CreateTopic
+    - sns:Publish
+    Resource:
+    - arn:aws:sns:*:*:*SageMaker*
+    - arn:aws:sns:*:*:*Sagemaker*
+    - arn:aws:sns:*:*:*sagemaker*
+  - Sid: AllowPassRoleForSageMakerRoles
+    Effect: Allow
+    Action:
+    - iam:PassRole
+    Resource: arn:aws:iam::*:role/*AmazonSageMaker*
+    Condition:
+      StringEquals:
+        iam:PassedToService:
+        - glue.amazonaws.com
+        - robomaker.amazonaws.com
+        - states.amazonaws.com
+  - Sid: AllowPassRoleToSageMaker
+    Effect: Allow
+    Action:
+    - iam:PassRole
+    Resource: arn:aws:iam::*:role/*
+    Condition:
+      StringEquals:
+        iam:PassedToService: sagemaker.amazonaws.com
+  - Sid: AllowAthenaActions
+    Effect: Allow
+    Action:
+    - athena:ListDataCatalogs
+    - athena:ListDatabases
+    - athena:ListTableMetadata
+    - athena:GetQueryExecution
+    - athena:GetQueryResults
+    - athena:StartQueryExecution
+    - athena:StopQueryExecution
+    Resource:
+    - '*'
+  - Sid: AllowGlueCreateTable
+    Effect: Allow
+    Action:
+    - glue:CreateTable
+    Resource:
+    - arn:aws:glue:*:*:table/*/sagemaker_tmp_*
+    - arn:aws:glue:*:*:table/sagemaker_featurestore/*
+    - arn:aws:glue:*:*:catalog
+    - arn:aws:glue:*:*:database/*
+  - Sid: AllowGlueUpdateTable
+    Effect: Allow
+    Action:
+    - glue:UpdateTable
+    Resource:
+    - arn:aws:glue:*:*:table/sagemaker_featurestore/*
+    - arn:aws:glue:*:*:catalog
+    - arn:aws:glue:*:*:database/sagemaker_featurestore
+  - Sid: AllowGlueDeleteTable
+    Effect: Allow
+    Action:
+    - glue:DeleteTable
+    Resource:
+    - arn:aws:glue:*:*:table/*/sagemaker_tmp_*
+    - arn:aws:glue:*:*:catalog
+    - arn:aws:glue:*:*:database/*
+  - Sid: AllowGlueGetTablesAndDatabases
+    Effect: Allow
+    Action:
+    - glue:GetDatabases
+    - glue:GetTable
+    - glue:GetTables
+    Resource:
+    - arn:aws:glue:*:*:table/*
+    - arn:aws:glue:*:*:catalog
+    - arn:aws:glue:*:*:database/*
+  - Sid: AllowGlueGetAndCreateDatabase
+    Effect: Allow
+    Action:
+    - glue:CreateDatabase
+    - glue:GetDatabase
+    Resource:
+    - arn:aws:glue:*:*:catalog
+    - arn:aws:glue:*:*:database/sagemaker_featurestore
+    - arn:aws:glue:*:*:database/sagemaker_processing
+    - arn:aws:glue:*:*:database/default
+    - arn:aws:glue:*:*:database/sagemaker_data_wrangler
+  - Sid: AllowRedshiftDataActions
+    Effect: Allow
+    Action:
+    - redshift-data:ExecuteStatement
+    - redshift-data:DescribeStatement
+    - redshift-data:CancelStatement
+    - redshift-data:GetStatementResult
+    - redshift-data:ListSchemas
+    - redshift-data:ListTables
+    Resource:
+    - '*'
+  - Sid: AllowRedshiftGetClusterCredentials
+    Effect: Allow
+    Action:
+    - redshift:GetClusterCredentials
+    Resource:
+    - arn:aws:redshift:*:*:dbuser:*/sagemaker_access*
+    - arn:aws:redshift:*:*:dbname:*
+  - Sid: AllowListTagsForUserProfile
+    Effect: Allow
+    Action:
+    - sagemaker:ListTags
+    Resource:
+    - arn:aws:sagemaker:*:*:user-profile/*
+  - Sid: AllowCloudformationListStackResources
+    Effect: Allow
+    Action:
+    - cloudformation:ListStackResources
+    Resource: arn:aws:cloudformation:*:*:stack/SC-*
+  - Sid: AllowS3ExpressObjectActions
+    Effect: Allow
+    Action:
+    - s3express:CreateSession
+    Resource:
+    - arn:aws:s3express:*:*:bucket/*SageMaker*
+    - arn:aws:s3express:*:*:bucket/*Sagemaker*
+    - arn:aws:s3express:*:*:bucket/*sagemaker*
+    - arn:aws:s3express:*:*:bucket/*aws-glue*
+    Condition:
+      StringEquals:
+        aws:ResourceAccount: ${aws:PrincipalAccount}
+  - Sid: AllowS3ExpressCreateBucketActions
+    Effect: Allow
+    Action:
+    - s3express:CreateBucket
+    Resource:
+    - arn:aws:s3express:*:*:bucket/*SageMaker*
+    - arn:aws:s3express:*:*:bucket/*Sagemaker*
+    - arn:aws:s3express:*:*:bucket/*sagemaker*
+    Condition:
+      StringEquals:
+        aws:ResourceAccount: ${aws:PrincipalAccount}
+  - Sid: AllowS3ExpressListBucketActions
+    Effect: Allow
+    Action:
+    - s3express:ListAllMyDirectoryBuckets
+    Resource: '*'
+  - Sid: AWSLambdaVPCAccessExecutionPermissions
+    Effect: Allow
+    Action:
+    - logs:CreateLogGroup
+    - logs:CreateLogStream
+    - logs:PutLogEvents
+    - ec2:CreateNetworkInterface
+    - ec2:DescribeNetworkInterfaces
+    - ec2:DescribeSubnets
+    - ec2:DeleteNetworkInterface
+    - ec2:AssignPrivateIpAddresses
+    - ec2:UnassignPrivateIpAddresses
+    Resource: '*'
+  - Effect: Allow
+    Action:
+    - ec2:ModifyInstanceAttribute
+    - ec2:StopInstances
+    - ec2:StartInstances
+    - ec2:TerminateInstances
+    Resource: '*'
+    Condition:
+      StringLike:
+        ec2:ResourceTag/aws:cloudformation:stack-id: arn:aws:cloudformation:*:*:stack/sms-app-*/*
+  - Effect: Allow
+    Action: ec2:CreateTags
+    Resource: arn:aws:ec2:*:*:instance/*
+  - Effect: Allow
+    Action:
+    - ec2:DisassociateIamInstanceProfile
+    - ec2:AssociateIamInstanceProfile
+    - ec2:ReplaceIamInstanceProfileAssociation
+    Resource: arn:aws:ec2:*:*:instance/*
+    Condition:
+      StringLike:
+        ec2:ResourceTag/aws:cloudformation:stack-id: arn:aws:cloudformation:*:*:stack/sms-app-*/*
+  - Effect: Allow
+    Action: iam:PassRole
+    Resource: '*'
+    Condition:
+      StringEquals:
+        iam:PassedToService: ec2.amazonaws.com
+  - Effect: Allow
+    Action:
+    - ec2:RunInstances
+    - ec2:Describe*
+    Resource: '*'
+  - Effect: Allow
+    Action:
+    - applicationinsights:Describe*
+    - applicationinsights:List*
+    - cloudformation:ListStackResources
+    - cloudformation:DescribeStacks
+    Resource: '*'
+  - Effect: Allow
+    Action:
+    - applicationinsights:CreateApplication
+    - applicationinsights:CreateComponent
+    - applicationinsights:UpdateApplication
+    - applicationinsights:DeleteApplication
+    - applicationinsights:UpdateComponentConfiguration
+    - applicationinsights:DeleteComponent
+    Resource: arn:aws:applicationinsights:*:*:application/resource-group/sms-app-*
+  - Effect: Allow
+    Action:
+    - resource-groups:CreateGroup
+    - resource-groups:GetGroup
+    - resource-groups:UpdateGroup
+    - resource-groups:DeleteGroup
+    Resource: arn:aws:resource-groups:*:*:group/sms-app-*
+    Condition:
+      StringLike:
+        aws:ResourceTag/aws:cloudformation:stack-id: arn:aws:cloudformation:*:*:stack/sms-app-*/*
+  - Effect: Allow
+    Action:
+    - iam:CreateServiceLinkedRole
+    Resource:
+    - arn:aws:iam::*:role/aws-service-role/application-insights.amazonaws.com/AWSServiceRoleForApplicationInsights
+    Condition:
+      StringEquals:
+        iam:AWSServiceName: application-insights.amazonaws.com
+request:
+  spec:
+    access_type: read-write
+    duration:
+      duration_hours: 2
+    resource_constraints: []
+  user: auditor-erin
+  justification: SOC 2 controls evidence collection
+scores:
+  det_score: 9
+  det_factors:
+  - '`NotResource` with wildcard action grants the action on every resource EXCEPT [''arn:aws:sagemaker:*:*:domain/*'', ''arn:aws:sagemaker:*:*:user-profile/*''].
+    This pattern is almost always broader than intended.'
+  - '`sagemaker:*` grants every action in sensitive service `sagemaker`'
+  - '`sagemaker:*` on Resource: `*` touches sensitive service `sagemaker`'
+  - '`sagemaker-geospatial:*` grants every action in `sagemaker-geospatial`'
+  - '`sagemaker:AddTags` on Resource: `*` touches sensitive service `sagemaker`'
+  - 'State-changing action `sagemaker:AddTags` on Resource: `*` (IAM access level: Tagging)'
+  - '`sagemaker:CreateTrainingJob` on Resource: `*` touches sensitive service `sagemaker`'
+  - '`sagemaker:CreateCluster` on Resource: `*` touches sensitive service `sagemaker`'
+  - '`sagemaker:UpdateCluster` on Resource: `*` touches sensitive service `sagemaker`'
+  - '`sagemaker:DescribeTrainingPlan` on Resource: `*` touches sensitive service `sagemaker`'
+  - 'State-changing action `sagemaker:CreateTrainingJob` on Resource: `*` (IAM access level: Write)'
+  - 'State-changing action `sagemaker:CreateCluster` on Resource: `*` (IAM access level: Write)'
+  - 'State-changing action `sagemaker:UpdateCluster` on Resource: `*` (IAM access level: Write)'
+  - '`sagemaker:CreatePresignedDomainUrl` on Resource: `*` touches sensitive service `sagemaker`'
+  - '`sagemaker:DescribeDomain` on Resource: `*` touches sensitive service `sagemaker`'
+  - '`sagemaker:ListDomains` on Resource: `*` touches sensitive service `sagemaker`'
+  - '`sagemaker:DescribeUserProfile` on Resource: `*` touches sensitive service `sagemaker`'
+  - '`sagemaker:ListUserProfiles` on Resource: `*` touches sensitive service `sagemaker`'
+  - '`sagemaker:DescribeSpace` on Resource: `*` touches sensitive service `sagemaker`'
+  - '`sagemaker:ListSpaces` on Resource: `*` touches sensitive service `sagemaker`'
+  - '`sagemaker:DescribeApp` on Resource: `*` touches sensitive service `sagemaker`'
+  - '`sagemaker:ListApps` on Resource: `*` touches sensitive service `sagemaker`'
+  - 'State-changing action `sagemaker:CreatePresignedDomainUrl` on Resource: `*` (IAM access level: Write)'
+  - "`Condition.Null.sagemaker:OwnerUserProfileArn: \"true\"` means \"the key MUST BE ABSENT\" \u2014 opposite of the typical\
+    \ \"require this key\" intent. Often misread by reviewers."
+  - '`sagemaker:CreateApp` on Resource: `*` touches sensitive service `sagemaker`'
+  - '`sagemaker:DeleteApp` on Resource: `*` touches sensitive service `sagemaker`'
+  - 'State-changing action `sagemaker:CreateApp` on Resource: `*` (IAM access level: Write)'
+  - 'Destructive action `sagemaker:DeleteApp` on Resource: `*` (blast radius = every resource in this account)'
+  - '`sagemaker:CreateSpace` on Resource: `*` touches sensitive service `sagemaker`'
+  - '`sagemaker:UpdateSpace` on Resource: `*` touches sensitive service `sagemaker`'
+  - '`sagemaker:DeleteSpace` on Resource: `*` touches sensitive service `sagemaker`'
+  - 'State-changing action `sagemaker:CreateSpace` on Resource: `*` (IAM access level: Write)'
+  - 'State-changing action `sagemaker:UpdateSpace` on Resource: `*` (IAM access level: Write)'
+  - 'Destructive action `sagemaker:DeleteSpace` on Resource: `*` (blast radius = every resource in this account)'
+  - "Action-name wildcard `codecommit:List*` on broad resource \u2014 matches multiple codecommit APIs at once"
+  - '`cognito-idp:AdminAddUserToGroup` on Resource: `*` touches sensitive service `cognito-idp`'
+  - '`cognito-idp:AdminCreateUser` on Resource: `*` touches sensitive service `cognito-idp`'
+  - '`cognito-idp:AdminDeleteUser` on Resource: `*` touches sensitive service `cognito-idp`'
+  - '`cognito-idp:AdminDisableUser` on Resource: `*` touches sensitive service `cognito-idp`'
+  - '`cognito-idp:AdminEnableUser` on Resource: `*` touches sensitive service `cognito-idp`'
+  - '`cognito-idp:AdminRemoveUserFromGroup` on Resource: `*` touches sensitive service `cognito-idp`'
+  - '`cognito-idp:CreateGroup` on Resource: `*` touches sensitive service `cognito-idp`'
+  - '`cognito-idp:CreateUserPool` on Resource: `*` touches sensitive service `cognito-idp`'
+  - '`cognito-idp:CreateUserPoolClient` on Resource: `*` touches sensitive service `cognito-idp`'
+  - '`cognito-idp:CreateUserPoolDomain` on Resource: `*` touches sensitive service `cognito-idp`'
+  - '`cognito-idp:DescribeUserPool` on Resource: `*` touches sensitive service `cognito-idp`'
+  - '`cognito-idp:DescribeUserPoolClient` on Resource: `*` touches sensitive service `cognito-idp`'
+  - 'Wildcard within sensitive service action: `cognito-idp:List*`'
+  - '`cognito-idp:List*` on Resource: `*` touches sensitive service `cognito-idp`'
+  - '`cognito-idp:UpdateUserPool` on Resource: `*` touches sensitive service `cognito-idp`'
+  - '`cognito-idp:UpdateUserPoolClient` on Resource: `*` touches sensitive service `cognito-idp`'
+  - "Action-name wildcard `ecr:Describe*` on broad resource \u2014 matches multiple ecr APIs at once"
+  - '`glue:CreateJob` on Resource: `*` touches sensitive service `glue`'
+  - '`glue:DeleteJob` on Resource: `*` touches sensitive service `glue`'
+  - 'Wildcard within sensitive service action: `glue:GetJob*`'
+  - '`glue:GetJob*` on Resource: `*` touches sensitive service `glue`'
+  - 'Wildcard within sensitive service action: `glue:GetTable*`'
+  - '`glue:GetTable*` on Resource: `*` touches sensitive service `glue`'
+  - '`glue:GetWorkflowRun` on Resource: `*` touches sensitive service `glue`'
+  - '`glue:ResetJobBookmark` on Resource: `*` touches sensitive service `glue`'
+  - '`glue:StartJobRun` on Resource: `*` touches sensitive service `glue`'
+  - '`glue:StartWorkflowRun` on Resource: `*` touches sensitive service `glue`'
+  - '`glue:UpdateJob` on Resource: `*` touches sensitive service `glue`'
+  - '`groundtruthlabeling:*` grants every action in `groundtruthlabeling`'
+  - '`iam:ListRoles` on Resource: `*` touches sensitive service `iam`'
+  - '`kms:DescribeKey` on Resource: `*` touches sensitive service `kms`'
+  - '`kms:ListAliases` on Resource: `*` touches sensitive service `kms`'
+  - "Action-name wildcard `logs:Describe*` on broad resource \u2014 matches multiple logs APIs at once"
+  - '`secretsmanager:ListSecrets` on Resource: `*` touches sensitive service `secretsmanager`'
+  - "Action-name wildcard `servicecatalog:Describe*` on broad resource \u2014 matches multiple servicecatalog APIs at once"
+  - "Action-name wildcard `servicecatalog:List*` on broad resource \u2014 matches multiple servicecatalog APIs at once"
+  - 'Destructive action `application-autoscaling:DeleteScalingPolicy` on Resource: `*` (blast radius = every resource in this
+    account)'
+  - 'Destructive action `application-autoscaling:DeleteScheduledAction` on Resource: `*` (blast radius = every resource in
+    this account)'
+  - 'State-changing action `application-autoscaling:DeregisterScalableTarget` on Resource: `*` (IAM access level: Write)'
+  - 'State-changing action `application-autoscaling:PutScalingPolicy` on Resource: `*` (IAM access level: Write)'
+  - 'State-changing action `application-autoscaling:PutScheduledAction` on Resource: `*` (IAM access level: Write)'
+  - 'State-changing action `application-autoscaling:RegisterScalableTarget` on Resource: `*` (IAM access level: Write)'
+  - 'Destructive action `cloudwatch:DeleteAlarms` on Resource: `*` (blast radius = every resource in this account)'
+  - 'State-changing action `cloudwatch:PutMetricAlarm` on Resource: `*` (IAM access level: Write)'
+  - 'State-changing action `cloudwatch:PutMetricData` on Resource: `*` (IAM access level: Write)'
+  - 'State-changing action `codecommit:CreateRepository` on Resource: `*` (IAM access level: Write)'
+  - 'State-changing action `cognito-idp:AdminAddUserToGroup` on Resource: `*` (IAM access level: Write)'
+  - 'State-changing action `cognito-idp:AdminCreateUser` on Resource: `*` (IAM access level: Write)'
+  - 'State-changing action `cognito-idp:AdminDeleteUser` on Resource: `*` (IAM access level: Write)'
+  - 'State-changing action `cognito-idp:AdminDisableUser` on Resource: `*` (IAM access level: Write)'
+  - 'State-changing action `cognito-idp:AdminEnableUser` on Resource: `*` (IAM access level: Write)'
+  - 'State-changing action `cognito-idp:AdminRemoveUserFromGroup` on Resource: `*` (IAM access level: Write)'
+  - 'State-changing action `cognito-idp:CreateGroup` on Resource: `*` (IAM access level: Write)'
+  - 'State-changing action `cognito-idp:CreateUserPool` on Resource: `*` (IAM access level: Write)'
+  - 'State-changing action `cognito-idp:CreateUserPoolClient` on Resource: `*` (IAM access level: Write)'
+  - 'State-changing action `cognito-idp:CreateUserPoolDomain` on Resource: `*` (IAM access level: Write)'
+  - 'State-changing action `cognito-idp:UpdateUserPool` on Resource: `*` (IAM access level: Write)'
+  - 'State-changing action `cognito-idp:UpdateUserPoolClient` on Resource: `*` (IAM access level: Write)'
+  - 'State-changing action `ec2:CreateNetworkInterface` on Resource: `*` (IAM access level: Write)'
+  - 'State-changing action `ec2:CreateNetworkInterfacePermission` on Resource: `*` (IAM access level: Permissions management)'
+  - 'State-changing action `ec2:CreateVpcEndpoint` on Resource: `*` (IAM access level: Write)'
+  - 'Destructive action `ec2:DeleteNetworkInterface` on Resource: `*` (blast radius = every resource in this account)'
+  - 'Destructive action `ec2:DeleteNetworkInterfacePermission` on Resource: `*` (blast radius = every resource in this account)'
+  - 'State-changing action `ecr:CreateRepository` on Resource: `*` (IAM access level: Write)'
+  - 'State-changing action `ecr:StartImageScan` on Resource: `*` (IAM access level: Write)'
+  - 'State-changing action `glue:CreateJob` on Resource: `*` (IAM access level: Write)'
+  - 'Destructive action `glue:DeleteJob` on Resource: `*` (blast radius = every resource in this account)'
+  - 'Destructive action `glue:ResetJobBookmark` on Resource: `*` (blast radius = every resource in this account)'
+  - 'State-changing action `glue:StartJobRun` on Resource: `*` (IAM access level: Write)'
+  - 'State-changing action `glue:StartWorkflowRun` on Resource: `*` (IAM access level: Write)'
+  - 'State-changing action `glue:UpdateJob` on Resource: `*` (IAM access level: Write)'
+  - 'State-changing action `logs:CreateLogDelivery` on Resource: `*` (IAM access level: Write)'
+  - 'State-changing action `logs:CreateLogGroup` on Resource: `*` (IAM access level: Write)'
+  - 'State-changing action `logs:CreateLogStream` on Resource: `*` (IAM access level: Write)'
+  - 'Destructive action `logs:DeleteLogDelivery` on Resource: `*` (blast radius = every resource in this account)'
+  - 'State-changing action `logs:PutLogEvents` on Resource: `*` (IAM access level: Write)'
+  - 'State-changing action `logs:PutResourcePolicy` on Resource: `*` (IAM access level: Permissions management)'
+  - 'State-changing action `logs:UpdateLogDelivery` on Resource: `*` (IAM access level: Write)'
+  - 'State-changing action `robomaker:CreateSimulationApplication` on Resource: `*` (IAM access level: Write)'
+  - 'Destructive action `robomaker:DeleteSimulationApplication` on Resource: `*` (blast radius = every resource in this account)'
+  - 'State-changing action `robomaker:CreateSimulationJob` on Resource: `*` (IAM access level: Write)'
+  - 'Destructive action `robomaker:CancelSimulationJob` on Resource: `*` (blast radius = every resource in this account)'
+  - "`cognito-idp:CreateUserPool` is a high-impact mutation on broad resource \u2014 single API call can rewrite every matching\
+    \ resource in the account."
+  - "`ec2:CreateNetworkInterface` is a high-impact mutation on broad resource \u2014 single API call can rewrite every matching\
+    \ resource in the account."
+  - '`cognito-idp:AdminAddUserToGroup` is catastrophic in blast radius (account governance / IAM total compromise / evidence
+    destruction). Always route to human review.'
+  - '`cognito-idp:AdminCreateUser` is catastrophic in blast radius (account governance / IAM total compromise / evidence destruction).
+    Always route to human review.'
+  - 'State-changing action `ecr:SetRepositoryPolicy` on Resource: `*` (IAM access level: Permissions management)'
+  - 'State-changing action `ecr:CompleteLayerUpload` on Resource: `*` (IAM access level: Write)'
+  - 'State-changing action `ecr:BatchDeleteImage` on Resource: `*` (IAM access level: Write)'
+  - 'State-changing action `ecr:UploadLayerPart` on Resource: `*` (IAM access level: Write)'
+  - 'Destructive action `ecr:DeleteRepositoryPolicy` on Resource: `*` (blast radius = every resource in this account)'
+  - 'State-changing action `ecr:InitiateLayerUpload` on Resource: `*` (IAM access level: Write)'
+  - 'Destructive action `ecr:DeleteRepository` on Resource: `*` (blast radius = every resource in this account)'
+  - 'State-changing action `ecr:PutImage` on Resource: `*` (IAM access level: Write)'
+  - 'Resource: `*` for ecr (broad cross-resource read/access)'
+  - "`ecr:BatchDeleteImage` is a high-impact mutation on broad resource \u2014 single API call can rewrite every matching\
+    \ resource in the account."
+  - "`ecr:PutImage` is a high-impact mutation on broad resource \u2014 single API call can rewrite every matching resource\
+    \ in the account."
+  - 'State-changing action `codecommit:GitPush` on Resource: `*` (IAM access level: Write)'
+  - 'Resource: `*` for codecommit (broad cross-resource read/access)'
+  - 'State-changing action `codebuild:StartBuild` on Resource: `*` (IAM access level: Write)'
+  - 'Resource: `*` for codebuild (broad cross-resource read/access)'
+  - "`codebuild:StartBuild` is a high-impact mutation on broad resource \u2014 single API call can rewrite every matching\
+    \ resource in the account."
+  - 'State-changing action `states:StartExecution` on Resource: `*` (IAM access level: Write)'
+  - 'Destructive action `states:StopExecution` on Resource: `*` (blast radius = every resource in this account)'
+  - 'State-changing action `states:UpdateStateMachine` on Resource: `*` (IAM access level: Write)'
+  - 'Resource: `*` for states (broad cross-resource read/access)'
+  - '`secretsmanager:DescribeSecret` on Resource: `*` touches sensitive service `secretsmanager`'
+  - '`secretsmanager:GetSecretValue` on Resource: `*` (broad access to secrets)'
+  - '`secretsmanager:CreateSecret` on Resource: `*` touches sensitive service `secretsmanager`'
+  - 'State-changing action `secretsmanager:CreateSecret` on Resource: `*` (IAM access level: Write)'
+  - 'State-changing action `servicecatalog:ProvisionProduct` on Resource: `*` (IAM access level: Write)'
+  - 'Resource: `*` for servicecatalog (broad cross-resource read/access)'
+  - 'Destructive action `servicecatalog:TerminateProvisionedProduct` on Resource: `*` (blast radius = every resource in this
+    account)'
+  - 'State-changing action `servicecatalog:UpdateProvisionedProduct` on Resource: `*` (IAM access level: Write)'
+  - 'State-changing action `s3:PutObject` on Resource: `*` (IAM access level: Write)'
+  - 'Destructive action `s3:DeleteObject` on Resource: `*` (blast radius = every resource in this account)'
+  - 'Destructive action `s3:AbortMultipartUpload` on Resource: `*` (blast radius = every resource in this account)'
+  - 'Resource: `*` for s3 (broad cross-resource read/access)'
+  - 'State-changing action `s3:CreateBucket` on Resource: `*` (IAM access level: Write)'
+  - 'State-changing action `s3:PutObjectAcl` on Resource: `*` (IAM access level: Permissions management)'
+  - "`s3:PutObjectAcl` is a high-impact mutation on broad resource \u2014 single API call can rewrite every matching resource\
+    \ in the account."
+  - 'State-changing action `lambda:InvokeFunction` on Resource: `*` (IAM access level: Write)'
+  - 'Resource: `*` for lambda (broad cross-resource read/access)'
+  - '`iam:CreateServiceLinkedRole` on Resource: `*` touches sensitive service `iam`'
+  - 'State-changing action `iam:CreateServiceLinkedRole` on Resource: `*` (IAM access level: Permissions management)'
+  - 'State-changing action `sns:Subscribe` on Resource: `*` (IAM access level: Write)'
+  - 'State-changing action `sns:CreateTopic` on Resource: `*` (IAM access level: Permissions management)'
+  - 'State-changing action `sns:Publish` on Resource: `*` (IAM access level: Write)'
+  - 'Resource: `*` for sns (broad cross-resource read/access)'
+  - '`iam:PassRole` on Resource: `*` is a privilege-escalation path'
+  - 'State-changing action `iam:PassRole` on Resource: `*` (IAM access level: Permissions management)'
+  - 'State-changing action `athena:StartQueryExecution` on Resource: `*` (IAM access level: Write)'
+  - 'Destructive action `athena:StopQueryExecution` on Resource: `*` (blast radius = every resource in this account)'
+  - 'Resource: `*` for athena (broad cross-resource read/access)'
+  - '`glue:CreateTable` on Resource: `*` touches sensitive service `glue`'
+  - 'State-changing action `glue:CreateTable` on Resource: `*` (IAM access level: Write)'
+  - '`glue:UpdateTable` on Resource: `*` touches sensitive service `glue`'
+  - 'State-changing action `glue:UpdateTable` on Resource: `*` (IAM access level: Write)'
+  - '`glue:DeleteTable` on Resource: `*` touches sensitive service `glue`'
+  - 'Destructive action `glue:DeleteTable` on Resource: `*` (blast radius = every resource in this account)'
+  - '`glue:GetDatabases` on Resource: `*` touches sensitive service `glue`'
+  - '`glue:GetTable` on Resource: `*` touches sensitive service `glue`'
+  - '`glue:GetTables` on Resource: `*` touches sensitive service `glue`'
+  - '`glue:CreateDatabase` on Resource: `*` touches sensitive service `glue`'
+  - '`glue:GetDatabase` on Resource: `*` touches sensitive service `glue`'
+  - 'State-changing action `glue:CreateDatabase` on Resource: `*` (IAM access level: Write)'
+  - 'State-changing action `redshift-data:ExecuteStatement` on Resource: `*` (IAM access level: Write)'
+  - 'Destructive action `redshift-data:CancelStatement` on Resource: `*` (blast radius = every resource in this account)'
+  - 'Resource: `*` for redshift-data (broad cross-resource read/access)'
+  - 'State-changing action `redshift:GetClusterCredentials` on Resource: `*` (IAM access level: Write)'
+  - 'Resource: `*` for redshift (broad cross-resource read/access)'
+  - "`redshift:GetClusterCredentials` is a high-impact mutation on broad resource \u2014 single API call can rewrite every\
+    \ matching resource in the account."
+  - '`sagemaker:ListTags` on Resource: `*` touches sensitive service `sagemaker`'
+  - 'State-changing action `s3express:CreateSession` on Resource: `*` (IAM access level: Write)'
+  - 'Resource: `*` for s3express (broad cross-resource read/access)'
+  - 'State-changing action `s3express:CreateBucket` on Resource: `*` (IAM access level: Write)'
+  - 'State-changing action `ec2:AssignPrivateIpAddresses` on Resource: `*` (IAM access level: Write)'
+  - 'State-changing action `ec2:UnassignPrivateIpAddresses` on Resource: `*` (IAM access level: Write)'
+  - 'Resource: `*` for ec2, logs (broad cross-resource read/access)'
+  - 'State-changing action `ec2:ModifyInstanceAttribute` on Resource: `*` (IAM access level: Write)'
+  - 'Destructive action `ec2:StopInstances` on Resource: `*` (blast radius = every resource in this account)'
+  - 'State-changing action `ec2:StartInstances` on Resource: `*` (IAM access level: Write)'
+  - 'Destructive action `ec2:TerminateInstances` on Resource: `*` (blast radius = every resource in this account)'
+  - 'Resource: `*` for ec2 (broad cross-resource read/access)'
+  - "`ec2:ModifyInstanceAttribute` is a high-impact mutation on broad resource \u2014 single API call can rewrite every matching\
+    \ resource in the account."
+  - '`ec2:ModifyInstanceAttribute` is catastrophic in blast radius (account governance / IAM total compromise / evidence destruction).
+    Always route to human review.'
+  - 'State-changing action `ec2:CreateTags` on Resource: `*` (IAM access level: Tagging)'
+  - 'Destructive action `ec2:DisassociateIamInstanceProfile` on Resource: `*` (blast radius = every resource in this account)'
+  - 'State-changing action `ec2:AssociateIamInstanceProfile` on Resource: `*` (IAM access level: Write)'
+  - 'State-changing action `ec2:ReplaceIamInstanceProfileAssociation` on Resource: `*` (IAM access level: Write)'
+  - '`ec2:AssociateIamInstanceProfile` is catastrophic in blast radius (account governance / IAM total compromise / evidence
+    destruction). Always route to human review.'
+  - '`ec2:ReplaceIamInstanceProfileAssociation` is catastrophic in blast radius (account governance / IAM total compromise
+    / evidence destruction). Always route to human review.'
+  - "Action-name wildcard `ec2:Describe*` on broad resource \u2014 matches multiple ec2 APIs at once"
+  - 'State-changing action `ec2:RunInstances` on Resource: `*` (IAM access level: Write)'
+  - "Action-name wildcard `applicationinsights:Describe*` on broad resource \u2014 matches multiple applicationinsights APIs\
+    \ at once"
+  - "Action-name wildcard `applicationinsights:List*` on broad resource \u2014 matches multiple applicationinsights APIs at\
+    \ once"
+  - 'Resource: `*` for applicationinsights, cloudformation (broad cross-resource read/access)'
+  - 'State-changing action `applicationinsights:CreateApplication` on Resource: `*` (IAM access level: Write)'
+  - 'State-changing action `applicationinsights:CreateComponent` on Resource: `*` (IAM access level: Write)'
+  - 'State-changing action `applicationinsights:UpdateApplication` on Resource: `*` (IAM access level: Write)'
+  - 'Destructive action `applicationinsights:DeleteApplication` on Resource: `*` (blast radius = every resource in this account)'
+  - 'State-changing action `applicationinsights:UpdateComponentConfiguration` on Resource: `*` (IAM access level: Write)'
+  - 'Destructive action `applicationinsights:DeleteComponent` on Resource: `*` (blast radius = every resource in this account)'
+  - 'Resource: `*` for applicationinsights (broad cross-resource read/access)'
+  - 'State-changing action `resource-groups:CreateGroup` on Resource: `*` (IAM access level: Write)'
+  - 'State-changing action `resource-groups:UpdateGroup` on Resource: `*` (IAM access level: Write)'
+  - 'Destructive action `resource-groups:DeleteGroup` on Resource: `*` (blast radius = every resource in this account)'
+  - 'Resource: `*` for resource-groups (broad cross-resource read/access)'
+  - 'Code-execution primitive on broad resource: codebuild:StartBuild, ec2:RunInstances, glue:CreateJob. Deploys attacker-controlled
+    code that runs under whatever role the matched resources use. Even without explicit PassRole, the existing roles of matched
+    resources become the attack target.'
+  - 'Code-execution-via-role composition: codebuild:StartBuild (+ 2 more) combined with iam:PassRole = RCE as the passed role.
+    Single-statement scoring underweights this; the composition is full account-compromise tier.'
+  - '`logs:GetLogEvents` on broad resource reads content that frequently contains secrets / sensitive data (boot logs, command
+    output, log streams, message bodies).'
+  - '`ecr:SetRepositoryPolicy` sets up ongoing cross-account / persistent exfiltration in a single call. The blast is ''everything
+    that flows through this resource from now on,'' not just what exists today.'
+  opus_score: null
+  opus_factors: null
+  opus_reasoning: null
+  gap_classification: pending

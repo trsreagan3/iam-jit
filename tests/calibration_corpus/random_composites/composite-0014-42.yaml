@@ -1,0 +1,48 @@
+name: composite-0014-42
+source_policies:
+- aws_managed/AWSHealthImagingServiceRolePolicy.yaml
+- aws_managed/AmazonHoneycodeWorkbookReadOnlyAccess.yaml
+- aws_managed/AmazonCognitoUnauthenticatedIdentities.yaml
+source_hash: 2296ab7eb9cdd4ef
+policy:
+  Version: '2012-10-17'
+  Statement:
+  - Effect: Allow
+    Action:
+    - cloudwatch:PutMetricData
+    Resource: '*'
+    Condition:
+      StringEquals:
+        cloudwatch:namespace: AWS/HealthImaging
+  - Action:
+    - honeycode:GetScreenData
+    - honeycode:DescribeTableDataImportJob
+    - honeycode:ListTableColumns
+    - honeycode:ListTableRows
+    - honeycode:ListTables
+    - honeycode:QueryTableRows
+    Resource: '*'
+    Effect: Allow
+  - Effect: Allow
+    Action: rum:PutRumEvents
+    Resource: '*'
+request:
+  spec:
+    access_type: read-write
+    duration:
+      duration_hours: 8
+    resource_constraints: []
+  user: sre-carol
+  justification: scale-out emergency for us-east-1 outage
+scores:
+  det_score: 6
+  det_factors:
+  - 'State-changing action `cloudwatch:PutMetricData` on Resource: `*` (IAM access level: Write)'
+  - 'Resource: `*` for cloudwatch (broad cross-resource read/access)'
+  - 'Resource: `*` for honeycode (broad cross-resource read/access)'
+  - 'State-changing action `rum:PutRumEvents` on Resource: `*` (IAM access level: Write)'
+  - 'Resource: `*` for rum (broad cross-resource read/access)'
+  opus_score: null
+  opus_factors: null
+  opus_reasoning: null
+  gap_classification: pending

@@ -1,0 +1,104 @@
+name: composite-0046-42
+source_policies:
+- aws_managed/Ec2ImageBuilderCrossAccountDistributionAccess.yaml
+- aws_managed/AmazonS3FilesFullAccess.yaml
+source_hash: cd6b419e1dc0f5c7
+policy:
+  Version: '2012-10-17'
+  Statement:
+  - Effect: Allow
+    Action: ec2:CreateTags
+    Resource: arn:aws:ec2:*::image/*
+  - Effect: Allow
+    Action:
+    - ec2:DescribeImages
+    - ec2:CopyImage
+    - ec2:ModifyImageAttribute
+    Resource: '*'
+  - Sid: S3FilesPermissions
+    Effect: Allow
+    Action: s3files:*
+    Resource: '*'
+  - Sid: EC2NetworkingPermissions
+    Effect: Allow
+    Action:
+    - ec2:DescribeSubnets
+    - ec2:DescribeNetworkInterfaces
+    - ec2:DescribeNetworkInterfaceAttribute
+    - ec2:CreateNetworkInterface
+    - ec2:DeleteNetworkInterface
+    - ec2:ModifyNetworkInterfaceAttribute
+    - ec2:DescribeSecurityGroups
+    - ec2:DescribeVpcs
+    - ec2:DescribeAvailabilityZones
+    Resource: '*'
+  - Sid: S3BucketPermissions
+    Effect: Allow
+    Action:
+    - s3:GetBucketNotification
+    - s3:PutBucketNotification
+    Resource: arn:aws:s3:::*
+  - Sid: EventBridgeManage
+    Effect: Allow
+    Action:
+    - events:DeleteRule
+    - events:PutRule
+    - events:PutTargets
+    - events:RemoveTargets
+    Condition:
+      StringEquals:
+        events:ManagedBy: elasticfilesystem.amazonaws.com
+    Resource:
+    - arn:aws:events:*:*:rule/DO-NOT-DELETE-S3-Files*
+  - Sid: EventBridgeRead
+    Effect: Allow
+    Action:
+    - events:DescribeRule
+    - events:ListRules
+    - events:ListTargetsByRule
+    Resource:
+    - arn:aws:events:*:*:rule/*
+  - Sid: IAMPassRoleForS3Files
+    Effect: Allow
+    Action: iam:PassRole
+    Resource: arn:aws:iam::*:role/*
+    Condition:
+      StringEquals:
+        iam:PassedToService: elasticfilesystem.amazonaws.com
+request:
+  spec:
+    access_type: read-write
+    duration:
+      duration_hours: 1
+    resource_constraints: []
+  user: ci-bot
+  justification: deploy via terraform-cloud agent
+scores:
+  det_score: 9
+  det_factors:
+  - 'State-changing action `ec2:CreateTags` on Resource: `*` (IAM access level: Tagging)'
+  - 'State-changing action `ec2:CopyImage` on Resource: `*` (IAM access level: Write)'
+  - 'State-changing action `ec2:ModifyImageAttribute` on Resource: `*` (IAM access level: Write)'
+  - 'Resource: `*` for ec2 (broad cross-resource read/access)'
+  - '`s3files:*` grants every action in `s3files`'
+  - 'Resource: `*` for s3files (broad cross-resource read/access)'
+  - 'State-changing action `ec2:CreateNetworkInterface` on Resource: `*` (IAM access level: Write)'
+  - 'Destructive action `ec2:DeleteNetworkInterface` on Resource: `*` (blast radius = every resource in this account)'
+  - 'State-changing action `ec2:ModifyNetworkInterfaceAttribute` on Resource: `*` (IAM access level: Write)'
+  - "`ec2:CreateNetworkInterface` is a high-impact mutation on broad resource \u2014 single API call can rewrite every matching\
+    \ resource in the account."
+  - 'State-changing action `s3:PutBucketNotification` on Resource: `*` (IAM access level: Write)'
+  - 'Resource: `*` for s3 (broad cross-resource read/access)'
+  - 'Destructive action `events:DeleteRule` on Resource: `*` (blast radius = every resource in this account)'
+  - 'State-changing action `events:PutRule` on Resource: `*` (IAM access level: Write)'
+  - 'State-changing action `events:PutTargets` on Resource: `*` (IAM access level: Write)'
+  - 'Destructive action `events:RemoveTargets` on Resource: `*` (blast radius = every resource in this account)'
+  - 'Resource: `*` for events (broad cross-resource read/access)'
+  - '`iam:PassRole` on Resource: `*` is a privilege-escalation path'
+  - 'State-changing action `iam:PassRole` on Resource: `*` (IAM access level: Permissions management)'
+  - '`ec2:ModifyImageAttribute` sets up ongoing cross-account / persistent exfiltration in a single call. The blast is ''everything
+    that flows through this resource from now on,'' not just what exists today.'
+  opus_score: null
+  opus_factors: null
+  opus_reasoning: null
+  gap_classification: pending

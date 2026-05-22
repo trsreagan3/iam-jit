@@ -1,0 +1,185 @@
+name: composite-0032-42
+source_policies:
+- aws_managed/AwsGlueSessionUserRestrictedPolicy.yaml
+- aws_managed/AmazonEKSNetworkingPolicy.yaml
+- aws_managed/AWSMarketplaceMeteringRegisterUsage.yaml
+source_hash: d50b0a123d1a235d
+policy:
+  Version: '2012-10-17'
+  Statement:
+  - Sid: AllowSessionActions
+    Effect: Allow
+    Action:
+    - glue:CreateSession
+    Resource:
+    - arn:aws:glue:*:*:session/*
+    Condition:
+      StringEquals:
+        aws:RequestTag/owner: ${aws:userid}
+      ForAnyValue:StringEquals:
+        aws:TagKeys:
+        - owner
+  - Sid: AllowGlueTaggingAction
+    Effect: Allow
+    Action:
+    - glue:TagResource
+    Resource: arn:aws:glue:*:*:session/*
+    Condition:
+      StringEquals:
+        aws:ResourceTag/owner: ${aws:userid}
+        aws:RequestTag/owner: ${aws:userid}
+  - Sid: AllowCompletionActions
+    Effect: Allow
+    Action:
+    - glue:StartCompletion
+    - glue:GetCompletion
+    Resource:
+    - arn:aws:glue:*:*:completion/*
+  - Sid: AllowGlueActions
+    Effect: Allow
+    Action:
+    - glue:RunStatement
+    - glue:GetStatement
+    - glue:ListStatements
+    - glue:CancelStatement
+    - glue:StopSession
+    - glue:DeleteSession
+    - glue:GetSession
+    Resource:
+    - arn:aws:glue:*:*:session/*
+    Condition:
+      StringEquals:
+        aws:ResourceTag/owner: ${aws:userid}
+  - Sid: AllowListSessions
+    Effect: Allow
+    Action:
+    - glue:ListSessions
+    Resource:
+    - '*'
+  - Sid: DenyTagActions
+    Effect: Deny
+    Action:
+    - glue:UntagResource
+    - tag:TagResources
+    - tag:UntagResources
+    Resource:
+    - arn:aws:glue:*:*:session/*
+    Condition:
+      ForAnyValue:StringEquals:
+        aws:TagKeys:
+        - owner
+  - Sid: AllowPassRoleActions
+    Effect: Allow
+    Action:
+    - iam:PassRole
+    Resource:
+    - arn:aws:iam::*:role/service-role/AwsGlueSessionServiceRoleUserRestricted*
+    Condition:
+      StringLike:
+        iam:PassedToService:
+        - glue.amazonaws.com
+  - Effect: Allow
+    Action: ec2:CreateNetworkInterface
+    Resource: '*'
+    Condition:
+      StringEquals:
+        aws:RequestTag/eks:eks-cluster-name: ${aws:PrincipalTag/eks:eks-cluster-name}
+      StringLike:
+        aws:RequestTag/eks:kubernetes-cni-node-name: '*'
+      ForAllValues:StringEquals:
+        aws:TagKeys:
+        - eks:eks-cluster-name
+        - eks:kubernetes-cni-node-name
+  - Effect: Allow
+    Action: ec2:CreateNetworkInterface
+    Resource:
+    - arn:aws:ec2:*:*:security-group/*
+    - arn:aws:ec2:*:*:subnet/*
+  - Effect: Allow
+    Action: ec2:CreateTags
+    Resource: '*'
+    Condition:
+      StringEquals:
+        ec2:CreateAction: CreateNetworkInterface
+  - Effect: Allow
+    Action:
+    - ec2:AttachNetworkInterface
+    - ec2:DetachNetworkInterface
+    - ec2:UnassignPrivateIpAddresses
+    - ec2:UnassignIpv6Addresses
+    - ec2:AssignPrivateIpAddresses
+    - ec2:AssignIpv6Addresses
+    Resource: '*'
+    Condition:
+      StringEquals:
+        aws:ResourceTag/eks:eks-cluster-name: ${aws:PrincipalTag/eks:eks-cluster-name}
+  - Effect: Allow
+    Action: ec2:ModifyNetworkInterfaceAttribute
+    Resource:
+    - arn:aws:ec2:*:*:network-interface/*
+    - arn:aws:ec2:*:*:instance/*
+    Condition:
+      StringEquals:
+        aws:ResourceTag/eks:eks-cluster-name: ${aws:PrincipalTag/eks:eks-cluster-name}
+  - Action:
+    - aws-marketplace:RegisterUsage
+    Effect: Allow
+    Resource: '*'
+request:
+  spec:
+    access_type: read-write
+    duration:
+      duration_hours: 8
+    resource_constraints: []
+  user: auditor-erin
+  justification: SOC 2 controls evidence collection
+scores:
+  det_score: 9
+  det_factors:
+  - '`glue:CreateSession` on Resource: `*` touches sensitive service `glue`'
+  - 'State-changing action `glue:CreateSession` on Resource: `*` (IAM access level: Write)'
+  - '`glue:TagResource` on Resource: `*` touches sensitive service `glue`'
+  - 'State-changing action `glue:TagResource` on Resource: `*` (IAM access level: Tagging)'
+  - '`glue:StartCompletion` on Resource: `*` touches sensitive service `glue`'
+  - '`glue:GetCompletion` on Resource: `*` touches sensitive service `glue`'
+  - 'State-changing action `glue:StartCompletion` on Resource: `*` (IAM access level: Write)'
+  - '`glue:RunStatement` on Resource: `*` touches sensitive service `glue`'
+  - '`glue:GetStatement` on Resource: `*` touches sensitive service `glue`'
+  - '`glue:ListStatements` on Resource: `*` touches sensitive service `glue`'
+  - '`glue:CancelStatement` on Resource: `*` touches sensitive service `glue`'
+  - '`glue:StopSession` on Resource: `*` touches sensitive service `glue`'
+  - '`glue:DeleteSession` on Resource: `*` touches sensitive service `glue`'
+  - '`glue:GetSession` on Resource: `*` touches sensitive service `glue`'
+  - 'State-changing action `glue:RunStatement` on Resource: `*` (IAM access level: Write)'
+  - 'Destructive action `glue:CancelStatement` on Resource: `*` (blast radius = every resource in this account)'
+  - 'Destructive action `glue:StopSession` on Resource: `*` (blast radius = every resource in this account)'
+  - 'Destructive action `glue:DeleteSession` on Resource: `*` (blast radius = every resource in this account)'
+  - '`glue:ListSessions` on Resource: `*` touches sensitive service `glue`'
+  - '`iam:PassRole` on Resource: `*` is a privilege-escalation path'
+  - 'State-changing action `iam:PassRole` on Resource: `*` (IAM access level: Permissions management)'
+  - "`Condition.StringEquals.aws:RequestTag/eks:eks-cluster-name: \"${aws:PrincipalTag/eks:eks-cluster-name}\"` interpolates\
+    \ an attacker-controllable tag \u2014 if the caller has `iam:TagRole`/`TagUser` on themselves, they control what the condition\
+    \ value expands to, defeating the apparent scope."
+  - 'State-changing action `ec2:CreateNetworkInterface` on Resource: `*` (IAM access level: Write)'
+  - 'Resource: `*` for ec2 (broad cross-resource read/access)'
+  - "`ec2:CreateNetworkInterface` is a high-impact mutation on broad resource \u2014 single API call can rewrite every matching\
+    \ resource in the account."
+  - 'State-changing action `ec2:CreateTags` on Resource: `*` (IAM access level: Tagging)'
+  - "`Condition.StringEquals.aws:ResourceTag/eks:eks-cluster-name: \"${aws:PrincipalTag/eks:eks-cluster-name}\"` interpolates\
+    \ an attacker-controllable tag \u2014 if the caller has `iam:TagRole`/`TagUser` on themselves, they control what the condition\
+    \ value expands to, defeating the apparent scope."
+  - 'State-changing action `ec2:AttachNetworkInterface` on Resource: `*` (IAM access level: Write)'
+  - 'Destructive action `ec2:DetachNetworkInterface` on Resource: `*` (blast radius = every resource in this account)'
+  - 'State-changing action `ec2:UnassignPrivateIpAddresses` on Resource: `*` (IAM access level: Write)'
+  - 'State-changing action `ec2:UnassignIpv6Addresses` on Resource: `*` (IAM access level: Write)'
+  - 'State-changing action `ec2:AssignPrivateIpAddresses` on Resource: `*` (IAM access level: Write)'
+  - 'State-changing action `ec2:AssignIpv6Addresses` on Resource: `*` (IAM access level: Write)'
+  - "`ec2:AttachNetworkInterface` is a high-impact mutation on broad resource \u2014 single API call can rewrite every matching\
+    \ resource in the account."
+  - 'State-changing action `ec2:ModifyNetworkInterfaceAttribute` on Resource: `*` (IAM access level: Write)'
+  - 'State-changing action `aws-marketplace:RegisterUsage` on Resource: `*` (IAM access level: Write)'
+  - 'Resource: `*` for aws-marketplace (broad cross-resource read/access)'
+  opus_score: null
+  opus_factors: null
+  opus_reasoning: null
+  gap_classification: pending

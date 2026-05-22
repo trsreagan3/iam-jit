@@ -1,0 +1,271 @@
+name: composite-0074-42
+source_policies:
+- aws_managed/AWSVendorInsightsAssessorFullAccess.yaml
+- aws_managed/AmazonECSInfrastructureRolePolicyForManagedInstances.yaml
+- aws_managed/KafkaServiceRolePolicy.yaml
+source_hash: 228112a47b02049d
+policy:
+  Version: '2012-10-17'
+  Statement:
+  - Effect: Allow
+    Action:
+    - vendor-insights:GetProfileAccessTerms
+    - vendor-insights:ListEntitledSecurityProfiles
+    - vendor-insights:GetEntitledSecurityProfileSnapshot
+    - vendor-insights:ListEntitledSecurityProfileSnapshots
+    Resource: '*'
+  - Effect: Allow
+    Action:
+    - aws-marketplace:CreateAgreementRequest
+    - aws-marketplace:GetAgreementRequest
+    - aws-marketplace:AcceptAgreementRequest
+    - aws-marketplace:CancelAgreementRequest
+    - aws-marketplace:ListAgreementRequests
+    - aws-marketplace:SearchAgreements
+    - aws-marketplace:CancelAgreement
+    Resource: '*'
+    Condition:
+      ForAnyValue:StringEquals:
+        aws-marketplace:AgreementType: VendorInsightsAgreement
+  - Effect: Allow
+    Action:
+    - artifact:GetReport
+    - artifact:GetReportMetadata
+    - artifact:GetTermForReport
+    - artifact:ListReports
+    Resource: arn:aws:artifact:*::report/*
+  - Sid: CreateLaunchTemplateForManagedInstances
+    Effect: Allow
+    Action:
+    - ec2:CreateLaunchTemplate
+    Resource:
+    - arn:aws:ec2:*:*:launch-template/*
+    Condition:
+      StringEquals:
+        aws:RequestTag/AmazonECSManaged: 'true'
+  - Sid: CreateLaunchTemplateVersionsForManagedInstances
+    Effect: Allow
+    Action:
+    - ec2:CreateLaunchTemplateVersion
+    - ec2:ModifyLaunchTemplate
+    Resource:
+    - arn:aws:ec2:*:*:launch-template/*
+    Condition:
+      StringEquals:
+        ec2:ManagedResourceOperator: ecs.amazonaws.com
+  - Sid: ProvisionEC2InstancesForManagedInstances
+    Effect: Allow
+    Action:
+    - ec2:CreateFleet
+    Resource:
+    - arn:aws:ec2:*:*:fleet/*
+    - arn:aws:ec2:*:*:instance/*
+    - arn:aws:ec2:*:*:network-interface/*
+    - arn:aws:ec2:*:*:launch-template/*
+    - arn:aws:ec2:*:*:volume/*
+    Condition:
+      StringEquals:
+        aws:RequestTag/AmazonECSManaged: 'true'
+  - Sid: CreateFleetForSupportingResources
+    Effect: Allow
+    Action:
+    - ec2:CreateFleet
+    Resource:
+    - arn:aws:ec2:*:*:subnet/*
+    - arn:aws:ec2:*:*:security-group/*
+    - arn:aws:ec2:*::image/*
+  - Sid: RunInstancesForManagedInstances
+    Effect: Allow
+    Action:
+    - ec2:RunInstances
+    Resource:
+    - arn:aws:ec2:*:*:instance/*
+    - arn:aws:ec2:*:*:volume/*
+    - arn:aws:ec2:*:*:network-interface/*
+    Condition:
+      StringEquals:
+        aws:RequestTag/AmazonECSManaged: 'true'
+  - Sid: RunInstancesForECSManagedLaunchTemplates
+    Effect: Allow
+    Action:
+    - ec2:RunInstances
+    Resource:
+    - arn:aws:ec2:*:*:launch-template/*
+    Condition:
+      StringEquals:
+        ec2:ResourceTag/AmazonECSManaged: 'true'
+  - Sid: RunInstancesForSupportingResources
+    Effect: Allow
+    Action:
+    - ec2:RunInstances
+    Resource:
+    - arn:aws:ec2:*:*:subnet/*
+    - arn:aws:ec2:*:*:security-group/*
+    - arn:aws:ec2:*::image/*
+    - arn:aws:resource-groups:*:*:group/*
+  - Sid: TagOnCreateEC2ResourcesForManagedInstances
+    Effect: Allow
+    Action:
+    - ec2:CreateTags
+    Resource:
+    - arn:aws:ec2:*:*:fleet/*
+    - arn:aws:ec2:*:*:launch-template/*
+    - arn:aws:ec2:*:*:network-interface/*
+    - arn:aws:ec2:*:*:instance/*
+    - arn:aws:ec2:*:*:volume/*
+    Condition:
+      StringEquals:
+        ec2:CreateAction:
+        - CreateFleet
+        - CreateLaunchTemplate
+        - RunInstances
+  - Sid: PassInstanceRoleForManagedInstances
+    Effect: Allow
+    Action:
+    - iam:PassRole
+    Resource:
+    - arn:aws:iam::*:role/ecsInstanceRole*
+    Condition:
+      StringLike:
+        iam:PassedToService: ec2.*
+  - Sid: CreateServiceLinkedRoleForEC2Spot
+    Effect: Allow
+    Action:
+    - iam:CreateServiceLinkedRole
+    Resource:
+    - arn:aws:iam::*:role/aws-service-role/spot.amazonaws.com/AWSServiceRoleForEC2Spot
+  - Sid: DescribeEC2ResourcesManagedByECS
+    Effect: Allow
+    Action:
+    - ec2:DescribeInstances
+    - ec2:DescribeInstanceTypes
+    - ec2:DescribeLaunchTemplates
+    - ec2:DescribeNetworkInterfaces
+    - ec2:DescribeInstanceTypeOfferings
+    - ec2:DescribeAvailabilityZones
+    - ec2:DescribeSecurityGroups
+    - ec2:DescribeSubnets
+    - ec2:DescribeVpcs
+    - ec2:DescribeCapacityReservations
+    Resource: '*'
+  - Sid: ListResourceGroupResources
+    Effect: Allow
+    Action:
+    - resource-groups:ListGroupResources
+    - cloudformation:DescribeStacks
+    - cloudformation:ListStackResources
+    - tag:GetResources
+    Resource: '*'
+  - Effect: Allow
+    Action:
+    - ec2:CreateNetworkInterface
+    - ec2:DescribeNetworkInterfaces
+    - ec2:CreateNetworkInterfacePermission
+    - ec2:AttachNetworkInterface
+    - ec2:DeleteNetworkInterface
+    - ec2:DetachNetworkInterface
+    - ec2:DescribeVpcEndpoints
+    - acm-pca:GetCertificateAuthorityCertificate
+    - secretsmanager:ListSecrets
+    Resource: '*'
+  - Effect: Allow
+    Action:
+    - ec2:ModifyVpcEndpoint
+    Resource: arn:*:ec2:*:*:subnet/*
+  - Effect: Allow
+    Action:
+    - ec2:DeleteVpcEndpoints
+    - ec2:ModifyVpcEndpoint
+    Resource: arn:*:ec2:*:*:vpc-endpoint/*
+    Condition:
+      StringEquals:
+        ec2:ResourceTag/AWSMSKManaged: 'true'
+      StringLike:
+        ec2:ResourceTag/ClusterArn: '*'
+  - Effect: Allow
+    Action:
+    - secretsmanager:GetResourcePolicy
+    - secretsmanager:PutResourcePolicy
+    - secretsmanager:DeleteResourcePolicy
+    - secretsmanager:DescribeSecret
+    Resource: '*'
+    Condition:
+      ArnLike:
+        secretsmanager:SecretId: arn:*:secretsmanager:*:*:secret:AmazonMSK_*
+  - Effect: Allow
+    Action:
+    - ec2:AssignIpv6Addresses
+    - ec2:UnassignIpv6Addresses
+    - ec2:ModifyNetworkInterfaceAttribute
+    Resource: arn:*:ec2:*:*:network-interface/*
+    Condition:
+      StringEquals:
+        ec2:ResourceTag/AWSMSKManaged: 'true'
+      StringLike:
+        ec2:ResourceTag/ClusterArn: '*'
+request:
+  spec:
+    access_type: read-write
+    duration:
+      duration_hours: 1
+    resource_constraints: []
+  user: dev-bob
+  justification: 'reproduce customer ticket #4422 locally'
+scores:
+  det_score: 9
+  det_factors:
+  - 'Resource: `*` for vendor-insights (broad cross-resource read/access)'
+  - 'State-changing action `aws-marketplace:CreateAgreementRequest` on Resource: `*` (IAM access level: Write)'
+  - 'State-changing action `aws-marketplace:AcceptAgreementRequest` on Resource: `*` (IAM access level: Write)'
+  - 'Destructive action `aws-marketplace:CancelAgreementRequest` on Resource: `*` (blast radius = every resource in this account)'
+  - 'Destructive action `aws-marketplace:CancelAgreement` on Resource: `*` (blast radius = every resource in this account)'
+  - 'Resource: `*` for aws-marketplace (broad cross-resource read/access)'
+  - 'State-changing action `ec2:CreateLaunchTemplate` on Resource: `*` (IAM access level: Write)'
+  - 'Resource: `*` for ec2 (broad cross-resource read/access)'
+  - 'State-changing action `ec2:CreateLaunchTemplateVersion` on Resource: `*` (IAM access level: Write)'
+  - 'State-changing action `ec2:ModifyLaunchTemplate` on Resource: `*` (IAM access level: Write)'
+  - 'State-changing action `ec2:CreateFleet` on Resource: `*` (IAM access level: Write)'
+  - 'State-changing action `ec2:RunInstances` on Resource: `*` (IAM access level: Write)'
+  - 'State-changing action `ec2:CreateTags` on Resource: `*` (IAM access level: Tagging)'
+  - '`iam:PassRole` on Resource: `*` is a privilege-escalation path'
+  - 'State-changing action `iam:PassRole` on Resource: `*` (IAM access level: Permissions management)'
+  - '`iam:CreateServiceLinkedRole` on Resource: `*` touches sensitive service `iam`'
+  - 'State-changing action `iam:CreateServiceLinkedRole` on Resource: `*` (IAM access level: Permissions management)'
+  - 'Resource: `*` for cloudformation, resource-groups, tag (broad cross-resource read/access)'
+  - '`acm-pca:GetCertificateAuthorityCertificate` on Resource: `*` touches sensitive service `acm-pca`'
+  - '`secretsmanager:ListSecrets` on Resource: `*` touches sensitive service `secretsmanager`'
+  - 'State-changing action `ec2:CreateNetworkInterface` on Resource: `*` (IAM access level: Write)'
+  - 'State-changing action `ec2:CreateNetworkInterfacePermission` on Resource: `*` (IAM access level: Permissions management)'
+  - 'State-changing action `ec2:AttachNetworkInterface` on Resource: `*` (IAM access level: Write)'
+  - 'Destructive action `ec2:DeleteNetworkInterface` on Resource: `*` (blast radius = every resource in this account)'
+  - 'Destructive action `ec2:DetachNetworkInterface` on Resource: `*` (blast radius = every resource in this account)'
+  - "`ec2:CreateNetworkInterface` is a high-impact mutation on broad resource \u2014 single API call can rewrite every matching\
+    \ resource in the account."
+  - "`ec2:AttachNetworkInterface` is a high-impact mutation on broad resource \u2014 single API call can rewrite every matching\
+    \ resource in the account."
+  - 'State-changing action `ec2:ModifyVpcEndpoint` on Resource: `*` (IAM access level: Write)'
+  - "`ec2:ModifyVpcEndpoint` is a high-impact mutation on broad resource \u2014 single API call can rewrite every matching\
+    \ resource in the account."
+  - "`Condition.StringLike.ec2:ResourceTag/ClusterArn` value is `\"*\"` \u2014 degenerate wildcard; the condition imposes\
+    \ no actual constraint."
+  - 'Destructive action `ec2:DeleteVpcEndpoints` on Resource: `*` (blast radius = every resource in this account)'
+  - '`secretsmanager:GetResourcePolicy` on Resource: `*` touches sensitive service `secretsmanager`'
+  - '`secretsmanager:PutResourcePolicy` on Resource: `*` touches sensitive service `secretsmanager`'
+  - '`secretsmanager:DeleteResourcePolicy` on Resource: `*` touches sensitive service `secretsmanager`'
+  - '`secretsmanager:DescribeSecret` on Resource: `*` touches sensitive service `secretsmanager`'
+  - 'State-changing action `secretsmanager:PutResourcePolicy` on Resource: `*` (IAM access level: Permissions management)'
+  - 'Destructive action `secretsmanager:DeleteResourcePolicy` on Resource: `*` (blast radius = every resource in this account)'
+  - 'State-changing action `ec2:AssignIpv6Addresses` on Resource: `*` (IAM access level: Write)'
+  - 'State-changing action `ec2:UnassignIpv6Addresses` on Resource: `*` (IAM access level: Write)'
+  - 'State-changing action `ec2:ModifyNetworkInterfaceAttribute` on Resource: `*` (IAM access level: Write)'
+  - 'Code-execution primitive on broad resource: ec2:RunInstances, ec2:RunInstances, ec2:RunInstances. Deploys attacker-controlled
+    code that runs under whatever role the matched resources use. Even without explicit PassRole, the existing roles of matched
+    resources become the attack target.'
+  - 'Code-execution-via-role composition: ec2:RunInstances combined with iam:PassRole = RCE as the passed role. Single-statement
+    scoring underweights this; the composition is full account-compromise tier.'
+  - '`secretsmanager:PutResourcePolicy` sets up ongoing cross-account / persistent exfiltration in a single call. The blast
+    is ''everything that flows through this resource from now on,'' not just what exists today.'
+  opus_score: null
+  opus_factors: null
+  opus_reasoning: null
+  gap_classification: pending

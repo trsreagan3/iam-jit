@@ -1,0 +1,79 @@
+name: composite-0009-42
+source_policies:
+- aws_managed/AWSServiceCatalogSyncServiceRolePolicy.yaml
+- aws_managed/CloudWatchLogsCrossAccountSharingConfiguration.yaml
+source_hash: a21079901b7fdc25
+policy:
+  Version: '2012-10-17'
+  Statement:
+  - Sid: ArtifactSyncToServiceCatalog
+    Effect: Allow
+    Action:
+    - servicecatalog:ListProvisioningArtifacts
+    - servicecatalog:DescribeProductAsAdmin
+    - servicecatalog:DeleteProvisioningArtifact
+    - servicecatalog:ListServiceActionsForProvisioningArtifact
+    - servicecatalog:DescribeProvisioningArtifact
+    - servicecatalog:CreateProvisioningArtifact
+    - servicecatalog:UpdateProvisioningArtifact
+    Resource: '*'
+  - Sid: AccessArtifactRepositories
+    Effect: Allow
+    Action:
+    - codestar-connections:UseConnection
+    - codeconnections:UseConnection
+    Resource:
+    - arn:aws:codestar-connections:*:*:connection/*
+    - arn:aws:codeconnections:*:*:connection/*
+  - Sid: ValidateTemplate
+    Effect: Allow
+    Action:
+    - cloudformation:ValidateTemplate
+    Resource: '*'
+  - Effect: Allow
+    Action:
+    - logs:Link
+    - oam:ListLinks
+    Resource: '*'
+  - Effect: Allow
+    Action:
+    - oam:DeleteLink
+    - oam:GetLink
+    - oam:TagResource
+    Resource: arn:aws:oam:*:*:link/*
+  - Effect: Allow
+    Action:
+    - oam:CreateLink
+    - oam:UpdateLink
+    Resource:
+    - arn:aws:oam:*:*:link/*
+    - arn:aws:oam:*:*:sink/*
+request:
+  spec:
+    access_type: read-write
+    duration:
+      duration_hours: 1
+    resource_constraints: []
+  user: contractor-frank
+  justification: 60-day integration project read access
+scores:
+  det_score: 8
+  det_factors:
+  - 'Destructive action `servicecatalog:DeleteProvisioningArtifact` on Resource: `*` (blast radius = every resource in this
+    account)'
+  - 'State-changing action `servicecatalog:CreateProvisioningArtifact` on Resource: `*` (IAM access level: Write)'
+  - 'State-changing action `servicecatalog:UpdateProvisioningArtifact` on Resource: `*` (IAM access level: Write)'
+  - 'Resource: `*` for servicecatalog (broad cross-resource read/access)'
+  - 'Resource: `*` for codeconnections, codestar-connections (broad cross-resource read/access)'
+  - 'Resource: `*` for cloudformation (broad cross-resource read/access)'
+  - 'State-changing action `logs:Link` on Resource: `*` (IAM access level: Write)'
+  - 'Resource: `*` for logs, oam (broad cross-resource read/access)'
+  - 'Destructive action `oam:DeleteLink` on Resource: `*` (blast radius = every resource in this account)'
+  - 'State-changing action `oam:TagResource` on Resource: `*` (IAM access level: Tagging)'
+  - 'Resource: `*` for oam (broad cross-resource read/access)'
+  - 'State-changing action `oam:CreateLink` on Resource: `*` (IAM access level: Write)'
+  - 'State-changing action `oam:UpdateLink` on Resource: `*` (IAM access level: Write)'
+  opus_score: null
+  opus_factors: null
+  opus_reasoning: null
+  gap_classification: pending

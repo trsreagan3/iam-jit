@@ -1,0 +1,89 @@
+name: composite-0031-42
+source_policies:
+- aws_managed/AmazonLexReadOnly.yaml
+- aws_managed/AmazonSSMAutomationApproverAccess.yaml
+source_hash: cdac9289c9adb011
+policy:
+  Version: '2012-10-17'
+  Statement:
+  - Sid: AmazonLexReadOnlyStatement1
+    Effect: Allow
+    Action:
+    - lex:GetBot
+    - lex:GetBotAlias
+    - lex:GetBotAliases
+    - lex:GetBots
+    - lex:GetBotChannelAssociation
+    - lex:GetBotChannelAssociations
+    - lex:GetBotVersions
+    - lex:GetBuiltinIntent
+    - lex:GetBuiltinIntents
+    - lex:GetBuiltinSlotTypes
+    - lex:GetIntent
+    - lex:GetIntents
+    - lex:GetIntentVersions
+    - lex:GetSlotType
+    - lex:GetSlotTypes
+    - lex:GetSlotTypeVersions
+    - lex:GetUtterancesView
+    - lex:DescribeBot
+    - lex:DescribeBotAlias
+    - lex:DescribeBotChannel
+    - lex:DescribeBotLocale
+    - lex:DescribeBotRecommendation
+    - lex:DescribeBotReplica
+    - lex:DescribeBotVersion
+    - lex:DescribeExport
+    - lex:DescribeImport
+    - lex:DescribeIntent
+    - lex:DescribeResourcePolicy
+    - lex:DescribeSlot
+    - lex:DescribeSlotType
+    - lex:ListBots
+    - lex:ListBotLocales
+    - lex:ListBotAliases
+    - lex:ListBotAliasReplicas
+    - lex:ListBotChannels
+    - lex:ListBotRecommendations
+    - lex:ListBotReplicas
+    - lex:ListBotVersions
+    - lex:ListBotVersionReplicas
+    - lex:ListBuiltInIntents
+    - lex:ListBuiltInSlotTypes
+    - lex:ListExports
+    - lex:ListImports
+    - lex:ListIntents
+    - lex:ListRecommendedIntents
+    - lex:ListSlots
+    - lex:ListSlotTypes
+    - lex:ListTagsForResource
+    - lex:SearchAssociatedTranscripts
+    - lex:ListCustomVocabularyItems
+    Resource: '*'
+  - Effect: Allow
+    Action:
+    - ssm:DescribeAutomationExecutions
+    - ssm:GetAutomationExecution
+    - ssm:SendAutomationSignal
+    Resource:
+    - '*'
+request:
+  spec:
+    access_type: read-write
+    duration:
+      duration_hours: 1
+    resource_constraints: []
+  user: dev-alice
+  justification: debug staging incident PROD-1417
+scores:
+  det_score: 6
+  det_factors:
+  - 'Resource: `*` for lex (broad cross-resource read/access)'
+  - '`ssm:DescribeAutomationExecutions` on Resource: `*` touches sensitive service `ssm`'
+  - '`ssm:GetAutomationExecution` on Resource: `*` touches sensitive service `ssm`'
+  - '`ssm:SendAutomationSignal` on Resource: `*` touches sensitive service `ssm`'
+  - 'State-changing action `ssm:SendAutomationSignal` on Resource: `*` (IAM access level: Write)'
+  opus_score: null
+  opus_factors: null
+  opus_reasoning: null
+  gap_classification: pending

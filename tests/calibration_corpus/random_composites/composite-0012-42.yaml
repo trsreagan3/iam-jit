@@ -1,0 +1,39 @@
+name: composite-0012-42
+source_policies:
+- aws_managed/AWSMarketplaceGetEntitlements.yaml
+- aws_managed/KeyspacesCDCServiceRolePolicy.yaml
+source_hash: 689dd76b2f1692db
+policy:
+  Version: '2012-10-17'
+  Statement:
+  - Sid: AWSMarketplaceGetEntitlements
+    Effect: Allow
+    Action:
+    - aws-marketplace:GetEntitlements
+    Resource: '*'
+  - Sid: KeyspacesPutMetricDataPermission
+    Effect: Allow
+    Action:
+    - cloudwatch:PutMetricData
+    Resource: '*'
+    Condition:
+      StringEquals:
+        cloudwatch:namespace: AWS/Cassandra
+request:
+  spec:
+    access_type: read-write
+    duration:
+      duration_hours: 8
+    resource_constraints: []
+  user: sre-carol
+  justification: scale-out emergency for us-east-1 outage
+scores:
+  det_score: 6
+  det_factors:
+  - 'Resource: `*` for aws-marketplace (broad cross-resource read/access)'
+  - 'State-changing action `cloudwatch:PutMetricData` on Resource: `*` (IAM access level: Write)'
+  - 'Resource: `*` for cloudwatch (broad cross-resource read/access)'
+  opus_score: null
+  opus_factors: null
+  opus_reasoning: null
+  gap_classification: pending

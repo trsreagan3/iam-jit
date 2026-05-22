@@ -1,0 +1,1425 @@
+name: composite-0089-42
+source_policies:
+- aws_managed/AIDevOpsAgentAccessPolicy.yaml
+- aws_managed/AWSServiceRolePolicyForBackupRestoreTesting.yaml
+- aws_managed/AWSSecurityIncidentResponseCaseFullAccess.yaml
+source_hash: 7ee0d961033ba61a
+policy:
+  Version: '2012-10-17'
+  Statement:
+  - Sid: AIOPSServiceAccess
+    Effect: Allow
+    Action:
+    - access-analyzer:GetAnalyzer
+    - access-analyzer:List*
+    - acm-pca:Describe*
+    - acm-pca:GetCertificate
+    - acm-pca:GetCertificateAuthorityCertificate
+    - acm-pca:GetCertificateAuthorityCsr
+    - acm-pca:List*
+    - acm:DescribeCertificate
+    - acm:GetAccountConfiguration
+    - aidevops:GetKnowledgeItem
+    - aidevops:ListKnowledgeItems
+    - airflow:List*
+    - amplify:GetApp
+    - amplify:GetBranch
+    - amplify:GetDomainAssociation
+    - amplify:List*
+    - aoss:BatchGetCollection
+    - aoss:BatchGetLifecyclePolicy
+    - aoss:BatchGetVpcEndpoint
+    - aoss:GetAccessPolicy
+    - aoss:GetSecurityConfig
+    - aoss:GetSecurityPolicy
+    - aoss:List*
+    - appconfig:GetApplication
+    - appconfig:GetConfigurationProfile
+    - appconfig:GetEnvironment
+    - appconfig:GetHostedConfigurationVersion
+    - appconfig:List*
+    - appflow:Describe*
+    - appflow:List*
+    - application-autoscaling:Describe*
+    - application-signals:BatchGetServiceLevelObjectiveBudgetReport
+    - application-signals:GetService
+    - application-signals:GetServiceLevelObjective
+    - application-signals:List*
+    - applicationinsights:Describe*
+    - applicationinsights:List*
+    - apprunner:Describe*
+    - apprunner:List*
+    - appstream:Describe*
+    - appstream:List*
+    - appsync:GetApiAssociation
+    - appsync:GetDataSource
+    - appsync:GetDomainName
+    - appsync:GetFunction
+    - appsync:GetGraphqlApi
+    - appsync:GetGraphqlApiEnvironmentVariables
+    - appsync:GetIntrospectionSchema
+    - appsync:GetResolver
+    - appsync:GetSourceApiAssociation
+    - appsync:List*
+    - aps:Describe*
+    - aps:List*
+    - arc-zonal-shift:GetManagedResource
+    - arc-zonal-shift:List*
+    - athena:GetCapacityAssignmentConfiguration
+    - athena:GetCapacityReservation
+    - athena:GetDataCatalog
+    - athena:GetNamedQuery
+    - athena:GetPreparedStatement
+    - athena:GetWorkGroup
+    - athena:List*
+    - auditmanager:GetAssessment
+    - auditmanager:List*
+    - autoscaling:Describe*
+    - backup-gateway:GetHypervisor
+    - backup-gateway:List*
+    - backup:Describe*
+    - backup:GetBackupPlan
+    - backup:GetBackupSelection
+    - backup:GetBackupVaultAccessPolicy
+    - backup:GetBackupVaultNotifications
+    - backup:GetRestoreTestingPlan
+    - backup:GetRestoreTestingSelection
+    - backup:List*
+    - batch:DescribeComputeEnvironments
+    - batch:DescribeJobQueues
+    - batch:DescribeSchedulingPolicies
+    - batch:List*
+    - bedrock:GetAgent
+    - bedrock:GetAgentActionGroup
+    - bedrock:GetAgentAlias
+    - bedrock:GetAgentKnowledgeBase
+    - bedrock:GetDataSource
+    - bedrock:GetGuardrail
+    - bedrock:GetKnowledgeBase
+    - bedrock:List*
+    - budgets:Describe*
+    - budgets:List*
+    - ce:Describe*
+    - ce:Get*
+    - ce:List*
+    - chatbot:Describe*
+    - chatbot:GetMicrosoftTeamsChannelConfiguration
+    - chatbot:List*
+    - cleanrooms-ml:GetTrainingDataset
+    - cleanrooms-ml:List*
+    - cleanrooms:GetAnalysisTemplate
+    - cleanrooms:GetCollaboration
+    - cleanrooms:GetConfiguredTable
+    - cleanrooms:GetConfiguredTableAnalysisRule
+    - cleanrooms:GetConfiguredTableAssociation
+    - cleanrooms:GetMembership
+    - cleanrooms:List*
+    - cloudformation:Describe*
+    - cloudformation:GetResource
+    - cloudformation:GetStackPolicy
+    - cloudformation:GetTemplate
+    - cloudformation:List*
+    - cloudfront:Describe*
+    - cloudfront:GetCachePolicy
+    - cloudfront:GetCloudFrontOriginAccessIdentity
+    - cloudfront:GetContinuousDeploymentPolicy
+    - cloudfront:GetDistribution
+    - cloudfront:GetDistributionConfig
+    - cloudfront:GetFunction
+    - cloudfront:GetKeyGroup
+    - cloudfront:GetMonitoringSubscription
+    - cloudfront:GetOriginAccessControl
+    - cloudfront:GetOriginRequestPolicy
+    - cloudfront:GetPublicKey
+    - cloudfront:GetRealtimeLogConfig
+    - cloudfront:GetResponseHeadersPolicy
+    - cloudfront:List*
+    - cloudtrail:Describe*
+    - cloudtrail:GetChannel
+    - cloudtrail:GetEventConfiguration
+    - cloudtrail:GetEventDataStore
+    - cloudtrail:GetEventSelectors
+    - cloudtrail:GetInsightSelectors
+    - cloudtrail:GetQueryResults
+    - cloudtrail:GetResourcePolicy
+    - cloudtrail:GetTrail
+    - cloudtrail:GetTrailStatus
+    - cloudtrail:List*
+    - cloudtrail:LookupEvents
+    - cloudtrail:StartQuery
+    - cloudwatch:Describe*
+    - cloudwatch:GenerateQuery
+    - cloudwatch:GetDashboard
+    - cloudwatch:GetInsightRuleReport
+    - cloudwatch:GetMetricData
+    - cloudwatch:GetMetricStatistics
+    - cloudwatch:GetMetricStream
+    - cloudwatch:GetService
+    - cloudwatch:GetServiceLevelObjective
+    - cloudwatch:List*
+    - codeartifact:Describe*
+    - codeartifact:GetDomainPermissionsPolicy
+    - codeartifact:GetRepositoryPermissionsPolicy
+    - codeartifact:List*
+    - codebuild:BatchGetFleets
+    - codebuild:List*
+    - codecommit:GetRepository
+    - codecommit:GetRepositoryTriggers
+    - codedeploy:BatchGetDeployments
+    - codedeploy:BatchGetDeploymentTargets
+    - codedeploy:GetApplication
+    - codedeploy:GetDeploymentConfig
+    - codedeploy:GetDeploymentTarget
+    - codedeploy:List*
+    - codeguru-profiler:Describe*
+    - codeguru-profiler:GetNotificationConfiguration
+    - codeguru-profiler:GetPolicy
+    - codeguru-profiler:List*
+    - codeguru-reviewer:Describe*
+    - codeguru-reviewer:List*
+    - codepipeline:GetPipeline
+    - codepipeline:GetPipelineState
+    - codepipeline:List*
+    - codestar-connections:GetConnection
+    - codestar-connections:GetRepositoryLink
+    - codestar-connections:GetSyncConfiguration
+    - codestar-connections:List*
+    - codestar-notifications:Describe*
+    - codestar-notifications:List*
+    - cognito-identity:DescribeIdentityPool
+    - cognito-identity:GetIdentityPoolRoles
+    - cognito-identity:ListIdentityPools
+    - cognito-identity:ListTagsForResource
+    - cognito-idp:AdminListGroupsForUser
+    - cognito-idp:DescribeIdentityProvider
+    - cognito-idp:DescribeResourceServer
+    - cognito-idp:DescribeRiskConfiguration
+    - cognito-idp:DescribeUserImportJob
+    - cognito-idp:DescribeUserPool
+    - cognito-idp:DescribeUserPoolDomain
+    - cognito-idp:GetGroup
+    - cognito-idp:GetLogDeliveryConfiguration
+    - cognito-idp:GetUICustomization
+    - cognito-idp:GetUserPoolMfaConfig
+    - cognito-idp:GetWebACLForResource
+    - cognito-idp:ListGroups
+    - cognito-idp:ListIdentityProviders
+    - cognito-idp:ListResourceServers
+    - cognito-idp:ListUserPoolClients
+    - cognito-idp:ListUserPools
+    - cognito-idp:ListTagsForResource
+    - comprehend:Describe*
+    - comprehend:List*
+    - config:Describe*
+    - config:GetStoredQuery
+    - config:List*
+    - connect:Describe*
+    - connect:GetTaskTemplate
+    - connect:List*
+    - databrew:Describe*
+    - databrew:List*
+    - datapipeline:Describe*
+    - datapipeline:GetPipelineDefinition
+    - datapipeline:List*
+    - datasync:Describe*
+    - datasync:List*
+    - deadline:GetFarm
+    - deadline:GetFleet
+    - deadline:GetLicenseEndpoint
+    - deadline:GetMonitor
+    - deadline:GetQueue
+    - deadline:GetQueueEnvironment
+    - deadline:GetQueueFleetAssociation
+    - deadline:GetStorageProfile
+    - deadline:List*
+    - detective:GetMembers
+    - detective:List*
+    - devicefarm:GetDevicePool
+    - devicefarm:GetInstanceProfile
+    - devicefarm:GetNetworkProfile
+    - devicefarm:GetProject
+    - devicefarm:GetTestGridProject
+    - devicefarm:GetVPCEConfiguration
+    - devicefarm:List*
+    - devops-guru:Describe*
+    - devops-guru:GetResourceCollection
+    - devops-guru:List*
+    - dms:Describe*
+    - dms:List*
+    - ds:Describe*
+    - dynamodb:Describe*
+    - dynamodb:GetResourcePolicy
+    - dynamodb:List*
+    - ec2:Describe*
+    - ec2:GetAssociatedEnclaveCertificateIamRoles
+    - ec2:GetIpamPoolAllocations
+    - ec2:GetIpamPoolCidrs
+    - ec2:GetManagedPrefixListEntries
+    - ec2:GetNetworkInsightsAccessScopeContent
+    - ec2:GetSnapshotBlockPublicAccessState
+    - ec2:GetTransitGatewayMulticastDomainAssociations
+    - ec2:GetTransitGatewayRouteTableAssociations
+    - ec2:GetTransitGatewayRouteTablePropagations
+    - ec2:GetVerifiedAccessEndpointPolicy
+    - ec2:GetVerifiedAccessGroupPolicy
+    - ec2:GetVerifiedAccessInstanceWebAcl
+    - ec2:SearchLocalGatewayRoutes
+    - ec2:SearchTransitGatewayRoutes
+    - ecr:Describe*
+    - ecr:GetLifecyclePolicy
+    - ecr:GetRegistryPolicy
+    - ecr:GetRepositoryPolicy
+    - ecr:List*
+    - ecs:Describe*
+    - ecs:List*
+    - eks:AccessKubernetesApi
+    - eks:Describe*
+    - eks:List*
+    - elasticache:Describe*
+    - elasticache:List*
+    - elasticbeanstalk:Describe*
+    - elasticbeanstalk:List*
+    - elasticfilesystem:Describe*
+    - elasticloadbalancing:GetResourcePolicy
+    - elasticloadbalancing:GetTrustStoreCaCertificatesBundle
+    - elasticloadbalancing:GetTrustStoreRevocationContent
+    - elasticloadbalancing:Describe*
+    - elasticmapreduce:Describe*
+    - elasticmapreduce:List*
+    - emr-containers:Describe*
+    - emr-containers:List*
+    - emr-serverless:GetApplication
+    - emr-serverless:List*
+    - es:Describe*
+    - es:List*
+    - events:Describe*
+    - events:List*
+    - evidently:GetExperiment
+    - evidently:GetFeature
+    - evidently:GetLaunch
+    - evidently:GetProject
+    - evidently:GetSegment
+    - evidently:List*
+    - firehose:Describe*
+    - firehose:List*
+    - fis:GetExperimentTemplate
+    - fis:GetTargetAccountConfiguration
+    - fis:List*
+    - fms:GetNotificationChannel
+    - fms:GetPolicy
+    - fms:List*
+    - forecast:Describe*
+    - forecast:List*
+    - frauddetector:BatchGetVariable
+    - frauddetector:Describe*
+    - frauddetector:GetDetectors
+    - frauddetector:GetDetectorVersion
+    - frauddetector:GetEntityTypes
+    - frauddetector:GetEventTypes
+    - frauddetector:GetExternalModels
+    - frauddetector:GetLabels
+    - frauddetector:GetListElements
+    - frauddetector:GetListsMetadata
+    - frauddetector:GetModelVersion
+    - frauddetector:GetOutcomes
+    - frauddetector:GetRules
+    - frauddetector:GetVariables
+    - frauddetector:List*
+    - fsx:Describe*
+    - gamelift:Describe*
+    - gamelift:List*
+    - globalaccelerator:Describe*
+    - globalaccelerator:List*
+    - glue:GetDatabase
+    - glue:GetDatabases
+    - glue:GetJob
+    - glue:GetRegistry
+    - glue:GetSchema
+    - glue:GetSchemaVersion
+    - glue:GetTable
+    - glue:GetTags
+    - glue:GetTrigger
+    - glue:List*
+    - glue:querySchemaVersionMetadata
+    - grafana:Describe*
+    - grafana:List*
+    - greengrass:Describe*
+    - greengrass:GetDeployment
+    - greengrass:List*
+    - groundstation:GetConfig
+    - groundstation:GetDataflowEndpointGroup
+    - groundstation:GetMissionProfile
+    - groundstation:List*
+    - guardduty:GetDetector
+    - guardduty:GetFilter
+    - guardduty:GetIPSet
+    - guardduty:GetMalwareProtectionPlan
+    - guardduty:GetMasterAccount
+    - guardduty:GetMembers
+    - guardduty:GetThreatIntelSet
+    - guardduty:List*
+    - health:DescribeEvents
+    - health:DescribeEventDetails
+    - healthlake:Describe*
+    - healthlake:List*
+    - iam:GetGroup
+    - iam:GetGroupPolicy
+    - iam:GetInstanceProfile
+    - iam:GetLoginProfile
+    - iam:GetOpenIDConnectProvider
+    - iam:GetPolicy
+    - iam:GetPolicyVersion
+    - iam:GetRole
+    - iam:GetRolePolicy
+    - iam:GetSAMLProvider
+    - iam:GetServerCertificate
+    - iam:GetServiceLinkedRoleDeletionStatus
+    - iam:GetUser
+    - iam:GetUserPolicy
+    - iam:ListAttachedRolePolicies
+    - iam:ListOpenIDConnectProviders
+    - iam:ListRolePolicies
+    - iam:ListRoles
+    - iam:ListServerCertificates
+    - iam:ListVirtualMFADevices
+    - identitystore:DescribeGroup
+    - identitystore:DescribeGroupMembership
+    - identitystore:ListGroupMemberships
+    - identitystore:ListGroups
+    - imagebuilder:GetComponent
+    - imagebuilder:GetContainerRecipe
+    - imagebuilder:GetDistributionConfiguration
+    - imagebuilder:GetImage
+    - imagebuilder:GetImagePipeline
+    - imagebuilder:GetImageRecipe
+    - imagebuilder:GetInfrastructureConfiguration
+    - imagebuilder:GetLifecyclePolicy
+    - imagebuilder:GetWorkflow
+    - imagebuilder:List*
+    - inspector2:List*
+    - inspector:Describe*
+    - inspector:List*
+    - internetmonitor:GetMonitor
+    - internetmonitor:List*
+    - iot:Describe*
+    - iot:GetPackage
+    - iot:GetPackageVersion
+    - iot:GetPolicy
+    - iot:GetThingShadow
+    - iot:GetTopicRule
+    - iot:GetTopicRuleDestination
+    - iot:GetV2LoggingOptions
+    - iot:List*
+    - iotanalytics:Describe*
+    - iotanalytics:List*
+    - iotevents:Describe*
+    - iotevents:List*
+    - iotsitewise:Describe*
+    - iotsitewise:List*
+    - iotwireless:GetDestination
+    - iotwireless:GetDeviceProfile
+    - iotwireless:GetFuotaTask
+    - iotwireless:GetMulticastGroup
+    - iotwireless:GetNetworkAnalyzerConfiguration
+    - iotwireless:GetServiceProfile
+    - iotwireless:GetWirelessDevice
+    - iotwireless:GetWirelessGateway
+    - iotwireless:GetWirelessGatewayTaskDefinition
+    - iotwireless:List*
+    - ivs:GetChannel
+    - ivs:GetEncoderConfiguration
+    - ivs:GetPlaybackRestrictionPolicy
+    - ivs:GetRecordingConfiguration
+    - ivs:GetStage
+    - ivs:List*
+    - ivschat:GetLoggingConfiguration
+    - ivschat:GetRoom
+    - ivschat:List*
+    - kafka:Describe*
+    - kafka:GetClusterPolicy
+    - kafka:List*
+    - kafkaconnect:Describe*
+    - kafkaconnect:List*
+    - kendra:Describe*
+    - kendra:List*
+    - kinesis:Describe*
+    - kinesis:GetResourcePolicy
+    - kinesis:List*
+    - kinesisanalytics:Describe*
+    - kinesisanalytics:List*
+    - kinesisvideo:Describe*
+    - kms:DescribeKey
+    - kms:ListResourceTags
+    - kms:ListKeys
+    - kms:GetKeyPolicy
+    - kms:GetKeyRotationStatus
+    - kms:ListAliases
+    - kms:ListKeyRotations
+    - lakeformation:Describe*
+    - lakeformation:GetLFTag
+    - lakeformation:GetResourceLFTags
+    - lakeformation:List*
+    - lambda:GetAlias
+    - lambda:GetCodeSigningConfig
+    - lambda:GetEventSourceMapping
+    - lambda:GetFunctionCodeSigningConfig
+    - lambda:GetFunctionConfiguration
+    - lambda:GetFunctionEventInvokeConfig
+    - lambda:GetFunctionRecursionConfig
+    - lambda:GetFunctionUrlConfig
+    - lambda:GetLayerVersion
+    - lambda:GetLayerVersionPolicy
+    - lambda:GetPolicy
+    - lambda:GetProvisionedConcurrencyConfig
+    - lambda:GetRuntimeManagementConfig
+    - lambda:List*
+    - launchwizard:GetDeployment
+    - launchwizard:List*
+    - license-manager:GetLicense
+    - license-manager:List*
+    - lightsail:GetAlarms
+    - lightsail:GetBuckets
+    - lightsail:GetCertificates
+    - lightsail:GetContainerServices
+    - lightsail:GetDisk
+    - lightsail:GetDisks
+    - lightsail:GetInstance
+    - lightsail:GetInstances
+    - lightsail:GetLoadBalancer
+    - lightsail:GetLoadBalancers
+    - lightsail:GetLoadBalancerTlsCertificates
+    - lightsail:GetStaticIp
+    - lightsail:GetStaticIps
+    - logs:Describe*
+    - logs:FilterLogEvents
+    - logs:GetDataProtectionPolicy
+    - logs:GetDelivery
+    - logs:GetDeliveryDestination
+    - logs:GetDeliveryDestinationPolicy
+    - logs:GetDeliverySource
+    - logs:GetLogAnomalyDetector
+    - logs:GetLogDelivery
+    - logs:GetLogGroupFields
+    - logs:GetQueryResults
+    - logs:List*
+    - logs:StartQuery
+    - logs:StopLiveTail
+    - logs:StopQuery
+    - logs:TestMetricFilter
+    - m2:GetApplication
+    - m2:GetEnvironment
+    - m2:List*
+    - macie2:GetAllowList
+    - macie2:GetCustomDataIdentifier
+    - macie2:GetFindingsFilter
+    - macie2:GetMacieSession
+    - macie2:List*
+    - mediaconnect:Describe*
+    - mediaconnect:List*
+    - medialive:Describe*
+    - medialive:GetCloudWatchAlarmTemplate
+    - medialive:GetCloudWatchAlarmTemplateGroup
+    - medialive:GetEventBridgeRuleTemplate
+    - medialive:GetEventBridgeRuleTemplateGroup
+    - medialive:GetSignalMap
+    - medialive:List*
+    - mediapackage-vod:Describe*
+    - mediapackage-vod:List*
+    - mediapackage:Describe*
+    - mediapackage:List*
+    - mediapackagev2:GetChannel
+    - mediapackagev2:GetChannelGroup
+    - mediapackagev2:GetChannelPolicy
+    - mediapackagev2:GetOriginEndpoint
+    - mediapackagev2:GetOriginEndpointPolicy
+    - mediapackagev2:List*
+    - memorydb:Describe*
+    - memorydb:List*
+    - mobiletargeting:GetInAppTemplate
+    - mobiletargeting:List*
+    - mq:Describe*
+    - mq:List*
+    - network-firewall:Describe*
+    - network-firewall:List*
+    - networkmanager:Describe*
+    - networkmanager:GetConnectAttachment
+    - networkmanager:GetConnectPeer
+    - networkmanager:GetCoreNetwork
+    - networkmanager:GetCoreNetworkPolicy
+    - networkmanager:GetCustomerGatewayAssociations
+    - networkmanager:GetDevices
+    - networkmanager:GetLinkAssociations
+    - networkmanager:GetLinks
+    - networkmanager:GetSites
+    - networkmanager:GetSiteToSiteVpnAttachment
+    - networkmanager:GetTransitGatewayPeering
+    - networkmanager:GetTransitGatewayRegistrations
+    - networkmanager:GetTransitGatewayRouteTableAttachment
+    - networkmanager:GetVpcAttachment
+    - networkmanager:List*
+    - oam:GetLink
+    - oam:GetSink
+    - oam:GetSinkPolicy
+    - oam:List*
+    - omics:GetAnnotationStore
+    - omics:GetReferenceStore
+    - omics:GetRunGroup
+    - omics:GetSequenceStore
+    - omics:GetVariantStore
+    - omics:GetWorkflow
+    - omics:List*
+    - organizations:Describe*
+    - organizations:List*
+    - osis:GetPipeline
+    - osis:List*
+    - payment-cryptography:GetAlias
+    - payment-cryptography:GetKey
+    - payment-cryptography:List*
+    - pca-connector-ad:GetConnector
+    - pca-connector-ad:GetDirectoryRegistration
+    - pca-connector-ad:GetServicePrincipalName
+    - pca-connector-ad:GetTemplate
+    - pca-connector-ad:GetTemplateGroupAccessControlEntry
+    - pca-connector-ad:List*
+    - pca-connector-scep:GetChallengeMetadata
+    - pca-connector-scep:GetConnector
+    - pca-connector-scep:List*
+    - personalize:Describe*
+    - personalize:List*
+    - pi:Describe*
+    - pi:Get*
+    - pi:List*
+    - pipes:Describe*
+    - pipes:List*
+    - proton:GetEnvironmentTemplate
+    - proton:GetServiceTemplate
+    - proton:List*
+    - qbusiness:GetApplication
+    - qbusiness:GetDataSource
+    - qbusiness:GetIndex
+    - qbusiness:GetPlugin
+    - qbusiness:GetRetriever
+    - qbusiness:GetWebExperience
+    - qbusiness:List*
+    - ram:GetPermission
+    - ram:GetResourceShares
+    - ram:List*
+    - rds:Describe*
+    - rds:List*
+    - redshift-serverless:GetNamespace
+    - redshift-serverless:GetWorkgroup
+    - redshift-serverless:List*
+    - redshift:Describe*
+    - refactor-spaces:GetApplication
+    - refactor-spaces:GetEnvironment
+    - refactor-spaces:GetRoute
+    - refactor-spaces:List*
+    - rekognition:Describe*
+    - rekognition:List*
+    - resiliencehub:Describe*
+    - resiliencehub:List*
+    - resource-explorer-2:GetDefaultView
+    - resource-explorer-2:GetIndex
+    - resource-explorer-2:GetView
+    - resource-explorer-2:List*
+    - resource-explorer-2:Search
+    - resource-groups:GetGroup
+    - resource-groups:GetGroupConfiguration
+    - resource-groups:GetGroupQuery
+    - resource-groups:GetTags
+    - resource-groups:List*
+    - route53-recovery-control-config:Describe*
+    - route53-recovery-control-config:List*
+    - route53-recovery-readiness:GetCell
+    - route53-recovery-readiness:GetReadinessCheck
+    - route53-recovery-readiness:GetRecoveryGroup
+    - route53-recovery-readiness:GetResourceSet
+    - route53-recovery-readiness:List*
+    - route53:GetDNSSEC
+    - route53:GetHealthCheck
+    - route53:GetHealthCheckStatus
+    - route53:GetHostedZone
+    - route53:List*
+    - route53profiles:GetProfile
+    - route53profiles:GetProfileAssociation
+    - route53profiles:GetProfileResourceAssociation
+    - route53profiles:List*
+    - route53resolver:GetFirewallDomainList
+    - route53resolver:GetFirewallRuleGroup
+    - route53resolver:GetFirewallRuleGroupAssociation
+    - route53resolver:GetOutpostResolver
+    - route53resolver:GetResolverConfig
+    - route53resolver:GetResolverQueryLogConfig
+    - route53resolver:GetResolverQueryLogConfigAssociation
+    - route53resolver:GetResolverRule
+    - route53resolver:GetResolverRuleAssociation
+    - route53resolver:List*
+    - rum:GetAppMonitor
+    - rum:List*
+    - s3-outposts:ListEndpoints
+    - s3-outposts:ListOutpostsWithS3
+    - s3:GetAccessGrant
+    - s3:GetAccessGrantsInstance
+    - s3:GetAccessGrantsLocation
+    - s3:GetAccessPoint
+    - s3:GetAccessPointConfigurationForObjectLambda
+    - s3:GetAccessPointForObjectLambda
+    - s3:GetAccessPointPolicy
+    - s3:GetAccessPointPolicyForObjectLambda
+    - s3:GetAccessPointPolicyStatusForObjectLambda
+    - s3:GetBucketAbac
+    - s3:GetBucketAcl
+    - s3:GetBucketCORS
+    - s3:GetBucketLocation
+    - s3:GetBucketLogging
+    - s3:GetBucketMetadataTableConfiguration
+    - s3:GetBucketNotification
+    - s3:GetBucketObjectLockConfiguration
+    - s3:GetBucketOwnershipControls
+    - s3:GetBucketPolicy
+    - s3:GetBucketPublicAccessBlock
+    - s3:GetBucketTagging
+    - s3:GetBucketVersioning
+    - s3:GetEncryptionConfiguration
+    - s3:GetLifecycleConfiguration
+    - s3:GetMultiRegionAccessPoint
+    - s3:GetMultiRegionAccessPointPolicy
+    - s3:GetMultiRegionAccessPointPolicyStatus
+    - s3:GetReplicationConfiguration
+    - s3:GetStorageLensConfiguration
+    - s3:GetStorageLensConfigurationTagging
+    - s3:GetStorageLensGroup
+    - s3:ListAllMyBuckets
+    - sagemaker:Describe*
+    - sagemaker:List*
+    - scheduler:GetSchedule
+    - scheduler:GetScheduleGroup
+    - scheduler:List*
+    - schemas:Describe*
+    - schemas:GetResourcePolicy
+    - schemas:List*
+    - secretsmanager:Describe*
+    - secretsmanager:GetResourcePolicy
+    - secretsmanager:List*
+    - securityhub:BatchGetAutomationRules
+    - securityhub:BatchGetSecurityControls
+    - securityhub:Describe*
+    - securityhub:GetConfigurationPolicy
+    - securityhub:GetConfigurationPolicyAssociation
+    - securityhub:GetEnabledStandards
+    - securityhub:GetFindingAggregator
+    - securityhub:GetInsights
+    - securityhub:List*
+    - securitylake:GetSubscriber
+    - securitylake:List*
+    - servicecatalog:Describe*
+    - servicecatalog:GetApplication
+    - servicecatalog:GetAttributeGroup
+    - servicecatalog:List*
+    - servicequotas:GetServiceQuota
+    - servicequotas:ListServiceQuotas
+    - ses:Describe*
+    - ses:GetAccount
+    - ses:GetAddonInstance
+    - ses:GetAddonSubscription
+    - ses:GetArchive
+    - ses:GetConfigurationSet
+    - ses:GetConfigurationSetEventDestinations
+    - ses:GetContactList
+    - ses:GetDedicatedIpPool
+    - ses:GetDedicatedIps
+    - ses:GetEmailIdentity
+    - ses:GetEmailTemplate
+    - ses:GetIngressPoint
+    - ses:GetRelay
+    - ses:GetRuleSet
+    - ses:GetTemplate
+    - ses:GetTrafficPolicy
+    - ses:List*
+    - shield:Describe*
+    - shield:List*
+    - signer:GetSigningProfile
+    - signer:List*
+    - sns:GetDataProtectionPolicy
+    - sns:GetSubscriptionAttributes
+    - sns:GetTopicAttributes
+    - sns:List*
+    - sqs:GetQueueAttributes
+    - sqs:GetQueueUrl
+    - sqs:List*
+    - ssm-contacts:GetContact
+    - ssm-contacts:GetContactChannel
+    - ssm-contacts:List*
+    - ssm-incidents:GetReplicationSet
+    - ssm-incidents:GetResponsePlan
+    - ssm-incidents:List*
+    - ssm-sap:GetApplication
+    - ssm-sap:List*
+    - ssm:Describe*
+    - ssm:GetDefaultPatchBaseline
+    - ssm:GetDocument
+    - ssm:GetParameters
+    - ssm:GetPatchBaseline
+    - ssm:GetResourcePolicies
+    - ssm:List*
+    - sso:GetInlinePolicyForPermissionSet
+    - sso:GetManagedApplicationInstance
+    - sso:GetPermissionsBoundaryForPermissionSet
+    - sso:GetSharedSsoConfiguration
+    - sso:ListAccountAssignments
+    - sso:ListApplicationAssignments
+    - sso:ListApplications
+    - sso:ListCustomerManagedPolicyReferencesInPermissionSet
+    - sso:ListInstances
+    - sso:ListManagedPoliciesInPermissionSet
+    - sso:ListTagsForResource
+    - states:GetExecutionHistory
+    - states:Describe*
+    - states:List*
+    - support:CreateCase
+    - support:DescribeCases
+    - synthetics:Describe*
+    - synthetics:GetCanary
+    - synthetics:GetCanaryRuns
+    - synthetics:GetGroup
+    - synthetics:List*
+    - tag:GetResources
+    - timestream:Describe*
+    - timestream:List*
+    - transfer:Describe*
+    - transfer:List*
+    - verifiedpermissions:GetIdentitySource
+    - verifiedpermissions:GetPolicy
+    - verifiedpermissions:GetPolicyStore
+    - verifiedpermissions:GetPolicyTemplate
+    - verifiedpermissions:GetSchema
+    - verifiedpermissions:List*
+    - vpc-lattice:GetAccessLogSubscription
+    - vpc-lattice:GetAuthPolicy
+    - vpc-lattice:GetListener
+    - vpc-lattice:GetResourcePolicy
+    - vpc-lattice:GetRule
+    - vpc-lattice:GetService
+    - vpc-lattice:GetServiceNetwork
+    - vpc-lattice:GetServiceNetworkServiceAssociation
+    - vpc-lattice:GetServiceNetworkVpcAssociation
+    - vpc-lattice:GetTargetGroup
+    - vpc-lattice:List*
+    - wafv2:GetIPSet
+    - wafv2:GetLoggingConfiguration
+    - wafv2:GetRegexPatternSet
+    - wafv2:GetRuleGroup
+    - wafv2:GetWebACL
+    - wafv2:GetWebACLForResource
+    - wafv2:List*
+    - workspaces-web:GetBrowserSettings
+    - workspaces-web:GetIdentityProvider
+    - workspaces-web:GetNetworkSettings
+    - workspaces-web:GetPortal
+    - workspaces-web:GetPortalServiceProviderMetadata
+    - workspaces-web:GetTrustStore
+    - workspaces-web:GetUserAccessLoggingSettings
+    - workspaces-web:GetUserSettings
+    - workspaces-web:List*
+    - workspaces:Describe*
+    - xray:BatchGetTraces
+    - xray:GetGroup
+    - xray:GetGroups
+    - xray:GetSamplingRules
+    - xray:GetServiceGraph
+    - xray:GetTraceSummaries
+    - xray:List*
+    Resource: '*'
+  - Sid: AIOPSAPIGatewayAccess
+    Effect: Allow
+    Action:
+    - apigateway:GET
+    Resource:
+    - arn:aws:apigateway:*::/restapis
+    - arn:aws:apigateway:*::/restapis/*
+    - arn:aws:apigateway:*::/restapis/*/deployments
+    - arn:aws:apigateway:*::/restapis/*/deployments/*
+    - arn:aws:apigateway:*::/restapis/*/resources/*/methods/*/integrations
+    - arn:aws:apigateway:*::/restapis/*/resources/*/methods/*/integrations/*
+    - arn:aws:apigateway:*::/restapis/*/stages
+    - arn:aws:apigateway:*::/restapis/*/stages/*
+    - arn:aws:apigateway:*::/apis
+    - arn:aws:apigateway:*::/apis/*
+    - arn:aws:apigateway:*::/apis/*/deployments
+    - arn:aws:apigateway:*::/apis/*/deployments/*
+    - arn:aws:apigateway:*::/apis/*/integrations
+    - arn:aws:apigateway:*::/apis/*/integrations/*
+    - arn:aws:apigateway:*::/apis/*/stages
+    - arn:aws:apigateway:*::/apis/*/stages/*
+    - arn:aws:apigateway:*::/domainnames/*
+  - Sid: BackupActions
+    Effect: Allow
+    Action:
+    - backup:DescribeRecoveryPoint
+    - backup:DescribeRestoreJob
+    - backup:DescribeProtectedResource
+    - backup:GetRecoveryPointRestoreMetadata
+    - backup:ListBackupVaults
+    - backup:ListProtectedResources
+    - backup:ListProtectedResourcesByBackupVault
+    - backup:ListRecoveryPointsByBackupVault
+    - backup:ListRecoveryPointsByResource
+    - backup:ListTags
+    - backup:StartRestoreJob
+    Resource: '*'
+  - Sid: IamPassRole
+    Effect: Allow
+    Action: iam:PassRole
+    Resource: '*'
+    Condition:
+      StringEquals:
+        iam:PassedToService: backup.amazonaws.com
+  - Sid: DescribeActions
+    Effect: Allow
+    Action:
+    - ec2:DescribeInstances
+    - ec2:DescribeSnapshotTierStatus
+    - ec2:DescribeTags
+    - ec2:DescribeVolumes
+    - elasticfilesystem:DescribeFileSystems
+    - elasticfilesystem:DescribeMountTargets
+    - fsx:DescribeFileSystems
+    - fsx:DescribeVolumes
+    - fsx:ListTagsForResource
+    - rds:DescribeDBInstances
+    - rds:DescribeDBClusters
+    - rds:DescribeDBInstanceAutomatedBackups
+    - rds:DescribeDBClusterAutomatedBackups
+    - rds:ListTagsForResource
+    - redshift:DescribeClusters
+    Resource: '*'
+  - Sid: DeleteActions
+    Effect: Allow
+    Action:
+    - ec2:DeleteVolume
+    - ec2:TerminateInstances
+    - elasticfilesystem:DeleteFilesystem
+    - elasticfilesystem:DeleteMountTarget
+    - rds:DeleteDBCluster
+    - rds:DeleteDBInstance
+    - rds:DeleteTenantDatabase
+    - fsx:DeleteFileSystem
+    - fsx:DeleteVolume
+    Resource: '*'
+    Condition:
+      'Null':
+        aws:ResourceTag/awsbackup-restore-test: 'false'
+  - Sid: DdbDeleteActions
+    Effect: Allow
+    Action:
+    - dynamodb:DeleteTable
+    - dynamodb:DescribeTable
+    Resource: arn:aws:dynamodb:*:*:table/awsbackup-restore-test-*
+    Condition:
+      StringEquals:
+        aws:ResourceAccount: ${aws:PrincipalAccount}
+  - Sid: RedshiftDeleteActions
+    Effect: Allow
+    Action: redshift:DeleteCluster
+    Resource: arn:aws:redshift:*:*:cluster:awsbackup-restore-test-*
+  - Sid: S3DeleteActions
+    Effect: Allow
+    Action:
+    - s3:DeleteBucket
+    - s3:GetLifecycleConfiguration
+    - s3:PutLifecycleConfiguration
+    Resource: arn:aws:s3:::awsbackup-restore-test-*
+    Condition:
+      StringEquals:
+        aws:ResourceAccount: ${aws:PrincipalAccount}
+  - Sid: TimestreamDeleteActions
+    Effect: Allow
+    Action: timestream:DeleteTable
+    Resource: arn:aws:timestream:*:*:database/*/table/awsbackup-restore-test-*
+  - Sid: SecurityIRCaseFullAccess
+    Effect: Allow
+    Action:
+    - security-ir:GetCase
+    - security-ir:ListCases
+    - security-ir:GetCaseAttachmentDownloadUrl
+    - security-ir:ListComments
+    - security-ir:ListCaseEdits
+    - security-ir:CreateCase
+    - security-ir:UpdateCase
+    - security-ir:CloseCase
+    - security-ir:UpdateCaseStatus
+    - security-ir:UpdateResolverType
+    - security-ir:GetCaseAttachmentUploadUrl
+    - security-ir:CreateCaseComment
+    - security-ir:UpdateCaseComment
+    - security-ir:SendFeedback
+    - security-ir:ListInvestigations
+    Resource: '*'
+  - Sid: SecurityIRCaseTagFullAccess
+    Effect: Allow
+    Action:
+    - security-ir:ListTagsForResource
+    - security-ir:TagResource
+    - security-ir:UntagResource
+    Resource: arn:aws:security-ir:*:*:case/*
+request:
+  spec:
+    access_type: read-write
+    duration:
+      duration_hours: 2
+    resource_constraints: []
+  user: dev-bob
+  justification: 'reproduce customer ticket #4422 locally'
+scores:
+  det_score: 9
+  det_factors:
+  - "Action-name wildcard `access-analyzer:List*` on broad resource \u2014 matches multiple access-analyzer APIs at once"
+  - 'Wildcard within sensitive service action: `acm-pca:Describe*`'
+  - '`acm-pca:Describe*` on Resource: `*` touches sensitive service `acm-pca`'
+  - '`acm-pca:GetCertificate` on Resource: `*` touches sensitive service `acm-pca`'
+  - '`acm-pca:GetCertificateAuthorityCertificate` on Resource: `*` touches sensitive service `acm-pca`'
+  - '`acm-pca:GetCertificateAuthorityCsr` on Resource: `*` touches sensitive service `acm-pca`'
+  - 'Wildcard within sensitive service action: `acm-pca:List*`'
+  - '`acm-pca:List*` on Resource: `*` touches sensitive service `acm-pca`'
+  - "Action-name wildcard `airflow:List*` on broad resource \u2014 matches multiple airflow APIs at once"
+  - "Action-name wildcard `amplify:List*` on broad resource \u2014 matches multiple amplify APIs at once"
+  - "Action-name wildcard `aoss:List*` on broad resource \u2014 matches multiple aoss APIs at once"
+  - "Action-name wildcard `appconfig:List*` on broad resource \u2014 matches multiple appconfig APIs at once"
+  - "Action-name wildcard `appflow:Describe*` on broad resource \u2014 matches multiple appflow APIs at once"
+  - "Action-name wildcard `appflow:List*` on broad resource \u2014 matches multiple appflow APIs at once"
+  - "Action-name wildcard `application-autoscaling:Describe*` on broad resource \u2014 matches multiple application-autoscaling\
+    \ APIs at once"
+  - "Action-name wildcard `application-signals:List*` on broad resource \u2014 matches multiple application-signals APIs at\
+    \ once"
+  - "Action-name wildcard `applicationinsights:Describe*` on broad resource \u2014 matches multiple applicationinsights APIs\
+    \ at once"
+  - "Action-name wildcard `applicationinsights:List*` on broad resource \u2014 matches multiple applicationinsights APIs at\
+    \ once"
+  - "Action-name wildcard `apprunner:Describe*` on broad resource \u2014 matches multiple apprunner APIs at once"
+  - "Action-name wildcard `apprunner:List*` on broad resource \u2014 matches multiple apprunner APIs at once"
+  - "Action-name wildcard `appstream:Describe*` on broad resource \u2014 matches multiple appstream APIs at once"
+  - "Action-name wildcard `appstream:List*` on broad resource \u2014 matches multiple appstream APIs at once"
+  - "Action-name wildcard `appsync:List*` on broad resource \u2014 matches multiple appsync APIs at once"
+  - "Action-name wildcard `aps:Describe*` on broad resource \u2014 matches multiple aps APIs at once"
+  - "Action-name wildcard `aps:List*` on broad resource \u2014 matches multiple aps APIs at once"
+  - "Action-name wildcard `arc-zonal-shift:List*` on broad resource \u2014 matches multiple arc-zonal-shift APIs at once"
+  - "Action-name wildcard `athena:List*` on broad resource \u2014 matches multiple athena APIs at once"
+  - "Action-name wildcard `auditmanager:List*` on broad resource \u2014 matches multiple auditmanager APIs at once"
+  - "Action-name wildcard `autoscaling:Describe*` on broad resource \u2014 matches multiple autoscaling APIs at once"
+  - "Action-name wildcard `backup-gateway:List*` on broad resource \u2014 matches multiple backup-gateway APIs at once"
+  - "Action-name wildcard `backup:Describe*` on broad resource \u2014 matches multiple backup APIs at once"
+  - "Action-name wildcard `backup:List*` on broad resource \u2014 matches multiple backup APIs at once"
+  - "Action-name wildcard `batch:List*` on broad resource \u2014 matches multiple batch APIs at once"
+  - '`bedrock:GetAgent` on Resource: `*` touches sensitive service `bedrock`'
+  - '`bedrock:GetAgentActionGroup` on Resource: `*` touches sensitive service `bedrock`'
+  - '`bedrock:GetAgentAlias` on Resource: `*` touches sensitive service `bedrock`'
+  - '`bedrock:GetAgentKnowledgeBase` on Resource: `*` touches sensitive service `bedrock`'
+  - '`bedrock:GetDataSource` on Resource: `*` touches sensitive service `bedrock`'
+  - '`bedrock:GetGuardrail` on Resource: `*` touches sensitive service `bedrock`'
+  - '`bedrock:GetKnowledgeBase` on Resource: `*` touches sensitive service `bedrock`'
+  - 'Wildcard within sensitive service action: `bedrock:List*`'
+  - '`bedrock:List*` on Resource: `*` touches sensitive service `bedrock`'
+  - "Action-name wildcard `budgets:Describe*` on broad resource \u2014 matches multiple budgets APIs at once"
+  - "Action-name wildcard `budgets:List*` on broad resource \u2014 matches multiple budgets APIs at once"
+  - "Action-name wildcard `ce:Describe*` on broad resource \u2014 matches multiple ce APIs at once"
+  - "Action-name wildcard `ce:Get*` on broad resource \u2014 matches multiple ce APIs at once"
+  - "Action-name wildcard `ce:List*` on broad resource \u2014 matches multiple ce APIs at once"
+  - "Action-name wildcard `chatbot:Describe*` on broad resource \u2014 matches multiple chatbot APIs at once"
+  - "Action-name wildcard `chatbot:List*` on broad resource \u2014 matches multiple chatbot APIs at once"
+  - "Action-name wildcard `cleanrooms-ml:List*` on broad resource \u2014 matches multiple cleanrooms-ml APIs at once"
+  - "Action-name wildcard `cleanrooms:List*` on broad resource \u2014 matches multiple cleanrooms APIs at once"
+  - "Action-name wildcard `cloudformation:Describe*` on broad resource \u2014 matches multiple cloudformation APIs at once"
+  - "Action-name wildcard `cloudformation:List*` on broad resource \u2014 matches multiple cloudformation APIs at once"
+  - "Action-name wildcard `cloudfront:Describe*` on broad resource \u2014 matches multiple cloudfront APIs at once"
+  - "Action-name wildcard `cloudfront:List*` on broad resource \u2014 matches multiple cloudfront APIs at once"
+  - "Action-name wildcard `cloudtrail:Describe*` on broad resource \u2014 matches multiple cloudtrail APIs at once"
+  - "Action-name wildcard `cloudtrail:List*` on broad resource \u2014 matches multiple cloudtrail APIs at once"
+  - "Action-name wildcard `cloudwatch:Describe*` on broad resource \u2014 matches multiple cloudwatch APIs at once"
+  - "Action-name wildcard `cloudwatch:List*` on broad resource \u2014 matches multiple cloudwatch APIs at once"
+  - "Action-name wildcard `codeartifact:Describe*` on broad resource \u2014 matches multiple codeartifact APIs at once"
+  - "Action-name wildcard `codeartifact:List*` on broad resource \u2014 matches multiple codeartifact APIs at once"
+  - "Action-name wildcard `codebuild:List*` on broad resource \u2014 matches multiple codebuild APIs at once"
+  - "Action-name wildcard `codedeploy:List*` on broad resource \u2014 matches multiple codedeploy APIs at once"
+  - "Action-name wildcard `codeguru-profiler:Describe*` on broad resource \u2014 matches multiple codeguru-profiler APIs at\
+    \ once"
+  - "Action-name wildcard `codeguru-profiler:List*` on broad resource \u2014 matches multiple codeguru-profiler APIs at once"
+  - "Action-name wildcard `codeguru-reviewer:Describe*` on broad resource \u2014 matches multiple codeguru-reviewer APIs at\
+    \ once"
+  - "Action-name wildcard `codeguru-reviewer:List*` on broad resource \u2014 matches multiple codeguru-reviewer APIs at once"
+  - "Action-name wildcard `codepipeline:List*` on broad resource \u2014 matches multiple codepipeline APIs at once"
+  - "Action-name wildcard `codestar-connections:List*` on broad resource \u2014 matches multiple codestar-connections APIs\
+    \ at once"
+  - "Action-name wildcard `codestar-notifications:Describe*` on broad resource \u2014 matches multiple codestar-notifications\
+    \ APIs at once"
+  - "Action-name wildcard `codestar-notifications:List*` on broad resource \u2014 matches multiple codestar-notifications\
+    \ APIs at once"
+  - '`cognito-identity:DescribeIdentityPool` on Resource: `*` touches sensitive service `cognito-identity`'
+  - '`cognito-identity:GetIdentityPoolRoles` on Resource: `*` touches sensitive service `cognito-identity`'
+  - '`cognito-identity:ListIdentityPools` on Resource: `*` touches sensitive service `cognito-identity`'
+  - '`cognito-identity:ListTagsForResource` on Resource: `*` touches sensitive service `cognito-identity`'
+  - '`cognito-idp:AdminListGroupsForUser` on Resource: `*` touches sensitive service `cognito-idp`'
+  - '`cognito-idp:DescribeIdentityProvider` on Resource: `*` touches sensitive service `cognito-idp`'
+  - '`cognito-idp:DescribeResourceServer` on Resource: `*` touches sensitive service `cognito-idp`'
+  - '`cognito-idp:DescribeRiskConfiguration` on Resource: `*` touches sensitive service `cognito-idp`'
+  - '`cognito-idp:DescribeUserImportJob` on Resource: `*` touches sensitive service `cognito-idp`'
+  - '`cognito-idp:DescribeUserPool` on Resource: `*` touches sensitive service `cognito-idp`'
+  - '`cognito-idp:DescribeUserPoolDomain` on Resource: `*` touches sensitive service `cognito-idp`'
+  - '`cognito-idp:GetGroup` on Resource: `*` touches sensitive service `cognito-idp`'
+  - '`cognito-idp:GetLogDeliveryConfiguration` on Resource: `*` touches sensitive service `cognito-idp`'
+  - '`cognito-idp:GetUICustomization` on Resource: `*` touches sensitive service `cognito-idp`'
+  - '`cognito-idp:GetUserPoolMfaConfig` on Resource: `*` touches sensitive service `cognito-idp`'
+  - '`cognito-idp:GetWebACLForResource` on Resource: `*` touches sensitive service `cognito-idp`'
+  - '`cognito-idp:ListGroups` on Resource: `*` touches sensitive service `cognito-idp`'
+  - '`cognito-idp:ListIdentityProviders` on Resource: `*` touches sensitive service `cognito-idp`'
+  - '`cognito-idp:ListResourceServers` on Resource: `*` touches sensitive service `cognito-idp`'
+  - '`cognito-idp:ListUserPoolClients` on Resource: `*` touches sensitive service `cognito-idp`'
+  - '`cognito-idp:ListUserPools` on Resource: `*` touches sensitive service `cognito-idp`'
+  - '`cognito-idp:ListTagsForResource` on Resource: `*` touches sensitive service `cognito-idp`'
+  - "Action-name wildcard `comprehend:Describe*` on broad resource \u2014 matches multiple comprehend APIs at once"
+  - "Action-name wildcard `comprehend:List*` on broad resource \u2014 matches multiple comprehend APIs at once"
+  - "Action-name wildcard `config:Describe*` on broad resource \u2014 matches multiple config APIs at once"
+  - "Action-name wildcard `config:List*` on broad resource \u2014 matches multiple config APIs at once"
+  - "Action-name wildcard `connect:Describe*` on broad resource \u2014 matches multiple connect APIs at once"
+  - "Action-name wildcard `connect:List*` on broad resource \u2014 matches multiple connect APIs at once"
+  - "Action-name wildcard `databrew:Describe*` on broad resource \u2014 matches multiple databrew APIs at once"
+  - "Action-name wildcard `databrew:List*` on broad resource \u2014 matches multiple databrew APIs at once"
+  - "Action-name wildcard `datapipeline:Describe*` on broad resource \u2014 matches multiple datapipeline APIs at once"
+  - "Action-name wildcard `datapipeline:List*` on broad resource \u2014 matches multiple datapipeline APIs at once"
+  - "Action-name wildcard `datasync:Describe*` on broad resource \u2014 matches multiple datasync APIs at once"
+  - "Action-name wildcard `datasync:List*` on broad resource \u2014 matches multiple datasync APIs at once"
+  - "Action-name wildcard `deadline:List*` on broad resource \u2014 matches multiple deadline APIs at once"
+  - "Action-name wildcard `detective:List*` on broad resource \u2014 matches multiple detective APIs at once"
+  - "Action-name wildcard `devicefarm:List*` on broad resource \u2014 matches multiple devicefarm APIs at once"
+  - "Action-name wildcard `devops-guru:Describe*` on broad resource \u2014 matches multiple devops-guru APIs at once"
+  - "Action-name wildcard `devops-guru:List*` on broad resource \u2014 matches multiple devops-guru APIs at once"
+  - "Action-name wildcard `dms:Describe*` on broad resource \u2014 matches multiple dms APIs at once"
+  - "Action-name wildcard `dms:List*` on broad resource \u2014 matches multiple dms APIs at once"
+  - "Action-name wildcard `ds:Describe*` on broad resource \u2014 matches multiple ds APIs at once"
+  - "Action-name wildcard `dynamodb:Describe*` on broad resource \u2014 matches multiple dynamodb APIs at once"
+  - "Action-name wildcard `dynamodb:List*` on broad resource \u2014 matches multiple dynamodb APIs at once"
+  - "Action-name wildcard `ec2:Describe*` on broad resource \u2014 matches multiple ec2 APIs at once"
+  - "Action-name wildcard `ecr:Describe*` on broad resource \u2014 matches multiple ecr APIs at once"
+  - "Action-name wildcard `ecr:List*` on broad resource \u2014 matches multiple ecr APIs at once"
+  - "Action-name wildcard `ecs:Describe*` on broad resource \u2014 matches multiple ecs APIs at once"
+  - "Action-name wildcard `ecs:List*` on broad resource \u2014 matches multiple ecs APIs at once"
+  - "Action-name wildcard `eks:Describe*` on broad resource \u2014 matches multiple eks APIs at once"
+  - "Action-name wildcard `eks:List*` on broad resource \u2014 matches multiple eks APIs at once"
+  - "Action-name wildcard `elasticache:Describe*` on broad resource \u2014 matches multiple elasticache APIs at once"
+  - "Action-name wildcard `elasticache:List*` on broad resource \u2014 matches multiple elasticache APIs at once"
+  - "Action-name wildcard `elasticbeanstalk:Describe*` on broad resource \u2014 matches multiple elasticbeanstalk APIs at\
+    \ once"
+  - "Action-name wildcard `elasticbeanstalk:List*` on broad resource \u2014 matches multiple elasticbeanstalk APIs at once"
+  - "Action-name wildcard `elasticfilesystem:Describe*` on broad resource \u2014 matches multiple elasticfilesystem APIs at\
+    \ once"
+  - "Action-name wildcard `elasticloadbalancing:Describe*` on broad resource \u2014 matches multiple elasticloadbalancing\
+    \ APIs at once"
+  - "Action-name wildcard `elasticmapreduce:Describe*` on broad resource \u2014 matches multiple elasticmapreduce APIs at\
+    \ once"
+  - "Action-name wildcard `elasticmapreduce:List*` on broad resource \u2014 matches multiple elasticmapreduce APIs at once"
+  - "Action-name wildcard `emr-containers:Describe*` on broad resource \u2014 matches multiple emr-containers APIs at once"
+  - "Action-name wildcard `emr-containers:List*` on broad resource \u2014 matches multiple emr-containers APIs at once"
+  - "Action-name wildcard `emr-serverless:List*` on broad resource \u2014 matches multiple emr-serverless APIs at once"
+  - "Action-name wildcard `es:Describe*` on broad resource \u2014 matches multiple es APIs at once"
+  - "Action-name wildcard `es:List*` on broad resource \u2014 matches multiple es APIs at once"
+  - "Action-name wildcard `events:Describe*` on broad resource \u2014 matches multiple events APIs at once"
+  - "Action-name wildcard `events:List*` on broad resource \u2014 matches multiple events APIs at once"
+  - "Action-name wildcard `evidently:List*` on broad resource \u2014 matches multiple evidently APIs at once"
+  - "Action-name wildcard `firehose:Describe*` on broad resource \u2014 matches multiple firehose APIs at once"
+  - "Action-name wildcard `firehose:List*` on broad resource \u2014 matches multiple firehose APIs at once"
+  - "Action-name wildcard `fis:List*` on broad resource \u2014 matches multiple fis APIs at once"
+  - "Action-name wildcard `fms:List*` on broad resource \u2014 matches multiple fms APIs at once"
+  - "Action-name wildcard `forecast:Describe*` on broad resource \u2014 matches multiple forecast APIs at once"
+  - "Action-name wildcard `forecast:List*` on broad resource \u2014 matches multiple forecast APIs at once"
+  - "Action-name wildcard `frauddetector:Describe*` on broad resource \u2014 matches multiple frauddetector APIs at once"
+  - "Action-name wildcard `frauddetector:List*` on broad resource \u2014 matches multiple frauddetector APIs at once"
+  - "Action-name wildcard `fsx:Describe*` on broad resource \u2014 matches multiple fsx APIs at once"
+  - "Action-name wildcard `gamelift:Describe*` on broad resource \u2014 matches multiple gamelift APIs at once"
+  - "Action-name wildcard `gamelift:List*` on broad resource \u2014 matches multiple gamelift APIs at once"
+  - "Action-name wildcard `globalaccelerator:Describe*` on broad resource \u2014 matches multiple globalaccelerator APIs at\
+    \ once"
+  - "Action-name wildcard `globalaccelerator:List*` on broad resource \u2014 matches multiple globalaccelerator APIs at once"
+  - '`glue:GetDatabase` on Resource: `*` touches sensitive service `glue`'
+  - '`glue:GetDatabases` on Resource: `*` touches sensitive service `glue`'
+  - '`glue:GetJob` on Resource: `*` touches sensitive service `glue`'
+  - '`glue:GetRegistry` on Resource: `*` touches sensitive service `glue`'
+  - '`glue:GetSchema` on Resource: `*` touches sensitive service `glue`'
+  - '`glue:GetSchemaVersion` on Resource: `*` touches sensitive service `glue`'
+  - '`glue:GetTable` on Resource: `*` touches sensitive service `glue`'
+  - '`glue:GetTags` on Resource: `*` touches sensitive service `glue`'
+  - '`glue:GetTrigger` on Resource: `*` touches sensitive service `glue`'
+  - 'Wildcard within sensitive service action: `glue:List*`'
+  - '`glue:List*` on Resource: `*` touches sensitive service `glue`'
+  - '`glue:querySchemaVersionMetadata` on Resource: `*` touches sensitive service `glue`'
+  - "Action-name wildcard `grafana:Describe*` on broad resource \u2014 matches multiple grafana APIs at once"
+  - "Action-name wildcard `grafana:List*` on broad resource \u2014 matches multiple grafana APIs at once"
+  - "Action-name wildcard `greengrass:Describe*` on broad resource \u2014 matches multiple greengrass APIs at once"
+  - "Action-name wildcard `greengrass:List*` on broad resource \u2014 matches multiple greengrass APIs at once"
+  - "Action-name wildcard `groundstation:List*` on broad resource \u2014 matches multiple groundstation APIs at once"
+  - "Action-name wildcard `guardduty:List*` on broad resource \u2014 matches multiple guardduty APIs at once"
+  - "Action-name wildcard `healthlake:Describe*` on broad resource \u2014 matches multiple healthlake APIs at once"
+  - "Action-name wildcard `healthlake:List*` on broad resource \u2014 matches multiple healthlake APIs at once"
+  - '`iam:GetGroup` on Resource: `*` touches sensitive service `iam`'
+  - '`iam:GetGroupPolicy` on Resource: `*` touches sensitive service `iam`'
+  - '`iam:GetInstanceProfile` on Resource: `*` touches sensitive service `iam`'
+  - '`iam:GetLoginProfile` on Resource: `*` touches sensitive service `iam`'
+  - '`iam:GetOpenIDConnectProvider` on Resource: `*` touches sensitive service `iam`'
+  - '`iam:GetPolicy` on Resource: `*` touches sensitive service `iam`'
+  - '`iam:GetPolicyVersion` on Resource: `*` touches sensitive service `iam`'
+  - '`iam:GetRole` on Resource: `*` touches sensitive service `iam`'
+  - '`iam:GetRolePolicy` on Resource: `*` touches sensitive service `iam`'
+  - '`iam:GetSAMLProvider` on Resource: `*` touches sensitive service `iam`'
+  - '`iam:GetServerCertificate` on Resource: `*` touches sensitive service `iam`'
+  - '`iam:GetServiceLinkedRoleDeletionStatus` on Resource: `*` touches sensitive service `iam`'
+  - '`iam:GetUser` on Resource: `*` touches sensitive service `iam`'
+  - '`iam:GetUserPolicy` on Resource: `*` touches sensitive service `iam`'
+  - '`iam:ListAttachedRolePolicies` on Resource: `*` touches sensitive service `iam`'
+  - '`iam:ListOpenIDConnectProviders` on Resource: `*` touches sensitive service `iam`'
+  - '`iam:ListRolePolicies` on Resource: `*` touches sensitive service `iam`'
+  - '`iam:ListRoles` on Resource: `*` touches sensitive service `iam`'
+  - '`iam:ListServerCertificates` on Resource: `*` touches sensitive service `iam`'
+  - '`iam:ListVirtualMFADevices` on Resource: `*` touches sensitive service `iam`'
+  - '`identitystore:DescribeGroup` on Resource: `*` touches sensitive service `identitystore`'
+  - '`identitystore:DescribeGroupMembership` on Resource: `*` touches sensitive service `identitystore`'
+  - '`identitystore:ListGroupMemberships` on Resource: `*` touches sensitive service `identitystore`'
+  - '`identitystore:ListGroups` on Resource: `*` touches sensitive service `identitystore`'
+  - '`imagebuilder:GetComponent` on Resource: `*` touches sensitive service `imagebuilder`'
+  - '`imagebuilder:GetContainerRecipe` on Resource: `*` touches sensitive service `imagebuilder`'
+  - '`imagebuilder:GetDistributionConfiguration` on Resource: `*` touches sensitive service `imagebuilder`'
+  - '`imagebuilder:GetImage` on Resource: `*` touches sensitive service `imagebuilder`'
+  - '`imagebuilder:GetImagePipeline` on Resource: `*` touches sensitive service `imagebuilder`'
+  - '`imagebuilder:GetImageRecipe` on Resource: `*` touches sensitive service `imagebuilder`'
+  - '`imagebuilder:GetInfrastructureConfiguration` on Resource: `*` touches sensitive service `imagebuilder`'
+  - '`imagebuilder:GetLifecyclePolicy` on Resource: `*` touches sensitive service `imagebuilder`'
+  - '`imagebuilder:GetWorkflow` on Resource: `*` touches sensitive service `imagebuilder`'
+  - 'Wildcard within sensitive service action: `imagebuilder:List*`'
+  - '`imagebuilder:List*` on Resource: `*` touches sensitive service `imagebuilder`'
+  - "Action-name wildcard `inspector2:List*` on broad resource \u2014 matches multiple inspector2 APIs at once"
+  - "Action-name wildcard `inspector:Describe*` on broad resource \u2014 matches multiple inspector APIs at once"
+  - "Action-name wildcard `inspector:List*` on broad resource \u2014 matches multiple inspector APIs at once"
+  - "Action-name wildcard `internetmonitor:List*` on broad resource \u2014 matches multiple internetmonitor APIs at once"
+  - "Action-name wildcard `iot:Describe*` on broad resource \u2014 matches multiple iot APIs at once"
+  - "Action-name wildcard `iot:List*` on broad resource \u2014 matches multiple iot APIs at once"
+  - "Action-name wildcard `iotanalytics:Describe*` on broad resource \u2014 matches multiple iotanalytics APIs at once"
+  - "Action-name wildcard `iotanalytics:List*` on broad resource \u2014 matches multiple iotanalytics APIs at once"
+  - "Action-name wildcard `iotevents:Describe*` on broad resource \u2014 matches multiple iotevents APIs at once"
+  - "Action-name wildcard `iotevents:List*` on broad resource \u2014 matches multiple iotevents APIs at once"
+  - "Action-name wildcard `iotsitewise:Describe*` on broad resource \u2014 matches multiple iotsitewise APIs at once"
+  - "Action-name wildcard `iotsitewise:List*` on broad resource \u2014 matches multiple iotsitewise APIs at once"
+  - "Action-name wildcard `iotwireless:List*` on broad resource \u2014 matches multiple iotwireless APIs at once"
+  - "Action-name wildcard `ivs:List*` on broad resource \u2014 matches multiple ivs APIs at once"
+  - "Action-name wildcard `ivschat:List*` on broad resource \u2014 matches multiple ivschat APIs at once"
+  - "Action-name wildcard `kafka:Describe*` on broad resource \u2014 matches multiple kafka APIs at once"
+  - "Action-name wildcard `kafka:List*` on broad resource \u2014 matches multiple kafka APIs at once"
+  - "Action-name wildcard `kafkaconnect:Describe*` on broad resource \u2014 matches multiple kafkaconnect APIs at once"
+  - "Action-name wildcard `kafkaconnect:List*` on broad resource \u2014 matches multiple kafkaconnect APIs at once"
+  - "Action-name wildcard `kendra:Describe*` on broad resource \u2014 matches multiple kendra APIs at once"
+  - "Action-name wildcard `kendra:List*` on broad resource \u2014 matches multiple kendra APIs at once"
+  - "Action-name wildcard `kinesis:Describe*` on broad resource \u2014 matches multiple kinesis APIs at once"
+  - "Action-name wildcard `kinesis:List*` on broad resource \u2014 matches multiple kinesis APIs at once"
+  - "Action-name wildcard `kinesisanalytics:Describe*` on broad resource \u2014 matches multiple kinesisanalytics APIs at\
+    \ once"
+  - "Action-name wildcard `kinesisanalytics:List*` on broad resource \u2014 matches multiple kinesisanalytics APIs at once"
+  - "Action-name wildcard `kinesisvideo:Describe*` on broad resource \u2014 matches multiple kinesisvideo APIs at once"
+  - '`kms:DescribeKey` on Resource: `*` touches sensitive service `kms`'
+  - '`kms:ListResourceTags` on Resource: `*` touches sensitive service `kms`'
+  - '`kms:ListKeys` on Resource: `*` touches sensitive service `kms`'
+  - '`kms:GetKeyPolicy` on Resource: `*` touches sensitive service `kms`'
+  - '`kms:GetKeyRotationStatus` on Resource: `*` touches sensitive service `kms`'
+  - '`kms:ListAliases` on Resource: `*` touches sensitive service `kms`'
+  - '`kms:ListKeyRotations` on Resource: `*` touches sensitive service `kms`'
+  - "Action-name wildcard `lakeformation:Describe*` on broad resource \u2014 matches multiple lakeformation APIs at once"
+  - "Action-name wildcard `lakeformation:List*` on broad resource \u2014 matches multiple lakeformation APIs at once"
+  - "Action-name wildcard `lambda:List*` on broad resource \u2014 matches multiple lambda APIs at once"
+  - "Action-name wildcard `launchwizard:List*` on broad resource \u2014 matches multiple launchwizard APIs at once"
+  - "Action-name wildcard `license-manager:List*` on broad resource \u2014 matches multiple license-manager APIs at once"
+  - "Action-name wildcard `logs:Describe*` on broad resource \u2014 matches multiple logs APIs at once"
+  - "Action-name wildcard `logs:List*` on broad resource \u2014 matches multiple logs APIs at once"
+  - "Action-name wildcard `m2:List*` on broad resource \u2014 matches multiple m2 APIs at once"
+  - "Action-name wildcard `macie2:List*` on broad resource \u2014 matches multiple macie2 APIs at once"
+  - "Action-name wildcard `mediaconnect:Describe*` on broad resource \u2014 matches multiple mediaconnect APIs at once"
+  - "Action-name wildcard `mediaconnect:List*` on broad resource \u2014 matches multiple mediaconnect APIs at once"
+  - "Action-name wildcard `medialive:Describe*` on broad resource \u2014 matches multiple medialive APIs at once"
+  - "Action-name wildcard `medialive:List*` on broad resource \u2014 matches multiple medialive APIs at once"
+  - "Action-name wildcard `mediapackage-vod:Describe*` on broad resource \u2014 matches multiple mediapackage-vod APIs at\
+    \ once"
+  - "Action-name wildcard `mediapackage-vod:List*` on broad resource \u2014 matches multiple mediapackage-vod APIs at once"
+  - "Action-name wildcard `mediapackage:Describe*` on broad resource \u2014 matches multiple mediapackage APIs at once"
+  - "Action-name wildcard `mediapackage:List*` on broad resource \u2014 matches multiple mediapackage APIs at once"
+  - "Action-name wildcard `mediapackagev2:List*` on broad resource \u2014 matches multiple mediapackagev2 APIs at once"
+  - "Action-name wildcard `memorydb:Describe*` on broad resource \u2014 matches multiple memorydb APIs at once"
+  - "Action-name wildcard `memorydb:List*` on broad resource \u2014 matches multiple memorydb APIs at once"
+  - "Action-name wildcard `mobiletargeting:List*` on broad resource \u2014 matches multiple mobiletargeting APIs at once"
+  - "Action-name wildcard `mq:Describe*` on broad resource \u2014 matches multiple mq APIs at once"
+  - "Action-name wildcard `mq:List*` on broad resource \u2014 matches multiple mq APIs at once"
+  - "Action-name wildcard `network-firewall:Describe*` on broad resource \u2014 matches multiple network-firewall APIs at\
+    \ once"
+  - "Action-name wildcard `network-firewall:List*` on broad resource \u2014 matches multiple network-firewall APIs at once"
+  - "Action-name wildcard `networkmanager:Describe*` on broad resource \u2014 matches multiple networkmanager APIs at once"
+  - "Action-name wildcard `networkmanager:List*` on broad resource \u2014 matches multiple networkmanager APIs at once"
+  - "Action-name wildcard `oam:List*` on broad resource \u2014 matches multiple oam APIs at once"
+  - "Action-name wildcard `omics:List*` on broad resource \u2014 matches multiple omics APIs at once"
+  - 'Wildcard within sensitive service action: `organizations:Describe*`'
+  - '`organizations:Describe*` on Resource: `*` touches sensitive service `organizations`'
+  - 'Wildcard within sensitive service action: `organizations:List*`'
+  - '`organizations:List*` on Resource: `*` touches sensitive service `organizations`'
+  - "Action-name wildcard `osis:List*` on broad resource \u2014 matches multiple osis APIs at once"
+  - "Action-name wildcard `payment-cryptography:List*` on broad resource \u2014 matches multiple payment-cryptography APIs\
+    \ at once"
+  - "Action-name wildcard `pca-connector-ad:List*` on broad resource \u2014 matches multiple pca-connector-ad APIs at once"
+  - "Action-name wildcard `pca-connector-scep:List*` on broad resource \u2014 matches multiple pca-connector-scep APIs at\
+    \ once"
+  - "Action-name wildcard `personalize:Describe*` on broad resource \u2014 matches multiple personalize APIs at once"
+  - "Action-name wildcard `personalize:List*` on broad resource \u2014 matches multiple personalize APIs at once"
+  - "Action-name wildcard `pi:Describe*` on broad resource \u2014 matches multiple pi APIs at once"
+  - "Action-name wildcard `pi:Get*` on broad resource \u2014 matches multiple pi APIs at once"
+  - "Action-name wildcard `pi:List*` on broad resource \u2014 matches multiple pi APIs at once"
+  - "Action-name wildcard `pipes:Describe*` on broad resource \u2014 matches multiple pipes APIs at once"
+  - "Action-name wildcard `pipes:List*` on broad resource \u2014 matches multiple pipes APIs at once"
+  - "Action-name wildcard `proton:List*` on broad resource \u2014 matches multiple proton APIs at once"
+  - "Action-name wildcard `qbusiness:List*` on broad resource \u2014 matches multiple qbusiness APIs at once"
+  - "Action-name wildcard `ram:List*` on broad resource \u2014 matches multiple ram APIs at once"
+  - "Action-name wildcard `rds:Describe*` on broad resource \u2014 matches multiple rds APIs at once"
+  - "Action-name wildcard `rds:List*` on broad resource \u2014 matches multiple rds APIs at once"
+  - "Action-name wildcard `redshift-serverless:List*` on broad resource \u2014 matches multiple redshift-serverless APIs at\
+    \ once"
+  - "Action-name wildcard `redshift:Describe*` on broad resource \u2014 matches multiple redshift APIs at once"
+  - "Action-name wildcard `refactor-spaces:List*` on broad resource \u2014 matches multiple refactor-spaces APIs at once"
+  - "Action-name wildcard `rekognition:Describe*` on broad resource \u2014 matches multiple rekognition APIs at once"
+  - "Action-name wildcard `rekognition:List*` on broad resource \u2014 matches multiple rekognition APIs at once"
+  - "Action-name wildcard `resiliencehub:Describe*` on broad resource \u2014 matches multiple resiliencehub APIs at once"
+  - "Action-name wildcard `resiliencehub:List*` on broad resource \u2014 matches multiple resiliencehub APIs at once"
+  - "Action-name wildcard `resource-explorer-2:List*` on broad resource \u2014 matches multiple resource-explorer-2 APIs at\
+    \ once"
+  - "Action-name wildcard `resource-groups:List*` on broad resource \u2014 matches multiple resource-groups APIs at once"
+  - "Action-name wildcard `route53-recovery-control-config:Describe*` on broad resource \u2014 matches multiple route53-recovery-control-config\
+    \ APIs at once"
+  - "Action-name wildcard `route53-recovery-control-config:List*` on broad resource \u2014 matches multiple route53-recovery-control-config\
+    \ APIs at once"
+  - "Action-name wildcard `route53-recovery-readiness:List*` on broad resource \u2014 matches multiple route53-recovery-readiness\
+    \ APIs at once"
+  - "Action-name wildcard `route53:List*` on broad resource \u2014 matches multiple route53 APIs at once"
+  - "Action-name wildcard `route53profiles:List*` on broad resource \u2014 matches multiple route53profiles APIs at once"
+  - "Action-name wildcard `route53resolver:List*` on broad resource \u2014 matches multiple route53resolver APIs at once"
+  - "Action-name wildcard `rum:List*` on broad resource \u2014 matches multiple rum APIs at once"
+  - 'Wildcard within sensitive service action: `sagemaker:Describe*`'
+  - '`sagemaker:Describe*` on Resource: `*` touches sensitive service `sagemaker`'
+  - 'Wildcard within sensitive service action: `sagemaker:List*`'
+  - '`sagemaker:List*` on Resource: `*` touches sensitive service `sagemaker`'
+  - "Action-name wildcard `scheduler:List*` on broad resource \u2014 matches multiple scheduler APIs at once"
+  - "Action-name wildcard `schemas:Describe*` on broad resource \u2014 matches multiple schemas APIs at once"
+  - "Action-name wildcard `schemas:List*` on broad resource \u2014 matches multiple schemas APIs at once"
+  - 'Wildcard within sensitive service action: `secretsmanager:Describe*`'
+  - '`secretsmanager:Describe*` on Resource: `*` touches sensitive service `secretsmanager`'
+  - '`secretsmanager:GetResourcePolicy` on Resource: `*` touches sensitive service `secretsmanager`'
+  - 'Wildcard within sensitive service action: `secretsmanager:List*`'
+  - '`secretsmanager:List*` on Resource: `*` touches sensitive service `secretsmanager`'
+  - "Action-name wildcard `securityhub:Describe*` on broad resource \u2014 matches multiple securityhub APIs at once"
+  - "Action-name wildcard `securityhub:List*` on broad resource \u2014 matches multiple securityhub APIs at once"
+  - "Action-name wildcard `securitylake:List*` on broad resource \u2014 matches multiple securitylake APIs at once"
+  - "Action-name wildcard `servicecatalog:Describe*` on broad resource \u2014 matches multiple servicecatalog APIs at once"
+  - "Action-name wildcard `servicecatalog:List*` on broad resource \u2014 matches multiple servicecatalog APIs at once"
+  - 'Wildcard within sensitive service action: `ses:Describe*`'
+  - '`ses:Describe*` on Resource: `*` touches sensitive service `ses`'
+  - '`ses:GetAccount` on Resource: `*` touches sensitive service `ses`'
+  - '`ses:GetAddonInstance` on Resource: `*` touches sensitive service `ses`'
+  - '`ses:GetAddonSubscription` on Resource: `*` touches sensitive service `ses`'
+  - '`ses:GetArchive` on Resource: `*` touches sensitive service `ses`'
+  - '`ses:GetConfigurationSet` on Resource: `*` touches sensitive service `ses`'
+  - '`ses:GetConfigurationSetEventDestinations` on Resource: `*` touches sensitive service `ses`'
+  - '`ses:GetContactList` on Resource: `*` touches sensitive service `ses`'
+  - '`ses:GetDedicatedIpPool` on Resource: `*` touches sensitive service `ses`'
+  - '`ses:GetDedicatedIps` on Resource: `*` touches sensitive service `ses`'
+  - '`ses:GetEmailIdentity` on Resource: `*` touches sensitive service `ses`'
+  - '`ses:GetEmailTemplate` on Resource: `*` touches sensitive service `ses`'
+  - '`ses:GetIngressPoint` on Resource: `*` touches sensitive service `ses`'
+  - '`ses:GetRelay` on Resource: `*` touches sensitive service `ses`'
+  - '`ses:GetRuleSet` on Resource: `*` touches sensitive service `ses`'
+  - '`ses:GetTemplate` on Resource: `*` touches sensitive service `ses`'
+  - '`ses:GetTrafficPolicy` on Resource: `*` touches sensitive service `ses`'
+  - 'Wildcard within sensitive service action: `ses:List*`'
+  - '`ses:List*` on Resource: `*` touches sensitive service `ses`'
+  - "Action-name wildcard `shield:Describe*` on broad resource \u2014 matches multiple shield APIs at once"
+  - "Action-name wildcard `shield:List*` on broad resource \u2014 matches multiple shield APIs at once"
+  - "Action-name wildcard `signer:List*` on broad resource \u2014 matches multiple signer APIs at once"
+  - "Action-name wildcard `sns:List*` on broad resource \u2014 matches multiple sns APIs at once"
+  - "Action-name wildcard `sqs:List*` on broad resource \u2014 matches multiple sqs APIs at once"
+  - "Action-name wildcard `ssm-contacts:List*` on broad resource \u2014 matches multiple ssm-contacts APIs at once"
+  - "Action-name wildcard `ssm-incidents:List*` on broad resource \u2014 matches multiple ssm-incidents APIs at once"
+  - "Action-name wildcard `ssm-sap:List*` on broad resource \u2014 matches multiple ssm-sap APIs at once"
+  - 'Wildcard within sensitive service action: `ssm:Describe*`'
+  - '`ssm:Describe*` on Resource: `*` touches sensitive service `ssm`'
+  - '`ssm:GetDefaultPatchBaseline` on Resource: `*` touches sensitive service `ssm`'
+  - '`ssm:GetDocument` on Resource: `*` touches sensitive service `ssm`'
+  - '`ssm:GetParameters` on Resource: `*` (broad access to sensitive resource)'
+  - '`ssm:GetPatchBaseline` on Resource: `*` touches sensitive service `ssm`'
+  - '`ssm:GetResourcePolicies` on Resource: `*` touches sensitive service `ssm`'
+  - 'Wildcard within sensitive service action: `ssm:List*`'
+  - '`ssm:List*` on Resource: `*` touches sensitive service `ssm`'
+  - "Action-name wildcard `states:Describe*` on broad resource \u2014 matches multiple states APIs at once"
+  - "Action-name wildcard `states:List*` on broad resource \u2014 matches multiple states APIs at once"
+  - "Action-name wildcard `synthetics:Describe*` on broad resource \u2014 matches multiple synthetics APIs at once"
+  - "Action-name wildcard `synthetics:List*` on broad resource \u2014 matches multiple synthetics APIs at once"
+  - "Action-name wildcard `timestream:Describe*` on broad resource \u2014 matches multiple timestream APIs at once"
+  - "Action-name wildcard `timestream:List*` on broad resource \u2014 matches multiple timestream APIs at once"
+  - "Action-name wildcard `transfer:Describe*` on broad resource \u2014 matches multiple transfer APIs at once"
+  - "Action-name wildcard `transfer:List*` on broad resource \u2014 matches multiple transfer APIs at once"
+  - "Action-name wildcard `verifiedpermissions:List*` on broad resource \u2014 matches multiple verifiedpermissions APIs at\
+    \ once"
+  - "Action-name wildcard `vpc-lattice:List*` on broad resource \u2014 matches multiple vpc-lattice APIs at once"
+  - "Action-name wildcard `wafv2:List*` on broad resource \u2014 matches multiple wafv2 APIs at once"
+  - "Action-name wildcard `workspaces-web:List*` on broad resource \u2014 matches multiple workspaces-web APIs at once"
+  - "Action-name wildcard `workspaces:Describe*` on broad resource \u2014 matches multiple workspaces APIs at once"
+  - "Action-name wildcard `xray:List*` on broad resource \u2014 matches multiple xray APIs at once"
+  - 'State-changing action `cloudtrail:StartQuery` on Resource: `*` (IAM access level: Write)'
+  - 'Destructive action `logs:StopLiveTail` on Resource: `*` (blast radius = every resource in this account)'
+  - 'Destructive action `logs:StopQuery` on Resource: `*` (blast radius = every resource in this account)'
+  - 'State-changing action `support:CreateCase` on Resource: `*` (IAM access level: Write)'
+  - "`eks:AccessKubernetesApi` is a high-impact mutation on broad resource \u2014 single API call can rewrite every matching\
+    \ resource in the account."
+  - '`eks:AccessKubernetesApi` is catastrophic in blast radius (account governance / IAM total compromise / evidence destruction).
+    Always route to human review.'
+  - 'State-changing action `backup:StartRestoreJob` on Resource: `*` (IAM access level: Write)'
+  - 'Resource: `*` for backup (broad cross-resource read/access)'
+  - '`iam:PassRole` on Resource: `*` is a privilege-escalation path'
+  - 'State-changing action `iam:PassRole` on Resource: `*` (IAM access level: Permissions management)'
+  - 'Destructive action `ec2:DeleteVolume` on Resource: `*` (blast radius = every resource in this account)'
+  - 'Destructive action `ec2:TerminateInstances` on Resource: `*` (blast radius = every resource in this account)'
+  - 'Destructive action `elasticfilesystem:DeleteFilesystem` on Resource: `*` (blast radius = every resource in this account)'
+  - 'Destructive action `elasticfilesystem:DeleteMountTarget` on Resource: `*` (blast radius = every resource in this account)'
+  - 'Destructive action `rds:DeleteDBCluster` on Resource: `*` (blast radius = every resource in this account)'
+  - 'Destructive action `rds:DeleteDBInstance` on Resource: `*` (blast radius = every resource in this account)'
+  - 'Destructive action `rds:DeleteTenantDatabase` on Resource: `*` (blast radius = every resource in this account)'
+  - 'Destructive action `fsx:DeleteFileSystem` on Resource: `*` (blast radius = every resource in this account)'
+  - 'Destructive action `fsx:DeleteVolume` on Resource: `*` (blast radius = every resource in this account)'
+  - 'Resource: `*` for ec2, elasticfilesystem, fsx, rds (broad cross-resource read/access)'
+  - 'Destructive action `dynamodb:DeleteTable` on Resource: `*` (blast radius = every resource in this account)'
+  - 'Resource: `*` for dynamodb (broad cross-resource read/access)'
+  - 'Destructive action `redshift:DeleteCluster` on Resource: `*` (blast radius = every resource in this account)'
+  - 'Resource: `*` for redshift (broad cross-resource read/access)'
+  - 'Destructive action `s3:DeleteBucket` on Resource: `*` (blast radius = every resource in this account)'
+  - 'State-changing action `s3:PutLifecycleConfiguration` on Resource: `*` (IAM access level: Write)'
+  - 'Resource: `*` for s3 (broad cross-resource read/access)'
+  - "`s3:PutLifecycleConfiguration` is a high-impact mutation on broad resource \u2014 single API call can rewrite every matching\
+    \ resource in the account."
+  - 'Destructive action `timestream:DeleteTable` on Resource: `*` (blast radius = every resource in this account)'
+  - 'Resource: `*` for timestream (broad cross-resource read/access)'
+  - 'State-changing action `security-ir:CreateCase` on Resource: `*` (IAM access level: Write)'
+  - 'State-changing action `security-ir:UpdateCase` on Resource: `*` (IAM access level: Write)'
+  - 'State-changing action `security-ir:CloseCase` on Resource: `*` (IAM access level: Write)'
+  - 'State-changing action `security-ir:UpdateCaseStatus` on Resource: `*` (IAM access level: Write)'
+  - 'State-changing action `security-ir:UpdateResolverType` on Resource: `*` (IAM access level: Write)'
+  - 'State-changing action `security-ir:GetCaseAttachmentUploadUrl` on Resource: `*` (IAM access level: Write)'
+  - 'State-changing action `security-ir:CreateCaseComment` on Resource: `*` (IAM access level: Write)'
+  - 'State-changing action `security-ir:UpdateCaseComment` on Resource: `*` (IAM access level: Write)'
+  - 'State-changing action `security-ir:SendFeedback` on Resource: `*` (IAM access level: Write)'
+  - 'Resource: `*` for security-ir (broad cross-resource read/access)'
+  - 'State-changing action `security-ir:TagResource` on Resource: `*` (IAM access level: Tagging)'
+  - 'State-changing action `security-ir:UntagResource` on Resource: `*` (IAM access level: Tagging)'
+  - '`ecs:Describe*` on broad resource reads content that frequently contains secrets / sensitive data (boot logs, command
+    output, log streams, message bodies).'
+  - '`elasticbeanstalk:Describe*` sets up ongoing cross-account / persistent exfiltration in a single call. The blast is ''everything
+    that flows through this resource from now on,'' not just what exists today.'
+  opus_score: null
+  opus_factors: null
+  opus_reasoning: null
+  gap_classification: pending

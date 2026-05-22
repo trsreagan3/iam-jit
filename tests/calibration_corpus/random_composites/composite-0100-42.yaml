@@ -1,0 +1,169 @@
+name: composite-0100-42
+source_policies:
+- aws_managed/AmazonElasticsearchServiceRolePolicy.yaml
+- aws_managed/CloudFormationStackSetsOrgMemberServiceRolePolicy.yaml
+- aws_managed/SplitCostAllocationDataServiceRolePolicy.yaml
+source_hash: 6dea5535327fc094
+policy:
+  Version: '2012-10-17'
+  Statement:
+  - Sid: Stmt1480452973134
+    Action:
+    - ec2:CreateNetworkInterface
+    - ec2:DeleteNetworkInterface
+    - ec2:DescribeNetworkInterfaces
+    - ec2:ModifyNetworkInterfaceAttribute
+    - ec2:DescribeSecurityGroups
+    - ec2:DescribeSubnets
+    - ec2:DescribeVpcs
+    - elasticloadbalancing:AddListenerCertificates
+    - elasticloadbalancing:RemoveListenerCertificates
+    Effect: Allow
+    Resource: '*'
+  - Sid: Stmt1480452973135
+    Effect: Allow
+    Action:
+    - acm:DescribeCertificate
+    Resource: '*'
+  - Sid: Stmt1480452973136
+    Effect: Allow
+    Action: cloudwatch:PutMetricData
+    Resource: '*'
+    Condition:
+      StringEquals:
+        cloudwatch:namespace: AWS/ES
+  - Sid: Stmt1480452973198
+    Effect: Allow
+    Action:
+    - ec2:CreateVpcEndpoint
+    - ec2:ModifyVpcEndpoint
+    Resource:
+    - arn:aws:ec2:*:*:vpc/*
+    - arn:aws:ec2:*:*:security-group/*
+    - arn:aws:ec2:*:*:subnet/*
+    - arn:aws:ec2:*:*:route-table/*
+  - Sid: Stmt1480452973199
+    Effect: Allow
+    Action: ec2:CreateVpcEndpoint
+    Resource: arn:aws:ec2:*:*:vpc-endpoint/*
+    Condition:
+      StringEquals:
+        aws:RequestTag/OpenSearchManaged: 'true'
+  - Sid: Stmt1480452973200
+    Effect: Allow
+    Action:
+    - ec2:ModifyVpcEndpoint
+    - ec2:DeleteVpcEndpoints
+    Resource: arn:aws:ec2:*:*:vpc-endpoint/*
+    Condition:
+      StringEquals:
+        aws:ResourceTag/OpenSearchManaged: 'true'
+  - Sid: Stmt1480452973201
+    Effect: Allow
+    Action:
+    - ec2:DescribeVpcEndpoints
+    Resource: '*'
+  - Sid: Stmt1480452973149
+    Effect: Allow
+    Action:
+    - ec2:AssignIpv6Addresses
+    Resource: arn:aws:ec2:*:*:network-interface/*
+  - Sid: Stmt1480452973150
+    Effect: Allow
+    Action:
+    - ec2:UnAssignIpv6Addresses
+    Resource: arn:aws:ec2:*:*:network-interface/*
+  - Sid: Stmt1480452973202
+    Effect: Allow
+    Action:
+    - ec2:CreateTags
+    Resource: arn:aws:ec2:*:*:vpc-endpoint/*
+    Condition:
+      StringEquals:
+        ec2:CreateAction: CreateVpcEndpoint
+  - Action:
+    - iam:CreateRole
+    - iam:DeleteRole
+    - iam:GetRole
+    Effect: Allow
+    Resource:
+    - arn:aws:iam::*:role/stacksets-exec-*
+  - Action:
+    - iam:DetachRolePolicy
+    - iam:AttachRolePolicy
+    Effect: Allow
+    Resource:
+    - arn:aws:iam::*:role/stacksets-exec-*
+    Condition:
+      StringEquals:
+        iam:PolicyARN: arn:aws:iam::aws:policy/AdministratorAccess
+  - Sid: AwsOrganizationsAccess
+    Effect: Allow
+    Action:
+    - organizations:DescribeOrganization
+    - organizations:ListAccounts
+    - organizations:ListAWSServiceAccessForOrganization
+    - organizations:ListParents
+    Resource: '*'
+  - Sid: AmazonManagedServiceForPrometheusAccess
+    Effect: Allow
+    Action:
+    - aps:ListWorkspaces
+    - aps:QueryMetrics
+    Resource: '*'
+request:
+  spec:
+    access_type: read-write
+    duration:
+      duration_hours: 2
+    resource_constraints: []
+  user: auditor-erin
+  justification: SOC 2 controls evidence collection
+scores:
+  det_score: 9
+  det_factors:
+  - 'State-changing action `ec2:CreateNetworkInterface` on Resource: `*` (IAM access level: Write)'
+  - 'Destructive action `ec2:DeleteNetworkInterface` on Resource: `*` (blast radius = every resource in this account)'
+  - 'State-changing action `ec2:ModifyNetworkInterfaceAttribute` on Resource: `*` (IAM access level: Write)'
+  - 'State-changing action `elasticloadbalancing:AddListenerCertificates` on Resource: `*` (IAM access level: Write)'
+  - 'Destructive action `elasticloadbalancing:RemoveListenerCertificates` on Resource: `*` (blast radius = every resource
+    in this account)'
+  - 'Resource: `*` for ec2, elasticloadbalancing (broad cross-resource read/access)'
+  - "`ec2:CreateNetworkInterface` is a high-impact mutation on broad resource \u2014 single API call can rewrite every matching\
+    \ resource in the account."
+  - 'State-changing action `cloudwatch:PutMetricData` on Resource: `*` (IAM access level: Write)'
+  - 'Resource: `*` for cloudwatch (broad cross-resource read/access)'
+  - 'State-changing action `ec2:CreateVpcEndpoint` on Resource: `*` (IAM access level: Write)'
+  - 'State-changing action `ec2:ModifyVpcEndpoint` on Resource: `*` (IAM access level: Write)'
+  - 'Resource: `*` for ec2 (broad cross-resource read/access)'
+  - "`ec2:ModifyVpcEndpoint` is a high-impact mutation on broad resource \u2014 single API call can rewrite every matching\
+    \ resource in the account."
+  - 'Destructive action `ec2:DeleteVpcEndpoints` on Resource: `*` (blast radius = every resource in this account)'
+  - 'State-changing action `ec2:AssignIpv6Addresses` on Resource: `*` (IAM access level: Write)'
+  - 'State-changing action `ec2:CreateTags` on Resource: `*` (IAM access level: Tagging)'
+  - '`iam:CreateRole` on Resource: `*` touches sensitive service `iam`'
+  - '`iam:DeleteRole` on Resource: `*` touches sensitive service `iam`'
+  - '`iam:GetRole` on Resource: `*` touches sensitive service `iam`'
+  - 'State-changing action `iam:CreateRole` on Resource: `*` (IAM access level: Permissions management)'
+  - 'Destructive action `iam:DeleteRole` on Resource: `*` (blast radius = every resource in this account)'
+  - '`iam:CreateRole` is catastrophic in blast radius (account governance / IAM total compromise / evidence destruction).
+    Always route to human review.'
+  - '`iam:DetachRolePolicy` on Resource: `*` touches sensitive service `iam`'
+  - '`iam:AttachRolePolicy` on Resource: `*` touches sensitive service `iam`'
+  - 'Destructive action `iam:DetachRolePolicy` on Resource: `*` (blast radius = every resource in this account)'
+  - 'State-changing action `iam:AttachRolePolicy` on Resource: `*` (IAM access level: Permissions management)'
+  - "`iam:DetachRolePolicy` is a high-impact mutation on broad resource \u2014 single API call can rewrite every matching\
+    \ resource in the account."
+  - "`iam:AttachRolePolicy` is a high-impact mutation on broad resource \u2014 single API call can rewrite every matching\
+    \ resource in the account."
+  - '`iam:AttachRolePolicy` is catastrophic in blast radius (account governance / IAM total compromise / evidence destruction).
+    Always route to human review.'
+  - '`organizations:DescribeOrganization` on Resource: `*` touches sensitive service `organizations`'
+  - '`organizations:ListAccounts` on Resource: `*` touches sensitive service `organizations`'
+  - '`organizations:ListAWSServiceAccessForOrganization` on Resource: `*` touches sensitive service `organizations`'
+  - '`organizations:ListParents` on Resource: `*` touches sensitive service `organizations`'
+  - 'Resource: `*` for aps (broad cross-resource read/access)'
+  opus_score: null
+  opus_factors: null
+  opus_reasoning: null
+  gap_classification: pending

@@ -1,0 +1,264 @@
+name: composite-0025-42
+source_policies:
+- aws_managed/AIOpsConsoleAdminPolicy.yaml
+- aws_managed/VMImportExportRoleForAWSConnector.yaml
+source_hash: b45f46307d8256e1
+policy:
+  Version: '2012-10-17'
+  Statement:
+  - Sid: AIOpsAdmin
+    Effect: Allow
+    Action:
+    - aiops:*
+    Resource: '*'
+  - Sid: OrganizationsAccess
+    Effect: Allow
+    Action:
+    - organizations:ListAWSServiceAccessForOrganization
+    - organizations:DescribeOrganization
+    Resource: '*'
+  - Sid: SSOApplicationManagement
+    Effect: Allow
+    Action:
+    - sso:PutApplicationAccessScope
+    - sso:PutApplicationAssignmentConfiguration
+    - sso:PutApplicationGrant
+    - sso:PutApplicationAuthenticationMethod
+    - sso:DeleteApplication
+    Resource: '*'
+    Condition:
+      StringEquals:
+        aws:CalledViaLast: aiops.amazonaws.com
+        aws:ResourceTag/ManagedByAmazonAIOperations: 'true'
+  - Sid: SSOApplicationTagManagement
+    Effect: Allow
+    Action:
+    - sso:CreateApplication
+    - sso:TagResource
+    Resource:
+    - arn:aws:sso:::instance/*
+    - arn:aws:sso::aws:applicationProvider/aiops
+    Condition:
+      StringEquals:
+        aws:CalledViaLast: aiops.amazonaws.com
+        aws:RequestTag/ManagedByAmazonAIOperations: 'true'
+      ForAllValues:StringEquals:
+        aws:TagKeys:
+        - ManagedByAmazonAIOperations
+  - Sid: SSOTagManagement
+    Effect: Allow
+    Action:
+    - sso:TagResource
+    Resource: arn:aws:sso::*:application/*
+    Condition:
+      StringEquals:
+        aws:CalledViaLast: aiops.amazonaws.com
+        aws:ResourceTag/ManagedByAmazonAIOperations: 'true'
+      ForAllValues:StringEquals:
+        aws:TagKeys:
+        - ManagedByAmazonAIOperations
+  - Sid: SSOManagementAccess
+    Effect: Allow
+    Action:
+    - identitystore:DescribeUser
+    - sso:ListApplications
+    - sso:ListInstances
+    - sso:DescribeRegisteredRegions
+    - sso:GetSharedSsoConfiguration
+    - sso:DescribeInstance
+    - sso:GetSSOStatus
+    - sso-directory:DescribeUsers
+    Resource: '*'
+  - Sid: AllowSTSContextSetting
+    Effect: Allow
+    Action:
+    - sts:SetContext
+    Resource: arn:aws:sts::*:self
+  - Sid: IdentityPropagationAccess
+    Effect: Allow
+    Action:
+    - signin:ListTrustedIdentityPropagationApplicationsForConsole
+    Resource: '*'
+  - Sid: CloudtrailAccess
+    Effect: Allow
+    Action:
+    - cloudtrail:ListTrails
+    - cloudtrail:DescribeTrails
+    - cloudtrail:ListEventDataStores
+    Resource: '*'
+  - Sid: KMSAccess
+    Effect: Allow
+    Action:
+    - kms:ListAliases
+    Resource: '*'
+  - Sid: SSMIntegrationSecretsManagerAccess
+    Effect: Allow
+    Action:
+    - secretsmanager:CreateSecret
+    - secretsmanager:PutResourcePolicy
+    - secretsmanager:UpdateSecret
+    - secretsmanager:DeleteSecret
+    Resource: arn:aws:secretsmanager:*:*:secret:aws/ssm/3p/*
+  - Sid: SSMIntegrationAccess
+    Effect: Allow
+    Action:
+    - ssm:GetServiceSetting
+    - ssm:UpdateServiceSetting
+    Resource: arn:aws:ssm:*:*:servicesetting/integrations/*
+  - Sid: SSMIntegrationCreatePolicy
+    Effect: Allow
+    Action:
+    - iam:CreatePolicy
+    Resource: arn:aws:iam::*:policy/service-role/AWSServiceRoleSSMIntegrationsPolicy*
+  - Sid: ChatbotConfigurations
+    Effect: Allow
+    Action:
+    - chatbot:DescribeChimeWebhookConfigurations
+    - chatbot:DescribeSlackWorkspaces
+    - chatbot:DescribeSlackChannelConfigurations
+    - chatbot:ListMicrosoftTeamsChannelConfigurations
+    - chatbot:ListMicrosoftTeamsConfiguredTeams
+    Resource: '*'
+  - Sid: IAMPassRoleToAIOps
+    Effect: Allow
+    Action:
+    - iam:PassRole
+    Resource: '*'
+    Condition:
+      StringEquals:
+        iam:PassedToService: aiops.amazonaws.com
+  - Sid: IAMListRoles
+    Effect: Allow
+    Action:
+    - iam:ListRoles
+    Resource: '*'
+  - Sid: TagBoundaryPermission
+    Effect: Allow
+    Action:
+    - tag:GetTagKeys
+    Resource: '*'
+  - Sid: IAMPassRoleToSSMIntegration
+    Effect: Allow
+    Action:
+    - iam:PassRole
+    Resource: '*'
+    Condition:
+      StringEquals:
+        iam:PassedToService: ssm.integrations.amazonaws.com
+      ArnEquals:
+        iam:AssociatedResourceArn: arn:aws:aiops:*:*:investigation-group/*
+  - Sid: SSMOpsItemAccess
+    Effect: Allow
+    Action:
+    - ssm:CreateOpsItem
+    - ssm:AddTagsToResource
+    Resource: arn:*:ssm:*:*:opsitem/*
+    Condition:
+      StringEquals:
+        aws:RequestTag/Integration: CloudWatch
+        aws:ResourceTag/Integration: CloudWatch
+      ForAllValues:StringEquals:
+        aws:TagKeys:
+        - Integration
+  - Sid: CreateAIOpsCrossAccountAssistantPolicy
+    Effect: Allow
+    Action:
+    - iam:CreatePolicy
+    Resource: arn:aws:iam::*:policy/AIOpsCrossAccountAssistantPolicy*
+  - Sid: AmazonQAccess
+    Effect: Allow
+    Action:
+    - q:StartConversation
+    - q:SendMessage
+    - q:GetConversation
+    - q:ListConversations
+    - q:UpdateConversation
+    - q:DeleteConversation
+    - q:PassRequest
+    Resource: '*'
+  - Effect: Allow
+    Action:
+    - s3:ListBucket
+    - s3:GetBucketLocation
+    - s3:GetObject
+    Resource:
+    - arn:aws:s3:::import-to-ec2-*
+  - Effect: Allow
+    Action:
+    - ec2:ModifySnapshotAttribute
+    - ec2:CopySnapshot
+    - ec2:RegisterImage
+    - ec2:Describe*
+    Resource: '*'
+request:
+  spec:
+    access_type: read-write
+    duration:
+      duration_hours: 4
+    resource_constraints: []
+  user: sre-carol
+  justification: scale-out emergency for us-east-1 outage
+scores:
+  det_score: 9
+  det_factors:
+  - '`aiops:*` grants every action in `aiops`'
+  - 'Resource: `*` for aiops (broad cross-resource read/access)'
+  - '`organizations:ListAWSServiceAccessForOrganization` on Resource: `*` touches sensitive service `organizations`'
+  - '`organizations:DescribeOrganization` on Resource: `*` touches sensitive service `organizations`'
+  - 'State-changing action `sso:PutApplicationAccessScope` on Resource: `*` (IAM access level: Write)'
+  - 'State-changing action `sso:PutApplicationAssignmentConfiguration` on Resource: `*` (IAM access level: Write)'
+  - 'State-changing action `sso:PutApplicationGrant` on Resource: `*` (IAM access level: Write)'
+  - 'State-changing action `sso:PutApplicationAuthenticationMethod` on Resource: `*` (IAM access level: Write)'
+  - 'Destructive action `sso:DeleteApplication` on Resource: `*` (blast radius = every resource in this account)'
+  - 'Resource: `*` for sso (broad cross-resource read/access)'
+  - 'State-changing action `sso:CreateApplication` on Resource: `*` (IAM access level: Write)'
+  - 'State-changing action `sso:TagResource` on Resource: `*` (IAM access level: Tagging)'
+  - '`identitystore:DescribeUser` on Resource: `*` touches sensitive service `identitystore`'
+  - '`sts:SetContext` on Resource: `*` touches sensitive service `sts`'
+  - 'State-changing action `sts:SetContext` on Resource: `*` (IAM access level: Write)'
+  - '`kms:ListAliases` on Resource: `*` touches sensitive service `kms`'
+  - '`secretsmanager:CreateSecret` on Resource: `*` touches sensitive service `secretsmanager`'
+  - '`secretsmanager:PutResourcePolicy` on Resource: `*` touches sensitive service `secretsmanager`'
+  - '`secretsmanager:UpdateSecret` on Resource: `*` touches sensitive service `secretsmanager`'
+  - '`secretsmanager:DeleteSecret` on Resource: `*` touches sensitive service `secretsmanager`'
+  - 'State-changing action `secretsmanager:CreateSecret` on Resource: `*` (IAM access level: Write)'
+  - 'State-changing action `secretsmanager:PutResourcePolicy` on Resource: `*` (IAM access level: Permissions management)'
+  - 'State-changing action `secretsmanager:UpdateSecret` on Resource: `*` (IAM access level: Write)'
+  - 'Destructive action `secretsmanager:DeleteSecret` on Resource: `*` (blast radius = every resource in this account)'
+  - "`secretsmanager:UpdateSecret` is a high-impact mutation on broad resource \u2014 single API call can rewrite every matching\
+    \ resource in the account."
+  - '`ssm:GetServiceSetting` on Resource: `*` touches sensitive service `ssm`'
+  - '`ssm:UpdateServiceSetting` on Resource: `*` touches sensitive service `ssm`'
+  - 'State-changing action `ssm:UpdateServiceSetting` on Resource: `*` (IAM access level: Write)'
+  - '`iam:CreatePolicy` on Resource: `*` touches sensitive service `iam`'
+  - 'State-changing action `iam:CreatePolicy` on Resource: `*` (IAM access level: Permissions management)'
+  - '`iam:PassRole` on Resource: `*` is a privilege-escalation path'
+  - 'State-changing action `iam:PassRole` on Resource: `*` (IAM access level: Permissions management)'
+  - '`iam:ListRoles` on Resource: `*` touches sensitive service `iam`'
+  - 'Resource: `*` for tag (broad cross-resource read/access)'
+  - '`Condition.ArnEquals.iam:AssociatedResourceArn: arn:aws:aiops:*:*:investigation-group/*` matches the named principal
+    in EVERY AWS account (account segment wildcarded). The literal resource-name portion doesn''t narrow the scope cross-account.'
+  - '`ssm:CreateOpsItem` on Resource: `*` touches sensitive service `ssm`'
+  - '`ssm:AddTagsToResource` on Resource: `*` touches sensitive service `ssm`'
+  - 'State-changing action `ssm:CreateOpsItem` on Resource: `*` (IAM access level: Write)'
+  - 'State-changing action `ssm:AddTagsToResource` on Resource: `*` (IAM access level: Tagging)'
+  - 'State-changing action `q:StartConversation` on Resource: `*` (IAM access level: Write)'
+  - 'State-changing action `q:SendMessage` on Resource: `*` (IAM access level: Write)'
+  - 'State-changing action `q:UpdateConversation` on Resource: `*` (IAM access level: Write)'
+  - 'Destructive action `q:DeleteConversation` on Resource: `*` (blast radius = every resource in this account)'
+  - 'State-changing action `q:PassRequest` on Resource: `*` (IAM access level: Write)'
+  - 'Resource: `*` for q (broad cross-resource read/access)'
+  - 'Resource: `*` for s3 (broad cross-resource read/access)'
+  - "Action-name wildcard `ec2:Describe*` on broad resource \u2014 matches multiple ec2 APIs at once"
+  - 'State-changing action `ec2:ModifySnapshotAttribute` on Resource: `*` (IAM access level: Permissions management)'
+  - 'State-changing action `ec2:CopySnapshot` on Resource: `*` (IAM access level: Write)'
+  - 'State-changing action `ec2:RegisterImage` on Resource: `*` (IAM access level: Write)'
+  - 'Resource: `*` for ec2 (broad cross-resource read/access)'
+  - '`s3:GetObject` on broad resource reads content that frequently contains secrets / sensitive data (boot logs, command
+    output, log streams, message bodies).'
+  - '`secretsmanager:PutResourcePolicy` sets up ongoing cross-account / persistent exfiltration in a single call. The blast
+    is ''everything that flows through this resource from now on,'' not just what exists today.'
+  opus_score: null
+  opus_factors: null
+  opus_reasoning: null
+  gap_classification: pending

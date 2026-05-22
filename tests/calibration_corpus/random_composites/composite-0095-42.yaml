@@ -1,0 +1,134 @@
+name: composite-0095-42
+source_policies:
+- aws_managed/AWSCloudTrail_ReadOnlyAccess.yaml
+- aws_managed/AmazonGrafanaRedshiftAccess.yaml
+- aws_managed/AmazonECSInstanceRolePolicyForManagedInstances.yaml
+- aws_managed/CloudWatchLogsReadOnlyAccess.yaml
+source_hash: 9801e0ec3351b815
+policy:
+  Version: '2012-10-17'
+  Statement:
+  - Effect: Allow
+    Action:
+    - cloudtrail:Get*
+    - cloudtrail:Describe*
+    - cloudtrail:List*
+    - cloudtrail:LookupEvents
+    Resource: '*'
+  - Effect: Allow
+    Action:
+    - redshift:DescribeClusters
+    - redshift-data:GetStatementResult
+    - redshift-data:DescribeStatement
+    - secretsmanager:ListSecrets
+    Resource: '*'
+  - Effect: Allow
+    Action:
+    - redshift-data:DescribeTable
+    - redshift-data:ExecuteStatement
+    - redshift-data:ListTables
+    - redshift-data:ListSchemas
+    Resource: '*'
+    Condition:
+      'Null':
+        aws:ResourceTag/GrafanaDataSource: 'false'
+  - Effect: Allow
+    Action: redshift:GetClusterCredentials
+    Resource:
+    - arn:aws:redshift:*:*:dbname:*/*
+    - arn:aws:redshift:*:*:dbuser:*/redshift_data_api_user
+  - Effect: Allow
+    Action:
+    - secretsmanager:GetSecretValue
+    Resource: '*'
+    Condition:
+      'Null':
+        secretsmanager:ResourceTag/RedshiftQueryOwner: 'false'
+  - Sid: ECSAgentDiscoverPollEndpointPermissions
+    Effect: Allow
+    Action:
+    - ecs:DiscoverPollEndpoint
+    Resource: '*'
+  - Sid: ECSAgentRegisterPermissions
+    Effect: Allow
+    Action:
+    - ecs:RegisterContainerInstance
+    Resource: arn:aws:ecs:*:*:cluster/*
+  - Sid: ECSAgentPollPermissions
+    Effect: Allow
+    Action:
+    - ecs:Poll
+    Resource: arn:aws:ecs:*:*:container-instance/*
+  - Sid: ECSAgentTelemetryPermissions
+    Effect: Allow
+    Action:
+    - ecs:StartTelemetrySession
+    - ecs:PutSystemLogEvents
+    Resource: arn:aws:ecs:*:*:container-instance/*
+  - Sid: ECSAgentStateChangePermissions
+    Effect: Allow
+    Action:
+    - ecs:SubmitAttachmentStateChanges
+    - ecs:SubmitTaskStateChange
+    Resource: arn:aws:ecs:*:*:cluster/*
+  - Sid: CloudWatchLogsReadOnlyAccess
+    Effect: Allow
+    Action:
+    - logs:Describe*
+    - logs:Get*
+    - logs:List*
+    - logs:StartQuery
+    - logs:StopQuery
+    - logs:TestMetricFilter
+    - logs:FilterLogEvents
+    - logs:StartLiveTail
+    - logs:StopLiveTail
+    - cloudwatch:GenerateQuery
+    - cloudwatch:GenerateQueryResultsSummary
+    - observabilityadmin:ListS3TableIntegrations
+    - observabilityadmin:GetS3TableIntegration
+    - observabilityadmin:ListTelemetryPipelines
+    Resource: '*'
+request:
+  spec:
+    access_type: read-write
+    duration:
+      duration_hours: 1
+    resource_constraints: []
+  user: contractor-frank
+  justification: 60-day integration project read access
+scores:
+  det_score: 8
+  det_factors:
+  - "Action-name wildcard `cloudtrail:Get*` on broad resource \u2014 matches multiple cloudtrail APIs at once"
+  - "Action-name wildcard `cloudtrail:Describe*` on broad resource \u2014 matches multiple cloudtrail APIs at once"
+  - "Action-name wildcard `cloudtrail:List*` on broad resource \u2014 matches multiple cloudtrail APIs at once"
+  - 'Resource: `*` for cloudtrail (broad cross-resource read/access)'
+  - '`secretsmanager:ListSecrets` on Resource: `*` touches sensitive service `secretsmanager`'
+  - 'State-changing action `redshift-data:ExecuteStatement` on Resource: `*` (IAM access level: Write)'
+  - 'Resource: `*` for redshift-data (broad cross-resource read/access)'
+  - 'State-changing action `redshift:GetClusterCredentials` on Resource: `*` (IAM access level: Write)'
+  - 'Resource: `*` for redshift (broad cross-resource read/access)'
+  - "`redshift:GetClusterCredentials` is a high-impact mutation on broad resource \u2014 single API call can rewrite every\
+    \ matching resource in the account."
+  - '`secretsmanager:GetSecretValue` on Resource: `*` (broad access to secrets)'
+  - 'State-changing action `ecs:DiscoverPollEndpoint` on Resource: `*` (IAM access level: Write)'
+  - 'Resource: `*` for ecs (broad cross-resource read/access)'
+  - 'State-changing action `ecs:RegisterContainerInstance` on Resource: `*` (IAM access level: Write)'
+  - 'State-changing action `ecs:Poll` on Resource: `*` (IAM access level: Write)'
+  - 'State-changing action `ecs:StartTelemetrySession` on Resource: `*` (IAM access level: Write)'
+  - 'State-changing action `ecs:PutSystemLogEvents` on Resource: `*` (IAM access level: Write)'
+  - 'State-changing action `ecs:SubmitAttachmentStateChanges` on Resource: `*` (IAM access level: Write)'
+  - 'State-changing action `ecs:SubmitTaskStateChange` on Resource: `*` (IAM access level: Write)'
+  - "Action-name wildcard `logs:Describe*` on broad resource \u2014 matches multiple logs APIs at once"
+  - "Action-name wildcard `logs:Get*` on broad resource \u2014 matches multiple logs APIs at once"
+  - "Action-name wildcard `logs:List*` on broad resource \u2014 matches multiple logs APIs at once"
+  - 'Destructive action `logs:StopQuery` on Resource: `*` (blast radius = every resource in this account)'
+  - 'Destructive action `logs:StopLiveTail` on Resource: `*` (blast radius = every resource in this account)'
+  - 'Resource: `*` for cloudwatch, logs, observabilityadmin (broad cross-resource read/access)'
+  - '`logs:Get*` on broad resource reads content that frequently contains secrets / sensitive data (boot logs, command output,
+    log streams, message bodies).'
+  opus_score: null
+  opus_factors: null
+  opus_reasoning: null
+  gap_classification: pending

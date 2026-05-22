@@ -1,0 +1,495 @@
+name: composite-0016-42
+source_policies:
+- aws_managed/AWSSystemsManagerJustInTimeAccessServicePolicy.yaml
+- aws_managed/AmazonEBSCSIDriverPolicy.yaml
+- aws_managed/AWSReachabilityAnalyzerServiceRolePolicy.yaml
+- aws_managed/AWSCloud9User.yaml
+source_hash: 3ec9cfd4fba8491b
+policy:
+  Version: '2012-10-17'
+  Statement:
+  - Sid: AllowOpsItemReplication
+    Effect: Allow
+    Action:
+    - ssm:CreateOpsItem
+    Resource:
+    - arn:aws:ssm:*:*:opsitem/*
+    Condition:
+      StringEquals:
+        aws:ResourceAccount: ${aws:PrincipalAccount}
+        aws:RequestTag/SystemsManagerJustInTimeNodeAccessManaged: Replica
+      ForAllValues:StringEquals:
+        aws:TagKeys:
+        - SystemsManagerJustInTimeNodeAccessManaged
+  - Sid: AllowOpsItemReplicationTagging
+    Effect: Allow
+    Action:
+    - ssm:AddTagsToResource
+    Resource:
+    - arn:aws:ssm:*:*:opsitem/*
+    Condition:
+      StringEquals:
+        aws:RequestTag/SystemsManagerJustInTimeNodeAccessManaged: Replica
+      ForAllValues:StringEquals:
+        aws:TagKeys:
+        - SystemsManagerJustInTimeNodeAccessManaged
+  - Sid: AllowAutomationExecutionTagging
+    Effect: Allow
+    Action:
+    - ssm:AddTagsToResource
+    Resource:
+    - arn:aws:ssm:*:*:automation-execution/*
+    Condition:
+      StringEquals:
+        aws:RequestTag/SystemsManagerJustInTimeNodeAccessManaged: 'true'
+      ForAllValues:StringEquals:
+        aws:TagKeys:
+        - SystemsManagerJustInTimeNodeAccessManaged
+  - Sid: AllowOpsItemManagement
+    Effect: Allow
+    Action:
+    - ssm:GetOpsItem
+    - ssm:UpdateOpsItem
+    Resource:
+    - arn:aws:ssm:*:*:opsitem/*
+    Condition:
+      StringEquals:
+        aws:ResourceAccount: ${aws:PrincipalAccount}
+  - Sid: AllowRetrieveDocument
+    Effect: Allow
+    Action:
+    - ssm:GetDocument
+    - ssm:DescribeDocument
+    Resource:
+    - arn:aws:ssm:*:*:document/*
+    Condition:
+      StringEquals:
+        ssm:DocumentType:
+        - ManualApprovalPolicy
+        - AutoApprovalPolicy
+  - Sid: AllowDescriptions
+    Effect: Allow
+    Action:
+    - ssm:DescribeOpsItems
+    - ssm:DescribeSessions
+    - ssm:ListDocuments
+    Resource:
+    - '*'
+  - Sid: AllowListTagsForManagedInstances
+    Effect: Allow
+    Action:
+    - ssm:ListTagsForResource
+    Resource:
+    - arn:aws:ssm:*:*:managed-instance/*
+  - Sid: AllowListSSMGUIConnections
+    Effect: Allow
+    Action:
+    - ssm-guiconnect:ListConnections
+    Resource:
+    - '*'
+  - Sid: AllowIdentityStoreActions
+    Effect: Allow
+    Action:
+    - identitystore:ListGroupMembershipsForMember
+    - identitystore:DescribeUser
+    - identitystore:GetGroupId
+    - identitystore:GetUserId
+    Resource:
+    - '*'
+  - Sid: AllowSSODirectoryActions
+    Effect: Allow
+    Action:
+    - sso-directory:DescribeUsers
+    - sso-directory:IsMemberInGroup
+    Resource:
+    - '*'
+  - Sid: AllowSSOInstanceActions
+    Effect: Allow
+    Action:
+    - sso:ListInstances
+    - sso:DescribeRegisteredRegions
+    - sso:ListDirectoryAssociations
+    Resource:
+    - '*'
+  - Sid: AllowDescribingEC2Tags
+    Effect: Allow
+    Action:
+    - ec2:DescribeTags
+    Resource:
+    - '*'
+  - Sid: AllowPublishingCloudWatchMetrics
+    Effect: Allow
+    Action:
+    - cloudwatch:PutMetricData
+    Resource:
+    - '*'
+    Condition:
+      StringEquals:
+        cloudwatch:namespace: AWS/SSM/JustInTimeAccess
+  - Sid: AllowKmsAccessViaIdentityCenter
+    Effect: Allow
+    Action:
+    - kms:Decrypt
+    Resource: '*'
+    Condition:
+      ArnLike:
+        kms:EncryptionContext:aws:sso:instance-arn: arn:*:sso:::instance/*
+      StringLike:
+        kms:ViaService: sso.*.amazonaws.com
+  - Sid: AllowKmsAccessViaIdentityStore
+    Effect: Allow
+    Action:
+    - kms:Decrypt
+    Resource: '*'
+    Condition:
+      ArnLike:
+        kms:EncryptionContext:aws:identitystore:identitystore-arn: arn:*:identitystore::*:identitystore/*
+      StringLike:
+        kms:ViaService: identitystore.*.amazonaws.com
+  - Effect: Allow
+    Action:
+    - ec2:DescribeAvailabilityZones
+    - ec2:DescribeInstances
+    - ec2:DescribeSnapshots
+    - ec2:DescribeTags
+    - ec2:DescribeVolumes
+    - ec2:DescribeVolumesModifications
+    - ec2:DescribeVolumeStatus
+    Resource: '*'
+  - Effect: Allow
+    Action:
+    - ec2:CreateSnapshot
+    - ec2:ModifyVolume
+    Resource: arn:aws:ec2:*:*:volume/*
+  - Effect: Allow
+    Action:
+    - ec2:CopyVolumes
+    Resource:
+    - arn:aws:ec2:*:*:volume/vol-*
+  - Effect: Allow
+    Action:
+    - ec2:AttachVolume
+    - ec2:DetachVolume
+    Resource:
+    - arn:aws:ec2:*:*:volume/*
+    - arn:aws:ec2:*:*:instance/*
+  - Effect: Allow
+    Action:
+    - ec2:CreateVolume
+    - ec2:EnableFastSnapshotRestores
+    Resource: arn:aws:ec2:*:*:snapshot/*
+  - Effect: Allow
+    Action:
+    - ec2:CreateTags
+    Resource:
+    - arn:aws:ec2:*:*:volume/*
+    - arn:aws:ec2:*:*:snapshot/*
+    Condition:
+      StringEquals:
+        ec2:CreateAction:
+        - CreateVolume
+        - CreateSnapshot
+        - CopyVolumes
+  - Effect: Allow
+    Action:
+    - ec2:DeleteTags
+    Resource:
+    - arn:aws:ec2:*:*:volume/*
+    - arn:aws:ec2:*:*:snapshot/*
+  - Effect: Allow
+    Action:
+    - ec2:CreateVolume
+    - ec2:CopyVolumes
+    Resource: arn:aws:ec2:*:*:volume/*
+    Condition:
+      StringLike:
+        aws:RequestTag/ebs.csi.aws.com/cluster: 'true'
+  - Effect: Allow
+    Action:
+    - ec2:CreateVolume
+    - ec2:CopyVolumes
+    Resource: arn:aws:ec2:*:*:volume/*
+    Condition:
+      StringLike:
+        aws:RequestTag/CSIVolumeName: '*'
+  - Effect: Allow
+    Action:
+    - ec2:DeleteVolume
+    Resource: arn:aws:ec2:*:*:volume/*
+    Condition:
+      StringLike:
+        ec2:ResourceTag/ebs.csi.aws.com/cluster: 'true'
+  - Effect: Allow
+    Action:
+    - ec2:DeleteVolume
+    Resource: arn:aws:ec2:*:*:volume/*
+    Condition:
+      StringLike:
+        ec2:ResourceTag/CSIVolumeName: '*'
+  - Effect: Allow
+    Action:
+    - ec2:DeleteVolume
+    Resource: arn:aws:ec2:*:*:volume/*
+    Condition:
+      StringLike:
+        ec2:ResourceTag/kubernetes.io/created-for/pvc/name: '*'
+  - Effect: Allow
+    Action:
+    - ec2:CreateSnapshot
+    Resource: arn:aws:ec2:*:*:snapshot/*
+    Condition:
+      StringLike:
+        aws:RequestTag/CSIVolumeSnapshotName: '*'
+  - Effect: Allow
+    Action:
+    - ec2:CreateSnapshot
+    Resource: arn:aws:ec2:*:*:snapshot/*
+    Condition:
+      StringLike:
+        aws:RequestTag/ebs.csi.aws.com/cluster: 'true'
+  - Effect: Allow
+    Action:
+    - ec2:DeleteSnapshot
+    - ec2:LockSnapshot
+    Resource: arn:aws:ec2:*:*:snapshot/*
+    Condition:
+      StringLike:
+        ec2:ResourceTag/CSIVolumeSnapshotName: '*'
+  - Effect: Allow
+    Action:
+    - ec2:DeleteSnapshot
+    - ec2:LockSnapshot
+    Resource: arn:aws:ec2:*:*:snapshot/*
+    Condition:
+      StringLike:
+        ec2:ResourceTag/ebs.csi.aws.com/cluster: 'true'
+  - Sid: ReachabilityAnalyzerPermissions
+    Effect: Allow
+    Action:
+    - cloudformation:DescribeStacks
+    - cloudformation:ListStackResources
+    - directconnect:DescribeConnections
+    - directconnect:DescribeDirectConnectGatewayAssociations
+    - directconnect:DescribeDirectConnectGatewayAttachments
+    - directconnect:DescribeDirectConnectGateways
+    - directconnect:DescribeVirtualGateways
+    - directconnect:DescribeVirtualInterfaces
+    - ec2:DescribeAvailabilityZones
+    - ec2:DescribeCustomerGateways
+    - ec2:DescribeInstances
+    - ec2:DescribeInternetGateways
+    - ec2:DescribeManagedPrefixLists
+    - ec2:DescribeNatGateways
+    - ec2:DescribeNetworkAcls
+    - ec2:DescribeNetworkInterfaces
+    - ec2:DescribePrefixLists
+    - ec2:DescribeRegions
+    - ec2:DescribeRouteTables
+    - ec2:DescribeSecurityGroups
+    - ec2:DescribeSubnets
+    - ec2:DescribeTransitGatewayAttachments
+    - ec2:DescribeTransitGatewayConnects
+    - ec2:DescribeTransitGatewayPeeringAttachments
+    - ec2:DescribeTransitGatewayRouteTables
+    - ec2:DescribeTransitGatewayVpcAttachments
+    - ec2:DescribeTransitGateways
+    - ec2:DescribeVpcEndpointServiceConfigurations
+    - ec2:DescribeVpcEndpoints
+    - ec2:DescribeVpcPeeringConnections
+    - ec2:DescribeVpcs
+    - ec2:DescribeVpnConnections
+    - ec2:DescribeVpnGateways
+    - ec2:GetManagedPrefixListEntries
+    - ec2:GetTransitGatewayRouteTablePropagations
+    - ec2:SearchTransitGatewayRoutes
+    - elasticloadbalancing:DescribeListeners
+    - elasticloadbalancing:DescribeLoadBalancerAttributes
+    - elasticloadbalancing:DescribeLoadBalancers
+    - elasticloadbalancing:DescribeRules
+    - elasticloadbalancing:DescribeTags
+    - elasticloadbalancing:DescribeTargetGroupAttributes
+    - elasticloadbalancing:DescribeTargetGroups
+    - elasticloadbalancing:DescribeTargetHealth
+    - network-firewall:DescribeFirewall
+    - network-firewall:DescribeFirewallPolicy
+    - network-firewall:DescribeResourcePolicy
+    - network-firewall:DescribeRuleGroup
+    - network-firewall:ListFirewallPolicies
+    - network-firewall:ListFirewalls
+    - network-firewall:ListRuleGroups
+    - organizations:DescribeAccount
+    - organizations:DescribeOrganization
+    - organizations:ListAWSServiceAccessForOrganization
+    - organizations:ListAccounts
+    - organizations:ListDelegatedAdministrators
+    - resource-groups:ListGroups
+    - resource-groups:ListGroupResources
+    - tag:GetResources
+    - tiros:CreateQuery
+    - tiros:ExtendQuery
+    - tiros:GetQueryAnswer
+    - tiros:GetQueryExplanation
+    - tiros:GetQueryExtensionAccounts
+    Resource: '*'
+  - Sid: ApigatewayPermissions
+    Effect: Allow
+    Action:
+    - apigateway:GET
+    Resource:
+    - arn:aws:apigateway:*::/restapis
+    - arn:aws:apigateway:*::/restapis/*/stages
+    - arn:aws:apigateway:*::/restapis/*/stages/*
+    - arn:aws:apigateway:*::/vpclinks
+  - Effect: Allow
+    Action:
+    - cloud9:UpdateUserSettings
+    - cloud9:GetUserSettings
+    - cloud9:GetMigrationExperiences
+    - iam:GetUser
+    - iam:ListUsers
+    - ec2:DescribeVpcs
+    - ec2:DescribeSubnets
+    - ec2:DescribeInstanceTypeOfferings
+    - ec2:DescribeRouteTables
+    Resource: '*'
+  - Effect: Allow
+    Action:
+    - cloud9:CreateEnvironmentEC2
+    - cloud9:CreateEnvironmentSSH
+    Resource: '*'
+    Condition:
+      'Null':
+        cloud9:OwnerArn: 'true'
+  - Effect: Allow
+    Action:
+    - cloud9:GetUserPublicKey
+    Resource: '*'
+    Condition:
+      'Null':
+        cloud9:UserArn: 'true'
+  - Effect: Allow
+    Action:
+    - cloud9:DescribeEnvironmentMemberships
+    Resource:
+    - '*'
+    Condition:
+      'Null':
+        cloud9:UserArn: 'true'
+        cloud9:EnvironmentId: 'true'
+  - Effect: Allow
+    Action:
+    - iam:CreateServiceLinkedRole
+    Resource: '*'
+    Condition:
+      StringLike:
+        iam:AWSServiceName: cloud9.amazonaws.com
+  - Effect: Allow
+    Action:
+    - ssm:StartSession
+    - ssm:GetConnectionStatus
+    Resource: arn:aws:ec2:*:*:instance/*
+    Condition:
+      StringLike:
+        ssm:resourceTag/aws:cloud9:environment: '*'
+      StringEquals:
+        aws:CalledViaFirst: cloud9.amazonaws.com
+  - Effect: Allow
+    Action:
+    - ssm:StartSession
+    Resource:
+    - arn:aws:ssm:*:*:document/*
+  - Effect: Allow
+    Action:
+    - ssmmessages:OpenDataChannel
+    Resource:
+    - arn:aws:ssm:*:*:session/*
+request:
+  spec:
+    access_type: read-write
+    duration:
+      duration_hours: 4
+    resource_constraints: []
+  user: dev-bob
+  justification: 'reproduce customer ticket #4422 locally'
+scores:
+  det_score: 9
+  det_factors:
+  - '`ssm:CreateOpsItem` on Resource: `*` touches sensitive service `ssm`'
+  - 'State-changing action `ssm:CreateOpsItem` on Resource: `*` (IAM access level: Write)'
+  - '`ssm:AddTagsToResource` on Resource: `*` touches sensitive service `ssm`'
+  - 'State-changing action `ssm:AddTagsToResource` on Resource: `*` (IAM access level: Tagging)'
+  - '`ssm:GetOpsItem` on Resource: `*` touches sensitive service `ssm`'
+  - '`ssm:UpdateOpsItem` on Resource: `*` touches sensitive service `ssm`'
+  - 'State-changing action `ssm:UpdateOpsItem` on Resource: `*` (IAM access level: Write)'
+  - '`ssm:GetDocument` on Resource: `*` touches sensitive service `ssm`'
+  - '`ssm:DescribeDocument` on Resource: `*` touches sensitive service `ssm`'
+  - '`ssm:DescribeOpsItems` on Resource: `*` touches sensitive service `ssm`'
+  - '`ssm:DescribeSessions` on Resource: `*` touches sensitive service `ssm`'
+  - '`ssm:ListDocuments` on Resource: `*` touches sensitive service `ssm`'
+  - '`ssm:ListTagsForResource` on Resource: `*` touches sensitive service `ssm`'
+  - '`identitystore:ListGroupMembershipsForMember` on Resource: `*` touches sensitive service `identitystore`'
+  - '`identitystore:DescribeUser` on Resource: `*` touches sensitive service `identitystore`'
+  - '`identitystore:GetGroupId` on Resource: `*` touches sensitive service `identitystore`'
+  - '`identitystore:GetUserId` on Resource: `*` touches sensitive service `identitystore`'
+  - 'Resource: `*` for sso-directory (broad cross-resource read/access)'
+  - 'State-changing action `cloudwatch:PutMetricData` on Resource: `*` (IAM access level: Write)'
+  - 'Resource: `*` for cloudwatch (broad cross-resource read/access)'
+  - '`kms:Decrypt` on Resource: `*` (broad access to sensitive resource)'
+  - 'State-changing action `kms:Decrypt` on Resource: `*` (IAM access level: Write)'
+  - 'State-changing action `ec2:CreateSnapshot` on Resource: `*` (IAM access level: Write)'
+  - 'State-changing action `ec2:ModifyVolume` on Resource: `*` (IAM access level: Write)'
+  - 'Resource: `*` for ec2 (broad cross-resource read/access)'
+  - 'State-changing action `ec2:CopyVolumes` on Resource: `*` (IAM access level: Write)'
+  - 'State-changing action `ec2:AttachVolume` on Resource: `*` (IAM access level: Write)'
+  - 'Destructive action `ec2:DetachVolume` on Resource: `*` (blast radius = every resource in this account)'
+  - 'State-changing action `ec2:CreateVolume` on Resource: `*` (IAM access level: Write)'
+  - 'State-changing action `ec2:EnableFastSnapshotRestores` on Resource: `*` (IAM access level: Write)'
+  - 'State-changing action `ec2:CreateTags` on Resource: `*` (IAM access level: Tagging)'
+  - 'Destructive action `ec2:DeleteTags` on Resource: `*` (blast radius = every resource in this account)'
+  - "`Condition.StringLike.aws:RequestTag/CSIVolumeName` value is `\"*\"` \u2014 degenerate wildcard; the condition imposes\
+    \ no actual constraint."
+  - 'Destructive action `ec2:DeleteVolume` on Resource: `*` (blast radius = every resource in this account)'
+  - "`Condition.StringLike.ec2:ResourceTag/CSIVolumeName` value is `\"*\"` \u2014 degenerate wildcard; the condition imposes\
+    \ no actual constraint."
+  - "`Condition.StringLike.ec2:ResourceTag/kubernetes.io/created-for/pvc/name` value is `\"*\"` \u2014 degenerate wildcard;\
+    \ the condition imposes no actual constraint."
+  - "`Condition.StringLike.aws:RequestTag/CSIVolumeSnapshotName` value is `\"*\"` \u2014 degenerate wildcard; the condition\
+    \ imposes no actual constraint."
+  - "`Condition.StringLike.ec2:ResourceTag/CSIVolumeSnapshotName` value is `\"*\"` \u2014 degenerate wildcard; the condition\
+    \ imposes no actual constraint."
+  - 'Destructive action `ec2:DeleteSnapshot` on Resource: `*` (blast radius = every resource in this account)'
+  - 'State-changing action `ec2:LockSnapshot` on Resource: `*` (IAM access level: Write)'
+  - '`organizations:DescribeAccount` on Resource: `*` touches sensitive service `organizations`'
+  - '`organizations:DescribeOrganization` on Resource: `*` touches sensitive service `organizations`'
+  - '`organizations:ListAWSServiceAccessForOrganization` on Resource: `*` touches sensitive service `organizations`'
+  - '`organizations:ListAccounts` on Resource: `*` touches sensitive service `organizations`'
+  - '`organizations:ListDelegatedAdministrators` on Resource: `*` touches sensitive service `organizations`'
+  - 'State-changing action `tiros:CreateQuery` on Resource: `*` (IAM access level: Write)'
+  - 'State-changing action `tiros:ExtendQuery` on Resource: `*` (IAM access level: Write)'
+  - '`iam:GetUser` on Resource: `*` touches sensitive service `iam`'
+  - '`iam:ListUsers` on Resource: `*` touches sensitive service `iam`'
+  - 'State-changing action `cloud9:UpdateUserSettings` on Resource: `*` (IAM access level: Write)'
+  - "`Condition.Null.cloud9:OwnerArn: \"true\"` means \"the key MUST BE ABSENT\" \u2014 opposite of the typical \"require\
+    \ this key\" intent. Often misread by reviewers."
+  - 'State-changing action `cloud9:CreateEnvironmentEC2` on Resource: `*` (IAM access level: Write)'
+  - 'State-changing action `cloud9:CreateEnvironmentSSH` on Resource: `*` (IAM access level: Write)'
+  - 'Resource: `*` for cloud9 (broad cross-resource read/access)'
+  - "`Condition.Null.cloud9:UserArn: \"true\"` means \"the key MUST BE ABSENT\" \u2014 opposite of the typical \"require this\
+    \ key\" intent. Often misread by reviewers."
+  - '`iam:CreateServiceLinkedRole` on Resource: `*` touches sensitive service `iam`'
+  - 'State-changing action `iam:CreateServiceLinkedRole` on Resource: `*` (IAM access level: Permissions management)'
+  - "`Condition.StringLike.ssm:resourceTag/aws:cloud9:environment` value is `\"*\"` \u2014 degenerate wildcard; the condition\
+    \ imposes no actual constraint."
+  - '`ssm:StartSession` on Resource: `*` touches sensitive service `ssm`'
+  - '`ssm:GetConnectionStatus` on Resource: `*` touches sensitive service `ssm`'
+  - 'State-changing action `ssm:StartSession` on Resource: `*` (IAM access level: Write)'
+  - "`ssm:StartSession` is a high-impact mutation on broad resource \u2014 single API call can rewrite every matching resource\
+    \ in the account."
+  - '`ssm:StartSession` is catastrophic in blast radius (account governance / IAM total compromise / evidence destruction).
+    Always route to human review.'
+  - 'State-changing action `ssmmessages:OpenDataChannel` on Resource: `*` (IAM access level: Write)'
+  - 'Resource: `*` for ssmmessages (broad cross-resource read/access)'
+  opus_score: null
+  opus_factors: null
+  opus_reasoning: null
+  gap_classification: pending

@@ -1,0 +1,447 @@
+name: composite-0093-42
+source_policies:
+- aws_managed/AWSWAFConsoleReadOnlyAccess.yaml
+- aws_managed/AWSDMSServerlessServiceRolePolicy.yaml
+- aws_managed/AWSPanoramaFullAccess.yaml
+source_hash: d4140af419a612ae
+policy:
+  Version: '2012-10-17'
+  Statement:
+  - Sid: AllowReadOnlyOfAWSWAFClassic
+    Effect: Allow
+    Action:
+    - waf:Get*
+    - waf:List*
+    - waf-regional:Get*
+    - waf-regional:List*
+    Resource:
+    - arn:aws:waf::*:bytematchset/*
+    - arn:aws:waf::*:ipset/*
+    - arn:aws:waf::*:ratebasedrule/*
+    - arn:aws:waf::*:rule/*
+    - arn:aws:waf::*:sizeconstraintset/*
+    - arn:aws:waf::*:sqlinjectionset/*
+    - arn:aws:waf::*:webacl/*
+    - arn:aws:waf::*:xssmatchset/*
+    - arn:aws:waf::*:regexmatch/*
+    - arn:aws:waf::*:regexpatternset/*
+    - arn:aws:waf::*:geomatchset/*
+    - arn:aws:waf::*:rulegroup/*
+    - arn:aws:waf:*:*:changetoken/*
+    - arn:aws:waf-regional:*:*:bytematchset/*
+    - arn:aws:waf-regional:*:*:ipset/*
+    - arn:aws:waf-regional:*:*:ratebasedrule/*
+    - arn:aws:waf-regional:*:*:rule/*
+    - arn:aws:waf-regional:*:*:sizeconstraintset/*
+    - arn:aws:waf-regional:*:*:sqlinjectionset/*
+    - arn:aws:waf-regional:*:*:webacl/*
+    - arn:aws:waf-regional:*:*:xssmatchset/*
+    - arn:aws:waf-regional:*:*:regexmatch/*
+    - arn:aws:waf-regional:*:*:regexpatternset/*
+    - arn:aws:waf-regional:*:*:geomatchset/*
+    - arn:aws:waf-regional:*:*:rulegroup/*
+    - arn:aws:waf-regional:*:*:changetoken/*
+  - Sid: AllowWAFClassicGetWebACLForResource
+    Effect: Allow
+    Action:
+    - waf-regional:GetWebACLForResource
+    Resource: arn:aws:waf-regional:*:*:*/*
+  - Sid: AllowReadOnlyOfAWSWAF
+    Effect: Allow
+    Action:
+    - wafv2:Get*
+    - wafv2:List*
+    - wafv2:Describe*
+    - wafv2:CheckCapacity
+    Resource:
+    - arn:aws:wafv2:*:*:*/webacl/*/*
+    - arn:aws:wafv2:*:*:*/ipset/*/*
+    - arn:aws:wafv2:*:*:*/managedruleset/*/*
+    - arn:aws:wafv2:*:*:*/rulegroup/*/*
+    - arn:aws:wafv2:*:*:*/regexpatternset/*/*
+  - Sid: AllowEC2DescribeRegions
+    Effect: Allow
+    Action:
+    - ec2:DescribeRegions
+    Resource: '*'
+  - Sid: AllowListActionsForCloudWatch
+    Effect: Allow
+    Action:
+    - cloudwatch:GetMetricData
+    - cloudwatch:GetMetricStatistics
+    - cloudwatch:ListMetrics
+    Resource: '*'
+  - Sid: AllowGetActionForCloudFront
+    Effect: Allow
+    Action:
+    - cloudfront:GetDistributionConfig
+    - cloudfront:GetDistribution
+    Resource: arn:aws:cloudfront::*:distribution/*
+  - Sid: AllowListActionsForCloudFront
+    Effect: Allow
+    Action:
+    - cloudfront:ListDistributions
+    - cloudfront:ListDistributionsByWebACLId
+    Resource: '*'
+  - Sid: AllowGetActionForCloudFrontTenant
+    Effect: Allow
+    Action:
+    - cloudfront:GetDistributionTenant
+    Resource: arn:aws:cloudfront::*:distribution-tenant/*
+  - Sid: AllowListActionsForCloudFrontTenant
+    Effect: Allow
+    Action:
+    - cloudfront:ListDistributionTenants
+    - cloudfront:ListDistributionTenantsByCustomization
+    Resource: '*'
+  - Sid: AllowGetActionsForALB
+    Effect: Allow
+    Action:
+    - elasticloadbalancing:GetLoadBalancerWebACL
+    Resource: arn:aws:elasticloadbalancing:*:*:loadbalancer/app/*/*
+  - Sid: AllowListActionsForALB
+    Effect: Allow
+    Action:
+    - elasticloadbalancing:DescribeLoadBalancers
+    - elasticloadbalancing:DescribeWebACLAssociation
+    Resource: '*'
+  - Sid: AllowListActionsForAPIGateway
+    Effect: Allow
+    Action:
+    - apigateway:GET
+    Resource: arn:aws:apigateway:*::/*
+  - Sid: AllowGetActionsForAppSync
+    Effect: Allow
+    Action:
+    - appsync:GetWebACLForResource
+    Resource: arn:aws:appsync:*:*:apis/*
+  - Sid: AllowListActionsForAppSync
+    Effect: Allow
+    Action:
+    - appsync:ListGraphqlApis
+    - appsync:ListApis
+    - appsync:ListResourcesForWebACL
+    Resource: '*'
+  - Sid: AllowGetActionForCognito
+    Effect: Allow
+    Action:
+    - cognito-idp:GetWebACLForResource
+    Resource: arn:aws:cognito-idp:*:*:userpool/*
+  - Sid: AllowListActionsForCognito
+    Effect: Allow
+    Action:
+    - cognito-idp:ListUserPools
+    - cognito-idp:ListResourcesForWebACL
+    Resource: '*'
+  - Sid: AllowGetActionForAppRunner
+    Effect: Allow
+    Action:
+    - apprunner:DescribeWebAclForService
+    Resource: arn:aws:apprunner:*:*:service/*/*
+  - Sid: AllowListActionsForAppRunner
+    Effect: Allow
+    Action:
+    - apprunner:ListServices
+    - apprunner:ListAssociatedServicesForWebAcl
+    Resource: '*'
+  - Sid: AllowGetActionForAVA
+    Effect: Allow
+    Action:
+    - ec2:GetVerifiedAccessInstanceWebAcl
+    Resource: arn:aws:ec2:*:*:verified-access-instance/*
+  - Sid: AllowListActionsForAVA
+    Effect: Allow
+    Action:
+    - ec2:DescribeVerifiedAccessInstances
+    - ec2:DescribeVerifiedAccessInstanceWebAclAssociations
+    Resource: '*'
+  - Sid: AllowGetActionForAmplify
+    Effect: Allow
+    Action:
+    - amplify:GetWebACLForResource
+    Resource: arn:aws:amplify:*:*:apps/*
+  - Sid: AllowListActionsForAmplify
+    Effect: Allow
+    Action:
+    - amplify:ListApps
+    - amplify:ListResourcesForWebACL
+    Resource: '*'
+  - Sid: AllowS3ListAllMyBuckets
+    Effect: Allow
+    Action:
+    - s3:ListAllMyBuckets
+    Resource: '*'
+  - Sid: AllowLogGroupDescribeActions
+    Effect: Allow
+    Action:
+    - logs:DescribeResourcePolicies
+    - logs:DescribeLogGroups
+    Resource: '*'
+  - Sid: AllowListActionForFirehoseStream
+    Effect: Allow
+    Action:
+    - firehose:ListDeliveryStreams
+    Resource: '*'
+  - Sid: AllowActionsForPricing
+    Effect: Allow
+    Action:
+    - pricing:ListPriceLists
+    - pricing:GetPriceListFileUrl
+    Resource: '*'
+  - Sid: AllowMarketplaceViewSubscriptions
+    Effect: Allow
+    Action:
+    - aws-marketplace:ViewSubscriptions
+    Resource: '*'
+  - Sid: AllowLogQueryActions
+    Effect: Allow
+    Action:
+    - logs:StartQuery
+    - logs:DescribeQueryDefinitions
+    - logs:GetQueryResults
+    Resource: arn:aws:logs:*:*:log-group:aws-waf-logs-*
+  - Sid: AllowListActionsForPricingPlanManager
+    Effect: Allow
+    Action:
+    - pricingplanmanager:GetSubscription
+    Resource: arn:aws:pricingplanmanager::*:subscription:*
+  - Sid: AllowListActionsForRoute53
+    Effect: Allow
+    Action:
+    - route53:ListHostedZones
+    - route53:GetHostedZone
+    Resource: '*'
+  - Sid: AllowListSubscriptionsForPricingPlanManager
+    Effect: Allow
+    Action:
+    - pricingplanmanager:ListSubscriptions
+    Resource: '*'
+  - Sid: id0
+    Effect: Allow
+    Action:
+    - dms:CreateReplicationInstance
+    - dms:CreateReplicationTask
+    Resource: '*'
+    Condition:
+      StringEquals:
+        dms:req-tag/ResourceCreatedBy: DMSServerless
+  - Sid: id1
+    Effect: Allow
+    Action:
+    - dms:DescribeReplicationInstances
+    - dms:DescribeReplicationTasks
+    Resource: '*'
+  - Sid: id2
+    Effect: Allow
+    Action:
+    - dms:StartReplicationTask
+    - dms:StopReplicationTask
+    - dms:ModifyReplicationTask
+    - dms:DeleteReplicationTask
+    - dms:ModifyReplicationInstance
+    - dms:DeleteReplicationInstance
+    Resource:
+    - arn:aws:dms:*:*:rep:*
+    - arn:aws:dms:*:*:task:*
+    Condition:
+      StringEqualsIgnoreCase:
+        aws:ResourceTag/ResourceCreatedBy: DMSServerless
+  - Sid: id3
+    Effect: Allow
+    Action:
+    - dms:TestConnection
+    - dms:DeleteConnection
+    Resource:
+    - arn:aws:dms:*:*:rep:*
+    - arn:aws:dms:*:*:endpoint:*
+  - Sid: id4
+    Effect: Allow
+    Action:
+    - s3:PutObject
+    - s3:DeleteObject
+    - s3:GetObject
+    - s3:PutObjectTagging
+    Resource:
+    - arn:aws:s3:::dms-serverless-premigration-results-*
+    - arn:aws:s3:::dms-premigration-results-*
+    Condition:
+      StringEquals:
+        s3:ResourceAccount: ${aws:PrincipalAccount}
+  - Sid: id5
+    Effect: Allow
+    Action:
+    - s3:PutBucketPolicy
+    - s3:ListBucket
+    - s3:GetBucketLocation
+    - s3:CreateBucket
+    Resource:
+    - arn:aws:s3:::dms-serverless-premigration-results-*
+    - arn:aws:s3:::dms-premigration-results-*
+    Condition:
+      StringEquals:
+        s3:ResourceAccount: ${aws:PrincipalAccount}
+  - Sid: id6
+    Effect: Allow
+    Action:
+    - dms:StartReplicationTaskAssessmentRun
+    Resource:
+    - arn:aws:dms:*:*:task:*
+    Condition:
+      StringEquals:
+        aws:ResourceAccount: ${aws:PrincipalAccount}
+  - Effect: Allow
+    Action:
+    - panorama:*
+    Resource: '*'
+  - Effect: Allow
+    Action:
+    - s3:PutObject
+    - s3:PutObjectAcl
+    - s3:DeleteObject
+    - s3:GetObject
+    - s3:ListBucket
+    Resource: '*'
+    Condition:
+      ArnLike:
+        s3:DataAccessPointArn: arn:aws:s3:*:*:accesspoint/panorama*
+  - Effect: Allow
+    Action:
+    - secretsmanager:GetSecretValue
+    - secretsmanager:DescribeSecret
+    - secretsmanager:ListSecretVersionIds
+    - secretsmanager:PutSecretValue
+    - secretsmanager:UpdateSecret
+    Resource:
+    - arn:aws:secretsmanager:*:*:secret:panorama*
+    - arn:aws:secretsmanager:*:*:secret:Panorama*
+  - Effect: Allow
+    Action:
+    - iam:PassRole
+    Resource: '*'
+    Condition:
+      StringEquals:
+        iam:PassedToService: panorama.amazonaws.com
+  - Effect: Allow
+    Action:
+    - logs:Describe*
+    - logs:Get*
+    - logs:List*
+    - logs:StartQuery
+    - logs:StopQuery
+    - logs:TestMetricFilter
+    - logs:FilterLogEvents
+    Resource:
+    - arn:aws:logs:*:*:log-group:/aws/panorama_device*:log-stream:*
+    - arn:aws:logs:*:*:log-group:/aws/panorama/devices/*
+  - Effect: Allow
+    Action:
+    - logs:DescribeLogGroups
+    Resource:
+    - arn:aws:logs:*:*:log-group:*
+  - Effect: Allow
+    Action:
+    - cloudwatch:ListMetrics
+    - cloudwatch:GetMetricData
+    - cloudwatch:GetMetricStatistics
+    Resource: '*'
+  - Effect: Allow
+    Action: iam:ListRoles
+    Resource: '*'
+  - Effect: Allow
+    Action: iam:CreateServiceLinkedRole
+    Resource: '*'
+    Condition:
+      StringEquals:
+        iam:AWSServiceName: panorama.amazonaws.com
+request:
+  spec:
+    access_type: read-write
+    duration:
+      duration_hours: 1
+    resource_constraints: []
+  user: sre-carol
+  justification: scale-out emergency for us-east-1 outage
+scores:
+  det_score: 9
+  det_factors:
+  - "Action-name wildcard `waf:Get*` on broad resource \u2014 matches multiple waf APIs at once"
+  - "Action-name wildcard `waf:List*` on broad resource \u2014 matches multiple waf APIs at once"
+  - "Action-name wildcard `waf-regional:Get*` on broad resource \u2014 matches multiple waf-regional APIs at once"
+  - "Action-name wildcard `waf-regional:List*` on broad resource \u2014 matches multiple waf-regional APIs at once"
+  - 'Resource: `*` for waf, waf-regional (broad cross-resource read/access)'
+  - 'Resource: `*` for waf-regional (broad cross-resource read/access)'
+  - "Action-name wildcard `wafv2:Get*` on broad resource \u2014 matches multiple wafv2 APIs at once"
+  - "Action-name wildcard `wafv2:List*` on broad resource \u2014 matches multiple wafv2 APIs at once"
+  - "Action-name wildcard `wafv2:Describe*` on broad resource \u2014 matches multiple wafv2 APIs at once"
+  - 'Resource: `*` for wafv2 (broad cross-resource read/access)'
+  - 'Resource: `*` for cloudwatch (broad cross-resource read/access)'
+  - 'Resource: `*` for cloudfront (broad cross-resource read/access)'
+  - 'Resource: `*` for elasticloadbalancing (broad cross-resource read/access)'
+  - 'Resource: `*` for appsync (broad cross-resource read/access)'
+  - '`cognito-idp:GetWebACLForResource` on Resource: `*` touches sensitive service `cognito-idp`'
+  - '`cognito-idp:ListUserPools` on Resource: `*` touches sensitive service `cognito-idp`'
+  - '`cognito-idp:ListResourcesForWebACL` on Resource: `*` touches sensitive service `cognito-idp`'
+  - 'Resource: `*` for ec2 (broad cross-resource read/access)'
+  - 'Resource: `*` for amplify (broad cross-resource read/access)'
+  - 'Resource: `*` for pricing (broad cross-resource read/access)'
+  - 'Resource: `*` for aws-marketplace (broad cross-resource read/access)'
+  - 'Resource: `*` for logs (broad cross-resource read/access)'
+  - 'Resource: `*` for pricingplanmanager (broad cross-resource read/access)'
+  - 'Resource: `*` for route53 (broad cross-resource read/access)'
+  - 'State-changing action `dms:CreateReplicationInstance` on Resource: `*` (IAM access level: Write)'
+  - 'State-changing action `dms:CreateReplicationTask` on Resource: `*` (IAM access level: Write)'
+  - 'Resource: `*` for dms (broad cross-resource read/access)'
+  - 'State-changing action `dms:StartReplicationTask` on Resource: `*` (IAM access level: Write)'
+  - 'Destructive action `dms:StopReplicationTask` on Resource: `*` (blast radius = every resource in this account)'
+  - 'State-changing action `dms:ModifyReplicationTask` on Resource: `*` (IAM access level: Write)'
+  - 'Destructive action `dms:DeleteReplicationTask` on Resource: `*` (blast radius = every resource in this account)'
+  - 'State-changing action `dms:ModifyReplicationInstance` on Resource: `*` (IAM access level: Write)'
+  - 'Destructive action `dms:DeleteReplicationInstance` on Resource: `*` (blast radius = every resource in this account)'
+  - 'Destructive action `dms:DeleteConnection` on Resource: `*` (blast radius = every resource in this account)'
+  - 'State-changing action `s3:PutObject` on Resource: `*` (IAM access level: Write)'
+  - 'Destructive action `s3:DeleteObject` on Resource: `*` (blast radius = every resource in this account)'
+  - 'State-changing action `s3:PutObjectTagging` on Resource: `*` (IAM access level: Tagging)'
+  - 'Resource: `*` for s3 (broad cross-resource read/access)'
+  - 'State-changing action `s3:PutBucketPolicy` on Resource: `*` (IAM access level: Permissions management)'
+  - 'State-changing action `s3:CreateBucket` on Resource: `*` (IAM access level: Write)'
+  - "`s3:PutBucketPolicy` is a high-impact mutation on broad resource \u2014 single API call can rewrite every matching resource\
+    \ in the account."
+  - '`s3:PutBucketPolicy` is catastrophic in blast radius (account governance / IAM total compromise / evidence destruction).
+    Always route to human review.'
+  - 'State-changing action `dms:StartReplicationTaskAssessmentRun` on Resource: `*` (IAM access level: Write)'
+  - '`panorama:*` grants every action in `panorama`'
+  - 'Resource: `*` for panorama (broad cross-resource read/access)'
+  - 'State-changing action `s3:PutObjectAcl` on Resource: `*` (IAM access level: Permissions management)'
+  - "`s3:PutObjectAcl` is a high-impact mutation on broad resource \u2014 single API call can rewrite every matching resource\
+    \ in the account."
+  - '`secretsmanager:GetSecretValue` on Resource: `*` (broad access to secrets)'
+  - '`secretsmanager:DescribeSecret` on Resource: `*` touches sensitive service `secretsmanager`'
+  - '`secretsmanager:ListSecretVersionIds` on Resource: `*` touches sensitive service `secretsmanager`'
+  - '`secretsmanager:PutSecretValue` on Resource: `*` touches sensitive service `secretsmanager`'
+  - '`secretsmanager:UpdateSecret` on Resource: `*` touches sensitive service `secretsmanager`'
+  - 'State-changing action `secretsmanager:PutSecretValue` on Resource: `*` (IAM access level: Write)'
+  - 'State-changing action `secretsmanager:UpdateSecret` on Resource: `*` (IAM access level: Write)'
+  - "`secretsmanager:PutSecretValue` is a high-impact mutation on broad resource \u2014 single API call can rewrite every\
+    \ matching resource in the account."
+  - "`secretsmanager:UpdateSecret` is a high-impact mutation on broad resource \u2014 single API call can rewrite every matching\
+    \ resource in the account."
+  - '`iam:PassRole` on Resource: `*` is a privilege-escalation path'
+  - 'State-changing action `iam:PassRole` on Resource: `*` (IAM access level: Permissions management)'
+  - "Action-name wildcard `logs:Describe*` on broad resource \u2014 matches multiple logs APIs at once"
+  - "Action-name wildcard `logs:Get*` on broad resource \u2014 matches multiple logs APIs at once"
+  - "Action-name wildcard `logs:List*` on broad resource \u2014 matches multiple logs APIs at once"
+  - 'Destructive action `logs:StopQuery` on Resource: `*` (blast radius = every resource in this account)'
+  - '`iam:ListRoles` on Resource: `*` touches sensitive service `iam`'
+  - '`iam:CreateServiceLinkedRole` on Resource: `*` touches sensitive service `iam`'
+  - 'State-changing action `iam:CreateServiceLinkedRole` on Resource: `*` (IAM access level: Permissions management)'
+  - 'Code-execution primitive on broad resource: dms:CreateReplicationInstance, dms:CreateReplicationTask. Deploys attacker-controlled
+    code that runs under whatever role the matched resources use. Even without explicit PassRole, the existing roles of matched
+    resources become the attack target.'
+  - 'Code-execution-via-role composition: dms:CreateReplicationInstance (+ 1 more) combined with iam:PassRole = RCE as the
+    passed role. Single-statement scoring underweights this; the composition is full account-compromise tier.'
+  - '`s3:GetObject` on broad resource reads content that frequently contains secrets / sensitive data (boot logs, command
+    output, log streams, message bodies).'
+  opus_score: null
+  opus_factors: null
+  opus_reasoning: null
+  gap_classification: pending

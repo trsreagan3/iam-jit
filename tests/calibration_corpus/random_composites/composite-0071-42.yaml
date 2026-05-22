@@ -1,0 +1,217 @@
+name: composite-0071-42
+source_policies:
+- aws_managed/AWSAutoScalingPlansEC2AutoScalingPolicy.yaml
+- aws_managed/AmazonBedrockFullAccess.yaml
+source_hash: 867a8dfc1be1e44a
+policy:
+  Version: '2012-10-17'
+  Statement:
+  - Effect: Allow
+    Action:
+    - cloudwatch:GetMetricData
+    - autoscaling:DescribeAutoScalingGroups
+    - autoscaling:DescribeScheduledActions
+    - autoscaling:BatchPutScheduledUpdateGroupAction
+    - autoscaling:BatchDeleteScheduledAction
+    Resource: '*'
+  - Sid: BedrockAll
+    Effect: Allow
+    Action:
+    - bedrock:*
+    Resource: '*'
+  - Sid: BedrockMantleAll
+    Effect: Allow
+    Action:
+    - bedrock-mantle:*
+    Resource: '*'
+  - Sid: DescribeKey
+    Effect: Allow
+    Action:
+    - kms:DescribeKey
+    Resource: arn:*:kms:*:::*
+  - Sid: APIsWithAllResourceAccess
+    Effect: Allow
+    Action:
+    - iam:ListRoles
+    - ec2:DescribeVpcs
+    - ec2:DescribeSubnets
+    - ec2:DescribeSecurityGroups
+    Resource: '*'
+  - Sid: MarketplaceModelEndpointMutatingAPIs
+    Effect: Allow
+    Action:
+    - sagemaker:CreateEndpoint
+    - sagemaker:CreateEndpointConfig
+    - sagemaker:CreateModel
+    - sagemaker:DeleteEndpoint
+    - sagemaker:UpdateEndpoint
+    Resource:
+    - arn:aws:sagemaker:*:*:endpoint/*
+    - arn:aws:sagemaker:*:*:endpoint-config/*
+    - arn:aws:sagemaker:*:*:model/*
+    Condition:
+      StringEquals:
+        aws:CalledViaLast: bedrock.amazonaws.com
+        aws:ResourceTag/sagemaker-sdk:bedrock: compatible
+  - Sid: MarketplaceModelEndpointAddTagsOperations
+    Effect: Allow
+    Action:
+    - sagemaker:AddTags
+    Resource:
+    - arn:aws:sagemaker:*:*:endpoint/*
+    - arn:aws:sagemaker:*:*:endpoint-config/*
+    - arn:aws:sagemaker:*:*:model/*
+    Condition:
+      ForAllValues:StringEquals:
+        aws:TagKeys:
+        - sagemaker-sdk:bedrock
+        - bedrock:marketplace-registration-status
+        - sagemaker-studio:hub-content-arn
+      StringLike:
+        aws:RequestTag/sagemaker-sdk:bedrock: compatible
+        aws:RequestTag/bedrock:marketplace-registration-status: registered
+        aws:RequestTag/sagemaker-studio:hub-content-arn: arn:aws:sagemaker:*:aws:hub-content/SageMakerPublicHub/Model/*
+  - Sid: MarketplaceModelEndpointDeleteTagsOperations
+    Effect: Allow
+    Action:
+    - sagemaker:DeleteTags
+    Resource:
+    - arn:aws:sagemaker:*:*:endpoint/*
+    - arn:aws:sagemaker:*:*:endpoint-config/*
+    - arn:aws:sagemaker:*:*:model/*
+    Condition:
+      ForAllValues:StringEquals:
+        aws:TagKeys:
+        - sagemaker-sdk:bedrock
+        - bedrock:marketplace-registration-status
+        - sagemaker-studio:hub-content-arn
+      StringLike:
+        aws:ResourceTag/sagemaker-sdk:bedrock: compatible
+        aws:ResourceTag/bedrock:marketplace-registration-status: registered
+        aws:ResourceTag/sagemaker-studio:hub-content-arn: arn:aws:sagemaker:*:aws:hub-content/SageMakerPublicHub/Model/*
+  - Sid: MarketplaceModelEndpointNonMutatingAPIs
+    Effect: Allow
+    Action:
+    - sagemaker:DescribeEndpoint
+    - sagemaker:DescribeEndpointConfig
+    - sagemaker:DescribeModel
+    - sagemaker:DescribeInferenceComponent
+    - sagemaker:ListEndpoints
+    - sagemaker:ListTags
+    Resource:
+    - arn:aws:sagemaker:*:*:endpoint/*
+    - arn:aws:sagemaker:*:*:endpoint-config/*
+    - arn:aws:sagemaker:*:*:model/*
+    Condition:
+      StringEquals:
+        aws:CalledViaLast: bedrock.amazonaws.com
+  - Sid: MarketplaceModelEndpointInvokingOperations
+    Effect: Allow
+    Action:
+    - sagemaker:InvokeEndpoint
+    - sagemaker:InvokeEndpointWithResponseStream
+    Resource:
+    - arn:aws:sagemaker:*:*:endpoint/*
+    Condition:
+      StringEquals:
+        aws:CalledViaLast: bedrock.amazonaws.com
+        aws:ResourceTag/sagemaker-sdk:bedrock: compatible
+  - Sid: DiscoveringMarketplaceModel
+    Effect: Allow
+    Action:
+    - sagemaker:DescribeHubContent
+    Resource:
+    - arn:aws:sagemaker:*:aws:hub-content/SageMakerPublicHub/Model/*
+    - arn:aws:sagemaker:*:aws:hub/SageMakerPublicHub
+  - Sid: AllowMarketplaceModelsListing
+    Effect: Allow
+    Action:
+    - sagemaker:ListHubContents
+    Resource: arn:aws:sagemaker:*:aws:hub/SageMakerPublicHub
+  - Sid: PassRoleToSageMaker
+    Effect: Allow
+    Action:
+    - iam:PassRole
+    Resource:
+    - arn:aws:iam::*:role/*SageMaker*ForBedrock*
+    Condition:
+      StringEquals:
+        iam:PassedToService:
+        - sagemaker.amazonaws.com
+        - bedrock.amazonaws.com
+  - Sid: PassRoleToBedrock
+    Effect: Allow
+    Action:
+    - iam:PassRole
+    Resource: arn:aws:iam::*:role/*AmazonBedrock*
+    Condition:
+      StringEquals:
+        iam:PassedToService:
+        - bedrock.amazonaws.com
+  - Sid: MarketplaceOperationsFromBedrockFor3pModels
+    Effect: Allow
+    Action:
+    - aws-marketplace:Subscribe
+    - aws-marketplace:ViewSubscriptions
+    - aws-marketplace:Unsubscribe
+    Resource: '*'
+    Condition:
+      StringEquals:
+        aws:CalledViaLast: bedrock.amazonaws.com
+request:
+  spec:
+    access_type: read-write
+    duration:
+      duration_hours: 8
+    resource_constraints: []
+  user: dev-bob
+  justification: 'reproduce customer ticket #4422 locally'
+scores:
+  det_score: 9
+  det_factors:
+  - 'State-changing action `autoscaling:BatchPutScheduledUpdateGroupAction` on Resource: `*` (IAM access level: Write)'
+  - 'State-changing action `autoscaling:BatchDeleteScheduledAction` on Resource: `*` (IAM access level: Write)'
+  - 'Resource: `*` for autoscaling, cloudwatch (broad cross-resource read/access)'
+  - '`bedrock:*` grants every action in sensitive service `bedrock`'
+  - '`bedrock:*` on Resource: `*` touches sensitive service `bedrock`'
+  - "`bedrock:*` is a high-impact mutation on broad resource \u2014 single API call can rewrite every matching resource in\
+    \ the account."
+  - '`bedrock-mantle:*` grants every action in `bedrock-mantle`'
+  - 'Resource: `*` for bedrock-mantle (broad cross-resource read/access)'
+  - '`kms:DescribeKey` on Resource: `*` touches sensitive service `kms`'
+  - '`iam:ListRoles` on Resource: `*` touches sensitive service `iam`'
+  - '`sagemaker:CreateEndpoint` on Resource: `*` touches sensitive service `sagemaker`'
+  - '`sagemaker:CreateEndpointConfig` on Resource: `*` touches sensitive service `sagemaker`'
+  - '`sagemaker:CreateModel` on Resource: `*` touches sensitive service `sagemaker`'
+  - '`sagemaker:DeleteEndpoint` on Resource: `*` touches sensitive service `sagemaker`'
+  - '`sagemaker:UpdateEndpoint` on Resource: `*` touches sensitive service `sagemaker`'
+  - 'State-changing action `sagemaker:CreateEndpoint` on Resource: `*` (IAM access level: Write)'
+  - 'State-changing action `sagemaker:CreateEndpointConfig` on Resource: `*` (IAM access level: Write)'
+  - 'State-changing action `sagemaker:CreateModel` on Resource: `*` (IAM access level: Write)'
+  - 'Destructive action `sagemaker:DeleteEndpoint` on Resource: `*` (blast radius = every resource in this account)'
+  - 'State-changing action `sagemaker:UpdateEndpoint` on Resource: `*` (IAM access level: Write)'
+  - '`sagemaker:AddTags` on Resource: `*` touches sensitive service `sagemaker`'
+  - 'State-changing action `sagemaker:AddTags` on Resource: `*` (IAM access level: Tagging)'
+  - '`sagemaker:DeleteTags` on Resource: `*` touches sensitive service `sagemaker`'
+  - 'Destructive action `sagemaker:DeleteTags` on Resource: `*` (blast radius = every resource in this account)'
+  - '`sagemaker:DescribeEndpoint` on Resource: `*` touches sensitive service `sagemaker`'
+  - '`sagemaker:DescribeEndpointConfig` on Resource: `*` touches sensitive service `sagemaker`'
+  - '`sagemaker:DescribeModel` on Resource: `*` touches sensitive service `sagemaker`'
+  - '`sagemaker:DescribeInferenceComponent` on Resource: `*` touches sensitive service `sagemaker`'
+  - '`sagemaker:ListEndpoints` on Resource: `*` touches sensitive service `sagemaker`'
+  - '`sagemaker:ListTags` on Resource: `*` touches sensitive service `sagemaker`'
+  - '`sagemaker:InvokeEndpoint` on Resource: `*` touches sensitive service `sagemaker`'
+  - '`sagemaker:InvokeEndpointWithResponseStream` on Resource: `*` touches sensitive service `sagemaker`'
+  - '`iam:PassRole` on Resource: `*` is a privilege-escalation path'
+  - 'State-changing action `iam:PassRole` on Resource: `*` (IAM access level: Permissions management)'
+  - 'State-changing action `aws-marketplace:Subscribe` on Resource: `*` (IAM access level: Write)'
+  - 'State-changing action `aws-marketplace:Unsubscribe` on Resource: `*` (IAM access level: Write)'
+  - 'Resource: `*` for aws-marketplace (broad cross-resource read/access)'
+  - 'Code-execution-via-role composition: bedrock:* combined with iam:PassRole = RCE as the passed role. Single-statement
+    scoring underweights this; the composition is full account-compromise tier.'
+  - '`bedrock:*` sets up ongoing cross-account / persistent exfiltration in a single call. The blast is ''everything that
+    flows through this resource from now on,'' not just what exists today.'
+  opus_score: null
+  opus_factors: null
+  opus_reasoning: null
+  gap_classification: pending

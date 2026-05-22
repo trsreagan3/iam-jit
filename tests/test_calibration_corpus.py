@@ -41,6 +41,15 @@ def _load_examples() -> list[tuple[str, dict[str, Any]]]:
         if yaml_path.name.startswith("_"):
             continue  # Convention: leading underscore = WIP/disabled
         rel = yaml_path.relative_to(CORPUS_ROOT)
+        # `random_composites/` uses a different schema (scoring
+        # methodology output, not regression assertions). Composite
+        # YAMLs carry `scores` instead of `expected` and are
+        # consumed by `scripts/random_policy_fuzz_compare.py`. They
+        # become regression tests only when the founder promotes a
+        # LIKELY_BUG case to `bug_regressions/` per the documented
+        # ratchet workflow.
+        if rel.parts and rel.parts[0] == "random_composites":
+            continue
         test_id = str(rel).replace("\\", "/").replace(".yaml", "")
         with yaml_path.open("r", encoding="utf-8") as f:
             try:

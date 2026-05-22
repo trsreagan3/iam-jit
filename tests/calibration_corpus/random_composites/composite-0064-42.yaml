@@ -1,0 +1,323 @@
+name: composite-0064-42
+source_policies:
+- aws_managed/AWSGlueDataBrewServiceRole.yaml
+- aws_managed/AWSResourceExplorerFullAccess.yaml
+- aws_managed/AWSSSOServiceRolePolicy.yaml
+source_hash: ad5bf0b8fad7a0b2
+policy:
+  Version: '2012-10-17'
+  Statement:
+  - Sid: GlueDataPermissions
+    Effect: Allow
+    Action:
+    - glue:GetDatabases
+    - glue:GetPartitions
+    - glue:GetTable
+    - glue:GetTables
+    - glue:GetConnection
+    Resource:
+    - '*'
+  - Sid: GluePIIPermissions
+    Effect: Allow
+    Action:
+    - glue:BatchGetCustomEntityTypes
+    - glue:GetCustomEntityType
+    Resource:
+    - '*'
+  - Sid: S3PublicDatasetAccess
+    Effect: Allow
+    Action:
+    - s3:ListBucket
+    - s3:GetObject
+    Resource:
+    - arn:aws:s3:::databrew-public-datasets-*
+  - Sid: EC2NetworkingPermissions
+    Effect: Allow
+    Action:
+    - ec2:DescribeVpcEndpoints
+    - ec2:DescribeRouteTables
+    - ec2:DescribeNetworkInterfaces
+    - ec2:DescribeSecurityGroups
+    - ec2:DescribeSubnets
+    - ec2:DescribeVpcAttribute
+    - ec2:CreateNetworkInterface
+    Resource:
+    - '*'
+  - Sid: EC2DeleteGlueNetworkInterfacePermissions
+    Effect: Allow
+    Action: ec2:DeleteNetworkInterface
+    Condition:
+      StringLike:
+        aws:ResourceTag/aws-glue-service-resource: '*'
+    Resource:
+    - '*'
+  - Sid: EC2GlueTaggingPermissions
+    Effect: Allow
+    Action:
+    - ec2:CreateTags
+    - ec2:DeleteTags
+    Condition:
+      ForAllValues:StringEquals:
+        aws:TagKeys:
+        - aws-glue-service-resource
+    Resource:
+    - arn:aws:ec2:*:*:network-interface/*
+    - arn:aws:ec2:*:*:security-group/*
+  - Sid: GlueDatabrewLogGroupPermissions
+    Effect: Allow
+    Action:
+    - logs:CreateLogGroup
+    - logs:CreateLogStream
+    - logs:PutLogEvents
+    Resource:
+    - arn:aws:logs:*:*:log-group:/aws-glue-databrew/*
+  - Sid: LakeFormationPermissions
+    Effect: Allow
+    Action:
+    - lakeformation:GetDataAccess
+    Resource: '*'
+  - Sid: SecretsManagerPermissions
+    Effect: Allow
+    Action:
+    - secretsmanager:GetSecretValue
+    Resource: arn:aws:secretsmanager:*:*:secret:databrew!default-*
+  - Sid: ResourceExplorerConsoleFullAccess
+    Effect: Allow
+    Action:
+    - resource-explorer-2:*
+    - ec2:DescribeRegions
+    - ram:ListResources
+    - ram:GetResourceShares
+    - organizations:DescribeOrganization
+    Resource: '*'
+  - Sid: ResourceExplorerSLRAccess
+    Effect: Allow
+    Action:
+    - iam:CreateServiceLinkedRole
+    Resource: '*'
+    Condition:
+      StringEquals:
+        iam:AWSServiceName:
+        - resource-explorer-2.amazonaws.com
+  - Sid: IAMRoleProvisioningActions
+    Effect: Allow
+    Action:
+    - iam:AttachRolePolicy
+    - iam:CreateRole
+    - iam:PutRolePolicy
+    - iam:UpdateRole
+    - iam:UpdateRoleDescription
+    - iam:UpdateAssumeRolePolicy
+    - iam:PutRolePermissionsBoundary
+    - iam:DeleteRolePermissionsBoundary
+    Resource:
+    - arn:aws:iam::*:role/aws-reserved/sso.amazonaws.com/*
+    Condition:
+      StringNotEquals:
+        aws:PrincipalOrgMasterAccountId: ${aws:PrincipalAccount}
+  - Sid: IAMRoleReadActions
+    Effect: Allow
+    Action:
+    - iam:GetRole
+    - iam:ListRoles
+    Resource:
+    - '*'
+  - Sid: IAMRoleCleanupActions
+    Effect: Allow
+    Action:
+    - iam:DeleteRole
+    - iam:DeleteRolePolicy
+    - iam:DetachRolePolicy
+    - iam:ListRolePolicies
+    - iam:ListAttachedRolePolicies
+    Resource:
+    - arn:aws:iam::*:role/aws-reserved/sso.amazonaws.com/*
+  - Sid: IAMSLRCleanupActions
+    Effect: Allow
+    Action:
+    - iam:DeleteServiceLinkedRole
+    - iam:GetServiceLinkedRoleDeletionStatus
+    - iam:DeleteRole
+    - iam:GetRole
+    Resource:
+    - arn:aws:iam::*:role/aws-service-role/sso.amazonaws.com/AWSServiceRoleForSSO
+  - Sid: IAMSAMLProviderCreationAction
+    Effect: Allow
+    Action:
+    - iam:CreateSAMLProvider
+    Resource:
+    - arn:aws:iam::*:saml-provider/AWSSSO_*
+    Condition:
+      StringNotEquals:
+        aws:PrincipalOrgMasterAccountId: ${aws:PrincipalAccount}
+  - Sid: IAMSAMLProviderUpdateAction
+    Effect: Allow
+    Action:
+    - iam:UpdateSAMLProvider
+    Resource:
+    - arn:aws:iam::*:saml-provider/AWSSSO_*
+  - Sid: IAMSAMLProviderCleanupActions
+    Effect: Allow
+    Action:
+    - iam:DeleteSAMLProvider
+    - iam:GetSAMLProvider
+    Resource:
+    - arn:aws:iam::*:saml-provider/AWSSSO_*
+  - Effect: Allow
+    Action:
+    - organizations:DescribeAccount
+    - organizations:DescribeOrganization
+    - organizations:ListAccounts
+    - organizations:ListDelegatedAdministrators
+    - organizations:ListAWSServiceAccessForOrganization
+    Resource:
+    - '*'
+  - Sid: AllowUnauthAppForDirectory
+    Effect: Allow
+    Action:
+    - ds:UnauthorizeApplication
+    Resource:
+    - '*'
+  - Sid: AllowDescribeForDirectory
+    Effect: Allow
+    Action:
+    - ds:DescribeDirectories
+    - ds:DescribeTrusts
+    Resource:
+    - '*'
+  - Sid: AllowDescribeAndListOperationsOnIdentitySource
+    Effect: Allow
+    Action:
+    - identitystore:DescribeUser
+    - identitystore:DescribeGroup
+    - identitystore:ListGroups
+    - identitystore:ListUsers
+    Resource:
+    - '*'
+  - Sid: AllowDeleteSyncProfile
+    Effect: Allow
+    Action:
+    - identity-sync:DeleteSyncProfile
+    Resource:
+    - arn:aws:identity-sync:*:*:profile/*
+request:
+  spec:
+    access_type: read-write
+    duration:
+      duration_hours: 1
+    resource_constraints: []
+  user: contractor-frank
+  justification: 60-day integration project read access
+scores:
+  det_score: 9
+  det_factors:
+  - '`glue:GetDatabases` on Resource: `*` touches sensitive service `glue`'
+  - '`glue:GetPartitions` on Resource: `*` touches sensitive service `glue`'
+  - '`glue:GetTable` on Resource: `*` touches sensitive service `glue`'
+  - '`glue:GetTables` on Resource: `*` touches sensitive service `glue`'
+  - '`glue:GetConnection` on Resource: `*` touches sensitive service `glue`'
+  - '`glue:BatchGetCustomEntityTypes` on Resource: `*` touches sensitive service `glue`'
+  - '`glue:GetCustomEntityType` on Resource: `*` touches sensitive service `glue`'
+  - 'Resource: `*` for s3 (broad cross-resource read/access)'
+  - 'State-changing action `ec2:CreateNetworkInterface` on Resource: `*` (IAM access level: Write)'
+  - 'Resource: `*` for ec2 (broad cross-resource read/access)'
+  - "`ec2:CreateNetworkInterface` is a high-impact mutation on broad resource \u2014 single API call can rewrite every matching\
+    \ resource in the account."
+  - "`Condition.StringLike.aws:ResourceTag/aws-glue-service-resource` value is `\"*\"` \u2014 degenerate wildcard; the condition\
+    \ imposes no actual constraint."
+  - 'Destructive action `ec2:DeleteNetworkInterface` on Resource: `*` (blast radius = every resource in this account)'
+  - 'State-changing action `ec2:CreateTags` on Resource: `*` (IAM access level: Tagging)'
+  - 'Destructive action `ec2:DeleteTags` on Resource: `*` (blast radius = every resource in this account)'
+  - 'State-changing action `logs:CreateLogGroup` on Resource: `*` (IAM access level: Write)'
+  - 'State-changing action `logs:CreateLogStream` on Resource: `*` (IAM access level: Write)'
+  - 'State-changing action `logs:PutLogEvents` on Resource: `*` (IAM access level: Write)'
+  - 'Resource: `*` for logs (broad cross-resource read/access)'
+  - 'State-changing action `lakeformation:GetDataAccess` on Resource: `*` (IAM access level: Write)'
+  - 'Resource: `*` for lakeformation (broad cross-resource read/access)'
+  - "`lakeformation:GetDataAccess` is a high-impact mutation on broad resource \u2014 single API call can rewrite every matching\
+    \ resource in the account."
+  - '`secretsmanager:GetSecretValue` on Resource: `*` (broad access to secrets)'
+  - '`resource-explorer-2:*` grants every action in `resource-explorer-2`'
+  - '`organizations:DescribeOrganization` on Resource: `*` touches sensitive service `organizations`'
+  - '`iam:CreateServiceLinkedRole` on Resource: `*` touches sensitive service `iam`'
+  - 'State-changing action `iam:CreateServiceLinkedRole` on Resource: `*` (IAM access level: Permissions management)'
+  - '`iam:AttachRolePolicy` on Resource: `*` touches sensitive service `iam`'
+  - '`iam:CreateRole` on Resource: `*` touches sensitive service `iam`'
+  - '`iam:PutRolePolicy` on Resource: `*` touches sensitive service `iam`'
+  - '`iam:UpdateRole` on Resource: `*` touches sensitive service `iam`'
+  - '`iam:UpdateRoleDescription` on Resource: `*` touches sensitive service `iam`'
+  - '`iam:UpdateAssumeRolePolicy` on Resource: `*` touches sensitive service `iam`'
+  - '`iam:PutRolePermissionsBoundary` on Resource: `*` touches sensitive service `iam`'
+  - '`iam:DeleteRolePermissionsBoundary` on Resource: `*` touches sensitive service `iam`'
+  - 'State-changing action `iam:AttachRolePolicy` on Resource: `*` (IAM access level: Permissions management)'
+  - 'State-changing action `iam:CreateRole` on Resource: `*` (IAM access level: Permissions management)'
+  - 'State-changing action `iam:PutRolePolicy` on Resource: `*` (IAM access level: Permissions management)'
+  - 'State-changing action `iam:UpdateRole` on Resource: `*` (IAM access level: Permissions management)'
+  - 'State-changing action `iam:UpdateRoleDescription` on Resource: `*` (IAM access level: Permissions management)'
+  - 'State-changing action `iam:UpdateAssumeRolePolicy` on Resource: `*` (IAM access level: Permissions management)'
+  - 'State-changing action `iam:PutRolePermissionsBoundary` on Resource: `*` (IAM access level: Permissions management)'
+  - 'Destructive action `iam:DeleteRolePermissionsBoundary` on Resource: `*` (blast radius = every resource in this account)'
+  - "`iam:AttachRolePolicy` is a high-impact mutation on broad resource \u2014 single API call can rewrite every matching\
+    \ resource in the account."
+  - "`iam:PutRolePolicy` is a high-impact mutation on broad resource \u2014 single API call can rewrite every matching resource\
+    \ in the account."
+  - "`iam:UpdateAssumeRolePolicy` is a high-impact mutation on broad resource \u2014 single API call can rewrite every matching\
+    \ resource in the account."
+  - '`iam:AttachRolePolicy` is catastrophic in blast radius (account governance / IAM total compromise / evidence destruction).
+    Always route to human review.'
+  - '`iam:CreateRole` is catastrophic in blast radius (account governance / IAM total compromise / evidence destruction).
+    Always route to human review.'
+  - '`iam:PutRolePolicy` is catastrophic in blast radius (account governance / IAM total compromise / evidence destruction).
+    Always route to human review.'
+  - '`iam:UpdateAssumeRolePolicy` is catastrophic in blast radius (account governance / IAM total compromise / evidence destruction).
+    Always route to human review.'
+  - '`iam:PutRolePermissionsBoundary` is catastrophic in blast radius (account governance / IAM total compromise / evidence
+    destruction). Always route to human review.'
+  - '`iam:DeleteRolePermissionsBoundary` is catastrophic in blast radius (account governance / IAM total compromise / evidence
+    destruction). Always route to human review.'
+  - '`iam:GetRole` on Resource: `*` touches sensitive service `iam`'
+  - '`iam:ListRoles` on Resource: `*` touches sensitive service `iam`'
+  - '`iam:DeleteRole` on Resource: `*` touches sensitive service `iam`'
+  - '`iam:DeleteRolePolicy` on Resource: `*` touches sensitive service `iam`'
+  - '`iam:DetachRolePolicy` on Resource: `*` touches sensitive service `iam`'
+  - '`iam:ListRolePolicies` on Resource: `*` touches sensitive service `iam`'
+  - '`iam:ListAttachedRolePolicies` on Resource: `*` touches sensitive service `iam`'
+  - 'Destructive action `iam:DeleteRole` on Resource: `*` (blast radius = every resource in this account)'
+  - 'Destructive action `iam:DeleteRolePolicy` on Resource: `*` (blast radius = every resource in this account)'
+  - 'Destructive action `iam:DetachRolePolicy` on Resource: `*` (blast radius = every resource in this account)'
+  - "`iam:DeleteRolePolicy` is a high-impact mutation on broad resource \u2014 single API call can rewrite every matching\
+    \ resource in the account."
+  - "`iam:DetachRolePolicy` is a high-impact mutation on broad resource \u2014 single API call can rewrite every matching\
+    \ resource in the account."
+  - '`iam:DeleteServiceLinkedRole` on Resource: `*` touches sensitive service `iam`'
+  - '`iam:GetServiceLinkedRoleDeletionStatus` on Resource: `*` touches sensitive service `iam`'
+  - 'Destructive action `iam:DeleteServiceLinkedRole` on Resource: `*` (blast radius = every resource in this account)'
+  - '`iam:CreateSAMLProvider` on Resource: `*` touches sensitive service `iam`'
+  - 'State-changing action `iam:CreateSAMLProvider` on Resource: `*` (IAM access level: Permissions management)'
+  - '`iam:CreateSAMLProvider` is catastrophic in blast radius (account governance / IAM total compromise / evidence destruction).
+    Always route to human review.'
+  - '`iam:UpdateSAMLProvider` on Resource: `*` touches sensitive service `iam`'
+  - 'State-changing action `iam:UpdateSAMLProvider` on Resource: `*` (IAM access level: Permissions management)'
+  - '`iam:UpdateSAMLProvider` is catastrophic in blast radius (account governance / IAM total compromise / evidence destruction).
+    Always route to human review.'
+  - '`iam:DeleteSAMLProvider` on Resource: `*` touches sensitive service `iam`'
+  - '`iam:GetSAMLProvider` on Resource: `*` touches sensitive service `iam`'
+  - 'Destructive action `iam:DeleteSAMLProvider` on Resource: `*` (blast radius = every resource in this account)'
+  - '`organizations:DescribeAccount` on Resource: `*` touches sensitive service `organizations`'
+  - '`organizations:ListAccounts` on Resource: `*` touches sensitive service `organizations`'
+  - '`organizations:ListDelegatedAdministrators` on Resource: `*` touches sensitive service `organizations`'
+  - '`organizations:ListAWSServiceAccessForOrganization` on Resource: `*` touches sensitive service `organizations`'
+  - 'State-changing action `ds:UnauthorizeApplication` on Resource: `*` (IAM access level: Write)'
+  - 'Resource: `*` for ds (broad cross-resource read/access)'
+  - '`identitystore:DescribeUser` on Resource: `*` touches sensitive service `identitystore`'
+  - '`identitystore:DescribeGroup` on Resource: `*` touches sensitive service `identitystore`'
+  - '`identitystore:ListGroups` on Resource: `*` touches sensitive service `identitystore`'
+  - '`identitystore:ListUsers` on Resource: `*` touches sensitive service `identitystore`'
+  - 'Destructive action `identity-sync:DeleteSyncProfile` on Resource: `*` (blast radius = every resource in this account)'
+  - 'Resource: `*` for identity-sync (broad cross-resource read/access)'
+  - '`s3:GetObject` on broad resource reads content that frequently contains secrets / sensitive data (boot logs, command
+    output, log streams, message bodies).'
+  opus_score: null
+  opus_factors: null
+  opus_reasoning: null
+  gap_classification: pending

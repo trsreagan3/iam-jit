@@ -1,0 +1,130 @@
+name: composite-0051-42
+source_policies:
+- aws_managed/AmazonS3ObjectLambdaExecutionRolePolicy.yaml
+- aws_managed/AWSChatbotServiceLinkedRolePolicy.yaml
+- aws_managed/AWSSystemsManagerEnableConfigRecordingExecutionPolicy.yaml
+source_hash: 5e3f5f666006acd4
+policy:
+  Version: '2012-10-17'
+  Statement:
+  - Effect: Allow
+    Action:
+    - logs:CreateLogGroup
+    - logs:CreateLogStream
+    - logs:PutLogEvents
+    - s3-object-lambda:WriteGetObjectResponse
+    Resource: '*'
+  - Action:
+    - sns:ListSubscriptionsByTopic
+    - sns:ListTopics
+    - sns:Unsubscribe
+    - sns:Subscribe
+    - sns:ListSubscriptions
+    Effect: Allow
+    Resource: '*'
+  - Effect: Allow
+    Action:
+    - logs:PutLogEvents
+    - logs:CreateLogStream
+    - logs:DescribeLogStreams
+    - logs:CreateLogGroup
+    - logs:DescribeLogGroups
+    Resource: arn:aws:logs:*:*:log-group:/aws/chatbot/*
+  - Sid: S3BucketCreatePermissions
+    Effect: Allow
+    Action:
+    - s3:CreateBucket
+    - s3:PutBucketPublicAccessBlock
+    - s3:ListBucket
+    - s3:PutBucketPolicy
+    - s3:PutEncryptionConfiguration
+    Resource:
+    - arn:aws:s3:::aws-quick-setup-config-recording-*
+    Condition:
+      StringEquals:
+        aws:ResourceAccount: ${aws:PrincipalAccount}
+  - Sid: SNSTopicsListPermissions
+    Effect: Allow
+    Action:
+    - sns:ListTopics
+    Resource: '*'
+  - Sid: DefaultSNSTopicCreatePermissions
+    Effect: Allow
+    Action:
+    - sns:CreateTopic
+    Resource: arn:aws:sns:*:*:ConfigRecording-Default-Topic
+  - Sid: ConfigureAndStartConfigurationRecorderPermissions
+    Effect: Allow
+    Action:
+    - config:DescribeConfigurationRecorders
+    - config:DescribeDeliveryChannels
+    - config:PutConfigurationRecorder
+    - config:PutDeliveryChannel
+    - config:StartConfigurationRecorder
+    Resource: '*'
+  - Sid: GetAndPassConfigSLRPermissions
+    Effect: Allow
+    Action:
+    - iam:GetRole
+    - iam:PassRole
+    Resource:
+    - arn:aws:iam::*:role/aws-service-role/config.amazonaws.com/AWSServiceRoleForConfig
+    - arn:aws:iam::*:role/AWSServiceRoleForConfig
+  - Sid: CreateConfigSLRPermissions
+    Effect: Allow
+    Action:
+    - iam:CreateServiceLinkedRole
+    Resource:
+    - arn:aws:iam::*:role/aws-service-role/config.amazonaws.com/AWSServiceRoleForConfig
+    Condition:
+      StringEquals:
+        iam:AWSServiceName: config.amazonaws.com
+request:
+  spec:
+    access_type: read-write
+    duration:
+      duration_hours: 1
+    resource_constraints: []
+  user: ci-bot
+  justification: deploy via terraform-cloud agent
+scores:
+  det_score: 9
+  det_factors:
+  - 'State-changing action `logs:CreateLogGroup` on Resource: `*` (IAM access level: Write)'
+  - 'State-changing action `logs:CreateLogStream` on Resource: `*` (IAM access level: Write)'
+  - 'State-changing action `logs:PutLogEvents` on Resource: `*` (IAM access level: Write)'
+  - 'State-changing action `s3-object-lambda:WriteGetObjectResponse` on Resource: `*` (IAM access level: Write)'
+  - 'Resource: `*` for logs, s3-object-lambda (broad cross-resource read/access)'
+  - "`s3-object-lambda:WriteGetObjectResponse` is a high-impact mutation on broad resource \u2014 single API call can rewrite\
+    \ every matching resource in the account."
+  - 'State-changing action `sns:Unsubscribe` on Resource: `*` (IAM access level: Write)'
+  - 'State-changing action `sns:Subscribe` on Resource: `*` (IAM access level: Write)'
+  - 'Resource: `*` for sns (broad cross-resource read/access)'
+  - 'Resource: `*` for logs (broad cross-resource read/access)'
+  - 'State-changing action `s3:CreateBucket` on Resource: `*` (IAM access level: Write)'
+  - 'State-changing action `s3:PutBucketPublicAccessBlock` on Resource: `*` (IAM access level: Permissions management)'
+  - 'State-changing action `s3:PutBucketPolicy` on Resource: `*` (IAM access level: Permissions management)'
+  - 'State-changing action `s3:PutEncryptionConfiguration` on Resource: `*` (IAM access level: Write)'
+  - 'Resource: `*` for s3 (broad cross-resource read/access)'
+  - "`s3:PutBucketPolicy` is a high-impact mutation on broad resource \u2014 single API call can rewrite every matching resource\
+    \ in the account."
+  - '`s3:PutBucketPolicy` is catastrophic in blast radius (account governance / IAM total compromise / evidence destruction).
+    Always route to human review.'
+  - 'State-changing action `sns:CreateTopic` on Resource: `*` (IAM access level: Permissions management)'
+  - 'State-changing action `config:PutConfigurationRecorder` on Resource: `*` (IAM access level: Write)'
+  - 'State-changing action `config:PutDeliveryChannel` on Resource: `*` (IAM access level: Write)'
+  - 'State-changing action `config:StartConfigurationRecorder` on Resource: `*` (IAM access level: Write)'
+  - 'Resource: `*` for config (broad cross-resource read/access)'
+  - '`config:PutConfigurationRecorder` is catastrophic in blast radius (account governance / IAM total compromise / evidence
+    destruction). Always route to human review.'
+  - '`config:PutDeliveryChannel` is catastrophic in blast radius (account governance / IAM total compromise / evidence destruction).
+    Always route to human review.'
+  - '`iam:GetRole` on Resource: `*` touches sensitive service `iam`'
+  - '`iam:PassRole` on Resource: `*` is a privilege-escalation path'
+  - 'State-changing action `iam:PassRole` on Resource: `*` (IAM access level: Permissions management)'
+  - '`iam:CreateServiceLinkedRole` on Resource: `*` touches sensitive service `iam`'
+  - 'State-changing action `iam:CreateServiceLinkedRole` on Resource: `*` (IAM access level: Permissions management)'
+  opus_score: null
+  opus_factors: null
+  opus_reasoning: null
+  gap_classification: pending

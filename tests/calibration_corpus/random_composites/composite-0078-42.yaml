@@ -1,0 +1,64 @@
+name: composite-0078-42
+source_policies:
+- aws_managed/AWSCloudHSMRole.yaml
+- aws_managed/AWSSSMOpsInsightsServiceRolePolicy.yaml
+source_hash: 85d66fc7e3798094
+policy:
+  Version: '2012-10-17'
+  Statement:
+  - Effect: Allow
+    Action:
+    - ec2:CreateNetworkInterface
+    - ec2:CreateTags
+    - ec2:DeleteNetworkInterface
+    - ec2:DescribeNetworkInterfaceAttribute
+    - ec2:DescribeNetworkInterfaces
+    - ec2:DescribeSubnets
+    - ec2:DescribeVpcs
+    - ec2:DetachNetworkInterface
+    Resource:
+    - '*'
+  - Sid: AllowCreateOpsItem
+    Effect: Allow
+    Action:
+    - ssm:CreateOpsItem
+    - ssm:AddTagsToResource
+    Resource: '*'
+  - Sid: AllowAccessOpsItem
+    Effect: Allow
+    Action:
+    - ssm:UpdateOpsItem
+    - ssm:GetOpsItem
+    Resource: '*'
+    Condition:
+      StringEquals:
+        aws:ResourceTag/SsmOperationalInsight: 'true'
+request:
+  spec:
+    access_type: read-write
+    duration:
+      duration_hours: 8
+    resource_constraints: []
+  user: sre-dave
+  justification: post-incident audit pull
+scores:
+  det_score: 8
+  det_factors:
+  - 'State-changing action `ec2:CreateNetworkInterface` on Resource: `*` (IAM access level: Write)'
+  - 'State-changing action `ec2:CreateTags` on Resource: `*` (IAM access level: Tagging)'
+  - 'Destructive action `ec2:DeleteNetworkInterface` on Resource: `*` (blast radius = every resource in this account)'
+  - 'Destructive action `ec2:DetachNetworkInterface` on Resource: `*` (blast radius = every resource in this account)'
+  - 'Resource: `*` for ec2 (broad cross-resource read/access)'
+  - "`ec2:CreateNetworkInterface` is a high-impact mutation on broad resource \u2014 single API call can rewrite every matching\
+    \ resource in the account."
+  - '`ssm:CreateOpsItem` on Resource: `*` touches sensitive service `ssm`'
+  - '`ssm:AddTagsToResource` on Resource: `*` touches sensitive service `ssm`'
+  - 'State-changing action `ssm:CreateOpsItem` on Resource: `*` (IAM access level: Write)'
+  - 'State-changing action `ssm:AddTagsToResource` on Resource: `*` (IAM access level: Tagging)'
+  - '`ssm:UpdateOpsItem` on Resource: `*` touches sensitive service `ssm`'
+  - '`ssm:GetOpsItem` on Resource: `*` touches sensitive service `ssm`'
+  - 'State-changing action `ssm:UpdateOpsItem` on Resource: `*` (IAM access level: Write)'
+  opus_score: null
+  opus_factors: null
+  opus_reasoning: null
+  gap_classification: pending

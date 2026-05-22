@@ -1,0 +1,429 @@
+name: composite-0076-42
+source_policies:
+- aws_managed/AWSMigrationHubRefactorSpacesFullAccess.yaml
+- aws_managed/AWSLambda_FullAccess.yaml
+- aws_managed/AmazonHoneycodeServiceRolePolicy.yaml
+- aws_managed/AmazonAppFlowFullAccess.yaml
+source_hash: 624bad834280f939
+policy:
+  Version: '2012-10-17'
+  Statement:
+  - Sid: RefactorSpaces
+    Effect: Allow
+    Action:
+    - refactor-spaces:*
+    Resource: '*'
+  - Sid: EC2Describe
+    Effect: Allow
+    Action:
+    - ec2:DescribeNetworkInterfaces
+    - ec2:DescribeRouteTables
+    - ec2:DescribeSecurityGroups
+    - ec2:DescribeSubnets
+    - ec2:DescribeVpcEndpointServiceConfigurations
+    - ec2:DescribeVpcs
+    - ec2:DescribeTransitGatewayVpcAttachments
+    - ec2:DescribeTransitGateways
+    - ec2:DescribeTags
+    - ec2:DescribeAccountAttributes
+    - ec2:DescribeInternetGateways
+    Resource: '*'
+  - Sid: RequestTagTransitGatewayCreate
+    Effect: Allow
+    Action:
+    - ec2:CreateTransitGateway
+    - ec2:CreateSecurityGroup
+    - ec2:CreateTransitGatewayVpcAttachment
+    Resource: '*'
+    Condition:
+      'Null':
+        aws:RequestTag/refactor-spaces:environment-id: 'false'
+  - Sid: ResourceTagTransitGatewayCreate
+    Effect: Allow
+    Action:
+    - ec2:CreateTransitGateway
+    - ec2:CreateSecurityGroup
+    - ec2:CreateTransitGatewayVpcAttachment
+    Resource: '*'
+    Condition:
+      'Null':
+        aws:ResourceTag/refactor-spaces:environment-id: 'false'
+  - Sid: VpcEndpointServiceConfigurationCreate
+    Effect: Allow
+    Action:
+    - ec2:CreateVpcEndpointServiceConfiguration
+    Resource: '*'
+  - Sid: EC2NetworkingModify
+    Effect: Allow
+    Action:
+    - ec2:DeleteTransitGateway
+    - ec2:AuthorizeSecurityGroupIngress
+    - ec2:RevokeSecurityGroupIngress
+    - ec2:DeleteSecurityGroup
+    - ec2:DeleteTransitGatewayVpcAttachment
+    - ec2:CreateRoute
+    - ec2:DeleteRoute
+    - ec2:DeleteTags
+    Resource: '*'
+    Condition:
+      'Null':
+        aws:ResourceTag/refactor-spaces:environment-id: 'false'
+  - Sid: VpcEndpointServiceConfigurationDelete
+    Effect: Allow
+    Action: ec2:DeleteVpcEndpointServiceConfigurations
+    Resource: '*'
+    Condition:
+      'Null':
+        aws:ResourceTag/refactor-spaces:application-id: 'false'
+  - Sid: ELBLoadBalancerCreate
+    Effect: Allow
+    Action:
+    - elasticloadbalancing:AddTags
+    - elasticloadbalancing:CreateLoadBalancer
+    Resource: arn:*:elasticloadbalancing:*:*:loadbalancer/net/refactor-spaces-nlb-*
+    Condition:
+      'Null':
+        aws:RequestTag/refactor-spaces:application-id: 'false'
+  - Sid: ELBDescribe
+    Effect: Allow
+    Action:
+    - elasticloadbalancing:DescribeLoadBalancers
+    - elasticloadbalancing:DescribeTags
+    - elasticloadbalancing:DescribeTargetHealth
+    - elasticloadbalancing:DescribeTargetGroups
+    - elasticloadbalancing:DescribeListeners
+    Resource: '*'
+  - Sid: ELBModify
+    Effect: Allow
+    Action:
+    - elasticloadbalancing:RegisterTargets
+    - elasticloadbalancing:CreateLoadBalancerListeners
+    - elasticloadbalancing:CreateListener
+    - elasticloadbalancing:DeleteListener
+    - elasticloadbalancing:DeleteTargetGroup
+    Resource: '*'
+    Condition:
+      StringLike:
+        aws:ResourceTag/refactor-spaces:route-id:
+        - '*'
+  - Sid: ELBLoadBalancerDelete
+    Effect: Allow
+    Action: elasticloadbalancing:DeleteLoadBalancer
+    Resource: arn:*:elasticloadbalancing:*:*:loadbalancer/net/refactor-spaces-nlb-*
+  - Sid: ELBListenerCreate
+    Effect: Allow
+    Action:
+    - elasticloadbalancing:AddTags
+    - elasticloadbalancing:CreateListener
+    Resource:
+    - arn:*:elasticloadbalancing:*:*:loadbalancer/net/refactor-spaces-nlb-*
+    - arn:*:elasticloadbalancing:*:*:listener/net/refactor-spaces-nlb-*
+    Condition:
+      'Null':
+        aws:RequestTag/refactor-spaces:route-id: 'false'
+  - Sid: ELBListenerDelete
+    Effect: Allow
+    Action: elasticloadbalancing:DeleteListener
+    Resource: arn:*:elasticloadbalancing:*:*:listener/net/refactor-spaces-nlb-*
+  - Sid: ELBTargetGroupModify
+    Effect: Allow
+    Action:
+    - elasticloadbalancing:DeleteTargetGroup
+    - elasticloadbalancing:RegisterTargets
+    Resource: arn:*:elasticloadbalancing:*:*:targetgroup/refactor-spaces-tg-*
+  - Sid: ELBTargetGroupCreate
+    Effect: Allow
+    Action:
+    - elasticloadbalancing:AddTags
+    - elasticloadbalancing:CreateTargetGroup
+    Resource: arn:*:elasticloadbalancing:*:*:targetgroup/refactor-spaces-tg-*
+    Condition:
+      'Null':
+        aws:RequestTag/refactor-spaces:route-id: 'false'
+  - Sid: APIGatewayModify
+    Effect: Allow
+    Action:
+    - apigateway:GET
+    - apigateway:DELETE
+    - apigateway:PATCH
+    - apigateway:POST
+    - apigateway:PUT
+    - apigateway:UpdateRestApiPolicy
+    Resource:
+    - arn:aws:apigateway:*::/restapis
+    - arn:aws:apigateway:*::/restapis/*
+    - arn:aws:apigateway:*::/vpclinks
+    - arn:aws:apigateway:*::/vpclinks/*
+    - arn:aws:apigateway:*::/tags
+    - arn:aws:apigateway:*::/tags/*
+    Condition:
+      'Null':
+        aws:ResourceTag/refactor-spaces:application-id: 'false'
+  - Sid: APIGatewayVpcLinksGet
+    Effect: Allow
+    Action: apigateway:GET
+    Resource:
+    - arn:aws:apigateway:*::/vpclinks
+    - arn:aws:apigateway:*::/vpclinks/*
+  - Sid: OrganizationDescribe
+    Effect: Allow
+    Action:
+    - organizations:DescribeOrganization
+    Resource: '*'
+  - Sid: CloudformationStackCreate
+    Effect: Allow
+    Action:
+    - cloudformation:CreateStack
+    Resource: '*'
+  - Sid: CloudformationStackTag
+    Effect: Allow
+    Action:
+    - cloudformation:TagResource
+    Resource: arn:aws:cloudformation:*:*:stack/*
+  - Sid: CreateRefactorSpacesSLR
+    Effect: Allow
+    Action: iam:CreateServiceLinkedRole
+    Resource: '*'
+    Condition:
+      StringEquals:
+        iam:AWSServiceName: refactor-spaces.amazonaws.com
+  - Sid: CreateELBSLR
+    Effect: Allow
+    Action: iam:CreateServiceLinkedRole
+    Resource: '*'
+    Condition:
+      StringEquals:
+        iam:AWSServiceName: elasticloadbalancing.amazonaws.com
+  - Effect: Allow
+    Action:
+    - cloudformation:DescribeStacks
+    - cloudformation:ListStackResources
+    - cloudwatch:ListMetrics
+    - cloudwatch:GetMetricData
+    - ec2:DescribeSecurityGroups
+    - ec2:DescribeSubnets
+    - ec2:DescribeVpcs
+    - kms:DescribeKey
+    - kms:ListAliases
+    - iam:GetPolicy
+    - iam:GetPolicyVersion
+    - iam:GetRole
+    - iam:GetRolePolicy
+    - iam:ListAttachedRolePolicies
+    - iam:ListRolePolicies
+    - iam:ListRoles
+    - lambda:*
+    - logs:DescribeLogGroups
+    - states:DescribeStateMachine
+    - states:ListStateMachines
+    - tag:GetResources
+    - xray:GetTraceSummaries
+    - xray:BatchGetTraces
+    Resource: '*'
+  - Effect: Allow
+    Action: iam:PassRole
+    Resource: '*'
+    Condition:
+      StringEquals:
+        iam:PassedToService: lambda.amazonaws.com
+  - Effect: Allow
+    Action:
+    - logs:DescribeLogStreams
+    - logs:GetLogEvents
+    - logs:FilterLogEvents
+    - logs:StartLiveTail
+    - logs:StopLiveTail
+    Resource: arn:aws:logs:*:*:log-group:/aws/lambda/*
+  - Effect: Allow
+    Action: iam:CreateServiceLinkedRole
+    Resource: arn:aws:iam::*:role/aws-service-role/lambda.amazonaws.com/AWSServiceRoleForLambda
+    Condition:
+      StringEquals:
+        iam:AWSServiceName: lambda.amazonaws.com
+  - Action:
+    - sso:GetManagedApplicationInstance
+    Resource: '*'
+    Effect: Allow
+  - Effect: Allow
+    Action: appflow:*
+    Resource: '*'
+  - Sid: ListRolesForRedshift
+    Effect: Allow
+    Action: iam:ListRoles
+    Resource: '*'
+  - Sid: KMSListAccess
+    Effect: Allow
+    Action:
+    - kms:ListKeys
+    - kms:DescribeKey
+    - kms:ListAliases
+    Resource: '*'
+  - Sid: KMSGrantAccess
+    Effect: Allow
+    Action:
+    - kms:CreateGrant
+    Resource: '*'
+    Condition:
+      StringLike:
+        kms:ViaService: appflow.*.amazonaws.com
+      Bool:
+        kms:GrantIsForAWSResource: 'true'
+  - Sid: KMSListGrantAccess
+    Effect: Allow
+    Action:
+    - kms:ListGrants
+    Resource: '*'
+    Condition:
+      StringLike:
+        kms:ViaService: appflow.*.amazonaws.com
+  - Sid: S3ReadAccess
+    Effect: Allow
+    Action:
+    - s3:ListAllMyBuckets
+    - s3:ListBucket
+    - s3:GetBucketLocation
+    - s3:GetBucketPolicy
+    Resource: '*'
+  - Sid: S3PutBucketPolicyAccess
+    Effect: Allow
+    Action:
+    - s3:PutBucketPolicy
+    Resource: arn:aws:s3:::appflow-*
+  - Sid: SecretsManagerCreateSecretAccess
+    Effect: Allow
+    Action: secretsmanager:CreateSecret
+    Resource: '*'
+    Condition:
+      StringLike:
+        secretsmanager:Name: appflow!*
+      ForAnyValue:StringEquals:
+        aws:CalledVia:
+        - appflow.amazonaws.com
+  - Sid: SecretsManagerPutResourcePolicyAccess
+    Effect: Allow
+    Action:
+    - secretsmanager:PutResourcePolicy
+    Resource: '*'
+    Condition:
+      ForAnyValue:StringEquals:
+        aws:CalledVia:
+        - appflow.amazonaws.com
+      StringEqualsIgnoreCase:
+        secretsmanager:ResourceTag/aws:secretsmanager:owningService: appflow
+  - Sid: LambdaListFunctions
+    Effect: Allow
+    Action:
+    - lambda:ListFunctions
+    Resource: '*'
+request:
+  spec:
+    access_type: read-write
+    duration:
+      duration_hours: 1
+    resource_constraints: []
+  user: sre-carol
+  justification: scale-out emergency for us-east-1 outage
+scores:
+  det_score: 9
+  det_factors:
+  - '`refactor-spaces:*` grants every action in `refactor-spaces`'
+  - 'Resource: `*` for refactor-spaces (broad cross-resource read/access)'
+  - 'State-changing action `ec2:CreateTransitGateway` on Resource: `*` (IAM access level: Write)'
+  - 'State-changing action `ec2:CreateSecurityGroup` on Resource: `*` (IAM access level: Write)'
+  - 'State-changing action `ec2:CreateTransitGatewayVpcAttachment` on Resource: `*` (IAM access level: Write)'
+  - 'Resource: `*` for ec2 (broad cross-resource read/access)'
+  - 'State-changing action `ec2:CreateVpcEndpointServiceConfiguration` on Resource: `*` (IAM access level: Write)'
+  - 'Destructive action `ec2:DeleteTransitGateway` on Resource: `*` (blast radius = every resource in this account)'
+  - 'State-changing action `ec2:AuthorizeSecurityGroupIngress` on Resource: `*` (IAM access level: Write)'
+  - 'Destructive action `ec2:RevokeSecurityGroupIngress` on Resource: `*` (blast radius = every resource in this account)'
+  - 'Destructive action `ec2:DeleteSecurityGroup` on Resource: `*` (blast radius = every resource in this account)'
+  - 'Destructive action `ec2:DeleteTransitGatewayVpcAttachment` on Resource: `*` (blast radius = every resource in this account)'
+  - 'State-changing action `ec2:CreateRoute` on Resource: `*` (IAM access level: Write)'
+  - 'Destructive action `ec2:DeleteRoute` on Resource: `*` (blast radius = every resource in this account)'
+  - 'Destructive action `ec2:DeleteTags` on Resource: `*` (blast radius = every resource in this account)'
+  - "`ec2:AuthorizeSecurityGroupIngress` is a high-impact mutation on broad resource \u2014 single API call can rewrite every\
+    \ matching resource in the account."
+  - "`ec2:RevokeSecurityGroupIngress` is a high-impact mutation on broad resource \u2014 single API call can rewrite every\
+    \ matching resource in the account."
+  - "`ec2:CreateRoute` is a high-impact mutation on broad resource \u2014 single API call can rewrite every matching resource\
+    \ in the account."
+  - "`ec2:DeleteRoute` is a high-impact mutation on broad resource \u2014 single API call can rewrite every matching resource\
+    \ in the account."
+  - 'Destructive action `ec2:DeleteVpcEndpointServiceConfigurations` on Resource: `*` (blast radius = every resource in this
+    account)'
+  - 'State-changing action `elasticloadbalancing:AddTags` on Resource: `*` (IAM access level: Tagging)'
+  - 'State-changing action `elasticloadbalancing:CreateLoadBalancer` on Resource: `*` (IAM access level: Write)'
+  - 'Resource: `*` for elasticloadbalancing (broad cross-resource read/access)'
+  - "`Condition.StringLike.aws:ResourceTag/refactor-spaces:route-id` value is `\"*\"` \u2014 degenerate wildcard; the condition\
+    \ imposes no actual constraint."
+  - 'State-changing action `elasticloadbalancing:RegisterTargets` on Resource: `*` (IAM access level: Write)'
+  - 'State-changing action `elasticloadbalancing:CreateLoadBalancerListeners` on Resource: `*` (IAM access level: Write)'
+  - 'State-changing action `elasticloadbalancing:CreateListener` on Resource: `*` (IAM access level: Write)'
+  - 'Destructive action `elasticloadbalancing:DeleteListener` on Resource: `*` (blast radius = every resource in this account)'
+  - 'Destructive action `elasticloadbalancing:DeleteTargetGroup` on Resource: `*` (blast radius = every resource in this account)'
+  - "`elasticloadbalancing:DeleteListener` is a high-impact mutation on broad resource \u2014 single API call can rewrite\
+    \ every matching resource in the account."
+  - 'Destructive action `elasticloadbalancing:DeleteLoadBalancer` on Resource: `*` (blast radius = every resource in this
+    account)'
+  - 'State-changing action `elasticloadbalancing:CreateTargetGroup` on Resource: `*` (IAM access level: Write)'
+  - 'Destructive action `apigateway:DELETE` on Resource: `*` (blast radius = every resource in this account)'
+  - 'State-changing action `apigateway:PATCH` on Resource: `*` (IAM access level: Write)'
+  - 'State-changing action `apigateway:POST` on Resource: `*` (IAM access level: Write)'
+  - 'State-changing action `apigateway:PUT` on Resource: `*` (IAM access level: Write)'
+  - 'State-changing action `apigateway:UpdateRestApiPolicy` on Resource: `*` (IAM access level: Permissions management)'
+  - "`apigateway:PATCH` is a high-impact mutation \u2014 a single narrowly-scoped change can affect production operations\
+    \ / security posture."
+  - '`organizations:DescribeOrganization` on Resource: `*` touches sensitive service `organizations`'
+  - 'State-changing action `cloudformation:CreateStack` on Resource: `*` (IAM access level: Write)'
+  - 'Resource: `*` for cloudformation (broad cross-resource read/access)'
+  - "`cloudformation:CreateStack` is a high-impact mutation on broad resource \u2014 single API call can rewrite every matching\
+    \ resource in the account."
+  - 'State-changing action `cloudformation:TagResource` on Resource: `*` (IAM access level: Tagging)'
+  - '`iam:CreateServiceLinkedRole` on Resource: `*` touches sensitive service `iam`'
+  - 'State-changing action `iam:CreateServiceLinkedRole` on Resource: `*` (IAM access level: Permissions management)'
+  - '`kms:DescribeKey` on Resource: `*` touches sensitive service `kms`'
+  - '`kms:ListAliases` on Resource: `*` touches sensitive service `kms`'
+  - '`iam:GetPolicy` on Resource: `*` touches sensitive service `iam`'
+  - '`iam:GetPolicyVersion` on Resource: `*` touches sensitive service `iam`'
+  - '`iam:GetRole` on Resource: `*` touches sensitive service `iam`'
+  - '`iam:GetRolePolicy` on Resource: `*` touches sensitive service `iam`'
+  - '`iam:ListAttachedRolePolicies` on Resource: `*` touches sensitive service `iam`'
+  - '`iam:ListRolePolicies` on Resource: `*` touches sensitive service `iam`'
+  - '`iam:ListRoles` on Resource: `*` touches sensitive service `iam`'
+  - '`lambda:*` grants every action in `lambda`'
+  - "`lambda:*` is a high-impact mutation on broad resource \u2014 single API call can rewrite every matching resource in\
+    \ the account."
+  - '`iam:PassRole` on Resource: `*` is a privilege-escalation path'
+  - 'State-changing action `iam:PassRole` on Resource: `*` (IAM access level: Permissions management)'
+  - 'Destructive action `logs:StopLiveTail` on Resource: `*` (blast radius = every resource in this account)'
+  - 'Resource: `*` for logs (broad cross-resource read/access)'
+  - 'Resource: `*` for sso (broad cross-resource read/access)'
+  - '`appflow:*` grants every action in `appflow`'
+  - 'Resource: `*` for appflow (broad cross-resource read/access)'
+  - '`kms:ListKeys` on Resource: `*` touches sensitive service `kms`'
+  - '`kms:CreateGrant` on Resource: `*` touches sensitive service `kms`'
+  - 'State-changing action `kms:CreateGrant` on Resource: `*` (IAM access level: Permissions management)'
+  - '`kms:ListGrants` on Resource: `*` touches sensitive service `kms`'
+  - 'Resource: `*` for s3 (broad cross-resource read/access)'
+  - 'State-changing action `s3:PutBucketPolicy` on Resource: `*` (IAM access level: Permissions management)'
+  - "`s3:PutBucketPolicy` is a high-impact mutation on broad resource \u2014 single API call can rewrite every matching resource\
+    \ in the account."
+  - '`s3:PutBucketPolicy` is catastrophic in blast radius (account governance / IAM total compromise / evidence destruction).
+    Always route to human review.'
+  - '`secretsmanager:CreateSecret` on Resource: `*` touches sensitive service `secretsmanager`'
+  - 'State-changing action `secretsmanager:CreateSecret` on Resource: `*` (IAM access level: Write)'
+  - '`secretsmanager:PutResourcePolicy` on Resource: `*` touches sensitive service `secretsmanager`'
+  - 'State-changing action `secretsmanager:PutResourcePolicy` on Resource: `*` (IAM access level: Permissions management)'
+  - 'Code-execution primitive on broad resource: cloudformation:CreateStack. Deploys attacker-controlled code that runs under
+    whatever role the matched resources use. Even without explicit PassRole, the existing roles of matched resources become
+    the attack target.'
+  - 'Code-execution-via-role composition: cloudformation:CreateStack (+ 1 more) combined with iam:PassRole = RCE as the passed
+    role. Single-statement scoring underweights this; the composition is full account-compromise tier.'
+  - '`lambda:*` on broad resource reads content that frequently contains secrets / sensitive data (boot logs, command output,
+    log streams, message bodies).'
+  - '`lambda:*` sets up ongoing cross-account / persistent exfiltration in a single call. The blast is ''everything that flows
+    through this resource from now on,'' not just what exists today.'
+  opus_score: null
+  opus_factors: null
+  opus_reasoning: null
+  gap_classification: pending

@@ -1,0 +1,155 @@
+name: composite-0049-42
+source_policies:
+- aws_managed/AmazonGrafanaCloudWatchAccess.yaml
+- aws_managed/AWSSecurityHubReadOnlyAccess.yaml
+- aws_managed/AmazonEKSNetworkingPolicy.yaml
+- aws_managed/Route53ResolverServiceRolePolicy.yaml
+source_hash: 456dde631ac9cfd4
+policy:
+  Version: '2012-10-17'
+  Statement:
+  - Effect: Allow
+    Action:
+    - cloudwatch:DescribeAlarmsForMetric
+    - cloudwatch:DescribeAlarmHistory
+    - cloudwatch:DescribeAlarms
+    - cloudwatch:ListMetrics
+    - cloudwatch:GetMetricStatistics
+    - cloudwatch:GetMetricData
+    - cloudwatch:GetInsightRuleReport
+    Resource: '*'
+  - Effect: Allow
+    Action:
+    - logs:DescribeLogGroups
+    - logs:GetLogGroupFields
+    - logs:StartQuery
+    - logs:StopQuery
+    - logs:GetQueryResults
+    - logs:GetLogEvents
+    Resource: '*'
+  - Effect: Allow
+    Action:
+    - ec2:DescribeTags
+    - ec2:DescribeInstances
+    - ec2:DescribeRegions
+    Resource: '*'
+  - Effect: Allow
+    Action: tag:GetResources
+    Resource: '*'
+  - Effect: Allow
+    Action:
+    - oam:ListSinks
+    - oam:ListAttachedLinks
+    Resource: '*'
+  - Sid: AWSSecurityHubReadOnlyAccess
+    Effect: Allow
+    Action:
+    - securityhub:Get*
+    - securityhub:List*
+    - securityhub:BatchGet*
+    - securityhub:Describe*
+    Resource: '*'
+  - Effect: Allow
+    Action: ec2:CreateNetworkInterface
+    Resource: '*'
+    Condition:
+      StringEquals:
+        aws:RequestTag/eks:eks-cluster-name: ${aws:PrincipalTag/eks:eks-cluster-name}
+      StringLike:
+        aws:RequestTag/eks:kubernetes-cni-node-name: '*'
+      ForAllValues:StringEquals:
+        aws:TagKeys:
+        - eks:eks-cluster-name
+        - eks:kubernetes-cni-node-name
+  - Effect: Allow
+    Action: ec2:CreateNetworkInterface
+    Resource:
+    - arn:aws:ec2:*:*:security-group/*
+    - arn:aws:ec2:*:*:subnet/*
+  - Effect: Allow
+    Action: ec2:CreateTags
+    Resource: '*'
+    Condition:
+      StringEquals:
+        ec2:CreateAction: CreateNetworkInterface
+  - Effect: Allow
+    Action:
+    - ec2:AttachNetworkInterface
+    - ec2:DetachNetworkInterface
+    - ec2:UnassignPrivateIpAddresses
+    - ec2:UnassignIpv6Addresses
+    - ec2:AssignPrivateIpAddresses
+    - ec2:AssignIpv6Addresses
+    Resource: '*'
+    Condition:
+      StringEquals:
+        aws:ResourceTag/eks:eks-cluster-name: ${aws:PrincipalTag/eks:eks-cluster-name}
+  - Effect: Allow
+    Action: ec2:ModifyNetworkInterfaceAttribute
+    Resource:
+    - arn:aws:ec2:*:*:network-interface/*
+    - arn:aws:ec2:*:*:instance/*
+    Condition:
+      StringEquals:
+        aws:ResourceTag/eks:eks-cluster-name: ${aws:PrincipalTag/eks:eks-cluster-name}
+  - Action:
+    - logs:CreateLogDelivery
+    - logs:GetLogDelivery
+    - logs:UpdateLogDelivery
+    - logs:DeleteLogDelivery
+    - logs:ListLogDeliveries
+    - logs:DescribeResourcePolicies
+    - logs:DescribeLogGroups
+    - s3:GetBucketPolicy
+    Effect: Allow
+    Resource: '*'
+request:
+  spec:
+    access_type: read-write
+    duration:
+      duration_hours: 8
+    resource_constraints: []
+  user: auditor-erin
+  justification: SOC 2 controls evidence collection
+scores:
+  det_score: 8
+  det_factors:
+  - 'Resource: `*` for cloudwatch (broad cross-resource read/access)'
+  - 'Destructive action `logs:StopQuery` on Resource: `*` (blast radius = every resource in this account)'
+  - 'Resource: `*` for logs (broad cross-resource read/access)'
+  - 'Resource: `*` for tag (broad cross-resource read/access)'
+  - "Action-name wildcard `securityhub:Get*` on broad resource \u2014 matches multiple securityhub APIs at once"
+  - "Action-name wildcard `securityhub:List*` on broad resource \u2014 matches multiple securityhub APIs at once"
+  - "Action-name wildcard `securityhub:BatchGet*` on broad resource \u2014 matches multiple securityhub APIs at once"
+  - "Action-name wildcard `securityhub:Describe*` on broad resource \u2014 matches multiple securityhub APIs at once"
+  - 'Resource: `*` for securityhub (broad cross-resource read/access)'
+  - "`Condition.StringEquals.aws:RequestTag/eks:eks-cluster-name: \"${aws:PrincipalTag/eks:eks-cluster-name}\"` interpolates\
+    \ an attacker-controllable tag \u2014 if the caller has `iam:TagRole`/`TagUser` on themselves, they control what the condition\
+    \ value expands to, defeating the apparent scope."
+  - 'State-changing action `ec2:CreateNetworkInterface` on Resource: `*` (IAM access level: Write)'
+  - 'Resource: `*` for ec2 (broad cross-resource read/access)'
+  - "`ec2:CreateNetworkInterface` is a high-impact mutation on broad resource \u2014 single API call can rewrite every matching\
+    \ resource in the account."
+  - 'State-changing action `ec2:CreateTags` on Resource: `*` (IAM access level: Tagging)'
+  - "`Condition.StringEquals.aws:ResourceTag/eks:eks-cluster-name: \"${aws:PrincipalTag/eks:eks-cluster-name}\"` interpolates\
+    \ an attacker-controllable tag \u2014 if the caller has `iam:TagRole`/`TagUser` on themselves, they control what the condition\
+    \ value expands to, defeating the apparent scope."
+  - 'State-changing action `ec2:AttachNetworkInterface` on Resource: `*` (IAM access level: Write)'
+  - 'Destructive action `ec2:DetachNetworkInterface` on Resource: `*` (blast radius = every resource in this account)'
+  - 'State-changing action `ec2:UnassignPrivateIpAddresses` on Resource: `*` (IAM access level: Write)'
+  - 'State-changing action `ec2:UnassignIpv6Addresses` on Resource: `*` (IAM access level: Write)'
+  - 'State-changing action `ec2:AssignPrivateIpAddresses` on Resource: `*` (IAM access level: Write)'
+  - 'State-changing action `ec2:AssignIpv6Addresses` on Resource: `*` (IAM access level: Write)'
+  - "`ec2:AttachNetworkInterface` is a high-impact mutation on broad resource \u2014 single API call can rewrite every matching\
+    \ resource in the account."
+  - 'State-changing action `ec2:ModifyNetworkInterfaceAttribute` on Resource: `*` (IAM access level: Write)'
+  - 'State-changing action `logs:CreateLogDelivery` on Resource: `*` (IAM access level: Write)'
+  - 'State-changing action `logs:UpdateLogDelivery` on Resource: `*` (IAM access level: Write)'
+  - 'Destructive action `logs:DeleteLogDelivery` on Resource: `*` (blast radius = every resource in this account)'
+  - 'Resource: `*` for logs, s3 (broad cross-resource read/access)'
+  - '`logs:GetLogEvents` on broad resource reads content that frequently contains secrets / sensitive data (boot logs, command
+    output, log streams, message bodies).'
+  opus_score: null
+  opus_factors: null
+  opus_reasoning: null
+  gap_classification: pending

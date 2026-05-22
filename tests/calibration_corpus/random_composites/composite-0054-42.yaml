@@ -1,0 +1,170 @@
+name: composite-0054-42
+source_policies:
+- aws_managed/AWSPanoramaFullAccess.yaml
+- aws_managed/AmazonEC2ContainerRegistryReadOnly.yaml
+- aws_managed/AWSECRPullThroughCache_ServiceRolePolicy.yaml
+source_hash: 9d516f799a415477
+policy:
+  Version: '2012-10-17'
+  Statement:
+  - Effect: Allow
+    Action:
+    - panorama:*
+    Resource: '*'
+  - Effect: Allow
+    Action:
+    - s3:PutObject
+    - s3:PutObjectAcl
+    - s3:DeleteObject
+    - s3:GetObject
+    - s3:ListBucket
+    Resource: '*'
+    Condition:
+      ArnLike:
+        s3:DataAccessPointArn: arn:aws:s3:*:*:accesspoint/panorama*
+  - Effect: Allow
+    Action:
+    - secretsmanager:GetSecretValue
+    - secretsmanager:DescribeSecret
+    - secretsmanager:ListSecretVersionIds
+    - secretsmanager:PutSecretValue
+    - secretsmanager:UpdateSecret
+    Resource:
+    - arn:aws:secretsmanager:*:*:secret:panorama*
+    - arn:aws:secretsmanager:*:*:secret:Panorama*
+  - Effect: Allow
+    Action:
+    - iam:PassRole
+    Resource: '*'
+    Condition:
+      StringEquals:
+        iam:PassedToService: panorama.amazonaws.com
+  - Effect: Allow
+    Action:
+    - logs:Describe*
+    - logs:Get*
+    - logs:List*
+    - logs:StartQuery
+    - logs:StopQuery
+    - logs:TestMetricFilter
+    - logs:FilterLogEvents
+    Resource:
+    - arn:aws:logs:*:*:log-group:/aws/panorama_device*:log-stream:*
+    - arn:aws:logs:*:*:log-group:/aws/panorama/devices/*
+  - Effect: Allow
+    Action:
+    - logs:DescribeLogGroups
+    Resource:
+    - arn:aws:logs:*:*:log-group:*
+  - Effect: Allow
+    Action:
+    - cloudwatch:ListMetrics
+    - cloudwatch:GetMetricData
+    - cloudwatch:GetMetricStatistics
+    Resource: '*'
+  - Effect: Allow
+    Action: iam:ListRoles
+    Resource: '*'
+  - Effect: Allow
+    Action: iam:CreateServiceLinkedRole
+    Resource: '*'
+    Condition:
+      StringEquals:
+        iam:AWSServiceName: panorama.amazonaws.com
+  - Effect: Allow
+    Action:
+    - ecr:GetAuthorizationToken
+    - ecr:BatchCheckLayerAvailability
+    - ecr:GetDownloadUrlForLayer
+    - ecr:GetRepositoryPolicy
+    - ecr:DescribeRepositories
+    - ecr:ListImages
+    - ecr:DescribeImages
+    - ecr:BatchGetImage
+    - ecr:GetLifecyclePolicy
+    - ecr:GetLifecyclePolicyPreview
+    - ecr:ListTagsForResource
+    - ecr:DescribeImageScanFindings
+    Resource: '*'
+  - Sid: ECR
+    Effect: Allow
+    Action:
+    - ecr:GetAuthorizationToken
+    - ecr:BatchCheckLayerAvailability
+    - ecr:InitiateLayerUpload
+    - ecr:UploadLayerPart
+    - ecr:CompleteLayerUpload
+    - ecr:PutImage
+    - ecr:BatchGetImage
+    - ecr:BatchImportUpstreamImage
+    - ecr:GetDownloadUrlForLayer
+    - ecr:GetImageCopyStatus
+    Resource: '*'
+    Condition:
+      StringEquals:
+        aws:ResourceAccount: ${aws:PrincipalAccount}
+  - Sid: SecretsManager
+    Effect: Allow
+    Action:
+    - secretsmanager:GetSecretValue
+    Resource: arn:aws:secretsmanager:*:*:secret:ecr-pullthroughcache/*
+    Condition:
+      StringEquals:
+        aws:ResourceAccount: ${aws:PrincipalAccount}
+request:
+  spec:
+    access_type: read-write
+    duration:
+      duration_hours: 1
+    resource_constraints: []
+  user: contractor-frank
+  justification: 60-day integration project read access
+scores:
+  det_score: 9
+  det_factors:
+  - '`panorama:*` grants every action in `panorama`'
+  - 'Resource: `*` for panorama (broad cross-resource read/access)'
+  - 'State-changing action `s3:PutObject` on Resource: `*` (IAM access level: Write)'
+  - 'State-changing action `s3:PutObjectAcl` on Resource: `*` (IAM access level: Permissions management)'
+  - 'Destructive action `s3:DeleteObject` on Resource: `*` (blast radius = every resource in this account)'
+  - 'Resource: `*` for s3 (broad cross-resource read/access)'
+  - "`s3:PutObjectAcl` is a high-impact mutation on broad resource \u2014 single API call can rewrite every matching resource\
+    \ in the account."
+  - '`secretsmanager:GetSecretValue` on Resource: `*` (broad access to secrets)'
+  - '`secretsmanager:DescribeSecret` on Resource: `*` touches sensitive service `secretsmanager`'
+  - '`secretsmanager:ListSecretVersionIds` on Resource: `*` touches sensitive service `secretsmanager`'
+  - '`secretsmanager:PutSecretValue` on Resource: `*` touches sensitive service `secretsmanager`'
+  - '`secretsmanager:UpdateSecret` on Resource: `*` touches sensitive service `secretsmanager`'
+  - 'State-changing action `secretsmanager:PutSecretValue` on Resource: `*` (IAM access level: Write)'
+  - 'State-changing action `secretsmanager:UpdateSecret` on Resource: `*` (IAM access level: Write)'
+  - "`secretsmanager:PutSecretValue` is a high-impact mutation on broad resource \u2014 single API call can rewrite every\
+    \ matching resource in the account."
+  - "`secretsmanager:UpdateSecret` is a high-impact mutation on broad resource \u2014 single API call can rewrite every matching\
+    \ resource in the account."
+  - '`iam:PassRole` on Resource: `*` is a privilege-escalation path'
+  - 'State-changing action `iam:PassRole` on Resource: `*` (IAM access level: Permissions management)'
+  - "Action-name wildcard `logs:Describe*` on broad resource \u2014 matches multiple logs APIs at once"
+  - "Action-name wildcard `logs:Get*` on broad resource \u2014 matches multiple logs APIs at once"
+  - "Action-name wildcard `logs:List*` on broad resource \u2014 matches multiple logs APIs at once"
+  - 'Destructive action `logs:StopQuery` on Resource: `*` (blast radius = every resource in this account)'
+  - 'Resource: `*` for logs (broad cross-resource read/access)'
+  - 'Resource: `*` for cloudwatch (broad cross-resource read/access)'
+  - '`iam:ListRoles` on Resource: `*` touches sensitive service `iam`'
+  - '`iam:CreateServiceLinkedRole` on Resource: `*` touches sensitive service `iam`'
+  - 'State-changing action `iam:CreateServiceLinkedRole` on Resource: `*` (IAM access level: Permissions management)'
+  - 'Resource: `*` for ecr (broad cross-resource read/access)'
+  - 'State-changing action `ecr:InitiateLayerUpload` on Resource: `*` (IAM access level: Write)'
+  - 'State-changing action `ecr:UploadLayerPart` on Resource: `*` (IAM access level: Write)'
+  - 'State-changing action `ecr:CompleteLayerUpload` on Resource: `*` (IAM access level: Write)'
+  - 'State-changing action `ecr:PutImage` on Resource: `*` (IAM access level: Write)'
+  - 'State-changing action `ecr:BatchImportUpstreamImage` on Resource: `*` (IAM access level: Write)'
+  - "`ecr:PutImage` is a high-impact mutation on broad resource \u2014 single API call can rewrite every matching resource\
+    \ in the account."
+  - '`s3:GetObject` on broad resource reads content that frequently contains secrets / sensitive data (boot logs, command
+    output, log streams, message bodies).'
+  - '`ecr:PutImage` sets up ongoing cross-account / persistent exfiltration in a single call. The blast is ''everything that
+    flows through this resource from now on,'' not just what exists today.'
+  opus_score: null
+  opus_factors: null
+  opus_reasoning: null
+  gap_classification: pending

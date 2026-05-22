@@ -1,0 +1,386 @@
+name: composite-0073-42
+source_policies:
+- aws_managed/AWSGlueConsoleFullAccess.yaml
+- aws_managed/AWSPanoramaServiceLinkedRolePolicy.yaml
+- aws_managed/AWSHealthImagingFullAccess.yaml
+- aws_managed/AWSIoTDeviceDefenderUpdateCACertMitigationAction.yaml
+- aws_managed/AmazonECSInfrastructureRolePolicyForServiceConnectTransportLayerSecurity.yaml
+source_hash: f8300a707b55734f
+policy:
+  Version: '2012-10-17'
+  Statement:
+  - Sid: BaseAppPermissions
+    Effect: Allow
+    Action:
+    - glue:*
+    - redshift:DescribeClusters
+    - redshift:DescribeClusterSubnetGroups
+    - iam:ListRoles
+    - iam:ListUsers
+    - iam:ListGroups
+    - iam:ListRolePolicies
+    - iam:GetRole
+    - iam:GetRolePolicy
+    - iam:ListAttachedRolePolicies
+    - ec2:DescribeSecurityGroups
+    - ec2:DescribeSubnets
+    - ec2:DescribeVpcs
+    - ec2:DescribeVpcEndpoints
+    - ec2:DescribeRouteTables
+    - ec2:DescribeVpcAttribute
+    - ec2:DescribeKeyPairs
+    - ec2:DescribeInstances
+    - ec2:DescribeImages
+    - rds:DescribeDBInstances
+    - rds:DescribeDBClusters
+    - rds:DescribeDBSubnetGroups
+    - s3:ListAllMyBuckets
+    - s3:ListBucket
+    - s3:GetBucketAcl
+    - s3:GetBucketLocation
+    - cloudformation:ListStacks
+    - cloudformation:DescribeStacks
+    - cloudformation:GetTemplateSummary
+    - dynamodb:ListTables
+    - kms:ListAliases
+    - kms:DescribeKey
+    - cloudwatch:GetMetricData
+    - cloudwatch:ListDashboards
+    - databrew:ListRecipes
+    - databrew:ListRecipeVersions
+    - databrew:DescribeRecipe
+    Resource:
+    - '*'
+  - Effect: Allow
+    Action:
+    - s3:GetObject
+    - s3:PutObject
+    Resource:
+    - arn:aws:s3:::aws-glue-*/*
+    - arn:aws:s3:::*/*aws-glue-*/*
+    - arn:aws:s3:::aws-glue-*
+  - Effect: Allow
+    Action:
+    - tag:GetResources
+    Resource:
+    - '*'
+  - Effect: Allow
+    Action:
+    - s3:CreateBucket
+    Resource:
+    - arn:aws:s3:::aws-glue-*
+  - Effect: Allow
+    Action:
+    - logs:GetLogEvents
+    Resource:
+    - arn:aws:logs:*:*:/aws-glue/*
+  - Effect: Allow
+    Action:
+    - cloudformation:CreateStack
+    - cloudformation:DeleteStack
+    Resource: arn:aws:cloudformation:*:*:stack/aws-glue*/*
+  - Effect: Allow
+    Action:
+    - ec2:RunInstances
+    Resource:
+    - arn:aws:ec2:*:*:instance/*
+    - arn:aws:ec2:*:*:key-pair/*
+    - arn:aws:ec2:*:*:image/*
+    - arn:aws:ec2:*:*:security-group/*
+    - arn:aws:ec2:*:*:network-interface/*
+    - arn:aws:ec2:*:*:subnet/*
+    - arn:aws:ec2:*:*:volume/*
+  - Effect: Allow
+    Action:
+    - ec2:TerminateInstances
+    - ec2:CreateTags
+    - ec2:DeleteTags
+    Resource:
+    - arn:aws:ec2:*:*:instance/*
+    Condition:
+      StringLike:
+        ec2:ResourceTag/aws:cloudformation:stack-id: arn:aws:cloudformation:*:*:stack/aws-glue-*/*
+      StringEquals:
+        ec2:ResourceTag/aws:cloudformation:logical-id: ZeppelinInstance
+  - Action:
+    - iam:PassRole
+    Effect: Allow
+    Resource: arn:aws:iam::*:role/AWSGlueServiceRole*
+    Condition:
+      StringLike:
+        iam:PassedToService:
+        - glue.amazonaws.com
+  - Action:
+    - iam:PassRole
+    Effect: Allow
+    Resource: arn:aws:iam::*:role/AWSGlueServiceNotebookRole*
+    Condition:
+      StringLike:
+        iam:PassedToService:
+        - ec2.amazonaws.com
+  - Action:
+    - iam:PassRole
+    Effect: Allow
+    Resource:
+    - arn:aws:iam::*:role/service-role/AWSGlueServiceRole*
+    Condition:
+      StringLike:
+        iam:PassedToService:
+        - glue.amazonaws.com
+  - Sid: PanoramaIoTThingAccess
+    Effect: Allow
+    Action:
+    - iot:CreateThing
+    - iot:DeleteThing
+    - iot:DeleteThingShadow
+    - iot:DescribeThing
+    - iot:GetThingShadow
+    - iot:UpdateThing
+    - iot:UpdateThingShadow
+    Resource:
+    - arn:aws:iot:*:*:thing/panorama*
+  - Sid: PanoramaIoTCertificateAccess
+    Effect: Allow
+    Action:
+    - iot:AttachThingPrincipal
+    - iot:DetachThingPrincipal
+    - iot:UpdateCertificate
+    - iot:DeleteCertificate
+    - iot:AttachPrincipalPolicy
+    - iot:DetachPrincipalPolicy
+    Resource:
+    - arn:aws:iot:*:*:thing/panorama*
+    - arn:aws:iot:*:*:cert/*
+  - Sid: PanoramaIoTCreateCertificateAccess
+    Effect: Allow
+    Action:
+    - iot:CreateKeysAndCertificate
+    Resource:
+    - '*'
+  - Sid: PanoramaIoTCreatePolicyAndVersionAccess
+    Effect: Allow
+    Action:
+    - iot:CreatePolicy
+    - iot:CreatePolicyVersion
+    - iot:AttachPolicy
+    Resource:
+    - arn:aws:iot:*:*:policy/panorama*
+  - Sid: PanoramaIoTJobAccess
+    Effect: Allow
+    Action:
+    - iot:DescribeJobExecution
+    - iot:CreateJob
+    - iot:DeleteJob
+    Resource:
+    - arn:aws:iot:*:*:job/panorama*
+    - arn:aws:iot:*:*:thing/panorama*
+  - Sid: PanoramaIoTEndpointAccess
+    Effect: Allow
+    Action:
+    - iot:DescribeEndpoint
+    Resource:
+    - '*'
+  - Sid: PanoramaReadOnlyAccess
+    Effect: Allow
+    Action:
+    - panorama:Describe*
+    - panorama:List*
+    Resource:
+    - '*'
+  - Sid: SecretsManagerPermissions
+    Effect: Allow
+    Action:
+    - secretsmanager:GetSecretValue
+    - secretsmanager:DescribeSecret
+    - secretsmanager:CreateSecret
+    - secretsmanager:ListSecretVersionIds
+    - secretsmanager:DeleteSecret
+    Resource:
+    - arn:aws:secretsmanager:*:*:secret:panorama*
+    - arn:aws:secretsmanager:*:*:secret:Panorama*
+  - Effect: Allow
+    Action:
+    - medical-imaging:*
+    Resource: '*'
+  - Effect: Allow
+    Action: iam:PassRole
+    Resource: '*'
+    Condition:
+      StringEquals:
+        iam:PassedToService: medical-imaging.amazonaws.com
+  - Effect: Allow
+    Action:
+    - iot:UpdateCACertificate
+    Resource:
+    - '*'
+  - Sid: CreateSecret
+    Effect: Allow
+    Action: secretsmanager:CreateSecret
+    Resource: arn:aws:secretsmanager:*:*:secret:ecs-sc!*
+    Condition:
+      ArnLike:
+        aws:RequestTag/AmazonECSCreated:
+        - arn:aws:ecs:*:*:service/*/*
+        - arn:aws:ecs:*:*:task-set/*/*
+      StringEquals:
+        aws:RequestTag/AmazonECSManaged: 'true'
+        aws:ResourceAccount: ${aws:PrincipalAccount}
+  - Sid: TagOnCreateSecret
+    Effect: Allow
+    Action: secretsmanager:TagResource
+    Resource: arn:aws:secretsmanager:*:*:secret:ecs-sc!*
+    Condition:
+      ArnLike:
+        aws:RequestTag/AmazonECSCreated:
+        - arn:aws:ecs:*:*:service/*/*
+        - arn:aws:ecs:*:*:task-set/*/*
+      StringEquals:
+        aws:RequestTag/AmazonECSManaged: 'true'
+        aws:ResourceAccount: ${aws:PrincipalAccount}
+  - Sid: RotateTLSCertificateSecret
+    Effect: Allow
+    Action:
+    - secretsmanager:UpdateSecret
+    - secretsmanager:GetSecretValue
+    - secretsmanager:PutSecretValue
+    - secretsmanager:DeleteSecret
+    - secretsmanager:RotateSecret
+    - secretsmanager:UpdateSecretVersionStage
+    Resource: arn:aws:secretsmanager:*:*:secret:ecs-sc!*
+    Condition:
+      StringEquals:
+        secretsmanager:ResourceTag/aws:secretsmanager:owningService: ecs-sc
+        aws:ResourceAccount: ${aws:PrincipalAccount}
+  - Sid: DescribeTLSCertificateSecret
+    Effect: Allow
+    Action:
+    - secretsmanager:DescribeSecret
+    Resource: arn:aws:secretsmanager:*:*:secret:ecs-sc!*
+    Condition:
+      StringEquals:
+        aws:ResourceAccount: ${aws:PrincipalAccount}
+  - Sid: ManagePrivateCertificateAuthority
+    Effect: Allow
+    Action:
+    - acm-pca:GetCertificate
+    - acm-pca:GetCertificateAuthorityCertificate
+    - acm-pca:DescribeCertificateAuthority
+    Resource: '*'
+    Condition:
+      StringEquals:
+        aws:ResourceTag/AmazonECSManaged: 'true'
+  - Sid: ManagePrivateCertificateAuthorityForIssuingEndEntityCertificate
+    Effect: Allow
+    Action:
+    - acm-pca:IssueCertificate
+    Resource: '*'
+    Condition:
+      StringEquals:
+        aws:ResourceTag/AmazonECSManaged: 'true'
+        acm-pca:TemplateArn: arn:aws:acm-pca:::template/EndEntityCertificate/V1
+request:
+  spec:
+    access_type: read-write
+    duration:
+      duration_hours: 1
+    resource_constraints: []
+  user: ci-bot
+  justification: deploy via terraform-cloud agent
+scores:
+  det_score: 9
+  det_factors:
+  - '`glue:*` grants every action in sensitive service `glue`'
+  - '`glue:*` on Resource: `*` touches sensitive service `glue`'
+  - '`iam:ListRoles` on Resource: `*` touches sensitive service `iam`'
+  - '`iam:ListUsers` on Resource: `*` touches sensitive service `iam`'
+  - '`iam:ListGroups` on Resource: `*` touches sensitive service `iam`'
+  - '`iam:ListRolePolicies` on Resource: `*` touches sensitive service `iam`'
+  - '`iam:GetRole` on Resource: `*` touches sensitive service `iam`'
+  - '`iam:GetRolePolicy` on Resource: `*` touches sensitive service `iam`'
+  - '`iam:ListAttachedRolePolicies` on Resource: `*` touches sensitive service `iam`'
+  - '`kms:ListAliases` on Resource: `*` touches sensitive service `kms`'
+  - '`kms:DescribeKey` on Resource: `*` touches sensitive service `kms`'
+  - 'State-changing action `s3:PutObject` on Resource: `*` (IAM access level: Write)'
+  - 'Resource: `*` for s3 (broad cross-resource read/access)'
+  - 'Resource: `*` for tag (broad cross-resource read/access)'
+  - 'State-changing action `s3:CreateBucket` on Resource: `*` (IAM access level: Write)'
+  - 'Resource: `*` for logs (broad cross-resource read/access)'
+  - 'State-changing action `cloudformation:CreateStack` on Resource: `*` (IAM access level: Write)'
+  - 'Destructive action `cloudformation:DeleteStack` on Resource: `*` (blast radius = every resource in this account)'
+  - 'Resource: `*` for cloudformation (broad cross-resource read/access)'
+  - "`cloudformation:CreateStack` is a high-impact mutation on broad resource \u2014 single API call can rewrite every matching\
+    \ resource in the account."
+  - 'State-changing action `ec2:RunInstances` on Resource: `*` (IAM access level: Write)'
+  - 'Resource: `*` for ec2 (broad cross-resource read/access)'
+  - 'Destructive action `ec2:TerminateInstances` on Resource: `*` (blast radius = every resource in this account)'
+  - 'State-changing action `ec2:CreateTags` on Resource: `*` (IAM access level: Tagging)'
+  - 'Destructive action `ec2:DeleteTags` on Resource: `*` (blast radius = every resource in this account)'
+  - '`iam:PassRole` on Resource: `*` is a privilege-escalation path'
+  - 'State-changing action `iam:PassRole` on Resource: `*` (IAM access level: Permissions management)'
+  - 'State-changing action `iot:CreateThing` on Resource: `*` (IAM access level: Write)'
+  - 'Destructive action `iot:DeleteThing` on Resource: `*` (blast radius = every resource in this account)'
+  - 'Destructive action `iot:DeleteThingShadow` on Resource: `*` (blast radius = every resource in this account)'
+  - 'State-changing action `iot:UpdateThing` on Resource: `*` (IAM access level: Write)'
+  - 'State-changing action `iot:UpdateThingShadow` on Resource: `*` (IAM access level: Write)'
+  - 'Resource: `*` for iot (broad cross-resource read/access)'
+  - 'State-changing action `iot:AttachThingPrincipal` on Resource: `*` (IAM access level: Write)'
+  - 'Destructive action `iot:DetachThingPrincipal` on Resource: `*` (blast radius = every resource in this account)'
+  - 'State-changing action `iot:UpdateCertificate` on Resource: `*` (IAM access level: Write)'
+  - 'Destructive action `iot:DeleteCertificate` on Resource: `*` (blast radius = every resource in this account)'
+  - 'State-changing action `iot:AttachPrincipalPolicy` on Resource: `*` (IAM access level: Permissions management)'
+  - 'Destructive action `iot:DetachPrincipalPolicy` on Resource: `*` (blast radius = every resource in this account)'
+  - 'State-changing action `iot:CreateKeysAndCertificate` on Resource: `*` (IAM access level: Write)'
+  - 'State-changing action `iot:CreatePolicy` on Resource: `*` (IAM access level: Permissions management)'
+  - 'State-changing action `iot:CreatePolicyVersion` on Resource: `*` (IAM access level: Permissions management)'
+  - 'State-changing action `iot:AttachPolicy` on Resource: `*` (IAM access level: Permissions management)'
+  - 'State-changing action `iot:CreateJob` on Resource: `*` (IAM access level: Write)'
+  - 'Destructive action `iot:DeleteJob` on Resource: `*` (blast radius = every resource in this account)'
+  - "Action-name wildcard `panorama:Describe*` on broad resource \u2014 matches multiple panorama APIs at once"
+  - "Action-name wildcard `panorama:List*` on broad resource \u2014 matches multiple panorama APIs at once"
+  - 'Resource: `*` for panorama (broad cross-resource read/access)'
+  - '`secretsmanager:GetSecretValue` on Resource: `*` (broad access to secrets)'
+  - '`secretsmanager:DescribeSecret` on Resource: `*` touches sensitive service `secretsmanager`'
+  - '`secretsmanager:CreateSecret` on Resource: `*` touches sensitive service `secretsmanager`'
+  - '`secretsmanager:ListSecretVersionIds` on Resource: `*` touches sensitive service `secretsmanager`'
+  - '`secretsmanager:DeleteSecret` on Resource: `*` touches sensitive service `secretsmanager`'
+  - 'State-changing action `secretsmanager:CreateSecret` on Resource: `*` (IAM access level: Write)'
+  - 'Destructive action `secretsmanager:DeleteSecret` on Resource: `*` (blast radius = every resource in this account)'
+  - '`medical-imaging:*` grants every action in `medical-imaging`'
+  - 'Resource: `*` for medical-imaging (broad cross-resource read/access)'
+  - 'State-changing action `iot:UpdateCACertificate` on Resource: `*` (IAM access level: Write)'
+  - '`secretsmanager:TagResource` on Resource: `*` touches sensitive service `secretsmanager`'
+  - 'State-changing action `secretsmanager:TagResource` on Resource: `*` (IAM access level: Tagging)'
+  - '`secretsmanager:UpdateSecret` on Resource: `*` touches sensitive service `secretsmanager`'
+  - '`secretsmanager:PutSecretValue` on Resource: `*` touches sensitive service `secretsmanager`'
+  - '`secretsmanager:RotateSecret` on Resource: `*` touches sensitive service `secretsmanager`'
+  - '`secretsmanager:UpdateSecretVersionStage` on Resource: `*` touches sensitive service `secretsmanager`'
+  - 'State-changing action `secretsmanager:UpdateSecret` on Resource: `*` (IAM access level: Write)'
+  - 'State-changing action `secretsmanager:PutSecretValue` on Resource: `*` (IAM access level: Write)'
+  - 'State-changing action `secretsmanager:RotateSecret` on Resource: `*` (IAM access level: Write)'
+  - 'State-changing action `secretsmanager:UpdateSecretVersionStage` on Resource: `*` (IAM access level: Write)'
+  - "`secretsmanager:UpdateSecret` is a high-impact mutation on broad resource \u2014 single API call can rewrite every matching\
+    \ resource in the account."
+  - "`secretsmanager:PutSecretValue` is a high-impact mutation on broad resource \u2014 single API call can rewrite every\
+    \ matching resource in the account."
+  - "`secretsmanager:RotateSecret` is a high-impact mutation on broad resource \u2014 single API call can rewrite every matching\
+    \ resource in the account."
+  - '`acm-pca:GetCertificate` on Resource: `*` touches sensitive service `acm-pca`'
+  - '`acm-pca:GetCertificateAuthorityCertificate` on Resource: `*` touches sensitive service `acm-pca`'
+  - '`acm-pca:DescribeCertificateAuthority` on Resource: `*` touches sensitive service `acm-pca`'
+  - '`acm-pca:IssueCertificate` on Resource: `*` touches sensitive service `acm-pca`'
+  - 'State-changing action `acm-pca:IssueCertificate` on Resource: `*` (IAM access level: Write)'
+  - '`acm-pca:IssueCertificate` is catastrophic in blast radius (account governance / IAM total compromise / evidence destruction).
+    Always route to human review.'
+  - 'Code-execution primitive on broad resource: cloudformation:CreateStack, ec2:RunInstances. Deploys attacker-controlled
+    code that runs under whatever role the matched resources use. Even without explicit PassRole, the existing roles of matched
+    resources become the attack target.'
+  - 'Code-execution-via-role composition: cloudformation:CreateStack (+ 2 more) combined with iam:PassRole = RCE as the passed
+    role. Single-statement scoring underweights this; the composition is full account-compromise tier.'
+  - '`s3:GetObject` on broad resource reads content that frequently contains secrets / sensitive data (boot logs, command
+    output, log streams, message bodies).'
+  - '`glue:*` sets up ongoing cross-account / persistent exfiltration in a single call. The blast is ''everything that flows
+    through this resource from now on,'' not just what exists today.'
+  opus_score: null
+  opus_factors: null
+  opus_reasoning: null
+  gap_classification: pending

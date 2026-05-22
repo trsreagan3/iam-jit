@@ -1,0 +1,638 @@
+name: composite-0062-42
+source_policies:
+- aws_managed/ElasticLoadBalancingReadOnly.yaml
+- aws_managed/AmazonRoute53AutoNamingReadOnlyAccess.yaml
+- aws_managed/AWS-SSM-RemediationAutomation-OperationalAccountAdministrationRolePolicy.yaml
+- aws_managed/IVSFullAccess.yaml
+- aws_managed/AmazonSageMakerAdmin-ServiceCatalogProductsServiceRolePolicy.yaml
+source_hash: 28073078fc1dba10
+policy:
+  Version: '2012-10-17'
+  Statement:
+  - Sid: Statement1
+    Effect: Allow
+    Action:
+    - elasticloadbalancing:Describe*
+    - elasticloadbalancing:Get*
+    Resource: '*'
+  - Sid: Statement2
+    Effect: Allow
+    Action:
+    - ec2:DescribeInstances
+    - ec2:DescribeClassicLinkInstances
+    - ec2:DescribeSecurityGroups
+    Resource: '*'
+  - Sid: Statement3
+    Effect: Allow
+    Action: arc-zonal-shift:GetManagedResource
+    Resource: arn:aws:elasticloadbalancing:*:*:loadbalancer/*
+  - Sid: Statement4
+    Effect: Allow
+    Action:
+    - arc-zonal-shift:ListManagedResources
+    - arc-zonal-shift:ListZonalShifts
+    Resource: '*'
+  - Effect: Allow
+    Action:
+    - servicediscovery:Get*
+    - servicediscovery:List*
+    Resource:
+    - '*'
+  - Sid: AllowReadOnlyAccessOrganization
+    Effect: Allow
+    Action:
+    - organizations:ListRoots
+    - organizations:ListChildren
+    Resource: '*'
+  - Sid: AllowAssumeRemediationExecutionRoleWithinOrg
+    Effect: Allow
+    Action: sts:AssumeRole
+    Resource: arn:aws:iam::*:role/AWS-SSM-RemediationExecutionRole*
+    Condition:
+      StringEquals:
+        aws:ResourceOrgId: ${aws:PrincipalOrgId}
+  - Sid: IVSFullAccess
+    Effect: Allow
+    Action:
+    - ivs:*
+    - ivschat:*
+    Resource: '*'
+  - Sid: AmazonSageMakerServiceCatalogAPIGatewayPermission
+    Effect: Allow
+    Action:
+    - apigateway:GET
+    - apigateway:POST
+    - apigateway:PUT
+    - apigateway:PATCH
+    - apigateway:DELETE
+    Resource: '*'
+    Condition:
+      StringLike:
+        aws:ResourceTag/sagemaker:launch-source: '*'
+  - Sid: AmazonSageMakerServiceCatalogAPIGatewayPostPermission
+    Effect: Allow
+    Action:
+    - apigateway:POST
+    Resource: '*'
+    Condition:
+      ForAnyValue:StringLike:
+        aws:TagKeys:
+        - sagemaker:launch-source
+  - Sid: AmazonSageMakerServiceCatalogAPIGatewayPatchPermission
+    Effect: Allow
+    Action:
+    - apigateway:PATCH
+    Resource:
+    - arn:aws:apigateway:*::/account
+  - Sid: AmazonSageMakerServiceCatalogCFnMutatePermission
+    Effect: Allow
+    Action:
+    - cloudformation:CreateStack
+    - cloudformation:UpdateStack
+    - cloudformation:DeleteStack
+    Resource: arn:aws:cloudformation:*:*:stack/SC-*
+    Condition:
+      ArnLikeIfExists:
+        cloudformation:RoleArn:
+        - arn:aws:sts::*:assumed-role/AmazonSageMakerServiceCatalog*
+  - Sid: AmazonSageMakerServiceCatalogCFnTagPermission
+    Effect: Allow
+    Action:
+    - cloudformation:TagResource
+    - cloudformation:UntagResource
+    Resource: arn:aws:cloudformation:*:*:stack/SC-*
+    Condition:
+      'Null':
+        aws:ResourceTag/sagemaker:project-name: 'false'
+  - Sid: AmazonSageMakerServiceCatalogCFnReadPermission
+    Effect: Allow
+    Action:
+    - cloudformation:DescribeStackEvents
+    - cloudformation:DescribeStacks
+    Resource: arn:aws:cloudformation:*:*:stack/SC-*
+  - Sid: AmazonSageMakerServiceCatalogCFnTemplatePermission
+    Effect: Allow
+    Action:
+    - cloudformation:GetTemplateSummary
+    - cloudformation:ValidateTemplate
+    Resource: '*'
+  - Sid: AmazonSageMakerServiceCatalogCodeBuildPermission
+    Effect: Allow
+    Action:
+    - codebuild:CreateProject
+    - codebuild:DeleteProject
+    - codebuild:UpdateProject
+    Resource:
+    - arn:aws:codebuild:*:*:project/sagemaker-*
+  - Sid: AmazonSageMakerServiceCatalogCodeCommitPermission
+    Effect: Allow
+    Action:
+    - codecommit:CreateCommit
+    - codecommit:CreateRepository
+    - codecommit:DeleteRepository
+    - codecommit:GetRepository
+    - codecommit:TagResource
+    Resource:
+    - arn:aws:codecommit:*:*:sagemaker-*
+  - Sid: AmazonSageMakerServiceCatalogCodeCommitListPermission
+    Effect: Allow
+    Action:
+    - codecommit:ListRepositories
+    Resource: '*'
+  - Sid: AmazonSageMakerServiceCatalogCodePipelinePermission
+    Effect: Allow
+    Action:
+    - codepipeline:CreatePipeline
+    - codepipeline:DeletePipeline
+    - codepipeline:GetPipeline
+    - codepipeline:GetPipelineState
+    - codepipeline:StartPipelineExecution
+    - codepipeline:TagResource
+    - codepipeline:UpdatePipeline
+    Resource:
+    - arn:aws:codepipeline:*:*:sagemaker-*
+  - Sid: AmazonSageMakerServiceCatalogCIAMUserPermission
+    Effect: Allow
+    Action:
+    - cognito-idp:CreateUserPool
+    - cognito-idp:TagResource
+    Resource: '*'
+    Condition:
+      ForAnyValue:StringLike:
+        aws:TagKeys:
+        - sagemaker:launch-source
+  - Sid: AmazonSageMakerServiceCatalogCIAMPermission
+    Effect: Allow
+    Action:
+    - cognito-idp:CreateGroup
+    - cognito-idp:CreateUserPoolDomain
+    - cognito-idp:CreateUserPoolClient
+    - cognito-idp:DeleteGroup
+    - cognito-idp:DeleteUserPool
+    - cognito-idp:DeleteUserPoolClient
+    - cognito-idp:DeleteUserPoolDomain
+    - cognito-idp:DescribeUserPool
+    - cognito-idp:DescribeUserPoolClient
+    - cognito-idp:UpdateUserPool
+    - cognito-idp:UpdateUserPoolClient
+    Resource: '*'
+    Condition:
+      StringLike:
+        aws:ResourceTag/sagemaker:launch-source: '*'
+  - Sid: AmazonSageMakerServiceCatalogECRPermission
+    Effect: Allow
+    Action:
+    - ecr:CreateRepository
+    - ecr:DeleteRepository
+    - ecr:TagResource
+    Resource:
+    - arn:aws:ecr:*:*:repository/sagemaker-*
+  - Sid: AmazonSageMakerServiceCatalogEventBridgePermission
+    Effect: Allow
+    Action:
+    - events:DescribeRule
+    - events:DeleteRule
+    - events:DisableRule
+    - events:EnableRule
+    - events:PutRule
+    - events:PutTargets
+    - events:RemoveTargets
+    Resource:
+    - arn:aws:events:*:*:rule/sagemaker-*
+  - Sid: AmazonSageMakerServiceCatalogFirehosePermission
+    Effect: Allow
+    Action:
+    - firehose:CreateDeliveryStream
+    - firehose:DeleteDeliveryStream
+    - firehose:DescribeDeliveryStream
+    - firehose:StartDeliveryStreamEncryption
+    - firehose:StopDeliveryStreamEncryption
+    - firehose:UpdateDestination
+    Resource: arn:aws:firehose:*:*:deliverystream/sagemaker-*
+  - Sid: AmazonSageMakerServiceCatalogGluePermission
+    Effect: Allow
+    Action:
+    - glue:CreateDatabase
+    - glue:DeleteDatabase
+    Resource:
+    - arn:aws:glue:*:*:catalog
+    - arn:aws:glue:*:*:database/sagemaker-*
+    - arn:aws:glue:*:*:table/sagemaker-*
+    - arn:aws:glue:*:*:userDefinedFunction/sagemaker-*
+  - Sid: AmazonSageMakerServiceCatalogGlueClassiferPermission
+    Effect: Allow
+    Action:
+    - glue:CreateClassifier
+    - glue:DeleteClassifier
+    - glue:DeleteCrawler
+    - glue:DeleteJob
+    - glue:DeleteTrigger
+    - glue:DeleteWorkflow
+    - glue:StopCrawler
+    Resource:
+    - '*'
+  - Sid: AmazonSageMakerServiceCatalogGlueWorkflowPermission
+    Effect: Allow
+    Action:
+    - glue:CreateWorkflow
+    Resource:
+    - arn:aws:glue:*:*:workflow/sagemaker-*
+  - Sid: AmazonSageMakerServiceCatalogGlueJobPermission
+    Effect: Allow
+    Action:
+    - glue:CreateJob
+    Resource:
+    - arn:aws:glue:*:*:job/sagemaker-*
+  - Sid: AmazonSageMakerServiceCatalogGlueCrawlerPermission
+    Effect: Allow
+    Action:
+    - glue:CreateCrawler
+    - glue:GetCrawler
+    Resource:
+    - arn:aws:glue:*:*:crawler/sagemaker-*
+  - Sid: AmazonSageMakerServiceCatalogGlueTriggerPermission
+    Effect: Allow
+    Action:
+    - glue:CreateTrigger
+    - glue:GetTrigger
+    Resource:
+    - arn:aws:glue:*:*:trigger/sagemaker-*
+  - Sid: AmazonSageMakerServiceCatalogPassRolePermission
+    Effect: Allow
+    Action:
+    - iam:PassRole
+    Resource:
+    - arn:aws:iam::*:role/service-role/AmazonSageMakerServiceCatalog*
+  - Sid: AmazonSageMakerServiceCatalogLambdaPermission
+    Effect: Allow
+    Action:
+    - lambda:AddPermission
+    - lambda:CreateFunction
+    - lambda:DeleteFunction
+    - lambda:GetFunction
+    - lambda:GetFunctionConfiguration
+    - lambda:InvokeFunction
+    - lambda:RemovePermission
+    Resource:
+    - arn:aws:lambda:*:*:function:sagemaker-*
+  - Sid: AmazonSageMakerServiceCatalogLambdaTagPermission
+    Effect: Allow
+    Action: lambda:TagResource
+    Resource:
+    - arn:aws:lambda:*:*:function:sagemaker-*
+    Condition:
+      ForAllValues:StringLike:
+        aws:TagKeys:
+        - sagemaker:*
+  - Sid: AmazonSageMakerServiceCatalogLogGroupPermission
+    Effect: Allow
+    Action:
+    - logs:CreateLogGroup
+    - logs:CreateLogStream
+    - logs:DeleteLogGroup
+    - logs:DeleteLogStream
+    - logs:DescribeLogGroups
+    - logs:DescribeLogStreams
+    - logs:PutRetentionPolicy
+    Resource:
+    - arn:aws:logs:*:*:log-group:/aws/apigateway/AccessLogs/*
+    - arn:aws:logs:*:*:log-group::log-stream:*
+  - Sid: AmazonSageMakerServiceCatalogS3ReadPermission
+    Effect: Allow
+    Action: s3:GetObject
+    Resource: '*'
+    Condition:
+      StringEquals:
+        s3:ExistingObjectTag/servicecatalog:provisioning: 'true'
+  - Sid: AmazonSageMakerServiceCatalogS3ReadSagemakerResourcePermission
+    Effect: Allow
+    Action: s3:GetObject
+    Resource:
+    - arn:aws:s3:::sagemaker-*
+  - Sid: AmazonSageMakerServiceCatalogS3MutatePermission
+    Effect: Allow
+    Action:
+    - s3:CreateBucket
+    - s3:DeleteBucket
+    - s3:DeleteBucketPolicy
+    - s3:GetBucketPolicy
+    - s3:PutBucketAcl
+    - s3:PutBucketNotification
+    - s3:PutBucketPolicy
+    - s3:PutBucketPublicAccessBlock
+    - s3:PutBucketLogging
+    - s3:PutEncryptionConfiguration
+    - s3:PutBucketCORS
+    - s3:PutBucketTagging
+    - s3:PutObjectTagging
+    Resource: arn:aws:s3:::sagemaker-*
+  - Sid: AmazonSageMakerServiceCatalogSageMakerPermission
+    Effect: Allow
+    Action:
+    - sagemaker:CreateEndpoint
+    - sagemaker:CreateEndpointConfig
+    - sagemaker:CreateModel
+    - sagemaker:CreateWorkteam
+    - sagemaker:DeleteEndpoint
+    - sagemaker:DeleteEndpointConfig
+    - sagemaker:DeleteModel
+    - sagemaker:DeleteWorkteam
+    - sagemaker:DescribeModel
+    - sagemaker:DescribeEndpointConfig
+    - sagemaker:DescribeEndpoint
+    - sagemaker:DescribeWorkteam
+    - sagemaker:CreateCodeRepository
+    - sagemaker:DescribeCodeRepository
+    - sagemaker:UpdateCodeRepository
+    - sagemaker:DeleteCodeRepository
+    Resource:
+    - arn:aws:sagemaker:*:*:*
+  - Sid: AmazonSageMakerServiceCatalogSageMakerTagPermission
+    Effect: Allow
+    Action:
+    - sagemaker:AddTags
+    Resource:
+    - arn:aws:sagemaker:*:*:endpoint/*
+    - arn:aws:sagemaker:*:*:endpoint-config/*
+    - arn:aws:sagemaker:*:*:model/*
+    - arn:aws:sagemaker:*:*:pipeline/*
+    - arn:aws:sagemaker:*:*:project/*
+    - arn:aws:sagemaker:*:*:model-package/*
+    Condition:
+      ForAllValues:StringLike:
+        aws:TagKeys:
+        - sagemaker:*
+  - Sid: AmazonSageMakerServiceCatalogSageMakerImagePermission
+    Effect: Allow
+    Action:
+    - sagemaker:CreateImage
+    - sagemaker:DeleteImage
+    - sagemaker:DescribeImage
+    - sagemaker:UpdateImage
+    - sagemaker:ListTags
+    Resource:
+    - arn:aws:sagemaker:*:*:image/*
+  - Sid: AmazonSageMakerServiceCatalogStepFunctionPermission
+    Effect: Allow
+    Action:
+    - states:CreateStateMachine
+    - states:DeleteStateMachine
+    - states:UpdateStateMachine
+    Resource:
+    - arn:aws:states:*:*:stateMachine:sagemaker-*
+  - Sid: AmazonSageMakerServiceCatalogCodeStarPermission
+    Effect: Allow
+    Action: codestar-connections:PassConnection
+    Resource:
+    - arn:aws:codestar-connections:*:*:connection/*
+    - arn:aws:codeconnections:*:*:connection/*
+    Condition:
+      StringEquals:
+        codestar-connections:PassedToService: codepipeline.amazonaws.com
+  - Sid: AmazonSageMakerServiceCatalogCodeConnectionPermission
+    Effect: Allow
+    Action: codeconnections:PassConnection
+    Resource:
+    - arn:aws:codeconnections:*:*:connection/*
+    - arn:aws:codestar-connections:*:*:connection/*
+    Condition:
+      StringEquals:
+        codeconnections:PassedToService: codepipeline.amazonaws.com
+request:
+  spec:
+    access_type: read-write
+    duration:
+      duration_hours: 8
+    resource_constraints: []
+  user: sre-carol
+  justification: scale-out emergency for us-east-1 outage
+scores:
+  det_score: 9
+  det_factors:
+  - "Action-name wildcard `elasticloadbalancing:Describe*` on broad resource \u2014 matches multiple elasticloadbalancing\
+    \ APIs at once"
+  - "Action-name wildcard `elasticloadbalancing:Get*` on broad resource \u2014 matches multiple elasticloadbalancing APIs\
+    \ at once"
+  - 'Resource: `*` for elasticloadbalancing (broad cross-resource read/access)'
+  - 'Resource: `*` for arc-zonal-shift (broad cross-resource read/access)'
+  - "Action-name wildcard `servicediscovery:Get*` on broad resource \u2014 matches multiple servicediscovery APIs at once"
+  - "Action-name wildcard `servicediscovery:List*` on broad resource \u2014 matches multiple servicediscovery APIs at once"
+  - 'Resource: `*` for servicediscovery (broad cross-resource read/access)'
+  - '`organizations:ListRoots` on Resource: `*` touches sensitive service `organizations`'
+  - '`organizations:ListChildren` on Resource: `*` touches sensitive service `organizations`'
+  - '`sts:AssumeRole` on Resource: `*` (broad access to sensitive resource)'
+  - 'State-changing action `sts:AssumeRole` on Resource: `*` (IAM access level: Write)'
+  - '`ivs:*` grants every action in `ivs`'
+  - '`ivschat:*` grants every action in `ivschat`'
+  - 'Resource: `*` for ivs, ivschat (broad cross-resource read/access)'
+  - "`Condition.StringLike.aws:ResourceTag/sagemaker:launch-source` value is `\"*\"` \u2014 degenerate wildcard; the condition\
+    \ imposes no actual constraint."
+  - 'State-changing action `apigateway:POST` on Resource: `*` (IAM access level: Write)'
+  - 'State-changing action `apigateway:PUT` on Resource: `*` (IAM access level: Write)'
+  - 'State-changing action `apigateway:PATCH` on Resource: `*` (IAM access level: Write)'
+  - 'Destructive action `apigateway:DELETE` on Resource: `*` (blast radius = every resource in this account)'
+  - 'Resource: `*` for apigateway (broad cross-resource read/access)'
+  - "`apigateway:PATCH` is a high-impact mutation on broad resource \u2014 single API call can rewrite every matching resource\
+    \ in the account."
+  - "`apigateway:PATCH` is a high-impact mutation \u2014 a single narrowly-scoped change can affect production operations\
+    \ / security posture."
+  - 'State-changing action `cloudformation:CreateStack` on Resource: `*` (IAM access level: Write)'
+  - 'State-changing action `cloudformation:UpdateStack` on Resource: `*` (IAM access level: Write)'
+  - 'Destructive action `cloudformation:DeleteStack` on Resource: `*` (blast radius = every resource in this account)'
+  - 'Resource: `*` for cloudformation (broad cross-resource read/access)'
+  - "`cloudformation:CreateStack` is a high-impact mutation on broad resource \u2014 single API call can rewrite every matching\
+    \ resource in the account."
+  - "`cloudformation:UpdateStack` is a high-impact mutation on broad resource \u2014 single API call can rewrite every matching\
+    \ resource in the account."
+  - 'State-changing action `cloudformation:TagResource` on Resource: `*` (IAM access level: Tagging)'
+  - 'State-changing action `cloudformation:UntagResource` on Resource: `*` (IAM access level: Tagging)'
+  - 'State-changing action `codebuild:CreateProject` on Resource: `*` (IAM access level: Write)'
+  - 'Destructive action `codebuild:DeleteProject` on Resource: `*` (blast radius = every resource in this account)'
+  - 'State-changing action `codebuild:UpdateProject` on Resource: `*` (IAM access level: Write)'
+  - 'Resource: `*` for codebuild (broad cross-resource read/access)'
+  - 'State-changing action `codecommit:CreateCommit` on Resource: `*` (IAM access level: Write)'
+  - 'State-changing action `codecommit:CreateRepository` on Resource: `*` (IAM access level: Write)'
+  - 'Destructive action `codecommit:DeleteRepository` on Resource: `*` (blast radius = every resource in this account)'
+  - 'State-changing action `codecommit:TagResource` on Resource: `*` (IAM access level: Tagging)'
+  - 'Resource: `*` for codecommit (broad cross-resource read/access)'
+  - 'State-changing action `codepipeline:CreatePipeline` on Resource: `*` (IAM access level: Write)'
+  - 'Destructive action `codepipeline:DeletePipeline` on Resource: `*` (blast radius = every resource in this account)'
+  - 'State-changing action `codepipeline:StartPipelineExecution` on Resource: `*` (IAM access level: Write)'
+  - 'State-changing action `codepipeline:TagResource` on Resource: `*` (IAM access level: Tagging)'
+  - 'State-changing action `codepipeline:UpdatePipeline` on Resource: `*` (IAM access level: Write)'
+  - 'Resource: `*` for codepipeline (broad cross-resource read/access)'
+  - "`codepipeline:StartPipelineExecution` is a high-impact mutation on broad resource \u2014 single API call can rewrite\
+    \ every matching resource in the account."
+  - '`cognito-idp:CreateUserPool` on Resource: `*` touches sensitive service `cognito-idp`'
+  - '`cognito-idp:TagResource` on Resource: `*` touches sensitive service `cognito-idp`'
+  - 'State-changing action `cognito-idp:CreateUserPool` on Resource: `*` (IAM access level: Write)'
+  - 'State-changing action `cognito-idp:TagResource` on Resource: `*` (IAM access level: Tagging)'
+  - "`cognito-idp:CreateUserPool` is a high-impact mutation on broad resource \u2014 single API call can rewrite every matching\
+    \ resource in the account."
+  - '`cognito-idp:CreateGroup` on Resource: `*` touches sensitive service `cognito-idp`'
+  - '`cognito-idp:CreateUserPoolDomain` on Resource: `*` touches sensitive service `cognito-idp`'
+  - '`cognito-idp:CreateUserPoolClient` on Resource: `*` touches sensitive service `cognito-idp`'
+  - '`cognito-idp:DeleteGroup` on Resource: `*` touches sensitive service `cognito-idp`'
+  - '`cognito-idp:DeleteUserPool` on Resource: `*` touches sensitive service `cognito-idp`'
+  - '`cognito-idp:DeleteUserPoolClient` on Resource: `*` touches sensitive service `cognito-idp`'
+  - '`cognito-idp:DeleteUserPoolDomain` on Resource: `*` touches sensitive service `cognito-idp`'
+  - '`cognito-idp:DescribeUserPool` on Resource: `*` touches sensitive service `cognito-idp`'
+  - '`cognito-idp:DescribeUserPoolClient` on Resource: `*` touches sensitive service `cognito-idp`'
+  - '`cognito-idp:UpdateUserPool` on Resource: `*` touches sensitive service `cognito-idp`'
+  - '`cognito-idp:UpdateUserPoolClient` on Resource: `*` touches sensitive service `cognito-idp`'
+  - 'State-changing action `cognito-idp:CreateGroup` on Resource: `*` (IAM access level: Write)'
+  - 'State-changing action `cognito-idp:CreateUserPoolDomain` on Resource: `*` (IAM access level: Write)'
+  - 'State-changing action `cognito-idp:CreateUserPoolClient` on Resource: `*` (IAM access level: Write)'
+  - 'Destructive action `cognito-idp:DeleteGroup` on Resource: `*` (blast radius = every resource in this account)'
+  - 'Destructive action `cognito-idp:DeleteUserPool` on Resource: `*` (blast radius = every resource in this account)'
+  - 'Destructive action `cognito-idp:DeleteUserPoolClient` on Resource: `*` (blast radius = every resource in this account)'
+  - 'Destructive action `cognito-idp:DeleteUserPoolDomain` on Resource: `*` (blast radius = every resource in this account)'
+  - 'State-changing action `cognito-idp:UpdateUserPool` on Resource: `*` (IAM access level: Write)'
+  - 'State-changing action `cognito-idp:UpdateUserPoolClient` on Resource: `*` (IAM access level: Write)'
+  - 'State-changing action `ecr:CreateRepository` on Resource: `*` (IAM access level: Write)'
+  - 'Destructive action `ecr:DeleteRepository` on Resource: `*` (blast radius = every resource in this account)'
+  - 'State-changing action `ecr:TagResource` on Resource: `*` (IAM access level: Tagging)'
+  - 'Resource: `*` for ecr (broad cross-resource read/access)'
+  - 'Destructive action `events:DeleteRule` on Resource: `*` (blast radius = every resource in this account)'
+  - 'Destructive action `events:DisableRule` on Resource: `*` (blast radius = every resource in this account)'
+  - 'State-changing action `events:EnableRule` on Resource: `*` (IAM access level: Write)'
+  - 'State-changing action `events:PutRule` on Resource: `*` (IAM access level: Write)'
+  - 'State-changing action `events:PutTargets` on Resource: `*` (IAM access level: Write)'
+  - 'Destructive action `events:RemoveTargets` on Resource: `*` (blast radius = every resource in this account)'
+  - 'Resource: `*` for events (broad cross-resource read/access)'
+  - 'State-changing action `firehose:CreateDeliveryStream` on Resource: `*` (IAM access level: Write)'
+  - 'Destructive action `firehose:DeleteDeliveryStream` on Resource: `*` (blast radius = every resource in this account)'
+  - 'State-changing action `firehose:StartDeliveryStreamEncryption` on Resource: `*` (IAM access level: Write)'
+  - 'Destructive action `firehose:StopDeliveryStreamEncryption` on Resource: `*` (blast radius = every resource in this account)'
+  - 'State-changing action `firehose:UpdateDestination` on Resource: `*` (IAM access level: Write)'
+  - 'Resource: `*` for firehose (broad cross-resource read/access)'
+  - '`glue:CreateDatabase` on Resource: `*` touches sensitive service `glue`'
+  - '`glue:DeleteDatabase` on Resource: `*` touches sensitive service `glue`'
+  - 'State-changing action `glue:CreateDatabase` on Resource: `*` (IAM access level: Write)'
+  - 'Destructive action `glue:DeleteDatabase` on Resource: `*` (blast radius = every resource in this account)'
+  - '`glue:CreateClassifier` on Resource: `*` touches sensitive service `glue`'
+  - '`glue:DeleteClassifier` on Resource: `*` touches sensitive service `glue`'
+  - '`glue:DeleteCrawler` on Resource: `*` touches sensitive service `glue`'
+  - '`glue:DeleteJob` on Resource: `*` touches sensitive service `glue`'
+  - '`glue:DeleteTrigger` on Resource: `*` touches sensitive service `glue`'
+  - '`glue:DeleteWorkflow` on Resource: `*` touches sensitive service `glue`'
+  - '`glue:StopCrawler` on Resource: `*` touches sensitive service `glue`'
+  - 'State-changing action `glue:CreateClassifier` on Resource: `*` (IAM access level: Write)'
+  - 'Destructive action `glue:DeleteClassifier` on Resource: `*` (blast radius = every resource in this account)'
+  - 'Destructive action `glue:DeleteCrawler` on Resource: `*` (blast radius = every resource in this account)'
+  - 'Destructive action `glue:DeleteJob` on Resource: `*` (blast radius = every resource in this account)'
+  - 'Destructive action `glue:DeleteTrigger` on Resource: `*` (blast radius = every resource in this account)'
+  - 'Destructive action `glue:DeleteWorkflow` on Resource: `*` (blast radius = every resource in this account)'
+  - 'Destructive action `glue:StopCrawler` on Resource: `*` (blast radius = every resource in this account)'
+  - '`glue:CreateWorkflow` on Resource: `*` touches sensitive service `glue`'
+  - 'State-changing action `glue:CreateWorkflow` on Resource: `*` (IAM access level: Write)'
+  - '`glue:CreateJob` on Resource: `*` touches sensitive service `glue`'
+  - 'State-changing action `glue:CreateJob` on Resource: `*` (IAM access level: Write)'
+  - '`glue:CreateCrawler` on Resource: `*` touches sensitive service `glue`'
+  - '`glue:GetCrawler` on Resource: `*` touches sensitive service `glue`'
+  - 'State-changing action `glue:CreateCrawler` on Resource: `*` (IAM access level: Write)'
+  - '`glue:CreateTrigger` on Resource: `*` touches sensitive service `glue`'
+  - '`glue:GetTrigger` on Resource: `*` touches sensitive service `glue`'
+  - 'State-changing action `glue:CreateTrigger` on Resource: `*` (IAM access level: Write)'
+  - '`iam:PassRole` on Resource: `*` is a privilege-escalation path'
+  - 'State-changing action `iam:PassRole` on Resource: `*` (IAM access level: Permissions management)'
+  - 'State-changing action `lambda:AddPermission` on Resource: `*` (IAM access level: Permissions management)'
+  - 'State-changing action `lambda:CreateFunction` on Resource: `*` (IAM access level: Write)'
+  - 'Destructive action `lambda:DeleteFunction` on Resource: `*` (blast radius = every resource in this account)'
+  - 'State-changing action `lambda:InvokeFunction` on Resource: `*` (IAM access level: Write)'
+  - 'Destructive action `lambda:RemovePermission` on Resource: `*` (blast radius = every resource in this account)'
+  - 'Resource: `*` for lambda (broad cross-resource read/access)'
+  - "`lambda:AddPermission` is a high-impact mutation on broad resource \u2014 single API call can rewrite every matching\
+    \ resource in the account."
+  - "`lambda:DeleteFunction` is a high-impact mutation on broad resource \u2014 single API call can rewrite every matching\
+    \ resource in the account."
+  - "`lambda:RemovePermission` is a high-impact mutation on broad resource \u2014 single API call can rewrite every matching\
+    \ resource in the account."
+  - 'State-changing action `lambda:TagResource` on Resource: `*` (IAM access level: Tagging)'
+  - 'State-changing action `logs:CreateLogGroup` on Resource: `*` (IAM access level: Write)'
+  - 'State-changing action `logs:CreateLogStream` on Resource: `*` (IAM access level: Write)'
+  - 'Destructive action `logs:DeleteLogGroup` on Resource: `*` (blast radius = every resource in this account)'
+  - 'Destructive action `logs:DeleteLogStream` on Resource: `*` (blast radius = every resource in this account)'
+  - 'State-changing action `logs:PutRetentionPolicy` on Resource: `*` (IAM access level: Write)'
+  - 'Resource: `*` for logs (broad cross-resource read/access)'
+  - '`logs:DeleteLogGroup` is catastrophic in blast radius (account governance / IAM total compromise / evidence destruction).
+    Always route to human review.'
+  - 'Resource: `*` for s3 (broad cross-resource read/access)'
+  - 'State-changing action `s3:CreateBucket` on Resource: `*` (IAM access level: Write)'
+  - 'Destructive action `s3:DeleteBucket` on Resource: `*` (blast radius = every resource in this account)'
+  - 'Destructive action `s3:DeleteBucketPolicy` on Resource: `*` (blast radius = every resource in this account)'
+  - 'State-changing action `s3:PutBucketAcl` on Resource: `*` (IAM access level: Permissions management)'
+  - 'State-changing action `s3:PutBucketNotification` on Resource: `*` (IAM access level: Write)'
+  - 'State-changing action `s3:PutBucketPolicy` on Resource: `*` (IAM access level: Permissions management)'
+  - 'State-changing action `s3:PutBucketPublicAccessBlock` on Resource: `*` (IAM access level: Permissions management)'
+  - 'State-changing action `s3:PutBucketLogging` on Resource: `*` (IAM access level: Write)'
+  - 'State-changing action `s3:PutEncryptionConfiguration` on Resource: `*` (IAM access level: Write)'
+  - 'State-changing action `s3:PutBucketCORS` on Resource: `*` (IAM access level: Write)'
+  - 'State-changing action `s3:PutBucketTagging` on Resource: `*` (IAM access level: Tagging)'
+  - 'State-changing action `s3:PutObjectTagging` on Resource: `*` (IAM access level: Tagging)'
+  - "`s3:DeleteBucketPolicy` is a high-impact mutation on broad resource \u2014 single API call can rewrite every matching\
+    \ resource in the account."
+  - "`s3:PutBucketAcl` is a high-impact mutation on broad resource \u2014 single API call can rewrite every matching resource\
+    \ in the account."
+  - "`s3:PutBucketPolicy` is a high-impact mutation on broad resource \u2014 single API call can rewrite every matching resource\
+    \ in the account."
+  - '`s3:DeleteBucketPolicy` is catastrophic in blast radius (account governance / IAM total compromise / evidence destruction).
+    Always route to human review.'
+  - '`s3:PutBucketPolicy` is catastrophic in blast radius (account governance / IAM total compromise / evidence destruction).
+    Always route to human review.'
+  - '`sagemaker:CreateEndpoint` on Resource: `*` touches sensitive service `sagemaker`'
+  - '`sagemaker:CreateEndpointConfig` on Resource: `*` touches sensitive service `sagemaker`'
+  - '`sagemaker:CreateModel` on Resource: `*` touches sensitive service `sagemaker`'
+  - '`sagemaker:CreateWorkteam` on Resource: `*` touches sensitive service `sagemaker`'
+  - '`sagemaker:DeleteEndpoint` on Resource: `*` touches sensitive service `sagemaker`'
+  - '`sagemaker:DeleteEndpointConfig` on Resource: `*` touches sensitive service `sagemaker`'
+  - '`sagemaker:DeleteModel` on Resource: `*` touches sensitive service `sagemaker`'
+  - '`sagemaker:DeleteWorkteam` on Resource: `*` touches sensitive service `sagemaker`'
+  - '`sagemaker:DescribeModel` on Resource: `*` touches sensitive service `sagemaker`'
+  - '`sagemaker:DescribeEndpointConfig` on Resource: `*` touches sensitive service `sagemaker`'
+  - '`sagemaker:DescribeEndpoint` on Resource: `*` touches sensitive service `sagemaker`'
+  - '`sagemaker:DescribeWorkteam` on Resource: `*` touches sensitive service `sagemaker`'
+  - '`sagemaker:CreateCodeRepository` on Resource: `*` touches sensitive service `sagemaker`'
+  - '`sagemaker:DescribeCodeRepository` on Resource: `*` touches sensitive service `sagemaker`'
+  - '`sagemaker:UpdateCodeRepository` on Resource: `*` touches sensitive service `sagemaker`'
+  - '`sagemaker:DeleteCodeRepository` on Resource: `*` touches sensitive service `sagemaker`'
+  - 'State-changing action `sagemaker:CreateEndpoint` on Resource: `*` (IAM access level: Write)'
+  - 'State-changing action `sagemaker:CreateEndpointConfig` on Resource: `*` (IAM access level: Write)'
+  - 'State-changing action `sagemaker:CreateModel` on Resource: `*` (IAM access level: Write)'
+  - 'State-changing action `sagemaker:CreateWorkteam` on Resource: `*` (IAM access level: Write)'
+  - 'Destructive action `sagemaker:DeleteEndpoint` on Resource: `*` (blast radius = every resource in this account)'
+  - 'Destructive action `sagemaker:DeleteEndpointConfig` on Resource: `*` (blast radius = every resource in this account)'
+  - 'Destructive action `sagemaker:DeleteModel` on Resource: `*` (blast radius = every resource in this account)'
+  - 'Destructive action `sagemaker:DeleteWorkteam` on Resource: `*` (blast radius = every resource in this account)'
+  - 'State-changing action `sagemaker:CreateCodeRepository` on Resource: `*` (IAM access level: Write)'
+  - 'State-changing action `sagemaker:UpdateCodeRepository` on Resource: `*` (IAM access level: Write)'
+  - 'Destructive action `sagemaker:DeleteCodeRepository` on Resource: `*` (blast radius = every resource in this account)'
+  - '`sagemaker:AddTags` on Resource: `*` touches sensitive service `sagemaker`'
+  - 'State-changing action `sagemaker:AddTags` on Resource: `*` (IAM access level: Tagging)'
+  - '`sagemaker:CreateImage` on Resource: `*` touches sensitive service `sagemaker`'
+  - '`sagemaker:DeleteImage` on Resource: `*` touches sensitive service `sagemaker`'
+  - '`sagemaker:DescribeImage` on Resource: `*` touches sensitive service `sagemaker`'
+  - '`sagemaker:UpdateImage` on Resource: `*` touches sensitive service `sagemaker`'
+  - '`sagemaker:ListTags` on Resource: `*` touches sensitive service `sagemaker`'
+  - 'State-changing action `sagemaker:CreateImage` on Resource: `*` (IAM access level: Write)'
+  - 'Destructive action `sagemaker:DeleteImage` on Resource: `*` (blast radius = every resource in this account)'
+  - 'State-changing action `sagemaker:UpdateImage` on Resource: `*` (IAM access level: Write)'
+  - 'State-changing action `states:CreateStateMachine` on Resource: `*` (IAM access level: Write)'
+  - 'Destructive action `states:DeleteStateMachine` on Resource: `*` (blast radius = every resource in this account)'
+  - 'State-changing action `states:UpdateStateMachine` on Resource: `*` (IAM access level: Write)'
+  - 'Resource: `*` for states (broad cross-resource read/access)'
+  - 'Resource: `*` for codestar-connections (broad cross-resource read/access)'
+  - 'Resource: `*` for codeconnections (broad cross-resource read/access)'
+  - 'Code-execution primitive on broad resource: cloudformation:CreateStack, cloudformation:UpdateStack, codebuild:CreateProject.
+    Deploys attacker-controlled code that runs under whatever role the matched resources use. Even without explicit PassRole,
+    the existing roles of matched resources become the attack target.'
+  - 'Code-execution-via-role composition: cloudformation:CreateStack (+ 2 more) combined with iam:PassRole = RCE as the passed
+    role. Single-statement scoring underweights this; the composition is full account-compromise tier.'
+  - '`lambda:GetFunction` on broad resource reads content that frequently contains secrets / sensitive data (boot logs, command
+    output, log streams, message bodies).'
+  - '`lambda:AddPermission` sets up ongoing cross-account / persistent exfiltration in a single call. The blast is ''everything
+    that flows through this resource from now on,'' not just what exists today.'
+  opus_score: null
+  opus_factors: null
+  opus_reasoning: null
+  gap_classification: pending

@@ -1,0 +1,198 @@
+name: composite-0033-42
+source_policies:
+- aws_managed/SecurityAgentWebAppPolicy.yaml
+- aws_managed/AWSSupportPlansReadOnlyAccess.yaml
+- aws_managed/AmazonDynamoDBFullAccess_v2.yaml
+source_hash: 54ffa38570c7407f
+policy:
+  Version: '2012-10-17'
+  Statement:
+  - Sid: ApplicationAccess
+    Effect: Allow
+    Action:
+    - securityagent:ListAgentSpaces
+    - securityagent:ListSecurityRequirements
+    Resource: '*'
+    Condition:
+      StringEquals:
+        aws:ResourceAccount: ${aws:PrincipalAccount}
+  - Sid: AgentSpaceAccess
+    Effect: Allow
+    Action:
+    - securityagent:AddArtifact
+    - securityagent:BatchDeletePentests
+    - securityagent:BatchGetAgentSpaces
+    - securityagent:BatchGetArtifactMetadata
+    - securityagent:BatchGetFindings
+    - securityagent:BatchGetPentestJobs
+    - securityagent:BatchGetPentests
+    - securityagent:BatchGetPentestJobContentMetadata
+    - securityagent:BatchGetPentestJobTasks
+    - securityagent:CreateDesignReview
+    - securityagent:CreatePentest
+    - securityagent:DeleteArtifact
+    - securityagent:GetArtifact
+    - securityagent:DeleteDesignReview
+    - securityagent:GetDesignReview
+    - securityagent:GetDesignReviewArtifact
+    - securityagent:ListArtifacts
+    - securityagent:ListSecurityRequirements
+    - securityagent:ListDiscoveredEndpoints
+    - securityagent:ListDesignReviewComments
+    - securityagent:ListDesignReviews
+    - securityagent:ListFindings
+    - securityagent:ListIntegratedResources
+    - securityagent:ListPentestJobsForPentest
+    - securityagent:ListPentests
+    - securityagent:ListPentestJobTasks
+    - securityagent:StartCodeRemediation
+    - securityagent:StartPentestJob
+    - securityagent:StopPentestJob
+    - securityagent:UpdateFinding
+    - securityagent:UpdatePentest
+    Resource: arn:aws:securityagent:*:*:agent-space*
+    Condition:
+      StringEquals:
+        aws:ResourceAccount: ${aws:PrincipalAccount}
+  - Effect: Allow
+    Action:
+    - supportplans:GetSupportPlan
+    - supportplans:GetSupportPlanUpdateStatus
+    - supportplans:ListSupportPlanModifiers
+    Resource: '*'
+  - Sid: DDBAndDAXFullAccess
+    Effect: Allow
+    Action:
+    - dynamodb:*
+    - dax:*
+    Resource: '*'
+  - Sid: KMSIntegration
+    Effect: Allow
+    Action:
+    - kms:DescribeKey
+    - kms:ListAliases
+    Resource: '*'
+  - Sid: LambdaIntegration
+    Effect: Allow
+    Action:
+    - lambda:ListEventSourceMappings
+    - lambda:ListFunctions
+    Resource: '*'
+  - Sid: DaxSNSIntegration
+    Effect: Allow
+    Action:
+    - sns:ListTopics
+    Resource: '*'
+  - Sid: ApplicationAutoscalingIntegration
+    Effect: Allow
+    Action:
+    - application-autoscaling:DeleteScalingPolicy
+    - application-autoscaling:DeregisterScalableTarget
+    - application-autoscaling:PutScalingPolicy
+    - application-autoscaling:RegisterScalableTarget
+    Resource: '*'
+    Condition:
+      StringEquals:
+        application-autoscaling:service-namespace: dynamodb
+  - Sid: ApplicationAutoscalingDescribeActions
+    Effect: Allow
+    Action:
+    - application-autoscaling:DescribeScalableTargets
+    - application-autoscaling:DescribeScalingActivities
+    - application-autoscaling:DescribeScalingPolicies
+    Resource: '*'
+  - Sid: TagManagement
+    Effect: Allow
+    Action:
+    - tag:GetResources
+    Resource: '*'
+  - Sid: CloudwatchMonitoring
+    Effect: Allow
+    Action:
+    - cloudwatch:DescribeAlarms
+    - cloudwatch:GetMetricStatistics
+    - cloudwatch:GetMetricData
+    Resource: '*'
+  - Sid: ListKinesisResources
+    Effect: Allow
+    Action:
+    - kinesis:ListStreams
+    - kinesis:DescribeStream
+    - kinesis:DescribeStreamSummary
+    Resource: '*'
+  - Sid: ListEC2ResourcesForDaxClusterCreation
+    Effect: Allow
+    Action:
+    - ec2:DescribeVpcs
+    - ec2:DescribeSubnets
+    - ec2:DescribeSecurityGroups
+    Resource: '*'
+  - Sid: CloudwatchInsightsRules
+    Effect: Allow
+    Action: cloudwatch:GetInsightRuleReport
+    Resource: arn:aws:cloudwatch:*:*:insight-rule/DynamoDBContributorInsights*
+  - Sid: ServiceRoleCreation
+    Effect: Allow
+    Action:
+    - iam:CreateServiceLinkedRole
+    Resource: '*'
+    Condition:
+      StringEquals:
+        iam:AWSServiceName:
+        - replication.dynamodb.amazonaws.com
+        - dax.amazonaws.com
+        - dynamodb.application-autoscaling.amazonaws.com
+        - contributorinsights.dynamodb.amazonaws.com
+        - kinesisreplication.dynamodb.amazonaws.com
+  - Sid: IamIntegration
+    Effect: Allow
+    Action:
+    - iam:ListRoles
+    Resource:
+    - '*'
+request:
+  spec:
+    access_type: read-write
+    duration:
+      duration_hours: 2
+    resource_constraints: []
+  user: sre-dave
+  justification: post-incident audit pull
+scores:
+  det_score: 8
+  det_factors:
+  - 'State-changing action `securityagent:AddArtifact` on Resource: `*` (IAM access level: Write)'
+  - 'State-changing action `securityagent:BatchDeletePentests` on Resource: `*` (IAM access level: Write)'
+  - 'State-changing action `securityagent:CreateDesignReview` on Resource: `*` (IAM access level: Write)'
+  - 'State-changing action `securityagent:CreatePentest` on Resource: `*` (IAM access level: Write)'
+  - 'Destructive action `securityagent:DeleteArtifact` on Resource: `*` (blast radius = every resource in this account)'
+  - 'Destructive action `securityagent:DeleteDesignReview` on Resource: `*` (blast radius = every resource in this account)'
+  - 'State-changing action `securityagent:StartCodeRemediation` on Resource: `*` (IAM access level: Write)'
+  - 'State-changing action `securityagent:StartPentestJob` on Resource: `*` (IAM access level: Write)'
+  - 'Destructive action `securityagent:StopPentestJob` on Resource: `*` (blast radius = every resource in this account)'
+  - 'State-changing action `securityagent:UpdateFinding` on Resource: `*` (IAM access level: Write)'
+  - 'State-changing action `securityagent:UpdatePentest` on Resource: `*` (IAM access level: Write)'
+  - 'Resource: `*` for securityagent (broad cross-resource read/access)'
+  - 'Resource: `*` for supportplans (broad cross-resource read/access)'
+  - '`dynamodb:*` grants every action in `dynamodb`'
+  - '`dax:*` grants every action in `dax`'
+  - 'Resource: `*` for dax, dynamodb (broad cross-resource read/access)'
+  - '`kms:DescribeKey` on Resource: `*` touches sensitive service `kms`'
+  - '`kms:ListAliases` on Resource: `*` touches sensitive service `kms`'
+  - 'Destructive action `application-autoscaling:DeleteScalingPolicy` on Resource: `*` (blast radius = every resource in this
+    account)'
+  - 'State-changing action `application-autoscaling:DeregisterScalableTarget` on Resource: `*` (IAM access level: Write)'
+  - 'State-changing action `application-autoscaling:PutScalingPolicy` on Resource: `*` (IAM access level: Write)'
+  - 'State-changing action `application-autoscaling:RegisterScalableTarget` on Resource: `*` (IAM access level: Write)'
+  - 'Resource: `*` for application-autoscaling (broad cross-resource read/access)'
+  - 'Resource: `*` for tag (broad cross-resource read/access)'
+  - 'Resource: `*` for cloudwatch (broad cross-resource read/access)'
+  - '`iam:CreateServiceLinkedRole` on Resource: `*` touches sensitive service `iam`'
+  - 'State-changing action `iam:CreateServiceLinkedRole` on Resource: `*` (IAM access level: Permissions management)'
+  - '`iam:ListRoles` on Resource: `*` touches sensitive service `iam`'
+  - '`dynamodb:*` on broad resource reads content that frequently contains secrets / sensitive data (boot logs, command output,
+    log streams, message bodies).'
+  opus_score: null
+  opus_factors: null
+  opus_reasoning: null
+  gap_classification: pending

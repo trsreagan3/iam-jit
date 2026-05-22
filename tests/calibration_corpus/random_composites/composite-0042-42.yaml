@@ -1,0 +1,111 @@
+name: composite-0042-42
+source_policies:
+- aws_managed/ElasticLoadBalancingFullAccess.yaml
+- aws_managed/DynamoDBReplicationServiceRolePolicy.yaml
+source_hash: 7d595e8e72fa66f2
+policy:
+  Version: '2012-10-17'
+  Statement:
+  - Effect: Allow
+    Action: elasticloadbalancing:*
+    Resource: '*'
+  - Effect: Allow
+    Action:
+    - ec2:DescribeAccountAttributes
+    - ec2:DescribeAddresses
+    - ec2:DescribeInternetGateways
+    - ec2:DescribeSecurityGroups
+    - ec2:DescribeSubnets
+    - ec2:DescribeVpcs
+    - ec2:DescribeVpcClassicLink
+    - ec2:DescribeInstances
+    - ec2:DescribeNetworkInterfaces
+    - ec2:DescribeClassicLinkInstances
+    - ec2:DescribeRouteTables
+    - ec2:DescribeCoipPools
+    - ec2:GetCoipPoolUsage
+    - ec2:GetSecurityGroupsForVpc
+    - ec2:DescribeVpcPeeringConnections
+    - ec2:DescribeAvailabilityZones
+    - cognito-idp:DescribeUserPoolClient
+    Resource: '*'
+  - Effect: Allow
+    Action: iam:CreateServiceLinkedRole
+    Resource: '*'
+    Condition:
+      StringEquals:
+        iam:AWSServiceName: elasticloadbalancing.amazonaws.com
+  - Effect: Allow
+    Action: arc-zonal-shift:*
+    Resource: arn:aws:elasticloadbalancing:*:*:loadbalancer/*
+  - Effect: Allow
+    Action:
+    - arc-zonal-shift:ListManagedResources
+    - arc-zonal-shift:ListZonalShifts
+    Resource: '*'
+  - Sid: DynamoDBActionsNeededForSteadyStateReplication
+    Effect: Allow
+    Action:
+    - dynamodb:GetItem
+    - dynamodb:PutItem
+    - dynamodb:UpdateItem
+    - dynamodb:DeleteItem
+    - dynamodb:DescribeTable
+    - dynamodb:UpdateTable
+    - dynamodb:Scan
+    - dynamodb:DescribeStream
+    - dynamodb:GetRecords
+    - dynamodb:GetShardIterator
+    - dynamodb:DescribeTimeToLive
+    - dynamodb:UpdateTimeToLive
+    - dynamodb:DescribeLimits
+    - dynamodb:GetResourcePolicy
+    - application-autoscaling:RegisterScalableTarget
+    - application-autoscaling:DescribeScalableTargets
+    - application-autoscaling:PutScalingPolicy
+    - application-autoscaling:DescribeScalingPolicies
+    - account:ListRegions
+    Resource: '*'
+  - Sid: DynamoDBReplicationServiceRolePolicy
+    Effect: Allow
+    Action:
+    - iam:CreateServiceLinkedRole
+    Resource: '*'
+    Condition:
+      StringEquals:
+        iam:AWSServiceName:
+        - dynamodb.application-autoscaling.amazonaws.com
+request:
+  spec:
+    access_type: read-write
+    duration:
+      duration_hours: 1
+    resource_constraints: []
+  user: ci-bot
+  justification: rotate signing key via CI pipeline
+scores:
+  det_score: 8
+  det_factors:
+  - '`elasticloadbalancing:*` grants every action in `elasticloadbalancing`'
+  - 'Resource: `*` for elasticloadbalancing (broad cross-resource read/access)'
+  - "`elasticloadbalancing:*` is a high-impact mutation on broad resource \u2014 single API call can rewrite every matching\
+    \ resource in the account."
+  - '`cognito-idp:DescribeUserPoolClient` on Resource: `*` touches sensitive service `cognito-idp`'
+  - '`iam:CreateServiceLinkedRole` on Resource: `*` touches sensitive service `iam`'
+  - 'State-changing action `iam:CreateServiceLinkedRole` on Resource: `*` (IAM access level: Permissions management)'
+  - '`arc-zonal-shift:*` grants every action in `arc-zonal-shift`'
+  - 'Resource: `*` for arc-zonal-shift (broad cross-resource read/access)'
+  - 'State-changing action `dynamodb:PutItem` on Resource: `*` (IAM access level: Write)'
+  - 'State-changing action `dynamodb:UpdateItem` on Resource: `*` (IAM access level: Write)'
+  - 'Destructive action `dynamodb:DeleteItem` on Resource: `*` (blast radius = every resource in this account)'
+  - 'State-changing action `dynamodb:UpdateTable` on Resource: `*` (IAM access level: Write)'
+  - 'State-changing action `dynamodb:UpdateTimeToLive` on Resource: `*` (IAM access level: Write)'
+  - 'State-changing action `application-autoscaling:RegisterScalableTarget` on Resource: `*` (IAM access level: Write)'
+  - 'State-changing action `application-autoscaling:PutScalingPolicy` on Resource: `*` (IAM access level: Write)'
+  - 'Resource: `*` for account, application-autoscaling, dynamodb (broad cross-resource read/access)'
+  - '`dynamodb:Scan` on broad resource reads content that frequently contains secrets / sensitive data (boot logs, command
+    output, log streams, message bodies).'
+  opus_score: null
+  opus_factors: null
+  opus_reasoning: null
+  gap_classification: pending

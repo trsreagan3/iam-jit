@@ -1,0 +1,259 @@
+name: composite-0010-42
+source_policies:
+- aws_managed/SageMakerStudioBedrockKnowledgeBaseServiceRolePolicy.yaml
+- aws_managed/AWSCloudHSMRole.yaml
+- aws_managed/AWSBackupServiceLinkedRolePolicyForBackupTest.yaml
+source_hash: 6858f0fce3de1aba
+policy:
+  Version: '2012-10-17'
+  Statement:
+  - Sid: BedrockAppInferenceProfileInvocationPermissions
+    Effect: Allow
+    Action:
+    - bedrock:GetInferenceProfile
+    - bedrock:InvokeModel
+    - bedrock:InvokeModelWithResponseStream
+    Resource: arn:aws:bedrock:*:*:application-inference-profile/*
+    Condition:
+      StringEquals:
+        aws:ResourceTag/AmazonDataZoneProject: ${aws:PrincipalTag/AmazonDataZoneProject}
+  - Sid: BedrockModelInvocationPermission
+    Effect: Allow
+    Action:
+    - bedrock:InvokeModel
+    - bedrock:InvokeModelWithResponseStream
+    Resource:
+    - arn:aws:bedrock:*::foundation-model/*
+    - arn:aws:bedrock:*:*:custom-model/*
+    - arn:aws:bedrock:*:*:provisioned-model/*
+    Condition:
+      'Null':
+        bedrock:InferenceProfileArn: 'false'
+  - Sid: OpenSearchServerlessPermissions
+    Effect: Allow
+    Action: aoss:APIAccessAll
+    Resource: arn:aws:aoss:*:*:collection/*
+    Condition:
+      StringEquals:
+        aws:ResourceAccount: ${aws:PrincipalAccount}
+      StringLike:
+        aoss:collection: bedrock*
+  - Sid: ListDomainS3BucketPermissions
+    Effect: Allow
+    Action: s3:ListBucket
+    Resource: arn:aws:s3:::${aws:PrincipalTag/DomainBucketName}
+    Condition:
+      StringEquals:
+        aws:ResourceAccount: ${aws:PrincipalAccount}
+      StringLike:
+        s3:prefix:
+        - ${aws:PrincipalTag/AmazonDataZoneDomain}/${aws:PrincipalTag/AmazonDataZoneProject}
+        - ${aws:PrincipalTag/AmazonDataZoneDomain}/${aws:PrincipalTag/AmazonDataZoneProject}/*
+      StringNotEquals:
+        aws:PrincipalTag/DomainBucketName: ''
+        aws:PrincipalTag/AmazonDataZoneDomain: ''
+        aws:PrincipalTag/AmazonDataZoneProject: ''
+  - Sid: AccessDomainS3BucketPermissions
+    Effect: Allow
+    Action:
+    - s3:GetObject
+    - s3:GetObjectVersion
+    Resource: arn:aws:s3:::${aws:PrincipalTag/DomainBucketName}/${aws:PrincipalTag/AmazonDataZoneDomain}/${aws:PrincipalTag/AmazonDataZoneProject}/*
+    Condition:
+      StringEquals:
+        aws:ResourceAccount: ${aws:PrincipalAccount}
+      StringNotEquals:
+        aws:PrincipalTag/DomainBucketName: ''
+        aws:PrincipalTag/AmazonDataZoneDomain: ''
+        aws:PrincipalTag/AmazonDataZoneProject: ''
+  - Sid: VectorStoresKms
+    Effect: Allow
+    Action:
+    - kms:Decrypt
+    - kms:GenerateDataKey
+    Resource: arn:aws:kms:*:*:key/${aws:PrincipalTag/KmsKeyId}
+    Condition:
+      StringLike:
+        kms:ViaService:
+        - neptune-graph.*.amazonaws.com
+        - s3vectors.*.amazonaws.com
+      StringEquals:
+        aws:ResourceAccount: ${aws:PrincipalAccount}
+      'Null':
+        kms:EncryptionContextKeys: 'false'
+  - Sid: VectorStoresKmsDescribeKey
+    Effect: Allow
+    Action:
+    - kms:DescribeKey
+    Resource: arn:aws:kms:*:*:key/${aws:PrincipalTag/KmsKeyId}
+    Condition:
+      StringLike:
+        kms:ViaService:
+        - neptune-graph.*.amazonaws.com
+        - s3vectors.*.amazonaws.com
+      StringEquals:
+        aws:ResourceAccount: ${aws:PrincipalAccount}
+  - Sid: NeptuneGraphDataAccess
+    Effect: Allow
+    Action:
+    - neptune-graph:GetGraph
+    - neptune-graph:DeleteDataViaQuery
+    - neptune-graph:WriteDataViaQuery
+    - neptune-graph:ReadDataViaQuery
+    Resource: arn:aws:neptune-graph:*:*:graph/*
+    Condition:
+      StringEquals:
+        aws:ResourceAccount: ${aws:PrincipalAccount}
+        aws:ResourceTag/AmazonDataZoneProject: ${aws:PrincipalTag/AmazonDataZoneProject}
+  - Sid: S3VectorsDataAccess
+    Effect: Allow
+    Action:
+    - s3vectors:GetVectorBucket
+    - s3vectors:GetIndex
+    - s3vectors:PutVectors
+    - s3vectors:GetVectors
+    - s3vectors:ListVectors
+    - s3vectors:QueryVectors
+    - s3vectors:DeleteVectors
+    Resource: arn:aws:s3vectors:*:*:bucket/amazon-bedrock-ide-${aws:PrincipalTag/AmazonDataZoneProject}*
+    Condition:
+      StringNotEquals:
+        aws:PrincipalTag/AmazonDataZoneProject: ''
+      StringEquals:
+        aws:ResourceAccount: ${aws:PrincipalAccount}
+  - Sid: BedrockKnowledgeBaseKmsPermissions
+    Effect: Allow
+    Action:
+    - kms:Decrypt
+    - kms:GenerateDataKey
+    Resource: arn:aws:kms:*:*:key/${aws:PrincipalTag/KmsKeyId}
+    Condition:
+      StringEquals:
+        aws:ResourceAccount: ${aws:PrincipalAccount}
+      StringLike:
+        kms:EncryptionContext:aws:bedrock:arn: arn:aws:bedrock:*:${aws:PrincipalAccount}:knowledge-base/*
+  - Sid: S3KmsPermissions
+    Effect: Allow
+    Action: kms:Decrypt
+    Resource: arn:aws:kms:*:*:key/${aws:PrincipalTag/KmsKeyId}
+    Condition:
+      StringLike:
+        kms:ViaService: s3.*.amazonaws.com
+      StringEquals:
+        aws:ResourceAccount: ${aws:PrincipalAccount}
+      ArnLike:
+        kms:EncryptionContext:aws:s3:arn:
+        - arn:aws:s3:::${aws:PrincipalTag/DomainBucketName}
+        - arn:aws:s3:::${aws:PrincipalTag/DomainBucketName}/*
+  - Sid: SqlWorkbenchAccessPermissions
+    Effect: Allow
+    Action:
+    - sqlworkbench:GetSqlRecommendations
+    - sqlworkbench:PutSqlGenerationContext
+    - sqlworkbench:GetSqlGenerationContext
+    - sqlworkbench:DeleteSqlGenerationContext
+    Resource: '*'
+  - Sid: BedrockGenerateQueryPermissions
+    Effect: Allow
+    Action:
+    - bedrock:GenerateQuery
+    Resource: '*'
+  - Effect: Allow
+    Action:
+    - ec2:CreateNetworkInterface
+    - ec2:CreateTags
+    - ec2:DeleteNetworkInterface
+    - ec2:DescribeNetworkInterfaceAttribute
+    - ec2:DescribeNetworkInterfaces
+    - ec2:DescribeSubnets
+    - ec2:DescribeVpcs
+    - ec2:DetachNetworkInterface
+    Resource:
+    - '*'
+  - Action:
+    - elasticfilesystem:Backup
+    - elasticfilesystem:DescribeTags
+    Resource: arn:aws:elasticfilesystem:*:*:file-system/*
+    Effect: Allow
+    Condition:
+      StringLike:
+        aws:ResourceTag/aws:elasticfilesystem:default-backup: enabled
+  - Action:
+    - tag:GetResources
+    Resource: '*'
+    Effect: Allow
+request:
+  spec:
+    access_type: read-write
+    duration:
+      duration_hours: 1
+    resource_constraints: []
+  user: dev-bob
+  justification: 'reproduce customer ticket #4422 locally'
+scores:
+  det_score: 8
+  det_factors:
+  - "`Condition.StringEquals.aws:ResourceTag/AmazonDataZoneProject: \"${aws:PrincipalTag/AmazonDataZoneProject}\"` interpolates\
+    \ an attacker-controllable tag \u2014 if the caller has `iam:TagRole`/`TagUser` on themselves, they control what the condition\
+    \ value expands to, defeating the apparent scope."
+  - '`bedrock:GetInferenceProfile` on Resource: `*` touches sensitive service `bedrock`'
+  - '`bedrock:InvokeModel` on Resource: `*` touches sensitive service `bedrock`'
+  - '`bedrock:InvokeModelWithResponseStream` on Resource: `*` touches sensitive service `bedrock`'
+  - 'State-changing action `aoss:APIAccessAll` on Resource: `*` (IAM access level: Write)'
+  - 'Resource: `*` for aoss (broad cross-resource read/access)'
+  - "Resource `arn:aws:s3:::${aws:PrincipalTag/DomainBucketName}` interpolates an attacker-controllable tag (`${{aws:PrincipalTag/...}}`\
+    \ or `${{aws:RequestTag/...}}` or `${{aws:ResourceTag/...}}`). If the caller has `iam:TagRole` / `iam:TagUser` on themselves\
+    \ (common in ABAC patterns), they can rewrite the tag to construct any resource ARN \u2014 the Resource scope is illusory."
+  - "`Condition.StringLike.s3:prefix: \"${aws:PrincipalTag/AmazonDataZoneDomain}/${aws:PrincipalTag/AmazonDataZoneProject}\"\
+    ` interpolates an attacker-controllable tag \u2014 if the caller has `iam:TagRole`/`TagUser` on themselves, they control\
+    \ what the condition value expands to, defeating the apparent scope."
+  - "Resource `arn:aws:s3:::${aws:PrincipalTag/DomainBucketName}/${aws:PrincipalTag/AmazonDataZoneDomain}/${aws:PrincipalTag/AmazonDataZoneProject}/*`\
+    \ interpolates an attacker-controllable tag (`${{aws:PrincipalTag/...}}` or `${{aws:RequestTag/...}}` or `${{aws:ResourceTag/...}}`).\
+    \ If the caller has `iam:TagRole` / `iam:TagUser` on themselves (common in ABAC patterns), they can rewrite the tag to\
+    \ construct any resource ARN \u2014 the Resource scope is illusory."
+  - "`Condition.StringNotEquals.aws:PrincipalTag/DomainBucketName` is empty string \u2014 matches absent / unspecified key;\
+    \ almost certainly not the intended scope."
+  - "Resource `arn:aws:kms:*:*:key/${aws:PrincipalTag/KmsKeyId}` interpolates an attacker-controllable tag (`${{aws:PrincipalTag/...}}`\
+    \ or `${{aws:RequestTag/...}}` or `${{aws:ResourceTag/...}}`). If the caller has `iam:TagRole` / `iam:TagUser` on themselves\
+    \ (common in ABAC patterns), they can rewrite the tag to construct any resource ARN \u2014 the Resource scope is illusory."
+  - '`kms:Decrypt` on Resource: `*` (broad access to sensitive resource)'
+  - '`kms:GenerateDataKey` on Resource: `*` (broad access to sensitive resource)'
+  - 'State-changing action `kms:Decrypt` on Resource: `*` (IAM access level: Write)'
+  - 'State-changing action `kms:GenerateDataKey` on Resource: `*` (IAM access level: Write)'
+  - '`kms:DescribeKey` on Resource: `*` touches sensitive service `kms`'
+  - 'Destructive action `neptune-graph:DeleteDataViaQuery` on Resource: `*` (blast radius = every resource in this account)'
+  - 'State-changing action `neptune-graph:WriteDataViaQuery` on Resource: `*` (IAM access level: Write)'
+  - 'Resource: `*` for neptune-graph (broad cross-resource read/access)'
+  - "Resource `arn:aws:s3vectors:*:*:bucket/amazon-bedrock-ide-${aws:PrincipalTag/AmazonDataZoneProject}*` interpolates an\
+    \ attacker-controllable tag (`${{aws:PrincipalTag/...}}` or `${{aws:RequestTag/...}}` or `${{aws:ResourceTag/...}}`).\
+    \ If the caller has `iam:TagRole` / `iam:TagUser` on themselves (common in ABAC patterns), they can rewrite the tag to\
+    \ construct any resource ARN \u2014 the Resource scope is illusory."
+  - "`Condition.StringNotEquals.aws:PrincipalTag/AmazonDataZoneProject` is empty string \u2014 matches absent / unspecified\
+    \ key; almost certainly not the intended scope."
+  - 'State-changing action `s3vectors:PutVectors` on Resource: `*` (IAM access level: Write)'
+  - 'Destructive action `s3vectors:DeleteVectors` on Resource: `*` (blast radius = every resource in this account)'
+  - 'Resource: `*` for s3vectors (broad cross-resource read/access)'
+  - "`Condition.ArnLike.kms:EncryptionContext:aws:s3:arn: \"arn:aws:s3:::${aws:PrincipalTag/DomainBucketName}\"` interpolates\
+    \ an attacker-controllable tag \u2014 if the caller has `iam:TagRole`/`TagUser` on themselves, they control what the condition\
+    \ value expands to, defeating the apparent scope."
+  - 'State-changing action `sqlworkbench:PutSqlGenerationContext` on Resource: `*` (IAM access level: Write)'
+  - 'Destructive action `sqlworkbench:DeleteSqlGenerationContext` on Resource: `*` (blast radius = every resource in this
+    account)'
+  - 'Resource: `*` for sqlworkbench (broad cross-resource read/access)'
+  - '`bedrock:GenerateQuery` on Resource: `*` touches sensitive service `bedrock`'
+  - 'State-changing action `ec2:CreateNetworkInterface` on Resource: `*` (IAM access level: Write)'
+  - 'State-changing action `ec2:CreateTags` on Resource: `*` (IAM access level: Tagging)'
+  - 'Destructive action `ec2:DeleteNetworkInterface` on Resource: `*` (blast radius = every resource in this account)'
+  - 'Destructive action `ec2:DetachNetworkInterface` on Resource: `*` (blast radius = every resource in this account)'
+  - 'Resource: `*` for ec2 (broad cross-resource read/access)'
+  - "`ec2:CreateNetworkInterface` is a high-impact mutation on broad resource \u2014 single API call can rewrite every matching\
+    \ resource in the account."
+  - 'State-changing action `elasticfilesystem:Backup` on Resource: `*` (IAM access level: Write)'
+  - 'Resource: `*` for elasticfilesystem (broad cross-resource read/access)'
+  - 'Resource: `*` for tag (broad cross-resource read/access)'
+  - '`bedrock:InvokeModel` sets up ongoing cross-account / persistent exfiltration in a single call. The blast is ''everything
+    that flows through this resource from now on,'' not just what exists today.'
+  opus_score: null
+  opus_factors: null
+  opus_reasoning: null
+  gap_classification: pending

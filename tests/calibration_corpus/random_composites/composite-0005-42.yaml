@@ -1,0 +1,112 @@
+name: composite-0005-42
+source_policies:
+- aws_managed/AmazonWorkMailMessageFlowReadOnlyAccess.yaml
+- aws_managed/AWSS3OnOutpostsServiceRolePolicy.yaml
+source_hash: 874dc052f4a334bd
+policy:
+  Version: '2012-10-17'
+  Statement:
+  - Action:
+    - workmailmessageflow:Get*
+    Resource: '*'
+    Effect: Allow
+  - Effect: Allow
+    Action:
+    - ec2:DescribeSubnets
+    - ec2:DescribeSecurityGroups
+    - ec2:DescribeNetworkInterfaces
+    - ec2:DescribeVpcs
+    - ec2:DescribeCoipPools
+    - ec2:GetCoipPoolUsage
+    - ec2:DescribeAddresses
+    - ec2:DescribeLocalGatewayRouteTableVpcAssociations
+    Resource: '*'
+    Sid: DescribeVpcResources
+  - Effect: Allow
+    Action:
+    - ec2:CreateNetworkInterface
+    Resource:
+    - arn:aws:ec2:*:*:subnet/*
+    - arn:aws:ec2:*:*:security-group/*
+    Sid: CreateNetworkInterface
+  - Effect: Allow
+    Action:
+    - ec2:CreateNetworkInterface
+    Resource:
+    - arn:aws:ec2:*:*:network-interface/*
+    Condition:
+      StringEquals:
+        aws:RequestTag/CreatedBy: S3 On Outposts
+    Sid: CreateTagsForCreateNetworkInterface
+  - Effect: Allow
+    Action:
+    - ec2:AllocateAddress
+    Resource:
+    - arn:aws:ec2:*:*:ipv4pool-ec2/*
+    Sid: AllocateIpAddress
+  - Effect: Allow
+    Action:
+    - ec2:AllocateAddress
+    Resource:
+    - arn:aws:ec2:*:*:elastic-ip/*
+    Condition:
+      StringEquals:
+        aws:RequestTag/CreatedBy: S3 On Outposts
+    Sid: CreateTagsForAllocateIpAddress
+  - Effect: Allow
+    Action:
+    - ec2:ModifyNetworkInterfaceAttribute
+    - ec2:CreateNetworkInterfacePermission
+    - ec2:DeleteNetworkInterface
+    - ec2:DeleteNetworkInterfacePermission
+    - ec2:DisassociateAddress
+    - ec2:ReleaseAddress
+    - ec2:AssociateAddress
+    Resource: '*'
+    Condition:
+      StringEquals:
+        aws:ResourceTag/CreatedBy: S3 On Outposts
+    Sid: ReleaseVpcResources
+  - Effect: Allow
+    Action:
+    - ec2:CreateTags
+    Resource: '*'
+    Condition:
+      StringEquals:
+        ec2:CreateAction:
+        - CreateNetworkInterface
+        - AllocateAddress
+        aws:RequestTag/CreatedBy:
+        - S3 On Outposts
+    Sid: CreateTags
+request:
+  spec:
+    access_type: read-write
+    duration:
+      duration_hours: 1
+    resource_constraints: []
+  user: ci-bot
+  justification: deploy via terraform-cloud agent
+scores:
+  det_score: 8
+  det_factors:
+  - "Action-name wildcard `workmailmessageflow:Get*` on broad resource \u2014 matches multiple workmailmessageflow APIs at\
+    \ once"
+  - 'Resource: `*` for workmailmessageflow (broad cross-resource read/access)'
+  - 'Resource: `*` for ec2 (broad cross-resource read/access)'
+  - 'State-changing action `ec2:CreateNetworkInterface` on Resource: `*` (IAM access level: Write)'
+  - "`ec2:CreateNetworkInterface` is a high-impact mutation on broad resource \u2014 single API call can rewrite every matching\
+    \ resource in the account."
+  - 'State-changing action `ec2:AllocateAddress` on Resource: `*` (IAM access level: Write)'
+  - 'State-changing action `ec2:ModifyNetworkInterfaceAttribute` on Resource: `*` (IAM access level: Write)'
+  - 'State-changing action `ec2:CreateNetworkInterfacePermission` on Resource: `*` (IAM access level: Permissions management)'
+  - 'Destructive action `ec2:DeleteNetworkInterface` on Resource: `*` (blast radius = every resource in this account)'
+  - 'Destructive action `ec2:DeleteNetworkInterfacePermission` on Resource: `*` (blast radius = every resource in this account)'
+  - 'Destructive action `ec2:DisassociateAddress` on Resource: `*` (blast radius = every resource in this account)'
+  - 'State-changing action `ec2:ReleaseAddress` on Resource: `*` (IAM access level: Write)'
+  - 'State-changing action `ec2:AssociateAddress` on Resource: `*` (IAM access level: Write)'
+  - 'State-changing action `ec2:CreateTags` on Resource: `*` (IAM access level: Tagging)'
+  opus_score: null
+  opus_factors: null
+  opus_reasoning: null
+  gap_classification: pending

@@ -1,0 +1,212 @@
+name: composite-0081-42
+source_policies:
+- aws_managed/AlexaForBusinessFullAccess.yaml
+- aws_managed/AWSSystemsManagerEnableConfigRecordingExecutionPolicy.yaml
+- aws_managed/AmazonElasticFileSystemServiceRolePolicy.yaml
+source_hash: d53c0f4a1c512a76
+policy:
+  Version: '2012-10-17'
+  Statement:
+  - Effect: Allow
+    Action:
+    - a4b:*
+    - kms:DescribeKey
+    Resource: '*'
+  - Action:
+    - iam:CreateServiceLinkedRole
+    Effect: Allow
+    Resource: '*'
+    Condition:
+      StringLike:
+        iam:AWSServiceName:
+        - '*a4b.amazonaws.com'
+  - Effect: Allow
+    Action:
+    - iam:DeleteServiceLinkedRole
+    - iam:GetServiceLinkedRoleDeletionStatus
+    Resource: arn:aws:iam::*:role/aws-service-role/*a4b.amazonaws.com/AWSServiceRoleForAlexaForBusiness*
+  - Effect: Allow
+    Action:
+    - secretsmanager:GetSecretValue
+    - secretsmanager:DeleteSecret
+    - secretsmanager:UpdateSecret
+    Resource: arn:aws:secretsmanager:*:*:secret:A4B*
+  - Effect: Allow
+    Action: secretsmanager:CreateSecret
+    Resource: '*'
+    Condition:
+      StringLike:
+        secretsmanager:Name: A4B*
+  - Sid: S3BucketCreatePermissions
+    Effect: Allow
+    Action:
+    - s3:CreateBucket
+    - s3:PutBucketPublicAccessBlock
+    - s3:ListBucket
+    - s3:PutBucketPolicy
+    - s3:PutEncryptionConfiguration
+    Resource:
+    - arn:aws:s3:::aws-quick-setup-config-recording-*
+    Condition:
+      StringEquals:
+        aws:ResourceAccount: ${aws:PrincipalAccount}
+  - Sid: SNSTopicsListPermissions
+    Effect: Allow
+    Action:
+    - sns:ListTopics
+    Resource: '*'
+  - Sid: DefaultSNSTopicCreatePermissions
+    Effect: Allow
+    Action:
+    - sns:CreateTopic
+    Resource: arn:aws:sns:*:*:ConfigRecording-Default-Topic
+  - Sid: ConfigureAndStartConfigurationRecorderPermissions
+    Effect: Allow
+    Action:
+    - config:DescribeConfigurationRecorders
+    - config:DescribeDeliveryChannels
+    - config:PutConfigurationRecorder
+    - config:PutDeliveryChannel
+    - config:StartConfigurationRecorder
+    Resource: '*'
+  - Sid: GetAndPassConfigSLRPermissions
+    Effect: Allow
+    Action:
+    - iam:GetRole
+    - iam:PassRole
+    Resource:
+    - arn:aws:iam::*:role/aws-service-role/config.amazonaws.com/AWSServiceRoleForConfig
+    - arn:aws:iam::*:role/AWSServiceRoleForConfig
+  - Sid: CreateConfigSLRPermissions
+    Effect: Allow
+    Action:
+    - iam:CreateServiceLinkedRole
+    Resource:
+    - arn:aws:iam::*:role/aws-service-role/config.amazonaws.com/AWSServiceRoleForConfig
+    Condition:
+      StringEquals:
+        iam:AWSServiceName: config.amazonaws.com
+  - Effect: Allow
+    Action:
+    - backup-storage:MountCapsule
+    - ec2:CreateNetworkInterface
+    - ec2:DeleteNetworkInterface
+    - ec2:DescribeSecurityGroups
+    - ec2:DescribeSubnets
+    - ec2:DescribeNetworkInterfaceAttribute
+    - ec2:ModifyNetworkInterfaceAttribute
+    - tag:GetResources
+    Resource: '*'
+  - Effect: Allow
+    Action:
+    - kms:DescribeKey
+    Resource: arn:aws:kms:*:*:key/*
+  - Effect: Allow
+    Action:
+    - backup:CreateBackupVault
+    - backup:PutBackupVaultAccessPolicy
+    Resource:
+    - arn:aws:backup:*:*:backup-vault:aws/efs/automatic-backup-vault
+  - Effect: Allow
+    Action:
+    - backup:CreateBackupPlan
+    - backup:CreateBackupSelection
+    Resource:
+    - arn:aws:backup:*:*:backup-plan:*
+  - Effect: Allow
+    Action:
+    - iam:CreateServiceLinkedRole
+    Resource: '*'
+    Condition:
+      StringEquals:
+        iam:AWSServiceName:
+        - backup.amazonaws.com
+  - Effect: Allow
+    Action:
+    - iam:PassRole
+    Resource:
+    - arn:aws:iam::*:role/aws-service-role/backup.amazonaws.com/AWSServiceRoleForBackup
+    Condition:
+      StringLike:
+        iam:PassedToService: backup.amazonaws.com
+  - Effect: Allow
+    Action:
+    - elasticfilesystem:DescribeFileSystems
+    - elasticfilesystem:CreateReplicationConfiguration
+    - elasticfilesystem:DescribeReplicationConfigurations
+    - elasticfilesystem:DeleteReplicationConfiguration
+    - elasticfilesystem:ReplicationRead
+    - elasticfilesystem:ReplicationWrite
+    Resource: '*'
+request:
+  spec:
+    access_type: read-write
+    duration:
+      duration_hours: 4
+    resource_constraints: []
+  user: contractor-frank
+  justification: 60-day integration project read access
+scores:
+  det_score: 9
+  det_factors:
+  - '`a4b:*` grants every action in `a4b`'
+  - '`kms:DescribeKey` on Resource: `*` touches sensitive service `kms`'
+  - '`iam:CreateServiceLinkedRole` on Resource: `*` touches sensitive service `iam`'
+  - 'State-changing action `iam:CreateServiceLinkedRole` on Resource: `*` (IAM access level: Permissions management)'
+  - '`iam:DeleteServiceLinkedRole` on Resource: `*` touches sensitive service `iam`'
+  - '`iam:GetServiceLinkedRoleDeletionStatus` on Resource: `*` touches sensitive service `iam`'
+  - 'Destructive action `iam:DeleteServiceLinkedRole` on Resource: `*` (blast radius = every resource in this account)'
+  - '`secretsmanager:GetSecretValue` on Resource: `*` (broad access to secrets)'
+  - '`secretsmanager:DeleteSecret` on Resource: `*` touches sensitive service `secretsmanager`'
+  - '`secretsmanager:UpdateSecret` on Resource: `*` touches sensitive service `secretsmanager`'
+  - 'Destructive action `secretsmanager:DeleteSecret` on Resource: `*` (blast radius = every resource in this account)'
+  - 'State-changing action `secretsmanager:UpdateSecret` on Resource: `*` (IAM access level: Write)'
+  - "`secretsmanager:UpdateSecret` is a high-impact mutation on broad resource \u2014 single API call can rewrite every matching\
+    \ resource in the account."
+  - '`secretsmanager:CreateSecret` on Resource: `*` touches sensitive service `secretsmanager`'
+  - 'State-changing action `secretsmanager:CreateSecret` on Resource: `*` (IAM access level: Write)'
+  - 'State-changing action `s3:CreateBucket` on Resource: `*` (IAM access level: Write)'
+  - 'State-changing action `s3:PutBucketPublicAccessBlock` on Resource: `*` (IAM access level: Permissions management)'
+  - 'State-changing action `s3:PutBucketPolicy` on Resource: `*` (IAM access level: Permissions management)'
+  - 'State-changing action `s3:PutEncryptionConfiguration` on Resource: `*` (IAM access level: Write)'
+  - 'Resource: `*` for s3 (broad cross-resource read/access)'
+  - "`s3:PutBucketPolicy` is a high-impact mutation on broad resource \u2014 single API call can rewrite every matching resource\
+    \ in the account."
+  - '`s3:PutBucketPolicy` is catastrophic in blast radius (account governance / IAM total compromise / evidence destruction).
+    Always route to human review.'
+  - 'State-changing action `sns:CreateTopic` on Resource: `*` (IAM access level: Permissions management)'
+  - 'Resource: `*` for sns (broad cross-resource read/access)'
+  - 'State-changing action `config:PutConfigurationRecorder` on Resource: `*` (IAM access level: Write)'
+  - 'State-changing action `config:PutDeliveryChannel` on Resource: `*` (IAM access level: Write)'
+  - 'State-changing action `config:StartConfigurationRecorder` on Resource: `*` (IAM access level: Write)'
+  - 'Resource: `*` for config (broad cross-resource read/access)'
+  - '`config:PutConfigurationRecorder` is catastrophic in blast radius (account governance / IAM total compromise / evidence
+    destruction). Always route to human review.'
+  - '`config:PutDeliveryChannel` is catastrophic in blast radius (account governance / IAM total compromise / evidence destruction).
+    Always route to human review.'
+  - '`iam:GetRole` on Resource: `*` touches sensitive service `iam`'
+  - '`iam:PassRole` on Resource: `*` is a privilege-escalation path'
+  - 'State-changing action `iam:PassRole` on Resource: `*` (IAM access level: Permissions management)'
+  - 'State-changing action `backup-storage:MountCapsule` on Resource: `*` (IAM access level: Write)'
+  - 'State-changing action `ec2:CreateNetworkInterface` on Resource: `*` (IAM access level: Write)'
+  - 'Destructive action `ec2:DeleteNetworkInterface` on Resource: `*` (blast radius = every resource in this account)'
+  - 'State-changing action `ec2:ModifyNetworkInterfaceAttribute` on Resource: `*` (IAM access level: Write)'
+  - 'Resource: `*` for backup-storage, ec2, tag (broad cross-resource read/access)'
+  - "`ec2:CreateNetworkInterface` is a high-impact mutation on broad resource \u2014 single API call can rewrite every matching\
+    \ resource in the account."
+  - 'State-changing action `backup:CreateBackupVault` on Resource: `*` (IAM access level: Write)'
+  - 'State-changing action `backup:PutBackupVaultAccessPolicy` on Resource: `*` (IAM access level: Permissions management)'
+  - 'Resource: `*` for backup (broad cross-resource read/access)'
+  - 'State-changing action `backup:CreateBackupPlan` on Resource: `*` (IAM access level: Write)'
+  - 'State-changing action `backup:CreateBackupSelection` on Resource: `*` (IAM access level: Write)'
+  - 'State-changing action `elasticfilesystem:CreateReplicationConfiguration` on Resource: `*` (IAM access level: Write)'
+  - 'Destructive action `elasticfilesystem:DeleteReplicationConfiguration` on Resource: `*` (blast radius = every resource
+    in this account)'
+  - 'State-changing action `elasticfilesystem:ReplicationWrite` on Resource: `*` (IAM access level: Write)'
+  - 'Resource: `*` for elasticfilesystem (broad cross-resource read/access)'
+  - '`backup:PutBackupVaultAccessPolicy` sets up ongoing cross-account / persistent exfiltration in a single call. The blast
+    is ''everything that flows through this resource from now on,'' not just what exists today.'
+  opus_score: null
+  opus_factors: null
+  opus_reasoning: null
+  gap_classification: pending

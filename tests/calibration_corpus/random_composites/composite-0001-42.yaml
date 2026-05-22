@@ -1,0 +1,153 @@
+name: composite-0001-42
+source_policies:
+- aws_managed/AWSApplicationAutoscalingLambdaConcurrencyPolicy.yaml
+- aws_managed/AWSRoboMakerServicePolicy.yaml
+- aws_managed/AWSPrivateCAPrivilegedUser.yaml
+source_hash: 5af88ff9214c2891
+policy:
+  Version: '2012-10-17'
+  Statement:
+  - Effect: Allow
+    Action:
+    - lambda:PutProvisionedConcurrencyConfig
+    - lambda:GetProvisionedConcurrencyConfig
+    - lambda:DeleteProvisionedConcurrencyConfig
+    - cloudwatch:PutMetricAlarm
+    - cloudwatch:DescribeAlarms
+    - cloudwatch:DeleteAlarms
+    Resource:
+    - '*'
+  - Action:
+    - ec2:CreateNetworkInterfacePermission
+    - ec2:DescribeNetworkInterfaces
+    - ec2:DeleteNetworkInterface
+    - ec2:DescribeSubnets
+    - ec2:DescribeVpcs
+    - ec2:DescribeSecurityGroups
+    - greengrass:CreateDeployment
+    - greengrass:CreateGroupVersion
+    - greengrass:CreateFunctionDefinition
+    - greengrass:CreateFunctionDefinitionVersion
+    - greengrass:GetDeploymentStatus
+    - greengrass:GetGroup
+    - greengrass:GetGroupVersion
+    - greengrass:GetCoreDefinitionVersion
+    - greengrass:GetFunctionDefinitionVersion
+    - greengrass:GetAssociatedRole
+    - lambda:CreateFunction
+    - robomaker:CreateSimulationJob
+    - robomaker:CancelSimulationJob
+    Effect: Allow
+    Resource: '*'
+  - Action:
+    - robomaker:TagResource
+    Effect: Allow
+    Resource: arn:aws:robomaker:*:*:simulation-job/*
+  - Action:
+    - lambda:UpdateFunctionCode
+    - lambda:GetFunction
+    - lambda:UpdateFunctionConfiguration
+    - lambda:DeleteFunction
+    - lambda:ListVersionsByFunction
+    - lambda:GetAlias
+    - lambda:UpdateAlias
+    - lambda:CreateAlias
+    - lambda:DeleteAlias
+    Effect: Allow
+    Resource: arn:aws:lambda:*:*:function:aws-robomaker-*
+  - Effect: Allow
+    Action: iam:PassRole
+    Resource: '*'
+    Condition:
+      StringEquals:
+        iam:PassedToService:
+        - lambda.amazonaws.com
+        - robomaker.amazonaws.com
+  - Effect: Allow
+    Action:
+    - acm-pca:IssueCertificate
+    Resource: arn:aws:acm-pca:*:*:certificate-authority/*
+    Condition:
+      ArnLike:
+        acm-pca:TemplateArn:
+        - arn:aws:acm-pca:*:*:template/*CACertificate*/V*
+  - Effect: Deny
+    Action:
+    - acm-pca:IssueCertificate
+    Resource: arn:aws:acm-pca:*:*:certificate-authority/*
+    Condition:
+      ArnNotLike:
+        acm-pca:TemplateArn:
+        - arn:aws:acm-pca:*:*:template/*CACertificate*/V*
+  - Effect: Allow
+    Action:
+    - acm-pca:RevokeCertificate
+    - acm-pca:GetCertificate
+    - acm-pca:ListPermissions
+    Resource: arn:aws:acm-pca:*:*:certificate-authority/*
+  - Effect: Allow
+    Action:
+    - acm-pca:ListCertificateAuthorities
+    Resource: '*'
+request:
+  spec:
+    access_type: read-write
+    duration:
+      duration_hours: 1
+    resource_constraints: []
+  user: dev-bob
+  justification: 'reproduce customer ticket #4422 locally'
+scores:
+  det_score: 9
+  det_factors:
+  - 'State-changing action `lambda:PutProvisionedConcurrencyConfig` on Resource: `*` (IAM access level: Write)'
+  - 'Destructive action `lambda:DeleteProvisionedConcurrencyConfig` on Resource: `*` (blast radius = every resource in this
+    account)'
+  - 'State-changing action `cloudwatch:PutMetricAlarm` on Resource: `*` (IAM access level: Write)'
+  - 'Destructive action `cloudwatch:DeleteAlarms` on Resource: `*` (blast radius = every resource in this account)'
+  - 'Resource: `*` for cloudwatch, lambda (broad cross-resource read/access)'
+  - 'State-changing action `ec2:CreateNetworkInterfacePermission` on Resource: `*` (IAM access level: Permissions management)'
+  - 'Destructive action `ec2:DeleteNetworkInterface` on Resource: `*` (blast radius = every resource in this account)'
+  - 'State-changing action `greengrass:CreateDeployment` on Resource: `*` (IAM access level: Write)'
+  - 'State-changing action `greengrass:CreateGroupVersion` on Resource: `*` (IAM access level: Write)'
+  - 'State-changing action `greengrass:CreateFunctionDefinition` on Resource: `*` (IAM access level: Write)'
+  - 'State-changing action `greengrass:CreateFunctionDefinitionVersion` on Resource: `*` (IAM access level: Write)'
+  - 'State-changing action `lambda:CreateFunction` on Resource: `*` (IAM access level: Write)'
+  - 'State-changing action `robomaker:CreateSimulationJob` on Resource: `*` (IAM access level: Write)'
+  - 'Destructive action `robomaker:CancelSimulationJob` on Resource: `*` (blast radius = every resource in this account)'
+  - 'Resource: `*` for ec2, greengrass, lambda, robomaker (broad cross-resource read/access)'
+  - 'State-changing action `robomaker:TagResource` on Resource: `*` (IAM access level: Tagging)'
+  - 'Resource: `*` for robomaker (broad cross-resource read/access)'
+  - 'State-changing action `lambda:UpdateFunctionCode` on Resource: `*` (IAM access level: Write)'
+  - 'State-changing action `lambda:UpdateFunctionConfiguration` on Resource: `*` (IAM access level: Write)'
+  - 'Destructive action `lambda:DeleteFunction` on Resource: `*` (blast radius = every resource in this account)'
+  - 'State-changing action `lambda:UpdateAlias` on Resource: `*` (IAM access level: Write)'
+  - 'State-changing action `lambda:CreateAlias` on Resource: `*` (IAM access level: Write)'
+  - 'Destructive action `lambda:DeleteAlias` on Resource: `*` (blast radius = every resource in this account)'
+  - 'Resource: `*` for lambda (broad cross-resource read/access)'
+  - "`lambda:UpdateFunctionCode` is a high-impact mutation on broad resource \u2014 single API call can rewrite every matching\
+    \ resource in the account."
+  - "`lambda:DeleteFunction` is a high-impact mutation on broad resource \u2014 single API call can rewrite every matching\
+    \ resource in the account."
+  - '`iam:PassRole` on Resource: `*` is a privilege-escalation path'
+  - 'State-changing action `iam:PassRole` on Resource: `*` (IAM access level: Permissions management)'
+  - '`acm-pca:IssueCertificate` on Resource: `*` touches sensitive service `acm-pca`'
+  - 'State-changing action `acm-pca:IssueCertificate` on Resource: `*` (IAM access level: Write)'
+  - '`acm-pca:IssueCertificate` is catastrophic in blast radius (account governance / IAM total compromise / evidence destruction).
+    Always route to human review.'
+  - '`acm-pca:RevokeCertificate` on Resource: `*` touches sensitive service `acm-pca`'
+  - '`acm-pca:GetCertificate` on Resource: `*` touches sensitive service `acm-pca`'
+  - '`acm-pca:ListPermissions` on Resource: `*` touches sensitive service `acm-pca`'
+  - 'Destructive action `acm-pca:RevokeCertificate` on Resource: `*` (blast radius = every resource in this account)'
+  - '`acm-pca:ListCertificateAuthorities` on Resource: `*` touches sensitive service `acm-pca`'
+  - 'Code-execution primitive on broad resource: lambda:CreateFunction, lambda:UpdateFunctionCode, lambda:UpdateFunctionConfiguration.
+    Deploys attacker-controlled code that runs under whatever role the matched resources use. Even without explicit PassRole,
+    the existing roles of matched resources become the attack target.'
+  - 'Code-execution-via-role composition: lambda:CreateFunction (+ 2 more) combined with iam:PassRole = RCE as the passed
+    role. Single-statement scoring underweights this; the composition is full account-compromise tier.'
+  - '`lambda:GetFunction` on broad resource reads content that frequently contains secrets / sensitive data (boot logs, command
+    output, log streams, message bodies).'
+  opus_score: null
+  opus_factors: null
+  opus_reasoning: null
+  gap_classification: pending

@@ -1,0 +1,310 @@
+name: composite-0011-42
+source_policies:
+- aws_managed/AWSOutpostsServiceRolePolicy.yaml
+- aws_managed/AWSDataSyncFullAccess.yaml
+- aws_managed/AmazonConnectCampaignsServiceLinkedRolePolicy.yaml
+- aws_managed/AWSS3OnOutpostsServiceRolePolicy.yaml
+- aws_managed/AmazonGlacierFullAccess.yaml
+source_hash: fd375bf6afe4f2b0
+policy:
+  Version: '2012-10-17'
+  Statement:
+  - Sid: PrivateConnectivityServiceRolePolicy
+    Effect: Allow
+    Action:
+    - ec2:DescribeNetworkInterfaces
+    - ec2:DescribeSecurityGroups
+    - ec2:DescribeSubnets
+    - ec2:DescribeVpcEndpoints
+    Resource: '*'
+  - Sid: PrivateConnectivityCreateNetworkInterfacePolicy
+    Effect: Allow
+    Action:
+    - ec2:CreateNetworkInterface
+    Resource:
+    - arn:*:ec2:*:*:vpc/*
+    - arn:*:ec2:*:*:subnet/*
+    - arn:*:ec2:*:*:security-group/*
+  - Sid: PrivateConnectivityCreateNetworkInterfaceTaggingPolicy
+    Effect: Allow
+    Action:
+    - ec2:CreateNetworkInterface
+    Resource:
+    - arn:*:ec2:*:*:network-interface/*
+    Condition:
+      ForAnyValue:StringEquals:
+        aws:TagKeys:
+        - outposts:private-connectivity-resourceId
+  - Sid: PrivateConnectivityCreateSecurityGroupPolicy
+    Effect: Allow
+    Action:
+    - ec2:CreateSecurityGroup
+    Resource:
+    - arn:*:ec2:*:*:vpc/*
+  - Sid: PrivateConnectivityCreateSecurityGroupTaggingPolicy
+    Effect: Allow
+    Action:
+    - ec2:CreateSecurityGroup
+    Resource:
+    - arn:*:ec2:*:*:security-group/*
+    Condition:
+      ForAnyValue:StringEquals:
+        aws:TagKeys:
+        - outposts:private-connectivity-resourceId
+  - Sid: DataSyncFullAccessPermissions
+    Effect: Allow
+    Action:
+    - datasync:*
+    - ec2:CreateNetworkInterface
+    - ec2:CreateNetworkInterfacePermission
+    - ec2:DeleteNetworkInterface
+    - ec2:DescribeNetworkInterfaces
+    - ec2:DescribeRegions
+    - ec2:DescribeSecurityGroups
+    - ec2:DescribeSubnets
+    - ec2:DescribeVpcEndpoints
+    - ec2:ModifyNetworkInterfaceAttribute
+    - fsx:DescribeFileSystems
+    - fsx:DescribeStorageVirtualMachines
+    - elasticfilesystem:DescribeAccessPoints
+    - elasticfilesystem:DescribeFileSystems
+    - elasticfilesystem:DescribeMountTargets
+    - iam:GetRole
+    - iam:ListRoles
+    - logs:CreateLogGroup
+    - logs:DescribeLogGroups
+    - logs:DescribeResourcePolicies
+    - outposts:ListOutposts
+    - s3:GetBucketLocation
+    - s3:ListAllMyBuckets
+    - s3:ListBucket
+    - s3:ListBucketVersions
+    - s3-outposts:ListAccessPoints
+    - s3-outposts:ListRegionalBuckets
+    - secretsmanager:ListSecrets
+    - kms:ListAliases
+    - kms:DescribeKey
+    Resource: '*'
+  - Sid: DataSyncPassRolePermissions
+    Effect: Allow
+    Action:
+    - iam:PassRole
+    Resource: '*'
+    Condition:
+      StringEquals:
+        iam:PassedToService:
+        - datasync.amazonaws.com
+  - Sid: DataSyncCreateSLRPermissions
+    Effect: Allow
+    Action: iam:CreateServiceLinkedRole
+    Resource: arn:aws:iam::*:role/aws-service-role/datasync.amazonaws.com/AWSServiceRoleForDataSync
+    Condition:
+      StringEquals:
+        iam:AWSServiceName: datasync.amazonaws.com
+  - Sid: DataSyncSecretsManagerCreateAccess
+    Effect: Allow
+    Action:
+    - secretsmanager:CreateSecret
+    Resource:
+    - arn:*:secretsmanager:*:*:secret:aws-datasync!*
+    Condition:
+      StringEquals:
+        aws:ResourceAccount: ${aws:PrincipalAccount}
+  - Sid: DataSyncSecretsManagerAccess
+    Effect: Allow
+    Action:
+    - secretsmanager:DeleteSecret
+    - secretsmanager:UpdateSecret
+    - secretsmanager:PutSecretValue
+    Resource:
+    - arn:*:secretsmanager:*:*:secret:aws-datasync!*
+    Condition:
+      StringEquals:
+        secretsmanager:ResourceTag/aws:secretsmanager:owningService: aws-datasync
+        aws:ResourceAccount: ${aws:PrincipalAccount}
+  - Sid: ConnectCampaignAccess
+    Effect: Allow
+    Action:
+    - connect-campaigns:ListCampaigns
+    Resource: '*'
+  - Sid: ConnectAccess
+    Effect: Allow
+    Action:
+    - connect:BatchPutContact
+    - connect:StopContact
+    - connect:DescribeContactFlow
+    - connect:SendOutboundEmail
+    Resource: arn:aws:connect:*:*:instance/*
+  - Sid: EventBridgeListRuleAccess
+    Effect: Allow
+    Action:
+    - events:ListRules
+    Resource: arn:aws:events:*:*:rule/*
+    Condition:
+      StringEquals:
+        aws:ResourceAccount: ${aws:PrincipalAccount}
+  - Sid: EventBridgeManagedResourceAccess
+    Effect: Allow
+    Action:
+    - events:DeleteRule
+    - events:PutRule
+    - events:PutTargets
+    - events:RemoveTargets
+    Resource: arn:aws:events:*:*:rule/ConnectCampaignsRule*
+    Condition:
+      StringEquals:
+        aws:ResourceAccount: ${aws:PrincipalAccount}
+        events:ManagedBy: connect-campaigns.amazonaws.com
+  - Sid: EventBridgeListTargetsByRuleAccess
+    Effect: Allow
+    Action:
+    - events:ListTargetsByRule
+    Resource: arn:aws:events:*:*:rule/ConnectCampaignsRule*
+    Condition:
+      StringEquals:
+        aws:ResourceAccount: ${aws:PrincipalAccount}
+  - Sid: AllowWisdomForConnectCampaignsEnabledTaggedResources
+    Effect: Allow
+    Action:
+    - wisdom:GetMessageTemplate
+    - wisdom:RenderMessageTemplate
+    Resource: '*'
+    Condition:
+      StringEquals:
+        aws:ResourceTag/AmazonConnectCampaignsEnabled: 'True'
+  - Effect: Allow
+    Action:
+    - ec2:DescribeSubnets
+    - ec2:DescribeSecurityGroups
+    - ec2:DescribeNetworkInterfaces
+    - ec2:DescribeVpcs
+    - ec2:DescribeCoipPools
+    - ec2:GetCoipPoolUsage
+    - ec2:DescribeAddresses
+    - ec2:DescribeLocalGatewayRouteTableVpcAssociations
+    Resource: '*'
+    Sid: DescribeVpcResources
+  - Effect: Allow
+    Action:
+    - ec2:CreateNetworkInterface
+    Resource:
+    - arn:aws:ec2:*:*:subnet/*
+    - arn:aws:ec2:*:*:security-group/*
+    Sid: CreateNetworkInterface
+  - Effect: Allow
+    Action:
+    - ec2:CreateNetworkInterface
+    Resource:
+    - arn:aws:ec2:*:*:network-interface/*
+    Condition:
+      StringEquals:
+        aws:RequestTag/CreatedBy: S3 On Outposts
+    Sid: CreateTagsForCreateNetworkInterface
+  - Effect: Allow
+    Action:
+    - ec2:AllocateAddress
+    Resource:
+    - arn:aws:ec2:*:*:ipv4pool-ec2/*
+    Sid: AllocateIpAddress
+  - Effect: Allow
+    Action:
+    - ec2:AllocateAddress
+    Resource:
+    - arn:aws:ec2:*:*:elastic-ip/*
+    Condition:
+      StringEquals:
+        aws:RequestTag/CreatedBy: S3 On Outposts
+    Sid: CreateTagsForAllocateIpAddress
+  - Effect: Allow
+    Action:
+    - ec2:ModifyNetworkInterfaceAttribute
+    - ec2:CreateNetworkInterfacePermission
+    - ec2:DeleteNetworkInterface
+    - ec2:DeleteNetworkInterfacePermission
+    - ec2:DisassociateAddress
+    - ec2:ReleaseAddress
+    - ec2:AssociateAddress
+    Resource: '*'
+    Condition:
+      StringEquals:
+        aws:ResourceTag/CreatedBy: S3 On Outposts
+    Sid: ReleaseVpcResources
+  - Effect: Allow
+    Action:
+    - ec2:CreateTags
+    Resource: '*'
+    Condition:
+      StringEquals:
+        ec2:CreateAction:
+        - CreateNetworkInterface
+        - AllocateAddress
+        aws:RequestTag/CreatedBy:
+        - S3 On Outposts
+    Sid: CreateTags
+  - Action: glacier:*
+    Effect: Allow
+    Resource: '*'
+request:
+  spec:
+    access_type: read-write
+    duration:
+      duration_hours: 1
+    resource_constraints: []
+  user: sre-dave
+  justification: post-incident audit pull
+scores:
+  det_score: 9
+  det_factors:
+  - 'State-changing action `ec2:CreateNetworkInterface` on Resource: `*` (IAM access level: Write)'
+  - 'Resource: `*` for ec2 (broad cross-resource read/access)'
+  - "`ec2:CreateNetworkInterface` is a high-impact mutation on broad resource \u2014 single API call can rewrite every matching\
+    \ resource in the account."
+  - 'State-changing action `ec2:CreateSecurityGroup` on Resource: `*` (IAM access level: Write)'
+  - '`datasync:*` grants every action in `datasync`'
+  - '`iam:GetRole` on Resource: `*` touches sensitive service `iam`'
+  - '`iam:ListRoles` on Resource: `*` touches sensitive service `iam`'
+  - '`secretsmanager:ListSecrets` on Resource: `*` touches sensitive service `secretsmanager`'
+  - '`kms:ListAliases` on Resource: `*` touches sensitive service `kms`'
+  - '`kms:DescribeKey` on Resource: `*` touches sensitive service `kms`'
+  - 'State-changing action `ec2:CreateNetworkInterfacePermission` on Resource: `*` (IAM access level: Permissions management)'
+  - 'Destructive action `ec2:DeleteNetworkInterface` on Resource: `*` (blast radius = every resource in this account)'
+  - 'State-changing action `ec2:ModifyNetworkInterfaceAttribute` on Resource: `*` (IAM access level: Write)'
+  - 'State-changing action `logs:CreateLogGroup` on Resource: `*` (IAM access level: Write)'
+  - '`iam:PassRole` on Resource: `*` is a privilege-escalation path'
+  - 'State-changing action `iam:PassRole` on Resource: `*` (IAM access level: Permissions management)'
+  - '`iam:CreateServiceLinkedRole` on Resource: `*` touches sensitive service `iam`'
+  - 'State-changing action `iam:CreateServiceLinkedRole` on Resource: `*` (IAM access level: Permissions management)'
+  - '`secretsmanager:CreateSecret` on Resource: `*` touches sensitive service `secretsmanager`'
+  - 'State-changing action `secretsmanager:CreateSecret` on Resource: `*` (IAM access level: Write)'
+  - '`secretsmanager:DeleteSecret` on Resource: `*` touches sensitive service `secretsmanager`'
+  - '`secretsmanager:UpdateSecret` on Resource: `*` touches sensitive service `secretsmanager`'
+  - '`secretsmanager:PutSecretValue` on Resource: `*` touches sensitive service `secretsmanager`'
+  - 'Destructive action `secretsmanager:DeleteSecret` on Resource: `*` (blast radius = every resource in this account)'
+  - 'State-changing action `secretsmanager:UpdateSecret` on Resource: `*` (IAM access level: Write)'
+  - 'State-changing action `secretsmanager:PutSecretValue` on Resource: `*` (IAM access level: Write)'
+  - "`secretsmanager:UpdateSecret` is a high-impact mutation on broad resource \u2014 single API call can rewrite every matching\
+    \ resource in the account."
+  - "`secretsmanager:PutSecretValue` is a high-impact mutation on broad resource \u2014 single API call can rewrite every\
+    \ matching resource in the account."
+  - 'State-changing action `connect:BatchPutContact` on Resource: `*` (IAM access level: Write)'
+  - 'Destructive action `connect:StopContact` on Resource: `*` (blast radius = every resource in this account)'
+  - 'State-changing action `connect:SendOutboundEmail` on Resource: `*` (IAM access level: Write)'
+  - 'Resource: `*` for connect (broad cross-resource read/access)'
+  - 'Destructive action `events:DeleteRule` on Resource: `*` (blast radius = every resource in this account)'
+  - 'State-changing action `events:PutRule` on Resource: `*` (IAM access level: Write)'
+  - 'State-changing action `events:PutTargets` on Resource: `*` (IAM access level: Write)'
+  - 'Destructive action `events:RemoveTargets` on Resource: `*` (blast radius = every resource in this account)'
+  - 'Resource: `*` for events (broad cross-resource read/access)'
+  - 'Resource: `*` for wisdom (broad cross-resource read/access)'
+  - 'State-changing action `ec2:AllocateAddress` on Resource: `*` (IAM access level: Write)'
+  - 'Destructive action `ec2:DeleteNetworkInterfacePermission` on Resource: `*` (blast radius = every resource in this account)'
+  - 'Destructive action `ec2:DisassociateAddress` on Resource: `*` (blast radius = every resource in this account)'
+  - 'State-changing action `ec2:ReleaseAddress` on Resource: `*` (IAM access level: Write)'
+  - 'State-changing action `ec2:AssociateAddress` on Resource: `*` (IAM access level: Write)'
+  - 'State-changing action `ec2:CreateTags` on Resource: `*` (IAM access level: Tagging)'
+  - '`glacier:*` grants every action in `glacier`'
+  - 'Resource: `*` for glacier (broad cross-resource read/access)'
+  opus_score: null
+  opus_factors: null
+  opus_reasoning: null
+  gap_classification: pending

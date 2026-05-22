@@ -1,0 +1,223 @@
+name: composite-0065-42
+source_policies:
+- aws_managed/AWSM2ServicePolicy.yaml
+- aws_managed/ROSAControlPlaneOperatorPolicy.yaml
+- aws_managed/CloudWatchSyntheticsReadOnlyAccess.yaml
+source_hash: 076d28cf3b96daea
+policy:
+  Version: '2012-10-17'
+  Statement:
+  - Effect: Allow
+    Action:
+    - ec2:DescribeSubnets
+    - ec2:CreateNetworkInterface
+    - ec2:DeleteNetworkInterface
+    - ec2:DescribeNetworkInterfaces
+    - ec2:CreateNetworkInterfacePermission
+    - ec2:ModifyNetworkInterfaceAttribute
+    Resource: '*'
+  - Effect: Allow
+    Action:
+    - elasticfilesystem:DescribeMountTargets
+    Resource: '*'
+  - Effect: Allow
+    Action:
+    - elasticloadbalancing:RegisterTargets
+    - elasticloadbalancing:DeregisterTargets
+    Resource: '*'
+  - Effect: Allow
+    Action:
+    - fsx:DescribeFileSystems
+    Resource: '*'
+  - Effect: Allow
+    Action:
+    - cloudwatch:PutMetricData
+    Resource: '*'
+    Condition:
+      StringEquals:
+        cloudwatch:namespace:
+        - AWS/M2
+  - Sid: ReadPermissions
+    Effect: Allow
+    Action:
+    - ec2:DescribeVpcEndpoints
+    - ec2:DescribeVpcs
+    - ec2:DescribeSecurityGroups
+    - route53:ListHostedZones
+    Resource: '*'
+  - Sid: CreateSecurityGroups
+    Effect: Allow
+    Action:
+    - ec2:CreateSecurityGroup
+    Resource:
+    - arn:aws:ec2:*:*:security-group*/*
+    Condition:
+      StringEquals:
+        aws:RequestTag/red-hat-managed: 'true'
+  - Sid: DeleteSecurityGroup
+    Effect: Allow
+    Action:
+    - ec2:DeleteSecurityGroup
+    Resource:
+    - arn:aws:ec2:*:*:security-group*/*
+    Condition:
+      StringEquals:
+        aws:ResourceTag/red-hat-managed: 'true'
+  - Sid: SecurityGroupIngressEgress
+    Effect: Allow
+    Action:
+    - ec2:AuthorizeSecurityGroupIngress
+    - ec2:AuthorizeSecurityGroupEgress
+    - ec2:RevokeSecurityGroupIngress
+    - ec2:RevokeSecurityGroupEgress
+    Resource:
+    - arn:aws:ec2:*:*:security-group*/*
+    Condition:
+      StringEquals:
+        aws:ResourceTag/red-hat-managed: 'true'
+  - Sid: CreateSecurityGroupsVPCNoCondition
+    Effect: Allow
+    Action:
+    - ec2:CreateSecurityGroup
+    Resource:
+    - arn:aws:ec2:*:*:vpc/*
+  - Sid: ListResourceRecordSets
+    Effect: Allow
+    Action:
+    - route53:ListResourceRecordSets
+    Resource:
+    - '*'
+  - Sid: ChangeResourceRecordSetsRestrictedRecordNames
+    Effect: Allow
+    Action:
+    - route53:ChangeResourceRecordSets
+    Resource:
+    - '*'
+    Condition:
+      ForAllValues:StringLike:
+        route53:ChangeResourceRecordSetsNormalizedRecordNames:
+        - '*.hypershift.local'
+  - Sid: VPCEndpointWithCondition
+    Effect: Allow
+    Action:
+    - ec2:CreateVpcEndpoint
+    Resource:
+    - arn:aws:ec2:*:*:vpc-endpoint/*
+    Condition:
+      StringEquals:
+        aws:RequestTag/red-hat-managed: 'true'
+  - Sid: VPCEndpointResourceTagCondition
+    Effect: Allow
+    Action:
+    - ec2:CreateVpcEndpoint
+    Resource:
+    - arn:aws:ec2:*:*:security-group*/*
+    Condition:
+      StringEquals:
+        aws:ResourceTag/red-hat-managed: 'true'
+  - Sid: VPCEndpointNoCondition
+    Effect: Allow
+    Action:
+    - ec2:CreateVpcEndpoint
+    Resource:
+    - arn:aws:ec2:*:*:vpc/*
+    - arn:aws:ec2:*:*:subnet/*
+    - arn:aws:ec2:*:*:route-table/*
+  - Sid: ManageVPCEndpointWithCondition
+    Effect: Allow
+    Action:
+    - ec2:ModifyVpcEndpoint
+    - ec2:DeleteVpcEndpoints
+    Resource:
+    - arn:aws:ec2:*:*:vpc-endpoint/*
+    - arn:aws:ec2:*:*:security-group/*
+    Condition:
+      StringEquals:
+        aws:ResourceTag/red-hat-managed: 'true'
+  - Sid: ModifyVPCEndpointNoCondition
+    Effect: Allow
+    Action:
+    - ec2:ModifyVpcEndpoint
+    Resource:
+    - arn:aws:ec2:*:*:subnet/*
+  - Sid: CreateTagsRestrictedActions
+    Effect: Allow
+    Action:
+    - ec2:CreateTags
+    Resource:
+    - arn:aws:ec2:*:*:vpc-endpoint/*
+    - arn:aws:ec2:*:*:security-group/*
+    Condition:
+      StringEquals:
+        ec2:CreateAction:
+        - CreateVpcEndpoint
+        - CreateSecurityGroup
+  - Sid: AddTagsToRedHatManagedSecurityGroups
+    Effect: Allow
+    Action:
+    - ec2:CreateTags
+    Resource: arn:aws:ec2:*:*:security-group/*
+    Condition:
+      StringEquals:
+        aws:ResourceTag/red-hat-managed: 'true'
+  - Effect: Allow
+    Action:
+    - synthetics:Describe*
+    - synthetics:Get*
+    - synthetics:List*
+    Resource: '*'
+request:
+  spec:
+    access_type: read-write
+    duration:
+      duration_hours: 4
+    resource_constraints: []
+  user: sre-carol
+  justification: scale-out emergency for us-east-1 outage
+scores:
+  det_score: 8
+  det_factors:
+  - 'State-changing action `ec2:CreateNetworkInterface` on Resource: `*` (IAM access level: Write)'
+  - 'Destructive action `ec2:DeleteNetworkInterface` on Resource: `*` (blast radius = every resource in this account)'
+  - 'State-changing action `ec2:CreateNetworkInterfacePermission` on Resource: `*` (IAM access level: Permissions management)'
+  - 'State-changing action `ec2:ModifyNetworkInterfaceAttribute` on Resource: `*` (IAM access level: Write)'
+  - 'Resource: `*` for ec2 (broad cross-resource read/access)'
+  - "`ec2:CreateNetworkInterface` is a high-impact mutation on broad resource \u2014 single API call can rewrite every matching\
+    \ resource in the account."
+  - 'State-changing action `elasticloadbalancing:RegisterTargets` on Resource: `*` (IAM access level: Write)'
+  - 'State-changing action `elasticloadbalancing:DeregisterTargets` on Resource: `*` (IAM access level: Write)'
+  - 'Resource: `*` for elasticloadbalancing (broad cross-resource read/access)'
+  - 'State-changing action `cloudwatch:PutMetricData` on Resource: `*` (IAM access level: Write)'
+  - 'Resource: `*` for cloudwatch (broad cross-resource read/access)'
+  - 'State-changing action `ec2:CreateSecurityGroup` on Resource: `*` (IAM access level: Write)'
+  - 'Destructive action `ec2:DeleteSecurityGroup` on Resource: `*` (blast radius = every resource in this account)'
+  - 'State-changing action `ec2:AuthorizeSecurityGroupIngress` on Resource: `*` (IAM access level: Write)'
+  - 'State-changing action `ec2:AuthorizeSecurityGroupEgress` on Resource: `*` (IAM access level: Write)'
+  - 'Destructive action `ec2:RevokeSecurityGroupIngress` on Resource: `*` (blast radius = every resource in this account)'
+  - 'Destructive action `ec2:RevokeSecurityGroupEgress` on Resource: `*` (blast radius = every resource in this account)'
+  - "`ec2:AuthorizeSecurityGroupIngress` is a high-impact mutation on broad resource \u2014 single API call can rewrite every\
+    \ matching resource in the account."
+  - "`ec2:AuthorizeSecurityGroupEgress` is a high-impact mutation on broad resource \u2014 single API call can rewrite every\
+    \ matching resource in the account."
+  - "`ec2:RevokeSecurityGroupIngress` is a high-impact mutation on broad resource \u2014 single API call can rewrite every\
+    \ matching resource in the account."
+  - "`ec2:RevokeSecurityGroupEgress` is a high-impact mutation on broad resource \u2014 single API call can rewrite every\
+    \ matching resource in the account."
+  - 'State-changing action `route53:ChangeResourceRecordSets` on Resource: `*` (IAM access level: Write)'
+  - 'Resource: `*` for route53 (broad cross-resource read/access)'
+  - "`route53:ChangeResourceRecordSets` is a high-impact mutation on broad resource \u2014 single API call can rewrite every\
+    \ matching resource in the account."
+  - 'State-changing action `ec2:CreateVpcEndpoint` on Resource: `*` (IAM access level: Write)'
+  - 'State-changing action `ec2:ModifyVpcEndpoint` on Resource: `*` (IAM access level: Write)'
+  - 'Destructive action `ec2:DeleteVpcEndpoints` on Resource: `*` (blast radius = every resource in this account)'
+  - "`ec2:ModifyVpcEndpoint` is a high-impact mutation on broad resource \u2014 single API call can rewrite every matching\
+    \ resource in the account."
+  - 'State-changing action `ec2:CreateTags` on Resource: `*` (IAM access level: Tagging)'
+  - "Action-name wildcard `synthetics:Describe*` on broad resource \u2014 matches multiple synthetics APIs at once"
+  - "Action-name wildcard `synthetics:Get*` on broad resource \u2014 matches multiple synthetics APIs at once"
+  - "Action-name wildcard `synthetics:List*` on broad resource \u2014 matches multiple synthetics APIs at once"
+  - 'Resource: `*` for synthetics (broad cross-resource read/access)'
+  opus_score: null
+  opus_factors: null
+  opus_reasoning: null
+  gap_classification: pending

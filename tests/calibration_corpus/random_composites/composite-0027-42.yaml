@@ -1,0 +1,148 @@
+name: composite-0027-42
+source_policies:
+- aws_managed/AWSLambdaVPCAccessExecutionRole.yaml
+- aws_managed/AWSForWordPressPluginPolicy.yaml
+- aws_managed/AmazonCodeGuruProfilerReadOnlyAccess.yaml
+source_hash: 28c2ebed31e433de
+policy:
+  Version: '2012-10-17'
+  Statement:
+  - Sid: AWSLambdaVPCAccessExecutionPermissions
+    Effect: Allow
+    Action:
+    - logs:CreateLogGroup
+    - logs:CreateLogStream
+    - logs:PutLogEvents
+    - ec2:CreateNetworkInterface
+    - ec2:DescribeNetworkInterfaces
+    - ec2:DescribeSubnets
+    - ec2:DeleteNetworkInterface
+    - ec2:AssignPrivateIpAddresses
+    - ec2:UnassignPrivateIpAddresses
+    Resource: '*'
+  - Sid: Permissions1
+    Effect: Allow
+    Action:
+    - polly:SynthesizeSpeech
+    - polly:DescribeVoices
+    - translate:TranslateText
+    Resource: '*'
+  - Sid: Permissions2
+    Effect: Allow
+    Action:
+    - s3:ListBucket
+    - s3:GetBucketAcl
+    - s3:GetBucketPolicy
+    - s3:PutObject
+    - s3:DeleteObject
+    - s3:CreateBucket
+    - s3:PutObjectAcl
+    Resource:
+    - arn:aws:s3:::audio_for_wordpress*
+    - arn:aws:s3:::audio-for-wordpress*
+  - Sid: Permissions3
+    Effect: Allow
+    Action:
+    - acm:AddTagsToCertificate
+    - acm:DescribeCertificate
+    - acm:RequestCertificate
+    - cloudformation:CreateStack
+    - cloudfront:ListDistributions
+    Resource: '*'
+    Condition:
+      StringEquals:
+        aws:RequestedRegion: us-east-1
+  - Sid: Permissions4
+    Effect: Allow
+    Action:
+    - acm:DeleteCertificate
+    - cloudformation:DeleteStack
+    - cloudformation:DescribeStackEvents
+    - cloudformation:DescribeStackResources
+    - cloudformation:UpdateStack
+    - cloudfront:CreateDistribution
+    - cloudfront:CreateInvalidation
+    - cloudfront:DeleteDistribution
+    - cloudfront:GetDistribution
+    - cloudfront:GetInvalidation
+    - cloudfront:TagResource
+    - cloudfront:UpdateDistribution
+    Resource: '*'
+    Condition:
+      StringEquals:
+        aws:ResourceTag/createdBy: AWSForWordPressPlugin
+  - Action:
+    - codeguru:Get*
+    - codeguru-profiler:BatchGet*
+    - codeguru-profiler:Describe*
+    - codeguru-profiler:Get*
+    - codeguru-profiler:List*
+    - iam:ListRoles
+    - iam:ListUsers
+    Effect: Allow
+    Resource: '*'
+request:
+  spec:
+    access_type: read-write
+    duration:
+      duration_hours: 4
+    resource_constraints: []
+  user: dev-alice
+  justification: debug staging incident PROD-1417
+scores:
+  det_score: 8
+  det_factors:
+  - 'State-changing action `logs:CreateLogGroup` on Resource: `*` (IAM access level: Write)'
+  - 'State-changing action `logs:CreateLogStream` on Resource: `*` (IAM access level: Write)'
+  - 'State-changing action `logs:PutLogEvents` on Resource: `*` (IAM access level: Write)'
+  - 'State-changing action `ec2:CreateNetworkInterface` on Resource: `*` (IAM access level: Write)'
+  - 'Destructive action `ec2:DeleteNetworkInterface` on Resource: `*` (blast radius = every resource in this account)'
+  - 'State-changing action `ec2:AssignPrivateIpAddresses` on Resource: `*` (IAM access level: Write)'
+  - 'State-changing action `ec2:UnassignPrivateIpAddresses` on Resource: `*` (IAM access level: Write)'
+  - 'Resource: `*` for ec2, logs (broad cross-resource read/access)'
+  - "`ec2:CreateNetworkInterface` is a high-impact mutation on broad resource \u2014 single API call can rewrite every matching\
+    \ resource in the account."
+  - 'Resource: `*` for polly, translate (broad cross-resource read/access)'
+  - 'State-changing action `s3:PutObject` on Resource: `*` (IAM access level: Write)'
+  - 'Destructive action `s3:DeleteObject` on Resource: `*` (blast radius = every resource in this account)'
+  - 'State-changing action `s3:CreateBucket` on Resource: `*` (IAM access level: Write)'
+  - 'State-changing action `s3:PutObjectAcl` on Resource: `*` (IAM access level: Permissions management)'
+  - 'Resource: `*` for s3 (broad cross-resource read/access)'
+  - "`s3:PutObjectAcl` is a high-impact mutation on broad resource \u2014 single API call can rewrite every matching resource\
+    \ in the account."
+  - 'State-changing action `acm:AddTagsToCertificate` on Resource: `*` (IAM access level: Tagging)'
+  - 'State-changing action `acm:RequestCertificate` on Resource: `*` (IAM access level: Write)'
+  - 'State-changing action `cloudformation:CreateStack` on Resource: `*` (IAM access level: Write)'
+  - 'Resource: `*` for acm, cloudformation, cloudfront (broad cross-resource read/access)'
+  - "`cloudformation:CreateStack` is a high-impact mutation on broad resource \u2014 single API call can rewrite every matching\
+    \ resource in the account."
+  - 'Destructive action `acm:DeleteCertificate` on Resource: `*` (blast radius = every resource in this account)'
+  - 'Destructive action `cloudformation:DeleteStack` on Resource: `*` (blast radius = every resource in this account)'
+  - 'State-changing action `cloudformation:UpdateStack` on Resource: `*` (IAM access level: Write)'
+  - 'State-changing action `cloudfront:CreateDistribution` on Resource: `*` (IAM access level: Write)'
+  - 'State-changing action `cloudfront:CreateInvalidation` on Resource: `*` (IAM access level: Write)'
+  - 'Destructive action `cloudfront:DeleteDistribution` on Resource: `*` (blast radius = every resource in this account)'
+  - 'State-changing action `cloudfront:TagResource` on Resource: `*` (IAM access level: Tagging)'
+  - 'State-changing action `cloudfront:UpdateDistribution` on Resource: `*` (IAM access level: Write)'
+  - "`cloudformation:UpdateStack` is a high-impact mutation on broad resource \u2014 single API call can rewrite every matching\
+    \ resource in the account."
+  - "`cloudfront:DeleteDistribution` is a high-impact mutation on broad resource \u2014 single API call can rewrite every\
+    \ matching resource in the account."
+  - "`cloudfront:UpdateDistribution` is a high-impact mutation on broad resource \u2014 single API call can rewrite every\
+    \ matching resource in the account."
+  - "Action-name wildcard `codeguru:Get*` on broad resource \u2014 matches multiple codeguru APIs at once"
+  - "Action-name wildcard `codeguru-profiler:BatchGet*` on broad resource \u2014 matches multiple codeguru-profiler APIs at\
+    \ once"
+  - "Action-name wildcard `codeguru-profiler:Describe*` on broad resource \u2014 matches multiple codeguru-profiler APIs at\
+    \ once"
+  - "Action-name wildcard `codeguru-profiler:Get*` on broad resource \u2014 matches multiple codeguru-profiler APIs at once"
+  - "Action-name wildcard `codeguru-profiler:List*` on broad resource \u2014 matches multiple codeguru-profiler APIs at once"
+  - '`iam:ListRoles` on Resource: `*` touches sensitive service `iam`'
+  - '`iam:ListUsers` on Resource: `*` touches sensitive service `iam`'
+  - 'Code-execution primitive on broad resource: cloudformation:CreateStack, cloudformation:UpdateStack. Deploys attacker-controlled
+    code that runs under whatever role the matched resources use. Even without explicit PassRole, the existing roles of matched
+    resources become the attack target.'
+  opus_score: null
+  opus_factors: null
+  opus_reasoning: null
+  gap_classification: pending

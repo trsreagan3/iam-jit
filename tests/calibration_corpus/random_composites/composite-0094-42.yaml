@@ -1,0 +1,724 @@
+name: composite-0094-42
+source_policies:
+- aws_managed/AWSEntityResolutionConsoleFullAccess.yaml
+- aws_managed/AWSApplicationAutoscalingKafkaClusterPolicy.yaml
+- aws_managed/AWSBackupServiceRolePolicyForBackup.yaml
+- aws_managed/AWSPrivateCAPrivilegedUser.yaml
+source_hash: 30b0d5ed55930d88
+policy:
+  Version: '2012-10-17'
+  Statement:
+  - Sid: EntityResolutionAccess
+    Effect: Allow
+    Action:
+    - entityresolution:*
+    Resource: '*'
+  - Sid: GlueSourcesConsoleDisplay
+    Effect: Allow
+    Action:
+    - glue:GetSchema
+    - glue:SearchTables
+    - glue:GetSchemaByDefinition
+    - glue:GetSchemaVersion
+    - glue:GetSchemaVersionsDiff
+    - glue:GetDatabase
+    - glue:GetDatabases
+    - glue:GetTable
+    - glue:GetTables
+    - glue:GetTableVersion
+    - glue:GetTableVersions
+    Resource: '*'
+  - Sid: S3BucketsConsoleDisplay
+    Effect: Allow
+    Action:
+    - s3:ListAllMyBuckets
+    Resource: '*'
+  - Sid: S3SourcesConsoleDisplay
+    Effect: Allow
+    Action:
+    - s3:ListBucket
+    - s3:GetBucketLocation
+    - s3:ListBucketVersions
+    - s3:GetBucketVersioning
+    Resource: '*'
+  - Sid: TaggingConsoleDisplay
+    Effect: Allow
+    Action:
+    - tag:GetTagKeys
+    - tag:GetTagValues
+    Resource: '*'
+  - Sid: KMSConsoleDisplay
+    Effect: Allow
+    Action:
+    - kms:DescribeKey
+    - kms:ListAliases
+    Resource: '*'
+  - Sid: ListRolesToPickRoleForPassing
+    Effect: Allow
+    Action:
+    - iam:ListRoles
+    Resource: '*'
+  - Sid: PassRoleToEntityResolutionService
+    Effect: Allow
+    Action:
+    - iam:PassRole
+    Resource: arn:aws:iam::*:role/*entityresolution*
+    Condition:
+      StringEquals:
+        iam:PassedToService:
+        - entityresolution.amazonaws.com
+  - Sid: ManageEventBridgeRules
+    Effect: Allow
+    Action:
+    - events:DeleteRule
+    - events:PutTargets
+    - events:PutRule
+    Resource:
+    - arn:aws:events:*:*:rule/entity-resolution-automatic*
+  - Sid: ADXReadAccess
+    Effect: Allow
+    Action:
+    - dataexchange:GetDataSet
+    Resource: '*'
+  - Sid: CustomerProfilesIntegrationReadAccess
+    Effect: Allow
+    Action:
+    - connect:ListInstances
+    - profile:ListDomains
+    - profile:GetDomain
+    - profile:ListIntegrations
+    - profile:ListAccountIntegrations
+    - profile:ListProfileObjectTypes
+    Resource: '*'
+  - Sid: CustomerProfilesIntegrationWriteAccess
+    Effect: Allow
+    Action:
+    - profile:PutProfileObjectType
+    Resource:
+    - arn:aws:profile:*:*:domains/*/object-types/*
+  - Effect: Allow
+    Action:
+    - kafka:DescribeCluster
+    - kafka:DescribeClusterOperation
+    - kafka:UpdateBrokerStorage
+    - cloudwatch:PutMetricAlarm
+    - cloudwatch:DescribeAlarms
+    - cloudwatch:DeleteAlarms
+    Resource:
+    - '*'
+  - Sid: DynamoDBPermissions
+    Effect: Allow
+    Action:
+    - dynamodb:DescribeTable
+    - dynamodb:CreateBackup
+    Resource: arn:aws:dynamodb:*:*:table/*
+  - Sid: DynamoDBBackupResourcePermissions
+    Effect: Allow
+    Action:
+    - dynamodb:DescribeBackup
+    - dynamodb:DeleteBackup
+    Resource: arn:aws:dynamodb:*:*:table/*/backup/*
+  - Sid: DynamoDBBackupPermissions
+    Effect: Allow
+    Action:
+    - rds:AddTagsToResource
+    - rds:ListTagsForResource
+    - rds:DescribeDBSnapshots
+    - rds:CreateDBSnapshot
+    - rds:CopyDBSnapshot
+    - rds:DescribeDBInstances
+    - rds:CreateDBClusterSnapshot
+    - rds:DescribeDBClusters
+    - rds:DescribeDBClusterSnapshots
+    - rds:CopyDBClusterSnapshot
+    - rds:DescribeDBClusterAutomatedBackups
+    Resource: '*'
+  - Sid: RDSInstanceAutomatedBackupPermissions
+    Effect: Allow
+    Action: rds:DeleteDBInstanceAutomatedBackup
+    Resource: arn:aws:rds:*:*:auto-backup:*
+  - Sid: RDSClusterPermissions
+    Effect: Allow
+    Action:
+    - rds:ModifyDBCluster
+    Resource:
+    - arn:aws:rds:*:*:cluster:*
+  - Sid: RDSClusterBackupPermissions
+    Effect: Allow
+    Action: rds:DeleteDBClusterAutomatedBackup
+    Resource: arn:aws:rds:*:*:cluster-auto-backup:*
+  - Sid: RDSModifyPermissions
+    Effect: Allow
+    Action:
+    - rds:ModifyDBInstance
+    Resource:
+    - arn:aws:rds:*:*:db:*
+  - Sid: RDSBackupPermissions
+    Effect: Allow
+    Action:
+    - rds:DeleteDBSnapshot
+    - rds:ModifyDBSnapshotAttribute
+    Resource:
+    - arn:aws:rds:*:*:snapshot:awsbackup:*
+  - Sid: RDSClusterModifyPermissions
+    Effect: Allow
+    Action:
+    - rds:DeleteDBClusterSnapshot
+    - rds:ModifyDBClusterSnapshotAttribute
+    Resource:
+    - arn:aws:rds:*:*:cluster-snapshot:awsbackup:*
+  - Sid: StorageGatewayPermissions
+    Effect: Allow
+    Action:
+    - storagegateway:CreateSnapshot
+    - storagegateway:ListTagsForResource
+    Resource: arn:aws:storagegateway:*:*:gateway/*/volume/*
+  - Sid: EBSCopyPermissions
+    Effect: Allow
+    Action:
+    - ec2:CopySnapshot
+    Resource: arn:aws:ec2:*::snapshot/*
+  - Sid: EC2CopyPermissions
+    Effect: Allow
+    Action:
+    - ec2:CopyImage
+    Resource: '*'
+  - Sid: EBSTagAndDeletePermissions
+    Effect: Allow
+    Action:
+    - ec2:CreateTags
+    - ec2:DeleteSnapshot
+    Resource: arn:aws:ec2:*::snapshot/*
+  - Sid: EC2Permissions
+    Effect: Allow
+    Action:
+    - ec2:CreateImage
+    - ec2:DeregisterImage
+    - ec2:DescribeSnapshots
+    - ec2:DescribeTags
+    - ec2:DescribeImages
+    - ec2:DescribeInstances
+    - ec2:DescribeInstanceAttribute
+    - ec2:DescribeInstanceCreditSpecifications
+    - ec2:DescribeNetworkInterfaces
+    - ec2:DescribeElasticGpus
+    - ec2:DescribeSpotInstanceRequests
+    - ec2:DescribeSnapshotTierStatus
+    Resource: '*'
+  - Sid: EC2TagPermissions
+    Effect: Allow
+    Action:
+    - ec2:CreateTags
+    Resource: arn:aws:ec2:*:*:image/*
+  - Sid: EC2ModifyPermissions
+    Effect: Allow
+    Action:
+    - ec2:ModifySnapshotAttribute
+    - ec2:ModifyImageAttribute
+    Resource: '*'
+    Condition:
+      'Null':
+        aws:ResourceTag/aws:backup:source-resource: 'false'
+  - Sid: EBSSnapshotTierPermissions
+    Effect: Allow
+    Action:
+    - ec2:ModifySnapshotTier
+    Resource: arn:aws:ec2:*::snapshot/*
+    Condition:
+      'Null':
+        aws:ResourceTag/aws:backup:source-resource: 'false'
+  - Sid: BackupVaultPermissions
+    Effect: Allow
+    Action:
+    - backup:DescribeBackupVault
+    - backup:CopyIntoBackupVault
+    Resource: arn:aws:backup:*:*:backup-vault:*
+  - Sid: BackupVaultCopyPermissions
+    Effect: Allow
+    Action:
+    - backup:CopyFromBackupVault
+    Resource: '*'
+  - Sid: EFSPermissions
+    Effect: Allow
+    Action:
+    - elasticfilesystem:Backup
+    - elasticfilesystem:DescribeTags
+    Resource: arn:aws:elasticfilesystem:*:*:file-system/*
+  - Sid: EBSResourcePermissions
+    Effect: Allow
+    Action:
+    - ec2:CreateSnapshot
+    - ec2:DeleteSnapshot
+    - ec2:DescribeVolumes
+    - ec2:DescribeSnapshots
+    Resource: '*'
+  - Sid: KMSDynamoDBPermissions
+    Effect: Allow
+    Action:
+    - kms:Decrypt
+    - kms:GenerateDataKey
+    Resource: '*'
+    Condition:
+      StringLike:
+        kms:ViaService:
+        - dynamodb.*.amazonaws.com
+  - Sid: KMSPermissions
+    Effect: Allow
+    Action: kms:DescribeKey
+    Resource: '*'
+  - Sid: KMSCreateGrantPermissions
+    Effect: Allow
+    Action: kms:CreateGrant
+    Resource: '*'
+    Condition:
+      Bool:
+        kms:GrantIsForAWSResource: 'true'
+  - Sid: KMSEC2Permissions
+    Effect: Allow
+    Action:
+    - kms:GenerateDataKeyWithoutPlaintext
+    - kms:ReEncryptTo
+    - kms:ReEncryptFrom
+    Resource: arn:aws:kms:*:*:key/*
+    Condition:
+      StringLike:
+        kms:ViaService:
+        - ec2.*.amazonaws.com
+      ForAnyValue:StringEquals:
+        kms:EncryptionContextKeys: aws:ebs:id
+  - Sid: GetResourcesPermissions
+    Effect: Allow
+    Action:
+    - tag:GetResources
+    Resource: '*'
+  - Sid: SSMPermissions
+    Effect: Allow
+    Action:
+    - ssm:CancelCommand
+    - ssm:GetCommandInvocation
+    Resource: '*'
+  - Sid: SSMSendPermissions
+    Effect: Allow
+    Action: ssm:SendCommand
+    Resource:
+    - arn:aws:ssm:*:*:document/AWSEC2-CreateVssSnapshot
+    - arn:aws:ec2:*:*:instance/*
+  - Sid: FsxBackupPermissions
+    Effect: Allow
+    Action: fsx:DescribeBackups
+    Resource: arn:aws:fsx:*:*:backup/*
+  - Sid: FsxCreateBackupPermissions
+    Effect: Allow
+    Action: fsx:CreateBackup
+    Resource:
+    - arn:aws:fsx:*:*:file-system/*
+    - arn:aws:fsx:*:*:backup/*
+    - arn:aws:fsx:*:*:volume/*
+  - Sid: FsxPermissions
+    Effect: Allow
+    Action: fsx:DescribeFileSystems
+    Resource: arn:aws:fsx:*:*:file-system/*
+  - Sid: FsxVolumePermissions
+    Effect: Allow
+    Action: fsx:DescribeVolumes
+    Resource: arn:aws:fsx:*:*:volume/*
+  - Sid: FsxListTagsPermissions
+    Effect: Allow
+    Action: fsx:ListTagsForResource
+    Resource:
+    - arn:aws:fsx:*:*:file-system/*
+    - arn:aws:fsx:*:*:volume/*
+  - Sid: FsxDeletePermissions
+    Effect: Allow
+    Action: fsx:DeleteBackup
+    Resource: arn:aws:fsx:*:*:backup/*
+  - Sid: FsxResourcePermissions
+    Effect: Allow
+    Action:
+    - fsx:ListTagsForResource
+    - fsx:ManageBackupPrincipalAssociations
+    - fsx:CopyBackup
+    - fsx:TagResource
+    Resource: arn:aws:fsx:*:*:backup/*
+  - Sid: DynamodbBackupPermissions
+    Effect: Allow
+    Action:
+    - dynamodb:StartAwsBackupJob
+    - dynamodb:ListTagsOfResource
+    Resource: arn:aws:dynamodb:*:*:table/*
+  - Sid: BackupGatewayBackupPermissions
+    Effect: Allow
+    Action:
+    - backup-gateway:Backup
+    - backup-gateway:ListTagsForResource
+    Resource: arn:aws:backup-gateway:*:*:vm/*
+  - Sid: CloudformationStackPermissions
+    Effect: Allow
+    Action:
+    - cloudformation:ListStacks
+    - cloudformation:GetTemplate
+    - cloudformation:DescribeStacks
+    - cloudformation:ListStackResources
+    Resource: arn:aws:cloudformation:*:*:stack/*/*
+  - Sid: RedshiftCreatePermissions
+    Effect: Allow
+    Action:
+    - redshift:CreateClusterSnapshot
+    - redshift:DescribeClusterSnapshots
+    - redshift:DescribeTags
+    Resource:
+    - arn:aws:redshift:*:*:snapshot:*/*
+    - arn:aws:redshift:*:*:cluster:*
+  - Sid: RedshiftSnapshotPermissions
+    Effect: Allow
+    Action:
+    - redshift:DeleteClusterSnapshot
+    Resource:
+    - arn:aws:redshift:*:*:snapshot:*/*
+  - Sid: RedshiftPermissions
+    Effect: Allow
+    Action:
+    - redshift:DescribeClusters
+    Resource:
+    - arn:aws:redshift:*:*:cluster:*
+  - Sid: RedshiftResourcePermissions
+    Effect: Allow
+    Action:
+    - redshift:CreateTags
+    Resource:
+    - arn:aws:redshift:*:*:snapshot:*/*
+  - Sid: RedshiftServerlessCreatePermissions
+    Effect: Allow
+    Action:
+    - redshift-serverless:CreateSnapshot
+    Resource:
+    - arn:aws:redshift-serverless:*:*:snapshot/*
+    - arn:aws:redshift-serverless:*:*:namespace/*
+  - Sid: RedshiftServerlessSnapshotPermissions
+    Effect: Allow
+    Action:
+    - redshift-serverless:DeleteSnapshot
+    Resource:
+    - arn:aws:redshift-serverless:*:*:snapshot/*
+    Condition:
+      'Null':
+        aws:ResourceTag/aws:backup:source-resource: 'false'
+  - Sid: RedshiftServerlessGetPermissions
+    Effect: Allow
+    Action:
+    - redshift-serverless:GetNamespace
+    Resource:
+    - arn:aws:redshift-serverless:*:*:namespace/*
+  - Sid: RedshiftServerlessResourcePermissions
+    Effect: Allow
+    Action:
+    - redshift-serverless:GetSnapshot
+    - redshift-serverless:TagResource
+    Resource:
+    - arn:aws:redshift-serverless:*:*:snapshot/*
+  - Sid: RedshiftServerlessListPermissions
+    Effect: Allow
+    Action:
+    - redshift-serverless:ListNamespaces
+    - redshift-serverless:ListSnapshots
+    - redshift-serverless:ListTagsForResource
+    Resource:
+    - '*'
+  - Sid: TimestreamResourcePermissions
+    Effect: Allow
+    Action:
+    - timestream:StartAwsBackupJob
+    - timestream:GetAwsBackupStatus
+    - timestream:ListTables
+    - timestream:ListDatabases
+    - timestream:ListTagsForResource
+    - timestream:DescribeTable
+    - timestream:DescribeDatabase
+    Resource:
+    - arn:aws:timestream:*:*:database/*
+  - Sid: TimestreamEndpointPermissions
+    Effect: Allow
+    Action:
+    - timestream:DescribeEndpoints
+    Resource: '*'
+  - Sid: SSMSAPPermissions
+    Effect: Allow
+    Action:
+    - ssm-sap:GetOperation
+    - ssm-sap:ListDatabases
+    Resource: '*'
+  - Sid: SSMSAPResourcePermissions
+    Effect: Allow
+    Action:
+    - ssm-sap:BackupDatabase
+    - ssm-sap:UpdateHanaBackupSettings
+    - ssm-sap:GetDatabase
+    - ssm-sap:ListTagsForResource
+    Resource: arn:aws:ssm-sap:*:*:*
+  - Sid: RecoveryPointTaggingPermissions
+    Effect: Allow
+    Action:
+    - backup:TagResource
+    Resource: arn:aws:backup:*:*:recovery-point:*
+    Condition:
+      StringEquals:
+        aws:PrincipalAccount: ${aws:ResourceAccount}
+  - Sid: DSQLResourcePermissionsForBackup
+    Effect: Allow
+    Action:
+    - dsql:StartBackupJob
+    - dsql:GetBackupJob
+    - dsql:StopBackupJob
+    - dsql:GetCluster
+    - dsql:ListClusters
+    - dsql:ListTagsForResource
+    Resource:
+    - '*'
+  - Sid: KMSDSQLPermissions
+    Effect: Allow
+    Action:
+    - kms:Decrypt
+    Resource: '*'
+    Condition:
+      StringLike:
+        kms:ViaService:
+        - dsql.*.amazonaws.com
+      ForAnyValue:StringEquals:
+        kms:EncryptionContextKeys: aws:dsql:ClusterId
+  - Sid: EKSClusterConfigurationBackup
+    Effect: Allow
+    Action:
+    - eks:ListClusters
+    - eks:ListTagsForResource
+    - eks:DescribeCluster
+    - eks:ListAddons
+    - eks:DescribeAddon
+    - eks:ListNodegroups
+    - eks:DescribeNodegroup
+    - eks:ListPodIdentityAssociations
+    - eks:DescribePodIdentityAssociation
+    - eks:ListAccessEntries
+    - eks:DescribeAccessEntry
+    - eks:ListAssociatedAccessPolicies
+    - eks:ListFargateProfiles
+    - eks:DescribeFargateProfile
+    - ec2:DescribeLaunchTemplateVersions
+    Resource: '*'
+  - Sid: CreateBackupAccessEntry
+    Effect: Allow
+    Action:
+    - eks:CreateAccessEntry
+    Resource: arn:aws:eks:*:*:cluster/*
+  - Sid: AssociateBackupAccessPolicy
+    Effect: Allow
+    Action:
+    - eks:AssociateAccessPolicy
+    - eks:DisassociateAccessPolicy
+    Resource: arn:aws:eks:*:*:access-entry/*
+    Condition:
+      StringEquals:
+        eks:policyArn: arn:aws:eks::aws:cluster-access-policy/AWSBackupFullAccessPolicyForBackup
+        eks:accessScope: cluster
+  - Sid: GuardDutyMalwareScanPermissions
+    Effect: Allow
+    Action:
+    - guardduty:StartMalwareScan
+    - guardduty:GetMalwareScan
+    Resource: '*'
+  - Sid: GuardDutyMalwareScanIAMPassPermissions
+    Effect: Allow
+    Action: iam:PassRole
+    Resource: arn:aws:iam::*:role/*
+    Condition:
+      StringEquals:
+        iam:PassedToService: malware-protection.guardduty.amazonaws.com
+  - Effect: Allow
+    Action:
+    - acm-pca:IssueCertificate
+    Resource: arn:aws:acm-pca:*:*:certificate-authority/*
+    Condition:
+      ArnLike:
+        acm-pca:TemplateArn:
+        - arn:aws:acm-pca:*:*:template/*CACertificate*/V*
+  - Effect: Deny
+    Action:
+    - acm-pca:IssueCertificate
+    Resource: arn:aws:acm-pca:*:*:certificate-authority/*
+    Condition:
+      ArnNotLike:
+        acm-pca:TemplateArn:
+        - arn:aws:acm-pca:*:*:template/*CACertificate*/V*
+  - Effect: Allow
+    Action:
+    - acm-pca:RevokeCertificate
+    - acm-pca:GetCertificate
+    - acm-pca:ListPermissions
+    Resource: arn:aws:acm-pca:*:*:certificate-authority/*
+  - Effect: Allow
+    Action:
+    - acm-pca:ListCertificateAuthorities
+    Resource: '*'
+request:
+  spec:
+    access_type: read-write
+    duration:
+      duration_hours: 4
+    resource_constraints: []
+  user: agent-claude
+  justification: background reconciliation loop
+scores:
+  det_score: 9
+  det_factors:
+  - '`entityresolution:*` grants every action in `entityresolution`'
+  - 'Resource: `*` for entityresolution (broad cross-resource read/access)'
+  - '`glue:GetSchema` on Resource: `*` touches sensitive service `glue`'
+  - '`glue:SearchTables` on Resource: `*` touches sensitive service `glue`'
+  - '`glue:GetSchemaByDefinition` on Resource: `*` touches sensitive service `glue`'
+  - '`glue:GetSchemaVersion` on Resource: `*` touches sensitive service `glue`'
+  - '`glue:GetSchemaVersionsDiff` on Resource: `*` touches sensitive service `glue`'
+  - '`glue:GetDatabase` on Resource: `*` touches sensitive service `glue`'
+  - '`glue:GetDatabases` on Resource: `*` touches sensitive service `glue`'
+  - '`glue:GetTable` on Resource: `*` touches sensitive service `glue`'
+  - '`glue:GetTables` on Resource: `*` touches sensitive service `glue`'
+  - '`glue:GetTableVersion` on Resource: `*` touches sensitive service `glue`'
+  - '`glue:GetTableVersions` on Resource: `*` touches sensitive service `glue`'
+  - 'Resource: `*` for s3 (broad cross-resource read/access)'
+  - 'Resource: `*` for tag (broad cross-resource read/access)'
+  - '`kms:DescribeKey` on Resource: `*` touches sensitive service `kms`'
+  - '`kms:ListAliases` on Resource: `*` touches sensitive service `kms`'
+  - '`iam:ListRoles` on Resource: `*` touches sensitive service `iam`'
+  - '`iam:PassRole` on Resource: `*` is a privilege-escalation path'
+  - 'State-changing action `iam:PassRole` on Resource: `*` (IAM access level: Permissions management)'
+  - 'Destructive action `events:DeleteRule` on Resource: `*` (blast radius = every resource in this account)'
+  - 'State-changing action `events:PutTargets` on Resource: `*` (IAM access level: Write)'
+  - 'State-changing action `events:PutRule` on Resource: `*` (IAM access level: Write)'
+  - 'Resource: `*` for events (broad cross-resource read/access)'
+  - 'Resource: `*` for dataexchange (broad cross-resource read/access)'
+  - 'Resource: `*` for connect, profile (broad cross-resource read/access)'
+  - 'State-changing action `profile:PutProfileObjectType` on Resource: `*` (IAM access level: Write)'
+  - 'Resource: `*` for profile (broad cross-resource read/access)'
+  - 'State-changing action `kafka:UpdateBrokerStorage` on Resource: `*` (IAM access level: Write)'
+  - 'State-changing action `cloudwatch:PutMetricAlarm` on Resource: `*` (IAM access level: Write)'
+  - 'Destructive action `cloudwatch:DeleteAlarms` on Resource: `*` (blast radius = every resource in this account)'
+  - 'Resource: `*` for cloudwatch, kafka (broad cross-resource read/access)'
+  - 'State-changing action `dynamodb:CreateBackup` on Resource: `*` (IAM access level: Write)'
+  - 'Resource: `*` for dynamodb (broad cross-resource read/access)'
+  - 'Destructive action `dynamodb:DeleteBackup` on Resource: `*` (blast radius = every resource in this account)'
+  - 'State-changing action `rds:AddTagsToResource` on Resource: `*` (IAM access level: Tagging)'
+  - 'State-changing action `rds:CreateDBSnapshot` on Resource: `*` (IAM access level: Write)'
+  - 'State-changing action `rds:CopyDBSnapshot` on Resource: `*` (IAM access level: Write)'
+  - 'State-changing action `rds:CreateDBClusterSnapshot` on Resource: `*` (IAM access level: Write)'
+  - 'State-changing action `rds:CopyDBClusterSnapshot` on Resource: `*` (IAM access level: Write)'
+  - 'Resource: `*` for rds (broad cross-resource read/access)'
+  - 'Destructive action `rds:DeleteDBInstanceAutomatedBackup` on Resource: `*` (blast radius = every resource in this account)'
+  - 'State-changing action `rds:ModifyDBCluster` on Resource: `*` (IAM access level: Write)'
+  - '`rds:ModifyDBCluster` is catastrophic in blast radius (account governance / IAM total compromise / evidence destruction).
+    Always route to human review.'
+  - 'Destructive action `rds:DeleteDBClusterAutomatedBackup` on Resource: `*` (blast radius = every resource in this account)'
+  - 'State-changing action `rds:ModifyDBInstance` on Resource: `*` (IAM access level: Write)'
+  - "`rds:ModifyDBInstance` is a high-impact mutation on broad resource \u2014 single API call can rewrite every matching\
+    \ resource in the account."
+  - '`rds:ModifyDBInstance` is catastrophic in blast radius (account governance / IAM total compromise / evidence destruction).
+    Always route to human review.'
+  - 'Destructive action `rds:DeleteDBSnapshot` on Resource: `*` (blast radius = every resource in this account)'
+  - 'State-changing action `rds:ModifyDBSnapshotAttribute` on Resource: `*` (IAM access level: Permissions management)'
+  - 'Destructive action `rds:DeleteDBClusterSnapshot` on Resource: `*` (blast radius = every resource in this account)'
+  - 'State-changing action `rds:ModifyDBClusterSnapshotAttribute` on Resource: `*` (IAM access level: Permissions management)'
+  - 'State-changing action `storagegateway:CreateSnapshot` on Resource: `*` (IAM access level: Write)'
+  - 'Resource: `*` for storagegateway (broad cross-resource read/access)'
+  - 'State-changing action `ec2:CopySnapshot` on Resource: `*` (IAM access level: Write)'
+  - 'State-changing action `ec2:CopyImage` on Resource: `*` (IAM access level: Write)'
+  - 'Resource: `*` for ec2 (broad cross-resource read/access)'
+  - 'State-changing action `ec2:CreateTags` on Resource: `*` (IAM access level: Tagging)'
+  - 'Destructive action `ec2:DeleteSnapshot` on Resource: `*` (blast radius = every resource in this account)'
+  - 'State-changing action `ec2:CreateImage` on Resource: `*` (IAM access level: Write)'
+  - 'State-changing action `ec2:DeregisterImage` on Resource: `*` (IAM access level: Write)'
+  - "`ec2:CreateImage` is a high-impact mutation on broad resource \u2014 single API call can rewrite every matching resource\
+    \ in the account."
+  - 'State-changing action `ec2:ModifySnapshotAttribute` on Resource: `*` (IAM access level: Permissions management)'
+  - 'State-changing action `ec2:ModifyImageAttribute` on Resource: `*` (IAM access level: Write)'
+  - 'State-changing action `ec2:ModifySnapshotTier` on Resource: `*` (IAM access level: Write)'
+  - 'State-changing action `backup:CopyIntoBackupVault` on Resource: `*` (IAM access level: Write)'
+  - 'Resource: `*` for backup (broad cross-resource read/access)'
+  - 'State-changing action `backup:CopyFromBackupVault` on Resource: `*` (IAM access level: Write)'
+  - 'State-changing action `elasticfilesystem:Backup` on Resource: `*` (IAM access level: Write)'
+  - 'Resource: `*` for elasticfilesystem (broad cross-resource read/access)'
+  - 'State-changing action `ec2:CreateSnapshot` on Resource: `*` (IAM access level: Write)'
+  - '`kms:Decrypt` on Resource: `*` (broad access to sensitive resource)'
+  - '`kms:GenerateDataKey` on Resource: `*` (broad access to sensitive resource)'
+  - 'State-changing action `kms:Decrypt` on Resource: `*` (IAM access level: Write)'
+  - 'State-changing action `kms:GenerateDataKey` on Resource: `*` (IAM access level: Write)'
+  - '`kms:CreateGrant` on Resource: `*` touches sensitive service `kms`'
+  - 'State-changing action `kms:CreateGrant` on Resource: `*` (IAM access level: Permissions management)'
+  - '`kms:GenerateDataKeyWithoutPlaintext` on Resource: `*` touches sensitive service `kms`'
+  - '`kms:ReEncryptTo` on Resource: `*` touches sensitive service `kms`'
+  - '`kms:ReEncryptFrom` on Resource: `*` touches sensitive service `kms`'
+  - 'State-changing action `kms:GenerateDataKeyWithoutPlaintext` on Resource: `*` (IAM access level: Write)'
+  - 'State-changing action `kms:ReEncryptTo` on Resource: `*` (IAM access level: Write)'
+  - 'State-changing action `kms:ReEncryptFrom` on Resource: `*` (IAM access level: Write)'
+  - '`ssm:CancelCommand` on Resource: `*` touches sensitive service `ssm`'
+  - '`ssm:GetCommandInvocation` on Resource: `*` touches sensitive service `ssm`'
+  - 'Destructive action `ssm:CancelCommand` on Resource: `*` (blast radius = every resource in this account)'
+  - '`ssm:SendCommand` on Resource: `*` touches sensitive service `ssm`'
+  - 'State-changing action `ssm:SendCommand` on Resource: `*` (IAM access level: Write)'
+  - "`ssm:SendCommand` is a high-impact mutation on broad resource \u2014 single API call can rewrite every matching resource\
+    \ in the account."
+  - '`ssm:SendCommand` is catastrophic in blast radius (account governance / IAM total compromise / evidence destruction).
+    Always route to human review.'
+  - 'State-changing action `fsx:CreateBackup` on Resource: `*` (IAM access level: Write)'
+  - 'Resource: `*` for fsx (broad cross-resource read/access)'
+  - 'Destructive action `fsx:DeleteBackup` on Resource: `*` (blast radius = every resource in this account)'
+  - 'State-changing action `fsx:ManageBackupPrincipalAssociations` on Resource: `*` (IAM access level: Permissions management)'
+  - 'State-changing action `fsx:CopyBackup` on Resource: `*` (IAM access level: Write)'
+  - 'State-changing action `fsx:TagResource` on Resource: `*` (IAM access level: Tagging)'
+  - 'State-changing action `dynamodb:StartAwsBackupJob` on Resource: `*` (IAM access level: Write)'
+  - 'State-changing action `backup-gateway:Backup` on Resource: `*` (IAM access level: Write)'
+  - 'Resource: `*` for backup-gateway (broad cross-resource read/access)'
+  - 'Resource: `*` for cloudformation (broad cross-resource read/access)'
+  - 'State-changing action `redshift:CreateClusterSnapshot` on Resource: `*` (IAM access level: Write)'
+  - 'Resource: `*` for redshift (broad cross-resource read/access)'
+  - 'Destructive action `redshift:DeleteClusterSnapshot` on Resource: `*` (blast radius = every resource in this account)'
+  - 'State-changing action `redshift:CreateTags` on Resource: `*` (IAM access level: Tagging)'
+  - 'State-changing action `redshift-serverless:CreateSnapshot` on Resource: `*` (IAM access level: Write)'
+  - 'Resource: `*` for redshift-serverless (broad cross-resource read/access)'
+  - 'Destructive action `redshift-serverless:DeleteSnapshot` on Resource: `*` (blast radius = every resource in this account)'
+  - 'State-changing action `redshift-serverless:TagResource` on Resource: `*` (IAM access level: Tagging)'
+  - 'State-changing action `timestream:StartAwsBackupJob` on Resource: `*` (IAM access level: Write)'
+  - 'Resource: `*` for timestream (broad cross-resource read/access)'
+  - 'Resource: `*` for ssm-sap (broad cross-resource read/access)'
+  - 'State-changing action `ssm-sap:BackupDatabase` on Resource: `*` (IAM access level: Write)'
+  - 'State-changing action `backup:TagResource` on Resource: `*` (IAM access level: Tagging)'
+  - 'State-changing action `dsql:StartBackupJob` on Resource: `*` (IAM access level: Write)'
+  - 'Destructive action `dsql:StopBackupJob` on Resource: `*` (blast radius = every resource in this account)'
+  - 'Resource: `*` for dsql (broad cross-resource read/access)'
+  - 'State-changing action `eks:CreateAccessEntry` on Resource: `*` (IAM access level: Write)'
+  - 'Resource: `*` for eks (broad cross-resource read/access)'
+  - "`eks:CreateAccessEntry` is a high-impact mutation on broad resource \u2014 single API call can rewrite every matching\
+    \ resource in the account."
+  - '`eks:CreateAccessEntry` is catastrophic in blast radius (account governance / IAM total compromise / evidence destruction).
+    Always route to human review.'
+  - 'State-changing action `eks:AssociateAccessPolicy` on Resource: `*` (IAM access level: Write)'
+  - 'Destructive action `eks:DisassociateAccessPolicy` on Resource: `*` (blast radius = every resource in this account)'
+  - "`eks:AssociateAccessPolicy` is a high-impact mutation on broad resource \u2014 single API call can rewrite every matching\
+    \ resource in the account."
+  - '`eks:AssociateAccessPolicy` is catastrophic in blast radius (account governance / IAM total compromise / evidence destruction).
+    Always route to human review.'
+  - 'State-changing action `guardduty:StartMalwareScan` on Resource: `*` (IAM access level: Write)'
+  - 'Resource: `*` for guardduty (broad cross-resource read/access)'
+  - '`acm-pca:IssueCertificate` on Resource: `*` touches sensitive service `acm-pca`'
+  - 'State-changing action `acm-pca:IssueCertificate` on Resource: `*` (IAM access level: Write)'
+  - '`acm-pca:IssueCertificate` is catastrophic in blast radius (account governance / IAM total compromise / evidence destruction).
+    Always route to human review.'
+  - '`acm-pca:RevokeCertificate` on Resource: `*` touches sensitive service `acm-pca`'
+  - '`acm-pca:GetCertificate` on Resource: `*` touches sensitive service `acm-pca`'
+  - '`acm-pca:ListPermissions` on Resource: `*` touches sensitive service `acm-pca`'
+  - 'Destructive action `acm-pca:RevokeCertificate` on Resource: `*` (blast radius = every resource in this account)'
+  - '`acm-pca:ListCertificateAuthorities` on Resource: `*` touches sensitive service `acm-pca`'
+  - '`ssm:GetCommandInvocation` on broad resource reads content that frequently contains secrets / sensitive data (boot logs,
+    command output, log streams, message bodies).'
+  - '`rds:ModifyDBSnapshotAttribute` sets up ongoing cross-account / persistent exfiltration in a single call. The blast is
+    ''everything that flows through this resource from now on,'' not just what exists today.'
+  opus_score: null
+  opus_factors: null
+  opus_reasoning: null
+  gap_classification: pending

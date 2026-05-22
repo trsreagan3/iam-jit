@@ -1,0 +1,117 @@
+name: composite-0063-42
+source_policies:
+- aws_managed/AWSElasticDisasterRecoveryRecoveryInstancePolicy.yaml
+- aws_managed/AWSQuickSightListIAM.yaml
+source_hash: ef15759907e0dd7d
+policy:
+  Version: '2012-10-17'
+  Statement:
+  - Sid: DRSRecoveryInstancePolicy1
+    Effect: Allow
+    Action:
+    - drs:SendAgentMetricsForDrs
+    - drs:SendAgentLogsForDrs
+    - drs:UpdateAgentSourcePropertiesForDrs
+    - drs:UpdateAgentReplicationInfoForDrs
+    - drs:UpdateAgentConversionInfoForDrs
+    - drs:GetAgentCommandForDrs
+    - drs:GetAgentConfirmedResumeInfoForDrs
+    - drs:GetAgentRuntimeConfigurationForDrs
+    - drs:UpdateAgentBacklogForDrs
+    - drs:GetAgentReplicationInfoForDrs
+    - drs:UpdateReplicationCertificateForDrs
+    - drs:NotifyReplicationServerAuthenticationForDrs
+    Resource: arn:aws:drs:*:*:recovery-instance/*
+    Condition:
+      StringEquals:
+        drs:EC2InstanceARN: ${ec2:SourceInstanceARN}
+  - Sid: DRSRecoveryInstancePolicy2
+    Effect: Allow
+    Action:
+    - drs:DescribeRecoveryInstances
+    Resource: '*'
+  - Sid: DRSRecoveryInstancePolicy3
+    Effect: Allow
+    Action:
+    - ec2:DescribeInstanceTypes
+    Resource: '*'
+  - Sid: DRSRecoveryInstancePolicy4
+    Effect: Allow
+    Action:
+    - drs:GetAgentInstallationAssetsForDrs
+    - drs:SendClientLogsForDrs
+    - drs:CreateSourceServerForDrs
+    Resource: '*'
+  - Sid: DRSRecoveryInstancePolicy5
+    Effect: Allow
+    Action:
+    - drs:TagResource
+    Resource: arn:aws:drs:*:*:source-server/*
+    Condition:
+      StringEquals:
+        drs:CreateAction: CreateSourceServerForDrs
+  - Sid: DRSRecoveryInstancePolicy6
+    Effect: Allow
+    Action:
+    - drs:SendAgentMetricsForDrs
+    - drs:SendAgentLogsForDrs
+    - drs:UpdateAgentSourcePropertiesForDrs
+    - drs:UpdateAgentReplicationInfoForDrs
+    - drs:UpdateAgentConversionInfoForDrs
+    - drs:GetAgentCommandForDrs
+    - drs:GetAgentConfirmedResumeInfoForDrs
+    - drs:GetAgentRuntimeConfigurationForDrs
+    - drs:UpdateAgentBacklogForDrs
+    - drs:GetAgentReplicationInfoForDrs
+    Resource: arn:aws:drs:*:*:source-server/*
+  - Sid: DRSRecoveryInstancePolicy7
+    Effect: Allow
+    Action:
+    - sts:AssumeRole
+    - sts:TagSession
+    Resource:
+    - arn:aws:iam::*:role/service-role/DRSCrossAccountAgentAuthorizedRole_*
+    Condition:
+      StringLike:
+        aws:RequestTag/SourceInstanceARN: ${ec2:SourceInstanceARN}
+      ForAnyValue:StringEquals:
+        sts:TransitiveTagKeys: SourceInstanceARN
+  - Effect: Allow
+    Action:
+    - iam:List*
+    Resource: '*'
+request:
+  spec:
+    access_type: read-write
+    duration:
+      duration_hours: 1
+    resource_constraints: []
+  user: ci-bot
+  justification: rotate signing key via CI pipeline
+scores:
+  det_score: 9
+  det_factors:
+  - 'State-changing action `drs:SendAgentMetricsForDrs` on Resource: `*` (IAM access level: Write)'
+  - 'State-changing action `drs:SendAgentLogsForDrs` on Resource: `*` (IAM access level: Write)'
+  - 'State-changing action `drs:UpdateAgentSourcePropertiesForDrs` on Resource: `*` (IAM access level: Write)'
+  - 'State-changing action `drs:UpdateAgentReplicationInfoForDrs` on Resource: `*` (IAM access level: Write)'
+  - 'State-changing action `drs:UpdateAgentConversionInfoForDrs` on Resource: `*` (IAM access level: Write)'
+  - 'State-changing action `drs:UpdateAgentBacklogForDrs` on Resource: `*` (IAM access level: Write)'
+  - 'State-changing action `drs:UpdateReplicationCertificateForDrs` on Resource: `*` (IAM access level: Write)'
+  - 'State-changing action `drs:NotifyReplicationServerAuthenticationForDrs` on Resource: `*` (IAM access level: Write)'
+  - 'Resource: `*` for drs (broad cross-resource read/access)'
+  - 'State-changing action `drs:SendClientLogsForDrs` on Resource: `*` (IAM access level: Write)'
+  - 'State-changing action `drs:CreateSourceServerForDrs` on Resource: `*` (IAM access level: Write)'
+  - 'State-changing action `drs:TagResource` on Resource: `*` (IAM access level: Tagging)'
+  - '`sts:AssumeRole` on Resource: `*` (broad access to sensitive resource)'
+  - '`sts:TagSession` on Resource: `*` touches sensitive service `sts`'
+  - 'State-changing action `sts:AssumeRole` on Resource: `*` (IAM access level: Write)'
+  - 'State-changing action `sts:TagSession` on Resource: `*` (IAM access level: Tagging)'
+  - 'Wildcard within sensitive service action: `iam:List*`'
+  - '`iam:List*` on Resource: `*` touches sensitive service `iam`'
+  - "IAM-recon + broad sts:AssumeRole composition \u2014 enumerate roles then assume any of them. Textbook lateral-movement\
+    \ primitive; the per-statement view misses it."
+  opus_score: null
+  opus_factors: null
+  opus_reasoning: null
+  gap_classification: pending

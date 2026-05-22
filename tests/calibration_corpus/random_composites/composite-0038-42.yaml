@@ -1,0 +1,82 @@
+name: composite-0038-42
+source_policies:
+- aws_managed/KafkaConnectServiceRolePolicy.yaml
+- aws_managed/AmazonMSKReadOnlyAccess.yaml
+source_hash: fac2282b6c01f5bb
+policy:
+  Version: '2012-10-17'
+  Statement:
+  - Effect: Allow
+    Action:
+    - ec2:CreateNetworkInterface
+    Resource: arn:aws:ec2:*:*:network-interface/*
+    Condition:
+      StringEquals:
+        aws:RequestTag/AmazonMSKConnectManaged: 'true'
+      ForAllValues:StringEquals:
+        aws:TagKeys: AmazonMSKConnectManaged
+  - Effect: Allow
+    Action:
+    - ec2:CreateNetworkInterface
+    Resource:
+    - arn:aws:ec2:*:*:subnet/*
+    - arn:aws:ec2:*:*:security-group/*
+  - Effect: Allow
+    Action:
+    - ec2:CreateTags
+    Resource: arn:aws:ec2:*:*:network-interface/*
+    Condition:
+      StringEquals:
+        ec2:CreateAction: CreateNetworkInterface
+  - Effect: Allow
+    Action:
+    - ec2:DescribeNetworkInterfaces
+    - ec2:CreateNetworkInterfacePermission
+    - ec2:AttachNetworkInterface
+    - ec2:DetachNetworkInterface
+    - ec2:DeleteNetworkInterface
+    Resource: arn:aws:ec2:*:*:network-interface/*
+    Condition:
+      StringEquals:
+        ec2:ResourceTag/AmazonMSKConnectManaged: 'true'
+  - Action:
+    - kafka:Describe*
+    - kafka:List*
+    - kafka:Get*
+    - ec2:DescribeNetworkInterfaces
+    - ec2:DescribeSecurityGroups
+    - ec2:DescribeSubnets
+    - ec2:DescribeVpcs
+    - kms:DescribeKey
+    Effect: Allow
+    Resource: '*'
+request:
+  spec:
+    access_type: read-write
+    duration:
+      duration_hours: 4
+    resource_constraints: []
+  user: dev-bob
+  justification: 'reproduce customer ticket #4422 locally'
+scores:
+  det_score: 8
+  det_factors:
+  - 'State-changing action `ec2:CreateNetworkInterface` on Resource: `*` (IAM access level: Write)'
+  - 'Resource: `*` for ec2 (broad cross-resource read/access)'
+  - "`ec2:CreateNetworkInterface` is a high-impact mutation on broad resource \u2014 single API call can rewrite every matching\
+    \ resource in the account."
+  - 'State-changing action `ec2:CreateTags` on Resource: `*` (IAM access level: Tagging)'
+  - 'State-changing action `ec2:CreateNetworkInterfacePermission` on Resource: `*` (IAM access level: Permissions management)'
+  - 'State-changing action `ec2:AttachNetworkInterface` on Resource: `*` (IAM access level: Write)'
+  - 'Destructive action `ec2:DetachNetworkInterface` on Resource: `*` (blast radius = every resource in this account)'
+  - 'Destructive action `ec2:DeleteNetworkInterface` on Resource: `*` (blast radius = every resource in this account)'
+  - "`ec2:AttachNetworkInterface` is a high-impact mutation on broad resource \u2014 single API call can rewrite every matching\
+    \ resource in the account."
+  - "Action-name wildcard `kafka:Describe*` on broad resource \u2014 matches multiple kafka APIs at once"
+  - "Action-name wildcard `kafka:List*` on broad resource \u2014 matches multiple kafka APIs at once"
+  - "Action-name wildcard `kafka:Get*` on broad resource \u2014 matches multiple kafka APIs at once"
+  - '`kms:DescribeKey` on Resource: `*` touches sensitive service `kms`'
+  opus_score: null
+  opus_factors: null
+  opus_reasoning: null
+  gap_classification: pending

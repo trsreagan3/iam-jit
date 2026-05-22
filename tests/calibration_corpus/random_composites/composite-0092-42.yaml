@@ -1,0 +1,132 @@
+name: composite-0092-42
+source_policies:
+- aws_managed/AWSCodeStarNotificationsServiceRolePolicy.yaml
+- aws_managed/AWSSecurityAgentWebAppPolicy.yaml
+source_hash: fa3120dff9c9206e
+policy:
+  Version: '2012-10-17'
+  Statement:
+  - Action:
+    - events:PutTargets
+    - events:PutRule
+    - events:DescribeRule
+    Resource: arn:aws:events:*:*:rule/awscodestarnotifications-*
+    Effect: Allow
+  - Action:
+    - sns:CreateTopic
+    Resource: arn:aws:sns:*:*:CodeStarNotifications-*
+    Effect: Allow
+  - Action:
+    - codecommit:GetCommentsForPullRequest
+    - codecommit:GetCommentsForComparedCommit
+    - chatbot:DescribeSlackChannelConfigurations
+    - chatbot:UpdateSlackChannelConfiguration
+    - codecommit:GetDifferences
+    - codepipeline:ListActionExecutions
+    Resource: '*'
+    Effect: Allow
+  - Action:
+    - codecommit:GetFile
+    Resource: '*'
+    Condition:
+      StringNotEquals:
+        aws:ResourceTag/ExcludeFileContentFromNotifications: 'true'
+    Effect: Allow
+  - Sid: ApplicationAccess
+    Effect: Allow
+    Action:
+    - securityagent:ListAgentSpaces
+    - securityagent:ListSecurityRequirements
+    - securityagent:ListTargetDomains
+    - securityagent:BatchGetTargetDomains
+    Resource: '*'
+    Condition:
+      StringEquals:
+        aws:ResourceAccount: ${aws:PrincipalAccount}
+  - Sid: AgentSpaceAccess
+    Effect: Allow
+    Action:
+    - securityagent:AddArtifact
+    - securityagent:BatchDeletePentests
+    - securityagent:BatchDeleteCodeReviews
+    - securityagent:BatchGetAgentSpaces
+    - securityagent:BatchGetArtifactMetadata
+    - securityagent:BatchGetFindings
+    - securityagent:BatchGetPentestJobs
+    - securityagent:BatchGetCodeReviewJobs
+    - securityagent:BatchGetPentests
+    - securityagent:BatchGetCodeReviews
+    - securityagent:BatchGetPentestJobContentMetadata
+    - securityagent:BatchGetPentestJobTasks
+    - securityagent:BatchGetCodeReviewJobTasks
+    - securityagent:CreateDesignReview
+    - securityagent:CreatePentest
+    - securityagent:CreateCodeReview
+    - securityagent:DeleteArtifact
+    - securityagent:GetArtifact
+    - securityagent:DeleteDesignReview
+    - securityagent:GetDesignReview
+    - securityagent:GetDesignReviewArtifact
+    - securityagent:ListArtifacts
+    - securityagent:ListDiscoveredEndpoints
+    - securityagent:ListDesignReviewComments
+    - securityagent:ListDesignReviews
+    - securityagent:ListFindings
+    - securityagent:ListIntegratedResources
+    - securityagent:ListPentestJobsForPentest
+    - securityagent:ListCodeReviewJobsForCodeReview
+    - securityagent:ListPentests
+    - securityagent:ListCodeReviews
+    - securityagent:ListPentestJobTasks
+    - securityagent:ListCodeReviewJobTasks
+    - securityagent:StartCodeRemediation
+    - securityagent:StartPentestJob
+    - securityagent:StartCodeReviewJob
+    - securityagent:StopPentestJob
+    - securityagent:StopCodeReviewJob
+    - securityagent:UpdateFinding
+    - securityagent:UpdatePentest
+    - securityagent:UpdateCodeReview
+    - securityagent:GetDesignReviewFeedback
+    - securityagent:PutDesignReviewFeedback
+    Resource: arn:aws:securityagent:*:*:agent-space*
+    Condition:
+      StringEquals:
+        aws:ResourceAccount: ${aws:PrincipalAccount}
+request:
+  spec:
+    access_type: read-write
+    duration:
+      duration_hours: 8
+    resource_constraints: []
+  user: auditor-erin
+  justification: SOC 2 controls evidence collection
+scores:
+  det_score: 8
+  det_factors:
+  - 'State-changing action `events:PutTargets` on Resource: `*` (IAM access level: Write)'
+  - 'State-changing action `events:PutRule` on Resource: `*` (IAM access level: Write)'
+  - 'Resource: `*` for events (broad cross-resource read/access)'
+  - 'State-changing action `sns:CreateTopic` on Resource: `*` (IAM access level: Permissions management)'
+  - 'Resource: `*` for sns (broad cross-resource read/access)'
+  - 'State-changing action `chatbot:UpdateSlackChannelConfiguration` on Resource: `*` (IAM access level: Write)'
+  - 'Resource: `*` for chatbot, codecommit, codepipeline (broad cross-resource read/access)'
+  - 'Resource: `*` for codecommit (broad cross-resource read/access)'
+  - 'Resource: `*` for securityagent (broad cross-resource read/access)'
+  - 'State-changing action `securityagent:AddArtifact` on Resource: `*` (IAM access level: Write)'
+  - 'State-changing action `securityagent:BatchDeletePentests` on Resource: `*` (IAM access level: Write)'
+  - 'State-changing action `securityagent:CreateDesignReview` on Resource: `*` (IAM access level: Write)'
+  - 'State-changing action `securityagent:CreatePentest` on Resource: `*` (IAM access level: Write)'
+  - 'Destructive action `securityagent:DeleteArtifact` on Resource: `*` (blast radius = every resource in this account)'
+  - 'Destructive action `securityagent:DeleteDesignReview` on Resource: `*` (blast radius = every resource in this account)'
+  - 'State-changing action `securityagent:StartCodeRemediation` on Resource: `*` (IAM access level: Write)'
+  - 'State-changing action `securityagent:StartPentestJob` on Resource: `*` (IAM access level: Write)'
+  - 'Destructive action `securityagent:StopPentestJob` on Resource: `*` (blast radius = every resource in this account)'
+  - 'Destructive action `securityagent:StopCodeReviewJob` on Resource: `*` (blast radius = every resource in this account)'
+  - 'State-changing action `securityagent:UpdateFinding` on Resource: `*` (IAM access level: Write)'
+  - 'State-changing action `securityagent:UpdatePentest` on Resource: `*` (IAM access level: Write)'
+  - 'State-changing action `securityagent:PutDesignReviewFeedback` on Resource: `*` (IAM access level: Write)'
+  opus_score: null
+  opus_factors: null
+  opus_reasoning: null
+  gap_classification: pending

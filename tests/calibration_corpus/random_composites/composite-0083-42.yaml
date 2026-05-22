@@ -1,0 +1,258 @@
+name: composite-0083-42
+source_policies:
+- aws_managed/AIDevOpsOperatorAppAccessPolicy.yaml
+- aws_managed/AmazonRDSPreviewServiceRolePolicy.yaml
+- aws_managed/AmazonS3ExpressReadOnlyAccess.yaml
+source_hash: c3b9ddaec28ab481
+policy:
+  Version: '2012-10-17'
+  Statement:
+  - Sid: AllowOperatorAgentSpaceActions
+    Effect: Allow
+    Action:
+    - aidevops:GetAgentSpace
+    - aidevops:GetAssociation
+    - aidevops:ListAssociations
+    - aidevops:CreateBacklogTask
+    - aidevops:GetBacklogTask
+    - aidevops:UpdateBacklogTask
+    - aidevops:ListBacklogTasks
+    - aidevops:ListJournalRecords
+    - aidevops:DiscoverTopology
+    - aidevops:ListGoals
+    - aidevops:UpdateGoal
+    - aidevops:ListRecommendations
+    - aidevops:ListExecutions
+    - aidevops:GetRecommendation
+    - aidevops:UpdateRecommendation
+    - aidevops:CreateKnowledgeItem
+    - aidevops:ListKnowledgeItems
+    - aidevops:ListKnowledgeItemVersions
+    - aidevops:GetKnowledgeItem
+    - aidevops:UpdateKnowledgeItem
+    - aidevops:DeleteKnowledgeItem
+    - aidevops:ListPendingMessages
+    - aidevops:InitiateChatForCase
+    - aidevops:EndChatForCase
+    - aidevops:DescribeSupportLevel
+    - aidevops:ListChats
+    - aidevops:CreateChat
+    - aidevops:SendMessage
+    - aidevops:DescribeServices
+    Resource: arn:aws:aidevops:*:*:agentspace/${aws:PrincipalTag/AgentSpaceId}
+    Condition:
+      StringEquals:
+        aws:ResourceAccount: ${aws:PrincipalAccount}
+  - Sid: AllowOperatorAccountActions
+    Effect: Allow
+    Action:
+    - aidevops:GetAccountUsage
+    Resource: '*'
+    Condition:
+      StringEquals:
+        aws:ResourceAccount: ${aws:PrincipalAccount}
+  - Sid: AllowSupportOperatorActions
+    Effect: Allow
+    Action:
+    - support:DescribeCases
+    - support:DescribeServices
+    - support:InitiateChatForCase
+    - support:DescribeSupportLevel
+    Resource: '*'
+    Condition:
+      StringEquals:
+        aws:ResourceAccount: ${aws:PrincipalAccount}
+  - Effect: Allow
+    Action:
+    - rds:CrossRegionCommunication
+    Resource: '*'
+  - Effect: Allow
+    Action:
+    - ec2:AllocateAddress
+    - ec2:AssociateAddress
+    - ec2:AuthorizeSecurityGroupIngress
+    - ec2:CreateCoipPoolPermission
+    - ec2:CreateLocalGatewayRouteTablePermission
+    - ec2:CreateNetworkInterface
+    - ec2:CreateSecurityGroup
+    - ec2:DeleteCoipPoolPermission
+    - ec2:DeleteLocalGatewayRouteTablePermission
+    - ec2:DeleteNetworkInterface
+    - ec2:DeleteSecurityGroup
+    - ec2:DescribeAddresses
+    - ec2:DescribeAvailabilityZones
+    - ec2:DescribeCoipPools
+    - ec2:DescribeInternetGateways
+    - ec2:DescribeLocalGatewayRouteTablePermissions
+    - ec2:DescribeLocalGatewayRouteTables
+    - ec2:DescribeLocalGatewayRouteTableVpcAssociations
+    - ec2:DescribeLocalGateways
+    - ec2:DescribeSecurityGroups
+    - ec2:DescribeSubnets
+    - ec2:DescribeVpcAttribute
+    - ec2:DescribeVpcs
+    - ec2:DisassociateAddress
+    - ec2:ModifyNetworkInterfaceAttribute
+    - ec2:ReleaseAddress
+    - ec2:RevokeSecurityGroupIngress
+    Resource: '*'
+  - Effect: Allow
+    Action:
+    - logs:CreateLogGroup
+    Resource:
+    - arn:aws:logs:*:*:log-group:/aws/rds/*
+  - Effect: Allow
+    Action:
+    - logs:CreateLogStream
+    - logs:PutLogEvents
+    - logs:DescribeLogStreams
+    Resource:
+    - arn:aws:logs:*:*:log-group:/aws/rds/*:log-stream:*
+  - Effect: Allow
+    Action:
+    - cloudwatch:PutMetricData
+    Resource: '*'
+    Condition:
+      StringEquals:
+        cloudwatch:namespace:
+        - AWS/DocDB-Preview
+        - AWS/Neptune-Preview
+        - AWS/RDS-Preview
+        - AWS/Usage
+  - Effect: Allow
+    Action:
+    - secretsmanager:GetRandomPassword
+    Resource: '*'
+  - Effect: Allow
+    Action:
+    - secretsmanager:DeleteSecret
+    - secretsmanager:DescribeSecret
+    - secretsmanager:PutSecretValue
+    - secretsmanager:RotateSecret
+    - secretsmanager:UpdateSecret
+    - secretsmanager:UpdateSecretVersionStage
+    - secretsmanager:ListSecretVersionIds
+    Resource:
+    - arn:aws:secretsmanager:*:*:secret:rds-preview-us-east-2!*
+    Condition:
+      StringLike:
+        secretsmanager:ResourceTag/aws:secretsmanager:owningService: rds-preview-us-east-2
+  - Effect: Allow
+    Action: secretsmanager:TagResource
+    Resource: arn:aws:secretsmanager:*:*:secret:rds-preview-us-east-2!*
+    Condition:
+      ForAllValues:StringEquals:
+        aws:TagKeys:
+        - aws:rds:primaryDBInstanceArn
+        - aws:rds:primaryDBClusterArn
+      StringLike:
+        secretsmanager:ResourceTag/aws:secretsmanager:owningService: rds-preview-us-east-2
+  - Sid: S3ExpressReadOnlySessionObjectAccess
+    Effect: Allow
+    Action: s3express:CreateSession
+    Resource: '*'
+    Condition:
+      StringEquals:
+        s3express:SessionMode: ReadOnly
+  - Sid: S3ExpressReadOnlyControlPlaneAccess
+    Effect: Allow
+    Action:
+    - s3express:GetBucketPolicy
+    - s3express:GetEncryptionConfiguration
+    - s3express:GetLifecycleConfiguration
+    - s3express:GetAccessPoint
+    - s3express:GetAccessPointPolicy
+    - s3express:GetAccessPointScope
+    - s3express:ListAllMyDirectoryBuckets
+    - s3express:ListAccessPointsForDirectoryBuckets
+    - s3express:ListTagsForResource
+    Resource: '*'
+request:
+  spec:
+    access_type: read-write
+    duration:
+      duration_hours: 1
+    resource_constraints: []
+  user: dev-bob
+  justification: 'reproduce customer ticket #4422 locally'
+scores:
+  det_score: 8
+  det_factors:
+  - "Resource `arn:aws:aidevops:*:*:agentspace/${aws:PrincipalTag/AgentSpaceId}` interpolates an attacker-controllable tag\
+    \ (`${{aws:PrincipalTag/...}}` or `${{aws:RequestTag/...}}` or `${{aws:ResourceTag/...}}`). If the caller has `iam:TagRole`\
+    \ / `iam:TagUser` on themselves (common in ABAC patterns), they can rewrite the tag to construct any resource ARN \u2014\
+    \ the Resource scope is illusory."
+  - 'State-changing action `aidevops:CreateBacklogTask` on Resource: `*` (IAM access level: Write)'
+  - 'State-changing action `aidevops:UpdateBacklogTask` on Resource: `*` (IAM access level: Write)'
+  - 'State-changing action `aidevops:DiscoverTopology` on Resource: `*` (IAM access level: Write)'
+  - 'State-changing action `aidevops:UpdateGoal` on Resource: `*` (IAM access level: Write)'
+  - 'State-changing action `aidevops:UpdateRecommendation` on Resource: `*` (IAM access level: Write)'
+  - 'State-changing action `aidevops:CreateKnowledgeItem` on Resource: `*` (IAM access level: Write)'
+  - 'State-changing action `aidevops:UpdateKnowledgeItem` on Resource: `*` (IAM access level: Write)'
+  - 'Destructive action `aidevops:DeleteKnowledgeItem` on Resource: `*` (blast radius = every resource in this account)'
+  - 'State-changing action `aidevops:InitiateChatForCase` on Resource: `*` (IAM access level: Write)'
+  - 'State-changing action `aidevops:EndChatForCase` on Resource: `*` (IAM access level: Write)'
+  - 'State-changing action `aidevops:DescribeSupportLevel` on Resource: `*` (IAM access level: Write)'
+  - 'State-changing action `aidevops:CreateChat` on Resource: `*` (IAM access level: Write)'
+  - 'State-changing action `aidevops:SendMessage` on Resource: `*` (IAM access level: Write)'
+  - 'Resource: `*` for aidevops (broad cross-resource read/access)'
+  - 'State-changing action `support:InitiateChatForCase` on Resource: `*` (IAM access level: Write)'
+  - 'Resource: `*` for support (broad cross-resource read/access)'
+  - 'State-changing action `rds:CrossRegionCommunication` on Resource: `*` (IAM access level: Write)'
+  - 'Resource: `*` for rds (broad cross-resource read/access)'
+  - 'State-changing action `ec2:AllocateAddress` on Resource: `*` (IAM access level: Write)'
+  - 'State-changing action `ec2:AssociateAddress` on Resource: `*` (IAM access level: Write)'
+  - 'State-changing action `ec2:AuthorizeSecurityGroupIngress` on Resource: `*` (IAM access level: Write)'
+  - 'State-changing action `ec2:CreateCoipPoolPermission` on Resource: `*` (IAM access level: Permissions management)'
+  - 'State-changing action `ec2:CreateLocalGatewayRouteTablePermission` on Resource: `*` (IAM access level: Permissions management)'
+  - 'State-changing action `ec2:CreateNetworkInterface` on Resource: `*` (IAM access level: Write)'
+  - 'State-changing action `ec2:CreateSecurityGroup` on Resource: `*` (IAM access level: Write)'
+  - 'Destructive action `ec2:DeleteCoipPoolPermission` on Resource: `*` (blast radius = every resource in this account)'
+  - 'Destructive action `ec2:DeleteLocalGatewayRouteTablePermission` on Resource: `*` (blast radius = every resource in this
+    account)'
+  - 'Destructive action `ec2:DeleteNetworkInterface` on Resource: `*` (blast radius = every resource in this account)'
+  - 'Destructive action `ec2:DeleteSecurityGroup` on Resource: `*` (blast radius = every resource in this account)'
+  - 'Destructive action `ec2:DisassociateAddress` on Resource: `*` (blast radius = every resource in this account)'
+  - 'State-changing action `ec2:ModifyNetworkInterfaceAttribute` on Resource: `*` (IAM access level: Write)'
+  - 'State-changing action `ec2:ReleaseAddress` on Resource: `*` (IAM access level: Write)'
+  - 'Destructive action `ec2:RevokeSecurityGroupIngress` on Resource: `*` (blast radius = every resource in this account)'
+  - 'Resource: `*` for ec2 (broad cross-resource read/access)'
+  - "`ec2:AuthorizeSecurityGroupIngress` is a high-impact mutation on broad resource \u2014 single API call can rewrite every\
+    \ matching resource in the account."
+  - "`ec2:CreateNetworkInterface` is a high-impact mutation on broad resource \u2014 single API call can rewrite every matching\
+    \ resource in the account."
+  - "`ec2:RevokeSecurityGroupIngress` is a high-impact mutation on broad resource \u2014 single API call can rewrite every\
+    \ matching resource in the account."
+  - 'State-changing action `logs:CreateLogGroup` on Resource: `*` (IAM access level: Write)'
+  - 'Resource: `*` for logs (broad cross-resource read/access)'
+  - 'State-changing action `logs:CreateLogStream` on Resource: `*` (IAM access level: Write)'
+  - 'State-changing action `logs:PutLogEvents` on Resource: `*` (IAM access level: Write)'
+  - 'State-changing action `cloudwatch:PutMetricData` on Resource: `*` (IAM access level: Write)'
+  - 'Resource: `*` for cloudwatch (broad cross-resource read/access)'
+  - '`secretsmanager:GetRandomPassword` on Resource: `*` touches sensitive service `secretsmanager`'
+  - '`secretsmanager:DeleteSecret` on Resource: `*` touches sensitive service `secretsmanager`'
+  - '`secretsmanager:DescribeSecret` on Resource: `*` touches sensitive service `secretsmanager`'
+  - '`secretsmanager:PutSecretValue` on Resource: `*` touches sensitive service `secretsmanager`'
+  - '`secretsmanager:RotateSecret` on Resource: `*` touches sensitive service `secretsmanager`'
+  - '`secretsmanager:UpdateSecret` on Resource: `*` touches sensitive service `secretsmanager`'
+  - '`secretsmanager:UpdateSecretVersionStage` on Resource: `*` touches sensitive service `secretsmanager`'
+  - '`secretsmanager:ListSecretVersionIds` on Resource: `*` touches sensitive service `secretsmanager`'
+  - 'Destructive action `secretsmanager:DeleteSecret` on Resource: `*` (blast radius = every resource in this account)'
+  - 'State-changing action `secretsmanager:PutSecretValue` on Resource: `*` (IAM access level: Write)'
+  - 'State-changing action `secretsmanager:RotateSecret` on Resource: `*` (IAM access level: Write)'
+  - 'State-changing action `secretsmanager:UpdateSecret` on Resource: `*` (IAM access level: Write)'
+  - 'State-changing action `secretsmanager:UpdateSecretVersionStage` on Resource: `*` (IAM access level: Write)'
+  - "`secretsmanager:PutSecretValue` is a high-impact mutation on broad resource \u2014 single API call can rewrite every\
+    \ matching resource in the account."
+  - "`secretsmanager:RotateSecret` is a high-impact mutation on broad resource \u2014 single API call can rewrite every matching\
+    \ resource in the account."
+  - "`secretsmanager:UpdateSecret` is a high-impact mutation on broad resource \u2014 single API call can rewrite every matching\
+    \ resource in the account."
+  - '`secretsmanager:TagResource` on Resource: `*` touches sensitive service `secretsmanager`'
+  - 'State-changing action `secretsmanager:TagResource` on Resource: `*` (IAM access level: Tagging)'
+  - 'State-changing action `s3express:CreateSession` on Resource: `*` (IAM access level: Write)'
+  - 'Resource: `*` for s3express (broad cross-resource read/access)'
+  opus_score: null
+  opus_factors: null
+  opus_reasoning: null
+  gap_classification: pending

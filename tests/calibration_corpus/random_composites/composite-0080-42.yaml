@@ -1,0 +1,292 @@
+name: composite-0080-42
+source_policies:
+- aws_managed/AWSQuickSetupStartStopInstancesExecutionPolicy.yaml
+- aws_managed/AWSIoTDeviceTesterForGreengrassFullAccess.yaml
+- aws_managed/AmazonTimestreamInfluxDBServiceRolePolicy.yaml
+- aws_managed/AWSQuickSightSecretsManagerWriteAccess.yaml
+source_hash: d5576d2d21f91009
+policy:
+  Version: '2012-10-17'
+  Statement:
+  - Effect: Allow
+    Action:
+    - ec2:DescribeInstances
+    - ec2:DescribeInstanceStatus
+    - ec2:DescribeRegions
+    - ec2:DescribeTags
+    Resource: '*'
+  - Effect: Allow
+    Action:
+    - ec2:StartInstances
+    - ec2:StopInstances
+    Resource: arn:aws:ec2:*:*:instance/*
+  - Effect: Allow
+    Action:
+    - ssm:GetCalendarState
+    Resource: arn:aws:ssm:*:*:document/AWSQuickSetup-ChangeCalendar*
+  - Effect: Allow
+    Action:
+    - ssm:StartAssociationsOnce
+    - ssm:StartAutomationExecution
+    Resource:
+    - arn:aws:ssm:*:*:association/*
+    - arn:aws:ssm:*:*:document/AWSQuickSetupType-Scheduler-ApplyInstanceState
+    - arn:aws:ssm:*:*:automation-execution/*
+    - arn:aws:ssm:*:*:automation-definition/AWSQuickSetupType-Scheduler-ApplyInstanceState*
+  - Effect: Allow
+    Action: iam:PassRole
+    Resource:
+    - arn:aws:iam::*:role/AWS-QuickSetup*
+    Condition:
+      StringEquals:
+        iam:PassedToService:
+        - ssm.amazonaws.com
+      ArnLike:
+        iam:AssociatedResourceARN:
+        - arn:aws:ssm:*::document/AWSQuickSetupType-Scheduler-ApplyInstanceState
+        - arn:aws:ssm:*:*:association/*
+  - Sid: VisualEditor1
+    Effect: Allow
+    Action: iam:PassRole
+    Resource: arn:aws:iam::*:role/idt-*
+    Condition:
+      StringEquals:
+        iam:PassedToService:
+        - iot.amazonaws.com
+        - lambda.amazonaws.com
+        - greengrass.amazonaws.com
+  - Sid: VisualEditor2
+    Effect: Allow
+    Action:
+    - lambda:CreateFunction
+    - iot:DeleteCertificate
+    - lambda:DeleteFunction
+    - execute-api:Invoke
+    - iot:UpdateCertificate
+    Resource:
+    - arn:aws:execute-api:us-east-1:098862408343:9xpmnvs5h4/prod/POST/metrics
+    - arn:aws:lambda:*:*:function:idt-*
+    - arn:aws:iot:*:*:cert/*
+  - Sid: VisualEditor3
+    Effect: Allow
+    Action:
+    - iot:CreateThing
+    - iot:DeleteThing
+    Resource:
+    - arn:aws:iot:*:*:thing/idt-*
+    - arn:aws:iot:*:*:cert/*
+  - Sid: VisualEditor4
+    Effect: Allow
+    Action:
+    - iot:AttachPolicy
+    - iot:DetachPolicy
+    - iot:DeletePolicy
+    Resource:
+    - arn:aws:iot:*:*:policy/idt-*
+    - arn:aws:iot:*:*:cert/*
+  - Sid: VisualEditor5
+    Effect: Allow
+    Action:
+    - iot:CreateJob
+    - iot:DescribeJob
+    - iot:DescribeJobExecution
+    - iot:DeleteJob
+    Resource:
+    - arn:aws:iot:*:*:thing/idt-*
+    - arn:aws:iot:*:*:job/*
+  - Sid: VisualEditor6
+    Effect: Allow
+    Action:
+    - iot:DescribeEndpoint
+    - greengrass:*
+    - iam:ListAttachedRolePolicies
+    - iot:CreatePolicy
+    - iot:GetThingShadow
+    - iot:CreateKeysAndCertificate
+    - iot:ListThings
+    - iot:UpdateThingShadow
+    - iot:CreateCertificateFromCsr
+    - iot-device-tester:SendMetrics
+    - iot-device-tester:SupportedVersion
+    - iot-device-tester:LatestIdt
+    - iot-device-tester:CheckVersion
+    - iot-device-tester:DownloadTestSuite
+    Resource: '*'
+  - Sid: VisualEditor7
+    Effect: Allow
+    Action:
+    - iot:DetachThingPrincipal
+    - iot:AttachThingPrincipal
+    Resource:
+    - arn:aws:iot:*:*:thing/idt-*
+    - arn:aws:iot:*:*:cert/*
+  - Sid: VisualEditor8
+    Effect: Allow
+    Action:
+    - s3:PutObject
+    - s3:DeleteObjectVersion
+    - s3:ListBucketVersions
+    - s3:CreateBucket
+    - s3:DeleteObject
+    - s3:DeleteBucket
+    Resource: arn:aws:s3:::idt*
+  - Sid: DescribeNetworkStatement
+    Effect: Allow
+    Action:
+    - ec2:DescribeSubnets
+    - ec2:DescribeVpcs
+    - ec2:DescribeNetworkInterfaces
+    Resource: '*'
+  - Sid: CreateEniInSubnetStatement
+    Effect: Allow
+    Action:
+    - ec2:CreateNetworkInterface
+    Resource:
+    - arn:aws:ec2:*:*:subnet/*
+    - arn:aws:ec2:*:*:security-group/*
+  - Sid: CreateEniStatement
+    Effect: Allow
+    Action:
+    - ec2:CreateNetworkInterface
+    Resource: arn:aws:ec2:*:*:network-interface/*
+    Condition:
+      'Null':
+        aws:RequestTag/AmazonTimestreamInfluxDBManaged: 'false'
+  - Sid: CreateTagWithEniStatement
+    Effect: Allow
+    Action:
+    - ec2:CreateTags
+    Resource: arn:aws:ec2:*:*:network-interface/*
+    Condition:
+      'Null':
+        aws:RequestTag/AmazonTimestreamInfluxDBManaged: 'false'
+      StringEquals:
+        ec2:CreateAction:
+        - CreateNetworkInterface
+  - Sid: ManageEniStatement
+    Effect: Allow
+    Action:
+    - ec2:CreateNetworkInterfacePermission
+    - ec2:DeleteNetworkInterface
+    Resource: arn:aws:ec2:*:*:network-interface/*
+    Condition:
+      'Null':
+        aws:ResourceTag/AmazonTimestreamInfluxDBManaged: 'false'
+  - Sid: PutCloudWatchMetricsStatement
+    Effect: Allow
+    Action:
+    - cloudwatch:PutMetricData
+    Condition:
+      StringEquals:
+        cloudwatch:namespace:
+        - AWS/Timestream/InfluxDB
+        - AWS/Usage
+    Resource:
+    - '*'
+  - Sid: ManageSecretStatement
+    Effect: Allow
+    Action:
+    - secretsmanager:CreateSecret
+    - secretsmanager:DeleteSecret
+    Resource:
+    - arn:aws:secretsmanager:*:*:secret:READONLY-InfluxDB-auth-parameters-*
+    Condition:
+      StringEquals:
+        aws:ResourceAccount: ${aws:PrincipalAccount}
+  - Effect: Allow
+    Action:
+    - secretsmanager:PutResourcePolicy
+    Resource: arn:aws:secretsmanager:*:*:secret:quicksight!*
+    Condition:
+      StringEquals:
+        secretsmanager:ResourceTag/aws:secretsmanager:owningService: quicksight
+        aws:ResourceAccount: ${aws:PrincipalAccount}
+  - Effect: Allow
+    Action:
+    - secretsmanager:CreateSecret
+    Resource: arn:aws:secretsmanager:*:*:secret:quicksight!*
+    Condition:
+      StringEquals:
+        aws:ResourceAccount: ${aws:PrincipalAccount}
+      StringLike:
+        secretsmanager:Name: quicksight!*
+request:
+  spec:
+    access_type: read-write
+    duration:
+      duration_hours: 1
+    resource_constraints: []
+  user: ci-bot
+  justification: deploy via terraform-cloud agent
+scores:
+  det_score: 9
+  det_factors:
+  - 'State-changing action `ec2:StartInstances` on Resource: `*` (IAM access level: Write)'
+  - 'Destructive action `ec2:StopInstances` on Resource: `*` (blast radius = every resource in this account)'
+  - 'Resource: `*` for ec2 (broad cross-resource read/access)'
+  - '`ssm:GetCalendarState` on Resource: `*` touches sensitive service `ssm`'
+  - '`ssm:StartAssociationsOnce` on Resource: `*` touches sensitive service `ssm`'
+  - '`ssm:StartAutomationExecution` on Resource: `*` touches sensitive service `ssm`'
+  - 'State-changing action `ssm:StartAssociationsOnce` on Resource: `*` (IAM access level: Write)'
+  - 'State-changing action `ssm:StartAutomationExecution` on Resource: `*` (IAM access level: Write)'
+  - '`Condition.ArnLike.iam:AssociatedResourceARN: arn:aws:ssm:*::document/AWSQuickSetupType-Scheduler-ApplyInstanceState`
+    matches the named principal in EVERY AWS account (account segment wildcarded). The literal resource-name portion doesn''t
+    narrow the scope cross-account.'
+  - '`iam:PassRole` on Resource: `*` is a privilege-escalation path'
+  - 'State-changing action `iam:PassRole` on Resource: `*` (IAM access level: Permissions management)'
+  - 'State-changing action `lambda:CreateFunction` on Resource: `*` (IAM access level: Write)'
+  - 'Destructive action `iot:DeleteCertificate` on Resource: `*` (blast radius = every resource in this account)'
+  - 'Destructive action `lambda:DeleteFunction` on Resource: `*` (blast radius = every resource in this account)'
+  - 'State-changing action `execute-api:Invoke` on Resource: `*` (IAM access level: Write)'
+  - 'State-changing action `iot:UpdateCertificate` on Resource: `*` (IAM access level: Write)'
+  - 'Resource: `*` for execute-api, iot, lambda (broad cross-resource read/access)'
+  - "`lambda:DeleteFunction` is a high-impact mutation on broad resource \u2014 single API call can rewrite every matching\
+    \ resource in the account."
+  - 'State-changing action `iot:CreateThing` on Resource: `*` (IAM access level: Write)'
+  - 'Destructive action `iot:DeleteThing` on Resource: `*` (blast radius = every resource in this account)'
+  - 'Resource: `*` for iot (broad cross-resource read/access)'
+  - 'State-changing action `iot:AttachPolicy` on Resource: `*` (IAM access level: Permissions management)'
+  - 'Destructive action `iot:DetachPolicy` on Resource: `*` (blast radius = every resource in this account)'
+  - 'Destructive action `iot:DeletePolicy` on Resource: `*` (blast radius = every resource in this account)'
+  - 'State-changing action `iot:CreateJob` on Resource: `*` (IAM access level: Write)'
+  - 'Destructive action `iot:DeleteJob` on Resource: `*` (blast radius = every resource in this account)'
+  - '`greengrass:*` grants every action in `greengrass`'
+  - '`iam:ListAttachedRolePolicies` on Resource: `*` touches sensitive service `iam`'
+  - 'State-changing action `iot:CreatePolicy` on Resource: `*` (IAM access level: Permissions management)'
+  - 'State-changing action `iot:CreateKeysAndCertificate` on Resource: `*` (IAM access level: Write)'
+  - 'State-changing action `iot:UpdateThingShadow` on Resource: `*` (IAM access level: Write)'
+  - 'State-changing action `iot:CreateCertificateFromCsr` on Resource: `*` (IAM access level: Write)'
+  - 'State-changing action `iot-device-tester:SendMetrics` on Resource: `*` (IAM access level: Write)'
+  - 'Destructive action `iot:DetachThingPrincipal` on Resource: `*` (blast radius = every resource in this account)'
+  - 'State-changing action `iot:AttachThingPrincipal` on Resource: `*` (IAM access level: Write)'
+  - 'State-changing action `s3:PutObject` on Resource: `*` (IAM access level: Write)'
+  - 'Destructive action `s3:DeleteObjectVersion` on Resource: `*` (blast radius = every resource in this account)'
+  - 'State-changing action `s3:CreateBucket` on Resource: `*` (IAM access level: Write)'
+  - 'Destructive action `s3:DeleteObject` on Resource: `*` (blast radius = every resource in this account)'
+  - 'Destructive action `s3:DeleteBucket` on Resource: `*` (blast radius = every resource in this account)'
+  - 'Resource: `*` for s3 (broad cross-resource read/access)'
+  - 'State-changing action `ec2:CreateNetworkInterface` on Resource: `*` (IAM access level: Write)'
+  - "`ec2:CreateNetworkInterface` is a high-impact mutation on broad resource \u2014 single API call can rewrite every matching\
+    \ resource in the account."
+  - 'State-changing action `ec2:CreateTags` on Resource: `*` (IAM access level: Tagging)'
+  - 'State-changing action `ec2:CreateNetworkInterfacePermission` on Resource: `*` (IAM access level: Permissions management)'
+  - 'Destructive action `ec2:DeleteNetworkInterface` on Resource: `*` (blast radius = every resource in this account)'
+  - 'State-changing action `cloudwatch:PutMetricData` on Resource: `*` (IAM access level: Write)'
+  - 'Resource: `*` for cloudwatch (broad cross-resource read/access)'
+  - '`secretsmanager:CreateSecret` on Resource: `*` touches sensitive service `secretsmanager`'
+  - '`secretsmanager:DeleteSecret` on Resource: `*` touches sensitive service `secretsmanager`'
+  - 'State-changing action `secretsmanager:CreateSecret` on Resource: `*` (IAM access level: Write)'
+  - 'Destructive action `secretsmanager:DeleteSecret` on Resource: `*` (blast radius = every resource in this account)'
+  - '`secretsmanager:PutResourcePolicy` on Resource: `*` touches sensitive service `secretsmanager`'
+  - 'State-changing action `secretsmanager:PutResourcePolicy` on Resource: `*` (IAM access level: Permissions management)'
+  - 'Code-execution primitive on broad resource: lambda:CreateFunction. Deploys attacker-controlled code that runs under whatever
+    role the matched resources use. Even without explicit PassRole, the existing roles of matched resources become the attack
+    target.'
+  - 'Code-execution-via-role composition: lambda:CreateFunction combined with iam:PassRole = RCE as the passed role. Single-statement
+    scoring underweights this; the composition is full account-compromise tier.'
+  - '`secretsmanager:PutResourcePolicy` sets up ongoing cross-account / persistent exfiltration in a single call. The blast
+    is ''everything that flows through this resource from now on,'' not just what exists today.'
+  opus_score: null
+  opus_factors: null
+  opus_reasoning: null
+  gap_classification: pending

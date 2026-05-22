@@ -1,0 +1,70 @@
+name: composite-0059-42
+source_policies:
+- aws_managed/AmazonSageMakerHyperPodGatedModelAccess.yaml
+- aws_managed/AWSDataPipeline_PowerUser.yaml
+- aws_managed/AWSCloudWatchAlarms_ActionSSMIncidentsServiceRolePolicy.yaml
+source_hash: d5ea89578fecaf7b
+policy:
+  Version: '2012-10-17'
+  Statement:
+  - Sid: CreatePresignedUrlAccess
+    Effect: Allow
+    Action:
+    - sagemaker:CreateHubContentPresignedUrls
+    Resource:
+    - arn:aws:sagemaker:*:*:hub/SageMakerPublicHub
+    - arn:aws:sagemaker:*:*:hub-content/SageMakerPublicHub/*/*
+    Condition:
+      StringEquals:
+        aws:ResourceAccount: ${aws:PrincipalAccount}
+  - Action:
+    - s3:List*
+    - dynamodb:DescribeTable
+    - rds:DescribeDBInstances
+    - rds:DescribeDBSecurityGroups
+    - redshift:DescribeClusters
+    - redshift:DescribeClusterSecurityGroups
+    - sns:ListTopics
+    - iam:ListRoles
+    - iam:GetRolePolicy
+    - iam:GetInstanceProfile
+    - iam:ListInstanceProfiles
+    - datapipeline:*
+    Effect: Allow
+    Resource:
+    - '*'
+  - Action: iam:PassRole
+    Effect: Allow
+    Resource:
+    - arn:aws:iam::*:role/DataPipelineDefaultResourceRole
+    - arn:aws:iam::*:role/DataPipelineDefaultRole
+  - Sid: StartIncidentPermissions
+    Effect: Allow
+    Action: ssm-incidents:StartIncident
+    Resource: '*'
+request:
+  spec:
+    access_type: read-write
+    duration:
+      duration_hours: 1
+    resource_constraints: []
+  user: auditor-erin
+  justification: SOC 2 controls evidence collection
+scores:
+  det_score: 9
+  det_factors:
+  - '`sagemaker:CreateHubContentPresignedUrls` on Resource: `*` touches sensitive service `sagemaker`'
+  - "Action-name wildcard `s3:List*` on broad resource \u2014 matches multiple s3 APIs at once"
+  - '`iam:ListRoles` on Resource: `*` touches sensitive service `iam`'
+  - '`iam:GetRolePolicy` on Resource: `*` touches sensitive service `iam`'
+  - '`iam:GetInstanceProfile` on Resource: `*` touches sensitive service `iam`'
+  - '`iam:ListInstanceProfiles` on Resource: `*` touches sensitive service `iam`'
+  - '`datapipeline:*` grants every action in `datapipeline`'
+  - '`iam:PassRole` on Resource: `*` is a privilege-escalation path'
+  - 'State-changing action `iam:PassRole` on Resource: `*` (IAM access level: Permissions management)'
+  - 'State-changing action `ssm-incidents:StartIncident` on Resource: `*` (IAM access level: Write)'
+  - 'Resource: `*` for ssm-incidents (broad cross-resource read/access)'
+  opus_score: null
+  opus_factors: null
+  opus_reasoning: null
+  gap_classification: pending

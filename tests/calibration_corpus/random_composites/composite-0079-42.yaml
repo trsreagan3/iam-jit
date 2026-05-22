@@ -1,0 +1,527 @@
+name: composite-0079-42
+source_policies:
+- aws_managed/NetworkAdministrator.yaml
+- aws_managed/AmazonRoute53RecoveryReadinessReadOnlyAccess.yaml
+- aws_managed/AWSVPCTransitGatewayServiceRolePolicy.yaml
+source_hash: 32c6b9c492764497
+policy:
+  Version: '2012-10-17'
+  Statement:
+  - Sid: AllowDefaultNetworkAdminActions
+    Effect: Allow
+    Action:
+    - autoscaling:Describe*
+    - cloudfront:ListDistributions
+    - cloudwatch:DeleteAlarms
+    - cloudwatch:DescribeAlarms
+    - cloudwatch:GetMetricStatistics
+    - cloudwatch:PutMetricAlarm
+    - directconnect:*
+    - ec2:AcceptVpcEndpointConnections
+    - ec2:AllocateAddress
+    - ec2:AssignIpv6Addresses
+    - ec2:AssignPrivateIpAddresses
+    - ec2:AssociateAddress
+    - ec2:AssociateDhcpOptions
+    - ec2:AssociateRouteTable
+    - ec2:AssociateSubnetCidrBlock
+    - ec2:AssociateVpcCidrBlock
+    - ec2:AttachInternetGateway
+    - ec2:AttachNetworkInterface
+    - ec2:AttachVpnGateway
+    - ec2:CreateCarrierGateway
+    - ec2:CreateCustomerGateway
+    - ec2:CreateDefaultSubnet
+    - ec2:CreateDefaultVpc
+    - ec2:CreateDhcpOptions
+    - ec2:CreateEgressOnlyInternetGateway
+    - ec2:CreateFlowLogs
+    - ec2:CreateInternetGateway
+    - ec2:CreateNatGateway
+    - ec2:CreateNetworkAcl
+    - ec2:CreateNetworkAclEntry
+    - ec2:CreateNetworkInterface
+    - ec2:CreateNetworkInterfacePermission
+    - ec2:CreatePlacementGroup
+    - ec2:CreateRoute
+    - ec2:CreateRouteTable
+    - ec2:CreateSecurityGroup
+    - ec2:CreateSubnet
+    - ec2:CreateTags
+    - ec2:CreateVpc
+    - ec2:CreateVpcEndpoint
+    - ec2:CreateVpcEndpointConnectionNotification
+    - ec2:CreateVpcEndpointServiceConfiguration
+    - ec2:CreateVpnConnection
+    - ec2:CreateVpnConnectionRoute
+    - ec2:CreateVpnGateway
+    - ec2:DeleteCarrierGateway
+    - ec2:DeleteEgressOnlyInternetGateway
+    - ec2:DeleteFlowLogs
+    - ec2:DeleteNatGateway
+    - ec2:DeleteNetworkInterface
+    - ec2:DeleteNetworkInterfacePermission
+    - ec2:DeletePlacementGroup
+    - ec2:DeleteSubnet
+    - ec2:DeleteTags
+    - ec2:DeleteVpc
+    - ec2:DeleteVpcEndpointConnectionNotifications
+    - ec2:DeleteVpcEndpointServiceConfigurations
+    - ec2:DeleteVpcEndpoints
+    - ec2:DeleteVpnConnection
+    - ec2:DeleteVpnConnectionRoute
+    - ec2:DeleteVpnGateway
+    - ec2:DescribeAccountAttributes
+    - ec2:DescribeAddresses
+    - ec2:DescribeAvailabilityZones
+    - ec2:DescribeCarrierGateways
+    - ec2:DescribeClassicLinkInstances
+    - ec2:DescribeCustomerGateways
+    - ec2:DescribeDhcpOptions
+    - ec2:DescribeEgressOnlyInternetGateways
+    - ec2:DescribeFlowLogs
+    - ec2:DescribeInstances
+    - ec2:DescribeInternetGateways
+    - ec2:DescribeIpv6Pools
+    - ec2:DescribeKeyPairs
+    - ec2:DescribeMovingAddresses
+    - ec2:DescribeNatGateways
+    - ec2:DescribeNetworkAcls
+    - ec2:DescribeNetworkInterfaceAttribute
+    - ec2:DescribeNetworkInterfacePermissions
+    - ec2:DescribeNetworkInterfaces
+    - ec2:DescribePlacementGroups
+    - ec2:DescribePrefixLists
+    - ec2:DescribePublicIpv4Pools
+    - ec2:DescribeRouteTables
+    - ec2:DescribeSecurityGroupReferences
+    - ec2:DescribeSecurityGroupRules
+    - ec2:DescribeSecurityGroups
+    - ec2:DescribeStaleSecurityGroups
+    - ec2:DescribeSubnets
+    - ec2:DescribeTags
+    - ec2:DescribeVpcAttribute
+    - ec2:DescribeVpcClassicLink
+    - ec2:DescribeVpcClassicLinkDnsSupport
+    - ec2:DescribeVpcEndpointConnectionNotifications
+    - ec2:DescribeVpcEndpointConnections
+    - ec2:DescribeVpcEndpointServiceConfigurations
+    - ec2:DescribeVpcEndpointServicePermissions
+    - ec2:DescribeVpcEndpointServices
+    - ec2:DescribeVpcEndpoints
+    - ec2:DescribeVpcPeeringConnections
+    - ec2:DescribeVpcs
+    - ec2:DescribeVpnConnections
+    - ec2:DescribeVpnGateways
+    - ec2:DetachInternetGateway
+    - ec2:DetachNetworkInterface
+    - ec2:DetachVpnGateway
+    - ec2:DisableVgwRoutePropagation
+    - ec2:DisableVpcClassicLinkDnsSupport
+    - ec2:DisassociateAddress
+    - ec2:DisassociateRouteTable
+    - ec2:DisassociateSubnetCidrBlock
+    - ec2:DisassociateVpcCidrBlock
+    - ec2:EnableVgwRoutePropagation
+    - ec2:EnableVpcClassicLinkDnsSupport
+    - ec2:GetVpnConnectionDeviceSampleConfiguration
+    - ec2:GetVpnConnectionDeviceTypes
+    - ec2:GetVpnTunnelReplacementStatus
+    - ec2:ModifyNetworkInterfaceAttribute
+    - ec2:ModifySecurityGroupRules
+    - ec2:ModifySubnetAttribute
+    - ec2:ModifyVpcAttribute
+    - ec2:ModifyVpcEndpoint
+    - ec2:ModifyVpcEndpointConnectionNotification
+    - ec2:ModifyVpcEndpointServiceConfiguration
+    - ec2:ModifyVpcEndpointServicePermissions
+    - ec2:ModifyVpcPeeringConnectionOptions
+    - ec2:ModifyVpcTenancy
+    - ec2:ModifyVpnConnection
+    - ec2:ModifyVpnConnectionOptions
+    - ec2:ModifyVpnTunnelCertificate
+    - ec2:ModifyVpnTunnelOptions
+    - ec2:MoveAddressToVpc
+    - ec2:RejectVpcEndpointConnections
+    - ec2:ReleaseAddress
+    - ec2:ReplaceNetworkAclAssociation
+    - ec2:ReplaceNetworkAclEntry
+    - ec2:ReplaceRoute
+    - ec2:ReplaceRouteTableAssociation
+    - ec2:ReplaceVpnTunnel
+    - ec2:ResetNetworkInterfaceAttribute
+    - ec2:RestoreAddressToClassic
+    - ec2:UnassignIpv6Addresses
+    - ec2:UnassignPrivateIpAddresses
+    - ec2:UpdateSecurityGroupRuleDescriptionsEgress
+    - ec2:UpdateSecurityGroupRuleDescriptionsIngress
+    - elasticbeanstalk:Describe*
+    - elasticbeanstalk:List*
+    - elasticbeanstalk:RequestEnvironmentInfo
+    - elasticbeanstalk:RetrieveEnvironmentInfo
+    - elasticloadbalancing:*
+    - logs:DescribeLogGroups
+    - logs:DescribeLogStreams
+    - logs:GetLogEvents
+    - route53:*
+    - route53domains:*
+    - sns:CreateTopic
+    - sns:ListSubscriptionsByTopic
+    - sns:ListTopics
+    Resource: '*'
+  - Sid: AllowVPCPermissions
+    Effect: Allow
+    Action:
+    - ec2:AcceptVpcPeeringConnection
+    - ec2:AssociateSecurityGroupVpc
+    - ec2:AttachClassicLinkVpc
+    - ec2:AuthorizeSecurityGroupEgress
+    - ec2:AuthorizeSecurityGroupIngress
+    - ec2:CreateVpcPeeringConnection
+    - ec2:DeleteCustomerGateway
+    - ec2:DeleteDhcpOptions
+    - ec2:DeleteInternetGateway
+    - ec2:DeleteNetworkAcl
+    - ec2:DeleteNetworkAclEntry
+    - ec2:DeleteRoute
+    - ec2:DeleteRouteTable
+    - ec2:DeleteSecurityGroup
+    - ec2:DeleteVolume
+    - ec2:DeleteVpcPeeringConnection
+    - ec2:DescribeSecurityGroupVpcAssociations
+    - ec2:DetachClassicLinkVpc
+    - ec2:DisableVpcClassicLink
+    - ec2:DisassociateSecurityGroupVpc
+    - ec2:EnableVpcClassicLink
+    - ec2:GetConsoleScreenshot
+    - ec2:GetSecurityGroupsForVpc
+    - ec2:RejectVpcPeeringConnection
+    - ec2:RevokeSecurityGroupEgress
+    - ec2:RevokeSecurityGroupIngress
+    Resource:
+    - '*'
+  - Sid: AllowLocalGatewayPermissions
+    Effect: Allow
+    Action:
+    - ec2:CreateLocalGatewayRoute
+    - ec2:CreateLocalGatewayRouteTableVpcAssociation
+    - ec2:DeleteLocalGatewayRoute
+    - ec2:DeleteLocalGatewayRouteTableVpcAssociation
+    - ec2:DescribeLocalGatewayRouteTableVirtualInterfaceGroupAssociations
+    - ec2:DescribeLocalGatewayRouteTableVpcAssociations
+    - ec2:DescribeLocalGatewayRouteTables
+    - ec2:DescribeLocalGatewayVirtualInterfaceGroups
+    - ec2:DescribeLocalGatewayVirtualInterfaces
+    - ec2:DescribeLocalGateways
+    - ec2:SearchLocalGatewayRoutes
+    Resource: '*'
+  - Sid: DiscoverBuckets
+    Effect: Allow
+    Action:
+    - s3:GetBucketLocation
+    - s3:GetBucketWebsite
+    - s3:ListBucket
+    Resource:
+    - '*'
+  - Sid: DiscoverFlowLogRoles
+    Effect: Allow
+    Action:
+    - iam:GetRole
+    - iam:ListRoles
+    - iam:PassRole
+    Resource: arn:aws:iam::*:role/flow-logs-*
+  - Sid: NetworkmanagerPermissions
+    Effect: Allow
+    Action:
+    - networkmanager:*
+    Resource: '*'
+  - Sid: TransitGatewayPermissions
+    Effect: Allow
+    Action:
+    - ec2:AcceptTransitGatewayVpcAttachment
+    - ec2:AssociateTransitGatewayRouteTable
+    - ec2:CreateTransitGateway
+    - ec2:CreateTransitGatewayRoute
+    - ec2:CreateTransitGatewayRouteTable
+    - ec2:CreateTransitGatewayVpcAttachment
+    - ec2:DeleteTransitGateway
+    - ec2:DeleteTransitGatewayRoute
+    - ec2:DeleteTransitGatewayRouteTable
+    - ec2:DeleteTransitGatewayVpcAttachment
+    - ec2:DescribeTransitGatewayAttachments
+    - ec2:DescribeTransitGatewayRouteTables
+    - ec2:DescribeTransitGateways
+    - ec2:DescribeTransitGatewayVpcAttachments
+    - ec2:DisableTransitGatewayRouteTablePropagation
+    - ec2:DisassociateTransitGatewayRouteTable
+    - ec2:EnableTransitGatewayRouteTablePropagation
+    - ec2:ExportTransitGatewayRoutes
+    - ec2:GetTransitGatewayAttachmentPropagations
+    - ec2:GetTransitGatewayRouteTableAssociations
+    - ec2:GetTransitGatewayRouteTablePropagations
+    - ec2:ModifyTransitGateway
+    - ec2:ModifyTransitGatewayVpcAttachment
+    - ec2:RejectTransitGatewayVpcAttachment
+    - ec2:ReplaceTransitGatewayRoute
+    - ec2:SearchTransitGatewayRoutes
+    Resource: '*'
+  - Sid: AllowTransitGatewaySLRCreation
+    Effect: Allow
+    Action:
+    - iam:CreateServiceLinkedRole
+    Resource: '*'
+    Condition:
+      StringLike:
+        iam:AWSServiceName:
+        - transitgateway.amazonaws.com
+  - Effect: Allow
+    Action:
+    - route53-recovery-readiness:GetCell
+    - route53-recovery-readiness:GetReadinessCheck
+    - route53-recovery-readiness:GetReadinessCheckResourceStatus
+    - route53-recovery-readiness:GetReadinessCheckStatus
+    - route53-recovery-readiness:GetRecoveryGroup
+    - route53-recovery-readiness:GetRecoveryGroupReadinessSummary
+    - route53-recovery-readiness:GetResourceSet
+    - route53-recovery-readiness:ListCells
+    - route53-recovery-readiness:ListCrossAccountAuthorizations
+    - route53-recovery-readiness:ListReadinessChecks
+    - route53-recovery-readiness:ListRecoveryGroups
+    - route53-recovery-readiness:ListResourceSets
+    - route53-recovery-readiness:ListRules
+    - route53-recovery-readiness:ListTagsForResources
+    Resource: '*'
+  - Effect: Allow
+    Action:
+    - route53-recovery-readiness:GetArchitectureRecommendations
+    - route53-recovery-readiness:GetCellReadinessSummary
+    Resource: arn:aws:route53-recovery-readiness::*:*
+  - Action:
+    - ec2:CreateNetworkInterface
+    - ec2:DescribeNetworkInterfaces
+    - ec2:ModifyNetworkInterfaceAttribute
+    - ec2:DeleteNetworkInterface
+    - ec2:CreateNetworkInterfacePermission
+    - ec2:AssignIpv6Addresses
+    - ec2:UnAssignIpv6Addresses
+    Resource: '*'
+    Effect: Allow
+    Sid: '0'
+request:
+  spec:
+    access_type: read-write
+    duration:
+      duration_hours: 1
+    resource_constraints: []
+  user: ci-bot
+  justification: deploy via terraform-cloud agent
+scores:
+  det_score: 9
+  det_factors:
+  - "Action-name wildcard `autoscaling:Describe*` on broad resource \u2014 matches multiple autoscaling APIs at once"
+  - '`directconnect:*` grants every action in `directconnect`'
+  - "Action-name wildcard `elasticbeanstalk:Describe*` on broad resource \u2014 matches multiple elasticbeanstalk APIs at\
+    \ once"
+  - "Action-name wildcard `elasticbeanstalk:List*` on broad resource \u2014 matches multiple elasticbeanstalk APIs at once"
+  - '`elasticloadbalancing:*` grants every action in `elasticloadbalancing`'
+  - '`route53:*` grants every action in `route53`'
+  - '`route53domains:*` grants every action in `route53domains`'
+  - 'Destructive action `cloudwatch:DeleteAlarms` on Resource: `*` (blast radius = every resource in this account)'
+  - 'State-changing action `cloudwatch:PutMetricAlarm` on Resource: `*` (IAM access level: Write)'
+  - 'State-changing action `ec2:AcceptVpcEndpointConnections` on Resource: `*` (IAM access level: Write)'
+  - 'State-changing action `ec2:AllocateAddress` on Resource: `*` (IAM access level: Write)'
+  - 'State-changing action `ec2:AssignIpv6Addresses` on Resource: `*` (IAM access level: Write)'
+  - 'State-changing action `ec2:AssignPrivateIpAddresses` on Resource: `*` (IAM access level: Write)'
+  - 'State-changing action `ec2:AssociateAddress` on Resource: `*` (IAM access level: Write)'
+  - 'State-changing action `ec2:AssociateDhcpOptions` on Resource: `*` (IAM access level: Write)'
+  - 'State-changing action `ec2:AssociateRouteTable` on Resource: `*` (IAM access level: Write)'
+  - 'State-changing action `ec2:AssociateSubnetCidrBlock` on Resource: `*` (IAM access level: Write)'
+  - 'State-changing action `ec2:AssociateVpcCidrBlock` on Resource: `*` (IAM access level: Write)'
+  - 'State-changing action `ec2:AttachInternetGateway` on Resource: `*` (IAM access level: Write)'
+  - 'State-changing action `ec2:AttachNetworkInterface` on Resource: `*` (IAM access level: Write)'
+  - 'State-changing action `ec2:AttachVpnGateway` on Resource: `*` (IAM access level: Write)'
+  - 'State-changing action `ec2:CreateCarrierGateway` on Resource: `*` (IAM access level: Write)'
+  - 'State-changing action `ec2:CreateCustomerGateway` on Resource: `*` (IAM access level: Write)'
+  - 'State-changing action `ec2:CreateDefaultSubnet` on Resource: `*` (IAM access level: Write)'
+  - 'State-changing action `ec2:CreateDefaultVpc` on Resource: `*` (IAM access level: Write)'
+  - 'State-changing action `ec2:CreateDhcpOptions` on Resource: `*` (IAM access level: Write)'
+  - 'State-changing action `ec2:CreateEgressOnlyInternetGateway` on Resource: `*` (IAM access level: Write)'
+  - 'State-changing action `ec2:CreateFlowLogs` on Resource: `*` (IAM access level: Write)'
+  - 'State-changing action `ec2:CreateInternetGateway` on Resource: `*` (IAM access level: Write)'
+  - 'State-changing action `ec2:CreateNatGateway` on Resource: `*` (IAM access level: Write)'
+  - 'State-changing action `ec2:CreateNetworkAcl` on Resource: `*` (IAM access level: Write)'
+  - 'State-changing action `ec2:CreateNetworkAclEntry` on Resource: `*` (IAM access level: Write)'
+  - 'State-changing action `ec2:CreateNetworkInterface` on Resource: `*` (IAM access level: Write)'
+  - 'State-changing action `ec2:CreateNetworkInterfacePermission` on Resource: `*` (IAM access level: Permissions management)'
+  - 'State-changing action `ec2:CreatePlacementGroup` on Resource: `*` (IAM access level: Write)'
+  - 'State-changing action `ec2:CreateRoute` on Resource: `*` (IAM access level: Write)'
+  - 'State-changing action `ec2:CreateRouteTable` on Resource: `*` (IAM access level: Write)'
+  - 'State-changing action `ec2:CreateSecurityGroup` on Resource: `*` (IAM access level: Write)'
+  - 'State-changing action `ec2:CreateSubnet` on Resource: `*` (IAM access level: Write)'
+  - 'State-changing action `ec2:CreateTags` on Resource: `*` (IAM access level: Tagging)'
+  - 'State-changing action `ec2:CreateVpc` on Resource: `*` (IAM access level: Write)'
+  - 'State-changing action `ec2:CreateVpcEndpoint` on Resource: `*` (IAM access level: Write)'
+  - 'State-changing action `ec2:CreateVpcEndpointConnectionNotification` on Resource: `*` (IAM access level: Write)'
+  - 'State-changing action `ec2:CreateVpcEndpointServiceConfiguration` on Resource: `*` (IAM access level: Write)'
+  - 'State-changing action `ec2:CreateVpnConnection` on Resource: `*` (IAM access level: Write)'
+  - 'State-changing action `ec2:CreateVpnConnectionRoute` on Resource: `*` (IAM access level: Write)'
+  - 'State-changing action `ec2:CreateVpnGateway` on Resource: `*` (IAM access level: Write)'
+  - 'Destructive action `ec2:DeleteCarrierGateway` on Resource: `*` (blast radius = every resource in this account)'
+  - 'Destructive action `ec2:DeleteEgressOnlyInternetGateway` on Resource: `*` (blast radius = every resource in this account)'
+  - 'Destructive action `ec2:DeleteFlowLogs` on Resource: `*` (blast radius = every resource in this account)'
+  - 'Destructive action `ec2:DeleteNatGateway` on Resource: `*` (blast radius = every resource in this account)'
+  - 'Destructive action `ec2:DeleteNetworkInterface` on Resource: `*` (blast radius = every resource in this account)'
+  - 'Destructive action `ec2:DeleteNetworkInterfacePermission` on Resource: `*` (blast radius = every resource in this account)'
+  - 'Destructive action `ec2:DeletePlacementGroup` on Resource: `*` (blast radius = every resource in this account)'
+  - 'Destructive action `ec2:DeleteSubnet` on Resource: `*` (blast radius = every resource in this account)'
+  - 'Destructive action `ec2:DeleteTags` on Resource: `*` (blast radius = every resource in this account)'
+  - 'Destructive action `ec2:DeleteVpc` on Resource: `*` (blast radius = every resource in this account)'
+  - 'Destructive action `ec2:DeleteVpcEndpointConnectionNotifications` on Resource: `*` (blast radius = every resource in
+    this account)'
+  - 'Destructive action `ec2:DeleteVpcEndpointServiceConfigurations` on Resource: `*` (blast radius = every resource in this
+    account)'
+  - 'Destructive action `ec2:DeleteVpcEndpoints` on Resource: `*` (blast radius = every resource in this account)'
+  - 'Destructive action `ec2:DeleteVpnConnection` on Resource: `*` (blast radius = every resource in this account)'
+  - 'Destructive action `ec2:DeleteVpnConnectionRoute` on Resource: `*` (blast radius = every resource in this account)'
+  - 'Destructive action `ec2:DeleteVpnGateway` on Resource: `*` (blast radius = every resource in this account)'
+  - 'Destructive action `ec2:DetachInternetGateway` on Resource: `*` (blast radius = every resource in this account)'
+  - 'Destructive action `ec2:DetachNetworkInterface` on Resource: `*` (blast radius = every resource in this account)'
+  - 'Destructive action `ec2:DetachVpnGateway` on Resource: `*` (blast radius = every resource in this account)'
+  - 'Destructive action `ec2:DisableVgwRoutePropagation` on Resource: `*` (blast radius = every resource in this account)'
+  - 'Destructive action `ec2:DisableVpcClassicLinkDnsSupport` on Resource: `*` (blast radius = every resource in this account)'
+  - 'Destructive action `ec2:DisassociateAddress` on Resource: `*` (blast radius = every resource in this account)'
+  - 'Destructive action `ec2:DisassociateRouteTable` on Resource: `*` (blast radius = every resource in this account)'
+  - 'Destructive action `ec2:DisassociateSubnetCidrBlock` on Resource: `*` (blast radius = every resource in this account)'
+  - 'Destructive action `ec2:DisassociateVpcCidrBlock` on Resource: `*` (blast radius = every resource in this account)'
+  - 'State-changing action `ec2:EnableVgwRoutePropagation` on Resource: `*` (IAM access level: Write)'
+  - 'State-changing action `ec2:EnableVpcClassicLinkDnsSupport` on Resource: `*` (IAM access level: Write)'
+  - 'State-changing action `ec2:ModifyNetworkInterfaceAttribute` on Resource: `*` (IAM access level: Write)'
+  - 'State-changing action `ec2:ModifySecurityGroupRules` on Resource: `*` (IAM access level: Write)'
+  - 'State-changing action `ec2:ModifySubnetAttribute` on Resource: `*` (IAM access level: Write)'
+  - 'State-changing action `ec2:ModifyVpcAttribute` on Resource: `*` (IAM access level: Write)'
+  - 'State-changing action `ec2:ModifyVpcEndpoint` on Resource: `*` (IAM access level: Write)'
+  - 'State-changing action `ec2:ModifyVpcEndpointConnectionNotification` on Resource: `*` (IAM access level: Write)'
+  - 'State-changing action `ec2:ModifyVpcEndpointServiceConfiguration` on Resource: `*` (IAM access level: Write)'
+  - 'State-changing action `ec2:ModifyVpcEndpointServicePermissions` on Resource: `*` (IAM access level: Permissions management)'
+  - 'State-changing action `ec2:ModifyVpcPeeringConnectionOptions` on Resource: `*` (IAM access level: Write)'
+  - 'State-changing action `ec2:ModifyVpcTenancy` on Resource: `*` (IAM access level: Write)'
+  - 'State-changing action `ec2:ModifyVpnConnection` on Resource: `*` (IAM access level: Write)'
+  - 'State-changing action `ec2:ModifyVpnConnectionOptions` on Resource: `*` (IAM access level: Write)'
+  - 'State-changing action `ec2:ModifyVpnTunnelCertificate` on Resource: `*` (IAM access level: Write)'
+  - 'State-changing action `ec2:ModifyVpnTunnelOptions` on Resource: `*` (IAM access level: Write)'
+  - 'State-changing action `ec2:MoveAddressToVpc` on Resource: `*` (IAM access level: Write)'
+  - 'State-changing action `ec2:RejectVpcEndpointConnections` on Resource: `*` (IAM access level: Write)'
+  - 'State-changing action `ec2:ReleaseAddress` on Resource: `*` (IAM access level: Write)'
+  - 'State-changing action `ec2:ReplaceNetworkAclAssociation` on Resource: `*` (IAM access level: Write)'
+  - 'State-changing action `ec2:ReplaceNetworkAclEntry` on Resource: `*` (IAM access level: Write)'
+  - 'State-changing action `ec2:ReplaceRoute` on Resource: `*` (IAM access level: Write)'
+  - 'State-changing action `ec2:ReplaceRouteTableAssociation` on Resource: `*` (IAM access level: Write)'
+  - 'State-changing action `ec2:ReplaceVpnTunnel` on Resource: `*` (IAM access level: Write)'
+  - 'Destructive action `ec2:ResetNetworkInterfaceAttribute` on Resource: `*` (blast radius = every resource in this account)'
+  - 'State-changing action `ec2:RestoreAddressToClassic` on Resource: `*` (IAM access level: Write)'
+  - 'State-changing action `ec2:UnassignIpv6Addresses` on Resource: `*` (IAM access level: Write)'
+  - 'State-changing action `ec2:UnassignPrivateIpAddresses` on Resource: `*` (IAM access level: Write)'
+  - 'State-changing action `ec2:UpdateSecurityGroupRuleDescriptionsEgress` on Resource: `*` (IAM access level: Write)'
+  - 'State-changing action `ec2:UpdateSecurityGroupRuleDescriptionsIngress` on Resource: `*` (IAM access level: Write)'
+  - 'State-changing action `sns:CreateTopic` on Resource: `*` (IAM access level: Permissions management)'
+  - 'Resource: `*` for autoscaling, cloudfront, cloudwatch, directconnect, ec2, elasticbeanstalk, elasticloadbalancing, logs,
+    route53, route53domains, sns (broad cross-resource read/access)'
+  - "`ec2:AttachNetworkInterface` is a high-impact mutation on broad resource \u2014 single API call can rewrite every matching\
+    \ resource in the account."
+  - "`ec2:CreateNetworkInterface` is a high-impact mutation on broad resource \u2014 single API call can rewrite every matching\
+    \ resource in the account."
+  - "`ec2:CreateRoute` is a high-impact mutation on broad resource \u2014 single API call can rewrite every matching resource\
+    \ in the account."
+  - "`ec2:CreateVpnConnection` is a high-impact mutation on broad resource \u2014 single API call can rewrite every matching\
+    \ resource in the account."
+  - "`ec2:ModifySecurityGroupRules` is a high-impact mutation on broad resource \u2014 single API call can rewrite every matching\
+    \ resource in the account."
+  - "`ec2:ModifyVpcEndpoint` is a high-impact mutation on broad resource \u2014 single API call can rewrite every matching\
+    \ resource in the account."
+  - "`ec2:ReplaceRoute` is a high-impact mutation on broad resource \u2014 single API call can rewrite every matching resource\
+    \ in the account."
+  - "`elasticloadbalancing:*` is a high-impact mutation on broad resource \u2014 single API call can rewrite every matching\
+    \ resource in the account."
+  - "`route53:*` is a high-impact mutation on broad resource \u2014 single API call can rewrite every matching resource in\
+    \ the account."
+  - '`ec2:DeleteFlowLogs` is catastrophic in blast radius (account governance / IAM total compromise / evidence destruction).
+    Always route to human review.'
+  - '`route53:*` is catastrophic in blast radius (account governance / IAM total compromise / evidence destruction). Always
+    route to human review.'
+  - 'State-changing action `ec2:AcceptVpcPeeringConnection` on Resource: `*` (IAM access level: Write)'
+  - 'State-changing action `ec2:AssociateSecurityGroupVpc` on Resource: `*` (IAM access level: Write)'
+  - 'State-changing action `ec2:AttachClassicLinkVpc` on Resource: `*` (IAM access level: Write)'
+  - 'State-changing action `ec2:AuthorizeSecurityGroupEgress` on Resource: `*` (IAM access level: Write)'
+  - 'State-changing action `ec2:AuthorizeSecurityGroupIngress` on Resource: `*` (IAM access level: Write)'
+  - 'State-changing action `ec2:CreateVpcPeeringConnection` on Resource: `*` (IAM access level: Write)'
+  - 'Destructive action `ec2:DeleteCustomerGateway` on Resource: `*` (blast radius = every resource in this account)'
+  - 'Destructive action `ec2:DeleteDhcpOptions` on Resource: `*` (blast radius = every resource in this account)'
+  - 'Destructive action `ec2:DeleteInternetGateway` on Resource: `*` (blast radius = every resource in this account)'
+  - 'Destructive action `ec2:DeleteNetworkAcl` on Resource: `*` (blast radius = every resource in this account)'
+  - 'Destructive action `ec2:DeleteNetworkAclEntry` on Resource: `*` (blast radius = every resource in this account)'
+  - 'Destructive action `ec2:DeleteRoute` on Resource: `*` (blast radius = every resource in this account)'
+  - 'Destructive action `ec2:DeleteRouteTable` on Resource: `*` (blast radius = every resource in this account)'
+  - 'Destructive action `ec2:DeleteSecurityGroup` on Resource: `*` (blast radius = every resource in this account)'
+  - 'Destructive action `ec2:DeleteVolume` on Resource: `*` (blast radius = every resource in this account)'
+  - 'Destructive action `ec2:DeleteVpcPeeringConnection` on Resource: `*` (blast radius = every resource in this account)'
+  - 'Destructive action `ec2:DetachClassicLinkVpc` on Resource: `*` (blast radius = every resource in this account)'
+  - 'Destructive action `ec2:DisableVpcClassicLink` on Resource: `*` (blast radius = every resource in this account)'
+  - 'Destructive action `ec2:DisassociateSecurityGroupVpc` on Resource: `*` (blast radius = every resource in this account)'
+  - 'State-changing action `ec2:EnableVpcClassicLink` on Resource: `*` (IAM access level: Write)'
+  - 'State-changing action `ec2:RejectVpcPeeringConnection` on Resource: `*` (IAM access level: Write)'
+  - 'Destructive action `ec2:RevokeSecurityGroupEgress` on Resource: `*` (blast radius = every resource in this account)'
+  - 'Destructive action `ec2:RevokeSecurityGroupIngress` on Resource: `*` (blast radius = every resource in this account)'
+  - 'Resource: `*` for ec2 (broad cross-resource read/access)'
+  - "`ec2:AuthorizeSecurityGroupEgress` is a high-impact mutation on broad resource \u2014 single API call can rewrite every\
+    \ matching resource in the account."
+  - "`ec2:AuthorizeSecurityGroupIngress` is a high-impact mutation on broad resource \u2014 single API call can rewrite every\
+    \ matching resource in the account."
+  - "`ec2:DeleteRoute` is a high-impact mutation on broad resource \u2014 single API call can rewrite every matching resource\
+    \ in the account."
+  - "`ec2:RevokeSecurityGroupEgress` is a high-impact mutation on broad resource \u2014 single API call can rewrite every\
+    \ matching resource in the account."
+  - "`ec2:RevokeSecurityGroupIngress` is a high-impact mutation on broad resource \u2014 single API call can rewrite every\
+    \ matching resource in the account."
+  - 'State-changing action `ec2:CreateLocalGatewayRoute` on Resource: `*` (IAM access level: Write)'
+  - 'State-changing action `ec2:CreateLocalGatewayRouteTableVpcAssociation` on Resource: `*` (IAM access level: Write)'
+  - 'Destructive action `ec2:DeleteLocalGatewayRoute` on Resource: `*` (blast radius = every resource in this account)'
+  - 'Destructive action `ec2:DeleteLocalGatewayRouteTableVpcAssociation` on Resource: `*` (blast radius = every resource in
+    this account)'
+  - 'Resource: `*` for s3 (broad cross-resource read/access)'
+  - '`iam:GetRole` on Resource: `*` touches sensitive service `iam`'
+  - '`iam:ListRoles` on Resource: `*` touches sensitive service `iam`'
+  - '`iam:PassRole` on Resource: `*` is a privilege-escalation path'
+  - 'State-changing action `iam:PassRole` on Resource: `*` (IAM access level: Permissions management)'
+  - '`networkmanager:*` grants every action in `networkmanager`'
+  - 'Resource: `*` for networkmanager (broad cross-resource read/access)'
+  - 'State-changing action `ec2:AcceptTransitGatewayVpcAttachment` on Resource: `*` (IAM access level: Write)'
+  - 'State-changing action `ec2:AssociateTransitGatewayRouteTable` on Resource: `*` (IAM access level: Write)'
+  - 'State-changing action `ec2:CreateTransitGateway` on Resource: `*` (IAM access level: Write)'
+  - 'State-changing action `ec2:CreateTransitGatewayRoute` on Resource: `*` (IAM access level: Write)'
+  - 'State-changing action `ec2:CreateTransitGatewayRouteTable` on Resource: `*` (IAM access level: Write)'
+  - 'State-changing action `ec2:CreateTransitGatewayVpcAttachment` on Resource: `*` (IAM access level: Write)'
+  - 'Destructive action `ec2:DeleteTransitGateway` on Resource: `*` (blast radius = every resource in this account)'
+  - 'Destructive action `ec2:DeleteTransitGatewayRoute` on Resource: `*` (blast radius = every resource in this account)'
+  - 'Destructive action `ec2:DeleteTransitGatewayRouteTable` on Resource: `*` (blast radius = every resource in this account)'
+  - 'Destructive action `ec2:DeleteTransitGatewayVpcAttachment` on Resource: `*` (blast radius = every resource in this account)'
+  - 'Destructive action `ec2:DisableTransitGatewayRouteTablePropagation` on Resource: `*` (blast radius = every resource in
+    this account)'
+  - 'Destructive action `ec2:DisassociateTransitGatewayRouteTable` on Resource: `*` (blast radius = every resource in this
+    account)'
+  - 'State-changing action `ec2:EnableTransitGatewayRouteTablePropagation` on Resource: `*` (IAM access level: Write)'
+  - 'State-changing action `ec2:ExportTransitGatewayRoutes` on Resource: `*` (IAM access level: Write)'
+  - 'State-changing action `ec2:ModifyTransitGateway` on Resource: `*` (IAM access level: Write)'
+  - 'State-changing action `ec2:ModifyTransitGatewayVpcAttachment` on Resource: `*` (IAM access level: Write)'
+  - 'State-changing action `ec2:RejectTransitGatewayVpcAttachment` on Resource: `*` (IAM access level: Write)'
+  - 'State-changing action `ec2:ReplaceTransitGatewayRoute` on Resource: `*` (IAM access level: Write)'
+  - '`iam:CreateServiceLinkedRole` on Resource: `*` touches sensitive service `iam`'
+  - 'State-changing action `iam:CreateServiceLinkedRole` on Resource: `*` (IAM access level: Permissions management)'
+  - 'Resource: `*` for route53-recovery-readiness (broad cross-resource read/access)'
+  - '`logs:GetLogEvents` on broad resource reads content that frequently contains secrets / sensitive data (boot logs, command
+    output, log streams, message bodies).'
+  - '`directconnect:*` sets up ongoing cross-account / persistent exfiltration in a single call. The blast is ''everything
+    that flows through this resource from now on,'' not just what exists today.'
+  opus_score: null
+  opus_factors: null
+  opus_reasoning: null
+  gap_classification: pending

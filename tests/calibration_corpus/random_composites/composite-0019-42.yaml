@@ -1,0 +1,70 @@
+name: composite-0019-42
+source_policies:
+- aws_managed/AWSQuickSightDescribeRedshift.yaml
+- aws_managed/AmazonVPCReachabilityAnalyzerPathComponentReadPolicy.yaml
+- aws_managed/AmazonEMRServerlessServiceRolePolicy.yaml
+source_hash: 85c55afcf6afd2c5
+policy:
+  Version: '2012-10-17'
+  Statement:
+  - Action:
+    - redshift:Describe*
+    Effect: Allow
+    Resource: '*'
+  - Sid: NetworkFirewallPermissions
+    Effect: Allow
+    Action:
+    - network-firewall:Describe*
+    - network-firewall:List*
+    Resource: '*'
+  - Sid: EC2PolicyStatement
+    Effect: Allow
+    Action:
+    - ec2:CreateNetworkInterface
+    - ec2:DeleteNetworkInterface
+    - ec2:DescribeNetworkInterfaces
+    - ec2:DescribeSecurityGroups
+    - ec2:DescribeSubnets
+    - ec2:DescribeVpcs
+    - ec2:DescribeDhcpOptions
+    - ec2:DescribeRouteTables
+    Resource: '*'
+  - Sid: CloudWatchPolicyStatement
+    Effect: Allow
+    Action:
+    - cloudwatch:PutMetricData
+    Resource:
+    - '*'
+    Condition:
+      StringEquals:
+        cloudwatch:namespace:
+        - AWS/EMRServerless
+        - AWS/Usage
+request:
+  spec:
+    access_type: read-write
+    duration:
+      duration_hours: 2
+    resource_constraints: []
+  user: contractor-frank
+  justification: 60-day integration project read access
+scores:
+  det_score: 8
+  det_factors:
+  - "Action-name wildcard `redshift:Describe*` on broad resource \u2014 matches multiple redshift APIs at once"
+  - 'Resource: `*` for redshift (broad cross-resource read/access)'
+  - "Action-name wildcard `network-firewall:Describe*` on broad resource \u2014 matches multiple network-firewall APIs at\
+    \ once"
+  - "Action-name wildcard `network-firewall:List*` on broad resource \u2014 matches multiple network-firewall APIs at once"
+  - 'Resource: `*` for network-firewall (broad cross-resource read/access)'
+  - 'State-changing action `ec2:CreateNetworkInterface` on Resource: `*` (IAM access level: Write)'
+  - 'Destructive action `ec2:DeleteNetworkInterface` on Resource: `*` (blast radius = every resource in this account)'
+  - 'Resource: `*` for ec2 (broad cross-resource read/access)'
+  - "`ec2:CreateNetworkInterface` is a high-impact mutation on broad resource \u2014 single API call can rewrite every matching\
+    \ resource in the account."
+  - 'State-changing action `cloudwatch:PutMetricData` on Resource: `*` (IAM access level: Write)'
+  - 'Resource: `*` for cloudwatch (broad cross-resource read/access)'
+  opus_score: null
+  opus_factors: null
+  opus_reasoning: null
+  gap_classification: pending

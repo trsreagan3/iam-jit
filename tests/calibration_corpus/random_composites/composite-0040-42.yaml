@@ -1,0 +1,125 @@
+name: composite-0040-42
+source_policies:
+- aws_managed/AmazonEC2ReadOnlyAccess.yaml
+- aws_managed/AWSKeyManagementServiceCustomKeyStoresServiceRolePolicy.yaml
+- aws_managed/AWSDataExchangeDataGrantReceiverFullAccess.yaml
+source_hash: 2af1ca70f2a4aee0
+policy:
+  Version: '2012-10-17'
+  Statement:
+  - Effect: Allow
+    Action:
+    - ec2:Describe*
+    - ec2:GetSecurityGroupsForVpc
+    Resource: '*'
+  - Effect: Allow
+    Action: elasticloadbalancing:Describe*
+    Resource: '*'
+  - Effect: Allow
+    Action:
+    - cloudwatch:ListMetrics
+    - cloudwatch:GetMetricStatistics
+    - cloudwatch:Describe*
+    Resource: '*'
+  - Effect: Allow
+    Action: autoscaling:Describe*
+    Resource: '*'
+  - Effect: Allow
+    Action:
+    - cloudhsm:Describe*
+    - ec2:CreateNetworkInterface
+    - ec2:AuthorizeSecurityGroupIngress
+    - ec2:CreateSecurityGroup
+    - ec2:DescribeSecurityGroups
+    - ec2:RevokeSecurityGroupEgress
+    - ec2:DeleteSecurityGroup
+    - ec2:DescribeVpcs
+    - ec2:DescribeNetworkAcls
+    - ec2:DescribeNetworkInterfaces
+    Resource: '*'
+  - Sid: DataExchangeReadOnlyActions
+    Effect: Allow
+    Action:
+    - dataexchange:GetDataSet
+    - dataexchange:ListDataSets
+    - dataexchange:GetRevision
+    - dataexchange:ListDataSetRevisions
+    - dataexchange:GetAsset
+    - dataexchange:ListRevisionAssets
+    - dataexchange:SendApiAsset
+    Resource: '*'
+  - Sid: DataExchangeExportActions
+    Effect: Allow
+    Action:
+    - dataexchange:CreateJob
+    - dataexchange:StartJob
+    - dataexchange:CancelJob
+    Resource: '*'
+    Condition:
+      StringEquals:
+        dataexchange:JobType:
+        - EXPORT_ASSETS_TO_S3
+        - EXPORT_ASSET_TO_SIGNED_URL
+        - EXPORT_REVISIONS_TO_S3
+  - Sid: DataExchangeEventActionActions
+    Effect: Allow
+    Action:
+    - dataexchange:CreateEventAction
+    - dataexchange:UpdateEventAction
+    - dataexchange:DeleteEventAction
+    - dataexchange:GetEventAction
+    - dataexchange:ListEventActions
+    Resource: '*'
+  - Sid: DataExchangeDataGrantActions
+    Effect: Allow
+    Action:
+    - dataexchange:AcceptDataGrant
+    - dataexchange:ListReceivedDataGrants
+    - dataexchange:GetReceivedDataGrant
+    Resource: '*'
+request:
+  spec:
+    access_type: read-write
+    duration:
+      duration_hours: 8
+    resource_constraints: []
+  user: ci-bot
+  justification: rotate signing key via CI pipeline
+scores:
+  det_score: 8
+  det_factors:
+  - "Action-name wildcard `ec2:Describe*` on broad resource \u2014 matches multiple ec2 APIs at once"
+  - 'Resource: `*` for ec2 (broad cross-resource read/access)'
+  - "Action-name wildcard `elasticloadbalancing:Describe*` on broad resource \u2014 matches multiple elasticloadbalancing\
+    \ APIs at once"
+  - 'Resource: `*` for elasticloadbalancing (broad cross-resource read/access)'
+  - "Action-name wildcard `cloudwatch:Describe*` on broad resource \u2014 matches multiple cloudwatch APIs at once"
+  - 'Resource: `*` for cloudwatch (broad cross-resource read/access)'
+  - "Action-name wildcard `autoscaling:Describe*` on broad resource \u2014 matches multiple autoscaling APIs at once"
+  - 'Resource: `*` for autoscaling (broad cross-resource read/access)'
+  - "Action-name wildcard `cloudhsm:Describe*` on broad resource \u2014 matches multiple cloudhsm APIs at once"
+  - 'State-changing action `ec2:CreateNetworkInterface` on Resource: `*` (IAM access level: Write)'
+  - 'State-changing action `ec2:AuthorizeSecurityGroupIngress` on Resource: `*` (IAM access level: Write)'
+  - 'State-changing action `ec2:CreateSecurityGroup` on Resource: `*` (IAM access level: Write)'
+  - 'Destructive action `ec2:RevokeSecurityGroupEgress` on Resource: `*` (blast radius = every resource in this account)'
+  - 'Destructive action `ec2:DeleteSecurityGroup` on Resource: `*` (blast radius = every resource in this account)'
+  - 'Resource: `*` for cloudhsm, ec2 (broad cross-resource read/access)'
+  - "`ec2:CreateNetworkInterface` is a high-impact mutation on broad resource \u2014 single API call can rewrite every matching\
+    \ resource in the account."
+  - "`ec2:AuthorizeSecurityGroupIngress` is a high-impact mutation on broad resource \u2014 single API call can rewrite every\
+    \ matching resource in the account."
+  - "`ec2:RevokeSecurityGroupEgress` is a high-impact mutation on broad resource \u2014 single API call can rewrite every\
+    \ matching resource in the account."
+  - 'State-changing action `dataexchange:SendApiAsset` on Resource: `*` (IAM access level: Write)'
+  - 'Resource: `*` for dataexchange (broad cross-resource read/access)'
+  - 'State-changing action `dataexchange:CreateJob` on Resource: `*` (IAM access level: Write)'
+  - 'State-changing action `dataexchange:StartJob` on Resource: `*` (IAM access level: Write)'
+  - 'Destructive action `dataexchange:CancelJob` on Resource: `*` (blast radius = every resource in this account)'
+  - 'State-changing action `dataexchange:CreateEventAction` on Resource: `*` (IAM access level: Write)'
+  - 'State-changing action `dataexchange:UpdateEventAction` on Resource: `*` (IAM access level: Write)'
+  - 'Destructive action `dataexchange:DeleteEventAction` on Resource: `*` (blast radius = every resource in this account)'
+  - 'State-changing action `dataexchange:AcceptDataGrant` on Resource: `*` (IAM access level: Write)'
+  opus_score: null
+  opus_factors: null
+  opus_reasoning: null
+  gap_classification: pending

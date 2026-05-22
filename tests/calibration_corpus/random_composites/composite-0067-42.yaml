@@ -1,0 +1,63 @@
+name: composite-0067-42
+source_policies:
+- aws_managed/AWSVendorInsightsVendorReadOnly.yaml
+- aws_managed/AWSElasticDisasterRecoveryConversionServerPolicy.yaml
+source_hash: 2eefc0f0c4d44fe8
+policy:
+  Version: '2012-10-17'
+  Statement:
+  - Effect: Allow
+    Action: aws-marketplace:DescribeEntity
+    Resource: arn:aws:aws-marketplace:*:*:*/SaaSProduct/*
+  - Effect: Allow
+    Action: aws-marketplace:ListEntities
+    Resource: '*'
+  - Effect: Allow
+    Action:
+    - vendor-insights:GetDataSource
+    - vendor-insights:ListDataSources
+    - vendor-insights:ListSecurityProfiles
+    - vendor-insights:GetSecurityProfile
+    - vendor-insights:GetSecurityProfileSnapshot
+    - vendor-insights:ListSecurityProfileSnapshots
+    - vendor-insights:ListTagsForResource
+    Resource: '*'
+  - Effect: Allow
+    Action:
+    - artifact:GetReport
+    - artifact:GetReportMetadata
+    - artifact:GetTermForReport
+    - artifact:ListReports
+    Resource: arn:aws:artifact:*::report/*
+  - Sid: DRSConversionServerPolicy1
+    Effect: Allow
+    Action:
+    - drs:SendClientMetricsForDrs
+    - drs:SendClientLogsForDrs
+    Resource: '*'
+  - Sid: DRSConversionServerPolicy2
+    Effect: Allow
+    Action:
+    - drs:GetChannelCommandsForDrs
+    - drs:SendChannelCommandResultForDrs
+    Resource: '*'
+request:
+  spec:
+    access_type: read-write
+    duration:
+      duration_hours: 1
+    resource_constraints: []
+  user: sre-carol
+  justification: scale-out emergency for us-east-1 outage
+scores:
+  det_score: 6
+  det_factors:
+  - 'Resource: `*` for vendor-insights (broad cross-resource read/access)'
+  - 'State-changing action `drs:SendClientMetricsForDrs` on Resource: `*` (IAM access level: Write)'
+  - 'State-changing action `drs:SendClientLogsForDrs` on Resource: `*` (IAM access level: Write)'
+  - 'Resource: `*` for drs (broad cross-resource read/access)'
+  - 'State-changing action `drs:SendChannelCommandResultForDrs` on Resource: `*` (IAM access level: Write)'
+  opus_score: null
+  opus_factors: null
+  opus_reasoning: null
+  gap_classification: pending

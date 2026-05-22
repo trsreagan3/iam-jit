@@ -1,0 +1,162 @@
+name: composite-0096-42
+source_policies:
+- aws_managed/AmazonDMSVPCManagementRole.yaml
+- aws_managed/AmazonManagedBlockchainServiceRolePolicy.yaml
+- aws_managed/AmazonDynamoDBFullAccesswithDataPipeline.yaml
+source_hash: 8c996786226ee603
+policy:
+  Version: '2012-10-17'
+  Statement:
+  - Sid: Statement1
+    Effect: Allow
+    Action:
+    - ec2:CreateNetworkInterface
+    - ec2:DeleteNetworkInterface
+    - ec2:DescribeAvailabilityZones
+    - ec2:DescribeDhcpOptions
+    - ec2:DescribeInternetGateways
+    - ec2:DescribeNetworkInterfaces
+    - ec2:DescribeSecurityGroups
+    - ec2:DescribeSubnets
+    - ec2:DescribeVpcs
+    - ec2:ModifyNetworkInterfaceAttribute
+    Resource: '*'
+  - Action:
+    - logs:CreateLogGroup
+    Effect: Allow
+    Resource: arn:aws:logs:*:*:log-group:/aws/managedblockchain/*
+  - Effect: Allow
+    Action:
+    - logs:CreateLogStream
+    - logs:PutLogEvents
+    - logs:DescribeLogStreams
+    Resource:
+    - arn:aws:logs:*:*:log-group:/aws/managedblockchain/*:log-stream:*
+  - Action:
+    - cloudwatch:DeleteAlarms
+    - cloudwatch:DescribeAlarmHistory
+    - cloudwatch:DescribeAlarms
+    - cloudwatch:DescribeAlarmsForMetric
+    - cloudwatch:GetMetricStatistics
+    - cloudwatch:ListMetrics
+    - cloudwatch:PutMetricAlarm
+    - dynamodb:*
+    - sns:CreateTopic
+    - sns:DeleteTopic
+    - sns:ListSubscriptions
+    - sns:ListSubscriptionsByTopic
+    - sns:ListTopics
+    - sns:Subscribe
+    - sns:Unsubscribe
+    - sns:SetTopicAttributes
+    Effect: Allow
+    Resource: '*'
+    Sid: DDBConsole
+  - Action:
+    - lambda:*
+    - iam:ListRoles
+    Effect: Allow
+    Resource: '*'
+    Sid: DDBConsoleTriggers
+  - Action:
+    - datapipeline:*
+    - iam:ListRoles
+    Effect: Allow
+    Resource: '*'
+    Sid: DDBConsoleImportExport
+  - Effect: Allow
+    Action:
+    - iam:GetRolePolicy
+    - iam:PassRole
+    Resource:
+    - '*'
+    Sid: IAMEDPRoles
+  - Action:
+    - ec2:CreateTags
+    - ec2:DescribeInstances
+    - ec2:RunInstances
+    - ec2:StartInstances
+    - ec2:StopInstances
+    - ec2:TerminateInstances
+    - elasticmapreduce:*
+    - datapipeline:*
+    Effect: Allow
+    Resource: '*'
+    Sid: EMR
+  - Action:
+    - s3:DeleteObject
+    - s3:Get*
+    - s3:List*
+    - s3:Put*
+    Effect: Allow
+    Resource:
+    - '*'
+    Sid: S3
+request:
+  spec:
+    access_type: read-write
+    duration:
+      duration_hours: 1
+    resource_constraints: []
+  user: dev-bob
+  justification: 'reproduce customer ticket #4422 locally'
+scores:
+  det_score: 9
+  det_factors:
+  - 'State-changing action `ec2:CreateNetworkInterface` on Resource: `*` (IAM access level: Write)'
+  - 'Destructive action `ec2:DeleteNetworkInterface` on Resource: `*` (blast radius = every resource in this account)'
+  - 'State-changing action `ec2:ModifyNetworkInterfaceAttribute` on Resource: `*` (IAM access level: Write)'
+  - 'Resource: `*` for ec2 (broad cross-resource read/access)'
+  - "`ec2:CreateNetworkInterface` is a high-impact mutation on broad resource \u2014 single API call can rewrite every matching\
+    \ resource in the account."
+  - 'State-changing action `logs:CreateLogGroup` on Resource: `*` (IAM access level: Write)'
+  - 'Resource: `*` for logs (broad cross-resource read/access)'
+  - 'State-changing action `logs:CreateLogStream` on Resource: `*` (IAM access level: Write)'
+  - 'State-changing action `logs:PutLogEvents` on Resource: `*` (IAM access level: Write)'
+  - '`dynamodb:*` grants every action in `dynamodb`'
+  - 'Destructive action `cloudwatch:DeleteAlarms` on Resource: `*` (blast radius = every resource in this account)'
+  - 'State-changing action `cloudwatch:PutMetricAlarm` on Resource: `*` (IAM access level: Write)'
+  - 'State-changing action `sns:CreateTopic` on Resource: `*` (IAM access level: Permissions management)'
+  - 'Destructive action `sns:DeleteTopic` on Resource: `*` (blast radius = every resource in this account)'
+  - 'State-changing action `sns:Subscribe` on Resource: `*` (IAM access level: Write)'
+  - 'State-changing action `sns:Unsubscribe` on Resource: `*` (IAM access level: Write)'
+  - 'State-changing action `sns:SetTopicAttributes` on Resource: `*` (IAM access level: Permissions management)'
+  - 'Resource: `*` for cloudwatch, dynamodb, sns (broad cross-resource read/access)'
+  - '`lambda:*` grants every action in `lambda`'
+  - '`iam:ListRoles` on Resource: `*` touches sensitive service `iam`'
+  - "`lambda:*` is a high-impact mutation on broad resource \u2014 single API call can rewrite every matching resource in\
+    \ the account."
+  - '`datapipeline:*` grants every action in `datapipeline`'
+  - '`iam:GetRolePolicy` on Resource: `*` touches sensitive service `iam`'
+  - '`iam:PassRole` on Resource: `*` is a privilege-escalation path'
+  - 'State-changing action `iam:PassRole` on Resource: `*` (IAM access level: Permissions management)'
+  - '`elasticmapreduce:*` grants every action in `elasticmapreduce`'
+  - 'State-changing action `ec2:CreateTags` on Resource: `*` (IAM access level: Tagging)'
+  - 'State-changing action `ec2:RunInstances` on Resource: `*` (IAM access level: Write)'
+  - 'State-changing action `ec2:StartInstances` on Resource: `*` (IAM access level: Write)'
+  - 'Destructive action `ec2:StopInstances` on Resource: `*` (blast radius = every resource in this account)'
+  - 'Destructive action `ec2:TerminateInstances` on Resource: `*` (blast radius = every resource in this account)'
+  - 'Resource: `*` for datapipeline, ec2, elasticmapreduce (broad cross-resource read/access)'
+  - "Action-name wildcard `s3:Get*` on broad resource \u2014 matches multiple s3 APIs at once"
+  - "Action-name wildcard `s3:List*` on broad resource \u2014 matches multiple s3 APIs at once"
+  - "Action-name glob `s3:Put*` matches catastrophic actions including s3:PutBucketPolicy \u2014 the glob is a superset of\
+    \ always-human-review actions."
+  - 'Destructive action `s3:DeleteObject` on Resource: `*` (blast radius = every resource in this account)'
+  - 'Resource: `*` for s3 (broad cross-resource read/access)'
+  - "`s3:Put*` is a high-impact mutation on broad resource \u2014 single API call can rewrite every matching resource in the\
+    \ account."
+  - '`s3:Put*` is catastrophic in blast radius (account governance / IAM total compromise / evidence destruction). Always
+    route to human review.'
+  - 'Code-execution primitive on broad resource: ec2:RunInstances. Deploys attacker-controlled code that runs under whatever
+    role the matched resources use. Even without explicit PassRole, the existing roles of matched resources become the attack
+    target.'
+  - 'Code-execution-via-role composition: ec2:RunInstances (+ 2 more) combined with iam:PassRole = RCE as the passed role.
+    Single-statement scoring underweights this; the composition is full account-compromise tier.'
+  - '`dynamodb:*` on broad resource reads content that frequently contains secrets / sensitive data (boot logs, command output,
+    log streams, message bodies).'
+  - '`lambda:*` sets up ongoing cross-account / persistent exfiltration in a single call. The blast is ''everything that flows
+    through this resource from now on,'' not just what exists today.'
+  opus_score: null
+  opus_factors: null
+  opus_reasoning: null
+  gap_classification: pending
