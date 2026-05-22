@@ -1198,6 +1198,21 @@ class ProxyConfig:
     security_lake_role_arn: str | None = None
     security_lake_rotation_seconds: int = 300
 
+    # #317 — cloud-neutral S3-compatible NDJSON object-storage sink.
+    # All fields OFF by default. Per [[self-host-zero-billing-
+    # dependency]] the bucket is operator-owned (operator creates;
+    # bouncer never creates). Works across AWS S3 (native), GCS
+    # interop, Azure Blob S3-compat, MinIO, R2, B2, DigitalOcean
+    # Spaces; the same SigV4 signature signs every endpoint variant.
+    audit_object_storage_endpoint: str | None = None
+    audit_object_storage_bucket: str | None = None
+    audit_object_storage_prefix: str = ""
+    audit_object_storage_region: str = "us-east-1"
+    audit_object_storage_credentials_file: str | None = None
+    audit_object_storage_rotation_minutes: int = 5
+    audit_object_storage_max_size_mb: int = 16
+    audit_object_storage_instance_id: str | None = None
+
     audit_events_token: str | None = None
     """#271 — bearer token required on GET /audit/events when the
     proxy is bound off-loopback. None + loopback bind = no auth (the
@@ -2993,6 +3008,7 @@ async def serve(config: ProxyConfig, *, store: BouncerStore) -> None:
     audit_rule_engine = None
     session_recorder = None
     audit_security_lake_writer = None
+    audit_object_storage_writer = None
     # #285 — per-session NDJSON recording. Default OFF; only initialised
     # when the operator passed `--record-sessions-dir`. start() is
     # synchronous (matches the recorder's synchronous record() path).
@@ -3048,6 +3064,48 @@ async def serve(config: ProxyConfig, *, store: BouncerStore) -> None:
             sl_status.get("caller_arn", ""),
             config.security_lake_role_arn or "(default-chain)",
             config.security_lake_rotation_seconds,
+        )
+
+    # #317 — cloud-neutral S3-compatible NDJSON object-storage sink.
+    # Default OFF; only constructed when --audit-object-storage-bucket
+    # is set. start() probes the bucket (head_bucket) so credential /
+    # endpoint / bucket-name misconfigurations surface immediately
+    # rather than at first flush. Per [[self-host-zero-billing-
+    # dependency]] the bucket is operator-owned (operator creates;
+    # bouncer never creates).
+    if config.audit_object_storage_bucket:
+        from .audit_export import (
+            ObjectStorageWriter,
+            load_object_storage_credentials,
+        )
+        os_creds = load_object_storage_credentials(
+            config.audit_object_storage_credentials_file,
+        )
+        audit_object_storage_writer = ObjectStorageWriter(
+            endpoint_url=config.audit_object_storage_endpoint,
+            bucket=config.audit_object_storage_bucket,
+            prefix=config.audit_object_storage_prefix,
+            region=config.audit_object_storage_region or "us-east-1",
+            credentials=os_creds,
+            product="ibounce",
+            instance_id=config.audit_object_storage_instance_id,
+            rotation_minutes=config.audit_object_storage_rotation_minutes,
+            max_size_mb=config.audit_object_storage_max_size_mb,
+        )
+        audit_object_storage_writer.start()
+        register_audit_object_storage_writer(audit_object_storage_writer)
+        os_status = audit_object_storage_writer.status()
+        logger.info(
+            "audit-export object-storage enabled: endpoint=%s "
+            "bucket=%s prefix=%s region=%s instance_id=%s "
+            "rotation=%dm max_size=%dMB",
+            config.audit_object_storage_endpoint,
+            config.audit_object_storage_bucket,
+            config.audit_object_storage_prefix,
+            config.audit_object_storage_region,
+            os_status.get("instance_id", ""),
+            config.audit_object_storage_rotation_minutes,
+            config.audit_object_storage_max_size_mb,
         )
 
     # #280 — per-org notification routing engine. When configured, the
@@ -3413,6 +3471,17 @@ async def serve(config: ProxyConfig, *, store: BouncerStore) -> None:
                     "audit-export Security Lake writer stop failed: %s", e,
                 )
             register_audit_security_lake_writer(None)
+        # #317 — object-storage teardown finalizes the active NDJSON
+        # buffer synchronously (per the spec) so a clean shutdown
+        # doesn't drop in-memory rows.
+        if audit_object_storage_writer is not None:
+            try:
+                audit_object_storage_writer.stop()
+            except Exception as e:
+                logger.warning(
+                    "audit-export object-storage writer stop failed: %s", e,
+                )
+            register_audit_object_storage_writer(None)
         if audit_log_writer is not None:
             try:
                 await audit_log_writer.stop()
