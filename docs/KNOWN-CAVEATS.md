@@ -84,6 +84,24 @@ Tracking: every BUG entry has a task number (e.g., #299). v1.0 release gate: eve
 - **Workaround until fix:** operator-side cron + manual `*bounce diagnostics bundle` (#277)
 - **Task:** #311.
 
+## A15. Cloud-neutral object-storage NDJSON sink (S3-compatible) — `STATUS: QUEUED`
+- **Severity:** HIGH (per founder direction 2026-05-22: bouncers other than ibounce are cloud-neutral; AWS-only Security Lake adapter alone isn't enough)
+- **Why pre-launch:** operators need their SIEM/security-tool to collect bouncer logs from a bucket. Today: HTTPS webhook (synchronous push) + Security Lake (AWS-only parquet). Operators on GCS / Azure / MinIO / R2 / B2 have no pull-based collection path.
+- **What ships:**
+  - New exporter: `--audit-object-storage-endpoint URL --audit-object-storage-bucket NAME --audit-object-storage-prefix PREFIX --audit-object-storage-region REGION`
+  - Uses S3-compatible API; works with AWS S3, GCS (via S3 interop), Azure Blob (via S3-compat layer), MinIO, Cloudflare R2, Backblaze B2, DigitalOcean Spaces, etc.
+  - Authentication: standard AWS-style env vars (AWS_ACCESS_KEY_ID / AWS_SECRET_ACCESS_KEY) OR explicit `--audit-object-storage-credentials-file`
+  - Output format: NDJSON (one OCSF event per line, gzip-compressed); files rotated every `--audit-object-storage-rotation-minutes` (default 5) OR size cap
+  - Path convention: `{prefix}/year=YYYY/month=MM/day=DD/hour=HH/{product}-{instance_id}-{timestamp}.jsonl.gz`
+  - SIEM-pull-friendly: collectors do `LIST + GET` against the prefix; new files appear at predictable cadence
+  - Works ALONGSIDE existing webhook / Security Lake adapters (operator can run multiple sinks simultaneously)
+- **What does NOT ship in v1.0** (deferred to v1.1 per `[[don't-tailor-to-lighthouse]]`):
+  - Native GCS auth (Workload Identity / Service Account)
+  - Native Azure Blob auth (Managed Identity)
+  - Reason: S3-compatible covers ~95% of "drop logs in a bucket" via interop; native auth is friction-reducer for v1.1
+- **Engineering scope:** ~3-4 days cross-product
+- **Task:** #317.
+
 ## A12. gbounce: no domain blacklist + wildcard support — `STATUS: QUEUED`
 - **Severity:** HIGH (pre-launch feature gap; operators need to block specific domains without MITM)
 - **Symptom:** gbounce can audit-log every CONNECT, but it can't REFUSE one based on destination host. Operators who want "block this agent from calling api.openai.com" have no way to do it.
