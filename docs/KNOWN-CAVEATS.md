@@ -23,11 +23,12 @@ Tracking: every BUG entry has a task number (e.g., #299). v1.0 release gate: eve
 - **Fix:** iam-roles `5237ad4` — expanded eligible reasons in `_apply_mfa_and_self_approve_enforcement` to include `feature_disabled` (solo-mode default).
 - **Task:** #297 — completed 2026-05-22.
 
-## A2. dbounce: SCRAM-SHA-256 handshake hangs — `STATUS: IN FLIGHT`
+## A2. dbounce: SCRAM-SHA-256 handshake hangs — `STATUS: FIXED` ✓
 - **Severity:** CRITICAL
-- **Symptom:** Modern PG 14+ defaults to SCRAM. Connecting any psql/libpq client through dbounce hangs forever during initial auth.
-- **Workaround until fix:** edit upstream Postgres `pg_hba.conf` to use `trust` or `md5` auth.
-- **Task:** #299 — agent spawned 2026-05-22 (in flight).
+- **Was:** Modern PG 14+ defaults to SCRAM. Connecting any psql/libpq client through dbounce hung forever during initial auth — the proxy forwarded SCRAM bytes upstream but the AuthenticationOk / ParameterStatus / BackendKeyData / ReadyForQuery responses never propagated back to the client.
+- **Root cause:** `pumpAuthPhase` in `internal/proxy/forward.go` treated every `AuthenticationRequest` sub-code other than 0 (Ok) as "client-response required" and blocked on a client read. SCRAM walks `R/10` (SASL) → `R/11` (SASLContinue) → `R/12` (SASLFinal) → `R/0` (Ok); sub-code 12 is server-only with no client response. The proxy deadlocked on the spurious client read.
+- **Fix:** dbounce — introduced `authRequestExpectsClientResponse(uint32) bool` enumerating which PG protocol auth sub-codes trigger a client follow-up. Sub-codes 0, 2, 6, 12 (and any unknown code) fall through to the next upstream read instead of blocking on the client. Wire-protocol pass-through invariants preserved (no SCRAM bytes inspected/named). Regression coverage: `TestForward_SCRAMSHA256HandshakeCompletes` + `TestAuthRequestExpectsClientResponse` (unit) + `TestIntegration_SCRAMAuthThroughProxy` (build tag `integration`). End-to-end: psycopg2 through dbounce against PG 16 with `scram-sha-256` now succeeds in ~95ms.
+- **Task:** #299 — completed 2026-05-22.
 
 ## A3. ibounce: hardcoded HTTPS upstream scheme — `STATUS: IN FLIGHT`
 - **Severity:** CRITICAL
