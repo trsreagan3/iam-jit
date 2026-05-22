@@ -1,223 +1,160 @@
-# Known caveats + limitations (cross-product)
+# Known caveats + bugs (cross-product)
 
-**Read this BEFORE you install** — knowing the boundaries up-front saves hours of "why isn't this working?" debugging. Every claim in the README has a footnote in here.
+**Read this BEFORE you install** — knowing the boundaries up-front saves hours of debugging.
 
-This doc is mirrored across all 5 product repos (iam-jit, ibounce, kbounce, dbounce, gbounce) — same content, same path. Last updated 2026-05-22 after UAT findings.
+This doc is **strictly split into two sections**:
 
-## Categorization
+- **§A — LAUNCH-BLOCKING BUGS** — issues that must be FIXED before v1.0. Severity CRITICAL or HIGH. Each has a fix-tracker task. The product does NOT launch until every entry in §A is FIXED.
+- **§B — DOCUMENTED LIMITS** — design choices + gaps. NOT launch-blocking. Documented for transparency.
 
-Each caveat is one of:
-- **BUG** — will be fixed; track via the linked task. Workaround documented until fix lands.
-- **DESIGN** — intentional limit per architectural choice (e.g., `[[ibounce-honest-positioning]]`); not going away.
-- **GAP** — known incomplete; on the roadmap; documented version expectations.
+If a user hits something not in either section → it's a documentation gap. File an issue.
 
----
-
-## ibounce (AWS IAM gating proxy)
-
-### BUG: hardcoded HTTPS upstream scheme (UAT 2026-05-22)
-**Symptom:** Pointing ibounce at a plain-HTTP upstream (e.g., LocalStack at `http://127.0.0.1:4566`) fails with connection errors. The proxy code internally uses `https://` regardless of the upstream URL scheme.
-
-**Severity:** CRITICAL — blocks local development, blocks LocalStack-based testing.
-
-**Workaround:** point at an HTTPS upstream OR patch `src/iam_jit/bouncer/proxy.py` to honor the scheme of `--upstream`.
-
-**Fix tracking:** queued — see task list. Target v1.0.1.
-
-### DESIGN: SigV4-only request classification
-**Symptom:** Plain GET requests to ibounce return `403 "unclassifiable request — no SigV4 auth header"`.
-
-**Why:** ibounce gates AWS SDK calls. AWS SDKs always sign requests with SigV4. A bare GET isn't an AWS SDK call.
-
-**For browsers viewing the UI:** ibounce uses the `Accept` header to discriminate. Browsers (sending `Accept: text/html`) get the live audit UI. SDKs (sending JSON Accept) hit the proxy path.
-
-### DESIGN: ibounce gates AWS calls only
-**Symptom:** Your kubectl / psql / curl calls work normally — ibounce doesn't see them.
-
-**Why:** ibounce is the AWS-specific bouncer. K8s → kbounce. DB → dbounce. HTTP → gbounce.
-
-### GAP: ibounce safe-default = `readonly-admin-minus`
-**Behavior:** First-time-run profile is "all reads allowed except sensitive-data reads; all writes prompt." This is intentionally permissive on reads + strict on writes per `[[safe-default-is-readonly-admin-minus]]`.
-
-**If you want stricter (block all reads from sensitive prefixes):** use `--profile strict-admin` instead.
-
-### GAP: ibounce safe-default catches are VERB-level, not CONTENT-aware (UAT 2026-05-22)
-**Symptom:** The "catches" of hostile attempts (e.g., `iam:CreateRole` with wildcard policy) come from the same uniform "writes denied unless allowlisted" rule that also denies legitimate writes (PutPublicAccessBlock, PutBucketVersioning, CreateLogGroup, NetworkPolicy create, etc.). The denies are CORRECT outcomes but cosmetic — the bouncer can't tell a scoped `iam:CreateRole` from an `iam:*` wildcard one.
-
-**Why this matters:** without sync-deny-prompt enabled, every legitimate write is a hard fail with no escape valve. With sync-deny-prompt enabled, you'll prompt-storm on legitimate work.
-
-**For meaningful content-aware risk decisions:** add iam-jit to the path (Variant C — `iam-jit + ibounce`). iam-jit's policy-content risk scoring gives the scope-aware decision; ibounce gives the atomic gate. Per `[[four-products-one-brand]]`: they're complementary, not redundant.
-
-**Fix tracking:** queued. The right architectural answer is "ibounce calls into iam-jit's scorer for content-aware decisions" — design slice for v1.1.
+Last updated 2026-05-22.
 
 ---
 
-## kbounce (Kubernetes API gating proxy)
+# §A — LAUNCH-BLOCKING BUGS (must fix before v1.0)
 
-### BUG: kubectl OpenAPI discovery classified as "unclassifiable" (UAT 2026-05-22)
-**Symptom:** Every `kubectl` invocation fails. The first thing kubectl does is hit `/openapi/v3/<group>` for API discovery. kbounce's parser treats these as unclassifiable URL shapes → applies default-deny under safe-default profile.
+Tracking: every BUG entry has a task number (e.g., #299). v1.0 release gate: every entry below shows `STATUS: FIXED`.
 
-**Severity:** CRITICAL — makes the product unusable with kubectl on safe-default.
+## A1. iam-jit: solo-mode self-approval deadlock — `STATUS: FIXED` ✓
+- **Severity:** CRITICAL
+- **Was:** solo founder on laptop submits a request → goes to `human-review-required` → four-eyes check refuses approver==owner → deadlock.
+- **Fix:** iam-roles `5237ad4` — expanded eligible reasons in `_apply_mfa_and_self_approve_enforcement` to include `feature_disabled` (solo-mode default).
+- **Task:** #297 — completed 2026-05-22.
 
-**Workaround:** use `--profile full-user` until fix lands, OR explicitly allowlist `/openapi/v3/*` paths in your custom profile.
+## A2. dbounce: SCRAM-SHA-256 handshake hangs — `STATUS: IN FLIGHT`
+- **Severity:** CRITICAL
+- **Symptom:** Modern PG 14+ defaults to SCRAM. Connecting any psql/libpq client through dbounce hangs forever during initial auth.
+- **Workaround until fix:** edit upstream Postgres `pg_hba.conf` to use `trust` or `md5` auth.
+- **Task:** #299 — agent spawned 2026-05-22 (in flight).
 
-**Fix tracking:** queued. Target v1.0.1. The fix is parser-side: classify `GET /openapi/*` as `verb=read, resource=meta:openapi-schema` and let safe-default ALLOW it.
+## A3. ibounce: hardcoded HTTPS upstream scheme — `STATUS: IN FLIGHT`
+- **Severity:** CRITICAL
+- **Symptom:** ibounce proxy.py internally uses `https://` regardless of `--upstream` URL scheme. Plain-HTTP upstreams (LocalStack) fail entirely.
+- **Workaround until fix:** point only at HTTPS upstreams OR patch proxy.py.
+- **Task:** #300 — agent spawned 2026-05-22 (in flight).
 
-### BUG: stale binary in repo (UAT 2026-05-22)
-**Symptom:** Features documented in CHANGELOG might be missing from your binary if you cloned the repo + ran the pre-built bin/kbounce instead of `go build`.
+## A4. kbounce: kubectl OpenAPI discovery classified as "unclassifiable" — `STATUS: IN FLIGHT`
+- **Severity:** CRITICAL
+- **Symptom:** Every kubectl invocation fails. First call kubectl makes is `GET /openapi/v3/<group>` → kbounce parser → unclassifiable → safe-default denies.
+- **Workaround until fix:** use `--profile full-user` OR allowlist `/openapi/v3/*` in custom profile.
+- **Task:** #301 — agent spawned 2026-05-22 (in flight).
 
-**Severity:** HIGH — affects everyone who picks up the repo + uses the pre-built binary.
+## A5. dbounce: GRANT / REVOKE / DCL classified as `unknown` → default-allow — `STATUS: QUEUED`
+- **Severity:** HIGH
+- **Symptom:** `GRANT ALL PRIVILEGES ... TO PUBLIC` allowed by safe-default profile. dbounce parser doesn't classify DCL.
+- **Workaround until fix:** add explicit `deny grants_to_public: true` rule in custom profile.
+- **Task:** #302 — queued, not yet started.
 
-**Workaround:** always run `go build -o bin/kbounce ./cmd/kbounce` before first use, OR run `go install github.com/trsreagan3/kbouncer/cmd/kbounce@latest`.
+## A6. gbounce: unreachable-host CONNECTs not logged — `STATUS: QUEUED`
+- **Severity:** HIGH
+- **Symptom:** SSRF probes against private IPs (e.g., `169.254.169.254`) are INVISIBLE. gbounce only audits successful CONNECTs.
+- **Workaround until fix:** monitor stdout log for connection errors.
+- **Task:** #303 — queued.
 
-**Fix tracking:** queued — the bin/ checked-in binary will be removed from the repo; only `go install` will be supported. Target v1.0.
+## A7. gbounce: non-CONNECT requests rejected with no audit — `STATUS: QUEUED`
+- **Severity:** HIGH
+- **Symptom:** Plain HTTP requests get 421 "only CONNECT accepted" → silently dropped, no audit event. IMDS attacks (plain HTTP) invisible.
+- **Workaround until fix:** none — gbounce is HTTPS-CONNECT-only in v1.0.
+- **Task:** #305 — needs creation (added below).
 
-### DESIGN: kbounce doesn't see container-internal calls
-**Symptom:** Calls made INSIDE a pod (e.g., container-to-container service-mesh traffic) don't appear in kbounce.
-
-**Why:** kbounce sits between `kubectl` (or `client-go`) and the kube-apiserver. Pod-to-pod traffic doesn't go through that path. Per `[[no-k8s-proxy-for-iam-jit]]`.
-
----
-
-## dbounce (SQL gating proxy)
-
-### BUG: SCRAM-SHA-256 handshake hangs (UAT 2026-05-22)
-**Symptom:** Connecting any modern Postgres client (psql 14+, libpq 14+, etc.) through dbounce hangs forever during initial auth. dbounce forwards the SCRAM bytes upstream but the auth-OK / ReadyForQuery responses don't propagate back to the client.
-
-**Severity:** CRITICAL — modern PG 14+ defaults to SCRAM-SHA-256. This breaks every default Postgres install.
-
-**Workaround:** edit upstream Postgres `pg_hba.conf` to use `trust` or `md5` auth for the IP range dbounce connects from. Restart Postgres. Then dbounce works.
-
-**Fix tracking:** queued — dbounce's upstream forwarder needs to handle SCRAM message framing. Target v1.0.1.
-
-### BUG: GRANT / REVOKE / other DCL classified as "unknown" → default-allow (UAT 2026-05-22)
-**Symptom:** `GRANT ALL PRIVILEGES ... TO PUBLIC` is allowed by safe-default profile even though it's clearly dangerous. dbounce's parser doesn't classify DCL operations.
-
-**Severity:** HIGH — a hostile attack (H3 in the UAT) succeeded against dbounce safe-default because of this.
-
-**Workaround:** in your dbounce profile, explicitly add `deny grants_to_public: true` rule (custom rule today; will be built-in after fix).
-
-**Fix tracking:** queued. Target v1.0.1.
-
-### BUG: stale binary in repo (UAT 2026-05-22)
-Same as kbounce — always rebuild via `go build` or `go install`.
-
-### DESIGN: dbounce gates per-statement, not per-result
-**Symptom:** A SELECT that returns 1M rows is one DECISION event, not 1M.
-
-**Why:** Per-result gating would be insanely expensive + provide no value. The risk decision is on the QUERY, not the data.
-
-### DESIGN: literal-redaction is heuristic
-**Symptom:** Some literals in WHERE clauses get redacted in audit logs (replaced with `?`); others don't. Specifically: numeric literals are NEVER redacted (per `[[dbounce-sql-redaction-gaps]]` memo).
-
-**Why:** Identifying which numbers are PII (credit card numbers, SSNs) vs which are configuration (port numbers, retention days) requires schema knowledge dbounce doesn't have.
-
-**If you store PII as numeric columns:** use `--redact-numerics` (post-v1.0 flag).
+## A8. kbouncer + dbouncer: stale `bin/` binaries in repos — `STATUS: QUEUED`
+- **Severity:** HIGH
+- **Symptom:** Checked-in `bin/kbounce` and `bin/dbounce` may lag source by days. Users running the pre-built binary miss recent features (UI, audit endpoints, agent identity, etc.).
+- **Workaround until fix:** always `go build -o bin/kbounce ./cmd/kbounce` (and same for dbounce) before first use.
+- **Tasks:** #306 + #307 — need creation. Remove pre-built `bin/` from repos; only `go install` supported.
 
 ---
 
-## gbounce (generic HTTP/HTTPS forward proxy)
+# §B — DOCUMENTED LIMITS (NOT launch-blocking)
 
-### DESIGN: `--allow-connect` only sees host:port, NOT request URL/body
-**Symptom:** HTTPS calls through gbounce show `CONNECT api.example.com:443` in the audit log. Not `GET /v1/users/123`. Not the request body. Not the response.
+These are intentional limits OR roadmap-tracked gaps. Documented so users + agents aren't surprised. The product LAUNCHES with these in place; they're listed so adoption decisions are informed.
 
-**Why:** gbounce in CONNECT mode tunnels TLS. It can't read encrypted bytes. This is intentional per `[[ibounce-honest-positioning]]` — no MITM means more privacy + more deployability.
+## B1. ibounce: SigV4-only request classification (DESIGN)
+**Symptom:** Plain GET requests to ibounce return 403 "no SigV4 header."  
+**Why:** ibounce gates AWS SDK calls. AWS SDKs always sign SigV4. A bare GET isn't an AWS call.  
+**Browsers**: ibounce uses `Accept` header — `text/html` gets the UI, JSON gets the proxy path.
 
-**If you need URL-level visibility:** use `--upstream` rewrite mode (HTTP only) OR enable MITM mode in v1.1 (planned).
+## B2. ibounce: AWS-only scope (DESIGN)
+ibounce gates AWS calls only. K8s → kbounce. DB → dbounce. HTTP → gbounce.
 
-### BUG: unreachable-host CONNECTs not logged (UAT 2026-05-22)
-**Symptom:** If gbounce can't reach the upstream (host doesn't exist, network blocked), no audit event is logged. SSRF probes against private IPs (e.g., `169.254.169.254`) are invisible.
+## B3. ibounce: safe-default = `readonly-admin-minus` (DESIGN)
+First-time profile is "reads allowed except sensitive prefixes; writes prompt." Use `--profile strict-admin` for stricter.
 
-**Severity:** HIGH — defeats one of the canonical attack-detection use cases.
+## B4. ibounce: safe-default catches are VERB-level, not CONTENT-aware (DESIGN — v1.1 enhancement)
+**Symptom:** Scoped `iam:CreateRole` and wildcard `iam:*` both denied by same rule. Catches of legit + malicious writes look identical.  
+**For content-aware decisions:** add iam-jit to the path (Variants C). iam-jit provides scope-aware risk scoring; ibounce provides the atomic gate.  
+**v1.1 plan:** ibounce calls into iam-jit's scorer for content-aware decisions.
 
-**Workaround:** until fix lands, monitor gbounce's stdout log file (set `--log-path`) for connection errors.
+## B5. kbounce: doesn't see container-internal calls (DESIGN)
+kbounce sits between kubectl/client-go and the kube-apiserver. Pod-to-pod service-mesh traffic doesn't go through that path. Per `[[no-k8s-proxy-for-iam-jit]]`.
 
-**Fix tracking:** queued. Target v1.0.1.
+## B6. dbounce: per-statement gating, not per-result (DESIGN)
+A SELECT returning 1M rows is one DECISION event, not 1M.
 
-### BUG: non-CONNECT requests rejected without audit logging (UAT 2026-05-22)
-**Symptom:** Plain HTTP forward requests (NOT CONNECT) hit gbounce → returns 421 "only CONNECT accepted" → no audit event logged. Affects every protocol that's HTTP-but-not-HTTPS routed through gbounce.
+## B7. dbounce: literal-redaction is heuristic (DESIGN — partial)
+String literals in `WHERE` get redacted; numeric literals do NOT (per `[[dbounce-sql-redaction-gaps]]`). If you store PII as numeric columns, use `--redact-numerics` (post-v1.0 flag).
 
-**Severity:** HIGH — contradicts the "discovery-only" + "complete visibility" claims simultaneously. IMDS attacks (HTTP, not HTTPS) become invisible.
+## B8. gbounce: `--allow-connect` only sees host:port (DESIGN)
+HTTPS through gbounce shows `CONNECT host:443`. Not request URL/body. Per `[[ibounce-honest-positioning]]` — no MITM = more privacy + deployability.  
+**URL-level visibility:** use `--upstream` rewrite mode (HTTP only) OR enable MITM in v1.1.
 
-**Workaround:** until fix lands, document that gbounce v1.0 is HTTPS-CONNECT-only; use a separate HTTP proxy for plain-HTTP visibility.
+## B9. gbounce: G-Slice 1 = discovery only (GAP — v1.1)
+gbounce observes + logs but doesn't BLOCK. Profile-mode gating + auto-recommender are G-Slice 2-3, post-launch.
 
-**Fix tracking:** queued — gbounce should support `--upstream` rewrite mode (HTTP) per its existing flag, AND audit-log rejections rather than silently dropping them. Target v1.0.1.
+## B10. iam-jit: AWS-only scope (DESIGN)
+iam-jit is the AWS IAM risk scorer. K8s/DB/HTTP unaffected.
 
-### GAP: G-Slice 1 = discovery mode only
-**Behavior:** gbounce currently OBSERVES + LOGS, but doesn't BLOCK. Profile-mode gating + auto-recommender are G-Slice 2-3, post-launch.
+## B11. iam-jit: deterministic floor never lowered by LLM (DESIGN)
+LLM-Pro overrides go UP, never DOWN. Per `[[scorer-is-ground-truth]]`.
 
-**If you need active blocking on HTTPS today:** use ibounce (AWS-specific blocking) + your firewall.
+## B12. iam-jit: IAM score-9 collision (CALIBRATION — MEDIUM, not launch-blocking)
+Scoped `iam:CreateRole` and wildcard `iam:*` both score 9. Distinguishable via `factors` list but not numeric score.  
+**Severity:** MED — affects within-band-9 resolution; threshold-based auto-approval still works correctly.  
+**Plan:** v1.0.x calibration sweep.
 
----
+## B13. Cross-product: 1-3 concurrent terminals in v1.0 (GAP — v1.1 raises to 20)
+**Why:** active-mcp-session.json is single-entry; profile + pause state are global. 10+ concurrent terminals produce session-attribution issues.  
+**v1.1 plan:** task #296 multi-session SQLite refactor → 20-terminal target.
 
-## iam-jit (AWS IAM risk scorer + JIT grant issuer)
+## B14. Cross-product: defense-in-depth ≠ unified product (DESIGN per `[[four-products-one-brand]]`)
+~10% of decisions show TRUE multi-layer composition per UAT. The marketing claim is "complementary products under one brand," NOT "single integrated suite." This is the honest framing per `[[ibounce-honest-positioning]]`.
 
-### BUG: solo mode self-approval deadlock (UAT 2026-05-22 — in-flight fix #297)
-**Symptom:** Run iam-jit locally on your laptop. Submit a request. It goes to `human-review-required`. You ARE the only human. Four-eyes check refuses `approver==owner`. Deadlock.
-
-**Severity:** **CRITICAL — first experience every solo security engineer hits.**
-
-**Workaround:** set `IAM_JIT_AUTO_APPROVE_REDUCTIONS=true` in env (post-fix).
-
-**Fix tracking:** in flight as task #297 (will land in next 24h).
-
-### CALIBRATION: score-9 collision on IAM operations (UAT 2026-05-22)
-**Symptom:** A scoped `iam:CreateRole` for a narrow scoped policy scores 9. A wildcard `iam:* on *` also scores 9. Numerically identical despite very different risk.
-
-**Why:** the IAM-category scoring rule fires at risk-9 anytime broad IAM verbs are present, without distinguishing scope-narrow from scope-wide policies.
-
-**Severity:** MEDIUM — affects threshold-based auto-approval routing. The score-bands per `docs/SCORING-BANDS.md` still apply correctly; this is about WITHIN the band-9 zone there's lost resolution.
-
-**Fix tracking:** queued for calibration sweep. The `factors` list distinguishes them; the numeric score doesn't.
-
-### DESIGN: iam-jit is AWS-only
-**Symptom:** iam-jit doesn't gate K8s, DB, or HTTP operations. You can do whatever on those protocols.
-
-**Why:** iam-jit is the AWS IAM risk scorer + JIT grant issuer. The Bounce suite handles the other protocols.
-
-### DESIGN: deterministic scorer is the ground truth
-**Symptom:** Even when iam-jit Pro tier overrides the deterministic score (UP) with LLM analysis, the deterministic FLOOR is never lowered.
-
-**Why:** Per `[[scorer-is-ground-truth]]`. The safety contract is the floor.
+## B15. Cross-product: no unified deny-prompt UI in v1.0 (GAP — v1.1)
+Each bouncer prompts independently. v1.1 brings unified prompt-inbox UI.
 
 ---
 
-## Cross-product
+# Discoverability surfaces
 
-### GAP: 1-3 concurrent terminals supported in v1.0 (per UAT findings + the active-mcp-session.json race)
-**Symptom:** Running 10+ Claude Code terminals through one shared bouncer instance produces unpredictable session-attribution and prompt-routing.
+The §A + §B content here is **surfaced** at:
 
-**Severity:** HIGH at scale; not relevant for solo use.
+1. **README "Known Limitations" section** per product — top 3 entries + link here
+2. **CLI startup banner** — when a bouncer detects a triggering config, prints the relevant §A entry
+3. **`*bounce doctor`** — runs known-issue checks + prints applicable §A entries
+4. **`*bounce diagnostics bundle`** — includes a snapshot of this doc
+5. **Error messages** — when a §A bug triggers, error message links to the relevant entry
+6. **MCP tool descriptions** — agents see relevant §B entries embedded
 
-**Fix tracking:** v1.0 ships with 1-3 terminal support. v1.1 raises the bar to 20 terminals (task #296). 100+ deferred to v1.2.
-
-### GAP: defense-in-depth (iam-jit + bouncers) ≠ unified product (UAT 2026-05-22)
-**Behavior:** When you run iam-jit + bouncers together, you get more catches than either alone, but only ~10% of decisions show TRUE multi-layer composition. Most catches come from just one layer.
-
-**Implication:** the marketing claim should be "complementary products under one brand" (per `[[four-products-one-brand]]`), NOT "single integrated suite."
-
-### GAP: no unified deny-prompt UI
-**Behavior:** Each bouncer surfaces its own deny-prompts independently. When 4 bouncers all prompt simultaneously, the operator sees 4 separate prompt streams.
-
-**Fix tracking:** v1.1 — unified prompt-inbox UI (per `[[per-org-notification-routing]]` shape).
+Surfacing is tracked under task #304.
 
 ---
 
-## How these caveats are surfaced (discoverability layers)
+# Launch gate
 
-This document is the canonical reference. Caveats are ALSO surfaced at:
+v1.0 ships when:
+- Every §A entry shows `STATUS: FIXED`
+- §B is reviewed + signed off as accepted limits / honest gaps
+- Discoverability surfaces (#304) are live
 
-1. **README "Known Limitations" section** — top 3 caveats per product, with link to this doc
-2. **CLI startup banner** — when a bouncer detects a known-caveat-triggering config, prints a warning
-3. **`*bounce doctor` command** — runs known-issue checks + prints any that apply
-4. **`*bounce diagnostics bundle`** — includes a snapshot of this doc + your version's specific caveats
-5. **Error messages** — when a known caveat triggers, error message links to the relevant section here
-6. **MCP tool descriptions** — agents see "this tool has known limitation X" embedded in tool descriptions
+If a critical bug is discovered after this doc is locked: it's added to §A with `STATUS: NEW` and the launch is rebooked.
 
-If you hit something that ISN'T in this doc, please file an issue at:
+# Issue reporting
+
 - iam-jit: https://github.com/trsreagan3/iam-jit/issues
 - kbouncer: https://github.com/trsreagan3/kbouncer/issues
 - dbounce: https://github.com/trsreagan3/dbounce/issues
 - gbounce: https://github.com/trsreagan3/gbounce/issues
 
-A caveat you discover + we miss documenting = a documentation gap. Both you and we want this list comprehensive.
+A caveat you discover + we miss documenting = a documentation gap we both want closed.
