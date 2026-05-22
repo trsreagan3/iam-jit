@@ -378,6 +378,20 @@ Tested 2026-05-22 against the simulation harness at `tests/integration/nanoclaw_
 
 Workaround: operators who want determinism set `--preferred-backend ollama` (locally-hosted) + pin the model via `IAM_JIT_LLM_MODEL`. Hosted-API runs (Anthropic / Bedrock / OpenAI) are inherently sampling-non-deterministic; review the bundle before installing. See [docs/PROFILE-GENERATION.md](PROFILE-GENERATION.md) for the full guide.
 
+## B18. dbounce: dynamic-deny gates connections, not statements (DESIGN — v1.1 candidate)
+
+**Task #324f** (recommender Deny-injection from dynamic-deny rules) ships across the suite — except dbounce's dynamic-deny matcher operates at the CONNECTION level, not the per-statement level. An operator can `iam-jit deny add --target payments-db-prod.us-east-1.rds.amazonaws.com --duration 3h` to refuse connections to that DB host, but cannot author a dynamic-deny rule that says "deny SELECT against this column" or "deny INSERT into this table" — there is no statement-shaped pattern in the cross-product YAML schema (per `docs/schemas/dynamic-denies-v1.json`).
+
+**Practical impact on the role-effectiveness corpus.** Scenarios D1 (`SELECT * FROM credit_cards` from a shared connection) and D4 (`COPY (SELECT * FROM credit_cards) TO STDOUT` from a shared connection) remain THEATER / PARTIAL respectively under the post-#324f dynamic-denies bucket. To close these scenarios today, operators use the **#326 audit-pinned profile flow** instead — narrowing the allowlist by table rather than the denylist by statement-shape. Under the #326 path D1 and D4 both grade MEANINGFUL (see `tests/dogfood/role-effectiveness-grades-post-pivot.md`).
+
+**v1.1 candidate.** Statement-level dynamic-denies on dbounce would require:
+
+1. A new pattern shape in `docs/schemas/dynamic-denies-v1.json` (`statement:table.column` or `statement:verb:table` — schema_version 1.0 → 1.1 bump per the cross-product schema-bump convention).
+2. The dynamic-deny matcher composing with dbounce's existing AST-walk classifier (rather than running parallel-and-conflict).
+3. A new MCP tool argument letting agents author per-statement denies without learning the SQL parser.
+
+Tracked under the v1.1 roadmap, NOT a launch blocker. Logged per `[[ibounce-honest-positioning]]` so an operator evaluating dynamic-denies for dbounce knows the boundary up-front.
+
 ---
 
 # Discoverability surfaces

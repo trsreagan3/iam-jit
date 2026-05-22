@@ -262,6 +262,11 @@
               "items": { "type": "string" },
               "description": "AWS CLI commands equivalent to the boto3 calls that were executed. Auditability + manual-replay fallback."
             },
+            "embedded_dynamic_denies": {
+              "type": "array",
+              "items": { "type": "string", "pattern": "^dd_[0-9A-HJKMNP-TV-Z]{26}$" },
+              "description": "#324f — dynamic-deny rule ids (dd_<ULID>) whose explicit Deny statements were embedded into the issued role's inline policy. Empty when no rules were active or the recommender Deny-injection was disabled. Cross-references docs/DYNAMIC-DENY-RULES.md → Defense-in-depth model."
+            },
             "assume_instructions": {
               "type": "object",
               "additionalProperties": false,

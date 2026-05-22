@@ -1,13 +1,16 @@
 # Dynamic Deny Rules (#324) — Design
 
-> **Status:** SHIPPED (5 of 6 slices) — #324a (ibounce), #324b (kbouncer),
-> #324c (dbounce), #324d (gbounce), and #324e (unified `iam-jit deny`
-> CLI + MCP fan-out) are LIVE; #324f (recommender Deny-injection +
-> role-effectiveness re-grade) remains. The CLI + MCP tools call
-> through to the live YAML store + per-bouncer reload endpoints; this
+> **Status:** SHIPPED (all 6 slices, 2026-05-22) — #324a (ibounce),
+> #324b (kbouncer), #324c (dbounce), #324d (gbounce), #324e (unified
+> `iam-jit deny` CLI + MCP fan-out), and #324f (recommender
+> Deny-injection + role-effectiveness re-grade) are LIVE. The CLI +
+> MCP tools call through to the live YAML store + per-bouncer reload
+> endpoints; the iam-jit recommender consults the same YAML at
+> role-issuance time and embeds an explicit `Deny` statement per
+> active rule into every newly-issued role's inline policy. This
 > document is the canonical contract those implementations converge
-> against — DO NOT diverge from the wire shapes below without updating
-> this doc first.
+> against — DO NOT diverge from the wire shapes below without
+> updating this doc first.
 
 ## TL;DR
 
@@ -61,7 +64,7 @@ that gbounce ergonomic across the suite:
 | #324c  | **dbounce** — hostname / RDS endpoint matcher + YAML watcher                           | shipped          |
 | #324d  | **gbounce** — URL/hostname glob matcher (reuses #314 `deny_hosts` shape) + YAML watcher| shipped          |
 | #324e  | **iam-jit** — unified CLI + MCP fan-out + cross-bouncer e2e                            | shipped          |
-| #324f  | **iam-jit recommender** — `Deny`-injection at role-issuance + role-effectiveness re-grade | open          |
+| #324f  | **iam-jit recommender** — `Deny`-injection at role-issuance + role-effectiveness re-grade | shipped       |
 
 The unified CLI shipped with #324e replaces the skeleton — `iam-jit
 deny add | list | remove | show` now:
@@ -362,16 +365,36 @@ Dynamic deny rules apply at TWO points:
    OCSF audit event with `unmapped.iam_jit.deny_reason` naming the
    rule id.
 
-2. **Role-issuance time, in the iam-jit recommender.** Per #324f,
-   when the recommender drafts a role policy it consults the same
-   `~/.iam-jit/dynamic-denies.yaml` and embeds an explicit `Deny`
-   statement for every rule whose `applied_to` includes `ibounce`
-   AND whose `applies_to_recommender` is true. The Deny is scoped to
-   the rule's `targets` + carries a `Sid: "dynamic-deny-<id>"` so the
-   operator can read the role policy + see which deny rules
-   contributed. The recommender re-runs this evaluation any time it
-   issues a new role; existing roles minted before a deny lands keep
-   the bouncer-only enforcement path until they expire.
+2. **Role-issuance time, in the iam-jit recommender (#324f SHIPPED).**
+   When `src/iam_jit/provision.py` assembles the inline policy for a
+   newly-issued role, it calls
+   `src/iam_jit/dynamic_denies/recommender.py::build_deny_statements`
+   on the active rule set + appends one `Deny` statement per
+   eligible rule (`applied_to` contains `ibounce` AND
+   `applies_to_recommender` is true AND `expires_at` is in the future
+   AND at least one ARN-shaped target). Each statement carries
+   `Sid: "dynamicdeny<id>"` (IAM Sid grammar strips the underscore
+   from `dd_<ULID>`) + `Effect: Deny` + `Action: "*"` + `Resource:
+   <rule.targets>` so the operator reading the role policy can
+   trace exactly which deny rule contributed. The recommender
+   re-runs this evaluation any time it issues a new role; existing
+   roles minted before a deny lands keep the bouncer-only enforcement
+   path until they expire at their TTL.
+
+   The embedded rule ids surface as `embedded_dynamic_denies` on
+   `ProvisioningResult` + on the request's `status.provisioned`
+   block, AND as
+   `unmapped.iam_jit.ext.embedded_dynamic_denies[]` +
+   `unmapped.iam_jit.ext.embedded_dynamic_denies_count` on the
+   per-issuance `request.provisioned_with_dynamic_denies` audit
+   event. SIEM query:
+   `kind:"request.provisioned_with_dynamic_denies"` answers "which
+   role issuances embedded a dynamic-deny over the last N days?".
+
+   The recommender Deny-injection is gated by the
+   `IAM_JIT_DYNAMIC_DENIES_RECOMMENDER` env var (default enabled);
+   operators who want bouncer-only enforcement can set it to `0` /
+   `false` / `no` / `off`.
 
 Why both? Because the bouncer path is bypassable (agent calls AWS
 directly, skipping the proxy); the role path is bypassable (agent

@@ -40,6 +40,87 @@ within the same release.
 
 ### Added
 
+- **#324f — iam-jit recommender Deny-injection from dynamic-deny rules + role-effectiveness re-grade** (2026-05-22) —
+  Closes the final slice of the #324 dynamic-deny family. The
+  defense-in-depth half of the model: when iam-jit issues a new IAM
+  role (`src/iam_jit/provision.py::provision()`), the inline policy
+  it puts on that role now embeds an explicit `Deny` statement per
+  active dynamic-deny rule that (a) routes to `ibounce` via
+  `applied_to`, (b) has `applies_to_recommender: true`, (c) has at
+  least one AWS-ARN-shaped target, and (d) has not expired. The
+  embed runs AFTER the existing `_augment_policy_with_time_condition()`
+  pass so every embedded Deny carries the DateLessThan time
+  condition that bounds every Allow.
+  - **New module `src/iam_jit/dynamic_denies/recommender.py`** —
+    pure functions `build_deny_statements(ruleset)`,
+    `embedded_rule_ids(ruleset)`, and
+    `inject_into_policy(policy, ruleset)`. Each statement carries
+    `Sid: "dynamicdeny<id>"` (IAM Sid grammar strips the underscore
+    from `dd_<ULID>`), `Effect: "Deny"`, `Action: "*"`, `Resource:
+    <rule.targets>` — operator reading the role policy in the AWS
+    console can pattern-match all dynamic-deny statements with
+    `grep dynamicdeny`. AWS evaluates explicit-Deny with absolute
+    precedence over any Allow, so the embedded Deny fires even when
+    the bouncer is bypassed.
+  - **Provisioning helper `_build_issued_policy()`** —
+    composes the time-condition augmentation with the dynamic-deny
+    injection so the same call site can be used by both the preview
+    + the live `provision()` path. Returns
+    `(inline_policy, embedded_rule_ids)` so the caller can surface
+    the rule ids on `ProvisioningResult.embedded_dynamic_denies` +
+    on the audit emit.
+  - **Env-var gate `IAM_JIT_DYNAMIC_DENIES_RECOMMENDER`** —
+    default enabled (matches the existing
+    `ProxyConfig.dynamic_denies_enabled` default from #324a).
+    Setting to `0` / `false` / `no` / `off` short-circuits the
+    injection for operators who want bouncer-only enforcement.
+    Re-resolved on every issuance so a SIGHUP-style env refresh
+    works without a process restart.
+  - **Audit emission `request.provisioned_with_dynamic_denies`**
+    — fires on every issuance that embedded at least one rule,
+    carrying `details.unmapped.iam_jit.ext.embedded_dynamic_denies[]`
+    + `details.unmapped.iam_jit.ext.embedded_dynamic_denies_count`.
+    Best-effort: a broken audit sink never fails the issuance per
+    `[[creates-never-mutates]]`. SIEM filter
+    `kind:"request.provisioned_with_dynamic_denies"` answers
+    "which role issuances embedded a dynamic-deny over the last
+    N days?".
+  - **Schema update** — `schemas/request.schema.json` gains an
+    additive optional `status.provisioned.embedded_dynamic_denies`
+    field (array of `dd_<ULID>` strings). Additive only — no
+    schema_version bump per the cross-product convention.
+  - **Tests** — `tests/recommender/test_dynamic_deny_injection.py`
+    14 cases: embed for active ARN rule, skip non-ibounce rules,
+    skip expired rules, multi-rule embed, no-YAML baseline, audit
+    event carries `embedded_dynamic_denies`, hot-reload on YAML
+    change, disabled-flag short-circuit, + pure-function unit tests
+    for `build_deny_statements` (opt-out flag, non-mutation,
+    non-ARN-target filtering, GovCloud + China partitions, IAM
+    Sid legality, YAML round-trip).
+  - **Role-effectiveness re-grade** — appended a
+    "POST-#324f dynamic-denies" section to
+    `tests/dogfood/role-effectiveness-grades-post-pivot.md`.
+    **New hit-rate is 69.2% (9/13)** — 30.7 points above the
+    post-pivot default of 38.5%, 0.8 points below the 70%
+    launch-bar target. Dynamic-denies close 4 of 5 IAM-axis
+    THEATER gaps (I1, I2, I4, K2 → MEANINGFUL); D1 stays THEATER
+    because dbounce's dynamic-deny matcher operates at the
+    connection level not the statement level (logged as v1.1
+    candidate `KNOWN-CAVEATS.md §B18` per
+    `[[scorer-is-ground-truth]]`).
+
+  **Honest caveats:** existing roles minted BEFORE a deny lands
+  keep the bouncer-only enforcement path until they expire at
+  their TTL — we don't retroactively mutate existing roles per
+  `[[creates-never-mutates]]`. The `secret:NAME` shorthand target
+  shape (per the cross-protocol resolver) does NOT embed into the
+  role policy at v1.0 — IAM's evaluator wants a full ARN in
+  `Resource`; the bouncer-side path still enforces. v1.1
+  enhancement could resolve the shorthand to
+  `arn:aws:secretsmanager:*:*:secret:NAME*` at embed time.
+  Statement-level dynamic-denies on dbounce remain a v1.1 candidate
+  (logged at `KNOWN-CAVEATS.md §B18`).
+
 - **#324e — iam-jit unified `deny` CLI + `bounce_deny_*` MCP tools + cross-bouncer fan-out** (2026-05-22) —
   Replaces the design-stage skeleton at `src/iam_jit/cli_deny.py`
   with the live implementation. With #324a/b/c/d already shipping the

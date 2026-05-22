@@ -52,6 +52,11 @@ from .loader import (
     resolve_default_path,
 )
 from .matcher import ArnMatch, match_arn
+from .recommender import (
+    build_deny_statements,
+    embedded_rule_ids,
+    inject_into_policy,
+)
 from .types import Rule, RuleSet
 from .watcher import (
     DynamicDenyWatcher,
@@ -70,6 +75,9 @@ __all__ = [
     "Rule",
     "RuleSet",
     "SCHEMA_VERSION",
+    "build_deny_statements",
+    "embedded_rule_ids",
+    "inject_into_policy",
     "load_file",
     "make_admin_action_emitter",
     "match_arn",

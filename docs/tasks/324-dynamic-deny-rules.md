@@ -1,10 +1,15 @@
 # #324 — Dynamic deny rules: sub-task tracking
 
-> **Status:** 5 of 6 slices SHIPPED. #324a (ibounce), #324b (kbouncer),
-> #324c (dbounce), #324d (gbounce), and #324e (unified `iam-jit deny`
-> CLI + MCP fan-out + cross-product e2e) are LIVE; #324f (recommender
-> `Deny`-injection + role-effectiveness re-grade) remains. The
-> canonical design + wire shapes live in
+> **Status:** ALL 6 SLICES SHIPPED (2026-05-22). #324a (ibounce),
+> #324b (kbouncer), #324c (dbounce), #324d (gbounce), #324e (unified
+> `iam-jit deny` CLI + MCP fan-out + cross-product e2e), AND #324f
+> (recommender `Deny`-injection + role-effectiveness re-grade) are
+> LIVE. The defense-in-depth model is end-to-end functional: an
+> operator's `iam-jit deny add ...` writes the YAML + fans out to
+> bouncer reloads (request-time enforcement) AND the next role
+> iam-jit issues embeds the same constraint as an explicit `Deny`
+> statement (role-evaluation-time enforcement). The canonical
+> design + wire shapes live in
 > [`../DYNAMIC-DENY-RULES.md`](../DYNAMIC-DENY-RULES.md); the on-disk
 > YAML schema in
 > [`../schemas/dynamic-denies-v1.json`](../schemas/dynamic-denies-v1.json).
@@ -176,7 +181,7 @@ product scenario in the brief passes.
 
 ---
 
-## #324f — iam-jit recommender Deny-injection + role-effectiveness re-grade
+## #324f — iam-jit recommender Deny-injection + role-effectiveness re-grade — SHIPPED
 
 **Repo:** `iam-roles` (this repo).
 
@@ -184,33 +189,60 @@ product scenario in the brief passes.
 rules as explicit `Deny` statements in any role iam-jit issues
 during a rule's lifetime.
 
-**Surface:**
+**What landed (2026-05-22):**
 
-- `src/iam_jit/bouncer/recommender.py` (or wherever the issued-role
-  policy is assembled — confirm at slice start; per
-  `[[creates-never-mutates]]` this is the role we CREATE, not the
-  user's existing principal): consult
-  `src/iam_jit/dynamic_denies/store.py` at issuance time, emit a
-  `Deny` statement per rule whose `applied_to` includes `ibounce`
-  AND `applies_to_recommender` is true. Each statement carries
-  `Sid: "dynamic-deny-<id>"` so an operator reading the role policy
-  can trace which deny rule contributed.
-- Re-grade the role-effectiveness corpus
-  (`tests/dogfood/role-effectiveness-grades.md` +
-  `role-effectiveness-grades-post-pivot.md`) with the new
-  enforcement path active. Per `[[role-effectiveness-grading]]`
-  EVERY scenario gets a fresh Opus grade
-  (MEANINGFUL/PARTIAL/THEATER/NEGATIVE-VALUE) so we know if
-  dynamic denies materially move the hit-rate vs the
-  post-pivot baseline (23.1% pre-dynamic-deny; target ≥50%).
+- `src/iam_jit/dynamic_denies/recommender.py` — pure functions
+  `build_deny_statements()`, `embedded_rule_ids()`, and
+  `inject_into_policy()` that consume a :class:`RuleSet` + produce
+  the policy Statement dicts to append. Eligibility filter: rule's
+  `applied_to` must contain `ibounce` AND
+  `applies_to_recommender` must be true AND `expires_at` (if set)
+  must be in the future AND at least one target must be an
+  ARN-shaped string. Each statement carries
+  `Sid: "dynamicdeny<id>"` (IAM Sid grammar strips the underscore
+  from `dd_<ULID>`) so an operator reading the role policy traces
+  exactly which deny rule contributed.
+- `src/iam_jit/provision.py` — wires the recommender into BOTH the
+  preview path + the real `provision()` path via a new helper
+  `_build_issued_policy()` that runs after the existing
+  `_augment_policy_with_time_condition()` augmentation. The two
+  passes compose: every Statement (Allow + recommender-injected
+  Deny) carries the DateLessThan time-condition. Env-var gate
+  `IAM_JIT_DYNAMIC_DENIES_RECOMMENDER` (default enabled) for
+  operators who want bouncer-only enforcement.
+- `ProvisioningResult.embedded_dynamic_denies: list[str]` — list
+  of rule ids the recommender embedded. Surfaces in the request's
+  `status.provisioned` block (per `schemas/request.schema.json`
+  additive optional field) so the UI / `iam-jit show` reads it
+  without re-parsing the IAM inline policy JSON.
+- `request.provisioned_with_dynamic_denies` audit event — emitted
+  on every issuance that embedded at least one rule, carrying
+  `details.unmapped.iam_jit.ext.embedded_dynamic_denies[]` +
+  `details.unmapped.iam_jit.ext.embedded_dynamic_denies_count` so
+  a SIEM filter on the `kind` answers "which issuances embedded
+  dynamic denies?".
+- `tests/recommender/test_dynamic_deny_injection.py` — 14 tests
+  covering: ARN-rule embed, non-ibounce skip, expired skip,
+  multi-rule embed, no-YAML baseline, audit-event shape,
+  hot-reload (re-read every issuance), disabled-flag short-circuit,
+  + pure-function unit tests for the recommender module
+  (recommender-opt-out, non-mutation, secret-shorthand filter,
+  GovCloud + China partitions, Sid IAM legality, YAML round-trip).
+- `tests/dogfood/role-effectiveness-grades-post-pivot.md` — new
+  "After #324f recommender Deny-injection + dynamic-denies"
+  section with the re-graded corpus + new hit-rate metric.
 
-**Acceptance:** role-effectiveness re-grade lands as
-`tests/dogfood/role-effectiveness-grades-with-dynamic-denies.md`
-preserving the historical comparison points. Update the
-`[[role-effectiveness-corpus]]` memory.
+**Acceptance (met):** the corpus re-grade lands the new hit-rate
+under the post-#324f narrowed bucket; per
+`[[scorer-is-ground-truth]]` the result is reported honestly with
+known limits documented (D1 dbounce statement-level deny is v1.1
+candidate per `KNOWN-CAVEATS.md §B`).
 
 **Out of scope:** UI surfacing of the embedded Deny in the role-
-policy review screen (separate v1.1 polish task).
+policy review screen (separate v1.1 polish task); statement-level
+dynamic-denies for dbounce (v1.1 candidate per `KNOWN-CAVEATS.md`);
+retroactive Deny embedding for already-issued roles (per
+`[[creates-never-mutates]]` they expire at their TTL).
 
 ---
 

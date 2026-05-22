@@ -40,11 +40,91 @@ from __future__ import annotations
 
 import datetime as _dt
 import json
+import logging
 import os
 from dataclasses import dataclass, field
 from typing import Any
 
 from .accounts_store import Account, AccountStore, AccountNotFound
+
+logger = logging.getLogger(__name__)
+
+
+# ---------------------------------------------------------------------------
+# #324f — dynamic-deny recommender Deny-injection
+# ---------------------------------------------------------------------------
+#
+# Env-var gate (mirrors the per-product convention from
+# `[[enterprise-profile-distribution]]` + the ProxyConfig dynamic-deny
+# fields). Defaults to enabled because the loader is a no-op when
+# there's no YAML file on disk; operators who don't use dynamic
+# denies pay zero cost, operators who DO use them get defense-in-
+# depth without an extra flag flip.
+DYNAMIC_DENIES_RECOMMENDER_ENV = "IAM_JIT_DYNAMIC_DENIES_RECOMMENDER"
+"""Env var name. Set to ``0`` / ``false`` / ``no`` / ``off`` to disable
+the recommender's Deny-injection pass. Anything else (including unset)
+leaves it enabled per the design doc + per
+``[[deliberate-feature-completion]]``."""
+
+_DISABLED_VALUES = frozenset({"0", "false", "no", "off"})
+
+
+def _dynamic_denies_recommender_enabled() -> bool:
+    """Resolve the master switch from the env var. Defaults to True.
+
+    Separate function (not a module-level constant) so tests that
+    monkeypatch the env see fresh values per call — the bouncer's
+    ProxyConfig holds the analog field with the same default but
+    callers here re-resolve every issuance so a SIGHUP-style env
+    refresh works without a process restart.
+    """
+    raw = (os.environ.get(DYNAMIC_DENIES_RECOMMENDER_ENV) or "").strip().lower()
+    if not raw:
+        return True
+    return raw not in _DISABLED_VALUES
+
+
+def _load_active_dynamic_denies() -> "Any":
+    """Read the on-disk dynamic-denies YAML + return the active
+    :class:`RuleSet`. Returns an empty RuleSet on ANY load failure —
+    issuance must never crash on a malformed denies file (the
+    bouncer-side watcher surfaces parse errors via its own admin-
+    action channel; the recommender's job is to embed what's
+    AVAILABLE, not to second-guess upstream parsing).
+
+    Lazy-imports the dynamic_denies package so a deployment that
+    strips it for size reasons still imports provision.py cleanly.
+    """
+    try:
+        from .dynamic_denies import load_file, resolve_default_path
+        from .dynamic_denies.types import RuleSet
+    except Exception as e:
+        logger.debug(
+            "dynamic_denies package not importable; skipping "
+            "recommender Deny-injection: %s", e,
+        )
+        return None
+    try:
+        path = resolve_default_path()
+    except Exception as e:
+        logger.debug("dynamic_denies path resolve failed: %s", e)
+        return RuleSet.empty()
+    if not path:
+        return RuleSet.empty()
+    try:
+        return load_file(path)
+    except Exception as e:
+        # Parse / schema error — log + return empty so issuance proceeds.
+        # The bouncer-side watcher emits the admin-action event for this
+        # condition; we don't double-emit here.
+        logger.warning(
+            "dynamic-denies file unreadable at %s; embedding 0 rules "
+            "into issued role policy: %s", path, e,
+        )
+        try:
+            return RuleSet.empty(source_path=path)
+        except Exception:
+            return None
 
 
 class ProvisioningError(Exception):
@@ -132,6 +212,22 @@ class ProvisioningResult:
     state we created via boto3. Surfaced on the request detail page for
     auditability and as a copy-paste fallback if an admin ever needs to
     replay the provisioning by hand."""
+
+    embedded_dynamic_denies: list[str] = field(default_factory=list)
+    """#324f — list of dynamic-deny rule ids (``dd_<ULID>``) the
+    recommender embedded as explicit ``Deny`` statements into the
+    issued role's inline policy. Empty when:
+      * Dynamic-denies recommender is disabled
+        (:data:`DYNAMIC_DENIES_RECOMMENDER_ENV` set to off).
+      * No on-disk denies file or it's empty / unreadable.
+      * No active rule has ``applied_to`` containing ``ibounce`` AND
+        ``applies_to_recommender`` true AND a non-expired
+        ``expires_at`` AND at least one AWS-ARN-shaped target.
+
+    Surfaces in the audit emission (per the §324f spec) under
+    ``unmapped.iam_jit.ext.embedded_dynamic_denies`` so operators
+    can verify their dynamic-deny rules actually shaped the issued
+    role without manually inspecting AWS."""
 
 
 def _isoformat_z(dt: _dt.datetime) -> str:
@@ -260,6 +356,63 @@ def _augment_policy_with_time_condition(
         statements_out.append(s2)
     out["Statement"] = statements_out
     return out
+
+
+def _build_issued_policy(
+    raw_policy: dict[str, Any],
+    *,
+    expires_at: str,
+) -> tuple[dict[str, Any], list[str]]:
+    """#324f — assemble the inline policy iam-jit puts on a newly-issued
+    role + return the embedded dynamic-deny rule ids.
+
+    Pipeline:
+      1. Augment the operator's requested policy with the
+         DateLessThan time-condition on every statement (existing
+         :func:`_augment_policy_with_time_condition` behavior).
+      2. If the dynamic-denies recommender is enabled, load the
+         active rule set + append one explicit-Deny statement per
+         eligible rule.
+
+    Returns ``(inline_policy, embedded_rule_ids)`` so the caller can
+    propagate the rule-id list into the audit event without re-running
+    the eligibility check.
+
+    Per ``[[creates-never-mutates]]`` neither input is mutated. The
+    dynamic-deny load path swallows every exception (logging only)
+    so issuance never fails because of a malformed denies file —
+    the bouncer-side watcher is responsible for surfacing parse
+    errors via its own admin-action emit.
+    """
+    with_time = _augment_policy_with_time_condition(raw_policy, expires_at)
+    if not _dynamic_denies_recommender_enabled():
+        return with_time, []
+    ruleset = _load_active_dynamic_denies()
+    if ruleset is None or not getattr(ruleset, "rules", ()):
+        return with_time, []
+    try:
+        from .dynamic_denies.recommender import (
+            build_deny_statements,
+            embedded_rule_ids,
+        )
+    except Exception as e:
+        # If for some reason the recommender module is unimportable,
+        # log + continue without embedding. Defensive — the
+        # `dynamic_denies` package is shipped wholesale.
+        logger.warning(
+            "dynamic_denies.recommender unimportable; skipping "
+            "Deny-injection: %s", e,
+        )
+        return with_time, []
+    extra_statements = build_deny_statements(ruleset)
+    ids = embedded_rule_ids(ruleset)
+    if not extra_statements:
+        return with_time, []
+    out = {
+        "Version": with_time.get("Version", "2012-10-17"),
+        "Statement": list(with_time.get("Statement") or []) + extra_statements,
+    }
+    return out, ids
 
 
 def _assume_provisioner_role(
@@ -467,7 +620,11 @@ def preview(
         blocking.append("spec.policy is empty or malformed")
         inline_policy = {"Version": "2012-10-17", "Statement": []}
     else:
-        inline_policy = _augment_policy_with_time_condition(raw_policy, expires_at)
+        # #324f — augment with time-condition AND embed dynamic-deny
+        # Deny statements from the active rule set.
+        inline_policy, _ = _build_issued_policy(
+            raw_policy, expires_at=expires_at,
+        )
 
     trust = _build_trust_policy(
         assumer_arn or "<assumer-principal-arn>",
@@ -580,7 +737,13 @@ def provision(
     raw_policy = spec.get("policy") or {"Version": "2012-10-17", "Statement": []}
     if not isinstance(raw_policy, dict) or not raw_policy.get("Statement"):
         raise ProvisioningError("spec.policy is empty or malformed")
-    inline_policy = _augment_policy_with_time_condition(raw_policy, expires_at)
+    # #324f — augment with time-condition AND embed dynamic-deny
+    # Deny statements from the active rule set. Returns the embedded
+    # rule ids so we can surface them in the audit emit + on the
+    # ProvisioningResult.
+    inline_policy, embedded_dd_ids = _build_issued_policy(
+        raw_policy, expires_at=expires_at,
+    )
 
     requester_id = (metadata.get("requester") or {}).get("email") or "unknown"
     approver_id = _last_approver(request)
@@ -659,6 +822,45 @@ def provision(
         request_id=request_id,
     )
 
+    # #324f — best-effort audit emission for embedded dynamic-deny rules.
+    # The provisioning route handler (routes/requests.py) will also see
+    # the embedded ids via `ProvisioningResult.embedded_dynamic_denies`
+    # and surface them in `status.provisioned`; we additionally emit a
+    # standalone audit event here so a SIEM filter on
+    # `kind:request.provisioned_with_dynamic_denies` catches the
+    # cross-product correlation point without parsing the request
+    # detail. Best-effort: a broken audit sink never fails the
+    # issuance per [[creates-never-mutates]].
+    if embedded_dd_ids:
+        try:
+            from . import audit as _audit_mod
+            _audit_mod.emit(
+                actor="system",
+                kind="request.provisioned_with_dynamic_denies",
+                summary=(
+                    f"role {role_name} issued with {len(embedded_dd_ids)} "
+                    f"embedded dynamic-deny rule(s)"
+                ),
+                details={
+                    "request_id": request_id,
+                    "role_arn": role_arn,
+                    "unmapped": {
+                        "iam_jit": {
+                            "ext": {
+                                "embedded_dynamic_denies": list(embedded_dd_ids),
+                                "embedded_dynamic_denies_count": len(
+                                    embedded_dd_ids
+                                ),
+                            },
+                        },
+                    },
+                },
+            )
+        except Exception:
+            logger.exception(
+                "best-effort audit emit for embedded_dynamic_denies failed"
+            )
+
     return ProvisioningResult(
         role_arn=role_arn,
         role_name=role_name,
@@ -669,6 +871,7 @@ def provision(
         session_name=session_name,
         tags=tags,
         aws_cli_replay=cli_replay,
+        embedded_dynamic_denies=list(embedded_dd_ids),
     )
 
 

@@ -1413,6 +1413,13 @@ def _attempt_provisioning(
             "assume_instructions": instructions["assume_instructions"],
             "aws_cli_replay": list(result.aws_cli_replay),
             "creation_succeeded": True,
+            # #324f — surface embedded dynamic-deny rule ids so the
+            # UI / `iam-jit show` / audit replay sees which rules
+            # contributed to the role's policy without re-parsing the
+            # inline policy JSON.
+            "embedded_dynamic_denies": list(
+                getattr(result, "embedded_dynamic_denies", []) or []
+            ),
         }
     except Exception as e:
         logger.exception("post-provision result rendering failed")
