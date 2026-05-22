@@ -121,6 +121,8 @@ Each refreshes every 2s. Color-coded by verdict. Filter + pause controls. As you
 
 **Positioning**: NanoClaw uses [OneCLI Agent Vault](https://onecli.sh) as its credential gateway — it stores Slack/WhatsApp/Telegram/Gmail/etc. tokens and injects them at network boundary. **We are not a credential vault and do not compete with OneCLI on that axis.** We add the protocol-aware audit + risk-scoring layer for cloud + DB + general HTTPS — protocols OneCLI doesn't gate.
 
+**Verified 2026-05-22** against the simulation harness at [`tests/integration/nanoclaw_paths/`](../tests/integration/nanoclaw_paths/) — three integration paths (Chain / Replace / Parallel) tested end-to-end with alpine + curl + aws-cli + the four bouncers + LocalStack + kind + Postgres. All three paths pass; product gaps surfaced are listed under [Surfaced gaps](#surfaced-gaps-2026-05-22) below.
+
 #### The canonical NanoClaw + iam-jit deployment
 
 The expected operator pattern is **not "pick a path"** — it's a single combined config where each bouncer plays its native role:
@@ -163,6 +165,132 @@ docker run \
 **What we don't claim:** we don't replace OneCLI's credential vault. We don't store Slack/Gmail/WhatsApp tokens. NanoClaw + OneCLI keep their full role for messaging APIs; we add audit + risk scoring where they don't have coverage.
 
 **Complementary dashboards:** NanoClaw's existing dashboard at port 7890 (per [qwibitai/nanoclaw-dashboard](https://github.com/qwibitai/nanoclaw-dashboard)) shows agent INTERNAL state (sessions, tokens, memory). Our bouncer UIs (8767, 8766, 8768, 8769) show OUTBOUND protocol calls. Run both side-by-side for full visibility.
+
+#### Per-path verified commands (2026-05-22)
+
+The three NanoClaw integration paths from [openclaw-nanoclaw-architecture] memo, each verified against the harness:
+
+##### Path A — Chain (lowest control / lowest effort)
+
+`NanoClaw container → OneCLI gateway → gbounce → internet`
+
+Configure OneCLI's upstream HTTP proxy to point at gbounce. OneCLI does its credential injection first; gbounce audits the resulting CONNECT line.
+
+```bash
+# 1. gbounce on the host (CONNECT-tunnel mode for chained HTTPS).
+gbounce run --port 8080 --mgmt-port 8769 \
+  --allow-connect \
+  --audit-log-path ~/.iam-jit/audit/gbounce.jsonl &
+
+# 2. In OneCLI Agent Vault config, set the upstream HTTPS proxy to
+#    http://host.docker.internal:8080 (Docker Desktop) or your
+#    host's LAN IP (Linux). Refer to OneCLI docs for the exact key
+#    name; the shape is "HTTP_PROXY-style upstream chain."
+
+# 3. Launch NanoClaw normally; its containers inherit OneCLI's
+#    HTTPS_PROXY env var pointing at OneCLI; OneCLI then forwards
+#    CONNECT lines to gbounce.
+nanoclaw start
+```
+
+Verified by `tests/integration/nanoclaw_paths/test_path_a_chain`:
+- gbounce receives the CONNECT delivered through OneCLI's chain
+- `X-Agent-Session-Id` + `X-Agent-Name` proxy headers (when the inner client supplies them via `curl --proxy-header ...` / SDK equivalent) preserve agent attribution end-to-end — `unmapped.iam_jit.agent.session_id` is populated on gbounce events
+- gbounce in CONNECT-tunnel mode sees host+port only, not request bodies (TLS passthrough; for body-level audit use Path B)
+
+##### Path B — Replace (recommended for cloud-heavy workloads)
+
+```
+NanoClaw container → gbounce → internet
+                  → ibounce → AWS
+                  → kbounce → K8s API
+                  → dbounce → SQL
+```
+
+```bash
+# 1. Bouncers on the host.
+gbounce run --port 8080 --mgmt-port 8769 --allow-connect \
+  --audit-log-path ~/.iam-jit/audit/gbounce.jsonl &
+
+# IAM_JIT_BOUNCER_EXTRA_HOSTS lets ibounce accept the container's
+# host.docker.internal Host header (the SigV4 Host inside a container
+# isn't an AWS hostname — the CRIT-32-01 allowlist needs this addition
+# to forward; without it the event is logged but the client gets 403).
+IAM_JIT_BOUNCER_EXTRA_HOSTS=host.docker.internal \
+  iam-jit-bouncer run --port 8767 \
+    --upstream https://your-region.amazonaws.com \
+    --profile safe-default \
+    --audit-log-path ~/.iam-jit/audit/ibounce.jsonl &
+
+kbounce run --port 8766 --profile safe-default \
+  --kubeconfig ~/.kube/config \
+  --audit-log-path ~/.iam-jit/audit/kbounce.jsonl &
+
+dbounce run --port 5433 --mgmt-port 8768 \
+  --upstream postgresql://your-real-db:5432/your-db \
+  --profile safe-default \
+  --audit-log-path ~/.iam-jit/audit/dbounce.jsonl &
+
+# 2. NanoClaw container with the bouncers as the routing targets.
+SID="$(uuidgen)"
+docker run --rm \
+  -e HTTPS_PROXY=http://host.docker.internal:8080 \
+  -e HTTP_PROXY=http://host.docker.internal:8080 \
+  -e NO_PROXY=localhost,127.0.0.1 \
+  -e AWS_ENDPOINT_URL=http://host.docker.internal:8767 \
+  -e X_AGENT_NAME=nanoclaw \
+  -e X_AGENT_SESSION_ID="$SID" \
+  nanoclaw:latest
+```
+
+Verified by `tests/integration/nanoclaw_paths/test_path_b_replace`:
+- HTTPS / AWS / K8s / SQL each land in the **right** bouncer
+- No cross-contamination (AWS-shaped traffic does NOT show up in gbounce; HTTPS does NOT appear in ibounce)
+- gbounce preserves `agent.session_id` end-to-end via `X-Agent-Session-Id` header
+- ibounce / kbounce / dbounce events carry `agent.name` from User-Agent today; `agent.session_id` is NOT yet read from header (see [Surfaced gaps](#surfaced-gaps-2026-05-22))
+
+##### Path C — Parallel (defense in depth)
+
+```
+NanoClaw container → OneCLI (for non-cloud APIs)
+                  → ibounce (AWS via AWS_ENDPOINT_URL)
+                  → kbounce (K8s via KUBECONFIG)
+                  → dbounce (SQL via DATABASE_URL)
+                  → gbounce (other HTTPS via HTTPS_PROXY)
+```
+
+```bash
+SID="$(uuidgen)"
+docker run --rm \
+  -e HTTPS_PROXY=http://host.docker.internal:8080 \
+  -e HTTP_PROXY=http://host.docker.internal:8080 \
+  -e NO_PROXY=localhost,127.0.0.1,host.docker.internal \
+  -e AWS_ENDPOINT_URL=http://host.docker.internal:8767 \
+  -e X_AGENT_NAME=nanoclaw \
+  -e X_AGENT_SESSION_ID="$SID" \
+  nanoclaw:latest
+```
+
+The `NO_PROXY=...,host.docker.internal` membership is **load-bearing** for Path C: without it, the SDK respects `HTTPS_PROXY` even for AWS-shaped requests and they end up in gbounce instead of ibounce.
+
+Verified by `tests/integration/nanoclaw_paths/test_path_c_parallel`:
+- HTTPS to `example.com` flows through `HTTPS_PROXY` → (OneCLI in production) / OneCLI-mock (in test) → gbounce
+- AWS to `s3.amazonaws.com` bypasses `HTTPS_PROXY` via `NO_PROXY` and goes direct to ibounce
+- The two protocols **do not cross**
+
+#### Surfaced gaps (2026-05-22)
+
+Three product gaps were surfaced during integration testing. None are launch-blocking; each is captured here for separate work:
+
+| Gap | Where | Effect | Fix |
+|---|---|---|---|
+| `ibounce` does not read `X-Agent-Session-Id` header | AWS calls via Path B/C | `agent.session_id` is `null` on ibounce events; cross-bouncer correlation by session_id misses AWS traffic | Read inbound header + populate `unmapped.iam_jit.agent.session_id` (mirror gbounce's #308 pattern) |
+| `kbounce` does not read `X-Agent-Session-Id` header | K8s calls via Path B/C | Same gap — correlation misses K8s traffic | Mirror gbounce's #308 pattern |
+| `dbounce` does not surface agent-identity to wire-protocol audit events | SQL via Path B | Per-connection agent identity exists in dbounce internal state (#289) but isn't yet wired to OCSF audit events | Wire the existing `agent_session_id` column into the OCSF emitter |
+
+A fourth honest-positioning note: operational gbounce binaries pre-#308 emit `unmapped.iam_jit.ext.agent_session_id` instead of `unmapped.iam_jit.agent.session_id`. Rebuild gbounce against post-#308 source (which the smoke test confirmed works) so the cross-bouncer correlation query path matches.
+
+Tracker numbers: TBD — surface for separate task per `[[deliberate-feature-completion]]`.
 
 ### OpenClaw
 

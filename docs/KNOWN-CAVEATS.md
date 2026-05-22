@@ -108,17 +108,21 @@ Tracking: every BUG entry has a task number (e.g., #299). v1.0 release gate: eve
 - **Engineering scope:** ~3-4 days cross-product
 - **Task:** #317.
 
-## A12. gbounce: no domain blacklist + wildcard support — `STATUS: QUEUED`
-- **Severity:** HIGH (pre-launch feature gap; operators need to block specific domains without MITM)
-- **Symptom:** gbounce can audit-log every CONNECT, but it can't REFUSE one based on destination host. Operators who want "block this agent from calling api.openai.com" have no way to do it.
-- **What ships:**
-  - Profile YAML: `deny_hosts: [...]` list with exact + wildcard entries (`*.openai.com`, `evil.example.com`, `169.254.169.254`)
-  - CLI: `--deny-host` flag (repeatable) for ad-hoc deny rules
-  - Wildcard semantics: `*.example.com` matches `api.example.com`, `foo.bar.example.com`, AND bare `example.com` (operators usually mean "this org and all subdomains"; document the choice)
-  - Multi-level wildcards (`*.foo.*.bar.com`) rejected at config-parse time with clear error
-  - On CONNECT deny: emit OCSF event `verdict=deny`, `status_id=4 (Denied)`, `ext.deny_reason="matched deny_hosts: *.openai.com"`
-  - Order of evaluation: deny_hosts wins over any allow_hosts list
-- **Engineering scope:** ~1-2 days; matches existing kbounce/dbounce profile deny-list patterns
+## A12. gbounce: no domain blacklist + wildcard support — `STATUS: FIXED 2026-05-22`
+- **Severity:** HIGH (pre-launch feature gap; operators needed to block specific domains without MITM)
+- **Symptom (historical):** gbounce could audit-log every CONNECT, but couldn't REFUSE one based on destination host. Operators who wanted "block this agent from calling api.openai.com" had no way to do it.
+- **Fix (#314, gbounce commit `<SHA>`):**
+  - `--deny-host <entry>` CLI flag (repeatable; union with `--deny-hosts-file`).
+  - `--deny-hosts-file PATH` flag accepting newline-delimited entries OR the YAML-list shape the future profile-mode YAML will use (`deny_hosts:` key + `- entry` lines + inline `deny_hosts: [a, b]`). Forward-compatible with G-Slice 2 profile YAML.
+  - Wildcard semantics: `*.example.com` matches `api.example.com`, `foo.bar.example.com`, AND bare `example.com` (operator-friendly; documented in `internal/proxy/deny_hosts.go` header).
+  - Parse-time rejections (clear errors that name the offending entry):
+    - Bare `*` rejected (use `--default-policy deny` instead — queued for G-Slice 2).
+    - Multi-level wildcards (`*.foo.*.bar.com`, `foo.*`, `*.*`) rejected.
+    - Entries with embedded scheme / path / port / whitespace rejected.
+  - On CONNECT match: gbounce returns 403 to the client + emits OCSF event with `verdict=DENY`, `status_id=4 (Denied)`, `activity_id=6 (Connect)`, `ext.deny_reason="matched deny_hosts: <rule>"` naming the operator-written rule. Upstream TCP connection NEVER opened.
+  - Order of evaluation: deny WINS over any future allow_hosts list (safer-by-default per `[[safety-mode-lean-permissive]]`).
+  - `/healthz` surfaces `deny_hosts_count` + `total_deny_host_matches` for liveness-probe visibility.
+- **Verification:** 11 regression tests in `gbounce/internal/proxy/deny_hosts_test.go` cover exact match, wildcard subdomain, wildcard-matches-bare-domain, wildcard-does-NOT-match-unrelated, not-in-list-allows, bare-`*`-rejected-at-parse, multi-level-wildcard-rejected-at-parse, audit-event-shape (verdict + status_id + deny_reason + dst_endpoint + activity_id=Connect), deny-wins-over-allow, CLI+profile merge, and the /healthz counter surface. E2E sanity-run on a free port (8081 + mgmt 8770) with `--deny-host '*.openai.com' --deny-host 169.254.169.254`: `curl -x http://127.0.0.1:8081 https://api.openai.com/v1/models` → 403; `curl -x http://127.0.0.1:8081 https://openai.com/` → 403 (wildcard bare-domain); `curl -x http://127.0.0.1:8081 https://169.254.169.254/...` → 403; allowed hosts flow through. Audit log carries the documented OCSF deny shape.
 - **Task:** #314.
 
 ## A8. kbouncer + dbouncer: stale `bin/` binaries in repos — `STATUS: FIXED (2026-05-22)`
@@ -186,6 +190,9 @@ Scoped `iam:CreateRole` and wildcard `iam:*` both score 9. Distinguishable via `
 
 ## B15. Cross-product: no unified deny-prompt UI in v1.0 (GAP — v1.1)
 Each bouncer prompts independently. v1.1 brings unified prompt-inbox UI.
+
+## B16. Cross-product: only gbounce reads `X-Agent-Session-Id` header in v1.0 (GAP — v1.1)
+Tested 2026-05-22 against the simulation harness at `tests/integration/nanoclaw_paths/`. gbounce reads `X-Agent-Session-Id` + `X-Agent-Name` headers and populates `unmapped.iam_jit.agent.session_id` on every event (#308). ibounce / kbounce / dbounce do NOT read the header today — they derive `agent.name` from `User-Agent` (or process-tree for ibounce) and leave `agent.session_id` null. Effect: cross-bouncer correlation by `agent.session_id` works for HTTPS-via-gbounce traffic only; AWS / K8s / SQL traffic isn't yet correlatable on session_id. Workaround until v1.1: filter by `agent.name` + time window across products. The kbouncer / dbounce schemas already have the column (#289 / #266 plumbing); the missing piece is reading the header on inbound. Fix is the same shape across all three: mirror gbounce's `buildAgentBlock` from `internal/audit/event.go`. Per `[[don't-tailor-to-lighthouse]]`: the generic-header surface is already documented; closing this is product polish, not lighthouse-bespoke work.
 
 ---
 
