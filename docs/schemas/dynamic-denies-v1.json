@@ -1,0 +1,103 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://iam-jit.dev/schemas/dynamic-denies.v1.json",
+  "title": "iam-jit dynamic-deny rules file",
+  "description": "Schema for ~/.iam-jit/dynamic-denies.yaml — the operator-managed pool of in-flight deny rules that fan out across every Bounce-suite product (ibounce, kbounce, dbounce, gbounce). Authored interactively via `iam-jit deny add` or conversationally via the `bounce_deny_add` MCP tool. Watched by every running bouncer for hot reload (inotify on Linux; fsevents on macOS). Per the post-`[[discovery-first-default]]` pivot this is the primary opt-in deny ergonomics surface; the recommender (per #324f) ALSO consumes this file so that JIT-issued roles embed the same denies as explicit `Deny` statements (defense-in-depth: bouncer denies at request time + role embeds the constraint).\n\nFile-on-disk requirements (enforced by the writer; verified by the reader):\n  * Path: `~/.iam-jit/dynamic-denies.yaml` (override via `IAM_JIT_DYNAMIC_DENIES_PATH`).\n  * Permissions: 0600 (read/write owner only).\n  * Format: YAML 1.2 (round-trippable; preserves operator comments).\n  * Watcher: bouncer processes subscribe to fsevents/inotify; corruption falls back to the LAST-KNOWN-GOOD in-memory snapshot + emits an admin-action OCSF event with `kind=dynamic_deny.file_corrupt` + `severity=high`.\n\nThe authoritative builder ships in #324e (`src/iam_jit/cli_deny.py` + `src/iam_jit/dynamic_denies/store.py`); the per-bouncer consumers ship in #324a-d.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "denies"],
+  "properties": {
+    "schema_version": {
+      "type": "string",
+      "const": "1.0",
+      "description": "Wire-format version. Matches the cross-product common-subset convention from `schemas/INDEX.md` (string, not int)."
+    },
+    "product": {
+      "type": "string",
+      "const": "iam-jit-dynamic-denies",
+      "description": "Magic discriminator so a misrouted `ibounce-config.yaml` (or vice versa) gets refused at parse rather than silently mis-applied."
+    },
+    "exported_at": {
+      "type": "string",
+      "format": "date-time",
+      "description": "RFC3339 UTC timestamp the file was last written. Updated by every `iam-jit deny add/remove` invocation."
+    },
+    "source_hostname_hash": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{12}$",
+      "description": "sha256[:12] of the host that authored the file. Privacy-preserving provenance per `[[cross-product-agent-parity]]`."
+    },
+    "denies": {
+      "type": "array",
+      "description": "Ordered list of active deny rules. Order is preserved on disk (newest-last) but evaluation is by full match — order does not affect precedence per the design doc's `Conflict resolution` section.",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["id", "targets", "reason", "duration", "added_by", "added_at", "applied_to"],
+        "properties": {
+          "id": {
+            "type": "string",
+            "pattern": "^dd_[0-9A-HJKMNP-TV-Z]{26}$",
+            "description": "ULID-suffixed unique identifier (`dd_<ULID>`). ULIDs are 26 chars of Crockford base32 (rejects I/L/O/U to avoid digit confusion). Stable across the lifetime of the rule; referenced by `iam-jit deny remove ID` + the `bounce_deny_remove(id)` MCP tool."
+          },
+          "targets": {
+            "type": "array",
+            "minItems": 1,
+            "items": {"type": "string", "minLength": 1},
+            "description": "One or more target patterns. Cross-protocol — the resolver in `iam-jit deny add` classifies each pattern by shape (ARN → ibounce; hostname/RDS endpoint → dbounce + gbounce; k8s namespace/cluster → kbouncer; URL/glob → gbounce) and writes the destination(s) into `applied_to`. See the design doc's `Cross-protocol target resolver table` for exact heuristics + ambiguous-pattern handling."
+          },
+          "reason": {
+            "type": "string",
+            "minLength": 1,
+            "description": "Operator-supplied free-text reason. Surfaces verbatim in the bouncer's `403`-payload `deny_reason` field + the OCSF audit event so the next operator sees `why` without context-switching."
+          },
+          "duration": {
+            "type": "string",
+            "description": "Either a Go-style duration string (`30m`, `3h`, `7d`) OR the literal `permanent`. The duration anchors `expires_at`; permanent denies have `expires_at: null`.",
+            "pattern": "^(permanent|[0-9]+(s|m|h|d|w))$"
+          },
+          "added_by": {
+            "type": "string",
+            "description": "Audit-trail metadata. Resolved via `resolve_operator()` — typically `email@org.com` (OIDC) or `username@hostname` (local). Mirrors `admin-action-event.schema.json::admin_action.actor`."
+          },
+          "added_at": {
+            "type": "string",
+            "format": "date-time",
+            "description": "ISO 8601 / RFC3339 timestamp the rule was created. Source of truth for `expires_at = added_at + duration` (computed at write-time, not read-time, so clock drift on the read host does not extend the deny window)."
+          },
+          "expires_at": {
+            "type": ["string", "null"],
+            "format": "date-time",
+            "description": "When the rule auto-removes. `null` for `duration: permanent`. The watcher in each bouncer schedules removal at this timestamp + emits a `dynamic_deny.expired` admin-action event when fired."
+          },
+          "applied_to": {
+            "type": "array",
+            "minItems": 1,
+            "items": {
+              "type": "string",
+              "enum": ["ibounce", "kbounce", "dbounce", "gbounce"]
+            },
+            "uniqueItems": true,
+            "description": "Which bouncer(s) the deny is meant for, resolved at `deny add` time from the targets. A target pattern that resolves to multiple bouncers (e.g. an RDS hostname matches both dbounce + gbounce) yields multiple entries. An empty resolution is rejected at add-time with a structured error."
+          },
+          "applies_to_recommender": {
+            "type": "boolean",
+            "default": true,
+            "description": "Per #324f: when true (default), the iam-jit recommender embeds an explicit `Deny` statement matching the targets into any role it issues for the lifetime of the rule. Setting false scopes the rule to the bouncer-only enforcement path (useful when the deny target is non-AWS or the operator explicitly wants bouncer-only enforcement)."
+          },
+          "source": {
+            "type": "string",
+            "enum": ["cli", "mcp", "org-distributed", "imported"],
+            "default": "cli",
+            "description": "Provenance — how the rule landed. `org-distributed` rules cannot be loosened by personal denies per the design doc's `Conflict resolution` section."
+          },
+          "org_distributed_url": {
+            "type": ["string", "null"],
+            "format": "uri",
+            "description": "When `source == \"org-distributed\"`: the HTTPS URL the rule was installed from. Used at sync time to refresh."
+          }
+        }
+      }
+    }
+  }
+}

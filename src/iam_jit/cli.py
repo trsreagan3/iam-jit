@@ -1713,6 +1713,14 @@ register_audit_stream_command(audit_group)
 from .cli_session_replay import register_session_replay_group  # noqa: E402
 register_session_replay_group(main)
 
+# #324 — register `iam-jit deny` (SKELETON). Surfaces the planned
+# dynamic-deny-rule CLI shape on `--help`; each subcommand exits 2
+# with a structured "not implemented yet" payload pointing at the
+# design doc + the slice tracking the implementation. The full impl
+# replaces this skeleton in #324e. See docs/DYNAMIC-DENY-RULES.md.
+from .cli_deny import register_deny_group  # noqa: E402
+register_deny_group(main)
+
 
 if __name__ == "__main__":
     main()

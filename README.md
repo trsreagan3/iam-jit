@@ -36,6 +36,8 @@ All four share the same deterministic scoring engine. Open source under Apache 2
 
 > **Bounce-suite rename (v1.0, 2026-05-17).** What used to be `iam-jit-bouncer` is now `ibounce` — the canonical name across the Bounce family (ibounce + kbounce + future). The `iam-jit-bouncer` console script keeps working for v1.0 (prints a deprecation warning + forwards to the same entrypoint) and is removed in v1.1. Every `bouncer_*` MCP tool gets an `ibounce_*` alias; both names dispatch to the same handler in v1.0. See [docs/UPGRADING.md](docs/UPGRADING.md) for the one-line migration.
 
+> **Dynamic deny rules (in design).** Per the post-`discovery-first-default` pivot (§A21), the v1.0+ ergonomics for cross-product opt-in denies are conversational dynamic deny rules: `iam-jit deny add --target 'arn:aws:s3:::prod-*' --duration 3h` fans out across every applicable bouncer + embeds the same constraint into iam-jit-issued roles. The CLI skeleton is in (`iam-jit deny --help`); the full implementation lands across #324a-f. See [docs/DYNAMIC-DENY-RULES.md](docs/DYNAMIC-DENY-RULES.md) for the canonical design.
+
 ---
 
 ## Why this exists
