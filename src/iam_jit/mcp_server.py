@@ -2077,6 +2077,57 @@ TOOLS.extend([
 ])
 
 
+# ---------------------------------------------------------------------------
+# #383 / §A42 — `iam_jit_posture` cross-product introspection MCP tool.
+# ---------------------------------------------------------------------------
+# Mirrors the `iam-jit posture` CLI per [[cross-product-agent-parity]].
+# Any agent (Claude Code, Cursor, Codex, Devin) can call this BEFORE
+# performing a sensitive op to learn whether it's behind iam-jit + a
+# bouncer, then condition its plan on the answer.
+TOOLS.extend([
+    {
+        "name": "bouncer_posture",
+        "description": (
+            "Return ibounce's local posture: running / port / mode / "
+            "active-profile / scope primitives / whether the env var "
+            "is wired to it / MISCONFIG flag. Read-only single-bouncer "
+            "view; for the cross-product view use `iam_jit_posture`. "
+            "Per [[cross-product-agent-parity]] each bouncer ships the "
+            "same shape (`kbounce posture` + `dbounce posture` + "
+            "`gbounce posture`) so an agent's reasoning is uniform "
+            "across protocols."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {},
+        },
+    },
+    {
+        "name": "iam_jit_posture",
+        "description": (
+            "Return which security mode the operator is in: "
+            "iam-jit scoped role / bouncer interception / both / "
+            "neither. Reports per-traffic-class (AWS / K8s / DB / "
+            "HTTP) effective protection — for each, whether a "
+            "bouncer is intercepting + which mode it's in + whether "
+            "it enforces denials. Also surfaces MISCONFIGURATIONS "
+            "(env var points at a bouncer that isn't running) per "
+            "[[ibounce-honest-positioning]]. READ-ONLY: takes no "
+            "arguments + makes no AWS API calls (no credential leak "
+            "risk). Use this BEFORE recommending a sensitive op so "
+            "you can warn the user 'you're DIRECT — nothing is "
+            "intercepting these calls' or 'you're behind ibounce but "
+            "in DISCOVERY mode, which does not enforce denials'. "
+            "Schema version 1.0; output mirrors `iam-jit posture --json`."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {},
+        },
+    },
+])
+
+
 # Bounce-suite rename (2026-05-17): every `bouncer_*` MCP tool gets
 # an `ibounce_*` alias in v1.0. Both names dispatch to the same
 # handler; the `bouncer_*` originals carry a `(DEPRECATED ...)` note
@@ -4441,6 +4492,25 @@ def _handle_request(req: dict[str, Any]) -> dict[str, Any] | None:
             result_payload = _bounce_deny_list_for_mcp(args)
         elif tool_name == "bounce_deny_remove":
             result_payload = _bounce_deny_remove_for_mcp(args)
+        elif tool_name == "iam_jit_posture":
+            # #383 / §A42 — cross-product posture orchestrator.
+            from .cli_posture import posture_for_mcp
+            result_payload = posture_for_mcp(args)
+        elif tool_name == "bouncer_posture":
+            # #383 / §A42 — per-bouncer (ibounce) posture surface.
+            # Returns the same per-bouncer block the cross-product
+            # `iam_jit_posture` exposes for ibounce, plus the
+            # identity block (since ibounce IS the AWS-traffic-class
+            # bouncer + the user cares about both at once).
+            from .posture.bouncers import detect_ibounce
+            from .posture.identity import detect_iam_jit_role
+            from .posture.sanitize import sanitize_posture
+            result_payload = sanitize_posture({
+                "schema_version": "1.0",
+                "bouncer": "ibounce",
+                "block": detect_ibounce(),
+                "iam_jit_identity": detect_iam_jit_role(),
+            })
         else:
             return _err(rid, -32601, f"unknown tool: {tool_name}")
         # MCP tool result format: { content: [{type: "text", text: "..."}] }

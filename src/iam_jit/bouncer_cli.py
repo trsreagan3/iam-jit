@@ -7788,5 +7788,76 @@ def audit_webhook_presets_list_cmd(as_json: bool) -> None:
     )
 
 
+# ---------------------------------------------------------------------------
+# #383 / §A42 — `ibounce posture` (per-bouncer posture surface).
+# ---------------------------------------------------------------------------
+# Cross-product parity command per [[cross-product-agent-parity]] —
+# kbounce / dbounce / gbounce each ship the same `<bouncer> posture`
+# subcommand. Returns the ibounce-only view (mode + active profile +
+# env-var wiring + misconfig flag), in human OR --json. For the
+# cross-product view (all four bouncers + iam-jit role state +
+# per-traffic-class effective protection), use `iam-jit posture`.
+
+
+@main.command("posture")
+@click.option(
+    "--json",
+    "as_json",
+    is_flag=True,
+    default=False,
+    help="Emit the structured posture snapshot as JSON. Designed for "
+    "agent consumption / pipelines.",
+)
+def posture_cmd(as_json: bool) -> None:
+    """Report this bouncer's posture (running / mode / profile / env wiring).
+
+    For the cross-product view (all 4 bouncers + iam-jit identity +
+    per-traffic-class effective protection), use `iam-jit posture`.
+
+    Per [[ibounce-honest-positioning]]: the output is HONEST about
+    uncertainty + misconfig — if AWS_ENDPOINT_URL is set but no
+    bouncer is listening on that port, the output reports
+    "MISCONFIGURED — env points at down bouncer" rather than
+    silently claiming intercept.
+    """
+    # Lazy import — keeps the posture module out of the cold-start
+    # path for unrelated CLI commands.
+    import json as _json
+
+    from .posture.bouncers import detect_ibounce
+    from .posture.identity import detect_iam_jit_role
+    from .posture.sanitize import sanitize_posture
+
+    snapshot = sanitize_posture({
+        "schema_version": "1.0",
+        "bouncer": "ibounce",
+        "block": detect_ibounce(),
+        "iam_jit_identity": detect_iam_jit_role(),
+    })
+    if as_json:
+        click.echo(_json.dumps(snapshot, indent=2, sort_keys=True))
+        return
+    b = snapshot["block"]
+    ident = snapshot["iam_jit_identity"]
+    click.echo("== ibounce posture ==")
+    running = "RUNNING" if b.get("running") else "STOPPED"
+    click.echo(f"Status: {running} on 127.0.0.1:{b.get('port', '?')}")
+    click.echo(f"Mode: {b.get('mode', 'unknown')}")
+    click.echo(f"Active profile: {b.get('active_profile', 'unknown')}")
+    if b.get("env_var_pointing_here"):
+        click.echo(f"Env wiring: {b['env_var_pointing_here']}")
+    if b.get("misconfig"):
+        click.secho(f"MISCONFIG: {b['misconfig']}", fg="red", err=True)
+    arn = ident.get("role_arn") or "(none visible in env)"
+    scoped = ident.get("scoped_role_active")
+    click.echo("")
+    click.echo("AWS identity:")
+    click.echo(f"  ARN: {arn}")
+    click.echo(f"  Scoped (iam-jit issued?): {scoped}")
+    click.echo(
+        f"  Source: {ident.get('ambient_credential_source', 'unknown')}"
+    )
+
+
 if __name__ == "__main__":
     main()

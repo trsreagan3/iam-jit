@@ -1729,6 +1729,13 @@ register_deny_group(main)
 from .cli_profile_generate import register_profile_group  # noqa: E402
 register_profile_group(main)
 
+# #383 / §A42 — register `iam-jit posture` cross-product orchestrator.
+# Reports "iam-jit role / bouncer / both / neither" + per-traffic-class
+# protection. Backed by iam_jit.posture which is the SAME module the
+# `iam_jit_posture` MCP tool calls — schema parity by construction.
+from .cli_posture import register_posture_command  # noqa: E402
+register_posture_command(main)
+
 
 if __name__ == "__main__":
     main()
