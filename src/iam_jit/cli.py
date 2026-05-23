@@ -1772,5 +1772,13 @@ from .autopilot import register_autopilot_command  # noqa: E402
 register_autopilot_command(main)
 
 
+# #412 / §A56 — register `iam-jit digest` weekly "your bouncer caught X"
+# summary. Positive-signal counterweight to the deny-notification channel
+# per [[ambient-value-prop-and-friction-framing]]. Mirrors the
+# `bounce_digest_recent` MCP tool per [[cross-product-agent-parity]].
+from .cli_digest import register_digest_command  # noqa: E402
+register_digest_command(main)
+
+
 if __name__ == "__main__":
     main()

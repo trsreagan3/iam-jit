@@ -249,12 +249,20 @@ class AutopilotSupervisor:
     sweep_interval_s: float = _DEFAULT_SWEEP_INTERVAL_S
     improve_interval_s: float = _DEFAULT_IMPROVE_INTERVAL_S
     notify_denies: str = "stderr"  # stderr | webhook | none
+    # #412 / §A56 — weekly digest webhook delivery. ``False`` skips
+    # entirely. ``True`` opts in; the URL itself is read from
+    # ``IAM_JIT_AUTOPILOT_DIGEST_WEBHOOK_URL`` per the deny-webhook
+    # security model (webhooks carry secrets, never accept via CLI flag
+    # arg per [[push-policy-public-repo]]).
+    digest_webhook_enabled: bool = False
+    digest_interval_s: float = 7 * 86400.0  # weekly
     bouncer_states: dict[str, _BouncerSupervisorState] = dataclasses.field(
         default_factory=dict
     )
     started_at: float = dataclasses.field(default_factory=time.time)
     last_improve_at: float = 0.0
     last_sweep_at: float = 0.0
+    last_digest_at: float = 0.0
     stopped: bool = False
     alerts: list[str] = dataclasses.field(default_factory=list)
     _improve_count: int = 0
@@ -522,6 +530,17 @@ class AutopilotSupervisor:
             except Exception as e:  # pragma: no cover
                 logger.debug("autopilot deny notify failed: %s", e)
 
+        # #412 / §A56 — weekly digest webhook delivery (opt-in via
+        # --digest-webhook flag + IAM_JIT_AUTOPILOT_DIGEST_WEBHOOK_URL
+        # env var). Cadence is weekly; the first delivery fires after
+        # ``digest_interval_s`` since supervisor start so an operator
+        # restarting the daemon doesn't spam their channel.
+        if self.digest_webhook_enabled:
+            try:
+                self._maybe_deliver_digest_webhook()
+            except Exception as e:  # pragma: no cover
+                logger.debug("autopilot digest webhook failed: %s", e)
+
         status = AutopilotStatus(
             running=True,
             pid=os.getpid(),
@@ -666,6 +685,70 @@ class AutopilotSupervisor:
         except Exception as e:
             logger.debug("autopilot webhook notify failed: %s", e)
 
+    def _maybe_deliver_digest_webhook(self) -> None:
+        """Deliver a weekly digest card to the webhook URL if it's due.
+
+        Cadence: every ``digest_interval_s`` (default 7 days). First
+        delivery fires after the interval since supervisor start
+        (NOT on first tick — that would spam an operator restarting the
+        daemon).
+
+        URL source: ``IAM_JIT_AUTOPILOT_DIGEST_WEBHOOK_URL`` env var only.
+        Per [[push-policy-public-repo]] webhook URLs frequently embed
+        secrets so we don't take them as a CLI arg.
+
+        Failures degrade silently per [[ibounce-honest-positioning]] —
+        the operator can always run ``iam-jit digest`` interactively.
+        """
+        now = time.time()
+        # Anchor first delivery off supervisor start so a restart doesn't
+        # immediately re-fire. If last_digest_at is 0 we treat the
+        # interval boundary as ``started_at + digest_interval_s``.
+        if self.last_digest_at <= 0.0:
+            if (now - self.started_at) < self.digest_interval_s:
+                return
+        elif (now - self.last_digest_at) < self.digest_interval_s:
+            return
+
+        webhook_url = os.environ.get(
+            "IAM_JIT_AUTOPILOT_DIGEST_WEBHOOK_URL", "",
+        ).strip()
+        if not webhook_url:
+            logger.debug(
+                "autopilot digest webhook skipped: "
+                "IAM_JIT_AUTOPILOT_DIGEST_WEBHOOK_URL unset"
+            )
+            # Mark anyway so we don't re-check on every tick — operator
+            # who sets the var later starts the clock from then.
+            self.last_digest_at = now
+            return
+        try:
+            from ..digest import build_digest
+            from ..digest.render import build_webhook_payload
+        except Exception as e:  # pragma: no cover
+            logger.debug("autopilot digest import failed: %s", e)
+            return
+        try:
+            data = build_digest(since="1w")
+            payload = build_webhook_payload(data)
+        except Exception as e:
+            logger.debug("autopilot digest build failed: %s", e)
+            return
+        try:
+            import urllib.request
+            req = urllib.request.Request(
+                webhook_url,
+                data=json.dumps(payload).encode("utf-8"),
+                headers={"Content-Type": "application/json"},
+                method="POST",
+            )
+            with urllib.request.urlopen(req, timeout=5.0) as resp:
+                resp.read()
+        except Exception as e:
+            logger.debug("autopilot digest webhook post failed: %s", e)
+            return
+        self.last_digest_at = now
+
     def run_forever(
         self,
         *,
@@ -802,6 +885,8 @@ def autopilot_start(
     notify_denies: str = "stderr",
     sweep_interval_s: float = _DEFAULT_SWEEP_INTERVAL_S,
     improve_interval_s: float = _DEFAULT_IMPROVE_INTERVAL_S,
+    digest_webhook: bool = False,
+    digest_interval_s: float = 7 * 86400.0,
     max_ticks: int | None = None,
 ) -> dict[str, Any]:
     """Start the autopilot daemon.
@@ -862,6 +947,7 @@ def autopilot_start(
             cwd=cwd,
             notify_denies=notify_denies,
             source_label=source_label,
+            digest_webhook=digest_webhook,
         )
 
     # Foreground / in-process loop.
@@ -871,6 +957,8 @@ def autopilot_start(
         sweep_interval_s=sweep_interval_s,
         improve_interval_s=improve_interval_s,
         notify_denies=notify_denies,
+        digest_webhook_enabled=digest_webhook,
+        digest_interval_s=digest_interval_s,
     )
     supervisor.initialize()
     _write_pid_file(os.getpid())
@@ -894,6 +982,7 @@ def _spawn_detached(
     cwd: pathlib.Path | None,
     notify_denies: str,
     source_label: str,
+    digest_webhook: bool = False,
 ) -> dict[str, Any]:
     """Spawn a detached child process that runs the supervisor loop."""
     cmd = [
@@ -908,6 +997,8 @@ def _spawn_detached(
         cmd.extend(["--cwd", str(cwd)])
     if notify_denies and notify_denies != "stderr":
         cmd.extend(["--notify-denies", notify_denies])
+    if digest_webhook:
+        cmd.append("--digest-webhook")
     try:
         proc = subprocess.Popen(  # noqa: S603 — non-shell, known args
             cmd,
@@ -1051,6 +1142,15 @@ def register_autopilot_command(parent_group: click.Group) -> click.Group:
         help="Seconds between improve cycles when cadence=per_session.",
     )
     @click.option(
+        "--digest-webhook",
+        is_flag=True,
+        default=False,
+        help="Opt in to weekly digest webhook delivery. URL is read "
+             "from IAM_JIT_AUTOPILOT_DIGEST_WEBHOOK_URL env var per "
+             "webhook-secret hygiene; cadence is 7 days from supervisor "
+             "start.",
+    )
+    @click.option(
         "--json",
         "as_json",
         is_flag=True,
@@ -1065,6 +1165,7 @@ def register_autopilot_command(parent_group: click.Group) -> click.Group:
         max_ticks: int | None,
         sweep_interval: float,
         improve_interval: float,
+        digest_webhook: bool,
         as_json: bool,
     ) -> None:
         """Start the autopilot daemon."""
@@ -1076,6 +1177,7 @@ def register_autopilot_command(parent_group: click.Group) -> click.Group:
                 notify_denies=notify_denies,
                 sweep_interval_s=sweep_interval,
                 improve_interval_s=improve_interval,
+                digest_webhook=digest_webhook,
                 max_ticks=max_ticks,
             )
         except AutopilotError as e:
@@ -1202,6 +1304,7 @@ def _main_entry() -> None:
     parser.add_argument("--notify-denies", type=str, default="stderr")
     parser.add_argument("--sweep-interval", type=float, default=_DEFAULT_SWEEP_INTERVAL_S)
     parser.add_argument("--improve-interval", type=float, default=_DEFAULT_IMPROVE_INTERVAL_S)
+    parser.add_argument("--digest-webhook", action="store_true", default=False)
     args = parser.parse_args()
     try:
         autopilot_start(
@@ -1211,6 +1314,7 @@ def _main_entry() -> None:
             notify_denies=args.notify_denies,
             sweep_interval_s=args.sweep_interval,
             improve_interval_s=args.improve_interval,
+            digest_webhook=args.digest_webhook,
         )
     except AutopilotError as e:
         sys.stderr.write(f"autopilot: {e}\n")

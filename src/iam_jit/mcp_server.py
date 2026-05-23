@@ -2503,6 +2503,57 @@ TOOLS.extend([
 ])
 
 
+# #412 / §A56 — bounce_digest_recent: weekly "your bouncer caught X"
+# digest. Positive-signal counterweight to the deny-notification channel
+# per [[ambient-value-prop-and-friction-framing]]; mirrors the
+# `iam-jit digest` CLI per [[cross-product-agent-parity]]. Reads from
+# ~/.iam-jit/autopilot.status.json (schema 1.1) + the deny-fetch
+# fan-out + the pending-allow queue.
+TOOLS.extend([
+    {
+        "name": "bounce_digest_recent",
+        "description": (
+            "Cross-bouncer 'your bouncer week in review' summary over "
+            "a configurable window. Returns per-bouncer counts "
+            "(audited / denied / by classification) + improve-cycle "
+            "summary + pending-approval count + recommendations. Use "
+            "this when the operator asks 'what did the bouncer do "
+            "this week' or 'is iam-jit doing anything useful'. Lead "
+            "with the positive signal (audited count) per ambient-value-prop "
+            "framing; surface adversarial-classified denies explicitly "
+            "(never bury them in friendly aggregates). Read-only — no "
+            "audit row. Default --since is '1w' (last 7 days)."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "since": {
+                    "type": "string",
+                    "default": "1w",
+                    "description": (
+                        "Window lookback (5m / 1h / 2d / 1w) or ISO 8601 "
+                        "lower bound. Default 1w."
+                    ),
+                },
+                "bouncer": {
+                    "type": "string",
+                    "enum": [
+                        "ibounce",
+                        "kbouncer",
+                        "dbounce",
+                        "gbounce",
+                    ],
+                    "description": (
+                        "Restrict to a single bouncer. Default: every "
+                        "bouncer the autopilot status file knows about."
+                    ),
+                },
+            },
+        },
+    },
+])
+
+
 # Bounce-suite rename (2026-05-17): every `bouncer_*` MCP tool gets
 # an `ibounce_*` alias in v1.0. Both names dispatch to the same
 # handler; the `bouncer_*` originals carry a `(DEPRECATED ...)` note
@@ -4871,6 +4922,10 @@ def _handle_request(req: dict[str, Any]) -> dict[str, Any] | None:
             result_payload = _bounce_profile_allow_for_mcp(args)
         elif tool_name == "bounce_denies_recent":
             result_payload = _bounce_denies_recent_for_mcp(args)
+        elif tool_name == "bounce_digest_recent":
+            # #412 / §A56 — weekly "your bouncer caught X" digest.
+            from .cli_digest import digest_for_mcp
+            result_payload = digest_for_mcp(args)
         elif tool_name == "iam_jit_posture":
             # #383 / §A42 — cross-product posture orchestrator.
             from .cli_posture import posture_for_mcp
