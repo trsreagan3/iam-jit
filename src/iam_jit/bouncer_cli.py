@@ -3781,6 +3781,73 @@ def _parse_duration(raw: str) -> int:
          "for non-flag overrides.",
 )
 @click.option(
+    "--disk-pressure-mode",
+    "disk_pressure_mode",
+    type=click.Choice(
+        ["pause-requests", "rotate-aggressively", "archive-and-purge"],
+        case_sensitive=False,
+    ),
+    default="pause-requests",
+    show_default=True,
+    envvar="IBOUNCE_DISK_PRESSURE_MODE",
+    help="#424 / §A63 — disk-pressure circuit-breaker reaction mode "
+         "when audit-log directory crosses the critical threshold. "
+         "'pause-requests' (compliance-heavy default): refuse new agent "
+         "requests with HTTP 503. 'rotate-aggressively' (dev-friendly): "
+         "drop oldest rotated archives until disk falls back below "
+         "warn. 'archive-and-purge' (hybrid): drop oldest archives + "
+         "emit operator hint that the #317 object-storage sink should "
+         "ship before the next tick. See "
+         "docs/PRODUCTION-LOG-STORAGE.md §5 for the full decision "
+         "matrix.",
+)
+@click.option(
+    "--stop-on-disk-critical",
+    "stop_on_disk_critical",
+    is_flag=True,
+    default=False,
+    envvar="IBOUNCE_STOP_ON_DISK_CRITICAL",
+    help="#424 / §A63 — alias for --disk-pressure-mode=pause-requests. "
+         "Shipped as a convenience flag because the documented operator "
+         "intent ('the bouncer should pause if disk is critical') matches "
+         "this exact mode. When set, OVERRIDES --disk-pressure-mode. "
+         "Recommended for compliance-heavy deployments where losing audit "
+         "events is worse than refusing new traffic.",
+)
+@click.option(
+    "--disk-pressure-warn-pct",
+    "disk_pressure_warn_pct",
+    type=click.IntRange(0, 100),
+    default=None,
+    envvar="IBOUNCE_DISK_PRESSURE_WARN_PCT",
+    help="#424 / §A63 — disk-usage % AT-OR-ABOVE which /healthz "
+         "audit_log.status transitions ok -> degraded. Default 85 "
+         "(matches the rotation.py shipped default). 0 disables the "
+         "warn signal entirely.",
+)
+@click.option(
+    "--disk-pressure-crit-pct",
+    "disk_pressure_crit_pct",
+    type=click.IntRange(0, 100),
+    default=None,
+    envvar="IBOUNCE_DISK_PRESSURE_CRIT_PCT",
+    help="#424 / §A63 — disk-usage % AT-OR-ABOVE which /healthz "
+         "audit_log.status transitions degraded -> critical. Default 95. "
+         "pause-requests mode flips refuse_requests at this boundary; "
+         "rotate-aggressively / archive-and-purge drop oldest archives.",
+)
+@click.option(
+    "--disk-pressure-emergency-pct",
+    "disk_pressure_emergency_pct",
+    type=click.IntRange(0, 100),
+    default=None,
+    envvar="IBOUNCE_DISK_PRESSURE_EMERGENCY_PCT",
+    help="#424 / §A63 — disk-usage % AT-OR-ABOVE which /healthz "
+         "audit_log.status transitions critical -> emergency. Default "
+         "98. All modes treat emergency the same: surface in /healthz "
+         "+ emit OCSF admin-action transition event.",
+)
+@click.option(
     "--record-sessions-dir",
     "record_sessions_dir",
     type=click.Path(file_okay=False),
@@ -4170,6 +4237,11 @@ def run_cmd(
     audit_log_max_size_mb: int | None,
     audit_log_max_age_days: int | None,
     audit_db_retention_days: int | None,
+    disk_pressure_mode: str,
+    stop_on_disk_critical: bool,
+    disk_pressure_warn_pct: int | None,
+    disk_pressure_crit_pct: int | None,
+    disk_pressure_emergency_pct: int | None,
     record_sessions_dir: str | None,
     audit_webhook_url: str | None,
     audit_webhook_token: str | None,
@@ -4541,6 +4613,19 @@ def run_cmd(
         audit_log_max_size_mb=audit_log_max_size_mb,
         audit_log_max_age_days=audit_log_max_age_days,
         audit_db_retention_days=audit_db_retention_days,
+        # #424 / §A63 — disk-pressure circuit-breaker config.
+        # --stop-on-disk-critical is the documented convenience alias
+        # for --disk-pressure-mode=pause-requests; when present it
+        # overrides --disk-pressure-mode to keep the operator's
+        # intent unambiguous (vs silently picking one to win on
+        # conflict). See PRODUCTION-LOG-STORAGE.md §5.
+        disk_pressure_mode=(
+            "pause-requests" if stop_on_disk_critical
+            else disk_pressure_mode.lower()
+        ),
+        disk_pressure_warn_pct=disk_pressure_warn_pct,
+        disk_pressure_crit_pct=disk_pressure_crit_pct,
+        disk_pressure_emergency_pct=disk_pressure_emergency_pct,
         record_sessions_dir=record_sessions_dir,
         audit_webhook_url=audit_webhook_url,
         audit_webhook_token=audit_webhook_token,

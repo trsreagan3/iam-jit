@@ -200,6 +200,15 @@ ADMIN_ACTION_AUDIT_LOG_ROTATION_FAILED = "audit.log.rotation_failed"
 ADMIN_ACTION_AUDIT_LOG_RECOVERED_PARTIAL = "audit.log.recovered_partial"
 ADMIN_ACTION_AUDIT_LOG_PURGED = "audit.log.purged"
 ADMIN_ACTION_AUDIT_LOG_ARCHIVED = "audit.log.archived"
+# #424 / §A63 — disk-pressure circuit-breaker state transitions. Fired
+# on each ok/degraded/critical/emergency boundary cross by the
+# disk_pressure policy layer (audit_export/disk_pressure.py). Same
+# wire-name convention as the audit.log.* lifecycle events so a
+# SIEM rule keyed on `action == "disk_pressure.transition"` catches
+# the breaker firing across all four products
+# (per [[cross-product-agent-parity]] kbounce/dbounce/gbounce reuse
+# the same wire kind).
+ADMIN_ACTION_DISK_PRESSURE_TRANSITION = "disk_pressure.transition"
 
 
 # Set of every known kind. Used by the dispatch in the proxy's
@@ -227,6 +236,7 @@ KNOWN_ADMIN_ACTION_KINDS: frozenset[str] = frozenset({
     ADMIN_ACTION_AUDIT_LOG_ROTATION_FAILED,
     ADMIN_ACTION_AUDIT_LOG_RECOVERED_PARTIAL,
     ADMIN_ACTION_AUDIT_LOG_PURGED,
+    ADMIN_ACTION_DISK_PRESSURE_TRANSITION,
     ADMIN_ACTION_AUDIT_LOG_ARCHIVED,
 })
 
@@ -254,6 +264,7 @@ def admin_action_activity_id(kind: str) -> int:
         ADMIN_ACTION_ALERT_RULE_EDIT,
         ADMIN_ACTION_PROFILE_ASSIGN,
         ADMIN_ACTION_BACKUP_RESTORE,
+        ADMIN_ACTION_DISK_PRESSURE_TRANSITION,
     ):
         return ACTIVITY_UPDATE
     if kind in (
@@ -839,6 +850,7 @@ __all__ = [
     "ADMIN_ACTION_ALERT_RULE_EDIT",
     "ADMIN_ACTION_BACKUP_CREATE",
     "ADMIN_ACTION_BACKUP_RESTORE",
+    "ADMIN_ACTION_DISK_PRESSURE_TRANSITION",
     "ADMIN_ACTION_CONFIG_EXPORT",
     "ADMIN_ACTION_CONFIG_IMPORT",
     "ADMIN_ACTION_LICENSE_INSTALL",

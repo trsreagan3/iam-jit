@@ -126,6 +126,12 @@
           "pattern": "^[a-fA-F0-9]{64}$",
           "description": "Hex-encoded SHA-256 of the profile file referenced by `profile_source`. Optional but recommended for `posture: managed` — when present the loader verifies the file's hash before applying and refuses to start the bouncer on a mismatch (drift detection). 64 hex chars; case-insensitive."
         },
+        "disk_pressure_mode": {
+          "type": "string",
+          "enum": ["pause-requests", "rotate-aggressively", "archive-and-purge"],
+          "default": "pause-requests",
+          "description": "#424 / §A63 — disk-pressure circuit-breaker reaction mode when audit-log directory crosses the critical threshold. pause-requests (default, compliance-heavy) refuses new agent requests with HTTP 503. rotate-aggressively drops oldest rotated archives to recover space. archive-and-purge emits operator hint that the #317 object-storage sink should ship before dropping. See docs/PRODUCTION-LOG-STORAGE.md §5.1. Per [[cross-product-agent-parity]] kbouncer/dbouncer/gbouncer accept the same string values."
+        },
         "extra_args": {
           "type": "array",
           "items": { "type": "string" },

@@ -215,6 +215,67 @@ def detect_ibounce() -> dict[str, Any]:
     else:
         block["active_profile"] = "unknown"
 
+    # #424 / §A63 — disk-pressure surface. In-process read works ONLY
+    # when posture is invoked from inside a running ibounce serve()
+    # process (the disk-pressure state is in-process; not persisted).
+    # Otherwise we probe /healthz over HTTP if the bouncer is reachable
+    # (the audit_log block is always present on /healthz per §A63).
+    # On failure to read either, we surface "unknown" rather than
+    # absent — per [[ibounce-honest-positioning]] missing data is
+    # named, not hidden.
+    disk_pressure: dict[str, Any] | None = None
+    try:
+        from ..bouncer.proxy import active_disk_pressure_state
+        from ..bouncer.audit_export import healthz_audit_log_block
+        _dp = active_disk_pressure_state()
+        if _dp is not None:
+            disk_pressure = healthz_audit_log_block(_dp)
+    except Exception:
+        disk_pressure = None
+    if disk_pressure is None and running:
+        # Out-of-process probe via /healthz. Short timeout — posture
+        # is interactive; we don't want to hang the operator if the
+        # bouncer is unresponsive.
+        try:
+            import json
+            import urllib.error
+            import urllib.request
+            req = urllib.request.Request(
+                f"http://127.0.0.1:{port}/healthz",
+                method="GET",
+            )
+            with urllib.request.urlopen(req, timeout=1.0) as resp:
+                payload = json.loads(resp.read().decode("utf-8"))
+                disk_pressure = payload.get("audit_log")
+        except (urllib.error.URLError, OSError, ValueError, TimeoutError):
+            disk_pressure = None
+    if disk_pressure is not None:
+        block["disk_pressure"] = disk_pressure
+        # Surface a single-line operator-facing recommendation when
+        # the bouncer is approaching critical or already at it.
+        _status = disk_pressure.get("status")
+        _used = disk_pressure.get("used_pct")
+        _mode = disk_pressure.get("disk_pressure_mode")
+        if _status in ("critical", "emergency"):
+            block["disk_pressure_recommendation"] = (
+                f"disk pressure {_status} at {_used}% used; "
+                f"mode={_mode}. Clear space in the audit-log "
+                "directory OR switch to rotate-aggressively / "
+                "archive-and-purge to recover automatically."
+            )
+        elif _status == "degraded":
+            block["disk_pressure_recommendation"] = (
+                f"disk approaching threshold at {_used}% used. "
+                "Consider archiving older rotated logs OR raising "
+                "--disk-pressure-warn-pct if the threshold is set "
+                "too tight for your retention window."
+            )
+        else:
+            block["disk_pressure_recommendation"] = None
+    else:
+        block["disk_pressure"] = None
+        block["disk_pressure_recommendation"] = None
+
     # Env-var wiring + misconfig check.
     endpoint = os.environ.get(IBOUNCE_AWS_ENDPOINT_ENV, "").strip()
     endpoint_port = _parse_url_for_loopback_port(endpoint)

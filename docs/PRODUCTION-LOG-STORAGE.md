@@ -73,10 +73,14 @@ kbounce audit tail --filter severity_id=4         # high-severity only
 dbounce audit tail --export jsonl --out hits.json # bulk dump
 ```
 
-**Rotation + retention:** see #311 (in flight). Pre-#311, operator-side
-`logrotate` on the JSONL file is the recommended workaround. The
-SQLite audit DB is separate and unrotated in v1.0 — keep an eye on
-disk usage.
+**Rotation + retention:** shipped under #311 (size + age triggers,
+gzip archives, crash-recovery for partial tails). Full surface +
+flag reference: [docs/LOG-RETENTION.md](LOG-RETENTION.md). The
+SQLite audit DB rotates daily; rotated archives are eligible for
+purge via `--audit-db-retention-days` (default 30). Disk-pressure
+circuit breaker + the three operator-selectable response modes
+(pause-requests / rotate-aggressively / archive-and-purge) are
+covered in §5 below.
 
 ### 2.2 Multi-host on-prem (Splunk / Datadog / Sentinel)
 
@@ -595,28 +599,146 @@ Cribl's destinations.
 
 ---
 
-## 5. Audit log retention policy considerations
+## 5. Audit log retention + disk-pressure circuit breaker
 
 Disk fills silently if you don't think about retention. The full
 retention surface (automatic JSONL rotation, SQLite archive-rotate,
-`/healthz` disk-degraded signal, `*bounce doctor logs` integrity
+`/healthz` disk-pressure signal, `*bounce doctor logs` integrity
 checks, crash-recovery for partial-write JSONL tails, the
 `*bounce logs {tail,purge,archive,verify}` subcommand) ships under
-task #311. See [docs/LOG-RETENTION.md](LOG-RETENTION.md) once #311
-lands.
+task #311. See [docs/LOG-RETENTION.md](LOG-RETENTION.md) for the
+full flag + threshold reference.
 
-**Pre-#311 interim guidance:**
+### 5.1 Disk-pressure circuit-breaker modes (#424 / §A63)
 
-- Cron a daily `logrotate` on the JSONL files. Gzip on rotate; keep
-  30-90 days depending on your compliance posture.
-- Monitor disk usage at the OS level. Set an alert at 80%.
-- For SQLite audit DBs: vacuum monthly. The DB grows ~1KB per event;
-  a 100-events/sec deployment hits ~250MB / month.
-- For Security Lake parquet files: configure S3 lifecycle rules to
-  transition objects to S3 Glacier Deep Archive after 90 days,
-  delete after your compliance retention window.
-- For SIEM-destination events: retention is whatever your SIEM
+The disk-pressure circuit breaker ticks every 60 seconds against the
+audit-log directory + reacts when disk usage crosses configurable
+thresholds (default 85 % warn / 95 % critical / 98 % emergency).
+You pick the response strategy via `--disk-pressure-mode` (CLI) or
+`disk_pressure_mode:` (apply-config YAML). Three modes:
+
+| Mode                  | Behavior at critical                                                                                       | Recommended for                            |
+|-----------------------|------------------------------------------------------------------------------------------------------------|--------------------------------------------|
+| `pause-requests` (default) | Refuse new agent requests with HTTP 503. Audit integrity prioritised over liveness.                       | Compliance-heavy (HIPAA / PCI / SOC 2)     |
+| `rotate-aggressively` | Drop oldest rotated `audit-*.jsonl.gz` / `audit-*.db.gz` archives until disk falls back below warn. Active log untouched. | Dev laptops + ephemeral CI runners        |
+| `archive-and-purge`   | Emit operator hint that the #317 object-storage sink should ship oldest archives + drop them locally to recover space.    | Hybrid: ship to S3 / GCS, keep local hot   |
+
+All three modes treat `emergency` (default ≥ 98 % used) the same as
+`critical`. ALL modes always emit an OCSF v1.1.0 admin-action event
+with `action == "disk_pressure.transition"` on each ok/degraded/
+critical/emergency boundary cross, so a SIEM rule keyed on that wire
+name catches the transition regardless of which mode is configured.
+
+**CLI:**
+
+```bash
+ibounce run \
+    --audit-log-path ~/.iam-jit/audit/ibounce.jsonl \
+    --disk-pressure-mode pause-requests              # default
+```
+
+**Convenience alias:** `--stop-on-disk-critical` is shipped as a
+one-flag form of `--disk-pressure-mode=pause-requests` (matches the
+operator intent in the runbook). When present it OVERRIDES
+`--disk-pressure-mode` so the intent is unambiguous on conflict.
+
+```bash
+ibounce run \
+    --audit-log-path ~/.iam-jit/audit/ibounce.jsonl \
+    --stop-on-disk-critical                          # alias
+```
+
+**Declarative apply-config (cross-bouncer):**
+
+```yaml
+iam-jit:
+  bouncers:
+    ibounce:
+      enabled: true
+      disk_pressure_mode: archive-and-purge
+      disk_pressure_warn_pct: 80      # tighter than default 85
+    kbouncer:
+      enabled: true
+      disk_pressure_mode: rotate-aggressively
+```
+
+Cross-product parity per [[cross-product-agent-parity]]: kbounce /
+dbounce / gbounce accept the same `disk_pressure_mode:` field with
+the same three string values.
+
+### 5.2 Monitoring via `/healthz` audit_log block
+
+Every bouncer's `/healthz` payload includes an `audit_log` block
+(always present — monitoring parsers branch on a single field
+without first checking for the block). Example healthy response:
+
+```json
+{
+  "audit_log": {
+    "status": "ok",
+    "disk_free_pct": 72.3,
+    "used_pct": 27.7,
+    "warn_pct": 85,
+    "crit_pct": 95,
+    "emergency_pct": 98,
+    "path": "/Users/operator/.iam-jit/audit",
+    "disk_pressure_mode": "pause-requests",
+    "refuse_requests": false,
+    "current_archive_count": 12,
+    "current_archive_size_bytes": 142398723,
+    "transitions_count": 0,
+    "last_check_unix": 1716543200,
+    "last_action_taken": null,
+    "reason": "disk usage within thresholds"
+  }
+}
+```
+
+When `status` crosses to `critical` or `emergency`, `/healthz` flips
+to HTTP 503 so a k8s liveness probe / external monitor reacts
+deterministically (same shape as the existing heartbeat-gap +
+audit_export_degraded triggers).
+
+Monitor the block with a single field:
+
+```bash
+curl -sf http://127.0.0.1:8767/healthz | jq .audit_log.status
+```
+
+Expected values: `ok` / `degraded` / `critical` / `emergency`.
+Alert at `degraded` for early signal; page at `critical` /
+`emergency` for action-required.
+
+### 5.3 Retention defaults + tuning
+
+- **JSONL rotation:** triggers at 100 MB OR 7 days, whichever
+  fires first. Tune with `--audit-log-max-size-mb` /
+  `--audit-log-max-age-days` (0 disables).
+- **SQLite archive retention:** 30 days. Tune with
+  `--audit-db-retention-days` (0 disables purge — operator-side
+  retention only).
+- **Security Lake parquet:** configure S3 lifecycle rules to
+  transition objects to Glacier Deep Archive after 90 days, delete
+  after your compliance retention window. Not coupled to the
+  in-bouncer retention knobs.
+- **SIEM-destination events:** retention is whatever your SIEM
   enforces; configure indexer / log-storage retention there.
+
+### 5.4 `iam-jit posture` surface
+
+`iam-jit posture` surfaces disk-pressure state per bouncer when
+called from a process that can probe `/healthz` (or in-process
+when called inside a serve()). Approaching-critical states surface
+a single-line operator recommendation.
+
+```
+ibounce: running on 127.0.0.1:8767
+    Mode: discovery   Profile: full-user
+    Disk: degraded (88.2% used)  Mode: pause-requests  Archives: 47
+    DISK PRESSURE: disk approaching threshold at 88.2% used. Consider
+    archiving older rotated logs OR raising --disk-pressure-warn-pct
+    if the threshold is set too tight for your retention window.
+```
 
 ---
 
@@ -733,6 +855,9 @@ Same flag names + same semantics across all four bouncers per
 | `--audit-log-max-size-mb` (#311) | ✓       | ✓       | ✓       | ✓ (flag accepted; writer-level rotation deferred per LOG-RETENTION.md parity matrix) |
 | `--audit-log-max-age-days` (#311) | ✓       | ✓       | ✓       | ✓ (same caveat) |
 | `--audit-db-retention-days` (#311) | ✓       | ✓       | ✓       | ✓ (purge-only path; same caveat) |
+| `--disk-pressure-mode` (#424) | ✓       | follow-up | follow-up | follow-up |
+| `--stop-on-disk-critical` (#424; alias) | ✓ | follow-up | follow-up | follow-up |
+| `--disk-pressure-{warn,crit,emergency}-pct` (#424) | ✓ | follow-up | follow-up | follow-up |
 | `--audit-webhook-url`          | ✓       | ✓       | ✓       | G-Slice 6 (v1.1; use JSONL + Fluent Bit/Vector for v1.0) |
 | `--audit-webhook-token`        | ✓       | ✓       | ✓       | G-Slice 6 |
 | `--audit-webhook-preset`       | ✓       | ✓       | ✓       | G-Slice 6 |
@@ -764,7 +889,7 @@ Exporter implementations live in:
   per-org / per-severity fan-out routing engine (#280)
 - [QUERYING-AUDIT-LOGS.md](QUERYING-AUDIT-LOGS.md) — local `*bounce
   audit tail` filter + export catalog
-- `docs/LOG-RETENTION.md` — rotation + retention + disk monitoring
-  (in flight, #311)
+- [LOG-RETENTION.md](LOG-RETENTION.md) — rotation + retention +
+  disk monitoring (shipped under #311; full flag reference)
 - [KNOWN-CAVEATS.md](KNOWN-CAVEATS.md) — known gaps + workarounds,
   including §A10 (local audit-log retention) and §A14 (this doc)

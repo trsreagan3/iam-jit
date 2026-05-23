@@ -106,6 +106,30 @@ def _fmt_bouncers_block(bouncers: dict[str, Any]) -> list[str]:
             lines.append(f"    Env: {b['env_var_pointing_here']}")
         if b.get("misconfig"):
             lines.append(f"    MISCONFIG: {b['misconfig']}")
+        # #424 / §A63 — surface disk-pressure state per bouncer when
+        # /healthz (or in-process state) provided it. Always present
+        # in the snapshot when the bouncer is running; framed per
+        # [[ambient-value-prop-and-friction-framing]] (informational
+        # by default; recommendation surfaces only at degraded /
+        # critical / emergency).
+        _dp = b.get("disk_pressure")
+        if _dp:
+            _dp_status = _dp.get("status") or "unknown"
+            _dp_mode = _dp.get("disk_pressure_mode") or "unknown"
+            _dp_used = _dp.get("used_pct")
+            _dp_archives = _dp.get("current_archive_count") or 0
+            _used_str = (
+                f"{_dp_used:.1f}% used"
+                if isinstance(_dp_used, (int, float)) else "n/a"
+            )
+            lines.append(
+                f"    Disk: {_dp_status} ({_used_str})  "
+                f"Mode: {_dp_mode}  "
+                f"Archives: {_dp_archives}"
+            )
+            _dp_rec = b.get("disk_pressure_recommendation")
+            if _dp_rec:
+                lines.append(f"    DISK PRESSURE: {_dp_rec}")
     return lines
 
 

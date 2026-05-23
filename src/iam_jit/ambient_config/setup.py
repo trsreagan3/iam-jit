@@ -740,7 +740,21 @@ def apply_declaration(
         mode = bcfg.get("mode") or "discovery"
         profile = bcfg.get("profile") or "auto"
         port = bcfg.get("port")
-        extra_args = bcfg.get("extra_args") or []
+        extra_args = list(bcfg.get("extra_args") or [])
+        # #424 / §A63 — translate the declarative disk_pressure_mode
+        # field into the bouncer's CLI flag. Operator-supplied
+        # extra_args win on conflict (per [[creates-never-mutates]]
+        # the operator's explicit args are authoritative); we only
+        # append our flag pair when the operator hasn't already passed
+        # it via extra_args. Each Bounce reads the same wire field per
+        # [[cross-product-agent-parity]]; only ibounce wires it today
+        # (kbouncer/dbouncer/gbouncer follow-up tasks).
+        _dp_mode_decl = bcfg.get("disk_pressure_mode")
+        if _dp_mode_decl and not any(
+            a == "--disk-pressure-mode" or a.startswith("--disk-pressure-mode=")
+            for a in extra_args
+        ):
+            extra_args.extend(["--disk-pressure-mode", _dp_mode_decl])
 
         # #434 + #435 — record the declared→runtime mapping + the
         # provenance attribution per bouncer. The declaration is the

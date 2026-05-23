@@ -337,6 +337,18 @@ _audit_object_storage_writer: Any | None = None
 # file at `{dir}/{agent.session_id}.ndjson`. Events without a resolvable
 # session_id are silently dropped by the recorder itself.
 _session_recorder: Any | None = None
+# #424 / §A63 — disk-pressure circuit-breaker live state. Populated by
+# serve() at startup (when audit_log_path is set so there's a
+# directory to monitor) + ticked every
+# DISK_PRESSURE_CHECK_INTERVAL_SECONDS by the background periodic
+# loop. Read by /healthz (audit_log block) and by _handle_request
+# (pause-requests-mode refusal). None when audit_log_path is unset
+# OR when running outside serve() (test stubs that call evaluate_request
+# directly skip the disk-pressure layer entirely — refusal is a
+# serve-level concern, not a primitive-level one). Per
+# [[ibounce-honest-positioning]] the state is in-process only; on
+# restart the next periodic tick re-detects from the filesystem.
+_disk_pressure_state: Any | None = None
 # #262 Slice 2 — alert rule engine. Same module-level registry shape
 # as the two transport channels above so evaluate_request feeds it
 # without threading args through every call site. Enterprise-gated
@@ -427,6 +439,25 @@ def register_session_recorder(recorder: Any | None) -> None:
     registration so the first event's open doesn't no-op."""
     global _session_recorder
     _session_recorder = recorder
+
+
+def register_disk_pressure_state(state: Any | None) -> None:
+    """#424 / §A63 — install the disk-pressure state holder. Pass None
+    to clear. /healthz + _handle_request read this via the
+    `active_disk_pressure_state` helper below; the periodic check loop
+    mutates the held instance directly (in-place updates per
+    [[creates-never-mutates]] — no new objects per tick)."""
+    global _disk_pressure_state
+    _disk_pressure_state = state
+
+
+def active_disk_pressure_state() -> Any | None:
+    """#424 / §A63 — read the current disk-pressure state. Returns None
+    when audit logging is disabled (no directory to monitor) or when
+    not running under serve() (tests calling evaluate_request directly).
+    Public so /healthz, _handle_request, posture, and tests can
+    introspect without circular imports."""
+    return _disk_pressure_state
 
 
 def register_audit_rule_engine(engine: Any | None) -> None:
@@ -1184,6 +1215,47 @@ class ProxyConfig:
     destroys data; only the explicit logs-purge command does).
     Plumbed through ProxyConfig so MCP `bouncer_audit_export_status`
     can report the effective value."""
+
+    # #424 / §A63 — disk-pressure circuit-breaker policy. The
+    # disk_status primitive ships with #311 (rotation.py:381); the
+    # circuit-breaker layer here is THIN — picks one of three
+    # operator-declared response modes when disk usage crosses
+    # critical/emergency thresholds. Default pause-requests matches
+    # the compliance-heavy posture documented in
+    # PRODUCTION-LOG-STORAGE.md and the [[self-host-zero-billing-
+    # dependency]] memo (audit log IS the compliance value). See
+    # audit_export/disk_pressure.py for the full reaction surface.
+    disk_pressure_mode: str = "pause-requests"
+    """#424 / §A63 — operator-selectable disk-pressure response.
+    One of:
+      * 'pause-requests' (default, compliance-heavy): refuse new
+        agent requests with HTTP 503 when disk hits critical.
+      * 'rotate-aggressively' (dev-friendly): drop oldest rotated
+        archives to recover space at critical.
+      * 'archive-and-purge' (hybrid): emit operator hint + drop
+        oldest archives at critical (operator pairs with #317
+        object-storage sink for pre-purge upload).
+    Equivalent operator CLI flags: --disk-pressure-mode VALUE OR
+    the convenience alias --stop-on-disk-critical (which sets
+    disk_pressure_mode='pause-requests')."""
+
+    disk_pressure_warn_pct: int | None = None
+    """#424 / §A63 — disk-usage % AT-OR-ABOVE which /healthz status
+    transitions ok -> degraded. None = use rotation.py
+    DEFAULT_DISK_WARN_PCT (85). 0 disables the warn signal entirely."""
+
+    disk_pressure_crit_pct: int | None = None
+    """#424 / §A63 — disk-usage % AT-OR-ABOVE which /healthz status
+    transitions degraded -> critical. None = use rotation.py
+    DEFAULT_DISK_CRIT_PCT (95). pause-requests mode flips
+    refuse_requests at this boundary."""
+
+    disk_pressure_emergency_pct: int | None = None
+    """#424 / §A63 — disk-usage % AT-OR-ABOVE which /healthz status
+    transitions critical -> emergency. None = use disk_pressure
+    DEFAULT_DISK_EMERGENCY_PCT (98). All modes treat emergency the
+    same: surface in /healthz + emit admin-action transition; the
+    mode-specific reaction is the same as critical."""
     audit_webhook_url: str | None = None
     """HTTPS URL of the operator's audit collector. None disables
     the channel. SSRF-gated at start (RFC1918 / loopback /
@@ -2812,6 +2884,46 @@ async def _handle_request(request, *, store, config: ProxyConfig, session):
     """
     from aiohttp import web
 
+    # #424 / §A63 — disk-pressure pause-requests circuit breaker.
+    # Fires BEFORE evaluate_request to skip the parse + decision work
+    # we'd just throw away. /healthz bypasses the proxy handler
+    # entirely so liveness probes still succeed (operator can still
+    # poll /healthz to see the audit_log.status === "critical" state
+    # that triggered the refusal). Per
+    # [[ambient-value-prop-and-friction-framing]] the refusal body
+    # leads with WHY + HOW TO CHANGE, not "ERROR".
+    _dp_state = active_disk_pressure_state()
+    if _dp_state is not None and _dp_state.refuse_requests:
+        from .audit_export import PAUSE_REQUESTS_REFUSAL_REASON_TEMPLATE
+        _used_pct = (
+            _dp_state.last_observed.used_pct
+            if _dp_state.last_observed else 0.0
+        )
+        return web.json_response(
+            {
+                "caught_by_bouncer": True,
+                "deny_reason": PAUSE_REQUESTS_REFUSAL_REASON_TEMPLATE.format(
+                    used_pct=_used_pct, crit_pct=_dp_state.crit_pct,
+                ),
+                "deny_source": "disk_pressure",
+                "bouncer_status": _dp_state.status_label(),
+                "disk_pressure_mode": _dp_state.mode,
+                "remediation": (
+                    "Clear space in the audit-log directory, or "
+                    "switch to disk_pressure_mode=rotate-aggressively "
+                    "(auto-drops oldest archives) or "
+                    "disk_pressure_mode=archive-and-purge (operator "
+                    "ships to S3 before purge)."
+                ),
+            },
+            status=503,
+            headers={
+                "x-iam-jit-bouncer-verdict": "paused",
+                "x-iam-jit-bouncer-paused-reason": "disk-pressure",
+                "retry-after": "60",
+            },
+        )
+
     body = await request.read()
     # #253 — let an in-process profile override (installed by
     # `prompts bulk-answer` option 1) supersede the startup profile so
@@ -3362,6 +3474,47 @@ async def serve(config: ProxyConfig, *, store: BouncerStore) -> None:
                     str(_init_err) if _init_err is not None else None
                 ),
             })
+        # #424 / §A63 — audit_log block. Always emitted (matches
+        # audit_export / dynamic_denies always-present convention) so
+        # external monitoring parsers can branch on a single field
+        # (audit_log.status) without first checking "is the block
+        # present?". When the disk-pressure state isn't installed
+        # (audit logging disabled), surfaces status=ok with null
+        # disk_free_pct so monitoring sees the deliberate-disabled
+        # shape rather than missing-field.
+        from .audit_export import healthz_audit_log_block
+        _dp_state_now = active_disk_pressure_state()
+        if _dp_state_now is not None:
+            audit_log_block = healthz_audit_log_block(_dp_state_now)
+            # /healthz transitions to 503 when disk-pressure reaches
+            # critical OR emergency — same shape as the heartbeat-gap
+            # + audit_export_degraded triggers above. Per
+            # [[ibounce-honest-positioning]] the 503 is the operator-
+            # facing signal that the bouncer is in an at-risk state;
+            # k8s liveness probes + external monitors react
+            # deterministically.
+            if audit_log_block["status"] in ("critical", "emergency"):
+                http_status_code = 503
+                if status_str == "ok":
+                    status_str = "degraded"
+        else:
+            audit_log_block = {
+                "status": "ok",
+                "disk_free_pct": None,
+                "used_pct": None,
+                "warn_pct": None,
+                "crit_pct": None,
+                "emergency_pct": None,
+                "path": None,
+                "disk_pressure_mode": None,
+                "refuse_requests": False,
+                "current_archive_count": 0,
+                "current_archive_size_bytes": 0,
+                "transitions_count": 0,
+                "last_check_unix": None,
+                "last_action_taken": None,
+                "reason": "audit logging not configured",
+            }
         return web.json_response({
             # #433 — bouncer_kind identifier so apply-config /
             # cross-product tooling can disambiguate "port is in use
@@ -3379,6 +3532,7 @@ async def serve(config: ProxyConfig, *, store: BouncerStore) -> None:
             "pause_lookup_errors_total": pause_errs,
             "heartbeat": heartbeat_payload,
             "audit_export": audit_export_section,
+            "audit_log": audit_log_block,
             "dynamic_denies": dynamic_denies_block,
         }, status=http_status_code)
 
@@ -3647,6 +3801,59 @@ async def serve(config: ProxyConfig, *, store: BouncerStore) -> None:
             _max_size_mb, _max_age_days,
             config.audit_db_retention_days,
         )
+        # #424 / §A63 — disk-pressure circuit-breaker state setup.
+        # Only initialised when there's an audit-log dir to monitor;
+        # all-other-disabled deployments skip the periodic loop
+        # entirely (per [[v1-scope-bar]] no surface lights up that
+        # the operator didn't opt into). The periodic loop itself is
+        # registered later (with the other background loops) so the
+        # cancellation chain in `finally:` tears them all down
+        # together.
+        from .audit_export import (
+            DEFAULT_DISK_CRIT_PCT as _DP_CRIT,
+            DEFAULT_DISK_EMERGENCY_PCT as _DP_EMERG,
+            DEFAULT_DISK_WARN_PCT as _DP_WARN,
+            DiskPressureState,
+            normalize_disk_pressure_mode,
+        )
+        from .audit_export.disk_pressure import _resolve_log_dir
+        _dp_log_dir = _resolve_log_dir(config.audit_log_path)
+        _dp_warn = (
+            _DP_WARN if config.disk_pressure_warn_pct is None
+            else config.disk_pressure_warn_pct
+        )
+        _dp_crit = (
+            _DP_CRIT if config.disk_pressure_crit_pct is None
+            else config.disk_pressure_crit_pct
+        )
+        _dp_emerg = (
+            _DP_EMERG if config.disk_pressure_emergency_pct is None
+            else config.disk_pressure_emergency_pct
+        )
+        try:
+            _dp_mode = normalize_disk_pressure_mode(config.disk_pressure_mode)
+        except ValueError as _dp_err:
+            # Fail-loud during startup so a typo in apply-config YAML
+            # doesn't silently fall through to the default + leave the
+            # operator thinking they're in archive-and-purge mode when
+            # they're actually in pause-requests. The serve() caller
+            # (bouncer_cli.run_cmd) wraps this in a try/except + exits.
+            raise RuntimeError(
+                f"invalid disk_pressure_mode in config: {_dp_err}"
+            ) from _dp_err
+        disk_pressure_state = DiskPressureState(
+            mode=_dp_mode,
+            log_dir=_dp_log_dir,
+            warn_pct=_dp_warn,
+            crit_pct=_dp_crit,
+            emergency_pct=_dp_emerg,
+        )
+        register_disk_pressure_state(disk_pressure_state)
+        logger.info(
+            "disk-pressure circuit-breaker enabled: mode=%s warn=%d%% "
+            "crit=%d%% emergency=%d%% log_dir=%s",
+            _dp_mode, _dp_warn, _dp_crit, _dp_emerg, _dp_log_dir,
+        )
     # #258 — Security Lake adapter. Default OFF; only constructed when
     # the operator passed --security-lake-bucket. start() probes
     # credentials (default chain or AssumeRole if --security-lake-role-
@@ -3903,6 +4110,57 @@ async def serve(config: ProxyConfig, *, store: BouncerStore) -> None:
     rule_expiry_task = asyncio.create_task(
         _rule_expiry_sweeper_loop(), name="ibounce-rule-expiry-sweeper",
     )
+
+    # #424 / §A63 — disk-pressure periodic check loop. 60s tick per
+    # the spec; small enough that a runaway-disk event hits the
+    # policy within one tick, large enough that the statvfs call is
+    # not a meaningful load. No-op when the disk-pressure state isn't
+    # installed (audit_log_path was unset at startup; nothing to
+    # monitor). Fail-soft per [[deliberate-feature-completion]]: a
+    # single tick failure logs + the loop continues. The loop runs
+    # an immediate evaluate-and-react ONCE at startup so /healthz
+    # reflects the real disk state from the first probe (operators
+    # don't see 60s of "unknown" after startup before the first
+    # tick fires).
+    async def _disk_pressure_check_loop() -> None:
+        from .audit_export import (
+            DISK_PRESSURE_CHECK_INTERVAL_SECONDS,
+            disk_pressure_evaluate_and_react,
+        )
+        # Initial probe so /healthz is honest immediately.
+        try:
+            _dp_state_now = active_disk_pressure_state()
+            if _dp_state_now is not None:
+                disk_pressure_evaluate_and_react(
+                    _dp_state_now, emit=_emit_audit_event_raw,
+                )
+        except Exception as e:
+            logger.warning(
+                "ibounce disk-pressure initial probe failed: %s", e,
+            )
+        try:
+            while True:
+                await asyncio.sleep(DISK_PRESSURE_CHECK_INTERVAL_SECONDS)
+                try:
+                    _dp_state_now = active_disk_pressure_state()
+                    if _dp_state_now is None:
+                        continue
+                    disk_pressure_evaluate_and_react(
+                        _dp_state_now, emit=_emit_audit_event_raw,
+                    )
+                except Exception as e:
+                    logger.warning(
+                        "ibounce disk-pressure tick failed: %s", e,
+                    )
+        except asyncio.CancelledError:
+            return
+
+    disk_pressure_task: asyncio.Task | None = None
+    if active_disk_pressure_state() is not None:
+        disk_pressure_task = asyncio.create_task(
+            _disk_pressure_check_loop(),
+            name="ibounce-disk-pressure-check",
+        )
 
     # #270 Slice 2 — pending-audit-events drainer. Profile-install
     # synthetics enqueue from a separate process (the `ibounce profile
@@ -4196,5 +4454,23 @@ async def serve(config: ProxyConfig, *, store: BouncerStore) -> None:
             logger.warning(
                 "pending-audit-events drain cancel failed: %s", e,
             )
+        # #424 / §A63 — disk-pressure periodic check teardown. May be
+        # None when audit logging is disabled (no loop ever started).
+        if disk_pressure_task is not None:
+            try:
+                disk_pressure_task.cancel()
+                try:
+                    await disk_pressure_task
+                except asyncio.CancelledError:
+                    pass
+                except Exception as e:
+                    logger.warning(
+                        "disk-pressure check teardown failed: %s", e,
+                    )
+            except Exception as e:
+                logger.warning(
+                    "disk-pressure check cancel failed: %s", e,
+                )
+        register_disk_pressure_state(None)
         register_burst_detector(None)
         set_bulk_answer_mcp_token(None)
