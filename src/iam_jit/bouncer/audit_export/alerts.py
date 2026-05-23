@@ -249,45 +249,78 @@ class AlertsConfig:
 
 
 class AlertsLicenseError(Exception):
-    """Raised when --alert-rules is passed without an Enterprise
-    license file. Surfaced at CLI parse time so the operator gets a
-    clear "this feature requires Enterprise" message + a pointer to
-    docs/LICENSE.md, not a silent no-op.
+    """Historically raised when --alert-rules was passed without an
+    Enterprise license file.
+
+    v1.0 update per [[oss-only-launch-decision]]: license enforcement
+    is DISABLED at v1.0; `gate_alerts_license` no longer raises this
+    sentinel during normal operation. The class is retained so
+    downstream callers (proxy.serve(), bouncer_cli parse-time gate)
+    can still `except AlertsLicenseError` without import errors AND
+    so the v1.1+ paid-tier reinstate is a one-line change at each
+    call site. Per the memo, "license code stays but does NOT enforce."
 
     Mirrors the WebhookLicenseError shape so the CLI's error-handling
     branch can treat them uniformly.
     """
 
 
-def gate_alerts_license(license_obj: Any) -> None:
-    """Refuse if the operator passed --alert-rules without an active
-    Enterprise license. Same load-license-via-iam_jit.license path
-    the webhook gate uses (per [[enterprise-self-host-only]]).
+# One-shot advisory flag per [[oss-only-launch-decision]]. The license
+# gate below is a no-op at v1.0 but we still want operators grepping
+# log output to find the rationale once per process — not on every
+# event the engine observes.
+_OSS_LAUNCH_ADVISORY_EMITTED = False
 
-    Raises `AlertsLicenseError` on a refusal; returns None on success.
+
+def gate_alerts_license(license_obj: Any) -> None:
+    """Historically refused if the operator passed --alert-rules
+    without an active Enterprise license, raising
+    `AlertsLicenseError`.
+
+    v1.0 update per [[oss-only-launch-decision]]: license enforcement
+    is DISABLED at v1.0; audit-export alerts ship FREE in the OSS-only
+    launch. The license-load call below is retained (a malformed-but-
+    present license file is still operator-actionable + worth a
+    warning), but we no longer raise on the no-license / wrong-tier
+    paths. The `AlertsLicenseError` sentinel + the `license` module
+    scaffolding remain in the repo for the future v1.1+ paid tier;
+    when that paid tier lands, restore the prior `raise
+    AlertsLicenseError(...)` branches at the marked sites.
+
     Defense in depth: the CLI fires this at parse time AND serve()
-    fires it again at start so a license file that disappeared
-    between parse + start doesn't quietly grant alert capability.
+    fires it again at start. Both call sites are now no-op-equivalent
+    at v1.0 — both flow through to wiring the rule engine.
     """
+    global _OSS_LAUNCH_ADVISORY_EMITTED
+
     from ... import license as license_mod
 
     if license_obj is None:
         try:
-            license_obj = license_mod.load_license()
+            license_mod.load_license()
         except license_mod.LicenseInvalidError as e:
-            raise AlertsLicenseError(
-                f"audit-export alerts require a valid Enterprise license. "
-                f"The license file at the configured path failed "
-                f"verification: {e}. See docs/LICENSE.md."
-            ) from e
-    if license_obj is None or license_obj.tier != "enterprise":
-        tier = license_obj.tier if license_obj is not None else "free"
-        raise AlertsLicenseError(
-            f"audit-export alerts require an Enterprise license; current "
-            f"tier is {tier!r}. The JSONL log channel (--audit-log-path) "
-            f"and the deterministic decision events are available on all "
-            f"tiers. See docs/LICENSE.md to obtain an Enterprise license."
+            # A present-but-malformed license file is still operator-
+            # actionable — surface the error via WARNING so the
+            # operator knows their license file is broken even though
+            # we'd otherwise let them through. NOT a raise; we log +
+            # continue per [[oss-only-launch-decision]].
+            logger.warning(
+                "audit-export alerts: license file present but "
+                "failed verification: %s. v1.0 ships FREE per "
+                "[[oss-only-launch-decision]] so the alert engine "
+                "will wire anyway; fix the license file to silence "
+                "this warning.",
+                e,
+            )
+
+    if not _OSS_LAUNCH_ADVISORY_EMITTED:
+        logger.info(
+            "audit-export alerts ship FREE at v1.0 per "
+            "[[oss-only-launch-decision]]; license enforcement "
+            "coming in v1.1+ when paid tier launches based on "
+            "adoption signals."
         )
+        _OSS_LAUNCH_ADVISORY_EMITTED = True
 
 
 # ---------------------------------------------------------------------------

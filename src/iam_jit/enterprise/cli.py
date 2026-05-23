@@ -7,11 +7,20 @@ Registered onto the top-level CLI group in src/iam_jit/cli.py via
 from __future__ import annotations
 
 import getpass
+import logging
 import os
 import pathlib
 import sys
 
 import click
+
+logger = logging.getLogger(__name__)
+
+# One-shot advisory flag per [[oss-only-launch-decision]]. The license
+# gate below is a no-op at v1.0 but we still want operators grepping
+# log output to find the rationale once per process — not on every CLI
+# invocation in a shell loop.
+_OSS_LAUNCH_ADVISORY_EMITTED = False
 
 
 def _default_config_path() -> pathlib.Path:
@@ -29,55 +38,51 @@ def _default_audit_path() -> pathlib.Path:
 
 
 def _enforce_enterprise_tier() -> None:
-    """Per [[enterprise-self-host-only]]: bootstrap is Enterprise
-    only. On any non-Enterprise binary (including unsigned/Free
-    builds), print a clear error pointing at the upgrade path.
+    """Per [[enterprise-self-host-only]]: bootstrap was historically
+    Enterprise-only and rejected non-Enterprise binaries with sys.exit(3).
+
+    v1.0 update per [[oss-only-launch-decision]]: license enforcement
+    is DISABLED at v1.0; `iam-jit enterprise bootstrap` ships FREE in
+    the OSS-only launch. The license-load call below is retained (it
+    still surfaces a clear error on a malformed-but-present license
+    file, which is operator-actionable). License-check infrastructure
+    + the `LicenseInvalidError` sentinel remain in the repo for the
+    future v1.1+ paid tier (per the memo, "license code stays but
+    does NOT enforce"). When that paid tier lands, restore the prior
+    sys.exit(3) branches at the marked sites; today they emit a
+    one-shot INFO advisory + proceed.
 
     Bypass-honest: anyone with the source can patch this gate; the
     contract is the legal artifact. Same posture as license.py's
     user-cap gate.
     """
+    global _OSS_LAUNCH_ADVISORY_EMITTED
+
     from .. import license as _license
 
     try:
-        lic = _license.load_license()
+        _license.load_license()
     except _license.LicenseInvalidError as e:
-        click.secho(
-            f"iam-jit enterprise bootstrap requires an Enterprise license. "
-            f"Current license file failed verification: {e}",
-            fg="red", err=True,
+        # A present-but-malformed license file is still operator-
+        # actionable — surface the error so the operator knows their
+        # license file is broken even though we'd otherwise let them
+        # through. NOT a sys.exit; we log + continue per
+        # [[oss-only-launch-decision]].
+        logger.warning(
+            "iam-jit enterprise bootstrap: license file present but "
+            "failed verification: %s. v1.0 ships FREE per "
+            "[[oss-only-launch-decision]] so bootstrap will proceed; "
+            "fix the license file to silence this warning.",
+            e,
         )
-        click.echo(
-            "Run `iam-jit license show` for details. Contact sales at "
-            "iam-risk-score.com to provision an Enterprise license.",
-            err=True,
-        )
-        sys.exit(3)
 
-    if lic is None:
-        click.secho(
-            "iam-jit enterprise bootstrap requires an Enterprise license; "
-            "this deployment is running on the Free tier.",
-            fg="red", err=True,
+    if not _OSS_LAUNCH_ADVISORY_EMITTED:
+        logger.info(
+            "iam-jit enterprise bootstrap ships FREE at v1.0 per "
+            "[[oss-only-launch-decision]]; license enforcement coming "
+            "in v1.1+ when paid tier launches based on adoption signals."
         )
-        click.echo(
-            "Install an Enterprise license file at "
-            f"{os.environ.get(_license.LICENSE_PATH_ENV) or '~/.iam-jit/license.json'} "
-            "and re-run. Contact sales at iam-risk-score.com.",
-            err=True,
-        )
-        sys.exit(3)
-
-    if (lic.tier or "").lower() != "enterprise":
-        click.secho(
-            f"iam-jit enterprise bootstrap requires the Enterprise tier; "
-            f"this deployment is licensed for the {lic.tier} tier.",
-            fg="red", err=True,
-        )
-        click.echo(
-            "Contact sales at iam-risk-score.com to upgrade.", err=True,
-        )
-        sys.exit(3)
+        _OSS_LAUNCH_ADVISORY_EMITTED = True
 
 
 @click.group("enterprise")

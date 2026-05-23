@@ -127,45 +127,165 @@ def fake_clock():
 
 
 # ---------------------------------------------------------------------------
-# License gate
+# License gate — disabled at v1.0 per [[oss-only-launch-decision]] (#511b)
+#
+# Prior tests asserted `gate_alerts_license` RAISES `AlertsLicenseError`
+# on no-license / wrong-tier paths. At v1.0 the gate ships FREE — the
+# raise path is reserved for the v1.1+ paid-tier reinstate. These
+# tests have been flipped to NoLicenseShipsFree state-verification per
+# docs/CONTRIBUTING.md: the gate returns silently AND the rule engine
+# wired downstream actually observes events + fires alerts.
 # ---------------------------------------------------------------------------
 
 
-def test_gate_alerts_license_refuses_without_license(monkeypatch) -> None:
-    """No license file = refuse with AlertsLicenseError."""
+def test_gate_alerts_license_no_license_ships_free(monkeypatch, caplog) -> None:
+    """No license file = gate returns silently (NOT raises) + emits a
+    one-shot INFO advisory citing [[oss-only-launch-decision]].
+
+    State verification: a freshly constructed RuleEngine actually
+    observes an event + fires an admin-fallback-burst alert when the
+    threshold trips. Asserting the gate "passed" without exercising the
+    engine would be a #475-shape (passes even if downstream wiring is
+    silently broken).
+    """
+    import logging
+
+    from iam_jit.bouncer.audit_export import alerts as alerts_mod
+
     monkeypatch.delenv("IAM_JIT_LICENSE_FILE", raising=False)
-    with pytest.raises(AlertsLicenseError, match="Enterprise license"):
+    # Reset the one-shot advisory flag so the INFO log is observable
+    # in caplog; the module-level flag survives across tests otherwise.
+    monkeypatch.setattr(
+        alerts_mod, "_OSS_LAUNCH_ADVISORY_EMITTED", False,
+    )
+
+    with caplog.at_level(logging.INFO, logger=alerts_mod.__name__):
+        # 1. The gate no longer raises.
         gate_alerts_license(None)
 
+    # 2. State: the advisory fired with the memo reference.
+    advisory_records = [
+        r for r in caplog.records
+        if "oss-only-launch-decision" in r.message
+    ]
+    assert advisory_records, (
+        "expected one-shot INFO advisory citing "
+        "[[oss-only-launch-decision]]; got: "
+        f"{[r.message for r in caplog.records]}"
+    )
+    assert advisory_records[0].levelno == logging.INFO
 
-def test_gate_alerts_license_refuses_invalid_license(
-    monkeypatch, tmp_path,
+    # 3. State: the alert engine actually wires + fires WITHOUT a
+    #    license file. This is the load-bearing assertion — the
+    #    gate "returning silently" is meaningless if the downstream
+    #    engine doesn't function.
+    fired: list[dict] = []
+    engine = RuleEngine(
+        config=AlertsConfig.default(), emit=fired.append,
+    )
+    for i in range(DEFAULT_ADMIN_FALLBACK_THRESHOLD + 1):
+        engine.observe(
+            make_admin_fallback_grant_event(principal="alice", grant_id=i)
+        )
+    assert len(fired) >= 1, (
+        f"engine should have fired admin-fallback-burst above the "
+        f"threshold of {DEFAULT_ADMIN_FALLBACK_THRESHOLD}; got 0 alerts"
+    )
+    assert fired[0]["unmapped"]["iam_jit"]["pattern"] == (
+        "admin-fallback-burst"
+    )
+
+
+def test_gate_alerts_license_invalid_license_warns_but_proceeds(
+    monkeypatch, tmp_path, caplog,
 ) -> None:
-    """Bad signature = refuse + surface the underlying error."""
+    """Bad signature = WARN (not raise) + proceed. A present-but-
+    malformed license file is still operator-actionable so we surface
+    a warning, but per [[oss-only-launch-decision]] we don't refuse.
+
+    State verification: the engine constructs + observes an event
+    after the gate returns, mirroring the no-license path.
+    """
+    import logging
+
+    from iam_jit.bouncer.audit_export import alerts as alerts_mod
+
     bad = tmp_path / "bad.json"
     bad.write_text('{"payload": {"tier": "enterprise"}, "signature": "x"}')
     monkeypatch.setenv("IAM_JIT_LICENSE_FILE", str(bad))
-    with pytest.raises(AlertsLicenseError):
-        gate_alerts_license(None)
+    monkeypatch.setattr(
+        alerts_mod, "_OSS_LAUNCH_ADVISORY_EMITTED", False,
+    )
+
+    with caplog.at_level(logging.WARNING, logger=alerts_mod.__name__):
+        gate_alerts_license(None)  # no raise
+
+    # State: a warning fired surfacing the verification failure.
+    warn_records = [
+        r for r in caplog.records
+        if r.levelno == logging.WARNING
+        and "failed verification" in r.message
+    ]
+    assert warn_records, (
+        "expected WARNING log surfacing the license verification "
+        "failure; got: "
+        f"{[(r.levelname, r.message) for r in caplog.records]}"
+    )
+
+    # State: the engine still works downstream.
+    fired: list[dict] = []
+    engine = RuleEngine(
+        config=AlertsConfig.default(), emit=fired.append,
+    )
+    for i in range(DEFAULT_ADMIN_FALLBACK_THRESHOLD + 1):
+        engine.observe(
+            make_admin_fallback_grant_event(principal="alice", grant_id=i)
+        )
+    assert len(fired) >= 1
 
 
-def test_gate_alerts_license_passes_with_enterprise(
+def test_gate_alerts_license_with_enterprise_license_still_passes(
     enterprise_license_factory, tmp_path,
 ) -> None:
-    """A valid Enterprise license = gate returns None silently."""
+    """A valid Enterprise license = gate returns None silently (the
+    pre-v1.0 happy path; preserved so the v1.1+ reinstate finds the
+    test surface still in place).
+    """
     enterprise_license_factory(tmp_path)
     gate_alerts_license(None)  # no raise
 
 
-def test_gate_alerts_license_refuses_pro_tier(
+def test_gate_alerts_license_pro_tier_ships_free_at_v1_0(
     enterprise_license_factory, tmp_path,
 ) -> None:
-    """Pro license = refuse (alerts are Enterprise-only)."""
-    # Use the factory's tier hook; the factory signs ANY tier the
-    # caller asks for, then the gate refuses anything != "enterprise".
+    """Pro license = gate returns silently at v1.0 (was: refused).
+
+    Prior behavior: alerts were Enterprise-only so a Pro license was
+    refused. Per [[oss-only-launch-decision]] alerts ship FREE at v1.0
+    regardless of tier. When the v1.1+ paid tier reinstate lands,
+    this test flips back to asserting refusal — keeping the surface
+    in place so the reinstate is a one-line revert in the gate
+    function.
+    """
     enterprise_license_factory(tmp_path, tier="pro")
-    with pytest.raises(AlertsLicenseError, match="Enterprise"):
-        gate_alerts_license(None)
+    gate_alerts_license(None)  # no raise at v1.0
+
+
+def test_alerts_license_error_sentinel_still_exported() -> None:
+    """`AlertsLicenseError` must remain importable from the package
+    surface so v1.1+ paid-tier reinstate is a one-line revert at each
+    call site. Mirrors the Go-side
+    `TestAuditWebhook_LicenseErrorSentinelStillExported` pattern from
+    the kbouncer #511 fix.
+    """
+    # Import via the package surface (the same path callers use):
+    from iam_jit.bouncer.audit_export import AlertsLicenseError as _e1
+    # And via the module path:
+    from iam_jit.bouncer.audit_export.alerts import (
+        AlertsLicenseError as _e2,
+    )
+    assert _e1 is _e2
+    assert issubclass(_e1, Exception)
 
 
 # ---------------------------------------------------------------------------
@@ -1041,43 +1161,27 @@ def test_audit_export_status_when_no_engine_installed(restore_registry) -> None:
 # ---------------------------------------------------------------------------
 
 
-def test_cli_alert_rules_without_license_fails_fast(
+def test_cli_alert_rules_without_license_ships_free(
     tmp_path, monkeypatch,
 ) -> None:
     """`ibounce run --alert-rules defaults` without an Enterprise
-    license = exit 2 + a clear error message before serve() starts."""
-    from click.testing import CliRunner
+    license = proceeds at v1.0 per [[oss-only-launch-decision]] (#511b).
 
-    from iam_jit.bouncer_cli import main
+    Prior behavior: exit 2 + "Enterprise license" error before
+    serve() starts. v1.0 flips this to a no-op + INFO advisory.
 
-    monkeypatch.delenv("IAM_JIT_LICENSE_FILE", raising=False)
-    runner = CliRunner()
-    result = runner.invoke(
-        main,
-        ["run", "--alert-rules", "defaults", "--port", "0"],
-        catch_exceptions=False,
-    )
-    assert result.exit_code == 2
-    assert "Enterprise license" in result.output
-
-
-def test_cli_alert_rules_with_enterprise_license_proceeds(
-    tmp_path, monkeypatch, enterprise_license_factory,
-) -> None:
-    """With a valid Enterprise license, the --alert-rules gate passes.
-    We don't actually start serve() (that would block) — patch it to
-    a no-op so we only exercise the CLI parse + gate path."""
+    State verification: the CLI reaches serve() (which we stub to a
+    no-op so the test doesn't block); exit 0 + no "refused" string.
+    """
     from click.testing import CliRunner
 
     from iam_jit import bouncer_cli
 
-    enterprise_license_factory(tmp_path)
+    monkeypatch.delenv("IAM_JIT_LICENSE_FILE", raising=False)
 
     async def _fake_serve(*args, **kwargs):
         return None
 
-    # Replace serve in the proxy module so the CLI's `from .bouncer.proxy
-    # import serve` call sees the no-op.
     from iam_jit.bouncer import proxy as proxy_mod
     monkeypatch.setattr(proxy_mod, "serve", _fake_serve)
 
@@ -1087,9 +1191,41 @@ def test_cli_alert_rules_with_enterprise_license_proceeds(
         ["run", "--alert-rules", "defaults", "--port", "0"],
         catch_exceptions=False,
     )
-    # The CLI should reach serve() (which is now a no-op) — exit 0.
-    # The license gate firing would have produced exit code 2.
-    assert "Enterprise license" not in result.output
+    # State: did not refuse + reached serve().
+    assert result.exit_code == 0, (
+        f"expected exit 0 (gate disabled at v1.0); got {result.exit_code}\n"
+        f"output: {result.output}"
+    )
+    assert "audit-export alerts refused" not in result.output
+    # Prior failure-mode string is also absent.
+    assert "require a valid Enterprise license" not in result.output
+
+
+def test_cli_alert_rules_with_enterprise_license_still_proceeds(
+    tmp_path, monkeypatch, enterprise_license_factory,
+) -> None:
+    """With a valid Enterprise license, the --alert-rules gate passes
+    (same as it did pre-v1.0; preserved so the v1.1+ reinstate finds
+    the happy path test in place).
+    """
+    from click.testing import CliRunner
+
+    from iam_jit import bouncer_cli
+
+    enterprise_license_factory(tmp_path)
+
+    async def _fake_serve(*args, **kwargs):
+        return None
+
+    from iam_jit.bouncer import proxy as proxy_mod
+    monkeypatch.setattr(proxy_mod, "serve", _fake_serve)
+
+    runner = CliRunner()
+    result = runner.invoke(
+        bouncer_cli.main,
+        ["run", "--alert-rules", "defaults", "--port", "0"],
+        catch_exceptions=False,
+    )
     assert "audit-export alerts refused" not in result.output
 
 
