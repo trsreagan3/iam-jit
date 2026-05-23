@@ -47,9 +47,51 @@ from __future__ import annotations
 
 import dataclasses
 import datetime as _dt
+import json as _json
+import logging as _logging
+import os as _os
+import pathlib as _pathlib
 import secrets
 import time
 import typing
+
+_logger = _logging.getLogger(__name__)
+
+
+# Default upper bound on how far back the agent's evidence audit-window
+# is allowed to point. 365 days is permissive enough for re-discovery
+# loops + long-running migrations and tight enough that a "from=1970-
+# 01-01" fabrication doesn't sail through. Operators can raise / lower
+# this via the ``IAM_JIT_SYNTHESIS_MAX_LOOKBACK_DAYS`` env var without
+# touching code; the per-request override is intentionally NOT
+# exposed (the floor is operator-set, not request-set).
+DEFAULT_MAX_LOOKBACK_DAYS = 365
+
+
+def _max_lookback_days() -> int:
+    """Return the operator-configured max lookback window in days.
+
+    Sourced from ``IAM_JIT_SYNTHESIS_MAX_LOOKBACK_DAYS`` env var, with
+    ``DEFAULT_MAX_LOOKBACK_DAYS`` as the fallback. A bad value (non-
+    integer, <=0) falls back to the default + logs a warning rather
+    than erroring — the synthesis surface should never refuse to run
+    just because an operator typo'd a config value.
+    """
+    raw = _os.environ.get("IAM_JIT_SYNTHESIS_MAX_LOOKBACK_DAYS")
+    if not raw:
+        return DEFAULT_MAX_LOOKBACK_DAYS
+    try:
+        v = int(raw)
+        if v <= 0:
+            raise ValueError("must be positive")
+        return v
+    except ValueError as e:
+        _logger.warning(
+            "IAM_JIT_SYNTHESIS_MAX_LOOKBACK_DAYS=%r is invalid (%s); "
+            "falling back to default %d days",
+            raw, e, DEFAULT_MAX_LOOKBACK_DAYS,
+        )
+        return DEFAULT_MAX_LOOKBACK_DAYS
 
 
 # ---------------------------------------------------------------------------
@@ -148,11 +190,88 @@ def _validate_evidence(evidence: typing.Any) -> dict[str, typing.Any]:
             code="missing_audit_window_field",
             details={"missing_fields": missing_w},
         )
+    # #477 / §A60f — validate the from/to are actual ISO-8601 / RFC-3339
+    # timestamps, not opaque "x"/"y" strings. The recipe page promises
+    # the audit chain traces back to a SPECIFIC bouncer window; "x"/"y"
+    # makes that promise vacuous. Per [[ibounce-honest-positioning]]
+    # the discipline is enforced at the seam, not left as a future TODO.
+    from_str = str(window["from"])
+    to_str = str(window["to"])
+    try:
+        from_dt = _parse_iso8601(from_str)
+    except ValueError as e:
+        raise SynthesisRequestError(
+            f"`evidence.bouncer_audit_window.from` must be ISO-8601 / "
+            f"RFC-3339 (e.g. `2026-05-23T13:00:00Z`); got {from_str!r} "
+            f"({e}).",
+            code="invalid_audit_window_iso_format",
+            details={"field": "from", "value": from_str},
+        ) from None
+    try:
+        to_dt = _parse_iso8601(to_str)
+    except ValueError as e:
+        raise SynthesisRequestError(
+            f"`evidence.bouncer_audit_window.to` must be ISO-8601 / "
+            f"RFC-3339 (e.g. `2026-05-23T14:00:00Z`); got {to_str!r} "
+            f"({e}).",
+            code="invalid_audit_window_iso_format",
+            details={"field": "to", "value": to_str},
+        ) from None
+    if from_dt > to_dt:
+        raise SynthesisRequestError(
+            f"`evidence.bouncer_audit_window.from` ({from_str}) must "
+            f"not be after `to` ({to_str}). The window is read as "
+            "[from, to]; a reversed window suggests fabrication.",
+            code="invalid_audit_window_reversed",
+            details={"from": from_str, "to": to_str},
+        )
+    now = _dt.datetime.now(_dt.timezone.utc)
+    # Allow up to 60s of clock skew so a freshly-bouncer-stamped window
+    # whose `to` is "right now" doesn't trip the future-window guard.
+    if from_dt > now + _dt.timedelta(seconds=60):
+        raise SynthesisRequestError(
+            f"`evidence.bouncer_audit_window.from` ({from_str}) is in "
+            "the future. The window must point to OBSERVED bouncer "
+            "activity, not a planned one.",
+            code="invalid_audit_window_future",
+            details={"from": from_str, "now": now.isoformat()},
+        )
+    max_days = _max_lookback_days()
+    oldest_allowed = now - _dt.timedelta(days=max_days)
+    if to_dt < oldest_allowed:
+        raise SynthesisRequestError(
+            f"`evidence.bouncer_audit_window.to` ({to_str}) is older "
+            f"than the operator-configured max lookback "
+            f"({max_days} days). Set "
+            "IAM_JIT_SYNTHESIS_MAX_LOOKBACK_DAYS to raise the ceiling "
+            "if a longer window is genuinely intended.",
+            code="invalid_audit_window_too_old",
+            details={
+                "to": to_str,
+                "max_lookback_days": max_days,
+                "oldest_allowed": oldest_allowed.isoformat(),
+            },
+        )
+
     refs = evidence.get("codebase_references")
     if not isinstance(refs, list):
         raise SynthesisRequestError(
             "`evidence.codebase_references` must be a list of strings.",
             code="invalid_codebase_references",
+        )
+    # #477 / §A60f — empty codebase_references defeats the whole purpose
+    # of the evidence chain (no traceback to what the agent actually
+    # read). Reject explicitly + tell the operator how to satisfy it.
+    cleaned_refs = [str(r).strip() for r in refs if str(r).strip()]
+    if not cleaned_refs:
+        raise SynthesisRequestError(
+            "`evidence.codebase_references` must contain at least one "
+            "non-empty entry — the path(s) / symbol(s) the agent read "
+            "to synthesise this request (e.g. `CLAUDE.md`, "
+            "`terraform/prod/main.tf`, `src/handlers/upload.py:42`). "
+            "An empty list defeats the audit-chain purpose of the "
+            "evidence block.",
+            code="invalid_codebase_references_empty",
         )
     intent = evidence.get("operator_intent")
     if not isinstance(intent, str) or not intent.strip():
@@ -163,13 +282,43 @@ def _validate_evidence(evidence: typing.Any) -> dict[str, typing.Any]:
         )
     return {
         "bouncer_audit_window": {
-            "from": str(window["from"]),
-            "to": str(window["to"]),
+            "from": from_str,
+            "to": to_str,
             "bouncer": str(window["bouncer"]),
         },
-        "codebase_references": [str(r) for r in refs],
+        "codebase_references": cleaned_refs,
         "operator_intent": intent.strip(),
     }
+
+
+def _parse_iso8601(value: str) -> _dt.datetime:
+    """Parse an ISO-8601 / RFC-3339 timestamp into a tz-aware datetime.
+
+    Handles the `Z` suffix (UTC) Python's stdlib fromisoformat()
+    historically choked on — pre-3.11 it didn't recognise `Z`; we
+    normalise + accept it across versions for parity with the
+    audit-export wire shape which always emits `Z`.
+
+    Raises :class:`ValueError` on any parse failure so the caller can
+    map the failure to a stable rejection code.
+    """
+    if not isinstance(value, str) or not value.strip():
+        raise ValueError("must be a non-empty string")
+    s = value.strip()
+    # Normalise `Z` to `+00:00` for fromisoformat across Python versions.
+    if s.endswith("Z"):
+        s = s[:-1] + "+00:00"
+    try:
+        dt = _dt.datetime.fromisoformat(s)
+    except ValueError as e:
+        raise ValueError(f"not parseable as ISO-8601: {e}") from None
+    # Force tz-awareness — naive datetimes from the agent would compare
+    # incorrectly against `now()`. Per RFC-3339 a timestamp without
+    # offset is ambiguous; we treat it as UTC + log no warning (the
+    # agent's responsibility is to send the right shape).
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=_dt.timezone.utc)
+    return dt
 
 
 # ---------------------------------------------------------------------------
@@ -274,7 +423,16 @@ def _new_request_id() -> str:
 @dataclasses.dataclass(frozen=True)
 class SynthesisVerdict:
     """Outcome of a synthesis-request evaluation. The MCP / CLI wrapper
-    serialises this to JSON for the agent."""
+    serialises this to JSON for the agent.
+
+    The ``notes`` field (#476 / §A60e) is an operator-language list of
+    strings explaining partial-state conditions the agent needs to know
+    about — most commonly "approved but credentials not minted in this
+    release; here's how to mint them". Always present (possibly empty)
+    so the wire shape is stable. Per
+    [[ambient-value-prop-and-friction-framing]] the notes are framed
+    as actionable next-steps, not as errors.
+    """
 
     request_id: str
     status: str  # auto_approved | pending_operator_approval | rejected
@@ -287,6 +445,7 @@ class SynthesisVerdict:
     resource_mapping_applied: str | None
     requested_duration: str
     credentials: dict[str, typing.Any] | None
+    notes: tuple[str, ...] = ()
 
     def as_dict(self) -> dict[str, typing.Any]:
         return {
@@ -301,6 +460,7 @@ class SynthesisVerdict:
             "resource_mapping_applied": self.resource_mapping_applied,
             "requested_duration": self.requested_duration,
             "credentials": dict(self.credentials) if self.credentials else None,
+            "notes": list(self.notes),
         }
 
 
@@ -593,6 +753,26 @@ def request_role_from_synthesis(
         audit_sink=audit_sink,
     )
 
+    # 6) Operator-facing notes. #476 / §A60e: when the verdict says
+    #    auto_approved but no credentials came back (because the caller
+    #    didn't wire a credential_factory yet — the v1.0 default for the
+    #    MCP path), surface an HONEST signal to the agent so it doesn't
+    #    pretend STS creds are coming. Per
+    #    [[ambient-value-prop-and-friction-framing]] the framing is
+    #    "here's what's done + here's what's next", not an error.
+    notes_list: list[str] = []
+    if status == "auto_approved" and credentials is None:
+        notes_list.append(
+            "Synthesis approved; credential issuance not yet wired in "
+            "this v1.0 release. To mint actual STS credentials, run "
+            f"`iam-jit request --from-synthesis {request_id}` OR wait "
+            "for the credential-factory MCP wiring (filed as #473)."
+        )
+        notes_list.append(
+            "Your audit chain is preserved: query via "
+            f"`iam-jit audit query --filter audit_event_id={audit_event_id}`."
+        )
+
     return SynthesisVerdict(
         request_id=request_id,
         status=status,
@@ -605,7 +785,232 @@ def request_role_from_synthesis(
         resource_mapping_applied=resource_mapping_applied,
         requested_duration=requested_duration,
         credentials=credentials,
+        notes=tuple(notes_list),
     )
+
+
+# ---------------------------------------------------------------------------
+# OCSF audit-sink wiring (#475 / §A60d)
+# ---------------------------------------------------------------------------
+#
+# The synthesis-request audit row needs to land in the SAME OCSF stream
+# the ibounce proxy writes to so that `iam-jit audit query --filter
+# audit_event_id=<id>` can retrieve it. Without this wiring the recipe
+# page's promise ("the auditor reading 'why did this synth request fail
+# at 14:02' should always find the answer") is vacuous — the row is
+# emitted as a Python dict + immediately discarded.
+#
+# Architecture choice: write to the SAME JSONL path the ibounce proxy
+# uses (default ``~/.iam-jit/audit.jsonl``, overridable via the same
+# ``IAM_JIT_BOUNCER_AUDIT_LOG`` env var). The synthesis surface runs
+# inside the iam-jit MCP server process, not inside ibounce, but the
+# default audit-log path is shared by convention so cross-product
+# ``iam-jit audit query`` finds synthesis rows alongside proxy
+# decisions without operators wiring two log paths.
+#
+# A separate env var ``IAM_JIT_SYNTHESIS_AUDIT_LOG`` overrides JUST the
+# synthesis path for operators who deliberately want it segregated.
+#
+# Per [[ibounce-honest-positioning]] failures here MUST be observable
+# (logged) but never crash the agent's loop. The audit sink is a
+# feature, not a hard dependency of correctness.
+
+
+# OCSF constants — mirror ``bouncer/audit_export/event.py`` so the
+# synthesis row shares the same product/class/category identity. Kept
+# local (rather than imported) so the synthesis surface stays
+# decoupled from the bouncer's lifecycle imports.
+_OCSF_SCHEMA_VERSION = "1.1.0"
+_PRODUCT_NAME = "iam-jit"
+_PRODUCT_VENDOR_NAME = "iam-jit"
+_CLASS_UID = 6003
+_CLASS_NAME = "API Activity"
+_CATEGORY_UID = 6
+_CATEGORY_NAME = "Application Activity"
+# Synthesis is a CREATE-shaped activity (we're creating a role-request
+# record, possibly issuing creds). Pick activity_id=1 (Create) per the
+# OCSF v1.1.0 class 6003 spec.
+_ACTIVITY_CREATE = 1
+_TYPE_UID = _CLASS_UID * 100 + _ACTIVITY_CREATE
+_STATUS_SUCCESS_ID = 1
+_STATUS_SUCCESS_NAME = "Success"
+_STATUS_FAILURE_ID = 2
+_STATUS_FAILURE_NAME = "Failure"
+_SEVERITY_INFORMATIONAL_ID = 1
+_SEVERITY_INFORMATIONAL_NAME = "Informational"
+
+# Custom event_type discriminator under unmapped.iam_jit.event_type
+# so a filter on that key isolates synthesis rows from proxy decisions
+# / admin actions / pause events / etc.
+SYNTHESIS_EVENT_TYPE = "iam_jit_request_role_from_synthesis"
+
+
+def _default_synthesis_audit_log_path() -> _pathlib.Path:
+    """Return the JSONL path the synthesis sink writes to.
+
+    Resolution order:
+
+      1. ``IAM_JIT_SYNTHESIS_AUDIT_LOG`` env var (synthesis-only
+         override; lets operators segregate synthesis rows if they
+         really want).
+      2. ``IAM_JIT_BOUNCER_AUDIT_LOG`` env var (the same override
+         ibounce honours — keeps synthesis + proxy rows in one stream
+         by default).
+      3. ``~/.iam-jit/audit.jsonl`` (the conventional bouncer path).
+
+    The path is advisory; the writer creates parent dirs as needed.
+    """
+    override = _os.environ.get("IAM_JIT_SYNTHESIS_AUDIT_LOG")
+    if override:
+        return _pathlib.Path(override)
+    bouncer_override = _os.environ.get("IAM_JIT_BOUNCER_AUDIT_LOG")
+    if bouncer_override:
+        return _pathlib.Path(bouncer_override)
+    return _pathlib.Path.home() / ".iam-jit" / "audit.jsonl"
+
+
+def synthesis_row_to_ocsf(row: dict[str, typing.Any]) -> dict[str, typing.Any]:
+    """Convert a synthesis audit row (the dict shape emitted by
+    ``_emit_synthesis_audit``) into an OCSF v1.1.0 class 6003 event.
+
+    Same wire shape every ibounce/kbounce/dbounce/gbounce decision
+    event uses, so the existing cross-bouncer query CLI + the per-
+    bouncer `/audit/events` endpoint pick it up without per-product
+    parsing.
+
+    The synthesis audit chain (bouncer_audit_window, codebase_references,
+    operator_intent) is reproduced under ``unmapped.iam_jit.synthesis``
+    so the operator's audit query can fan out from the synthesis row
+    to the underlying bouncer window without joining tables.
+    """
+    status = str(row.get("status") or "")
+    status_id = _STATUS_SUCCESS_ID
+    status_name = _STATUS_SUCCESS_NAME
+    if status == "rejected":
+        status_id = _STATUS_FAILURE_ID
+        status_name = _STATUS_FAILURE_NAME
+
+    evidence = dict(row.get("evidence") or {})
+    audit_event_id = str(row.get("audit_event_id") or "")
+    request_id = str(row.get("request_id") or "")
+
+    # OCSF `time` is unix milliseconds. The synthesis row carries
+    # `when` as ISO-8601; parse + convert here. Fall back to now() if
+    # absent / malformed.
+    when_ms = int(time.time() * 1000)
+    when_iso = row.get("when")
+    if isinstance(when_iso, str) and when_iso:
+        try:
+            dt = _parse_iso8601(when_iso)
+            when_ms = int(dt.timestamp() * 1000)
+        except ValueError:
+            pass
+
+    status_detail = (
+        f"synthesis request {request_id} status={status} "
+        f"score={row.get('score')} "
+        f"rejection_code={row.get('rejection_code')}"
+    )
+
+    return {
+        "metadata": {
+            "version": _OCSF_SCHEMA_VERSION,
+            "product": {
+                "name": _PRODUCT_NAME,
+                "vendor_name": _PRODUCT_VENDOR_NAME,
+            },
+        },
+        "time": when_ms,
+        "class_uid": _CLASS_UID,
+        "class_name": _CLASS_NAME,
+        "category_uid": _CATEGORY_UID,
+        "category_name": _CATEGORY_NAME,
+        "activity_id": _ACTIVITY_CREATE,
+        "activity_name": "Create",
+        "type_uid": _TYPE_UID,
+        "type_name": f"{_CLASS_NAME}: Create",
+        "severity_id": _SEVERITY_INFORMATIONAL_ID,
+        "severity": _SEVERITY_INFORMATIONAL_NAME,
+        "status_id": status_id,
+        "status": status_name,
+        "status_detail": status_detail,
+        # Top-level convenience for grep + the events_endpoint filter
+        # parser — `iam-jit audit query --filter audit_event_id=evt_rfs_…`
+        # walks dotted paths, so a top-level key resolves cleanly. The
+        # nested copy under unmapped.iam_jit also keeps the OCSF-pure
+        # consumers happy (everything iam-jit-specific lives under
+        # `unmapped`).
+        "audit_event_id": audit_event_id,
+        "actor": {"user": {"name": "agent-synthesis", "uid": request_id}},
+        "api": {
+            "operation": SYNTHESIS_EVENT_TYPE,
+            "service": {"name": "iam-jit.synthesis"},
+            "request": {"uid": request_id},
+        },
+        "resources": [],
+        "src_endpoint": {},
+        "dst_endpoint": {},
+        "unmapped": {
+            "iam_jit": {
+                "event_type": SYNTHESIS_EVENT_TYPE,
+                "audit_event_id": audit_event_id,
+                "request_id": request_id,
+                "verdict": status,
+                "score": row.get("score"),
+                "rejection_code": row.get("rejection_code"),
+                "resource_mapping_applied": row.get("resource_mapping_applied"),
+                "requested_duration": row.get("requested_duration"),
+                "permissions_count": row.get("permissions_count"),
+                "justification": row.get("justification"),
+                # Full evidence chain reproduced for the auditor — per
+                # the recipe page's "trace WHY this role was issued"
+                # promise.
+                "synthesis": {
+                    "evidence": evidence,
+                },
+                "ext": {},
+            },
+        },
+    }
+
+
+def default_synthesis_audit_sink(
+    row: dict[str, typing.Any],
+    *,
+    path: _pathlib.Path | None = None,
+) -> None:
+    """Append one synthesis row to the JSONL audit log as an OCSF event.
+
+    This is the DEFAULT sink wired into :func:`request_role_from_synthesis_for_mcp`
+    so synthesis rows are findable via `iam-jit audit query` out of the
+    box — no operator config required.
+
+    Per [[ibounce-honest-positioning]] failures are LOGGED but never
+    raised. A broken disk should not make the agent's MCP call fail.
+    """
+    target = path or _default_synthesis_audit_log_path()
+    try:
+        target.parent.mkdir(parents=True, exist_ok=True)
+        ocsf_event = synthesis_row_to_ocsf(row)
+        # Append-only JSONL — matches the on-disk shape ibounce's
+        # AuditLogWriter produces so the events_endpoint reader picks
+        # it up with no changes. One JSON object per line, no trailing
+        # comma, no array wrapping (NDJSON).
+        with target.open("a", encoding="utf-8") as f:
+            f.write(_json.dumps(ocsf_event, ensure_ascii=False))
+            f.write("\n")
+    except OSError as e:
+        _logger.warning(
+            "synthesis audit sink failed to write to %s: %s. The "
+            "synthesis verdict was still returned to the caller; the "
+            "audit chain is broken for this row.",
+            target, e,
+        )
+    except Exception as e:  # defensive — never raise into the MCP path
+        _logger.warning(
+            "synthesis audit sink unexpected error: %s. Row dropped.",
+            e,
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -615,9 +1020,26 @@ def request_role_from_synthesis(
 
 def request_role_from_synthesis_for_mcp(
     args: dict[str, typing.Any],
+    *,
+    audit_sink: typing.Callable[[dict[str, typing.Any]], None] | None = None,
+    credential_factory: typing.Callable[
+        [dict[str, typing.Any]], dict[str, typing.Any] | None,
+    ] | None = None,
 ) -> dict[str, typing.Any]:
     """MCP-tool entry point. Wraps :func:`request_role_from_synthesis`
-    with arg unpacking + a stable JSON-friendly response."""
+    with arg unpacking + a stable JSON-friendly response.
+
+    ``audit_sink`` defaults to :func:`default_synthesis_audit_sink`
+    (#475 / §A60d) which appends OCSF v1.1.0 class 6003 events to the
+    shared JSONL audit log — making synthesis rows findable via
+    `iam-jit audit query --filter audit_event_id=...` out of the box.
+
+    ``credential_factory`` is left None by default in v1.0 (#473
+    follow-up). The verdict's ``notes`` field surfaces an honest
+    "credentials not yet wired" signal in that state per #476 / §A60e
+    + [[ambient-value-prop-and-friction-framing]].
+    """
+    sink = audit_sink if audit_sink is not None else default_synthesis_audit_sink
     verdict = request_role_from_synthesis(
         permissions=args.get("permissions") or [],
         observed_scope=args.get("observed_scope") or {},
@@ -629,14 +1051,20 @@ def request_role_from_synthesis_for_mcp(
             args.get("auto_approve_threshold")
             or DEFAULT_AUTO_APPROVE_THRESHOLD,
         ),
+        audit_sink=sink,
+        credential_factory=credential_factory,
     )
     return verdict.as_dict()
 
 
 __all__ = [
     "DEFAULT_AUTO_APPROVE_THRESHOLD",
+    "DEFAULT_MAX_LOOKBACK_DAYS",
+    "SYNTHESIS_EVENT_TYPE",
     "SynthesisRequestError",
     "SynthesisVerdict",
+    "default_synthesis_audit_sink",
     "request_role_from_synthesis",
     "request_role_from_synthesis_for_mcp",
+    "synthesis_row_to_ocsf",
 ]
