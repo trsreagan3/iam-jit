@@ -1,5 +1,15 @@
 # Launch plan — iam-risk-score
 
+> **SUPERSEDED 2026-05-23**: v1.0 ships fully free + open source per
+> `project_oss_only_launch_decision.md`. The tier/pricing sections
+> below (Indie / Pro / Team / Enterprise) are RETAINED FOR HISTORICAL
+> CONTEXT ONLY — they do NOT reflect v1.0 launch shape. v1.0 launch
+> copy lives in the README + landing-site. Pricing-page + Stripe
+> integration items in the pre-launch checklist are DEFERRED to a
+> future paid tier (no earlier than 12-18mo post-launch per the OSS
+> launch decision). Revenue motion at launch = consulting funnel +
+> EOR-supporting international remote opportunities.
+
 The standalone scoring product. Built to be the "API and CLI for
 scoring AWS IAM policy risk" — for AI agents submitting policies
 before requesting access, for CI pipelines gating PRs that touch

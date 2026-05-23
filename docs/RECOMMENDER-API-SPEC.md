@@ -7,6 +7,14 @@
 > corpus and Hoop integration can be built against it; it could land
 > in v1.1 in some form but is not part of v1.0.
 >
+> **SUPERSEDED tier framing 2026-05-23**: per
+> `project_oss_only_launch_decision.md`, v1.0 ships fully free + open
+> source — no Pro / Team / Enterprise tiers. References below to
+> "Free tier ships X" / "Pro tier auto-discovers Y" / "Team tier
+> Opus" are HISTORICAL DESIGN CONTEXT only. Any future paid tier
+> (no earlier than 12-18mo post-launch) would add NEW capabilities,
+> not gate features that ship at v1.0.
+>
 > For the shipped recommender behavior, see:
 >
 > - `src/iam_jit/bouncer/recommender.py` — observation-based rule

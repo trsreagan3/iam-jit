@@ -99,11 +99,15 @@ interface Mode {
   featured?: boolean;
 }
 
+// Per project_oss_only_launch_decision.md (2026-05-23): v1.0 ships
+// fully free + open source. Self-host only — no multi-tenant SaaS
+// per project_no_hosted_saas. Local mode + self-host are the two
+// deployment shapes; both are free.
 const modes: Mode[] = [
   {
     name: "Local (free)",
     audience: "Solo devs, individual admins",
-    price: "$0",
+    price: "Free + open source",
     shape: "Runs on your laptop. ZERO iam-jit-the-company involvement. " +
       "Trust model is 'trust the binary' (same as aws-cli, kubectl). " +
       "Uses your local AWS credentials. SQLite audit log.",
@@ -111,23 +115,14 @@ const modes: Mode[] = [
     featured: true,
   },
   {
-    name: "Hosted (Indie / Pro / Team)",
-    audience: "Small teams to mid-market",
-    price: "from $39/mo",
-    shape: "iam-jit-the-company runs the control plane. You apply a " +
-      "~90-second CloudFormation that creates a trust role. iam-jit " +
-      "never holds AWS credentials directly — the customer's " +
-      "permissions boundary is the hard max.",
-    cta: "Start free trial",
-  },
-  {
-    name: "Self-host (Enterprise)",
-    audience: "Regulated / data-sovereign",
-    price: "Annual license",
+    name: "Self-host (free)",
+    audience: "Teams + enterprises with shared audit + multi-user needs",
+    price: "Free + open source",
     shape: "You deploy iam-jit into your own AWS account via SAM. " +
       "Bedrock/Anthropic/AWS bills route directly to your account. " +
-      "No phone-home. No telemetry. Annual support + SLA.",
-    cta: "Contact sales",
+      "No phone-home. No telemetry. Consulting available for production " +
+      "deployments + custom integration + compliance audits.",
+    cta: "git clone + sam deploy --guided",
   },
 ];
 ---

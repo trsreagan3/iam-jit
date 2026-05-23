@@ -171,10 +171,13 @@ Screenshot placeholder: PR with the risk-score comment inline.
 
 ## Pricing section
 
-(Same as docs/LAUNCH-PLAN.md.)
-
-Each tier has a "Get started" button. Free + Indie are
-self-serve via Stripe Checkout. Pro+ has a "Talk to us" form.
+> **SUPERSEDED 2026-05-23**: v1.0 ships fully free + open source per
+> `project_oss_only_launch_decision.md`. The shipped landing-site
+> pricing copy is a single "Free + open source" CTA card plus a
+> consulting-engagement / international-remote-opportunities CTA.
+> See `landing-site/src/pages/index.astro` for the actual v1.0 copy.
+> The tier-comparison framing previously in this section (Free /
+> Indie / Pro / Team / Enterprise) is HISTORICAL CONTEXT ONLY.
 
 ---
 
@@ -210,8 +213,9 @@ self-serve via Stripe Checkout. Pro+ has a "Talk to us" form.
 
 **Q: How do you handle SOC 2 / compliance?**
 
-> SOC 2 Type 1 in progress (target: Q3). Enterprise tier
-> includes the audit evidence export.
+> SOC 2 Type 1 in progress (target: Q3). The audit-evidence export
+> ships in the v1.0 open-source release; consulting engagements
+> available for guided compliance audits.
 
 **Q: How is this different from AWS IAM Access Analyzer?**
 

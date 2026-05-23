@@ -54,51 +54,44 @@ const ciSample = `# .github/workflows/iam-review.yml
     threshold: 5
     comment-on-pr: true`;
 
-interface PricingTier {
+// Per project_oss_only_launch_decision.md (2026-05-23): v1.0 ships
+// fully free + open source. No paid tier at launch. Consulting funnel
+// + EOR-supporting international remote opportunities are the
+// revenue motion.
+interface PricingCard {
   name: string;
   price: string;
-  quota: string;
   features: string;
   cta: string;
+  href: string;
   featured?: boolean;
 }
 
-const tiers: PricingTier[] = [
+const pricingCards: PricingCard[] = [
   {
-    name: "Free",
-    price: "$0",
-    quota: "100 req / mo, per IP",
-    features: "Public API, all scoring features, no auth required",
-    cta: "Try the CLI",
-  },
-  {
-    name: "Indie",
-    price: "$19 / mo",
-    quota: "5K req / mo",
-    features: "API key, deterministic scoring",
-    cta: "Start free trial",
-  },
-  {
-    name: "Pro",
-    price: "$99 / mo",
-    quota: "50K req / mo",
-    features: "API key, LLM narrative (Opus 4.7), basic dashboard",
-    cta: "Start free trial",
+    name: "iam-risk-score — hosted API",
+    price: "Free",
+    features:
+      "Public API at api.iam-risk-score.com — 100 req/mo per IP. No auth, no sign-up. Every scoring feature, full per-factor breakdown.",
+    cta: "Try the API",
+    href: "#install",
     featured: true,
   },
   {
-    name: "Team",
-    price: "$499 / mo",
-    quota: "500K req / mo",
-    features: "+ admin context API, Slack notifications, weekly digest",
-    cta: "Start free trial",
+    name: "iam-risk-score — offline CLI",
+    price: "Free + open source",
+    features:
+      "`pip install iam-risk-score` — unlimited offline scoring, no network call, Apache-2.0. Drop into pre-commit hooks + CI gates.",
+    cta: "pip install iam-risk-score",
+    href: "#install",
   },
   {
-    name: "Enterprise",
-    price: "Talk to us",
-    quota: "Unlimited",
-    features: "+ SOC 2 evidence export, dedicated calibration, SLA",
-    cta: "Contact sales",
+    name: "Self-host + consulting",
+    price: "Free + paid support",
+    features:
+      "Self-host the full suite (iam-jit + ibounce + kbouncer + dbounce + gbounce) in your own AWS account — every feature ships free at v1.0. Built by trsreagan3, American based in Thailand — open to international remote roles with EOR-supporting employers (Deel / Remote.com / Velocity Global) + select consulting engagements for production deployments + custom integration + compliance audits.",
+    cta: "Get in touch",
+    href: "https://github.com/trsreagan3/iam-jit/issues",
   },
 ];
 ---
@@ -348,7 +341,7 @@ const tiers: PricingTier[] = [
           <a href="#how">How it works</a>
           <a href="#agents">For agents</a>
           <a href="#cicd">For CI/CD</a>
-          <a href="#pricing">Pricing</a>
+          <a href="#pricing">Free + open source</a>
           <a href="#faq">FAQ</a>
           <a href="https://github.com/trsreagan3/iam-jit">GitHub</a>
         </nav>
@@ -503,18 +496,23 @@ const tiers: PricingTier[] = [
 
     <section id="pricing">
       <div class="container">
-        <h2>Pricing</h2>
-        <p>Free tier is generous enough for any solo dev. Indie &amp;
-          Pro are self-serve via Stripe Checkout. Team &amp; Enterprise
-          have a short kickoff call.</p>
+        <h2>Free + open source</h2>
+        <p>
+          v1.0 ships fully free + open source under Apache-2.0.
+          Every feature in this README ships in the release — no
+          paid tier at launch, no per-feature gating. Self-host in
+          your own AWS account; zero phone-home. Local-dev with an
+          agent in the loop needs <strong>zero LLM credentials on the
+          iam-jit / bouncer side</strong> — the agent's own LLM does
+          the intelligent work via MCP.
+        </p>
         <div class="pricing">
-          {tiers.map((t) => (
+          {pricingCards.map((t) => (
             <div class={`tier ${t.featured ? "featured" : ""}`}>
               <div class="name">{t.name}</div>
               <div class="price">{t.price}</div>
-              <div class="quota">{t.quota}</div>
               <div class="features">{t.features}</div>
-              <a class={`btn ${t.featured ? "primary" : ""}`} href="#install">
+              <a class={`btn ${t.featured ? "primary" : ""}`} href={t.href}>
                 {t.cta}
               </a>
             </div>
@@ -565,7 +563,7 @@ const tiers: PricingTier[] = [
           </dd>
 
           <dt>How do you handle SOC 2 / compliance?</dt>
-          <dd>SOC 2 Type 1 in progress. Enterprise tier includes the audit evidence export.</dd>
+          <dd>SOC 2 Type 1 in progress. The audit-evidence export ships in the v1.0 open-source release; consulting engagements available for guided compliance audits.</dd>
 
           <dt>How is this different from AWS IAM Access Analyzer?</dt>
           <dd>
@@ -581,7 +579,7 @@ const tiers: PricingTier[] = [
     <footer class="site">
       <div class="container links">
         <a href="https://github.com/trsreagan3/iam-jit">GitHub</a>
-        <a href="#pricing">Pricing</a>
+        <a href="#pricing">Free + open source</a>
         <a href="#faq">FAQ</a>
         <a href="https://github.com/trsreagan3/iam-jit/issues">Issues</a>
         <span style="margin-left: auto;">&copy; 2026 iam-risk-score</span>

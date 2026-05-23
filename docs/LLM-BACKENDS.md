@@ -1,16 +1,26 @@
 # LLM backends
 
-iam-jit's Pro / Team / Enterprise tiers add an LLM-generated narrative
-and 1-3 reduction suggestions on top of the deterministic score. The
-deterministic score itself NEVER changes — per
-[scorer-is-ground-truth](../README.md). The LLM is bounded to
+**Local-dev (agent-in-loop) needs ZERO LLM credentials on the
+iam-jit / bouncer side.** Per `[[bouncer-zero-llm-when-agent-in-loop]]`
+(2026-05-23): when an agent (Claude Code / Cursor / Codex / Devin /
+any MCP client) is in the loop, all intelligent work (deny classify,
+profile improvement, NL synthesis, audit-NL, scoring narrative) runs
+as MCP tools the agent calls with the agent's OWN credentials. iam-jit
++ bouncers stay deterministic + audit + MCP-server.
+
+**Backend selection (below) is for the standalone / CI / cron mode
+only** — explicitly opt in with `--enable-bouncer-side-llm
+--llm-backend <name>`. iam-jit's optional LLM commentary adds an
+LLM-generated narrative and 1-3 reduction suggestions on top of the
+deterministic score. The deterministic score itself NEVER changes —
+per [scorer-is-ground-truth](../README.md). The LLM is bounded to
 commentary only.
 
-As of v1.0 the LLM call is **pluggable**: pick any of four backends
-based on your existing vendor relationships, latency budget, and cost
-target. None is "the default" — `IAM_JIT_LLM_BACKEND` selects per
-deployment; per-account `llm_preferred_backend` can override per AWS
-account.
+When standalone-mode LLM IS desired, the LLM call is **pluggable**:
+pick any of four backends based on your existing vendor relationships,
+latency budget, and cost target. None is "the default" —
+`IAM_JIT_LLM_BACKEND` selects per deployment; per-account
+`llm_preferred_backend` can override per AWS account.
 
 | Backend     | Best for                                       | Latency  | Cost (rough) | Setup                    |
 |-------------|-----------------------------------------------|----------|--------------|--------------------------|

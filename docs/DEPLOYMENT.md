@@ -165,11 +165,16 @@ The full list of supported principal ARN shapes (IAM users, IAM roles, Identity 
 
 ## Step 5 — pick an LLM backend and configure it
 
-**iam-jit's LLM backend is your choice.** Pro/Team/Enterprise tiers
-use an LLM to score policy proposals against the LLM-graded calibration
-corpus; pick whichever LLM your org already pays for. Four backends
-ship in v1.0 with equal first-class support — pick the one that fits
-your org's existing billing + perimeter posture:
+**iam-jit's LLM backend is your choice.** Per
+`[[bouncer-zero-llm-when-agent-in-loop]]`: when an agent is in the
+loop (Claude Code, Cursor, Codex, Devin, custom MCP client), iam-jit
++ bouncers need **ZERO LLM credentials** — the agent's own LLM does
+the intelligent work via MCP. Configure an LLM backend here ONLY for
+standalone-mode deployments (CI/CD, scheduled cron, no-agent daemon
+mode) where you explicitly want bouncer-side LLM features (deny
+classifier, improve_profile suggestions, etc.). Four backends ship
+in v1.0 with equal first-class support — pick the one that fits your
+org's existing billing + perimeter posture:
 
 | Backend           | Setup                                       | Cost per 1k scores | Notes                                                                                  |
 |-------------------|---------------------------------------------|--------------------|----------------------------------------------------------------------------------------|
@@ -338,27 +343,27 @@ on your behalf — Bedrock model access is account-scoped, and the
 verification is binding to your AWS account holder's terms with
 Anthropic.
 
-### What this means for pricing if you eventually subscribe to a paid tier
+### What this means for cost ownership
 
-If you self-host iam-jit Pro/Team/Enterprise (paid tiers), the
-subscription covers the **software license + support**, not the
-infrastructure cost. Standard enterprise self-host model (same
-shape as GitLab Self-Managed, Sentry Self-Hosted, Mattermost, etc.).
-You continue to pay AWS / Anthropic directly for the runtime; you
-pay iam-jit (the company) for the right to use the paid-tier
-features and for support/SLA.
+Per `[[oss-only-launch-decision]]` (2026-05-23): v1.0 ships fully
+free + open source — no paid tier at launch. Every feature you read
+about in the README ships in the Apache-2.0 release. You pay AWS /
+Anthropic / OpenAI / Bedrock directly for the LLM runtime (whichever
+backend you pick, or none if your agent has its own LLM); iam-jit-the-
+company gets paid for **consulting engagements** when you want
+guided production deployment + custom integration + compliance audits.
 
 This separation of cost ownership is captured in the
 [[self-host-zero-billing-dependency]] memo and is a deliberate
-architectural choice.
+architectural choice — your AWS account holds all data; no phone-home.
 
 ## Step 5.6 — Pilot deployment profile (design-partner / first-customer)
 
-If you are evaluating iam-jit as a design partner — full
-Enterprise-tier feature set on, but with hard cost ceilings so the
-trial cannot accidentally generate substantial LLM spend — use
-this parameter set. It's intentionally conservative on cost while
-leaving every feature exercisable.
+If you are evaluating iam-jit as a design partner — full v1.0 feature
+set on, but with hard cost ceilings so the trial cannot accidentally
+generate substantial LLM spend — use this parameter set. It's
+intentionally conservative on cost while leaving every feature
+exercisable.
 
 > The parameter set below uses the **Bedrock** backend as a worked
 > example because that's where AWS Budgets gives you a native
@@ -371,9 +376,10 @@ leaving every feature exercisable.
 
 ### What this profile does
 
-- Enables Enterprise-tier features (task-description analysis,
-  audit report export, custom intent types) so the customer can
-  test the full surface.
+- Enables the full v1.0 feature set (task-description analysis,
+  audit report export, custom intent types — all FREE at v1.0 per
+  `[[oss-only-launch-decision]]`) so the customer can test the
+  full surface.
 - Picks Sonnet — not Opus — as the LLM backend for all tiers.
   Sonnet is ~5× cheaper, handles the scoring + narrative prompts
   cleanly, and is the right cost/quality point for a pilot.

@@ -1,5 +1,14 @@
 # Publishing checklist — iam-risk-score launch
 
+> **SUPERSEDED 2026-05-23 (Stripe + billing sections)**: v1.0 ships
+> fully free + open source per `project_oss_only_launch_decision.md`.
+> The Stripe checkout / paid-tier webhook / pricing-page sections
+> below are DEFERRED to a future paid tier (no earlier than 12-18mo
+> post-launch). PyPI + GitHub Action + docs site + landing site
+> sections REMAIN ACCURATE for v1.0. Revenue motion at launch =
+> consulting funnel + EOR-supporting international remote
+> opportunities.
+
 Pre-launch steps to publish the standalone scoring product
 across three channels.
 

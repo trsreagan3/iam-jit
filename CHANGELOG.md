@@ -9,7 +9,32 @@ from software version (see `docs/ROADMAP-V1.1.md`); changes to
 the scorer corpus today are noted as `### Scorer` blocks
 within the same release.
 
-## Unreleased — Bounce-suite rename (2026-05-17)
+## Unreleased — v1.0 launch prep (2026-05)
+
+### Changed
+
+- **Tier rescope: v1.0 ships fully free + open source** (2026-05-23) —
+  Per `[[oss-only-launch-decision]]`: all features previously labeled
+  Pro / Team / Enterprise now ship FREE at v1.0. README + landing-site
+  + docs/LAUNCH-PLAN.md + docs/PUBLISHING.md + docs/LANDING-PAGE-COPY.md
+  + docs/DEPLOYMENT.md + docs/LLM-BACKENDS.md + docs/RECOMMENDER-API-SPEC.md
+  rewritten to remove tier framing. Single CTA across the suite:
+  "Free + open source. Self-host in your own AWS account. Built by
+  trsreagan3, American based in Thailand — open to international remote
+  opportunities with EOR-supporting employers + select consulting
+  engagements." License-validation code (#161) stays in repo but does
+  NOT enforce at v1.0; Ed25519 license keygen (#235) deferred to v1.1+.
+  Cross-product alignment: kbouncer + dbounce help-text + audit
+  webhook docstrings updated in parallel; ibounce inherits the iam-roles
+  README + docs above. Per `[[bouncer-zero-llm-when-agent-in-loop]]`:
+  local-dev with an agent in the loop needs ZERO LLM credentials on
+  iam-jit/bouncer side. Per `[[vendor-integration-claim-qualifier]]`:
+  webhook + Security Lake vendor adapters carry the
+  "wire-shape verified against vendor docs; live-tenant verification
+  is operator's first-install exercise" qualifier in all marketing
+  copy. Per `[[ibounce-honest-positioning]]`: anomaly detection is
+  ibounce-only at v1.0; Go bouncers ship anomaly detection in v1.0+1
+  (#508).
 
 ### Documentation
 

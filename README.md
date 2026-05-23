@@ -86,7 +86,7 @@ Suggestions to reduce risk:
 ### Integration paths
 
 - **CLI** — `pip install iam-risk-score`. Works offline (no network call) or against any API URL. Good for pre-commit hooks + CI gates.
-- **HTTP API** — `POST https://api.iam-risk-score.com/api/v1/score`. Anonymous + free up to 100 requests/month per IP. Paid tiers add an LLM narrative.
+- **HTTP API** — `POST https://api.iam-risk-score.com/api/v1/score`. Anonymous + free up to 100 requests/month per IP. The offline CLI is unlimited.
 - **GitHub Action** — drops into CI; fails the workflow if a policy scores above your threshold. [Action](https://github.com/trsreagan3/iam-risk-score-action) · [SARIF output](docs/SARIF.md) for code-scanning integrations.
 
 ### What gets scored
@@ -324,7 +324,7 @@ User sees ZERO friction prompts in the read-only investigation phase. The single
   - **Broad baselines** — AWS-managed (`ReadOnlyAccess`, `SecurityAudit`, etc.) + iam-jit's `AdminLikeWithSensitiveExclusions` (broad admin minus secrets/sensitive S3/KMS decrypt/audit-infra destruction)
   - **Parameterized task templates** — narrow shapes like `update-one-secret(arn)`, `download-one-file(bucket, key)`, `invoke-one-lambda(arn)`, `read-one-cloudwatch-log-group(arn)` — score 1-3, almost always auto-approve
   - **Saved templates** — your team's recurring shapes (auto-evolved from re-use) and admin-promoted org-tier templates
-- **Agent-driven reduction** — even human-driven web-UI sessions are encouraged to pull up Claude Code / Cursor for the narrowing step. iam-jit's UI never authors policies from natural-language prompts. Free tier: pick a template + fill parameters, OR submit raw JSON. Pro tier: also gets an LLM-guided Q&A walkthrough ("do you need RDS? secrets? which region?") that picks reductions for you — LLM acts as UX, not as author; questions are customer-configurable for tighter fit with your org's reduction patterns
+- **Agent-driven reduction** — even human-driven web-UI sessions are encouraged to pull up Claude Code / Cursor for the narrowing step. iam-jit's UI never authors policies from natural-language prompts. Pick a template + fill parameters, OR submit raw JSON. An LLM-guided Q&A walkthrough ("do you need RDS? secrets? which region?") drives reductions for you when an LLM backend is configured — LLM acts as UX, not as author; questions are customer-configurable for tighter fit with your org's reduction patterns
 - **Evolving preset library** — your team's recurring shapes get saved automatically after re-use; "based on `payment-incident-triage` template" in the audit trail; per-customer, no cross-tenant learning
 - **Multi-user accounts** with role-based access (requester / approver / admin)
 - **OIDC SSO** — Google Workspace + Okta out of the box; generic OIDC for Azure AD / Auth0 / others
@@ -336,16 +336,15 @@ User sees ZERO friction prompts in the read-only investigation phase. The single
 - **MFA propagation** — propagates IdP MFA assertion through to `aws:MultiFactorAuthPresent` AWS Conditions
 - **Safety modes** — `read_write_swap` (default, lean-permissive) and `strict` (compliance environments); configurable per-deployment, per-account, per-session
 
-### Tiers (two-tier model)
+### Pricing — free + open source
 
-| Tier | What it is | LLM backend | Pricing |
-|---|---|---|---|
-| **Free** | Self-host the OSS Apache 2.0 core in your own AWS account. Unlimited users (honor-system threshold ~25 users to consider Enterprise). All MCP tools, scoring engine, audit log, OIDC SSO, MFA propagation, Slack approval bot, raw-JSON submission, personal-tier template library. | Customer-chosen (Bedrock / Anthropic / OpenAI / Ollama — any) | $0 |
-| **Enterprise** | Free + proprietary plugins (live action tail / org-tier preset library / UI guided reduction) + support contract with SLA + signed release binaries. Self-host in your account OR dedicated-managed (single-tenant in a dedicated AWS account) for large customers. | Customer-chosen for self-host; managed-tier negotiated | Annual contract; typical $25–100K/yr self-host; $200K+/yr dedicated-managed |
+**iam-jit v1.0 ships fully free + open source.** Every feature described in this README ships in the Apache-2.0 release: scoring engine, audit log, MCP server, OIDC SSO, MFA propagation, Slack approval bot, all four bouncers, deny/anomaly/autopilot tooling — no per-feature gating, no paid tier at launch.
 
-**Why no per-seat hosted tier.** A hosted iam-jit would hold cross-account trust into every customer's AWS account — one breach pivots to many customers. We refuse to operate that. The OSS self-host model keeps each customer's blast radius bounded to their own account, the same as their existing IAM tooling.
+Self-host in your own AWS account (no multi-tenant SaaS — see below). Zero phone-home. Customer-chosen LLM backend (Bedrock / Anthropic / OpenAI / Ollama / none) when standalone-mode LLM is desired; local-dev with an agent in the loop needs **zero LLM credentials on the iam-jit/bouncer side** — the agent's own LLM does the intelligent work via MCP. See [`docs/LLM-BACKENDS.md`](docs/LLM-BACKENDS.md).
 
-**LLM-touching features (risk narrative, per-account LLM policy, LLM-augmented suggestions) are FREE in OSS** — you pay the LLM bills directly to your provider; iam-jit-the-company doesn't double-charge to enable features where you do the work. Enterprise pricing only applies to proprietary plugins where iam-jit-the-company maintains real infrastructure on your behalf.
+**Built by trsreagan3, American based in Thailand.** Open to international remote opportunities with companies that use EOR services (Deel, Remote.com, Velocity Global, etc.) for international hires — and to select consulting engagements for production deployments + custom integrations + compliance audits. [Get in touch.](https://github.com/trsreagan3/iam-jit/issues)
+
+**Why no multi-tenant hosted SaaS.** A hosted iam-jit would hold cross-account trust into every customer's AWS account — one breach pivots to many customers. We refuse to operate that. The OSS self-host model keeps each customer's blast radius bounded to their own account, the same as their existing IAM tooling.
 
 ### Self-host quickstart
 
@@ -388,7 +387,7 @@ Every deployment writes a structured, queryable audit log. The exact storage bac
 | **Self-host** | DynamoDB in customer's hub account | Per customer's CloudFormation params | JSON API `/api/v1/requests/...`, web UI grant-detail page, raw DDB access |
 | **Dedicated Enterprise** | Same as self-host (customer's dedicated AWS account) | Per customer's contract | Same as self-host |
 
-All modes additionally emit structured logs to stdout/CloudWatch (one-line JSON per event) so existing SIEM pipelines (Datadog, Splunk, Sumo, Wiz) can ingest in real time. No proprietary format.
+All modes additionally emit structured logs to stdout/CloudWatch (one-line JSON per event). Compatible with SIEM pipelines that consume OCSF / JSON-line events (Datadog Logs intake, Splunk HEC, Microsoft Sentinel, AWS Security Lake) — wire shape verified against published vendor docs, live-tenant verification is a ~60-second exercise on first install. No proprietary format.
 
 ### Log retention + rotation
 
@@ -405,11 +404,11 @@ The grant-record fields map 1:1 to common compliance evidence asks:
 
 See [docs/compliance/](docs/compliance/) for the full framework mapping.
 
-### Live action tail *(Pro+ tier, planned)*
+### Live action tail
 
 > "What is alice's agent doing right now with the grant I approved 10 minutes ago?"
 
-For grants currently within their TTL window, Pro+ tier surfaces a live stream of CloudTrail events filtered to the JIT-issued role's session ID. Three surfaces:
+For grants currently within their TTL window, iam-jit surfaces a live stream of CloudTrail events filtered to the JIT-issued role's session ID. Three surfaces:
 
 - **Web UI** — the grant-detail page shows actions as they happen, with `service:Action` + resource ARN per row
 - **Slack DM** — opt-in periodic summaries ("alice's grant has executed 47 API calls in the last 5 min: s3:GetObject ×40, cloudwatch:GetMetricData ×7")
@@ -478,6 +477,105 @@ See [docs/AGENTS.md](docs/AGENTS.md) for the agent-driven reduction-loop pattern
 
 ---
 
+## v1.0 platform features (Phase A-H shipped)
+
+These features ship in the v1.0 free + open-source release. Per
+`[[bouncer-zero-llm-when-agent-in-loop]]`: all LLM-augmented paths
+below use the agent's OWN LLM via MCP — iam-jit + bouncers need ZERO
+LLM credentials in local-dev (agent-in-loop) mode.
+
+### Declarative config (Phase A)
+
+`.iam-jit.yaml` is the declarative config schema for an iam-jit
+deployment — per-host bouncers + cross-product denies + autopilot
+cadence + log destinations + alert routing all in one operator-edited
+file. Apply with `iam-jit doctor --apply-config` (idempotent; reports
+drift before mutating). Agents can synthesize config from observed
+state via the `iam_jit_setup_from_config` MCP tool. Per-harness
+recipes for Claude Code / Cursor / Codex / Devin live in
+[docs/recipes/](docs/recipes/).
+
+### Autopilot + ambient protection (Phase B + Phase D)
+
+`iam-jit autopilot start` runs a long-lived daemon that orchestrates
+per-bouncer improve cycles, threat-feed pulls, and cross-bouncer
+status aggregation. Threat-feed subscription pulls Ed25519-signed
+remote feeds (signature verification on every pull; reject + alert
+on mismatch) so the deployment stays current with known-adversarial
+patterns without operator intervention. `iam-jit updates` prints the
+current feed state + next-poll countdown. Per
+`[[bouncer-zero-llm-when-agent-in-loop]]`: autopilot in local-dev
+needs ZERO LLM credentials on the iam-jit side — LLM-augmented
+suggestions come from the agent calling MCP tools (`iam_jit_classify_deny`,
+`iam_jit_improve_profile`, etc.) with the agent's own LLM.
+
+### Continuous improvement (Phase C)
+
+`iam_jit_improve_profile` MCP tool: the agent reads the bouncer's
+recent denies + audit context, suggests rule changes, and posts back
+to install. Workflow: agent observes denies → agent reasons (using
+its codebase context) → agent calls MCP to install narrowing rule →
+bouncer reload picks up next request. Per `[[agent-context-primacy]]`
+the agent has the full task context iam-jit lacks; iam-jit + bouncers
+provide the evidence + the install surface.
+
+### Bouncer-informs-iam-jit chain (Phase E)
+
+Per `[[bouncer-informs-agent-informs-iam-jit]]`: bouncer = evidence;
+agent = synthesizer (with full user context); iam-jit = provisioner
+(within safety floors). MCP tools that wire the chain:
+
+- `iam_jit_classify_deny(deny_event)` — classify legit /
+  ambiguous / adversarial; agent reasons; returns classification +
+  confidence + reasoning
+- `iam_jit_handle_deny(deny_event, classification)` — operator-facing
+  surface for resolving a deny (always-allow / add-to-profile /
+  ignore / request-narrower-role)
+- `iam_jit_resource_map(scope)` — observed resources within a scope,
+  sourced from cross-bouncer audit trails
+- `iam_jit_request_role_from_synthesis(synthesis_record)` — the
+  canonical use case: "based on staging bouncer activity, request a
+  prod-scoped role." iam-jit re-scores; creates role; returns
+  assume-role package; agent calls STS directly per
+  `[[create-not-assume-pattern]]`
+
+### Forensic-grade audit (Phase F)
+
+Tamper-evident hash chain + Ed25519 signed manifests over every audit
+batch. Compliance retention tiering (PCI 1y / HIPAA 6y / SOX 7y /
+GDPR 30d after subject erasure request; cumulative thresholds applied
+per-event class). Log shipping to standard destinations (JSONL +
+HTTPS webhook + Datadog / Splunk-HEC / Sentinel presets + AWS
+Security Lake parquet). **Disk-pressure circuit breaker**: warn / crit
+/ emergency tiers with operator-declared response mode
+(`refuse-requests` / `rotate-aggressively` / `archive-and-purge`)
+prevents the audit channel from filling the disk + crashing the host
+(the critical-gap fix per `[[logging-system-comprehensive]]`).
+
+### Anomaly detection (Phase H)
+
+Z-score baseline (15-min sliding windows) + classifier fallback +
+MITRE ATLAS catalog. **Currently ibounce-only at v1.0; Go bouncers
+ship anomaly detection in v1.0+1 (#508)** — per
+`[[ibounce-honest-positioning]]` we mark this caveat explicitly
+rather than overstating coverage. Suspicious sequences fire structured
+deny events; downstream SIEM rules (built-in + operator-defined) ride
+the same OCSF transport as decision events (activity_id 99,
+activity_name `anomaly_detected`).
+
+### `iam-jit posture` CLI
+
+Cross-product live state introspection: `iam-jit posture` prints which
+mode the deployment is running in (iam-jit role / bouncer / both /
+neither), per-bouncer status, profile in effect, autopilot daemon
+state, threat-feed currency. `iam_jit_posture` MCP tool exposes the
+same shape to agents so they can introspect the deployment before
+making requests. Per `[[posture-check-feature]]`: without this surface,
+the "iam-jit native" marketing is unsupported — operators + agents
+need a single-shot answer to "what's running where."
+
+---
+
 ## Documentation
 
 - **[docs/AGENTS.md](docs/AGENTS.md)** — the agent-driven reduction loop in detail (self-scoping flow, MCP tool catalog, three reduction axes, anti-patterns, human-user fallback)
@@ -501,12 +599,12 @@ See [docs/AGENTS.md](docs/AGENTS.md) for the agent-driven reduction-loop pattern
 - **Product 1 — iam-risk-score**: shipped. Stable schema; CLI + API + GitHub Action live. 1,489 / 1,489 AWS-managed-policy corpus pass rate.
 - **Product 2 — ibounce** *(renamed from `iam-jit-bouncer` in v1.0)*: ships everything — CLI rule/task/audit management, MCP enforcement surface (`iam_jit_scope_self_for_task` composer + `ibounce_*` tools, aliased from `bouncer_*` for v1.0 backward-compat), HTTP proxy with cooperative + transparent modes (SigV4-preserving forwarding via `ibounce run`), environment profiles + `--profile` activation + cross-product `full-user` / `safe-default` built-in defaults (the `safe-default` profile uses a `policy_sentry`-backed readonly-admin-minus baseline + sensitive-Read subtract list, supersedes the v1.0-alpha `readonly` deny-verb shape) + community-profile install via `profile install --from URL`, `bouncer pause --for 30m` timed escape hatch, `bouncer prompts` async deny-notification queue, `/healthz` liveness endpoint. v1.1 follow-ups: synchronous deny-prompts, HTTPS/MITM TLS on the proxy listener itself, plan-capture for IaC workflows, removal of the `iam-jit-bouncer` + `bouncer_*` + `none` + `prod-readonly` + `readonly` deprecation aliases.
 - **Product 3 — iam-jit local**: v1.0 ready. `iam-jit serve --local` + read-only-default + region/account scoping + 1h TTL + local SQLite audit.
-- **Product 4 — iam-jit self-host**: v1.0 ready with multi-provider OIDC (Google + Okta), Slack approval bot, template browser, evolving preset library, agent-driven reduction loop, MFA propagation, two safety modes, applicability framework, per-account LLM policy. No multi-tenant hosted SaaS planned; Enterprise customers either self-host or contract for dedicated-managed single-tenant.
+- **Product 4 — iam-jit self-host**: v1.0 ready with multi-provider OIDC (Google + Okta), Slack approval bot, template browser, evolving preset library, agent-driven reduction loop, MFA propagation, two safety modes, applicability framework, per-account LLM policy. No multi-tenant hosted SaaS planned (per `[[no-hosted-saas]]`); every customer self-hosts in their own AWS account.
 - **MCP server**: v0.4.0 — canonical `list_templates`, `get_template`, `submit_policy`, `score_iam_policy`; plus extended surface `check_iam_jit_compatibility`, `list_compatibility_catalog`, `list_compatibility_overrides`, `save_template`, `list_my_templates`, `get_my_template`, `find_similar_templates`, `tail_grant`, `iam_jit_scope_self_for_task`, and the `bouncer_*` tool family. Legacy `generate_iam_policy` was removed in 0.4.0 — replaced by the agent-driven workflow per [docs/AGENTS.md](docs/AGENTS.md). The `reduce_policy` / `get_reduction_checklist` / `apply_reduction_checklist` tools enumerated in [docs/RECOMMENDER-API-SPEC.md](docs/RECOMMENDER-API-SPEC.md) are **design draft, NOT v1.0**; the shipped recommender behavior lives at `src/iam_jit/bouncer/recommender.py` (observation-based synthesis per #173) and `src/iam_jit/dynamic_denies/recommender.py` (Deny-injection per #324f).
 
 **What's NOT in iam-jit** (intentional, not deferred):
 - Natural-language policy synthesis from a free-form prompt. We measured the approach + removed it when it didn't deliver — any iam-jit-side LLM-as-AUTHOR faces the same structural limit (no codebase context). iam-jit is scorer + catalog + gate; the agent (with codebase context + LLM) does the policy authoring.
-- *What IS in iam-jit, distinctly:* LLM-as-UX-helper in the Pro-tier UI walkthrough (LLM asks bounded questions about a fixed baseline; user's answers drive deterministic policy modifications; scorer evaluates). Different category — the LLM never invents policy content.
+- *What IS in iam-jit, distinctly:* LLM-as-UX-helper in the UI walkthrough (LLM asks bounded questions about a fixed baseline; user's answers drive deterministic policy modifications; scorer evaluates). Different category — the LLM never invents policy content.
 
 **Pre-launch queue** (each finished fully before the next per *deliberate-feature-completion*):
 - ✅ Remarketing pass (claims aligned with shipped reality, v1.1 roadmap collapsed)
@@ -514,7 +612,7 @@ See [docs/AGENTS.md](docs/AGENTS.md) for the agent-driven reduction-loop pattern
 - ⏸ Preset library — `save_as_template` + similarity matcher + auto-suggest
 - ⏸ `AdminLikeWithSensitiveExclusions` baseline (catalog entry + default presentation)
 - ⏸ Reduction UX on templates (three reduction axes + grouped questions + one-shot checklist)
-- ⏸ UI guided reduction (Pro tier, LLM-as-UX-helper, customer-configurable questions)
+- ⏸ UI guided reduction (LLM-as-UX-helper, customer-configurable questions)
 - ⏸ Real-IdP doctor validation (blocked on AWS account verification)
 
 See [CHANGELOG.md](CHANGELOG.md) for release history and [docs/ROADMAP-V1.1.md](docs/ROADMAP-V1.1.md) for post-launch scope.
