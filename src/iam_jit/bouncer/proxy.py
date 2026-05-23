@@ -3311,9 +3311,12 @@ async def serve(config: ProxyConfig, *, store: BouncerStore) -> None:
     # surface. Same filter language as `ibounce audit tail --filter`;
     # the cross-bouncer `iam-jit audit query` CLI calls this endpoint
     # in parallel against each reachable bouncer to produce a single
-    # merged stream. Reads the same JSONL file `audit tail` reads, so
-    # the endpoint returns nothing until --audit-log-path is set + the
-    # writer has produced at least one event.
+    # merged stream. Prefers the JSONL audit-log file (richer OCSF
+    # shape including agent identity + src/dst endpoint), falls back
+    # to the SQLite decision store when JSONL is unset (§A31 / #360
+    # launch-blocker: cross-bouncer fan-out used to silently exclude
+    # ibounce when the operator never configured --audit-log-path
+    # because the JSONL file was empty by default).
     from .audit_export.events_endpoint import register_audit_events_route
     register_audit_events_route(
         app,
@@ -3322,6 +3325,7 @@ async def serve(config: ProxyConfig, *, store: BouncerStore) -> None:
             if config.audit_log_path else None
         ),
         require_bearer=config.audit_events_token,
+        store=store,
     )
     # #272 — GET / serves the minimal live audit-stream web UI. The
     # page polls /audit/events every 2 s; it shares the same auth
@@ -3821,10 +3825,55 @@ async def serve(config: ProxyConfig, *, store: BouncerStore) -> None:
         config.host, config.port,
     )
 
-    # Block forever (until task cancellation)
+    # §A30 / #359 — SIGTERM graceful-shutdown hookup. Without this,
+    # SIGTERM (the signal `systemctl stop`, `docker stop`, and k8s
+    # pod termination send) kills the process without running the
+    # `finally` block below — leaving the SessionRecorder's `.partial`
+    # files unfinalised and the JSONL audit writer's queue undrained.
+    # SIGINT already works through Python's default
+    # KeyboardInterrupt → asyncio.CancelledError path that the existing
+    # CLI catches; we only need to wire SIGTERM here.
+    #
+    # Mirrors gbounce's `signal.NotifyContext` pattern in cmd/cli.go;
+    # per [[cross-product-agent-parity]] every Bounce gets the same
+    # shutdown shape. Idempotent + fail-soft per
+    # [[creates-never-mutates]]: a second SIGTERM during shutdown just
+    # re-sets the already-set Event.
+    shutdown_event = asyncio.Event()
+    loop = asyncio.get_running_loop()
+    _installed_signals: list[int] = []
     try:
-        await asyncio.Event().wait()
+        import signal as _signal
+    except ImportError:  # pragma: no cover — stdlib always present
+        _signal = None  # type: ignore[assignment]
+    if _signal is not None:
+        try:
+            loop.add_signal_handler(_signal.SIGTERM, shutdown_event.set)
+            _installed_signals.append(_signal.SIGTERM)
+        except (NotImplementedError, RuntimeError, ValueError):
+            # add_signal_handler raises NotImplementedError on Windows
+            # + inside threads that aren't the main thread (pytest
+            # workers, embedded callers). Fall back to the legacy
+            # CancelledError path so the proxy still serves; the only
+            # loss is graceful SIGTERM cleanup in those environments.
+            logger.debug(
+                "could not install SIGTERM handler; graceful shutdown "
+                "via SIGTERM disabled (SIGINT/cancel still works)",
+            )
+
+    # Block until cancelled OR SIGTERM fires.
+    try:
+        await shutdown_event.wait()
     finally:
+        # Remove signal handlers BEFORE the cleanup chain runs so a
+        # second SIGTERM during shutdown doesn't try to re-set an
+        # Event on a torn-down loop.
+        if _signal is not None:
+            for _sig in _installed_signals:
+                try:
+                    loop.remove_signal_handler(_sig)
+                except (NotImplementedError, RuntimeError, ValueError):
+                    pass
         await session.close()
         await runner.cleanup()
         # #324a — dynamic-deny watcher teardown. Stop BEFORE the

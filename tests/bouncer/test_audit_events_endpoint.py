@@ -242,3 +242,301 @@ def test_auth_token_correct_returns_200(seeded_audit_log):
         require_bearer="secret-token",
     )
     assert status == 200, body
+
+
+# ---------------------------------------------------------------------------
+# §A31 / #360 — SQLite-fallback tests.
+#
+# The pre-§A31 handler ONLY read JSONL. When the operator never set
+# --audit-log-path the file was missing and /audit/events returned []
+# even though the SQLite decisions table had rows. Result: cross-bouncer
+# fan-out silently excluded ibounce. Fix: when no JSONL is available,
+# read from the BouncerStore and reconstruct OCSF events from rows.
+# ---------------------------------------------------------------------------
+
+
+def _seed_store_with_decisions(tmp_path: pathlib.Path):
+    """Build a BouncerStore with a handful of recorded decisions."""
+    from iam_jit.bouncer.decisions import Decision, DecisionRecord, Mode
+    from iam_jit.bouncer.store import BouncerStore
+
+    db = tmp_path / "bouncer.sqlite"
+    store = BouncerStore(db_path=db)
+    decs = [
+        DecisionRecord(
+            decision=Decision.ALLOW, mode=Mode.ENFORCE,
+            service="s3", action="GetObject",
+            arn="arn:aws:s3:::example-bucket/key",
+            region="us-east-1", matched_rule=None,
+            reason="profile allow",
+        ),
+        DecisionRecord(
+            decision=Decision.DENY, mode=Mode.ENFORCE,
+            service="iam", action="CreateUser",
+            arn=None, region="us-east-1", matched_rule=None,
+            reason="safe-default deny",
+        ),
+        DecisionRecord(
+            decision=Decision.ALLOW, mode=Mode.LEARN,
+            service="ec2", action="DescribeInstances",
+            arn=None, region="us-west-2", matched_rule=None,
+            reason="learn-mode allow",
+        ),
+    ]
+    for d in decs:
+        store.record_decision(d)
+    return store
+
+
+def _make_app_with_store(
+    audit_log_path: pathlib.Path | None,
+    store,
+    require_bearer: str | None = None,
+):
+    """Variant of _make_app that wires the optional store fallback."""
+    pytest.importorskip("aiohttp")
+    from aiohttp import web
+
+    from iam_jit.bouncer.audit_export.events_endpoint import (
+        register_audit_events_route,
+    )
+    app = web.Application()
+    register_audit_events_route(
+        app,
+        audit_log_path=audit_log_path,
+        require_bearer=require_bearer,
+        store=store,
+    )
+    return app
+
+
+async def _request_with_store(
+    audit_log_path: pathlib.Path | None,
+    store,
+    path: str,
+    *,
+    headers: dict[str, str] | None = None,
+    require_bearer: str | None = None,
+):
+    from aiohttp.test_utils import TestClient, TestServer
+    app = _make_app_with_store(audit_log_path, store, require_bearer)
+    async with TestClient(TestServer(app)) as client:
+        async with client.get(path, headers=headers or {}) as resp:
+            return resp.status, await resp.text(), dict(resp.headers)
+
+
+def _run_with_store(audit_log_path, store, path, headers=None, require_bearer=None):
+    loop = asyncio.new_event_loop()
+    try:
+        return loop.run_until_complete(
+            _request_with_store(
+                audit_log_path, store, path,
+                headers=headers, require_bearer=require_bearer,
+            ),
+        )
+    finally:
+        loop.close()
+
+
+def test_audit_events_endpoint_serves_from_sqlite_when_no_jsonl_configured(
+    tmp_path,
+):
+    """§A31 core fix: no JSONL, store has decisions → events returned."""
+    store = _seed_store_with_decisions(tmp_path)
+    try:
+        status, body, headers = _run_with_store(
+            None, store, "/audit/events?limit=10",
+        )
+        assert status == 200, body
+        assert "application/x-ndjson" in headers.get("Content-Type", "")
+        lines = [line for line in body.split("\n") if line.strip()]
+        assert len(lines) == 3, (
+            "expected 3 reconstructed events from store; got " + body
+        )
+        # Spot-check the OCSF shape: every event MUST carry the wire-
+        # contract fields a cross-bouncer consumer relies on.
+        for line in lines:
+            ev = json.loads(line)
+            assert ev["class_uid"] == 6003, ev
+            assert ev["class_name"] == "API Activity"
+            assert "metadata" in ev
+            assert "unmapped" in ev and "iam_jit" in ev["unmapped"]
+            iam_block = ev["unmapped"]["iam_jit"]
+            assert iam_block["verdict"] in {"allow", "deny", "prompt"}
+            assert iam_block["mode"] in {"enforce", "learn", "prompt"}
+    finally:
+        store.close()
+
+
+def test_audit_events_endpoint_prefers_jsonl_when_both_configured(
+    tmp_path, seeded_audit_log,
+):
+    """§A31 backward-compat: JSONL takes precedence over the store.
+
+    Operators who already configured --audit-log-path get exactly the
+    same wire shape they did before (rich OCSF including agent
+    identity); the store is only a fallback for the no-JSONL case.
+    """
+    store = _seed_store_with_decisions(tmp_path)
+    try:
+        status, body, _ = _run_with_store(
+            seeded_audit_log, store, "/audit/events?limit=20",
+        )
+        assert status == 200, body
+        lines = [line for line in body.split("\n") if line.strip()]
+        # Both sources have 3 entries; we expect ONLY the JSONL rows
+        # (3 events), not 6. JSONL events carry the actor.user.name
+        # the fixture set; store-reconstructed events don't.
+        assert len(lines) == 3, lines
+        actors = {
+            json.loads(line).get("actor", {}).get("user", {}).get("name")
+            for line in lines
+        }
+        # Fixture actors are alice + bob; store rows would have no
+        # actor.user.name (we didn't persist principal).
+        assert actors == {"alice", "bob"}, (
+            f"expected JSONL actors only; got {actors}"
+        )
+    finally:
+        store.close()
+
+
+def test_audit_events_endpoint_filters_apply_to_store_path(tmp_path):
+    """§A31 — the same filter language works against the store path."""
+    store = _seed_store_with_decisions(tmp_path)
+    try:
+        status, body, _ = _run_with_store(
+            None, store,
+            "/audit/events?filter=unmapped.iam_jit.verdict=deny",
+        )
+        assert status == 200, body
+        lines = [line for line in body.split("\n") if line.strip()]
+        assert len(lines) == 1, "expected 1 deny event from store"
+        ev = json.loads(lines[0])
+        assert ev["unmapped"]["iam_jit"]["verdict"] == "deny"
+    finally:
+        store.close()
+
+
+def test_audit_events_endpoint_empty_when_no_jsonl_and_no_store(tmp_path):
+    """§A31 — preserve the no-config no-data shape (return []).
+
+    An operator with neither --audit-log-path nor a registered store
+    still gets a 200 with an empty body, not a 500 or 404. Matches
+    the legacy pre-§A31 behaviour for the no-config case.
+    """
+    missing = tmp_path / "no-such-file.jsonl"
+    status, body, _ = _run_with_store(missing, None, "/audit/events")
+    assert status == 200, body
+    assert body.strip() == ""
+
+
+def test_audit_events_endpoint_store_ocsf_bundle_format(tmp_path):
+    """§A31 — ?format=ocsf-bundle wraps store events in a Detection
+    Finding the same way the JSONL path does."""
+    store = _seed_store_with_decisions(tmp_path)
+    try:
+        status, body, headers = _run_with_store(
+            None, store, "/audit/events?format=ocsf-bundle",
+        )
+        assert status == 200, body
+        assert "application/json" in headers.get("Content-Type", "")
+        bundle = json.loads(body)
+        assert bundle["class_uid"] == 2004
+        assert bundle["class_name"] == "Detection Finding"
+        evs = bundle["finding"]["evidence"]["events"]
+        assert len(evs) == 3
+    finally:
+        store.close()
+
+
+def test_audit_events_endpoint_returns_events_after_init_solo(tmp_path):
+    """§A31 — the operator-flow regression test.
+
+    Mirrors the operator path: `init-solo` provisions a store; the
+    proxy records a decision into it; `/audit/events` MUST return the
+    decision instead of an empty list (the pre-§A31 bug).
+    """
+    from iam_jit.bouncer.decisions import Decision, DecisionRecord, Mode
+    from iam_jit.bouncer.store import BouncerStore
+
+    # Step 1: provision a store (stand-in for `init-solo`).
+    db = tmp_path / "post-init-solo.sqlite"
+    store = BouncerStore(db_path=db)
+    try:
+        # Step 2: a proxy request lands and writes a decision.
+        store.record_decision(DecisionRecord(
+            decision=Decision.ALLOW, mode=Mode.ENFORCE,
+            service="sts", action="GetCallerIdentity",
+            arn=None, region="us-east-1", matched_rule=None,
+            reason="readonly safe-default allow",
+        ))
+        # Step 3: cross-bouncer fan-out queries /audit/events.
+        status, body, _ = _run_with_store(
+            None, store, "/audit/events?limit=100",
+        )
+        assert status == 200, body
+        lines = [line for line in body.split("\n") if line.strip()]
+        assert len(lines) == 1, (
+            "operator flow: a request was driven → exactly 1 event "
+            f"must surface on /audit/events. Got: {body!r}"
+        )
+        ev = json.loads(lines[0])
+        assert ev["api"]["operation"] == "sts:GetCallerIdentity"
+        assert ev["unmapped"]["iam_jit"]["verdict"] == "allow"
+    finally:
+        store.close()
+
+
+def test_cross_bouncer_fan_out_includes_ibounce_by_default(tmp_path):
+    """§A31 — verifies the user-facing story: cross-bouncer fan-out
+    finds ibounce decisions without the operator setting
+    --audit-log-path. Integration-style: drive a decision, then query
+    /audit/events the way `iam-jit audit query` would, and assert
+    ibounce events surface."""
+    from iam_jit.bouncer.decisions import Decision, DecisionRecord, Mode
+    from iam_jit.bouncer.store import BouncerStore
+
+    store = BouncerStore(db_path=tmp_path / "ib.sqlite")
+    try:
+        # Two decisions of mixed verdict so the cross-bouncer aggregator
+        # sees both an allow and a deny from this bouncer.
+        for d in (
+            DecisionRecord(
+                decision=Decision.ALLOW, mode=Mode.ENFORCE,
+                service="s3", action="ListBuckets",
+                arn=None, region=None, matched_rule=None,
+                reason="profile allow",
+            ),
+            DecisionRecord(
+                decision=Decision.DENY, mode=Mode.ENFORCE,
+                service="iam", action="DeleteRole",
+                arn=None, region=None, matched_rule=None,
+                reason="safe-default deny",
+            ),
+        ):
+            store.record_decision(d)
+
+        # The `iam-jit audit query` CLI calls the endpoint with no
+        # extra config — operator never configured --audit-log-path.
+        status, body, _ = _run_with_store(None, store, "/audit/events")
+        assert status == 200, body
+        lines = [line for line in body.split("\n") if line.strip()]
+        assert len(lines) == 2, (
+            "cross-bouncer fan-out MUST include ibounce decisions; "
+            f"got {len(lines)} events instead of 2"
+        )
+        # The cross-bouncer aggregator keys on
+        # metadata.product.vendor_name to identify ibounce; verify it.
+        vendors = {
+            json.loads(line)["metadata"]["product"]["vendor_name"]
+            for line in lines
+        }
+        assert vendors == {"iam-jit"}, vendors
+        products = {
+            json.loads(line)["metadata"]["product"]["name"]
+            for line in lines
+        }
+        assert products == {"ibounce"}, products
+    finally:
+        store.close()

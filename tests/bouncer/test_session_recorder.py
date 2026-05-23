@@ -659,3 +659,88 @@ class TestSessionCli:
                     f"forbidden word {forbidden!r} found in `session "
                     f"{sub} --help`"
                 )
+
+
+# ---------------------------------------------------------------------------
+# §A30 / #359 — stop() idempotency tests.
+#
+# The proxy now installs a SIGTERM handler that triggers serve()'s
+# `finally` block, which calls recorder.stop(). The handler is fire-
+# and-forget; a second SIGTERM during shutdown can race with the first.
+# stop() MUST be safe to call twice (or N times) without crashing.
+# The end-to-end subprocess test lives in test_proxy_signal_shutdown.py.
+# ---------------------------------------------------------------------------
+
+
+SID_A_IDEMP = "11111111-1111-1111-1111-111111111111"
+
+
+def test_session_recorder_stop_is_idempotent_after_finalization(
+    tmp_path: pathlib.Path,
+) -> None:
+    """§A30 — calling stop() twice MUST NOT crash + the second call
+    is a no-op (final file stays, no new partial appears)."""
+    rec = SessionRecorder(dir=tmp_path, bouncer_product="ibounce")
+    rec.start()
+    rec.record(_make_event(SID_A_IDEMP))
+    rec.stop()
+    final = tmp_path / f"{SID_A_IDEMP}.ndjson"
+    partial = tmp_path / f"{SID_A_IDEMP}.ndjson.partial"
+    assert final.exists()
+    assert not partial.exists()
+
+    # Second stop() should be a clean no-op.
+    rec.stop()
+    assert final.exists(), "second stop() must not destroy the final file"
+    assert not partial.exists()
+
+
+def test_session_recorder_stop_idempotent_with_no_active_sessions(
+    tmp_path: pathlib.Path,
+) -> None:
+    """§A30 — stop() with no events recorded (no session opened) MUST
+    NOT crash. Covers the SIGTERM-before-first-request case."""
+    rec = SessionRecorder(dir=tmp_path, bouncer_product="ibounce")
+    rec.start()
+    rec.stop()
+    rec.stop()  # second call still a no-op
+
+
+def test_session_recorder_stop_without_start_is_noop(
+    tmp_path: pathlib.Path,
+) -> None:
+    """§A30 — defensive: stop() before start() is a no-op (avoids the
+    case where serve()'s finally fires before start() ran).
+    """
+    rec = SessionRecorder(dir=tmp_path, bouncer_product="ibounce")
+    rec.stop()  # never started; MUST NOT raise
+
+
+def test_session_recorder_stop_finalizes_all_active_sessions(
+    tmp_path: pathlib.Path,
+) -> None:
+    """§A30 — multiple concurrent sessions all get finalised by a
+    single stop(). Covers the SIGTERM-during-N-active-sessions case
+    (the most common reason for stale .partial files in the field)."""
+    sids = [
+        "aaaaaaaa-1111-2222-3333-444444444444",
+        "bbbbbbbb-1111-2222-3333-444444444444",
+        "cccccccc-1111-2222-3333-444444444444",
+    ]
+    rec = SessionRecorder(dir=tmp_path, bouncer_product="ibounce")
+    rec.start()
+    for sid in sids:
+        rec.record(_make_event(sid))
+    # Sanity: all three sessions have a .partial right now.
+    for sid in sids:
+        assert (tmp_path / f"{sid}.ndjson.partial").exists()
+        assert not (tmp_path / f"{sid}.ndjson").exists()
+    # The simulated SIGTERM path.
+    rec.stop()
+    for sid in sids:
+        assert not (tmp_path / f"{sid}.ndjson.partial").exists(), (
+            f"session {sid} left a .partial after stop()"
+        )
+        assert (tmp_path / f"{sid}.ndjson").exists(), (
+            f"session {sid} did not get finalised by stop()"
+        )
