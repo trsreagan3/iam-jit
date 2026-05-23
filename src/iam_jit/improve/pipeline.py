@@ -54,9 +54,30 @@ class ImproveProfileError(RuntimeError):
 
 @dataclasses.dataclass
 class ImproveProfileResult:
-    """Structured outcome of one improve-profile invocation."""
+    """Structured outcome of one improve-profile invocation.
 
-    status: str  # auto_installed | pending_approval | no_change | managed_posture_refused | error | dry_run
+    Status values (per [[ibounce-honest-positioning]] — each string
+    matches observable reality):
+
+      * ``auto_installed`` — one or more allow rules were appended to
+        the profile + admin_action audit events emitted (#452 fix:
+        ONLY when ``rules_added > 0``; scope-only changes route to
+        ``scope_only_change`` instead).
+      * ``scope_only_change`` (#452) — generator proposed scope-floor
+        tightening (e.g. ``only_account_ids``) but no new allow rules;
+        scope-changes were enqueued to the pending JSONL so the
+        operator can review (NEVER silently mutated; #451 fix).
+      * ``pending_approval`` — change-size above threshold OR
+        auto-install disabled; allow + scope changes both queued.
+        ``pending_entry_ids`` is populated; JSONL file at
+        ~/.iam-jit/bouncer/profile-allow-pending.jsonl is created.
+      * ``no_change`` — nothing for the generator to add.
+      * ``managed_posture_refused`` — posture=managed + we refused.
+      * ``dry_run`` — ``apply=False`` preview.
+      * ``error`` — surfaced via :class:`ImproveProfileError` adapter.
+    """
+
+    status: str  # auto_installed | pending_approval | scope_only_change | no_change | managed_posture_refused | error | dry_run
     bouncer: str
     cadence_window: str
     rules_added: int = 0
@@ -490,16 +511,30 @@ def improve_profile(
 
     # -----------------------------------------------------------------
     # Above threshold OR auto_install disabled → pending approval.
+    # Per #451 (§A47b) fix: ALSO enqueue scope-only diffs so the JSONL
+    # file is created + pending_entry_ids is populated — previously
+    # scope-only paths reported pending_approval with an empty
+    # pending_entry_ids[] and never created the file the explanation
+    # pointed at.
     # -----------------------------------------------------------------
     above = size >= threshold
     if above or not auto_install:
+        reason_str = (
+            f"improve-profile @ size={size:.3f} "
+            f"(threshold={threshold:.3f}) — "
+            f"{len(events)} events in window={window}"
+        )
         pending_ids = _enqueue_pending_for_each(
             proposed_allows=proposed_allows,
-            reason=(
-                f"improve-profile @ size={size:.3f} "
-                f"(threshold={threshold:.3f}) — "
-                f"{len(events)} events in window={window}"
-            ),
+            reason=reason_str,
+            profile_name=current.name,
+            actor=actor,
+            source=source,
+            queue_path=queue_path,
+        )
+        pending_ids += _enqueue_pending_for_scope_changes(
+            scope_changes=scope_changes,
+            reason=reason_str,
             profile_name=current.name,
             actor=actor,
             source=source,
@@ -521,9 +556,55 @@ def improve_profile(
             explanation=(
                 f"change-size {size:.3f} >= threshold {threshold:.3f} "
                 f"OR auto_install disabled. {len(pending_ids)} entries "
-                f"queued for operator approval. Review with "
-                f"`iam-jit denies recent --pending` "
+                f"queued for operator approval "
+                f"({len(added)} allow + {len(scope_changes)} scope). "
+                f"Review with `iam-jit denies recent --pending` "
                 f"(or inspect ~/.iam-jit/bouncer/profile-allow-pending.jsonl)."
+            ),
+        )
+
+    # -----------------------------------------------------------------
+    # #452 (§A47c) honest-status routing: below threshold + only scope
+    # changes (no allow adds) → status="scope_only_change" and route
+    # the scope diffs through the pending queue per Fix 1. Previously
+    # the auto-install loop ran zero iterations and we returned
+    # status="auto_installed" with "auto-installed 0 allow rule(s)" —
+    # which misleads operators per [[ibounce-honest-positioning]].
+    # -----------------------------------------------------------------
+    if not added and scope_changes:
+        reason_str = (
+            f"improve-profile scope-only @ size={size:.3f} "
+            f"(threshold={threshold:.3f}) — "
+            f"{len(events)} events in window={window}"
+        )
+        pending_ids = _enqueue_pending_for_scope_changes(
+            scope_changes=scope_changes,
+            reason=reason_str,
+            profile_name=current.name,
+            actor=actor,
+            source=source,
+            queue_path=queue_path,
+        )
+        return ImproveProfileResult(
+            status="scope_only_change",
+            bouncer=bouncer,
+            cadence_window=window,
+            posture=posture,
+            change_size=size,
+            rules_added=0,
+            rules_removed=len(removed),
+            scope_changes=scope_changes,
+            requires_approval=True,
+            pending_entry_ids=pending_ids,
+            proposed_allows=[],
+            proposed_removals=proposed_removals,
+            explanation=(
+                f"scope-only change for {bouncer}: {len(scope_changes)} "
+                f"scope-floor diff(s) — no new allow rules to install. "
+                f"Queued {len(pending_ids)} pending scope-change "
+                f"entries for operator approval per "
+                f"[[creates-never-mutates]] (inspect "
+                f"~/.iam-jit/bouncer/profile-allow-pending.jsonl)."
             ),
         )
 
@@ -596,6 +677,26 @@ def improve_profile(
         if ev_id:
             audit_ids.append(ev_id)
 
+    # Even when auto-installing allow rules, scope-floor changes route
+    # through pending approval per [[creates-never-mutates]] (scope
+    # narrowing affects what was previously permitted). Composes with
+    # #451 (§A47b) so any scope diffs DO surface as pending entries
+    # rather than disappearing silently.
+    pending_scope_ids: list[str] = []
+    if scope_changes:
+        pending_scope_ids = _enqueue_pending_for_scope_changes(
+            scope_changes=scope_changes,
+            reason=(
+                f"improve-profile auto-install side-effect @ size={size:.3f} "
+                f"(threshold={threshold:.3f}) — "
+                f"{len(events)} events in window={window}"
+            ),
+            profile_name=current.name,
+            actor=actor,
+            source=source,
+            queue_path=queue_path,
+        )
+
     return ImproveProfileResult(
         status="auto_installed",
         bouncer=bouncer,
@@ -605,16 +706,23 @@ def improve_profile(
         rules_added=len(added),
         rules_removed=len(removed),
         scope_changes=scope_changes,
-        requires_approval=False,
+        requires_approval=bool(pending_scope_ids),
         audit_event_ids=audit_ids,
+        pending_entry_ids=pending_scope_ids,
         proposed_allows=proposed_allows,
         proposed_removals=proposed_removals,
         explanation=(
             f"auto-installed {len(added)} allow rule(s) for {bouncer} "
             f"(size={size:.3f} < threshold={threshold:.3f}). "
             f"{len(removed)} stale rule(s) flagged for operator review "
-            f"but NOT removed per [[creates-never-mutates]]."
-        ),
+            f"but NOT removed per [[creates-never-mutates]]. "
+            + (
+                f"Queued {len(pending_scope_ids)} scope-change "
+                f"entries for operator approval."
+                if pending_scope_ids
+                else ""
+            )
+        ).rstrip(),
     )
 
 
@@ -680,52 +788,124 @@ def _enqueue_pending_for_each(
 ) -> list[str]:
     """Enqueue one pending-approval entry per proposed allow.
 
-    Mirrors :func:`iam_jit.profile_allow.operations._enqueue_pending`
-    via the public ``add_profile_allow_rule`` path: we set
-    ``source="mcp"`` + ``allow_agent_self_grant=False`` so EVERY rule
-    is queued, never applied.
+    Per #451 (§A47b) fix: regardless of whether the caller's ``source``
+    is ``cli`` / ``mcp`` / ``autopilot``, we ALWAYS route through the
+    pending queue here — the contract is "this function pends; it does
+    NOT apply". Previously we passed ``source`` through unchanged,
+    which let the ``cli`` path slip past the agent-self-grant gate and
+    silently APPLY (so ``pending_entry_ids`` came back empty + the
+    JSONL file the explanation references was never created).
+
+    The pending entry's ``source`` field preserves the caller's
+    original source so the audit trail still shows whether a
+    CLI / MCP / autopilot invocation triggered the pending request.
+    We achieve "always pend" by writing directly to the JSONL queue
+    via :func:`iam_jit.profile_allow.operations._enqueue_pending`,
+    bypassing the gate entirely.
     """
     out: list[str] = []
     try:
-        from ..profile_allow.operations import (
-            ProfileAllowError,
-            add_profile_allow_rule,
-        )
+        from ..profile_allow.operations import _enqueue_pending
     except Exception:  # pragma: no cover
         return out
+    resolved_actor = (actor or "improve-profile-agent").strip() or "improve-profile-agent"
     for entry in proposed_allows:
         action = entry["action"]
         target = entry["target"] or "*"
         if target == "*":
-            # The profile_allow gate refuses ``*`` — surface a placeholder
-            # id so the operator sees the suggestion in their pending
-            # review (we never write through; pending logger uses its
-            # own validation).
+            # The pending queue's reviewer surface refuses wildcard
+            # targets too; surface a debug log + skip so we don't
+            # write garbage rows.
             logger.warning(
                 "improve-profile: skipping pending enqueue for "
                 "wildcard target on action=%s", action,
             )
             continue
         try:
-            r = add_profile_allow_rule(
+            written = _enqueue_pending(
                 target=target,
-                action=action,
+                actions=[action],
                 reason=reason,
+                duration=None,
+                expires_at=None,
                 profile_name=profile_name,
+                actor=resolved_actor,
                 source=source,
-                actor=actor,
                 queue_path=queue_path,
-                allow_agent_self_grant=False,  # force pending
-                skip_fanout=True,
+                kind="profile_allow",
             )
-        except ProfileAllowError as e:
+        except Exception as e:
             logger.debug(
-                "improve-profile pending enqueue refused: %s (code=%s)",
-                e, e.code,
+                "improve-profile pending enqueue failed: %s "
+                "(action=%s target=%s)", e, action, target,
             )
             continue
-        if r.pending_entry:
-            out.append(r.pending_entry.get("id", ""))
+        if written and written.get("id"):
+            out.append(written["id"])
+    return out
+
+
+def _enqueue_pending_for_scope_changes(
+    *,
+    scope_changes: list[str],
+    reason: str,
+    profile_name: str,
+    actor: str | None,
+    source: str,
+    queue_path: pathlib.Path | None,
+) -> list[str]:
+    """Enqueue one pending-approval entry per scope-floor change.
+
+    Per #451 (§A47b) fix: scope-only diffs (e.g.
+    ``only_account_ids: added 999988887777``) MUST land in the same
+    JSONL queue as allow-rule proposals so the operator has ONE place
+    to review every pending change AND the explanation message that
+    references ``~/.iam-jit/bouncer/profile-allow-pending.jsonl`` is
+    honest (file IS created on first scope-change).
+
+    Each bullet has shape ``"<field>: <op> <value>"`` produced by
+    :func:`_compute_diff`; we re-parse them here so the queue entry
+    carries structured fields the operator's review tool can render.
+    """
+    out: list[str] = []
+    if not scope_changes:
+        return out
+    try:
+        from ..profile_allow.operations import enqueue_pending_scope_change
+    except Exception:  # pragma: no cover
+        return out
+    resolved_actor = (actor or "improve-profile-agent").strip() or "improve-profile-agent"
+    for bullet in scope_changes:
+        # Bullet shape from _compute_diff: "<field>: <op> <value>"
+        if ":" not in bullet:
+            continue
+        field, rhs = bullet.split(":", 1)
+        rhs = rhs.strip()
+        parts = rhs.split(None, 1)
+        if len(parts) != 2:
+            continue
+        op, value = parts[0], parts[1]
+        if op not in ("added", "removed"):
+            continue
+        try:
+            entry = enqueue_pending_scope_change(
+                field=field.strip(),
+                op=op,
+                value=value,
+                reason=reason,
+                profile_name=profile_name,
+                actor=resolved_actor,
+                source=source,
+                queue_path=queue_path,
+            )
+        except Exception as e:  # pragma: no cover
+            logger.debug(
+                "improve-profile scope-change enqueue failed: %s (bullet=%s)",
+                e, bullet,
+            )
+            continue
+        if entry and entry.get("id"):
+            out.append(entry["id"])
     return out
 
 

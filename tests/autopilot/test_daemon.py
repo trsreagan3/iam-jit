@@ -481,3 +481,200 @@ def test_autopilot_refuses_improve_in_managed_posture(
     results = sup.run_improve_for_all()
     assert results == []
     assert any("managed" in a.lower() for a in sup.alerts)
+
+
+# ---------------------------------------------------------------------------
+# #453 (§A49b) — autopilot.status.json schema for #412 weekly digest
+# ---------------------------------------------------------------------------
+
+
+def test_autopilot_status_json_includes_denies_recent_count(
+    write_config,
+    stub_posture_running,
+    stub_start_bouncer,
+    quiet_improve,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Top-level denies_recent_count MUST be present (required by
+    #412 weekly digest consumer). Default 0 when no denies."""
+    cfg = write_config({
+        "iam-jit": {
+            "enabled": True,
+            "posture": "ambient",
+            "bouncers": {"ibounce": {"enabled": True, "mode": "discovery"}},
+            "improve": {"enabled": True, "cadence": "per_session"},
+        }
+    })
+    monkeypatch.setattr(
+        "iam_jit.autopilot.daemon.AutopilotSupervisor._notify_recent_denies",
+        lambda self: None,
+    )
+    # Stub _count_recent_denies to return a deterministic value.
+    monkeypatch.setattr(
+        "iam_jit.autopilot.daemon._count_recent_denies",
+        lambda: 3,
+    )
+    monkeypatch.setattr(
+        "iam_jit.autopilot.daemon._poll_bouncer_healthz",
+        lambda name, port: None,
+    )
+    autopilot_start(
+        config_path=cfg,
+        detach=False,
+        notify_denies="none",
+        sweep_interval_s=0.01,
+        max_ticks=1,
+    )
+    sf = resolve_pid_path().parent / "autopilot.status.json"
+    payload = json.loads(sf.read_text())
+    assert "denies_recent_count" in payload
+    assert payload["denies_recent_count"] == 3
+
+
+def test_autopilot_status_json_aggregates_per_bouncer_decisions_count(
+    write_config,
+    stub_posture_running,
+    stub_start_bouncer,
+    quiet_improve,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Per-bouncer healthz block MUST surface decisions_count for the
+    #412 weekly digest. Pulled from /healthz on each sweep tick."""
+    cfg = write_config({
+        "iam-jit": {
+            "enabled": True,
+            "posture": "ambient",
+            "bouncers": {"ibounce": {"enabled": True, "mode": "discovery"}},
+            "improve": {"enabled": True, "cadence": "per_session"},
+        }
+    })
+    monkeypatch.setattr(
+        "iam_jit.autopilot.daemon.AutopilotSupervisor._notify_recent_denies",
+        lambda self: None,
+    )
+    monkeypatch.setattr(
+        "iam_jit.autopilot.daemon._count_recent_denies",
+        lambda: 0,
+    )
+
+    def _fake_healthz(name: str, port: int) -> dict:
+        return {
+            "bouncer_kind": "ibounce",
+            "status": "ok",
+            "mode": "discovery",
+            "default_policy": "allow",
+            "active_profile": "full-user",
+            "decisions_count": 42,
+        }
+
+    monkeypatch.setattr(
+        "iam_jit.autopilot.daemon._poll_bouncer_healthz",
+        _fake_healthz,
+    )
+    autopilot_start(
+        config_path=cfg,
+        detach=False,
+        notify_denies="none",
+        sweep_interval_s=0.01,
+        max_ticks=1,
+    )
+    sf = resolve_pid_path().parent / "autopilot.status.json"
+    payload = json.loads(sf.read_text())
+    ibounce_block = payload["bouncers"]["ibounce"]
+    assert "healthz" in ibounce_block, ibounce_block
+    assert ibounce_block["healthz"]["decisions_count"] == 42
+    assert ibounce_block["healthz"]["active_profile"] == "full-user"
+
+
+def test_autopilot_status_json_preserves_last_results_from_improve_cycle(
+    write_config,
+    stub_posture_running,
+    stub_start_bouncer,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """When a sweep tick doesn't run improve (e.g. cadence not due),
+    last_results MUST be preserved from the most recent cycle, not
+    cleared to []. Per #453: #412 weekly digest depends on this."""
+    cfg = write_config({
+        "iam-jit": {
+            "enabled": True,
+            "posture": "ambient",
+            "bouncers": {"ibounce": {"enabled": True, "mode": "discovery"}},
+            "improve": {"enabled": True, "cadence": "per_session"},
+        }
+    })
+    monkeypatch.setattr(
+        "iam_jit.autopilot.daemon.AutopilotSupervisor._notify_recent_denies",
+        lambda self: None,
+    )
+    monkeypatch.setattr(
+        "iam_jit.autopilot.daemon._count_recent_denies",
+        lambda: 0,
+    )
+    monkeypatch.setattr(
+        "iam_jit.autopilot.daemon._poll_bouncer_healthz",
+        lambda name, port: None,
+    )
+
+    # Stub improve_profile to return a populated result. First call returns
+    # this; subsequent calls would too if invoked.
+    populated = []
+
+    def _fake_improve(**kwargs):
+        from iam_jit.improve import ImproveProfileResult
+        r = ImproveProfileResult(
+            status="auto_installed",
+            bouncer=kwargs.get("bouncer", "ibounce"),
+            cadence_window="1h",
+            posture=kwargs.get("posture", "ambient"),
+            rules_added=2,
+            explanation="auto-installed 2 allow rule(s)",
+        )
+        populated.append(r.as_dict())
+        return r
+
+    monkeypatch.setattr("iam_jit.improve.improve_profile", _fake_improve)
+
+    from iam_jit.ambient_config import load_declaration
+    from iam_jit.autopilot.daemon import AutopilotSupervisor
+
+    declaration, src = load_declaration(cfg)
+    sup = AutopilotSupervisor(
+        declaration=declaration,
+        config_source=src,
+        sweep_interval_s=0.01,
+        improve_interval_s=999.0,  # so improve runs only on the FIRST tick
+        notify_denies="none",
+    )
+    # Tick 1 — improve fires (last_improve_at == 0).
+    status1 = sup.run_once()
+    assert len(status1.improve["last_results"]) >= 1
+    assert status1.improve["last_results"][0]["rules_added"] == 2
+
+    # Tick 2 — improve does NOT fire (interval not elapsed).
+    status2 = sup.run_once()
+    # Per #453 fix: last_results MUST still be populated.
+    assert len(status2.improve["last_results"]) >= 1, (
+        f"last_results cleared between cycles: {status2.improve}"
+    )
+    assert status2.improve["last_results"][0]["rules_added"] == 2
+
+
+def test_autopilot_status_json_schema_documented(
+) -> None:
+    """The AutopilotStatus docstring MUST document the schema fields
+    consumed by the #412 weekly digest. This locks in the schema
+    contract so future refactors don't silently break the digest."""
+    from iam_jit.autopilot.daemon import AutopilotStatus
+    doc = AutopilotStatus.__doc__ or ""
+    for required_field in (
+        "denies_recent_count",
+        "last_results",
+        "decisions_count",
+        "schema_version",
+    ):
+        assert required_field in doc, (
+            f"AutopilotStatus docstring missing schema field "
+            f"{required_field!r}; #412 digest depends on the schema "
+            f"being documented in the dataclass."
+        )

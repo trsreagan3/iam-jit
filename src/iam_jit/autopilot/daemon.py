@@ -83,9 +83,50 @@ class AutopilotError(RuntimeError):
 
 @dataclasses.dataclass
 class AutopilotStatus:
-    """One snapshot of autopilot's view of the world."""
+    """One snapshot of autopilot's view of the world.
 
-    schema_version: str = "1.0"
+    Schema (v1.1) documented per #453 (§A49b) for the #412 weekly
+    digest consumer + any external monitoring that subscribes to
+    ``~/.iam-jit/autopilot.status.json``:
+
+      * ``schema_version`` — "1.1" (incremented from 1.0 when #453
+        added ``denies_recent_count`` + per-bouncer healthz fields).
+      * ``running`` — autopilot daemon liveness.
+      * ``pid`` — autopilot PID when running, else None.
+      * ``started_at`` — ISO 8601 UTC start time.
+      * ``config_source`` — path / source label of the loaded
+        declaration.
+      * ``posture`` — declaration's ``posture`` (``ambient`` |
+        ``managed``).
+      * ``bouncers`` — map of ``name`` → per-bouncer block:
+          ``{name, running, config, restart_attempts_in_window,
+            alert_emitted, pid?, port?, status?, restart_outcome?,
+            healthz?: {decisions_count, mode, default_policy,
+            active_profile, status, dynamic_denies, …}}``
+        The ``healthz`` sub-block is populated when the bouncer's
+        /healthz endpoint responds within the per-poll timeout
+        (#453); the #412 weekly digest reads
+        ``bouncers[name].healthz.decisions_count`` for activity
+        counting.
+      * ``improve`` — improve-cycle metadata:
+          ``{enabled, cadence, auto_install, threshold,
+            improve_count_since_startup, last_results}``
+        ``last_results`` is the PRESERVED result list from the most
+        recent improve cycle (#453 fix: previously this cleared to
+        ``[]`` on every sweep tick where improve didn't run).
+      * ``denies_recent_count`` — top-level aggregate count of denies
+        observed across all bouncers in the last 5 minutes (#453
+        required for #412 weekly digest consumption). 0 when the
+        fetcher couldn't reach the bouncers OR when no denies fired.
+      * ``alerts`` — supervisor-emitted alerts (restart throttles,
+        binary-missing, managed-posture-refused, etc.).
+      * ``last_improve_at`` — ISO 8601 UTC of last improve cycle, or
+        None if no cycle has run.
+      * ``last_sweep_at`` — ISO 8601 UTC of last sweep tick.
+      * ``notes`` — tuning constants for the operator's reference.
+    """
+
+    schema_version: str = "1.1"
     running: bool = False
     pid: int | None = None
     started_at: str | None = None
@@ -93,6 +134,7 @@ class AutopilotStatus:
     posture: str = "ambient"
     bouncers: dict[str, dict[str, Any]] = dataclasses.field(default_factory=dict)
     improve: dict[str, Any] = dataclasses.field(default_factory=dict)
+    denies_recent_count: int = 0
     alerts: list[str] = dataclasses.field(default_factory=list)
     last_improve_at: str | None = None
     last_sweep_at: str | None = None
@@ -216,6 +258,12 @@ class AutopilotSupervisor:
     stopped: bool = False
     alerts: list[str] = dataclasses.field(default_factory=list)
     _improve_count: int = 0
+    # #453 (§A49b) — preserve the last improve cycle's results across
+    # ticks so the operator (+ #412 weekly digest) can read what
+    # changed even when the most recent sweep tick didn't run improve.
+    _last_improve_results: list[dict[str, Any]] = dataclasses.field(
+        default_factory=list
+    )
 
     @property
     def posture(self) -> str:
@@ -376,6 +424,10 @@ class AutopilotSupervisor:
                 )
         self.last_improve_at = time.time()
         self._improve_count += 1
+        # #453 (§A49b) — preserve so subsequent status writes between
+        # cycles still surface the last cycle's outcomes; #412 weekly
+        # digest reads this directly.
+        self._last_improve_results = list(results)
         return results
 
     # ------------------------------------------------------------------
@@ -405,6 +457,15 @@ class AutopilotSupervisor:
                 state.alert_emitted = False  # reset alert on healthy
                 entry["pid"] = block.get("pid")
                 entry["port"] = block.get("port")
+                # #453 (§A49b) — pull /healthz on each tick to surface
+                # per-bouncer decisions_count + active-profile + mode.
+                # Best-effort: a slow / unreachable healthz must NOT
+                # stall the supervisor loop.
+                healthz = _poll_bouncer_healthz(
+                    name, block.get("port") or 0,
+                )
+                if healthz is not None:
+                    entry["healthz"] = healthz
             else:
                 # Not running — try to restart (subject to throttle).
                 if state.alert_emitted:
@@ -433,10 +494,23 @@ class AutopilotSupervisor:
             per_bouncer[name] = entry
         self.last_sweep_at = time.time()
 
-        # Improve cycle (independent cadence from sweep).
-        improve_results: list[dict[str, Any]] = []
+        # Improve cycle (independent cadence from sweep). Per #453
+        # (§A49b) fix: when the current tick didn't run improve, we
+        # PRESERVE the most recent cycle's results so the status
+        # JSON's ``improve.last_results`` doesn't flap empty between
+        # cycles — the #412 weekly digest relies on this field being
+        # populated whenever improve has run at least once.
         if self._improve_due():
             improve_results = self.run_improve_for_all()
+        else:
+            improve_results = list(self._last_improve_results)
+
+        # #453 (§A49b) — aggregate top-level denies_recent_count for
+        # the #412 weekly digest consumer. fetch_recent_denies fans
+        # out to every bouncer's /audit/events; failures degrade to
+        # zero (per [[ibounce-honest-positioning]] we don't fabricate
+        # counts when the channel is broken).
+        denies_recent_count = _count_recent_denies()
 
         # Deny notification surface — per the brief, this is a
         # placeholder hook for #389 (full notification daemon ships
@@ -471,6 +545,7 @@ class AutopilotSupervisor:
                 "improve_count_since_startup": self._improve_count,
                 "last_results": improve_results,
             },
+            denies_recent_count=denies_recent_count,
             alerts=list(self.alerts),
             last_improve_at=(
                 _dt.datetime.fromtimestamp(
@@ -1144,6 +1219,89 @@ def _main_entry() -> None:
 
 def _now_iso() -> str:
     return _dt.datetime.now(_dt.timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z")
+
+
+# ---------------------------------------------------------------------------
+# #453 (§A49b) — per-bouncer /healthz polling + cross-bouncer denies count
+# ---------------------------------------------------------------------------
+
+
+_HEALTHZ_TIMEOUT_S = 2.0
+"""Per-bouncer /healthz HTTP timeout. Short — supervisor must NOT
+stall on a slow bouncer. Failures degrade to ``None`` (no healthz block
+in the status entry)."""
+
+
+# Project the subset of /healthz the autopilot status JSON needs.
+# Keeping this list small means the status file stays small + stable
+# for the #412 weekly digest consumer; the bouncer's /healthz can add
+# new fields without breaking the digest.
+_HEALTHZ_PROJECTED_FIELDS = (
+    "bouncer_kind",
+    "status",
+    "mode",
+    "default_policy",
+    "active_profile",
+    "decisions_count",
+)
+
+
+def _poll_bouncer_healthz(name: str, port: int) -> dict[str, Any] | None:
+    """Best-effort GET ``http://127.0.0.1:<port>/healthz``.
+
+    Returns the projected sub-dict on 2xx; ``None`` on any failure
+    (timeout, refused, non-2xx, parse error, port=0). Never raises —
+    per [[ibounce-honest-positioning]] we don't fabricate metrics when
+    the channel is broken; the absent ``healthz`` key tells the
+    consumer "couldn't reach the bouncer this tick.\""""
+    if not port:
+        return None
+    url = f"http://127.0.0.1:{int(port)}/healthz"
+    try:
+        import urllib.request
+        req = urllib.request.Request(url, method="GET")
+        with urllib.request.urlopen(req, timeout=_HEALTHZ_TIMEOUT_S) as resp:
+            if resp.status < 200 or resp.status >= 300:
+                return None
+            raw = resp.read().decode("utf-8", errors="replace")
+    except Exception as e:
+        logger.debug("autopilot healthz poll failed for %s: %s", name, e)
+        return None
+    try:
+        body = json.loads(raw)
+    except Exception:
+        return None
+    if not isinstance(body, dict):
+        return None
+    out: dict[str, Any] = {
+        k: body[k] for k in _HEALTHZ_PROJECTED_FIELDS if k in body
+    }
+    # The dynamic_denies sub-block has its own stable schema; carry it
+    # whole so the #412 digest can surface "rules_count went up by N".
+    dd = body.get("dynamic_denies")
+    if isinstance(dd, dict):
+        out["dynamic_denies"] = dd
+    return out
+
+
+def _count_recent_denies() -> int:
+    """Return the count of deny rows observed across all default
+    bouncers in the last 5 minutes. Returns ``0`` on any error.
+
+    Per [[ibounce-honest-positioning]] we degrade silently on
+    failures — a fetcher error is NOT a deny event; surfacing it as
+    one would mislead the #412 weekly digest consumer.
+    """
+    try:
+        from ..profile_allow.denies import fetch_recent_denies
+    except Exception:
+        return 0
+    try:
+        rows, _notes = fetch_recent_denies(since="5m", limit=200)
+    except Exception as e:
+        logger.debug("autopilot denies-count fetch failed: %s", e)
+        return 0
+    return len(rows)
 
 
 if __name__ == "__main__":  # pragma: no cover

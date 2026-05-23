@@ -11,6 +11,7 @@ Covers:
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
 from typing import Any
 
@@ -435,6 +436,358 @@ def test_compute_diff_correctly_identifies_added_removed() -> None:
     assert all("ec2:Describe*" != a for a, _ in added)
     assert any("only_account_ids: added 999988887777" in s for s in scope)
     assert any("only_regions: added us-east-1" in s for s in scope)
+
+
+# ---------------------------------------------------------------------------
+# #451 (§A47b) — pending-queue + JSONL writing for scope-only diffs
+# ---------------------------------------------------------------------------
+
+
+def test_improve_pending_queue_writes_jsonl_when_threshold_exceeded(
+    tmp_profiles: Path,
+    tmp_pending_queue: Path,
+    stub_generator,
+    stub_audit_events,
+    quiet_fanout,
+) -> None:
+    """Above-threshold runs MUST create the JSONL file + append entries.
+
+    Per #451 (§A47b): explanation references the JSONL path, so the
+    file must exist when status='pending_approval'."""
+    p = tmp_profiles
+    p.write_text(yaml.safe_dump({
+        "profiles": {
+            "full-user": {"description": "passthrough"},
+            "active-test": {
+                "description": "empty",
+                "allow_rules": [],
+            },
+        },
+    }))
+    stub_audit_events([{"_bouncer": "ibounce"}])
+    stub_generator(
+        bouncer="ibounce",
+        allows=[
+            {"target": "arn:aws:s3:::cache", "actions": ["s3:GetObject"]},
+        ],
+    )
+    result = improve_profile(
+        bouncer="ibounce",
+        threshold=0.10,
+        apply=True,
+        profile_name="active-test",
+    )
+    assert result.status == "pending_approval"
+    assert tmp_pending_queue.exists()
+    contents = tmp_pending_queue.read_text().strip().splitlines()
+    assert len(contents) >= 1
+
+
+def test_improve_pending_entry_ids_populated_in_response(
+    tmp_profiles: Path,
+    tmp_pending_queue: Path,
+    stub_generator,
+    stub_audit_events,
+    quiet_fanout,
+) -> None:
+    """Each enqueued entry's id MUST surface in pending_entry_ids[]."""
+    p = tmp_profiles
+    p.write_text(yaml.safe_dump({
+        "profiles": {
+            "full-user": {"description": "passthrough"},
+            "active-test": {
+                "description": "empty",
+                "allow_rules": [],
+            },
+        },
+    }))
+    stub_audit_events([{"_bouncer": "ibounce"}])
+    stub_generator(
+        bouncer="ibounce",
+        allows=[
+            {"target": "arn:aws:s3:::cache", "actions": ["s3:GetObject"]},
+        ],
+    )
+    result = improve_profile(
+        bouncer="ibounce",
+        threshold=0.10,
+        apply=True,
+        profile_name="active-test",
+    )
+    assert result.status == "pending_approval"
+    assert len(result.pending_entry_ids) >= 1
+    for pid in result.pending_entry_ids:
+        assert pid.startswith("pa_")
+
+
+def test_improve_pending_jsonl_appends_not_overwrites(
+    tmp_profiles: Path,
+    tmp_pending_queue: Path,
+    stub_generator,
+    stub_audit_events,
+    quiet_fanout,
+) -> None:
+    """A second pending run MUST append, not truncate — JSONL is a
+    forensic record."""
+    p = tmp_profiles
+    p.write_text(yaml.safe_dump({
+        "profiles": {
+            "full-user": {"description": "passthrough"},
+            "active-test": {
+                "description": "empty",
+                "allow_rules": [],
+            },
+        },
+    }))
+    stub_audit_events([{"_bouncer": "ibounce"}])
+    stub_generator(
+        bouncer="ibounce",
+        allows=[{"target": "arn:aws:s3:::cache", "actions": ["s3:GetObject"]}],
+    )
+    improve_profile(
+        bouncer="ibounce",
+        threshold=0.10,
+        apply=True,
+        profile_name="active-test",
+    )
+    lines_after_first = tmp_pending_queue.read_text().splitlines()
+    # Drive a second pending cycle (new generator output).
+    stub_generator(
+        bouncer="ibounce",
+        allows=[{"target": "arn:aws:s3:::other", "actions": ["s3:GetObject"]}],
+    )
+    improve_profile(
+        bouncer="ibounce",
+        threshold=0.10,
+        apply=True,
+        profile_name="active-test",
+    )
+    lines_after_second = tmp_pending_queue.read_text().splitlines()
+    assert len(lines_after_second) > len(lines_after_first), (
+        "JSONL must append; second cycle truncated the file"
+    )
+
+
+def test_improve_scope_only_diff_routes_through_queue(
+    tmp_profiles: Path,
+    tmp_pending_queue: Path,
+    stub_generator,
+    stub_audit_events,
+    quiet_fanout,
+) -> None:
+    """Scope-only diff (no new allows) MUST also create JSONL entries
+    + populate pending_entry_ids, NOT silently no-op."""
+    p = tmp_profiles
+    # Pre-existing has many allow rules so a single scope-change is
+    # below threshold (size = 0.5 / (10 + 0) = 0.05).
+    p.write_text(yaml.safe_dump({
+        "profiles": {
+            "full-user": {"description": "passthrough"},
+            "active-test": {
+                "description": "scope-floor candidate",
+                "allow_rules": [
+                    {"pattern": f"ec2:Action{i}"} for i in range(10)
+                ] + [
+                    {"pattern": "s3:GetObject", "arn_scope": "arn:aws:s3:::cache"},
+                ],
+            },
+        },
+    }))
+    stub_audit_events([{"_bouncer": "ibounce"}])
+    # Generator: same allow rule already present, but scope-floor narrower.
+    stub_generator(
+        bouncer="ibounce",
+        allows=[
+            {"target": "arn:aws:s3:::cache", "actions": ["s3:GetObject"]},
+        ] + [
+            {"target": "*", "actions": [f"ec2:Action{i}"]} for i in range(10)
+        ],
+        scope={"only_account_ids": ["111122223333"]},
+    )
+    result = improve_profile(
+        bouncer="ibounce",
+        threshold=0.30,
+        apply=True,
+        profile_name="active-test",
+    )
+    # Per #452 fix: scope-only diff with no allow adds is its own status.
+    assert result.status == "scope_only_change", (
+        f"expected scope_only_change got {result.status}: {result.explanation}"
+    )
+    assert result.rules_added == 0
+    assert len(result.scope_changes) >= 1
+    # Per #451 fix: pending_entry_ids MUST be populated + JSONL exists.
+    assert len(result.pending_entry_ids) >= 1
+    assert tmp_pending_queue.exists()
+    entries = [
+        json.loads(line) for line in tmp_pending_queue.read_text().splitlines()
+        if line.strip()
+    ]
+    assert any(e.get("kind") == "scope_change" for e in entries)
+
+
+# ---------------------------------------------------------------------------
+# #452 (§A47c) — honest status reporting
+# ---------------------------------------------------------------------------
+
+
+def test_improve_status_no_change_when_no_diff(
+    tmp_profiles: Path,
+    tmp_pending_queue: Path,
+    stub_generator,
+    stub_audit_events,
+    quiet_fanout,
+) -> None:
+    """Zero adds + zero removals + zero scope changes → status='no_change'."""
+    p = tmp_profiles
+    p.write_text(yaml.safe_dump({
+        "profiles": {
+            "full-user": {"description": "passthrough"},
+            "active-test": {
+                "description": "fully covered",
+                "allow_rules": [
+                    {"pattern": "s3:GetObject", "arn_scope": "arn:aws:s3:::cache"},
+                ],
+            },
+        },
+    }))
+    stub_audit_events([{"_bouncer": "ibounce"}])
+    stub_generator(
+        bouncer="ibounce",
+        allows=[
+            {"target": "arn:aws:s3:::cache", "actions": ["s3:GetObject"]},
+        ],
+    )
+    result = improve_profile(
+        bouncer="ibounce",
+        threshold=0.30,
+        apply=True,
+        profile_name="active-test",
+    )
+    assert result.status == "no_change"
+    assert result.rules_added == 0
+    assert result.scope_changes == []
+
+
+def test_improve_status_scope_only_change_when_only_scope_diff(
+    tmp_profiles: Path,
+    tmp_pending_queue: Path,
+    stub_generator,
+    stub_audit_events,
+    quiet_fanout,
+) -> None:
+    """Scope-only diff (no allow adds) → status='scope_only_change',
+    NOT 'auto_installed' (per #452 honesty fix)."""
+    p = tmp_profiles
+    p.write_text(yaml.safe_dump({
+        "profiles": {
+            "full-user": {"description": "passthrough"},
+            "active-test": {
+                "description": "many rules",
+                "allow_rules": [
+                    {"pattern": f"ec2:Action{i}"} for i in range(20)
+                ],
+            },
+        },
+    }))
+    stub_audit_events([{"_bouncer": "ibounce"}])
+    stub_generator(
+        bouncer="ibounce",
+        allows=[
+            {"target": "*", "actions": [f"ec2:Action{i}"]} for i in range(20)
+        ],
+        scope={"only_regions": ["us-east-1"]},
+    )
+    result = improve_profile(
+        bouncer="ibounce",
+        threshold=0.30,
+        apply=True,
+        profile_name="active-test",
+    )
+    assert result.status == "scope_only_change"
+    assert result.rules_added == 0
+    assert "auto-installed" not in result.explanation.lower()
+
+
+def test_improve_status_auto_installed_only_when_rules_added(
+    tmp_profiles: Path,
+    tmp_pending_queue: Path,
+    stub_generator,
+    stub_audit_events,
+    quiet_fanout,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """status='auto_installed' MUST require rules_added > 0 (per #452)."""
+    # Many existing rules so the change-size is small.
+    p = tmp_profiles
+    p.write_text(yaml.safe_dump({
+        "profiles": {
+            "full-user": {"description": "passthrough"},
+            "active-test": {
+                "description": "many rules",
+                "allow_rules": [
+                    {"pattern": f"ec2:Action{i}"} for i in range(100)
+                ],
+            },
+        },
+    }))
+    stub_audit_events([{"_bouncer": "ibounce"}])
+    stub_generator(
+        bouncer="ibounce",
+        allows=[
+            {"target": "arn:aws:s3:::cache", "actions": ["s3:GetObject"]},
+        ],
+    )
+    result = improve_profile(
+        bouncer="ibounce",
+        threshold=0.30,
+        apply=True,
+        profile_name="active-test",
+    )
+    assert result.status == "auto_installed"
+    assert result.rules_added >= 1
+
+
+def test_improve_explanation_matches_status_honestly(
+    tmp_profiles: Path,
+    tmp_pending_queue: Path,
+    stub_generator,
+    stub_audit_events,
+    quiet_fanout,
+) -> None:
+    """When rules_added=0 + status='scope_only_change' the explanation
+    MUST NOT say 'auto-installed N rules'. Per
+    [[ibounce-honest-positioning]]."""
+    p = tmp_profiles
+    p.write_text(yaml.safe_dump({
+        "profiles": {
+            "full-user": {"description": "passthrough"},
+            "active-test": {
+                "description": "many rules",
+                "allow_rules": [
+                    {"pattern": f"ec2:Action{i}"} for i in range(20)
+                ],
+            },
+        },
+    }))
+    stub_audit_events([{"_bouncer": "ibounce"}])
+    stub_generator(
+        bouncer="ibounce",
+        allows=[
+            {"target": "*", "actions": [f"ec2:Action{i}"]} for i in range(20)
+        ],
+        scope={"only_account_ids": ["111122223333"]},
+    )
+    result = improve_profile(
+        bouncer="ibounce",
+        threshold=0.30,
+        apply=True,
+        profile_name="active-test",
+    )
+    assert result.status == "scope_only_change"
+    expl = result.explanation.lower()
+    assert "auto-installed" not in expl
+    assert "scope-only" in expl or "scope" in expl
 
 
 def test_change_size_normalizes_appropriately() -> None:

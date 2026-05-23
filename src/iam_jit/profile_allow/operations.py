@@ -259,15 +259,30 @@ def _enqueue_pending(
     actor: str,
     source: str,
     queue_path: pathlib.Path | None = None,
+    kind: str = "profile_allow",
+    extra: dict[str, typing.Any] | None = None,
 ) -> dict[str, typing.Any]:
     """Append one pending-approval entry to the JSONL queue. Returns
     the entry dict so the caller can echo a ticket id back to the
-    agent."""
+    agent.
+
+    ``kind`` defaults to ``"profile_allow"`` (the historical shape:
+    propose adding ``actions`` on ``target`` to the profile). The
+    improve-profile pipeline (#451 fix) also enqueues
+    ``kind="scope_change"`` entries for scope-only diffs (e.g.
+    ``only_account_ids: added 999988887777``); those entries carry
+    ``extra`` payload describing the scope field + value(s).
+
+    Per [[ibounce-honest-positioning]] both kinds land in the SAME
+    JSONL file so the operator has ONE place to review every pending
+    change — preserving the explanation message that says "inspect
+    ~/.iam-jit/bouncer/profile-allow-pending.jsonl"."""
     qp = queue_path or resolve_pending_path()
     qp.parent.mkdir(parents=True, exist_ok=True)
-    entry = {
+    entry: dict[str, typing.Any] = {
         "id": _new_pending_id(),
         "requested_at": _now_iso(),
+        "kind": kind,
         "target": target,
         "actions": list(actions),
         "reason": reason,
@@ -278,6 +293,8 @@ def _enqueue_pending(
         "source": source,
         "status": "pending",
     }
+    if extra:
+        entry["extra"] = dict(extra)
     # Append, never rewrite — the file is a forensic record.
     with qp.open("a", encoding="utf-8") as fh:
         fh.write(json.dumps(entry, separators=(",", ":")) + "\n")
@@ -559,6 +576,48 @@ def list_pending(
     return out
 
 
+def enqueue_pending_scope_change(
+    *,
+    field: str,
+    op: str,
+    value: str,
+    reason: str,
+    profile_name: str,
+    actor: str,
+    source: str,
+    queue_path: pathlib.Path | None = None,
+) -> dict[str, typing.Any]:
+    """Append one ``kind="scope_change"`` pending entry to the JSONL
+    queue. Public surface for #451 fix — the improve-profile pipeline
+    routes scope-only diffs (e.g. ``only_account_ids: added X``) through
+    here so the JSONL file IS created + ``pending_entry_ids`` IS
+    populated per ``[[ibounce-honest-positioning]]``.
+
+    Parameters
+    ----------
+    field
+        Scope field name (e.g. ``"only_account_ids"``, ``"only_regions"``).
+    op
+        One of ``"added"`` / ``"removed"`` (matches the human-readable
+        bullet shape emitted by ``_compute_diff``).
+    value
+        The scope value being added/removed.
+    """
+    return _enqueue_pending(
+        target=f"scope:{field}",
+        actions=[f"{op} {value}"],
+        reason=reason,
+        duration=None,
+        expires_at=None,
+        profile_name=profile_name,
+        actor=actor,
+        source=source,
+        queue_path=queue_path,
+        kind="scope_change",
+        extra={"scope_field": field, "scope_op": op, "scope_value": value},
+    )
+
+
 __all__ = [
     "ALLOW_AGENT_SELF_GRANT_ENV",
     "AllowAddResult",
@@ -566,6 +625,7 @@ __all__ = [
     "PENDING_APPROVALS_PATH_ENV",
     "ProfileAllowError",
     "add_profile_allow_rule",
+    "enqueue_pending_scope_change",
     "list_pending",
     "resolve_pending_path",
 ]
