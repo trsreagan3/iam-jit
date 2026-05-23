@@ -301,6 +301,26 @@ Tracking: every BUG entry has a task number (e.g., #299). v1.0 release gate: eve
 
 ---
 
+## A23. Missing / unattributed LICENSE + NOTICE files across the suite — `STATUS: FIXED 2026-05-23`
+- **Severity:** HIGH (blocks Anthropic Cyber Verification Program application #338; renders "open source" competitive claim technically false per Berne Convention — code without LICENSE = all-rights-reserved by default)
+- **Symptom (historical):** License verification on 2026-05-23 found:
+  - **kbouncer** — NO `LICENSE` file at all
+  - **iam-roles + gbounce + dbounce** — `LICENSE` files were canonical Apache-2.0 text BUT the boilerplate copyright line was unfilled (`Copyright [yyyy] [name of copyright owner]`) or wrong (`Copyright 2026 dbounce contributors` in dbounce)
+  - **All 4 repos** — NO `NOTICE` file
+  - **iam-roles + gbounce READMEs** — `## License` section was a one-liner (`Apache-2.0.` / `Apache 2.0. See [LICENSE](LICENSE).`) without copyright attribution
+  - **kbouncer + dbounce READMEs** — NO `## License` section at all
+  - `pyproject.toml` declared `license = { text = "Apache-2.0" }` but didn't ship `LICENSE` or `NOTICE` in the wheel
+- **Fix (#342):** Apache-2.0 with `trsreagan3` as the copyright holder across the full suite. Per repo:
+  - `LICENSE` — canonical Apache-2.0 text verbatim, copyright line `Copyright 2026 trsreagan3` (created in kbouncer; copyright line corrected in iam-roles + gbounce + dbounce)
+  - `NOTICE` — minimal attribution with per-product name (iam-jit (Python) / gbounce / kbouncer / dbounce)
+  - README `## License` section — populated / added with `Apache-2.0 — see [LICENSE](./LICENSE). Copyright 2026 trsreagan3.`
+  - `pyproject.toml` (iam-roles only) — added `[tool.setuptools].license-files = ["LICENSE", "NOTICE"]` so the wheel ships both files; kept the existing `license = { text = "Apache-2.0" }` form to avoid bumping `setuptools>=68` to `>=77.0.3` just for PEP 639
+- **Deferred:** Per-source-file `SPDX-License-Identifier: Apache-2.0` headers (good hygiene but high churn; v1.1 candidate per `[[deliberate-feature-completion]]`)
+- **Verification:** All 4 repos now satisfy `ls LICENSE NOTICE` + `grep "^## License" README.md` + `grep "Copyright 2026 trsreagan3" LICENSE`
+- **Tasks closed:** #342
+
+---
+
 # §B — DOCUMENTED LIMITS (NOT launch-blocking)
 
 These are intentional limits OR roadmap-tracked gaps. Documented so users + agents aren't surprised. The product LAUNCHES with these in place; they're listed so adoption decisions are informed.

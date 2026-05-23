@@ -527,4 +527,6 @@ Issues + discussions: [GitHub Issues](https://github.com/trsreagan3/iam-jit/issu
 
 ## License
 
-Apache 2.0. See [LICENSE](LICENSE).
+Apache-2.0 — see [LICENSE](./LICENSE).
+
+Copyright 2026 trsreagan3.

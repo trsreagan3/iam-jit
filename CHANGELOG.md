@@ -40,6 +40,26 @@ within the same release.
 
 ### Added
 
+- **#342 / §A23 — Formal Apache-2.0 LICENSE + NOTICE files + README license attribution** (2026-05-23) —
+  Closes the cross-suite license-file gap surfaced by the 2026-05-23
+  verification (no LICENSE files in kbouncer; unfilled `[yyyy] [name of
+  copyright owner]` boilerplate in iam-roles + gbounce; `Copyright 2026
+  dbounce contributors` placeholder in dbounce; no NOTICE files
+  anywhere; bare `## License` headers in the iam-roles + gbounce
+  READMEs; missing `## License` sections in kbouncer + dbounce
+  READMEs). Apache-2.0 with `trsreagan3` as the copyright holder per
+  founder direction; same shape across all 4 repos so the suite
+  presents one coherent license posture. iam-roles' `pyproject.toml`
+  also gets `[tool.setuptools].license-files = ["LICENSE", "NOTICE"]`
+  so the wheel ships both files (conservative; doesn't bump
+  `setuptools>=68` to `>=77.0.3` purely for PEP 639's modernized
+  `license-files` field). Unblocks: Anthropic Cyber Verification
+  Program application (#338) + iam-jit-vs-OneCLI competitive-matrix
+  accuracy + satellite-repo (#231 / #232 / #233) license alignment.
+  Per-source-file SPDX-License-Identifier headers DEFERRED to v1.1 per
+  `[[deliberate-feature-completion]]` (good hygiene, but adds churn to
+  every source file — out of scope for this slice).
+
 - **#324f — iam-jit recommender Deny-injection from dynamic-deny rules + role-effectiveness re-grade** (2026-05-22) —
   Closes the final slice of the #324 dynamic-deny family. The
   defense-in-depth half of the model: when iam-jit issues a new IAM

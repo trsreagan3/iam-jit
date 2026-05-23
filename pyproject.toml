@@ -111,6 +111,14 @@ iam-risk-score = "iam_jit.cli_score:main"
 ibounce = "iam_jit.bouncer_cli:main"
 iam-jit-bouncer = "iam_jit.bouncer_cli:main_deprecated_alias"
 
+[tool.setuptools]
+# §A23 / #342 — explicitly ship LICENSE + NOTICE in the wheel so
+# pip-installed users see the same Apache-2.0 + attribution as the
+# repo. Kept in the setuptools-native table (not PEP 639 `project.
+# license-files`) so we don't have to bump `setuptools>=68` to
+# `>=77.0.3` just for this slice.
+license-files = ["LICENSE", "NOTICE"]
+
 [tool.setuptools.packages.find]
 where = ["src"]
 
