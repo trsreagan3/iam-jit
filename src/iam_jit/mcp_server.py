@@ -2212,6 +2212,153 @@ TOOLS.extend([
 
 
 # ---------------------------------------------------------------------------
+# #401 / §A47 — ambient autonomous improve-profile MCP tool.
+# ---------------------------------------------------------------------------
+# Per [[ambient-autonomous-protection]] the agent calls this periodically
+# (per declaration cadence). The pipeline runs generate-from-audit on the
+# recent audit window, diffs against the current active profile, and
+# either auto-installs (when change_size < threshold) or queues for
+# operator approval. Cross-product symmetric per
+# [[cross-product-agent-parity]] — accepts `bouncer` for any of the four.
+TOOLS.extend([
+    {
+        "name": "iam_jit_improve_profile",
+        "description": (
+            "Run one improve-profile cycle for a bouncer. Reads recent "
+            "audit events, runs the #326 generator + §A38 scope-floor "
+            "emission, diffs against the active profile, and either "
+            "auto-installs (when change_size < threshold) or queues for "
+            "operator approval via the existing §A25 pending queue. Per "
+            "[[creates-never-mutates]] this never overwrites manually-"
+            "authored allow rules. Per [[ambient-autonomous-protection]] "
+            "managed posture REFUSES auto-improve (reproducibility). "
+            "Use this from the agent's session-start hook with the "
+            "declared cadence to keep the operator's bouncer tightening "
+            "around observed traffic with zero manual maintenance."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "bouncer": {
+                    "type": "string",
+                    "enum": ["ibounce", "kbouncer", "dbounce", "gbounce"],
+                    "default": "ibounce",
+                },
+                "cadence": {
+                    "type": "string",
+                    "enum": ["per_session", "daily", "weekly", "never"],
+                    "default": "per_session",
+                },
+                "cadence_window": {
+                    "type": "string",
+                    "description": (
+                        "Explicit window override (e.g. `1h`, `24h`). "
+                        "When omitted, derived from `cadence`."
+                    ),
+                },
+                "threshold": {
+                    "type": "number",
+                    "minimum": 0.0,
+                    "maximum": 1.0,
+                    "default": 0.30,
+                    "description": (
+                        "Auto-install threshold per "
+                        "`require_operator_approval_above_change_threshold`."
+                    ),
+                },
+                "auto_install": {
+                    "type": "boolean",
+                    "default": True,
+                },
+                "apply": {
+                    "type": "boolean",
+                    "default": True,
+                    "description": (
+                        "When False, return what WOULD happen without "
+                        "mutating the profile."
+                    ),
+                },
+                "posture": {
+                    "type": "string",
+                    "enum": ["ambient", "managed"],
+                    "default": "ambient",
+                    "description": (
+                        "Declaration posture; `managed` REFUSES auto-improve."
+                    ),
+                },
+                "profile_name": {
+                    "type": "string",
+                    "description": (
+                        "Override active-profile resolution; defaults to "
+                        "the bouncer's currently-active profile."
+                    ),
+                },
+                "preferred_backend": {
+                    "type": "string",
+                    "enum": ["anthropic", "openai", "bedrock", "ollama"],
+                    "description": (
+                        "LLM backend override for the generator step."
+                    ),
+                },
+            },
+        },
+    },
+    {
+        "name": "iam_jit_handle_deny",
+        "description": (
+            "Look up the full structured context for a single deny event "
+            "the agent saw a 403 for. Returns the canonical structured "
+            "deny payload (caught_by_bouncer + classification + "
+            "suggested_allow_command + recommended_action) PLUS the "
+            "surrounding audit trail so the agent can make an informed "
+            "decision (easy-allow / halt+escalate / rephrase+retry). Per "
+            "[[ambient-value-prop-and-friction-framing]] the response "
+            "frames deny as `caught by bouncer`, never `ERROR`. Per "
+            "[[creates-never-mutates]] this is READ-ONLY — the agent "
+            "must call `bounce_profile_allow` separately to actually "
+            "install a recommended allow."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "required": ["deny_event_id"],
+            "properties": {
+                "deny_event_id": {
+                    "type": "string",
+                    "description": (
+                        "Stable id from a prior structured-deny payload "
+                        "(format: `evt_<bouncer>_<sha8>`)."
+                    ),
+                },
+                "lookback_minutes": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "maximum": 1440,
+                    "default": 60,
+                },
+                "include_recent_audit": {
+                    "type": "boolean",
+                    "default": True,
+                },
+                "agent_session_id": {
+                    "type": "string",
+                    "description": (
+                        "Optional — constrains the audit query to one "
+                        "agent's traffic."
+                    ),
+                },
+                "limit": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "maximum": 1000,
+                    "default": 200,
+                },
+            },
+        },
+    },
+])
+
+
+# ---------------------------------------------------------------------------
 # #345 / §A25 — Easy profile extension + deny visibility.
 # ---------------------------------------------------------------------------
 # Symmetric flip of the bounce_deny_* family (#324e):
@@ -4747,6 +4894,14 @@ def _handle_request(req: dict[str, Any]) -> dict[str, Any] | None:
             # #397 / #398 — ambient-autonomous-protection setup applier.
             from .cli_apply_config import apply_config_for_mcp
             result_payload = apply_config_for_mcp(args)
+        elif tool_name == "iam_jit_improve_profile":
+            # #401 / §A47 — autonomous improve-profile cycle.
+            from .improve import improve_profile_for_mcp
+            result_payload = improve_profile_for_mcp(args)
+        elif tool_name == "iam_jit_handle_deny":
+            # #402 / §A48 — structured deny handler.
+            from .structured_deny import handle_deny_for_mcp
+            result_payload = handle_deny_for_mcp(args)
         else:
             return _err(rid, -32601, f"unknown tool: {tool_name}")
         # MCP tool result format: { content: [{type: "text", text: "..."}] }

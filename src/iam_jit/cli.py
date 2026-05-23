@@ -1757,5 +1757,20 @@ from .cli_apply_config import register_apply_config_command  # noqa: E402
 register_apply_config_command(doctor)
 
 
+# #401 / §A47 — register `iam-jit improve-profile` autonomous profile
+# improvement. Mirrors the `iam_jit_improve_profile` MCP tool per
+# [[cross-product-agent-parity]]: same backend, same shape; CLI default
+# is DRY-RUN (operator must pass --apply to mutate).
+from .cli_improve import register_improve_command  # noqa: E402
+register_improve_command(main)
+
+
+# #403 / §A49 — register `iam-jit autopilot` one-command background daemon.
+# Reads `.iam-jit.yaml`, starts bouncers, periodically runs improve cycles.
+# Subcommands: start / status / stop.
+from .autopilot import register_autopilot_command  # noqa: E402
+register_autopilot_command(main)
+
+
 if __name__ == "__main__":
     main()
