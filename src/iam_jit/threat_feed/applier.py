@@ -240,16 +240,19 @@ def _append_ledger(
         pass
 
 
-def remove_from_ledger(
+def peek_latest_application(
     rule_id: str,
     *,
     ledger_path: pathlib.Path | None = None,
 ) -> dict[str, typing.Any] | None:
-    """Mark a rule_id as revoked in the ledger. Appends a
-    ``status="revoked"`` record (the ledger is append-only) + returns
-    the most recent application record for the rule_id so the caller
-    can carry the artifact-id into the bouncer-side remove call.
-    Returns None when no such rule_id was ever applied.
+    """Return the most recent application record for ``rule_id`` WITHOUT
+    mutating the ledger. Returns ``None`` when no such rule_id was ever
+    applied.
+
+    Used by :func:`record_revoked_in_ledger` callers that need to perform
+    a bouncer-side removal BEFORE marking the ledger ([[ibounce-honest-
+    positioning]] — ledger must reflect bouncer state, never advertise
+    a revoke that didn't actually land).
     """
     lp = ledger_path or resolve_ledger_path()
     records = [
@@ -258,17 +261,53 @@ def remove_from_ledger(
     ]
     if not records:
         return None
-    latest = records[-1]
+    return records[-1]
+
+
+def record_revoked_in_ledger(
+    rule_id: str,
+    prior: dict[str, typing.Any],
+    *,
+    ledger_path: pathlib.Path | None = None,
+) -> None:
+    """Append a ``status="revoked"`` record for ``rule_id`` to the
+    append-only ledger. Caller is expected to have already performed
+    the bouncer-side removal — this function MUST NOT be called when
+    the bouncer removal failed (would violate [[ibounce-honest-
+    positioning]] by claiming a revoke that didn't actually land)."""
+    lp = ledger_path or resolve_ledger_path()
     _append_ledger(
         {
             "rule_id": rule_id,
             "status": "revoked",
             "revoked_at": _now_iso(),
-            "previous_artifact_id": latest.get("applied_artifact_id"),
-            "previous_action": latest.get("action"),
+            "previous_artifact_id": prior.get("applied_artifact_id"),
+            "previous_action": prior.get("action"),
         },
         ledger_path=lp,
     )
+
+
+def remove_from_ledger(
+    rule_id: str,
+    *,
+    ledger_path: pathlib.Path | None = None,
+) -> dict[str, typing.Any] | None:
+    """Legacy peek-and-mark helper. Mark a rule_id as revoked in the
+    ledger. Appends a ``status="revoked"`` record (the ledger is
+    append-only) + returns the most recent application record for the
+    rule_id. Returns None when no such rule_id was ever applied.
+
+    DEPRECATED for the revoke flow — prefer the
+    :func:`peek_latest_application` + :func:`record_revoked_in_ledger`
+    pair so the ledger update can be deferred until AFTER the bouncer
+    removal succeeds (see [[ibounce-honest-positioning]]). Retained for
+    backward compatibility + tests that only exercise the ledger side.
+    """
+    latest = peek_latest_application(rule_id, ledger_path=ledger_path)
+    if latest is None:
+        return None
+    record_revoked_in_ledger(rule_id, latest, ledger_path=ledger_path)
     return latest
 
 
@@ -650,6 +689,8 @@ __all__ = [
     "apply_feed_entries",
     "classify_apply_action",
     "load_ledger",
+    "peek_latest_application",
+    "record_revoked_in_ledger",
     "remove_from_ledger",
     "resolve_ledger_path",
 ]

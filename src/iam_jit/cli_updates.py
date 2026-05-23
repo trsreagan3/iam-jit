@@ -41,7 +41,8 @@ from .threat_feed import (
 )
 from .threat_feed.applier import (
     load_ledger,
-    remove_from_ledger,
+    peek_latest_application,
+    record_revoked_in_ledger,
     resolve_ledger_path,
 )
 from .threat_feed.fetcher import (
@@ -383,7 +384,24 @@ def _do_revoke(
     *,
     as_json: bool,
 ) -> int:
-    prior = remove_from_ledger(rule_id)
+    """Revoke a previously-applied threat-feed entry.
+
+    Order-of-operations (per [[ibounce-honest-positioning]]):
+
+      1. Peek the latest ledger application — exit 1 if absent.
+      2. If the prior was an auto-apply of a ``dynamic_deny``, call
+         ``remove_rules(rule_ids=[artifact_id])`` to actually delete
+         the rule from ``dynamic-denies.yaml`` + fan out a reload.
+      3. ONLY when step 2 succeeds (or was unnecessary) do we append a
+         ``status="revoked"`` record to the ledger.
+
+    The historical implementation appended the revoke FIRST + then tried
+    the bouncer-side removal — meaning a bouncer failure left the ledger
+    falsely advertising "revoked" while the YAML still contained the
+    rule. That violated [[ibounce-honest-positioning]] (status reporting
+    must match reality) + was the §A51b CRIT.
+    """
+    prior = peek_latest_application(rule_id)
     if prior is None:
         click.secho(
             f"updates revoke: rule_id {rule_id!r} not found in ledger",
@@ -391,28 +409,76 @@ def _do_revoke(
             err=True,
         )
         return 1
-    # Best-effort: if the prior application was a dynamic_deny, remove
-    # the dynamic-deny rule by its artifact id.
     artifact_id = prior.get("applied_artifact_id") or ""
     bouncer_remove_result: dict[str, typing.Any] = {}
-    if artifact_id and prior.get("action") in ("auto_apply", "auto_apply_notify"):
+    bouncer_error: str | None = None
+    needs_bouncer_remove = bool(
+        artifact_id and prior.get("action") in ("auto_apply", "auto_apply_notify")
+    )
+    if needs_bouncer_remove:
         try:
             from .dynamic_denies.operations import remove_rules
 
             removed = remove_rules(
-                ids=[artifact_id],
+                rule_ids=[artifact_id],
                 skip_fanout=False,
             )
             bouncer_remove_result = {
-                "removed_count": len(removed.get("removed", [])),
-                "details": removed,
+                "removed_count": int(removed.get("removed_count") or 0),
+                "removed_ids": list(removed.get("removed_ids") or []),
+                "not_found": list(removed.get("not_found") or []),
+                "fanout": list(removed.get("fanout") or []),
             }
         except Exception as e:
-            bouncer_remove_result = {"error": str(e)}
+            bouncer_error = f"{type(e).__name__}: {e}"
+            bouncer_remove_result = {"error": bouncer_error}
+
+    if bouncer_error is not None:
+        payload = {
+            "rule_id": rule_id,
+            "prior": prior,
+            "bouncer_remove": bouncer_remove_result,
+            "ledger_updated": False,
+            "error": bouncer_error,
+        }
+        if as_json:
+            click.echo(json.dumps(payload, indent=2, default=str))
+        else:
+            click.secho(
+                f"FAIL  revoke aborted for {rule_id}: bouncer-side removal "
+                f"failed ({bouncer_error})",
+                fg="red",
+                err=True,
+            )
+            click.secho(
+                "  ledger unchanged — rule_id is still active. Inspect the "
+                "bouncer + dynamic-denies.yaml + retry.",
+                fg="red",
+                err=True,
+            )
+        return 2
+
+    # Bouncer-side removal succeeded (or wasn't needed). Now and only
+    # now do we mark the ledger.
+    record_revoked_in_ledger(rule_id, prior)
+
+    # Per [[ibounce-honest-positioning]] surface fan-out reload failures
+    # honestly. The dynamic-denies.yaml on THIS host was updated (so
+    # ledger-revoked is truthful here), but a downstream bouncer that
+    # holds a cached copy may still be enforcing the rule until its
+    # next reload — surface that so the operator doesn't think the
+    # revoke is globally effective when it isn't.
+    fanout_failures = [
+        f for f in bouncer_remove_result.get("fanout", [])
+        if not f.get("reloaded", False)
+    ] if needs_bouncer_remove else []
+
     payload = {
         "rule_id": rule_id,
         "prior": prior,
         "bouncer_remove": bouncer_remove_result,
+        "ledger_updated": True,
+        "fanout_failures": fanout_failures,
     }
     if as_json:
         click.echo(json.dumps(payload, indent=2, default=str))
@@ -420,8 +486,24 @@ def _do_revoke(
     click.secho(f"OK  revoked {rule_id}", fg="green")
     if artifact_id:
         click.echo(f"  prior artifact: {artifact_id}")
-    if bouncer_remove_result:
-        click.echo(f"  bouncer remove: {bouncer_remove_result}")
+    if needs_bouncer_remove:
+        removed_count = bouncer_remove_result.get("removed_count", 0)
+        click.echo(
+            f"  bouncer remove: {removed_count} rule(s) removed from "
+            f"dynamic-denies.yaml"
+        )
+        if fanout_failures:
+            click.secho(
+                f"  fanout: {len(fanout_failures)} bouncer(s) did NOT reload — "
+                f"they may still enforce this rule until their next reload",
+                fg="yellow",
+            )
+            for f in fanout_failures:
+                bouncer = f.get("bouncer") or "(unknown)"
+                err = f.get("error") or "unknown error"
+                click.secho(f"    - {bouncer}: {err}", fg="yellow")
+    else:
+        click.echo("  bouncer remove: (no dynamic-deny artifact to remove)")
     return 0
 
 
