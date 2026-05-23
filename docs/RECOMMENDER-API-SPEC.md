@@ -1,6 +1,20 @@
 # Recommender API Spec
 
-> Status: design draft (2026-05-15). Extends what already exists in
+> **STATUS: DESIGN DRAFT — NOT a v1.0 launch artifact**
+>
+> The endpoint surface described below is NOT implemented under the
+> names listed. This doc defines a target shape so the calibration
+> corpus and Hoop integration can be built against it; it could land
+> in v1.1 in some form but is not part of v1.0.
+>
+> For the shipped recommender behavior, see:
+>
+> - `src/iam_jit/bouncer/recommender.py` — observation-based rule
+>   synthesis (per task #173)
+> - `src/iam_jit/dynamic_denies/recommender.py` — recommender-driven
+>   `Effect: Deny` injection into iam-jit-issued roles (per task #324f)
+>
+> Original draft note (2026-05-15): Extends what already exists in
 > `policy_gen/`, `narrow.py`, and `routes/policy.py`. The behaviors
 > below are NOT yet implemented in the listed shape — this doc defines
 > the target so the calibration corpus and Hoop integration can be

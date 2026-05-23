@@ -5,6 +5,23 @@ Status: documentation slice 2026-05-22 — companion to the
 `bounce profile doctor` upgrade runbook shipped under task #321
 (see [PROFILE-UPGRADE.md](PROFILE-UPGRADE.md)).
 
+> **Status — v1.0 shipped surface vs v1.1 roadmap**
+>
+> **Shipped today (v1.0):** `ibounce profile install --from URL --sha256 <hex>`
+> — one-shot install of a profile bundle from a URL with sha256 pinning. This
+> is the load-bearing engineer-onboarding command. See
+> [§4 — Engineer onboarding (day 1 flow)](#4-engineer-onboarding-day-1-flow)
+> for the actual shipped flow.
+>
+> **v1.1 deliverable (PLANNED — not invokable in v1.0):** a unified
+> `bounce init --org-url ...` for day-1 multi-profile bootstrap +
+> `bounce profile sync` for ETag-based update polling. Both are
+> documented in this runbook so security teams can plan their
+> distribution shape now, but **the binaries do not yet ship these
+> subcommands**. Where this doc references them, they are marked
+> **PLANNED (v1.1)**. Today's equivalents (one-shot install + manual
+> re-run for updates) are called out alongside.
+
 Audience: security teams, DevSecOps, platform-engineering teams whose
 engineers run AI coding agents (Claude Code, Cursor, OpenCode,
 custom MCP clients) on production-adjacent credentials. If your
@@ -37,9 +54,11 @@ This is for the human (or team) inside an organization who answers
 - The IT team that ships onboarding scripts for new engineers
 
 If you're the engineer being asked to install a bouncer on your
-laptop on day 1, you don't need this doc — `bounce init --org-url
-<URL your IT team gave you>` is the whole story. The
-[`IBOUNCE.md`](IBOUNCE.md) reference covers the engineer surface.
+laptop on day 1, you don't need this doc — `ibounce profile install
+--from <URL your IT team gave you> --sha256 <hex>` is the whole
+story (v1.0; the unified `bounce init --org-url` form is PLANNED for
+v1.1). The [`IBOUNCE.md`](IBOUNCE.md) reference covers the engineer
+surface.
 
 This doc is what your security team curates. It assumes you already
 have:
@@ -91,62 +110,94 @@ exhaustive allow baselines for every job role in your org."
 ## 3. Distribution mechanics
 
 The bundle lives at a URL your org controls. Engineers fetch it
-once at onboarding:
+once at onboarding.
+
+### v1.0 shipped flow
 
 ```bash
-bounce init --org-url https://internal.example.com/bounce-profiles/index.yaml
+ibounce profile install --from https://internal.example.com/bounce-profiles/my-profile.yaml \
+    --sha256 <hex>
 ```
 
-What that command does (cross-product; ibounce / kbounce /
-dbounce / gbounce all share the surface per
-[[cross-product-agent-parity]]):
+What that command does today:
 
-1. **Fetches the index** over HTTPS. HTTP is refused.
-2. **Validates the index** against the published schema (see
-   `docs/examples/profiles/index.yaml.template`).
-3. **Fetches each profile YAML** referenced by the index. All
-   profiles in the bundle must validate before any are written.
-4. **Verifies the bundle SHA-256** if `--sha256 <hex>` is supplied
-   or the bundle declares `bundle_sha256` in its index. IT teams
-   should ship the hash in onboarding docs.
-5. **Installs the profiles** to the per-product profile directory
-   (e.g. `~/.iam-jit/bouncer/profiles.yaml` for ibounce,
-   `~/.kbouncer/profiles.yaml` for kbouncer, etc.) — marking each
+1. **Fetches the profile YAML** over HTTPS. HTTP is refused.
+2. **Verifies the SHA-256** against the operator-supplied `--sha256`
+   value. Mismatch aborts the install before any state mutates. IT
+   teams should ship the hash in onboarding docs.
+3. **Validates the profile** against the profile schema.
+4. **Installs the profile** to the per-product profile directory
+   (`~/.iam-jit/bouncer/profiles.yaml` for ibounce) — marking the
    profile's `source` field as the fetch URL.
-6. **Pins the source URL** in per-product state. Future
-   `bounce profile sync` re-fetches without the operator having to
-   re-type the URL.
-7. **Emits an `admin-action` audit event** for the install (who,
-   when, from what URL, what SHA the bundle resolved to).
+5. **Emits an `admin-action` audit event** for the install (who,
+   when, from what URL, what SHA the profile resolved to).
 
 Installed-from-URL profiles are **read-only at the CLI surface**.
 Engineers cannot edit them via `ibounce profile edit`; doing so
 would let an agent (or a curious engineer) bypass the org-level
 floor. The only way to change an installed-from-URL profile is to
-re-publish the bundle and re-sync. Per [[creates-never-mutates]],
-attempted edits are logged but not applied.
+re-publish the bundle and re-run install. Per
+[[creates-never-mutates]], attempted edits are logged but not
+applied.
 
-ETag-based sync: the bouncer remembers the bundle's HTTP ETag (or
-the SHA if no ETag is sent) and `bounce profile sync` short-circuits
-when nothing has changed. This makes `sync` cheap enough to run on
-every `bounce run` startup if you want — see §6.
+For multi-profile bundles in v1.0, IT teams ship one
+`ibounce profile install --from URL --sha256 <hex>` invocation per
+profile in their onboarding script.
+
+### v1.1 PLANNED flow (NOT invokable in v1.0)
+
+The v1.1 deliverable is a unified `bounce init --org-url ...` that
+collapses the per-profile loop into a single command and adds
+index-level mechanics:
+
+```bash
+# PLANNED — v1.1; NOT shipped in v1.0
+bounce init --org-url https://internal.example.com/bounce-profiles/index.yaml
+```
+
+What that command will do (cross-product; ibounce / kbounce /
+dbounce / gbounce all sharing the surface per
+[[cross-product-agent-parity]]):
+
+1. **Fetches the index** over HTTPS. HTTP refused.
+2. **Validates the index** against the published schema (see
+   `docs/examples/profiles/index.yaml.template`).
+3. **Fetches each profile YAML** referenced by the index. All
+   profiles in the bundle must validate before any are written.
+4. **Verifies the bundle SHA-256** if `--sha256 <hex>` is supplied
+   or the bundle declares `bundle_sha256` in its index.
+5. **Installs the profiles** to the per-product profile directory.
+6. **Pins the source URL** in per-product state so future
+   `bounce profile sync` re-fetches without re-typing the URL.
+7. **Emits an `admin-action` audit event** for the install.
+
+ETag-based sync (PLANNED, v1.1): the bouncer will remember the
+bundle's HTTP ETag (or the SHA if no ETag is sent) and
+`bounce profile sync` will short-circuit when nothing has changed.
+This is what will make `sync` cheap enough to run on every
+`bounce run` startup — see §6. In v1.0, updates are operator-driven
+by re-running `ibounce profile install --from URL --sha256 <new-hex>`.
 
 ---
 
 ## 4. Engineer onboarding (day 1 flow)
 
+### Engineer onboarding (today — v1.0)
+
 The handoff from "engineer joins" to "engineer's agents respect
-the safety floor" is one command:
+the safety floor" is two commands:
 
 ```bash
 # 1. Install the binary (one of: brew, pip, go install, docker)
 pip install iam-jit
 
 # 2. Apply the org safety floor
-bounce init --org-url https://internal.example.com/bounce-profiles/index.yaml
-# → fetches bundle, verifies sha256 (if pinned)
+ibounce profile install \
+    --from https://internal.example.com/bounce-profiles/my-profile.yaml \
+    --sha256 <hex-your-IT-team-published>
+# → fetches profile YAML, verifies sha256
 # → installs org-wide denies + audit-export config
-# → pins source URL for future `bounce profile sync`
+# → marks profile.source = the fetch URL (read-only at CLI)
 # → engineer's agent immediately respects the floor
 
 # 3. Start the proxy (normal day-1 workflow from here on)
@@ -155,17 +206,34 @@ ibounce run
 
 Properties of this handoff:
 
-- **Idempotent.** Re-running `bounce init --org-url ...` with the
-  same URL is a no-op (it sync-checks, doesn't reinstall).
-- **Audited.** Every install + every sync is an `admin-action`
-  OCSF event in the per-product audit log + (if configured) sent
-  to the org's webhook before the engineer's first agent call.
-- **Single command.** No follow-up wizard, no manual file edits.
-  If your IT team can ship a `setup.sh` that calls `pip install
-  iam-jit && bounce init --org-url $ORG_BOUNCE_URL`, you're done.
+- **Audited.** Every install is an `admin-action` OCSF event in the
+  per-product audit log + (if configured) sent to the org's webhook
+  before the engineer's first agent call.
+- **Two commands.** Per-profile install loop in v1.0 (one install
+  call per profile in your bundle); the v1.1 `bounce init --org-url`
+  collapses this to one command.
 - **Survives upgrades.** The profile stays installed across binary
   upgrades. `bounce profile doctor` (§6) surfaces drift when
   shipped defaults move forward of the installed bundle.
+- **Read-only at the CLI.** Engineers cannot edit installed-from-URL
+  profiles; the only way to change them is to re-publish + re-run
+  install.
+
+### Engineer onboarding (PLANNED — v1.1)
+
+When `bounce init --org-url` ships, the day-1 flow collapses to:
+
+```bash
+# PLANNED — v1.1; NOT invokable in v1.0
+pip install iam-jit
+bounce init --org-url https://internal.example.com/bounce-profiles/index.yaml
+ibounce run
+```
+
+The v1.1 form is idempotent (re-runs become sync-checks) and pulls
+the entire bundle (multiple profiles + index-level metadata) in one
+HTTP fetch. Until it lands, use the v1.0 per-profile install form
+above.
 
 ---
 
@@ -195,11 +263,15 @@ moves *below* it without re-publishing the bundle.
 
 ## 6. Update flow
 
-Three commands cover the update lifecycle:
+### Updates today (v1.0)
+
+In v1.0 the update lifecycle has two commands:
 
 ```bash
-# Re-fetch the bundle from the pinned URL
-bounce profile sync
+# Re-fetch + re-install the profile with the new SHA
+ibounce profile install \
+    --from https://internal.example.com/bounce-profiles/my-profile.yaml \
+    --sha256 <new-hex>
 
 # Audit installed profile against shipped per-product defaults
 bounce profile doctor             # see PROFILE-UPGRADE.md
@@ -209,10 +281,12 @@ bounce profile doctor --apply     # additively merge new safety floors
 
 What each does:
 
-- **`bounce profile sync`** — re-fetches the bundle from its pinned
-  `--org-url`. If the ETag matches, no-op. If new content, validates
-  + (optionally) re-verifies SHA + atomically swaps the installed
-  profile. Old version is backed up to `<profiles>.yaml.bak-<ts>`.
+- **`ibounce profile install --from URL --sha256 <hex>`** — re-fetches
+  the profile from the URL, verifies the new SHA, and atomically
+  installs over the existing profile. The org workflow today: when
+  your security team publishes a new profile version, IT pushes an
+  updated onboarding hash; engineers re-run the install command (or
+  a setup script does it on their behalf).
 - **`bounce profile doctor`** — diffs your installed profile
   (whether locally curated or installed-from-URL) against the
   bouncer's *shipped* defaults. Surfaces fields the binary now
@@ -222,10 +296,27 @@ What each does:
   [PROFILE-UPGRADE.md](PROFILE-UPGRADE.md). Per-bouncer auto-banner
   on `*bounce run` fires only for missing `safety-floor` fields.
 
-The org workflow: when your security team publishes a new bundle
-version, push it to the same URL. Every engineer's next
+### Updates PLANNED (v1.1)
+
+```bash
+# PLANNED — v1.1; NOT invokable in v1.0
+bounce profile sync
+```
+
+**`bounce profile sync`** (PLANNED) — will re-fetch the bundle from
+its pinned `--org-url`. If the ETag matches, no-op. If new content,
+validates + (optionally) re-verifies SHA + atomically swaps the
+installed profile. Old version is backed up to
+`<profiles>.yaml.bak-<ts>`. Cheap enough to wire into `bounce run`
+startup once it ships.
+
+The v1.1 org workflow: when your security team publishes a new
+bundle version, push it to the same URL. Every engineer's next
 `bounce profile sync` (or `bounce run` if you wire sync to run on
 startup) picks it up. No fleet-wide push needed; pull-only updates.
+Until v1.1 lands, achieve the same outcome by re-running
+`ibounce profile install --from URL --sha256 <new-hex>` (the
+operator's setup script can wrap this).
 
 ---
 
@@ -236,19 +327,26 @@ same floor as engineers' laptops, which is the [[ci-standard-play]]
 shape — *"we run the bouncer in CI"* becomes a standard line in
 your team's setup scripts.
 
-A typical CI job pattern (GitHub Actions / GitLab CI / Buildkite):
+A typical CI job pattern (GitHub Actions / GitLab CI / Buildkite),
+v1.0 shape:
 
 ```yaml
 # .github/workflows/agent-run.yml
 - name: install bouncer + apply org safety floor
   run: |
     pip install iam-jit
-    bounce init --org-url ${{ secrets.ORG_BOUNCE_URL }}
+    # v1.0: per-profile install loop
+    ibounce profile install \
+        --from ${{ secrets.ORG_BOUNCE_PROFILE_URL }} \
+        --sha256 ${{ secrets.ORG_BOUNCE_PROFILE_SHA }}
 - name: run the agent under the bouncer
   run: |
     ibounce run --background --profile ci-runner
     # ... agent runs here, all AWS calls gated by the org floor
 ```
+
+When `bounce init --org-url` ships in v1.1, the install step
+collapses to a single line — see §4 PLANNED block.
 
 Why this matters: a misconfigured CI runner is the single highest-
 leverage attack surface in most orgs (long-lived creds, no human
@@ -268,8 +366,8 @@ Org profile changes are themselves first-class audit events:
 
 | Event | When emitted | Fields |
 |---|---|---|
-| `profile.install` | `bounce init --org-url ...` | source_url, bundle_sha256, profiles_added |
-| `profile.sync` | `bounce profile sync` (and content changed) | source_url, old_sha, new_sha, diff_summary |
+| `profile.install` | `ibounce profile install --from URL --sha256 <hex>` (v1.0) / `bounce init --org-url ...` (v1.1 PLANNED) | source_url, bundle_sha256, profiles_added |
+| `profile.sync` | `bounce profile sync` (v1.1 PLANNED — and content changed) | source_url, old_sha, new_sha, diff_summary |
 | `profile.doctor.applied` | `bounce profile doctor --apply` | fields_added, shipped_defaults_version |
 | `profile.edit_attempt_blocked` | Engineer tried to edit an installed-from-URL profile via CLI | profile_name, attempted_change, principal |
 | `profile.pause_started` / `profile.pause_ended` | `bounce pause --for ...` window opened/closed | duration, reason |
@@ -382,8 +480,9 @@ substitute for one.
 You're an OSS maintainer who wants outside contributors to be
 able to point Claude Code / Cursor at your repo. The org profile
 denies anything outside your test-fixtures bucket + your CI test
-account. Contributors run `bounce init --org-url
-https://your-project.example.com/bounce-profiles/index.yaml` and
+account. Contributors run
+`ibounce profile install --from https://your-project.example.com/bounce-profiles/contributor.yaml --sha256 <hex>`
+(v1.0; the unified `bounce init --org-url` form ships in v1.1) and
 their agent gets a known-safe sandbox. The bundle lives in your
 project repo's GitHub Pages.
 
@@ -409,9 +508,12 @@ profiles:
     applies_to_teams: ["support", "tier-2-ops"]
 ```
 
-Engineers' `bounce init --org-url ... --team data-engineering`
-applies just the matching profile + the universal `org-base`
-floor.
+PLANNED (v1.1): engineers will run
+`bounce init --org-url ... --team data-engineering` to apply just
+the matching profile + the universal `org-base` floor in one
+command. In v1.0, IT's onboarding script runs the per-profile
+`ibounce profile install --from URL --sha256 <hex>` calls for the
+profiles assigned to the engineer's team.
 
 ---
 

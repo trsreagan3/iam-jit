@@ -40,6 +40,51 @@ within the same release.
 
 ### Added
 
+- **#343 / §A24 — Pre-launch claims-vs-functionality audit fix sweep** (2026-05-23) —
+  Closes 5 quick wins surfaced by the 2026-05-23 claims-vs-functionality
+  audit:
+    1. **H1 — Org-distribution doc overclaim**: docs claimed
+       `bounce init --org-url` + `bounce profile sync` + ETag-based
+       sync as shipped surface. Code only ships
+       `ibounce profile install --from URL --sha256 <hex>`. Added a
+       prominent v1.0-vs-v1.1 status note at the top of
+       `docs/ORG-PROFILE-DISTRIBUTION.md`; reshaped §3 (Distribution
+       mechanics), §4 (Engineer onboarding), §6 (Update flow), §7
+       (CI/CD), §8 (Audit chain) so the v1.0-shipped flow is the
+       PRIMARY path and v1.1 enhancements are marked PLANNED.
+       README L436 + L489 updated to cite the actually-shipped CLI
+       command.
+    2. **H2 — Tag `RECOMMENDER-API-SPEC.md` status**: strengthened
+       the status banner at the top of the spec so it's impossible
+       to miss it's a design draft, NOT a v1.0 launch artifact, with
+       pointers to the actually-shipped recommender code paths
+       (`src/iam_jit/bouncer/recommender.py` per #173 and
+       `src/iam_jit/dynamic_denies/recommender.py` per #324f).
+       README MCP-tools list (§Status) footnotes
+       `reduce_policy` / `get_reduction_checklist` /
+       `apply_reduction_checklist` as design-draft.
+    3. **M1 — Honest caveat for `secret:NAME` shorthand**: added a
+       new bullet to `docs/DYNAMIC-DENY-RULES.md` "Honest caveats"
+       documenting that `secret:NAME` shorthand fires at the bouncer
+       layer only and is NOT embedded into iam-jit-issued role
+       Deny statements (which require ARN-shaped targets per #324f).
+       Operators wanting defense-in-depth at both layers should use
+       the explicit `arn:aws:secretsmanager:*:*:secret:NAME-*` form.
+    4. **M3 — gbounce LogWriter rotation footnote**: README L395
+       audit-log paragraph now notes gbounce LogWriter-level rotation
+       is deferred to v1.1 per KNOWN-CAVEATS §A10; gbounce ships
+       the rotation primitives + CLI surface but the WRITER-side
+       hook is pending.
+    5. **Unit tests for `ProxyConfig.default_mode` property** (15
+       tests in `tests/bouncer/test_default_mode.py`): exercises
+       the discovery-vs-profile truth-table — `None` / `""` /
+       `"full-user"` / `"none"` resolve to "discovery"; any other
+       profile name resolves to "profile". Closes the load-bearing
+       gap that the 38.5% / 69.2% / 84.6% role-effectiveness hit-
+       rate numbers depend on (default-mode=discovery is the
+       baseline they're measured against; a silent regression
+       flipping the property would invalidate the published claims).
+
 - **#342 / §A23 — Formal Apache-2.0 LICENSE + NOTICE files + README license attribution** (2026-05-23) —
   Closes the cross-suite license-file gap surfaced by the 2026-05-23
   verification (no LICENSE files in kbouncer; unfilled `[yyyy] [name of

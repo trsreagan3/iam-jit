@@ -301,6 +301,25 @@ Tracking: every BUG entry has a task number (e.g., #299). v1.0 release gate: eve
 
 ---
 
+## A24. Pre-launch claims-vs-functionality audit fix sweep — `STATUS: FIXED 2026-05-23`
+- **Severity:** HIGH (cluster of doc overclaims + 1 load-bearing test gap surfaced by the 2026-05-23 claims-vs-functionality audit; left unfixed, every claim about iam-jit's discovery-default + recommender + org-distribution would have shipped with a documented gap between docs and shipped surface)
+- **Symptom (historical):** 2026-05-23 audit found:
+  1. **H1 — Org-distribution doc overclaim:** `docs/ORG-PROFILE-DISTRIBUTION.md` + README L436/L489 documented `bounce init --org-url ...` + `bounce profile sync` + ETag-based sync as shipped CLI surface. Code only ships `ibounce profile install --from URL --sha256 <hex>` (one-shot, per-profile, no bundle index, no ETag sync). Engineers following the docs would hit "command not found".
+  2. **H2 — `RECOMMENDER-API-SPEC.md` overclaim:** the spec doc had a one-line "Status: design draft" note at the top that was easy to miss; README's MCP-tools list (§Status) enumerated `reduce_policy` / `get_reduction_checklist` / `apply_reduction_checklist` alongside actually-shipped tools with no marker.
+  3. **M1 — `secret:NAME` shorthand non-embedding:** `docs/DYNAMIC-DENY-RULES.md` "Honest caveats" section didn't disclose that `secret:NAME` shorthand fires at the bouncer layer only and is NOT embedded into iam-jit-issued role Deny statements (recommender Deny-injection per #324f requires ARN-shaped targets). Operators wanting defense-in-depth at both layers needed to know to use `arn:aws:secretsmanager:*:*:secret:NAME-*`.
+  4. **M3 — gbounce LogWriter rotation gap:** README L395 said audit-log rotation "ships on kbounce / dbounce / gbounce" with no qualifier; in reality gbounce ships the rotation primitives + CLI surface but the WRITER-side rotation hook is pending (deferred to v1.1 per §A10).
+  5. **Test gap — `ProxyConfig.default_mode` property had no unit coverage:** the property is the discovery-vs-profile mode selector that the 38.5% / 69.2% / 84.6% role-effectiveness hit-rate numbers measure against. A silent regression flipping the truth table would invalidate the published claims.
+- **Fix (#343):**
+  1. Added a prominent v1.0-vs-v1.1 status note at the top of `docs/ORG-PROFILE-DISTRIBUTION.md`; reshaped §3 (Distribution mechanics), §4 (Engineer onboarding), §6 (Update flow), §7 (CI/CD), §8 (Audit chain) so the shipped `ibounce profile install --from URL --sha256 <hex>` flow is the PRIMARY path and the v1.1 `bounce init --org-url` + `bounce profile sync` surface is clearly marked PLANNED. README L436 + L489 rewritten to cite the actually-shipped CLI command.
+  2. Strengthened the status banner at the top of `docs/RECOMMENDER-API-SPEC.md` so it's impossible to miss it's a design draft, with pointers to the actually-shipped code paths (`src/iam_jit/bouncer/recommender.py` per #173, `src/iam_jit/dynamic_denies/recommender.py` per #324f). README MCP-tools list footnotes `reduce_policy` / `get_reduction_checklist` / `apply_reduction_checklist` as design-draft.
+  3. Added a new bullet to `docs/DYNAMIC-DENY-RULES.md` "Honest caveats" disclosing the `secret:NAME` shorthand non-embedding behavior + the explicit-ARN workaround.
+  4. README L395 audit-log paragraph now notes gbounce LogWriter-level rotation is deferred to v1.1 per §A10.
+  5. Added `tests/bouncer/test_default_mode.py` (15 tests) covering the discovery-vs-profile truth table: `None` / `""` / `"full-user"` / `"none"` → "discovery"; any other profile name → "profile". Parametrize-driven row for table-locked coverage.
+- **Verification:** 15/15 tests in `tests/bouncer/test_default_mode.py` pass; doc audits confirm no remaining unflagged `bounce init --org-url` / `bounce profile sync` references in either ORG-PROFILE-DISTRIBUTION.md or README; RECOMMENDER-API-SPEC.md status banner is now unmissable.
+- **Tasks closed:** #343
+
+---
+
 ## A23. Missing / unattributed LICENSE + NOTICE files across the suite — `STATUS: FIXED 2026-05-23`
 - **Severity:** HIGH (blocks Anthropic Cyber Verification Program application #338; renders "open source" competitive claim technically false per Berne Convention — code without LICENSE = all-rights-reserved by default)
 - **Symptom (historical):** License verification on 2026-05-23 found:

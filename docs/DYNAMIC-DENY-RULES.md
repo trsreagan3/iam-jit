@@ -544,6 +544,15 @@ applied in this order:
   installed from operator-controlled HTTPS URLs (same shape as
   org-distributed profiles per `[[enterprise-profile-distribution]]`).
 
+- **`secret:NAME` shorthand target does NOT embed into iam-jit roles.**
+  This shorthand is recognized by the loader + the bouncer-side
+  matcher but is NOT embedded into the iam-jit-issued IAM role's
+  policy. The recommender Deny-injection (#324f) requires
+  ARN-shaped targets (`arn:aws:*`) to embed; `secret:NAME` rules
+  fire at the bouncer layer only. For defense-in-depth (bouncer +
+  role both denying), use the explicit ARN form
+  (`arn:aws:secretsmanager:*:*:secret:NAME-*`).
+
 ## References
 
 - Schema: [`schemas/dynamic-denies-v1.json`](schemas/dynamic-denies-v1.json)
