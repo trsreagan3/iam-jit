@@ -26,10 +26,15 @@ class _StubBackend:
 
 @pytest.fixture
 def patch_backend(monkeypatch: pytest.MonkeyPatch):
+    """Patch `_resolve_backend` to return a stub backend.
+
+    Also enables the §A93 / #509 Phase 3 opt-in so tests exercising
+    the LLM round-trip path don't get NoOp-substituted."""
     def _make(reply: str, name: str = "stub"):
         def _resolve(preferred: str | None):
             return _StubBackend(reply), name
         monkeypatch.setattr(pg, "_resolve_backend", _resolve)
+        monkeypatch.setenv("IAM_JIT_ENABLE_SIDE_LLM", "1")
     return _make
 
 

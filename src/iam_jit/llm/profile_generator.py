@@ -62,6 +62,7 @@ import datetime as _dt
 import hashlib
 import json
 import logging
+import os
 import pathlib
 import re
 from collections import Counter, defaultdict
@@ -71,6 +72,28 @@ from . import default_score_backend
 from ._core import NoOpBackend, get_backend
 
 logger = logging.getLogger("iam_jit.llm.profile_generator")
+
+
+# §A93 / #509 Phase 3 — opt-in gate for bouncer-side LLM. Mirrors the
+# helper in :mod:`iam_jit.structured_deny.response` so all four sites
+# (deny classifier / improve cycle / profile generator / enterprise
+# proposal) honor the same env var.
+_SIDE_LLM_OPT_IN_ENV = "IAM_JIT_ENABLE_SIDE_LLM"
+
+
+def _side_llm_enabled() -> bool:
+    """True iff operator EXPLICITLY enabled bouncer-side LLM via
+    ``IAM_JIT_ENABLE_SIDE_LLM=1|true|yes|on``.
+
+    Per [[bouncer-zero-llm-when-agent-in-loop]] the default is OFF.
+    Local-dev / agent-in-loop deployments leave it unset; the agent
+    drives the LLM-augmented path via MCP (e.g.
+    ``iam_jit_improve_profile``) using ITS OWN LLM. Generators in this
+    module still produce a complete deterministic-only result when
+    gated (safety-floor denies + event-derived allows), which is the
+    intended local-dev shape."""
+    raw = (os.environ.get(_SIDE_LLM_OPT_IN_ENV) or "").strip().lower()
+    return raw in ("1", "true", "yes", "on")
 
 
 # ---------------------------------------------------------------------------
@@ -1322,23 +1345,48 @@ def generate_from_audit(
     )
 
     raw = ""
-    # §A93 / #509 Phase 2 — surface NoOp / unconfigured-backend as a
-    # structured report_skip so operators see the local-dev / agent-in-
-    # loop deferral on /healthz + posture. The deterministic fallback
-    # in _parse_llm_response still runs; this just makes the deferral
-    # visible (per [[bouncer-zero-llm-when-agent-in-loop]] the agent
-    # can call iam_jit_improve_profile via MCP to fill the gap with
-    # its OWN LLM).
-    backend_kind = getattr(backend, "name", None) or backend.__class__.__name__
-    if backend_kind in ("NoOpBackend", "noop", ""):
+    # §A93 / #509 Phase 3 — opt-in gate (A2 site via improve/pipeline.py +
+    # any direct caller). When IAM_JIT_ENABLE_SIDE_LLM is unset (the
+    # local-dev / agent-in-loop default) we SKIP the bouncer-side LLM
+    # call entirely — even when a backend is configured via env vars
+    # picked up by sibling tools. The deterministic event-derived
+    # fallback in _parse_llm_response still runs; the agent drives the
+    # LLM-augmented shape via the iam_jit_improve_profile MCP tool
+    # using ITS OWN LLM per [[bouncer-zero-llm-when-agent-in-loop]].
+    if not _side_llm_enabled():
+        backend = NoOpBackend()
+        backend_name = "noop"
         try:
-            from .report_skip import REASON_NO_LLM_BACKEND, report_skip
+            from .report_skip import REASON_NO_SIDE_LLM_ENABLED, report_skip
             report_skip(
                 feature="profile_generator.from_audit",
-                reason=REASON_NO_LLM_BACKEND,
+                reason=REASON_NO_SIDE_LLM_ENABLED,
+                mode_hint=(
+                    "Local-dev / agent-in-loop default: agent can call "
+                    "iam_jit_improve_profile via MCP (with its own LLM) "
+                    "to get LLM-augmented profile suggestions. To run "
+                    "the bouncer-side LLM directly (standalone / CI), "
+                    "set IAM_JIT_ENABLE_SIDE_LLM=1 + IAM_JIT_LLM="
+                    "anthropic|openai|bedrock|ollama with credentials."
+                ),
             )
         except Exception:  # pragma: no cover
             pass
+    else:
+        # §A93 / #509 Phase 2 — opt-in IS set but backend resolved to
+        # NoOp (creds missing). Surface as a structured report_skip so
+        # operators see the misconfig in their counter; the deterministic
+        # fallback still runs.
+        backend_kind = getattr(backend, "name", None) or backend.__class__.__name__
+        if backend_kind in ("NoOpBackend", "noop", ""):
+            try:
+                from .report_skip import REASON_NO_LLM_BACKEND, report_skip
+                report_skip(
+                    feature="profile_generator.from_audit",
+                    reason=REASON_NO_LLM_BACKEND,
+                )
+            except Exception:  # pragma: no cover
+                pass
     try:
         raw = backend.chat(
             system_prompt=_SYSTEM_PROMPT_AUDIT,
@@ -1462,6 +1510,46 @@ def generate_from_context(
     )
 
     raw = ""
+    # §A93 / #509 Phase 3 — opt-in gate (A3 site: NL → profile YAML).
+    # When IAM_JIT_ENABLE_SIDE_LLM is unset we SKIP the bouncer-side
+    # LLM call and return a scaffold (deterministic safety floor across
+    # all four bouncers). Per [[bouncer-zero-llm-when-agent-in-loop]]
+    # the agent doing NL → YAML translation with ITS OWN LLM is the
+    # local-dev shape; the bouncer-side LLM path is for standalone
+    # deployments (CI / cron / no-agent-in-loop) only.
+    if not _side_llm_enabled():
+        backend = NoOpBackend()
+        backend_name = "noop"
+        try:
+            from .report_skip import REASON_NO_SIDE_LLM_ENABLED, report_skip
+            report_skip(
+                feature="profile_generator.from_context",
+                reason=REASON_NO_SIDE_LLM_ENABLED,
+                mode_hint=(
+                    "Local-dev / agent-in-loop default: returning a "
+                    "deterministic safety-floor scaffold. Your agent "
+                    "can perform NL → profile YAML translation with "
+                    "its OWN LLM and call iam_jit_install_profile via "
+                    "MCP. To run the bouncer-side LLM directly "
+                    "(standalone / CI), set IAM_JIT_ENABLE_SIDE_LLM=1 "
+                    "+ IAM_JIT_LLM=anthropic|openai|bedrock|ollama "
+                    "with credentials."
+                ),
+            )
+        except Exception:  # pragma: no cover
+            pass
+    else:
+        # Opt-in IS set but backend resolved to NoOp (creds missing).
+        backend_kind = getattr(backend, "name", None) or backend.__class__.__name__
+        if backend_kind in ("NoOpBackend", "noop", ""):
+            try:
+                from .report_skip import REASON_NO_LLM_BACKEND, report_skip
+                report_skip(
+                    feature="profile_generator.from_context",
+                    reason=REASON_NO_LLM_BACKEND,
+                )
+            except Exception:  # pragma: no cover
+                pass
     try:
         raw = backend.chat(
             system_prompt=_SYSTEM_PROMPT_CONTEXT,

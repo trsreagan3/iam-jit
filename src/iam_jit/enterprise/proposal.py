@@ -26,11 +26,32 @@ from __future__ import annotations
 import dataclasses
 import json
 import logging
+import os
 from typing import Any
 
 from .discovery import DiscoveredEnv
 
 logger = logging.getLogger("iam_jit.enterprise.proposal")
+
+
+# §A93 / #509 Phase 3 — opt-in gate for bouncer-side LLM. Mirrors the
+# helper in :mod:`iam_jit.structured_deny.response` /
+# :mod:`iam_jit.llm.profile_generator` so all four sites honor the
+# same env var.
+_SIDE_LLM_OPT_IN_ENV = "IAM_JIT_ENABLE_SIDE_LLM"
+
+
+def _side_llm_enabled() -> bool:
+    """True iff operator EXPLICITLY enabled bouncer-side LLM via
+    ``IAM_JIT_ENABLE_SIDE_LLM=1|true|yes|on``.
+
+    Per [[bouncer-zero-llm-when-agent-in-loop]] the default is OFF.
+    Local-dev / agent-in-loop deployments leave it unset; the agent
+    drives the LLM-augmented proposal path via MCP using ITS OWN
+    LLM. Enterprise bootstrap still returns a complete deterministic-
+    fallback ProposedConfig when gated."""
+    raw = (os.environ.get(_SIDE_LLM_OPT_IN_ENV) or "").strip().lower()
+    return raw in ("1", "true", "yes", "on")
 
 
 # Tier vocabulary for account llm_policy values.
@@ -406,15 +427,54 @@ def propose(
     deterministic-fallback ProposedConfig with notes explaining
     why; the operator still gets to review.
     """
+    # §A93 / #509 Phase 3 — opt-in gate (A4 site: enterprise bootstrap
+    # proposer). When IAM_JIT_ENABLE_SIDE_LLM is unset (the local-dev
+    # / agent-in-loop default per
+    # [[bouncer-zero-llm-when-agent-in-loop]]) we SKIP the bouncer-
+    # side LLM call entirely — even when a backend is configured via
+    # env vars picked up by sibling tools — and return the
+    # deterministic-fallback ProposedConfig. The agent drives the
+    # LLM-augmented proposal via MCP using ITS OWN LLM when desired.
+    #
+    # Caller-supplied `backend` (tests / explicit code paths in the
+    # autopilot CLI's `--enable-side-llm` flow) is HONORED — the gate
+    # only applies to the auto-resolved default. This matches the
+    # autopilot daemon's `--enable-side-llm` shape: when a caller
+    # deliberately injects a backend object, they've already opted in.
+    _caller_supplied_backend = backend is not None
     if backend is None:
         from .. import llm as _llm
         backend = _llm.get_backend_for_tier("enterprise")
 
-    # §A93 / #509 Phase 2 — surface no-LLM case as a structured
-    # report_skip so operators see the local-dev deferral. The
-    # deterministic fallback below still runs; the agent can call the
-    # enterprise proposal MCP tool with its OWN LLM if it wants the
-    # LLM-augmented shape per [[bouncer-zero-llm-when-agent-in-loop]].
+    if not _caller_supplied_backend and not _side_llm_enabled():
+        try:
+            from ..llm.report_skip import REASON_NO_SIDE_LLM_ENABLED, report_skip
+            report_skip(
+                feature="enterprise.proposal",
+                reason=REASON_NO_SIDE_LLM_ENABLED,
+                mode_hint=(
+                    "Local-dev / agent-in-loop default: enterprise "
+                    "bootstrap returns a deterministic fallback. Your "
+                    "agent can drive the LLM-augmented proposal via "
+                    "MCP using its OWN LLM. To run the bouncer-side "
+                    "LLM directly (standalone / CI), set "
+                    "IAM_JIT_ENABLE_SIDE_LLM=1 + IAM_JIT_LLM="
+                    "anthropic|openai|bedrock|ollama with credentials."
+                ),
+            )
+        except Exception:  # pragma: no cover
+            pass
+        return _deterministic_fallback(
+            env,
+            "side-LLM not enabled (IAM_JIT_ENABLE_SIDE_LLM unset) — "
+            "returning deterministic-fallback ProposedConfig per "
+            "[[bouncer-zero-llm-when-agent-in-loop]]. Agent can drive "
+            "the LLM-augmented proposal via MCP.",
+        )
+
+    # §A93 / #509 Phase 2 — opt-in IS set but backend resolved to
+    # NoOp (creds missing). Surface as a structured report_skip; the
+    # deterministic fallback below still runs.
     _backend_kind = getattr(backend, "name", None) or backend.__class__.__name__
     if _backend_kind in ("NoOpBackend", "noop", ""):
         try:

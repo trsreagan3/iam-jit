@@ -229,6 +229,9 @@ def test_cli_generate_from_audit_writes_bundle(tmp_path, monkeypatch):
         pg, "_resolve_backend",
         lambda preferred: (_StubLLMBackend(), "anthropic"),
     )
+    # §A93 / #509 Phase 3 — opt in to bouncer-side LLM for this test
+    # (we explicitly want to exercise the LLM round-trip path).
+    monkeypatch.setenv("IAM_JIT_ENABLE_SIDE_LLM", "1")
 
     runner = CliRunner()
     out_dir = tmp_path / "bundle"
@@ -312,6 +315,9 @@ def test_cli_generate_from_audit_refuses_overwrite(tmp_path, monkeypatch):
         pg, "_resolve_backend",
         lambda preferred: (_StubLLMBackend(), "stub"),
     )
+    # §A93 / #509 Phase 3 — opt in to bouncer-side LLM for this test
+    # (we explicitly want to exercise the LLM round-trip path).
+    monkeypatch.setenv("IAM_JIT_ENABLE_SIDE_LLM", "1")
 
     runner = CliRunner()
     out_dir = tmp_path / "noclobber"
@@ -346,6 +352,9 @@ def test_cli_generate_yaml_bundle_format(tmp_path, monkeypatch):
         pg, "_resolve_backend",
         lambda preferred: (_StubLLMBackend(), "stub"),
     )
+    # §A93 / #509 Phase 3 — opt in to bouncer-side LLM for this test
+    # (we explicitly want to exercise the LLM round-trip path).
+    monkeypatch.setenv("IAM_JIT_ENABLE_SIDE_LLM", "1")
     runner = CliRunner()
     r = runner.invoke(cli_module.main, [
         "profile", "generate-from-audit",
@@ -373,6 +382,9 @@ def test_mcp_tool_dispatch_smoke(monkeypatch):
         pg, "_resolve_backend",
         lambda preferred: (_StubLLMBackend(), "stub"),
     )
+    # §A93 / #509 Phase 3 — opt in to bouncer-side LLM for this test
+    # (we explicitly want to exercise the LLM round-trip path).
+    monkeypatch.setenv("IAM_JIT_ENABLE_SIDE_LLM", "1")
     out = cli_profile_generate.generate_from_audit_for_mcp({
         "events": _all_events(),
         "time_range": "1h",
