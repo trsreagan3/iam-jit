@@ -173,6 +173,67 @@ ibounce / kbounce installer surface.
 
 ---
 
+## MCP tool catalog (v1.0 Phase A-H surface)
+
+The `iam-jit` MCP server (the iam-jit host process per
+`[[ibounce-is-two-jobs-in-one-process]]`) exposes 60+ tools as of
+v1.0. The headline catalog operators + agents should know:
+
+### Setup + configuration (Phase A — declarative config)
+
+| Tool | Purpose |
+|---|---|
+| `iam_jit_setup_from_config` | Apply `.iam-jit.yaml` declarative config; idempotent; reports drift |
+| `iam_jit_posture` | Cross-product live state (mode / bouncers / autopilot / threat-feed currency) |
+
+### Profile evolution (Phase C — continuous improvement)
+
+| Tool | Purpose |
+|---|---|
+| `iam_jit_improve_profile` | Returns recent denies + audit context; agent reasons; agent calls back to install rule |
+| `bounce_query_audit_long_range` | Multi-bouncer audit query across configurable time windows |
+| `bounce_extract_permissions_from_audit` | Extract observed permissions from audit trail (input to profile generation) |
+| `bounce_digest_recent` | "Your bouncer caught X this week" weekly-digest synthesis |
+
+### Bouncer-informs-iam-jit chain (Phase E)
+
+Per `[[bouncer-informs-agent-informs-iam-jit]]`:
+
+| Tool | Purpose |
+|---|---|
+| `iam_jit_classify_deny` | Classify deny event as legit / ambiguous / adversarial (agent reasons; bouncer surfaces) |
+| `iam_jit_handle_deny` | Operator-facing surface for resolving a deny (always-allow / add-to-profile / ignore / request-narrower-role) |
+| `iam_jit_resource_map` | Observed resources within a scope, sourced from cross-bouncer audit trails |
+| `iam_jit_request_role_from_synthesis` | Canonical use case: based on staging bouncer activity, request a prod-scoped role |
+
+### Anomaly detection (Phase H — ibounce-only at v1.0)
+
+Per `[[ibounce-honest-positioning]]`: Go bouncers ship anomaly
+detection in v1.0+1 (#508). For ibounce:
+
+| Tool | Purpose |
+|---|---|
+| `iam_jit_anomaly_status` | Current z-score baseline state per bouncer |
+| `iam_jit_anomaly_recent_events` | Recently fired anomaly events with MITRE ATLAS classification |
+
+### Canonical scoring + role-issuance
+
+| Tool | Purpose |
+|---|---|
+| `list_templates` | Browse template catalog (AWS-managed + parameterized task + saved) |
+| `get_template` | Fetch a template's policy shape |
+| `score_iam_policy` | Deterministic 1-10 risk score + per-factor breakdown |
+| `submit_policy` | Submit policy for grant issuance; gated by score + safety mode |
+| `iam_jit_scope_self_for_task` | Compose JIT role for an agent's declared task scope |
+
+For the full 60+ tool surface use `iam-jit mcp list-tools` (the
+authoritative shape your agent would see). Per
+`[[bouncer-zero-llm-when-agent-in-loop]]`: every "intelligent work"
+tool above delegates LLM reasoning to the agent's own LLM — iam-jit
++ bouncers need ZERO LLM credentials on their side in local-dev mode.
+
+---
+
 ## Verification recipe (no client required)
 
 You can confirm the MCP server is healthy without any client. The
