@@ -1845,5 +1845,14 @@ from .cli_anomaly import register_anomaly_group  # noqa: E402
 register_anomaly_group(main)
 
 
+# #507 / §A92 — `iam-jit canary` subcommand cluster. THIS-machine
+# dogfood deploy mechanics: issues file, URL surface, status snapshot,
+# and redeploy mechanism (`iam-jit canary update` / `--watch`). Per
+# [[bouncer-zero-llm-when-agent-in-loop]] the canary deploys in zero-
+# LLM-env-var mode; agent handles LLM via MCP.
+from .cli_canary import register_canary_group  # noqa: E402
+register_canary_group(main)
+
+
 if __name__ == "__main__":
     main()
