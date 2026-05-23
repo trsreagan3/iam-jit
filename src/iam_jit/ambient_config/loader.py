@@ -286,13 +286,28 @@ def validate_declaration(
     *,
     source: str | None = None,
 ) -> dict[str, Any]:
-    """Validate a parsed declaration against the embedded JSON Schema.
+    """Validate a parsed declaration against the embedded JSON Schema
+    AND the cross-field rules that govern the ``posture`` distinction.
 
     Returns the declaration unchanged on success; raises
     ``ConfigLoadError`` with a structured ``details.errors`` list on
     failure. If jsonschema is somehow unavailable (it's a base dep,
-    but...) returns the declaration unchanged with a warning logged
-    via the details payload.
+    but...) returns the declaration unchanged.
+
+    Cross-field rules (run AFTER JSON-Schema parse so the error
+    messages use operator-language per [[ibounce-honest-positioning]]
+    rather than ``oneOf failed at /...``):
+      * `posture: managed` + `improve.enabled: true` → ERROR
+        "managed posture forbids auto-improve; commit profile changes
+        via PR"
+      * `posture: managed` + bouncer with `profile: auto` (default or
+        explicit) → ERROR "managed posture requires named + pinned
+        profile; auto is for ambient only"
+      * `posture: managed` + enabled bouncer missing `profile_source`
+        → ERROR "managed posture requires profile_source for each
+        enabled bouncer"
+      * `posture: ambient` + `fail_on_deny: true` → WARNING returned
+        in ``details.warnings`` (not an error; ambient still loads).
     """
     if not _HAS_JSONSCHEMA:
         # Defensive: jsonschema is a base dep but if it's missing
@@ -301,23 +316,138 @@ def validate_declaration(
 
     validator = jsonschema.Draft202012Validator(IAM_JIT_CONFIG_SCHEMA)
     errors = sorted(validator.iter_errors(declaration), key=lambda e: e.path)
-    if not errors:
-        return declaration
+    if errors:
+        formatted = [
+            {
+                "path": "/".join(str(p) for p in err.absolute_path) or "/",
+                "message": err.message,
+                "schema_path": "/".join(str(p) for p in err.schema_path),
+            }
+            for err in errors
+        ]
+        raise ConfigLoadError(
+            f"declaration failed schema validation: {len(errors)} error(s)",
+            source=source,
+            code="schema_validation_error",
+            details={"errors": formatted},
+        )
 
-    formatted = [
-        {
-            "path": "/".join(str(p) for p in err.absolute_path) or "/",
-            "message": err.message,
-            "schema_path": "/".join(str(p) for p in err.schema_path),
-        }
-        for err in errors
-    ]
-    raise ConfigLoadError(
-        f"declaration failed schema validation: {len(errors)} error(s)",
-        source=source,
-        code="schema_validation_error",
-        details={"errors": formatted},
-    )
+    # ---- Cross-field rules (posture-aware) ---------------------------
+    cross_errors, cross_warnings = _check_cross_field_rules(declaration)
+    if cross_errors:
+        raise ConfigLoadError(
+            f"declaration failed posture cross-field validation: "
+            f"{len(cross_errors)} error(s)",
+            source=source,
+            code="posture_cross_field_error",
+            details={
+                "errors": cross_errors,
+                "warnings": cross_warnings,
+            },
+        )
+    # Warnings alone do not raise — they're surfaced via the loader's
+    # caller (apply_declaration emits them; --inspect prints them).
+    if cross_warnings:
+        # Attach as a sentinel attribute so callers that want to see
+        # the warning can read it. The declaration dict itself stays
+        # untouched (no schema mutation).
+        declaration.setdefault("__posture_warnings__", []).extend(
+            cross_warnings
+        )
+    return declaration
+
+
+def _check_cross_field_rules(
+    declaration: dict[str, Any],
+) -> tuple[list[dict[str, Any]], list[str]]:
+    """Run the posture-aware cross-field checks.
+
+    Returns ``(errors, warnings)`` where each error is a dict matching
+    the JSON-Schema-error shape (so the CLI can print uniformly).
+    """
+    errors: list[dict[str, Any]] = []
+    warnings: list[str] = []
+
+    block = declaration.get("iam-jit") or {}
+    if not isinstance(block, dict):
+        return errors, warnings
+
+    posture = (block.get("posture") or "ambient").strip().lower()
+    bouncers = block.get("bouncers") or {}
+    improve = block.get("improve") or {}
+    fail_on_deny = bool(block.get("fail_on_deny", False))
+
+    if posture == "managed":
+        # Rule M1: managed forbids auto-improve.
+        if improve.get("enabled") is True:
+            errors.append({
+                "path": "iam-jit/improve/enabled",
+                "message": (
+                    "managed posture forbids auto-improve; commit "
+                    "profile changes via PR. Set `improve.enabled: "
+                    "false` or change `posture: ambient` for local "
+                    "dev."
+                ),
+                "schema_path": "cross_field/posture_managed_no_improve",
+            })
+
+        # Rule M2 + M3: each enabled bouncer must have a NAMED profile
+        # (not `auto`) AND a `profile_source` pin.
+        for name, bcfg in bouncers.items():
+            if not isinstance(bcfg, dict):
+                continue
+            raw_enabled = bcfg.get("enabled")
+            # In managed mode we treat any non-false `enabled` (true or
+            # `when_X_present` heuristic) as "operator intends to run
+            # this bouncer" → must be pinned. A conditional that
+            # resolves false at runtime still must be pinned so the
+            # declaration is self-contained.
+            if raw_enabled is False:
+                continue
+            profile = (bcfg.get("profile") or "auto").strip()
+            if profile == "auto":
+                errors.append({
+                    "path": f"iam-jit/bouncers/{name}/profile",
+                    "message": (
+                        "managed posture requires named + pinned "
+                        f"profile for `{name}`; `auto` is for ambient "
+                        "posture only. Specify `profile: <name>` "
+                        "matching a profile in your profiles.yaml."
+                    ),
+                    "schema_path": (
+                        "cross_field/posture_managed_no_auto_profile"
+                    ),
+                })
+            if not bcfg.get("profile_source"):
+                errors.append({
+                    "path": f"iam-jit/bouncers/{name}/profile_source",
+                    "message": (
+                        "managed posture requires `profile_source` "
+                        f"for each enabled bouncer; `{name}` is "
+                        "enabled but no `profile_source` is set. "
+                        "Pin to a committed file (e.g. "
+                        "`./profiles/ci-staging.yaml`) or a signed "
+                        "URL."
+                    ),
+                    "schema_path": (
+                        "cross_field/"
+                        "posture_managed_requires_profile_source"
+                    ),
+                })
+
+    elif posture == "ambient":
+        # Rule A1 (warning, not error): ambient + fail_on_deny is
+        # unusual. Surface as a friendly suggestion.
+        if fail_on_deny:
+            warnings.append(
+                "ambient posture typically tolerates blocks; you set "
+                "`fail_on_deny: true` which will halt your dev loop on "
+                "every deny. Consider `posture: managed` for CI/CD or "
+                "leave `fail_on_deny: false` (the ambient default) for "
+                "local dev."
+            )
+
+    return errors, warnings
 
 
 __all__ = [

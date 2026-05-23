@@ -63,6 +63,16 @@
           "type": "boolean",
           "default": true,
           "description": "Surface block notifications to the operator (stderr / Slack hook depending on `iam-jit --notify-denies` config). Per founder direction 2026-05-23 the deny-obviousness surface MUST stay on by default; setting this false is the explicit operator choice to mute."
+        },
+        "fail_on_deny": {
+          "type": "boolean",
+          "default": false,
+          "description": "When true, any unexpected deny is treated as a build/operation failure (non-zero exit, raised in CI). Default false for `posture: ambient` (local dev tolerates blocks); per [[ambient-autonomous-protection]] managed posture (CI/CD) typically sets this true so silent drift can't pass through a pipeline. Setting `fail_on_deny: true` with `posture: ambient` emits a warning suggesting `posture: managed`."
+        },
+        "require_signed_profiles": {
+          "type": "boolean",
+          "default": false,
+          "description": "Optional: only load profiles carrying a valid Ed25519 signature from a trusted publisher. Forward-compat field for the threat-feed + signed-profile work; in v1.0 Phase A this is a declaration field only and is surfaced in `--inspect` output but does not gate profile loading yet (full enforcement ships with #407+#410). Recommended for `posture: managed`."
         }
       }
     }
@@ -105,6 +115,16 @@
           "minimum": 1,
           "maximum": 65535,
           "description": "Override the bouncer's default port. Optional — when omitted the bouncer-specific default is used (ibounce 8767, kbouncer 8766, dbounce mgmt 8768 / wire 5433, gbounce mgmt 8769 / wire 8080)."
+        },
+        "profile_source": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Path or URL to the canonical profile file. REQUIRED per enabled bouncer when the parent declaration uses `posture: managed`. Local path (`./profiles/ci-staging.yaml`) or HTTPS URL (`https://profiles.example.com/ci-staging.yaml`). Ambient posture ignores this field (the profile is derived/observed); managed posture pins the source so the running bouncer matches the committed file byte-for-byte."
+        },
+        "profile_sha256": {
+          "type": "string",
+          "pattern": "^[a-fA-F0-9]{64}$",
+          "description": "Hex-encoded SHA-256 of the profile file referenced by `profile_source`. Optional but recommended for `posture: managed` — when present the loader verifies the file's hash before applying and refuses to start the bouncer on a mismatch (drift detection). 64 hex chars; case-insensitive."
         },
         "extra_args": {
           "type": "array",

@@ -37,17 +37,104 @@ KUBECONFIG=/Users/x/.kube/config → enabled=true"`).
 
 from __future__ import annotations
 
+import json
 import logging
 import os
 import pathlib
 import shutil
+import socket
 import subprocess
 import sys
 import time
+import urllib.error
+import urllib.request
+from contextlib import closing
 from dataclasses import asdict, dataclass, field
 from typing import Any
 
 logger = logging.getLogger(__name__)
+
+
+# ---------------------------------------------------------------------------
+# /healthz probe (#433) — distinguish "iam-jit bouncer is listening" from
+# "some other process took the port". Returns one of:
+#   ("bouncer", "ibounce" | "kbounce" | ...)  — port belongs to a bouncer
+#   ("non_bouncer", "<reason>")                — port is in use but the
+#                                                  response did not identify
+#                                                  as a bouncer; the reason
+#                                                  string is operator-
+#                                                  facing (e.g. "connection
+#                                                  closed without an HTTP
+#                                                  response" or "GET /healthz
+#                                                  returned 404").
+#   ("free", "")                              — nothing listening on the port
+# ---------------------------------------------------------------------------
+
+
+def _probe_bouncer_healthz(
+    port: int,
+    *,
+    expected_kind: str,
+    host: str = "127.0.0.1",
+    timeout: float = 0.5,
+) -> tuple[str, str]:
+    """Probe ``http://host:port/healthz`` and report whether the
+    listener is an iam-jit bouncer of the expected kind.
+
+    Resolution:
+      * TCP connect refused → ("free", "")
+      * HTTP 200 + JSON body with ``bouncer_kind`` matching expected →
+        ("bouncer", bouncer_kind)
+      * HTTP 200 + JSON body with a DIFFERENT bouncer_kind → ("bouncer",
+        that_kind) — the caller decides what to do (in practice "wrong
+        bouncer on this port" is a misconfig the operator must resolve).
+      * Anything else (timeout, non-JSON body, no bouncer_kind, HTTP
+        error code, ...) → ("non_bouncer", <reason>).
+
+    Never raises — every failure mode maps to a tuple. Cheap loopback
+    call (< 500ms in the worst case).
+    """
+    # Fast-path: TCP-connect check. If the port is closed there's no
+    # point doing the HTTP request (urlopen would be slower).
+    with closing(socket.socket(socket.AF_INET, socket.SOCK_STREAM)) as sock:
+        sock.settimeout(timeout)
+        try:
+            sock.connect((host, port))
+        except OSError:
+            return ("free", "")
+    url = f"http://{host}:{port}/healthz"
+    try:
+        with urllib.request.urlopen(url, timeout=timeout) as resp:  # noqa: S310 — loopback only
+            status = resp.status
+            body = resp.read(8192)  # cap to avoid pathological responses
+    except urllib.error.HTTPError as e:
+        return (
+            "non_bouncer",
+            f"GET {url} returned HTTP {e.code}; not an iam-jit bouncer",
+        )
+    except (urllib.error.URLError, OSError, TimeoutError) as e:
+        return (
+            "non_bouncer",
+            f"GET {url} failed: {e}; port is in use but not by a "
+            "bouncer (or bouncer is not responding to /healthz)",
+        )
+    try:
+        payload = json.loads(body.decode("utf-8", errors="replace"))
+    except (json.JSONDecodeError, UnicodeDecodeError):
+        return (
+            "non_bouncer",
+            f"GET {url} returned non-JSON body; not an iam-jit bouncer",
+        )
+    kind = payload.get("bouncer_kind") if isinstance(payload, dict) else None
+    if not isinstance(kind, str) or not kind.strip():
+        return (
+            "non_bouncer",
+            f"GET {url} returned a response without `bouncer_kind`; "
+            "not an iam-jit bouncer",
+        )
+    _ = status  # accepted; status non-200 with parseable bouncer_kind
+    # body still means a bouncer (e.g. degraded → 503).
+    return ("bouncer", kind.strip().lower())
 
 
 # ---------------------------------------------------------------------------
@@ -101,6 +188,72 @@ DECLARATION_TO_POSTURE_KEY = {
 }
 
 
+# #434 — mode-naming alias between declaration vocabulary + runtime
+# (ibounce ProxyMode) vocabulary. The declaration calls the
+# "observe + audit + always-forward" mode `discovery` per
+# [[discovery-first-default]]; the runtime proxy calls it `cooperative`
+# (the historical name; semantics are pass-through-forward). Per the
+# UAT finding this caused declaration→posture asymmetry where
+# `mode: discovery` in the declaration surfaced as `mode: cooperative`
+# in posture + apply-config warnings, breaking operator confidence
+# that the declaration was actually applied.
+#
+# Per the brief we ship option (c): document the alias explicitly +
+# always surface the DECLARED name in operator-facing messages, with
+# the runtime name in parentheses where it matters for debugging.
+# This avoids touching the ProxyMode enum (which would ripple through
+# /healthz, audit events, the CLI flag, and dozens of tests).
+#
+# `declared_runtime_alias(mode)` returns the runtime equivalent;
+# `runtime_declared_alias(mode)` returns the declared equivalent.
+# Both round-trip on inputs they don't recognize (pass-through).
+DECLARATION_MODE_TO_RUNTIME = {
+    "discovery": "cooperative",   # discovery in declaration = cooperative runtime
+    "cooperative": "cooperative", # operator who literally writes "cooperative" → no change
+    "strict": "transparent",      # strict in declaration = transparent runtime
+}
+
+RUNTIME_MODE_TO_DECLARED = {
+    "cooperative": "discovery",   # runtime cooperative = discovery in declaration vocab
+    "transparent": "strict",
+    "plan-capture": "plan-capture",
+    "off": "off",
+}
+
+
+def declared_runtime_alias(declared_mode: str | None) -> str:
+    """Translate a declaration-mode string to the runtime ProxyMode
+    string. Pass-through for unknowns."""
+    if not isinstance(declared_mode, str):
+        return "cooperative"
+    return DECLARATION_MODE_TO_RUNTIME.get(
+        declared_mode.strip().lower(), declared_mode.strip().lower(),
+    )
+
+
+def runtime_declared_alias(runtime_mode: str | None) -> str:
+    """Translate a runtime ProxyMode string to the declaration vocab.
+    Pass-through for unknowns (e.g. `plan-capture`)."""
+    if not isinstance(runtime_mode, str):
+        return "unknown"
+    return RUNTIME_MODE_TO_DECLARED.get(
+        runtime_mode.strip().lower(), runtime_mode.strip().lower(),
+    )
+
+
+def _modes_match(declared: str | None, runtime: str | None) -> bool:
+    """True iff the declared mode resolves to the running runtime mode
+    (e.g. declared=discovery + running=cooperative → True; declared=
+    strict + running=transparent → True). Unknown on either side
+    yields True (we can't claim mismatch on missing info)."""
+    if not declared or not runtime:
+        return True
+    if str(runtime).lower() == "unknown":
+        return True
+    expected_runtime = declared_runtime_alias(declared)
+    return expected_runtime.lower() == str(runtime).lower()
+
+
 # ---------------------------------------------------------------------------
 # Result dataclass
 # ---------------------------------------------------------------------------
@@ -125,6 +278,14 @@ class SetupResult:
     audit_event_ids: list[str] = field(default_factory=list)
     warnings: list[str] = field(default_factory=list)
     resolved_conditionals: list[dict[str, Any]] = field(default_factory=list)
+    # #434 — declared-mode → runtime-mode mapping for every enabled
+    # bouncer in the declaration. Surfaces the alias so apply-config /
+    # MCP structuredContent show the operator both vocabularies.
+    # #435 — `mode_source` per bouncer attributes the provenance of
+    # the effective mode (declaration / cli_flag / env_var / default).
+    bouncer_mode_resolutions: list[dict[str, Any]] = field(
+        default_factory=list
+    )
 
     def as_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -315,6 +476,12 @@ def _start_bouncer(
     if extra_args:
         cmd.extend(extra_args)
 
+    # #434 — record BOTH the declared mode (the operator's vocabulary,
+    # what they wrote in `.iam-jit.yaml`) AND the runtime alias
+    # (cooperative/transparent/...), so dry-run / JSON output keeps
+    # the declaration→posture mapping transparent. The `mode` field
+    # stays the declared value for backward-compat with existing
+    # callers.
     record: dict[str, Any] = {
         "name": name,
         "started": False,
@@ -322,6 +489,8 @@ def _start_bouncer(
         "command": cmd,
         "port": resolved_port,
         "mode": mode,
+        "mode_declared": mode,
+        "mode_runtime": declared_runtime_alias(mode),
         "profile": profile,
     }
 
@@ -333,6 +502,20 @@ def _start_bouncer(
     # this process. Stdout / stderr go to /dev/null per the bouncer's
     # own conventions (operator inspects via `bounce posture` or the
     # bouncer's audit log).
+    #
+    # #435 — propagate IAM_JIT_BOUNCER_MODE + IAM_JIT_MODE_SOURCE into
+    # the child env so the bouncer's `resolve_active_mode` returns
+    # source="declaration" when its mode was picked by the operator's
+    # `.iam-jit.yaml`. We always set both; even when the mode is the
+    # default "discovery"/"cooperative" the attribution matters
+    # (operator wants posture to say "declaration", not "default").
+    child_env = dict(os.environ)
+    runtime_mode = declared_runtime_alias(mode)
+    if name == "ibounce":
+        # ibounce reads IAM_JIT_BOUNCER_MODE; other bouncers have their
+        # own env-var conventions and ignore these.
+        child_env["IAM_JIT_BOUNCER_MODE"] = runtime_mode
+        child_env["IAM_JIT_MODE_SOURCE"] = "declaration"
     try:
         proc = subprocess.Popen(  # noqa: S603 — args are non-shell
             cmd,
@@ -341,6 +524,7 @@ def _start_bouncer(
             stdin=subprocess.DEVNULL,
             start_new_session=True,
             close_fds=True,
+            env=child_env,
         )
         record["started"] = True
         record["pid"] = proc.pid
@@ -483,6 +667,12 @@ def apply_declaration(
     block = declaration.get("iam-jit") or {}
     result = SetupResult(dry_run=not execute, declaration_source=source)
 
+    # Cross-field warnings stashed by validate_declaration (e.g.
+    # ambient + fail_on_deny=true). Surface them up front so the
+    # operator sees the friendly nudge before any setup happens.
+    for w in declaration.get("__posture_warnings__", []) or []:
+        result.warnings.append(w)
+
     # Master switch: enabled: false → no-op.
     if not block.get("enabled", False):
         result.status = "disabled"
@@ -552,6 +742,87 @@ def apply_declaration(
         port = bcfg.get("port")
         extra_args = bcfg.get("extra_args") or []
 
+        # #434 + #435 — record the declared→runtime mapping + the
+        # provenance attribution per bouncer. The declaration is the
+        # operator's explicit input; surfacing both vocabularies +
+        # `mode_source: declaration` keeps `apply-config` output
+        # symmetric with `posture` output.
+        result.bouncer_mode_resolutions.append({
+            "bouncer": name,
+            "mode_declared": mode,
+            "mode_runtime": declared_runtime_alias(mode),
+            "mode_source": "declaration",
+        })
+
+        # #433 — probe /healthz to confirm the listener really IS an
+        # iam-jit bouncer of the expected kind before we claim
+        # "already running". A bare TCP probe (posture's mechanism)
+        # cannot tell us whether nc/redis/whatever happens to be on
+        # the port. Run only when posture says the port is bound.
+        if already_running:
+            probe_port = int(
+                pbouncer.get("port")
+                or port
+                or BOUNCER_DEFAULTS[name]["default_port"]
+            )
+            probe_kind, probe_detail = _probe_bouncer_healthz(
+                probe_port,
+                expected_kind=name,
+            )
+            if probe_kind == "non_bouncer":
+                # The TCP port is occupied but the listener is NOT a
+                # bouncer. Don't claim "already running"; warn loudly.
+                result.bouncers_skipped.append({
+                    "name": name,
+                    "reason": (
+                        f"port {probe_port} already occupied by a "
+                        f"non-iam-jit process. {probe_detail} "
+                        f"Specify a different port for {name} via the "
+                        f"declaration's `port:` field or stop the "
+                        f"existing process."
+                    ),
+                })
+                result.warnings.append(
+                    f"{name}: port {probe_port} is in use by a process "
+                    f"that does NOT identify as an iam-jit bouncer. "
+                    f"{probe_detail} The setup will NOT start {name} "
+                    f"on this port (would conflict). Either stop the "
+                    f"existing process or set `bouncers.{name}.port:` "
+                    f"to a free port in your declaration."
+                )
+                # Don't add to bouncers_already_running and don't
+                # advertise an env var pointing at the wrong process.
+                continue
+            if probe_kind == "bouncer" and probe_detail not in (
+                name,
+                # kbouncer's posture key is "kbounce" but the bouncer
+                # may identify as either; accept the kbouncer/kbounce
+                # symmetry per the existing alias map.
+                DECLARATION_TO_POSTURE_KEY.get(name, name),
+            ):
+                # A DIFFERENT bouncer is on the port we wanted —
+                # transparent warning + skip per
+                # [[ibounce-honest-positioning]].
+                result.bouncers_skipped.append({
+                    "name": name,
+                    "reason": (
+                        f"port {probe_port} is occupied by a different "
+                        f"iam-jit bouncer (`{probe_detail}`); cannot "
+                        f"start {name} here. Choose a different port "
+                        f"or stop the other bouncer."
+                    ),
+                })
+                result.warnings.append(
+                    f"{name}: port {probe_port} is occupied by another "
+                    f"iam-jit bouncer (`{probe_detail}`). Setting "
+                    f"`bouncers.{name}.port:` to a free port resolves "
+                    f"this."
+                )
+                continue
+            # probe_kind == "free" is impossible here (posture said
+            # running) but handle it conservatively — treat as "no
+            # confirmation; fall through to legacy path".
+
         if already_running:
             # Per [[creates-never-mutates]]: do NOT restart a running
             # bouncer to apply a different mode/profile without explicit
@@ -559,10 +830,13 @@ def apply_declaration(
             running_mode = pbouncer.get("mode", "unknown")
             running_profile = pbouncer.get("active_profile", "unknown")
             running_port = pbouncer.get("port")
+            # #434 — compare using the alias-aware helper so a
+            # declaration-mode `discovery` does NOT trip a "mismatch"
+            # against a runtime mode `cooperative` (they're the same
+            # thing under different vocabularies).
             mode_mismatch = (
-                running_mode not in ("unknown", mode)
-                and not (mode == "strict" and running_mode == "transparent")
-                and not (mode == "discovery" and running_mode == "discovery")
+                running_mode not in ("unknown", "")
+                and not _modes_match(mode, running_mode)
             )
             profile_mismatch = (
                 profile != "auto"
@@ -574,9 +848,17 @@ def apply_declaration(
                 and int(port) != int(running_port)
             )
             if mode_mismatch or profile_mismatch or port_mismatch:
+                # Surface the running mode in DECLARED vocabulary so the
+                # operator can compare apples-to-apples with their
+                # `.iam-jit.yaml`. The runtime form is included in
+                # parentheses so a curious operator can map back to the
+                # ibounce CLI flag.
+                running_mode_declared = runtime_declared_alias(running_mode)
                 result.warnings.append(
                     f"{name} is already running with "
-                    f"mode={running_mode!r} profile={running_profile!r} "
+                    f"mode={running_mode_declared!r} "
+                    f"(runtime: {running_mode!r}) "
+                    f"profile={running_profile!r} "
                     f"port={running_port!r}; the declaration asks for "
                     f"mode={mode!r} profile={profile!r} port={port!r}. "
                     f"Per [[creates-never-mutates]] we will NOT restart "

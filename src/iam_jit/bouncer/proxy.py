@@ -264,6 +264,24 @@ logger = logging.getLogger(__name__)
 # agents do not flip it.
 ACTIVE_MODE_ENV = "IAM_JIT_BOUNCER_MODE"
 
+# #435 — provenance attribution env var. When ambient_config's
+# `apply_declaration` starts the bouncer, it sets this env var to
+# `declaration` so `resolve_active_mode` can report `mode_source=
+# declaration` (instead of the misleading `env`, which conflates
+# operator-typed env vars with declaration-derived ones). Accepted
+# values: declaration | cli_flag | env_var | default | session_override.
+# When set to an unknown value we ignore it and fall back to the
+# pre-#435 attribution logic.
+MODE_SOURCE_ENV = "IAM_JIT_MODE_SOURCE"
+KNOWN_MODE_SOURCES = (
+    "declaration",
+    "cli_flag",
+    "env",
+    "env_var",  # alias for `env` (kept for forward-compat readers)
+    "default",
+    "session_override",
+)
+
 # Per-session override slot. The CLI (or a test) can call
 # `set_session_mode_override("transparent")` to declare "for this
 # Python session, the effective mode is X" — overrides the env var.
@@ -896,10 +914,18 @@ def resolve_active_mode() -> dict[str, str]:
       1. Session override (set via `set_session_mode_override`) ->
          source="session_override"
       2. `IAM_JIT_BOUNCER_MODE` env var (case-insensitive; accepts
-         cooperative | transparent | off) -> source="env"
+         cooperative | transparent | off) -> source as below
       3. Default = "cooperative" (matches `ProxyConfig.mode` default
          + the [[safety-mode-lean-permissive]] guidance) ->
          source="default"
+
+    Per #435, when the env var IS used the source attribution is
+    refined by the optional ``IAM_JIT_MODE_SOURCE`` env var (set by
+    ambient-config's apply_declaration to `declaration`, by the CLI
+    flag handler to `cli_flag`, etc.). When that env var is absent
+    or unknown we fall back to `env_var`. The legacy `env` value is
+    still accepted as an alias for backward compat with anything
+    that pre-#435 parsed the `source` field literally.
 
     Unknown env values fall through to the default + source="default"
     (we don't crash the MCP server on a typo'd env). Returned dict
@@ -910,7 +936,19 @@ def resolve_active_mode() -> dict[str, str]:
         return {"mode": _session_mode_override, "source": "session_override"}
     raw = os.environ.get(ACTIVE_MODE_ENV, "").strip().lower()
     if raw in ("cooperative", "transparent", "off", "plan-capture"):
-        return {"mode": raw, "source": "env"}
+        # #435 — refine source attribution from IAM_JIT_MODE_SOURCE.
+        # Default stays `env` for backward compat with existing
+        # callers that string-match on the source value (the
+        # plan-capture MCP test, the audit-export consumer, etc.).
+        # Only when ambient-config (or another caller) explicitly sets
+        # IAM_JIT_MODE_SOURCE=declaration|cli_flag|... do we surface
+        # the refined attribution.
+        attributed_source = (
+            os.environ.get(MODE_SOURCE_ENV, "").strip().lower() or "env"
+        )
+        if attributed_source not in KNOWN_MODE_SOURCES:
+            attributed_source = "env"
+        return {"mode": raw, "source": attributed_source}
     return {"mode": "cooperative", "source": "default"}
 
 
@@ -3244,6 +3282,13 @@ async def serve(config: ProxyConfig, *, store: BouncerStore) -> None:
                 ),
             })
         return web.json_response({
+            # #433 — bouncer_kind identifier so apply-config /
+            # cross-product tooling can disambiguate "port is in use
+            # by a bouncer" from "port is in use by some other
+            # process". Always "ibounce" for this proxy; kbounce /
+            # dbounce / gbounce surface the same field on their own
+            # /healthz endpoints per [[cross-product-agent-parity]].
+            "bouncer_kind": "ibounce",
             "status": status_str,
             "mode": config.mode.value,
             "default_policy": config.default_policy.value,

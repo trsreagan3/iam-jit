@@ -138,13 +138,23 @@ def register_apply_config_command(doctor_group: click.Group) -> click.Command:
                         )
             sys.exit(2)
 
-        # --inspect: validation only.
+        # --inspect: validation only. Surface any posture cross-field
+        # warnings the loader stashed (e.g. ambient + fail_on_deny).
         if inspect:
+            posture_warnings = list(
+                declaration.get("__posture_warnings__", []) or []
+            )
+            # Don't leak the sentinel key in the rendered declaration.
+            clean_declaration = {
+                k: v for k, v in declaration.items()
+                if k != "__posture_warnings__"
+            }
             payload = {
                 "status": "ok",
                 "validated": True,
                 "source": source_label,
-                "declaration": declaration,
+                "declaration": clean_declaration,
+                "warnings": posture_warnings,
             }
             if as_json:
                 click.echo(_json.dumps(payload, indent=2))
@@ -153,7 +163,13 @@ def register_apply_config_command(doctor_group: click.Group) -> click.Command:
                     f"declaration at {source_label} is VALID",
                     fg="green",
                 )
-                click.echo(_json.dumps(declaration, indent=2))
+                if posture_warnings:
+                    click.echo()
+                    click.secho("Posture warnings:", fg="yellow", bold=True)
+                    for w in posture_warnings:
+                        click.secho(f"  - {w}", fg="yellow")
+                    click.echo()
+                click.echo(_json.dumps(clean_declaration, indent=2))
             return
 
         # Plan or apply.
@@ -198,6 +214,22 @@ def _render_human(result: Any, *, dry_run: bool) -> None:
             click.secho(
                 f"  - {r['bouncer']}: {r['evidence']}",
                 fg=color,
+            )
+
+    if getattr(result, "bouncer_mode_resolutions", None):
+        click.echo()
+        click.secho(
+            "Per-bouncer mode resolution (declared → runtime):", bold=True,
+        )
+        for r in result.bouncer_mode_resolutions:
+            declared = r.get("mode_declared")
+            runtime = r.get("mode_runtime")
+            src = r.get("mode_source", "declaration")
+            same = declared == runtime
+            arrow = "" if same else f" (runtime alias: {runtime})"
+            click.echo(
+                f"  - {r['bouncer']}: mode={declared!r}{arrow} "
+                f"mode_source={src!r}"
             )
 
     if result.bouncers_started:
@@ -296,11 +328,19 @@ def apply_config_for_mcp(args: dict[str, Any]) -> dict[str, Any]:
         }
 
     if inspect:
+        posture_warnings = list(
+            declaration.get("__posture_warnings__", []) or []
+        )
+        clean_declaration = {
+            k: v for k, v in declaration.items()
+            if k != "__posture_warnings__"
+        }
         return {
             "status": "ok",
             "validated": True,
             "source": source_label,
-            "declaration": declaration,
+            "declaration": clean_declaration,
+            "warnings": posture_warnings,
         }
 
     if dry_run:

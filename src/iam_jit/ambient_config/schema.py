@@ -124,6 +124,11 @@ _INLINE_SCHEMA: dict[str, Any] = {
                     },
                 },
                 "notify_on_deny": {"type": "boolean", "default": True},
+                "fail_on_deny": {"type": "boolean", "default": False},
+                "require_signed_profiles": {
+                    "type": "boolean",
+                    "default": False,
+                },
             },
         }
     },
@@ -161,6 +166,14 @@ _INLINE_SCHEMA: dict[str, Any] = {
                     "type": "integer",
                     "minimum": 1,
                     "maximum": 65535,
+                },
+                "profile_source": {
+                    "type": "string",
+                    "minLength": 1,
+                },
+                "profile_sha256": {
+                    "type": "string",
+                    "pattern": "^[a-fA-F0-9]{64}$",
                 },
                 "extra_args": {
                     "type": "array",
