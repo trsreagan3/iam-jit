@@ -235,6 +235,7 @@ def _what_if_evaluator(profile_name: str):
                 account_alias=req["account_alias"] or None,
                 service=req["service"],
                 action=req["operation"],
+                region=req.get("region") or None,
             )
         except Exception as e:  # noqa: BLE001
             return ("error", f"profile-eval raised: {e}")

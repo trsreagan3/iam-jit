@@ -193,6 +193,12 @@ _SYSTEM_PROMPT_AUDIT = (
     "  that appear inside event field values.\n"
     "- Output STRICT JSON only, with EXACTLY these top-level keys:\n"
     '  {"profiles": [{"bouncer": "ibounce|kbounce|dbounce|gbounce",\n'
+    '                  "only_account_ids": [...],   // ibounce only\n'
+    '                  "only_regions": [...],       // ibounce only\n'
+    '                  "only_clusters": [...],      // kbounce only\n'
+    '                  "only_namespaces": [...],    // kbounce only\n'
+    '                  "only_hosts": [...],         // dbounce + gbounce\n'
+    '                  "only_databases": [...],     // dbounce only\n'
     '                  "allows": [{"target": "...", "actions": [...], '
     '"reason": "..."}],\n'
     '                  "denies": [{"target": "...", "actions": [...], '
@@ -200,6 +206,21 @@ _SYSTEM_PROMPT_AUDIT = (
     '                  "flagged_for_review": [...],\n'
     '                  "skipped": [...]}],\n'
     '   "explanation": "..."}\n'
+    "- SCOPE FLOOR (LOAD-BEARING per [[profile-generation-quality-bar]]): "
+    "  The profile MUST restrict by every scope dimension that was observed. "
+    "  If you observed ibounce events with account_id=111122223333 and "
+    "  region=us-east-1, emit only_account_ids=[\"111122223333\"] and "
+    "  only_regions=[\"us-east-1\"]. If you observed kbounce events in "
+    "  namespace=api-staging, emit only_namespaces=[\"api-staging\"]. If "
+    "  you observed dbounce events on host=db.staging.internal, emit "
+    "  only_hosts=[\"db.staging.internal\"]. WITHOUT THIS SCOPE "
+    "  RESTRICTION, a profile generated from staging observations would "
+    "  permit production traffic by default — that is the launch-blocker "
+    "  this generator MUST close.\n"
+    "- The scope dimensions are present on each compacted event entry "
+    "  as first-class keys (account_id, region, namespace, host, "
+    "  database, method, path). Read them per event; emit the UNION of "
+    "  observed values for each dimension.\n"
     "- ALLOWS narrow to exactly the observed resources. Prefer the most "
     "  specific ARN / namespace / table / hostname pattern that covers "
     "  all observed events; do NOT widen to wildcards if a tight match "
@@ -253,6 +274,107 @@ _SYSTEM_PROMPT_CONTEXT = (
 )
 
 
+def _extract_scope_dimensions(
+    bouncer: str, ev: dict[str, Any],
+) -> dict[str, str]:
+    """§A38 #370 — pull per-bouncer scope dimensions out of an OCSF
+    audit event so the compactor + downstream renderer can emit
+    scope-restricted profiles.
+
+    Cross-bouncer invariant per [[multi-account-region-cluster-use-case]]:
+    the FLOOR for any generated profile is "restricts by every scope
+    dimension that was observed." Without this extraction the generator
+    is scope-blind (observing staging permits prod). Empty dict when
+    the event has nothing extractable — caller treats missing scope as
+    "unknown, do not restrict on this dimension" (honest per
+    [[ibounce-honest-positioning]]; the operator sees no scope in the
+    rendered YAML rather than a fabricated one).
+
+    Per-bouncer extraction:
+      - ibounce: account_id parsed from `unmapped.iam_jit.ext.aws_account_id`
+        falling back to ARN parts[4] (`arn:aws:s3:::reports`-style ARNs
+        without an account-id portion stay account-blind, which is the
+        truthful answer); region from `unmapped.iam_jit.ext.aws_region`
+        falling back to ARN parts[3].
+      - kbouncer: namespace from `unmapped.iam_jit.ext.namespace` (the
+        canonical kbouncer place; cluster identity is the bouncer
+        instance itself per [[no-k8s-proxy-for-iam-jit]] — no cluster
+        field in the event today; the operator distinguishes clusters
+        by which kbounce instance fed the events).
+      - dbounce: host + port from `dst_endpoint.hostname` / `.port`;
+        database from `unmapped.iam_jit.ext.database` when present
+        (dbounce extracts the db name at handshake; older events
+        without it stay db-blind).
+      - gbounce: host from `dst_endpoint.hostname` falling back to
+        `api.service.name`; method/path from api.operation prefix.
+    """
+    out: dict[str, str] = {}
+    ext = (ev.get("unmapped") or {}).get("iam_jit", {}).get("ext") or {}
+    dst = ev.get("dst_endpoint") or {}
+    api = ev.get("api") or {}
+    api_service = (api.get("service") or {}).get("name") or ""
+    api_operation = api.get("operation") or ""
+    resources = api.get("resources") or []
+    first_resource_uid = ""
+    if resources and isinstance(resources, list):
+        first = resources[0]
+        if isinstance(first, dict):
+            first_resource_uid = str(first.get("uid") or first.get("name") or "")
+
+    if bouncer == "ibounce":
+        # account_id: prefer explicit ext field, fall back to ARN
+        # segment. Per the audit_export/event.py builder the
+        # canonical home is unmapped.iam_jit.ext.aws_account_id but
+        # current builders only emit aws_region — so fall back to
+        # parsing the ARN (parts[4]).
+        acct = str(ext.get("aws_account_id") or "")
+        if not acct and first_resource_uid.startswith("arn:"):
+            parts = first_resource_uid.split(":", 5)
+            if len(parts) >= 5 and parts[4]:
+                acct = parts[4]
+        if acct:
+            out["account_id"] = acct
+        region = str(ext.get("aws_region") or "")
+        if not region and first_resource_uid.startswith("arn:"):
+            parts = first_resource_uid.split(":", 5)
+            if len(parts) >= 4 and parts[3]:
+                region = parts[3]
+        if region:
+            out["region"] = region
+    elif bouncer in ("kbounce", "kbouncer"):
+        ns = str(ext.get("namespace") or "")
+        if ns:
+            out["namespace"] = ns
+        # Cluster identity is the bouncer instance itself; no cluster
+        # field in the event today. When kbouncer adds a cluster
+        # selector (v1.1 #374) this is where it lands.
+        cluster = str(ext.get("cluster") or ext.get("cluster_name") or "")
+        if cluster:
+            out["cluster"] = cluster
+    elif bouncer in ("dbounce", "dbouncer"):
+        host = str(dst.get("hostname") or "")
+        if host:
+            out["host"] = host
+        port = dst.get("port")
+        if port:
+            out["port"] = str(port)
+        database = str(ext.get("database") or ext.get("db_name") or "")
+        if database:
+            out["database"] = database
+    elif bouncer in ("gbounce", "gbouncer"):
+        host = str(dst.get("hostname") or api_service or "")
+        if host:
+            out["host"] = host
+        # api.operation is "<METHOD> <path>" for gbounce
+        if api_operation and " " in api_operation:
+            method, _, path = api_operation.partition(" ")
+            if method:
+                out["method"] = method
+            if path:
+                out["path"] = path
+    return out
+
+
 def _compact_audit_events_for_prompt(
     events: list[dict[str, Any]],
     *,
@@ -262,13 +384,25 @@ def _compact_audit_events_for_prompt(
 
     Targets ~1500-3000 input tokens for typical 1-hour windows.
     Drops timestamp resolution to second precision, deduplicates
-    identical (verdict, action, resource) tuples (we send count
-    instead), and caps the per-bouncer list at `max_events` so a
-    runaway event firehose doesn't blow the context window."""
+    identical (verdict, action, resource, scope) tuples (we send
+    count instead), and caps the per-bouncer list at `max_events` so
+    a runaway event firehose doesn't blow the context window.
+
+    §A38 #370: the dedupe key now INCLUDES per-bouncer scope
+    dimensions (account_id+region for ibounce, namespace for kbouncer,
+    host+database for dbounce, host for gbounce) so the LLM sees the
+    scope context per cluster of similar events. Without this the
+    compactor collapsed cross-account/region events to a single line
+    and the generated profile was scope-blind (FAILED the floor in
+    [[profile-generation-quality-bar]]).
+    """
     per_bouncer: dict[str, list[dict[str, Any]]] = defaultdict(list)
-    # Dedupe key: (bouncer, verdict, action, resource). Count occurrences.
-    counter: Counter[tuple[str, str, str, str]] = Counter()
-    examples: dict[tuple[str, str, str, str], dict[str, Any]] = {}
+    # Dedupe key now includes a stable serialization of the scope so
+    # different accounts/regions/namespaces/hosts produce DISTINCT
+    # rows in the prompt — the LLM needs that visibility to emit
+    # scope-restricted profiles.
+    counter: Counter[tuple[str, str, str, str, str]] = Counter()
+    examples: dict[tuple[str, str, str, str, str], dict[str, Any]] = {}
     for ev in events:
         bouncer = str(ev.get("_bouncer") or "unknown")
         ext = (ev.get("unmapped") or {}).get("iam_jit") or {}
@@ -287,16 +421,25 @@ def _compact_audit_events_for_prompt(
         if not resource:
             resource = str(ext.get("resource") or "")
         action = f"{svc}:{op}" if svc and op else op
-        key = (bouncer, verdict, action, resource)
+        scope = _extract_scope_dimensions(bouncer, ev)
+        # Stable-ordered serialization for dedupe key.
+        scope_key = json.dumps(scope, sort_keys=True)
+        key = (bouncer, verdict, action, resource, scope_key)
         counter[key] += 1
         if key not in examples:
-            examples[key] = {
+            entry: dict[str, Any] = {
                 "bouncer": bouncer,
                 "verdict": verdict,
                 "action": action,
                 "resource": resource,
                 "time": ev.get("time"),
             }
+            # Flatten the scope dimensions onto the example so the LLM
+            # sees them as first-class keys (account_id, region,
+            # namespace, host, database, method, path) without having
+            # to parse a nested object.
+            entry.update(scope)
+            examples[key] = entry
 
     for key, count in counter.most_common():
         ex = examples[key]
@@ -384,6 +527,112 @@ def _flatten_targets(rules: list[dict[str, Any]]) -> list[str]:
 
 
 _VALID_BOUNCERS = frozenset({"ibounce", "kbounce", "dbounce", "gbounce", "bundle"})
+
+
+# §A38 #370 — per-bouncer scope-restriction field names. The generator
+# emits these AT THE PROFILE TOP LEVEL alongside `allows` / `denies`.
+# Each bouncer's loader recognizes its applicable fields (ibounce has
+# only_account_ids + only_regions today; kbouncer adds only_clusters /
+# only_namespaces in v1.1 #374; dbounce has only_hosts / only_databases
+# per §A40 #372). Per [[creates-never-mutates]] emitting a field whose
+# loader doesn't yet understand it is additive — the loader tolerates
+# unknown YAML keys.
+_SCOPE_FIELDS_BY_BOUNCER: dict[str, tuple[str, ...]] = {
+    "ibounce": ("only_account_ids", "only_regions"),
+    "kbounce": ("only_clusters", "only_namespaces"),
+    "dbounce": ("only_hosts", "only_databases"),
+    "gbounce": ("only_hosts",),
+}
+
+
+# §A38 #370 — map per-bouncer scope-field name to the event scope
+# dimension key (set by _extract_scope_dimensions). The generator
+# UNIONs the observed values per dimension into the corresponding
+# scope field. e.g. observed ibounce events with account_id=111 +
+# account_id=222 yield only_account_ids: [111, 222]; the operator
+# narrows manually if both were observed but only one is desired.
+_SCOPE_DIM_BY_FIELD: dict[str, str] = {
+    "only_account_ids": "account_id",
+    "only_regions": "region",
+    "only_clusters": "cluster",
+    "only_namespaces": "namespace",
+    "only_hosts": "host",
+    "only_databases": "database",
+}
+
+
+def _parse_scope_fields(entry: dict[str, Any]) -> dict[str, list[str]]:
+    """Pull recognized scope fields out of an LLM-emitted profile dict.
+    Values must be lists of strings; anything else is silently dropped
+    (the client overlay in _enrich_scope_from_events will fill the gap
+    from observed events)."""
+    out: dict[str, list[str]] = {}
+    for field in _SCOPE_DIM_BY_FIELD:
+        v = entry.get(field)
+        if isinstance(v, list):
+            cleaned = [str(x) for x in v if isinstance(x, (str, int))]
+            if cleaned:
+                out[field] = cleaned
+    return out
+
+
+def _enrich_scope_from_events(
+    profiles: list[dict[str, Any]],
+    events_by_bouncer: dict[str, list[dict[str, Any]]],
+) -> list[dict[str, Any]]:
+    """§A38 #370 — overlay the observed-scope union onto each profile.
+
+    For each bouncer, for each applicable scope field (per
+    _SCOPE_FIELDS_BY_BOUNCER), collect the set of observed values
+    for that dimension across all compacted events. UNION with what
+    the LLM emitted (so an LLM that ran ahead of the fallback overlay
+    doesn't get overridden) and re-emit. Empty observed-set for a
+    dimension = leave the LLM's value (or absence) alone — we never
+    inject a wildcard or guess.
+
+    Per [[creates-never-mutates]]: additive only. Existing scope
+    values from the LLM are preserved; observed values are merged in.
+    """
+    out: list[dict[str, Any]] = []
+    for p in profiles:
+        bouncer = str(p.get("bouncer") or "")
+        fields = _SCOPE_FIELDS_BY_BOUNCER.get(bouncer, ())
+        if not fields:
+            out.append(p)
+            continue
+        observed_per_dim: dict[str, list[str]] = defaultdict(list)
+        seen_per_dim: dict[str, set[str]] = defaultdict(set)
+        for ev in events_by_bouncer.get(bouncer, []):
+            for field in fields:
+                dim = _SCOPE_DIM_BY_FIELD.get(field)
+                if not dim:
+                    continue
+                v = ev.get(dim)
+                if v and v not in seen_per_dim[dim]:
+                    seen_per_dim[dim].add(str(v))
+                    observed_per_dim[dim].append(str(v))
+        enriched = dict(p)
+        for field in fields:
+            dim = _SCOPE_DIM_BY_FIELD.get(field, "")
+            observed = observed_per_dim.get(dim, [])
+            if not observed:
+                continue
+            existing_raw = enriched.get(field) or []
+            existing = (
+                [str(x) for x in existing_raw if isinstance(x, (str, int))]
+                if isinstance(existing_raw, list)
+                else []
+            )
+            # Union, preserve order: existing first, then new observed.
+            seen = set(existing)
+            merged = list(existing)
+            for v in observed:
+                if v not in seen:
+                    seen.add(v)
+                    merged.append(v)
+            enriched[field] = merged
+        out.append(enriched)
+    return out
 
 
 # Hard-coded safety floor — the deterministic fallback when the LLM
@@ -489,8 +738,19 @@ def _deterministic_fallback_profile(
     fallback profile contains only allows for its own observed
     traffic — without this gate the deterministic-fallback dumps
     every bouncer's resources into every profile.
+
+    §A38 #370: the deterministic fallback also extracts + emits scope
+    dimensions per [[multi-account-region-cluster-use-case]] —
+    observed account_ids land in only_account_ids; observed regions
+    in only_regions; namespaces in only_namespaces; hosts in
+    only_hosts; databases in only_databases. The FLOOR test
+    (observed staging denies prod) must pass in the LLM-unavailable
+    case too, not just on the happy path.
     """
     seen: dict[str, set[str]] = defaultdict(set)
+    # Per-dimension observed sets feed scope-restriction fields.
+    scope_observed: dict[str, list[str]] = defaultdict(list)
+    scope_seen: dict[str, set[str]] = defaultdict(set)
     for ev in events:
         ev_bouncer = str(ev.get("_bouncer") or "")
         # Only this bouncer's events contribute to this bouncer's allows.
@@ -512,6 +772,14 @@ def _deterministic_fallback_profile(
         if not resource:
             resource = str(ext.get("resource") or "")
         verdict = str(ext.get("verdict") or ev.get("activity_name") or "")
+        # Capture scope BEFORE the allow-only filter so deny-mode
+        # discovery (the operator-watches-a-bad-flow scenario) still
+        # gets the right scope floor in the generated profile.
+        dims = _extract_scope_dimensions(bouncer, ev)
+        for dim, val in dims.items():
+            if val and val not in scope_seen[dim]:
+                scope_seen[dim].add(val)
+                scope_observed[dim].append(val)
         if verdict.lower() != "allow":
             continue
         if not action or not resource:
@@ -524,7 +792,7 @@ def _deterministic_fallback_profile(
         for res, actions in sorted(seen.items())
     ]
     denies = list(_SAFETY_FLOOR_DENIES.get(bouncer, [])) if add_safety_denies else []
-    return {
+    out: dict[str, Any] = {
         "bouncer": bouncer,
         "allows": allows,
         "denies": denies,
@@ -535,6 +803,13 @@ def _deterministic_fallback_profile(
         ],
         "skipped": [],
     }
+    # §A38 #370 — emit scope-restriction fields per applicable bouncer.
+    for field in _SCOPE_FIELDS_BY_BOUNCER.get(bouncer, ()):
+        dim = _SCOPE_DIM_BY_FIELD.get(field, "")
+        observed = scope_observed.get(dim, [])
+        if observed:
+            out[field] = observed
+    return out
 
 
 def _parse_llm_response(
@@ -621,6 +896,14 @@ def _parse_llm_response(
         flagged = [str(f) for f in flagged_raw if isinstance(f, (str, dict))]
         skipped = [str(s) for s in skipped_raw if isinstance(s, (str, dict))]
 
+        # §A38 #370 — parse scope dimensions the LLM emitted (per
+        # _SYSTEM_PROMPT_AUDIT). _enrich_scope_from_events below adds
+        # a client-side belt-and-suspenders: if the LLM omitted a
+        # scope dimension that's present in EVERY observed event for
+        # this bouncer, the client adds it. Defense in depth against
+        # an LLM that ignored the scope-floor instruction.
+        scope_fields = _parse_scope_fields(entry)
+
         # Per [[ibounce-honest-positioning]]: auto-flag any allow / deny
         # whose target contains a wildcard. Even if the LLM didn't catch
         # it, we add the flag client-side as a safety net.
@@ -639,13 +922,23 @@ def _parse_llm_response(
                 if floor["reason"] not in existing_reasons:
                     denies.append(floor)
 
-        out.append({
+        out_entry = {
             "bouncer": bouncer,
             "allows": allows,
             "denies": denies,
             "flagged_for_review": flagged,
             "skipped": skipped,
-        })
+        }
+        out_entry.update(scope_fields)
+        out.append(out_entry)
+
+    # §A38 #370 — enrich every parsed profile with observed-scope
+    # restrictions. This runs AFTER the LLM parse so even if the LLM
+    # missed (or hallucinated) scope, the client overlay reflects the
+    # actual observed events. Per [[profile-generation-quality-bar]]
+    # this is the FLOOR. Idempotent: re-running on an already-scoped
+    # profile is a no-op (union with itself).
+    out = _enrich_scope_from_events(out, events_by_bouncer)
 
     if not out:
         # LLM returned a structurally-valid response with no usable
@@ -720,6 +1013,7 @@ def _render_profile_yaml(
     provenance: str,
     llm_backend: str,
     source_session_id: str | None,
+    scope_fields: dict[str, list[str]] | None = None,
 ) -> str:
     """Render one bouncer's generated profile to YAML. Includes the
     honest-positioning header + provenance metadata."""
@@ -768,6 +1062,35 @@ def _render_profile_yaml(
         )
     lines.append(f"  events_analyzed: {events_analyzed}")
     lines.append("")
+
+    # §A38 #370 — scope-restriction fields rendered AFTER provenance,
+    # BEFORE allows/denies so the YAML reads "this profile is scoped
+    # to X, then allows Y, then denies Z" top-to-bottom. Per-bouncer
+    # applicable fields are gated by _SCOPE_FIELDS_BY_BOUNCER so we
+    # never emit an only_account_ids on a kbounce profile (etc.). For
+    # dbounce + gbounce: per §A40 (#372) dbounce's loader already
+    # recognizes only_hosts + only_databases (sibling agent landed it
+    # in dbounce working tree at session-start). gbounce currently
+    # uses deny_hosts at the rules layer; emitting only_hosts at the
+    # profile-level is additive and gbounce's loader tolerates
+    # unknown keys (UnmarshalYAML strict-decode is disabled per
+    # cross-product invariant).
+    if scope_fields:
+        applicable = set(_SCOPE_FIELDS_BY_BOUNCER.get(bouncer, ()))
+        for field in (
+            "only_account_ids", "only_regions",
+            "only_clusters", "only_namespaces",
+            "only_hosts", "only_databases",
+        ):
+            if field not in applicable:
+                continue
+            values = scope_fields.get(field) or []
+            if not values:
+                continue
+            lines.append(f"{field}:")
+            for v in values:
+                lines.append(f"  - {_yaml_quote(str(v))}")
+        lines.append("")
 
     if allows:
         lines.append("allows:")
@@ -1032,6 +1355,14 @@ def generate_from_audit(
                 seen_set.add(res)
                 observed.append(res)
 
+        # §A38 #370 — pull scope-restriction fields off the parsed
+        # profile dict (populated by _parse_scope_fields +
+        # _enrich_scope_from_events from the audit observations).
+        scope_fields = {
+            field: list(p[field])
+            for field in _SCOPE_DIM_BY_FIELD
+            if isinstance(p.get(field), list) and p.get(field)
+        }
         rendered = _render_profile_yaml(
             bouncer=bouncer,
             profile_name=f"{profile_name}-{bouncer}",
@@ -1046,6 +1377,7 @@ def generate_from_audit(
             provenance="llm-generated-from-audit",
             llm_backend=backend_name,
             source_session_id=agent_session_id,
+            scope_fields=scope_fields,
         )
         rendered_yamls.append(rendered)
         bundle.append(GeneratedProfile(
@@ -1128,6 +1460,11 @@ def generate_from_context(
     bundle: list[GeneratedProfile] = []
     for p in profiles:
         bouncer = p["bouncer"]
+        scope_fields = {
+            field: list(p[field])
+            for field in _SCOPE_DIM_BY_FIELD
+            if isinstance(p.get(field), list) and p.get(field)
+        }
         rendered = _render_profile_yaml(
             bouncer=bouncer,
             profile_name=f"{profile_name}-{bouncer}",
@@ -1142,6 +1479,7 @@ def generate_from_context(
             provenance="llm-generated-from-context",
             llm_backend=backend_name,
             source_session_id=None,
+            scope_fields=scope_fields,
         )
         # Hash the context for provenance audit trail.
         ctx_hash = hashlib.sha256(

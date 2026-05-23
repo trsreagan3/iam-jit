@@ -13,10 +13,11 @@ approving the install — "even with admin, this can't touch prod."
 Composition order (load-bearing):
   1. Profile `deny_keywords` match (and not in `exceptions`) → DENY
   2. Profile `only_account_ids` mismatch → DENY
-  3. Profile `deny_verbs` match → DENY
-  4. Active task scope denies → DENY
-  5. Active task scope allows → ALLOW
-  6. Global rules → standard match flow
+  3. Profile `only_regions` mismatch → DENY (§A39 #371)
+  4. Profile `deny_verbs` match → DENY
+  5. Active task scope denies → DENY
+  6. Active task scope allows → ALLOW
+  7. Global rules → standard match flow
 
 Profiles do NOT replace per-task scopes; they layer above them.
 
@@ -26,8 +27,9 @@ Honest limitations (must be documented):
 - False positives possible. Default `word_boundary` matching reduces
   but doesn't eliminate them; per-profile `exceptions` list closes
   remaining false positives.
-- The `only_account_ids` field is the STRUCTURED boundary; keywords
-  are the human-friendly 80%-coverage layer on top.
+- The `only_account_ids` + `only_regions` fields are the STRUCTURED
+  boundaries; keywords are the human-friendly 80%-coverage layer on
+  top.
 """
 
 from __future__ import annotations
@@ -78,6 +80,16 @@ class Profile:
     keyword_targets: tuple[str, ...] = ("arn", "resource_name")
     keyword_match: KeywordMatchMode = "word_boundary"
     only_account_ids: tuple[str, ...] = ()
+    # ----------------------------------------------------------------
+    # §A39 #371 — top-level region scope, symmetric with only_account_ids.
+    # Multi-region operators need a profile-level region floor without
+    # hand-crafting per-rule region_scope on every allow_rule. When
+    # non-empty, request region MUST be in the set or evaluation
+    # short-circuits with DENY reason "profile_only_regions". Empty
+    # tuple (default) means "no region restriction" — matches the
+    # only_account_ids convention. Per [[multi-account-region-cluster-use-case]]
+    # this closes the cross-region launch-blocker.
+    only_regions: tuple[str, ...] = ()
     deny_verbs: tuple[str, ...] = ()
     exceptions: tuple[str, ...] = ()
     # Profile-scoped ALLOW rules. Only consulted when this profile is
@@ -506,6 +518,7 @@ def _profile_from_dict(name: str, body: dict[str, Any]) -> Profile:
         keyword_targets=_str_tuple("keyword_targets", default=("arn", "resource_name")),
         keyword_match=keyword_match,  # type: ignore[arg-type]
         only_account_ids=_str_tuple("only_account_ids"),
+        only_regions=_str_tuple("only_regions"),
         deny_verbs=_str_tuple("deny_verbs"),
         exceptions=_str_tuple("exceptions"),
         allow_rules=allow_rules,
@@ -629,6 +642,8 @@ def profile_to_yaml_dict(profile: Profile) -> dict[str, Any]:
         body["keyword_match"] = profile.keyword_match
     if profile.only_account_ids:
         body["only_account_ids"] = list(profile.only_account_ids)
+    if profile.only_regions:
+        body["only_regions"] = list(profile.only_regions)
     if profile.deny_verbs:
         body["deny_verbs"] = list(profile.deny_verbs)
     if profile.exceptions:
@@ -923,6 +938,7 @@ def evaluate_profile(
     account_alias: str | None = None,
     service: str | None = None,
     action: str | None = None,
+    region: str | None = None,
 ) -> ProfileVerdict:
     """Evaluate a request against a single active profile. Returns a
     DENY verdict on the first matching rule; otherwise returns the
@@ -933,15 +949,17 @@ def evaluate_profile(
       2. deny_actions exact match → DENY (subtracts from baseline)
       3. deny_actions_with_condition match → DENY (subtracts conditionally)
       4. Account-ID restriction (only_account_ids) → DENY
-      5. Keyword denies against `keyword_targets` (with exceptions) → DENY
-      6. Verb denies against `deny_verbs` → DENY
-      7. No objection → allow downstream rules to decide
+      5. Region restriction (only_regions) → DENY (§A39 #371)
+      6. Keyword denies against `keyword_targets` (with exceptions) → DENY
+      7. Verb denies against `deny_verbs` → DENY
+      8. No objection → allow downstream rules to decide
 
     Layers 1-3 are the readonly-admin-minus framing (per
-    safe_default_is_readonly_admin_minus memo); layers 4-6 are the
-    pre-existing keyword/verb model. Both are supported simultaneously
-    so operator-authored profiles with only `deny_keywords` keep working
-    unchanged (no allow_baseline → layer 1 abstains).
+    safe_default_is_readonly_admin_minus memo); layers 4-7 are the
+    pre-existing keyword/verb model (+ §A39 region floor). Both are
+    supported simultaneously so operator-authored profiles with only
+    `deny_keywords` keep working unchanged (no allow_baseline → layer 1
+    abstains).
     """
     # Profile 'full-user' (or any empty profile — incl. the legacy
     # 'none' alias) is a no-op. Note we also check the new fields.
@@ -949,6 +967,7 @@ def evaluate_profile(
         not profile.deny_keywords
         and not profile.deny_verbs
         and not profile.only_account_ids
+        and not profile.only_regions
         and not profile.allow_baseline
         and not profile.deny_actions
         and not profile.deny_actions_with_condition
@@ -1012,12 +1031,30 @@ def evaluate_profile(
                 reason=(
                     f"profile {profile.name!r} restricts to accounts "
                     f"{sorted(profile.only_account_ids)}; request account "
-                    f"{account_id or 'unknown'}"
+                    f"{account_id or 'unknown'} (profile_only_account_ids)"
                 ),
                 source="profile",
             )
 
-    # 5. Keyword denies
+    # 5. Region lock (§A39 #371). Mirrors only_account_ids exactly:
+    # when non-empty, the request's region MUST be in the allowed set
+    # or the profile short-circuits with DENY. Unknown / unspecified
+    # region fails CLOSED so a parser that didn't surface the region
+    # can't bypass the multi-region floor. Empty tuple = no
+    # restriction (default).
+    if profile.only_regions:
+        if region is None or region not in profile.only_regions:
+            return ProfileVerdict(
+                denied=True,
+                reason=(
+                    f"profile {profile.name!r} restricts to regions "
+                    f"{sorted(profile.only_regions)}; request region "
+                    f"{region or 'unknown'} (profile_only_regions)"
+                ),
+                source="profile",
+            )
+
+    # 6. Keyword denies
     if profile.deny_keywords:
         target_values: dict[str, str | None] = {
             "arn": arn,
@@ -1044,7 +1081,7 @@ def evaluate_profile(
                         source="profile",
                     )
 
-    # 6. Verb denies (legacy shape; safe-default no longer uses these
+    # 7. Verb denies (legacy shape; safe-default no longer uses these
     # but operator-authored profiles + community profiles still can)
     if profile.deny_verbs and service and action:
         for verb_pat in profile.deny_verbs:

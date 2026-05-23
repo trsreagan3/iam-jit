@@ -880,3 +880,146 @@ def test_load_profiles_round_trips_new_fields(tmp_path, monkeypatch) -> None:
     assert "kms:Decrypt" in p.deny_actions
     assert len(p.deny_actions_with_condition) == 1
     assert p.deny_actions_with_condition[0]["action"] == "s3:GetObject"
+
+
+# ---------------------------------------------------------------------------
+# §A39 #371 — only_regions top-level field (multi-region scope floor)
+# Per [[multi-account-region-cluster-use-case]] this is the launch-blocker
+# primitive for operators routinely working across staging/prod regions.
+# ---------------------------------------------------------------------------
+
+
+def test_evaluate_profile_only_regions_match_allowed() -> None:
+    """A request whose region IS in only_regions falls through to
+    downstream rules (the profile abstains)."""
+    profile = Profile(name="t", only_regions=("us-east-1", "us-west-2"))
+    verdict = evaluate_profile(profile, region="us-east-1")
+    assert not verdict.denied
+    verdict = evaluate_profile(profile, region="us-west-2")
+    assert not verdict.denied
+
+
+def test_evaluate_profile_only_regions_mismatch_denied() -> None:
+    """THE FLOOR TEST: a profile generated from observing us-east-1
+    MUST DENY a request to eu-west-1. Per
+    [[profile-generation-quality-bar]] this is the launch-blocker.
+    """
+    profile = Profile(name="staging", only_regions=("us-east-1",))
+    verdict = evaluate_profile(profile, region="eu-west-1")
+    assert verdict.denied
+    assert "profile_only_regions" in verdict.reason
+    assert "us-east-1" in verdict.reason
+    assert "eu-west-1" in verdict.reason
+    assert verdict.source == "profile"
+
+
+def test_evaluate_profile_only_regions_unknown_region_denied() -> None:
+    """Fail-CLOSED: a request with no region (parser failure) is
+    DENIED when only_regions is set. Same shape as only_account_ids."""
+    profile = Profile(name="t", only_regions=("us-east-1",))
+    verdict = evaluate_profile(profile, region=None)
+    assert verdict.denied
+    assert "unknown" in verdict.reason
+
+
+def test_evaluate_profile_only_regions_empty_no_restriction() -> None:
+    """Empty tuple (default) means no region restriction; any region
+    falls through to downstream rules."""
+    profile = Profile(name="t")
+    assert profile.only_regions == ()
+    verdict = evaluate_profile(profile, region="us-east-1")
+    assert not verdict.denied
+    verdict = evaluate_profile(profile, region="eu-west-1")
+    assert not verdict.denied
+
+
+def test_only_regions_composes_with_only_account_ids() -> None:
+    """only_account_ids fires BEFORE only_regions; both deny in their
+    own right."""
+    profile = Profile(
+        name="t",
+        only_account_ids=("111122223333",),
+        only_regions=("us-east-1",),
+    )
+    # Wrong account → DENY on account check (fires first)
+    v = evaluate_profile(
+        profile, account_id="999988887777", region="us-east-1",
+    )
+    assert v.denied
+    assert "profile_only_account_ids" in v.reason
+    # Right account, wrong region → DENY on region check
+    v = evaluate_profile(
+        profile, account_id="111122223333", region="eu-west-1",
+    )
+    assert v.denied
+    assert "profile_only_regions" in v.reason
+    # Right both → no objection
+    v = evaluate_profile(
+        profile, account_id="111122223333", region="us-east-1",
+    )
+    assert not v.denied
+
+
+def test_profile_yaml_roundtrip_only_regions(tmp_path: pathlib.Path) -> None:
+    """only_regions survives the YAML round-trip (write → load)."""
+    from iam_jit.bouncer.profiles import (
+        load_profiles, profile_to_yaml_dict, upsert_profile,
+    )
+    custom = tmp_path / "profiles.yaml"
+    p = Profile(
+        name="multi-region",
+        description="staging in two regions",
+        only_account_ids=("111122223333",),
+        only_regions=("us-east-1", "us-west-2"),
+    )
+    upsert_profile(p, path=custom)
+    body = profile_to_yaml_dict(p)
+    assert body["only_regions"] == ["us-east-1", "us-west-2"]
+    loaded = load_profiles(custom)
+    assert "multi-region" in loaded
+    lp = loaded["multi-region"]
+    assert lp.only_regions == ("us-east-1", "us-west-2")
+    assert lp.only_account_ids == ("111122223333",)
+
+
+def test_translate_generator_shape_only_regions(tmp_path: pathlib.Path) -> None:
+    """The generator-shape parser bridge passes only_regions through
+    untouched (the field is not in the strip-list)."""
+    from iam_jit.bouncer.profiles import load_profiles
+    custom = tmp_path / "profiles.yaml"
+    # Mimic the LLM-generator emit shape: top-level allows/denies +
+    # scope fields alongside.
+    custom.write_text(yaml.safe_dump({
+        "profiles": {
+            "audit-gen": {
+                "schema_version": 1,
+                "bouncer": "ibounce",
+                "only_account_ids": ["111122223333"],
+                "only_regions": ["us-east-1"],
+                "allows": [
+                    {
+                        "target": "arn:aws:s3:::reports-bucket",
+                        "actions": ["s3:GetObject"],
+                        "reason": "observed read",
+                    },
+                ],
+                "denies": [],
+            },
+        },
+    }))
+    profiles = load_profiles(custom)
+    p = profiles["audit-gen"]
+    assert p.only_account_ids == ("111122223333",)
+    assert p.only_regions == ("us-east-1",)
+    # The translator surfaced the action into deny_actions / allow_rules
+    # as the schema bridge dictates; only_regions sits beside untouched.
+    assert any(r.pattern == "s3:GetObject" for r in p.allow_rules)
+
+
+def test_evaluate_profile_only_regions_profile_full_user_no_op() -> None:
+    """Profile with only only_regions empty + nothing else set still
+    short-circuits the no-op path."""
+    profile = Profile(name="full-user")
+    # No region passed; no fields set → no objection.
+    verdict = evaluate_profile(profile)
+    assert not verdict.denied

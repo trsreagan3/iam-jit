@@ -1600,6 +1600,7 @@ def evaluate_request(
             account_alias=account_alias,
             service=parsed.service,
             action=parsed.action,
+            region=parsed.region,
         )
         if prof_verdict.denied:
             short_circuit = DecisionRecord(
