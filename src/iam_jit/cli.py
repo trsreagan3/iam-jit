@@ -1727,7 +1727,18 @@ register_deny_group(main)
 # Distinct from `[[no-nl-synthesis]]` which forbids NL->IAM-policy;
 # bounce profiles are operator-reviewable config artifacts.
 from .cli_profile_generate import register_profile_group  # noqa: E402
-register_profile_group(main)
+_profile_group = register_profile_group(main)
+
+# #345 / §A25 — easy profile extension (`iam-jit profile allow`) +
+# deny visibility (`iam-jit denies recent`). Symmetric flip of the
+# #324 dynamic-deny direction; together they close the operator
+# feedback loop ("what got blocked + how do I unblock if safe?").
+from .cli_profile_allow import (  # noqa: E402
+    register_denies_group,
+    register_profile_allow_command,
+)
+register_profile_allow_command(_profile_group)
+register_denies_group(main)
 
 # #383 / §A42 — register `iam-jit posture` cross-product orchestrator.
 # Reports "iam-jit role / bouncer / both / neither" + per-traffic-class

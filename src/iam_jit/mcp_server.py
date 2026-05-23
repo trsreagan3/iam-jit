@@ -2128,6 +2128,151 @@ TOOLS.extend([
 ])
 
 
+# ---------------------------------------------------------------------------
+# #345 / §A25 — Easy profile extension + deny visibility.
+# ---------------------------------------------------------------------------
+# Symmetric flip of the bounce_deny_* family (#324e):
+#   * bounce_profile_allow: "this is safe, allow it" — append a rule to
+#     a profile's allow_rules with the agent-self-grant safety rail.
+#   * bounce_denies_recent: "what just got blocked?" — query each
+#     bouncer's /audit/events for DENY rows + suggested_allow_command.
+TOOLS.extend([
+    {
+        "name": "bounce_profile_allow",
+        "description": (
+            "Append an ALLOW rule to a profile (operator's profile YAML "
+            "in ~/.iam-jit/bouncer/profiles.yaml). The rule is ADDITIVE "
+            "per [[creates-never-mutates]] — existing allow_rules + "
+            "deny_actions are preserved; the new rule goes at the END "
+            "with provenance in the note field. Use when an operator "
+            "(or agent on their behalf) determines that a specific "
+            "service:Action on a specific target is safe + should not "
+            "have been denied. Per [[dynamic-deny-rules]] conflict "
+            "resolution: a personal allow CANNOT loosen an org-distributed "
+            "deny. SAFETY RAIL: when an agent (via MCP) issues this "
+            "without --allow-agent-self-grant set on the bouncer, the "
+            "request is QUEUED for operator confirmation rather than "
+            "auto-applied. The agent's request is ALWAYS audited. "
+            "Refuses target='*' (force operator specificity). Each "
+            "action must be a 'service:Action' string."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "required": ["target", "action", "reason"],
+            "properties": {
+                "target": {
+                    "type": "string",
+                    "minLength": 1,
+                    "description": (
+                        "Resource target (ARN glob). Example: "
+                        "'arn:aws:s3:::staging-cache-*'. '*' alone is "
+                        "refused."
+                    ),
+                },
+                "action": {
+                    "oneOf": [
+                        {"type": "string", "minLength": 1},
+                        {
+                            "type": "array",
+                            "items": {"type": "string", "minLength": 1},
+                            "minItems": 1,
+                        },
+                    ],
+                    "description": (
+                        "Single 'service:Action' string or a list of "
+                        "them. Example: 's3:GetObject' or "
+                        "['dynamodb:PutItem','dynamodb:UpdateItem']."
+                    ),
+                },
+                "reason": {
+                    "type": "string",
+                    "minLength": 1,
+                    "description": (
+                        "Free-text justification. Surfaces in the "
+                        "profile's note field + the admin-action OCSF "
+                        "audit event."
+                    ),
+                },
+                "duration": {
+                    "type": "string",
+                    "pattern": "^(permanent|[0-9]+(s|m|h|d|w))$",
+                    "description": (
+                        "Optional Go-style duration ('30m', '3h', "
+                        "'7d') or 'permanent'. Default permanent. "
+                        "When non-permanent the note carries an "
+                        "expires=<iso> tag (advisory today; Phase 2 "
+                        "wires expiry-sweep into the watcher)."
+                    ),
+                },
+                "profile": {
+                    "type": "string",
+                    "description": (
+                        "Profile name. Default: the active profile "
+                        "(IAM_JIT_BOUNCER_PROFILE env or full-user)."
+                    ),
+                },
+            },
+        },
+    },
+    {
+        "name": "bounce_denies_recent",
+        "description": (
+            "Query each bouncer's /audit/events stream for recent DENY "
+            "verdicts and return one row per deny with: timestamp, "
+            "bouncer, agent.session_id, action, resource, deny_reason, "
+            "deny_source (static profile / dynamic deny / safe-default "
+            "/ profile_only_account_ids / profile_only_regions), and a "
+            "ready-to-run suggested_allow_command. Use this to answer "
+            "'what did the bouncer block in the last N minutes' + to "
+            "synthesise the operator-confirmation question 'is THIS one "
+            "safe to allow?'. Read-only; no audit row. Cross-bouncer "
+            "fan-out follows the same shape as `iam-jit audit query` so "
+            "an unreachable bouncer is surfaced honestly as a per-row "
+            "note rather than failing the whole call."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "since": {
+                    "type": "string",
+                    "default": "5m",
+                    "description": (
+                        "Window lookback (5m / 1h / 2d) or an ISO 8601 "
+                        "lower bound."
+                    ),
+                },
+                "agent_session_id": {
+                    "type": "string",
+                    "description": (
+                        "Filter to one agent session id (the "
+                        "unmapped.iam_jit.agent.session_id field)."
+                    ),
+                },
+                "limit": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "maximum": 500,
+                    "default": 50,
+                    "description": "Max rows to return.",
+                },
+                "bouncer": {
+                    "type": "array",
+                    "items": {
+                        "type": "string",
+                        "enum": ["ibounce", "kbouncer", "kbounce",
+                                 "dbounce", "gbounce"],
+                    },
+                    "description": (
+                        "Restrict to specific bouncer(s). Default: "
+                        "every reachable bouncer."
+                    ),
+                },
+            },
+        },
+    },
+])
+
+
 # Bounce-suite rename (2026-05-17): every `bouncer_*` MCP tool gets
 # an `ibounce_*` alias in v1.0. Both names dispatch to the same
 # handler; the `bouncer_*` originals carry a `(DEPRECATED ...)` note
@@ -4492,6 +4637,10 @@ def _handle_request(req: dict[str, Any]) -> dict[str, Any] | None:
             result_payload = _bounce_deny_list_for_mcp(args)
         elif tool_name == "bounce_deny_remove":
             result_payload = _bounce_deny_remove_for_mcp(args)
+        elif tool_name == "bounce_profile_allow":
+            result_payload = _bounce_profile_allow_for_mcp(args)
+        elif tool_name == "bounce_denies_recent":
+            result_payload = _bounce_denies_recent_for_mcp(args)
         elif tool_name == "iam_jit_posture":
             # #383 / §A42 — cross-product posture orchestrator.
             from .cli_posture import posture_for_mcp
@@ -4804,6 +4953,201 @@ def _bounce_deny_remove_for_mcp(args: dict[str, Any]) -> dict[str, Any]:
             f"Bouncers reloaded: "
             f"{', '.join(r['bouncer'] for r in result.get('fanout', []) if r.get('reloaded')) or '(none)'}."
         ),
+    }
+
+
+# ---------------------------------------------------------------------------
+# #345 / §A25 — bounce_profile_allow + bounce_denies_recent handlers.
+# ---------------------------------------------------------------------------
+# Shared backend with `iam-jit profile allow` + `iam-jit denies recent` per
+# [[cross-product-agent-parity]]. The agent-self-grant safety rail lives
+# in the operations layer; this layer only translates wire shapes.
+
+
+def _bounce_profile_allow_for_mcp(args: dict[str, Any]) -> dict[str, Any]:
+    """MCP backend for `bounce_profile_allow`. Mirrors `iam-jit profile allow`."""
+    from .profile_allow.operations import (
+        ProfileAllowError,
+        add_profile_allow_rule,
+    )
+
+    target = args.get("target")
+    if not isinstance(target, str) or not target.strip():
+        return {
+            "status": "error",
+            "code": "missing_target",
+            "message": "`target` is required and must be a non-empty string",
+        }
+
+    action_raw = args.get("action")
+    if isinstance(action_raw, str):
+        actions: list[str] = [action_raw]
+    elif isinstance(action_raw, list):
+        actions = [str(a) for a in action_raw]
+    else:
+        return {
+            "status": "error",
+            "code": "missing_action",
+            "message": "`action` is required and must be a string or list of strings",
+        }
+
+    reason = args.get("reason")
+    if not isinstance(reason, str) or not reason.strip():
+        return {
+            "status": "error",
+            "code": "missing_reason",
+            "message": "`reason` is required and must be a non-empty string",
+        }
+
+    duration = args.get("duration")
+    profile_name = args.get("profile")
+
+    try:
+        result = add_profile_allow_rule(
+            target=str(target),
+            action=actions,
+            reason=str(reason),
+            duration=str(duration) if duration else None,
+            profile_name=str(profile_name) if profile_name else None,
+            source="mcp",
+        )
+    except ProfileAllowError as e:
+        return {
+            "status": "error",
+            "code": e.code,
+            "message": str(e),
+            "details": e.details,
+        }
+    except (ValueError, OSError) as e:
+        return {
+            "status": "error",
+            "code": "bad_input",
+            "message": str(e),
+        }
+
+    # Best-effort admin-action audit emit.
+    try:
+        from .bouncer.audit_export.admin_action import emit_admin_action_direct
+        from .bouncer.proxy import _emit_audit_event
+        emit_admin_action_direct(
+            _emit_audit_event,
+            kind=(
+                "profile.allow.added"
+                if result.status == "applied"
+                else "profile.allow.requested_by_agent"
+            ),
+            actor=result.actor,
+            target_kind="profile_allow_rule",
+            target_id=f"{result.profile_name}:{','.join(result.actions)}",
+            source="mcp",
+            extra={
+                "target": result.target,
+                "actions": result.actions,
+                "reason": result.reason,
+                "duration": result.duration,
+                "expires_at": result.expires_at,
+                "status": result.status,
+                "profile_name": result.profile_name,
+            },
+        )
+    except Exception:
+        pass
+
+    if result.status == "pending_approval":
+        entry = result.pending_entry or {}
+        return {
+            "status": "pending_approval",
+            "profile_updated": None,
+            "profile_name": result.profile_name,
+            "applied_to_bouncers": [],
+            "next_request_will_allow": False,
+            "audit_event_id": entry.get("id", ""),
+            "pending_entry": entry,
+            "summary": (
+                f"Agent-issued profile allow QUEUED for operator "
+                f"confirmation (pending id {entry.get('id', '?')}). The "
+                f"operator must set --allow-agent-self-grant on the "
+                f"bouncer (or IAM_JIT_BOUNCER_ALLOW_AGENT_SELF_GRANT=1) "
+                f"to auto-apply agent allows in future."
+            ),
+        }
+
+    applied_bouncers = [
+        r.get("bouncer", "")
+        for r in result.fanout
+        if r.get("reloaded")
+    ]
+    return {
+        "status": "ok",
+        "profile_updated": result.profile_path,
+        "profile_name": result.profile_name,
+        "applied_to_bouncers": applied_bouncers,
+        "next_request_will_allow": bool(applied_bouncers),
+        "audit_event_id": f"{result.profile_name}:{','.join(result.actions)}",
+        "fanout": result.fanout,
+        "summary": (
+            f"Added allow rule(s) to profile {result.profile_name!r}: "
+            f"{', '.join(result.actions)} on {result.target}. "
+            f"Reload fanout: {len(applied_bouncers)} bouncer(s) "
+            f"reloaded; profiles.yaml updated at {result.profile_path}."
+        ),
+    }
+
+
+def _bounce_denies_recent_for_mcp(args: dict[str, Any]) -> dict[str, Any]:
+    """MCP backend for `bounce_denies_recent`. Mirrors `iam-jit denies recent`."""
+    from .profile_allow.denies import fetch_recent_denies
+
+    since = args.get("since", "5m")
+    agent_session_id = args.get("agent_session_id")
+    limit_raw = args.get("limit", 50)
+    try:
+        limit = int(limit_raw)
+    except (TypeError, ValueError):
+        limit = 50
+    if limit < 1:
+        limit = 1
+    if limit > 500:
+        limit = 500
+    bouncer_raw = args.get("bouncer") or []
+    if not isinstance(bouncer_raw, list):
+        bouncer_raw = []
+
+    try:
+        rows, notes = fetch_recent_denies(
+            since=str(since) if since else "5m",
+            agent_session_id=str(agent_session_id) if agent_session_id else None,
+            limit=limit,
+            bouncer_names=[str(b) for b in bouncer_raw] or None,
+        )
+    except Exception as e:
+        return {
+            "status": "error",
+            "code": "fetch_failed",
+            "message": str(e),
+        }
+
+    row_dicts = [r.as_dict() for r in rows]
+    summary_lines = [
+        f"{len(row_dicts)} deny row(s) in window since={since!r}"
+    ]
+    for n in notes:
+        summary_lines.append(f"  (note) {n}")
+    for r in row_dicts[:5]:  # cap summary; full list is in `rows`
+        summary_lines.append(
+            f"  [{r.get('when', '?')[:19]}] "
+            f"{r.get('bouncer', '?'):<10} "
+            f"DENY {r.get('action', '?')} {r.get('resource', '?')} "
+            f"({r.get('deny_source', '?')})"
+        )
+
+    return {
+        "status": "ok",
+        "count": len(row_dicts),
+        "since": since,
+        "rows": row_dicts,
+        "notes": notes,
+        "summary": "\n".join(summary_lines),
     }
 
 

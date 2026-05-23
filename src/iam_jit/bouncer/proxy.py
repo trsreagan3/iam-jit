@@ -3372,6 +3372,84 @@ async def serve(config: ProxyConfig, *, store: BouncerStore) -> None:
         "POST", "/admin/dynamic-denies/reload",
         dynamic_denies_reload_handler,
     )
+
+    # #345 / §A25 — POST /admin/profile/reload — re-read profiles.yaml +
+    # swap in the new copy of the active profile so an
+    # `iam-jit profile allow` mutation takes effect on the very next
+    # decision without a bouncer restart. Registered BEFORE the
+    # proxy catch-all (same precedence guarantee as the dynamic-denies
+    # endpoint). The session-profile-override mechanism (from #253) is
+    # the in-process channel; this endpoint is the cross-process bridge
+    # so a separate CLI shell can install an allow rule + see it land.
+    async def profile_reload_handler(request):
+        from .profiles import (
+            load_profiles,
+            resolve_active_profile,
+        )
+        startup_profile = getattr(config, "active_profile", None)
+        if startup_profile is None:
+            # Profile system not in use; nothing to reload. Treat as a
+            # successful no-op per [[ibounce-honest-positioning]] —
+            # better than 503ing a cross-product fan-out call when the
+            # operator chose to run without a profile.
+            return web.json_response({
+                "reloaded": True,
+                "no_active_profile": True,
+                "active_profile": "",
+                "rules_in_active_profile": 0,
+            })
+        try:
+            fresh = load_profiles()
+            # Resolve under the name of the currently-active profile so
+            # a profile rename doesn't accidentally swap which profile
+            # is loaded.
+            try:
+                resolved = resolve_active_profile(
+                    cli_flag=startup_profile.name,
+                    profiles=fresh,
+                )
+            except ValueError:
+                # Active profile was removed from the file; surface
+                # honestly + keep the in-memory copy.
+                return web.json_response(
+                    {
+                        "reloaded": False,
+                        "error": "active_profile_missing_from_file",
+                        "detail": (
+                            f"active profile {startup_profile.name!r} "
+                            f"no longer present in profiles.yaml; "
+                            f"refusing to silently swap"
+                        ),
+                        "active_profile": startup_profile.name,
+                    },
+                    status=409,
+                )
+        except (ValueError, OSError) as e:
+            return web.json_response(
+                {
+                    "reloaded": False,
+                    "error": "parse_error",
+                    "detail": str(e),
+                    "active_profile": getattr(startup_profile, "name", ""),
+                },
+                status=400,
+            )
+        # Install via the session-override channel so the existing
+        # resolve-on-every-request path picks up the new copy. Test
+        # smoke: after this returns, the next request that triggers
+        # evaluate_request() sees the new allow_rules tuple.
+        set_session_profile_override(resolved)
+        return web.json_response({
+            "reloaded": True,
+            "active_profile": resolved.name,
+            "rules_in_active_profile": len(resolved.allow_rules),
+            "deny_actions_in_active_profile": len(resolved.deny_actions),
+        })
+
+    app.router.add_route(
+        "POST", "/admin/profile/reload",
+        profile_reload_handler,
+    )
     app.router.add_route("*", "/{tail:.*}", handler)
 
     # #252 Slice 1 — bring up the audit-export channels (if any).
