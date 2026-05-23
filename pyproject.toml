@@ -110,6 +110,9 @@ iam-risk-score = "iam_jit.cli_score:main"
 # the same Click app; removed in v1.1.
 ibounce = "iam_jit.bouncer_cli:main"
 iam-jit-bouncer = "iam_jit.bouncer_cli:main_deprecated_alias"
+# #409 / §A53 — threat-feed publisher tooling. Separate entry-point so
+# operator-only deployments don't accidentally surface signing tools.
+iam-jit-feed-publish = "iam_jit.threat_feed.cli_publisher:main"
 
 [tool.setuptools]
 # §A23 / #342 — explicitly ship LICENSE + NOTICE in the wheel so

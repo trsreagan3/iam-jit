@@ -129,6 +129,28 @@ _INLINE_SCHEMA: dict[str, Any] = {
                     "type": "boolean",
                     "default": False,
                 },
+                "threat_feed": {
+                    "type": "object",
+                    "additionalProperties": False,
+                    "properties": {
+                        "enabled": {"type": "boolean", "default": False},
+                        "update_cadence": {
+                            "type": "string",
+                            "enum": [
+                                "per_session",
+                                "hourly",
+                                "daily",
+                                "weekly",
+                                "on_demand",
+                            ],
+                            "default": "daily",
+                        },
+                        "feeds": {
+                            "type": "array",
+                            "items": {"$ref": "#/$defs/threat_feed_block"},
+                        },
+                    },
+                },
             },
         }
     },
@@ -180,7 +202,30 @@ _INLINE_SCHEMA: dict[str, Any] = {
                     "items": {"type": "string"},
                 },
             },
-        }
+        },
+        "threat_feed_block": {
+            "type": "object",
+            "additionalProperties": False,
+            "required": ["url"],
+            "properties": {
+                "url": {"type": "string", "minLength": 1},
+                "publisher_pubkey": {"type": "string"},
+                "verification_mode": {
+                    "type": "string",
+                    "enum": ["ed25519", "cosign-keyless"],
+                    "default": "ed25519",
+                },
+                "severity_auto_apply_threshold": {
+                    "type": "string",
+                    "enum": ["CRITICAL", "HIGH", "MEDIUM", "LOW"],
+                    "default": "HIGH",
+                },
+                "cosign_identity": {"type": "string"},
+                "cosign_issuer": {"type": "string"},
+                "enabled": {"type": "boolean", "default": True},
+                "nickname": {"type": "string"},
+            },
+        },
     },
 }
 

@@ -73,6 +73,23 @@
           "type": "boolean",
           "default": false,
           "description": "Optional: only load profiles carrying a valid Ed25519 signature from a trusted publisher. Forward-compat field for the threat-feed + signed-profile work; in v1.0 Phase A this is a declaration field only and is surfaced in `--inspect` output but does not gate profile loading yet (full enforcement ships with #407+#410). Recommended for `posture: managed`."
+        },
+        "threat_feed": {
+          "type": "object",
+          "additionalProperties": false,
+          "description": "Phase C (#407-#411 §A51-§A55) — operator-pinned threat-feed subscriptions. Per [[independence-as-security-property]] feeds are operator-pinned; the bouncer fetches + verifies + applies per severity. Per [[ambient-autonomous-protection]] `posture: managed` REFUSES auto-apply (CI must explicitly PR-review).",
+          "properties": {
+            "enabled": { "type": "boolean", "default": false },
+            "update_cadence": {
+              "type": "string",
+              "enum": ["per_session", "hourly", "daily", "weekly", "on_demand"],
+              "default": "daily"
+            },
+            "feeds": {
+              "type": "array",
+              "items": { "$ref": "#/$defs/threat_feed_block" }
+            }
+          }
         }
       }
     }
@@ -136,6 +153,48 @@
           "type": "array",
           "items": { "type": "string" },
           "description": "Extra CLI args passed to the bouncer's `run` command. Use sparingly — the declarative shape should cover the common cases."
+        }
+      }
+    },
+    "threat_feed_block": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["url"],
+      "description": "Phase C (#407 §A51) — one pinned threat-feed subscription. Per [[independence-as-security-property]] every subscription is OPERATOR-pinned (URL + publisher pubkey OR cosign identity). Per [[ambient-autonomous-protection]] entries auto-apply by severity (CRITICAL/HIGH auto; MEDIUM pending; LOW informational) — `managed` posture REFUSES auto-apply for ALL severities.",
+      "properties": {
+        "url": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Feed source URL. HTTPS recommended; file:// accepted for air-gap + tests."
+        },
+        "publisher_pubkey": {
+          "type": "string",
+          "description": "For verification_mode=ed25519: the pinned publisher pubkey as PEM OR `ed25519:<base64>` short form (`iam-jit-feed-publish init` emits the short form). Required for ed25519 mode; ignored for cosign-keyless mode."
+        },
+        "verification_mode": {
+          "type": "string",
+          "enum": ["ed25519", "cosign-keyless"],
+          "default": "ed25519",
+          "description": "ed25519 (canonical, no key management beyond pinning the pubkey) or cosign-keyless (per #441 Sysdig research; requires `cosign` binary on PATH + cosign_identity + cosign_issuer)."
+        },
+        "severity_auto_apply_threshold": {
+          "type": "string",
+          "enum": ["CRITICAL", "HIGH", "MEDIUM", "LOW"],
+          "default": "HIGH",
+          "description": "Minimum severity for auto-apply on this feed. CRITICAL+HIGH auto-apply (with HIGH adding stderr notify); MEDIUM always queues; LOW always informational. Knob lets operator pin different thresholds per feed (community vs internal)."
+        },
+        "cosign_identity": {
+          "type": "string",
+          "description": "Required when verification_mode=cosign-keyless. Pins the OIDC subject (e.g. 'releases@iam-jit.com' OR 'trsreagan3@gmail.com')."
+        },
+        "cosign_issuer": {
+          "type": "string",
+          "description": "Required when verification_mode=cosign-keyless. Pins the OIDC issuer (e.g. 'https://accounts.google.com')."
+        },
+        "enabled": { "type": "boolean", "default": true },
+        "nickname": {
+          "type": "string",
+          "description": "Optional human-readable label for log lines + `iam-jit updates last-fetch` output."
         }
       }
     }

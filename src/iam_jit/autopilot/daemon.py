@@ -134,6 +134,11 @@ class AutopilotStatus:
     posture: str = "ambient"
     bouncers: dict[str, dict[str, Any]] = dataclasses.field(default_factory=dict)
     improve: dict[str, Any] = dataclasses.field(default_factory=dict)
+    # #411 / §A55 — threat-feed tick block. Mirrors the shape of
+    # ``improve`` so a future schema 1.2 bump unifies the wire shape
+    # but DOES NOT REQUIRE one — the field defaults to empty so older
+    # readers ignore it gracefully.
+    threat_feed: dict[str, Any] = dataclasses.field(default_factory=dict)
     denies_recent_count: int = 0
     alerts: list[str] = dataclasses.field(default_factory=list)
     last_improve_at: str | None = None
@@ -263,6 +268,13 @@ class AutopilotSupervisor:
     last_improve_at: float = 0.0
     last_sweep_at: float = 0.0
     last_digest_at: float = 0.0
+    # #411 / §A55 — threat-feed fetch+apply cadence. Anchored off
+    # supervisor start so a restart doesn't immediately re-fetch.
+    last_threat_feed_at: float = 0.0
+    threat_feed_interval_s: float = 86400.0  # default daily
+    _last_threat_feed_results: list[dict[str, Any]] = dataclasses.field(
+        default_factory=list
+    )
     stopped: bool = False
     alerts: list[str] = dataclasses.field(default_factory=list)
     _improve_count: int = 0
@@ -439,6 +451,162 @@ class AutopilotSupervisor:
         return results
 
     # ------------------------------------------------------------------
+    # #411 / §A55 — threat-feed fetch + apply tick
+    # ------------------------------------------------------------------
+
+    def _threat_feed_config(self) -> dict[str, Any]:
+        """Return the declarative `threat_feed` block (or empty dict)."""
+        return self._block().get("threat_feed") or {}
+
+    def _threat_feed_subscriptions(self) -> list[Any]:
+        """Resolve subscriptions from the declaration. Returns ``[]``
+        on any config error (the alert is emitted from the apply path
+        so the operator sees it loudly, not silently — per
+        [[ibounce-honest-positioning]])."""
+        try:
+            from ..threat_feed import load_subscriptions_from_declaration
+
+            subs, _block = load_subscriptions_from_declaration(self.declaration)
+            return list(subs)
+        except Exception as e:
+            logger.debug("threat-feed sub load failed: %s", e)
+            return []
+
+    def _cadence_to_seconds(self, cadence: str) -> float:
+        return {
+            "per_session": self.improve_interval_s,
+            "hourly": 3600.0,
+            "daily": 86400.0,
+            "weekly": 604800.0,
+            "on_demand": float("inf"),
+        }.get(cadence, 86400.0)
+
+    def _threat_feed_due(self) -> bool:
+        """Return True iff it's time to fetch + apply pinned feeds."""
+        block = self._threat_feed_config()
+        if not block or not block.get("enabled"):
+            return False
+        if not self._threat_feed_subscriptions():
+            return False
+        cadence = str(block.get("update_cadence") or "daily")
+        interval = self._cadence_to_seconds(cadence)
+        self.threat_feed_interval_s = interval
+        if self.last_threat_feed_at <= 0.0:
+            # First tick: defer until cadence elapses past supervisor
+            # start, so a daemon restart doesn't re-fetch every feed
+            # immediately.
+            return (time.time() - self.started_at) >= interval
+        return (time.time() - self.last_threat_feed_at) >= interval
+
+    def run_threat_feed_for_all(self) -> list[dict[str, Any]]:
+        """Fetch + verify + apply every pinned feed once. Returns one
+        per-feed result dict (always — even when fetch fails — so the
+        status surfaces the failure)."""
+        from ..threat_feed import (
+            SubscriptionConfigError,
+            apply_feed_entries,
+            fetch_feed,
+        )
+        from ..threat_feed import (
+            load_subscriptions_from_declaration as _load_subs,
+        )
+
+        try:
+            subs, _block = _load_subs(self.declaration)
+        except SubscriptionConfigError as e:
+            msg = f"threat_feed config invalid: {e}"
+            self.alerts.append(msg)
+            sys.stderr.write(f"[autopilot] {msg}\n")
+            self.last_threat_feed_at = time.time()
+            return []
+
+        results: list[dict[str, Any]] = []
+        for sub in subs:
+            if not sub.enabled:
+                results.append({
+                    "url": sub.url,
+                    "label": sub.label(),
+                    "status": "paused",
+                    "applied": 0,
+                    "refused": 0,
+                    "pending": 0,
+                    "informational": 0,
+                    "managed_refused": 0,
+                })
+                continue
+            try:
+                fetch = fetch_feed(sub.url)
+            except Exception as e:
+                msg = (
+                    f"threat-feed fetch raised for {sub.label()}: {e}"
+                )
+                self.alerts.append(msg)
+                results.append({
+                    "url": sub.url,
+                    "label": sub.label(),
+                    "status": "fetch_error",
+                    "error": str(e),
+                })
+                continue
+            if fetch.feed is None:
+                msg = (
+                    f"threat-feed unavailable for {sub.label()}: "
+                    f"{fetch.error}"
+                )
+                self.alerts.append(msg)
+                results.append({
+                    "url": sub.url,
+                    "label": sub.label(),
+                    "status": "unavailable",
+                    "error": fetch.error,
+                    "http_status": fetch.http_status,
+                })
+                continue
+
+            outcomes = apply_feed_entries(
+                fetch.feed,
+                sub,
+                posture=self.posture,
+            )
+            counts: dict[str, int] = {
+                "applied": 0,
+                "refused": 0,
+                "pending": 0,
+                "informational": 0,
+                "managed_refused": 0,
+                "already_applied": 0,
+            }
+            for o in outcomes:
+                if o.action in ("auto_apply", "auto_apply_notify"):
+                    counts["applied"] += 1
+                elif o.action == "refused_verification":
+                    counts["refused"] += 1
+                elif o.action == "pending_approval":
+                    counts["pending"] += 1
+                elif o.action == "informational":
+                    counts["informational"] += 1
+                elif o.action == "managed_refused":
+                    counts["managed_refused"] += 1
+                elif o.action == "refused_already_applied":
+                    counts["already_applied"] += 1
+            results.append({
+                "url": sub.url,
+                "label": sub.label(),
+                "status": "ok" if not fetch.cached else "ok_cached",
+                "cached": fetch.cached,
+                "http_status": fetch.http_status,
+                "manifest_sha256": fetch.manifest_sha256,
+                "feed_id": fetch.feed.feed_id,
+                "publisher": fetch.feed.publisher,
+                "entry_count": len(fetch.feed.entries),
+                **counts,
+            })
+
+        self.last_threat_feed_at = time.time()
+        self._last_threat_feed_results = list(results)
+        return results
+
+    # ------------------------------------------------------------------
     # One sweep tick — health-check every bouncer + maybe improve
     # ------------------------------------------------------------------
 
@@ -513,6 +681,20 @@ class AutopilotSupervisor:
         else:
             improve_results = list(self._last_improve_results)
 
+        # #411 / §A55 — threat-feed fetch + apply tick. Independent
+        # cadence from improve; same posture-gate (managed posture
+        # REFUSES auto-apply). Failures (network, malformed feeds)
+        # surface as alerts; the local cache backs the next attempt
+        # so a transient outage doesn't drop protection.
+        if self._threat_feed_due():
+            try:
+                threat_feed_results = self.run_threat_feed_for_all()
+            except Exception as e:
+                self.alerts.append(f"threat-feed tick raised: {e}")
+                threat_feed_results = list(self._last_threat_feed_results)
+        else:
+            threat_feed_results = list(self._last_threat_feed_results)
+
         # #453 (§A49b) — aggregate top-level denies_recent_count for
         # the #412 weekly digest consumer. fetch_recent_denies fans
         # out to every bouncer's /audit/events; failures degrade to
@@ -563,6 +745,22 @@ class AutopilotSupervisor:
                 ),
                 "improve_count_since_startup": self._improve_count,
                 "last_results": improve_results,
+            },
+            threat_feed={
+                "enabled": bool(self._threat_feed_config().get("enabled")),
+                "subscription_count": len(self._threat_feed_subscriptions()),
+                "cadence": str(
+                    self._threat_feed_config().get("update_cadence")
+                    or "daily"
+                ),
+                "last_run_at": (
+                    _dt.datetime.fromtimestamp(
+                        self.last_threat_feed_at, tz=_dt.timezone.utc
+                    ).replace(microsecond=0).isoformat().replace("+00:00", "Z")
+                    if self.last_threat_feed_at
+                    else None
+                ),
+                "last_results": threat_feed_results,
             },
             denies_recent_count=denies_recent_count,
             alerts=list(self.alerts),

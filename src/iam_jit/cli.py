@@ -1780,5 +1780,13 @@ from .cli_digest import register_digest_command  # noqa: E402
 register_digest_command(main)
 
 
+# #408 / §A52 — register `iam-jit updates` threat-feed surface. List /
+# pin / unpin / dry-run / revoke / last-fetch. Mirrors the
+# `bounce_updates_recent` + `bounce_update_status` MCP tools per
+# [[cross-product-agent-parity]].
+from .cli_updates import register_updates_command  # noqa: E402
+register_updates_command(main)
+
+
 if __name__ == "__main__":
     main()

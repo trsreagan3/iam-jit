@@ -2554,6 +2554,82 @@ TOOLS.extend([
 ])
 
 
+# #408 / §A52 — bounce_updates_recent + bounce_update_status: threat-feed
+# operator surfaces. Per [[independence-as-security-property]] feeds are
+# OPERATOR-pinned + locally evaluated; these tools surface the ledger
+# (`bounce_updates_recent`) + the per-feed health (`bounce_update_status`).
+# Read-only — applying/revoking goes through the CLI per
+# [[creates-never-mutates]] (no agent-driven feed pinning).
+TOOLS.extend([
+    {
+        "name": "bounce_updates_recent",
+        "description": (
+            "List threat-feed entries that were applied (or refused / "
+            "revoked) on this host. Reads the local applied-ledger at "
+            "~/.iam-jit/threat_feed/applied.jsonl + filters by --since "
+            "/ --severity / --feed-url. Use to answer 'what new "
+            "protections did my bouncer install this week?' or 'did "
+            "the feed install anything that broke me?'. Read-only — "
+            "no audit row, no state change. Compliance-tag aware: each "
+            "record carries the NIST 800-53 / SOC 2 / HIPAA / MITRE "
+            "ATT&CK tags the publisher attached (per #441 Sysdig "
+            "research) so auditors can trace 'we applied X CVE rule "
+            "under control Y on date Z'."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "since": {
+                    "type": "string",
+                    "default": "",
+                    "description": "Filter entries within a rolling window (e.g. 7d / 24h / 1w).",
+                },
+                "severity": {
+                    "type": "string",
+                    "enum": ["CRITICAL", "HIGH", "MEDIUM", "LOW"],
+                    "description": "Filter to entries at or above this severity.",
+                },
+                "feed_url": {
+                    "type": "string",
+                    "description": "Filter to one feed URL.",
+                },
+                "show_refused": {
+                    "type": "boolean",
+                    "default": False,
+                    "description": "Include verification-refused + revoked entries.",
+                },
+            },
+        },
+    },
+    {
+        "name": "bounce_update_status",
+        "description": (
+            "Report per-feed health: last fetch time, last fetch "
+            "status, http status code, cached manifest hash, entry "
+            "count, verification mode, severity threshold. Use to "
+            "verify the threat-feed channel is healthy + recent. Per "
+            "[[ibounce-honest-positioning]] surfaces BOTH last "
+            "successful fetch AND last attempt — so stale-cache + "
+            "recent-failure are both visible. Read-only; no state "
+            "change."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "config_path": {
+                    "type": "string",
+                    "description": "Optional override for the declaration source path.",
+                },
+                "cwd": {
+                    "type": "string",
+                    "description": "Optional override for the declaration cwd.",
+                },
+            },
+        },
+    },
+])
+
+
 # Bounce-suite rename (2026-05-17): every `bouncer_*` MCP tool gets
 # an `ibounce_*` alias in v1.0. Both names dispatch to the same
 # handler; the `bouncer_*` originals carry a `(DEPRECATED ...)` note
@@ -4926,6 +5002,14 @@ def _handle_request(req: dict[str, Any]) -> dict[str, Any] | None:
             # #412 / §A56 — weekly "your bouncer caught X" digest.
             from .cli_digest import digest_for_mcp
             result_payload = digest_for_mcp(args)
+        elif tool_name == "bounce_updates_recent":
+            # #408 / §A52 — threat-feed applied-ledger surface.
+            from .cli_updates import updates_recent_for_mcp
+            result_payload = updates_recent_for_mcp(args)
+        elif tool_name == "bounce_update_status":
+            # #408 / §A52 — threat-feed per-feed health.
+            from .cli_updates import update_status_for_mcp
+            result_payload = update_status_for_mcp(args)
         elif tool_name == "iam_jit_posture":
             # #383 / §A42 — cross-product posture orchestrator.
             from .cli_posture import posture_for_mcp

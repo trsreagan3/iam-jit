@@ -25,3 +25,13 @@ htmlcov/
 .env
 .env.local
 node_modules/
+
+# #407 / §A51 — threat-feed publisher private keys MUST NEVER land in
+# this repo per [[push-policy-public-repo]]. Both the canonical default
+# location AND any *.pem files inside feeds/ are blocked. The PUBKEY
+# (feeds/*.pubkey + *.pub) IS safe to commit.
+*.ed25519.pem
+publisher.ed25519.pem
+feeds/*.pem
+feeds/*.private*
+

@@ -1,0 +1,1064 @@
+{
+  "entries": [
+    {
+      "action": [
+        "iam:AttachRolePolicy",
+        "iam:PutRolePolicy",
+        "iam:CreatePolicyVersion"
+      ],
+      "applies_to_bouncers": [
+        "ibounce"
+      ],
+      "compliance_tags": [
+        "NIST-AC-6",
+        "SOC2-CC6.1",
+        "MITRE-T1098.001",
+        "MITRE-T1078"
+      ],
+      "description": "Block agent attempts to escalate role privileges via policy attachment",
+      "discovered_at": "2026-05-23T00:00:00Z",
+      "rule_id": "tf_official_001",
+      "rule_kind": "dynamic_deny",
+      "severity": "CRITICAL",
+      "signature": {
+        "algorithm": "ed25519",
+        "publisher": "iam-jit-official",
+        "value": "Cgf1G8SpqRq+xs5EaESf2KAyOdhoI57hJqBorRbe1EtpBVqLrHk8klkHDDGkwMy0HM4YIFs+AGxrB10GrGWTCg=="
+      },
+      "source_incident": "Wave3-INC-2024-replit-agent-deleted-prod-db: agent attempted to attach admin policy after operator denied",
+      "target": "arn:aws:iam::*:role/*"
+    },
+    {
+      "action": [
+        "iam:CreateAccessKey",
+        "iam:UpdateAccessKey"
+      ],
+      "applies_to_bouncers": [
+        "ibounce"
+      ],
+      "compliance_tags": [
+        "NIST-IA-5",
+        "SOC2-CC6.2",
+        "MITRE-T1098.001",
+        "DORA-Art.5"
+      ],
+      "description": "Block creation of long-lived access keys by agents (use JIT tokens instead)",
+      "discovered_at": "2026-05-23T00:00:00Z",
+      "rule_id": "tf_official_002",
+      "rule_kind": "dynamic_deny",
+      "severity": "CRITICAL",
+      "signature": {
+        "algorithm": "ed25519",
+        "publisher": "iam-jit-official",
+        "value": "+F89UPgR/l4oLxid4fHog5dM+Eg2QRXM6tajtLSH6Iogli3IaaNPaUBOw0Sdv5vbeSRvchyln2QsvCxjWR2mCA=="
+      },
+      "source_incident": "CVE-2025-AGENT-CRED-PERSIST: agent persists credentials via long-lived access keys",
+      "target": "arn:aws:iam::*:user/*"
+    },
+    {
+      "action": [
+        "sts:AssumeRole"
+      ],
+      "applies_to_bouncers": [
+        "ibounce"
+      ],
+      "compliance_tags": [
+        "NIST-AC-6",
+        "SOC2-CC6.1",
+        "MITRE-T1078.004"
+      ],
+      "description": "Block agents from assuming AWS SSO reserved roles (operator-only)",
+      "discovered_at": "2026-05-23T00:00:00Z",
+      "rule_id": "tf_official_003",
+      "rule_kind": "dynamic_deny",
+      "severity": "CRITICAL",
+      "signature": {
+        "algorithm": "ed25519",
+        "publisher": "iam-jit-official",
+        "value": "cinvwc9006ERvIpaV6z5V7nZjrrNA/UM1zu0ydWPfXOJtsFr1gN+GIkpijijG4KZuKwjlkZ+3c0nMmEUx7pHCA=="
+      },
+      "source_incident": "Wave3-INC-2024-aws-sso-pivot: agent attempted to pivot to operator's IAM Identity Center role",
+      "target": "arn:aws:iam::*:role/AWSReservedSSO_*"
+    },
+    {
+      "action": [
+        "iam:AttachUserPolicy",
+        "iam:AttachRolePolicy",
+        "iam:AttachGroupPolicy"
+      ],
+      "applies_to_bouncers": [
+        "ibounce"
+      ],
+      "compliance_tags": [
+        "NIST-AC-6",
+        "SOC2-CC6.3",
+        "MITRE-T1098",
+        "HIPAA-164.312(a)(1)"
+      ],
+      "description": "Block agents from attaching AWS-managed AdministratorAccess to ANY principal",
+      "discovered_at": "2026-05-23T00:00:00Z",
+      "rule_id": "tf_official_004",
+      "rule_kind": "dynamic_deny",
+      "severity": "CRITICAL",
+      "signature": {
+        "algorithm": "ed25519",
+        "publisher": "iam-jit-official",
+        "value": "ONc9EohW47rNzyS17PY9hkAA1MyLpMvHeuvXi6OKaTquTOsNYx/kPXq6mh1hwgkiGuA7W1sD76ceMOq+G2dcAg=="
+      },
+      "source_incident": "Wave3-INC-2024-priv-esc-via-managed-policy: agent attempted to attach AdministratorAccess",
+      "target": "arn:aws:iam::aws:policy/AdministratorAccess"
+    },
+    {
+      "action": [
+        "s3:DeleteBucket",
+        "s3:DeleteObject",
+        "s3:DeleteObjectVersion"
+      ],
+      "applies_to_bouncers": [
+        "ibounce"
+      ],
+      "compliance_tags": [
+        "NIST-CP-9",
+        "SOC2-CC7.3",
+        "MITRE-T1486",
+        "HIPAA-164.308(a)(7)"
+      ],
+      "description": "Block agents from deleting backup buckets/objects (matches *-backup* convention)",
+      "discovered_at": "2026-05-23T00:00:00Z",
+      "rule_id": "tf_official_005",
+      "rule_kind": "dynamic_deny",
+      "severity": "CRITICAL",
+      "signature": {
+        "algorithm": "ed25519",
+        "publisher": "iam-jit-official",
+        "value": "ZzKYSNR63GKqYeNO3FDOhrsJVzilsTLMEiheL8gOWVdXylOeae31FJok5XR/tjrPvQk7MZ26Ywv4v5+NTA6hCw=="
+      },
+      "source_incident": "Wave3-INC-2024-agent-deleted-backups: prompt-injection-driven backup destruction",
+      "target": "arn:aws:s3:::*-backup*"
+    },
+    {
+      "action": [
+        "rds:DeleteDBSnapshot",
+        "rds:DeleteDBClusterSnapshot"
+      ],
+      "applies_to_bouncers": [
+        "ibounce"
+      ],
+      "compliance_tags": [
+        "NIST-CP-9",
+        "SOC2-CC7.3",
+        "MITRE-T1486",
+        "DORA-Art.5"
+      ],
+      "description": "Block agents from deleting RDS snapshots",
+      "discovered_at": "2026-05-23T00:00:00Z",
+      "rule_id": "tf_official_006",
+      "rule_kind": "dynamic_deny",
+      "severity": "CRITICAL",
+      "signature": {
+        "algorithm": "ed25519",
+        "publisher": "iam-jit-official",
+        "value": "MOL8Wzb+YlTW341WE59Wjk4KxOVWPjbC47IteNhAxu/HYOLHpFrkZfCO0ns23KL933WlcwieviXF5kx7j7f6CQ=="
+      },
+      "source_incident": "Wave3-INC-2025-agent-deleted-rds-snapshots",
+      "target": "*"
+    },
+    {
+      "action": [
+        "dynamodb:DeleteBackup",
+        "dynamodb:DeleteTable"
+      ],
+      "applies_to_bouncers": [
+        "ibounce"
+      ],
+      "compliance_tags": [
+        "NIST-CP-9",
+        "SOC2-CC7.3",
+        "MITRE-T1486"
+      ],
+      "description": "Block agents from deleting DynamoDB backups or tables",
+      "discovered_at": "2026-05-23T00:00:00Z",
+      "rule_id": "tf_official_007",
+      "rule_kind": "dynamic_deny",
+      "severity": "CRITICAL",
+      "signature": {
+        "algorithm": "ed25519",
+        "publisher": "iam-jit-official",
+        "value": "Kd5yJHL0S26c3jolWaOBOJRIxqUgK71f7nGH8xTHRuTY4mNr5+l/7O9IBh8b4FbeqZxlDlGNQWxP1CzNQ4aXBw=="
+      },
+      "source_incident": "Wave3-INC-2025-agent-deleted-dynamodb-backups",
+      "target": "*"
+    },
+    {
+      "action": [
+        "sql:DROP_DATABASE",
+        "sql:DROP_SCHEMA"
+      ],
+      "applies_to_bouncers": [
+        "dbounce"
+      ],
+      "compliance_tags": [
+        "NIST-AC-3",
+        "SOC2-CC7.3",
+        "MITRE-T1486"
+      ],
+      "description": "Block agent-issued DROP DATABASE / DROP SCHEMA",
+      "discovered_at": "2026-05-23T00:00:00Z",
+      "rule_id": "tf_official_008",
+      "rule_kind": "dynamic_deny",
+      "severity": "CRITICAL",
+      "signature": {
+        "algorithm": "ed25519",
+        "publisher": "iam-jit-official",
+        "value": "avtVrSQZLVihTDnS9pibzMZtAyQyl8lG0TaDB5jvvUzDRgosIZ4iC0g9Lnv6ixUarzb2Pq1NapTT/Hqz7FWaDA=="
+      },
+      "source_incident": "Wave3-INC-2025-agent-dropped-prod-db: agent confused dev/prod and dropped prod schema",
+      "target": "DROP DATABASE *"
+    },
+    {
+      "action": [
+        "secretsmanager:GetSecretValue",
+        "ssm:GetParameter"
+      ],
+      "applies_to_bouncers": [
+        "ibounce"
+      ],
+      "compliance_tags": [
+        "NIST-IA-5",
+        "NIST-SC-28",
+        "SOC2-CC6.7",
+        "MITRE-T1552",
+        "HIPAA-164.312(a)(2)"
+      ],
+      "description": "Block bulk secret/parameter reads by agents (operator must scope explicitly)",
+      "discovered_at": "2026-05-23T00:00:00Z",
+      "rule_id": "tf_official_009",
+      "rule_kind": "dynamic_deny",
+      "severity": "CRITICAL",
+      "signature": {
+        "algorithm": "ed25519",
+        "publisher": "iam-jit-official",
+        "value": "qhAaSZvTv9Lcd2yVWLnAl2jzUbQzvr213F6IpysFxe/mEOrlABVZG/NiTLb+sW99+aiIt8sDrwmhZpU6CcWDDA=="
+      },
+      "source_incident": "Wave3-INC-2025-agent-leaked-prod-secrets: agent accidentally exfiltrated secrets through tool output",
+      "target": "*"
+    },
+    {
+      "action": [
+        "kms:ScheduleKeyDeletion",
+        "kms:DisableKey"
+      ],
+      "applies_to_bouncers": [
+        "ibounce"
+      ],
+      "compliance_tags": [
+        "NIST-SC-12",
+        "SOC2-CC6.7",
+        "MITRE-T1485"
+      ],
+      "description": "Block KMS key deletion/disable by agents",
+      "discovered_at": "2026-05-23T00:00:00Z",
+      "rule_id": "tf_official_010",
+      "rule_kind": "dynamic_deny",
+      "severity": "CRITICAL",
+      "signature": {
+        "algorithm": "ed25519",
+        "publisher": "iam-jit-official",
+        "value": "tz6Vp3Zvto8ieBoEkDGKJKNCbga3LVUs06z/NKUOFJx8AyNgqvSpejCVw23FAtQ0agLnffsDv/7oPu7PE9imBQ=="
+      },
+      "source_incident": "Wave3-INC-2024-agent-scheduled-key-deletion",
+      "target": "arn:aws:kms:*:*:key/*"
+    },
+    {
+      "action": [
+        "organizations:InviteAccountToOrganization",
+        "organizations:CreateAccount"
+      ],
+      "applies_to_bouncers": [
+        "ibounce"
+      ],
+      "compliance_tags": [
+        "NIST-AC-3",
+        "SOC2-CC6.1",
+        "MITRE-T1136"
+      ],
+      "description": "Block agents from creating/inviting AWS accounts in your Organization",
+      "discovered_at": "2026-05-23T00:00:00Z",
+      "rule_id": "tf_official_011",
+      "rule_kind": "dynamic_deny",
+      "severity": "CRITICAL",
+      "signature": {
+        "algorithm": "ed25519",
+        "publisher": "iam-jit-official",
+        "value": "UZL5PT++SDq0+nlw8me9fzYgXlxpHR/155BU2Z5NfgKP8WRABI1t04gJIiGU/wjUt1GoNzmFYxKntUmLC4X/Cg=="
+      },
+      "source_incident": "Wave4-PROMPT-INJ-cross-org-pivot",
+      "target": "*"
+    },
+    {
+      "action": [
+        "iam:CreateUser",
+        "iam:CreateRole"
+      ],
+      "applies_to_bouncers": [
+        "ibounce"
+      ],
+      "compliance_tags": [
+        "NIST-AC-2",
+        "SOC2-CC6.2",
+        "MITRE-T1136",
+        "DORA-Art.5"
+      ],
+      "description": "Block agents from creating new IAM users or roles (backdoor principal)",
+      "discovered_at": "2026-05-23T00:00:00Z",
+      "rule_id": "tf_official_012",
+      "rule_kind": "dynamic_deny",
+      "severity": "CRITICAL",
+      "signature": {
+        "algorithm": "ed25519",
+        "publisher": "iam-jit-official",
+        "value": "t7MSXkBrqGzw/TMyVjUAxIeIMQwX7xLBy9agKGhAHuAliQrAKoSjfZCOZMnrd4P/lcxO2JeF/tPrn5DF6CTSDQ=="
+      },
+      "source_incident": "Wave4-PROMPT-INJ-create-backdoor-principal",
+      "target": "*"
+    },
+    {
+      "action": [
+        "create",
+        "patch",
+        "update"
+      ],
+      "applies_to_bouncers": [
+        "kbouncer"
+      ],
+      "compliance_tags": [
+        "NIST-AC-6",
+        "SOC2-CC6.1",
+        "MITRE-T1078",
+        "MITRE-T1611"
+      ],
+      "description": "Block agents from creating/modifying cluster-admin ClusterRoleBindings",
+      "discovered_at": "2026-05-23T00:00:00Z",
+      "rule_id": "tf_official_013",
+      "rule_kind": "dynamic_deny",
+      "severity": "CRITICAL",
+      "signature": {
+        "algorithm": "ed25519",
+        "publisher": "iam-jit-official",
+        "value": "I3OBMGizRpU6QAefa32MqeqK59u6Xi4sjKFqimcUovPXWsqT/PhtqBLw+MHYmlDaHUHB3lz+GbGQ/GAoqeESCA=="
+      },
+      "source_incident": "Wave3-INC-2025-agent-bound-cluster-admin",
+      "target": "clusterrolebindings/cluster-admin"
+    },
+    {
+      "action": [
+        "create"
+      ],
+      "applies_to_bouncers": [
+        "kbouncer"
+      ],
+      "compliance_tags": [
+        "NIST-AC-3",
+        "SOC2-CC6.1",
+        "MITRE-T1611",
+        "MITRE-T1059"
+      ],
+      "description": "Block agent kubectl exec into kube-system pods",
+      "discovered_at": "2026-05-23T00:00:00Z",
+      "rule_id": "tf_official_014",
+      "rule_kind": "dynamic_deny",
+      "severity": "CRITICAL",
+      "signature": {
+        "algorithm": "ed25519",
+        "publisher": "iam-jit-official",
+        "value": "Jzjj3B0f+O/39PrvUQS9K/EJUXudZQSin84WzAwkfM4MgHEX55BVONo4RTxOnm7R7HAyntS7zAlZC12vqIYgAQ=="
+      },
+      "source_incident": "Wave3-INC-2025-agent-exec-into-kube-system-pod",
+      "target": "pods/exec"
+    },
+    {
+      "action": [
+        "delete",
+        "patch"
+      ],
+      "applies_to_bouncers": [
+        "kbouncer"
+      ],
+      "compliance_tags": [
+        "NIST-CM-7",
+        "SOC2-CC7.2",
+        "MITRE-T1485"
+      ],
+      "description": "Block agent modifications to kube-system namespace",
+      "discovered_at": "2026-05-23T00:00:00Z",
+      "rule_id": "tf_official_015",
+      "rule_kind": "dynamic_deny",
+      "severity": "CRITICAL",
+      "signature": {
+        "algorithm": "ed25519",
+        "publisher": "iam-jit-official",
+        "value": "gs1QhqTcW+b3i+lDQrRKLrFshBf9xZkTs39MbycpVSqePi5BXILn34rEnPUZTWopFWsWFJlDYYFca+W5Q2E9Aw=="
+      },
+      "source_incident": "Wave3-INC-2025-agent-modified-kube-system",
+      "target": "namespaces/kube-system"
+    },
+    {
+      "action": [
+        "s3:PutBucketAcl",
+        "s3:PutBucketPolicy"
+      ],
+      "applies_to_bouncers": [
+        "ibounce"
+      ],
+      "compliance_tags": [
+        "NIST-AC-3",
+        "NIST-AC-4",
+        "SOC2-CC6.7",
+        "MITRE-T1530"
+      ],
+      "description": "Block agents from changing S3 bucket ACLs or policies (public-read risk)",
+      "discovered_at": "2026-05-23T00:00:00Z",
+      "rule_id": "tf_official_016",
+      "rule_kind": "dynamic_deny",
+      "severity": "HIGH",
+      "signature": {
+        "algorithm": "ed25519",
+        "publisher": "iam-jit-official",
+        "value": "M8tcjoHeP1yz8smWVDGhW8T74UD75ZP3GbRLo8eKV5U56rcOSiqp/fVOZddK7onYqu9ma1s3l+w+YuQIEyNZCA=="
+      },
+      "source_incident": "Wave3-INC-2024-agent-made-bucket-public",
+      "target": "*"
+    },
+    {
+      "action": [
+        "s3:PutObjectAcl"
+      ],
+      "applies_to_bouncers": [
+        "ibounce"
+      ],
+      "compliance_tags": [
+        "NIST-AC-3",
+        "SOC2-CC6.7",
+        "MITRE-T1530"
+      ],
+      "description": "Block agents from making individual S3 objects public-read",
+      "discovered_at": "2026-05-23T00:00:00Z",
+      "rule_id": "tf_official_017",
+      "rule_kind": "dynamic_deny",
+      "severity": "HIGH",
+      "signature": {
+        "algorithm": "ed25519",
+        "publisher": "iam-jit-official",
+        "value": "AW6DfiDn9sIvXKj2cWpaBvZlM4bgZE5SEx3evxWZ40pBIvoc4X4OqIoLVbok1uiy52GBj5/rwQEpNPXK6o3pBw=="
+      },
+      "source_incident": "Wave3-INC-2024-agent-made-object-public",
+      "target": "*"
+    },
+    {
+      "action": [
+        "ec2:ModifyImageAttribute",
+        "ec2:ModifySnapshotAttribute"
+      ],
+      "applies_to_bouncers": [
+        "ibounce"
+      ],
+      "compliance_tags": [
+        "NIST-AC-3",
+        "SOC2-CC6.7",
+        "MITRE-T1530"
+      ],
+      "description": "Block agents from sharing AMIs / snapshots cross-account (data exfil)",
+      "discovered_at": "2026-05-23T00:00:00Z",
+      "rule_id": "tf_official_018",
+      "rule_kind": "dynamic_deny",
+      "severity": "HIGH",
+      "signature": {
+        "algorithm": "ed25519",
+        "publisher": "iam-jit-official",
+        "value": "zcUTCPEOFQrclB/FahJPRlieaoN3BktW5nFLnu3OBGIww/s0sIZK3cNUzNo3AaBKqN12lx/H6ZglQHNog/dGCg=="
+      },
+      "source_incident": "Wave3-INC-2024-agent-shared-AMI-with-attacker",
+      "target": "*"
+    },
+    {
+      "action": [
+        "logs:DeleteLogGroup",
+        "logs:DeleteLogStream"
+      ],
+      "applies_to_bouncers": [
+        "ibounce"
+      ],
+      "compliance_tags": [
+        "NIST-AU-9",
+        "SOC2-CC7.2",
+        "MITRE-T1070",
+        "HIPAA-164.312(b)"
+      ],
+      "description": "Block agents from deleting CloudWatch log groups (audit-trail tampering)",
+      "discovered_at": "2026-05-23T00:00:00Z",
+      "rule_id": "tf_official_019",
+      "rule_kind": "dynamic_deny",
+      "severity": "HIGH",
+      "signature": {
+        "algorithm": "ed25519",
+        "publisher": "iam-jit-official",
+        "value": "xV6QzMB+bZdTD5SrlmVh4Wg6oVnDh2upLJIYMtU0U/Nbt7Kit//scA6vNPEapj02kz6r73lhOkqNVVDlmylpBg=="
+      },
+      "source_incident": "Wave3-INC-2024-agent-erased-cloudwatch-logs",
+      "target": "*"
+    },
+    {
+      "action": [
+        "cloudtrail:StopLogging",
+        "cloudtrail:DeleteTrail"
+      ],
+      "applies_to_bouncers": [
+        "ibounce"
+      ],
+      "compliance_tags": [
+        "NIST-AU-2",
+        "NIST-AU-12",
+        "SOC2-CC7.2",
+        "MITRE-T1562.008",
+        "HIPAA-164.312(b)"
+      ],
+      "description": "Block agents from stopping/deleting CloudTrail (audit-trail tampering)",
+      "discovered_at": "2026-05-23T00:00:00Z",
+      "rule_id": "tf_official_020",
+      "rule_kind": "dynamic_deny",
+      "severity": "HIGH",
+      "signature": {
+        "algorithm": "ed25519",
+        "publisher": "iam-jit-official",
+        "value": "O+XzIf/2bmf3ATCm3yxC9+iNCaq7cpM37Sd2lgRA2H+/d0j06oD9f2E8RBhVYn5uN50UQHb5T+UPtduiW+/FDQ=="
+      },
+      "source_incident": "Wave3-INC-2024-agent-stopped-cloudtrail",
+      "target": "*"
+    },
+    {
+      "action": [
+        "get",
+        "list",
+        "watch"
+      ],
+      "applies_to_bouncers": [
+        "kbouncer"
+      ],
+      "compliance_tags": [
+        "NIST-AC-3",
+        "SOC2-CC6.7",
+        "MITRE-T1552.007",
+        "HIPAA-164.312(a)(2)"
+      ],
+      "description": "Bouncer-default: agents must specify a namespace for secret reads (no cluster-wide list)",
+      "discovered_at": "2026-05-23T00:00:00Z",
+      "rule_id": "tf_official_021",
+      "rule_kind": "dynamic_deny",
+      "severity": "HIGH",
+      "signature": {
+        "algorithm": "ed25519",
+        "publisher": "iam-jit-official",
+        "value": "pEqjaF7hmrjkLtjlYPXBCBzAzwRPJoLUuxYb8I2kWSejLMFc7rRKEF9WrJsL27oenw8nrmrcX96+lJFAEUeXBQ=="
+      },
+      "source_incident": "Wave3-INC-2025-agent-listed-secrets-cross-namespace",
+      "target": "secrets"
+    },
+    {
+      "action": [
+        "delete"
+      ],
+      "applies_to_bouncers": [
+        "kbouncer"
+      ],
+      "compliance_tags": [
+        "NIST-CM-3",
+        "SOC2-CC7.2",
+        "MITRE-T1485"
+      ],
+      "description": "Block agents from deleting ConfigMaps",
+      "discovered_at": "2026-05-23T00:00:00Z",
+      "rule_id": "tf_official_022",
+      "rule_kind": "dynamic_deny",
+      "severity": "HIGH",
+      "signature": {
+        "algorithm": "ed25519",
+        "publisher": "iam-jit-official",
+        "value": "DHz6DxZR1HuTTKS7Duyr75W4o89aUZSWuFIVOFVjf3YEKVbeySC90GxT73RGht+6dQyHi/JrMIBf2dtLha4yCg=="
+      },
+      "source_incident": "Wave3-INC-2025-agent-deleted-configmaps",
+      "target": "configmaps"
+    },
+    {
+      "action": [
+        "sql:DELETE_UNBOUNDED"
+      ],
+      "applies_to_bouncers": [
+        "dbounce"
+      ],
+      "compliance_tags": [
+        "NIST-AC-3",
+        "SOC2-CC7.3",
+        "MITRE-T1485"
+      ],
+      "description": "Flag unbounded DELETE statements (no WHERE clause) for operator review",
+      "discovered_at": "2026-05-23T00:00:00Z",
+      "rule_id": "tf_official_023",
+      "rule_kind": "dynamic_deny",
+      "severity": "HIGH",
+      "signature": {
+        "algorithm": "ed25519",
+        "publisher": "iam-jit-official",
+        "value": "pJZzKBxAgpyQcFbnokDxJWjUTG6K+qTCuc1uCrf7zUmYURhdO/jNDhrjTHkRS+x71Yi+aanq9Wu8EVm0QMEBDA=="
+      },
+      "source_incident": "Wave3-INC-2025-agent-deleted-all-users",
+      "target": "DELETE FROM * WHERE"
+    },
+    {
+      "action": [
+        "sql:UPDATE_UNBOUNDED"
+      ],
+      "applies_to_bouncers": [
+        "dbounce"
+      ],
+      "compliance_tags": [
+        "NIST-AC-3",
+        "SOC2-CC7.3",
+        "MITRE-T1565.001"
+      ],
+      "description": "Flag unbounded UPDATE statements (no WHERE clause)",
+      "discovered_at": "2026-05-23T00:00:00Z",
+      "rule_id": "tf_official_024",
+      "rule_kind": "dynamic_deny",
+      "severity": "HIGH",
+      "signature": {
+        "algorithm": "ed25519",
+        "publisher": "iam-jit-official",
+        "value": "ih8KRgZthWTwVB+2d8zI//menAZqyFg1pRxlv0riXzpq/9WSQRurKLgpWFD745qhS/LDFR7s3R5kW5SUfuLFDA=="
+      },
+      "source_incident": "Wave3-INC-2025-agent-mass-updated-records",
+      "target": "UPDATE * SET"
+    },
+    {
+      "action": [
+        "http:POST",
+        "http:PUT"
+      ],
+      "applies_to_bouncers": [
+        "gbounce"
+      ],
+      "compliance_tags": [
+        "NIST-SC-7",
+        "SOC2-CC6.6",
+        "MITRE-T1041"
+      ],
+      "description": "Block agent POSTs to requestbin.com / interactsh-style exfil endpoints",
+      "discovered_at": "2026-05-23T00:00:00Z",
+      "rule_id": "tf_official_025",
+      "rule_kind": "dynamic_deny",
+      "severity": "HIGH",
+      "signature": {
+        "algorithm": "ed25519",
+        "publisher": "iam-jit-official",
+        "value": "tBsSLrJMmMtGSWBJ9HZQ4+YYSPzJgSxTKPbOgeBs0ghJ8Is/kXHDTp5pnVORgCebVgGNpoNRmbYmy6A6T8YCBA=="
+      },
+      "source_incident": "Wave4-PROMPT-INJ-exfil-via-requestbin",
+      "target": "https://*.requestbin.com/*"
+    },
+    {
+      "action": [
+        "http:POST",
+        "http:PUT"
+      ],
+      "applies_to_bouncers": [
+        "gbounce"
+      ],
+      "compliance_tags": [
+        "NIST-SC-7",
+        "SOC2-CC6.6",
+        "MITRE-T1041"
+      ],
+      "description": "Block agent POSTs to ngrok tunnels (common exfil staging)",
+      "discovered_at": "2026-05-23T00:00:00Z",
+      "rule_id": "tf_official_026",
+      "rule_kind": "dynamic_deny",
+      "severity": "HIGH",
+      "signature": {
+        "algorithm": "ed25519",
+        "publisher": "iam-jit-official",
+        "value": "qdh3+fN/29iDAaGrwQoIsV043kWjGKcOqSbRpDcJ/Mhr2puywzOUx7PqkkHxgHgqDNzD0zmEdJs71OzjWDahDQ=="
+      },
+      "source_incident": "Wave4-PROMPT-INJ-exfil-via-ngrok",
+      "target": "https://*.ngrok.io/*"
+    },
+    {
+      "action": [
+        "ec2:RunInstances"
+      ],
+      "applies_to_bouncers": [
+        "ibounce"
+      ],
+      "compliance_tags": [
+        "NIST-AC-3",
+        "SOC2-CC7.2",
+        "MITRE-T1496"
+      ],
+      "description": "Block agent EC2 RunInstances (operator must explicitly allow per-instance-type)",
+      "discovered_at": "2026-05-23T00:00:00Z",
+      "rule_id": "tf_official_027",
+      "rule_kind": "dynamic_deny",
+      "severity": "HIGH",
+      "signature": {
+        "algorithm": "ed25519",
+        "publisher": "iam-jit-official",
+        "value": "SDBqCFVSZ8A2MMIWZ1DYKGECgCcd3PpJC18JMFxKK0vTGvSL+cHu3DfP30pe960MMn+Z/laPw16Yau3GOyKCAA=="
+      },
+      "source_incident": "CVE-2025-AGENT-CRYPTOMINE: agents launching unauthorized large instances",
+      "target": "*"
+    },
+    {
+      "action": [
+        "lambda:CreateFunction",
+        "lambda:UpdateFunctionCode"
+      ],
+      "applies_to_bouncers": [
+        "ibounce"
+      ],
+      "compliance_tags": [
+        "NIST-CM-7",
+        "SOC2-CC7.2",
+        "MITRE-T1098"
+      ],
+      "description": "Block agents from creating/updating Lambda functions (persistence vector)",
+      "discovered_at": "2026-05-23T00:00:00Z",
+      "rule_id": "tf_official_028",
+      "rule_kind": "dynamic_deny",
+      "severity": "HIGH",
+      "signature": {
+        "algorithm": "ed25519",
+        "publisher": "iam-jit-official",
+        "value": "hpYIMvby0GvfPwzkKlpMTny++O1nGXP2z5A5n+vmQWRsqWMQs1zN3awNbmwcmHWR2rRUm3tPSi91/moOvZjABw=="
+      },
+      "source_incident": "CVE-2025-AGENT-LAMBDA-PERSIST: agent persists via Lambda functions",
+      "target": "*"
+    },
+    {
+      "action": [
+        "events:PutRule",
+        "events:PutTargets"
+      ],
+      "applies_to_bouncers": [
+        "ibounce"
+      ],
+      "compliance_tags": [
+        "NIST-CM-7",
+        "SOC2-CC7.2",
+        "MITRE-T1098"
+      ],
+      "description": "Block agents from creating EventBridge rules/targets (persistence vector)",
+      "discovered_at": "2026-05-23T00:00:00Z",
+      "rule_id": "tf_official_029",
+      "rule_kind": "dynamic_deny",
+      "severity": "HIGH",
+      "signature": {
+        "algorithm": "ed25519",
+        "publisher": "iam-jit-official",
+        "value": "YgiZHti336BrOH7/Ke5zdr+xFTjOuUMpGTP/h1NowdrtjS663X47wbK5uhnwwHRFuwKxciUHObiW/2JOHpcgDA=="
+      },
+      "source_incident": "CVE-2025-AGENT-EVENTBRIDGE-PERSIST: agent persists via EventBridge rules",
+      "target": "*"
+    },
+    {
+      "action": [
+        "guardduty:DisassociateMembers",
+        "guardduty:DeleteDetector"
+      ],
+      "applies_to_bouncers": [
+        "ibounce"
+      ],
+      "compliance_tags": [
+        "NIST-SI-4",
+        "SOC2-CC7.3",
+        "MITRE-T1562.001"
+      ],
+      "description": "Block agents from disabling GuardDuty (detection-evasion)",
+      "discovered_at": "2026-05-23T00:00:00Z",
+      "rule_id": "tf_official_030",
+      "rule_kind": "dynamic_deny",
+      "severity": "HIGH",
+      "signature": {
+        "algorithm": "ed25519",
+        "publisher": "iam-jit-official",
+        "value": "E2z6g6gYQoqzkeOFp+rarvbzJkn/pNvyceaSsB7iWFw8QCHwr7qik+jtiA1kG5Etkc0xxWWrw5KLm5b05s9pBw=="
+      },
+      "source_incident": "Wave3-INC-2024-agent-disabled-guardduty",
+      "target": "*"
+    },
+    {
+      "action": [
+        "securityhub:DisableSecurityHub",
+        "config:DeleteConfigurationRecorder"
+      ],
+      "applies_to_bouncers": [
+        "ibounce"
+      ],
+      "compliance_tags": [
+        "NIST-SI-4",
+        "SOC2-CC7.3",
+        "MITRE-T1562.001",
+        "HIPAA-164.312(b)"
+      ],
+      "description": "Block agents from disabling Security Hub or AWS Config",
+      "discovered_at": "2026-05-23T00:00:00Z",
+      "rule_id": "tf_official_031",
+      "rule_kind": "dynamic_deny",
+      "severity": "HIGH",
+      "signature": {
+        "algorithm": "ed25519",
+        "publisher": "iam-jit-official",
+        "value": "AeWKJcq2qpoazbHdhDlR/7poxzDZFlQskdXzzrKYPmlMunPKDUy7EipwA05+EZj4m9q2oDCN56Je0B0O3CAaBA=="
+      },
+      "source_incident": "Wave3-INC-2024-agent-disabled-security-hub",
+      "target": "*"
+    },
+    {
+      "action": [
+        "sts:AssumeRoleWithWebIdentity",
+        "sts:AssumeRoleWithSAML"
+      ],
+      "applies_to_bouncers": [
+        "ibounce"
+      ],
+      "compliance_tags": [
+        "NIST-AC-6",
+        "SOC2-CC6.1",
+        "MITRE-T1078.004"
+      ],
+      "description": "Block agents from assuming roles via federation (operator-only)",
+      "discovered_at": "2026-05-23T00:00:00Z",
+      "rule_id": "tf_official_032",
+      "rule_kind": "dynamic_deny",
+      "severity": "HIGH",
+      "signature": {
+        "algorithm": "ed25519",
+        "publisher": "iam-jit-official",
+        "value": "AqBBX4At4XLDpTVYitpsNNjMagDMspGj4nftg2zhx8MOozWQLuh0OxJzCFopV/1dOjp1Cp9GlugDWLdF+ambDg=="
+      },
+      "source_incident": "CVE-2025-AGENT-FEDERATION-PIVOT",
+      "target": "*"
+    },
+    {
+      "action": [
+        "ecr:PutImage",
+        "ecr:DeleteRepository"
+      ],
+      "applies_to_bouncers": [
+        "ibounce"
+      ],
+      "compliance_tags": [
+        "NIST-CM-3",
+        "SOC2-CC7.2",
+        "MITRE-T1525"
+      ],
+      "description": "Block agents from pushing to or deleting ECR repositories",
+      "discovered_at": "2026-05-23T00:00:00Z",
+      "rule_id": "tf_official_033",
+      "rule_kind": "dynamic_deny",
+      "severity": "HIGH",
+      "signature": {
+        "algorithm": "ed25519",
+        "publisher": "iam-jit-official",
+        "value": "+7KknE0D3ikFOOadvHySGRoNLdFQL2TAYRQn3HxZ07yyPMfH+F4RpJehtLWjJYGzH56YMpCXXBYD4c4j75YJCg=="
+      },
+      "source_incident": "Wave3-INC-2025-agent-overwrote-prod-image",
+      "target": "*"
+    },
+    {
+      "action": [
+        "create",
+        "delete",
+        "patch"
+      ],
+      "applies_to_bouncers": [
+        "kbouncer"
+      ],
+      "compliance_tags": [
+        "NIST-CM-7",
+        "SOC2-CC6.1",
+        "MITRE-T1562.001"
+      ],
+      "description": "Block agents from modifying ValidatingWebhookConfigurations (defense disabling)",
+      "discovered_at": "2026-05-23T00:00:00Z",
+      "rule_id": "tf_official_034",
+      "rule_kind": "dynamic_deny",
+      "severity": "HIGH",
+      "signature": {
+        "algorithm": "ed25519",
+        "publisher": "iam-jit-official",
+        "value": "GFE/laCGhyv6CzVfIOm1z4JBUk+xBXFtXYr16Yo4j5sHtwePGTQlYHG8DMGcB3FBiG2tb4Vq5K4zCVjypDXnDQ=="
+      },
+      "source_incident": "Wave3-INC-2025-agent-tampered-admission-webhooks",
+      "target": "validatingwebhookconfigurations"
+    },
+    {
+      "action": [
+        "create",
+        "delete",
+        "patch"
+      ],
+      "applies_to_bouncers": [
+        "kbouncer"
+      ],
+      "compliance_tags": [
+        "NIST-CM-7",
+        "SOC2-CC6.1",
+        "MITRE-T1562.001"
+      ],
+      "description": "Block agents from modifying MutatingWebhookConfigurations",
+      "discovered_at": "2026-05-23T00:00:00Z",
+      "rule_id": "tf_official_035",
+      "rule_kind": "dynamic_deny",
+      "severity": "HIGH",
+      "signature": {
+        "algorithm": "ed25519",
+        "publisher": "iam-jit-official",
+        "value": "se9AOqu81cSf6PorKmIzInEz8ymdpRQnLgGeeRMEO4lQ3pbGeH5WiQy6i2nC9MOZKIVx2E0J+PJEJHT03bsmBw=="
+      },
+      "source_incident": "Wave3-INC-2025-agent-tampered-mutating-webhooks",
+      "target": "mutatingwebhookconfigurations"
+    },
+    {
+      "action": [
+        "s3:PutObjectAcl",
+        "s3:DeleteObject"
+      ],
+      "applies_to_bouncers": [
+        "ibounce"
+      ],
+      "compliance_tags": [
+        "NIST-AU-9",
+        "SOC2-CC7.2"
+      ],
+      "description": "Recommend extending safety floor to protect *log* buckets from agent deletion",
+      "discovered_at": "2026-05-23T00:00:00Z",
+      "rule_id": "tf_official_036",
+      "rule_kind": "profile_safety_floor_extension",
+      "severity": "MEDIUM",
+      "signature": {
+        "algorithm": "ed25519",
+        "publisher": "iam-jit-official",
+        "value": "ZtIokAaMGSAU3o+aVVETwgfC4nxMQ6W4qAWb0mSoZ3kKsHze2yGhHI9XWvG37my3N6QeJBWmqOXdb8FBfzddAw=="
+      },
+      "source_incident": "Gap#406-S3-LOG-BUCKET-PROTECTION",
+      "target": "arn:aws:s3:::*log*"
+    },
+    {
+      "action": [
+        "iam:PassRole"
+      ],
+      "applies_to_bouncers": [
+        "ibounce"
+      ],
+      "compliance_tags": [
+        "NIST-AC-6",
+        "SOC2-CC6.1",
+        "MITRE-T1078"
+      ],
+      "description": "Recommend safety floor: deny iam:PassRole except for operator-pinned roles",
+      "discovered_at": "2026-05-23T00:00:00Z",
+      "rule_id": "tf_official_037",
+      "rule_kind": "profile_safety_floor_extension",
+      "severity": "MEDIUM",
+      "signature": {
+        "algorithm": "ed25519",
+        "publisher": "iam-jit-official",
+        "value": "o0pOwwJallXqnN78ipCzJxY5dVcXy2fT/xm0BUONOUERXmu7BXOK9WdvRa6+sOJyY+zr9S1qExcEFEfuQ4RaCA=="
+      },
+      "source_incident": "Gap#406-IAM-PASSROLE-DEFAULT-DENY",
+      "target": "*"
+    },
+    {
+      "action": [
+        "session_duration_lte_1h"
+      ],
+      "applies_to_bouncers": [
+        "ibounce"
+      ],
+      "compliance_tags": [
+        "NIST-AC-12",
+        "SOC2-CC6.1",
+        "DORA-Art.5"
+      ],
+      "description": "Recommend agent-issued roles default to <=1h session duration",
+      "discovered_at": "2026-05-23T00:00:00Z",
+      "rule_id": "tf_official_038",
+      "rule_kind": "scope_primitive_recommendation",
+      "severity": "MEDIUM",
+      "signature": {
+        "algorithm": "ed25519",
+        "publisher": "iam-jit-official",
+        "value": "8mvqotBUPIv22MX9rEuleeJ7IWFo1GJ5cXWby0oYCwCsDGM8dhjjPYWICl7sT/KWP87lr/pcHbqJtWNQNWn1BQ=="
+      },
+      "source_incident": "Gap#406-SHORT-TTL-DEFAULT",
+      "target": "agent-issued-roles"
+    },
+    {
+      "action": [
+        "NEW-MCP-CVE-DISCLOSED"
+      ],
+      "applies_to_bouncers": [
+        "ibounce",
+        "kbouncer",
+        "dbounce",
+        "gbounce"
+      ],
+      "compliance_tags": [
+        "NIST-RA-5",
+        "SOC2-CC7.4"
+      ],
+      "description": "Informational: a new prompt-injection vector was disclosed in an MCP server",
+      "discovered_at": "2026-05-23T00:00:00Z",
+      "rule_id": "tf_official_039",
+      "rule_kind": "informational_alert",
+      "severity": "LOW",
+      "signature": {
+        "algorithm": "ed25519",
+        "publisher": "iam-jit-official",
+        "value": "ufTRGKUvDWquWZ8WhHcfC+dFJHAXqU/afA6MMBQs6E1VCdcQzBZNYpyYYv4njqi0fGeuFZTf7bmDtp8TcJK+Bg=="
+      },
+      "source_incident": "MCP-CVE-2026-001: prompt-injection vector in <hypothetical> MCP server",
+      "target": ""
+    },
+    {
+      "action": [
+        "AGENT-FRAMEWORK-UPDATE-RECOMMENDED"
+      ],
+      "applies_to_bouncers": [
+        "ibounce",
+        "kbouncer",
+        "dbounce",
+        "gbounce"
+      ],
+      "compliance_tags": [
+        "NIST-SI-2",
+        "SOC2-CC7.1"
+      ],
+      "description": "Informational: agent framework version recommendation",
+      "discovered_at": "2026-05-23T00:00:00Z",
+      "rule_id": "tf_official_040",
+      "rule_kind": "informational_alert",
+      "severity": "LOW",
+      "signature": {
+        "algorithm": "ed25519",
+        "publisher": "iam-jit-official",
+        "value": "0nOw62JLK6cmrqgB2CIesWIIQc2zSS4x3mC9x/HTmvKpkyAkVy2Qh3TGxGDHxKDN4ccEuRNYj/gbuvYFgEAPAg=="
+      },
+      "source_incident": "iam-jit-Advisory-2026-01: recommend upgrading <hypothetical agent framework> to >=1.5.0",
+      "target": ""
+    }
+  ],
+  "feed_id": "iam-jit-official-v1",
+  "generated_at": "2026-05-23T10:43:28Z",
+  "manifest_sha256": "eea4d1fc605e7118e03fed94342edb75c7d12e22552987c06a8c84e1e0f49a2a",
+  "publisher": "iam-jit-official",
+  "schema_version": "1.0"
+}
