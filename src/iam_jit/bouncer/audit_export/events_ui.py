@@ -16,6 +16,41 @@ A future bump can swap the JS polling loop for an ``EventSource``
 without touching the server contract. The kbounce / dbounce /
 gbounce ports serve the same HTML for cross-product parity.
 
+#425 / §A64 extensions
+----------------------
+
+Per the Phase F audit (#431) the original #272 UI shipped one freeform
+``filter`` text input + pause/clear/counts. Operator UAT showed
+muscle-memory friction for the common slices, so the launch-blocker
+adds first-class controls that fan out into the same
+``parse_filter_expr`` server-side grammar:
+
+  * **Time-range buttons** (5m / 1h / 24h / custom). Custom prompts for
+    an ISO 8601 / RFC 3339 ``since`` so an operator investigating an
+    incident can scope to the exact window. Translates to the server's
+    ``?since=`` parameter (already #271-shipped).
+  * **Action / resource pattern filter** — regex against
+    ``api.operation`` ORed with the first ``resources[].uid`` so a
+    single input matches either column.
+  * **Agent session id filter** — shortcut for
+    ``unmapped.iam_jit.agent.session_id=<value>``.
+  * **Verdict filter** (allow / deny / both). When set, expands to a
+    server-side ``filter=verdict=<value>`` (the same shortcut the
+    ``tail.get_path`` helper supports).
+  * **Free-text reason search** — regex against
+    ``unmapped.iam_jit.reason`` AND ``status_detail`` so the operator
+    finds the deny reason text regardless of which field the writer
+    used.
+  * **Export buttons** (CSV / JSON / OCSF NDJSON). Each issues a
+    one-shot ``/audit/events?format=<fmt>&limit=1000`` against the
+    SAME filter set, then triggers a browser download. CSV uses the
+    ``DEFAULT_CSV_COLUMNS`` PII guard; OCSF NDJSON is the same JSONL
+    wire format SIEM ingest expects (one OCSF event per line).
+  * **Pagination + virtualized rows** — soft cap at 10K rendered rows
+    with FIFO eviction (oldest dropped). Keeps the page responsive
+    when an operator loads a wide window. The "shown / total seen"
+    counter surfaces in the header.
+
 Auth model
 ----------
 
@@ -31,7 +66,9 @@ that mutate bouncer state. Per ``[[self-host-zero-billing-
 dependency]]`` no CDN dependencies; everything inline + offline-
 ready. Per ``[[security-team-positioning-safety-not-surveillance]]``
 labels use "deny" / "allow" / "policy mismatch", never
-"violation" / "infraction" / "unauthorized".
+"violation" / "infraction" / "unauthorized". Per
+``[[unified-ui-link-page]]`` this is the PER-BOUNCER query surface;
+the #298 link page stays a link page (no aggregator UI here).
 """
 
 from __future__ import annotations
@@ -159,6 +196,60 @@ header button {
 }
 header button:hover { border-color: var(--accent); }
 header button.active { border-color: var(--accent); color: var(--accent); }
+.filterbar {
+  background: var(--panel);
+  border-bottom: 1px solid var(--line);
+  padding: 8px 14px;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.filterbar-row {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+  align-items: center;
+}
+.filterbar-label {
+  color: var(--muted);
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.4px;
+  margin-right: 2px;
+}
+.filterbar-display {
+  color: var(--muted);
+  font-size: 11px;
+  margin-left: 6px;
+}
+.filterbar-input {
+  background: var(--bg);
+  color: var(--text);
+  border: 1px solid var(--line);
+  border-radius: 4px;
+  padding: 4px 7px;
+  font: inherit;
+  font-size: 12px;
+  width: 180px;
+}
+.filterbar-input::placeholder { color: var(--muted); }
+.range-btn, .verdict-btn, .export-btn {
+  background: var(--bg);
+  color: var(--text);
+  border: 1px solid var(--line);
+  border-radius: 4px;
+  padding: 3px 8px;
+  font: inherit;
+  font-size: 12px;
+  cursor: pointer;
+}
+.range-btn:hover, .verdict-btn:hover, .export-btn:hover {
+  border-color: var(--accent);
+}
+.range-btn.active, .verdict-btn.active {
+  border-color: var(--accent);
+  color: var(--accent);
+}
 main { padding: 0; }
 table {
   width: 100%;
@@ -237,7 +328,7 @@ footer {
 <header>
   <div class="brand"><span class="dot" id="status-dot"></span>{{BOUNCER_NAME}} <span style="color: var(--muted); font-weight: 400;">- live audit stream</span></div>
   <div class="counts">
-    <span>total <b id="count-total">0</b></span>
+    <span>shown <b id="count-shown">0</b> / total <b id="count-total">0</b></span>
     <span>allow <b id="count-allow">0</b></span>
     <span>deny <b id="count-deny">0</b></span>
     <span>admin <b id="count-admin">0</b></span>
@@ -249,6 +340,38 @@ footer {
     <button type="button" id="clear-btn">clear</button>
   </div>
 </header>
+<div class="filterbar" id="filterbar">
+  <div class="filterbar-row">
+    <span class="filterbar-label">time:</span>
+    <button type="button" class="range-btn" data-range="5m">5m</button>
+    <button type="button" class="range-btn" data-range="1h">1h</button>
+    <button type="button" class="range-btn" data-range="24h">24h</button>
+    <button type="button" class="range-btn" data-range="all">all</button>
+    <button type="button" class="range-btn" id="range-custom">custom&hellip;</button>
+    <span id="range-display" class="filterbar-display"></span>
+  </div>
+  <div class="filterbar-row">
+    <span class="filterbar-label">verdict:</span>
+    <button type="button" class="verdict-btn active" data-verdict="">both</button>
+    <button type="button" class="verdict-btn" data-verdict="allow">allow only</button>
+    <button type="button" class="verdict-btn" data-verdict="deny">deny only</button>
+  </div>
+  <div class="filterbar-row">
+    <span class="filterbar-label">session:</span>
+    <input type="text" id="filter-session" placeholder="agent.session_id" class="filterbar-input">
+    <span class="filterbar-label">action / resource:</span>
+    <input type="text" id="filter-action" placeholder="regex (s3:Get.*  |  prod-.*)" class="filterbar-input">
+    <span class="filterbar-label">reason search:</span>
+    <input type="text" id="filter-reason" placeholder="free text (regex)" class="filterbar-input">
+  </div>
+  <div class="filterbar-row">
+    <span class="filterbar-label">export:</span>
+    <button type="button" class="export-btn" id="export-csv">CSV</button>
+    <button type="button" class="export-btn" id="export-json">JSON</button>
+    <button type="button" class="export-btn" id="export-ocsf">OCSF NDJSON</button>
+    <span class="filterbar-display">exports include the SAME filters; capped at 1000 events / call</span>
+  </div>
+</div>
 <div class="err-banner" id="err-banner"></div>
 <main>
 <table>
@@ -272,7 +395,15 @@ footer {
 "use strict";
 (function () {
   var POLL_MS = 2000;
-  var MAX_ROWS = 500;
+  // #425 / §A64: 10K hard cap on rendered rows (virtualized FIFO).
+  // The "shown" counter surfaces how many we kept vs how many we saw
+  // so an operator who loads a huge window knows the table is windowed.
+  var MAX_ROWS = 10000;
+  // Per-call cap on the export endpoint. The server's
+  // AUDIT_EVENTS_MAX_LIMIT (1000) is the upper bound; we ask for it
+  // explicitly so the operator's download contains the full slice
+  // their filters select (not just the polling window).
+  var EXPORT_LIMIT = 1000;
   var token = null;
   try {
     var m = window.location.hash.match(/[#&]token=([^&]+)/);
@@ -286,16 +417,32 @@ footer {
   var elErr = document.getElementById("err-banner");
   var elDot = document.getElementById("status-dot");
   var elCountTotal = document.getElementById("count-total");
+  var elCountShown = document.getElementById("count-shown");
   var elCountAllow = document.getElementById("count-allow");
   var elCountDeny = document.getElementById("count-deny");
   var elCountAdmin = document.getElementById("count-admin");
   var elCountHeartbeat = document.getElementById("count-heartbeat");
+
+  // #425 / §A64 extended filter controls.
+  var elFilterSession = document.getElementById("filter-session");
+  var elFilterAction = document.getElementById("filter-action");
+  var elFilterReason = document.getElementById("filter-reason");
+  var elRangeDisplay = document.getElementById("range-display");
+  var elExportCsv = document.getElementById("export-csv");
+  var elExportJson = document.getElementById("export-json");
+  var elExportOcsf = document.getElementById("export-ocsf");
 
   var counts = { total: 0, allow: 0, deny: 0, admin: 0, heartbeat: 0 };
   var seenIds = Object.create(null);
   var paused = false;
   var lastTimeMs = 0;
   var pollHandle = null;
+  // Currently-selected time-range; "all" disables `since=` entirely.
+  // Anything else is a relative-window keyword the JS converts to an
+  // ISO 8601 lower bound at request time.
+  var rangeMode = "all";
+  var rangeCustomIso = null;
+  var verdictMode = "";
 
   function setErr(msg) { elErr.textContent = msg || ""; }
   function setDot(state) {
@@ -386,6 +533,14 @@ footer {
     elCountDeny.textContent = counts.deny;
     elCountAdmin.textContent = counts.admin;
     elCountHeartbeat.textContent = counts.heartbeat;
+    updateShownCount();
+  }
+
+  function updateShownCount() {
+    if (elCountShown) {
+      var rendered = elBody.querySelectorAll("tr:not(.empty-row)").length;
+      elCountShown.textContent = String(rendered);
+    }
   }
 
   function renderRow(ev) {
@@ -420,6 +575,12 @@ footer {
     events.forEach(function (ev) {
       var id = eventId(ev);
       if (seenIds[id]) return;
+      // Client-side filter: action/resource regex + reason regex.
+      // The session_id + verdict are already enforced server-side
+      // via filter= params, but the action/reason controls use a
+      // multi-field OR semantic the server's AND-only grammar
+      // can't express cleanly — we keep them client-side.
+      if (!passesClientFilters(ev)) return;
       seenIds[id] = true;
       var tms = eventTimeMs(ev);
       if (tms > lastTimeMs) lastTimeMs = tms;
@@ -427,11 +588,53 @@ footer {
       bump(v.cls);
       elBody.appendChild(renderRow(ev));
     });
-    // Cap row count to keep the page snappy.
+    // #425 / §A64: virtualized cap at MAX_ROWS (10K). FIFO eviction
+    // so the operator sees the most recent slice without the page
+    // crashing the browser on 100K+-event loads.
     while (elBody.children.length > MAX_ROWS) {
       elBody.removeChild(elBody.firstChild);
     }
+    updateShownCount();
     window.scrollTo(0, document.body.scrollHeight);
+  }
+
+  function compileRegex(raw) {
+    if (!raw) return null;
+    try { return new RegExp(raw); }
+    catch (e) { return null; }
+  }
+
+  function extractResourceUid(ev) {
+    var rs = ev && ev.resources;
+    if (!rs || !rs.length) return "";
+    var first = rs[0];
+    if (first && typeof first === "object") {
+      return String(first.uid || first.name || "");
+    }
+    return "";
+  }
+
+  function extractReason(ev) {
+    var u = ev && ev.unmapped && ev.unmapped.iam_jit || {};
+    if (u.reason) return String(u.reason);
+    if (ev && ev.status_detail) return String(ev.status_detail);
+    if (u.status_detail) return String(u.status_detail);
+    return "";
+  }
+
+  function passesClientFilters(ev) {
+    var actionRe = compileRegex((elFilterAction.value || "").trim());
+    if (actionRe) {
+      var op = extractOperation(ev);
+      var resUid = extractResourceUid(ev);
+      if (!actionRe.test(op) && !actionRe.test(resUid)) return false;
+    }
+    var reasonRe = compileRegex((elFilterReason.value || "").trim());
+    if (reasonRe) {
+      var reason = extractReason(ev);
+      if (!reasonRe.test(reason)) return false;
+    }
+    return true;
   }
 
   function parseNdjson(text) {
@@ -447,14 +650,66 @@ footer {
     return out;
   }
 
-  function buildUrl() {
-    var qs = ["limit=200"];
-    if (lastTimeMs) {
-      qs.push("since=" + encodeURIComponent(new Date(lastTimeMs + 1).toISOString()));
+  function computeRangeSinceIso() {
+    if (rangeMode === "all") return null;
+    if (rangeMode === "custom") return rangeCustomIso;
+    var ms = parseRangeMs(rangeMode);
+    if (!ms) return null;
+    return new Date(Date.now() - ms).toISOString();
+  }
+
+  function parseRangeMs(raw) {
+    var m = /^(\\d+)([smhd])$/.exec(raw);
+    if (!m) return 0;
+    var n = parseInt(m[1], 10);
+    var unit = m[2];
+    if (unit === "s") return n * 1000;
+    if (unit === "m") return n * 60 * 1000;
+    if (unit === "h") return n * 60 * 60 * 1000;
+    if (unit === "d") return n * 24 * 60 * 60 * 1000;
+    return 0;
+  }
+
+  function buildQueryParams(opts) {
+    // Shared server-side parameter builder for poll + export. opts:
+    //   { limit, format, livePoll }
+    // livePoll=true uses the polling cursor (since=<lastTimeMs+1>);
+    // livePoll=false uses the range-window since.
+    var qs = [];
+    qs.push("limit=" + (opts.limit || 200));
+    if (opts.format) qs.push("format=" + encodeURIComponent(opts.format));
+    if (opts.livePoll) {
+      if (lastTimeMs) {
+        qs.push("since=" + encodeURIComponent(new Date(lastTimeMs + 1).toISOString()));
+      }
+    } else {
+      var rangeIso = computeRangeSinceIso();
+      if (rangeIso) qs.push("since=" + encodeURIComponent(rangeIso));
     }
+    // Server-side filter slot 1: the freeform input.
     var f = (elFilter.value || "").trim();
     if (f) qs.push("filter=" + encodeURIComponent(f));
-    return "/audit/events?" + qs.join("&");
+    // Server-side filter slot 2: session id shortcut.
+    var sess = (elFilterSession.value || "").trim();
+    if (sess) {
+      qs.push("filter=" + encodeURIComponent(
+        "unmapped.iam_jit.agent.session_id=" + sess,
+      ));
+    }
+    // Server-side filter slot 3: verdict.
+    if (verdictMode === "allow") {
+      qs.push("filter=" + encodeURIComponent("verdict=ALLOW"));
+    } else if (verdictMode === "deny") {
+      qs.push("filter=" + encodeURIComponent("verdict=DENY"));
+    }
+    return qs.join("&");
+  }
+
+  function buildUrl() {
+    return "/audit/events?" + buildQueryParams({
+      limit: 200,
+      livePoll: true,
+    });
   }
 
   function poll() {
@@ -506,6 +761,7 @@ footer {
     seenIds = Object.create(null);
     counts = { total: 0, allow: 0, deny: 0, admin: 0, heartbeat: 0 };
     elCountTotal.textContent = "0";
+    if (elCountShown) elCountShown.textContent = "0";
     elCountAllow.textContent = "0";
     elCountDeny.textContent = "0";
     elCountAdmin.textContent = "0";
@@ -524,6 +780,141 @@ footer {
     // rendered stay on screen, but new poll uses the new filter.
     poll();
   });
+
+  // #425 / §A64 — wire the new filter inputs. Server-side filters
+  // (session, verdict, range) re-fetch; client-side filters
+  // (action/reason regex) re-run on the existing buffer next poll.
+  function wireRefetch(el) {
+    if (!el) return;
+    el.addEventListener("change", function () { poll(); });
+  }
+  wireRefetch(elFilterSession);
+  wireRefetch(elFilterAction);
+  wireRefetch(elFilterReason);
+
+  // Time-range buttons. Multi-selection guard: exactly one active.
+  var rangeButtons = document.querySelectorAll(".range-btn[data-range]");
+  function setActiveRange(mode) {
+    rangeMode = mode;
+    rangeButtons.forEach(function (b) {
+      b.classList.toggle("active", b.getAttribute("data-range") === mode);
+    });
+    // Reset the polling cursor so the new window's existing events
+    // are pulled on the next tick (otherwise since=<recent> would
+    // silently exclude everything older than the polling cursor).
+    lastTimeMs = 0;
+    seenIds = Object.create(null);
+    elBody.innerHTML = "";
+    counts = { total: 0, allow: 0, deny: 0, admin: 0, heartbeat: 0 };
+    elCountTotal.textContent = "0";
+    if (elCountShown) elCountShown.textContent = "0";
+    elCountAllow.textContent = "0";
+    elCountDeny.textContent = "0";
+    elCountAdmin.textContent = "0";
+    elCountHeartbeat.textContent = "0";
+    elRangeDisplay.textContent = mode === "all"
+      ? "window: all events"
+      : mode === "custom"
+        ? "window: since " + (rangeCustomIso || "<not set>")
+        : "window: last " + mode;
+    poll();
+  }
+  rangeButtons.forEach(function (b) {
+    b.addEventListener("click", function () {
+      var mode = b.getAttribute("data-range");
+      if (mode === "custom") return;  // handled by range-custom button
+      setActiveRange(mode);
+    });
+  });
+  var elRangeCustom = document.getElementById("range-custom");
+  if (elRangeCustom) {
+    elRangeCustom.addEventListener("click", function () {
+      var raw = window.prompt(
+        "Custom time window: enter an ISO 8601 / RFC 3339 lower bound\\n" +
+        "(e.g. 2026-05-23T14:00:00Z) — events at or after this time will be shown.",
+        ""
+      );
+      if (!raw) return;
+      rangeCustomIso = raw.trim();
+      rangeButtons.forEach(function (b) {
+        b.classList.toggle("active", b.getAttribute("data-range") === "custom");
+      });
+      // range-custom isn't in the data-range buttons; toggle it explicitly.
+      elRangeCustom.classList.add("active");
+      setActiveRange("custom");
+    });
+  }
+  setActiveRange("all");
+
+  // Verdict buttons.
+  var verdictButtons = document.querySelectorAll(".verdict-btn[data-verdict]");
+  verdictButtons.forEach(function (b) {
+    b.addEventListener("click", function () {
+      verdictMode = b.getAttribute("data-verdict") || "";
+      verdictButtons.forEach(function (other) {
+        other.classList.toggle("active", other === b);
+      });
+      poll();
+    });
+  });
+
+  // Export buttons. Each triggers a one-shot fetch with the current
+  // filter set + a download. CSV uses the DEFAULT_CSV_COLUMNS PII
+  // guard (no email/phone/credential/token in the default schema);
+  // JSON + OCSF NDJSON are byte-identical to what `iam-jit audit
+  // query --format jsonl` would emit so SIEM ingest is the same.
+  function doExport(format, suggestedFilename, mime) {
+    var url = "/audit/events?" + buildQueryParams({
+      limit: EXPORT_LIMIT,
+      format: format,
+      livePoll: false,
+    });
+    var req = new XMLHttpRequest();
+    req.open("GET", url, true);
+    req.responseType = "blob";
+    if (token) req.setRequestHeader("Authorization", "Bearer " + token);
+    req.timeout = 30000;
+    req.onload = function () {
+      if (req.status !== 200) {
+        setErr("export failed: HTTP " + req.status);
+        return;
+      }
+      var blob = req.response;
+      // Force the desired MIME so the browser saves with the right
+      // extension hint even when the server sent the same bytes
+      // under a generic Content-Type.
+      if (mime) {
+        try { blob = new Blob([blob], { type: mime }); }
+        catch (e) { /* ignore */ }
+      }
+      var downloadUrl = URL.createObjectURL(blob);
+      var a = document.createElement("a");
+      a.href = downloadUrl;
+      a.download = suggestedFilename;
+      document.body.appendChild(a);
+      a.click();
+      document.body.removeChild(a);
+      setTimeout(function () { URL.revokeObjectURL(downloadUrl); }, 1000);
+    };
+    req.onerror = function () { setErr("export failed: network error"); };
+    req.ontimeout = function () { setErr("export failed: timed out"); };
+    req.send();
+  }
+  if (elExportCsv) {
+    elExportCsv.addEventListener("click", function () {
+      doExport("csv", "audit-events.csv", "text/csv");
+    });
+  }
+  if (elExportJson) {
+    elExportJson.addEventListener("click", function () {
+      doExport("jsonl", "audit-events.json", "application/json");
+    });
+  }
+  if (elExportOcsf) {
+    elExportOcsf.addEventListener("click", function () {
+      doExport("jsonl", "audit-events.ocsf.ndjson", "application/x-ndjson");
+    });
+  }
 
   poll();
 })();

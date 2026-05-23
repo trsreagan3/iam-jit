@@ -67,10 +67,12 @@ from typing import Any
 
 from .event import audit_event_from_decision
 from .tail import (
+    DEFAULT_CSV_COLUMNS,
     FilterParseError,
     build_ocsf_bundle,
     default_audit_log_path,
     event_matches,
+    get_path,
     iter_audit_file,
     parse_filter_expr,
 )
@@ -92,6 +94,12 @@ AUDIT_EVENTS_FORMAT_OCSF_BUNDLE = "ocsf-bundle"
 """Single OCSF v1.1.0 class 2004 Detection Finding wrapping the
 matched events. Useful when the caller wants ONE SIEM-ingestible
 artifact instead of a stream."""
+
+AUDIT_EVENTS_FORMAT_CSV = "csv"
+"""CSV export (#425 / §A64). Header row is the dotted column names
+from :data:`tail.DEFAULT_CSV_COLUMNS`; one event per row. The PII guard
+default applies (no email/phone/credential/token/secret fields without
+explicit opt-in via the future ``?csv_columns=`` query parameter)."""
 
 
 def make_audit_events_handler(
@@ -231,6 +239,26 @@ def make_audit_events_handler(
             bundle = build_ocsf_bundle(events)
             return web.json_response(bundle, status=200)
 
+        if opts["format"] == AUDIT_EVENTS_FORMAT_CSV:
+            # #425 / §A64: CSV export for SIEM handoff. Uses the same
+            # default column set as `ibounce audit tail --export csv`
+            # (PII guard applies; no email/phone/credential/token in
+            # the default schema). Caller filters via ?filter= first;
+            # the CSV body is the post-filter slice.
+            csv_body = _format_csv(events)
+            headers = {
+                "Content-Disposition": (
+                    "attachment; filename=\"audit-events.csv\""
+                ),
+            }
+            return web.Response(
+                body=csv_body,
+                status=200,
+                content_type="text/csv",
+                charset="utf-8",
+                headers=headers,
+            )
+
         # JSONL (default) — emit one JSON object per line. Use a raw
         # response body so the Content-Type matches the cross-product
         # convention used by kbounce / dbounce / gbounce.
@@ -245,6 +273,42 @@ def make_audit_events_handler(
         )
 
     return handler
+
+
+def _format_csv(events: list[dict[str, Any]]) -> str:
+    """Render ``events`` as a CSV string with :data:`DEFAULT_CSV_COLUMNS`.
+
+    Materialises in-memory because the response handler needs the full
+    body length up-front (aiohttp can stream but the
+    ``Content-Disposition`` shape works better when the client gets a
+    fully-formed download). The cap from
+    :data:`AUDIT_EVENTS_MAX_LIMIT` is applied at the upstream slice so
+    the CSV never grows unbounded.
+
+    Per :data:`tail.DEFAULT_CSV_COLUMNS` the PII-guarded column set
+    excludes email/phone/credential/token/secret-shaped fields — the
+    operator who needs them passes the explicit set to the CLI
+    (``ibounce audit tail --csv-columns``); the HTTP endpoint sticks
+    to the safe default.
+    """
+    import csv as _csv
+    import io as _io
+    cols = list(DEFAULT_CSV_COLUMNS)
+    sio = _io.StringIO()
+    writer = _csv.writer(sio)
+    writer.writerow(cols)
+    for ev in events:
+        row: list[str] = []
+        for col in cols:
+            val = get_path(ev, col)
+            if val is None:
+                row.append("")
+            elif isinstance(val, (dict, list)):
+                row.append(json.dumps(val, ensure_ascii=False))
+            else:
+                row.append(str(val))
+        writer.writerow(row)
+    return sio.getvalue()
 
 
 def register_audit_events_route(
@@ -356,11 +420,15 @@ def _parse_query(query) -> dict[str, Any]:
         opts["limit"] = n
     if (v := query.get("format")) is not None:
         if v not in (
-            AUDIT_EVENTS_FORMAT_JSONL, AUDIT_EVENTS_FORMAT_OCSF_BUNDLE,
+            AUDIT_EVENTS_FORMAT_JSONL,
+            AUDIT_EVENTS_FORMAT_OCSF_BUNDLE,
+            AUDIT_EVENTS_FORMAT_CSV,
         ):
             raise _BadRequest(
                 f"format={v!r}: want one of: "
-                f"{AUDIT_EVENTS_FORMAT_JSONL}, {AUDIT_EVENTS_FORMAT_OCSF_BUNDLE}",
+                f"{AUDIT_EVENTS_FORMAT_JSONL}, "
+                f"{AUDIT_EVENTS_FORMAT_OCSF_BUNDLE}, "
+                f"{AUDIT_EVENTS_FORMAT_CSV}",
             )
         opts["format"] = v
     for key in ("since", "until"):

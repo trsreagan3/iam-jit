@@ -1706,6 +1706,14 @@ audit_group = register_audit_query_group(main)
 from .cli_audit_stream import register_audit_stream_command  # noqa: E402
 register_audit_stream_command(audit_group)
 
+# #427 / §A66 — register `iam-jit audit verify` (chain + signed-
+# manifest verifier). Hung off the same `audit` group so the
+# operator's mental model is "audit query reads; audit verify
+# attests". The implementation lives in cli_audit_verify so the
+# chain + manifest dependencies don't pull into every CLI surface.
+from .cli_audit_verify import register_audit_verify_command  # noqa: E402
+register_audit_verify_command(audit_group)
+
 # #285 — register `iam-jit session replay <FILE>` (cross-product session
 # replay). Lives in its own module so the (small) profile-evaluator
 # imports don't pull into every CLI surface. Mounts under a fresh
@@ -1788,6 +1796,16 @@ from .cli_updates import register_updates_command  # noqa: E402
 register_updates_command(main)
 
 
+# #429 / §A68 — register `iam-jit logs ship-to` log shipping detector.
+# Detects AWS / Datadog / Splunk / K8s markers in the operator's env
+# + prints bouncer-launch flag recommendations. Per
+# [[creates-never-mutates]] NEVER auto-applies; operator copies flags
+# into their bouncer launch. Composes with #257 webhook presets +
+# #258 Security Lake + #317 S3-compat sink (no new SIEM adapters).
+from .cli_logs import register_logs_command  # noqa: E402
+register_logs_command(main)
+
+
 # #420 / §A59 — register `iam-jit resource-map` synthesiser helper.
 # Phase E of [[bouncer-informs-agent-informs-iam-jit]]: applies a
 # declared resource mapping (staging→prod, etc.) to a permission set
@@ -1795,6 +1813,19 @@ register_updates_command(main)
 # the `iam_jit_resource_map` MCP tool per [[cross-product-agent-parity]].
 from .cli_resource_map import register_resource_map_command  # noqa: E402
 register_resource_map_command(main)
+
+
+# #437 / §A71 — register `iam-jit deployment-targets {list,show}`.
+# Phase G of [[bouncer-informs-agent-informs-iam-jit]]: operator-
+# declared deployment-target taxonomy (prod-k8s, staging-k8s, etc.)
+# the agent reads to scope a long-range audit query (#436) before
+# synthesising a per-target bouncer config. Mirrors the
+# `bounce_deployment_targets_for_filter` MCP tool per
+# [[cross-product-agent-parity]].
+from .cli_deployment_targets import (  # noqa: E402
+    register_deployment_targets_group,
+)
+register_deployment_targets_group(main)
 
 
 if __name__ == "__main__":

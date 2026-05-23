@@ -540,3 +540,76 @@ def test_cross_bouncer_fan_out_includes_ibounce_by_default(tmp_path):
         assert products == {"ibounce"}, products
     finally:
         store.close()
+
+
+# ---------------------------------------------------------------------------
+# #425 / §A64 — CSV export format.
+#
+# UI surfaces a "Download CSV" button that issues
+# /audit/events?format=csv&limit=1000. The CSV body uses the same
+# DEFAULT_CSV_COLUMNS PII guard the CLI's `ibounce audit tail --export
+# csv` uses — no email/phone/credential/token in the default schema.
+# ---------------------------------------------------------------------------
+
+
+def test_csv_format_returns_text_csv(seeded_audit_log):
+    status, body, headers = _run(
+        seeded_audit_log, "/audit/events?format=csv&limit=10",
+    )
+    assert status == 200, body
+    assert "text/csv" in headers.get("Content-Type", "")
+    # First line is the header; subsequent lines are events.
+    lines = body.splitlines()
+    assert len(lines) == 4, "expected header + 3 events"  # header + 3 events
+    # Header includes time, severity, event_type, actor.user.name,
+    # api.operation, verdict — the DEFAULT_CSV_COLUMNS set.
+    header = lines[0]
+    assert "actor.user.name" in header
+    assert "api.operation" in header
+    assert "verdict" in header
+    # No PII-shaped columns by default.
+    assert "email" not in header.lower()
+    assert "credential" not in header.lower()
+    assert "secret" not in header.lower()
+
+
+def test_csv_format_respects_filter(seeded_audit_log):
+    status, body, _ = _run(
+        seeded_audit_log,
+        "/audit/events?format=csv&filter=actor.user.name=alice",
+    )
+    assert status == 200, body
+    lines = body.splitlines()
+    # Header + 2 alice events.
+    assert len(lines) == 3, lines
+
+
+def test_csv_format_has_attachment_disposition(seeded_audit_log):
+    """Browsers honor Content-Disposition: attachment to trigger a
+    download dialog with the suggested filename. Without it the CSV
+    just renders as plain text in a new tab."""
+    _, _, headers = _run(seeded_audit_log, "/audit/events?format=csv")
+    cd = headers.get("Content-Disposition", "")
+    assert "attachment" in cd
+    assert "audit-events.csv" in cd
+
+
+def test_csv_format_empty_log(tmp_path):
+    """Empty log = header-only CSV body. Operators can still open it
+    in a spreadsheet without parse errors."""
+    log = tmp_path / "empty.jsonl"
+    log.touch()
+    status, body, _ = _run(log, "/audit/events?format=csv")
+    assert status == 200, body
+    lines = body.splitlines()
+    assert len(lines) == 1, "expected header-only body"
+    assert "time" in lines[0]
+
+
+def test_csv_format_listed_in_unknown_format_error(seeded_audit_log):
+    """The 400 error for an unknown ?format= should mention csv now
+    so operators discover the format from the error message."""
+    status, body, _ = _run(seeded_audit_log, "/audit/events?format=wat")
+    assert status == 400
+    err = json.loads(body)["error"]
+    assert "csv" in err

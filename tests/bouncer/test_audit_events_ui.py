@@ -176,11 +176,18 @@ def test_html_has_strict_csp_header():
     assert "https://" not in csp
 
 
-def test_html_under_500_lines():
-    """Per spec — under 500 lines of HTML+CSS+JS."""
+def test_html_under_1500_lines():
+    """Per #425/§A64 — page bumps the original #272 500-line cap to 1500.
+
+    The launch-blocker adds first-class time-range / verdict / session /
+    action-regex / reason-search controls + CSV/JSON/OCSF export
+    buttons + 10K-row virtualization. The original 500-line target was
+    a #272 minimum-surface goal; the Phase F audit explicitly enlarged
+    the surface so the cap moves with the scope (1500 leaves headroom
+    for one more iteration without making the test brittle)."""
     _, body, _ = _run()
     n_lines = len(body.splitlines())
-    assert n_lines < 500, f"HTML grew to {n_lines} lines (cap 500)"
+    assert n_lines < 1500, f"HTML grew to {n_lines} lines (cap 1500)"
 
 
 def test_loopback_root_no_auth_required():
@@ -215,3 +222,135 @@ def test_external_root_serves_html_without_header():
     assert status == 200
     assert "<title>" in body
     assert "s3kret" not in body
+
+
+# ---------------------------------------------------------------------------
+# #425 / §A64 — UI query depth (per-bouncer filter surface + export).
+#
+# Per the Phase F audit (#431) the per-bouncer UI already shipped a
+# freeform filter input + pause/clear. Launch-blocker adds first-class
+# time-range / verdict / session / action-regex / reason-search inputs
+# + CSV/JSON/OCSF export buttons + 10K-row virtualization. Tests check
+# the rendered HTML carries the controls + the JS that wires them.
+#
+# Per [[unified-ui-link-page]] this surface lives on the PER-BOUNCER
+# UI, not on the suite link page. (#298 link page stays a link page.)
+# ---------------------------------------------------------------------------
+
+
+def test_events_ui_time_range_filter_5m_1h_24h_custom():
+    """Header bar exposes 5m / 1h / 24h / all + a custom-window button."""
+    _, body, _ = _run()
+    # Each preset button is wired by data-range attribute.
+    for window in ("5m", "1h", "24h", "all"):
+        assert f'data-range="{window}"' in body, f"missing range button: {window}"
+    # Custom window is a dedicated button (not a data-range preset).
+    assert 'id="range-custom"' in body
+    # Range display reads back the current window state.
+    assert 'id="range-display"' in body
+
+
+def test_events_ui_action_resource_pattern_filter():
+    """Action / resource regex input is present + plumbed client-side."""
+    _, body, _ = _run()
+    assert 'id="filter-action"' in body
+    # The JS extracts the operation AND the first resource UID so a
+    # single regex matches either column.
+    assert "extractResourceUid" in body
+    assert "extractOperation" in body
+    assert "passesClientFilters" in body
+
+
+def test_events_ui_agent_session_id_filter():
+    """Session id input fans out to the canonical filter expression."""
+    _, body, _ = _run()
+    assert 'id="filter-session"' in body
+    # The JS expands the input to the canonical long-form filter
+    # field per [[cross-product-agent-parity]] §A18 — agents + UI
+    # share the same fully-qualified path.
+    assert "unmapped.iam_jit.agent.session_id=" in body
+
+
+def test_events_ui_verdict_filter_allow_deny():
+    """Verdict toggle exposes both / allow / deny modes."""
+    _, body, _ = _run()
+    for verdict in ("", "allow", "deny"):
+        assert f'data-verdict="{verdict}"' in body, f"missing verdict btn: {verdict}"
+    # Plumbed to the server's verdict=ALLOW / verdict=DENY filter
+    # shortcut (which tail.get_path expands to
+    # unmapped.iam_jit.verdict).
+    assert "verdict=ALLOW" in body
+    assert "verdict=DENY" in body
+
+
+def test_events_ui_free_text_reason_search():
+    """Reason-search input runs as a client-side regex over the
+    decision's reason field (and falls back to status_detail)."""
+    _, body, _ = _run()
+    assert 'id="filter-reason"' in body
+    assert "extractReason" in body
+    # Both fallback fields are checked.
+    assert "u.reason" in body or "ev.status_detail" in body
+
+
+def test_events_ui_export_csv_json_ocsf():
+    """Three export buttons (CSV / JSON / OCSF NDJSON) issue a
+    one-shot fetch with the current filter set + trigger a download."""
+    _, body, _ = _run()
+    for el_id in ("export-csv", "export-json", "export-ocsf"):
+        assert f'id="{el_id}"' in body, f"missing export button: {el_id}"
+    # Each export hits /audit/events?format=... with the SAME filter
+    # set + the AUDIT_EVENTS_MAX_LIMIT (1000) cap.
+    assert "format=csv" in body or 'doExport("csv"' in body
+    assert 'doExport("jsonl"' in body
+    # Suggested download filenames so a SIEM ingest doesn't see
+    # browser-default `download` names.
+    assert "audit-events.csv" in body
+    assert "audit-events.ocsf.ndjson" in body
+
+
+def test_events_ui_pagination_virtualized_10k_events():
+    """Page caps rendered rows at 10K with FIFO eviction so the
+    browser doesn't crash on 100K-event loads. The shown / total
+    counter surfaces how many were kept vs how many were seen."""
+    _, body, _ = _run()
+    # 10K cap is a load-bearing constant — explicit + searchable.
+    assert "MAX_ROWS = 10000" in body
+    # Shown / total counter surfaces the windowing.
+    assert 'id="count-shown"' in body
+    assert "updateShownCount" in body
+
+
+def test_events_ui_filterbar_renders_outside_link_page():
+    """The PER-BOUNCER UI carries these filters; the suite link page
+    (#298) MUST NOT — per [[unified-ui-link-page]] the link page stays
+    a link page. This is the negative-control: assert the filter bar
+    block we render is the per-bouncer surface, not a re-purposed
+    link page (which lives in gbounce/internal/proxy/suite_handler.go,
+    not here)."""
+    _, body, _ = _run()
+    assert 'class="filterbar"' in body or 'id="filterbar"' in body
+    # No mention of cross-bouncer aggregation on this surface.
+    low = body.lower()
+    assert "aggregator" not in low
+    assert "cross-bouncer" not in low
+
+
+def test_events_ui_export_buttons_carry_filter_state():
+    """Export endpoint URL includes the SAME filter params as the
+    poll — otherwise the operator's filtered view + their downloaded
+    CSV diverge silently. The JS uses one buildQueryParams helper for
+    both code paths."""
+    _, body, _ = _run()
+    assert "buildQueryParams" in body
+    # Both poll + export call the helper.
+    assert "buildQueryParams({" in body
+
+
+def test_events_ui_export_csv_uses_format_csv_param():
+    """The CSV export hits /audit/events?format=csv — the server-side
+    AUDIT_EVENTS_FORMAT_CSV path the endpoint shipped per #425."""
+    _, body, _ = _run()
+    # The doExport call site passes "csv" as the format argument; the
+    # server then renders DEFAULT_CSV_COLUMNS with the PII guard.
+    assert 'doExport("csv"' in body
