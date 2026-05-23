@@ -33,6 +33,14 @@ the verification result, and the bouncer-side artifact id (for
 ``dynamic_deny`` entries: the ``dd_<ULID>`` returned by the resolver
 so ``iam-jit updates revoke <rule_id>`` knows which dynamic-deny to
 remove).
+
+Tests for this module MUST follow the state-verification pattern per
+``docs/CONTRIBUTING.md`` — assert observable state matches reported
+status, not just the status string. This module sits behind the
+``updates revoke`` surface that shipped bug #463 (``status="revoked"``
+in the ledger while the dynamic-deny rule was still live in
+``dynamic-denies.yaml``); the convention exists to prevent the same
+shape from re-shipping.
 """
 
 from __future__ import annotations

@@ -15,6 +15,13 @@ mutations, no audit emits, no queue writes.
 
 Per ``[[v1-scope-bar]]`` we ship terminal + JSON + Markdown + HTML
 exports. No separate web UI.
+
+Tests for this module MUST follow the state-verification pattern per
+``docs/CONTRIBUTING.md`` — assert observable state matches reported
+status, not just the status string. This module was the surface that
+shipped bug #462 (``status="ok"`` with "0 denies" on a 401 from a
+misconfigured token, real denies hidden); the convention exists to
+prevent the same shape from re-shipping.
 """
 
 from __future__ import annotations

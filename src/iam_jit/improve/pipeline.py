@@ -17,6 +17,13 @@ Strict invariants per the brief:
     entries the operator approves.
 
 Returns :class:`ImproveProfileResult` (round-trippable as a dict).
+
+Tests for this module MUST follow the state-verification pattern per
+``docs/CONTRIBUTING.md`` — assert observable state matches reported
+status, not just the status string. This module was the surface that
+shipped bug #448 (``status="auto_installed"`` with zero rules
+actually persisted); the convention exists to prevent the same shape
+from re-shipping.
 """
 
 from __future__ import annotations

@@ -4,6 +4,11 @@ The project ships three testing tiers. The default is fast and self-contained �
 
 The principle: **a contributor should be able to run the entire test suite without an AWS account.** If a test can only pass against real AWS, that's a bug — it means we accidentally hardcoded an AWS-specific URL, region, or behavior.
 
+> **Before writing a new test** — read the **state-verification convention** in
+> [docs/CONTRIBUTING.md](CONTRIBUTING.md#testing-standards). It is the single
+> testing standard that has caught the most operator-visible bugs in v1.0 and
+> is mandatory for any test that asserts a reported success status.
+
 ## Tier 1 — Unit (default)
 
 ```
@@ -170,6 +175,59 @@ For the same reason no real Anthropic/Bedrock API calls are made in tests:
 - **Reliability.** External service flakiness should not fail your build.
 - **Adopters.** A new contributor shouldn't need an AWS account to make a PR.
 - **Agnosticism.** Forcing tests to work against a generic AWS-compatible endpoint surfaces hardcoded assumptions about AWS-specific behavior. That's the same property that makes the system itself easier to fork, self-host, and modify.
+
+## State-verification convention (cross-reference)
+
+The *what to assert* counterpart to this *how to run* document lives in
+[docs/CONTRIBUTING.md](CONTRIBUTING.md#testing-standards). The short
+version, repeated here so contributors landing in this file see it
+without an extra click:
+
+**Every test that asserts a reported success status MUST also assert
+the observable state matches.**
+
+Seven v1.0 bugs (#326, #448, #462, #463, #475, #476, #477) shipped past
+status-string-only tests; all would have failed loudly under the
+convention. See CONTRIBUTING.md for the anti-pattern → pattern code
+examples + the table of helper choices per observable surface.
+
+### When state-verification applies
+
+Any operator-facing success path — CLI exit code, MCP tool return,
+async/queue handler, status banner. See CONTRIBUTING.md for the
+exemption list (pure-function unit tests, schema-rejection tests,
+failure-path tests). In doubt → add the verification; the cost is one
+extra read of the artifact you just claimed to mutate.
+
+### What constitutes "observable state"
+
+Anything the operator could check from outside the function under test:
+the filesystem (`dynamic-denies.yaml`, profile YAML, ledger JSONL),
+SQLite audit rows, an `iam-jit audit query` result, a `/healthz` HTTP
+response, the §A25 pending-approval queue, a fan-out reload return
+value, an embedded sub-payload of a "success" wrapper (the inner
+`bouncer_remove` block of a `status: revoked` response — bug #463 hid
+exactly here). The fuller list with helper pointers is in
+CONTRIBUTING.md.
+
+### Existing helpers to lean on
+
+| You're verifying | Reach for |
+|---|---|
+| `dynamic-denies.yaml` contents | YAML readers used by `tests/threat_feed/test_cli_updates.py` |
+| Recent denies surfaced to the operator | `fetch_recent_denies` from the digest module |
+| An audit event is queryable end-to-end | `iam-jit audit query` or its module-level entry point |
+| A profile is materially installed | profile-read helpers used by `tests/cli/test_profile_allow.py` |
+| §A25 pending-queue contents | helpers in `improve/pipeline.py` |
+
+### Smoke tests as a separate concern
+
+Smoke tests (`tests/threat_feed/test_smoke.py` is the canonical example)
+verify the cross-component happy path end-to-end. They are NOT a
+substitute for unit-level state-verification — they catch wiring
+regressions; the unit tests catch the operator-visible status-vs-reality
+mismatch that motivates the convention. Both layers are required for
+any operator-facing surface.
 
 [moto]: https://github.com/getmoto/moto
 [respx]: https://github.com/lundberg/respx

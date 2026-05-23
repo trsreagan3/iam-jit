@@ -32,6 +32,15 @@ iam-jit deliberately does NOT:
 
 The schema for ``evidence`` is documented inline below; tests
 enforce it.
+
+Tests for this module MUST follow the state-verification pattern per
+``docs/CONTRIBUTING.md`` — assert observable state matches reported
+status, not just the status string. This module was the surface that
+shipped bugs #475 (``audit_event_ids`` returned but events were
+write-only; query path returned empty), #476 (``status="auto_approved"``
+with ``credentials: null`` silently) and #477 (empty
+``codebase_references: []`` passing evidence-block discipline). The
+convention exists to prevent the same shape from re-shipping.
 """
 
 from __future__ import annotations

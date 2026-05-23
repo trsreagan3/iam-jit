@@ -19,6 +19,13 @@ cache + recent failure simultaneously, never one without the other.
 
 Per [[no-hosted-saas]] there is no centralized state — everything is
 local: cache files + applied-ledger + the declarative config.
+
+Tests for this module MUST follow the state-verification pattern per
+``docs/CONTRIBUTING.md`` — assert observable state matches reported
+status, not just the status string. This module was the surface that
+shipped bug #463 (``status="revoked"`` in the ledger while the rule
+was still live in ``dynamic-denies.yaml``); the convention exists to
+prevent the same shape from re-shipping.
 """
 
 from __future__ import annotations
