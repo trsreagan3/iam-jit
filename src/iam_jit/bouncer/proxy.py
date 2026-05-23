@@ -3820,6 +3820,25 @@ async def serve(config: ProxyConfig, *, store: BouncerStore) -> None:
         # branch on a single field. Mirrors the audit_log block's
         # always-present convention.
         anomaly_detection_block = active_anomaly_detection_marker()
+        # §A93 / #509 Phase 2 — silent-degradation tracker per
+        # [[bouncer-zero-llm-when-agent-in-loop]]. Surfaces every
+        # LLM-augmented site that fell back to deterministic-only
+        # (local-dev / agent-in-loop is the EXPECTED mode here; the
+        # block lets operators confirm "yes, my bouncer is in
+        # local-dev mode and intelligently deferring to my agent"
+        # rather than silently losing signal). Always present so
+        # monitors can branch on a single field; counts reset on
+        # process restart.
+        try:
+            from ..llm.report_skip import skip_counter_snapshot
+            llm_skips_block = skip_counter_snapshot()
+        except Exception:  # pragma: no cover
+            llm_skips_block = {
+                "total": 0,
+                "counts": {},
+                "by_reason": {},
+                "last_skips": [],
+            }
         return web.json_response({
             # #433 — bouncer_kind identifier so apply-config /
             # cross-product tooling can disambiguate "port is in use
@@ -3840,6 +3859,7 @@ async def serve(config: ProxyConfig, *, store: BouncerStore) -> None:
             "audit_log": audit_log_block,
             "dynamic_denies": dynamic_denies_block,
             "anomaly_detection": anomaly_detection_block,
+            "llm_skips": llm_skips_block,
         }, status=http_status_code)
 
     # #324a — POST /admin/dynamic-denies/reload triggers an immediate

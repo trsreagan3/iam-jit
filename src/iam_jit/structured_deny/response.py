@@ -55,6 +55,17 @@ resource rather than ask for an allow."""
 INJECTION_APPEARS_LEGITIMATE = "appears_legitimate"
 INJECTION_AMBIGUOUS = "ambiguous"
 INJECTION_APPEARS_ADVERSARIAL = "appears_adversarial"
+INJECTION_PENDING_CLASSIFICATION = "pending_classification"
+"""§A93 / #509 Phase 2 — local-dev / agent-in-loop default. The
+synchronous LLM-classifier call has been REMOVED from the deny
+hot-path per [[bouncer-zero-llm-when-agent-in-loop]]. When the
+deterministic backstop (structural heuristic + KNOWN_ADVERSARIAL
+match) does NOT flag the deny AND no env-pinned hook is configured,
+classification is deferred to the agent: the agent receives the
+``deny_event_id`` on the 403 body + calls the
+``iam_jit_classify_deny`` MCP tool (which uses the agent's OWN
+LLM via Claude Code / Cursor / etc.) to fill the gap. This avoids
+making local-dev users supply API credits."""
 
 _VALID_RECOMMENDED_ACTIONS = frozenset({
     RECOMMENDED_ACTION_EASY_ALLOW,
@@ -66,7 +77,14 @@ _VALID_INJECTION_CLASSIFICATIONS = frozenset({
     INJECTION_APPEARS_LEGITIMATE,
     INJECTION_AMBIGUOUS,
     INJECTION_APPEARS_ADVERSARIAL,
+    INJECTION_PENDING_CLASSIFICATION,
 })
+
+# Env-var-driven opt-in to keep the synchronous bouncer-side LLM
+# classifier path in standalone-mode deployments (CI / cron / no
+# agent in loop). Default OFF per
+# [[bouncer-zero-llm-when-agent-in-loop]].
+_SYNC_CLASSIFIER_OPT_IN_ENV = "IAM_JIT_ENABLE_SIDE_LLM"
 
 
 # ---------------------------------------------------------------------------
@@ -97,8 +115,16 @@ class StructuredDenyResponse:
     ``safe_default`` / ``profile_allow_baseline`` / etc)."""
 
     is_likely_injection_classification: str
-    """One of ``appears_legitimate`` / ``ambiguous`` / ``appears_adversarial``.
-    Today this is ``ambiguous`` unless #404 LLM classifier is wired."""
+    """One of ``appears_legitimate`` / ``ambiguous`` /
+    ``appears_adversarial`` / ``pending_classification`` (#509 Phase 2).
+
+    ``pending_classification`` is the local-dev / agent-in-loop
+    default: the synchronous LLM call has been removed from the deny
+    hot-path; the agent receives ``deny_event_id`` + calls the
+    ``iam_jit_classify_deny`` MCP tool (using its OWN LLM) to fill in
+    the real classification when desired. Operators in standalone
+    mode (CI / cron) can re-enable the synchronous classifier path by
+    setting ``IAM_JIT_ENABLE_SIDE_LLM=1`` + a real LLM backend."""
 
     suggested_allow_command: str
     """One-line ``iam-jit profile allow ...`` command (or a `#` comment
@@ -130,7 +156,13 @@ class StructuredDenyResponse:
     ``is_likely_injection_classification`` value (empty when the
     placeholder fallback fired)."""
 
-    schema_version: str = "1.0"
+    schema_version: str = "1.1"
+    """``1.1`` (#509 Phase 2): adds ``pending_classification`` as a
+    valid ``is_likely_injection_classification`` value. Agents
+    grepping the legacy three-value enum should add the new value to
+    their match set; ``deny_event_id`` is unchanged + remains the key
+    used to call ``iam_jit_classify_deny`` for agent-mediated
+    enrichment."""
 
     def as_dict(self) -> dict[str, Any]:
         return dataclasses.asdict(self)
@@ -148,6 +180,10 @@ class StructuredDenyResponse:
             INJECTION_APPEARS_LEGITIMATE: "looks legitimate",
             INJECTION_AMBIGUOUS: "ambiguous — needs your judgment",
             INJECTION_APPEARS_ADVERSARIAL: "looks adversarial",
+            INJECTION_PENDING_CLASSIFICATION: (
+                "pending — your agent can call iam_jit_classify_deny "
+                "(MCP) to classify with its own LLM"
+            ),
         }.get(cls, "ambiguous")
         lines = [
             f"Your {self.caught_by_bouncer} bouncer caught something:",
@@ -210,6 +246,18 @@ def _load_classifier_hook() -> Optional[Any]:
         return None
 
 
+def _side_llm_opted_in() -> bool:
+    """True iff operator EXPLICITLY enabled the synchronous bouncer-side
+    LLM classifier (standalone-mode opt-in).
+
+    Per [[bouncer-zero-llm-when-agent-in-loop]] this default is OFF.
+    Local-dev / agent-in-loop deployments leave it unset; the agent
+    classifies via the ``iam_jit_classify_deny`` MCP tool (using the
+    agent's own LLM) when desired."""
+    raw = (os.environ.get(_SYNC_CLASSIFIER_OPT_IN_ENV) or "").strip().lower()
+    return raw in ("1", "true", "yes", "on")
+
+
 def classify_injection_likelihood(
     *,
     action: str,
@@ -220,16 +268,28 @@ def classify_injection_likelihood(
 ) -> tuple[str, str]:
     """Return ``(classification, hook_name)``.
 
-    Resolution order:
+    Resolution order (#509 Phase 2 refactor — the synchronous
+    bouncer-side LLM call is REMOVED from the local-dev hot-path per
+    [[bouncer-zero-llm-when-agent-in-loop]]):
+
       1. If an env-var-pinned hook (``IAM_JIT_INJECTION_CLASSIFIER_HOOK``)
          is loadable, defer to it. Used by tests + custom integrations.
-      2. If the #404 :mod:`iam_jit.deny_classifier` module is importable
-         (it ships in v1.0 alongside Phase B), call its
-         :func:`classify_deny` and map the result.
-      3. Otherwise fall back to a SHORT structural heuristic:
-         * destructive verbs (``Delete*`` / ``Destroy*`` / etc) →
-           ``appears_adversarial``
-         * everything else → ``ambiguous`` (honest default)
+      2. ALWAYS run the deterministic structural heuristic first
+         (KNOWN_ADVERSARIAL_PATTERNS + destructive-verb markers).
+         This is the Bucket D safety floor per
+         [[scorer-is-ground-truth]] and fires independent of LLM
+         availability — operators in standalone-mode + local-dev get
+         the same backstop.
+      3. If the operator EXPLICITLY opted into standalone-mode by
+         setting ``IAM_JIT_ENABLE_SIDE_LLM=1`` AND the #404
+         :mod:`iam_jit.deny_classifier` module is importable AND a
+         backend is reachable, defer to its
+         :func:`classify_deny` for the synchronous LLM call.
+      4. Otherwise return ``pending_classification`` + emit a
+         structured ``report_skip`` so the operator's logs +
+         ``/healthz`` show the local-dev mode. The agent receives the
+         ``deny_event_id`` on the 403 + can call ``iam_jit_classify_deny``
+         (MCP) for agent-mediated enrichment using its OWN LLM.
     """
     hook = _load_classifier_hook()
     if hook is not None:
@@ -250,47 +310,9 @@ def classify_injection_likelihood(
         except Exception as e:  # pragma: no cover
             logger.debug("classifier hook call failed: %s", e)
 
-    # #404 deny_classifier integration. Best-effort import — the module
-    # is shipped in v1.0 but the LLM call may decline on Free tier or
-    # when no backend is configured; in those cases the classifier
-    # returns ``ambiguous`` and we fall through to the structural
-    # heuristic below (which always runs as a deterministic backstop
-    # for destructive verbs per [[scorer-is-ground-truth]] — the
-    # backstop is independent of the LLM availability).
-    deny_classifier_result: dict | None = None
-    try:
-        from ..deny_classifier import classify_deny as _classify_deny
-    except Exception:  # pragma: no cover
-        _classify_deny = None
-    if _classify_deny is not None:
-        try:
-            cls_result = _classify_deny(
-                deny_event={
-                    "action": action,
-                    "resource": resource,
-                    "agent_prompt_context": "",
-                    "operator_recent_pattern": "",
-                },
-                backend=None,
-                budget_usd=float(os.environ.get(
-                    "IAM_JIT_CLASSIFIER_BUDGET_USD", "0.001",
-                ) or 0.001),
-            )
-            if isinstance(cls_result, dict):
-                deny_classifier_result = cls_result
-                cls = cls_result.get("classification")
-                # Honor the LLM result ONLY when it has a real opinion
-                # (legitimate / adversarial) — ambiguous-with-no-backend
-                # falls through to the structural heuristic so we never
-                # silently drop a destructive-verb backstop.
-                if cls in (INJECTION_APPEARS_LEGITIMATE, INJECTION_APPEARS_ADVERSARIAL):
-                    backend = cls_result.get("backend") or ""
-                    return cls, f"deny_classifier:{backend or 'fallback'}"
-        except Exception as e:  # pragma: no cover
-            logger.debug("deny_classifier call failed: %s", e)
-
     # Structural heuristic (deterministic backstop for destructive
-    # verbs — runs even when the LLM is unavailable).
+    # verbs — runs FIRST so the safety floor never depends on the LLM
+    # path being reachable). Bucket D per [[scorer-is-ground-truth]].
     act = (action or "").lower()
     if act:
         adversarial_markers = (
@@ -302,18 +324,99 @@ def classify_injection_likelihood(
         if any(m in act for m in adversarial_markers):
             return INJECTION_APPEARS_ADVERSARIAL, "structural_heuristic"
 
-    # If the LLM said ambiguous and the heuristic doesn't fire, return
-    # ambiguous + surface the LLM's hook name when it ran (so the
-    # classifier_reasoning explanation can be honest about what was
-    # consulted).
-    if deny_classifier_result is not None:
-        backend = deny_classifier_result.get("backend") or ""
-        return (
-            INJECTION_AMBIGUOUS,
-            f"deny_classifier:{backend or 'fallback'}",
-        )
+    # Standalone-mode opt-in path: operator explicitly enabled the
+    # synchronous bouncer-side LLM. Honor it. Failures degrade to
+    # pending_classification (agent enrichment) rather than a 500.
+    if _side_llm_opted_in():
+        try:
+            from ..deny_classifier import classify_deny as _classify_deny
+        except Exception:  # pragma: no cover
+            _classify_deny = None
+        if _classify_deny is not None:
+            try:
+                cls_result = _classify_deny(
+                    deny_event={
+                        "action": action,
+                        "resource": resource,
+                        "agent_prompt_context": "",
+                        "operator_recent_pattern": "",
+                    },
+                    backend=None,
+                    budget_usd=float(os.environ.get(
+                        "IAM_JIT_CLASSIFIER_BUDGET_USD", "0.001",
+                    ) or 0.001),
+                )
+                if isinstance(cls_result, dict):
+                    cls = cls_result.get("classification")
+                    backend = cls_result.get("backend") or ""
+                    if cls in (INJECTION_APPEARS_LEGITIMATE, INJECTION_APPEARS_ADVERSARIAL):
+                        return cls, f"deny_classifier:{backend or 'fallback'}"
+                    # LLM said ambiguous OR returned a safe-fallback;
+                    # report_skip to surface the degradation.
+                    try:
+                        from ..llm.report_skip import (
+                            REASON_BACKEND_UNAVAILABLE,
+                            report_skip,
+                        )
+                        report_skip(
+                            feature="structured_deny.classify",
+                            reason=REASON_BACKEND_UNAVAILABLE,
+                            extra={
+                                "llm_skip_backend": backend,
+                                "llm_skip_classifier_note": str(
+                                    cls_result.get("note") or ""
+                                ),
+                            },
+                        )
+                    except Exception:  # pragma: no cover
+                        pass
+                    return (
+                        INJECTION_AMBIGUOUS,
+                        f"deny_classifier:{backend or 'fallback'}",
+                    )
+            except Exception as e:  # pragma: no cover
+                logger.debug("deny_classifier call failed: %s", e)
+        # Opt-in set but classifier module unavailable; still skip.
+        try:
+            from ..llm.report_skip import (
+                REASON_BACKEND_UNAVAILABLE,
+                report_skip,
+            )
+            report_skip(
+                feature="structured_deny.classify",
+                reason=REASON_BACKEND_UNAVAILABLE,
+                mode_hint=(
+                    "IAM_JIT_ENABLE_SIDE_LLM is set but the deny_classifier "
+                    "module is not importable. Install iam-jit with the "
+                    "LLM extras or unset IAM_JIT_ENABLE_SIDE_LLM."
+                ),
+            )
+        except Exception:  # pragma: no cover
+            pass
+        return INJECTION_PENDING_CLASSIFICATION, ""
 
-    return INJECTION_AMBIGUOUS, ""
+    # Local-dev / agent-in-loop default: defer to the agent. Emit a
+    # structured warning so operators see the deferral in their logs +
+    # /healthz; agents see deny_event_id on the 403 body and can call
+    # iam_jit_classify_deny (MCP) for enrichment using their own LLM.
+    try:
+        from ..llm.report_skip import REASON_NO_LLM_BACKEND, report_skip
+        report_skip(
+            feature="structured_deny.classify",
+            reason=REASON_NO_LLM_BACKEND,
+            mode_hint=(
+                "Local-dev / agent-in-loop default: your agent can call "
+                "the iam_jit_classify_deny MCP tool (with its own LLM) "
+                "using the deny_event_id from the 403 response. To run "
+                "the synchronous bouncer-side classifier instead "
+                "(standalone / CI deployments), set "
+                "IAM_JIT_ENABLE_SIDE_LLM=1 + IAM_JIT_LLM=anthropic|"
+                "openai|bedrock|ollama with credentials."
+            ),
+        )
+    except Exception:  # pragma: no cover
+        pass
+    return INJECTION_PENDING_CLASSIFICATION, ""
 
 
 # ---------------------------------------------------------------------------
@@ -336,6 +439,9 @@ def derive_recommended_action(
       * deny_source in (dynamic_deny, profile_only_*)    → rephrase+retry
       * suggested_allow_command starts with ``#``        → rephrase+retry
       * classification == appears_legitimate             → easy-allow
+      * classification == pending_classification         → easy-allow
+        (lean-permissive — agent can call iam_jit_classify_deny via
+         MCP to refine before deciding; operator still confirms)
       * default (ambiguous)                              → easy-allow
         (the friction-minimized default per
          ``[[ambient-value-prop-and-friction-framing]]``; the agent
@@ -580,6 +686,220 @@ def handle_deny_for_mcp(args: dict[str, Any]) -> dict[str, Any]:
     return payload
 
 
+# ---------------------------------------------------------------------------
+# MCP backend: iam_jit_classify_deny (#509 Phase 2)
+# ---------------------------------------------------------------------------
+
+
+_VALID_ADVISORY_ACTIONS = frozenset({
+    "easy-allow",
+    "hold",
+    "escalate",
+})
+
+
+def classify_deny_for_mcp(args: dict[str, Any]) -> dict[str, Any]:
+    """MCP backend for ``iam_jit_classify_deny`` (#509 Phase 2).
+
+    The agent calls this AFTER seeing a 403 with
+    ``is_likely_injection_classification: pending_classification`` to
+    fill in the classification using its OWN LLM. Per
+    [[bouncer-zero-llm-when-agent-in-loop]] this is the seam where the
+    agent's full task context replaces the bouncer-side LLM call —
+    same architecture as ``iam_jit_improve_profile`` (#401) which
+    already delegates to the agent.
+
+    Two call shapes:
+
+      A. Agent provides ``classification`` + ``confidence`` +
+         ``reasoning`` (the agent's LLM has already analyzed the deny
+         event using the structured payload + recent_audit from
+         ``iam_jit_handle_deny``):
+
+           - The deterministic KNOWN_ADVERSARIAL backstop applies on
+             OUTPUT (mirroring the existing #404 safety floor) — if the
+             action matches a known-adversarial pattern, the classifier
+             OVERRIDES to ``appears_adversarial`` regardless of the
+             agent's input.
+           - ``advisory_action`` is computed via the canonical decision
+             matrix in :mod:`iam_jit.deny_classifier.classifier`.
+
+      B. Agent omits classification fields (look-up only):
+
+           - Returns the structured deny + audit context (same shape
+             as :func:`handle_deny_for_mcp`) so the agent can call
+             back with a real classification once its LLM has weighed
+             in.
+
+    Args:
+      deny_event_id: REQUIRED — stable id from a prior 403 / structured
+        deny response.
+      classification: optional — one of ``appears_legitimate`` /
+        ``ambiguous`` / ``appears_adversarial``.
+      confidence: optional float 0..1.
+      reasoning: optional short operator-language explanation.
+
+    Returns dict with:
+      * ``status``: ``ok`` | ``not_found`` | ``error``
+      * ``classification``: final classification (agent-input or
+        backstop-overridden)
+      * ``confidence``: final confidence (0..1)
+      * ``reasoning``: final reasoning string (backstop annotation
+        prepended when override fires)
+      * ``advisory_action``: ``easy-allow`` | ``hold`` | ``escalate``
+      * ``structured_deny``: the structured deny dict (so the agent
+        sees the deny event in canonical shape)
+      * ``deterministic_backstop_fired``: bool — True iff the
+        KNOWN_ADVERSARIAL backstop overrode the agent's input
+      * ``mode``: ``agent_classified`` | ``lookup_only``
+    """
+    deny_event_id = (args.get("deny_event_id") or "").strip()
+    if not deny_event_id:
+        return {
+            "status": "error",
+            "code": "missing_deny_event_id",
+            "message": "deny_event_id is required",
+        }
+
+    # Resolve the deny event via the same fetch path as handle_deny.
+    try:
+        from ..profile_allow.denies import fetch_recent_denies
+    except Exception as e:  # pragma: no cover
+        return {
+            "status": "error",
+            "code": "import_failed",
+            "message": f"could not import deny fetcher: {e}",
+        }
+
+    lookback_minutes = int(args.get("lookback_minutes") or 60)
+    since = _iso_minus_minutes(lookback_minutes)
+    rows, notes = fetch_recent_denies(
+        since=since,
+        agent_session_id=(args.get("agent_session_id") or "").strip() or None,
+        limit=int(args.get("limit") or 200),
+    )
+    matched_sd: StructuredDenyResponse | None = None
+    matched_row: Any = None
+    for r in rows:
+        sd = build_structured_deny(
+            bouncer=r.bouncer,
+            action=r.action,
+            resource=r.resource,
+            deny_reason=r.deny_reason,
+            deny_source=r.deny_source,
+            rule_id_if_dynamic=r.rule_id_if_dynamic,
+            suggested_allow_command=r.suggested_allow_command,
+            agent_session_id=r.agent_session_id,
+            when=r.when,
+        )
+        if sd.deny_event_id == deny_event_id:
+            matched_sd = sd
+            matched_row = r
+            break
+
+    if matched_sd is None:
+        return {
+            "status": "not_found",
+            "deny_event_id": deny_event_id,
+            "lookback_minutes": lookback_minutes,
+            "notes": notes,
+            "message": (
+                f"no recent deny with id {deny_event_id} in the last "
+                f"{lookback_minutes} minutes; try increasing "
+                "lookback_minutes."
+            ),
+        }
+
+    # Agent-provided classification? If not, return lookup-only payload
+    # so the agent can analyze + call back.
+    raw_cls = args.get("classification")
+    if raw_cls is None:
+        return {
+            "status": "ok",
+            "mode": "lookup_only",
+            "structured_deny": matched_sd.as_dict(),
+            "notes": notes,
+            "guidance": (
+                "Call this MCP tool again with `classification` "
+                "('appears_legitimate' | 'ambiguous' | "
+                "'appears_adversarial'), `confidence` (0..1), and "
+                "`reasoning` populated by your LLM. The bouncer's "
+                "deterministic KNOWN_ADVERSARIAL backstop will still "
+                "fire on output for safety."
+            ),
+        }
+
+    classification = str(raw_cls).strip().lower()
+    if classification not in {
+        INJECTION_APPEARS_LEGITIMATE,
+        INJECTION_AMBIGUOUS,
+        INJECTION_APPEARS_ADVERSARIAL,
+    }:
+        return {
+            "status": "error",
+            "code": "invalid_classification",
+            "message": (
+                f"classification must be one of "
+                f"'{INJECTION_APPEARS_LEGITIMATE}' / "
+                f"'{INJECTION_AMBIGUOUS}' / "
+                f"'{INJECTION_APPEARS_ADVERSARIAL}'; "
+                f"got {classification!r}."
+            ),
+        }
+    try:
+        confidence = float(args.get("confidence", 0.5))
+    except (TypeError, ValueError):
+        confidence = 0.5
+    confidence = max(0.0, min(1.0, confidence))
+    reasoning = str(args.get("reasoning") or "").strip()[:1000]
+
+    # Apply the deterministic KNOWN_ADVERSARIAL backstop on the OUTPUT
+    # side (mirroring the existing #404 safety floor). The agent's LLM
+    # can't override the destructive-verb floor — the bouncer enforces
+    # it regardless of agent input.
+    backstop_fired = False
+    try:
+        from ..deny_classifier.classifier import _is_known_adversarial
+        if _is_known_adversarial(matched_sd.action) and (
+            classification != INJECTION_APPEARS_ADVERSARIAL
+        ):
+            backstop_fired = True
+            classification = INJECTION_APPEARS_ADVERSARIAL
+            confidence = max(confidence, 0.9)
+            reasoning = (
+                f"[backstop: action {matched_sd.action!r} matches "
+                f"KNOWN_ADVERSARIAL_PATTERNS] " + (reasoning or "")
+            )
+    except Exception:  # pragma: no cover
+        pass
+
+    # Compute advisory_action via the canonical decision matrix.
+    try:
+        from ..deny_classifier.classifier import _decide_advisory_action
+        advisory = _decide_advisory_action(
+            classification,  # type: ignore[arg-type]
+            confidence,
+            is_adversarial_action=backstop_fired,
+        )
+    except Exception:  # pragma: no cover
+        advisory = "hold"
+
+    if advisory not in _VALID_ADVISORY_ACTIONS:
+        advisory = "hold"
+
+    return {
+        "status": "ok",
+        "mode": "agent_classified",
+        "classification": classification,
+        "confidence": confidence,
+        "reasoning": reasoning or "(no reasoning provided)",
+        "advisory_action": advisory,
+        "deterministic_backstop_fired": backstop_fired,
+        "structured_deny": matched_sd.as_dict(),
+        "notes": notes,
+    }
+
+
 def _classifier_reasoning_for(sd: StructuredDenyResponse) -> str:
     """Compose a short, operator-language explanation of why the
     classifier returned what it did.
@@ -597,13 +917,20 @@ def _classifier_reasoning_for(sd: StructuredDenyResponse) -> str:
     if cls == INJECTION_APPEARS_ADVERSARIAL:
         return (
             f"Structural heuristic flagged {sd.action!r} as a "
-            f"destructive verb. The #404 LLM classifier will replace "
-            f"this with a real rationale when available."
+            f"destructive verb (deterministic backstop)."
+        )
+    if cls == INJECTION_PENDING_CLASSIFICATION:
+        return (
+            "Local-dev / agent-in-loop mode (#509 Phase 2). The "
+            "synchronous bouncer-side LLM classifier is OFF by default; "
+            "the deterministic structural heuristic did not flag this "
+            f"action ({sd.action!r}). Call the iam_jit_classify_deny "
+            "MCP tool with this deny_event_id to classify with your "
+            "agent's own LLM."
         )
     return (
-        "Placeholder classification (#404 LLM classifier not yet "
-        "wired). Defaulting to 'ambiguous' so the agent prompts the "
-        "operator for confirmation."
+        "Defaulting to 'ambiguous' so the agent prompts the operator "
+        "for confirmation."
     )
 
 
@@ -616,11 +943,13 @@ __all__ = [
     "INJECTION_AMBIGUOUS",
     "INJECTION_APPEARS_ADVERSARIAL",
     "INJECTION_APPEARS_LEGITIMATE",
+    "INJECTION_PENDING_CLASSIFICATION",
     "RECOMMENDED_ACTION_EASY_ALLOW",
     "RECOMMENDED_ACTION_HALT_ESCALATE",
     "RECOMMENDED_ACTION_REPHRASE_RETRY",
     "StructuredDenyResponse",
     "build_structured_deny",
+    "classify_deny_for_mcp",
     "classify_injection_likelihood",
     "derive_recommended_action",
     "handle_deny_for_mcp",

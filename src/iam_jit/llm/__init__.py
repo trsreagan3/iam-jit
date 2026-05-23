@@ -52,6 +52,16 @@ from .registry import (  # noqa: F401
     default_score_backend,
     get_score_backend,
 )
+from .report_skip import (  # noqa: F401
+    REASON_BACKEND_UNAVAILABLE,
+    REASON_BUDGET_EXCEEDED,
+    REASON_NO_LLM_BACKEND,
+    REASON_NO_SIDE_LLM_ENABLED,
+    REASON_RESPONSE_INVALID,
+    report_skip,
+    reset_skip_counter,
+    skip_counter_snapshot,
+)
 from .types import ScoreContext, ScoreResponse  # noqa: F401
 
 
@@ -95,4 +105,13 @@ __all__ = [
     "default_score_backend",
     "get_score_backend",
     "score_policy",
+    # #509 Phase 2 — silent-degradation tracker
+    "REASON_BACKEND_UNAVAILABLE",
+    "REASON_BUDGET_EXCEEDED",
+    "REASON_NO_LLM_BACKEND",
+    "REASON_NO_SIDE_LLM_ENABLED",
+    "REASON_RESPONSE_INVALID",
+    "report_skip",
+    "reset_skip_counter",
+    "skip_counter_snapshot",
 ]

@@ -38,22 +38,32 @@ operator has opted in via ``IAM_JIT_BOUNCER_ALLOW_AGENT_SELF_GRANT``).
 """
 
 from .response import (
+    INJECTION_AMBIGUOUS,
+    INJECTION_APPEARS_ADVERSARIAL,
+    INJECTION_APPEARS_LEGITIMATE,
+    INJECTION_PENDING_CLASSIFICATION,
     RECOMMENDED_ACTION_EASY_ALLOW,
     RECOMMENDED_ACTION_HALT_ESCALATE,
     RECOMMENDED_ACTION_REPHRASE_RETRY,
     StructuredDenyResponse,
     build_structured_deny,
+    classify_deny_for_mcp,
     classify_injection_likelihood,
     derive_recommended_action,
     handle_deny_for_mcp,
 )
 
 __all__ = [
+    "INJECTION_AMBIGUOUS",
+    "INJECTION_APPEARS_ADVERSARIAL",
+    "INJECTION_APPEARS_LEGITIMATE",
+    "INJECTION_PENDING_CLASSIFICATION",
     "RECOMMENDED_ACTION_EASY_ALLOW",
     "RECOMMENDED_ACTION_HALT_ESCALATE",
     "RECOMMENDED_ACTION_REPHRASE_RETRY",
     "StructuredDenyResponse",
     "build_structured_deny",
+    "classify_deny_for_mcp",
     "classify_injection_likelihood",
     "derive_recommended_action",
     "handle_deny_for_mcp",

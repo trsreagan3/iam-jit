@@ -410,11 +410,36 @@ def propose(
         from .. import llm as _llm
         backend = _llm.get_backend_for_tier("enterprise")
 
+    # §A93 / #509 Phase 2 — surface no-LLM case as a structured
+    # report_skip so operators see the local-dev deferral. The
+    # deterministic fallback below still runs; the agent can call the
+    # enterprise proposal MCP tool with its OWN LLM if it wants the
+    # LLM-augmented shape per [[bouncer-zero-llm-when-agent-in-loop]].
+    _backend_kind = getattr(backend, "name", None) or backend.__class__.__name__
+    if _backend_kind in ("NoOpBackend", "noop", ""):
+        try:
+            from ..llm.report_skip import REASON_NO_LLM_BACKEND, report_skip
+            report_skip(
+                feature="enterprise.proposal",
+                reason=REASON_NO_LLM_BACKEND,
+            )
+        except Exception:  # pragma: no cover
+            pass
+
     messages = build_proposal_prompt(env, operator_prompt)
     try:
         raw = backend.chat(system_prompt=SYSTEM_PROMPT, messages=messages)
     except Exception as e:  # noqa: BLE001 — proposal must never crash
         logger.warning("LLM backend raised during propose(): %s", e)
+        try:
+            from ..llm.report_skip import REASON_BACKEND_UNAVAILABLE, report_skip
+            report_skip(
+                feature="enterprise.proposal",
+                reason=REASON_BACKEND_UNAVAILABLE,
+                extra={"llm_skip_exception_type": type(e).__name__},
+            )
+        except Exception:  # pragma: no cover
+            pass
         return _deterministic_fallback(env, f"LLM backend error: {e}")
 
     return parse_llm_proposal(raw or "", env)

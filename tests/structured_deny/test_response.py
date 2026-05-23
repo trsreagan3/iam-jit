@@ -72,9 +72,14 @@ def test_deny_response_includes_suggested_allow_command() -> None:
 
 
 def test_deny_response_classifier_tag_present() -> None:
-    """`is_likely_injection_classification` MUST be one of the three
-    valid values. Without an LLM backend configured the #404 classifier
-    returns 'ambiguous' + we surface that as the result + hook name."""
+    """`is_likely_injection_classification` MUST be one of the four
+    valid values. §A93 / #509 Phase 2 — local-dev / agent-in-loop is
+    the default; the synchronous bouncer-side LLM has been removed
+    from the hot-path per [[bouncer-zero-llm-when-agent-in-loop]]. A
+    non-destructive deny without an env-pinned hook returns
+    `pending_classification` (agent calls iam_jit_classify_deny MCP
+    with its own LLM)."""
+    from iam_jit.structured_deny.response import INJECTION_PENDING_CLASSIFICATION
     sd = build_structured_deny(
         bouncer="ibounce",
         action="s3:GetObject",
@@ -86,14 +91,14 @@ def test_deny_response_classifier_tag_present() -> None:
         INJECTION_APPEARS_LEGITIMATE,
         INJECTION_AMBIGUOUS,
         INJECTION_APPEARS_ADVERSARIAL,
+        INJECTION_PENDING_CLASSIFICATION,
     )
-    # With no LLM backend the deny_classifier returns ambiguous.
-    assert sd.is_likely_injection_classification == INJECTION_AMBIGUOUS
-    # classifier_hook reflects which classifier was consulted; either
-    # empty (no #404 module) or `deny_classifier:...` when integrated.
-    assert sd.classifier_hook == "" or sd.classifier_hook.startswith(
-        "deny_classifier:"
-    )
+    # Local-dev default: pending_classification (the synchronous
+    # bouncer-side LLM was removed in #509 Phase 2).
+    assert sd.is_likely_injection_classification == INJECTION_PENDING_CLASSIFICATION
+    # classifier_hook reflects which classifier was consulted; empty
+    # in pending mode (agent will call back with its LLM).
+    assert sd.classifier_hook == ""
 
 
 def test_recommended_action_legit_returns_easy_allow() -> None:

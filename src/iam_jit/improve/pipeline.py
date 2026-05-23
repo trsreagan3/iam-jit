@@ -411,6 +411,25 @@ def improve_profile(
         preferred_backend=preferred_backend,
     )
 
+    # §A93 / #509 Phase 2 — surface degraded generator runs to the
+    # operator. When the backend was NoOp (no LLM creds) the generator
+    # still produces deterministic event-derived rules but that's
+    # not the full LLM-augmented shape; report_skip lets operators see
+    # the deferral on /healthz + posture. Distinct from the inner skip
+    # in profile_generator.from_audit (which counts the chat() call);
+    # this one counts the improve-cycle invocation.
+    _gen_backend = (gen_result.backend_name or "").lower()
+    if _gen_backend in ("", "noop"):
+        try:
+            from ..llm.report_skip import REASON_NO_LLM_BACKEND, report_skip
+            report_skip(
+                feature="improve.pipeline",
+                reason=REASON_NO_LLM_BACKEND,
+                extra={"llm_skip_bouncer": bouncer},
+            )
+        except Exception:  # pragma: no cover
+            pass
+
     # The generator returns ONE GeneratedProfile per bouncer; pick ours.
     target = None
     for gp in gen_result.bundle:

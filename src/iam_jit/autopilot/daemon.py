@@ -144,6 +144,14 @@ class AutopilotStatus:
     last_improve_at: str | None = None
     last_sweep_at: str | None = None
     notes: list[str] = dataclasses.field(default_factory=list)
+    # §A93 / #509 Phase 2 — LLM-skip surface per
+    # [[bouncer-zero-llm-when-agent-in-loop]]. ``side_llm_enabled``
+    # reflects whether the operator opted into bouncer-side LLM via
+    # ``--enable-side-llm``; ``llm_skips`` is the cross-feature counter
+    # snapshot (also exposed via /healthz on each bouncer + iam-jit
+    # posture). Default empty so older readers ignore gracefully.
+    side_llm_enabled: bool = False
+    llm_skips: dict[str, Any] = dataclasses.field(default_factory=dict)
 
     def as_dict(self) -> dict[str, Any]:
         return dataclasses.asdict(self)
@@ -229,6 +237,76 @@ _RESTART_WINDOW_S = 60.0
 _MAX_RESTARTS_PER_WINDOW = 3
 
 
+def _skip_counter_snapshot_safe() -> dict[str, Any]:
+    """Wrap :func:`iam_jit.llm.report_skip.skip_counter_snapshot` with
+    a best-effort guard so a missing helper doesn't poison the status
+    JSON. Returns an empty-but-typed dict on failure (matches the
+    schema older readers expect)."""
+    try:
+        from ..llm.report_skip import skip_counter_snapshot
+        return skip_counter_snapshot()
+    except Exception:  # pragma: no cover
+        return {"total": 0, "counts": {}, "by_reason": {}, "last_skips": []}
+
+
+def _validate_side_llm_creds_or_raise() -> None:
+    """§A93 / #509 Phase 2 — fail loudly at autopilot-start when the
+    operator opted in to bouncer-side LLM via ``--enable-side-llm``
+    but didn't configure a backend.
+
+    Detection rules (matches the pluggable backend selector in
+    :mod:`iam_jit.llm.registry`):
+
+      * IAM_JIT_LLM in (anthropic, openai, bedrock, ollama)
+      * Per-provider credential expected:
+          - anthropic → ANTHROPIC_API_KEY
+          - openai → OPENAI_API_KEY
+          - bedrock → IAM_JIT_BEDROCK_MODEL  (boto3 picks up creds)
+          - ollama → OLLAMA_HOST OR localhost default
+        Missing → raise :class:`AutopilotError`.
+      * If IAM_JIT_LLM is unset → raise (same shape).
+
+    Per [[ibounce-honest-positioning]] this is the loud-failure
+    pattern: operator's explicit opt-in deserves a clear error rather
+    than a quiet downgrade to deterministic-only."""
+    backend = (os.environ.get("IAM_JIT_LLM") or "").strip().lower()
+    if not backend:
+        raise AutopilotError(
+            "--enable-side-llm requires IAM_JIT_LLM=anthropic|openai|"
+            "bedrock|ollama to be set. Local-dev / agent-in-loop "
+            "shouldn't set --enable-side-llm at all — the agent's "
+            "LLM handles the improve cycle via the "
+            "iam_jit_improve_profile MCP tool.",
+            code="side_llm_no_backend",
+        )
+    creds = {
+        "anthropic": ("ANTHROPIC_API_KEY", "Anthropic API key"),
+        "openai": ("OPENAI_API_KEY", "OpenAI API key"),
+        "bedrock": ("IAM_JIT_BEDROCK_MODEL", "AWS Bedrock model id"),
+        "ollama": ("OLLAMA_HOST", "Ollama host"),
+    }
+    if backend not in creds:
+        raise AutopilotError(
+            f"--enable-side-llm: IAM_JIT_LLM={backend!r} is not one of "
+            f"the supported backends "
+            f"({', '.join(sorted(creds))}).",
+            code="side_llm_unknown_backend",
+        )
+    env_name, label = creds[backend]
+    if backend == "ollama":
+        # Ollama defaults to localhost:11434 if OLLAMA_HOST is unset;
+        # don't fail-fast on that. Same convention as
+        # iam_jit.llm._core.OllamaBackend.
+        return
+    if not (os.environ.get(env_name) or "").strip():
+        raise AutopilotError(
+            f"--enable-side-llm: IAM_JIT_LLM={backend!r} requires "
+            f"{env_name} ({label}) to be set. Either set it or "
+            f"remove --enable-side-llm.",
+            code="side_llm_missing_credential",
+        )
+
+
 @dataclasses.dataclass
 class _BouncerSupervisorState:
     name: str
@@ -254,6 +332,16 @@ class AutopilotSupervisor:
     sweep_interval_s: float = _DEFAULT_SWEEP_INTERVAL_S
     improve_interval_s: float = _DEFAULT_IMPROVE_INTERVAL_S
     notify_denies: str = "stderr"  # stderr | webhook | none
+    # §A93 / #509 Phase 2 — opt-in to the synchronous bouncer-side LLM
+    # for improve cycles. Default OFF per
+    # [[bouncer-zero-llm-when-agent-in-loop]]: local-dev / agent-in-loop
+    # autopilot runs the improve cycle in deterministic-only mode
+    # (event-derived allows + safety-floor denies) and lets the agent
+    # call iam_jit_improve_profile via MCP for LLM-augmented
+    # suggestions using ITS OWN LLM. When True, the supervisor reads
+    # IAM_JIT_LLM=anthropic|openai|bedrock|ollama + creds and runs the
+    # generator with the configured backend.
+    side_llm_enabled: bool = False
     # #412 / §A56 — weekly digest webhook delivery. ``False`` skips
     # entirely. ``True`` opts in; the URL itself is read from
     # ``IAM_JIT_AUTOPILOT_DIGEST_WEBHOOK_URL`` per the deny-webhook
@@ -400,7 +488,16 @@ class AutopilotSupervisor:
 
     def run_improve_for_all(self) -> list[dict[str, Any]]:
         """Run one improve cycle for each enabled bouncer. Returns the
-        list of result dicts (one per bouncer)."""
+        list of result dicts (one per bouncer).
+
+        §A93 / #509 Phase 2 — when ``side_llm_enabled=False`` (the
+        local-dev / agent-in-loop default per
+        [[bouncer-zero-llm-when-agent-in-loop]]), each cycle emits a
+        structured ``report_skip`` (once per supervisor session) so
+        operators can see autopilot is running in deterministic-only
+        mode. The deterministic event-derived rules still install;
+        the agent can call ``iam_jit_improve_profile`` via MCP to
+        contribute LLM-augmented suggestions using its OWN LLM."""
         if self.posture == "managed":
             # Explicit refusal per the brief — also surfaces in alerts
             # so the operator sees we tried + chose not to.
@@ -423,6 +520,34 @@ class AutopilotSupervisor:
             or 0.30
         )
         auto_install = bool(improve_cfg.get("auto_install_profiles", True))
+        # §A93 / #509 Phase 2 — when side-LLM is NOT opted in, emit
+        # report_skip once per cycle so operators see the deferral.
+        # The generator pipeline ALSO falls back to deterministic
+        # event-derived rules when no backend is reachable; we surface
+        # the deferral up-front so the deferral is visible in posture +
+        # /healthz even when the cycle ends up "no_change".
+        if not self.side_llm_enabled:
+            try:
+                from ..llm.report_skip import (
+                    REASON_NO_SIDE_LLM_ENABLED,
+                    report_skip,
+                )
+                report_skip(
+                    feature="autopilot.improve_cycle",
+                    reason=REASON_NO_SIDE_LLM_ENABLED,
+                    mode_hint=(
+                        "Local-dev / agent-in-loop default: autopilot "
+                        "runs improve in deterministic-only mode. Your "
+                        "agent can call iam_jit_improve_profile via MCP "
+                        "to contribute LLM-augmented suggestions using "
+                        "its own LLM. To run the synchronous bouncer-"
+                        "side generator (standalone / CI deployments), "
+                        "restart with --enable-side-llm + IAM_JIT_LLM="
+                        "anthropic|openai|bedrock|ollama with credentials."
+                    ),
+                )
+            except Exception:  # pragma: no cover
+                pass
         results = []
         for name, state in self.bouncer_states.items():
             if not state.enabled:
@@ -777,6 +902,8 @@ class AutopilotSupervisor:
                 f"improve_interval_s={self.improve_interval_s}",
                 f"max_restarts_per_window={_MAX_RESTARTS_PER_WINDOW}",
             ],
+            side_llm_enabled=bool(self.side_llm_enabled),
+            llm_skips=_skip_counter_snapshot_safe(),
         )
         _write_status_file(status)
         return status
@@ -1094,6 +1221,7 @@ def autopilot_start(
     digest_webhook: bool = False,
     digest_interval_s: float = 7 * 86400.0,
     max_ticks: int | None = None,
+    enable_side_llm: bool = False,
 ) -> dict[str, Any]:
     """Start the autopilot daemon.
 
@@ -1146,6 +1274,14 @@ def autopilot_start(
             code="declaration_disabled",
         )
 
+    # §A93 / #509 Phase 2 — fail loudly when opt-in flag is set but
+    # the operator forgot to configure a backend. The opposite of
+    # silent-degradation: if you ASKED for bouncer-side LLM, you
+    # deserve a clear error rather than a daemon that quietly runs
+    # deterministic-only despite your flag.
+    if enable_side_llm:
+        _validate_side_llm_creds_or_raise()
+
     if detach:
         # Spawn a child that re-invokes this command without --detach.
         return _spawn_detached(
@@ -1154,6 +1290,7 @@ def autopilot_start(
             notify_denies=notify_denies,
             source_label=source_label,
             digest_webhook=digest_webhook,
+            enable_side_llm=enable_side_llm,
         )
 
     # Foreground / in-process loop.
@@ -1165,6 +1302,7 @@ def autopilot_start(
         notify_denies=notify_denies,
         digest_webhook_enabled=digest_webhook,
         digest_interval_s=digest_interval_s,
+        side_llm_enabled=enable_side_llm,
     )
     supervisor.initialize()
     _write_pid_file(os.getpid())
@@ -1189,6 +1327,7 @@ def _spawn_detached(
     notify_denies: str,
     source_label: str,
     digest_webhook: bool = False,
+    enable_side_llm: bool = False,
 ) -> dict[str, Any]:
     """Spawn a detached child process that runs the supervisor loop."""
     cmd = [
@@ -1205,6 +1344,8 @@ def _spawn_detached(
         cmd.extend(["--notify-denies", notify_denies])
     if digest_webhook:
         cmd.append("--digest-webhook")
+    if enable_side_llm:
+        cmd.append("--enable-side-llm")
     try:
         proc = subprocess.Popen(  # noqa: S603 — non-shell, known args
             cmd,
@@ -1357,6 +1498,21 @@ def register_autopilot_command(parent_group: click.Group) -> click.Group:
              "start.",
     )
     @click.option(
+        "--enable-side-llm",
+        is_flag=True,
+        default=False,
+        help="§A93 / #509 Phase 2 — opt in to the synchronous "
+             "bouncer-side LLM for the improve cycle. Default OFF per "
+             "[[bouncer-zero-llm-when-agent-in-loop]] — local-dev / "
+             "agent-in-loop deployments leave this unset and let the "
+             "agent call iam_jit_improve_profile via MCP with its OWN "
+             "LLM (Claude Max / ChatGPT / etc.). Only set this for "
+             "standalone / CI / cron deployments where no agent is in "
+             "the loop. Requires IAM_JIT_LLM=anthropic|openai|bedrock|"
+             "ollama + the corresponding credential; autopilot REFUSES "
+             "TO START if set without a usable backend.",
+    )
+    @click.option(
         "--json",
         "as_json",
         is_flag=True,
@@ -1372,6 +1528,7 @@ def register_autopilot_command(parent_group: click.Group) -> click.Group:
         sweep_interval: float,
         improve_interval: float,
         digest_webhook: bool,
+        enable_side_llm: bool,
         as_json: bool,
     ) -> None:
         """Start the autopilot daemon."""
@@ -1385,6 +1542,7 @@ def register_autopilot_command(parent_group: click.Group) -> click.Group:
                 improve_interval_s=improve_interval,
                 digest_webhook=digest_webhook,
                 max_ticks=max_ticks,
+                enable_side_llm=enable_side_llm,
             )
         except AutopilotError as e:
             payload = {
@@ -1511,6 +1669,7 @@ def _main_entry() -> None:
     parser.add_argument("--sweep-interval", type=float, default=_DEFAULT_SWEEP_INTERVAL_S)
     parser.add_argument("--improve-interval", type=float, default=_DEFAULT_IMPROVE_INTERVAL_S)
     parser.add_argument("--digest-webhook", action="store_true", default=False)
+    parser.add_argument("--enable-side-llm", action="store_true", default=False)
     args = parser.parse_args()
     try:
         autopilot_start(
@@ -1521,6 +1680,7 @@ def _main_entry() -> None:
             sweep_interval_s=args.sweep_interval,
             improve_interval_s=args.improve_interval,
             digest_webhook=args.digest_webhook,
+            enable_side_llm=args.enable_side_llm,
         )
     except AutopilotError as e:
         sys.stderr.write(f"autopilot: {e}\n")

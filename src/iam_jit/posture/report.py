@@ -44,6 +44,16 @@ def capture_posture(*, sanitize: bool = True) -> dict[str, Any]:
         identity=identity, bouncers=bouncers, effective=effective
     )
     overall = derive_overall_mode(identity=identity, effective=effective)
+    # §A93 / #509 Phase 2 — surface the LLM-skip counter snapshot so
+    # operators + agents can see local-dev / agent-in-loop deferrals
+    # at a glance (in addition to /healthz per-bouncer). Best-effort:
+    # any failure here degrades to an empty block rather than
+    # poisoning posture.
+    try:
+        from ..llm.report_skip import skip_counter_snapshot
+        llm_skips = skip_counter_snapshot()
+    except Exception:  # pragma: no cover
+        llm_skips = {"total": 0, "counts": {}, "by_reason": {}, "last_skips": []}
     snapshot: dict[str, Any] = {
         "schema_version": POSTURE_SCHEMA_VERSION,
         "captured_at": _dt.datetime.now(_dt.timezone.utc).isoformat(
@@ -55,6 +65,7 @@ def capture_posture(*, sanitize: bool = True) -> dict[str, Any]:
         "effective_protection": effective,
         "unprotected_traffic_present": has_unprotected_traffic(effective),
         "tips": tips,
+        "llm_skips": llm_skips,
     }
     if sanitize:
         snapshot = sanitize_posture(snapshot)

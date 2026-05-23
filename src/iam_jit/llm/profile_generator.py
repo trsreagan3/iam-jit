@@ -1322,6 +1322,23 @@ def generate_from_audit(
     )
 
     raw = ""
+    # §A93 / #509 Phase 2 — surface NoOp / unconfigured-backend as a
+    # structured report_skip so operators see the local-dev / agent-in-
+    # loop deferral on /healthz + posture. The deterministic fallback
+    # in _parse_llm_response still runs; this just makes the deferral
+    # visible (per [[bouncer-zero-llm-when-agent-in-loop]] the agent
+    # can call iam_jit_improve_profile via MCP to fill the gap with
+    # its OWN LLM).
+    backend_kind = getattr(backend, "name", None) or backend.__class__.__name__
+    if backend_kind in ("NoOpBackend", "noop", ""):
+        try:
+            from .report_skip import REASON_NO_LLM_BACKEND, report_skip
+            report_skip(
+                feature="profile_generator.from_audit",
+                reason=REASON_NO_LLM_BACKEND,
+            )
+        except Exception:  # pragma: no cover
+            pass
     try:
         raw = backend.chat(
             system_prompt=_SYSTEM_PROMPT_AUDIT,
@@ -1330,6 +1347,15 @@ def generate_from_audit(
     except Exception as e:  # noqa: BLE001 — generator never crashes
         logger.warning("profile_generator chat raised: %s", e)
         raw = ""
+        try:
+            from .report_skip import REASON_BACKEND_UNAVAILABLE, report_skip
+            report_skip(
+                feature="profile_generator.from_audit",
+                reason=REASON_BACKEND_UNAVAILABLE,
+                extra={"llm_skip_exception_type": type(e).__name__},
+            )
+        except Exception:  # pragma: no cover
+            pass
 
     profiles, explanation, parser_strict = _parse_llm_response(
         raw,

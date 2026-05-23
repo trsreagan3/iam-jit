@@ -324,6 +324,21 @@ def _llm_classify(
     if backend is None:
         backend = default_score_backend(preferred=backend_name)
     if backend is None:
+        # §A93 / #509 Phase 2 — surface no-LLM via structured
+        # report_skip so operators see deferrals on /healthz + posture.
+        # Most call sites are now gated by IAM_JIT_ENABLE_SIDE_LLM in
+        # structured_deny.response per
+        # [[bouncer-zero-llm-when-agent-in-loop]]; this counter still
+        # catches direct callers (CLI / tests / custom integrations)
+        # that bypass the structured_deny envelope.
+        try:
+            from ..llm.report_skip import REASON_NO_LLM_BACKEND, report_skip
+            report_skip(
+                feature="deny_classifier.classify_deny",
+                reason=REASON_NO_LLM_BACKEND,
+            )
+        except Exception:  # pragma: no cover
+            pass
         return _safe_fallback("no LLM backend available")
 
     # Build the prompt and budget-check BEFORE calling

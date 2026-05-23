@@ -2355,6 +2355,84 @@ TOOLS.extend([
             },
         },
     },
+    {
+        "name": "iam_jit_classify_deny",
+        "description": (
+            "§A93 / #509 Phase 2 — agent-mediated deny classifier. "
+            "When a 403 surfaces `is_likely_injection_classification: "
+            "pending_classification` the agent fills the gap using "
+            "ITS OWN LLM (Claude Code / Cursor / etc.) per "
+            "[[bouncer-zero-llm-when-agent-in-loop]]: no bouncer-side "
+            "LLM credits required for local-dev. Two call shapes: (A) "
+            "agent provides `classification` + `confidence` + `reasoning` "
+            "from its LLM and the bouncer applies the deterministic "
+            "KNOWN_ADVERSARIAL safety floor + returns canonical "
+            "`advisory_action`; (B) agent omits classification fields "
+            "for a lookup-only response (the structured deny + audit "
+            "context) so the agent can analyze first + call back. The "
+            "deterministic floor ALWAYS fires on output regardless of "
+            "agent input — destructive verbs cannot be classified as "
+            "legitimate."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "required": ["deny_event_id"],
+            "properties": {
+                "deny_event_id": {
+                    "type": "string",
+                    "description": (
+                        "Stable id from a 403 / structured-deny payload "
+                        "(format: `evt_<bouncer>_<sha8>`)."
+                    ),
+                },
+                "classification": {
+                    "type": "string",
+                    "enum": [
+                        "appears_legitimate",
+                        "ambiguous",
+                        "appears_adversarial",
+                    ],
+                    "description": (
+                        "Agent-computed classification from its own "
+                        "LLM analysis of the deny event. Omit for "
+                        "lookup-only mode."
+                    ),
+                },
+                "confidence": {
+                    "type": "number",
+                    "minimum": 0.0,
+                    "maximum": 1.0,
+                    "description": "0.0-1.0 agent-LLM confidence.",
+                },
+                "reasoning": {
+                    "type": "string",
+                    "description": (
+                        "Short operator-language explanation of the "
+                        "classification (the agent's LLM rationale)."
+                    ),
+                },
+                "lookback_minutes": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "maximum": 1440,
+                    "default": 60,
+                },
+                "agent_session_id": {
+                    "type": "string",
+                    "description": (
+                        "Optional — constrains the deny lookup to one "
+                        "agent's traffic."
+                    ),
+                },
+                "limit": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "maximum": 1000,
+                    "default": 200,
+                },
+            },
+        },
+    },
 ])
 
 
@@ -5450,6 +5528,11 @@ def _handle_request(req: dict[str, Any]) -> dict[str, Any] | None:
             # #402 / §A48 — structured deny handler.
             from .structured_deny import handle_deny_for_mcp
             result_payload = handle_deny_for_mcp(args)
+        elif tool_name == "iam_jit_classify_deny":
+            # §A93 / #509 Phase 2 — agent-mediated deny classifier
+            # per [[bouncer-zero-llm-when-agent-in-loop]].
+            from .structured_deny import classify_deny_for_mcp
+            result_payload = classify_deny_for_mcp(args)
         elif tool_name == "bounce_extract_permissions_from_audit":
             # #419 / §A58 — extract structured permission set from a
             # window of bouncer audit events. Phase E of
