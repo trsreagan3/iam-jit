@@ -87,3 +87,13 @@ Same as [claude-code.md](claude-code.md#4-30-second-smoke-test).
   codeblock tag is the same across CLAUDE.md / AGENTS.md /
   .cursorrules so a single declaration document can be cross-linked
   from multiple harness configs.
+
+## 6. Using bouncer activity to provision iam-jit roles
+
+Phase E pattern. See
+[bouncer-to-role-pattern.md](bouncer-to-role-pattern.md) for the
+canonical agent conversation + the REQUIRED evidence-block
+discipline. Codex's MCP support (when enabled per §5) exposes
+`bounce_extract_permissions_from_audit`, `iam_jit_resource_map`, and
+`iam_jit_request_role_from_synthesis` — the three primitives the
+pattern composes.

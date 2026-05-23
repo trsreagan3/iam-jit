@@ -528,6 +528,18 @@ def register_audit_query_group(parent_group: click.Group) -> click.Group:
              "won't pin the cross-bouncer query — each runs in a "
              "thread + the merge layer drops late responders.",
     )
+    @click.option(
+        "--extract-permissions",
+        "extract_permissions",
+        is_flag=True,
+        default=False,
+        help="#419 / §A58 — instead of returning OCSF events, project "
+             "the window into a structured permission set "
+             "({action, resources, count}+observed_scope) ready for "
+             "`iam_jit_request_role_from_synthesis`. Phase E of "
+             "[[bouncer-informs-agent-informs-iam-jit]]. Implies "
+             "single-bouncer scope — pass exactly one --bouncer.",
+    )
     def audit_query_cmd(
         bouncers_raw: tuple[str, ...],
         since: str | None,
@@ -537,6 +549,7 @@ def register_audit_query_group(parent_group: click.Group) -> click.Group:
         fmt: str,
         audit_events_token: str | None,
         timeout: float,
+        extract_permissions: bool,
     ) -> None:
         """Query audit events across every reachable bouncer in
         parallel. Default probes ibounce/kbounce/dbounce/gbounce on
@@ -631,6 +644,35 @@ def register_audit_query_group(parent_group: click.Group) -> click.Group:
         for r in results:
             merged.extend(r.events)
         merged.sort(key=_event_time_key)
+
+        # #419 / §A58 — `--extract-permissions` reshapes the merged
+        # event stream into the structured permission-set shape used
+        # by `iam_jit_request_role_from_synthesis`. We delegate to the
+        # audit_extract module so the same projection is shared with
+        # the MCP tool. Single-bouncer semantics — the agent
+        # synthesises ROLES from ONE bouncer's window, never a merged
+        # cross-bouncer set (mixing kbouncer activity into an iam-jit
+        # AWS role request would be a category error).
+        if extract_permissions:
+            if len(bouncers) != 1:
+                raise click.UsageError(
+                    "--extract-permissions requires exactly one "
+                    "--bouncer (the source of the permission set); "
+                    f"got {len(bouncers)} bouncer(s).",
+                )
+            from .audit_extract import extract_permissions_from_events
+            window = {"from": since or "", "to": until or ""}
+            extracted = extract_permissions_from_events(
+                merged,
+                bouncer=bouncers[0].name,
+                time_window=window,
+                notes=tuple(
+                    f"{r.bouncer} skipped ({r.error})"
+                    for r in results if r.error
+                ),
+            )
+            click.echo(json.dumps(extracted.as_dict(), indent=2))
+            return
 
         if fmt == "ocsf-bundle":
             click.echo(_format_ocsf_bundle(merged), nl=False)

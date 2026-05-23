@@ -151,6 +151,27 @@ _INLINE_SCHEMA: dict[str, Any] = {
                         },
                     },
                 },
+                # #420 / §A59 — declarative resource mappings consumed by
+                # `iam-jit resource-map` + `iam_jit_resource_map` MCP tool.
+                # Phase E of [[bouncer-informs-agent-informs-iam-jit]]:
+                # operator declares NAMED account/region/name substitution
+                # rules; agent picks a name by intent ("staging→prod") and
+                # iam-jit applies pure textual substitution. No inference
+                # at iam-jit layer (per [[scorer-is-ground-truth]]).
+                "resource_mappings": {
+                    "type": "object",
+                    "additionalProperties": {
+                        "$ref": "#/$defs/resource_mapping_block",
+                    },
+                    "description": (
+                        "Named mappings used by `iam-jit resource-map` + "
+                        "`iam_jit_resource_map` (MCP) to translate a "
+                        "permission set extracted from one environment "
+                        "(e.g. staging) into the equivalent shape for "
+                        "another environment (e.g. prod). The agent "
+                        "picks the mapping name by operator intent."
+                    ),
+                },
             },
         }
     },
@@ -224,6 +245,44 @@ _INLINE_SCHEMA: dict[str, Any] = {
                 "cosign_issuer": {"type": "string"},
                 "enabled": {"type": "boolean", "default": True},
                 "nickname": {"type": "string"},
+            },
+        },
+        "resource_mapping_block": {
+            "type": "object",
+            "additionalProperties": False,
+            "description": (
+                "One named resource mapping. account_id + region are "
+                "exact-match substitution maps. name_patterns are "
+                "ordered glob-style rewrites applied to resource names "
+                "(first match wins)."
+            ),
+            "properties": {
+                "account_id": {
+                    "type": "object",
+                    "additionalProperties": {
+                        "type": "string",
+                        "minLength": 1,
+                    },
+                },
+                "region": {
+                    "type": "object",
+                    "additionalProperties": {
+                        "type": "string",
+                        "minLength": 1,
+                    },
+                },
+                "name_patterns": {
+                    "type": "array",
+                    "items": {
+                        "type": "object",
+                        "additionalProperties": False,
+                        "required": ["match", "replace"],
+                        "properties": {
+                            "match": {"type": "string", "minLength": 1},
+                            "replace": {"type": "string"},
+                        },
+                    },
+                },
             },
         },
     },

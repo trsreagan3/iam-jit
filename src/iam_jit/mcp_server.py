@@ -2645,6 +2645,265 @@ TOOLS.extend([
 ])
 
 
+# #419 / §A58 — bounce_extract_permissions_from_audit MCP tool. Phase E
+# of [[bouncer-informs-agent-informs-iam-jit]]: agent calls this to
+# turn a window of bouncer audit events into a structured permission
+# set ready for `iam_jit_request_role_from_synthesis`.
+#
+# #420 / §A59 — iam_jit_resource_map MCP tool. Translates the permission
+# set from one environment to another via a declared mapping (e.g.
+# staging→prod). Pure substitution per [[scorer-is-ground-truth]];
+# the operator's declared mapping is the only judgment input.
+#
+# #421 / §A60 — iam_jit_request_role_from_synthesis MCP tool. The
+# synthesis-aware role-request seam. REQUIRES an `evidence` block per
+# [[ibounce-honest-positioning]] (no anonymous synthesised requests).
+TOOLS.extend([
+    {
+        "name": "bounce_extract_permissions_from_audit",
+        "description": (
+            "Extract a structured permission set from one bouncer's "
+            "audit-event window. Returns "
+            "`{time_window, bouncer, events_analyzed, "
+            "permissions:[{action, resources, count}], "
+            "observed_scope:{account_ids, regions}, notes}`. The agent "
+            "then optionally calls `iam_jit_resource_map` to translate "
+            "the scope (staging→prod) and finally "
+            "`iam_jit_request_role_from_synthesis` to request the "
+            "role. Phase E of [[bouncer-informs-agent-informs-iam-jit]]. "
+            "Read-only — no state change."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "since": {
+                    "type": "string",
+                    "default": "1h",
+                    "description": (
+                        "Window lookback (5m / 1h / 2d) or ISO 8601 "
+                        "lower bound."
+                    ),
+                },
+                "until": {
+                    "type": "string",
+                    "description": (
+                        "Optional upper bound. ISO 8601 or relative."
+                    ),
+                },
+                "bouncer": {
+                    "type": "string",
+                    "default": "ibounce",
+                    "description": (
+                        "Which bouncer's /audit/events to query. One "
+                        "of `ibounce`, `kbounce`, `dbounce`, `gbounce`, "
+                        "OR `name=URL` for off-default mgmt ports."
+                    ),
+                },
+                "limit": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "maximum": 10000,
+                    "default": 1000,
+                    "description": (
+                        "Max events to read from the bouncer (the "
+                        "extraction aggregates them all)."
+                    ),
+                },
+                "audit_events_token": {
+                    "type": "string",
+                    "description": (
+                        "Bearer token for the bouncer's /audit/events "
+                        "endpoint when bound off-loopback."
+                    ),
+                },
+            },
+        },
+    },
+    {
+        "name": "iam_jit_resource_map",
+        "description": (
+            "Apply a named resource mapping (declared in "
+            "`iam-jit.resource_mappings.<name>` in .iam-jit.yaml) to a "
+            "permission set extracted from one environment. Returns "
+            "the transformed permission set with the same shape plus a "
+            "`resource_mapping_applied: <name>` field. Per "
+            "[[scorer-is-ground-truth]] this is pure declarative "
+            "substitution; iam-jit does NOT infer the target "
+            "environment from staging audit. The agent has already "
+            "picked the mapping by name based on operator intent."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "required": ["permissions", "using"],
+            "properties": {
+                "permissions": {
+                    "type": "object",
+                    "description": (
+                        "The permission-set document produced by "
+                        "`bounce_extract_permissions_from_audit` (or "
+                        "the equivalent CLI). Must include "
+                        "`permissions: [...]` + `observed_scope`."
+                    ),
+                },
+                "using": {
+                    "type": "string",
+                    "description": (
+                        "Name of the mapping from .iam-jit.yaml "
+                        "(e.g. `staging_to_prod`)."
+                    ),
+                },
+                "config_path": {
+                    "type": "string",
+                    "description": (
+                        "Optional path to a specific iam-jit "
+                        "declaration. Default: auto-discover under "
+                        "cwd per the ambient-config loader."
+                    ),
+                },
+                "cwd": {
+                    "type": "string",
+                    "description": (
+                        "Optional cwd for auto-discovery."
+                    ),
+                },
+            },
+        },
+    },
+    {
+        "name": "iam_jit_request_role_from_synthesis",
+        "description": (
+            "Synthesis-aware role-request seam: agent submits a "
+            "permission set + REQUIRED evidence block (bouncer audit "
+            "window + codebase references + operator intent) and "
+            "iam-jit scores it through the standard auto-approve / "
+            "pending-review gate. Per "
+            "[[bouncer-informs-agent-informs-iam-jit]] this is where "
+            "the bouncer-observation channel meets the iam-jit "
+            "role-provisioning channel via the agent's contextual "
+            "synthesis. Per [[ibounce-honest-positioning]] requests "
+            "without an `evidence` block are REJECTED — no anonymous "
+            "synthesised requests. Per [[scorer-is-ground-truth]] the "
+            "scorer is unchanged; this surface is a thin wrapper that "
+            "validates structure + adds the evidence audit chain. "
+            "Per [[creates-never-mutates]] any credentials returned "
+            "belong to a NEW short-lived role iam-jit just created."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "required": [
+                "permissions", "justification", "evidence",
+            ],
+            "properties": {
+                "permissions": {
+                    "type": "array",
+                    "description": (
+                        "Permission set: list of "
+                        "`{action, resources:[ARN,...], count}` "
+                        "entries. From "
+                        "`bounce_extract_permissions_from_audit` "
+                        "(optionally translated via "
+                        "`iam_jit_resource_map`)."
+                    ),
+                    "items": {
+                        "type": "object",
+                        "required": ["action"],
+                        "properties": {
+                            "action": {"type": "string"},
+                            "resources": {
+                                "type": "array",
+                                "items": {"type": "string"},
+                            },
+                            "count": {"type": "integer"},
+                        },
+                    },
+                },
+                "observed_scope": {
+                    "type": "object",
+                    "description": (
+                        "Account IDs + regions observed in the "
+                        "underlying audit window. Carried forward "
+                        "from extract-permissions output."
+                    ),
+                    "properties": {
+                        "account_ids": {
+                            "type": "array",
+                            "items": {"type": "string"},
+                        },
+                        "regions": {
+                            "type": "array",
+                            "items": {"type": "string"},
+                        },
+                    },
+                },
+                "justification": {
+                    "type": "string",
+                    "description": (
+                        "Short business-context string — the human-"
+                        "readable WHY (operator intent + agent's "
+                        "summary of the request)."
+                    ),
+                },
+                "evidence": {
+                    "type": "object",
+                    "description": (
+                        "REQUIRED auditability chain per "
+                        "[[ibounce-honest-positioning]]. Missing or "
+                        "malformed → request is REJECTED."
+                    ),
+                    "required": [
+                        "bouncer_audit_window",
+                        "codebase_references",
+                        "operator_intent",
+                    ],
+                    "properties": {
+                        "bouncer_audit_window": {
+                            "type": "object",
+                            "required": ["from", "to", "bouncer"],
+                            "properties": {
+                                "from": {"type": "string"},
+                                "to": {"type": "string"},
+                                "bouncer": {"type": "string"},
+                            },
+                        },
+                        "codebase_references": {
+                            "type": "array",
+                            "items": {"type": "string"},
+                            "description": (
+                                "Files the agent consulted (paths)."
+                            ),
+                        },
+                        "operator_intent": {
+                            "type": "string",
+                            "description": (
+                                "Operator's stated goal in their own "
+                                "words."
+                            ),
+                        },
+                    },
+                },
+                "requested_duration": {
+                    "type": "string",
+                    "default": "PT1H",
+                    "description": (
+                        "ISO 8601 duration (e.g. PT3H, PT15M, P1D). "
+                        "Subject to deployment-wide TTL ceilings."
+                    ),
+                },
+                "resource_mapping_applied": {
+                    "type": "string",
+                    "description": (
+                        "If a mapping was applied via "
+                        "`iam_jit_resource_map`, pass its name here "
+                        "so the audit row records which translation "
+                        "was used."
+                    ),
+                },
+            },
+        },
+    },
+])
+
+
 # Bounce-suite rename (2026-05-17): every `bouncer_*` MCP tool gets
 # an `ibounce_*` alias in v1.0. Both names dispatch to the same
 # handler; the `bouncer_*` originals carry a `(DEPRECATED ...)` note
@@ -5056,6 +5315,23 @@ def _handle_request(req: dict[str, Any]) -> dict[str, Any] | None:
             # #402 / §A48 — structured deny handler.
             from .structured_deny import handle_deny_for_mcp
             result_payload = handle_deny_for_mcp(args)
+        elif tool_name == "bounce_extract_permissions_from_audit":
+            # #419 / §A58 — extract structured permission set from a
+            # window of bouncer audit events. Phase E of
+            # [[bouncer-informs-agent-informs-iam-jit]].
+            result_payload = _bounce_extract_permissions_from_audit_for_mcp(args)
+        elif tool_name == "iam_jit_resource_map":
+            # #420 / §A59 — apply a declared resource mapping
+            # (staging→prod etc.) to a permission set.
+            result_payload = _iam_jit_resource_map_for_mcp(args)
+        elif tool_name == "iam_jit_request_role_from_synthesis":
+            # #421 / §A60 — synthesis-aware role-request seam.
+            # Validates the REQUIRED evidence block + routes through
+            # the standard scorer + auto-approve gate.
+            from .request_from_synthesis import (
+                request_role_from_synthesis_for_mcp,
+            )
+            result_payload = request_role_from_synthesis_for_mcp(args)
         else:
             return _err(rid, -32601, f"unknown tool: {tool_name}")
         # MCP tool result format: { content: [{type: "text", text: "..."}] }
@@ -5545,6 +5821,132 @@ def _bounce_denies_recent_for_mcp(args: dict[str, Any]) -> dict[str, Any]:
         "notes": notes,
         "summary": "\n".join(summary_lines),
     }
+
+
+def _bounce_extract_permissions_from_audit_for_mcp(
+    args: dict[str, Any],
+) -> dict[str, Any]:
+    """MCP backend for ``bounce_extract_permissions_from_audit``.
+
+    Phase E of [[bouncer-informs-agent-informs-iam-jit]]. Fan-out to
+    one bouncer, extract permission set, return the agent-shaped doc.
+
+    Per [[ibounce-honest-positioning]] an unreachable bouncer surfaces
+    as a per-bouncer note rather than raising — the agent then sees
+    `events_analyzed: 0` + can re-ask.
+    """
+    from .audit_extract import extract_permissions_via_fanout
+
+    since = args.get("since") or "1h"
+    until = args.get("until")
+    bouncer = args.get("bouncer") or "ibounce"
+    limit_raw = args.get("limit", 1000)
+    try:
+        limit = int(limit_raw)
+    except (TypeError, ValueError):
+        limit = 1000
+    if limit < 1:
+        limit = 1
+    if limit > 10000:
+        limit = 10000
+    audit_events_token = args.get("audit_events_token")
+
+    try:
+        extracted = extract_permissions_via_fanout(
+            since=str(since) if since else "1h",
+            until=str(until) if until else None,
+            bouncer=str(bouncer),
+            limit=limit,
+            audit_events_token=(
+                str(audit_events_token) if audit_events_token else None
+            ),
+        )
+    except Exception as e:
+        return {
+            "status": "error",
+            "code": "extract_failed",
+            "message": str(e),
+        }
+    payload = extracted.as_dict()
+    payload["status"] = "ok"
+    return payload
+
+
+def _iam_jit_resource_map_for_mcp(
+    args: dict[str, Any],
+) -> dict[str, Any]:
+    """MCP backend for ``iam_jit_resource_map``.
+
+    Applies the operator's declared mapping to the agent-supplied
+    permission set. Pure substitution per [[scorer-is-ground-truth]];
+    no inference happens at this seam.
+    """
+    from .ambient_config.loader import load_declaration
+    from .resource_map import (
+        apply_resource_mapping_to_permissions,
+        load_mapping_from_config,
+    )
+
+    permissions = args.get("permissions")
+    if not isinstance(permissions, dict):
+        return {
+            "status": "error",
+            "code": "invalid_permissions",
+            "message": (
+                "`permissions` must be the document shape produced by "
+                "`bounce_extract_permissions_from_audit`."
+            ),
+        }
+    using = args.get("using")
+    if not isinstance(using, str) or not using.strip():
+        return {
+            "status": "error",
+            "code": "missing_using",
+            "message": (
+                "`using` (name of the resource_mappings entry) is "
+                "required."
+            ),
+        }
+    config_path = args.get("config_path")
+    cwd = args.get("cwd")
+    try:
+        if config_path:
+            declaration, source = load_declaration(str(config_path))
+        else:
+            declaration, source = load_declaration(None, cwd=cwd)
+    except Exception as e:
+        return {
+            "status": "error",
+            "code": "config_load_failed",
+            "message": str(e),
+        }
+    try:
+        mapping = load_mapping_from_config(declaration, using.strip())
+    except KeyError as e:
+        return {
+            "status": "error",
+            "code": "mapping_not_found",
+            "message": str(e),
+            "source": source,
+        }
+    except ValueError as e:
+        return {
+            "status": "error",
+            "code": "invalid_mapping",
+            "message": str(e),
+            "source": source,
+        }
+    try:
+        result = apply_resource_mapping_to_permissions(permissions, mapping)
+    except Exception as e:
+        return {
+            "status": "error",
+            "code": "mapping_failed",
+            "message": str(e),
+        }
+    result["status"] = "ok"
+    result["config_source"] = source
+    return result
 
 
 def _emit_session_ended_on_close() -> None:

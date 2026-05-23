@@ -90,6 +90,11 @@
               "items": { "$ref": "#/$defs/threat_feed_block" }
             }
           }
+        },
+        "resource_mappings": {
+          "type": "object",
+          "additionalProperties": { "$ref": "#/$defs/resource_mapping_block" },
+          "description": "Phase E (#420 §A59) — named resource mappings consumed by `iam-jit resource-map` + `iam_jit_resource_map` (MCP). Operator declares NAMED account/region/name substitution rules; agent picks a name by intent (e.g. 'staging_to_prod') and iam-jit applies pure textual substitution. No inference happens at the iam-jit layer per [[scorer-is-ground-truth]] — the agent is the synthesizer; iam-jit only substitutes per the operator's declaration."
         }
       }
     }
@@ -195,6 +200,43 @@
         "nickname": {
           "type": "string",
           "description": "Optional human-readable label for log lines + `iam-jit updates last-fetch` output."
+        }
+      }
+    },
+    "resource_mapping_block": {
+      "type": "object",
+      "additionalProperties": false,
+      "description": "One named resource mapping. `account_id` + `region` are exact-match substitution maps. `name_patterns` are ordered glob-style rewrites applied to resource names (first match wins; `*` is the only glob meta-char, with positional alignment between match + replace templates).",
+      "properties": {
+        "account_id": {
+          "type": "object",
+          "additionalProperties": { "type": "string", "minLength": 1 },
+          "description": "AWS account ID substitution map (exact match). YAML mapping `{ \"source_acct\": \"target_acct\" }`."
+        },
+        "region": {
+          "type": "object",
+          "additionalProperties": { "type": "string", "minLength": 1 },
+          "description": "AWS region substitution map (exact match). Applied to ARN region positional fields + observed_scope.regions."
+        },
+        "name_patterns": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["match", "replace"],
+            "properties": {
+              "match": {
+                "type": "string",
+                "minLength": 1,
+                "description": "Glob with `*` wildcards (e.g. `staging-*`)."
+              },
+              "replace": {
+                "type": "string",
+                "description": "Template with `*` placeholders aligned positionally to the captures from `match` (e.g. `prod-*`)."
+              }
+            }
+          },
+          "description": "Ordered glob rewrites applied to the resource-name tail of an ARN (or the bare string for pseudo-ARNs). First matching pattern wins."
         }
       }
     }

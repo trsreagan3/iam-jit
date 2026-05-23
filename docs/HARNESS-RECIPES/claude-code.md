@@ -177,3 +177,11 @@ agent-issued `bounce_profile_allow` for operator approval rather
 than auto-applying.
 
 See [`docs/IBOUNCE.md`](../IBOUNCE.md) for the full ibounce reference.
+
+## 6. Using bouncer activity to provision iam-jit roles
+
+Phase E pattern — agent reads bouncer audit, synthesises a role
+request through iam-jit. Canonical use case: *"I just did staging
+work; generate the equivalent role for prod."* See
+[bouncer-to-role-pattern.md](bouncer-to-role-pattern.md) for the
+canonical conversation + the REQUIRED evidence-block discipline.

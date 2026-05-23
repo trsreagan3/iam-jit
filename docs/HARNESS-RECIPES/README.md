@@ -83,10 +83,20 @@ The agent has these MCP tools available alongside
 * `bounce_profile_allow` — add an allow rule when something legit got
   blocked (§A25 / [[easy-profile-extension-and-deny-visibility]]).
 * `bounce_denies_recent` — query what recently got blocked (§A25).
+* `bounce_extract_permissions_from_audit` (Phase E §A58) — extract a
+  structured permission set from a bouncer audit window.
+* `iam_jit_resource_map` (Phase E §A59) — apply a declared resource
+  mapping to translate scope (staging→prod, etc.).
+* `iam_jit_request_role_from_synthesis` (Phase E §A60) — synthesis-
+  aware role-request seam (REQUIRES evidence block per
+  [[ibounce-honest-positioning]]).
 
 Together these close the feedback loop: setup gets you running; posture
 tells you what's running; denies_recent surfaces blocks;
-profile_allow unblocks the legit ones.
+profile_allow unblocks the legit ones; the Phase E trio
+(extract / map / request) turns bouncer observation into
+iam-jit role provisioning via agent synthesis — see
+[bouncer-to-role-pattern.md](bouncer-to-role-pattern.md).
 
 ## Honest behavior — what setup does NOT do
 

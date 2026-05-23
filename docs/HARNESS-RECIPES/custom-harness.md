@@ -91,6 +91,24 @@ to verify the bouncer surface at any point.
   something legit got blocked (agent-self-grant safety rail applies:
   the request is QUEUED for operator approval unless the bouncer was
   started with `--allow-agent-self-grant`).
+* `bounce_extract_permissions_from_audit` — Phase E #419: extract a
+  structured permission set from a bouncer audit window. The first
+  primitive in the bouncer→agent→iam-jit synthesis loop. See
+  [bouncer-to-role-pattern.md](bouncer-to-role-pattern.md).
+* `iam_jit_resource_map` — Phase E #420: apply a declared
+  resource-mapping (staging→prod, etc.) to the extracted permission
+  set. Pure declarative substitution.
+* `iam_jit_request_role_from_synthesis` — Phase E #421: synthesis-
+  aware role-request seam. REQUIRES an evidence block per
+  [[ibounce-honest-positioning]]; routes through the same scorer +
+  auto-approve gate as every other iam-jit request.
+
+## Bouncer activity → iam-jit role: the canonical pattern
+
+See [bouncer-to-role-pattern.md](bouncer-to-role-pattern.md) for the
+end-to-end agent conversation that composes the three Phase E
+primitives. The pattern is harness-agnostic — any MCP-capable agent
+can drive it.
 
 ## See also
 

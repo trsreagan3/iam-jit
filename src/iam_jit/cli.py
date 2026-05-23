@@ -1788,5 +1788,14 @@ from .cli_updates import register_updates_command  # noqa: E402
 register_updates_command(main)
 
 
+# #420 / §A59 — register `iam-jit resource-map` synthesiser helper.
+# Phase E of [[bouncer-informs-agent-informs-iam-jit]]: applies a
+# declared resource mapping (staging→prod, etc.) to a permission set
+# extracted from `iam-jit audit query --extract-permissions`. Mirrors
+# the `iam_jit_resource_map` MCP tool per [[cross-product-agent-parity]].
+from .cli_resource_map import register_resource_map_command  # noqa: E402
+register_resource_map_command(main)
+
+
 if __name__ == "__main__":
     main()

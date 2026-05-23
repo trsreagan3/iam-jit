@@ -96,3 +96,13 @@ iam-jit posture
   when bouncers are already running).
 * Cursor's "Composer Agent" mode honors MCP tools the same way Chat
   does; the recipe works in both surfaces.
+
+## 6. Using bouncer activity to provision iam-jit roles
+
+Phase E pattern. See
+[bouncer-to-role-pattern.md](bouncer-to-role-pattern.md) for the
+canonical agent conversation + the REQUIRED evidence-block
+discipline. The pattern is harness-agnostic; the
+`bounce_extract_permissions_from_audit` / `iam_jit_resource_map` /
+`iam_jit_request_role_from_synthesis` MCP tools work the same way
+under Cursor's Composer Agent.

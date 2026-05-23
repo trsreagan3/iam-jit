@@ -89,3 +89,15 @@ Same as [claude-code.md](claude-code.md#4-30-second-smoke-test).
   deployments, ensure the bouncer host + Devin agent share a
   network namespace OR Devin can reach a host-bridge port.
 * MCP support status: pending. Last confirmed: 2026-05-23.
+
+## 6. Using bouncer activity to provision iam-jit roles
+
+Phase E pattern. See
+[bouncer-to-role-pattern.md](bouncer-to-role-pattern.md) for the
+canonical agent conversation + the REQUIRED evidence-block
+discipline. Once Devin's MCP support lands, the
+`bounce_extract_permissions_from_audit` / `iam_jit_resource_map` /
+`iam_jit_request_role_from_synthesis` tools are the path; until then
+operators can drive the CLI sequence manually (`iam-jit audit query
+--extract-permissions` + `iam-jit resource-map`) and submit the
+resulting role request through the standard pending-review flow.
