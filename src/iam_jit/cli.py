@@ -1711,8 +1711,16 @@ register_audit_stream_command(audit_group)
 # operator's mental model is "audit query reads; audit verify
 # attests". The implementation lives in cli_audit_verify so the
 # chain + manifest dependencies don't pull into every CLI surface.
-from .cli_audit_verify import register_audit_verify_command  # noqa: E402
+from .cli_audit_verify import (  # noqa: E402
+    register_audit_retention_command,
+    register_audit_verify_command,
+)
 register_audit_verify_command(audit_group)
+# #428 / §A67 — register `iam-jit audit retention apply` for the
+# offline tier-mover + purge surface. Lives next to `verify` so the
+# operator's mental model is "audit retention apply + audit verify
+# are the two compliance-grade operations against the same log dir".
+register_audit_retention_command(audit_group)
 
 # #285 — register `iam-jit session replay <FILE>` (cross-product session
 # replay). Lives in its own module so the (small) profile-evaluator

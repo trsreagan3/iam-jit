@@ -75,6 +75,22 @@ class AuditLogWriter:
         on_rotation: Callable[[pathlib.Path], None] | None = None,
         on_rotation_failure: Callable[[str], None] | None = None,
         on_recovery: Callable[[int], None] | None = None,
+        # #427 / §A66 — optional hash-chain stamping. When `chain_state`
+        # is non-None, each event gets `unmapped.iam_jit.audit_chain`
+        # stamped on the worker thread before serialisation. The
+        # signer (if also non-None) emits Ed25519-signed manifests at
+        # the configured interval. Default OFF — operators opt in via
+        # --audit-chain / --audit-manifest-* CLI flags so existing
+        # deployments don't gain new on-disk state silently.
+        chain_state: Any | None = None,
+        manifest_signer: Any | None = None,
+        # #428 / §A67 — optional compliance retention policy. When
+        # set, write-time PII redaction (gdpr_pii_purge path) runs
+        # before serialisation. Apply-retention itself is invoked
+        # offline by `iam-jit audit retention apply` or the autopilot
+        # daemon; this writer only does the write-time portion.
+        retention_policy: Any | None = None,
+        on_manifest: Callable[[Any], None] | None = None,
     ) -> None:
         self.path = pathlib.Path(path)
         self.fsync = fsync
@@ -95,6 +111,16 @@ class AuditLogWriter:
         self._on_rotation = on_rotation
         self._on_rotation_failure = on_rotation_failure
         self._on_recovery = on_recovery
+        # #427 / §A66 — chain + manifest wiring. Held as plain
+        # references; the worker stamps + emits on the same task so
+        # ordering is naturally preserved (each manifest covers a
+        # contiguous chain prefix).
+        self._chain_state = chain_state
+        self._manifest_signer = manifest_signer
+        self._on_manifest = on_manifest
+        # #428 / §A67 — retention policy. Only the write-time PII
+        # scrub runs here; tier transitions happen offline.
+        self._retention_policy = retention_policy
         self._queue: asyncio.Queue[dict[str, Any] | None] | None = None
         self._worker_task: asyncio.Task | None = None
         self._fd: int | None = None
@@ -239,6 +265,34 @@ class AuditLogWriter:
             if event is None:
                 return
             try:
+                # #428 / §A67 — write-time PII redaction (gdpr_pii_purge
+                # path). Runs before chain stamping so the chain hash
+                # commits to the SCRUBBED event (a later verify_jsonl
+                # against the on-disk file works).
+                if self._retention_policy is not None:
+                    try:
+                        from .retention import redact_event_pii
+                        redact_event_pii(event, self._retention_policy)
+                    except Exception as e:
+                        # Redaction failure: log + carry on with the
+                        # ORIGINAL event. Per [[ibounce-honest-
+                        # positioning]] we'd rather emit an unredacted
+                        # event than drop a compliance row.
+                        self._record_error(f"pii redact: {e}")
+                # #427 / §A66 — chain stamping. Stamps
+                # `unmapped.iam_jit.audit_chain.*` on the event in
+                # place. The next manifest emission (gated by
+                # ``should_emit``) anchors at the head this stamp
+                # produces.
+                if self._chain_state is not None:
+                    try:
+                        from .chain import stamp_event
+                        stamp_event(event, self._chain_state)
+                    except Exception as e:
+                        # Chain failure does NOT drop the event;
+                        # surfaces via the error counter + verify_jsonl
+                        # will catch the missing chain block.
+                        self._record_error(f"chain stamp: {e}")
                 line = json.dumps(event, ensure_ascii=False) + "\n"
                 # Write encoded bytes via os.write (low-level fd path
                 # we opened above). os.write is atomic per write call
@@ -261,6 +315,28 @@ class AuditLogWriter:
                     # / last_error_at) are retained for forensics; the
                     # bool reflects the CURRENT health of the channel.
                     self._writes_ok = True
+                # #427 / §A66 — manifest emit. Fires when the chain
+                # head has advanced ``interval`` past the last
+                # manifest. The signed manifest lands on disk + (if
+                # the on_manifest callback is wired) on the OCSF
+                # webhook channel so SIEM consumers see signed
+                # checkpoints inline with decision events.
+                if (
+                    self._manifest_signer is not None
+                    and self._chain_state is not None
+                ):
+                    try:
+                        if self._manifest_signer.should_emit(self._chain_state):
+                            manifest = self._manifest_signer.emit(self._chain_state)
+                            if manifest is not None and self._on_manifest is not None:
+                                try:
+                                    self._on_manifest(manifest)
+                                except Exception as cb_err:
+                                    logger.warning(
+                                        "manifest callback raised: %s", cb_err,
+                                    )
+                    except Exception as e:
+                        self._record_error(f"manifest emit: {e}")
                 # #311 / §A10 — rotation guard runs after every
                 # successful write. Cheap: a single stat() unless one
                 # of the thresholds fires. We check on the worker
@@ -392,4 +468,46 @@ class AuditLogWriter:
                 "last_rotation_path": self._last_rotation_path,
                 "rotation_failures": self._rotation_failures,
                 "partial_bytes_recovered": self._partial_bytes_recovered,
+                # #427 / §A66 — chain + manifest visibility for
+                # /healthz + the MCP status tool. Absent fields are
+                # `None` so an unwired chain doesn't look broken.
+                "chain": {
+                    "configured": self._chain_state is not None,
+                    "head_seq": (
+                        self._chain_state.next_seq - 1
+                        if self._chain_state is not None
+                        and self._chain_state.next_seq > 0
+                        else None
+                    ),
+                    "head_hash": (
+                        self._chain_state.last_hash
+                        if self._chain_state is not None
+                        else None
+                    ),
+                    "state_file_missing_at_start": (
+                        self._chain_state.state_file_missing
+                        if self._chain_state is not None
+                        else None
+                    ),
+                },
+                "manifest": (
+                    self._manifest_signer.status()
+                    if self._manifest_signer is not None
+                    else {"configured": False}
+                ),
+                # #428 / §A67 — retention summary; full policy lives
+                # in the bouncer config exposed via /healthz.
+                "retention": (
+                    {
+                        "configured": True,
+                        "compliance": self._retention_policy.compliance,
+                        "hot_days": self._retention_policy.hot_days,
+                        "warm_days": self._retention_policy.warm_days,
+                        "cold_days": self._retention_policy.cold_days,
+                        "purge_after_days": self._retention_policy.purge_after_days,
+                        "gdpr_pii_purge": self._retention_policy.gdpr_pii_purge,
+                    }
+                    if self._retention_policy is not None
+                    else {"configured": False}
+                ),
             }

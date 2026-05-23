@@ -48,7 +48,7 @@ import pathlib
 import shutil
 import tarfile
 import time
-from typing import Iterable
+from typing import Any, Iterable
 
 # Default thresholds — match the cross-product table in
 # `docs/LOG-RETENTION.md`. Operators can override via CLI flags +
@@ -479,6 +479,36 @@ def rotate_db_daily(
     return archive
 
 
+def purge_by_policy(
+    log_dir: str | os.PathLike,
+    policy: Any,
+    *,
+    now: float | None = None,
+) -> tuple[list[pathlib.Path], list[pathlib.Path]]:
+    """#428 / §A67 — apply a RetentionPolicy to the log directory.
+
+    Thin compose-helper that delegates to
+    :func:`iam_jit.bouncer.audit_export.retention.apply_retention`
+    so callers in this module (the writer's tier helper, the CLI's
+    `iam-jit audit retention apply`) have a single entry point.
+
+    Returns ``(transitioned_files, purged_files)`` — the tier
+    transition + purge lists from the underlying call, simplified
+    to two lists for callers that don't need the full result shape.
+
+    Per `[[v1-scope-bar]]` this lives in rotation.py (rather than
+    each caller importing retention.py) because rotation.py is the
+    historical entrypoint for archive lifecycle operations.
+    """
+    # Lazy import to avoid retention -> rotation cyclic if retention
+    # ever needs to call rotate primitives.
+    from .retention import apply_retention
+    result = apply_retention(log_dir, policy, now=now)
+    transitioned = [pathlib.Path(t.path) for t in result.transitions]
+    purged = [pathlib.Path(p) for p in result.purged]
+    return transitioned, purged
+
+
 __all__ = [
     "DEFAULT_DB_RETENTION_DAYS",
     "DEFAULT_DISK_CRIT_PCT",
@@ -491,6 +521,7 @@ __all__ = [
     "ROTATED_JSONL_PATTERN",
     "archive_logs",
     "disk_status",
+    "purge_by_policy",
     "purge_older_than",
     "recover_partial_tail",
     "rotate",

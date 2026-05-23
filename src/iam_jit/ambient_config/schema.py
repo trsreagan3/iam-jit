@@ -151,6 +151,16 @@ _INLINE_SCHEMA: dict[str, Any] = {
                         },
                     },
                 },
+                # #428 / §A67 — compliance retention tiering. Declarative
+                # multi-tier retention selected by framework name + per-
+                # field overrides. Wired into the bouncer at start time:
+                # write-time PII redaction (gdpr_pii_purge path) + a
+                # `iam-jit audit retention apply` offline mover that
+                # transitions rotated archives across hot/warm/cold +
+                # purges past `purge_after_days`. Defaults per framework
+                # (PCI 1y, HIPAA 6y, SOX 7y, GDPR variable). See
+                # docs/PRODUCTION-LOG-STORAGE.md §retention.
+                "retention": {"$ref": "#/$defs/retention_block"},
                 # #420 / §A59 — declarative resource mappings consumed by
                 # `iam-jit resource-map` + `iam_jit_resource_map` MCP tool.
                 # Phase E of [[bouncer-informs-agent-informs-iam-jit]]:
@@ -170,6 +180,27 @@ _INLINE_SCHEMA: dict[str, Any] = {
                         "(e.g. staging) into the equivalent shape for "
                         "another environment (e.g. prod). The agent "
                         "picks the mapping name by operator intent."
+                    ),
+                },
+                # #437 / §A71 — Phase G deployment-target taxonomy.
+                # Operator-declared scope classifiers per deployment
+                # target (prod-k8s, staging-k8s, etc.) — the agent reads
+                # this to filter a long-range audit query (#436) before
+                # synthesising a per-target bouncer config. Per
+                # [[bouncer-informs-agent-informs-iam-jit]] iam-jit
+                # provides the taxonomy + the log access; the AGENT
+                # does the synthesis.
+                "deployment_targets": {
+                    "type": "object",
+                    "additionalProperties": {
+                        "$ref": "#/$defs/deployment_target_block",
+                    },
+                    "description": (
+                        "Named deployment-target classifiers consumed "
+                        "by `iam-jit deployment-targets list` + "
+                        "`bounce_deployment_targets_for_filter` (MCP). "
+                        "Phase G of "
+                        "[[bouncer-informs-agent-informs-iam-jit]]."
                     ),
                 },
             },
@@ -245,6 +276,133 @@ _INLINE_SCHEMA: dict[str, Any] = {
                 "cosign_issuer": {"type": "string"},
                 "enabled": {"type": "boolean", "default": True},
                 "nickname": {"type": "string"},
+            },
+        },
+        "deployment_target_block": {
+            "type": "object",
+            "additionalProperties": False,
+            "required": ["bouncer", "classifier"],
+            "description": (
+                "One named deployment-target (e.g. prod-k8s). bouncer "
+                "identifies which Bounce-suite product owns this "
+                "target; classifier declares the scope dimensions an "
+                "agent uses to filter a long-range audit-query by "
+                "deployment-target."
+            ),
+            "properties": {
+                "bouncer": {
+                    "type": "string",
+                    "enum": [
+                        "ibounce", "kbouncer", "dbounce", "gbounce",
+                    ],
+                },
+                "description": {"type": "string"},
+                "classifier": {
+                    "type": "object",
+                    "additionalProperties": False,
+                    "properties": {
+                        "clusters": {
+                            "type": "array",
+                            "items": {"type": "string", "minLength": 1},
+                        },
+                        "accounts": {
+                            "type": "array",
+                            "items": {"type": "string", "minLength": 1},
+                        },
+                        "regions": {
+                            "type": "array",
+                            "items": {"type": "string", "minLength": 1},
+                        },
+                        "namespaces": {
+                            "type": "array",
+                            "items": {"type": "string", "minLength": 1},
+                        },
+                        "hosts": {
+                            "type": "array",
+                            "items": {"type": "string", "minLength": 1},
+                        },
+                        "databases": {
+                            "type": "array",
+                            "items": {"type": "string", "minLength": 1},
+                        },
+                    },
+                },
+            },
+        },
+        "retention_block": {
+            "type": "object",
+            "additionalProperties": False,
+            "description": (
+                "#428 / §A67 — compliance retention tiering. Pick a "
+                "framework via `compliance:` to seed per-framework "
+                "defaults, then optionally override individual fields. "
+                "PCI/HIPAA/SOX/GDPR cover the common regulated "
+                "workloads; `custom` skips defaults so the operator "
+                "specifies every field. Wired at bouncer start time."
+            ),
+            "properties": {
+                "compliance": {
+                    "type": "string",
+                    "enum": ["pci", "hipaa", "sox", "gdpr", "custom"],
+                    "default": "pci",
+                    "description": (
+                        "Per-framework defaults (cumulative age "
+                        "thresholds in days). PCI: hot<=30 / warm<="
+                        "120 / cold<=365 / no purge. HIPAA: hot<=30 "
+                        "/ warm<=210 / cold<=2190 / purge 2190 (6 "
+                        "years). SOX: hot<=30 / warm<=395 / cold<="
+                        "2555 / no purge. GDPR: hot<=30 / warm<=120 "
+                        "/ cold<=365 / write-time PII purge. Custom: "
+                        "same shape as PCI, operator overrides every "
+                        "field."
+                    ),
+                },
+                "hot_days": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "description": (
+                        "Days a rotated archive stays in the hot tier "
+                        "(locally queryable). Must be > 0."
+                    ),
+                },
+                "warm_days": {
+                    "type": "integer",
+                    "minimum": 0,
+                    "description": (
+                        "Days an archive stays warm (compressed local) "
+                        "after leaving hot. 0 disables the warm tier."
+                    ),
+                },
+                "cold_days": {
+                    "type": "integer",
+                    "minimum": 0,
+                    "description": (
+                        "Days an archive stays cold (eligible for S3 "
+                        "archival) after leaving warm. 0 disables the "
+                        "cold tier."
+                    ),
+                },
+                "purge_after_days": {
+                    "type": ["integer", "null"],
+                    "minimum": 1,
+                    "description": (
+                        "Days at which an archive is unconditionally "
+                        "purged. null = keep indefinitely past cold. "
+                        "When set, MUST be >= hot+warm+cold so no data "
+                        "within the declared retention window is "
+                        "destroyed."
+                    ),
+                },
+                "gdpr_pii_purge": {
+                    "type": "boolean",
+                    "default": False,
+                    "description": (
+                        "When true, write-time PII redaction runs "
+                        "before disk + hot→warm archive transitions "
+                        "re-scrub the archive. True by default for "
+                        "the GDPR framework."
+                    ),
+                },
             },
         },
         "resource_mapping_block": {

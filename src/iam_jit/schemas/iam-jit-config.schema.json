@@ -91,10 +91,19 @@
             }
           }
         },
+        "retention": {
+          "$ref": "#/$defs/retention_block",
+          "description": "#428 / §A67 — compliance retention tiering. Declarative multi-tier retention (hot/warm/cold + optional purge) selected by framework name (pci | hipaa | sox | gdpr | custom) with per-field overrides. Per-framework defaults match industry: PCI 1y, HIPAA 6y, SOX 7y, GDPR variable + PII purge. Wired at bouncer start: write-time PII redaction (gdpr_pii_purge path) + offline tier mover (`iam-jit audit retention apply`). See docs/PRODUCTION-LOG-STORAGE.md §retention."
+        },
         "resource_mappings": {
           "type": "object",
           "additionalProperties": { "$ref": "#/$defs/resource_mapping_block" },
           "description": "Phase E (#420 §A59) — named resource mappings consumed by `iam-jit resource-map` + `iam_jit_resource_map` (MCP). Operator declares NAMED account/region/name substitution rules; agent picks a name by intent (e.g. 'staging_to_prod') and iam-jit applies pure textual substitution. No inference happens at the iam-jit layer per [[scorer-is-ground-truth]] — the agent is the synthesizer; iam-jit only substitutes per the operator's declaration."
+        },
+        "deployment_targets": {
+          "type": "object",
+          "additionalProperties": { "$ref": "#/$defs/deployment_target_block" },
+          "description": "Phase G (#437 §A71) — named deployment-target classifiers consumed by `iam-jit deployment-targets list` + `bounce_deployment_targets_for_filter` (MCP). Operator declares what their deployment-targets ARE (prod-k8s, staging-k8s, prod-aws, ...); agent reads the classifier to scope a long-range audit query (#436) when synthesising a per-target bouncer config. Per [[bouncer-informs-agent-informs-iam-jit]] iam-jit just provides the taxonomy + the long-range audit access; the AGENT does the synthesis. No inference happens at the iam-jit layer — operator authors the scope rules; iam-jit looks them up."
         }
       }
     }
@@ -200,6 +209,98 @@
         "nickname": {
           "type": "string",
           "description": "Optional human-readable label for log lines + `iam-jit updates last-fetch` output."
+        }
+      }
+    },
+    "deployment_target_block": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["bouncer", "classifier"],
+      "description": "One named deployment-target (e.g. `prod-k8s`). `bouncer` identifies which Bounce-suite product (`ibounce`/`kbouncer`/`dbounce`/`gbounce`) owns this target; `classifier` declares the scope dimensions an agent can use to filter a long-range audit-query by deployment-target. Per [[multi-account-region-cluster-use-case]] classifiers cover ALL the dimensions a multi-account+multi-region+multi-cluster operator routinely scopes against.",
+      "properties": {
+        "bouncer": {
+          "type": "string",
+          "enum": ["ibounce", "kbouncer", "dbounce", "gbounce"],
+          "description": "Which Bounce-suite product hosts this deployment-target. Determines which bouncer's `/audit/events` an agent queries for events from this target."
+        },
+        "description": {
+          "type": "string",
+          "description": "Optional human-readable description (surfaced in `iam-jit deployment-targets list` output)."
+        },
+        "classifier": {
+          "type": "object",
+          "additionalProperties": false,
+          "description": "Scope dimensions identifying which events belong to this deployment-target. The agent reads this block to build a `--scope-filter` argument for `iam-jit audit query --since 2y`. Multiple dimensions intersect (e.g. clusters AND accounts). Glob `*` is supported in every list entry.",
+          "properties": {
+            "clusters": {
+              "type": "array",
+              "items": { "type": "string", "minLength": 1 },
+              "description": "K8s cluster names (kbouncer scope). Globs allowed (e.g. `prod-*`). Used to filter kbouncer events by `unmapped.iam_jit.cluster`."
+            },
+            "accounts": {
+              "type": "array",
+              "items": { "type": "string", "minLength": 1 },
+              "description": "AWS account IDs (ibounce scope; kbouncer IRSA scope). Used to filter events by `cloud.account.uid`."
+            },
+            "regions": {
+              "type": "array",
+              "items": { "type": "string", "minLength": 1 },
+              "description": "AWS / cloud regions (ibounce scope). Used to filter events by `cloud.region`."
+            },
+            "namespaces": {
+              "type": "array",
+              "items": { "type": "string", "minLength": 1 },
+              "description": "K8s namespaces (kbouncer scope). Globs allowed (e.g. `api-*`)."
+            },
+            "hosts": {
+              "type": "array",
+              "items": { "type": "string", "minLength": 1 },
+              "description": "Hostnames (gbounce scope; dbounce scope). Globs allowed (e.g. `*.prod.example.com`). Used to filter events by `dst_endpoint.hostname`."
+            },
+            "databases": {
+              "type": "array",
+              "items": { "type": "string", "minLength": 1 },
+              "description": "Database names (dbounce scope). Globs allowed."
+            }
+          }
+        }
+      }
+    },
+    "retention_block": {
+      "type": "object",
+      "additionalProperties": false,
+      "description": "#428 / §A67 — compliance retention tiering. Pick a framework via `compliance:` to seed per-framework defaults, then optionally override individual fields. PCI/HIPAA/SOX/GDPR cover the common regulated workloads; `custom` skips defaults so the operator specifies every field.",
+      "properties": {
+        "compliance": {
+          "type": "string",
+          "enum": ["pci", "hipaa", "sox", "gdpr", "custom"],
+          "default": "pci",
+          "description": "Per-framework defaults (cumulative age thresholds in days). PCI: hot≤30 / warm≤120 / cold≤365 / no purge. HIPAA: hot≤30 / warm≤210 / cold≤2190 / purge 2190 (6 years). SOX: hot≤30 / warm≤395 / cold≤2555 / no purge (7-year floor). GDPR: hot≤30 / warm≤120 / cold≤365 / write-time PII purge. Custom: same shape as PCI, operator overrides every field."
+        },
+        "hot_days": {
+          "type": "integer",
+          "minimum": 1,
+          "description": "Days a rotated archive stays in the hot tier (locally queryable). Must be > 0."
+        },
+        "warm_days": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "Days an archive stays warm (compressed local) after leaving hot. 0 disables the warm tier."
+        },
+        "cold_days": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "Days an archive stays cold (eligible for S3 archival) after leaving warm. 0 disables the cold tier."
+        },
+        "purge_after_days": {
+          "type": ["integer", "null"],
+          "minimum": 1,
+          "description": "Days at which an archive is unconditionally purged. null = keep indefinitely past cold. When set, MUST be >= hot+warm+cold so no data within the declared retention window is destroyed."
+        },
+        "gdpr_pii_purge": {
+          "type": "boolean",
+          "default": false,
+          "description": "When true, write-time PII redaction runs before disk + hot→warm archive transitions re-scrub the archive. True by default for the GDPR framework."
         }
       }
     },
