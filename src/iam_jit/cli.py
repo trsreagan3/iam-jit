@@ -1836,5 +1836,14 @@ from .cli_deployment_targets import (  # noqa: E402
 register_deployment_targets_group(main)
 
 
+# Phase H §A76-§A79 — `iam-jit anomaly` (per-agent behavioral baseline +
+# anomaly detector). Per [[anomaly-detection-mode-phase-h]] this is the
+# operator-facing dry-run + inspection surface; the bouncer itself wires
+# the detector into the request path when `iam-jit.anomaly_detection.
+# enabled: true` is declared.
+from .cli_anomaly import register_anomaly_group  # noqa: E402
+register_anomaly_group(main)
+
+
 if __name__ == "__main__":
     main()

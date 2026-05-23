@@ -104,6 +104,10 @@
           "type": "object",
           "additionalProperties": { "$ref": "#/$defs/deployment_target_block" },
           "description": "Phase G (#437 §A71) — named deployment-target classifiers consumed by `iam-jit deployment-targets list` + `bounce_deployment_targets_for_filter` (MCP). Operator declares what their deployment-targets ARE (prod-k8s, staging-k8s, prod-aws, ...); agent reads the classifier to scope a long-range audit query (#436) when synthesising a per-target bouncer config. Per [[bouncer-informs-agent-informs-iam-jit]] iam-jit just provides the taxonomy + the long-range audit access; the AGENT does the synthesis. No inference happens at the iam-jit layer — operator authors the scope rules; iam-jit looks them up."
+        },
+        "anomaly_detection": {
+          "$ref": "#/$defs/anomaly_detection_block",
+          "description": "Phase H (#468-#471 §A76-§A79) — per-agent behavioral baseline + anomaly detector. Per [[anomaly-detection-mode-phase-h]] this is an ADDITIVE operator wedge: opt in to track each agent's baseline + flag actions that are either known-malicious (composes with #404 deny-classifier + #407 threat-feed) or N-sigma away from the agent's historical pattern. Two response modes: `block` (returns structured deny + emits OCSF anomaly_detected) or `alert` (lets through + emits). Per [[independence-as-security-property]] the baseline stays LOCAL; never sent anywhere. Per [[scorer-is-ground-truth]] the detector is ADVISORY — deterministic deny floor wins on conflict."
         }
       }
     }
@@ -338,6 +342,53 @@
             }
           },
           "description": "Ordered glob rewrites applied to the resource-name tail of an ARN (or the bare string for pseudo-ARNs). First matching pattern wins."
+        }
+      }
+    },
+    "anomaly_detection_block": {
+      "type": "object",
+      "additionalProperties": false,
+      "description": "Phase H — per-agent behavioral baseline + anomaly detector. Opt-in operator wedge. Per [[anomaly-detection-mode-phase-h]] the detector composes with #404 deny-classifier (cold-start fallback per F.2) + #407 threat-feed (severity weighting). Baseline storage uses DUAL-MODE rolling window + exponential decay per F.3.",
+      "properties": {
+        "enabled": {
+          "type": "boolean",
+          "default": false,
+          "description": "Master switch. Default OFF — operators opt in deliberately per [[anomaly-detection-mode-phase-h]] (don't make this the default; ambient mode without anomaly_detection stays as-is)."
+        },
+        "mode": {
+          "type": "string",
+          "enum": ["alert", "block"],
+          "default": "alert",
+          "description": "alert = let request through + emit OCSF anomaly_detected (default, friction-minimised). block = return structured deny + emit. Per [[scorer-is-ground-truth]] block-mode is ADVISORY; deterministic deny floor still wins on conflict."
+        },
+        "sensitivity": {
+          "type": "string",
+          "enum": ["low", "medium", "high"],
+          "default": "medium",
+          "description": "Z-score sensitivity. low=3.0σ (rare flags) / medium=2.0σ (default) / high=1.5σ (more flags). Operators tune per false-positive tolerance."
+        },
+        "baseline_window": {
+          "type": ["string", "integer"],
+          "default": "14d",
+          "description": "Rolling-window length. Accepts `Nd` / `Nh` / `Nm` / `Ns` strings or positive integer seconds. 14d default; matches the per-agent observable window from #266 + the Polygraph 14d convention."
+        },
+        "baseline_decay_rate": {
+          "type": "number",
+          "exclusiveMinimum": 0.0,
+          "maximum": 1.0,
+          "default": 0.96,
+          "description": "Exponential decay rate per period (24h periods). 0.96 default ≈ 14d half-life. Lower values forget faster (more sensitive to recent behavior shifts). Per F.3 dual-mode storage uses BOTH the rolling window AND this decay; the detector picks per-dimension."
+        },
+        "min_actions_for_baseline": {
+          "type": "integer",
+          "minimum": 0,
+          "default": 50,
+          "description": "Baseline must have at least this many observations before z-score scoring is authoritative. Below this the detector returns `insufficient_data` UNLESS cold_start_fallback is true (then it consults the #404 classifier)."
+        },
+        "cold_start_fallback": {
+          "type": "boolean",
+          "default": true,
+          "description": "F.2 — when the baseline is too small, fall back to the #404 deny-classifier + Phase C threat-feed catalog so the operator gets adversarial-pattern detection from day-1. Set false to honor `insufficient_data` strictly."
         }
       }
     }

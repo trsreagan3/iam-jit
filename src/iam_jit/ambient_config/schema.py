@@ -203,6 +203,15 @@ _INLINE_SCHEMA: dict[str, Any] = {
                         "[[bouncer-informs-agent-informs-iam-jit]]."
                     ),
                 },
+                # Phase H §A76-§A79 — per-agent behavioral baseline +
+                # anomaly detector. Opt-in operator wedge. Per
+                # [[anomaly-detection-mode-phase-h]] composes with #404
+                # deny-classifier (cold-start fallback per F.2) +
+                # #407 threat-feed (severity weighting). Storage uses
+                # dual-mode rolling + exponential decay per F.3.
+                "anomaly_detection": {
+                    "$ref": "#/$defs/anomaly_detection_block",
+                },
             },
         }
     },
@@ -402,6 +411,47 @@ _INLINE_SCHEMA: dict[str, Any] = {
                         "re-scrub the archive. True by default for "
                         "the GDPR framework."
                     ),
+                },
+            },
+        },
+        "anomaly_detection_block": {
+            "type": "object",
+            "additionalProperties": False,
+            "description": (
+                "Phase H — per-agent behavioral baseline + anomaly "
+                "detector. Opt-in operator wedge. See "
+                "[[anomaly-detection-mode-phase-h]]."
+            ),
+            "properties": {
+                "enabled": {"type": "boolean", "default": False},
+                "mode": {
+                    "type": "string",
+                    "enum": ["alert", "block"],
+                    "default": "alert",
+                },
+                "sensitivity": {
+                    "type": "string",
+                    "enum": ["low", "medium", "high"],
+                    "default": "medium",
+                },
+                "baseline_window": {
+                    "type": ["string", "integer"],
+                    "default": "14d",
+                },
+                "baseline_decay_rate": {
+                    "type": "number",
+                    "exclusiveMinimum": 0.0,
+                    "maximum": 1.0,
+                    "default": 0.96,
+                },
+                "min_actions_for_baseline": {
+                    "type": "integer",
+                    "minimum": 0,
+                    "default": 50,
+                },
+                "cold_start_fallback": {
+                    "type": "boolean",
+                    "default": True,
                 },
             },
         },
