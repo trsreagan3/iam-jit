@@ -464,6 +464,15 @@ def test_profile_install_enqueues_pending_audit_event(
     pending_audit_events for each installed profile. The serve
     process's drainer picks them up; this test asserts the enqueue
     half (the drainer half is exercised below)."""
+    # §A100 — the test URL (`internal.example.com`) doesn't resolve
+    # in DNS, which would trip the SSRF gate's fail-closed posture.
+    # The gate's behaviour is exercised by tests/bouncer/
+    # test_profile_install_ssrf.py; here we focus on the enqueue
+    # half + bypass the gate.
+    monkeypatch.setattr(
+        "iam_jit.bouncer_cli._validate_install_url_ssrf",
+        lambda url, *, allow_internal=False: None,
+    )
     db_path = tmp_path / "b.db"
     monkeypatch.setenv("IAM_JIT_BOUNCER_DB", str(db_path))
     monkeypatch.setenv(

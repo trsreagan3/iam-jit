@@ -35,6 +35,8 @@ def _mock_https(payload: bytes, *, status: int = 200):
             self._b = b
         def read(self) -> bytes:
             return self._b
+        def geturl(self) -> str:
+            return ""  # treat as "no redirect"
         def __enter__(self):
             return self
         def __exit__(self, *a):
@@ -46,6 +48,24 @@ def _mock_https(payload: bytes, *, status: int = 200):
         create=False,
     ):
         yield
+
+
+@pytest.fixture(autouse=True)
+def _bypass_ssrf_gate_in_install_tests(monkeypatch):
+    """§A100 — these tests use placeholder hostnames
+    (`internal.acme.com`, `attacker.example.com`) that don't resolve
+    in DNS, which would trigger the SSRF gate's fail-closed posture
+    and break the install-logic tests that aren't about SSRF.
+
+    The dedicated SSRF tests live in
+    ``tests/bouncer_cli/test_profile_install_ssrf.py`` and exercise
+    the real gate. Per ``docs/CONTRIBUTING.md`` we don't double-test
+    the same surface — bypass the gate here so these tests stay
+    focused on install / source-record / read-only logic."""
+    monkeypatch.setattr(
+        "iam_jit.bouncer_cli._validate_install_url_ssrf",
+        lambda url, *, allow_internal=False: None,
+    )
 
 
 def _invoke(args, env):

@@ -12,8 +12,9 @@ operator-visible mechanics:
                                   + graceful restart + audit-chain continuity
                                   verify + rollback on failure)
     iam-jit canary update --watch
-                                — opt-in polling auto-redeploy (LOCAL git
-                                  fetch only; no phone-home)
+                                — poll remote git for new commits;
+                                  default notify-only; pass
+                                  --auto-deploy for autopilot redeploy
 
 Design constraints (per linked memory docs):
 
@@ -21,9 +22,12 @@ Design constraints (per linked memory docs):
   ``ANTHROPIC_API_KEY`` / ``OPENAI_API_KEY`` / ``IAM_JIT_ENABLE_SIDE_LLM``
   per ``[[bouncer-zero-llm-when-agent-in-loop]]``. The agent (Claude
   Code in the founder's session) handles LLM reasoning via MCP.
-* **Local-only.** Per ``[[independence-as-security-property]]`` the
-  canary writes 4 files under ``~/.iam-jit/canary/``; nothing phones
-  home; ``--watch`` polls LOCAL git only.
+* **Local-only state.** Per ``[[independence-as-security-property]]``
+  the canary writes 4 files under ``~/.iam-jit/canary/``; nothing
+  phones home to iam-jit-the-company. ``--watch`` DOES contact the
+  remote git origin (the pre-§A101 'LOCAL only' claim was wrong); the
+  contact is to the operator's own GitHub remote, which is part of
+  the operator's existing trust boundary.
 * **State-verification convention.** Every reported success status
   must be backed by an observable side effect; tests assert both per
   ``docs/CONTRIBUTING.md``.
@@ -470,8 +474,34 @@ def register_canary_group(main_group: click.Group) -> click.Group:
         is_flag=True,
         default=False,
         help=(
-            "Poll for new commits + auto-redeploy. LOCAL git fetch only "
-            "(no phone-home). Opt-in only; off by default."
+            "Polls remote git for new commits on a fixed --interval. "
+            "By default (notify-only) the loop reports new commits to "
+            "stdout + appends a HIGH issue to issues.jsonl WITHOUT "
+            "pulling / reinstalling / restarting — the operator runs "
+            "`iam-jit canary update` manually when ready. Pass "
+            "--auto-deploy in addition to --watch to restore the "
+            "pre-§A101 behaviour where every new origin/main commit "
+            "is installed + bouncers restarted automatically. The "
+            "notify-only default is the safer posture per "
+            "[[push-policy-public-repo]] — autopilot deploys are "
+            "opt-in, not default. (Polling DOES contact the remote; "
+            "the pre-§A101 'LOCAL only / no phone-home' help text "
+            "was wrong — see issue §A101.)"
+        ),
+    )
+    @click.option(
+        "--auto-deploy",
+        is_flag=True,
+        default=False,
+        help=(
+            "§A101 — explicit opt-in to autopilot redeploy under "
+            "--watch. WITHOUT this flag, --watch is notify-only "
+            "(reports new commits; does NOT mutate). WITH this flag, "
+            "each new origin/main commit triggers a full "
+            "`iam-jit canary update` cycle (pull + reinstall + "
+            "restart). A WARN line is logged at watch-loop start so "
+            "the operator sees the autopilot posture in the terminal. "
+            "Ignored without --watch."
         ),
     )
     @click.option(
@@ -486,7 +516,12 @@ def register_canary_group(main_group: click.Group) -> click.Group:
         default=False,
         help="Report what would happen without pulling / rebuilding / restarting.",
     )
-    def update_cmd(watch: bool, interval: str, dry_run: bool) -> None:
+    def update_cmd(
+        watch: bool,
+        auto_deploy: bool,
+        interval: str,
+        dry_run: bool,
+    ) -> None:
         """Redeploy the canary on the newest commits.
 
         Implements the 9-step flow from
@@ -496,7 +531,11 @@ def register_canary_group(main_group: click.Group) -> click.Group:
         issue-log outcome (success or failure with rollback).
         """
         if watch:
-            _run_watch_loop(interval=interval, dry_run=dry_run)
+            _run_watch_loop(
+                interval=interval,
+                dry_run=dry_run,
+                auto_deploy=auto_deploy,
+            )
             return
         _do_one_update(dry_run=dry_run)
 
@@ -753,8 +792,27 @@ def _restart_bouncers(pre_status: dict[str, Any]) -> tuple[bool, str]:
     return True, "no live bouncers found on recorded ports"
 
 
-def _run_watch_loop(*, interval: str, dry_run: bool) -> None:
-    """Poll local git for new commits; trigger update when new SHAs land."""
+def _run_watch_loop(
+    *, interval: str, dry_run: bool, auto_deploy: bool = False,
+) -> None:
+    """Poll remote git for new commits.
+
+    §A101 behaviour split:
+
+      * ``auto_deploy=False`` (default for --watch): notify-only. New
+        upstream commits are surfaced to stdout AND appended as a
+        HIGH-severity entry in ~/.iam-jit/canary/issues.jsonl. The
+        operator runs ``iam-jit canary update`` manually when ready.
+      * ``auto_deploy=True``: each new upstream commit triggers a
+        full ``_do_one_update`` cycle (pre-§A101 behaviour). A WARN
+        line fires at watch-loop start so the autopilot posture is
+        visible in the terminal.
+
+    Per [[push-policy-public-repo]] the notify-only default is the
+    safer posture: autopilot redeploy across the suite means any
+    commit that lands on any origin/main becomes a live install,
+    which is a footgun the operator should opt into explicitly.
+    """
     m = re.fullmatch(r"(\d+)([smhd])", interval.lower())
     if not m:
         raise click.BadParameter(
@@ -763,12 +821,23 @@ def _run_watch_loop(*, interval: str, dry_run: bool) -> None:
     n, unit = int(m.group(1)), m.group(2)
     seconds = n * {"s": 1, "m": 60, "h": 3600, "d": 86400}[unit]
 
-    click.echo(
-        f"iam-jit canary update --watch: polling every {interval} "
-        f"(LOCAL git fetch only; no phone-home). Ctrl-C to stop."
-    )
+    if auto_deploy:
+        click.echo(
+            f"iam-jit canary update --watch --auto-deploy: WARNING — "
+            f"auto-deploy enabled. Any commit landing on origin/main "
+            f"will be installed + bouncers restarted automatically. "
+            f"Polling every {interval}. Ctrl-C to stop."
+        )
+    else:
+        click.echo(
+            f"iam-jit canary update --watch (notify-only): polling "
+            f"remote every {interval}. New commits will be reported "
+            f"to stdout + logged to issues.jsonl; no auto-redeploy. "
+            f"Pass --auto-deploy to enable autopilot redeploy. "
+            f"Ctrl-C to stop."
+        )
     while True:
-        any_new = False
+        new_commits: list[tuple[str, str, str]] = []  # (name, head, upstream)
         for name, repo in _CANARY_REPOS.items():
             _git(repo, "fetch", "--quiet")
             rc1, head = _git(repo, "rev-parse", "HEAD")
@@ -777,9 +846,55 @@ def _run_watch_loop(*, interval: str, dry_run: bool) -> None:
                 click.echo(
                     f"  {name}: new commits ({head[:12]} → {upstream[:12]})"
                 )
-                any_new = True
-        if any_new:
-            _do_one_update(dry_run=dry_run)
+                new_commits.append((name, head, upstream))
+        if new_commits:
+            if auto_deploy:
+                _do_one_update(dry_run=dry_run)
+            else:
+                # Notify-only: log to issues.jsonl so the operator's
+                # `iam-jit canary issues` query surfaces the pending
+                # update. Severity HIGH because an un-installed
+                # security fix is a meaningful gap.
+                for name, head, upstream in new_commits:
+                    try:
+                        # Category "other" — the existing canary
+                        # taxonomy doesn't have an "update_available"
+                        # bucket (only success / failure). "other"
+                        # is the documented escape hatch in the
+                        # _CATEGORIES tuple at module top.
+                        append_issue(
+                            bouncer=name,
+                            severity="HIGH",
+                            category="other",
+                            observable=(
+                                f"§A101 update_available: new "
+                                f"origin/main commits {head[:12]} -> "
+                                f"{upstream[:12]}"
+                            ),
+                            expected=(
+                                "operator runs `iam-jit canary update` "
+                                "to install + restart"
+                            ),
+                            repro_hint=(
+                                "iam-jit canary update --watch is in "
+                                "notify-only mode; pass --auto-deploy "
+                                "to enable autopilot redeploy"
+                            ),
+                            auto_generated=True,
+                            related_task="§A101",
+                        )
+                    except Exception as e:
+                        # Never crash the watch loop on a logging
+                        # failure — the stdout report above already
+                        # alerted the operator.
+                        click.secho(
+                            f"  warning: could not append issue: {e}",
+                            fg="yellow", err=True,
+                        )
+                click.echo(
+                    "  notify-only: NOT auto-deploying. Run "
+                    "`iam-jit canary update` to install."
+                )
         else:
             click.echo(f"  no new commits at {_now_iso()}")
         time.sleep(seconds)

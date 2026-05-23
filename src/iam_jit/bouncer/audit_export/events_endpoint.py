@@ -59,6 +59,7 @@ fan-out (the §A31 launch-blocker) instead of an empty result.
 from __future__ import annotations
 
 import datetime as _dt
+import hmac
 import json
 import logging
 import pathlib
@@ -156,7 +157,12 @@ def make_audit_events_handler(
                     status=401,
                 )
             tok = _parse_bearer(ah)
-            if tok is None or tok != require_bearer:
+            # §A99 — constant-time compare; a wall-clock-string compare
+            # leaks the configured token byte-by-byte over enough
+            # requests. ``hmac.compare_digest`` is the stdlib's
+            # constant-time helper used elsewhere in the package
+            # (see ``burst._bulk_answer_token_matches``).
+            if tok is None or not hmac.compare_digest(tok, require_bearer):
                 return web.json_response(
                     {"error": "bearer token rejected"},
                     status=403,

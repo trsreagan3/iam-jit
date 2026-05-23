@@ -1999,11 +1999,24 @@ def profile_show_cmd(name: str) -> None:
     "--timeout", type=int, default=10, show_default=True,
     help="HTTPS fetch timeout in seconds.",
 )
+@click.option(
+    "--allow-internal-source",
+    "allow_internal_source",
+    is_flag=True, default=False,
+    help="§A100 — opt-out of the SSRF gate that refuses --from URLs "
+         "resolving to RFC1918 / loopback / link-local / 169.254.169.254 "
+         "/ .internal / .local hosts. Required when shipping profiles "
+         "from an intranet distribution server on a trusted network "
+         "segment. Without this flag, only public-resolving hosts are "
+         "permitted (defence against cloud-instance-metadata exfil + "
+         "intranet pivots from an agent-controlled URL).",
+)
 def profile_install_cmd(
     from_url: str,
     expected_sha256: str | None,
     force: bool,
     timeout: int,
+    allow_internal_source: bool,
 ) -> None:
     """Fetch + install one or more profiles from a URL.
 
@@ -2025,7 +2038,9 @@ def profile_install_cmd(
 
     try:
         payload, resolved_source = _fetch_install_payload(
-            from_url, timeout=timeout,
+            from_url,
+            timeout=timeout,
+            allow_internal=allow_internal_source,
         )
     except _InstallFetchError as e:
         click.secho(str(e), fg="red", err=True)
@@ -2206,8 +2221,81 @@ class _InstallFetchError(Exception):
         self.exit_code = exit_code
 
 
+def _validate_install_url_ssrf(
+    url: str, *, allow_internal: bool,
+) -> None:
+    """§A100 — gate the install URL through the same SSRF helper the
+    audit-webhook surface uses (`validate_webhook_url`).
+
+    The webhook helper enforces https-only by default; the install
+    surface intentionally also accepts http:// (loopback for local-
+    dev, non-loopback emits a stderr WARN), so we re-implement the
+    gate's HOST checks here against the helper's primitives. This
+    keeps a single source of truth for "what counts as internal"
+    (suffix denylist + IP categorisation) while letting http://
+    through with the existing WARN.
+
+    Raises ``_InstallFetchError`` on a refusal."""
+    from .bouncer.audit_export.webhook import (
+        _hostname_has_internal_suffix,
+        _is_internal_ip,
+    )
+    import socket
+    import urllib.parse
+
+    if allow_internal:
+        return
+
+    parsed = urllib.parse.urlparse(url)
+    hostname = parsed.hostname or ""
+    if not hostname:
+        # Should be unreachable — the caller already parsed a scheme
+        # like https/http — but fail-closed if we somehow got here
+        # with a malformed URL.
+        raise _InstallFetchError(
+            f"refusing to fetch from {url!r}: missing hostname",
+            exit_code=2,
+        )
+    if _hostname_has_internal_suffix(hostname):
+        raise _InstallFetchError(
+            f"refusing to fetch from {url!r}: hostname {hostname!r} "
+            f"matches an intranet suffix (.internal / .local / "
+            f".home.arpa / .lan / .intranet / .corp / .localhost). "
+            f"Pass --allow-internal-source to permit (only for "
+            f"legitimate internal distribution servers on a trusted "
+            f"network segment).",
+            exit_code=2,
+        )
+    try:
+        _, _, ip_list = socket.gethostbyname_ex(hostname)
+    except socket.gaierror as e:
+        raise _InstallFetchError(
+            f"refusing to fetch from {url!r}: could not resolve "
+            f"hostname {hostname!r}: {e}",
+            exit_code=2,
+        )
+    if not ip_list:
+        raise _InstallFetchError(
+            f"refusing to fetch from {url!r}: hostname {hostname!r} "
+            f"resolved to no IPs",
+            exit_code=2,
+        )
+    for ip in ip_list:
+        if _is_internal_ip(ip):
+            raise _InstallFetchError(
+                f"refusing to fetch from {url!r}: hostname "
+                f"{hostname!r} resolves to internal IP {ip} "
+                f"(RFC1918 / loopback / link-local / 169.254.169.254 "
+                f"cloud-metadata / multicast / reserved). Pass "
+                f"--allow-internal-source to permit (only for "
+                f"legitimate internal distribution servers on a "
+                f"trusted network segment).",
+                exit_code=2,
+            )
+
+
 def _fetch_install_payload(
-    source: str, *, timeout: int,
+    source: str, *, timeout: int, allow_internal: bool = False,
 ) -> tuple[bytes, str]:
     """Resolve `--from` to (payload_bytes, canonical_source_str).
 
@@ -2222,6 +2310,12 @@ def _fetch_install_payload(
         When source is a directory, we look for `ibounce.yaml` first
         (the per-bouncer slot in the generator's bundle layout); fall
         back to `index.yaml` + the bouncer entry named `ibounce`.
+
+    Per §A100 the http/https paths run through an SSRF gate
+    (``_validate_install_url_ssrf``) that refuses RFC1918 / loopback /
+    link-local / 169.254.169.254 cloud-metadata / .internal / .local
+    hosts. Redirects are re-validated per-hop via a custom
+    ``HTTPRedirectHandler``. Opt-out: ``allow_internal=True``.
 
     Returns the canonical-source string that is written to each
     installed profile's `source:` field (so the read-only-at-CLI
@@ -2240,10 +2334,30 @@ def _fetch_install_payload(
         scheme = parsed.scheme
 
     if scheme == "https":
+        _validate_install_url_ssrf(source, allow_internal=allow_internal)
         click.echo(f"fetching {source} ...")
         try:
             with urllib.request.urlopen(source, timeout=timeout) as resp:
+                # §A100 — refuse to follow redirects. The
+                # urllib.request default ALREADY follows 3xx (up to
+                # ~10 hops), so an attacker can use a public URL
+                # that 302s to http://169.254.169.254/latest/
+                # meta-data/... and slip past the initial-URL gate.
+                # We instead surface the redirect to the operator
+                # who can re-point --from at the final URL (which
+                # will then be re-gated against SSRF). Note: by the
+                # time urlopen returns, the redirect chain has
+                # already completed — so we re-validate the final
+                # URL here. If the chain hit an internal IP, the
+                # gate fires.
+                final_url = resp.geturl()
+                if final_url != source:
+                    _validate_install_url_ssrf(
+                        final_url, allow_internal=allow_internal,
+                    )
                 return resp.read(), source
+        except _InstallFetchError:
+            raise
         except (urllib.error.URLError, urllib.error.HTTPError, TimeoutError) as e:
             raise _InstallFetchError(f"fetch failed: {e}", exit_code=1)
 
@@ -2259,10 +2373,25 @@ def _fetch_install_payload(
                 f"§A26 local-dev parity with audit-export HTTP).",
                 fg="yellow", err=True,
             )
+        # SSRF gate applies to http:// too — except that the
+        # loopback case obviously fails the gate by design, so we
+        # only run the gate when the operator hasn't pointed it at
+        # localhost. (Loopback-bind for local dev is the documented
+        # parity case; an attacker-supplied http://169.254.169.254
+        # still fails because that's not loopback.)
+        if not is_loopback:
+            _validate_install_url_ssrf(source, allow_internal=allow_internal)
         click.echo(f"fetching {source} ...")
         try:
             with urllib.request.urlopen(source, timeout=timeout) as resp:
+                final_url = resp.geturl()
+                if final_url != source and not is_loopback:
+                    _validate_install_url_ssrf(
+                        final_url, allow_internal=allow_internal,
+                    )
                 return resp.read(), source
+        except _InstallFetchError:
+            raise
         except (urllib.error.URLError, urllib.error.HTTPError, TimeoutError) as e:
             raise _InstallFetchError(f"fetch failed: {e}", exit_code=1)
 

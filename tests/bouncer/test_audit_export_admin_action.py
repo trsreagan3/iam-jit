@@ -596,8 +596,17 @@ def test_pause_stop_when_no_pause_active_does_not_emit(cli_env: str) -> None:
 
 
 def test_profile_install_emits_admin_action(
-    cli_env: str, tmp_path: pathlib.Path,
+    cli_env: str, tmp_path: pathlib.Path, monkeypatch,
 ) -> None:
+    # §A100 — the test URL (`internal.example.com`) doesn't resolve
+    # in DNS, which would trip the SSRF gate's fail-closed posture.
+    # The gate's behaviour is exercised by tests/bouncer/
+    # test_profile_install_ssrf.py; here we focus on the admin-
+    # action emit half + bypass the gate.
+    monkeypatch.setattr(
+        "iam_jit.bouncer_cli._validate_install_url_ssrf",
+        lambda url, *, allow_internal=False: None,
+    )
     payload = _yaml.safe_dump({
         "profiles": {
             "team-staging": {
