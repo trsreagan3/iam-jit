@@ -1,0 +1,117 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://iam-jit.dev/schemas/iam-jit-config.v1.json",
+  "title": "iam-jit ambient declarative config (v1.0)",
+  "description": "Operator-authored declaration consumed by `iam_jit_setup_from_config` (MCP) and `iam-jit doctor --apply-config` (CLI). One declaration, one block in CLAUDE.md / AGENTS.md / .cursorrules / .iam-jit.yaml — agent reads it on session start and installs + starts + configures the bouncers the operator asked for. v1.1 Phase A: setup-only; v1.1 Phase B will wire `improve.*` semantics (currently accepted but no-op with a warning).",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["iam-jit"],
+  "properties": {
+    "iam-jit": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["enabled"],
+      "properties": {
+        "schema_version": {
+          "type": "string",
+          "enum": ["1.0"],
+          "description": "Optional schema version pin. Defaults to 1.0 when omitted; bumps follow [[config-export-wire-divergence]] (STRING per ibounce/audit-export conventions)."
+        },
+        "enabled": {
+          "type": "boolean",
+          "description": "Master switch. When false, `iam_jit_setup_from_config` is a no-op (returns a structured `{status: 'disabled'}` payload) so an operator can flip a single bit to opt every harness out without removing the rest of the declaration."
+        },
+        "posture": {
+          "type": "string",
+          "enum": ["ambient", "managed"],
+          "default": "ambient",
+          "description": "ambient = agent reads this declaration on session start and maintains the bouncer surface; managed = operator manages bouncers manually (declaration is reference-only). v1.0 behavior is `managed`; v1.1 introduces `ambient` per [[ambient-autonomous-protection]]."
+        },
+        "bouncers": {
+          "type": "object",
+          "additionalProperties": false,
+          "description": "Per-bouncer declaration. Every Bounce gets the same shape per [[cross-product-agent-parity]].",
+          "properties": {
+            "ibounce": { "$ref": "#/$defs/bouncer_block" },
+            "kbouncer": { "$ref": "#/$defs/bouncer_block" },
+            "dbounce":  { "$ref": "#/$defs/bouncer_block" },
+            "gbounce":  { "$ref": "#/$defs/bouncer_block" }
+          }
+        },
+        "improve": {
+          "type": "object",
+          "additionalProperties": false,
+          "description": "Phase B (#401) continuous-improvement knobs. Accepted in Phase A for forward-compatibility but `enabled: true` triggers a warning that the feature is not yet wired.",
+          "properties": {
+            "enabled": { "type": "boolean", "default": false },
+            "cadence": {
+              "type": "string",
+              "enum": ["per_session", "daily", "weekly", "never"],
+              "default": "per_session"
+            },
+            "auto_install_profiles": { "type": "boolean", "default": true },
+            "require_operator_approval_above_change_threshold": {
+              "type": "number",
+              "minimum": 0.0,
+              "maximum": 1.0,
+              "default": 0.30,
+              "description": "Profile-diff fraction above which an auto-improve proposal is held for operator approval instead of auto-installed. 0.0 = always hold; 1.0 = never hold."
+            }
+          }
+        },
+        "notify_on_deny": {
+          "type": "boolean",
+          "default": true,
+          "description": "Surface block notifications to the operator (stderr / Slack hook depending on `iam-jit --notify-denies` config). Per founder direction 2026-05-23 the deny-obviousness surface MUST stay on by default; setting this false is the explicit operator choice to mute."
+        }
+      }
+    }
+  },
+  "$defs": {
+    "bouncer_block": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["enabled"],
+      "properties": {
+        "enabled": {
+          "oneOf": [
+            { "type": "boolean" },
+            {
+              "type": "string",
+              "enum": [
+                "when_kubeconfig_present",
+                "when_db_env_present",
+                "when_proxy_env_present",
+                "when_aws_env_present"
+              ]
+            }
+          ],
+          "description": "true / false explicit; OR a `when_X_present` heuristic the setup tool resolves at apply time. Per [[ibounce-honest-positioning]] heuristics MUST be transparent in dry-run output — operator sees exactly what each conditional resolved to."
+        },
+        "mode": {
+          "type": "string",
+          "enum": ["discovery", "cooperative", "strict"],
+          "default": "discovery",
+          "description": "discovery (default per [[discovery-first-default]]) = observe + audit + pass-through; cooperative = audit + advise but always forward; strict = transparent enforcement (DENY → 403)."
+        },
+        "profile": {
+          "type": "string",
+          "minLength": 1,
+          "default": "auto",
+          "description": "`auto` = use the currently-installed/active profile; named profile = pin to that named profile (must exist in profiles.yaml). When `auto` + nothing installed, falls back to the bouncer's discovery default per [[discovery-first-default]]."
+        },
+        "port": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 65535,
+          "description": "Override the bouncer's default port. Optional — when omitted the bouncer-specific default is used (ibounce 8767, kbouncer 8766, dbounce mgmt 8768 / wire 5433, gbounce mgmt 8769 / wire 8080)."
+        },
+        "extra_args": {
+          "type": "array",
+          "items": { "type": "string" },
+          "description": "Extra CLI args passed to the bouncer's `run` command. Use sparingly — the declarative shape should cover the common cases."
+        }
+      }
+    }
+  }
+}

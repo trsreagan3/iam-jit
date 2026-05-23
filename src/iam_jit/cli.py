@@ -1748,5 +1748,14 @@ from .cli_posture import register_posture_command  # noqa: E402
 register_posture_command(main)
 
 
+# #400 — register `iam-jit doctor apply-config` ambient-declaration applier.
+# Sibling shipped to the `iam_jit_setup_from_config` MCP tool per
+# [[cross-product-agent-parity]]: operator-side CLI + agent-side MCP share
+# the same iam_jit.ambient_config.apply_declaration backend so dry-run
+# output matches across both surfaces.
+from .cli_apply_config import register_apply_config_command  # noqa: E402
+register_apply_config_command(doctor)
+
+
 if __name__ == "__main__":
     main()

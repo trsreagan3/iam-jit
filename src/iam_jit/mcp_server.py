@@ -2129,6 +2129,89 @@ TOOLS.extend([
 
 
 # ---------------------------------------------------------------------------
+# #397 / #398 — ambient-autonomous-protection: setup-from-config MCP tool.
+# ---------------------------------------------------------------------------
+# Per [[ambient-autonomous-protection]]: operator writes ONE declaration
+# in CLAUDE.md / AGENTS.md / .cursorrules / .iam-jit.yaml; agent reads it
+# on session start and calls `iam_jit_setup_from_config` to install +
+# start + configure the bouncers. Phase A is setup-only; Phase B (#401)
+# will add `iam_jit_improve_profile`.
+TOOLS.extend([
+    {
+        "name": "iam_jit_setup_from_config",
+        "description": (
+            "Apply an iam-jit ambient declaration: start the bouncers "
+            "the operator declared, surface the env vars the agent "
+            "should propagate to its subprocesses (AWS_ENDPOINT_URL, "
+            "KUBECONFIG, PGHOST, HTTPS_PROXY), and emit "
+            "`admin_action.setup.applied` audit events. Per "
+            "[[ambient-autonomous-protection]] the agent calls this "
+            "on session start so the operator never has to manually "
+            "run `ibounce run` / `kbouncer run` / etc. — they wrote "
+            "one declaration; the agent maintains the bouncer surface "
+            "around it. Per [[creates-never-mutates]] this NEVER "
+            "restarts a running bouncer with different config — "
+            "conflicts emit warnings and the operator must stop the "
+            "bouncer manually to apply the new config. Per "
+            "[[ibounce-honest-positioning]] every `when_X_present` "
+            "heuristic resolves with its inputs visible in the result "
+            "(operator can run with dry_run=true to see exactly what "
+            "each conditional resolved to). Pass `declaration` as a "
+            "dict (parsed YAML), a string path to .iam-jit.yaml / "
+            "CLAUDE.md, or omit to auto-discover from cwd. Phase A "
+            "ships setup-only; declarations including `improve.*` are "
+            "accepted but the improve block is a no-op until Phase B "
+            "(#401) lands."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "declaration": {
+                    "description": (
+                        "Already-parsed declaration object (dict), OR a "
+                        "filesystem path to a `.iam-jit.yaml` / context "
+                        "file containing a fenced `iam-jit-config` "
+                        "codeblock. Omit to auto-discover under `cwd` "
+                        "(or the process cwd)."
+                    ),
+                    "oneOf": [
+                        {"type": "object"},
+                        {"type": "string"},
+                    ],
+                },
+                "dry_run": {
+                    "type": "boolean",
+                    "default": False,
+                    "description": (
+                        "When true, plan what WOULD happen but do NOT "
+                        "start any bouncers and do NOT emit audit "
+                        "events. Use to preview the effect of the "
+                        "declaration on the current host."
+                    ),
+                },
+                "inspect": {
+                    "type": "boolean",
+                    "default": False,
+                    "description": (
+                        "When true, validate the declaration against "
+                        "the schema + return the parsed shape. Does "
+                        "NOT plan or execute."
+                    ),
+                },
+                "cwd": {
+                    "type": "string",
+                    "description": (
+                        "Optional cwd override for auto-discovery; "
+                        "ignored when `declaration` is passed."
+                    ),
+                },
+            },
+        },
+    },
+])
+
+
+# ---------------------------------------------------------------------------
 # #345 / §A25 — Easy profile extension + deny visibility.
 # ---------------------------------------------------------------------------
 # Symmetric flip of the bounce_deny_* family (#324e):
@@ -4660,6 +4743,10 @@ def _handle_request(req: dict[str, Any]) -> dict[str, Any] | None:
                 "block": detect_ibounce(),
                 "iam_jit_identity": detect_iam_jit_role(),
             })
+        elif tool_name == "iam_jit_setup_from_config":
+            # #397 / #398 — ambient-autonomous-protection setup applier.
+            from .cli_apply_config import apply_config_for_mcp
+            result_payload = apply_config_for_mcp(args)
         else:
             return _err(rid, -32601, f"unknown tool: {tool_name}")
         # MCP tool result format: { content: [{type: "text", text: "..."}] }
