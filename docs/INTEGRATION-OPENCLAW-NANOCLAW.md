@@ -329,7 +329,7 @@ Cross-bouncer correlation via the `agent.session_id` field — if you run an inv
 
 Bouncers run locally on your machine. No phone-home (`[[self-host-zero-billing-dependency]]`). No external services billed.
 
-LLM-augmented risk scoring (iam-jit Pro tier) is opt-in + uses whichever LLM you configure — Bedrock, Anthropic API, OpenAI API, or local Ollama (per `[[pluggable-llm-backend-decision]]`).
+LLM-augmented risk scoring at v1.0 is **agent-delegated** per `[[bouncer-zero-llm-when-agent-in-loop]]` — the agent in the loop (Claude Code, Cursor, Codex, Devin, etc.) uses its OWN LLM credentials (Max / Plus / Pro / API key / Ollama / etc.). iam-jit ships with zero LLM credentials required for local-dev. For standalone-mode (CI/CD / cron / no-agent-in-loop), an opt-in `--llm-backend anthropic|openai|bedrock|ollama` flag uses whichever backend you configure (per `[[pluggable-llm-backend-decision]]`).
 
 ## What this does NOT do
 

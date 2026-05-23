@@ -26,7 +26,8 @@ requests/month per IP.
 ## The three distribution channels (all shipped)
 
 1. **Hosted API** — `https://api.iam-risk-score.com/api/v1/score`
-   (or self-hosted equivalent). Free tier + paid tiers.
+   (or self-hosted equivalent). Free + open source at v1.0
+   (consulting available for production deployments).
 2. **CLI** — `pip install iam-risk-score`. Works offline OR
    against any API URL. Drop-in for pre-commit hooks.
 3. **GitHub Action** — `trsreagan3/iam-risk-score-action@v1`. Score

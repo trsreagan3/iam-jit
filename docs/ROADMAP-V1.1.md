@@ -51,9 +51,10 @@ skip-verify the way kubectl does). Scheduling-bound to #2.
 
 The earlier draft of this doc deferred ~5 features ("plan-capture
 HTTP producer", "MFA full OAuth proxy", "scoring-feedback
-persistence + export", "LLM Pro tier", "preset library org tier")
-based on multi-week build estimates and speculative demand. That
-deferral criterion was too loose:
+persistence + export", "agent-delegated LLM scoring", "preset
+library org-curated distribution") based on multi-week build
+estimates and speculative demand. That deferral criterion was too
+loose:
 
 - **Bar for legitimate deferral:** the feature has been tried,
   measured, and proven to not deliver value (e.g., natural-language

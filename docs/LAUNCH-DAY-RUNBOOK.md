@@ -1,5 +1,12 @@
 # Launch-day runbook
 
+> **SUPERSEDED tier framing 2026-05-23**: per
+> `project_oss_only_launch_decision.md`, v1.0 ships fully free + open
+> source. References below to "Pro-tier LLM" / "free-tier" are
+> HISTORICAL DESIGN CONTEXT only — any LLM behavior at v1.0 is
+> agent-delegated per `[[bouncer-zero-llm-when-agent-in-loop]]` (the
+> agent in the loop uses its own credentials).
+
 What to watch for and what to do in the first 72 hours after a
 public launch. Pairs with `LAUNCH-PLAN.md` (strategic sequencing)
 and `PRODUCTION-READINESS.md` (deployment posture).
@@ -92,10 +99,12 @@ worst-case is a 10-minute downtime, not data loss.
    class). For now: reduce webhook retry storm by ensuring the
    route returns 200 on duplicate (already does).
 
-5. **If it's `ThrottlingException` on Bedrock** — Pro-tier LLM
-   path is rate-limited. Per-model RPM is the hard ceiling. Drop
-   to free-tier (deterministic-only) for affected requests via
-   `IAM_JIT_LLM=none` until the throttle clears.
+5. **If it's `ThrottlingException` on Bedrock** — the standalone-
+   mode LLM path is rate-limited. Per-model RPM is the hard ceiling.
+   Drop to deterministic-only for affected requests via
+   `IAM_JIT_LLM=none` until the throttle clears. (Local-dev mode is
+   agent-delegated per `[[bouncer-zero-llm-when-agent-in-loop]]` —
+   this throttle only affects standalone deployments.)
 
 6. **If you can't tell what's wrong** — the security_posture
    admin endpoint at `/api/v1/admin/security-posture` returns a

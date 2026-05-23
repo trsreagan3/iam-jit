@@ -230,16 +230,19 @@ These can't be tuned away in safety mode. They're the floor.
 ## Upgrading your team
 
 When personal use validates the value and you want team-wide
-adoption:
+adoption (v1.0 ships fully free + open source per
+`[[oss-only-launch-decision]]` — there is no paid tier at v1.0;
+the options below are all free):
 
 1. **Stay on local mode** — each dev runs their own; no
-   centralized infrastructure yet
-2. **Upgrade to hosted SaaS (Indie / Pro / Team tiers)** —
-   shared audit, Slack approval flows, multi-user accounts
-   with role-based access. ~5 min setup via CloudFormation
-   onboarding.
-3. **Move to self-host Enterprise** when you need compliance
-   scope, dedicated support, or full operational control
+   centralized infrastructure
+2. **Self-host** — deploy iam-jit into your own AWS account via
+   SAM for shared audit, Slack approval flows, multi-user accounts
+   with role-based access. Per `[[no-hosted-saas]]`, self-host is
+   the only multi-user shape.
+3. **Add consulting** when you need compliance scope, dedicated
+   support, or production-deployment help — consulting engagements
+   available per `[[launch-as-consulting-funnel]]`.
 
 See [`docs/DEPLOYMENT.md`](../DEPLOYMENT.md) for the upgrade
 path.

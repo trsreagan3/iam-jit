@@ -9,9 +9,10 @@ entry has a one-liner motivation so the priority isn't lost.
 
 Targets the self-hosted deployment. iam-jit continuously enumerates
 IAM roles across connected AWS accounts, scores each one with the
-deterministic scorer (+ Pro-tier LLM where licensed), and emits a
-notification when a role's score crosses a user-configured "high
-risk" threshold.
+deterministic scorer (+ agent-delegated LLM per
+`[[bouncer-zero-llm-when-agent-in-loop]]` when an agent is in the
+loop), and emits a notification when a role's score crosses a
+user-configured "high risk" threshold.
 
 - **Discovery triggers**: CloudTrail event subscription on
   `CreateRole`, `PutRolePolicy`, `AttachRolePolicy`, `PutUserPolicy`,

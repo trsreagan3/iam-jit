@@ -205,13 +205,16 @@ case there when you add a new pattern.
 
 - **Heuristic-first, no ML.** The current generator does NOT use an
   LLM. Every output is a deterministic function of the input. This
-  makes the generator suitable for the Free tier — no per-call cost,
-  no LLM hosting, no prompt injection in the description.
-- **LLM-backed generation is planned for Pro tier.** When a
-  description doesn't match any heuristic pattern, the Free tier
-  returns "unmatched" and suggests rephrasing; Pro tier (future)
-  will fall through to an LLM that produces a candidate policy,
-  which is then re-validated by the same deterministic scorer.
+  is the v1.0 (free + open source) shape — no per-call cost, no LLM
+  hosting, no prompt injection in the description.
+- **LLM-backed generation is agent-delegated.** When a description
+  doesn't match any heuristic pattern, the deterministic generator
+  returns "unmatched" and suggests rephrasing. Per
+  `[[bouncer-zero-llm-when-agent-in-loop]]`, the agent in the loop
+  (Claude Code, Cursor, Codex, Devin, etc.) does the LLM reasoning
+  with its OWN credentials (Max / Plus / Pro / API key / Ollama /
+  etc.) and re-submits via MCP — iam-jit ships with zero LLM
+  credentials required for local-dev.
 - **The scorer is the moat.** Every generated policy gets scored
   before return. The deterministic-scoring discipline (97+ adversarial-
   round closures, 1,800+ corpus test cases) protects the generator
@@ -224,5 +227,7 @@ case there when you add a new pattern.
 - Direct AWS STS integration: after the policy is approved, the CLI
   can return `aws sts assume-role` credentials ready to export.
 - More patterns (request via PR or open an issue).
-- LLM-backed generation (Pro tier) for free-form task descriptions
-  that don't match any heuristic pattern.
+- LLM-backed generation (agent-delegated per
+  `[[bouncer-zero-llm-when-agent-in-loop]]`) for free-form task
+  descriptions that don't match any heuristic pattern — agent in the
+  loop uses its own LLM credentials.

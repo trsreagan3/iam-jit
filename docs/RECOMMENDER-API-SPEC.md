@@ -46,9 +46,12 @@ and the agent / MCP flow need:
 - The recommender's quality needs to be measurable against a corpus,
   ratcheting up over time. Today no calibration loop exists.
 
-This spec defines the API + response shapes + tier behavior + the
-calibration loop. Implementation lands in phases — see
-"Implementation phases" at the end.
+This spec defines the API + response shapes + the calibration loop.
+Implementation lands in phases — see "Implementation phases" at the
+end. Per `project_oss_only_launch_decision.md`, v1.0 (free + open
+source) ships every behavior described below; the "tier" framing
+that appears in some passages is HISTORICAL DESIGN CONTEXT (see the
+SUPERSEDED banner above).
 
 ## Agent-context primacy
 
@@ -57,7 +60,7 @@ A foundational point that shapes every other decision in this spec:
 **The most accurate recommendations come from an agent that has
 access to the source code, not from iam-jit guessing at intent.**
 
-iam-jit's recommender — even with structured intents and Pro-tier
+iam-jit's recommender — even with structured intents and connected-
 account discovery — is operating on what the *caller chose to tell
 it*. An agent inside the dev environment can:
 
@@ -106,10 +109,11 @@ accuracy, and we shouldn't pretend otherwise.
   natural language) — measuring the delta tells us how much value
   agent context actually adds, and motivates the "pass us your
   findings" UX in the MCP tool.
-- Free tier ships the deterministic recommender; paid tiers add LLM
-  oversight; **but the highest-quality outcome on any tier comes
-  from an agent that gathered context first**. This is part of the
-  pitch, not a footnote.
+- v1.0 (free + open source) ships the deterministic recommender +
+  LLM oversight via agent delegation (per
+  `[[bouncer-zero-llm-when-agent-in-loop]]`); **the highest-quality
+  outcome comes from an agent that gathered context first**. This is
+  part of the pitch, not a footnote.
 
 ### Implications for positioning
 
@@ -196,9 +200,11 @@ Field notes:
   its required + optional parameters (see catalog).
 - `intent.natural_language` is always optional. Used for audit log,
   for the LLM tier, and for the human-readable approval-request UI.
-- `context` is the deployment context. On Pro+ tier the recommender
-  auto-discovers most of this from the connected account; the caller
-  can pass overrides.
+- `context` is the deployment context. When a read-only AWS account
+  connection is configured, the recommender auto-discovers most of
+  this from the connected account; the caller can pass overrides.
+  (v1.0 ships this auto-discovery as part of the free + open source
+  product.)
 - `caller.source` lets us tune anti-spam thresholds per surface
   (an MCP agent and a human web user have different normal request
   volumes).
@@ -288,7 +294,7 @@ non-wildcard policy. It returns the missing pieces structurally:
       }
     ]
   },
-  "explanation": "This intent involves an IRSA role binding. Free tier needs these inputs supplied; Pro tier auto-discovers cluster + OIDC provider from the connected account.",
+  "explanation": "This intent involves an IRSA role binding. Without a connected AWS account, the caller must supply these inputs; with a connected account, the recommender auto-discovers cluster + OIDC provider. v1.0 (free + open source) ships both paths.",
   "request_id": "..."
 }
 ```
@@ -431,8 +437,10 @@ For a worked example, see
 | `irsa.scope_existing_role`  | `existing_role_arn`, `aws_resources` | `cluster_arn`, `oidc_provider_arn` | A scoped permissions-policy update for an existing IRSA role |
 
 These are the intents that most heavily exercise the
-`needs_context` flow on free tier. Pro tier auto-discovers
-cluster + OIDC provider; free tier asks the caller.
+`needs_context` flow. With a read-only AWS account connected, the
+recommender auto-discovers cluster + OIDC provider; without a
+connection, the recommender asks the caller. v1.0 (free + open
+source) ships both paths.
 
 ### Out-of-scope intents (refused with pointer)
 
@@ -455,7 +463,7 @@ alternative pointer.
 
 The recommender's intent-handler declares `required_context`. After
 parameter validation, the handler checks each required context field
-against the merged context (request payload + Pro-tier
+against the merged context (request payload + connected-account
 auto-discovery). If anything is missing, the handler returns
 `needs_context` BEFORE attempting policy synthesis.
 
@@ -469,11 +477,12 @@ coexist:
   "I produced a policy but it has wildcards you might want to
   scope down."
 
-### Pro-tier auto-discovery
+### Connected-account auto-discovery
 
-When the caller is on Pro/Team/Enterprise and has connected an AWS
-account, the recommender consults a discovery cache before declaring
-context missing. Discovery is implemented per resource type:
+When the caller has connected a read-only AWS account, the
+recommender consults a discovery cache before declaring context
+missing. v1.0 (free + open source) ships auto-discovery. Discovery
+is implemented per resource type:
 
 | Context key             | Discovered via                                                       |
 | ----------------------- | -------------------------------------------------------------------- |
@@ -487,8 +496,8 @@ context missing. Discovery is implemented per resource type:
 The discovery cache is per-customer-account, TTL'd at 1 hour, and
 invalidated on customer-initiated "rescan" action. Read-only IAM
 permission required on the customer side
-(`AWSReadOnlyAccess`-equivalent — documented in the Pro-tier setup
-guide).
+(`AWSReadOnlyAccess`-equivalent — documented in the connected-
+account setup guide).
 
 Auto-discovery never silently changes the policy the caller asked
 for. If discovery resolves an ambiguous reference (e.g.,
@@ -527,22 +536,28 @@ filled-in context, they pass the original `request_id` in
 
 ---
 
-## Tier behavior
+## v1.0 behavior (all free + open source)
 
-| Behavior                                  | Free | Pro | Team | Enterprise |
-| ----------------------------------------- | ---- | --- | ---- | ---------- |
-| Structural recommendation (intent → actions + ARN templates) | ✓    | ✓   | ✓    | ✓          |
-| Account-connected context auto-discovery  | —    | ✓   | ✓    | ✓          |
-| LLM-tier override (Sonnet)                | —    | ✓   | —    | —          |
-| LLM-tier override (Opus)                  | —    | —   | ✓    | ✓          |
-| IRSA intents (with `needs_context`)       | ✓    | ✓   | ✓    | ✓          |
-| Calibration regression tests in CI        | ✓    | ✓   | ✓    | ✓          |
-| Custom intent types                       | —    | —   | —    | ✓          |
-| Audit-report export                       | —    | —   | —    | ✓          |
+Per `project_oss_only_launch_decision.md`, v1.0 ships every behavior
+below as free + open source. The earlier tier-gated table is removed.
 
-LLM-tier override behavior: see `[[llm-pro-tier-architecture]]` in
-memory. The LLM can RAISE a score / NARROW a policy but never lower
-or broaden. The free-tier deterministic recommender is the floor.
+| Behavior                                  | v1.0 |
+| ----------------------------------------- | ---- |
+| Structural recommendation (intent → actions + ARN templates) | ✓ |
+| Account-connected context auto-discovery  | ✓ |
+| LLM-tier override (agent-delegated per `[[bouncer-zero-llm-when-agent-in-loop]]`) | ✓ |
+| IRSA intents (with `needs_context`)       | ✓ |
+| Calibration regression tests in CI        | ✓ |
+| Custom intent types                       | ✓ |
+| Audit-report export                       | ✓ |
+
+LLM-override behavior: the LLM can RAISE a score / NARROW a policy
+but never lower or broaden. The deterministic recommender is the
+floor. In v1.0, LLM work is delegated to the agent in the loop
+(agent's own LLM credentials — Claude Max / ChatGPT Plus / Cursor
+Pro / API key / Ollama / etc.) per
+`[[bouncer-zero-llm-when-agent-in-loop]]`; iam-jit ships with zero
+LLM credentials required for local-dev.
 
 ---
 
@@ -774,7 +789,7 @@ and alternative URL.
   `tests/calibration/intent_to_policy/corpus/`.
 - Calibration harness shell (Opus call + diff, no gate yet).
 
-### Phase 1 (W2 post-launch): free-tier recommender API
+### Phase 1 (W2 post-launch): v1.0 recommender API
 - `POST /api/v1/recommend` endpoint, structural-only.
 - Intent type registry covering S3, CloudWatch, Secrets Manager,
   SSM, DynamoDB, SQS, RDS, KMS.
@@ -794,13 +809,16 @@ and alternative URL.
 - Three DDB tables shipped (rate / dedup / boundary-probe).
 - Layer logic implemented per spec above.
 
-### Phase 4 (W7-W8 post-launch): Pro-tier auto-discovery
+### Phase 4 (W7-W8 post-launch): Connected-account auto-discovery
 - Discovery cache + per-resource-type discoverers.
-- Read-only AWS account connection flow on Pro tier.
+- Read-only AWS account connection flow (v1.0 free + open source).
 - Disambiguation `needs_context` shape.
 
-### Phase 5 (W9+ post-launch): LLM-tier override
-- Pro tier (Sonnet) + Team tier (Opus) backends.
+### Phase 5 (W9+ post-launch): LLM-override (agent-delegated)
+- Agent-delegated per `[[bouncer-zero-llm-when-agent-in-loop]]` —
+  the agent in the loop uses its own LLM credentials (Claude Max /
+  ChatGPT Plus / Cursor Pro / API key / Ollama / etc.); iam-jit
+  ships with zero LLM credentials required.
 - LLM-can-raise-never-lower semantics
   ([[llm-pro-tier-architecture]]).
 - Per-LLM calibration corpus (separate from the deterministic one).

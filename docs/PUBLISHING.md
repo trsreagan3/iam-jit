@@ -182,7 +182,7 @@ Separate from docs. Pure marketing. Convert visitors → free signups.
 
 - [ ] SOC 2 Type 1 audit scoped (Vanta / Drata — sign up, $10-20K for v1)
 - [ ] DDoS protection on the API (CloudFront has basic by default; consider AWS Shield Advanced for enterprise tier)
-- [ ] Rate limit by API key (currently per-IP; not granular enough for paid tiers)
+- [ ] Rate limit by API key (currently per-IP; deferred — v1.0 ships per-IP only since v1.0 is fully free + open source per `project_oss_only_launch_decision.md`)
 - [ ] Audit log retention configured (see `docs/security-notes.md` § E5)
 - [ ] Privacy policy + Terms of Service drafted (lawyers, ~$500-1500 for boilerplate startup docs)
 - [ ] Cookie banner if collecting analytics in EU/UK

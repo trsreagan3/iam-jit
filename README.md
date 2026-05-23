@@ -101,7 +101,7 @@ Honest answer: **complementary, not a replacement.** They solve adjacent problem
 
 | | AWS IAM Access Analyzer | iam-risk-score |
 |---|---|---|
-| **Cost** | Free, built into AWS | Free (offline CLI / `pip install`); 100/mo free via API; paid tiers above |
+| **Cost** | Free, built into AWS | Free under Apache-2.0 (offline CLI / `pip install`); 100/mo free via hosted API |
 | **What it answers** | "What does this policy allow? Is there unused permission? Is anything publicly accessible?" | "If this policy is granted + compromised, how bad is the blast radius? (1–10)" |
 | **Output shape** | Findings (pass/warning/error), policy validation, CloudTrail-based refinement suggestions | Numeric score 1–10 + per-factor breakdown |
 | **Runs where** | AWS API call from an AWS context | Offline CLI, local API, hosted API, GitHub Action — no AWS account needed |

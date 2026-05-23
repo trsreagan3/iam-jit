@@ -1,8 +1,15 @@
-# Enterprise self-bootstrap (`iam-jit enterprise bootstrap`)
+# Self-host bootstrap (`iam-jit enterprise bootstrap`)
 
-> **Tier**: Enterprise (self-host only).
-> **Status**: ships in v1.0.
+> **Status**: ships in v1.0 (free + open source).
 > **Tracking issue**: #102.
+> **SUPERSEDED 2026-05-23**: per `project_oss_only_launch_decision.md`,
+> v1.0 ships fully free + open source. References below to "Enterprise
+> tier" / "license file" / "tier gating" are HISTORICAL DESIGN CONTEXT
+> only — the bootstrap command runs without any license at v1.0. The
+> license-validation code stays in the repo for future paid-tier
+> introduction (no earlier than 12-18mo post-launch) but does NOT
+> enforce at v1.0. The `enterprise` subcommand name is retained for
+> backward-compat; self-host bootstrap is the v1.0-accurate framing.
 
 `iam-jit enterprise bootstrap` lets a customer's IAM admin point
 iam-jit at a fresh AWS environment and have iam-jit propose its
@@ -112,16 +119,15 @@ sparingly; the review step is the safety net.
 | Network egress to iam-jit-the-company | None. No phone home, no license callback, no telemetry. Per `[[self-host-zero-billing-dependency]]`.           |
 | Source/binary trust                | Bypass-honest. Anyone with the source can patch out the tier gate; the contract is the legal artifact.          |
 
-## Licensing
+## Licensing (v1.0: not enforced)
 
-Bootstrap is gated on an **Enterprise** license file
-(`~/.iam-jit/license.json` or `$IAM_JIT_LICENSE_FILE`). On Free /
-Pro / Team tiers (or with no license at all), the command exits
-with code 3 and points the operator at the upgrade path. See
-`docs/PERMISSIONS-MODEL.md` for how iam-jit's tier gating works.
-
-This matches `[[enterprise-self-host-only]]`: Enterprise is
-self-host only; there is no hosted-SaaS bootstrap variant.
+Per `project_oss_only_launch_decision.md`, v1.0 ships fully free +
+open source. Bootstrap runs without any license file. The license-
+validation code stays in the repo (see `docs/PERMISSIONS-MODEL.md`)
+but does NOT enforce at v1.0; the upgrade-path messaging is reserved
+for a future paid-tier introduction (no earlier than 12-18mo
+post-launch). Self-host stays the only deployment shape per
+`[[no-hosted-saas]]`.
 
 ## Reference
 

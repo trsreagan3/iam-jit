@@ -151,10 +151,10 @@ documented in the MCP section of [`IBOUNCE.md`](IBOUNCE.md).
 
 ---
 
-## dbounce (future)
+## dbounce (SQL bouncer)
 
-`dbounce` ships with the same pattern when its v1.0 lands.
-Expected shape:
+`dbounce` ships at v1.0 with the same MCP installer pattern.
+Generic config shape:
 
 ```json
 {
@@ -168,8 +168,30 @@ Expected shape:
 }
 ```
 
-`dbounce mcp install-*` subcommands will mirror the
-ibounce / kbounce installer surface.
+`dbounce mcp install-*` subcommands mirror the ibounce / kbouncer
+installer surface. See the "Go Bouncer Tools" section below for the
+full tool catalog.
+
+---
+
+## gbounce (HTTP bouncer)
+
+`gbounce` ships at v1.0. Generic config shape:
+
+```json
+{
+  "mcpServers": {
+    "gbounce": {
+      "command": "gbounce",
+      "args": ["mcp", "serve"],
+      "env": {}
+    }
+  }
+}
+```
+
+`gbounce mcp install-*` mirrors the same pattern. See the "Go
+Bouncer Tools" section below.
 
 ---
 
@@ -231,6 +253,86 @@ authoritative shape your agent would see). Per
 `[[bouncer-zero-llm-when-agent-in-loop]]`: every "intelligent work"
 tool above delegates LLM reasoning to the agent's own LLM — iam-jit
 + bouncers need ZERO LLM credentials on their side in local-dev mode.
+
+---
+
+## Go Bouncer Tools
+
+Per `[[cross-product-agent-parity]]` the Go bouncers (kbouncer /
+dbounce / gbounce) expose the same agent-friendly UX surface as
+ibounce, with product-specific verbs underneath. Each bouncer's
+MCP server speaks its own tool prefix; agents that learn one
+bouncer's surface use the others identically (only the prefix
+changes).
+
+For the authoritative per-bouncer tool list, run:
+
+```bash
+kbouncer mcp list-tools
+dbounce  mcp list-tools
+gbounce  mcp list-tools
+```
+
+### kbouncer (K8s API gating)
+
+| Tool | Purpose |
+|---|---|
+| `kbounce_posture` | Live state — current mode, profile, recent denies, active task |
+| `kbounce_active_mode` | Current enforcement mode (cooperative / transparent / observe) |
+| `kbounce_active_profile` | Currently-active profile name + source |
+| `kbounce_active_task` | Currently-active task scope (if a task is open) |
+| `kbounce_recommend_mode_for_task` | Deterministic decision matrix: task description → recommended mode |
+| `kbounce_recommend_rules` | Synthesize draft rules from observed traffic over a window (per `[[cross-product-agent-parity]]` recommender parity) |
+| `kbounce_profile_allow` | Add an allow rule based on an observed deny (round-trip with `kbounce_denies_recent`) |
+| `kbounce_apply_preset` | Apply a curated rule pack (`cluster-admin-minus-destructive`, etc.) |
+| `kbounce_denies_recent` | Recent deny events with classification context |
+| `kbounce_tail_decisions` | Live tail of K8s-API decisions (compose with `iam_jit_request_role_from_synthesis` when k8s SA ↔ IAM role mapping is needed) |
+| `kbounce_scope_self_for_task` | Compose a task-scoped K8s RBAC posture (agent declares task; kbouncer narrows) |
+
+### dbounce (SQL bouncer)
+
+| Tool | Purpose |
+|---|---|
+| `dbounce_posture` | Live state — mode / profile / recent denies / active task |
+| `dbounce_active_mode` | Current enforcement mode |
+| `dbounce_active_profile` | Currently-active profile name + source |
+| `dbounce_active_task` | Currently-active task scope |
+| `dbounce_recommend_mode_for_task` | Decision matrix: task → recommended mode |
+| `dbounce_profile_allow` | Add an allow rule based on an observed denied SQL statement |
+| `dbounce_decide` | Get the deterministic verdict for a candidate SQL statement (dry-run a query without executing) |
+| `dbounce_denies_recent` | Recent denied SQL statements (redacted per `[[mitm-beta-pii-pci-concern]]`) |
+| `dbounce_tail_decisions` | Live tail of SQL decisions across connections (compose with `iam_jit_request_role_from_synthesis` when DB-role ↔ AWS-role mapping is needed) |
+| `dbounce_pending_sync_prompts` | Sync-mode deny prompts awaiting operator answer |
+| `dbounce_prompts_bulk_answer` | Resolve multiple pending prompts in one call |
+
+### gbounce (HTTP egress bouncer)
+
+| Tool | Purpose |
+|---|---|
+| `gbounce_posture` | Live state — mode / active deny rules / recent denies |
+| `gbounce_active_mode` | Current enforcement mode |
+| `gbounce_recommend_mode_for_task` | Decision matrix: task → recommended mode |
+| `gbounce_deny_add` | Add a dynamic deny rule (domain / method / pattern) |
+| `gbounce_deny_remove` | Remove a deny rule by ID |
+| `gbounce_dynamic_denies_list` | List currently-active deny rules |
+| `gbounce_denies_recent` | Recent denied HTTP egress attempts (URL + classification context) |
+| `gbounce_profile_allow` | Add an allow rule based on an observed deny |
+
+### Cross-product chain examples
+
+Per `[[bouncer-informs-agent-informs-iam-jit]]`, the canonical
+multi-bouncer flow is:
+
+1. `kbounce_tail_decisions` / `dbounce_tail_decisions` /
+   `gbounce_denies_recent` — bouncer surfaces evidence
+2. Agent reasons over the evidence (agent's own LLM per
+   `[[bouncer-zero-llm-when-agent-in-loop]]`)
+3. `iam_jit_request_role_from_synthesis` — agent synthesizes the
+   role request from observed bouncer activity, iam-jit provisions
+
+Worked example: "Based on the staging-cluster activity my kbouncer
+caught this week, request a prod-scoped IAM role narrowed to the
+exact actions the staging pod actually used."
 
 ---
 

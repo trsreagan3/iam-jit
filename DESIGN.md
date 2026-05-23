@@ -232,7 +232,15 @@ Auth: per-user API tokens (claimed via the web UI, copied into MCP config). The 
 
 The LLM is scaffolding, not authority. `policy_sentry` is the deterministic backbone — same inputs always produce the same actions, with no LLM influence on the final policy. Reviewers always see the final policy before any AWS API call.
 
-### LLM backends (free → paid tiers)
+### LLM backends (v1.0: all free + open source)
+
+> **SUPERSEDED tier framing 2026-05-23**: per
+> `project_oss_only_launch_decision.md`, v1.0 ships fully free + open
+> source. The "paid tier" mentions in this section are HISTORICAL
+> DESIGN CONTEXT — at v1.0, LLM work is agent-delegated per
+> `[[bouncer-zero-llm-when-agent-in-loop]]` (the agent in the loop
+> uses its own credentials). Standalone-mode LLM backends remain
+> opt-in via `IAM_JIT_LLM` for CI/CD and daemon deployments.
 
 The LLM is pluggable; the system never hard-codes a single provider. Selection precedence (in `iam_jit.llm.get_backend`):
 

@@ -1,11 +1,12 @@
 # Security posture
 
 Technical reference for the `iam-jit` family + the Bounce-suite
-binaries (`ibounce`, `kbounce`, future `dbounce`). Written for a
-SecOps procurement reviewer asking *"what does this binary actually
-do?"* — quotable from a security questionnaire. Pairs with
-[`SECURITY.md`](../SECURITY.md) (threat model + disclosure policy)
-and [`SECURITY-SLA.md`](SECURITY-SLA.md) (patch SLAs).
+binaries (`ibounce`, `kbouncer`, `dbounce`, `gbounce` — all
+shipped). Written for a SecOps procurement reviewer asking *"what
+does this binary actually do?"* — quotable from a security
+questionnaire. Pairs with [`SECURITY.md`](../SECURITY.md) (threat
+model + disclosure policy) and [`SECURITY-SLA.md`](SECURITY-SLA.md)
+(patch SLAs).
 
 For wiring the MCP surface into non-Claude-Code clients, see
 [`MCP-RECIPES.md`](MCP-RECIPES.md).
@@ -16,10 +17,11 @@ For wiring the MCP surface into non-Claude-Code clients, see
 
 `iam-jit` is a self-hosted IAM credential issuer that creates short-
 lived, narrowly-scoped IAM principals in the customer's own AWS
-account. The Bounce suite (`ibounce` for AWS, `kbounce` for
-Kubernetes, future `dbounce` for databases) is a family of local
-transparent proxies that gate the traffic an operator's machine sends
-to those upstreams against a local rule set.
+account. The Bounce suite (`ibounce` for AWS, `kbouncer` for
+Kubernetes, `dbounce` for SQL databases, `gbounce` for outbound
+HTTP — all shipped at v1.0) is a family of local transparent proxies
+that gate the traffic an operator's machine sends to those upstreams
+against a local rule set.
 
 What these tools do NOT do:
 
@@ -104,7 +106,7 @@ endpoint should appear.
 |---|---|---|
 | `ibounce` | AWS SigV4-signed HTTP requests | Received from the SDK client; forwarded **verbatim** to the AWS endpoint named in the signed Host header. The proxy never re-signs. The proxy never holds the operator's secret access key — the signature is computed by the SDK before the request reaches the proxy |
 | `kbounce` | Kubernetes bearer tokens, mTLS client certs | Forwarded verbatim. `kbounce` does not mint, refresh, or cache tokens — it is a pure pass-through with rule evaluation |
-| `dbounce` (future) | PG / MySQL SCRAM, cleartext-password, certificate auth | The SASL auth exchange between client and server is forwarded transparently. The proxy participates only at the wire-protocol framing level; the password material is never decoded into a form `dbounce` could reuse |
+| `dbounce` | PG / MySQL SCRAM, cleartext-password, certificate auth | The SASL auth exchange between client and server is forwarded transparently. The proxy participates only at the wire-protocol framing level; the password material is never decoded into a form `dbounce` could reuse |
 | `iam-jit` (JIT issuer) | Short-lived IAM principals (AWS STS) | iam-jit **creates** new short-lived scoped IAM users / role-session credentials in the customer's account via the customer's deployed Lambda. Per the creates-never-mutates invariant, iam-jit never modifies existing IAM resources the customer owns. The issued credentials are returned to the requester directly; iam-jit's own state stores only the issuance record (who, when, what scope, expiry) — not the secret material |
 | `iam-jit` (scorer) | None — pure policy text in / risk score out | The scorer takes a JSON IAM policy as input and returns a 1–10 risk score. No AWS API calls; no credentials involved |
 
@@ -142,9 +144,9 @@ shipper, no sync, no remote sink.
 
 ## 6. Code execution provenance
 
-- All Bounce binaries (`ibounce`, `kbounce`, future `dbounce`) are
-  Apache 2.0. Build-from-source is available; full commit history
-  is public on GitHub.
+- All Bounce binaries (`ibounce`, `kbouncer`, `dbounce`, `gbounce`)
+  are Apache 2.0 and shipped at v1.0. Build-from-source is available;
+  full commit history is public on GitHub.
 - `kbounce` and `dbounce` ship as single static Go binaries.
   Reproducible builds: same source + same toolchain version
   produces byte-identical output.
