@@ -1,7 +1,7 @@
 ---
-const title = "iam-jit — Don't give Claude your AWS keys";
+const title = "iam-jit — Don't give your AI agent your AWS keys";
 const description =
-  "iam-jit is a safety layer between your AI agent and AWS. Claude (or any agent) gets scoped, time-bound, audited credentials per task — never your standing admin keys.";
+  "iam-jit is a safety layer between your AI agent and AWS. Any MCP-compatible agent (Claude Code, Cursor, Codex, Devin, custom) gets scoped, time-bound, audited credentials per task — never your standing admin keys.";
 
 const installSample = `# 1. Install + bootstrap
 $ pip install iam-jit
@@ -98,6 +98,52 @@ interface Mode {
   cta: string;
   featured?: boolean;
 }
+
+interface SuiteProduct {
+  name: string;
+  tagline: string;
+  body: string;
+  href: string;
+}
+
+// Per project_four_products_one_brand + project_oss_only_launch_decision:
+// the suite ships 5 products (iam-jit + 4 bouncers) at v1.0, all free
+// + open source. This page is the iam-jit product page; the 4 bouncers
+// are sibling products under the same brand.
+const suiteProducts: SuiteProduct[] = [
+  {
+    name: "ibounce",
+    tagline: "AWS API bouncer",
+    body: "Local proxy that gates AWS API calls — instant feedback, " +
+      "local audit, deterministic deny rules. Dev-loop companion to " +
+      "iam-jit's role issuance.",
+    href: "https://github.com/trsreagan3/iam-jit",
+  },
+  {
+    name: "kbouncer",
+    tagline: "Kubernetes API bouncer",
+    body: "Gates kubectl + Helm + agent calls to the K8s API. Same " +
+      "profile + recommender + audit surface as ibounce; K8s-flavored " +
+      "verbs + resources.",
+    href: "https://github.com/trsreagan3/kbouncer",
+  },
+  {
+    name: "dbounce",
+    tagline: "SQL bouncer",
+    body: "Gates SQL statements at the connection layer — Postgres / " +
+      "MySQL / Snowflake / BigQuery shims. Dev-loop for query-shape " +
+      "safety; DB grants stay the boundary.",
+    href: "https://github.com/trsreagan3/dbounce",
+  },
+  {
+    name: "gbounce",
+    tagline: "HTTP bouncer",
+    body: "Gates outbound HTTP from agents — domain allowlists, " +
+      "method gating, audited per-call. Catches data-exfil and " +
+      "off-task egress attempts.",
+    href: "https://github.com/trsreagan3/gbounce",
+  },
+];
 
 // Per project_oss_only_launch_decision.md (2026-05-23): v1.0 ships
 // fully free + open source. Self-host only — no multi-tenant SaaS
@@ -297,8 +343,8 @@ const modes: Mode[] = [
   <body>
     <header>
       <div class="container hero">
-        <span class="accent-strip">v1 · agent-safety mode · works with Claude Code, Cursor, Devin</span>
-        <h1>Don't give Claude your AWS keys.</h1>
+        <span class="accent-strip">v1 · agent-safety mode · any MCP-compatible agent (Claude Code, Cursor, Codex, Devin, custom)</span>
+        <h1>Don't give your AI agent your AWS keys.</h1>
         <p class="lede">{description}</p>
         <div class="cta-row">
           <a class="cta-primary" href="#install">Install in 90 seconds</a>
@@ -356,7 +402,7 @@ const modes: Mode[] = [
 
     <section>
       <div class="container">
-        <h2>Three ways to run it</h2>
+        <h2>Two ways to run it</h2>
         <div class="modes">
           {modes.map((m) => (
             <div class={"mode" + (m.featured ? " featured" : "")}>
@@ -372,6 +418,27 @@ const modes: Mode[] = [
     </section>
 
     <section class="alt">
+      <div class="container">
+        <h2>Part of the Bounce suite</h2>
+        <p class="lede-section">
+          iam-jit is one of five products under one brand. Each ships
+          free + open source at v1.0. Run them independently or compose
+          them — same profile shape, same audit surface, same MCP
+          contract.
+        </p>
+        <div class="pillars">
+          {suiteProducts.map((p) => (
+            <div class="pillar">
+              <h3>{p.name} <span style="font-weight: 400; color: var(--muted); font-size: 14px;">— {p.tagline}</span></h3>
+              <p>{p.body}</p>
+              <p style="margin-top: 10px;"><a href={p.href} style="color: var(--accent); text-decoration: none; font-size: 14px;">View on GitHub →</a></p>
+            </div>
+          ))}
+        </div>
+      </div>
+    </section>
+
+    <section>
       <div class="container">
         <h2>What iam-jit does NOT protect against</h2>
         <p class="lede-section">
