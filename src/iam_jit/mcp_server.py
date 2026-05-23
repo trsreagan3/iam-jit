@@ -2548,6 +2548,21 @@ TOOLS.extend([
                         "bouncer the autopilot status file knows about."
                     ),
                 },
+                "audit_events_token": {
+                    "type": "string",
+                    "description": (
+                        "Optional bearer token for the per-bouncer "
+                        "/audit/events endpoint. Mirrors the `iam-jit "
+                        "digest --audit-events-token` flag. When the "
+                        "bouncer requires auth and no (or wrong) token "
+                        "is supplied the digest payload's `warnings` "
+                        "list surfaces the 401 explicitly — per "
+                        "[[ibounce-honest-positioning]] §A56c the "
+                        "deny count is NEVER silently reported as zero "
+                        "on an auth failure. Falls back to the "
+                        "IAM_JIT_AUDIT_EVENTS_TOKEN env when absent."
+                    ),
+                },
             },
         },
     },

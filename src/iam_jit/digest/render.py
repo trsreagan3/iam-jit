@@ -180,6 +180,14 @@ def render_terminal(data: DigestData, *, use_color: bool = True) -> str:
             lines.append(f"  - {r}")
         lines.append("")
 
+    # Warnings — surface FIRST per [[ibounce-honest-positioning]] §A56c
+    # so the operator can't miss a "deny count is incomplete" signal.
+    if getattr(data, "warnings", None):
+        lines.append("WARNINGS:")
+        for w in data.warnings:
+            lines.append(f"  (!) {w}")
+        lines.append("")
+
     # Notes
     if data.notes:
         lines.append("Notes:")
@@ -308,6 +316,13 @@ def render_markdown(data: DigestData) -> str:
             lines.append(f"- {r}")
         lines.append("")
 
+    if getattr(data, "warnings", None):
+        lines.append("## Warnings")
+        lines.append("")
+        for w in data.warnings:
+            lines.append(f"- **(!)** {w}")
+        lines.append("")
+
     if data.notes:
         lines.append("## Notes")
         lines.append("")
@@ -424,6 +439,14 @@ def render_html(data: DigestData) -> str:
         parts.append("<h2>Recommendations</h2><ul>")
         for r in data.recommendations:
             parts.append(f"<li>{html.escape(r)}</li>")
+        parts.append("</ul>")
+
+    if getattr(data, "warnings", None):
+        parts.append("<h2>Warnings</h2><ul>")
+        for w in data.warnings:
+            parts.append(
+                f"<li><strong>(!)</strong> {html.escape(w)}</li>"
+            )
         parts.append("</ul>")
 
     if data.notes:

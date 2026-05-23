@@ -658,3 +658,216 @@ def test_cli_digest_single_bouncer_filter(
     parsed = json.loads(res.output)
     assert "ibounce" in parsed["bouncers"]
     assert "kbouncer" not in parsed["bouncers"]
+
+
+# ---------------------------------------------------------------------------
+# #462 / §A56c — --audit-events-token plumbing + honest 401 warnings
+#
+# Per [[ibounce-honest-positioning]] a deployment that uses
+# --audit-events-token on the bouncer must not silently collapse to "0
+# denies" when the CLI / MCP tool isn't given a token. These tests pin
+# the token-plumbing contract + the warnings-on-401 honesty surface.
+# ---------------------------------------------------------------------------
+
+
+def _capturing_fetch_denies(captured: dict[str, Any]):
+    """fetch_recent_denies stand-in that records kwargs for assertion."""
+
+    def _fn(**kw: Any):
+        captured.update(kw)
+        return [], []
+
+    return _fn
+
+
+def test_digest_cli_passes_audit_events_token_flag(
+    _isolate_autopilot_dir: pathlib.Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    captured: dict[str, Any] = {}
+    monkeypatch.setattr(
+        "iam_jit.profile_allow.denies.fetch_recent_denies",
+        _capturing_fetch_denies(captured),
+    )
+    # Ensure env isn't leaking in.
+    monkeypatch.delenv("IAM_JIT_AUDIT_EVENTS_TOKEN", raising=False)
+    runner = CliRunner()
+    res = runner.invoke(
+        main,
+        ["digest", "--since", "1w", "--audit-events-token", "flag-token-xyz"],
+    )
+    assert res.exit_code == 0, res.output
+    assert captured.get("audit_events_token") == "flag-token-xyz"
+
+
+def test_digest_cli_reads_audit_events_token_env_var(
+    _isolate_autopilot_dir: pathlib.Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    captured: dict[str, Any] = {}
+    monkeypatch.setattr(
+        "iam_jit.profile_allow.denies.fetch_recent_denies",
+        _capturing_fetch_denies(captured),
+    )
+    monkeypatch.setenv("IAM_JIT_AUDIT_EVENTS_TOKEN", "env-token-abc")
+    runner = CliRunner()
+    res = runner.invoke(main, ["digest", "--since", "1w"])
+    assert res.exit_code == 0, res.output
+    assert captured.get("audit_events_token") == "env-token-abc"
+
+
+def test_digest_cli_flag_overrides_env_var(
+    _isolate_autopilot_dir: pathlib.Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    captured: dict[str, Any] = {}
+    monkeypatch.setattr(
+        "iam_jit.profile_allow.denies.fetch_recent_denies",
+        _capturing_fetch_denies(captured),
+    )
+    monkeypatch.setenv("IAM_JIT_AUDIT_EVENTS_TOKEN", "env-wrong")
+    runner = CliRunner()
+    res = runner.invoke(
+        main,
+        ["digest", "--since", "1w", "--audit-events-token", "flag-right"],
+    )
+    assert res.exit_code == 0, res.output
+    assert captured.get("audit_events_token") == "flag-right"
+
+
+def test_digest_warns_when_401_received(
+    _isolate_autopilot_dir: pathlib.Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """KEY honesty test per [[ibounce-honest-positioning]] §A56c.
+
+    A bouncer that 401s on /audit/events MUST surface a structured
+    warning instead of a silent "0 denies" report. The warning must
+    appear in BOTH the terminal output AND the --json shape so
+    operator scripts can branch on `len(warnings) > 0`.
+    """
+    _write_status(_isolate_autopilot_dir, {
+        "bouncers": {"ibounce": {"running": True, "healthz": {"decisions_count": 100}}}
+    })
+
+    def _fetch_with_401(**kw: Any):
+        # Mirrors the exact shape cli_audit_query._query_one_bouncer
+        # produces for an HTTP 401 — "ibounce skipped (HTTP 401: ...)".
+        return [], ["ibounce skipped (HTTP 401: Unauthorized)"]
+
+    monkeypatch.setattr(
+        "iam_jit.profile_allow.denies.fetch_recent_denies",
+        _fetch_with_401,
+    )
+    monkeypatch.delenv("IAM_JIT_AUDIT_EVENTS_TOKEN", raising=False)
+    runner = CliRunner()
+
+    # Terminal: warning surfaces in stdout (or stderr — both acceptable
+    # for honesty — we accept either capture).
+    res = runner.invoke(main, ["digest", "--since", "1w"])
+    assert res.exit_code == 0, res.output
+    out_blob = (res.output or "") + (res.stderr or "" if hasattr(res, "stderr") else "")
+    assert "401" in out_blob
+    assert "WARNINGS" in out_blob or "warning" in out_blob.lower()
+    assert "incomplete" in out_blob.lower()
+
+    # JSON: warnings array is populated + non-empty + mentions the
+    # remediation env / flag.
+    res_json = runner.invoke(main, ["digest", "--since", "1w", "--json"])
+    assert res_json.exit_code == 0, res_json.output
+    parsed = json.loads(res_json.output)
+    assert "warnings" in parsed
+    assert len(parsed["warnings"]) >= 1
+    w = " ".join(parsed["warnings"]).lower()
+    assert "401" in w
+    assert (
+        "iam_jit_audit_events_token" in w
+        or "--audit-events-token" in w
+    )
+
+
+def test_digest_warns_when_401_with_wrong_token_supplied(
+    _isolate_autopilot_dir: pathlib.Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """When a token IS supplied but still 401s the warning must call
+    out 'token may be wrong / expired' (don't blame the operator for
+    not setting one — they did)."""
+    def _fetch_with_401(**kw: Any):
+        return [], ["ibounce skipped (HTTP 401: Unauthorized)"]
+
+    monkeypatch.setattr(
+        "iam_jit.profile_allow.denies.fetch_recent_denies",
+        _fetch_with_401,
+    )
+    runner = CliRunner()
+    res = runner.invoke(
+        main,
+        [
+            "digest",
+            "--since",
+            "1w",
+            "--audit-events-token",
+            "wrong-token",
+            "--json",
+        ],
+    )
+    assert res.exit_code == 0, res.output
+    parsed = json.loads(res.output)
+    assert len(parsed.get("warnings") or []) >= 1
+    w = " ".join(parsed["warnings"]).lower()
+    assert "wrong" in w or "expired" in w
+    assert "incomplete" in w
+
+
+def test_mcp_digest_recent_accepts_audit_events_token_param(
+    _isolate_autopilot_dir: pathlib.Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    captured: dict[str, Any] = {}
+    monkeypatch.setattr(
+        "iam_jit.profile_allow.denies.fetch_recent_denies",
+        _capturing_fetch_denies(captured),
+    )
+    monkeypatch.delenv("IAM_JIT_AUDIT_EVENTS_TOKEN", raising=False)
+    result = digest_for_mcp({
+        "since": "1w",
+        "audit_events_token": "mcp-supplied-token",
+    })
+    assert result["status"] == "ok"
+    assert captured.get("audit_events_token") == "mcp-supplied-token"
+
+
+def test_mcp_digest_recent_falls_back_to_env_token(
+    _isolate_autopilot_dir: pathlib.Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    captured: dict[str, Any] = {}
+    monkeypatch.setattr(
+        "iam_jit.profile_allow.denies.fetch_recent_denies",
+        _capturing_fetch_denies(captured),
+    )
+    monkeypatch.setenv("IAM_JIT_AUDIT_EVENTS_TOKEN", "mcp-env-token")
+    result = digest_for_mcp({"since": "1w"})
+    assert result["status"] == "ok"
+    assert captured.get("audit_events_token") == "mcp-env-token"
+
+
+def test_mcp_digest_recent_surfaces_warnings_on_401(
+    _isolate_autopilot_dir: pathlib.Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def _fetch_with_401(**kw: Any):
+        return [], ["ibounce skipped (HTTP 401: Unauthorized)"]
+
+    monkeypatch.setattr(
+        "iam_jit.profile_allow.denies.fetch_recent_denies",
+        _fetch_with_401,
+    )
+    monkeypatch.delenv("IAM_JIT_AUDIT_EVENTS_TOKEN", raising=False)
+    result = digest_for_mcp({"since": "1w"})
+    assert result["status"] == "ok"
+    assert len(result.get("warnings") or []) >= 1
+    w = " ".join(result["warnings"]).lower()
+    assert "401" in w
+    assert "incomplete" in w

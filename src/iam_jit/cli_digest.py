@@ -20,6 +20,7 @@ exports. No separate web UI.
 from __future__ import annotations
 
 import json as _json
+import os
 import pathlib
 import sys
 from typing import Any
@@ -43,6 +44,7 @@ def _do_digest(
     as_json: bool,
     export_format: str | None,
     out: pathlib.Path | None,
+    audit_events_token: str | None = None,
 ) -> int:
     """Backend for the CLI command. Returns an exit code.
 
@@ -51,9 +53,25 @@ def _do_digest(
     classified ``appears_adversarial``, exit code is ``3`` so an
     operator's CI / shell wrapper can branch on "did something need my
     attention?". Quiet weeks + ambiguous-only weeks exit ``0``.
+
+    Per ``[[ibounce-honest-positioning]]`` §A56c the ``--audit-events-token``
+    flag mirrors the ``iam-jit denies recent`` plumbing — passed-through
+    flag wins over ``IAM_JIT_AUDIT_EVENTS_TOKEN`` env. When the token is
+    absent OR wrong, a 401 from any bouncer surfaces as a ``warnings``
+    entry on the digest payload + a stderr emit on the terminal renderer
+    (never silently report "0 denies").
     """
+    # Flag wins; env is fallback. Mirrors `denies recent` envvar pattern.
+    token = audit_events_token
+    if token is None:
+        env_tok = (os.environ.get("IAM_JIT_AUDIT_EVENTS_TOKEN") or "").strip()
+        token = env_tok or None
     try:
-        data = build_digest(since=since, bouncer=bouncer)
+        data = build_digest(
+            since=since,
+            bouncer=bouncer,
+            audit_events_token=token,
+        )
     except DigestError as e:
         payload = {"status": "error", "code": e.code, "message": str(e)}
         if as_json or export_format == "json":
@@ -147,12 +165,27 @@ def register_digest_command(parent_group: click.Group) -> click.Command:
         default=None,
         help="Write the rendered digest to this file instead of stdout.",
     )
+    @click.option(
+        "--audit-events-token",
+        "audit_events_token",
+        default=None,
+        envvar="IAM_JIT_AUDIT_EVENTS_TOKEN",
+        help=(
+            "Bearer token for the per-bouncer /audit/events endpoint "
+            "(mirrors `iam-jit denies recent`). Read from "
+            "IAM_JIT_AUDIT_EVENTS_TOKEN env when the flag is unset. "
+            "When a bouncer is configured to require auth and no token "
+            "(or a wrong one) is supplied the digest will surface a "
+            "structured warning rather than silently report 0 denies."
+        ),
+    )
     def digest_cmd(
         since: str,
         bouncer: str | None,
         as_json: bool,
         export_format: str | None,
         out: pathlib.Path | None,
+        audit_events_token: str | None,
     ) -> None:
         """Weekly "your bouncer caught X" digest (cross-bouncer summary).
 
@@ -181,6 +214,7 @@ def register_digest_command(parent_group: click.Group) -> click.Command:
             as_json=as_json,
             export_format=export_format,
             out=out,
+            audit_events_token=audit_events_token,
         ))
 
     return digest_cmd
@@ -193,12 +227,27 @@ def digest_for_mcp(args: dict[str, Any]) -> dict[str, Any]:
     a dict). On error returns a ``{"status": "error", ...}`` payload
     rather than raising — the MCP dispatch loop turns raises into
     JSON-RPC errors which agents handle worse than structured results.
+
+    Per ``[[ibounce-honest-positioning]]`` §A56c the optional
+    ``audit_events_token`` arg mirrors the CLI's ``--audit-events-token``
+    flag. When absent we fall back to the
+    ``IAM_JIT_AUDIT_EVENTS_TOKEN`` env so agents that don't pass the
+    arg still benefit from operator-side env config.
     """
     since = args.get("since") or "1w"
     bouncer_raw = args.get("bouncer")
     bouncer = str(bouncer_raw) if bouncer_raw else None
+    token_raw = args.get("audit_events_token")
+    token = str(token_raw).strip() if token_raw else None
+    if not token:
+        env_tok = (os.environ.get("IAM_JIT_AUDIT_EVENTS_TOKEN") or "").strip()
+        token = env_tok or None
     try:
-        data = build_digest(since=str(since), bouncer=bouncer)
+        data = build_digest(
+            since=str(since),
+            bouncer=bouncer,
+            audit_events_token=token,
+        )
     except DigestError as e:
         return {
             "status": "error",

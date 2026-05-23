@@ -65,6 +65,11 @@ class DigestData:
     totals: dict[str, int] = dataclasses.field(default_factory=dict)
     recommendations: list[str] = dataclasses.field(default_factory=list)
     notes: list[str] = dataclasses.field(default_factory=list)
+    # Per [[ibounce-honest-positioning]] §A56c — high-signal operator
+    # warnings that MUST surface visibly (e.g. 401 from a bouncer
+    # /audit/events endpoint). Separate from `notes` so JSON consumers
+    # can branch on `len(warnings) > 0` without parsing prose.
+    warnings: list[str] = dataclasses.field(default_factory=list)
 
     def as_dict(self) -> dict[str, Any]:
         return dataclasses.asdict(self)
@@ -464,6 +469,7 @@ def build_digest(
     bouncer: str | None = None,
     fetch_denies_fn: Any = None,
     limit: int = 500,
+    audit_events_token: str | None = None,
 ) -> DigestData:
     """Aggregate per-bouncer activity in the window into a :class:`DigestData`.
 
@@ -477,6 +483,13 @@ def build_digest(
         :func:`iam_jit.profile_allow.denies.fetch_recent_denies`.
       limit: max deny rows to fetch (per bouncer, NOT per-bouncer
         cumulative — the fetcher caps + returns the most recent).
+      audit_events_token: bearer token for the per-bouncer
+        ``/audit/events`` endpoints. When set, passed through to
+        :func:`fetch_recent_denies`. When unset AND a bouncer responds
+        401, a clear warning surfaces in :attr:`DigestData.warnings`
+        per ``[[ibounce-honest-positioning]]`` §A56c — silently
+        reporting "0 denies" on auth failure is the calibration-drift
+        pattern this fix exists to prevent.
 
     Returns:
       A populated :class:`DigestData`. Errors during data fetch DO NOT
@@ -542,16 +555,60 @@ def build_digest(
             fetch_denies_fn = None
 
     deny_rows: list[Any] = []
+    warnings: list[str] = []
     if fetch_denies_fn is not None:
         try:
             rows, fetch_notes = fetch_denies_fn(
                 since=since,
                 bouncer_names=bouncer_names if bouncer else None,
                 limit=limit,
+                audit_events_token=audit_events_token,
             )
             deny_rows = list(rows or [])
             for n in fetch_notes or []:
                 notes.append(f"deny-fetch: {n}")
+                # Per [[ibounce-honest-positioning]] §A56c: a 401 from a
+                # bouncer's /audit/events endpoint means our deny count
+                # for THAT bouncer is provably wrong (we got 0 because
+                # we couldn't read, not because there were 0). Surface
+                # as a structured WARNING the operator can branch on,
+                # not a buried prose note.
+                n_str = str(n)
+                if "401" in n_str or "Unauthorized" in n_str.lower():
+                    # Extract bouncer name — fetch notes look like
+                    # "ibounce skipped (HTTP 401: ...)".
+                    bname = n_str.split(" ", 1)[0] if " " in n_str else "bouncer"
+                    if audit_events_token:
+                        warnings.append(
+                            f"{bname} returned 401 with the supplied "
+                            f"--audit-events-token — token may be wrong / "
+                            f"expired / for a different bouncer. Deny "
+                            f"count for {bname} is INCOMPLETE."
+                        )
+                    else:
+                        warnings.append(
+                            f"{bname} returned 401; configure "
+                            f"--audit-events-token or set "
+                            f"IAM_JIT_AUDIT_EVENTS_TOKEN. Deny count "
+                            f"for {bname} is INCOMPLETE (treat the "
+                            f"reported zero as 'unknown', not 'clear')."
+                        )
+        except TypeError:
+            # Backwards-compat: a custom fetch_denies_fn (e.g. a test
+            # double) may not accept the new audit_events_token kwarg.
+            # Retry without it so existing call sites + tests keep
+            # working per [[v1-scope-bar]] additive-only constraint.
+            try:
+                rows, fetch_notes = fetch_denies_fn(
+                    since=since,
+                    bouncer_names=bouncer_names if bouncer else None,
+                    limit=limit,
+                )
+                deny_rows = list(rows or [])
+                for n in fetch_notes or []:
+                    notes.append(f"deny-fetch: {n}")
+            except Exception as e:
+                notes.append(f"deny fetch raised: {e}")
         except Exception as e:
             notes.append(f"deny fetch raised: {e}")
 
@@ -685,6 +742,7 @@ def build_digest(
         totals=totals,
         recommendations=recommendations,
         notes=notes,
+        warnings=warnings,
     )
 
 

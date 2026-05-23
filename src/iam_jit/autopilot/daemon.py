@@ -927,7 +927,15 @@ class AutopilotSupervisor:
             logger.debug("autopilot digest import failed: %s", e)
             return
         try:
-            data = build_digest(since="1w")
+            # Per [[ibounce-honest-positioning]] §A56c (#462) the scheduled
+            # autopilot digest must honor IAM_JIT_AUDIT_EVENTS_TOKEN — a
+            # deployment that locks down /audit/events with a bearer token
+            # would otherwise see "0 denies" forever in its weekly webhook.
+            _ev_tok = (os.environ.get("IAM_JIT_AUDIT_EVENTS_TOKEN") or "").strip()
+            data = build_digest(
+                since="1w",
+                audit_events_token=_ev_tok or None,
+            )
             payload = build_webhook_payload(data)
         except Exception as e:
             logger.debug("autopilot digest build failed: %s", e)
