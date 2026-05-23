@@ -23,6 +23,16 @@ or verdict. Overlay language stays neutral — no
 
 ## The four presets
 
+> **Vendor-integration qualifier** (per `[[vendor-integration-claim-qualifier]]`):
+> wire shape verified against each vendor's published intake spec
+> (commit `1020c73` ships 9 schema-conformance tests). Live-tenant
+> ingestion has NOT been performed against a paid Datadog org /
+> Splunk Cloud tenant / Azure Sentinel workspace / AWS Security Lake
+> instance — that is a ~60-second exercise the operator runs on
+> first install. Do NOT claim "tested with Datadog" or "live-validated"
+> in downstream copy until your tenant has actually exercised the
+> integration.
+
 | Preset       | When to use                                                                                              | Auth                                                              | Body                       |
 |--------------|----------------------------------------------------------------------------------------------------------|-------------------------------------------------------------------|----------------------------|
 | `generic`    | Default. Existing webhook consumers + custom ingest scripts. Pre-#257 byte-identical wire shape.         | `Authorization: Bearer <token>`                                   | NDJSON (or JSON array for kbounce — see "Per-product wire shapes") |
