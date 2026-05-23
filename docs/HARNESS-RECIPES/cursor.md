@@ -106,3 +106,13 @@ discipline. The pattern is harness-agnostic; the
 `bounce_extract_permissions_from_audit` / `iam_jit_resource_map` /
 `iam_jit_request_role_from_synthesis` MCP tools work the same way
 under Cursor's Composer Agent.
+
+## 7. Using long-range bouncer history to synthesise bouncer configs
+
+Phase G pattern — agent reads years of historical bouncer audit
+(scoped by an operator-declared deployment-target taxonomy) and
+synthesises a per-target bouncer config. See
+[bouncer-history-to-config-pattern.md](bouncer-history-to-config-pattern.md)
+for the three canonical asks (positive / scope-isolated / negative)
+and the agent-driven flow. iam-jit provides LOGS + TAXONOMY; the
+AGENT does the synthesis.

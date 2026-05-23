@@ -102,6 +102,16 @@ to verify the bouncer surface at any point.
   aware role-request seam. REQUIRES an evidence block per
   [[ibounce-honest-positioning]]; routes through the same scorer +
   auto-approve gate as every other iam-jit request.
+* `bounce_query_audit_long_range` — Phase G #436: year+ window
+  audit query for ONE bouncer with deployment-target scope
+  filtering. Surfaces a `cold_tier_warning` flag when the window
+  crosses ~90 days. See
+  [bouncer-history-to-config-pattern.md](bouncer-history-to-config-pattern.md).
+* `bounce_deployment_targets_for_filter` — Phase G #437: look up
+  the operator-declared deployment-target taxonomy. Returns the
+  classifier dict ready to pass as `scope_filter` to
+  `bounce_query_audit_long_range` (or `--scope-filter` to
+  `iam-jit audit query`).
 
 ## Bouncer activity → iam-jit role: the canonical pattern
 
@@ -109,6 +119,14 @@ See [bouncer-to-role-pattern.md](bouncer-to-role-pattern.md) for the
 end-to-end agent conversation that composes the three Phase E
 primitives. The pattern is harness-agnostic — any MCP-capable agent
 can drive it.
+
+## Long-range bouncer history → bouncer config: the canonical pattern
+
+See [bouncer-history-to-config-pattern.md](bouncer-history-to-config-pattern.md)
+for the Phase G three-canonical-ask recipe (positive / scope-
+isolated / negative). iam-jit provides the LOGS + the TAXONOMY +
+the recipe; the AGENT does the synthesis (no synthesize-config CLI
+inside iam-jit per [[bouncer-informs-agent-informs-iam-jit]]).
 
 ## See also
 

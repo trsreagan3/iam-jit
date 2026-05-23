@@ -2770,6 +2770,141 @@ TOOLS.extend([
         },
     },
     {
+        # #436 / §A70 — long-time-range audit query MCP tool. Phase G
+        # of [[bouncer-informs-agent-informs-iam-jit]]: agent calls
+        # this to read a year+ window of bouncer audit events filtered
+        # by a deployment-target classifier (from #437) so it can
+        # synthesise a per-target bouncer config from the operator's
+        # historical activity. iam-jit provides the LOGS; the AGENT
+        # synthesises the config.
+        "name": "bounce_query_audit_long_range",
+        "description": (
+            "Long-time-range audit query against ONE bouncer's "
+            "/audit/events endpoint with deployment-target scope "
+            "filtering. Returns a streaming NDJSON-shaped response "
+            "(events list + cold_tier_warning flag + scope-filter "
+            "stats) suitable for year+ windows. Use this when "
+            "synthesising a bouncer config from historical activity "
+            "for a specific deployment-target. Phase G of "
+            "[[bouncer-informs-agent-informs-iam-jit]] — iam-jit "
+            "provides the LOGS, the AGENT synthesises the config. "
+            "Pairs with `bounce_deployment_targets_for_filter` (read "
+            "the operator-declared classifier) and "
+            "`bounce_extract_permissions_from_audit` (aggregate the "
+            "returned events into a permission set)."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "required": ["bouncer"],
+            "properties": {
+                "bouncer": {
+                    "type": "string",
+                    "enum": [
+                        "ibounce", "kbouncer", "dbounce", "gbounce",
+                    ],
+                    "description": (
+                        "Which bouncer to query (single-bouncer per "
+                        "deployment-target)."
+                    ),
+                },
+                "since": {
+                    "type": "string",
+                    "default": "1y",
+                    "description": (
+                        "Lookback window. Long-form shorthand "
+                        "(`2y`, `6M`, `90d`) or ISO 8601 lower "
+                        "bound. Year+ windows surface a "
+                        "`cold_tier_warning: true` flag."
+                    ),
+                },
+                "until": {
+                    "type": "string",
+                    "description": (
+                        "Optional upper bound. ISO 8601 or relative."
+                    ),
+                },
+                "scope_filter": {
+                    "type": "object",
+                    "description": (
+                        "Deployment-target classifier dict "
+                        "(clusters/accounts/regions/namespaces/hosts"
+                        "/databases) — typically from "
+                        "`bounce_deployment_targets_for_filter`. "
+                        "Globs `*` supported per dimension."
+                    ),
+                },
+                "limit": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "maximum": 100000,
+                    "default": 10000,
+                    "description": (
+                        "Max events to read from the bouncer (the "
+                        "merged stream caps at this number)."
+                    ),
+                },
+                "audit_events_token": {
+                    "type": "string",
+                    "description": (
+                        "Bearer token when the bouncer's mgmt port "
+                        "is bound off-loopback."
+                    ),
+                },
+                "cold_tier_warn_days": {
+                    "type": "integer",
+                    "default": 90,
+                    "description": (
+                        "Threshold above which the response sets "
+                        "`cold_tier_warning: true`."
+                    ),
+                },
+            },
+        },
+    },
+    {
+        # #437 / §A71 — deployment-target taxonomy lookup MCP tool.
+        # Returns the classifier the agent feeds into
+        # `bounce_query_audit_long_range` (or `iam-jit audit query
+        # --scope-filter`). Pure look-up against the operator-declared
+        # .iam-jit.yaml — no inference at iam-jit layer.
+        "name": "bounce_deployment_targets_for_filter",
+        "description": (
+            "Look up the operator-declared deployment-target "
+            "taxonomy from .iam-jit.yaml. Returns the classifier "
+            "dict (clusters/accounts/regions/namespaces/hosts/"
+            "databases) ready to pass as `scope_filter` to "
+            "`bounce_query_audit_long_range` or `--scope-filter` "
+            "to `iam-jit audit query`. Phase G of "
+            "[[bouncer-informs-agent-informs-iam-jit]]. Read-only."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "name": {
+                    "type": "string",
+                    "description": (
+                        "Specific deployment-target name (e.g. "
+                        "`prod-k8s`). Omit to list every declared "
+                        "target."
+                    ),
+                },
+                "config_path": {
+                    "type": "string",
+                    "description": (
+                        "Optional path to an iam-jit declaration; "
+                        "default auto-discover under cwd."
+                    ),
+                },
+                "cwd": {
+                    "type": "string",
+                    "description": (
+                        "Optional cwd for auto-discovery."
+                    ),
+                },
+            },
+        },
+    },
+    {
         "name": "iam_jit_request_role_from_synthesis",
         "description": (
             "Synthesis-aware role-request seam: agent submits a "
@@ -5332,6 +5467,19 @@ def _handle_request(req: dict[str, Any]) -> dict[str, Any] | None:
                 request_role_from_synthesis_for_mcp,
             )
             result_payload = request_role_from_synthesis_for_mcp(args)
+        elif tool_name == "bounce_query_audit_long_range":
+            # #436 / §A70 — long-time-range audit query (year+
+            # windows + deployment-target scope filter + cold-tier
+            # warning). Phase G of
+            # [[bouncer-informs-agent-informs-iam-jit]].
+            result_payload = _bounce_query_audit_long_range_for_mcp(args)
+        elif tool_name == "bounce_deployment_targets_for_filter":
+            # #437 / §A71 — operator-declared deployment-target
+            # classifier look-up. Agent feeds the returned classifier
+            # into `bounce_query_audit_long_range`.
+            result_payload = (
+                _bounce_deployment_targets_for_filter_for_mcp(args)
+            )
         else:
             return _err(rid, -32601, f"unknown tool: {tool_name}")
         # MCP tool result format: { content: [{type: "text", text: "..."}] }
@@ -5947,6 +6095,230 @@ def _iam_jit_resource_map_for_mcp(
     result["status"] = "ok"
     result["config_source"] = source
     return result
+
+
+def _bounce_query_audit_long_range_for_mcp(
+    args: dict[str, Any],
+) -> dict[str, Any]:
+    """MCP backend for ``bounce_query_audit_long_range``.
+
+    Phase G of [[bouncer-informs-agent-informs-iam-jit]]: agent reads
+    a year+ window of ONE bouncer's events filtered by an
+    operator-declared deployment-target classifier so it can
+    synthesise a per-target bouncer config.
+
+    Per [[ibounce-honest-positioning]] an unreachable bouncer
+    surfaces as a per-bouncer note + `events_returned: 0` rather
+    than raising — the agent re-asks.
+    """
+    from .cli_audit_query import (
+        DEFAULT_BOUNCERS,
+        LONG_RANGE_WARN_DAYS,
+        _event_matches_classifier,
+        _event_time_key,
+        _parse_bouncer_override,
+        _parse_since_long_range,
+        _query_one_bouncer,
+        _since_window_days,
+    )
+
+    bouncer = args.get("bouncer")
+    if not isinstance(bouncer, str) or not bouncer:
+        return {
+            "status": "error",
+            "code": "missing_bouncer",
+            "message": (
+                "`bouncer` is required (one of ibounce / kbouncer / "
+                "dbounce / gbounce)."
+            ),
+        }
+    since = args.get("since") or "1y"
+    until = args.get("until")
+    scope_filter = args.get("scope_filter") or {}
+    if not isinstance(scope_filter, dict):
+        return {
+            "status": "error",
+            "code": "invalid_scope_filter",
+            "message": (
+                "`scope_filter` must be a dict mapping dimension "
+                "names to lists of strings."
+            ),
+        }
+    # Coerce to the {str: [str]} shape _event_matches_classifier
+    # expects; reject malformed entries early.
+    classifier: dict[str, list[str]] = {}
+    for k, v in scope_filter.items():
+        if not isinstance(v, list) or not all(
+            isinstance(x, str) for x in v
+        ):
+            return {
+                "status": "error",
+                "code": "invalid_scope_filter_dimension",
+                "message": (
+                    f"scope_filter[{k!r}] must be a list of strings."
+                ),
+            }
+        classifier[str(k)] = list(v)
+    limit_raw = args.get("limit", 10000)
+    try:
+        limit = int(limit_raw)
+    except (TypeError, ValueError):
+        limit = 10000
+    if limit < 1:
+        limit = 1
+    if limit > 100000:
+        limit = 100000
+    audit_events_token = args.get("audit_events_token")
+    try:
+        cold_warn_days = int(
+            args.get("cold_tier_warn_days", LONG_RANGE_WARN_DAYS)
+        )
+    except (TypeError, ValueError):
+        cold_warn_days = LONG_RANGE_WARN_DAYS
+
+    # Resolve the bouncer endpoint (default mgmt port OR name=URL).
+    if "=" in bouncer:
+        endpoint = _parse_bouncer_override(bouncer)
+    else:
+        endpoint = DEFAULT_BOUNCERS.get(bouncer)
+        if endpoint is None:
+            return {
+                "status": "error",
+                "code": "unknown_bouncer",
+                "message": (
+                    f"unknown bouncer {bouncer!r}; one of "
+                    f"{sorted(DEFAULT_BOUNCERS)} or name=URL."
+                ),
+            }
+
+    resolved_since = _parse_since_long_range(str(since)) if since else None
+    resolved_until = _parse_since_long_range(str(until)) if until else None
+    window_days = _since_window_days(resolved_since)
+    cold_warning = (
+        cold_warn_days > 0
+        and window_days is not None
+        and window_days >= cold_warn_days
+    )
+
+    try:
+        result = _query_one_bouncer(
+            endpoint,
+            since=resolved_since,
+            until=resolved_until,
+            filters=(),
+            limit=limit,
+            bearer_token=(
+                str(audit_events_token) if audit_events_token else None
+            ),
+        )
+    except Exception as e:
+        return {
+            "status": "error",
+            "code": "query_failed",
+            "message": str(e),
+        }
+
+    events = result.events
+    events.sort(key=_event_time_key)
+    events_before_filter = len(events)
+    if classifier:
+        events = [
+            ev for ev in events
+            if _event_matches_classifier(ev, classifier)
+        ]
+
+    notes: list[str] = []
+    if result.error:
+        notes.append(f"{result.bouncer} skipped ({result.error})")
+    if cold_warning:
+        notes.append(
+            f"cold-tier warning: --since window is "
+            f"~{window_days:.0f} days (threshold {cold_warn_days}d); "
+            "long-range queries may hit cold-tier object storage."
+        )
+
+    return {
+        "status": "ok",
+        "bouncer": endpoint.name,
+        "time_window": {
+            "from": resolved_since or "",
+            "to": resolved_until or "",
+        },
+        "events_returned": len(events),
+        "events_before_scope_filter": events_before_filter,
+        "scope_filter_applied": classifier,
+        "cold_tier_warning": bool(cold_warning),
+        "window_days_estimated": (
+            round(window_days, 1) if window_days is not None else None
+        ),
+        "events": events,
+        "notes": notes,
+    }
+
+
+def _bounce_deployment_targets_for_filter_for_mcp(
+    args: dict[str, Any],
+) -> dict[str, Any]:
+    """MCP backend for ``bounce_deployment_targets_for_filter``.
+
+    Pure look-up against the operator-declared
+    ``iam-jit.deployment_targets`` block. Returns one target's
+    classifier (when `name` is provided) OR the entire taxonomy
+    (when `name` is absent). Phase G of
+    [[bouncer-informs-agent-informs-iam-jit]].
+    """
+    from .ambient_config.loader import load_declaration
+    from .deployment_targets import (
+        DeploymentTargetError,
+        list_deployment_targets,
+        load_deployment_target,
+    )
+
+    config_path = args.get("config_path")
+    cwd = args.get("cwd")
+    try:
+        if config_path:
+            declaration, source = load_declaration(str(config_path))
+        else:
+            declaration, source = load_declaration(None, cwd=cwd)
+    except Exception as e:
+        return {
+            "status": "error",
+            "code": "config_load_failed",
+            "message": str(e),
+        }
+
+    name = args.get("name")
+    if isinstance(name, str) and name.strip():
+        try:
+            target = load_deployment_target(declaration, name.strip())
+        except DeploymentTargetError as e:
+            return {
+                "status": "error",
+                "code": e.code,
+                "message": str(e),
+                "source": source,
+            }
+        payload = target.as_dict()
+        payload["status"] = "ok"
+        payload["config_source"] = source
+        return payload
+
+    try:
+        targets = list_deployment_targets(declaration)
+    except DeploymentTargetError as e:
+        return {
+            "status": "error",
+            "code": e.code,
+            "message": str(e),
+            "source": source,
+        }
+    return {
+        "status": "ok",
+        "config_source": source,
+        "targets": [t.as_dict() for t in targets],
+        "count": len(targets),
+    }
 
 
 def _emit_session_ended_on_close() -> None:

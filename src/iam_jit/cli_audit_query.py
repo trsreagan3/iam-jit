@@ -36,8 +36,10 @@ review", not blame-assigning incident framing).
 from __future__ import annotations
 
 import csv as _csv
+import datetime as _dt
 import io
 import json
+import re as _re
 import sys
 import time as _time
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -47,6 +49,151 @@ from urllib import request as _urlrequest
 from urllib.error import HTTPError, URLError
 
 import click
+
+
+# #436 / §A70 — long-range audit-query support.
+# Windows >= LONG_RANGE_WARN_DAYS surface a stderr warning so the
+# operator knows a cold-tier query may be slow + costly. The threshold
+# tracks the boundary where typical hot/warm storage gives way to
+# cold-tier object storage (S3 + #428 retention tiering); a smaller
+# default keeps the warning honest for operators who haven't yet
+# wired #428.
+LONG_RANGE_WARN_DAYS = 90
+
+# Maximum lookback `_parse_since_long_range` will honor before
+# clamping. Years-back queries are intentional; we just refuse
+# nonsense like "100y" so accidental typos don't cascade into
+# absurd cold-tier scans.
+LONG_RANGE_MAX_YEARS = 10
+
+
+_LONG_RANGE_TOKEN_RE = _re.compile(r"^(\d+)([smhdwMy])$")
+"""Short-form duration tokens accepted by --since/--until on the
+long-range path. Calendar units (`y`, `M`) are added on top of the
+existing s/m/h/d/w set so operators can write `--since 2y` directly
+instead of `--since 730d`."""
+
+
+def _parse_since_long_range(spec: str | None) -> str | None:
+    """Convert a long-form `--since` shorthand (`2y`, `6M`, `90d`,
+    etc.) to an ISO 8601 UTC lower bound.
+
+    Pass-through for already-ISO strings and for empty / None values
+    so callers can mix shorthand + explicit timestamps freely.
+
+    Years use a 365-day approximation (calendar-month-boundary
+    accuracy isn't load-bearing for an audit-query lookback bound);
+    Months use 30 days.
+    """
+    if not spec:
+        return None
+    s = spec.strip()
+    if not s:
+        return None
+    # ISO-ish strings pass straight through; the bouncer parses them.
+    if "T" in s or "-" in s[:10]:
+        return s
+    m = _LONG_RANGE_TOKEN_RE.match(s)
+    if not m:
+        # Unknown shape — let the bouncer reject it rather than guess.
+        return s
+    qty = int(m.group(1))
+    unit = m.group(2)
+    if qty < 0:
+        return s
+    seconds_by_unit = {
+        "s": 1,
+        "m": 60,
+        "h": 3600,
+        "d": 86400,
+        "w": 7 * 86400,
+        "M": 30 * 86400,
+        "y": 365 * 86400,
+    }
+    delta_seconds = qty * seconds_by_unit[unit]
+    # Cap absurd values per LONG_RANGE_MAX_YEARS.
+    max_seconds = LONG_RANGE_MAX_YEARS * 365 * 86400
+    if delta_seconds > max_seconds:
+        delta_seconds = max_seconds
+    lower = (
+        _dt.datetime.now(_dt.timezone.utc)
+        - _dt.timedelta(seconds=delta_seconds)
+    )
+    return lower.replace(microsecond=0).isoformat().replace("+00:00", "Z")
+
+
+def _since_window_days(spec: str | None) -> float | None:
+    """Best-effort: parse `--since` into an approximate "how many days
+    back" used for the cold-tier warning threshold. Returns None when
+    the shorthand can't be reduced to a numeric window.
+
+    Accepts both short-form tokens (`2y`, `90d`) and ISO 8601
+    timestamps (the latter parsed with datetime).
+    """
+    if not spec:
+        return None
+    s = spec.strip()
+    if not s:
+        return None
+    m = _LONG_RANGE_TOKEN_RE.match(s)
+    if m:
+        qty = int(m.group(1))
+        unit = m.group(2)
+        seconds_by_unit = {
+            "s": 1, "m": 60, "h": 3600, "d": 86400,
+            "w": 7 * 86400, "M": 30 * 86400, "y": 365 * 86400,
+        }
+        return qty * seconds_by_unit[unit] / 86400.0
+    # Fall back to ISO parse.
+    try:
+        # Tolerate trailing Z.
+        cleaned = s.replace("Z", "+00:00") if s.endswith("Z") else s
+        parsed = _dt.datetime.fromisoformat(cleaned)
+        if parsed.tzinfo is None:
+            parsed = parsed.replace(tzinfo=_dt.timezone.utc)
+        delta = _dt.datetime.now(_dt.timezone.utc) - parsed
+        return max(delta.total_seconds() / 86400.0, 0.0)
+    except (ValueError, TypeError):
+        return None
+
+
+def _parse_scope_filter(raw: str | None) -> dict[str, list[str]] | None:
+    """Parse a JSON-encoded scope-filter classifier into the dict
+    shape the deployment-target taxonomy emits.
+
+    Accepts the exact wire shape produced by `iam-jit
+    deployment-targets show <NAME> --classifier-only` so an agent can
+    pipe between the two commands without re-serialising.
+    """
+    if raw is None:
+        return None
+    s = raw.strip()
+    if not s:
+        return None
+    try:
+        parsed = json.loads(s)
+    except json.JSONDecodeError as e:
+        raise click.BadParameter(
+            f"--scope-filter must be JSON (e.g. "
+            f'\'{{"clusters":["prod-*"]}}\'); got: {e}',
+        ) from e
+    if not isinstance(parsed, dict):
+        raise click.BadParameter(
+            "--scope-filter must be a JSON object mapping dimension "
+            "names (clusters/accounts/regions/namespaces/hosts/"
+            "databases) to lists of strings.",
+        )
+    out: dict[str, list[str]] = {}
+    for k, v in parsed.items():
+        if not isinstance(v, list) or not all(
+            isinstance(x, str) for x in v
+        ):
+            raise click.BadParameter(
+                f"--scope-filter dimension {k!r} must be a list of "
+                "strings.",
+            )
+        out[str(k)] = list(v)
+    return out
 
 
 class BouncerEndpoint(NamedTuple):
@@ -230,6 +377,122 @@ def _query_one_bouncer(
     return _BouncerQueryResult(
         bouncer=endpoint.name, events=events, error="",
     )
+
+
+def _glob_to_pattern(glob: str) -> _re.Pattern[str]:
+    """Compile a simple ``*``-glob into a regex used by the scope-
+    filter classifier. Cached at module level so a long-range query
+    over thousands of events doesn't re-compile per match."""
+    parts: list[str] = ["^"]
+    for ch in glob:
+        if ch == "*":
+            parts.append(".*")
+        else:
+            parts.append(_re.escape(ch))
+    parts.append("$")
+    return _re.compile("".join(parts))
+
+
+_GLOB_CACHE: dict[str, _re.Pattern[str]] = {}
+
+
+def _glob_match(value: str, glob: str) -> bool:
+    """Glob match with module-local cache; treats `*` as the only
+    wildcard (other regex meta-chars are escaped)."""
+    if "*" not in glob:
+        return value == glob
+    pat = _GLOB_CACHE.get(glob)
+    if pat is None:
+        pat = _glob_to_pattern(glob)
+        _GLOB_CACHE[glob] = pat
+    return pat.match(value) is not None
+
+
+def _event_field(ev: dict[str, Any], path: str) -> Any:
+    """Walk a dotted path through nested dicts; None on missing."""
+    cur: Any = ev
+    for part in path.split("."):
+        if not isinstance(cur, dict):
+            return None
+        cur = cur.get(part)
+        if cur is None:
+            return None
+    return cur
+
+
+# Map from classifier dimension → OCSF field-paths to check. An event
+# matches a classifier value when ANY of the listed paths' values
+# matches the glob. This is intentionally lenient: bouncers vary in
+# WHICH OCSF path they populate (e.g. kbouncer puts the cluster in
+# `unmapped.iam_jit.cluster`; ibounce puts the account in
+# `cloud.account.uid`). The fan-out is the same dimension-name set
+# every bouncer accepts via the deployment-target taxonomy.
+_CLASSIFIER_FIELD_PATHS: dict[str, tuple[str, ...]] = {
+    "clusters": (
+        "unmapped.iam_jit.cluster",
+        "cloud.zone",
+    ),
+    "accounts": (
+        "cloud.account.uid",
+        "unmapped.iam_jit.account_id",
+    ),
+    "regions": (
+        "cloud.region",
+        "unmapped.iam_jit.region",
+    ),
+    "namespaces": (
+        "unmapped.iam_jit.namespace",
+        "resources.0.namespace",
+    ),
+    "hosts": (
+        "dst_endpoint.hostname",
+        "unmapped.iam_jit.host",
+    ),
+    "databases": (
+        "unmapped.iam_jit.database",
+        "dst_endpoint.svc_name",
+    ),
+}
+
+
+def _event_matches_classifier(
+    ev: dict[str, Any],
+    classifier: dict[str, list[str]],
+) -> bool:
+    """Return True iff the event matches EVERY declared dimension.
+
+    Each dimension's globs are OR'd; dimensions are AND'd. An empty
+    classifier matches everything (so callers can disable filtering by
+    passing `{}`). A dimension whose value list is empty also matches
+    — we treat "the operator declared zero globs" as "no filter for
+    this dimension" rather than "match nothing".
+    """
+    if not classifier:
+        return True
+    for dim, globs in classifier.items():
+        if not globs:
+            continue
+        paths = _CLASSIFIER_FIELD_PATHS.get(dim, ())
+        if not paths:
+            # Unknown dimension — skip (forward-compat with future
+            # schema additions).
+            continue
+        found_match = False
+        for path in paths:
+            value = _event_field(ev, path)
+            if value is None:
+                continue
+            if not isinstance(value, str):
+                value = str(value)
+            for g in globs:
+                if _glob_match(value, g):
+                    found_match = True
+                    break
+            if found_match:
+                break
+        if not found_match:
+            return False
+    return True
 
 
 def _event_time_key(ev: dict[str, Any]) -> int:
@@ -540,6 +803,46 @@ def register_audit_query_group(parent_group: click.Group) -> click.Group:
              "[[bouncer-informs-agent-informs-iam-jit]]. Implies "
              "single-bouncer scope — pass exactly one --bouncer.",
     )
+    @click.option(
+        "--scope-filter",
+        "scope_filter_raw",
+        default=None,
+        metavar="JSON",
+        help="#436 / §A70 — JSON-encoded scope-filter classifier "
+             "(deployment-target taxonomy shape). Filters the merged "
+             "event stream client-side by ANY of: clusters / accounts "
+             "/ regions / namespaces / hosts / databases. Globs `*` "
+             "supported. Pipe from `iam-jit deployment-targets show "
+             "<NAME> --classifier-only`. Example: "
+             "`--scope-filter '{\"clusters\":[\"prod-*\"],"
+             "\"accounts\":[\"999988887777\"]}'`.",
+    )
+    @click.option(
+        "--output",
+        "output_path",
+        type=click.Path(
+            dir_okay=False,
+            writable=True,
+            allow_dash=True,
+        ),
+        default=None,
+        help="#436 / §A70 — stream events to FILE instead of stdout. "
+             "Critical for year+ queries that may return 100K+ events "
+             "— the stream writes incrementally rather than loading "
+             "everything into memory at once. Use `-` for stdout "
+             "(default behavior).",
+    )
+    @click.option(
+        "--cold-tier-warn-days",
+        "cold_tier_warn_days",
+        type=int,
+        default=LONG_RANGE_WARN_DAYS,
+        show_default=True,
+        help="#436 / §A70 — emit a stderr warning when the lookback "
+             "window crosses this many days. Operator signal that the "
+             "query is reaching into cold-tier object storage which "
+             "may be slow + costly. Set to 0 to disable the warning.",
+    )
     def audit_query_cmd(
         bouncers_raw: tuple[str, ...],
         since: str | None,
@@ -550,6 +853,9 @@ def register_audit_query_group(parent_group: click.Group) -> click.Group:
         audit_events_token: str | None,
         timeout: float,
         extract_permissions: bool,
+        scope_filter_raw: str | None,
+        output_path: str | None,
+        cold_tier_warn_days: int,
     ) -> None:
         """Query audit events across every reachable bouncer in
         parallel. Default probes ibounce/kbounce/dbounce/gbounce on
@@ -589,6 +895,36 @@ def register_audit_query_group(parent_group: click.Group) -> click.Group:
         # per-bouncer parsers with HTTP 400; this expansion closes the
         # gap without requiring per-bouncer changes.
         filter_exprs = _expand_short_form_filters(filter_exprs)
+
+        # #436 / §A70 — parse the scope-filter classifier (None when
+        # not provided so the existing call sites behave unchanged).
+        scope_filter = _parse_scope_filter(scope_filter_raw)
+
+        # #436 / §A70 — long-range `--since` shorthand (`2y`, `6M`)
+        # expansion. The bouncer's `/audit/events` accepts ISO 8601
+        # so we reduce calendar units locally before forwarding.
+        if since:
+            since = _parse_since_long_range(since)
+        if until:
+            until = _parse_since_long_range(until)
+
+        # #436 / §A70 — operator-visible cold-tier warning. Long
+        # lookbacks may hit cold-tier object storage which is slow +
+        # costly; surfacing the warning early lets the operator
+        # confirm before the query blocks for minutes.
+        window_days = _since_window_days(since)
+        if (
+            cold_tier_warn_days > 0
+            and window_days is not None
+            and window_days >= cold_tier_warn_days
+        ):
+            click.echo(
+                f"warning: --since window is ~{window_days:.0f} days "
+                f"(threshold {cold_tier_warn_days}d). Long-range "
+                f"queries may hit cold-tier object storage and take "
+                f"minutes to complete. See #436 cold-tier guidance.",
+                err=True,
+            )
 
         bouncers = _resolve_bouncer_set(bouncers_raw)
         if not bouncers:
@@ -645,6 +981,27 @@ def register_audit_query_group(parent_group: click.Group) -> click.Group:
             merged.extend(r.events)
         merged.sort(key=_event_time_key)
 
+        # #436 / §A70 — client-side scope-filter classifier match.
+        # Applied AFTER the merge so the per-bouncer servers don't
+        # need to grow the scope-filter shape. As more bouncers learn
+        # to honor the classifier server-side this can move upstream
+        # to drop bytes earlier on the wire.
+        if scope_filter:
+            before = len(merged)
+            merged = [
+                ev for ev in merged
+                if _event_matches_classifier(ev, scope_filter)
+            ]
+            if before > 0 and not merged:
+                click.echo(
+                    f"note: --scope-filter matched 0/{before} events; "
+                    "verify the classifier dimensions match the "
+                    "events' OCSF fields (kbouncer cluster, "
+                    "ibounce cloud.account.uid + cloud.region, "
+                    "gbounce dst_endpoint.hostname, etc.).",
+                    err=True,
+                )
+
         # #419 / §A58 — `--extract-permissions` reshapes the merged
         # event stream into the structured permission-set shape used
         # by `iam_jit_request_role_from_synthesis`. We delegate to the
@@ -671,19 +1028,56 @@ def register_audit_query_group(parent_group: click.Group) -> click.Group:
                     for r in results if r.error
                 ),
             )
-            click.echo(json.dumps(extracted.as_dict(), indent=2))
+            _write_output(
+                output_path,
+                json.dumps(extracted.as_dict(), indent=2) + "\n",
+            )
             return
 
         if fmt == "ocsf-bundle":
-            click.echo(_format_ocsf_bundle(merged), nl=False)
+            _write_output(
+                output_path,
+                _format_ocsf_bundle(merged),
+            )
             return
         if fmt == "csv":
-            click.echo(_format_csv(merged), nl=False)
+            _write_output(output_path, _format_csv(merged))
             return
-        # jsonl (default).
-        click.echo(_format_jsonl(merged), nl=False)
+        # jsonl (default) — streaming when --output is set so the
+        # whole result set isn't held in memory at once (long-range
+        # queries can return tens of thousands of events).
+        if output_path and output_path != "-":
+            with open(output_path, "w", encoding="utf-8") as fh:
+                for ev in merged:
+                    fh.write(_format_jsonl_one(ev))
+        else:
+            click.echo(_format_jsonl(merged), nl=False)
 
     return audit_group
+
+
+def _write_output(
+    output_path: str | None,
+    body: str,
+) -> None:
+    """Write ``body`` to ``output_path`` (or stdout when None / `-`).
+    Used by the non-streaming formats (csv / ocsf-bundle /
+    extract-permissions) where the whole rendered body fits in
+    memory naturally. The jsonl path uses a per-event streaming
+    writer instead to keep memory bounded for year+ queries.
+    """
+    if output_path and output_path != "-":
+        with open(output_path, "w", encoding="utf-8") as fh:
+            fh.write(body)
+    else:
+        click.echo(body, nl=False)
+
+
+def _format_jsonl_one(ev: dict[str, Any]) -> str:
+    """Render a single event as one JSONL line (newline-terminated).
+    Used by the streaming jsonl writer so the per-event encoding is
+    identical to the in-memory variant."""
+    return json.dumps(ev, default=str, separators=(",", ":")) + "\n"
 
 
 # Silence "imported but unused" warnings when `sys` is only used at

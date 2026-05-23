@@ -97,3 +97,15 @@ discipline. Codex's MCP support (when enabled per §5) exposes
 `bounce_extract_permissions_from_audit`, `iam_jit_resource_map`, and
 `iam_jit_request_role_from_synthesis` — the three primitives the
 pattern composes.
+
+## 7. Using long-range bouncer history to synthesise bouncer configs
+
+Phase G pattern — Codex reads a year+ window of bouncer audit
+(scoped by an operator-declared deployment-target taxonomy from
+`AGENTS.md` / `.iam-jit.yaml`) and synthesises a per-target bouncer
+config. See
+[bouncer-history-to-config-pattern.md](bouncer-history-to-config-pattern.md)
+for the three canonical asks and the agent-driven flow. Codex's
+MCP support exposes `bounce_query_audit_long_range` +
+`bounce_deployment_targets_for_filter` — iam-jit provides logs +
+taxonomy; Codex does the synthesis.

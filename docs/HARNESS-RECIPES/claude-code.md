@@ -185,3 +185,16 @@ request through iam-jit. Canonical use case: *"I just did staging
 work; generate the equivalent role for prod."* See
 [bouncer-to-role-pattern.md](bouncer-to-role-pattern.md) for the
 canonical conversation + the REQUIRED evidence-block discipline.
+
+## 7. Using long-range bouncer history to synthesise bouncer configs
+
+Phase G pattern — agent reads a year+ window of bouncer audit
+(scoped by an operator-declared deployment-target taxonomy) and
+synthesises a per-target bouncer config. Canonical use cases:
+*"Browse my last 2 years of kbouncer logs and put together a config
+for prod K8s"* / *"... config for staging without touching prod"* /
+*"Make a gbounce config that blocks production URLs when I'm in
+staging."* See
+[bouncer-history-to-config-pattern.md](bouncer-history-to-config-pattern.md)
+for the three canonical asks + the agent-driven flow (iam-jit
+provides the LOGS + the TAXONOMY; the AGENT does the synthesis).

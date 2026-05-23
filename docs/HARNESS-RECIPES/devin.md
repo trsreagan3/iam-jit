@@ -101,3 +101,16 @@ discipline. Once Devin's MCP support lands, the
 operators can drive the CLI sequence manually (`iam-jit audit query
 --extract-permissions` + `iam-jit resource-map`) and submit the
 resulting role request through the standard pending-review flow.
+
+## 7. Using long-range bouncer history to synthesise bouncer configs
+
+Phase G pattern — Devin reads a year+ window of bouncer audit
+(scoped by an operator-declared deployment-target taxonomy) and
+synthesises a per-target bouncer config. See
+[bouncer-history-to-config-pattern.md](bouncer-history-to-config-pattern.md)
+for the three canonical asks (positive / scope-isolated / negative)
+and the agent-driven flow. Until Devin's MCP support lands the
+operator can drive the CLI sequence manually
+(`iam-jit deployment-targets show <NAME> --classifier-only`
++ `iam-jit audit query --since 2y --scope-filter ...
+--extract-permissions`) and hand the result to Devin.
