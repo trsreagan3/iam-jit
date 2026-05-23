@@ -3,6 +3,26 @@
 This is the canonical recipe — the other harness pages are ports of
 the same flow with harness-specific tweaks.
 
+## First-run wallpaper — what to expect
+
+> Your iam-jit bouncer will work silently in the background. Most of
+> the time you'll never see it. When it catches something worth your
+> attention, you'll see a one-line "Your bouncer caught X" notification
+> + the agent's request will 403 with a structured payload it can act
+> on. The friction is intentional (it's how we catch prompt injection)
+> + the framing is "caught + here's how to allow if safe" not "ERROR".
+
+Most operators see fewer than one prompt per day after the first
+week of discovery (calibrated post-launch per `[[hit-rate-meaning]]`).
+The framing is the same across surfaces:
+
+| Surface | Lead text |
+|---|---|
+| CLI (`iam-jit denies recent`) | `Your bouncer caught N thing(s)...` |
+| stderr notification (autopilot) | `[autopilot] (?) Your ibounce bouncer caught: ...` |
+| Webhook (Slack/Discord) | `Your ibounce bouncer caught something.` |
+| Agent 403 wire body | `caught_by_bouncer: "ibounce"` + classification |
+
 ## 1. Where to write the declaration
 
 Add a fenced YAML codeblock tagged `iam-jit-config` to your repo's

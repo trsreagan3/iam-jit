@@ -498,7 +498,10 @@ def test_denies_recent_cli_lists_rows(
     runner = CliRunner()
     result = runner.invoke(main, ["denies", "recent", "--since", "1h"])
     assert result.exit_code == 0, result.output
-    assert "1 deny row" in result.output
+    # Post-#413 (§A57) the table leads with "Your bouncer caught" not
+    # "N deny row(s)" per [[ambient-value-prop-and-friction-framing]].
+    # Behavior is unchanged; only the framing string changed.
+    assert "Your bouncer caught 1 thing(s)" in result.output
     assert "iam:CreateAccessKey" in result.output
     assert "iam-jit profile allow" in result.output  # suggested fix
     # Per-bouncer note for the unreachable ones.

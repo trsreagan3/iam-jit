@@ -5,6 +5,26 @@ The operator writes ONE declarative block; the agent reads it on
 session start and calls `iam_jit_setup_from_config` to install + start
 + configure the bouncers. After that, the operator never reconfigures.
 
+## What to expect day-to-day
+
+> Your bouncer audits everything your agent does silently in the
+> background. Most of the time you'll see nothing. When the bouncer
+> catches something worth your attention you'll see a one-line
+> notification (and the agent's request 403s) — categorized so you
+> can scan high-signal first:
+>
+> * `(!) likely-adversarial` — investigate, do NOT just allow
+> * `(?) ambiguous` — your call; usually a 5-second decision
+> * `(*) likely-legit` — paste the suggested allow command if safe
+>
+> Most operators see fewer than one prompt per day after the first
+> week of discovery. We're never silent about catches — the framing
+> just leads with "your bouncer caught X" instead of "ERROR".
+
+(The "fewer than one prompt per day" claim is calibrated per
+`[[hit-rate-meaning]]` discipline — it's a target we measure post-launch,
+not a guarantee.)
+
 ## The canonical declaration
 
 ```yaml

@@ -1399,6 +1399,34 @@ class RequestObservation:
 
 
 # ---------------------------------------------------------------------------
+# #443 — proxy.RequestObservation.deny_source uses a short legacy enum
+# (``profile`` / ``dynamic`` / ``rule`` / ``task`` / ``default``) that
+# predates the §A25 :mod:`iam_jit.profile_allow.denies` canonical names
+# (``static_profile`` / ``dynamic_deny`` / ``safe_default`` / etc).
+# build_structured_deny() expects the canonical names so the recommender
+# (derive_recommended_action) routes deterministically. This map is the
+# narrow translator between the two enums; unknown values pass through.
+# ---------------------------------------------------------------------------
+_PROXY_DENY_SOURCE_TO_STRUCTURED = {
+    "profile": "static_profile",
+    "dynamic": "dynamic_deny",
+    "rule": "global_deny",
+    "task": "task_deny",
+    "default": "safe_default",
+}
+
+
+def _map_proxy_deny_source(proxy_value: str | None) -> str:
+    """Translate proxy.RequestObservation.deny_source -> structured_deny
+    canonical name. Returns the input unchanged when the value is
+    already canonical or when no mapping is known (callers tolerate
+    'unknown' / arbitrary string per [[ibounce-honest-positioning]])."""
+    if not proxy_value:
+        return ""
+    return _PROXY_DENY_SOURCE_TO_STRUCTURED.get(proxy_value, proxy_value)
+
+
+# ---------------------------------------------------------------------------
 # #324a — dynamic-deny snapshot accessor.
 #
 # Module-level registry mirrors the audit-export channels (above) so
@@ -2876,18 +2904,71 @@ async def _handle_request(request, *, store, config: ProxyConfig, session):
         # [[security-team-positioning-safety-not-surveillance]] this
         # is helpful framing ("here's how to evolve the catch") not
         # accusatory.
+        #
+        # #443 / §A48b — the 403 wire body MERGES the structured-deny
+        # payload (built by :func:`iam_jit.structured_deny.build_structured_deny`)
+        # with the legacy ibounce-shape fields. Per
+        # [[ambient-value-prop-and-friction-framing]] every agent /
+        # operator-facing surface leads with ``caught_by_bouncer`` (not
+        # "ERROR" / "DENIED" / "BLOCKED"). Per [[creates-never-mutates]]
+        # the legacy keys (``error``, ``decision_verdict``,
+        # ``decision_reason``, ``service``, ``action``, ``arn``,
+        # ``mode``, ``caveat_url``) are preserved unchanged so SDK
+        # clients + scrapers grepping the old shape keep working; the
+        # structured-deny fields are additive.
         from . import caveats as _caveats
+        from ..structured_deny import build_structured_deny
         _b4 = _caveats.by_id("B4")
+        decision_reason_with_caveat = obs.decision_reason + _caveats.link_suffix("B4")
+        # Best-effort agent_session_id from inbound headers (the
+        # canonical extractor lives in _parse_agent_headers but we
+        # avoid re-parsing the SigV4 envelope on the deny hot-path; the
+        # session id is informational on the 403 body — the agent can
+        # always cross-reference via `iam_jit_handle_deny`).
+        agent_session_id_hint = (
+            request.headers.get("x-iam-jit-agent-session-id", "")
+            or request.headers.get("x-iam-jit-agent-session", "")
+            or ""
+        )
+        structured = build_structured_deny(
+            bouncer="ibounce",
+            action=(
+                f"{obs.parsed_service}:{obs.parsed_action}"
+                if obs.parsed_service and obs.parsed_action
+                else (obs.parsed_action or "")
+            ),
+            resource=obs.parsed_arn or "",
+            deny_reason=decision_reason_with_caveat,
+            deny_source=_map_proxy_deny_source(obs.deny_source),
+            rule_id_if_dynamic=obs.dynamic_deny_rule_id,
+            agent_session_id=agent_session_id_hint,
+            when=_dt.datetime.now(_dt.timezone.utc)
+                .replace(microsecond=0).isoformat().replace("+00:00", "Z"),
+        )
         return web.json_response(
             {
+                # Legacy ibounce-shape (kept for wire-protocol
+                # backwards-compat; old grep-on-`error` agents +
+                # tooling keep working).
                 "error": "ibounce DENY",
                 "decision_verdict": obs.decision_verdict,
-                "decision_reason": obs.decision_reason + _caveats.link_suffix("B4"),
+                "decision_reason": decision_reason_with_caveat,
                 "service": obs.parsed_service,
                 "action": obs.parsed_action,
                 "arn": obs.parsed_arn,
                 "mode": obs.mode_at_decision,
                 "caveat_url": _b4.url if _b4 else "",
+                # #443 — structured-deny additive fields per
+                # [[ambient-value-prop-and-friction-framing]].
+                "caught_by_bouncer": structured.caught_by_bouncer,
+                "is_likely_injection_classification":
+                    structured.is_likely_injection_classification,
+                "suggested_allow_command": structured.suggested_allow_command,
+                "recommended_action": structured.recommended_action,
+                "deny_event_id": structured.deny_event_id,
+                "classifier_hook": structured.classifier_hook,
+                "deny_source_classified": structured.deny_source,
+                "structured_deny_schema_version": structured.schema_version,
             },
             status=403,
             # Wire-protocol response headers retain the

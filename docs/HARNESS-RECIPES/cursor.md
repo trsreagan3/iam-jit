@@ -4,6 +4,15 @@ Port of [claude-code.md](claude-code.md). Same MCP tool, same
 declaration shape; Cursor reads it from `.cursorrules` instead of
 `CLAUDE.md`.
 
+## First-run wallpaper
+
+Your iam-jit bouncer audits Cursor's tool calls silently. When it
+catches something worth your attention you'll see a one-line
+"Your bouncer caught X" notification + a structured 403 the agent
+can act on. The framing is "caught + here's how to allow if safe"
+not "ERROR". See [claude-code.md](claude-code.md#first-run-wallpaper--what-to-expect)
+for the cross-surface table.
+
 ## 1. Where to write the declaration
 
 Add a fenced YAML codeblock tagged `iam-jit-config` to your repo's

@@ -3,6 +3,15 @@
 Any MCP-capable agent can use the same flow as Claude Code / Cursor /
 Codex / Devin. This page covers the agent-side contract.
 
+## First-run wallpaper
+
+Your iam-jit bouncer audits your harness's tool calls silently. When
+it catches something worth your attention you'll see a one-line
+"Your bouncer caught X" notification + a structured 403 the agent
+can act on. The framing is "caught + here's how to allow if safe"
+not "ERROR". See [claude-code.md](claude-code.md#first-run-wallpaper--what-to-expect)
+for the cross-surface table.
+
 ## The contract
 
 1. Operator writes a declaration in `.iam-jit.yaml` at repo root, OR

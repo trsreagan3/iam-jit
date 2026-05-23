@@ -4,6 +4,15 @@ Port of [claude-code.md](claude-code.md). Devin's MCP support is
 still being announced — this recipe assumes MCP is available; if not,
 fall back to the operator-pre-runs path (CLI before the agent starts).
 
+## First-run wallpaper
+
+Your iam-jit bouncer audits Devin's tool calls silently. When it
+catches something worth your attention you'll see a one-line
+"Your bouncer caught X" notification + a structured 403 the agent
+can act on. The framing is "caught + here's how to allow if safe"
+not "ERROR". See [claude-code.md](claude-code.md#first-run-wallpaper--what-to-expect)
+for the cross-surface table.
+
 ## 1. Where to write the declaration
 
 If Devin reads from `.devin/config.yaml` (their stated convention),

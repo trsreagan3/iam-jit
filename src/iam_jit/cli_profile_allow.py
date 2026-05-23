@@ -368,39 +368,123 @@ def register_profile_allow_command(profile_group: click.Group) -> click.Command:
 # ---------------------------------------------------------------------------
 
 
+def _classify_row(row) -> str:
+    """Return one of 'appears_legitimate' / 'ambiguous' /
+    'appears_adversarial' for a DenyRow. Uses
+    :func:`iam_jit.structured_deny.classify_injection_likelihood` so
+    the categorization matches the agent-facing 403 wire body
+    (consistent operator + agent mental model per
+    [[cross-product-agent-parity]])."""
+    try:
+        from .structured_deny import classify_injection_likelihood
+    except Exception:
+        return "ambiguous"
+    try:
+        cls, _hook = classify_injection_likelihood(
+            action=row.action or "",
+            resource=row.resource or "",
+            deny_source=row.deny_source or "",
+            deny_reason=row.deny_reason or "",
+            agent_session_id=row.agent_session_id or "",
+        )
+    except Exception:
+        return "ambiguous"
+    return cls
+
+
+# Categorized header labels per [[ambient-value-prop-and-friction-framing]].
+# Operator scans the high-signal bucket (adversarial) first; the
+# legit-looking bucket carries an easy-allow nudge; the ambiguous
+# bucket is in the middle. Labels use plain ASCII glyphs (no emoji)
+# to keep the surface portable across terminals.
+_CATEGORY_ORDER = (
+    "appears_adversarial",
+    "ambiguous",
+    "appears_legitimate",
+)
+_CATEGORY_LABEL = {
+    "appears_adversarial": "(!) likely-adversarial",
+    "ambiguous": "(?) ambiguous",
+    "appears_legitimate": "(*) likely-legit",
+}
+
+
 def _format_denies_table(rows: list, notes: list[str]) -> str:
-    """Render denies rows as a compact table."""
+    """Render denies rows as categorized output per
+    [[ambient-value-prop-and-friction-framing]] §A57.
+
+    Lead with the bouncer's action ("caught"), NEVER ERROR/DENIED/BLOCKED.
+    Categorize by the structured-deny injection classifier so the
+    operator scans high-signal rows first.
+    """
     if not rows:
-        return "no denies in the requested window\n"
-    lines = [
-        f"{len(rows)} deny row(s); newest first"
-    ]
+        return "Your bouncer caught nothing in the requested window — clear.\n"
+
+    # Categorize.
+    by_cls: dict[str, list] = {c: [] for c in _CATEGORY_ORDER}
+    for r in rows:
+        by_cls.setdefault(_classify_row(r), []).append(r)
+
+    n = len(rows)
+    counts_blurb = "  ".join(
+        f"{_CATEGORY_LABEL.get(c, c)} ({len(by_cls.get(c) or [])})"
+        for c in _CATEGORY_ORDER
+        if (by_cls.get(c) or [])
+    )
+    header_line = (
+        f"Your bouncer caught {n} thing(s) in the requested window. "
+        f"Newest first; categorized by classifier."
+    )
+    lines = [header_line]
+    if counts_blurb:
+        lines.append("  " + counts_blurb)
     if notes:
-        for n in notes:
-            lines.append(f"  (note) {n}")
+        for n_msg in notes:
+            lines.append(f"  (note) {n_msg}")
     lines.append("")
-    header = (
+
+    col_header = (
         f"  {'WHEN':<20} {'BOUNCER':<10} {'ACTION':<28} "
         f"{'RESOURCE':<40} {'SOURCE':<22}"
     )
-    lines.append(header)
-    lines.append(f"  {'-' * (len(header) - 2)}")
-    for r in rows:
-        when = r.when[:19] if r.when else "?"
-        bouncer = (r.bouncer or "?")[:10]
-        action = (r.action or "?")[:28]
-        resource = (r.resource or "?")[:40]
-        source = (r.deny_source or "?")[:22]
-        lines.append(
-            f"  {when:<20} {bouncer:<10} {action:<28} "
-            f"{resource:<40} {source:<22}"
-        )
-        if r.deny_reason:
-            lines.append(f"    reason: {r.deny_reason[:120]}")
-        if r.agent_session_id:
-            lines.append(f"    agent.session_id: {r.agent_session_id}")
-        if r.suggested_allow_command:
-            lines.append(f"    fix: {r.suggested_allow_command}")
+    rule = "  " + ("-" * (len(col_header) - 2))
+
+    for cls in _CATEGORY_ORDER:
+        bucket = by_cls.get(cls) or []
+        if not bucket:
+            continue
+        label = _CATEGORY_LABEL.get(cls, cls)
+        lines.append(f"{label}  ({len(bucket)} of {n}):")
+        lines.append(col_header)
+        lines.append(rule)
+        for r in bucket:
+            when = r.when[:19] if r.when else "?"
+            bouncer = (r.bouncer or "?")[:10]
+            action = (r.action or "?")[:28]
+            resource = (r.resource or "?")[:40]
+            source = (r.deny_source or "?")[:22]
+            lines.append(
+                f"  {when:<20} {bouncer:<10} {action:<28} "
+                f"{resource:<40} {source:<22}"
+            )
+            if r.deny_reason:
+                lines.append(f"    why caught: {r.deny_reason[:120]}")
+            if r.agent_session_id:
+                lines.append(f"    agent.session_id: {r.agent_session_id}")
+            if r.suggested_allow_command:
+                # Per [[ambient-value-prop-and-friction-framing]]:
+                # adversarial-classified rows lead with the halt
+                # nudge; legit/ambiguous lead with the allow.
+                if cls == "appears_adversarial":
+                    lines.append(
+                        "    recommended: halt + escalate — do NOT auto-allow"
+                    )
+                    lines.append(
+                        f"    (if reviewed + still safe: {r.suggested_allow_command})"
+                    )
+                else:
+                    lines.append(f"    allow if legit: {r.suggested_allow_command}")
+        lines.append("")
     return "\n".join(lines) + "\n"
 
 
@@ -467,8 +551,11 @@ def _do_denies_follow(
 
     seen: set[tuple[str, str, str]] = set()
     current_since = since
+    # Per [[ambient-value-prop-and-friction-framing]] §A57: lead with
+    # the bouncer's posture, not raw 'following denies'.
     click.echo(
-        f"following denies (since={since!r}); Ctrl-C to stop"
+        f"Watching your bouncer (since={since!r}); Ctrl-C to stop. "
+        f"You'll see a one-line summary each time we catch something."
     )
     try:
         while True:
@@ -484,16 +571,31 @@ def _do_denies_follow(
                 if key in seen:
                     continue
                 seen.add(key)
+                cls = _classify_row(r)
+                tag = {
+                    "appears_adversarial": "(!)",
+                    "ambiguous": "(?)",
+                    "appears_legitimate": "(*)",
+                }.get(cls, "(?)")
                 click.echo(
-                    f"[{r.when}] {r.bouncer:<10} DENY {r.action} {r.resource}"
-                    f"  source={r.deny_source}"
+                    f"[{r.when}] {tag} Your {r.bouncer} bouncer caught: "
+                    f"{r.action} on {r.resource} "
+                    f"(source={r.deny_source})"
                 )
                 if r.deny_reason:
-                    click.echo(f"    reason: {r.deny_reason[:160]}")
+                    click.echo(f"    why caught: {r.deny_reason[:160]}")
                 if r.suggested_allow_command:
-                    click.echo(f"    fix: {r.suggested_allow_command}")
-            for n in notes:
-                click.echo(f"  (note) {n}", err=True)
+                    if cls == "appears_adversarial":
+                        click.echo(
+                            "    recommended: halt + escalate — do NOT auto-allow"
+                        )
+                        click.echo(
+                            f"    (if reviewed + still safe: {r.suggested_allow_command})"
+                        )
+                    else:
+                        click.echo(f"    allow if legit: {r.suggested_allow_command}")
+            for n_msg in notes:
+                click.echo(f"  (note) {n_msg}", err=True)
             # After the first poll narrow the window so subsequent
             # polls don't reach all the way back.
             current_since = "30s"

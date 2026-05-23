@@ -491,21 +491,105 @@ class AutopilotSupervisor:
 
     def _notify_recent_denies(self) -> None:
         """Probe each bouncer's /denies endpoint via the #345 fetcher
-        and surface a short note to stderr per new deny since the last
-        sweep. Placeholder for the #389 notification daemon."""
+        and surface a short note per new deny since the last sweep.
+        Placeholder for the #389 notification daemon.
+
+        Per #413 / [[ambient-value-prop-and-friction-framing]]:
+
+          * ``stderr``  — short "Your bouncer caught X" line + a
+            classification-aware recommendation (halt+escalate vs
+            allow-if-legit). NEVER leads with "ERROR" / "DENIED".
+          * ``webhook`` — POST a Slack/Discord-card-shaped JSON payload
+            to ``IAM_JIT_AUTOPILOT_DENY_WEBHOOK_URL`` (env var; webhooks
+            often carry secrets in their URLs so we DO NOT take it from
+            a CLI flag — env var only per
+            [[push-policy-public-repo]]).
+        """
         try:
             from ..profile_allow.denies import fetch_recent_denies
+            from ..structured_deny import build_structured_deny
         except Exception:
             return
         # Only sweep 30 seconds back to avoid spamming on every tick.
         rows, _notes = fetch_recent_denies(since="30s", limit=10)
+        if not rows:
+            return
+
         for row in rows:
-            sys.stderr.write(
-                f"[autopilot] Your {row.bouncer} bouncer caught: "
-                f"{row.action} on {row.resource} "
-                f"(why: {row.deny_source}). "
-                f"Try: {row.suggested_allow_command}\n"
+            structured = build_structured_deny(
+                bouncer=row.bouncer or "unknown",
+                action=row.action or "",
+                resource=row.resource or "",
+                deny_reason=row.deny_reason or "",
+                deny_source=row.deny_source or "",
+                rule_id_if_dynamic=row.rule_id_if_dynamic,
+                suggested_allow_command=row.suggested_allow_command or "",
+                agent_session_id=row.agent_session_id or "",
+                when=row.when or "",
             )
+            if self.notify_denies == "stderr":
+                self._notify_stderr(structured)
+            elif self.notify_denies == "webhook":
+                self._notify_webhook(structured)
+            # `none` is unreachable (we gate on != "none" in run_once)
+
+    def _notify_stderr(self, sd: Any) -> None:
+        """Write a one-line caught-framing summary to stderr per
+        [[ambient-value-prop-and-friction-framing]].
+
+        Adversarial classifications still escalate per
+        [[ibounce-honest-positioning]]: the recommended halt is loud,
+        not whispered, so an operator can't miss it."""
+        cls = sd.is_likely_injection_classification
+        tag = {
+            "appears_adversarial": "(!)",
+            "ambiguous": "(?)",
+            "appears_legitimate": "(*)",
+        }.get(cls, "(?)")
+        line = (
+            f"[autopilot] {tag} Your {sd.caught_by_bouncer} bouncer caught: "
+            f"{sd.action or '(unknown)'} on {sd.resource or '(unknown)'} "
+            f"(why: {sd.deny_source}). "
+        )
+        if cls == "appears_adversarial":
+            line += "Recommended: halt + escalate — do NOT auto-allow."
+        elif sd.suggested_allow_command:
+            line += f"Allow if legit: {sd.suggested_allow_command}"
+        sys.stderr.write(line + "\n")
+
+    def _notify_webhook(self, sd: Any) -> None:
+        """POST a Slack/Discord-shaped JSON card to the webhook URL.
+
+        Per [[ambient-value-prop-and-friction-framing]] the card LEADS
+        with the caught-framing; the payload is also explicit about
+        whether the classifier flagged this as worth halting.
+
+        Failure paths are silent (logger.debug) per
+        [[ibounce-honest-positioning]] — we don't surface webhook
+        flakiness as a deny-notification outage; the operator can
+        always fall back to `iam-jit denies recent`.
+        """
+        webhook_url = os.environ.get("IAM_JIT_AUTOPILOT_DENY_WEBHOOK_URL", "").strip()
+        if not webhook_url:
+            logger.debug(
+                "autopilot webhook notify skipped: IAM_JIT_AUTOPILOT_DENY_WEBHOOK_URL unset"
+            )
+            return
+        payload = _structured_deny_to_webhook_card(sd)
+        try:
+            import urllib.request
+            req = urllib.request.Request(
+                webhook_url,
+                data=json.dumps(payload).encode("utf-8"),
+                headers={"Content-Type": "application/json"},
+                method="POST",
+            )
+            # Best-effort 3-second timeout — webhook delivery latency
+            # must not stall the supervisor loop.
+            with urllib.request.urlopen(req, timeout=3.0) as resp:
+                resp.read()
+        except Exception as e:
+            logger.debug("autopilot webhook notify failed: %s", e)
 
     def run_forever(
         self,
@@ -554,6 +638,80 @@ class AutopilotSupervisor:
 
     def _handle_term(self, *_args: Any) -> None:
         self.stopped = True
+
+
+# ---------------------------------------------------------------------------
+# Webhook-card composer for `--notify-denies webhook` (#413 / §A57).
+#
+# Slack + Discord both accept a simple text-with-attachments payload;
+# we ship that as the canonical shape. Lead with "Your bouncer caught"
+# per [[ambient-value-prop-and-friction-framing]]. Adversarial
+# classifications surface a ``color: danger`` attachment color so the
+# Slack UI surfaces them as red-bar; legit/ambiguous use ``good`` /
+# ``warning`` respectively. Keeps the operator's eye-scan loud where it
+# matters, quiet where it doesn't.
+# ---------------------------------------------------------------------------
+
+
+def _structured_deny_to_webhook_card(sd: Any) -> dict[str, Any]:
+    """Return a Slack/Discord-compatible incoming-webhook payload.
+
+    The exact shape (top-level ``text`` + ``attachments`` array) is the
+    Slack legacy incoming-webhook contract; Discord accepts a superset
+    and renders ``text`` directly. Operators using other webhook
+    targets (Teams, etc.) can post-process via a transformation proxy;
+    we explicitly do NOT proliferate per-vendor shapes pre-launch.
+    """
+    cls = getattr(sd, "is_likely_injection_classification", "ambiguous")
+    color = {
+        "appears_adversarial": "danger",
+        "ambiguous": "warning",
+        "appears_legitimate": "good",
+    }.get(cls, "warning")
+    bouncer = getattr(sd, "caught_by_bouncer", "bouncer")
+    action = getattr(sd, "action", "") or "(unknown action)"
+    resource = getattr(sd, "resource", "") or "(unknown resource)"
+    reason = getattr(sd, "deny_reason", "") or getattr(sd, "deny_source", "")
+    recommended = getattr(sd, "recommended_action", "easy-allow")
+    suggested = getattr(sd, "suggested_allow_command", "")
+    deny_event_id = getattr(sd, "deny_event_id", "")
+
+    fields = [
+        {"title": "Agent tried", "value": f"{action} on {resource}", "short": False},
+        {"title": "Why caught", "value": reason or "(no reason supplied)", "short": False},
+        {"title": "Classification", "value": cls, "short": True},
+        {"title": "Recommended action", "value": recommended, "short": True},
+    ]
+    if suggested:
+        fields.append({
+            "title": "Suggested allow command",
+            "value": f"`{suggested}`",
+            "short": False,
+        })
+    if deny_event_id:
+        fields.append({
+            "title": "Deny event id",
+            "value": deny_event_id,
+            "short": False,
+        })
+
+    text = f"Your {bouncer} bouncer caught something."
+    if cls == "appears_adversarial":
+        text += " Recommended action: halt + escalate (do NOT auto-allow)."
+
+    return {
+        "text": text,
+        "attachments": [
+            {
+                "color": color,
+                "fallback": (
+                    f"Your {bouncer} bouncer caught {action} on {resource}"
+                ),
+                "title": "iam-jit autopilot notification",
+                "fields": fields,
+            }
+        ],
+    }
 
 
 # ---------------------------------------------------------------------------
