@@ -11,6 +11,36 @@ within the same release.
 
 ## Unreleased — Bounce-suite rename (2026-05-17)
 
+### Documentation
+
+- **#344 — Live dogfood loop: MEASURED audit-pinned profile hit-rate** (2026-05-23) —
+  Ran the end-to-end chain (discovery → legit traffic → audit JSONL →
+  `iam-jit profile generate-from-audit` → save → attempt install →
+  adversarial → wire verdict) for I1 + D1 + G1 against shipped binaries
+  with LocalStack, real Postgres, and a Python mock HTTP server.
+  Surfaced two integration gaps that contradict the previously projected
+  84.6% audit-pinned hit-rate per `[[scorer-is-ground-truth]]`:
+  (1) the YAML schema emitted by `iam-jit profile generate-from-audit`
+  (`denies: [{target, actions, reason}]`) does NOT match the parser in
+  `src/iam_jit/bouncer/profiles.py:_profile_from_dict` which only
+  understands `deny_actions` / `deny_keywords` / `allow_rules` — the
+  generated YAML parses to an EMPTY Profile (verified by direct
+  invocation; dbounce has the same shape mismatch);
+  (2) `ibounce profile install --from` is HTTPS-only with no
+  `file://` / local-path mode despite the quick-start in
+  `docs/PROFILE-GENERATION.md` line 53 showing `bounce profile install
+  --from ./profiles/`. Also surfaced that the local Ollama qwen2.5:7b
+  backend emits inverse-of-correct rules for both I1 and D1 (denying
+  the observed actions); deterministic-fallback is safety-floor-only.
+  MEASURED hit-rate on end-to-end chain: 0/3 MEANINGFUL (3/3 PARTIAL).
+  Full details + REASONED grades for adjacent scenarios in
+  `tests/dogfood/role-effectiveness-grades-post-pivot.md` ("MEASURED
+  via end-to-end live dogfood loop — 2026-05-23"). Recommendation:
+  honest single-claim marketing number is the post-#324f 69.2%
+  (dynamic-deny path IS wired end-to-end in prior measurement); do
+  not claim 84.6% until the #326 profile-install path is wired
+  end-to-end.
+
 ### Changed
 
 - **#296 / §A22 — Cross-product concurrent-terminal ceiling lifted (audit-write hardening)** (2026-05-22) —

@@ -606,3 +606,335 @@ already ships** — operators picking the right mode for their
 adoption phase (discovery default / one-command dynamic-denies /
 audit-pinned profile) clear the launch bar at 69.2% / 84.6%
 respectively.
+
+---
+
+## MEASURED via end-to-end live dogfood loop — 2026-05-23
+
+This section reports MEASURED grades from a chained execution: boot
+bouncer in discovery default → run legit traffic → capture audit
+JSONL → run `iam-jit profile generate-from-audit` → save to bundle
+dir → attempt to install profile → run adversarial traffic → capture
+wire verdict → grade with the 4-axis rubric per
+`[[role-effectiveness-grading]]`. Replaces the per-scenario REASONED
+projection of 84.6% with a measured outcome.
+
+Per `[[scorer-is-ground-truth]]`: the chain was NOT tuned to
+confirm the projected number. Every wire result below is the
+unaltered output of the shipped binaries.
+
+### TL;DR
+
+- Scenarios measured end-to-end: **3** (I1, D1, G1)
+- Scenarios reasoned-graded from observed adjacent behavior: **3** (I2, I4, D2 — same family as a measured scenario)
+- Scenarios UNRUN (infra not stood up in time-box): **10** (K1-K4, D3, D4, G2, G3, G4, I3) — kind cluster + MITM mock + dbounce stmt-deny work + gbounce MITM each have own setup cost
+- **MEASURED hit-rate (audit-pinned bucket)**: **0 / 3 = 0%**
+- **Projected (reasoned) audit-pinned hit-rate from prior section**: **84.6% (11/13)**
+- **Δ from projection: -84.6 percentage points** (catastrophic miss; root cause is shipping-binary integration gap, not scoring logic)
+
+### The chain broke at integration, not at scoring
+
+The 84.6% projection assumed that an audit-driven profile generated
+by `iam-jit profile generate-from-audit` could be **installed into a
+running bouncer** and would then **enforce a narrowed-allowlist** on
+the next adversarial traffic. Wire measurement shows TWO structural
+breaks in that chain:
+
+1. **Profile-schema mismatch (the load-bearing finding).** The
+   YAML schema emitted by `iam-jit profile generate-from-audit`
+   uses `denies: [{target, actions, reason}]` + `allows: [...]`.
+   The shipped `ibounce profile install` parser (`_profile_from_dict`
+   in `src/iam_jit/bouncer/profiles.py`) recognizes only
+   `deny_keywords`, `deny_actions`, `deny_actions_with_condition`,
+   `allow_rules`, `allow_baseline`. The generated YAML PARSES
+   successfully but every safety-floor + allow rule is **silently
+   dropped** to an empty tuple. Verified by direct Python invocation:
+   ```python
+   _profile_from_dict('test', yaml.safe_load(open('ibounce.yaml')))
+   # → Profile(deny_actions=(), allow_rules=(), allow_baseline=None, ...)
+   ```
+   The dbounce profile schema (`internal/profile/profile.go: DenyActions []string`)
+   has the same mismatch — accepts a list of literal strings, not the
+   generator's `denies: [{actions: [...], target: ..., reason: ...}]`
+   shape. Same expected story on kbouncer (not verified end-to-end in
+   this run).
+
+2. **`ibounce profile install --from` is HTTPS-only.** Even if the
+   schemas matched, the `--from` flag refuses `file://` and `http://`
+   (verified: `if not from_url.lower().startswith("https://"): sys.exit(2)`
+   at `bouncer_cli.py:2018`). To install an audit-generated bundle locally
+   the operator must spin up an HTTPS server. There is no documented
+   `ibounce profile install --from ./profiles/` flow despite
+   `docs/PROFILE-GENERATION.md` showing exactly that command in the
+   quick-start (line 53).
+
+Result: the #326 generator runs end-to-end (audit capture works;
+profile YAML lands on disk with bundle_sha256), but the profile
+**cannot be activated on the same bouncer that observed the audit**
+without operator manual editing into the legacy `deny_actions` schema
++ standing up HTTPS for distribution. The 84.6% projection assumed
+this integration was wired.
+
+### LLM backend caveat
+
+The only available LLM backend in this dogfood environment was
+local Ollama with `qwen2.5:7b`. The qwen output produced
+**inverse-of-correct rules** for both I1 and D1: it emitted the
+observed actions as DENIES (`deny s3:ListBucket` after observing
+the operator do a `ListBucket`; `deny postgres:SELECT` after
+observing a `SELECT`). If those YAML files were ingested into a
+parser that DID respect the generated schema, the result would be
+NEGATIVE-VALUE — the operator's own legit task gets denied next run.
+
+Anthropic / Bedrock / OpenAI backends were not available (no creds
+in the dogfood environment); the deterministic fallback (when LLM
+is unavailable) produces only the safety floor with no allow
+narrowing — also incompatible with the 84.6% projection's "narrow
+allowlist denies the off-set adversary" mechanism.
+
+### Per-scenario MEASURED results
+
+| # | Scenario | Mode | Wire evidence | Grade (MEASURED) | Grade (PROJECTED) | Δ |
+|---|---|---|---|---|---|---|
+| I1 | ibounce vs PII bucket exfil | MEASURED end-to-end | Adversarial `s3:GetObject customer-pii-bucket/pii.txt` returned 200 + body `pii data` through ibounce in cooperative+full-user. Audit captured `verdict=deny enforced=False profile=full-user`. Generated profile YAML present on disk but cannot be installed (schema mismatch + HTTPS-only install). | **PARTIAL** (audit + recommender-input only) | MEANINGFUL | **-1 step** |
+| D1 | dbounce safe-default count vs `SELECT *` | MEASURED end-to-end | Adversarial `SELECT * FROM credit_cards` returned `alice \| 4111` through dbounce in cooperative+full-user with `fwded=true`. Audit captured `tables_touched=['credit_cards'] verdict=DENY enforced=False`. Generated profile YAML present but qwen-fallback emitted `deny postgres:SELECT` (would be NEGATIVE-VALUE if ingested) + schema doesn't match dbounce parser. | **PARTIAL** (audit only; profile path broken) | MEANINGFUL | **-1 step** |
+| G1 | gbounce deny_hosts IMDS + openai | MEASURED end-to-end | Reverse-proxy mode test: even with `--deny-host 127.0.0.1` configured (`deny_hosts_count=1` per /healthz), adversarial `/secret` returned 200 + `pii-content`. `total_deny_host_matches=0` because deny-host matches the inbound request URL host, not the upstream — reverse-proxy mode (`--upstream`) bypasses the deny-host match. Audit captured the call as Success. CONNECT/forward-proxy mode (the gbounce-projected MEANINGFUL shape) was not measured. | **PARTIAL** (in reverse-proxy setup; CONNECT mode unmeasured) | MEANINGFUL | **-1 step** |
+| I2 | ibounce mass IAM mutation | REASONED from I1 mechanism | Same path as I1 (audit-pinned profile generation + install gap). Even with `--add-safety-denies` the generator emits the IAM-mutation denies into the unrecognized `denies:` block. The shipped safety-floor on ibounce comes from `init` with `admin-minus-sensitive` defaults (verified: `ibounce init` applies 17 rules including `iam:CreateAccessKey deny`) — that path WORKS independently of #326. | **MEANINGFUL** (via independent `ibounce init` path, NOT via #326) | MEANINGFUL | matches (but via different lever than the projection assumed) |
+| I4 | ibounce DynamoDB scope | REASONED from I1 mechanism | Same family as I1: discovery default + audit captures + the generated profile has the same schema-mismatch break. Without the install path, no enforcement. | **PARTIAL** | MEANINGFUL | **-1 step** |
+| D2 | dbounce task-scoped INSERT vs DROP | REASONED from D1 mechanism | dbounce in discovery default forwards both INSERT + DROP; audit captures both with `has_mutating_node=True`. Same #326 install-path gap as D1. Post-pivot default already lifted this from NEGATIVE-VALUE to MEANINGFUL because audit + discovery does the work without #326. | **MEANINGFUL** (carried from post-pivot default, NOT from #326) | MEANINGFUL | matches (but for a different reason than projected) |
+| K1, K2, K3, K4 | kbouncer family | UNRUN | kind cluster not stood up in time-box. | UNRUN | (1× MEANINGFUL + 1× MEANINGFUL + 1× MEANINGFUL + 1× BLIND-SPOT projected) | n/a |
+| D3, D4 | dbounce extended | UNRUN | Would require statement-level dynamic-deny + COPY-classifier paths neither of which the chain exercises. | UNRUN | (PARTIAL + MEANINGFUL projected) | n/a |
+| G2, G3, G4 | gbounce extended | UNRUN | CONNECT mode + MITM mode + body-redaction would each need their own mock target. | UNRUN | (BLIND-SPOT + MEANINGFUL + PARTIAL projected) | n/a |
+| I3 | ibounce admin-baseline-minus-sensitive | UNRUN | Unchanged from prior — excluded from aggregates. | UNRUN | UNRUN | n/a |
+
+### Aggregate (MEASURED bucket, audit-pinned profile path)
+
+Of 13 hit-rate-eligible scenarios in the prior section's table:
+
+- **MEASURED end-to-end**: 3 (I1, D1, G1)
+  - MEANINGFUL: 0
+  - PARTIAL: 3
+- **REASONED from measured adjacency**: 3 (I2, I4, D2)
+  - MEANINGFUL: 2 (I2 + D2 — but BOTH via paths independent of #326)
+  - PARTIAL: 1 (I4)
+- **UNRUN**: 7 (K1, K2, K3, D3, D4, G3, G4) — projected as MEANINGFUL but unverified
+  - K4, G2 BLIND-SPOT (architectural; carried from prior)
+
+**Hit-rate (MEASURED + REASONED, counting only #326-path verdicts honestly)**:
+- Scenarios where #326 audit-pinned profile demonstrably blocked the
+  adversarial: **0 / 6** = **0%**
+- Scenarios where audit-transparency + post-pivot default did real
+  work (no #326 dependency): I1 PARTIAL, D1 PARTIAL, G1 PARTIAL,
+  I4 PARTIAL = 4 PARTIAL + I2 MEANINGFUL (init path) + D2 MEANINGFUL
+  (post-pivot default path) = honest-coverage 6/6
+
+**Per the rubric** the hit-rate denominator excludes BLIND-SPOT and
+UNRUN. So:
+- MEASURED-only hit-rate: 0 MEANINGFUL / 3 (I1, D1, G1) = **0%**
+- MEASURED + REASONED hit-rate: 2 / 6 = **33.3%** (and BOTH MEANINGFULs are via non-#326 paths)
+
+### Detailed run evidence
+
+#### I1 — ibounce end-to-end measurement
+
+**Phase 1 (legit traffic + audit):**
+```
+$ AWS_ENDPOINT_URL=http://127.0.0.1:8767 aws s3 ls s3://reports-bucket/
+2026-05-23 08:20:46          7 q4.txt
+
+$ aws s3api head-object --bucket reports-bucket --key q4.txt
+{ "AcceptRanges": "bytes", "LastModified": "...", "ETag": "..." }
+
+# audit log (excerpt):
+op=s3:ListBucket res=arn:aws:s3:::reports-bucket?... verdict=deny enforced=False
+op=s3:HeadObject res=arn:aws:s3:::reports-bucket/q4.txt verdict=deny enforced=False
+```
+
+**Phase 2 (generate + save profile):**
+```
+$ OLLAMA_HOST=... iam-jit profile generate-from-audit \
+    --bouncer "ibounce=http://127.0.0.1:8767" \
+    --add-safety-denies --name dogfood-i1-ibounce \
+    --output ./profile-i1/ --preferred-backend ollama
+
+flag: ibounce: *:s3:s3:HeadObject:*   <-- qwen emitted backward target shape
+flag: ibounce: *:s3:s3:ListBucket:*   <-- as DENIES of the observed actions
+
+# profile-i1/ibounce.yaml denies:
+denies:
+  - target: "*:s3:s3:HeadObject:*"
+    actions: ["s3:s3:HeadObject"]  <-- doubled-prefix LLM artifact
+  - target: "*:s3:s3:ListBucket:*"
+    actions: ["s3:s3:ListBucket"]
+  - target: "arn:aws:iam::*:*"
+    actions: [iam:CreateAccessKey, iam:Attach*Policy, ...]
+```
+
+**Phase 3 (attempt install):**
+
+Direct schema-parse test confirms `denies` field is silently dropped:
+```python
+from iam_jit.bouncer.profiles import _profile_from_dict
+p = _profile_from_dict('test', yaml.safe_load(open('ibounce.yaml')))
+# → Profile(name='test', deny_actions=(), deny_keywords=(),
+#           allow_rules=(), allow_baseline=None, source='local')
+```
+
+`ibounce profile install --from ./profile-i1/ibounce.yaml` would
+fail on the HTTPS-only check before even reaching the parser. No
+HTTPS server was stood up because even with one, the parser would
+strip the `denies` block to empty.
+
+**Phase 4 (adversarial via cooperative+full-user, which is what the
+operator gets):**
+```
+$ aws s3api get-object --bucket customer-pii-bucket --key pii.txt /tmp/exfil
+{ "AcceptRanges": "bytes", "ContentLength": 9, ... }
+$ cat /tmp/exfil
+pii data
+# audit: op=s3:GetObject res=arn:aws:s3:::customer-pii-bucket/pii.txt
+#        verdict=deny enforced=False profile=full-user
+```
+
+**Grade**: **PARTIAL**. Audit captures the exfil with `enforced=False`
+because cooperative+full-user is observation-only. The #326 path that
+the projection assumed would lift this to MEANINGFUL is integration-
+broken on the install side.
+
+#### D1 — dbounce end-to-end measurement
+
+**Phase 1 (legit + audit):**
+```
+$ psql -h 127.0.0.1 -p 5433 -U postgres -d dogfood -c "SELECT count(*) FROM audit_log;"
+ count
+-------
+     1
+# audit: op=SELECT tables=['audit_log'] has_mut=False fwded=True
+```
+
+**Phase 2 (generate):**
+qwen emitted `deny postgres:SELECT` (would block the legit task on
+re-run) — see profile-d1/dbounce.yaml. Schema also doesn't match
+dbounce's `DenyActions []string` shape (dbounce expects literal
+statement_type strings like `"SELECT"`, not nested action objects).
+
+**Phase 3 (adversarial — chain integration not wired, so test
+runs against the discovery default the operator actually gets):**
+```
+$ psql ... -c "SELECT * FROM credit_cards;"
+ id | holder | number
+----+--------+--------
+  1 | alice  | 4111
+# audit: op=SELECT tables=['credit_cards'] fwded=True verdict=DENY enforced=False
+```
+
+**Grade**: **PARTIAL**. Audit captures table_touched=`credit_cards`;
+enforcement at the statement level requires either the (broken)
+#326 install path or the dbounce v1.1 statement-level dynamic-deny
+work (which the §B6 known-caveats already documents as deferred).
+
+#### G1 — gbounce end-to-end measurement
+
+**Phase 1 (legit + audit):**
+```
+$ curl -x http://127.0.0.1:8080 http://127.0.0.1:9999/api/weather
+ok
+# audit: op="GET /api/weather" status=Success mode=discovery
+```
+
+**Phase 2 (no generation — gbounce is already opt-in `--deny-host`
+shape per prior re-grades; tested the deny-host directly instead of
+#326 path):**
+```
+$ gbounce run --upstream http://127.0.0.1:9999 --deny-host 127.0.0.1
+# /healthz: deny_hosts_count=1, total_deny_host_matches=0
+```
+
+**Phase 3 (adversarial):**
+```
+$ curl -x http://127.0.0.1:8080 http://127.0.0.1:9999/secret
+pii-content   # HTTP 200, content returned
+# /healthz: total_deny_host_matches=0 (deny-host did NOT match)
+```
+
+Root cause: gbounce in `--upstream` reverse-proxy mode evaluates
+deny-host against the inbound request URL host (which the client
+sets to whatever it wanted), not the upstream destination. CONNECT
+mode (forward-proxy) would match correctly; the test environment
+used reverse-proxy so the deny-host was a no-op in this shape.
+
+**Grade**: **PARTIAL** (for this measurement; the prior projection
+of MEANINGFUL assumes the CONNECT/forward-proxy adoption shape
+which I did not measure). If gbounce were measured in CONNECT mode
+with the deny-host against `oai.openai.com` (the canonical G1
+shape), the projected MEANINGFUL would likely hold — but that's
+REASONED, not MEASURED here.
+
+### Honest founder summary (4 sentences)
+
+The end-to-end live measurement reveals the projected 84.6% number
+was an **upper-bound projection that assumed integration which the
+shipped binaries do not have**: the #326 audit-driven profile
+generator runs cleanly and produces YAML, but neither ibounce nor
+dbounce can ingest that YAML's schema, and even if they could
+`ibounce profile install --from` refuses local + http URLs. The
+MEASURED hit-rate on the 3 end-to-end scenarios is **0% MEANINGFUL
+/ 100% PARTIAL** — audit-transparency does real work (every
+adversarial call landed in audit with full attribution) but the
+"narrowed-allowlist enforcement" leg of the projection is currently
+unreachable through the shipped CLI surface. **The honest claim
+post-measurement is the post-pivot default 38.5% number from the
+prior section + the post-#324f dynamic-denies 69.2% (which uses an
+INDEPENDENT enforcement path that IS wired through — `iam-jit deny
+add` writes to `dynamic-denies.yaml` which the bouncers read at
+request time).** Marketing should NOT claim 84.6% until the #326
+profile install path is end-to-end wired — recommend writing up
+the schema-mismatch + HTTPS-only-install gaps as launch-blocking
+follow-up tasks and re-running this measurement loop after they
+land.
+
+### Calibration check
+
+- **What I MEASURED**: 3 scenarios end-to-end (I1, D1, G1) including
+  audit capture, profile generation, schema-mismatch verification
+  via direct parser invocation, adversarial wire result.
+- **What I REASONED from measured adjacency**: I2, I4, D2 (same
+  family as a measured scenario; mechanism transfer is the same
+  bouncer + same shipped binary surface).
+- **What I couldn't run (and why)**:
+  - K1-K4: kind cluster not stood up in time-box (~3-5 min setup).
+  - D3, D4: would require dbounce statement-level dynamic-denies
+    (deferred per §B6) + COPY-classifier opt-in respectively.
+  - G2 (BLIND-SPOT), G3 MITM, G4 body-redaction: each needs its
+    own mock target; not stood up.
+  - I3: profile not shipped in v1.0 — same exclusion as prior buckets.
+- **Confidence on the MEASURED 0%**: HIGH for the audit-pinned-
+  profile-path claim — the schema-mismatch + HTTPS-only-install
+  findings are reproducible with one Python invocation each. The
+  three PARTIAL grades are conservative; some could rise to
+  MEANINGFUL if a different LLM backend (Anthropic) emitted
+  correctly-shaped output AND the parser/install plumbing were
+  fixed.
+
+### Recommended marketing/positioning updates
+
+1. **Update `[[hit-rate-meaning]]` (or create if absent)** with the
+   measured-vs-projected distinction. The post-#324f number
+   (69.2%) is the highest defensible single claim today because
+   the dynamic-deny enforcement path IS shipped end-to-end
+   (verified independently in prior round). The post-#326 84.6%
+   is currently NOT defensible.
+
+2. **Add an integration-gap finding to launch-readiness**: ship
+   either (a) `iam-jit profile generate-from-audit` emitting the
+   parser-recognized `deny_actions` schema directly, OR (b) a
+   `bounce profile install --from <local-path>` flow that
+   translates the bundle YAML to the running bouncer's profile
+   schema. Both are concrete v1.0 follow-up tasks.
+
+3. **Surface the LLM-backend dependence**: the deterministic
+   fallback is safety-floor-only with no narrowing; the local
+   Ollama qwen2.5:7b output was unusable. The 84.6% projection
+   implicitly assumes Anthropic-grade LLM output. Self-host
+   operators without Anthropic creds get the floor-only path,
+   which the projection table mis-counts as MEANINGFUL.
