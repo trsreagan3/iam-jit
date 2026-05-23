@@ -130,6 +130,23 @@ def _fmt_bouncers_block(bouncers: dict[str, Any]) -> list[str]:
             _dp_rec = b.get("disk_pressure_recommendation")
             if _dp_rec:
                 lines.append(f"    DISK PRESSURE: {_dp_rec}")
+            # #499 / §A76b — anomaly-detection surface. Always present
+            # (None when the hook is NOT installed) so an operator can
+            # answer "is this bouncer scoring requests?" at a glance.
+            _ad = b.get("anomaly_detection")
+            if _ad is None:
+                lines.append("    Anomaly detection: off")
+            elif _ad.get("enabled"):
+                _ad_mode = _ad.get("mode") or "unknown"
+                _ad_sens = _ad.get("sensitivity") or "unknown"
+                _ad_count = _ad.get("alerts_emitted_total", 0)
+                lines.append(
+                    f"    Anomaly detection: enabled "
+                    f"(mode={_ad_mode}, sensitivity={_ad_sens}, "
+                    f"alerts_emitted={_ad_count})"
+                )
+            else:
+                lines.append("    Anomaly detection: off")
     return lines
 
 

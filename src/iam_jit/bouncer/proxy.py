@@ -355,6 +355,22 @@ _disk_pressure_state: Any | None = None
 # via gate_alerts_license at CLI parse + serve() start (defense in
 # depth, matches the webhook gate).
 _audit_rule_engine: Any | None = None
+# #499 / §A76b — Phase H anomaly-detection installation marker.
+# The hook itself lives in anomaly_detection.hook._STATE (module
+# singleton there); this proxy-side marker carries the operator-
+# visible config snapshot so /healthz, posture, and tests can
+# introspect "is the bouncer scoring requests?" without reaching
+# into another module's private state. Per [[ibounce-honest-
+# positioning]] operator MUST be able to verify protection is
+# actually active — the absence of this marker means the hook is
+# NOT installed (and serve() did NOT score requests).
+_anomaly_detection_marker: dict[str, Any] | None = None
+# Per-process counter of anomaly events the hook emitted (alert OR
+# block). Bumped by the hook's alert_emitter wrapper installed in
+# serve(); read by posture/healthz introspection. None when the hook
+# is not installed.
+_anomaly_alert_count: int = 0
+_anomaly_last_alert_at_unix: float | None = None
 # #267 — audit_export_degraded /healthz flag. Mirrors the heartbeat
 # pattern: when the audit_export_degraded rule fires it flips this
 # bool, which /healthz reads to return 503. Independent of the
@@ -391,6 +407,48 @@ def is_audit_export_degraded() -> bool:
     so /healthz + tests can introspect without a circular import."""
     with _audit_export_degraded_lock:
         return _audit_export_degraded_detected
+
+
+def register_anomaly_detection_marker(marker: dict[str, Any] | None) -> None:
+    """#499 / §A76b — install the proxy-side anomaly-detection state
+    marker. Pass None to clear (used by serve()'s finally + tests).
+    The actual hook state lives in anomaly_detection.hook; this is
+    the operator-visible status surface that posture + /healthz read.
+    """
+    global _anomaly_detection_marker, _anomaly_alert_count
+    global _anomaly_last_alert_at_unix
+    _anomaly_detection_marker = marker
+    if marker is None:
+        _anomaly_alert_count = 0
+        _anomaly_last_alert_at_unix = None
+
+
+def active_anomaly_detection_marker() -> dict[str, Any] | None:
+    """#499 / §A76b — read the current anomaly-detection state. Returns
+    None when the hook is NOT installed (the operator-observable signal
+    that the bouncer is NOT scoring requests). Public so posture,
+    /healthz, and tests can introspect without circular imports.
+
+    Per [[ibounce-honest-positioning]] this is the single source of
+    truth for "is anomaly detection actually wired into the request
+    path right now?" — the silent-no-op gap that motivated #499."""
+    if _anomaly_detection_marker is None:
+        return None
+    snapshot = dict(_anomaly_detection_marker)
+    snapshot["alerts_emitted_total"] = _anomaly_alert_count
+    snapshot["last_alert_at_unix"] = _anomaly_last_alert_at_unix
+    return snapshot
+
+
+def _bump_anomaly_alert_counter() -> None:
+    """#499 / §A76b — bump the per-process anomaly-emit counter +
+    update the wall-clock last-emit timestamp. Called by the alert
+    emitter wrapper installed in serve(); separate function so unit
+    tests can verify the counter moves without re-running the hook."""
+    global _anomaly_alert_count, _anomaly_last_alert_at_unix
+    import time as _time
+    _anomaly_alert_count += 1
+    _anomaly_last_alert_at_unix = _time.time()
 
 
 def register_audit_log_writer(writer: Any | None) -> None:
@@ -1272,6 +1330,50 @@ class ProxyConfig:
     Opt in via `--audit-retention-framework NAME` CLI flag or
     `iam-jit.retention.compliance: NAME` in `.iam-jit.yaml`."""
 
+    # #499 / §A76b — Phase H anomaly-detection wiring. Mirrors the
+    # §A66c audit-chain pattern: each gate default OFF per
+    # [[creates-never-mutates]]; the hook is installed at serve()
+    # startup when `anomaly_detection_mode` is set OR the declarative
+    # `iam-jit.anomaly_detection.enabled: true` block flips the gate.
+    # CLI flag wins on conflict (matches §A66c precedence). The smoke
+    # tests in test_proxy_anomaly_wiring.py exercise serve() + the
+    # request path end-to-end; the per-mode unit tests in
+    # anomaly_detection/ continue to exercise the primitives.
+    anomaly_detection_mode: str | None = None
+    """#499 / §A76b — operator-selected anomaly-detection mode. One of:
+      * 'off' (or None — the default): hook NOT installed; proxy
+        ignores anomaly scoring entirely (no observation, no scoring,
+        no events).
+      * 'alert': hook scores every request + emits an OCSF
+        anomaly_detected synthetic on anomalous verdicts. NEVER tightens
+        a floor-ALLOW to DENY (advisory only).
+      * 'block': hook scores every request + emits an OCSF synthetic
+        on anomalous verdicts + TIGHTENS a floor-ALLOW to DENY (anomaly
+        wins over allow). Floor-DENY still wins (short-circuit; no
+        double-count).
+      * 'detection-only': same as 'alert' but does NOT require a
+        profile to be configured; designed for ambient observation
+        deployments per [[discovery-first-default]].
+    Opt in via `--anomaly-detection MODE` CLI flag OR
+    `iam-jit.anomaly_detection.{enabled: true, mode: MODE}` in
+    `.iam-jit.yaml`."""
+
+    anomaly_sensitivity: str = "medium"
+    """#499 / §A76b — z-score threshold preset. One of low (3.0σ),
+    medium (2.0σ, default), high (1.5σ). Resolved by
+    AnomalyDetectionConfig.sigma_threshold. Operator opts in via
+    `--anomaly-sensitivity {low,medium,high}` OR
+    `iam-jit.anomaly_detection.sensitivity: high` in `.iam-jit.yaml`."""
+
+    anomaly_baseline_window: str = "14d"
+    """#499 / §A76b — rolling baseline window. Accepts Go-style
+    durations (7d / 14d / 30d / 12h / 60m / N for seconds). Resolved
+    by AnomalyDetectionConfig._parse_duration_to_seconds. Default 14d
+    matches the BaselineStore.DEFAULT_WINDOW_SECONDS shipped with
+    Phase H. Operator opts in via `--anomaly-baseline-window 30d` OR
+    `iam-jit.anomaly_detection.baseline_window: 30d` in
+    `.iam-jit.yaml`."""
+
     # #424 / §A63 — disk-pressure circuit-breaker policy. The
     # disk_status primitive ships with #311 (rotation.py:381); the
     # circuit-breaker layer here is THIN — picks one of three
@@ -1541,6 +1643,12 @@ _PROXY_DENY_SOURCE_TO_STRUCTURED = {
     "rule": "global_deny",
     "task": "task_deny",
     "default": "safe_default",
+    # #499 / §A76b — Phase H block-mode tighten. Maps to the canonical
+    # structured-deny source name so the 403 wire body's
+    # `caught_by_bouncer` + `deny_source_classified` reflect the
+    # anomaly hook (operator-facing surface MUST match the actual
+    # cause per [[ibounce-honest-positioning]]).
+    "anomaly_detection": "anomaly_detection",
 }
 
 
@@ -2089,6 +2197,140 @@ def evaluate_request(
     except Exception as e:
         logger.warning("audit-export emit (decision) failed: %s", e)
 
+    # #499 / §A76b — Phase H anomaly-detection hook. Mirrors the
+    # §A66c audit-chain wire-up pattern: the AnomalyHook + its OCSF
+    # alert path already shipped in commit ff38a77 + the integration
+    # tests verified it independently of proxy.py — what was missing
+    # was the proxy.py call into the hook. Without this fan-in, an
+    # operator who sets `iam-jit.anomaly_detection.enabled: true` in
+    # .iam-jit.yaml gets a SILENT NO-OP (the documented "calibration-
+    # drift" gap per [[ibounce-honest-positioning]]).
+    #
+    # Discipline (per the hook's own docstring + UAT findings):
+    #   1. Floor DENY wins — short-circuit the hook on a deny floor
+    #      verdict (the hook's run_anomaly_hook handles this; the
+    #      structured-deny + audit row are already authored above
+    #      with deny_source set to the actual floor that fired).
+    #   2. Alert mode NEVER tightens ALLOW to DENY (advisory only).
+    #   3. Block mode TIGHTENS an ALLOW to DENY when the hook returns
+    #      decision="deny" + the verdict is "anomalous" +
+    #      combined_score above the operator-configured threshold.
+    # The hook's HookResult.decision is the source of truth here —
+    # we don't re-derive from anomaly_score, that's the detector's
+    # job.
+    if _anomaly_detection_marker is not None:
+        try:
+            from ..anomaly_detection.hook import run_anomaly_hook
+            # The hook needs a stable agent_identity. The audit-export
+            # event builder's #266 path already canonicalised it via
+            # the User-Agent header; we mirror that lookup here so the
+            # baseline is keyed on the same identity the audit row
+            # references. Fallback to a non-empty marker so the hook
+            # still scores (silent observation is per-process useful
+            # even when the agent didn't set a User-Agent).
+            _aid = (
+                header_agent_name
+                or user_agent
+                or "anonymous"
+            )
+            _hook_result = run_anomaly_hook(
+                action=(
+                    f"{parsed.service}:{parsed.action}"
+                    if parsed.service and parsed.action
+                    else (parsed.action or "")
+                ),
+                agent_identity=_aid,
+                resource=resolved_arn,
+                bouncer="ibounce",
+                floor_decision=record.decision.value,
+                floor_deny_reason=record.reason,
+                record_observation=True,
+            )
+            if (
+                _hook_result.decision == "deny"
+                and record.decision.value != "deny"
+            ):
+                # Block-mode tightening: anomaly hook wins over ALLOW.
+                # Per [[ambient-value-prop-and-friction-framing]] the
+                # reason text leads with "your bouncer noticed..."
+                # framing (the hook's _friendly_summary already wrote
+                # this; we adopt it verbatim onto the DecisionRecord).
+                from .decisions import Decision as _AnomalyDecision
+                record = dataclasses.replace(
+                    record,
+                    decision=_AnomalyDecision.DENY,
+                    reason=(
+                        _hook_result.operator_message
+                        or "anomaly detection: anomalous request blocked"
+                    ),
+                )
+                # Re-emit a follow-up audit event so the audit row
+                # reflects the FINAL state (operator-facing surface
+                # MUST match observable reality per
+                # [[ibounce-honest-positioning]]). The first emit above
+                # captured the floor's verdict; this one carries the
+                # tightened-by-anomaly outcome with a distinct
+                # decision_source so reviewers can correlate.
+                try:
+                    from .audit_export import audit_event_from_decision
+                    _emit_audit_event(audit_event_from_decision(
+                        decision_id=decision_id,
+                        mode=effective_mode.value,
+                        profile=(
+                            active_profile.name
+                            if active_profile is not None else None
+                        ),
+                        verdict="deny",
+                        reason=record.reason,
+                        service=parsed.service,
+                        action=parsed.action,
+                        arn=resolved_arn,
+                        region=parsed.region,
+                        host=host,
+                        upstream=None,
+                        enforced=(
+                            effective_mode == ProxyMode.TRANSPARENT
+                        ),
+                        extra={
+                            "decision_source": "anomaly_detection",
+                            "anomaly_score": (
+                                _hook_result.anomaly_result.anomaly_score
+                                if _hook_result.anomaly_result else None
+                            ),
+                            "anomaly_verdict": (
+                                _hook_result.anomaly_result.verdict
+                                if _hook_result.anomaly_result else None
+                            ),
+                            "anomaly_mode": _hook_result.mode,
+                        },
+                        user_agent=user_agent,
+                        header_agent_name=header_agent_name,
+                        header_agent_session_id=header_agent_session_id,
+                        agent_header_rejections=agent_header_rejections,
+                    ))
+                except Exception as _emit_err:
+                    logger.warning(
+                        "audit-export emit (anomaly-tighten) failed: %s",
+                        _emit_err,
+                    )
+                # The anomaly-tighten case becomes the deny_source for
+                # _build_observation below so the 403 wire body's
+                # caught_by_bouncer + structured-deny reflect that the
+                # anomaly hook (not a profile / dynamic-deny) is what
+                # caught this request.
+                _anomaly_deny_source: str | None = "anomaly_detection"
+            else:
+                _anomaly_deny_source = None
+        except Exception as _hook_err:
+            # Hook is observability + opt-in enforcement; a hook crash
+            # MUST NOT break the proxy hot path. Log loud + continue.
+            logger.warning(
+                "anomaly-detection hook failed: %s", _hook_err,
+            )
+            _anomaly_deny_source = None
+    else:
+        _anomaly_deny_source = None
+
     # #270 Slice 2 — admin-fallback synthetic. Fires when a request
     # would have been DENIED in transparent mode but a pause window
     # is open, so the proxy demoted it to COOPERATIVE + the call
@@ -2174,6 +2416,7 @@ def evaluate_request(
         parsed=parsed, record=record, mode=effective_mode,
         decision_id=decision_id,
         active_pause_id=active_pause["id"] if active_pause is not None else None,
+        deny_source=_anomaly_deny_source,
     )
 
 
@@ -3571,6 +3814,12 @@ async def serve(config: ProxyConfig, *, store: BouncerStore) -> None:
                 "last_action_taken": None,
                 "reason": "audit logging not configured",
             }
+        # #499 / §A76b — anomaly-detection surface for /healthz.
+        # Always present (None when the hook is NOT installed) so
+        # external monitoring + cross-bouncer posture queries can
+        # branch on a single field. Mirrors the audit_log block's
+        # always-present convention.
+        anomaly_detection_block = active_anomaly_detection_marker()
         return web.json_response({
             # #433 — bouncer_kind identifier so apply-config /
             # cross-product tooling can disambiguate "port is in use
@@ -3590,6 +3839,7 @@ async def serve(config: ProxyConfig, *, store: BouncerStore) -> None:
             "audit_export": audit_export_section,
             "audit_log": audit_log_block,
             "dynamic_denies": dynamic_denies_block,
+            "anomaly_detection": anomaly_detection_block,
         }, status=http_status_code)
 
     # #324a — POST /admin/dynamic-denies/reload triggers an immediate
@@ -4197,6 +4447,124 @@ async def serve(config: ProxyConfig, *, store: BouncerStore) -> None:
             audit_rule_engine.status()["active_rules"],
         )
 
+    # #499 / §A76b — Phase H anomaly-detection hook installation.
+    # Mirrors the §A66c audit-chain wire-up: opt-in via ProxyConfig
+    # gate, fail-loud on misconfig (per [[ibounce-honest-positioning]]
+    # an operator who set `anomaly_detection.enabled: true` MUST get a
+    # loud warning if the hook can't install, not silent no-op). The
+    # hook itself lives in anomaly_detection.hook._STATE; serve()
+    # primes it + installs the proxy-side marker that evaluate_request
+    # checks on the hot path. Independent of audit_log_path: the
+    # alert_emitter routes through `_emit_audit_event_raw` so the
+    # OCSF synthetic flows to whichever channel(s) the operator wired
+    # (JSONL log / webhook / routes / object storage). No channel
+    # wired = log-only via the hook's internal logger.
+    if config.anomaly_detection_mode and config.anomaly_detection_mode != "off":
+        try:
+            from ..anomaly_detection import (
+                AnomalyDetectionConfig,
+                BaselineStore,
+                install_anomaly_hook,
+            )
+            from ..anomaly_detection.config import (
+                ConfigError as _AnomalyConfigError,
+                _parse_duration_to_seconds,
+            )
+            _mode_raw = config.anomaly_detection_mode.lower()
+            # Map the operator-facing mode names to the hook's internal
+            # API: 'alert' / 'block' map directly; 'detection-only' is
+            # the hook's `detection_only=True` toggle paired with
+            # 'alert' mode (so observation + scoring fire but enforcement
+            # never tightens). Invalid modes fail loud.
+            if _mode_raw not in ("alert", "block", "detection-only"):
+                raise RuntimeError(
+                    f"invalid --anomaly-detection mode "
+                    f"{config.anomaly_detection_mode!r}; expected one of "
+                    f"alert|block|detection-only"
+                )
+            _detection_only = _mode_raw == "detection-only"
+            _hook_mode = "alert" if _detection_only else _mode_raw
+            try:
+                _window_seconds = _parse_duration_to_seconds(
+                    config.anomaly_baseline_window,
+                    field="anomaly_baseline_window",
+                )
+            except _AnomalyConfigError as _w_err:
+                raise RuntimeError(
+                    f"invalid --anomaly-baseline-window "
+                    f"{config.anomaly_baseline_window!r}: {_w_err}"
+                ) from _w_err
+            _anomaly_cfg = AnomalyDetectionConfig(
+                enabled=True,
+                mode=_hook_mode,
+                sensitivity=config.anomaly_sensitivity,
+                baseline_window_seconds=_window_seconds,
+            )
+            _anomaly_store = BaselineStore(
+                window_seconds=_window_seconds,
+            )
+            # start() opens the SQLite + spawns the flush worker; an
+            # unwritable baseline path raises here. Per
+            # [[ibounce-honest-positioning]] this is a runtime
+            # failure (NOT a CLI-syntax error like "bogus mode"); the
+            # operator MUST see a loud warning but the bouncer keeps
+            # running. We wrap as RuntimeWarning-style + let the
+            # OUTER `except Exception` handler below surface it.
+            _anomaly_store.start()
+
+            def _anomaly_alert_emitter(event: dict[str, Any]) -> None:
+                """#499 wrapper: count the emit + fan out through the
+                same audit transport the rest of the bouncer uses so
+                JSONL / webhook / routes / object-storage all see it."""
+                _bump_anomaly_alert_counter()
+                try:
+                    _emit_audit_event_raw(event)
+                except Exception as _emit_err:  # pragma: no cover
+                    logger.warning(
+                        "anomaly-detection alert emit failed: %s",
+                        _emit_err,
+                    )
+
+            install_anomaly_hook(
+                config=_anomaly_cfg,
+                store=_anomaly_store,
+                alert_emitter=_anomaly_alert_emitter,
+                detection_only=_detection_only,
+            )
+            register_anomaly_detection_marker({
+                "enabled": True,
+                "mode": _mode_raw,
+                "sensitivity": config.anomaly_sensitivity,
+                "baseline_window_seconds": _window_seconds,
+                "baseline_path": _anomaly_store.path,
+                "detection_only": _detection_only,
+            })
+            logger.info(
+                "anomaly_detection: enabled (mode=%s sensitivity=%s "
+                "baseline_window=%ds baseline_path=%s)",
+                _mode_raw, config.anomaly_sensitivity,
+                _window_seconds, _anomaly_store.path,
+            )
+        except RuntimeError:
+            # Re-raise so misconfig surfaces (matches the §A66c
+            # --audit-sign-manifests-without-chain pattern: refuse to
+            # start rather than silently run without protection).
+            raise
+        except Exception as _anom_err:
+            # Per [[ibounce-honest-positioning]] this is the silent-
+            # gap risk we MUST surface loudly. The operator declared
+            # anomaly_detection.enabled: true; if the hook can't
+            # install we WARN unmistakably (stderr-visible logger) +
+            # leave the proxy running so traffic still flows, but the
+            # marker stays None so posture + /healthz both report the
+            # disabled state honestly.
+            logger.warning(
+                "anomaly_detection: CONFIGURED but NOT WIRED — "
+                "reason: %s (operator action needed; the hook will "
+                "NOT score requests until this is resolved)",
+                _anom_err,
+            )
+
     # #253 — bulk-prompt-answer UX. Install the burst detector + the
     # operator's MCP bulk-answer token so:
     #   1. Every `add_pending_prompt` from the proxy hot path feeds the
@@ -4630,3 +4998,16 @@ async def serve(config: ProxyConfig, *, store: BouncerStore) -> None:
         register_disk_pressure_state(None)
         register_burst_detector(None)
         set_bulk_answer_mcp_token(None)
+        # #499 / §A76b — tear down the anomaly hook so the next
+        # serve() call (in the same process — common in tests) starts
+        # clean. The marker MUST be cleared too so posture / /healthz
+        # don't report a stale "enabled" state after the bouncer stops.
+        try:
+            from ..anomaly_detection import uninstall_anomaly_hook
+            uninstall_anomaly_hook()
+        except Exception as _uninst_err:  # pragma: no cover
+            logger.warning(
+                "anomaly-detection hook uninstall failed: %s",
+                _uninst_err,
+            )
+        register_anomaly_detection_marker(None)

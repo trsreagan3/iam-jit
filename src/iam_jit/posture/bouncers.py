@@ -276,6 +276,35 @@ def detect_ibounce() -> dict[str, Any]:
         block["disk_pressure"] = None
         block["disk_pressure_recommendation"] = None
 
+    # #499 / §A76b — Phase H anomaly-detection surface. Same in-process
+    # / out-of-process probe pattern as disk_pressure above. Always
+    # present (None when the hook is NOT installed) so agents reading
+    # posture can branch on a single field instead of a missing key.
+    # Per [[ibounce-honest-positioning]] the absence of this marker is
+    # itself the operator-observable signal that the bouncer is NOT
+    # scoring requests.
+    anomaly_detection: dict[str, Any] | None = None
+    try:
+        from ..bouncer.proxy import active_anomaly_detection_marker
+        anomaly_detection = active_anomaly_detection_marker()
+    except Exception:
+        anomaly_detection = None
+    if anomaly_detection is None and running:
+        try:
+            import json
+            import urllib.error
+            import urllib.request
+            req = urllib.request.Request(
+                f"http://127.0.0.1:{port}/healthz",
+                method="GET",
+            )
+            with urllib.request.urlopen(req, timeout=1.0) as resp:
+                payload = json.loads(resp.read().decode("utf-8"))
+                anomaly_detection = payload.get("anomaly_detection")
+        except (urllib.error.URLError, OSError, ValueError, TimeoutError):
+            anomaly_detection = None
+    block["anomaly_detection"] = anomaly_detection
+
     # Env-var wiring + misconfig check.
     endpoint = os.environ.get(IBOUNCE_AWS_ENDPOINT_ENV, "").strip()
     endpoint_port = _parse_url_for_loopback_port(endpoint)

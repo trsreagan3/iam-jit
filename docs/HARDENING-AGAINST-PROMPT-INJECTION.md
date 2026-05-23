@@ -504,3 +504,6 @@ user-process with launchd/systemd supervision.
   output to a SIEM (the Layer 6 prerequisite).
 - [`PERMISSIONS-MODEL.md`](PERMISSIONS-MODEL.md) — the JIT-role
   permissions side of the defense-in-depth story.
+- [`ANOMALY-DETECTION.md`](ANOMALY-DETECTION.md) — Phase H per-agent
+  behavioral baseline + z-score scoring (Layer 5 advisory /
+  enforcement option).

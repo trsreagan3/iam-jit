@@ -3849,6 +3849,62 @@ def _parse_duration(raw: str) -> int:
          ".iam-jit.yaml. See docs/PRODUCTION-LOG-STORAGE.md §7.",
 )
 @click.option(
+    "--anomaly-detection",
+    "anomaly_detection_mode",
+    type=click.Choice(
+        ["off", "alert", "block", "detection-only"],
+        case_sensitive=False,
+    ),
+    default=None,
+    envvar="IBOUNCE_ANOMALY_DETECTION",
+    help="#499 / §A76b — Phase H per-agent anomaly-detection mode. "
+         "off (default): no scoring, no observation. alert: score "
+         "every request + emit OCSF anomaly_detected synthetic on "
+         "anomalous verdict (advisory; never tightens ALLOW to DENY). "
+         "block: same as alert + tighten ALLOW to DENY when anomaly "
+         "score crosses sensitivity threshold (floor DENY still wins). "
+         "detection-only: alert mode + no-profile-required (ambient "
+         "observation for discovery-mode deployments). Equivalent "
+         "declarative: `iam-jit.anomaly_detection.{enabled: true, "
+         "mode: MODE}` in .iam-jit.yaml. See docs/ANOMALY-DETECTION.md.",
+)
+@click.option(
+    "--anomaly-sensitivity",
+    "anomaly_sensitivity",
+    type=click.Choice(["low", "medium", "high"], case_sensitive=False),
+    default="medium",
+    show_default=True,
+    envvar="IBOUNCE_ANOMALY_SENSITIVITY",
+    help="#499 / §A76b — z-score threshold preset. low=3.0σ "
+         "(quietest), medium=2.0σ, high=1.5σ (loudest). Ignored when "
+         "--anomaly-detection is off. Equivalent declarative: "
+         "`iam-jit.anomaly_detection.sensitivity: high`.",
+)
+@click.option(
+    "--anomaly-baseline-window",
+    "anomaly_baseline_window",
+    default="14d",
+    show_default=True,
+    envvar="IBOUNCE_ANOMALY_BASELINE_WINDOW",
+    help="#499 / §A76b — rolling baseline window. Go-style duration "
+         "(7d / 14d / 30d / 12h / 60m / bare-int seconds). Default 14d "
+         "matches the Phase H BaselineStore shipped default. Ignored "
+         "when --anomaly-detection is off.",
+)
+@click.option(
+    "--detection-only",
+    "anomaly_detection_only_shorthand",
+    is_flag=True,
+    default=False,
+    envvar="IBOUNCE_ANOMALY_DETECTION_ONLY",
+    help="#499 / §A76b — shorthand for `--anomaly-detection "
+         "detection-only`. Convenience flag for discovery-mode "
+         "deployments where the operator wants ambient observation "
+         "without a configured profile. When both this flag and "
+         "--anomaly-detection are set, --anomaly-detection wins (the "
+         "explicit mode is treated as the operator's clearer intent).",
+)
+@click.option(
     "--disk-pressure-mode",
     "disk_pressure_mode",
     type=click.Choice(
@@ -4310,6 +4366,10 @@ def run_cmd(
     audit_manifest_interval_events: int | None,
     audit_manifest_keypair_dir: str | None,
     audit_retention_framework: str | None,
+    anomaly_detection_mode: str | None,
+    anomaly_sensitivity: str,
+    anomaly_baseline_window: str,
+    anomaly_detection_only_shorthand: bool,
     disk_pressure_mode: str,
     stop_on_disk_critical: bool,
     disk_pressure_warn_pct: int | None,
@@ -4681,6 +4741,7 @@ def run_cmd(
         not audit_chain_enabled
         or not audit_sign_manifests
         or not audit_retention_framework
+        or not anomaly_detection_mode
     ):
         try:
             from .ambient_config.loader import (
@@ -4716,11 +4777,43 @@ def run_cmd(
                         and _ret_framework
                     ):
                         audit_retention_framework = _ret_framework
+                    # #499 / §A76b — anomaly_detection declarative
+                    # block. Same precedence as audit-chain: CLI flag
+                    # wins (operator explicit intent); declaration
+                    # only flips an unset gate. Per
+                    # [[creates-never-mutates]] missing block = OFF.
+                    _anom_block = _ij_block.get("anomaly_detection") or {}
+                    if (
+                        anomaly_detection_mode is None
+                        and _anom_block.get("enabled") is True
+                    ):
+                        # Declaration sets mode; default to "alert"
+                        # when only enabled: true is supplied (matches
+                        # the config.py shipped default for the same
+                        # block; see [[ibounce-honest-positioning]]
+                        # conservative defaults).
+                        _decl_mode = str(
+                            _anom_block.get("mode") or "alert"
+                        ).strip().lower()
+                        anomaly_detection_mode = _decl_mode
+                        # Sensitivity / window only override when the
+                        # CLI flag was left at its default (we can't
+                        # easily distinguish "operator passed --anomaly-
+                        # sensitivity medium" from "default", so we
+                        # honour the declaration when present + only
+                        # override when its value is truthy).
+                        _decl_sens = _anom_block.get("sensitivity")
+                        if isinstance(_decl_sens, str) and _decl_sens:
+                            anomaly_sensitivity = _decl_sens.lower()
+                        _decl_window = _anom_block.get("baseline_window")
+                        if _decl_window:
+                            anomaly_baseline_window = str(_decl_window)
                 except ConfigLoadError as _decl_err:
                     click.secho(
                         f"warning: declarative config at "
                         f"{_discovered.path} failed to parse for "
-                        f"audit-chain/retention opt-in: {_decl_err}",
+                        f"audit-chain/retention/anomaly opt-in: "
+                        f"{_decl_err}",
                         fg="yellow", err=True,
                     )
         except Exception as _amb_err:  # pragma: no cover — defensive
@@ -4728,9 +4821,17 @@ def run_cmd(
             # the CLI flag path still works, so warn + continue.
             click.secho(
                 f"warning: ambient-config discovery unavailable for "
-                f"audit-chain/retention opt-in: {_amb_err}",
+                f"audit-chain/retention/anomaly opt-in: {_amb_err}",
                 fg="yellow", err=True,
             )
+
+    # #499 / §A76b — --detection-only convenience shorthand. When the
+    # operator passed --detection-only AND did NOT pass an explicit
+    # --anomaly-detection MODE, treat as `--anomaly-detection
+    # detection-only`. The explicit-flag-wins ordering keeps the
+    # operator's clearer intent surfacing when both are set.
+    if anomaly_detection_only_shorthand and anomaly_detection_mode is None:
+        anomaly_detection_mode = "detection-only"
 
     config = ProxyConfig(
         host=host,
@@ -4764,6 +4865,16 @@ def run_cmd(
         audit_manifest_interval_events=audit_manifest_interval_events,
         audit_manifest_keypair_dir=audit_manifest_keypair_dir,
         audit_retention_framework=audit_retention_framework,
+        # #499 / §A76b — Phase H anomaly-detection wiring. CLI flag
+        # OR declarative `iam-jit.anomaly_detection.enabled: true`
+        # (resolved above) sets the mode. Default OFF per
+        # [[creates-never-mutates]]; serve() installs the hook +
+        # baseline store when mode != off / None. Sensitivity +
+        # baseline_window are operator-tunable; their declarative
+        # equivalents live in the same anomaly_detection block.
+        anomaly_detection_mode=anomaly_detection_mode,
+        anomaly_sensitivity=anomaly_sensitivity,
+        anomaly_baseline_window=anomaly_baseline_window,
         # #424 / §A63 — disk-pressure circuit-breaker config.
         # --stop-on-disk-critical is the documented convenience alias
         # for --disk-pressure-mode=pause-requests; when present it
