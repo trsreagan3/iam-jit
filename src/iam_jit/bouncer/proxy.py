@@ -1216,6 +1216,62 @@ class ProxyConfig:
     Plumbed through ProxyConfig so MCP `bouncer_audit_export_status`
     can report the effective value."""
 
+    # #500 / §A66c — Phase F audit-chain + manifest + retention
+    # wiring. ALL three default OFF — operator opts in per
+    # [[creates-never-mutates]] (existing deployments don't gain
+    # new on-disk state silently). When enabled the AuditLogWriter
+    # constructed in serve() receives the matching kwargs so every
+    # written event carries the chain block + (optionally) a signed
+    # manifest is emitted every N events + (optionally) write-time
+    # PII redaction runs before the bytes hit disk.
+    #
+    # The integration test
+    # tests/bouncer/test_audit_export_log_chain_integration.py
+    # exercises the AuditLogWriter directly with these wired; the
+    # smoke tests in test_proxy_audit_chain_wiring.py exercise the
+    # full serve() path so a future regression in proxy.py construction
+    # is caught at PR time (per docs/CONTRIBUTING.md state-verification
+    # convention — #500 was caught exactly because the integration test
+    # passed while the serve() path did not stamp).
+    audit_chain_enabled: bool = False
+    """#500 / §A66c — when True, every audit event is stamped with
+    `unmapped.iam_jit.audit_chain.{seq,prev_hash,hash}` so a SOC can
+    detect tampering via `iam-jit audit verify`. State persists across
+    restarts at `<log_dir>/audit-chain-state.json`. Default OFF; opt in
+    via `--audit-chain` CLI flag or `iam-jit.audit_chain.enabled: true`
+    in `.iam-jit.yaml`."""
+
+    audit_sign_manifests: bool = False
+    """#500 / §A66c — when True, the bouncer additionally emits an
+    Ed25519-signed manifest every `audit_manifest_interval_events`
+    chain rows. Manifests land at `<log_dir>/manifests/manifest-*.json`;
+    keypair is loaded-or-generated at `~/.iam-jit/audit-keys/`. Default
+    OFF; requires `audit_chain_enabled=True` to be meaningful (a manifest
+    over an unstamped log is just an empty seq range). Opt in via
+    `--audit-sign-manifests` CLI flag or
+    `iam-jit.audit_sign_manifests.enabled: true` in `.iam-jit.yaml`."""
+
+    audit_manifest_interval_events: int | None = None
+    """#500 / §A66c — manifest cadence. None = use the shipped default
+    (1000 events per manifest); explicit int overrides. Operator-tunable
+    via `--audit-manifest-interval-events N`. Has no effect when
+    `audit_sign_manifests` is False."""
+
+    audit_manifest_keypair_dir: str | None = None
+    """#500 / §A66c — directory holding the Ed25519 keypair the manifest
+    signer uses. None = `~/.iam-jit/audit-keys/` (the shipped default,
+    auto-generated on first use). Operator-tunable via
+    `--audit-manifest-keypair-dir DIR`."""
+
+    audit_retention_framework: str | None = None
+    """#500 / §A66c — compliance retention framework name. None = no
+    retention enforcement (operator opts in). One of pci | hipaa | sox |
+    gdpr | custom; when set, the AuditLogWriter applies write-time PII
+    redaction (gdpr path) + the `iam-jit audit retention apply` offline
+    mover honours the framework's tier defaults (see retention.py).
+    Opt in via `--audit-retention-framework NAME` CLI flag or
+    `iam-jit.retention.compliance: NAME` in `.iam-jit.yaml`."""
+
     # #424 / §A63 — disk-pressure circuit-breaker policy. The
     # disk_status primitive ships with #311 (rotation.py:381); the
     # circuit-breaker layer here is THIN — picks one of three
@@ -3767,9 +3823,13 @@ async def serve(config: ProxyConfig, *, store: BouncerStore) -> None:
         )
     if config.audit_log_path:
         from .audit_export import (
+            DEFAULT_MANIFEST_INTERVAL_EVENTS,
             DEFAULT_MAX_AGE_DAYS,
             DEFAULT_MAX_SIZE_MB,
             AuditLogWriter,
+            ManifestSigner,
+            load_chain_state,
+            retention_policy_for_framework,
         )
         # #311 / §A20 (R3-01): None on the ProxyConfig field means
         # "use the shipped default"; an explicit 0 means "operator
@@ -3786,20 +3846,116 @@ async def serve(config: ProxyConfig, *, store: BouncerStore) -> None:
             if config.audit_log_max_age_days is None
             else config.audit_log_max_age_days
         )
+        # #500 / §A66c — Phase F audit-chain + manifest + retention
+        # wiring. Each gate is independent + default OFF per
+        # [[creates-never-mutates]]: existing deployments don't gain
+        # new on-disk state silently. The integration test in
+        # tests/bouncer/test_audit_export_log_chain_integration.py
+        # confirms AuditLogWriter HONOURS each kwarg; the smoke tests
+        # in test_proxy_audit_chain_wiring.py confirm proxy.py CONSTRUCTS
+        # the writer with each kwarg under the right gate. Both layers
+        # are required per the docs/CONTRIBUTING.md state-verification
+        # convention (the integration test passed while serve() was
+        # broken — exactly the gap the convention exists to close).
+        _chain_state = None
+        _manifest_signer = None
+        _retention_policy = None
+        # Resolve the log directory once — chain state + manifests
+        # both live alongside the active audit.jsonl.
+        import os.path as _ospath
+        _log_dir = _ospath.dirname(config.audit_log_path) or "."
+        if config.audit_chain_enabled:
+            # load_state creates the in-memory ChainState; the on-disk
+            # state file is created lazily by save_state after the first
+            # batch of stamps. state_file_missing=True on first run is
+            # surfaced via verify_jsonl (per [[ibounce-honest-positioning]]
+            # we never silently mask a re-anchored chain).
+            _chain_state = load_chain_state(_log_dir)
+            logger.info(
+                "audit-chain stamping enabled: log_dir=%s "
+                "state_file_missing=%s",
+                _log_dir, _chain_state.state_file_missing,
+            )
+        if config.audit_sign_manifests:
+            if not config.audit_chain_enabled:
+                # Refuse-to-misconfigure: a signed manifest without a
+                # chain is just a public key + a "covered nothing"
+                # range. Per [[ibounce-honest-positioning]] surface
+                # the misconfiguration loudly rather than silently
+                # emit empty manifests.
+                raise RuntimeError(
+                    "--audit-sign-manifests requires --audit-chain "
+                    "(a manifest without a chain has nothing to sign)"
+                )
+            _manifest_interval = (
+                DEFAULT_MANIFEST_INTERVAL_EVENTS
+                if config.audit_manifest_interval_events is None
+                else config.audit_manifest_interval_events
+            )
+            # load_or_generate_keypair runs eagerly inside the
+            # ManifestSigner ctor so an unwritable keypair-dir surfaces
+            # at startup, not on the first manifest emit (which would
+            # happen 1000 events deep into the run).
+            _manifest_signer = ManifestSigner(
+                log_dir=_log_dir,
+                bouncer_product="ibounce",
+                interval=_manifest_interval,
+                **(
+                    {"keypair_dir": config.audit_manifest_keypair_dir}
+                    if config.audit_manifest_keypair_dir
+                    else {}
+                ),
+            )
+            logger.info(
+                "audit-chain manifest signing enabled: log_dir=%s "
+                "interval=%d events keypair_dir=%s",
+                _log_dir, _manifest_interval,
+                config.audit_manifest_keypair_dir or "~/.iam-jit/audit-keys",
+            )
+        if config.audit_retention_framework:
+            # policy_for_framework raises ValueError on unknown framework;
+            # surface it as a startup RuntimeError so the operator sees
+            # the typo immediately.
+            try:
+                _retention_policy = retention_policy_for_framework(
+                    config.audit_retention_framework,
+                )
+            except ValueError as _ret_err:
+                raise RuntimeError(
+                    f"invalid --audit-retention-framework: {_ret_err}"
+                ) from _ret_err
+            logger.info(
+                "audit retention framework enabled: compliance=%s "
+                "hot_days=%d warm_days=%d cold_days=%d purge_after_days=%s "
+                "gdpr_pii_purge=%s",
+                _retention_policy.compliance,
+                _retention_policy.hot_days,
+                _retention_policy.warm_days,
+                _retention_policy.cold_days,
+                _retention_policy.purge_after_days,
+                _retention_policy.gdpr_pii_purge,
+            )
         audit_log_writer = AuditLogWriter(
             path=config.audit_log_path,
             fsync=config.audit_log_fsync,
             max_size_mb=_max_size_mb,
             max_age_days=_max_age_days,
+            chain_state=_chain_state,
+            manifest_signer=_manifest_signer,
+            retention_policy=_retention_policy,
         )
         await audit_log_writer.start()
         register_audit_log_writer(audit_log_writer)
         logger.info(
             "audit-export JSONL log enabled: path=%s fsync=%s "
-            "max_size_mb=%s max_age_days=%s db_retention_days=%s",
+            "max_size_mb=%s max_age_days=%s db_retention_days=%s "
+            "chain=%s sign_manifests=%s retention=%s",
             config.audit_log_path, config.audit_log_fsync,
             _max_size_mb, _max_age_days,
             config.audit_db_retention_days,
+            config.audit_chain_enabled,
+            config.audit_sign_manifests,
+            config.audit_retention_framework or "(off)",
         )
         # #424 / §A63 — disk-pressure circuit-breaker state setup.
         # Only initialised when there's an audit-log dir to monitor;

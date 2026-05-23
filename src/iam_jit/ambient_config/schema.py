@@ -161,6 +161,18 @@ _INLINE_SCHEMA: dict[str, Any] = {
                 # (PCI 1y, HIPAA 6y, SOX 7y, GDPR variable). See
                 # docs/PRODUCTION-LOG-STORAGE.md §retention.
                 "retention": {"$ref": "#/$defs/retention_block"},
+                # #500 / §A66c — Phase F audit-chain + manifest opt-in.
+                # Symmetric pair: chain stamps every event with the
+                # tamper-evident hash block; sign_manifests additionally
+                # emits Ed25519-signed checkpoints every N events to
+                # detect tail-truncation. Both default OFF per
+                # [[creates-never-mutates]]; operator opts in here or
+                # via the matching --audit-chain / --audit-sign-manifests
+                # CLI flags. See docs/PRODUCTION-LOG-STORAGE.md §6.
+                "audit_chain": {"$ref": "#/$defs/audit_chain_block"},
+                "audit_sign_manifests": {
+                    "$ref": "#/$defs/audit_sign_manifests_block",
+                },
                 # #420 / §A59 — declarative resource mappings consumed by
                 # `iam-jit resource-map` + `iam_jit_resource_map` MCP tool.
                 # Phase E of [[bouncer-informs-agent-informs-iam-jit]]:
@@ -410,6 +422,54 @@ _INLINE_SCHEMA: dict[str, Any] = {
                         "before disk + hot→warm archive transitions "
                         "re-scrub the archive. True by default for "
                         "the GDPR framework."
+                    ),
+                },
+            },
+        },
+        "audit_chain_block": {
+            "type": "object",
+            "additionalProperties": False,
+            "description": (
+                "#500 / §A66c — Phase F audit-chain opt-in. When "
+                "enabled=true the AuditLogWriter stamps every event "
+                "with `unmapped.iam_jit.audit_chain.{seq,prev_hash,"
+                "hash}` so `iam-jit audit verify` can detect tampering. "
+                "State persists across restarts at <log_dir>/audit-"
+                "chain-state.json. Symmetric with the --audit-chain "
+                "CLI flag."
+            ),
+            "properties": {
+                "enabled": {"type": "boolean", "default": False},
+            },
+        },
+        "audit_sign_manifests_block": {
+            "type": "object",
+            "additionalProperties": False,
+            "description": (
+                "#500 / §A66c — Phase F manifest-signing opt-in. When "
+                "enabled=true the bouncer emits Ed25519-signed manifests "
+                "every `interval_events` chain rows. Detects TAIL "
+                "truncation that the chain alone can't catch. Requires "
+                "`audit_chain.enabled: true`. Symmetric with the "
+                "--audit-sign-manifests CLI flag."
+            ),
+            "properties": {
+                "enabled": {"type": "boolean", "default": False},
+                "interval_events": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "description": (
+                        "Manifest cadence in events. Omitted = use the "
+                        "shipped default (1000)."
+                    ),
+                },
+                "keypair_dir": {
+                    "type": "string",
+                    "minLength": 1,
+                    "description": (
+                        "Directory holding the Ed25519 keypair. "
+                        "Omitted = ~/.iam-jit/audit-keys/ (auto-"
+                        "generated on first use)."
                     ),
                 },
             },

@@ -95,6 +95,14 @@
           "$ref": "#/$defs/retention_block",
           "description": "#428 / §A67 — compliance retention tiering. Declarative multi-tier retention (hot/warm/cold + optional purge) selected by framework name (pci | hipaa | sox | gdpr | custom) with per-field overrides. Per-framework defaults match industry: PCI 1y, HIPAA 6y, SOX 7y, GDPR variable + PII purge. Wired at bouncer start: write-time PII redaction (gdpr_pii_purge path) + offline tier mover (`iam-jit audit retention apply`). See docs/PRODUCTION-LOG-STORAGE.md §retention."
         },
+        "audit_chain": {
+          "$ref": "#/$defs/audit_chain_block",
+          "description": "#500 / §A66c — Phase F audit-chain opt-in. When `enabled: true` the AuditLogWriter stamps every audit event with `unmapped.iam_jit.audit_chain.{seq,prev_hash,hash}` so `iam-jit audit verify` can detect edits / re-ordering / deletion. State persists across restarts at <log_dir>/audit-chain-state.json. Symmetric with the --audit-chain CLI flag (either path opts in). Default OFF per [[creates-never-mutates]]."
+        },
+        "audit_sign_manifests": {
+          "$ref": "#/$defs/audit_sign_manifests_block",
+          "description": "#500 / §A66c — Phase F signed-manifest opt-in. When `enabled: true` the bouncer emits Ed25519-signed manifests every `interval_events` chain rows so TAIL-truncation (which the chain alone cannot catch) is detectable. Requires `audit_chain.enabled: true`. Symmetric with the --audit-sign-manifests CLI flag. Default OFF."
+        },
         "resource_mappings": {
           "type": "object",
           "additionalProperties": { "$ref": "#/$defs/resource_mapping_block" },
@@ -342,6 +350,32 @@
             }
           },
           "description": "Ordered glob rewrites applied to the resource-name tail of an ARN (or the bare string for pseudo-ARNs). First matching pattern wins."
+        }
+      }
+    },
+    "audit_chain_block": {
+      "type": "object",
+      "additionalProperties": false,
+      "description": "#500 / §A66c — Phase F audit-chain opt-in. When enabled=true the AuditLogWriter stamps every event with `unmapped.iam_jit.audit_chain.{seq,prev_hash,hash}` so `iam-jit audit verify` detects tampering. State persists across restarts at <log_dir>/audit-chain-state.json. Symmetric with the --audit-chain CLI flag.",
+      "properties": {
+        "enabled": { "type": "boolean", "default": false }
+      }
+    },
+    "audit_sign_manifests_block": {
+      "type": "object",
+      "additionalProperties": false,
+      "description": "#500 / §A66c — Phase F manifest-signing opt-in. When enabled=true the bouncer emits Ed25519-signed manifests every `interval_events` chain rows. Detects TAIL truncation that the chain alone cannot catch. Requires `audit_chain.enabled: true`. Symmetric with the --audit-sign-manifests CLI flag.",
+      "properties": {
+        "enabled": { "type": "boolean", "default": false },
+        "interval_events": {
+          "type": "integer",
+          "minimum": 1,
+          "description": "Manifest cadence in events. Omitted = use the shipped default (1000)."
+        },
+        "keypair_dir": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Directory holding the Ed25519 keypair. Omitted = ~/.iam-jit/audit-keys/ (auto-generated on first use with .priv at 0o600)."
         }
       }
     },

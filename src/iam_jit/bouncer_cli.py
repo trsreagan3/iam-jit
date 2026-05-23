@@ -3781,6 +3781,74 @@ def _parse_duration(raw: str) -> int:
          "for non-flag overrides.",
 )
 @click.option(
+    "--audit-chain",
+    "audit_chain_enabled",
+    is_flag=True,
+    default=False,
+    envvar="IBOUNCE_AUDIT_CHAIN",
+    help="#500 / §A66c — stamp every JSONL audit event with a tamper-"
+         "evident hash-chain block (unmapped.iam_jit.audit_chain). "
+         "Detect edits / re-ordering / deletion via `iam-jit audit "
+         "verify`. State persists across restarts at "
+         "<log_dir>/audit-chain-state.json. Default OFF; opt in here "
+         "(equivalent declarative: `iam-jit.audit_chain.enabled: true` "
+         "in .iam-jit.yaml). See docs/PRODUCTION-LOG-STORAGE.md §6.",
+)
+@click.option(
+    "--audit-sign-manifests",
+    "audit_sign_manifests",
+    is_flag=True,
+    default=False,
+    envvar="IBOUNCE_AUDIT_SIGN_MANIFESTS",
+    help="#500 / §A66c — emit Ed25519-signed manifests every "
+         "--audit-manifest-interval-events chain rows (default 1000). "
+         "Detects TAIL truncation that the chain alone can't catch. "
+         "Requires --audit-chain. Manifests land at <log_dir>/manifests/. "
+         "Keypair auto-generated at ~/.iam-jit/audit-keys/ on first run "
+         "(operator ships .pub to verifiers; .priv stays local at "
+         "0o600). Default OFF.",
+)
+@click.option(
+    "--audit-manifest-interval-events",
+    "audit_manifest_interval_events",
+    type=click.IntRange(1, 1_000_000),
+    default=None,
+    envvar="IBOUNCE_AUDIT_MANIFEST_INTERVAL_EVENTS",
+    help="#500 / §A66c — manifest cadence in events. None = use the "
+         "shipped default (1000). Ignored when --audit-sign-manifests "
+         "is OFF.",
+)
+@click.option(
+    "--audit-manifest-keypair-dir",
+    "audit_manifest_keypair_dir",
+    type=click.Path(file_okay=False),
+    default=None,
+    envvar="IBOUNCE_AUDIT_MANIFEST_KEYPAIR_DIR",
+    help="#500 / §A66c — directory holding the Ed25519 keypair used "
+         "to sign manifests. None = ~/.iam-jit/audit-keys/ (the "
+         "shipped default; auto-generated on first use with the .priv "
+         "file at 0o600). Ignored when --audit-sign-manifests is OFF.",
+)
+@click.option(
+    "--audit-retention-framework",
+    "audit_retention_framework",
+    type=click.Choice(
+        ["pci", "hipaa", "sox", "gdpr", "custom"],
+        case_sensitive=False,
+    ),
+    default=None,
+    envvar="IBOUNCE_AUDIT_RETENTION_FRAMEWORK",
+    help="#500 / §A66c — compliance retention framework. None = no "
+         "retention enforcement (operator opts in). pci: hot 30d / "
+         "warm 120d / cold 365d / no purge. hipaa: hot 30d / warm "
+         "210d / cold 2190d / purge 6y. sox: hot 30d / warm 395d / "
+         "cold 2555d / no purge. gdpr: as pci + write-time PII purge. "
+         "custom: skip framework defaults; operator overrides every "
+         "field via the apply-config retention block. Equivalent "
+         "declarative: `iam-jit.retention.compliance: NAME` in "
+         ".iam-jit.yaml. See docs/PRODUCTION-LOG-STORAGE.md §7.",
+)
+@click.option(
     "--disk-pressure-mode",
     "disk_pressure_mode",
     type=click.Choice(
@@ -4237,6 +4305,11 @@ def run_cmd(
     audit_log_max_size_mb: int | None,
     audit_log_max_age_days: int | None,
     audit_db_retention_days: int | None,
+    audit_chain_enabled: bool,
+    audit_sign_manifests: bool,
+    audit_manifest_interval_events: int | None,
+    audit_manifest_keypair_dir: str | None,
+    audit_retention_framework: str | None,
     disk_pressure_mode: str,
     stop_on_disk_critical: bool,
     disk_pressure_warn_pct: int | None,
@@ -4592,6 +4665,73 @@ def run_cmd(
         click.secho(f"profile error: {e}", fg="red", err=True)
         sys.exit(2)
 
+    # #500 / §A66c — declarative-config fallback for Phase F audit-chain
+    # + retention. CLI flag wins (operator explicit intent); otherwise we
+    # consult a discovered `.iam-jit.yaml` (or fenced codeblock in
+    # CLAUDE.md / AGENTS.md / .cursorrules). Per [[creates-never-mutates]]
+    # this is OPT-IN: missing declaration = OFF (no behavior change for
+    # operators who haven't authored one).
+    #
+    # The discovery + parsing already lives under ambient_config.loader;
+    # we just consume two specific sub-blocks here. Failures are non-
+    # fatal (log + continue) so a malformed YAML never blocks `ibounce
+    # run` from starting — the dedicated `iam-jit doctor` path is where
+    # we surface declaration errors loudly.
+    if (
+        not audit_chain_enabled
+        or not audit_sign_manifests
+        or not audit_retention_framework
+    ):
+        try:
+            from .ambient_config.loader import (
+                ConfigLoadError,
+                discover_declaration_source,
+                load_declaration_from_path,
+            )
+            _discovered = discover_declaration_source()
+            if _discovered is not None:
+                try:
+                    _decl = load_declaration_from_path(_discovered.path)
+                    _ij_block = _decl.get("iam-jit") or {}
+                    # audit_chain.enabled: true
+                    _chain_block = _ij_block.get("audit_chain") or {}
+                    if (
+                        not audit_chain_enabled
+                        and _chain_block.get("enabled") is True
+                    ):
+                        audit_chain_enabled = True
+                    # audit_sign_manifests.enabled: true
+                    _sign_block = _ij_block.get("audit_sign_manifests") or {}
+                    if (
+                        not audit_sign_manifests
+                        and _sign_block.get("enabled") is True
+                    ):
+                        audit_sign_manifests = True
+                    # retention.compliance: NAME
+                    _ret_block = _ij_block.get("retention") or {}
+                    _ret_framework = _ret_block.get("compliance")
+                    if (
+                        audit_retention_framework is None
+                        and isinstance(_ret_framework, str)
+                        and _ret_framework
+                    ):
+                        audit_retention_framework = _ret_framework
+                except ConfigLoadError as _decl_err:
+                    click.secho(
+                        f"warning: declarative config at "
+                        f"{_discovered.path} failed to parse for "
+                        f"audit-chain/retention opt-in: {_decl_err}",
+                        fg="yellow", err=True,
+                    )
+        except Exception as _amb_err:  # pragma: no cover — defensive
+            # ambient_config is a base import; if it's somehow missing
+            # the CLI flag path still works, so warn + continue.
+            click.secho(
+                f"warning: ambient-config discovery unavailable for "
+                f"audit-chain/retention opt-in: {_amb_err}",
+                fg="yellow", err=True,
+            )
+
     config = ProxyConfig(
         host=host,
         port=port,
@@ -4613,6 +4753,17 @@ def run_cmd(
         audit_log_max_size_mb=audit_log_max_size_mb,
         audit_log_max_age_days=audit_log_max_age_days,
         audit_db_retention_days=audit_db_retention_days,
+        # #500 / §A66c — Phase F audit-chain + signed-manifest + retention
+        # opt-in wiring. CLI flag OR declarative `.iam-jit.yaml` block
+        # (resolved above) flips each gate independently. Default OFF per
+        # [[creates-never-mutates]]; the AuditLogWriter in proxy.py
+        # constructs the matching chain_state / manifest_signer /
+        # retention_policy when the gate is True.
+        audit_chain_enabled=audit_chain_enabled,
+        audit_sign_manifests=audit_sign_manifests,
+        audit_manifest_interval_events=audit_manifest_interval_events,
+        audit_manifest_keypair_dir=audit_manifest_keypair_dir,
+        audit_retention_framework=audit_retention_framework,
         # #424 / §A63 — disk-pressure circuit-breaker config.
         # --stop-on-disk-critical is the documented convenience alias
         # for --disk-pressure-mode=pause-requests; when present it

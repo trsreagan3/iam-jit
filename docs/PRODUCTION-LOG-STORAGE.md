@@ -742,11 +742,287 @@ ibounce: running on 127.0.0.1:8767
 
 ---
 
-## 6. Validating the pipeline works
+## 6. Tamper-evident hash chain + signed manifests (#427 / §A66c)
+
+The JSONL audit log on its own is append-only by file mode but is not
+tamper-evident — an attacker with write access (or a buggy log
+processor) can edit, re-order, or delete rows and the file still
+parses cleanly. Compliance frameworks (SOC 2, HIPAA, PCI-DSS) and
+forensic investigations require **each row attests to the previous
+row** so tampering is detectable from the file alone.
+
+The hash chain is **opt-in** per `[[creates-never-mutates]]` — existing
+deployments don't gain new on-disk state silently. Operators enable it
+via a single CLI flag or one line in `.iam-jit.yaml`.
+
+### 6.1 What the chain stamps
+
+Each audit event gains an `unmapped.iam_jit.audit_chain` block:
+
+```json
+{
+  "unmapped": {
+    "iam_jit": {
+      "audit_chain": {
+        "seq": 42,
+        "prev_hash": "82d15900...cb5bbba79",
+        "hash": "3e4de5bfae...0a4ad34ec607"
+      }
+    }
+  }
+}
+```
+
+* `seq` is monotonic; **gaps reveal deletion**.
+* `prev_hash` chains to the previous row; **re-ordering breaks it**.
+* `hash` covers `(seq, prev_hash, the rest of the event)`; **any edit
+  invalidates it**.
+
+Chain state persists across restarts at
+`<log_dir>/audit-chain-state.json` (0o600). A crash mid-batch loses at
+most `save_every_n_events` (default 50) seq numbers — the chain itself
+is self-describing and `iam-jit audit verify` re-derives the head from
+the JSONL itself.
+
+### 6.2 Enable the chain (CLI flag)
+
+```bash
+ibounce run \
+    --audit-log-path ~/.iam-jit/audit/ibounce.jsonl \
+    --audit-chain
+```
+
+Equivalent declarative shape in `.iam-jit.yaml`:
+
+```yaml
+iam-jit:
+  enabled: true
+  audit_chain:
+    enabled: true
+```
+
+Either path opts in. CLI flag wins when both are set + disagree.
+
+### 6.3 Verify the chain on demand
+
+```bash
+# Default: verify the whole log_dir (active + rotated archives).
+iam-jit audit verify
+
+# Bound to a recent window for fast checks in CI.
+iam-jit audit verify --since 30d
+
+# Structured output for SIEM ingestion.
+iam-jit audit verify --json --since 7d
+```
+
+Exit `0` = chain verified clean. Exit `1` = at least one finding. Each
+finding carries `(source_file, line_number, seq, reason)` so a SOC
+analyst can pinpoint the broken row. Stable reason strings:
+
+| Reason | What it means |
+|---|---|
+| `hash mismatch — row was edited or chain payload changed` | The row's hash doesn't match a re-computation; the event was modified after stamping. |
+| `prev_hash mismatch — rows reordered or one deleted` | This row's `prev_hash` doesn't match the previous row's `hash`. |
+| `seq gap — row(s) deleted or inserted` | The seq isn't `previous + 1`. |
+| `missing audit_chain block — event was emitted before chain wiring or block was stripped` | The chain block is absent on a row — either pre-chain history (acceptable, surfaced explicitly) or post-stamp removal (tampering). |
+| `unparseable JSON line` | JSON didn't parse. |
+
+### 6.4 Sign manifests for tail-truncation defence (`--audit-sign-manifests`)
+
+The chain alone doesn't detect TRUNCATION of the chain's tail — an
+attacker can build a shorter chain that still verifies internally.
+Standard mitigation (Splunk / OSSEC / Wazuh pattern): periodic
+Ed25519-signed manifests shipped to an external party. Anyone holding
+the public key can prove what the chain head was at the manifest's
+moment.
+
+```bash
+ibounce run \
+    --audit-log-path ~/.iam-jit/audit/ibounce.jsonl \
+    --audit-chain \
+    --audit-sign-manifests \
+    --audit-manifest-interval-events 1000
+```
+
+Manifests land at `<log_dir>/manifests/manifest-{seq_start}-{seq_end}-{ts}.json`.
+The Ed25519 keypair lives at `~/.iam-jit/audit-keys/` (auto-generated
+on first run; `.priv` at `0o600`; `.pub` at `0o644` — ship the `.pub`
+to your verifier).
+
+Declarative equivalent:
+
+```yaml
+iam-jit:
+  enabled: true
+  audit_chain:
+    enabled: true
+  audit_sign_manifests:
+    enabled: true
+    interval_events: 1000
+    keypair_dir: ~/.iam-jit/audit-keys
+```
+
+`iam-jit audit verify` automatically checks every manifest's signature
+against the embedded public key. Pin the public key out-of-band for
+the strictest posture:
+
+```bash
+iam-jit audit verify --public-key "$KNOWN_GOOD_PUB_B64" --since 30d
+```
+
+`--audit-sign-manifests` REQUIRES `--audit-chain` — the bouncer
+refuses to start otherwise (a signed manifest over an unstamped log
+covers nothing). Per `[[ibounce-honest-positioning]]` we surface the
+misconfiguration loudly rather than silently emit empty manifests.
+
+### 6.5 Composability + zero billing dependency
+
+* Per `[[no-hosted-saas]]` iam-jit-the-company NEVER receives
+  manifests. Ship them wherever your security policy dictates: S3 with
+  object-lock, GitHub Actions secret, Splunk index, a Slack channel,
+  a cron job that emails them to your auditor's address.
+* Manifests are themselves OCSF-shaped events with
+  `activity_name=audit_chain_checkpoint`. They ride the same webhook
+  channel as decision events when configured.
+* The chain composes with every destination in §1-§4 above — the
+  hash block is just a field on the same JSONL row, so Splunk /
+  Datadog / Sentinel / Security Lake / Vector all see it transparently.
+
+---
+
+## 7. Compliance retention tiering (#428 / §A67)
+
+Single-window retention (one `max-age` knob) doesn't satisfy
+PCI-DSS / HIPAA / SOX / GDPR — every framework demands multi-tier
+retention (hot / warm / cold) with explicit purge semantics. The
+retention layer is **opt-in** alongside the hash chain.
+
+### 7.1 Pick a framework
+
+```bash
+ibounce run \
+    --audit-log-path ~/.iam-jit/audit/ibounce.jsonl \
+    --audit-retention-framework hipaa
+```
+
+Declarative equivalent:
+
+```yaml
+iam-jit:
+  enabled: true
+  retention:
+    compliance: hipaa     # pci | hipaa | sox | gdpr | custom
+    # Optional per-field overrides; unset = framework default.
+    # hot_days: 30
+    # warm_days: 210
+    # cold_days: 2190
+    # purge_after_days: 2190
+    # gdpr_pii_purge: false
+```
+
+### 7.2 Framework defaults
+
+| Framework | hot_days | warm_days | cold_days | purge_after_days | gdpr_pii_purge | Notes |
+|---|---|---|---|---|---|---|
+| `pci` | 30 | 120 | 365 | (never) | false | PCI-DSS minimum is 1 year; we keep indefinitely past cold by default. |
+| `hipaa` | 30 | 210 | 2190 | 2190 | false | HIPAA 6-year retention; explicit purge after that window to bound liability. |
+| `sox` | 30 | 395 | 2555 | (never) | false | SOX 7-year retention; SOX has no upper bound so we default to "keep" past cold. |
+| `gdpr` | 30 | 120 | 365 | (never) | **true** | The audit decision itself is retained for accountability; PII fields are scrubbed after the hot window per the right-to-be-forgotten. |
+| `custom` | 30 | 120 | 365 | (never) | false | Skip framework defaults; operator MUST override every field via the `retention:` block. |
+
+All days are **cumulative age thresholds** (not phase durations): "after
+Y days in the log, the event has aged into tier X."
+
+### 7.3 What the framework actually does
+
+* **Write-time PII redaction** (`gdpr_pii_purge: true` path): credential-
+  shaped patterns (AWS access keys, bearer tokens, JWTs) are replaced
+  with `[REDACTED:<kind>]` placeholders BEFORE bytes hit disk.
+* **Offline tier transitions**: `iam-jit audit retention apply` walks
+  rotated archives + renames them across `hot-` / `warm-` / `cold-`
+  prefixes per the framework's age thresholds. `[[creates-never-mutates]]`:
+  transitions are RENAMES, never destructive.
+* **Two-key purge**: an archive is only purged when (a)
+  `purge_after_days` is set AND (b) the file is older than that
+  threshold. The active log is **never** purged by this path.
+
+### 7.4 PII redaction — what's redacted by default
+
+Per `[[mitm-beta-pii-pci-concern]]` the default redaction strips
+**CREDENTIAL-SHAPED** patterns only:
+
+* AWS access key id (AKIA/ASIA prefix + 16 chars)
+* AWS secret access key (40-char base64-ish)
+* Bearer tokens (`Bearer <token>` in Authorization-header strings)
+* JWT-shaped three-part dot-separated tokens
+* Email addresses (basic PII)
+
+**PHI/PCI/PII-specific redaction stays opt-in** via the `custom`
+framework + `redact_patterns` extension. Operators in regulated
+workloads MUST configure their own redaction; we don't claim to redact
+everything by default. Sample custom block:
+
+```yaml
+iam-jit:
+  retention:
+    compliance: custom
+    hot_days: 30
+    warm_days: 90
+    cold_days: 2555
+    purge_after_days: 2555
+    gdpr_pii_purge: true
+    # redact_patterns: extends DEFAULT_PII_PATTERNS — see
+    # src/iam_jit/bouncer/audit_export/retention.py:DEFAULT_PII_PATTERNS
+    # for the canonical pattern list. Custom patterns can be added
+    # programmatically; the YAML surface for extending them ships in
+    # v1.1 (operators today edit retention.py for org-specific patterns
+    # or stack a downstream redactor against the JSONL stream).
+```
+
+### 7.5 Validate retention is wired
+
+The opt-in is reflected in the bouncer's status surface. Same path the
+MCP `bouncer_audit_export_status` + `/healthz` use:
+
+```bash
+curl -s http://127.0.0.1:8767/healthz | jq .audit_export.log.retention
+```
+
+```json
+{
+  "configured": true,
+  "compliance": "hipaa",
+  "hot_days": 30,
+  "warm_days": 210,
+  "cold_days": 2190,
+  "purge_after_days": 2190,
+  "gdpr_pii_purge": false
+}
+```
+
+`configured: false` = the retention policy did NOT wire (typo in flag
+or YAML). Per `[[ibounce-honest-positioning]]` invalid framework names
+fail-loud at startup — the proxy refuses to start with a clear error.
+
+### 7.6 Composability with §6 (chain) + §5 (disk pressure)
+
+* Hash-chain + retention compose cleanly: the chain block is part of
+  the row that retention transitions/purges.
+* Disk-pressure circuit-breaker (§5) consults retention tiers when
+  picking drop candidates in `rotate-aggressively` /
+  `archive-and-purge` modes — the oldest cold-tier files are the
+  natural drop candidates.
+* Per `[[self-host-zero-billing-dependency]]` retention runs purely
+  locally; iam-jit-the-company is never on the path.
+
+---
+
+## 8. Validating the pipeline works
 
 Sanity check after wiring any of the above. Three layers:
 
-### 6.1 Bouncer-side: events being generated
+### 8.1 Bouncer-side: events being generated
 
 ```bash
 # Live tail confirms events are being captured locally.
@@ -759,7 +1035,7 @@ gbounce audit tail --follow --limit 10
 If this returns nothing, the bouncer isn't intercepting traffic — fix
 that before debugging the export channel.
 
-### 6.2 Export-channel health
+### 8.2 Export-channel health
 
 Each bouncer exposes `/healthz` with an `audit_export` block reporting
 the last successful flush + any consecutive failure count:
@@ -787,7 +1063,7 @@ problem to the destination. Per `[[audit-export-failure-visibility]]`
 the 30-second heartbeat-gap rule fires in the SIEM when the channel
 silences — you'll get an alert from the SIEM side too.
 
-### 6.3 SIEM-side: events arriving
+### 8.3 SIEM-side: events arriving
 
 **Splunk SPL:**
 
@@ -828,7 +1104,7 @@ auth / URL / preset misconfigured. Check `/healthz.audit_export.last_error`.
 
 ---
 
-## 7. What this doc does NOT do
+## 9. What this doc does NOT do
 
 - **No "the recommended SIEM is X."** Pick the SIEM your security team
   already operates. We don't have a horse in that race.
