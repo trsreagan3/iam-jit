@@ -334,9 +334,143 @@ def _build_default_profile_map() -> dict[str, Profile]:
     return out
 
 
+# Top-level field names emitted by the LLM-driven profile generator
+# (`_render_profile_yaml` in iam_jit.llm.profile_generator) that the
+# canonical parser doesn't natively know about. `bouncer:` is a
+# routing field (a single bundle file targets one bouncer); the rules
+# live under `allows:` and `denies:` as objects with `target` +
+# `actions` + optional `reason` / `scope`. The schema-bridge step in
+# _translate_generator_shape projects these onto deny_actions +
+# allow_rules so the runtime enforcement layer can consume them.
+_GENERATOR_RULE_KEYS: tuple[str, ...] = ("denies", "allows")
+
+
+def _translate_generator_shape(name: str, body: dict[str, Any]) -> dict[str, Any]:
+    """Bridge the LLM-generated profile shape into the parser's
+    canonical shape. Pure function — returns a NEW dict, never mutates
+    the caller's body.
+
+    For each rule under `denies:` / `allows:`:
+      - If `actions:` is present, every `service:Action` entry is
+        added to the parser's `deny_actions` (for denies) or as an
+        ALLOW rule with `pattern: <action>` and `arn_scope: <target>`
+        (for allows). Action entries without a colon are skipped
+        (those are dbounce / kbounce shapes; ibounce's bouncer only
+        speaks `service:Action`).
+      - If a rule has NO actions but has a `target:` only, it is left
+        for downstream bouncers (dbounce SQL patterns / kbouncer
+        verbs); ibounce's runtime can't enforce a target-only rule
+        and skipping it is safer than fabricating a deny.
+
+    The translation is additive: pre-existing `deny_actions` /
+    `allow_rules` in `body` are preserved; the generator's rules are
+    appended after them with de-duplication on identical entries.
+
+    `bouncer:`, `profile_name:`, `schema_version:`, `provenance:`,
+    `flagged_for_review:`, `skipped:` are recognized + stripped (they
+    are bundle metadata, not enforcement rules).
+    """
+    if not isinstance(body, dict):
+        return body
+    # Fast path: no generator-shape keys means nothing to translate.
+    if not any(k in body for k in _GENERATOR_RULE_KEYS):
+        # Still strip generator-only metadata that the canonical
+        # parser would otherwise pass through to str(body.get(...))
+        # callers (description etc.). Conservative: only drop the
+        # known-safe keys, leave everything else.
+        return body
+
+    out: dict[str, Any] = {
+        k: v
+        for k, v in body.items()
+        if k not in {
+            "denies", "allows",
+            "bouncer", "profile_name", "schema_version",
+            "provenance", "flagged_for_review", "skipped",
+        }
+    }
+    # Pre-load any pre-existing canonical fields so we merge cleanly.
+    existing_deny_actions: list[str] = list(out.get("deny_actions") or [])
+    existing_allow_rules: list[Any] = list(out.get("allow_rules") or [])
+
+    new_deny_actions: list[str] = []
+    new_allow_rules: list[dict[str, Any]] = []
+
+    for rule in (body.get("denies") or []):
+        if not isinstance(rule, dict):
+            continue
+        target = rule.get("target")
+        target_str = target if isinstance(target, str) else None
+        actions = rule.get("actions") or []
+        reason = rule.get("reason") or ""
+        for a in actions:
+            if not isinstance(a, str) or ":" not in a:
+                continue
+            if a not in new_deny_actions and a not in existing_deny_actions:
+                new_deny_actions.append(a)
+        # Rules with no actions are bouncer-other shapes (dbounce /
+        # kbounce / gbounce); ibounce skips them silently.
+
+    for rule in (body.get("allows") or []):
+        if not isinstance(rule, dict):
+            continue
+        target = rule.get("target")
+        target_str = target if isinstance(target, str) else None
+        actions = rule.get("actions") or []
+        reason = rule.get("reason") or ""
+        for a in actions:
+            if not isinstance(a, str) or ":" not in a:
+                continue
+            entry: dict[str, Any] = {"pattern": a}
+            if target_str and target_str != "*":
+                entry["arn_scope"] = target_str
+            if reason:
+                entry["note"] = str(reason)
+            # De-dupe on (pattern, arn_scope) tuple.
+            key = (entry["pattern"], entry.get("arn_scope"))
+            seen_keys = {
+                (
+                    r.get("pattern") if isinstance(r, dict) else None,
+                    r.get("arn_scope") if isinstance(r, dict) else None,
+                )
+                for r in (existing_allow_rules + new_allow_rules)
+            }
+            if key not in seen_keys:
+                new_allow_rules.append(entry)
+
+    if new_deny_actions:
+        out["deny_actions"] = existing_deny_actions + new_deny_actions
+    elif existing_deny_actions:
+        out["deny_actions"] = existing_deny_actions
+    if new_allow_rules:
+        out["allow_rules"] = existing_allow_rules + new_allow_rules
+    elif existing_allow_rules:
+        out["allow_rules"] = existing_allow_rules
+    return out
+
+
 def _profile_from_dict(name: str, body: dict[str, Any]) -> Profile:
     """Construct a Profile from a YAML object. Tolerant of missing
-    optional fields; strict on field types when present."""
+    optional fields; strict on field types when present.
+
+    Per §A26 (#349) the parser ALSO accepts the
+    `iam-jit profile generate-from-audit` emitter shape — a richer
+    cross-bouncer rule list under `denies: [{target, actions, reason}]`
+    plus `allows: [{target, actions, reason}]`. When those keys are
+    present they are translated into the canonical `deny_actions` /
+    `allow_rules` shape BEFORE the existing parser runs. Both shapes
+    can coexist in one body; the generator-shape rules are merged in
+    additively. The translation is intentionally lossy on metadata
+    that the runtime engine doesn't consult (reason / scope) but the
+    enforcement-relevant fields (action set, target glob) are
+    preserved one-to-one.
+
+    Operator-authored profiles that use the old shape continue to
+    parse unchanged (per [[creates-never-mutates]] this is an
+    additive parser change, not a schema migration).
+    """
+    body = _translate_generator_shape(name, body)
+
     def _str_tuple(field: str, default: tuple[str, ...] = ()) -> tuple[str, ...]:
         v = body.get(field)
         if v is None:

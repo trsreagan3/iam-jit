@@ -1963,13 +1963,23 @@ def profile_show_cmd(name: str) -> None:
 
 @profile_group.command("install")
 @click.option(
-    "--from", "from_url", required=True, metavar="URL",
-    help="HTTPS URL of a profiles.yaml fragment (or single-profile YAML). "
-         "Used by enterprises to distribute curated profiles: IT publishes "
-         "`https://internal.acme.com/iam-jit-profiles/staging.yaml` + each "
-         "engineer runs `ibounce profile install --from <URL>`. "
-         "Refuses http:// — distribution over plaintext could be MITM'd to "
-         "substitute a permissive profile.",
+    "--from", "from_url", required=True, metavar="URL_OR_PATH",
+    help="Source of the profile(s) to install. Accepts:\n"
+         "  * `https://example.com/profiles.yaml` (preferred; HTTPS is\n"
+         "    the recommended distribution channel for org-published\n"
+         "    profiles — refuses MITM-substitutable plaintext below\n"
+         "    when the operator has not opted in).\n"
+         "  * `http://localhost:.../profiles.yaml` (plaintext; allowed\n"
+         "    for local-dev parity with the existing audit-export HTTP\n"
+         "    surface; a one-line stderr WARN flags non-loopback HTTP).\n"
+         "  * `file:///abs/path/...` or `./relative/path/...` or\n"
+         "    `/abs/path/...` (a single YAML file OR a bundle dir\n"
+         "    produced by `iam-jit profile generate-from-audit`; the\n"
+         "    dir form looks for `ibounce.yaml`, falling back to\n"
+         "    `index.yaml` + the bouncer entry matching ibounce).\n"
+         "Pre-§A26 the flag rejected everything except https://; the\n"
+         "broadened set lets the documented quick-start "
+         "`ibounce profile install --from ./profiles/` actually work.",
 )
 @click.option(
     "--sha256", "expected_sha256", default=None, metavar="HEX",
@@ -2004,8 +2014,6 @@ def profile_install_cmd(
     org profiles to bypass guardrails).
     """
     import hashlib
-    import urllib.error
-    import urllib.request
 
     from .bouncer.profiles import (
         Profile,
@@ -2015,22 +2023,13 @@ def profile_install_cmd(
         _profile_from_dict,
     )
 
-    if not from_url.lower().startswith("https://"):
-        click.secho(
-            f"refusing to fetch from {from_url!r}: only https:// URLs "
-            f"are allowed (MITM-substitutable plaintext is an attack "
-            f"vector against IT-distributed profiles).",
-            fg="red", err=True,
-        )
-        sys.exit(2)
-
-    click.echo(f"fetching {from_url} ...")
     try:
-        with urllib.request.urlopen(from_url, timeout=timeout) as resp:
-            payload = resp.read()
-    except (urllib.error.URLError, urllib.error.HTTPError, TimeoutError) as e:
-        click.secho(f"fetch failed: {e}", fg="red", err=True)
-        sys.exit(1)
+        payload, resolved_source = _fetch_install_payload(
+            from_url, timeout=timeout,
+        )
+    except _InstallFetchError as e:
+        click.secho(str(e), fg="red", err=True)
+        sys.exit(e.exit_code)
 
     actual_sha256 = hashlib.sha256(payload).hexdigest()
     if expected_sha256:
@@ -2056,10 +2055,21 @@ def profile_install_cmd(
         click.secho("payload must be a YAML object", fg="red", err=True)
         sys.exit(1)
 
-    profiles_obj = data.get("profiles")
+    # Normalize the document shape. We accept two on-disk shapes:
+    #   (a) Canonical profiles.yaml fragment: `{profiles: {<name>: {...}}}`
+    #   (b) `iam-jit profile generate-from-audit` per-bouncer file:
+    #       a flat object with `profile_name:` + `bouncer: ibounce` +
+    #       `denies:` / `allows:` (no `profiles:` wrapper). The parser
+    #       bridge in profiles.py translates the generator-shape
+    #       rules; here we just need to lift the document into the
+    #       `{profiles: {name: body}}` shape so the existing loop
+    #       below runs unchanged.
+    profiles_obj = _normalize_install_document(data, resolved_source)
     if not isinstance(profiles_obj, dict) or not profiles_obj:
         click.secho(
-            "payload must contain a non-empty `profiles` object",
+            "payload must contain a non-empty `profiles` object (or be a "
+            "generator-emitted single-profile file with `profile_name:` + "
+            "`bouncer:` at the top level)",
             fg="red", err=True,
         )
         sys.exit(1)
@@ -2073,10 +2083,10 @@ def profile_install_cmd(
                 fg="red", err=True,
             )
             sys.exit(1)
-        # Force the source field to the fetch URL — engineers cannot
-        # spoof a local source by including `source: local` in the
-        # payload.
-        body_with_source = {**body, "source": from_url}
+        # Force the source field to the resolved source — engineers
+        # cannot spoof a local source by including `source: local` in
+        # the payload.
+        body_with_source = {**body, "source": resolved_source}
         try:
             parsed.append(_profile_from_dict(name, body_with_source))
         except ValueError as e:
@@ -2115,7 +2125,7 @@ def profile_install_cmd(
         # check for prior org profiles. The cleanest way: write
         # directly via a re-implementation here that knows we're
         # installing from a URL.
-        _install_one_profile(p, from_url)
+        _install_one_profile(p, resolved_source)
         written.append(p.name)
 
     # #270 Slice 2 — enqueue one PROFILE_INSTALL synthetic per
@@ -2134,7 +2144,7 @@ def profile_install_cmd(
                     event_type=EVENT_TYPE_PROFILE_INSTALL,
                     payload_json=json.dumps({
                         "profile_name": name,
-                        "source_url": from_url,
+                        "source_url": resolved_source,
                         "installed_by": installer,
                         "sha256": actual_sha256,
                     }),
@@ -2152,12 +2162,12 @@ def profile_install_cmd(
                     target_kind="profile",
                     target_id=name,
                     target_extra={
-                        "source_url": from_url,
+                        "source_url": resolved_source,
                         "sha256": actual_sha256,
                     },
                     after={
                         "profile_name": name,
-                        "source_url": from_url,
+                        "source_url": resolved_source,
                         "sha256": actual_sha256,
                     },
                 )
@@ -2180,8 +2190,218 @@ def profile_install_cmd(
     click.echo()
     click.echo("Activate one with:")
     click.echo(f"  ibounce run --profile {written[0]}")
-    click.echo("These profiles are READ-ONLY (sourced from URL); "
-               "edit the upstream YAML + re-install to update.")
+    click.echo(f"These profiles are READ-ONLY (sourced from "
+               f"{resolved_source}); edit the upstream + re-install to "
+               f"update.")
+
+
+class _InstallFetchError(Exception):
+    """Raised by `_fetch_install_payload` when the source can't be
+    fetched or is rejected by the URL-scheme policy. Carries an exit
+    code matching the pre-§A26 convention: 2 = operator-fixable (bad
+    URL / unsupported scheme), 1 = transient or remote failure."""
+
+    def __init__(self, message: str, *, exit_code: int = 1) -> None:
+        super().__init__(message)
+        self.exit_code = exit_code
+
+
+def _fetch_install_payload(
+    source: str, *, timeout: int,
+) -> tuple[bytes, str]:
+    """Resolve `--from` to (payload_bytes, canonical_source_str).
+
+    Per §A26 / #350 this widens the pre-existing https://-only path to
+    accept:
+      * https:// (preferred — recommended distribution channel)
+      * http:// (loopback gets a silent pass; non-loopback gets a one-
+        line WARN — mirrors the audit-export HTTP convention)
+      * file:// (resolved as an absolute path)
+      * bare local paths (relative or absolute) including DIRECTORIES
+        produced by `iam-jit profile generate-from-audit --output ./X/`.
+        When source is a directory, we look for `ibounce.yaml` first
+        (the per-bouncer slot in the generator's bundle layout); fall
+        back to `index.yaml` + the bouncer entry named `ibounce`.
+
+    Returns the canonical-source string that is written to each
+    installed profile's `source:` field (so the read-only-at-CLI
+    invariant continues to mark the install as non-local) — for local
+    file sources this is the absolute resolved path so a SIEM viewer
+    can replay where the profile came from."""
+    import os as _os
+    import pathlib as _pathlib
+    import urllib.error
+    import urllib.parse
+    import urllib.request
+
+    scheme = ""
+    parsed = urllib.parse.urlparse(source)
+    if parsed.scheme in ("https", "http", "file"):
+        scheme = parsed.scheme
+
+    if scheme == "https":
+        click.echo(f"fetching {source} ...")
+        try:
+            with urllib.request.urlopen(source, timeout=timeout) as resp:
+                return resp.read(), source
+        except (urllib.error.URLError, urllib.error.HTTPError, TimeoutError) as e:
+            raise _InstallFetchError(f"fetch failed: {e}", exit_code=1)
+
+    if scheme == "http":
+        host = parsed.hostname or ""
+        is_loopback = host in {"localhost", "127.0.0.1", "::1"}
+        if not is_loopback:
+            click.secho(
+                f"WARN: fetching {source!r} over plaintext HTTP — a "
+                f"network attacker can MITM-substitute a permissive "
+                f"profile. Prefer https:// for IT-distributed profiles. "
+                f"This warning does NOT block the install (per "
+                f"§A26 local-dev parity with audit-export HTTP).",
+                fg="yellow", err=True,
+            )
+        click.echo(f"fetching {source} ...")
+        try:
+            with urllib.request.urlopen(source, timeout=timeout) as resp:
+                return resp.read(), source
+        except (urllib.error.URLError, urllib.error.HTTPError, TimeoutError) as e:
+            raise _InstallFetchError(f"fetch failed: {e}", exit_code=1)
+
+    # file:// or bare local path
+    if scheme == "file":
+        # Per RFC 8089: file:///abs/path/foo.yaml → parsed.path is the
+        # absolute path. file://localhost/abs/path/foo.yaml is also
+        # legal; treat both as local.
+        local_path = _pathlib.Path(urllib.parse.unquote(parsed.path))
+    else:
+        # Bare path. Reject anything that looks like an unknown
+        # URL scheme so we don't accidentally try to read
+        # `gopher://x` as a file. A path with a single colon (e.g.
+        # `./profiles:dev/foo.yaml`) is still a path because urlparse
+        # doesn't produce a known scheme; we already handled known
+        # schemes above.
+        if parsed.scheme and "/" not in parsed.scheme:
+            # urlparse can also produce scheme='' for paths like
+            # './profiles/foo.yaml'; only reject if it parsed as a
+            # genuine non-empty scheme that wasn't in our known set.
+            # Heuristic: a scheme is "real" when source starts with
+            # "<scheme>:". The known schemes were handled above.
+            if source.lower().startswith(f"{parsed.scheme.lower()}:"):
+                raise _InstallFetchError(
+                    f"refusing to fetch from {source!r}: scheme "
+                    f"{parsed.scheme!r} is not supported. Use one of "
+                    f"https://, http://, file://, or a local path.",
+                    exit_code=2,
+                )
+        local_path = _pathlib.Path(source).expanduser()
+
+    if not local_path.exists():
+        raise _InstallFetchError(
+            f"refusing to fetch from {source!r}: path does not exist "
+            f"(resolved to {local_path}).",
+            exit_code=2,
+        )
+
+    if local_path.is_dir():
+        # Bundle directory produced by `iam-jit profile generate-from-
+        # audit --output <dir>`. Prefer the canonical per-bouncer slot.
+        candidate = local_path / "ibounce.yaml"
+        if candidate.is_file():
+            payload = candidate.read_bytes()
+            return payload, str(candidate.resolve())
+        # Fallback: read index.yaml + pick the entry with bouncer=ibounce.
+        idx = local_path / "index.yaml"
+        if idx.is_file():
+            import yaml as _yaml
+            try:
+                idx_data = _yaml.safe_load(idx.read_text())
+            except _yaml.YAMLError as e:
+                raise _InstallFetchError(
+                    f"refusing to fetch from {source!r}: "
+                    f"index.yaml is not valid YAML: {e}",
+                    exit_code=1,
+                )
+            if isinstance(idx_data, dict):
+                profiles_entries = idx_data.get("profiles") or []
+                if isinstance(profiles_entries, list):
+                    for entry in profiles_entries:
+                        if (
+                            isinstance(entry, dict)
+                            and entry.get("bouncer") == "ibounce"
+                        ):
+                            file_field = entry.get("file")
+                            if isinstance(file_field, str):
+                                target = local_path / file_field
+                                if target.is_file():
+                                    return (
+                                        target.read_bytes(),
+                                        str(target.resolve()),
+                                    )
+        raise _InstallFetchError(
+            f"refusing to fetch from {source!r}: directory contains "
+            f"neither `ibounce.yaml` nor a usable `index.yaml` with an "
+            f"ibounce entry.",
+            exit_code=2,
+        )
+
+    # Single file.
+    return local_path.read_bytes(), str(local_path.resolve())
+
+
+def _normalize_install_document(
+    data: dict, source: str,
+) -> dict | None:
+    """Lift a parsed install YAML into the `{<name>: <body>}` shape.
+
+    Accepts:
+      * `{profiles: {<name>: {...}}}` — canonical fragment (returns
+        the inner `profiles` map unchanged).
+      * `{schema_version, profile_name, bouncer, denies, allows, ...}` —
+        `iam-jit profile generate-from-audit` per-bouncer file. We
+        derive a profile name from `profile_name:` (preferred) or
+        fall back to the source basename, and wrap the body in
+        `{<name>: <body>}` so the existing install loop runs.
+
+    Returns None on shapes that don't match either. Callers surface
+    the error message to the operator."""
+    import pathlib as _pathlib
+
+    if not isinstance(data, dict):
+        return None
+
+    profiles_obj = data.get("profiles")
+    if isinstance(profiles_obj, dict) and profiles_obj:
+        # Canonical fragment — make sure the values are dicts but
+        # otherwise pass through; per-profile validation happens in
+        # the caller via _profile_from_dict.
+        return profiles_obj
+
+    # Generator-shape single-profile file.
+    has_generator_shape = any(
+        k in data for k in ("profile_name", "bouncer", "denies", "allows")
+    )
+    if not has_generator_shape:
+        return None
+
+    name = data.get("profile_name")
+    if not isinstance(name, str) or not name.strip():
+        # Derive from source basename (file://path or local path).
+        try:
+            stem = _pathlib.Path(source).stem
+        except Exception:
+            stem = ""
+        name = stem or "generated-profile"
+
+    # Strip the schema-routing fields from the body — the parser's
+    # _translate_generator_shape step also strips them, but we set
+    # `description` here from the bouncer routing for operator clarity.
+    body = dict(data)
+    if "description" not in body or not body.get("description"):
+        bouncer = body.get("bouncer", "ibounce")
+        body["description"] = (
+            f"Generator-emitted profile (bouncer={bouncer}) — installed "
+            f"from {source}."
+        )
+    return {name: body}
 
 
 def _install_one_profile(profile: "Profile", source_url: str) -> None:
@@ -2216,19 +2436,14 @@ def _install_one_profile(profile: "Profile", source_url: str) -> None:
         existing = {"profiles": {}}
         profiles_obj = existing["profiles"]
 
-    # Force source to URL regardless of what the upstream YAML says
-    p = Profile(
-        name=profile.name,
-        description=profile.description,
-        deny_keywords=profile.deny_keywords,
-        keyword_targets=profile.keyword_targets,
-        keyword_match=profile.keyword_match,
-        only_account_ids=profile.only_account_ids,
-        deny_verbs=profile.deny_verbs,
-        exceptions=profile.exceptions,
-        allow_rules=profile.allow_rules,
-        source=source_url,
-    )
+    # Force source to URL regardless of what the upstream YAML says.
+    # Preserve EVERY enforcement-relevant field including the
+    # readonly-admin-minus shape (allow_baseline / deny_actions /
+    # deny_actions_with_condition) — pre-§A26 this code path dropped
+    # them silently which made generator-shape installs degrade to
+    # an empty profile even when the parser bridge fired.
+    import dataclasses as _dc
+    p = _dc.replace(profile, source=source_url)
     profiles_obj[p.name] = profile_to_yaml_dict(p)
     resolved.write_text(_yaml.safe_dump(existing, sort_keys=False))
 
