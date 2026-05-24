@@ -18,6 +18,15 @@ GO_ARCH_LINUX="$(uname -m | sed -e 's/aarch64/arm64/' -e 's/x86_64/amd64/')"
 container_spawn() {
   local scenario_id="$1"
   local name="iam-jit-uat-${scenario_id}-$$"
+  # Notes on memory:
+  #   * gbounce pulls aws-sdk-go-v2/service/s3 which needs ~3GB to
+  #     compile from source. Docker Desktop / colima defaults to 2GB
+  #     and OOMs.
+  #   * As a workaround, the harness pre-compiles gbounce on the host
+  #     and copies the binary into the container (see
+  #     container_install_gbounce_via_host_binary). The in-container
+  #     `go install` path is preserved (and exercised by L3 update)
+  #     for operators with sufficient memory.
   docker run --rm -d \
     --name "${name}" \
     -v "${IAM_JIT_CANARY_IAM_ROLES_REPO}":/src/iam-roles:ro \

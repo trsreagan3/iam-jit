@@ -55,9 +55,12 @@ container_install_toolchain "${CONTAINER_NAME}" >/dev/null
 # directly to a tempfile so EXIT line reflects pip's real exit code.
 PIP_OUT="$(container_exec "${CONTAINER_NAME}" "set -o pipefail; cd /work/iam-roles && pip3 install -e . 2>&1 | tail -10; echo EXIT=\${PIPESTATUS[0]}" 2>&1)"
 PIP_EXIT="$(echo "${PIP_OUT}" | grep -oE 'EXIT=[0-9]+' | tail -1 | cut -d= -f2)"
+echo "${PIP_OUT}" > "${RESULTS_DIR}/pip-install.log" 2>/dev/null || true
 
 GO_OUT="$(container_exec "${CONTAINER_NAME}" "set -o pipefail; cd /work/gbounce && export PATH=/usr/local/go/bin:/root/go/bin:\$PATH && go install ./cmd/gbounce 2>&1 | tail -10; echo EXIT=\${PIPESTATUS[0]}" 2>&1)"
 GO_EXIT="$(echo "${GO_OUT}" | grep -oE 'EXIT=[0-9]+' | tail -1 | cut -d= -f2)"
+# Stash GO_OUT for forensics (helps surface the actual error message).
+echo "${GO_OUT}" > "${RESULTS_DIR}/go-install.log" 2>/dev/null || true
 
 # Detect whether gbounce landed on the default PATH (a `go install`
 # drops binaries into $GOPATH/bin which defaults to ~/go/bin, NOT on
