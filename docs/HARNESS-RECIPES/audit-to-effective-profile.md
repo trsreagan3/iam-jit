@@ -1,4 +1,4 @@
-# Audit → effective profile — the lean-permissive loop
+# Audit → effective profile — the lean-permissive loop (with progressive tightening)
 
 **For the operator's agent.** Walks the full path from "discovery
 period is complete" to "enforce mode is on without breaking the
@@ -28,7 +28,11 @@ the profile is the local fast-iteration layer on top.
 * (Optional) operator-set friction budget in `.iam-jit.yaml` (default
   is 3 legit-denies/day, 10/week).
 
-## The 13-step loop
+## The 15-step loop
+
+Steps 1–13 cover initial profile generation + post-install monitoring.
+Steps 14–15 add the periodic progressive-tightening + suspect-pattern
+review cycle per PROFILE-GENERATION-DESIGN.md §10 + §11.
 
 ### Step 1 — Confirm the discovery period is complete
 
@@ -242,6 +246,92 @@ bounce_grade_profile_for_workflow
 Returns `PROFILE_MEANINGFUL` / `OVER_PERMISSIVE` / `OVER_TIGHT` /
 `NEGATIVE_VALUE` / `SCHEMA_INVALID` + rationale + recommended_action.
 
+### Step 14 — Periodic progressive-tightening review
+
+Per PROFILE-GENERATION-DESIGN.md §10 + `[[ambient-mode-progressive-tightening]]`:
+profiles evolve through phases as more history accumulates. Suggested
+cadence: weekly (Phase 1) → monthly (Phase 2+) once stable.
+
+```
+iam_jit_consider_tightening
+  current_profile: <currently installed YAML>
+  bouncer: ibounce
+  audit_window: {since: 14d}
+  operator_signals: {
+    workflow_declarations: [...],
+    role_declaration: "backend-dev",     # or null
+    always_allow_flags: [...]
+  }
+  friction_budget: <operator's config>
+```
+
+Returns either a `TighteningProposal` (with both `narrowing_proposals[]`
+AND `suspect_patterns[]` — see step 15) or `NoChange` (with the
+`gates_failed[]` list).
+
+**Decision tree for `narrowing_proposals[]`** (the §10 dimension):
+
+* `TighteningProposal.proposed_phase != current_phase` → phase
+  transition recommended. Surface to operator: "Profile has been stable
+  in {phase} for {N} days; ready to advance to {proposed_phase}.
+  Proposed narrowings: {list}. Approve?"
+* `TighteningProposal.proposed_phase == current_phase` AND
+  `narrowing_proposals` non-empty → in-phase tightening. Surface
+  proposed rules; operator approves per-rule.
+* `NoChange` with `gates_failed` listed → no action. Surface the
+  reason ("pattern stability gate failed — 14 new action shapes in last
+  7d, profile would cause friction if narrowed now") so operator
+  understands why tightening is paused.
+
+**Operator approval is required** for every narrowing per
+`[[safety-mode-lean-permissive]]` watch-out #3. `auto_install: true`
+on `iam_jit_consider_tightening` is OPT-IN only and is intentionally
+not the default. The phase-transition audit log is operator-visible
+per `[[ibounce-honest-positioning]]`.
+
+**Honest framing**: per `[[ambient-mode-progressive-tightening]]`
+tightening is OPTIONAL — for highly variable operators (sysadmin role,
+exploration work) `NoChange` indefinitely is the correct response, not
+a failure mode.
+
+### Step 15 — Suspect-pattern triage (when present)
+
+Per PROFILE-GENERATION-DESIGN.md §11 + `[[progressive-tightening-as-injection-detector]]`:
+the same `iam_jit_consider_tightening` call surfaces a parallel
+`suspect_patterns[]` block alongside narrowing proposals. Triage as
+soon as the call returns — DON'T wait for the next tightening cycle.
+
+For each `SuspectPattern` in the response, route by
+`recommended_action`:
+
+| `recommended_action` | Agent action |
+|---|---|
+| `INVESTIGATE_NOW` | Surface to operator immediately. Provide `shape`, `confidence`, the `events[]` that triggered, `mitre_atlas_tag`, and rationale. Frame as "your bouncer noticed X" per `[[ambient-value-prop-and-friction-framing]]` — not as an error or alert. Operator decides if real or workflow change. |
+| `BLOCK_PROACTIVELY` | Fires ONLY on `KNOWN_ADVERSARIAL_PATTERNS` matches; the safety floor (PROFILE-GENERATION-DESIGN.md §2.3) already blocks these. Surface as confirmation: "your bouncer blocked X (known adversarial pattern); evidence recorded." |
+| `LOG_AND_OBSERVE` | Log to the audit stream. Revisit next tightening cycle. No operator interruption — these are observations, not events. |
+
+**Honest framing** (per PROFILE-GENERATION-DESIGN.md §11.5 +
+`[[ibounce-honest-positioning]]`): the agent MUST frame these as
+SUSPECT activity, not CONFIRMED injection. Specifically:
+
+* Use language like "this looks unusual; investigate" — NOT
+  "prompt injection detected"
+* `suspect_patterns` surfaces SIGNALS; only operator judgment can
+  distinguish "workflow change" from "compromised agent"
+* High-variability operators will see many false positives;
+  that's expected — the noise floor stays high for them
+
+**Don't**:
+
+* Don't auto-block on a single `suspect_patterns` hit (except the
+  `KNOWN_ADVERSARIAL_PATTERNS` safety floor, which already blocks
+  pre-step-14)
+* Don't conflate detection (surfaces signal) with diagnosis (confirms
+  intent) — the operator's agent is the diagnostician
+* Don't claim "prompt-injection-PROOF" — claim "prompt-injection-AWARE
+  through pattern-drift signals" per
+  `[[prompt-injection-protection-positioning]]`
+
 ## Decision-rubric cheat sheet
 
 | Situation | Action |
@@ -258,6 +348,12 @@ Returns `PROFILE_MEANINGFUL` / `OVER_PERMISSIVE` / `OVER_TIGHT` /
 | Weekly grade `NEGATIVE_VALUE` | Surface as launch-blocker to operator; revisit profile from scratch. |
 | Weekly grade `SCHEMA_INVALID` | Bug — file via `iam-jit diagnostics bundle`. |
 | Weekly grade `PROFILE_MEANINGFUL` | No action. |
+| `iam_jit_consider_tightening` returns `TighteningProposal.proposed_phase != current_phase` | Surface phase transition proposal to operator; wait for approval. |
+| `iam_jit_consider_tightening` returns `NoChange` with `gates_failed` | Surface reason to operator; no action this cycle. |
+| `suspect_patterns[]` entry with `recommended_action == "INVESTIGATE_NOW"` | Surface to operator immediately (don't wait for next cycle); frame as "your bouncer noticed X." |
+| `suspect_patterns[]` entry with `recommended_action == "BLOCK_PROACTIVELY"` | Already blocked by §2.3 safety floor; surface as confirmation. |
+| `suspect_patterns[]` entry with `recommended_action == "LOG_AND_OBSERVE"` | Log; revisit next cycle. |
+| Operator's role / workflow shape changed materially | Reset profile state to `lean-permissive` via `iam-jit profile phase reset`; rebuild confidence. |
 
 ## What this recipe doesn't do
 
@@ -284,6 +380,21 @@ HIGH-uninstall-risk threshold (>5 denies/day) are intuition-derived
 The grading corpus (Phase 10 of the design doc) is the gate before
 these thresholds appear in marketing claims. Today they are
 defensible defaults; tomorrow they should be evidence-backed.
+
+Steps 14–15 add MORE guesses: the confidence-gate thresholds (§10.2),
+phase time floors (§10.1), `SuspectPattern` confidence scores (§11.2),
+`sudden_friction_spike` 5× baseline multiplier (§11.3), and
+`attack_chain_signature` sequence window (§11.3). All await
+Phase 18 UAT + a follow-up grading-corpus effort before any
+quantitative claim appears in marketing copy. See
+PROFILE-GENERATION-DESIGN.md §9.1.
+
+Per `[[ibounce-honest-positioning]]`: step 15 surfaces **suspect
+activity, not confirmed injection**. Marketing language is
+"prompt-injection-AWARE through pattern-drift signals" — NEVER
+"prompt-injection-PROOF." The IAM role / RBAC / DB grant remains the
+actual security boundary; `suspect_patterns` is observability
+extension on top.
 
 ## See also
 

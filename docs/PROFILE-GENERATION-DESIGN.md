@@ -401,6 +401,58 @@ Estimated effort: 4–6 agent-days across Phases 1–9; +1.5 days Phase 10
 (corpus); +0.5 day Phase 11; +0.5 day Phase 12. Total **6.5–8.5 agent-days**
 (rough; calibrate after Phase 2 lands).
 
+### 6.1 Progressive-tightening + suspect-pattern extension (Phases 13–18)
+
+Per §10 + §11. Builds on Phases 1–12 — assumes the simulator core
+(Phase 4) + heuristic module (Phase 1) + extended extract output
+(Phase 2) + friction-budget config (Phase 6) are in place.
+
+13. **Phase 13 — `iam_jit_consider_tightening` MCP tool.** Per §10.3 +
+    §11.2. Single tool surface; emits both `narrowing_proposals[]`
+    (§10) AND `suspect_patterns[]` (§11) blocks alongside
+    `ConfidenceMetrics`. Wires into `mcp_server.py`. State-verification
+    test + schema test. **~1.5 agent-days.**
+14. **Phase 14 — confidence-metrics aggregator.** Implements
+    `pattern_stability_score`, `friction_consumption_rate`,
+    `days_in_current_phase`, `operator_widen_rules_added_recent`,
+    `distinct_patterns_observed`, `unprecedented_actions_count` per
+    §10.4. Pure-function deterministic aggregator over the audit window
+    + profile state. Unit tests per metric. **~1 agent-day.**
+15. **Phase 15 — phase-transition state machine.** Persists
+    `.iam-jit/profile_state.json` per §10.5. Append-only audit log of
+    every transition. CLI surface (`iam-jit profile phase show` /
+    `iam-jit profile phase reset`). Transition rules enforced
+    deterministically (operator-triggered downgrades only; no automatic
+    downgrades). **~1 agent-day.**
+16. **Phase 16 — suspect-pattern detector helpers.** Implements one
+    helper per `SuspectPattern.shape` per §11.3. Reuses Phase H
+    z-score primitives for `velocity_anomaly` / `time_of_day_anomaly`.
+    Reuses `KNOWN_ADVERSARIAL_PATTERNS` predicate (extracted in §1
+    Phase 1 + §7.2). Calibration corpus is **deferred to Phase 18 UAT
+    + a follow-up Phase 10-style grading effort** — guesses pending
+    calibration per `[[calibration-quality-bar]]`. **~2 agent-days.**
+17. **Phase 17 — E2E test for the tightening + suspect-pattern loop.**
+    Synthetic audit window covering 3 phase transitions (lean-permissive
+    → confidence-tightened → habit-trained) + 3 suspect-pattern shapes
+    (`sudden_friction_spike`, `unprecedented_action`,
+    `known_adversarial_pattern_match`). Asserts tool output shape +
+    operator-visible audit log entries. **~1 agent-day.**
+18. **Phase 18 — independent-agent UAT.** Per
+    `[[tests-and-independent-uat-required]]` — different agent than
+    Phases 13–17 implementer runs the tightening loop end-to-end across
+    a multi-week synthetic audit window + grades both
+    `narrowing_proposals` and `suspect_patterns` output as MEANINGFUL /
+    PARTIAL / THEATER / NEGATIVE-VALUE per
+    `[[role-effectiveness-corpus]]` taxonomy. **~separate task.**
+
+**Extension total**: ~6.5 agent-days on top of Phases 1–12. Grand
+total: **~13–15 agent-days** end-to-end.
+
+Phases 13–18 are STRICTLY downstream of Phases 1–12. Don't start them
+until at least Phases 1, 2, 4, and 6 have landed — they depend on the
+heuristic module, extended extract output, simulator core, and
+friction-budget config respectively.
+
 ## 7. Anti-theater safeguards
 
 1. **Heuristic thresholds are inspectable.** Every choice
@@ -476,23 +528,382 @@ Explicit per `[[ibounce-honest-positioning]]`:
 All five guesses are labelled in the doc; none should appear in
 marketing copy until Phase 10 produces validation evidence.
 
-## 10. Out of scope
+### 9.1 Additional guesses from §10 + §11 (progressive tightening + suspect patterns)
 
-* Implementation of any new MCP tool — separate phase tasks per §6.
+6. **Confidence-gate thresholds** (§10.2) — "X new unique
+   patterns/week" floor, "N days without operator widen-rule" floor,
+   ">X observations of each pattern being narrowed" floor. All guesses;
+   need a multi-week real-traffic corpus to defend before any auto-
+   tightening fires unattended. Phase 18 UAT is the first calibration
+   data point.
+7. **Phase time floors** (§10.1) — `7d` lean-permissive → confidence-
+   tightened; `+23d` → habit-trained; `+30d` → stable. Pulled from
+   `[[ambient-mode-progressive-tightening]]` shape; intuitions about
+   "enough time to observe a workflow cycle." Need correlation evidence
+   (do tighter floors cause friction storms? do longer floors leave
+   value on the table?) before quantitative claims.
+8. **`SuspectPattern` confidence scores** (§11.2) — per-shape
+   `confidence: float` field is uncalibrated at design time. Phase 16
+   helpers must produce a number; what range corresponds to
+   `INVESTIGATE_NOW` vs `LOG_AND_OBSERVE` is itself a calibration
+   question. Don't market quantitative confidence claims (e.g. "94%
+   accurate detection") until corpus validates.
+9. **`sudden_friction_spike` "5× baseline" threshold** (§11.3) —
+   chosen for being clearly above natural variation, not from
+   measurement. Need real legitimate-traffic baselines per bouncer to
+   defend the multiplier.
+10. **`attack_chain_signature` "N minutes" sequence window** (§11.3) —
+    needs threat-model calibration: real adversarial chains have
+    timing characteristics; the window must be wide enough to catch
+    them without flagging legitimate sequential-task work.
+
+Guesses 6–10 join 1–5 on the "no marketing claim until calibrated"
+list. Phase 18 UAT + a follow-up grading-corpus effort (mirror of
+Phase 10) is the gate.
+
+## 10. Progressive tightening over time
+
+Per `[[ambient-mode-progressive-tightening]]` (founder direction 2026-05-24):
+the profile shape generated by §2 is the **Phase 1 starting point**, not the
+terminal state. Profiles evolve through five phases as (a) more audit
+history accumulates and (b) more operator-supplied context arrives.
+Tightening is **optional** per the founder qualifier "if possible" —
+operators with highly variable habits stay permissive forever, and that
+is correct behavior.
+
+This section composes with §1–§9 by adding a time dimension. The
+heuristic in §2 produces the Phase 1 profile; this section specifies how
+it tightens (or doesn't) afterward.
+
+### 10.1 The five-phase trajectory
+
+| Phase | Window | Profile shape | Tightening signal |
+|---|---|---|---|
+| **0. Discovery** | Day 0 → N days | Pass-through; observe only; never deny except `KNOWN_ADVERSARIAL_PATTERNS` safety floor | n/a (still building baseline) |
+| **1. Lean-permissive enforce** | Day N → +7d | Generated per design §2 heuristic | "discovery period complete" — operator (or operator's agent) confirms switch |
+| **2. Confidence-tightened** | Day N+7 → +30d | Reduce read-broad to observed services only; tighten observed-margin where confidence is high | Auto-trigger when same patterns recur >X times AND no new pattern shapes in last 7d AND friction stays under budget |
+| **3. Habit-trained** | Month 2+ | Tight; minimal observed-margin; explicit per-task widening operator-driven only | Auto-trigger when profile stable + operator hasn't added widening rules in 14d + friction well under budget |
+| **4. Stable** | Month 3+ | No further auto-tightening unless operator signals "I'm doing more of X now" | Operator-driven only |
+
+Phases 0 → 1 is already covered by §1–§9 (discovery → lean-permissive
+generation → simulate → install). Phases 1 → 2 → 3 → 4 are the new
+trajectory this section adds.
+
+### 10.2 Confidence-gate — all five must hold
+
+A phase transition (or in-phase narrowing) requires **ALL** of:
+
+1. **Time floor**: ≥7d in current phase (don't whiplash on a single quiet week)
+2. **Pattern stability**: same audit-shape recurring; <X new unique patterns/week
+3. **Friction budget**: legitimate denies under operator's configured budget per §4.1
+4. **Confidence threshold**: >X observations of each pattern being narrowed (per §2.2 confidence-weighted heuristic)
+5. **Operator signal**: either explicit "go ahead and tighten" OR implicit (no operator widen-rules added in N days)
+
+If ANY fails → stay at current phase. The defaults for "X" thresholds
+are **guesses pending calibration** per `[[calibration-quality-bar]]` —
+see §9.1 for the explicit guesses list; Phase 18 UAT (§6.1) + a
+follow-up grading-corpus effort (mirror of Phase 10) are the
+calibration gate before any quantitative claim is marketed.
+
+### 10.3 New MCP tool — `iam_jit_consider_tightening`
+
+**Purpose:** the agent invokes this periodically (suggested: weekly) or
+on-demand. Returns either a `TighteningProposal` (with concrete
+narrowing proposals + suspect_patterns per §11) or `NoChange` (with
+which gate failed). Per `[[bouncer-zero-llm-when-agent-in-loop]]` the
+tool is deterministic — it surfaces signals; the operator's agent
+reasons over them.
+
+```python
+def iam_jit_consider_tightening(args: dict) -> dict:
+    """
+    args:
+      current_profile: str         # YAML of currently-installed profile
+      bouncer: str
+      audit_window: {since, until}
+      operator_signals: dict | None  # workflow declarations, role
+                                     # declarations, friction tolerance,
+                                     # always-allow flags
+      friction_budget: dict | None   # uses operator default if absent
+
+    returns TighteningProposal | NoChange (see schemas below).
+    """
+```
+
+```python
+@dataclass
+class TighteningProposal:
+    current_phase: Literal["lean-permissive", "confidence-tightened",
+                           "habit-trained", "stable"]
+    proposed_phase: str  # may equal current_phase (narrow within phase)
+                         # or advance to next phase
+    narrowing_proposals: list[NarrowingProposal]  # concrete tighten rules
+    suspect_patterns: list[SuspectPattern]        # see §11
+    operator_attention_required: bool
+    confidence_metrics: ConfidenceMetrics  # see §10.4
+    rationale: str  # operator-readable narration
+
+@dataclass
+class NoChange:
+    current_phase: str
+    gates_failed: list[Literal["time_floor", "pattern_stability",
+                               "friction_budget", "confidence_threshold",
+                               "operator_signal"]]
+    rationale: str  # e.g. "pattern_stability gate failed — 14 new
+                    # action shapes observed in last 7d; profile would
+                    # cause friction if narrowed now"
+```
+
+### 10.4 `ConfidenceMetrics` aggregator
+
+Surfaced for operator inspection (per `[[ibounce-honest-positioning]]`
+no hidden tightening):
+
+```python
+@dataclass
+class ConfidenceMetrics:
+    pattern_stability_score: float  # 0-1; 1 = no new shapes in window
+    friction_consumption_rate: float  # legit-denies/day / budget/day
+    days_in_current_phase: int
+    operator_widen_rules_added_recent: int  # last 14d
+    distinct_patterns_observed: int
+    unprecedented_actions_count: int  # this informs §11 too
+```
+
+### 10.5 Phase-transition state machine
+
+The phase state lives in `.iam-jit/profile_state.json` alongside the
+profile bundle. Transitions are **append-only audit log** — every
+transition is operator-visible per `[[ibounce-honest-positioning]]`.
+
+Allowed transitions:
+
+* `discovery → lean-permissive` — operator confirms after §1–§9 flow
+* `lean-permissive → confidence-tightened` — confidence-gate passes
+* `confidence-tightened → habit-trained` — confidence-gate passes again
+* `habit-trained → stable` — confidence-gate passes again
+* **Any → lean-permissive** — operator-triggered "reset" (e.g. role change)
+* **Any → discovery** — operator-triggered "fresh start"
+
+No automatic downgrades. If friction spikes mid-`stable` the response is
+to **widen via `iam_jit_improve_profile`** (§4) — not to silently
+downgrade the phase.
+
+### 10.6 Context inputs from operator
+
+Explicit operator signals that inform tightening (separate from passive
+audit history):
+
+* **Workflow declarations**: "I'm doing X kind of work this week" →
+  temporarily widen for that workflow without changing phase
+* **Role declarations**: "I'm a backend dev, never touch IAM" → tighten
+  IAM-class actions faster (Phase 2 jumps to admin-very-tight on
+  shorter time floor)
+* **Friction tolerance**: per-operator `max_legitimate_denies_per_week`
+  from §4.1
+* **Always-allow flags**: operator marks specific patterns as "always
+  allow, never narrow"
+* **Block-now requests**: operator explicitly says "block X" → tight
+  immediately (skips confidence-gate; operator intent is the signal)
+
+### 10.7 Anti-patterns to avoid
+
+Per `[[ambient-mode-progressive-tightening]]`:
+
+* **Calendar-only triggers** — "it's been 14 days, tighten" without
+  confidence-gate causes friction storms
+* **Auto-removing operator widen-rules** — operator added them for a
+  reason; respect them
+* **Tightening across role changes** — needs operator-triggered reset
+  to lean-permissive, not silent narrowing
+* **Hidden tightening** — every transition emits an audit log entry +
+  optional notification per `[[ibounce-honest-positioning]]`
+* **Tightening that breaks Phase H anomaly baseline** — if anomaly
+  detection is enabled, narrowing shouldn't invalidate the baseline
+  without explicit reset
+
+### 10.8 Honest framing
+
+Per `[[ibounce-honest-positioning]]`: this section MUST be marketed
+with the **"if possible"** qualifier verbatim. Specifically:
+
+* Don't claim "auto-tightens over time" without the qualifier
+* Don't claim "stable phase = secure" — stable just means no auto-changes
+* For highly variable operators (sysadmin role, exploration work),
+  staying in Phase 1 forever is **correct behavior, not failure**
+* The deterministic safety floor (§2.3) carries the load regardless of
+  phase — tightening is layered on top, not foundational to safety
+
+## 11. Same process surfaces prompt-injection-suspect signals
+
+Per `[[progressive-tightening-as-injection-detector]]` (founder
+insight 2026-05-24): the data flow that drives §10's tightening
+proposals also produces the model needed for prompt-injection signal
+surfacing. Not separate features — same observability work, second
+output dimension.
+
+### 11.1 Why these are the same problem
+
+Process artifacts from §10 that DOUBLE as prompt-injection signals:
+
+| Artifact (from §10) | PI signal |
+|---|---|
+| Friction-budget tracking (§4.1) | Sudden spike = behavior outside trained pattern |
+| Confidence-weighted patterns (§2.2) | Action with `confidence = 0` = unprecedented |
+| Resource-pattern observation (§2.1) | Resource never touched = suspicious |
+| Phase H z-score baseline (existing) | Time-of-day / velocity anomalies |
+| `KNOWN_ADVERSARIAL_PATTERNS` (§2.3) | Direct pattern match |
+| `pattern_stability_score` (§10.4) | Discontinuity = something changed |
+| Sequence audit log | Attack-chain pattern (recon → escalate → exfil) |
+
+The MORE the profile-tightening matures, the BETTER the PI
+signal-to-noise. They co-evolve.
+
+### 11.2 Extension to `iam_jit_consider_tightening` response
+
+The MCP tool defined in §10.3 returns `suspect_patterns[]` alongside
+`narrowing_proposals[]`. Same call, two output dimensions, operator's
+agent reasons over both per `[[bouncer-zero-llm-when-agent-in-loop]]`.
+
+```python
+@dataclass
+class SuspectPattern:
+    shape: Literal[
+        "sudden_friction_spike",         # legit-deny rate jumped 5x baseline
+        "unprecedented_action",          # action with confidence=0
+        "resource_pattern_drift",        # resource never touched before
+        "known_adversarial_pattern_match",  # direct KNOWN_ADVERSARIAL match
+        "velocity_anomaly",              # actions/min outside historical
+        "time_of_day_anomaly",           # activity outside historical hours
+        "attack_chain_signature"         # recon → escalate → exfil sequence
+    ]
+    confidence: float                    # 0-1; calibration TBD
+    events: list[AuditEvent]             # the specific events that triggered
+    recommended_action: Literal[
+        "INVESTIGATE_NOW",               # surface to operator immediately
+        "LOG_AND_OBSERVE",               # log; revisit next cycle
+        "BLOCK_PROACTIVELY"              # only when KNOWN_ADVERSARIAL match
+    ]
+    mitre_atlas_tag: str                 # per Phase H F.5 catalog
+    rationale: str                       # operator-readable explanation
+```
+
+### 11.3 Per-shape detection sketches
+
+Implementation reuses Phase H z-score primitives where possible:
+
+| Shape | Detection |
+|---|---|
+| `sudden_friction_spike` | Rolling-7d legit-deny rate; current window > 5× baseline → fire |
+| `unprecedented_action` | Action absent from `bounce_extract_permissions_from_audit` historical window → fire |
+| `resource_pattern_drift` | Resource ARN / path / table never observed for this action → fire |
+| `known_adversarial_pattern_match` | Reuses `iam_jit_classify_deny` `KNOWN_ADVERSARIAL_PATTERNS` predicate (§2.3, §7.2) — no copy-paste |
+| `velocity_anomaly` | Reuses Phase H z-score baseline for actions/min |
+| `time_of_day_anomaly` | Reuses Phase H z-score baseline for hour-of-day distribution |
+| `attack_chain_signature` | Sequence match: 2+ KNOWN_ADVERSARIAL_PATTERNS within N minutes on same session |
+
+The `mitre_atlas_tag` per detection allows operators to map signals to
+their existing threat-model frameworks per Phase H F.5.
+
+### 11.4 Mapping to 3-tier prompt-injection framing
+
+Per `[[prompt-injection-protection-positioning]]`:
+
+| Tier | Progressive-tightening phase (§10) | PI signal-to-noise |
+|---|---|---|
+| **Tier 1** (casual ambient) | Phase 0–1: Discovery → Lean-permissive | Coarse; signals noisy; high false-positive rate |
+| **Tier 2** (production managed) | Phase 2: Confidence-tightened | S/N improves with history; usable for triage |
+| **Tier 3** (highly-secure strict) | Phase 3–4: Habit-trained → Stable | Any deviation IS a signal; lowest noise floor |
+
+This is the same composition story as §10.1: the protection improves
+as the profile matures, but the maturation is operator-paced and
+optional.
+
+### 11.5 HONEST FRAMING — AWARE not PROOF
+
+Per `[[ibounce-honest-positioning]]` + `[[prompt-injection-protection-positioning]]`:
+
+**Marketing claim shape**: *prompt-injection-AWARE* through
+pattern-drift signals.
+
+**Marketing claim shape MUST NOT be**: *prompt-injection-PROOF*,
+*prompt-injection-PROTECTED*, *prompt-injection-IMMUNE*, or any
+variant that implies prevention or guaranteed detection.
+
+#### What this DOES deliver
+
+* **Early warning** — deviation from baseline surfaces before damage compounds
+* **Blast-radius bounding** — actions still constrained to profile (the
+  IAM role / RBAC / DB grant remains the actual boundary per
+  `[[ibounce-honest-positioning]]`)
+* **Investigation prompts** — operator gets "here's what changed,
+  investigate" not "your bouncer broke"
+
+#### What this DOES NOT deliver
+
+* **Confirmed injection diagnosis** — `suspect_patterns` can't
+  distinguish "operator changed workflow" from "agent compromised by
+  injection"; that's a human-judgment call
+* **Prevention of all PI** — a sophisticated attacker crafts
+  normal-looking actions inside the trained envelope; signals will
+  miss it by design
+* **Adversarial-intent labels** — `recommended_action: "BLOCK_PROACTIVELY"`
+  fires ONLY on `KNOWN_ADVERSARIAL_PATTERNS` matches; everything else
+  is "investigate" or "log" — needs operator judgment
+* **Uniform signal quality across operators** — for highly variable
+  operators (sysadmin role, exploration work) the noise floor stays
+  high; `unprecedented_action` fires constantly and is mostly false
+  positives
+
+These limits are NOT bugs — they are the architecture per
+`[[ibounce-honest-positioning]]`. The bouncer is a deterrent + dev loop;
+the IAM role is the boundary. `suspect_patterns` is observability
+extension, not a security boundary upgrade.
+
+### 11.6 Anti-patterns
+
+Per `[[progressive-tightening-as-injection-detector]]`:
+
+* **Don't auto-block on single `suspect_patterns` hit** — false-positive
+  risk; needs operator review except for `KNOWN_ADVERSARIAL_PATTERNS`
+  safety floor (which already blocks at §2.3)
+* **Don't market "detection" without the SUSPECT-ACTIVITY qualifier** —
+  surfaces signals, doesn't confirm intent
+* **Don't conflate detection (surfaces signal) with diagnosis (confirms
+  adversarial intent)** — confidence scores carry uncertainty
+* **Don't claim signal-to-noise improves uniformly** — highly variable
+  operators stay in the noisy regime forever
+* **Don't ship `suspect_patterns` surfacing without grading rubric** —
+  Phase 16 (§6) extension is calibration corpus; without it operators
+  can't act on noise
+
+## 12. Out of scope
+
+* Implementation of any new MCP tool — separate phase tasks per §6
+  (Phases 1–12) and §6.1 (Phases 13–18).
 * Modification of existing code — design only.
 * Scorer behavior — `[[scorer-is-ground-truth]]` discipline.
-* Test changes — Phase 11 / 12 file tests when implementation lands.
+* Test changes — Phase 11 / 12 / 17 / 18 file tests when implementation lands.
 * Pro-tier LLM-augmented variants of the heuristic — out of v1.0 scope
   per `[[bouncer-zero-llm-when-agent-in-loop]]`; the heuristic is
   intentionally deterministic.
+* **Phase 13–18 calibration corpus** — out of this design's scope; a
+  follow-up grading-corpus effort (mirror of Phase 10) is the
+  calibration gate before any quantitative `suspect_patterns` or
+  `confidence-gate` thresholds appear in marketing copy.
 
 ## See also
 
-* [HARNESS-RECIPES/audit-to-effective-profile.md](HARNESS-RECIPES/audit-to-effective-profile.md) — operator-agent-facing walkthrough
+* [HARNESS-RECIPES/audit-to-effective-profile.md](HARNESS-RECIPES/audit-to-effective-profile.md) — operator-agent-facing walkthrough (extended with steps 14–15 for §10 + §11)
 * [PROFILE-GENERATION.md](PROFILE-GENERATION.md) — existing generator docs (`bounce_profile_generate_from_audit` MCP tool)
 * [MRR-1-USE-CASE-AUDIT-2026-05-24.md](MRR-1-USE-CASE-AUDIT-2026-05-24.md) — top blocker #1 (UC-17)
 * [HARNESS-RECIPES/bouncer-history-to-config-pattern.md](HARNESS-RECIPES/bouncer-history-to-config-pattern.md) — the Phase G recipe shape this design mirrors
 * `[[safety-mode-lean-permissive]]` — direction memo
 * `[[bouncer-zero-llm-when-agent-in-loop]]` — architectural memo
 * `[[calibration-quality-bar]]` — discipline memo
-* `[[role-effectiveness-corpus]]` — corpus framework this design mirrors for Phase 10
+* `[[role-effectiveness-corpus]]` — corpus framework this design mirrors for Phase 10 + Phase 18
+* `[[ambient-mode-progressive-tightening]]` — §10 source memo (time-evolution trajectory)
+* `[[progressive-tightening-as-injection-detector]]` — §11 source memo (suspect_patterns dimension)
+* `[[ibounce-honest-positioning]]` — §11.5 "AWARE not PROOF" framing source
+* `[[prompt-injection-protection-positioning]]` — §11.4 3-tier framing source
+* `[[tests-and-independent-uat-required]]` — Phase 18 UAT discipline
