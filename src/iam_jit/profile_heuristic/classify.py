@@ -25,7 +25,7 @@ from __future__ import annotations
 
 from enum import Enum
 
-from ..deny_classifier.prompts import KNOWN_ADVERSARIAL_PATTERNS
+from ..deny_classifier.classifier import is_known_adversarial as _public_is_known_adversarial
 from . import dbounce_classes as _db
 from . import gbounce_classes as _gb
 from . import ibounce_classes as _ib
@@ -71,52 +71,24 @@ _BOUNCER_ALIASES: dict[str, str] = {
 }
 
 
-# Pre-compute the KNOWN_ADVERSARIAL_PATTERNS index for O(1) exact match.
-# Strip leading/trailing whitespace; case-sensitive (AWS action names
-# are case-sensitive, SQL statements are normalised upper at call sites).
-_KNOWN_ADVERSARIAL_INDEX: frozenset[str] = frozenset(
-    p.strip() for p in KNOWN_ADVERSARIAL_PATTERNS
-)
-
-
 def _is_known_adversarial(bouncer: str, action: str, resource: str | None) -> bool:
-    """Return True if ``action`` (or ``action`` + ``resource``) matches
-    a KNOWN_ADVERSARIAL_PATTERNS entry.
+    """Bouncer-aware KNOWN_ADVERSARIAL_PATTERNS check.
 
-    The catalogue mixes AWS action-only matches (``s3:DeleteBucket``)
-    with K8s + SQL phrase-level matches (``kubectl delete namespace``,
-    ``DROP TABLE``). For ibounce we exact-match the AWS action; for
-    kbouncer + dbounce we substring-match against the catalogue
-    (a K8s ``delete`` verb on a ``namespace`` resource matches the
-    ``kubectl delete namespace`` catalogue entry).
+    Thin wrapper around the public predicate at
+    :func:`iam_jit.deny_classifier.classifier.is_known_adversarial` —
+    extracted per ``docs/PROFILE-GENERATION-DESIGN.md`` §3.5
+    acceptance #4 + §7 safeguard #2 so the catalogue match logic lives
+    in one place. Per the design's "single source of truth" discipline
+    this module no longer maintains its own index.
+
+    Behaviour is unchanged from the pre-extraction private predicate:
+    AWS exact match; kbouncer phrase reconstruction; dbounce
+    statement+resource composition. The public predicate also handles
+    the deny_classifier's unbounded-DELETE regex check — an additive
+    capability that doesn't change any of the Phase 1 classifier
+    behaviour pinned by the existing tests.
     """
-    if not action:
-        return False
-    a = action.strip()
-    if a in _KNOWN_ADVERSARIAL_INDEX:
-        return True
-    if bouncer == "kbouncer":
-        # Reconstruct a ``kubectl <verb> <resource>`` phrase and check
-        # whether any catalogue entry is a substring of it.
-        verb = a.split(":", 1)[-1].split()[0].lower() if a else ""
-        res = (resource or "").lower()
-        phrase = f"kubectl {verb} {res}".strip()
-        for entry in _KNOWN_ADVERSARIAL_INDEX:
-            if entry.lower().startswith("kubectl") and entry.lower() in phrase:
-                return True
-    if bouncer == "dbounce":
-        # SQL statements: catalogue entries are phrases like
-        # ``DROP TABLE`` or ``DELETE FROM users``. Match against the
-        # uppercased statement form. Reuse strip_dialect_prefix so
-        # ``psql:Drop Table`` normalises.
-        stmt_type = _db.strip_dialect_prefix(a)
-        # Also fold the resource into the search string so phrase
-        # matches against e.g. ``DELETE FROM users`` work.
-        composed = f"{stmt_type} {(resource or '').upper()}".strip()
-        for entry in _KNOWN_ADVERSARIAL_INDEX:
-            if entry.upper() in composed:
-                return True
-    return False
+    return _public_is_known_adversarial(action, bouncer=bouncer, resource=resource)
 
 
 def _split_aws_action(action: str) -> tuple[str, str] | None:

@@ -52,10 +52,12 @@ from .classifier import (
     ClassifierResult,
     DenyEvent,
     classify_deny,
+    is_known_adversarial,
 )
 
 __all__ = [
     "ClassifierResult",
     "DenyEvent",
     "classify_deny",
+    "is_known_adversarial",
 ]

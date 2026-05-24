@@ -23,8 +23,18 @@ See `docs/PROFILE-GENERATION-DESIGN.md` for the full design rationale.
 from __future__ import annotations
 
 from .classify import ActionClass, classify_action
+from .confidence import (
+    Confidence,
+    ConfidenceResult,
+    confidence_band,
+)
+from .ibounce_classes import sibling_action_prefixes
 
 __all__ = [
     "ActionClass",
     "classify_action",
+    "Confidence",
+    "ConfidenceResult",
+    "confidence_band",
+    "sibling_action_prefixes",
 ]

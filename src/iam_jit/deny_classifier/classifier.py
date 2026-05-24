@@ -121,27 +121,163 @@ _ADV_SUBSTRING_PATTERNS = tuple(
 )
 
 
-def _is_known_adversarial(action: str) -> bool:
-    """Hard-coded match against `KNOWN_ADVERSARIAL_PATTERNS`. Used as a
-    safety backstop on the OUTPUT side: even if the LLM somehow tags a
-    known-adversarial action as legitimate, the classifier overrides
-    to escalate. This is the deterministic floor on classifier output,
-    parallel to the deterministic scorer floor on policy scoring."""
-    if not action:
+# ---------------------------------------------------------------------------
+# Public predicate — extracted per docs/PROFILE-GENERATION-DESIGN.md
+# §3.5 acceptance #4 + §7 safeguard #2 + §A92 Phase 3 prerequisite.
+# ---------------------------------------------------------------------------
+#
+# The predicate has two callers that previously inlined their own
+# matchers:
+#
+#   * deny_classifier (this module + ``evaluator.py``) — historically
+#     called the private ``_is_known_adversarial(action: str)`` form.
+#   * profile_heuristic.classify — historically inlined its own
+#     ``_is_known_adversarial(bouncer, action, resource)`` form for the
+#     bouncer-aware phrase construction it needs (e.g. "kubectl delete
+#     <resource>" pattern reconstruction for kbouncer events).
+#
+# The public predicate accepts BOTH shapes via optional bouncer +
+# resource args. The internal call sites are migrated to the public
+# predicate so the catalogue match logic lives in one place. Per
+# docs/PROFILE-GENERATION-DESIGN.md §7 safeguard #2: "KNOWN_ADVERSARIAL_PATTERNS
+# matching is a pure predicate shared between all three surfaces" —
+# this is the single source of truth.
+
+
+def is_known_adversarial(
+    action: str,
+    bouncer: str | None = None,
+    resource: str | None = None,
+) -> bool:
+    """Public predicate: does ``action`` (optionally combined with
+    ``bouncer``-aware phrase reconstruction over ``resource``) match a
+    ``KNOWN_ADVERSARIAL_PATTERNS`` entry?
+
+    Pure function — same inputs always produce the same output. No I/O.
+
+    Args:
+        action: bouncer-specific action string. For ibounce =
+            ``service:Action`` (case-preserved); for kbouncer = K8s verb;
+            for dbounce = SQL statement; for gbounce = HTTP method.
+            Empty / non-string returns ``False`` safely.
+        bouncer: optional bouncer name (``"ibounce"`` / ``"kbouncer"`` /
+            ``"dbounce"`` / ``"gbounce"`` — short forms accepted). When
+            provided AND non-AWS, enables phrase reconstruction:
+            ``kbouncer`` synthesises ``"kubectl <verb> <resource>"``;
+            ``dbounce`` synthesises ``"<STMT> <RESOURCE>"`` for catalogue
+            substring matching. When ``None`` the match is the
+            classifier-style case-insensitive lookup + unbounded-DELETE
+            regex check (preserves the deny_classifier's prior
+            behaviour for evaluator + structured_deny callers).
+        resource: optional resource string. Only consulted when
+            ``bouncer`` is supplied AND is one of the phrase-bouncer
+            types (kbouncer / dbounce).
+
+    Returns:
+        True iff the action (or composed phrase) matches a
+        ``KNOWN_ADVERSARIAL_PATTERNS`` entry per design §2.3 + §7
+        safeguard #2 + §A92.
+
+    Behaviour parity:
+        * ``is_known_adversarial("iam:CreateAccessKey")`` →
+          identical to the legacy ``_is_known_adversarial("iam:CreateAccessKey")``
+          (case-insensitive exact match on the AWS action catalogue).
+        * ``is_known_adversarial("kubectl delete namespace prod")`` →
+          identical to legacy (substring match against catalogue).
+        * ``is_known_adversarial("delete", bouncer="kbouncer", resource="namespace/prod")`` →
+          reconstructs ``"kubectl delete namespace/prod"`` and
+          matches against catalogue. Adds the profile_heuristic
+          flow's phrase-construction capability.
+        * ``is_known_adversarial("DELETE", bouncer="dbounce", resource="FROM users")`` →
+          reconstructs ``"DELETE FROM USERS"`` and matches the
+          ``DELETE FROM users`` catalogue entry.
+        * ``is_known_adversarial("DELETE FROM orders")`` (no WHERE) →
+          matches via the unbounded-DELETE regex check.
+
+    See ``docs/PROFILE-GENERATION-DESIGN.md`` §2.3 + §7 safeguard #2.
+    """
+    if not isinstance(action, str) or not action:
         return False
+
+    # 1. Classifier-style case-insensitive catalogue match (the legacy
+    #    deny_classifier behaviour). Covers the AWS action shape +
+    #    catalogue entries that include their own bouncer prefix
+    #    (e.g. ``kubectl delete namespace``).
     norm = action.strip().lower()
-    # Exact IAM action match (case-insensitive)
     if norm in _ADV_PATTERNS_LOWER:
         return True
-    # Substring match for SQL / kubectl (e.g. action could be the full
-    # statement when called from dbounce/kbouncer)
     for pat in _ADV_SUBSTRING_PATTERNS:
         if pat in norm:
             return True
-    # Unbounded DELETE (any "DELETE FROM" without obvious WHERE)
-    if re.search(r"\bdelete\s+from\b", norm) and not re.search(r"\bwhere\b", norm):
+    if (
+        re.search(r"\bdelete\s+from\b", norm)
+        and not re.search(r"\bwhere\b", norm)
+    ):
         return True
+
+    # 2. Bouncer-aware phrase reconstruction (the profile_heuristic
+    #    behaviour). When the caller supplies a bouncer + the bouncer
+    #    is a phrase type, compose the catalogue-shaped phrase from
+    #    (action, resource) and re-check.
+    if not bouncer:
+        return False
+    normalised_bouncer = _normalise_bouncer(bouncer)
+    if normalised_bouncer == "kbouncer":
+        # Catalogue entries look like ``kubectl delete namespace``;
+        # the bouncer audit shape is ``("delete", "namespace/prod")``.
+        # Synthesise ``kubectl delete namespace/prod`` and check.
+        verb = action.split(":", 1)[-1].split()[0].lower() if action else ""
+        res = (resource or "").lower()
+        phrase = f"kubectl {verb} {res}".strip()
+        for entry in _ADV_PATTERNS_LOWER:
+            if entry.startswith("kubectl") and entry in phrase:
+                return True
+    elif normalised_bouncer == "dbounce":
+        # Catalogue entries look like ``DROP TABLE``, ``DELETE FROM users``;
+        # the bouncer shape is ``("DELETE", "FROM users")``. Fold
+        # the resource into the search string. Use stripped + uppercased
+        # forms so a ``psql:Drop Table`` action still matches.
+        from ..profile_heuristic.dbounce_classes import strip_dialect_prefix
+        stmt_type = strip_dialect_prefix(action)
+        composed = f"{stmt_type} {(resource or '').upper()}".strip()
+        for entry in _ADV_PATTERNS_LOWER:
+            if entry.upper() in composed:
+                return True
+
     return False
+
+
+def _normalise_bouncer(bouncer: str) -> str:
+    """Map short aliases (``kbounce`` / ``dbouncer``) to canonical
+    bouncer names. Inline copy of the profile_heuristic alias table so
+    we don't import that module at the top level (would create an
+    import cycle: profile_heuristic imports deny_classifier.prompts).
+    """
+    aliases = {
+        "ibounce": "ibounce",
+        "ibouncer": "ibounce",
+        "kbounce": "kbouncer",
+        "kbouncer": "kbouncer",
+        "dbounce": "dbounce",
+        "dbouncer": "dbounce",
+        "gbounce": "gbounce",
+        "gbouncer": "gbounce",
+    }
+    return aliases.get(bouncer.strip().lower(), "")
+
+
+def _is_known_adversarial(action: str) -> bool:
+    """Backward-compat shim. Existing in-tree callers
+    (``evaluator.py``, ``structured_deny.response``, this module's own
+    classify_deny path) keep the historical ``(action,)`` signature.
+
+    Delegates to :func:`is_known_adversarial` so the catalogue-match
+    logic lives in one place. Per docs/PROFILE-GENERATION-DESIGN.md §7
+    safeguard #2 the predicate is shared across all surfaces; this
+    shim preserves the public API of the prior private symbol so
+    callers can migrate to ``is_known_adversarial`` at their own pace.
+    """
+    return is_known_adversarial(action)
 
 
 # ----- Confidence + action policy ------------------------------------------

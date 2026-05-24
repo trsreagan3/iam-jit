@@ -748,6 +748,8 @@ def _deterministic_fallback_profile(
     bouncer: str,
     events: list[dict[str, Any]],
     add_safety_denies: bool,
+    lean_permissive: bool = False,
+    friction_budget: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """When the LLM is unavailable / returned junk, synthesize a
     minimal profile from the observed events + the safety floor.
@@ -769,7 +771,25 @@ def _deterministic_fallback_profile(
     only_hosts; databases in only_databases. The FLOOR test
     (observed staging denies prod) must pass in the LLM-unavailable
     case too, not just on the happy path.
+
+    Phase 3 prerequisite (docs/PROFILE-GENERATION-DESIGN.md §6 Phase 3):
+    accepts the Phase 3 ``lean_permissive`` + ``friction_budget`` kwargs
+    as keyword-only params with safe defaults so the Phase 3 wiring can
+    pass them through without breaking the four existing in-tree
+    callers (lines 852 / 864 / 878 / 894 / 970 — all use keyword
+    arguments). The fallback's current behaviour is unchanged when the
+    new kwargs are absent or default-valued; Phase 3 wires the
+    lean-permissive heuristic per design §2 inside this function.
     """
+    # Phase 3 wires lean_permissive + friction_budget into the
+    # heuristic flow. The kwargs are accepted now so Phase 3 ships as a
+    # single-file body change without a signature churn that would
+    # break the four existing callers (or any out-of-tree caller that
+    # may already be passing keyword arguments). Until Phase 3 ships,
+    # the new args are accepted-but-ignored — accepting them is the
+    # whole point of this prerequisite.
+    _ = lean_permissive
+    _ = friction_budget
     seen: dict[str, set[str]] = defaultdict(set)
     # Per-dimension observed sets feed scope-restriction fields.
     scope_observed: dict[str, list[str]] = defaultdict(list)

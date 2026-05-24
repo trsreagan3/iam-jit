@@ -208,4 +208,169 @@ __all__ = [
     "WRITE_DATA_PATTERNS",
     "ADMIN_PATTERNS",
     "DESTRUCTIVE_PATTERNS",
+    "READ_SIBLING_VERBS",
+    "WRITE_SIBLING_VERBS",
+    "CREATE_SIBLING_VERBS",
+    "sibling_action_prefixes",
 ]
+
+
+# ---------------------------------------------------------------------------
+# Phase 3 prerequisite — sibling verb adjacency.
+# ---------------------------------------------------------------------------
+#
+# Per ``docs/PROFILE-GENERATION-DESIGN.md`` §2.2 row 4 (adjacency): if
+# the operator observed a Get*-shape read on a resource, the
+# lean-permissive heuristic should silently include sibling read
+# verbs (List* / Describe* / Head*) for the same resource because
+# they're low-blast-radius reads with no incremental risk.
+#
+# These sibling sets are an INITIAL PASS. Per
+# ``[[calibration-quality-bar]]`` + design §9 guess #4 (per-bouncer
+# class prefix tables): coverage gaps are expected; Phase 10 corpus
+# expands.
+#
+# Sibling verb sets. Match the table-driven verbs in
+# READ_PATTERNS / WRITE_DATA_PATTERNS / ADMIN_PATTERNS above.
+
+READ_SIBLING_VERBS: frozenset[str] = frozenset({
+    "Get",
+    "List",
+    "Describe",
+    "Head",
+    "Lookup",
+    "Search",
+    "Filter",
+    "Count",
+    "Has",
+    "Is",
+    "Read",
+    "Query",
+    "Scan",
+    "View",
+    "Check",
+})
+
+
+WRITE_SIBLING_VERBS: frozenset[str] = frozenset({
+    "Put",
+    "Update",
+    "Modify",
+    "Replace",
+    "Set",
+    "Patch",
+})
+
+
+# Create siblings — paired with Put/Update because operators commonly
+# observe one (Put) and need the others (Create / Update) for the same
+# resource flow. The Phase 3 caller decides whether to honour the
+# adjacency per the action's ActionClass — Create* on iam:* /
+# organizations:* still classifies ADMIN, so the sibling expansion
+# composes safely with the lean-permissive disposition table.
+CREATE_SIBLING_VERBS: frozenset[str] = frozenset({
+    "Create",
+    "Register",
+})
+
+
+# Bands of verbs that should be considered siblings of each other. Each
+# band is a sibling set; a verb's siblings are the union of all bands it
+# appears in (minus itself). Put / Update / Create commonly co-occur on
+# the same resource — observing one signals the operator's flow needs
+# all three. Per the spec example: ``iam:PutRolePolicy`` siblings
+# include ``iam:UpdateRolePolicy`` AND ``iam:CreateRolePolicy``.
+_SIBLING_BANDS: tuple[frozenset[str], ...] = (
+    READ_SIBLING_VERBS,
+    WRITE_SIBLING_VERBS,
+    CREATE_SIBLING_VERBS,
+    # Cross-band: Put/Update/Create flow on the same resource.
+    WRITE_SIBLING_VERBS | CREATE_SIBLING_VERBS,
+)
+
+
+def _build_verb_to_siblings() -> dict[str, frozenset[str]]:
+    mapping: dict[str, set[str]] = {}
+    for verb_set in _SIBLING_BANDS:
+        for verb in verb_set:
+            mapping.setdefault(verb, set()).update(v for v in verb_set if v != verb)
+    return {verb: frozenset(siblings) for verb, siblings in mapping.items()}
+
+
+_VERB_TO_SIBLINGS: dict[str, frozenset[str]] = _build_verb_to_siblings()
+
+
+def _extract_verb_prefix(name: str) -> str:
+    """Extract the leading TitleCase verb from an AWS action name.
+
+    ``GetObject`` -> ``Get``; ``ListBucketVersions`` -> ``List``;
+    ``DescribeInstances`` -> ``Describe``. Stops at the first uppercase
+    letter that isn't the first character — i.e. the second
+    capital boundary. ``Get`` (bare) -> ``Get``.
+
+    Returns the empty string for non-TitleCase input.
+    """
+    if not name or not name[0].isupper():
+        return ""
+    # Walk forward until we hit the second uppercase boundary.
+    for i in range(1, len(name)):
+        if name[i].isupper():
+            return name[:i]
+    return name
+
+
+def sibling_action_prefixes(action: str) -> set[str]:
+    """Return well-known sibling action patterns for an AWS API action.
+
+    Per ``docs/PROFILE-GENERATION-DESIGN.md`` §2.2 adjacency: if the
+    operator observed ``s3:GetObject``, lean-permissive should consider
+    including ``s3:ListObject*`` / ``s3:DescribeObject*`` /
+    ``s3:HeadObject`` as low-blast-radius sibling reads.
+
+    Pure function — same inputs always produce the same output. No I/O.
+
+    Args:
+        action: an AWS-shape action (``service:Action``). Non-AWS
+            shapes (kbouncer / dbounce / gbounce) return the empty set
+            because their action grammar isn't verb-prefix based.
+
+    Returns:
+        A set of ``service:VerbPrefix*`` patterns (the trailing ``*`` is
+        intentional — the Phase 3 caller can either match exactly the
+        observed object suffix or widen, per its disposition).
+
+        Returns the empty set when the verb isn't in any known sibling
+        band, or when the action isn't AWS-shape.
+    """
+    if not isinstance(action, str) or ":" not in action:
+        return set()
+    service, _, name = action.partition(":")
+    if not service or not name:
+        return set()
+
+    verb = _extract_verb_prefix(name)
+    if not verb:
+        return set()
+
+    siblings = _VERB_TO_SIBLINGS.get(verb)
+    if not siblings:
+        return set()
+
+    # Strip the original verb from the name to get the "object" suffix
+    # (e.g. GetObject -> Object). Phase 3 callers want patterns like
+    # s3:ListObject* / s3:DescribeObject* that retain the noun.
+    object_suffix = name[len(verb):]
+
+    out: set[str] = set()
+    for sibling_verb in siblings:
+        if object_suffix:
+            # Emit ``s3:ListObject*`` rather than ``s3:List*`` so the
+            # Phase 3 caller stays narrow (sibling adjacency, NOT
+            # service-wide verb widening). The trailing ``*`` covers
+            # the natural variation (ListObjects vs ListObjectV2 etc.).
+            out.add(f"{service}:{sibling_verb}{object_suffix}*")
+        else:
+            # Bare verb (e.g. action was ``s3:Get``) — emit
+            # ``s3:List*`` etc.
+            out.add(f"{service}:{sibling_verb}*")
+    return out
