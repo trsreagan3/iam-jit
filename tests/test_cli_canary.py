@@ -158,8 +158,22 @@ def test_status_cmd_json_emits_verbatim(isolated_canary: pathlib.Path) -> None:
     result = runner.invoke(main, ["canary", "status", "--json"])
     assert result.exit_code == 0, result.output
     parsed = json.loads(result.output)
-    # Observable: round-trips faithfully.
-    assert parsed == data
+    # Observable: the originally-written fields round-trip; the §M4
+    # dogfood-metric writers ALSO populate denies_24h /
+    # intervention_count_24h / improvement_cycles per
+    # docs/MRR-5-MONITORING-RUNBOOK.md §M4, so the emitted JSON is a
+    # SUPERSET of the input — assert per-field membership rather than
+    # equality.
+    for k, v in data.items():
+        assert parsed[k] == v
+    # §M4 fields are always populated (ints; never null / absent).
+    for field in (
+        "denies_24h",
+        "intervention_count_24h",
+        "improvement_cycles",
+    ):
+        assert field in parsed
+        assert isinstance(parsed[field], int)
 
 
 # -- urls command --------------------------------------------------------

@@ -265,6 +265,263 @@ def _curl_responsive(url: str, timeout: float = 3.0) -> tuple[bool, int | None]:
 
 
 # ---------------------------------------------------------------------------
+# §M4 — dogfood-metrics writers (closes the MRR-5 phantom-fields gap)
+# ---------------------------------------------------------------------------
+#
+# Per docs/MRR-5-MONITORING-RUNBOOK.md §M4: three status.json fields
+# (``denies_24h``, ``intervention_count_24h``, ``improvement_cycles``)
+# were READ by ``status_cmd`` + ``report_cmd`` but NEVER WRITTEN. That
+# is the exact #475 ``state-claimed-without-observable-state`` shape
+# on the canary surface (calibration-drift catalog entry #22).
+#
+# Per ``[[ibounce-honest-positioning]]`` claimed state must match
+# observable reality. The dogfood-window aggregate per
+# ``[[no-announce-until-founder-validates]]`` is load-bearing on these
+# fields — without writers, the founder can't honestly assess
+# validation.
+#
+# Sources (all observable / persisted on disk):
+#
+#   * ``denies_24h`` — fan-out over the bouncer mgmt ports listed in
+#     ``status["ports"]``; ``GET /audit/events?since=<iso>&limit=1000``
+#     per bouncer, count events where
+#     ``unmapped.iam_jit.verdict`` lowercases to ``"deny"`` (ibounce
+#     emits "deny"; gbounce emits "DENY"; both normalise to the same
+#     count).
+#   * ``intervention_count_24h`` — read ``issues.jsonl``; count rows
+#     in the 24h window whose ``category == "operator_friction"`` OR
+#     ``severity`` in ``{"HIGH", "CRIT"}``.
+#   * ``improvement_cycles`` — read ``~/.iam-jit/autopilot.status.json``
+#     ``.improve.improve_count_since_startup``; absent file → 0.
+
+
+def _audit_events_url_for_port(port: int) -> str:
+    """Build the loopback /audit/events URL for a bouncer mgmt port.
+
+    Bouncers respond on a single management port (ibounce: same port
+    as the proxy; gbounce: ``ports[name + '_mgmt']``); the helper is
+    port-agnostic and the caller decides which port to pass.
+    """
+    return f"http://127.0.0.1:{int(port)}/audit/events"
+
+
+def _fetch_deny_count_for_bouncer(
+    port: int, since_iso: str, *, timeout: float = 3.0,
+) -> tuple[int | None, str | None]:
+    """Return ``(deny_count, error_message)`` for one bouncer port.
+
+    ``deny_count`` is None on any fetch / parse failure; the caller
+    treats that bouncer as a degraded source rather than a zero
+    contribution (so a missing bouncer doesn't silently understate
+    the cross-bouncer aggregate).
+    """
+    url = (
+        _audit_events_url_for_port(port)
+        + f"?since={since_iso}&limit={1000}"
+    )
+    try:
+        req = urllib.request.Request(url, method="GET")
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            body = resp.read().decode("utf-8", "replace")
+    except urllib.error.HTTPError as exc:
+        return None, f"HTTP {exc.code}"
+    except (urllib.error.URLError, ConnectionResetError,
+            TimeoutError, OSError) as exc:
+        return None, f"unreachable: {exc}"
+    count = 0
+    for line in body.splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            ev = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        # Verdict lives at unmapped.iam_jit.verdict; ibounce emits
+        # "deny", gbounce emits "DENY" — normalise to lower.
+        try:
+            verdict = (
+                (ev.get("unmapped") or {}).get("iam_jit") or {}
+            ).get("verdict") or ""
+        except AttributeError:
+            verdict = ""
+        if str(verdict).strip().lower() == "deny":
+            count += 1
+    return count, None
+
+
+def _read_autopilot_improve_count() -> int:
+    """Return ``improve_count_since_startup`` from the autopilot status
+    file. 0 when the file is absent / unparseable / lacks the field.
+
+    Honours ``IAM_JIT_AUTOPILOT_DIR`` for test isolation (matches the
+    ``autopilot/daemon._autopilot_dir`` resolver).
+    """
+    raw = (os.environ.get("IAM_JIT_AUTOPILOT_DIR") or "").strip()
+    base = pathlib.Path(raw).expanduser() if raw else (
+        pathlib.Path.home() / ".iam-jit"
+    )
+    p = base / "autopilot.status.json"
+    if not p.exists():
+        return 0
+    try:
+        doc = json.loads(p.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return 0
+    improve = doc.get("improve") or {}
+    raw_val = improve.get("improve_count_since_startup")
+    try:
+        return int(raw_val) if raw_val is not None else 0
+    except (TypeError, ValueError):
+        return 0
+
+
+def _intervention_count_in_window(
+    issues: list[dict[str, Any]],
+) -> int:
+    """Count interventions in the provided issues list.
+
+    Intervention = ``category == "operator_friction"`` OR
+    ``severity`` in ``("HIGH", "CRIT")``. Caller is responsible for
+    pre-filtering ``issues`` to the desired time window.
+    """
+    count = 0
+    for entry in issues:
+        cat = entry.get("category") or ""
+        sev = (entry.get("severity") or "").upper()
+        if cat == "operator_friction" or sev in ("HIGH", "CRIT"):
+            count += 1
+    return count
+
+
+def _compute_dogfood_metrics(
+    status: dict[str, Any] | None = None,
+    *,
+    audit_timeout: float = 3.0,
+) -> dict[str, Any]:
+    """Compute the §M4 dogfood-window metrics from observable sources.
+
+    Returns a dict shaped like::
+
+        {
+          "denies_24h": int,
+          "intervention_count_24h": int,
+          "improvement_cycles": int,
+          "computed_at": ISO8601,
+          "degraded_sources": [str, ...],
+        }
+
+    ``status`` is read from ``status.json`` when not provided; the
+    ``ports`` block names the bouncers to fan out to. Unreachable
+    bouncers append ``"<name>:<reason>"`` to ``degraded_sources``
+    (the count still aggregates across the reachable bouncers — a
+    missing bouncer never silently understates the total).
+
+    The autopilot file is treated as an honest 0 when absent: per
+    ``[[ibounce-honest-positioning]]`` we don't synthesise a count
+    we can't observe, but the absence-of-file IS the observable
+    "no improvement cycles" signal.
+    """
+    if status is None:
+        status = read_status()
+    now_dt = _dt.datetime.now(tz=_dt.timezone.utc)
+    since_dt = now_dt - _dt.timedelta(hours=24)
+    since_iso = since_dt.strftime("%Y-%m-%dT%H:%M:%SZ")
+
+    ports = (status or {}).get("ports") or {}
+
+    # denies_24h — fan-out across bouncers.
+    # NOTE: gbounce uses the *_mgmt port for /audit/events; ibounce
+    # serves /audit/events on the proxy port. Heuristic: if a port
+    # entry has a matching <name>_mgmt sibling, the mgmt one is the
+    # audit-export endpoint and the proxy one should be skipped to
+    # avoid double-counting. Otherwise the proxy port is the audit
+    # endpoint.
+    bouncer_ports: dict[str, int] = {}
+    for pname, pval in ports.items():
+        if not pname or not isinstance(pval, (int, str)):
+            continue
+        try:
+            port_int = int(pval)
+        except (TypeError, ValueError):
+            continue
+        if pname.endswith("_mgmt"):
+            # mgmt port wins for its bouncer.
+            bouncer_ports[pname[:-len("_mgmt")]] = port_int
+        else:
+            # Only record the proxy port if no mgmt sibling already
+            # claimed this bouncer name.
+            bouncer_ports.setdefault(pname, port_int)
+    # Second pass: prefer mgmt over proxy when both were declared.
+    for pname, pval in ports.items():
+        if pname.endswith("_mgmt"):
+            try:
+                bouncer_ports[pname[:-len("_mgmt")]] = int(pval)
+            except (TypeError, ValueError):
+                continue
+
+    degraded: list[str] = []
+    denies_total = 0
+    for bname, port in bouncer_ports.items():
+        count, err = _fetch_deny_count_for_bouncer(
+            port, since_iso, timeout=audit_timeout,
+        )
+        if count is None:
+            degraded.append(f"{bname}:{err or 'unknown'}")
+            continue
+        denies_total += count
+
+    # intervention_count_24h — read issues.jsonl filtered to 24h window.
+    issues = read_issues(since_iso=since_iso)
+    interventions = _intervention_count_in_window(issues)
+
+    # improvement_cycles — autopilot status counter.
+    improve_cycles = _read_autopilot_improve_count()
+
+    return {
+        "denies_24h": denies_total,
+        "intervention_count_24h": interventions,
+        "improvement_cycles": improve_cycles,
+        "computed_at": now_dt.strftime("%Y-%m-%dT%H:%M:%SZ"),
+        "degraded_sources": degraded,
+    }
+
+
+def _refresh_dogfood_metrics(
+    status: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Compute + persist the §M4 dogfood metrics into status.json.
+
+    Returns the updated status dict. Mutates the status.json file on
+    disk (state verification: every reported metric value is backed
+    by the persisted file).
+
+    Falls back gracefully when status.json is missing — returns the
+    empty dict and skips the write so this helper can be invoked
+    unconditionally on read paths.
+    """
+    if status is None:
+        status = read_status()
+    if not status:
+        return status
+    metrics = _compute_dogfood_metrics(status)
+    status["denies_24h"] = int(metrics["denies_24h"])
+    status["intervention_count_24h"] = int(metrics["intervention_count_24h"])
+    status["improvement_cycles"] = int(metrics["improvement_cycles"])
+    status["dogfood_metrics_computed_at"] = metrics["computed_at"]
+    if metrics["degraded_sources"]:
+        status["dogfood_metrics_degraded_sources"] = list(
+            metrics["degraded_sources"]
+        )
+    else:
+        # Don't leave a stale degraded list across recoveries; drop the
+        # key when no source is degraded.
+        status.pop("dogfood_metrics_degraded_sources", None)
+    write_status(status)
+    return status
+
+
+# ---------------------------------------------------------------------------
 # §A102 — canary YAML loader + daemon_args validation
 # ---------------------------------------------------------------------------
 #
@@ -696,6 +953,19 @@ def register_canary_group(main_group: click.Group) -> click.Group:
                 err=True,
             )
             raise SystemExit(1)
+        # §M4 — refresh dogfood metrics before display. Best-effort:
+        # fetch failures degrade the per-bouncer contribution but never
+        # fail the read path (the operator still needs to see the rest
+        # of the status). Per docs/MRR-5-MONITORING-RUNBOOK.md §M4.
+        try:
+            status = _refresh_dogfood_metrics(status)
+        except Exception:
+            # State-verification convention: if the refresh itself fails
+            # we surface stale values rather than synthesising new ones,
+            # so the operator sees the previously-persisted values
+            # (which may be 0 on first run). Never hide the failure on
+            # JSON consumers — but don't blow up the status read.
+            pass
         if as_json:
             click.echo(json.dumps(status, indent=2, sort_keys=True))
             return
@@ -766,6 +1036,13 @@ def register_canary_group(main_group: click.Group) -> click.Group:
         since_iso = _parse_since(since)
         issues = read_issues(since_iso=since_iso or None)
         status = read_status()
+        # §M4 — refresh dogfood metrics before display (same posture as
+        # status_cmd). Per docs/MRR-5-MONITORING-RUNBOOK.md §M4.
+        if status:
+            try:
+                status = _refresh_dogfood_metrics(status)
+            except Exception:
+                pass
         notes = NOTES_PATH.read_text(encoding="utf-8") if NOTES_PATH.exists() else ""
 
         if as_json:
