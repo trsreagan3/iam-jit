@@ -466,7 +466,14 @@ def generate_from_audit_for_mcp(args: dict[str, Any]) -> dict[str, Any]:
     """MCP-side wrapper. Same arg shape as the CLI but accepts the
     audit events as an already-fetched list (so the MCP tool can
     accept events directly + cross-host bouncer probes aren't a
-    requirement for the agent runtime)."""
+    requirement for the agent runtime).
+
+    Phase 3 (docs/PROFILE-GENERATION-DESIGN.md §6 Phase 3): accepts
+    ``lean_permissive`` (bool, default False) and ``friction_budget``
+    (dict | None, default None). When ``lean_permissive=True`` the
+    deterministic §2 heuristic drives the profile (no LLM call);
+    default-off keeps existing MCP callers byte-identical.
+    """
     time_range = args.get("time_range") or "1h"
     agent_session_id = args.get("agent_session_id")
     bouncers = args.get("bouncers") or None
@@ -475,6 +482,13 @@ def generate_from_audit_for_mcp(args: dict[str, Any]) -> dict[str, Any]:
     preferred_backend = args.get("preferred_backend")
     audit_window_start = args.get("audit_window_start")
     audit_window_end = args.get("audit_window_end")
+    lean_permissive = bool(args.get("lean_permissive", False))
+    friction_budget_raw = args.get("friction_budget")
+    friction_budget = (
+        friction_budget_raw
+        if isinstance(friction_budget_raw, dict)
+        else None
+    )
 
     # Two ways the agent can supply events:
     #   1. `events`: pre-fetched OCSF events as a list
@@ -503,6 +517,8 @@ def generate_from_audit_for_mcp(args: dict[str, Any]) -> dict[str, Any]:
         preferred_backend=preferred_backend,
         audit_window_start=audit_window_start,
         audit_window_end=audit_window_end,
+        lean_permissive=lean_permissive,
+        friction_budget=friction_budget,
     )
     return result.to_dict()
 

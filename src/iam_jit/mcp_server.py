@@ -1857,6 +1857,37 @@ TOOLS.extend([
                 "limit": {"type": "integer", "default": 500},
                 "audit_events_token": {"type": "string"},
                 "timeout": {"type": "number", "default": 10.0},
+                "lean_permissive": {
+                    "type": "boolean",
+                    "default": False,
+                    "description": (
+                        "Phase 3 of profile-generation design "
+                        "(docs/PROFILE-GENERATION-DESIGN.md §6). When "
+                        "true, runs the deterministic lean-permissive "
+                        "§2 heuristic in place of the LLM call. Per-"
+                        "ActionClass disposition: READ strong gets "
+                        "broad+siblings; WRITE_DATA strong stays "
+                        "narrow; ADMIN/DESTRUCTIVE always flagged; "
+                        "weak writes/admin/destructive SKIP. The "
+                        "_SAFETY_FLOOR_DENIES safety floor is always "
+                        "prepended regardless. Default OFF; operator "
+                        "must explicitly opt in per [[safety-mode-"
+                        "lean-permissive]] founder direction."
+                    ),
+                },
+                "friction_budget": {
+                    "type": "object",
+                    "description": (
+                        "Phase 3 of profile-generation design — "
+                        "operator's friction budget per design §4.1. "
+                        "Accepted by the heuristic for future Phase 4+ "
+                        "wiring (simulation + grading); the Phase 3 "
+                        "fallback itself does not consume this field. "
+                        "Shape: {max_legitimate_denies_per_day: int, "
+                        "max_legitimate_denies_per_week: int, "
+                        "auto_widen_on_repeat_deny: bool}."
+                    ),
+                },
             },
         },
     },

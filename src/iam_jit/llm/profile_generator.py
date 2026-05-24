@@ -772,24 +772,24 @@ def _deterministic_fallback_profile(
     (observed staging denies prod) must pass in the LLM-unavailable
     case too, not just on the happy path.
 
-    Phase 3 prerequisite (docs/PROFILE-GENERATION-DESIGN.md §6 Phase 3):
-    accepts the Phase 3 ``lean_permissive`` + ``friction_budget`` kwargs
-    as keyword-only params with safe defaults so the Phase 3 wiring can
-    pass them through without breaking the four existing in-tree
-    callers (lines 852 / 864 / 878 / 894 / 970 — all use keyword
-    arguments). The fallback's current behaviour is unchanged when the
-    new kwargs are absent or default-valued; Phase 3 wires the
-    lean-permissive heuristic per design §2 inside this function.
+    Phase 3 (docs/PROFILE-GENERATION-DESIGN.md §6 Phase 3):
+    when ``lean_permissive=True``, dispatches to the
+    :func:`_lean_permissive_fallback_profile` path which applies the
+    §2 confidence-weighted disposition table per ActionClass. Default
+    ``False`` keeps existing callers byte-identical. The
+    ``friction_budget`` kwarg is currently passed through but unused
+    inside the deterministic fallback — Phase 4+ wires it into
+    simulation + grading; for now the heuristic gates exclusively on
+    confidence band + ActionClass per design §2.2.
     """
-    # Phase 3 wires lean_permissive + friction_budget into the
-    # heuristic flow. The kwargs are accepted now so Phase 3 ships as a
-    # single-file body change without a signature churn that would
-    # break the four existing callers (or any out-of-tree caller that
-    # may already be passing keyword arguments). Until Phase 3 ships,
-    # the new args are accepted-but-ignored — accepting them is the
-    # whole point of this prerequisite.
-    _ = lean_permissive
-    _ = friction_budget
+    if lean_permissive:
+        return _lean_permissive_fallback_profile(
+            bouncer=bouncer,
+            events=events,
+            add_safety_denies=add_safety_denies,
+            friction_budget=friction_budget,
+        )
+    _ = friction_budget  # unused in legacy path
     seen: dict[str, set[str]] = defaultdict(set)
     # Per-dimension observed sets feed scope-restriction fields.
     scope_observed: dict[str, list[str]] = defaultdict(list)
@@ -855,23 +855,416 @@ def _deterministic_fallback_profile(
     return out
 
 
+# ---------------------------------------------------------------------------
+# Phase 3 — lean-permissive heuristic per design §2.
+# ---------------------------------------------------------------------------
+
+
+def _aggregate_events_for_bouncer(
+    bouncer: str,
+    events: list[dict[str, Any]],
+) -> tuple[
+    dict[str, dict[str, Any]],
+    dict[str, list[str]],
+]:
+    """Build per-action aggregates from this bouncer's events.
+
+    Returns ``(aggregates, scope_observed)`` where:
+
+    * ``aggregates`` maps action -> {count, resources (list, ordered),
+      resource_set (set), allow_count, deny_count}. ``count`` is the
+      total observation count regardless of verdict; per design §2.2
+      the confidence band is computed off the total observation count
+      across distinct resources.
+    * ``scope_observed`` maps dimension -> ordered-distinct list of
+      observed values (account_id / region / namespace / host /
+      database). Same shape the legacy fallback produced.
+    """
+    aggregates: dict[str, dict[str, Any]] = {}
+    scope_observed: dict[str, list[str]] = defaultdict(list)
+    scope_seen: dict[str, set[str]] = defaultdict(set)
+    for ev in events:
+        ev_bouncer = str(ev.get("_bouncer") or "")
+        if ev_bouncer and ev_bouncer != bouncer:
+            continue
+        ext = (ev.get("unmapped") or {}).get("iam_jit") or {}
+        api = ev.get("api") or {}
+        op = str(api.get("operation") or ext.get("action") or "")
+        svc = (api.get("service") or {}).get("name") or ext.get("service") or ""
+        action = f"{svc}:{op}" if svc and op else op
+        resources = api.get("resources") or []
+        resource = ""
+        if isinstance(resources, list) and resources:
+            first = resources[0]
+            if isinstance(first, dict):
+                resource = str(first.get("name") or first.get("uid") or "")
+            else:
+                resource = str(first)
+        if not resource:
+            resource = str(ext.get("resource") or "")
+        verdict = str(ext.get("verdict") or ev.get("activity_name") or "").lower()
+
+        # Scope is captured for every event regardless of action/verdict
+        # so deny-mode discovery + verdict-less events still drive scope.
+        dims = _extract_scope_dimensions(bouncer, ev)
+        for dim, val in dims.items():
+            if val and val not in scope_seen[dim]:
+                scope_seen[dim].add(val)
+                scope_observed[dim].append(val)
+
+        if not action:
+            continue
+        agg = aggregates.setdefault(action, {
+            "count": 0,
+            "resources": [],
+            "resource_set": set(),
+            "allow_count": 0,
+            "deny_count": 0,
+        })
+        agg["count"] += 1
+        if verdict == "allow":
+            agg["allow_count"] += 1
+        elif verdict == "deny":
+            agg["deny_count"] += 1
+        if resource and resource not in agg["resource_set"]:
+            agg["resource_set"].add(resource)
+            agg["resources"].append(resource)
+    return aggregates, scope_observed
+
+
+def _lean_permissive_fallback_profile(
+    *,
+    bouncer: str,
+    events: list[dict[str, Any]],
+    add_safety_denies: bool,
+    friction_budget: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Lean-permissive deterministic heuristic per design §2.
+
+    Builds a profile from observed audit events by applying the
+    per-ActionClass disposition table:
+
+    * READ strong: broad allow (exact-action) + sibling expansion
+      (Get -> List/Describe/Head/Lookup etc.)
+    * READ medium: include narrow (exact action + exact resource)
+    * READ weak: include narrow + flagged_for_review
+    * WRITE_DATA strong: include narrow (exact action + exact resource)
+    * WRITE_DATA medium: include narrow + flagged_for_review
+    * WRITE_DATA weak: SKIP (recorded in skipped block)
+    * ADMIN strong: include narrow + flagged_for_review (always)
+    * ADMIN medium: SKIP + flagged_for_review
+    * ADMIN weak: SKIP
+    * DESTRUCTIVE_DATA strong: include narrow + flagged_for_review
+      (no widening regardless of count per design §2.1)
+    * DESTRUCTIVE_DATA medium: SKIP + flagged_for_review
+    * DESTRUCTIVE_DATA weak: SKIP
+    * UNKNOWN: always SKIP (default-deny on unclassified)
+
+    Sibling expansion (per Phase 3 prereqs guidance from #555 final
+    report) applies ONLY to READ actions — write / admin / destructive
+    classes skip sibling expansion to keep adjacent verbs from getting
+    a free pass on the lean-permissive flag.
+
+    KNOWN_ADVERSARIAL_PATTERNS forcing to ADMIN is already handled
+    inside :func:`iam_jit.profile_heuristic.classify_action` (line 261)
+    so observed iam:CreateAccessKey + similar entries from the
+    catalogue land in the ADMIN bucket here.
+
+    Safety floor (per design §2.3): the universal ``_SAFETY_FLOOR_DENIES``
+    is always prepended when ``add_safety_denies=True``; never opt-out.
+
+    The returned dict carries a ``_provenance`` block (underscore-
+    prefixed so the YAML renderer ignores it as an unknown key while
+    callers can still inspect it for the operator-visible explanation
+    per the design §6 Phase 3 "Operator-visible explanation" rubric).
+    """
+    # ConfidenceResult-shaped object built from the aggregate dict; the
+    # classifier accepts any duck-typed object with .count + .resources.
+    from ..profile_heuristic import classify_action, confidence_band, sibling_action_prefixes
+    from ..profile_heuristic.classify import ActionClass
+
+    _ = friction_budget  # accepted but unused in Phase 3 fallback
+
+    aggregates, scope_observed = _aggregate_events_for_bouncer(bouncer, events)
+
+    # Distributions for the provenance block.
+    confidence_distribution = {"strong": 0, "medium": 0, "weak": 0}
+    action_class_distribution = {
+        "read": 0, "write_data": 0, "admin": 0,
+        "destructive_data": 0, "unknown": 0,
+    }
+    siblings_expanded_count = 0
+
+    allows: list[dict[str, Any]] = []
+    flagged: list[str] = []
+    skipped: list[str] = []
+
+    # Sort actions for deterministic output ordering — diff-friendly +
+    # snapshot-stable per the rest of this module's convention.
+    for action in sorted(aggregates.keys()):
+        agg = aggregates[action]
+        count = agg["count"]
+        resources_list = list(agg["resources"])
+        resource_set = set(resources_list)
+        rep_resource = resources_list[0] if resources_list else None
+
+        # Build a lightweight aggregate shape for confidence_band's
+        # structural typing (it reads .count + .resources). Use a
+        # simple namespace object to avoid creating extra dataclasses.
+        class _Agg:
+            pass
+        a = _Agg()
+        a.count = count
+        a.resources = resources_list
+
+        try:
+            conf = confidence_band(a)
+        except (ValueError, TypeError):
+            # Defensive: a malformed aggregate shouldn't crash the
+            # generator. Skip the action with a note.
+            skipped.append(
+                f"skipped {action}: aggregate shape invalid"
+            )
+            continue
+        cls = classify_action(bouncer, action, rep_resource)
+
+        # Track distributions for provenance.
+        confidence_distribution[conf.band.value] += 1
+        action_class_distribution[cls.value.replace("-", "_")] += 1
+
+        # Disposition table per design §2.
+        if cls is ActionClass.UNKNOWN:
+            # UNKNOWN -> SKIP regardless of confidence per design §2.2.
+            skipped.append(
+                f"skipped {action}: ActionClass.UNKNOWN ({conf.rationale})"
+            )
+            continue
+
+        # READ class.
+        if cls is ActionClass.READ:
+            if conf.band.value == "strong":
+                # Broad-ish allow: exact action across observed resources
+                # + sibling expansion. The resource list stays observed
+                # (lean-permissive widens VERBS not resources).
+                targets = sorted(resource_set) or ["*"]
+                actions_for_rule = sorted({action} | sibling_action_prefixes(action))
+                added_siblings = len(actions_for_rule) - 1
+                if added_siblings > 0:
+                    siblings_expanded_count += 1
+                for tgt in targets:
+                    allows.append({
+                        "target": tgt,
+                        "actions": actions_for_rule,
+                        "reason": (
+                            f"observed READ {count}x across "
+                            f"{len(resource_set)} resource(s); "
+                            f"lean-permissive STRONG: broad action + "
+                            f"sibling expansion"
+                        ),
+                    })
+            elif conf.band.value == "medium":
+                # Include narrow (exact action only, no siblings).
+                for tgt in sorted(resource_set) or ["*"]:
+                    allows.append({
+                        "target": tgt,
+                        "actions": [action],
+                        "reason": (
+                            f"observed READ {count}x; lean-permissive "
+                            f"MEDIUM: narrow (exact action)"
+                        ),
+                    })
+            else:  # weak
+                # Read weak: include narrow + flag for review.
+                for tgt in sorted(resource_set) or ["*"]:
+                    allows.append({
+                        "target": tgt,
+                        "actions": [action],
+                        "reason": (
+                            f"observed READ {count}x; lean-permissive "
+                            f"WEAK: narrow + flagged"
+                        ),
+                    })
+                flagged.append(
+                    f"WEAK READ pattern: {action} ({conf.rationale})"
+                )
+            continue
+
+        # WRITE_DATA class.
+        if cls is ActionClass.WRITE_DATA:
+            if conf.band.value == "strong":
+                # Narrow (exact action + exact resource).
+                for tgt in sorted(resource_set) or ["*"]:
+                    allows.append({
+                        "target": tgt,
+                        "actions": [action],
+                        "reason": (
+                            f"observed WRITE_DATA {count}x; "
+                            f"lean-permissive STRONG: narrow"
+                        ),
+                    })
+            elif conf.band.value == "medium":
+                for tgt in sorted(resource_set) or ["*"]:
+                    allows.append({
+                        "target": tgt,
+                        "actions": [action],
+                        "reason": (
+                            f"observed WRITE_DATA {count}x; "
+                            f"lean-permissive MEDIUM: narrow + flagged"
+                        ),
+                    })
+                flagged.append(
+                    f"MEDIUM WRITE_DATA pattern: {action} ({conf.rationale})"
+                )
+            else:  # weak
+                skipped.append(
+                    f"skipped {action}: WEAK WRITE_DATA pattern "
+                    f"({conf.rationale}); lean-permissive does not "
+                    f"auto-include single-observation writes"
+                )
+            continue
+
+        # ADMIN class — very tight; always flagged when included.
+        if cls is ActionClass.ADMIN:
+            if conf.band.value == "strong":
+                for tgt in sorted(resource_set) or ["*"]:
+                    allows.append({
+                        "target": tgt,
+                        "actions": [action],
+                        "reason": (
+                            f"observed ADMIN {count}x; lean-permissive "
+                            f"STRONG: narrow + flagged (admin shape)"
+                        ),
+                    })
+                flagged.append(
+                    f"STRONG ADMIN pattern (always flagged): {action} "
+                    f"({conf.rationale})"
+                )
+            elif conf.band.value == "medium":
+                skipped.append(
+                    f"skipped {action}: MEDIUM ADMIN pattern "
+                    f"({conf.rationale}); lean-permissive requires "
+                    f"STRONG confidence to include admin shapes"
+                )
+                flagged.append(
+                    f"MEDIUM ADMIN pattern skipped: {action} "
+                    f"({conf.rationale})"
+                )
+            else:  # weak
+                skipped.append(
+                    f"skipped {action}: WEAK ADMIN pattern "
+                    f"({conf.rationale})"
+                )
+            continue
+
+        # DESTRUCTIVE_DATA class — tightest; high blast-radius.
+        if cls is ActionClass.DESTRUCTIVE_DATA:
+            if conf.band.value == "strong":
+                for tgt in sorted(resource_set) or ["*"]:
+                    allows.append({
+                        "target": tgt,
+                        "actions": [action],
+                        "reason": (
+                            f"observed DESTRUCTIVE_DATA {count}x; "
+                            f"lean-permissive STRONG: narrow + flagged "
+                            f"(no widening per design §2.1)"
+                        ),
+                    })
+                flagged.append(
+                    f"STRONG DESTRUCTIVE_DATA pattern (always flagged): "
+                    f"{action} ({conf.rationale})"
+                )
+            elif conf.band.value == "medium":
+                skipped.append(
+                    f"skipped {action}: MEDIUM DESTRUCTIVE_DATA pattern "
+                    f"({conf.rationale}); lean-permissive requires "
+                    f"STRONG confidence to include destructive shapes"
+                )
+                flagged.append(
+                    f"MEDIUM DESTRUCTIVE_DATA pattern skipped: {action} "
+                    f"({conf.rationale})"
+                )
+            else:  # weak
+                skipped.append(
+                    f"skipped {action}: WEAK DESTRUCTIVE_DATA pattern "
+                    f"({conf.rationale})"
+                )
+            continue
+
+    # Anti-theater safety floor per design §2.3 — always-on when
+    # add_safety_denies is True. NEVER opt-out via lean_permissive.
+    denies = list(_SAFETY_FLOOR_DENIES.get(bouncer, [])) if add_safety_denies else []
+
+    # Provenance block per design §6 Phase 3 + §7 safeguard #7. The
+    # underscore-prefixed ``_provenance`` key is opaque to the YAML
+    # renderer (which only knows the public keys) so it doesn't end up
+    # in the rendered profile; callers / tests can inspect it directly.
+    provenance: dict[str, Any] = {
+        "mode": "lean_permissive",
+        "confidence_distribution": dict(confidence_distribution),
+        "action_class_distribution": dict(action_class_distribution),
+        "safety_floor_applied": bool(add_safety_denies),
+        "siblings_expanded_count": siblings_expanded_count,
+    }
+    # Surface the mode to operators as the first flagged-for-review
+    # entry so reading the YAML alone makes the lean-permissive
+    # decision visible. Per [[ibounce-honest-positioning]] no hidden
+    # tightening — same discipline applies to widening.
+    flagged.insert(0, (
+        f"lean_permissive heuristic applied "
+        f"(strong={confidence_distribution['strong']}, "
+        f"medium={confidence_distribution['medium']}, "
+        f"weak={confidence_distribution['weak']}; "
+        f"safety_floor_applied={bool(add_safety_denies)}; "
+        f"siblings_expanded={siblings_expanded_count})"
+    ))
+
+    out: dict[str, Any] = {
+        "bouncer": bouncer,
+        "allows": allows,
+        "denies": denies,
+        "flagged_for_review": flagged,
+        "skipped": skipped,
+        "_provenance": provenance,
+    }
+    # §A38 #370 — emit scope-restriction fields per applicable bouncer.
+    for field in _SCOPE_FIELDS_BY_BOUNCER.get(bouncer, ()):
+        dim = _SCOPE_DIM_BY_FIELD.get(field, "")
+        observed = scope_observed.get(dim, [])
+        if observed:
+            out[field] = observed
+    return out
+
+
 def _parse_llm_response(
     raw: str,
     *,
     events_by_bouncer: dict[str, list[dict[str, Any]]],
     add_safety_denies: bool,
     fallback_events: list[dict[str, Any]],
+    lean_permissive: bool = False,
+    friction_budget: dict[str, Any] | None = None,
 ) -> tuple[list[dict[str, Any]], str, bool]:
     """Strict-parse the LLM's JSON reply into a list-of-profile-dicts.
 
     Returns (profiles, explanation, parser_strict_match). On any
     deviation we fall back to deterministic synthesis per bouncer
-    and surface the reason in `flagged_for_review`."""
+    and surface the reason in `flagged_for_review`.
+
+    Phase 3 (docs/PROFILE-GENERATION-DESIGN.md §6 Phase 3): the
+    ``lean_permissive`` + ``friction_budget`` kwargs are threaded into
+    every fallback call so the heuristic fires whether the LLM was
+    unavailable, returned junk, or wasn't called at all (the
+    lean-permissive flow at the top of :func:`generate_from_audit`
+    skips the LLM entirely per [[bouncer-zero-llm-when-agent-in-loop]]
+    + design §2 "runs entirely deterministically").
+    """
     if not raw or not raw.strip():
         profiles = [
             _deterministic_fallback_profile(
                 bouncer=b, events=fallback_events,
                 add_safety_denies=add_safety_denies,
+                lean_permissive=lean_permissive,
+                friction_budget=friction_budget,
             )
             for b in events_by_bouncer.keys()
         ]
@@ -884,6 +1277,8 @@ def _parse_llm_response(
             _deterministic_fallback_profile(
                 bouncer=b, events=fallback_events,
                 add_safety_denies=add_safety_denies,
+                lean_permissive=lean_permissive,
+                friction_budget=friction_budget,
             )
             for b in events_by_bouncer.keys()
         ]
@@ -898,6 +1293,8 @@ def _parse_llm_response(
             _deterministic_fallback_profile(
                 bouncer=b, events=fallback_events,
                 add_safety_denies=add_safety_denies,
+                lean_permissive=lean_permissive,
+                friction_budget=friction_budget,
             )
             for b in events_by_bouncer.keys()
         ]
@@ -914,6 +1311,8 @@ def _parse_llm_response(
             _deterministic_fallback_profile(
                 bouncer=b, events=fallback_events,
                 add_safety_denies=add_safety_denies,
+                lean_permissive=lean_permissive,
+                friction_budget=friction_budget,
             )
             for b in events_by_bouncer.keys()
         ]
@@ -990,6 +1389,8 @@ def _parse_llm_response(
             _deterministic_fallback_profile(
                 bouncer=b, events=fallback_events,
                 add_safety_denies=add_safety_denies,
+                lean_permissive=lean_permissive,
+                friction_budget=friction_budget,
             )
             for b in events_by_bouncer.keys()
         ]
@@ -1271,6 +1672,8 @@ def generate_from_audit(
     preferred_backend: str | None = None,
     audit_window_start: str | None = None,
     audit_window_end: str | None = None,
+    lean_permissive: bool = False,
+    friction_budget: dict[str, Any] | None = None,
 ) -> ProfileResult:
     """Audit-driven generation — the headline post-pivot use case.
 
@@ -1365,6 +1768,17 @@ def generate_from_audit(
     )
 
     raw = ""
+    # Phase 3 (docs/PROFILE-GENERATION-DESIGN.md §6 Phase 3): when
+    # ``lean_permissive=True`` the heuristic runs entirely
+    # deterministically per design §2 + [[bouncer-zero-llm-when-agent-in-loop]].
+    # Bypass the LLM call regardless of opt-in state: even if the
+    # operator set IAM_JIT_ENABLE_SIDE_LLM=1, choosing lean-permissive
+    # explicitly selects the heuristic-driven path. The fallback layer
+    # in _parse_llm_response receives the lean_permissive flag and
+    # dispatches into _lean_permissive_fallback_profile per bouncer.
+    if lean_permissive:
+        backend = NoOpBackend()
+        backend_name = "noop"
     # §A93 / #509 Phase 3 — opt-in gate (A2 site via improve/pipeline.py +
     # any direct caller). When IAM_JIT_ENABLE_SIDE_LLM is unset (the
     # local-dev / agent-in-loop default) we SKIP the bouncer-side LLM
@@ -1373,7 +1787,7 @@ def generate_from_audit(
     # fallback in _parse_llm_response still runs; the agent drives the
     # LLM-augmented shape via the iam_jit_improve_profile MCP tool
     # using ITS OWN LLM per [[bouncer-zero-llm-when-agent-in-loop]].
-    if not _side_llm_enabled():
+    elif not _side_llm_enabled():
         backend = NoOpBackend()
         backend_name = "noop"
         try:
@@ -1430,6 +1844,8 @@ def generate_from_audit(
         events_by_bouncer=events_by_bouncer,
         add_safety_denies=add_safety_denies,
         fallback_events=events,
+        lean_permissive=lean_permissive,
+        friction_budget=friction_budget,
     )
 
     bundle: list[GeneratedProfile] = []
