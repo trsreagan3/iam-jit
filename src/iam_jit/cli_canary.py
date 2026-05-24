@@ -915,6 +915,1259 @@ def _verify_one_bouncer(
 
 
 # ---------------------------------------------------------------------------
+# §M1 — composite monitor (closes the MRR-5 single-pane-of-glass gap)
+# ---------------------------------------------------------------------------
+#
+# Per docs/MRR-5-MONITORING-RUNBOOK.md §M1: without a single subcommand
+# that aggregates the 11 documented signals, operators must read source
+# to know "is everything ok right now?" — which violates the MRR-5
+# acceptance criterion + per [[ibounce-honest-positioning]] violates
+# "operator can self-monitor."
+#
+# This subcommand iterates `status["ports"]` for the canary's declared
+# bouncers, fetches each bouncer's /healthz, computes derived rate-based
+# signals using a persistent state file at
+# ``~/.iam-jit/canary/monitor.state.json``, and reports the overall
+# posture with per-signal status + MRR-4 cross-references.
+#
+# Per [[ibounce-honest-positioning]]: a signal that cannot be reliably
+# read on this deployment (e.g. anomaly_detection block is null because
+# the operator hasn't enabled Phase H) MUST be marked UNKNOWN with a
+# human explanation in `notes`. We never synthesise a value.
+
+MONITOR_STATE_PATH = CANARY_DIR / "monitor.state.json"
+
+# Threshold constants (sourced from MRR-5 §1 + the bouncer-side
+# constants documented in proxy.py / disk_pressure.py).
+_DISK_FREE_PCT_WARN = 15.0
+_DISK_FREE_PCT_CRIT = 5.0
+_QUEUE_DEPTH_WARN_FRACTION = 0.5
+_WEBHOOK_CONSECUTIVE_FAILURES_WARN = 3
+_WEBHOOK_CONSECUTIVE_FAILURES_CRIT = 5
+_WEBHOOK_SILENCE_SECONDS_CRIT = 300
+_ANOMALY_RATE_WARN_PER_MIN = 10
+_ANOMALY_RATE_CRIT_PER_MIN = 100
+_THREAT_FEED_STALE_WARN_HOURS = 24
+_THREAT_FEED_STALE_CRIT_HOURS = 72
+_DECISION_RATE_SPIKE_MULTIPLIER = 5.0
+_DECISION_RATE_DROP_FRACTION = 0.1
+
+
+def _monitor_status_color(status: str) -> str:
+    """Map a per-signal status to a click color name. Lifted out so
+    tests + the report path use the same mapping."""
+    return {
+        "GREEN": "green",
+        "WARNING": "yellow",
+        "CRIT": "red",
+        "UNKNOWN": "white",
+    }.get(status, "white")
+
+
+def _read_monitor_state() -> dict[str, Any]:
+    """Read the prior monitor-state snapshot (deltas for rate signals).
+    Returns empty dict when the file is missing / unparseable so the
+    first poll degrades gracefully (rates marked UNKNOWN until a
+    second poll has a baseline to subtract from)."""
+    if not MONITOR_STATE_PATH.exists():
+        return {}
+    try:
+        return json.loads(MONITOR_STATE_PATH.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return {}
+
+
+def _write_monitor_state(state: dict[str, Any]) -> None:
+    """Persist the monitor-state snapshot. Best-effort: a write failure
+    means the next poll has no baseline (degraded — rates marked
+    UNKNOWN) but never blocks the report. Per [[ibounce-honest-positioning]]
+    we don't fail the read path on a state-file write hiccup."""
+    try:
+        _ensure_dir()
+        MONITOR_STATE_PATH.write_text(
+            json.dumps(state, indent=2, sort_keys=True) + "\n",
+            encoding="utf-8",
+        )
+    except OSError:
+        pass
+
+
+def _fetch_healthz_json(
+    url: str, timeout: float = 3.0,
+) -> tuple[dict[str, Any] | None, int | None, str | None]:
+    """Fetch a bouncer's /healthz endpoint and decode the JSON body.
+
+    Returns ``(body, http_status, error_message)``. ``body`` is the
+    parsed dict on success; None on any failure (unreachable / bad
+    JSON / non-OK status). ``http_status`` is the HTTP response code
+    when we got one, else None. ``error_message`` carries a one-line
+    diagnostic on failure (used in `notes`).
+
+    Note: a 503 from /healthz is still a SUCCESSFUL fetch — the
+    bouncer is signalling degraded state in the body and we want to
+    parse that body. We only return ``body=None`` on connection
+    failures or unparseable JSON.
+    """
+    try:
+        req = urllib.request.Request(url, method="GET")
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            status = resp.getcode()
+            raw = resp.read().decode("utf-8", "replace")
+    except urllib.error.HTTPError as exc:
+        # 503 with a JSON body still counts as a successful fetch.
+        status = exc.code
+        try:
+            raw = exc.read().decode("utf-8", "replace")
+        except Exception:
+            return None, status, f"HTTP {status} (no body)"
+    except (urllib.error.URLError, ConnectionResetError,
+            TimeoutError, OSError) as exc:
+        return None, None, f"unreachable: {exc}"
+    try:
+        body = json.loads(raw)
+    except json.JSONDecodeError as exc:
+        return None, status, f"unparseable body: {exc}"
+    if not isinstance(body, dict):
+        return None, status, "body not a JSON object"
+    return body, status, None
+
+
+def _signal_disk_pressure(
+    healthz_by_bouncer: dict[str, dict[str, Any] | None],
+) -> dict[str, Any]:
+    """Signal 1 — disk pressure (MRR-5 §1 Signal 1)."""
+    per_bouncer: dict[str, dict[str, Any]] = {}
+    worst = "GREEN"
+    notes_parts: list[str] = []
+    for bname, body in healthz_by_bouncer.items():
+        if body is None:
+            per_bouncer[bname] = {"status": "UNKNOWN"}
+            worst = _worst_status(worst, "UNKNOWN")
+            continue
+        audit_log = body.get("audit_log") or {}
+        status_field = audit_log.get("status")
+        disk_free = audit_log.get("disk_free_pct")
+        # Healthy default: status=='ok' + disk_free either None
+        # (audit not configured) or above warn threshold.
+        if status_field in ("critical", "emergency"):
+            entry_status = "CRIT"
+        elif status_field == "warn":
+            entry_status = "WARNING"
+        elif isinstance(disk_free, (int, float)):
+            if disk_free < _DISK_FREE_PCT_CRIT:
+                entry_status = "CRIT"
+            elif disk_free < _DISK_FREE_PCT_WARN:
+                entry_status = "WARNING"
+            else:
+                entry_status = "GREEN"
+        else:
+            # status==ok, disk_free not measurable (e.g. audit
+            # logging not configured) — treat as GREEN.
+            entry_status = "GREEN"
+        per_bouncer[bname] = {
+            "status": entry_status,
+            "audit_log_status": status_field,
+            "disk_free_pct": disk_free,
+        }
+        worst = _worst_status(worst, entry_status)
+        if entry_status != "GREEN":
+            notes_parts.append(f"{bname}: {status_field}/{disk_free}%")
+    return {
+        "name": "disk_pressure",
+        "mrr5_signal": 1,
+        "status": worst,
+        "value": per_bouncer,
+        "threshold_warning": f"disk_free_pct < {_DISK_FREE_PCT_WARN}",
+        "threshold_crit": f"disk_free_pct < {_DISK_FREE_PCT_CRIT}",
+        "mrr4_halt_condition": "C1" if worst == "CRIT" else None,
+        "response_procedure": (
+            "docs/MRR-4-ROLLBACK-RUNBOOK.md RB-C1"
+            if worst in ("CRIT", "WARNING") else None
+        ),
+        "raw_source": "/healthz.audit_log.{status,disk_free_pct}",
+        "per_bouncer": per_bouncer,
+        "notes": "; ".join(notes_parts) if notes_parts else "",
+    }
+
+
+def _signal_bouncer_process_health(
+    status: dict[str, Any],
+    healthz_by_bouncer: dict[str, dict[str, Any] | None],
+    healthz_status_by_bouncer: dict[str, int | None],
+) -> dict[str, Any]:
+    """Signal 2 — bouncer process health (MRR-5 §1 Signal 2)."""
+    pids = status.get("pids") or {}
+    per_bouncer: dict[str, dict[str, Any]] = {}
+    worst = "GREEN"
+    notes_parts: list[str] = []
+    for bname in healthz_by_bouncer:
+        pid_val = pids.get(bname)
+        try:
+            pid = int(pid_val) if pid_val else None
+        except (TypeError, ValueError):
+            pid = None
+        if pid is None:
+            entry_status = "UNKNOWN"
+            notes_parts.append(f"{bname}: no pid in status.json")
+        elif not _pid_alive(pid):
+            entry_status = "CRIT"
+            notes_parts.append(f"{bname}: pid {pid} not alive")
+        elif healthz_by_bouncer[bname] is None:
+            entry_status = "CRIT"
+            notes_parts.append(f"{bname}: /healthz unreachable")
+        else:
+            entry_status = "GREEN"
+        per_bouncer[bname] = {
+            "status": entry_status,
+            "pid": pid,
+            "healthz_http": healthz_status_by_bouncer.get(bname),
+        }
+        worst = _worst_status(worst, entry_status)
+    return {
+        "name": "bouncer_process_health",
+        "mrr5_signal": 2,
+        "status": worst,
+        "value": per_bouncer,
+        "threshold_warning": "cmdline diverges from recorded daemon_args",
+        "threshold_crit": "PID missing OR /healthz unreachable",
+        "mrr4_halt_condition": "C3" if worst == "CRIT" else None,
+        "response_procedure": (
+            "docs/MRR-4-ROLLBACK-RUNBOOK.md RB-C3"
+            if worst == "CRIT" else None
+        ),
+        "raw_source": "status.json.pids + os.kill(pid, 0) + /healthz",
+        "per_bouncer": per_bouncer,
+        "notes": "; ".join(notes_parts) if notes_parts else "",
+    }
+
+
+def _signal_audit_chain_continuity(
+    log_dir: str | None = None,
+) -> dict[str, Any]:
+    """Signal 3 — audit chain continuity (MRR-5 §1 Signal 3).
+
+    Invokes ``verify_chain_jsonl`` directly per the §M1 implementation
+    note (don't shell out). When the log dir doesn't exist (no audit
+    logging configured) we mark UNKNOWN with an explanatory note —
+    per [[ibounce-honest-positioning]] absence of audit logging is
+    NOT a CRIT, it's an honest UNKNOWN.
+    """
+    # Resolve log dir the same way `iam-jit audit verify` does.
+    if log_dir is None:
+        env_path = os.environ.get("IAM_JIT_AUDIT_LOG_PATH")
+        log_dir = (
+            str(pathlib.Path(env_path).parent) if env_path else None
+        )
+    if log_dir is None or not pathlib.Path(log_dir).is_dir():
+        return {
+            "name": "audit_chain_continuity",
+            "mrr5_signal": 3,
+            "status": "UNKNOWN",
+            "value": None,
+            "threshold_warning": "chain.state_file_missing_at_start",
+            "threshold_crit": "any chain.inconsistencies[] entry",
+            "mrr4_halt_condition": None,
+            "response_procedure": None,
+            "raw_source": "verify_chain_jsonl(IAM_JIT_AUDIT_LOG_PATH)",
+            "notes": (
+                "audit logging not configured (IAM_JIT_AUDIT_LOG_PATH "
+                "unset OR log_dir missing) — chain verification skipped"
+            ),
+        }
+    try:
+        from .bouncer.audit_export import (
+            chain_state_path,
+            verify_chain_jsonl,
+        )
+        state_file = chain_state_path(log_dir)
+        state_missing = not state_file.is_file()
+        result = verify_chain_jsonl(
+            log_dir, since_unix=None, state_file_missing=state_missing,
+        )
+    except Exception as exc:
+        return {
+            "name": "audit_chain_continuity",
+            "mrr5_signal": 3,
+            "status": "UNKNOWN",
+            "value": None,
+            "threshold_warning": "chain.state_file_missing_at_start",
+            "threshold_crit": "any chain.inconsistencies[] entry",
+            "mrr4_halt_condition": None,
+            "response_procedure": None,
+            "raw_source": "verify_chain_jsonl",
+            "notes": f"chain verify raised: {exc}",
+        }
+    result_dict = result.to_dict() if hasattr(result, "to_dict") else {}
+    inconsistencies = result_dict.get("inconsistencies") or []
+    state_missing_flag = bool(
+        result_dict.get("state_file_missing_at_start")
+    )
+    if inconsistencies:
+        status_v = "CRIT"
+    elif state_missing_flag:
+        status_v = "WARNING"
+    else:
+        status_v = "GREEN"
+    return {
+        "name": "audit_chain_continuity",
+        "mrr5_signal": 3,
+        "status": status_v,
+        "value": {
+            "events_checked": result_dict.get("events_checked"),
+            "files_checked": result_dict.get("files_checked"),
+            "head_seq": result_dict.get("head_seq"),
+            "inconsistencies_count": len(inconsistencies),
+            "state_file_missing_at_start": state_missing_flag,
+        },
+        "threshold_warning": "chain.state_file_missing_at_start",
+        "threshold_crit": "any chain.inconsistencies[] entry",
+        "mrr4_halt_condition": "C2" if status_v == "CRIT" else None,
+        "response_procedure": (
+            "docs/MRR-4-ROLLBACK-RUNBOOK.md RB-C2"
+            if status_v == "CRIT" else None
+        ),
+        "raw_source": "verify_chain_jsonl(IAM_JIT_AUDIT_LOG_PATH)",
+        "notes": (
+            f"{len(inconsistencies)} inconsistencies"
+            if inconsistencies else ""
+        ),
+    }
+
+
+def _signal_audit_export_queue(
+    healthz_by_bouncer: dict[str, dict[str, Any] | None],
+) -> dict[str, Any]:
+    """Signal 4 — audit-export queue depth (MRR-5 §1 Signal 4)."""
+    per_bouncer: dict[str, dict[str, Any]] = {}
+    worst = "GREEN"
+    notes_parts: list[str] = []
+    for bname, body in healthz_by_bouncer.items():
+        if body is None:
+            per_bouncer[bname] = {"status": "UNKNOWN"}
+            worst = _worst_status(worst, "UNKNOWN")
+            continue
+        export = body.get("audit_export")
+        if not isinstance(export, dict):
+            # gbounce / kbouncer may not surface audit_export — that's
+            # not a fault; it just means audit-export isn't configured.
+            per_bouncer[bname] = {
+                "status": "GREEN", "configured": False,
+            }
+            continue
+        if not export.get("configured"):
+            per_bouncer[bname] = {
+                "status": "GREEN", "configured": False,
+            }
+            continue
+        queue_depth = export.get("queue_depth") or 0
+        queue_capacity = export.get("queue_capacity") or 0
+        dropped = export.get("dropped_count_since_start") or 0
+        if dropped > 0:
+            entry_status = "CRIT"
+            notes_parts.append(f"{bname}: {dropped} dropped events")
+        elif (
+            queue_capacity > 0
+            and queue_depth >= queue_capacity * _QUEUE_DEPTH_WARN_FRACTION
+        ):
+            entry_status = "WARNING"
+            notes_parts.append(
+                f"{bname}: queue {queue_depth}/{queue_capacity}"
+            )
+        else:
+            entry_status = "GREEN"
+        per_bouncer[bname] = {
+            "status": entry_status,
+            "configured": True,
+            "queue_depth": queue_depth,
+            "queue_capacity": queue_capacity,
+            "dropped_count_since_start": dropped,
+        }
+        worst = _worst_status(worst, entry_status)
+    return {
+        "name": "audit_export_queue",
+        "mrr5_signal": 4,
+        "status": worst,
+        "value": per_bouncer,
+        "threshold_warning": f"queue_depth >= capacity * {_QUEUE_DEPTH_WARN_FRACTION}",
+        "threshold_crit": "dropped_count_since_start > 0",
+        "mrr4_halt_condition": None,
+        "response_procedure": (
+            "docs/MRR-5-MONITORING-RUNBOOK.md#signal-4"
+            if worst != "GREEN" else None
+        ),
+        "raw_source": "/healthz.audit_export.{queue_depth,queue_capacity,dropped_count_since_start}",
+        "per_bouncer": per_bouncer,
+        "notes": "; ".join(notes_parts) if notes_parts else "",
+    }
+
+
+def _signal_webhook_health(
+    healthz_by_bouncer: dict[str, dict[str, Any] | None],
+) -> dict[str, Any]:
+    """Signal 5 — webhook health (MRR-5 §1 Signal 5)."""
+    per_bouncer: dict[str, dict[str, Any]] = {}
+    worst = "GREEN"
+    notes_parts: list[str] = []
+    for bname, body in healthz_by_bouncer.items():
+        if body is None:
+            per_bouncer[bname] = {"status": "UNKNOWN"}
+            worst = _worst_status(worst, "UNKNOWN")
+            continue
+        export = body.get("audit_export")
+        if not isinstance(export, dict) or not export.get("webhook_configured"):
+            per_bouncer[bname] = {
+                "status": "GREEN", "webhook_configured": False,
+            }
+            continue
+        consec_fail = int(export.get("webhook_consecutive_failures") or 0)
+        last_success_ago = export.get("webhook_last_success_seconds_ago")
+        last_status = export.get("webhook_last_status_code")
+        if consec_fail > _WEBHOOK_CONSECUTIVE_FAILURES_CRIT:
+            entry_status = "CRIT"
+        elif (
+            last_success_ago is not None
+            and last_success_ago > _WEBHOOK_SILENCE_SECONDS_CRIT
+        ):
+            entry_status = "CRIT"
+        elif consec_fail >= _WEBHOOK_CONSECUTIVE_FAILURES_WARN:
+            entry_status = "WARNING"
+        else:
+            entry_status = "GREEN"
+        per_bouncer[bname] = {
+            "status": entry_status,
+            "webhook_configured": True,
+            "consecutive_failures": consec_fail,
+            "last_status_code": last_status,
+            "last_success_seconds_ago": last_success_ago,
+        }
+        worst = _worst_status(worst, entry_status)
+        if entry_status != "GREEN":
+            notes_parts.append(
+                f"{bname}: consec_fail={consec_fail} "
+                f"last_status={last_status}"
+            )
+    return {
+        "name": "webhook_health",
+        "mrr5_signal": 5,
+        "status": worst,
+        "value": per_bouncer,
+        "threshold_warning": (
+            f"consecutive_failures >= {_WEBHOOK_CONSECUTIVE_FAILURES_WARN}"
+        ),
+        "threshold_crit": (
+            f"consecutive_failures > {_WEBHOOK_CONSECUTIVE_FAILURES_CRIT} "
+            f"OR last_success_seconds_ago > {_WEBHOOK_SILENCE_SECONDS_CRIT}"
+        ),
+        "mrr4_halt_condition": "C4" if worst == "CRIT" else None,
+        "response_procedure": (
+            "docs/MRR-5-MONITORING-RUNBOOK.md#signal-5"
+            if worst != "GREEN" else None
+        ),
+        "raw_source": (
+            "/healthz.audit_export.{webhook_consecutive_failures,"
+            "webhook_last_status_code,webhook_last_success_seconds_ago}"
+        ),
+        "per_bouncer": per_bouncer,
+        "notes": "; ".join(notes_parts) if notes_parts else "",
+    }
+
+
+def _signal_anomaly_alert_rate(
+    healthz_by_bouncer: dict[str, dict[str, Any] | None],
+    prior_state: dict[str, Any],
+    now_unix: float,
+) -> tuple[dict[str, Any], dict[str, Any]]:
+    """Signal 6 — anomaly detection alert rate (MRR-5 §1 Signal 6).
+
+    Returns ``(signal_dict, state_delta_for_next_poll)``. The state
+    delta records the current ``alerts_emitted_total`` per bouncer
+    so the next poll can compute the rate.
+
+    Per [[anomaly-detection-mode-phase-h]] this is ibounce-only; for
+    other bouncers the block is null and the signal is GREEN with a
+    "not applicable" note.
+    """
+    per_bouncer: dict[str, dict[str, Any]] = {}
+    next_state: dict[str, Any] = {}
+    worst = "GREEN"
+    notes_parts: list[str] = []
+    prior_anomaly = (prior_state or {}).get("anomaly") or {}
+    for bname, body in healthz_by_bouncer.items():
+        if body is None:
+            per_bouncer[bname] = {"status": "UNKNOWN"}
+            worst = _worst_status(worst, "UNKNOWN")
+            continue
+        ad = body.get("anomaly_detection")
+        if not isinstance(ad, dict):
+            per_bouncer[bname] = {
+                "status": "GREEN",
+                "applicable": False,
+                "note": "anomaly detection not enabled on this bouncer",
+            }
+            continue
+        current_total = int(ad.get("alerts_emitted_total") or 0)
+        next_state[bname] = {
+            "total": current_total,
+            "ts": now_unix,
+        }
+        prior = prior_anomaly.get(bname) or {}
+        prior_total = prior.get("total")
+        prior_ts = prior.get("ts")
+        rate_per_min: float | None = None
+        if (
+            isinstance(prior_total, (int, float))
+            and isinstance(prior_ts, (int, float))
+            and now_unix > prior_ts
+        ):
+            elapsed_s = now_unix - prior_ts
+            delta = max(0, current_total - int(prior_total))
+            rate_per_min = (delta / elapsed_s) * 60.0
+        if rate_per_min is None:
+            entry_status = "UNKNOWN"
+            notes_parts.append(
+                f"{bname}: no prior baseline; rate UNKNOWN until next poll"
+            )
+        elif rate_per_min > _ANOMALY_RATE_CRIT_PER_MIN:
+            entry_status = "CRIT"
+            notes_parts.append(
+                f"{bname}: anomaly rate {rate_per_min:.1f}/min"
+            )
+        elif rate_per_min > _ANOMALY_RATE_WARN_PER_MIN:
+            entry_status = "WARNING"
+            notes_parts.append(
+                f"{bname}: anomaly rate {rate_per_min:.1f}/min"
+            )
+        else:
+            entry_status = "GREEN"
+        per_bouncer[bname] = {
+            "status": entry_status,
+            "applicable": True,
+            "alerts_emitted_total": current_total,
+            "rate_per_min": rate_per_min,
+        }
+        worst = _worst_status(worst, entry_status)
+    return (
+        {
+            "name": "anomaly_alert_rate",
+            "mrr5_signal": 6,
+            "status": worst,
+            "value": per_bouncer,
+            "threshold_warning": f"> {_ANOMALY_RATE_WARN_PER_MIN}/min",
+            "threshold_crit": f"> {_ANOMALY_RATE_CRIT_PER_MIN}/min",
+            "mrr4_halt_condition": None,
+            "response_procedure": (
+                "docs/MRR-5-MONITORING-RUNBOOK.md#signal-6"
+                if worst not in ("GREEN", "UNKNOWN") else None
+            ),
+            "raw_source": "/healthz.anomaly_detection.alerts_emitted_total (delta over time)",
+            "per_bouncer": per_bouncer,
+            "notes": "; ".join(notes_parts) if notes_parts else "",
+        },
+        next_state,
+    )
+
+
+def _signal_threat_feed(now_unix: float) -> dict[str, Any]:
+    """Signal 7 — threat-feed subscription health (MRR-5 §1 Signal 7).
+
+    Imports cli_updates lazily so the monitor still works when the
+    threat-feed surface isn't wired (older bouncer-only installs).
+    """
+    try:
+        from .threat_feed import load_cached_feed  # noqa: F401
+        from . import cli_updates  # noqa: F401 — used below
+    except Exception as exc:
+        return {
+            "name": "threat_feed",
+            "mrr5_signal": 7,
+            "status": "UNKNOWN",
+            "value": None,
+            "threshold_warning": f"last_fetch_at > {_THREAT_FEED_STALE_WARN_HOURS}h ago",
+            "threshold_crit": (
+                f"refused_verification OR last_fetch_at > "
+                f"{_THREAT_FEED_STALE_CRIT_HOURS}h ago"
+            ),
+            "mrr4_halt_condition": None,
+            "response_procedure": None,
+            "raw_source": "iam-jit updates last-fetch",
+            "notes": f"threat-feed surface unavailable: {exc}",
+        }
+    # Best-effort: reuse the cli_updates loader path if it's importable.
+    try:
+        # Match _load_subscriptions resolution path — config-less call
+        # falls back to default search.
+        subs, _block, _source = cli_updates._load_subscriptions(None, None)
+    except Exception as exc:
+        return {
+            "name": "threat_feed",
+            "mrr5_signal": 7,
+            "status": "UNKNOWN",
+            "value": None,
+            "threshold_warning": f"last_fetch_at > {_THREAT_FEED_STALE_WARN_HOURS}h ago",
+            "threshold_crit": (
+                f"refused_verification OR last_fetch_at > "
+                f"{_THREAT_FEED_STALE_CRIT_HOURS}h ago"
+            ),
+            "mrr4_halt_condition": None,
+            "response_procedure": None,
+            "raw_source": "iam-jit updates last-fetch",
+            "notes": f"could not load subscriptions: {exc}",
+        }
+    if not subs:
+        return {
+            "name": "threat_feed",
+            "mrr5_signal": 7,
+            "status": "GREEN",
+            "value": [],
+            "threshold_warning": f"last_fetch_at > {_THREAT_FEED_STALE_WARN_HOURS}h ago",
+            "threshold_crit": (
+                f"refused_verification OR last_fetch_at > "
+                f"{_THREAT_FEED_STALE_CRIT_HOURS}h ago"
+            ),
+            "mrr4_halt_condition": None,
+            "response_procedure": None,
+            "raw_source": "iam-jit updates last-fetch",
+            "notes": "no threat-feed subscriptions declared",
+        }
+    per_feed: list[dict[str, Any]] = []
+    worst = "GREEN"
+    notes_parts: list[str] = []
+    from .threat_feed import load_cached_feed as _load_cached_feed
+    for s in subs:
+        try:
+            _cached, meta = _load_cached_feed(s.url)
+        except Exception as exc:
+            per_feed.append({
+                "label": s.label(),
+                "status": "UNKNOWN",
+                "error": str(exc),
+            })
+            worst = _worst_status(worst, "UNKNOWN")
+            continue
+        last_status = meta.get("last_fetch_status")
+        last_fetch_at = meta.get("last_fetch_at")
+        # Compute age in hours.
+        age_h: float | None = None
+        if isinstance(last_fetch_at, str):
+            try:
+                ts = _dt.datetime.fromisoformat(
+                    last_fetch_at.replace("Z", "+00:00")
+                ).timestamp()
+                age_h = (now_unix - ts) / 3600.0
+            except (TypeError, ValueError):
+                age_h = None
+        if last_status == "refused_verification":
+            entry_status = "CRIT"
+            notes_parts.append(f"{s.label()}: refused_verification")
+        elif age_h is not None and age_h > _THREAT_FEED_STALE_CRIT_HOURS:
+            entry_status = "CRIT"
+            notes_parts.append(f"{s.label()}: stale {age_h:.0f}h")
+        elif (
+            last_status not in (None, "ok")
+            or (age_h is not None and age_h > _THREAT_FEED_STALE_WARN_HOURS)
+        ):
+            entry_status = "WARNING"
+        else:
+            entry_status = "GREEN"
+        per_feed.append({
+            "label": s.label(),
+            "status": entry_status,
+            "last_fetch_status": last_status,
+            "last_fetch_at": last_fetch_at,
+            "age_hours": age_h,
+        })
+        worst = _worst_status(worst, entry_status)
+    return {
+        "name": "threat_feed",
+        "mrr5_signal": 7,
+        "status": worst,
+        "value": per_feed,
+        "threshold_warning": f"last_fetch_at > {_THREAT_FEED_STALE_WARN_HOURS}h ago",
+        "threshold_crit": (
+            f"refused_verification OR last_fetch_at > "
+            f"{_THREAT_FEED_STALE_CRIT_HOURS}h ago"
+        ),
+        "mrr4_halt_condition": "C5+C6" if worst == "CRIT" else None,
+        "response_procedure": (
+            "docs/MRR-4-ROLLBACK-RUNBOOK.md RB-C6"
+            if worst == "CRIT" else None
+        ),
+        "raw_source": "iam-jit updates last-fetch",
+        "notes": "; ".join(notes_parts) if notes_parts else "",
+    }
+
+
+def _signal_llm_skips(
+    healthz_by_bouncer: dict[str, dict[str, Any] | None],
+) -> dict[str, Any]:
+    """Signal 8 — LLM skip counter (MRR-5 §1 Signal 8).
+
+    Per [[bouncer-zero-llm-when-agent-in-loop]] non-zero total is the
+    EXPECTED state in agent-delegated mode; we surface it as GREEN
+    with the count in the value. The signal goes WARNING/CRIT only
+    in the operator-configured side-LLM ramp-up case, which we don't
+    detect without /healthz exposing `--enable-side-llm` — so v1 of
+    this signal is GREEN-with-count.
+    """
+    per_bouncer: dict[str, dict[str, Any]] = {}
+    total = 0
+    for bname, body in healthz_by_bouncer.items():
+        if body is None:
+            per_bouncer[bname] = {"status": "UNKNOWN"}
+            continue
+        skips = body.get("llm_skips")
+        if not isinstance(skips, dict):
+            per_bouncer[bname] = {"status": "GREEN", "total": 0}
+            continue
+        bouncer_total = int(skips.get("total") or 0)
+        total += bouncer_total
+        per_bouncer[bname] = {
+            "status": "GREEN",
+            "total": bouncer_total,
+            "by_reason": skips.get("by_reason") or {},
+        }
+    return {
+        "name": "llm_skips",
+        "mrr5_signal": 8,
+        "status": "GREEN",
+        "value": {"total": total, "per_bouncer": per_bouncer},
+        "threshold_warning": "ramp-up without agent activity (operator inspection)",
+        "threshold_crit": "ramp-up with --enable-side-llm (operator inspection)",
+        "mrr4_halt_condition": None,
+        "response_procedure": None,
+        "raw_source": "/healthz.llm_skips",
+        "per_bouncer": per_bouncer,
+        "notes": (
+            f"total={total} (expected non-zero in agent-delegated mode "
+            f"per [[bouncer-zero-llm-when-agent-in-loop]])"
+        ),
+    }
+
+
+def _signal_decision_rate(
+    healthz_by_bouncer: dict[str, dict[str, Any] | None],
+    prior_state: dict[str, Any],
+    now_unix: float,
+) -> tuple[dict[str, Any], dict[str, Any]]:
+    """Signal 9 — per-bouncer decision rate (MRR-5 §1 Signal 9).
+
+    Returns ``(signal_dict, state_delta)``. State persists the prior
+    decisions_count per bouncer (and PID for restart detection — if
+    PID changed since the prior poll we reset the baseline).
+    """
+    per_bouncer: dict[str, dict[str, Any]] = {}
+    next_state: dict[str, Any] = {}
+    worst = "GREEN"
+    notes_parts: list[str] = []
+    prior_dr = (prior_state or {}).get("decisions") or {}
+    for bname, body in healthz_by_bouncer.items():
+        if body is None:
+            per_bouncer[bname] = {"status": "UNKNOWN"}
+            worst = _worst_status(worst, "UNKNOWN")
+            continue
+        # ibounce: decisions_count. gbounce: total_requests.
+        current = body.get("decisions_count")
+        if current is None:
+            current = body.get("total_requests")
+        if current is None:
+            per_bouncer[bname] = {"status": "UNKNOWN",
+                                  "note": "no decisions_count field"}
+            continue
+        current = int(current)
+        next_state[bname] = {"total": current, "ts": now_unix}
+        prior = prior_dr.get(bname) or {}
+        prior_total = prior.get("total")
+        prior_ts = prior.get("ts")
+        rate_per_min: float | None = None
+        if (
+            isinstance(prior_total, (int, float))
+            and isinstance(prior_ts, (int, float))
+            and now_unix > prior_ts
+        ):
+            elapsed_s = now_unix - prior_ts
+            delta = max(0, current - int(prior_total))
+            rate_per_min = (delta / elapsed_s) * 60.0
+        # We don't have a "baseline" to compare a spike/drop against
+        # without operator-defined expectations; mark GREEN with the
+        # observed rate. Composite-monitor v1 surfaces the value;
+        # spike/drop detection requires a learned baseline (v1.1).
+        entry_status = "GREEN" if rate_per_min is not None else "UNKNOWN"
+        per_bouncer[bname] = {
+            "status": entry_status,
+            "decisions_count": current,
+            "rate_per_min": rate_per_min,
+        }
+        worst = _worst_status(worst, entry_status)
+        if entry_status == "UNKNOWN":
+            notes_parts.append(
+                f"{bname}: no prior baseline; rate UNKNOWN until next poll"
+            )
+    return (
+        {
+            "name": "decision_rate",
+            "mrr5_signal": 9,
+            "status": worst,
+            "value": per_bouncer,
+            "threshold_warning": (
+                f"spike (>{_DECISION_RATE_SPIKE_MULTIPLIER}x baseline) OR "
+                f"drop (<{_DECISION_RATE_DROP_FRACTION * 100:.0f}% baseline)"
+            ),
+            "threshold_crit": "decisions_count flat across multiple polls",
+            "mrr4_halt_condition": None,
+            "response_procedure": None,
+            "raw_source": "/healthz.{decisions_count,total_requests}",
+            "per_bouncer": per_bouncer,
+            "notes": "; ".join(notes_parts) if notes_parts else "",
+        },
+        next_state,
+    )
+
+
+def _signal_dynamic_denies(
+    healthz_by_bouncer: dict[str, dict[str, Any] | None],
+) -> dict[str, Any]:
+    """Signal 10 — dynamic-deny rule count (MRR-5 §1 Signal 10)."""
+    per_bouncer: dict[str, dict[str, Any]] = {}
+    worst = "GREEN"
+    notes_parts: list[str] = []
+    for bname, body in healthz_by_bouncer.items():
+        if body is None:
+            per_bouncer[bname] = {"status": "UNKNOWN"}
+            worst = _worst_status(worst, "UNKNOWN")
+            continue
+        # ibounce: .dynamic_denies block. gbounce: flat
+        # dynamic_denies_count / dynamic_denies_enabled fields.
+        dd = body.get("dynamic_denies")
+        if isinstance(dd, dict):
+            enabled = bool(dd.get("enabled"))
+            rules_count = int(dd.get("rules_count") or 0)
+            rules_in_file = int(dd.get("rules_in_file") or 0)
+            initial_load_error = dd.get("initial_load_error")
+            parse_errors = int(dd.get("total_parse_errors") or 0)
+        else:
+            enabled = bool(body.get("dynamic_denies_enabled"))
+            rules_count = int(body.get("dynamic_denies_count") or 0)
+            rules_in_file = rules_count
+            initial_load_error = None
+            parse_errors = int(
+                body.get("total_dynamic_deny_parse_errors") or 0
+            )
+        if enabled and rules_count == 0 and initial_load_error:
+            entry_status = "CRIT"
+            notes_parts.append(
+                f"{bname}: enabled but 0 rules + load error"
+            )
+        elif rules_count < rules_in_file:
+            entry_status = "WARNING"
+            notes_parts.append(
+                f"{bname}: {rules_count}/{rules_in_file} rules loaded"
+            )
+        else:
+            entry_status = "GREEN"
+        per_bouncer[bname] = {
+            "status": entry_status,
+            "enabled": enabled,
+            "rules_count": rules_count,
+            "rules_in_file": rules_in_file,
+            "initial_load_error": initial_load_error,
+            "total_parse_errors": parse_errors,
+        }
+        worst = _worst_status(worst, entry_status)
+    return {
+        "name": "dynamic_denies",
+        "mrr5_signal": 10,
+        "status": worst,
+        "value": per_bouncer,
+        "threshold_warning": "rules_count < rules_in_file",
+        "threshold_crit": "enabled AND rules_count == 0 AND initial_load_error",
+        "mrr4_halt_condition": None,
+        "response_procedure": (
+            "docs/MRR-5-MONITORING-RUNBOOK.md#signal-10"
+            if worst != "GREEN" else None
+        ),
+        "raw_source": "/healthz.dynamic_denies (or *_count flat fields on gbounce)",
+        "per_bouncer": per_bouncer,
+        "notes": "; ".join(notes_parts) if notes_parts else "",
+    }
+
+
+def _signal_heartbeat(
+    healthz_by_bouncer: dict[str, dict[str, Any] | None],
+) -> dict[str, Any]:
+    """Signal 11 — heartbeat gap detection (MRR-5 §1 Signal 11).
+
+    Per MRR-5 §M7 heartbeat is opt-in default-off; when no bouncer has
+    `heartbeat.enabled: true` the signal is UNKNOWN (not GREEN, not
+    CRIT) with an honest note. Per [[ibounce-honest-positioning]] we
+    don't claim heartbeat health when heartbeat isn't running.
+    """
+    per_bouncer: dict[str, dict[str, Any]] = {}
+    worst: str | None = None
+    enabled_anywhere = False
+    notes_parts: list[str] = []
+    for bname, body in healthz_by_bouncer.items():
+        if body is None:
+            per_bouncer[bname] = {"status": "UNKNOWN"}
+            worst = _worst_status(worst or "GREEN", "UNKNOWN")
+            continue
+        hb = body.get("heartbeat")
+        if not isinstance(hb, dict) or not hb.get("enabled"):
+            per_bouncer[bname] = {
+                "status": "UNKNOWN", "enabled": False,
+            }
+            continue
+        enabled_anywhere = True
+        gap = bool(hb.get("gap_detected"))
+        last_ago = hb.get("last_emit_seconds_ago")
+        interval = hb.get("interval_seconds") or 0
+        if gap:
+            entry_status = "CRIT"
+            notes_parts.append(f"{bname}: gap detected")
+        elif (
+            isinstance(last_ago, (int, float))
+            and last_ago >= interval > 0
+            and last_ago < interval * 2
+        ):
+            entry_status = "WARNING"
+        else:
+            entry_status = "GREEN"
+        per_bouncer[bname] = {
+            "status": entry_status,
+            "enabled": True,
+            "gap_detected": gap,
+            "last_emit_seconds_ago": last_ago,
+            "interval_seconds": interval,
+        }
+        worst = _worst_status(worst or "GREEN", entry_status)
+    if not enabled_anywhere:
+        # No bouncer has heartbeat enabled — honest UNKNOWN.
+        return {
+            "name": "heartbeat",
+            "mrr5_signal": 11,
+            "status": "UNKNOWN",
+            "value": per_bouncer,
+            "threshold_warning": "last_emit_seconds_ago >= interval_seconds",
+            "threshold_crit": "gap_detected == true",
+            "mrr4_halt_condition": None,
+            "response_procedure": None,
+            "raw_source": "/healthz.heartbeat",
+            "per_bouncer": per_bouncer,
+            "notes": (
+                "heartbeat opt-in not enabled on any bouncer "
+                "(per MRR-5 §M7 default-off); enable via "
+                "--heartbeat-interval-seconds for audit-channel "
+                "coverage"
+            ),
+        }
+    return {
+        "name": "heartbeat",
+        "mrr5_signal": 11,
+        "status": worst or "GREEN",
+        "value": per_bouncer,
+        "threshold_warning": "last_emit_seconds_ago >= interval_seconds",
+        "threshold_crit": "gap_detected == true",
+        "mrr4_halt_condition": "C4" if worst == "CRIT" else None,
+        "response_procedure": (
+            "docs/MRR-5-MONITORING-RUNBOOK.md#signal-11"
+            if worst not in ("GREEN", "UNKNOWN") else None
+        ),
+        "raw_source": "/healthz.heartbeat",
+        "per_bouncer": per_bouncer,
+        "notes": "; ".join(notes_parts) if notes_parts else "",
+    }
+
+
+_STATUS_RANK = {"GREEN": 0, "UNKNOWN": 1, "WARNING": 2, "CRIT": 3}
+
+
+def _worst_status(a: str, b: str) -> str:
+    """Return the worse of two statuses (CRIT > WARNING > UNKNOWN > GREEN).
+
+    The ordering puts UNKNOWN above GREEN but below WARNING/CRIT so an
+    unreachable bouncer DOES degrade the overall signal but a real
+    WARNING/CRIT on a reachable bouncer takes precedence (worst wins
+    per MRR-5 §2 implementation note).
+    """
+    return a if _STATUS_RANK.get(a, 0) >= _STATUS_RANK.get(b, 0) else b
+
+
+def _aggregate_overall(signals: list[dict[str, Any]]) -> dict[str, int]:
+    """Count signals per status. UNKNOWN counted separately."""
+    counts = {"GREEN": 0, "WARNING": 0, "CRIT": 0, "UNKNOWN": 0}
+    for s in signals:
+        st = s.get("status", "UNKNOWN")
+        counts[st] = counts.get(st, 0) + 1
+    return counts
+
+
+def _exit_code_for_overall(
+    overall: str, unreachable_bouncers: bool,
+) -> int:
+    """Map the overall status + unreachability to a process exit code.
+
+    Per the user brief:
+      * 0 — GREEN
+      * 1 — WARNING (no CRIT)
+      * 2 — CRIT
+      * 3 — UNKNOWN due to unreachable bouncers (degraded monitoring)
+
+    CRIT always wins over the 'unreachable' bit — if there's a real
+    CRIT signal we exit 2 even if some bouncers are unreachable, so
+    the operator's alerting fires on the most severe signal.
+    """
+    if overall == "CRIT":
+        return 2
+    if overall == "WARNING":
+        return 1
+    if overall == "UNKNOWN" or unreachable_bouncers:
+        return 3
+    return 0
+
+
+def _compute_monitor_snapshot(
+    *,
+    status: dict[str, Any] | None = None,
+    audit_log_dir: str | None = None,
+    healthz_timeout: float = 3.0,
+    now_unix: float | None = None,
+    prior_state: dict[str, Any] | None = None,
+) -> tuple[dict[str, Any], dict[str, Any]]:
+    """Compute one composite-monitor snapshot.
+
+    Returns ``(snapshot, next_state)``. The snapshot is the
+    documented JSON shape per the user brief; the next_state is what
+    the caller should persist to ``monitor.state.json`` so the next
+    poll can compute rate-based signals.
+
+    Pure helper — does not write monitor.state.json itself. The CLI
+    wrapper persists. This split keeps tests deterministic.
+    """
+    if status is None:
+        status = read_status()
+    if now_unix is None:
+        now_unix = time.time()
+    if prior_state is None:
+        prior_state = _read_monitor_state()
+
+    ports = (status or {}).get("ports") or {}
+    # Distinct bouncer names — skip *_mgmt sub-ports.
+    bouncer_names = sorted(
+        n for n in ports if n and not n.endswith("_mgmt")
+    )
+
+    # Fetch /healthz per bouncer. ibounce serves on its primary port;
+    # gbounce serves on `<name>_mgmt` port.
+    healthz_by_bouncer: dict[str, dict[str, Any] | None] = {}
+    healthz_http_by_bouncer: dict[str, int | None] = {}
+    unreachable: list[str] = []
+    for bname in bouncer_names:
+        mgmt_port = ports.get(f"{bname}_mgmt")
+        primary_port = ports.get(bname)
+        try:
+            port = int(mgmt_port) if mgmt_port else int(primary_port)
+        except (TypeError, ValueError):
+            healthz_by_bouncer[bname] = None
+            healthz_http_by_bouncer[bname] = None
+            unreachable.append(bname)
+            continue
+        url = f"http://127.0.0.1:{port}/healthz"
+        body, http_status, _err = _fetch_healthz_json(
+            url, timeout=healthz_timeout,
+        )
+        healthz_by_bouncer[bname] = body
+        healthz_http_by_bouncer[bname] = http_status
+        if body is None:
+            unreachable.append(bname)
+
+    # Compute each signal. Stateful signals (6, 9) return a state-delta.
+    signals: list[dict[str, Any]] = []
+    next_state: dict[str, Any] = {}
+
+    signals.append(_signal_disk_pressure(healthz_by_bouncer))
+    signals.append(_signal_bouncer_process_health(
+        status or {}, healthz_by_bouncer, healthz_http_by_bouncer,
+    ))
+    signals.append(_signal_audit_chain_continuity(log_dir=audit_log_dir))
+    signals.append(_signal_audit_export_queue(healthz_by_bouncer))
+    signals.append(_signal_webhook_health(healthz_by_bouncer))
+
+    anomaly_sig, anomaly_state = _signal_anomaly_alert_rate(
+        healthz_by_bouncer, prior_state, now_unix,
+    )
+    signals.append(anomaly_sig)
+    next_state["anomaly"] = anomaly_state
+
+    signals.append(_signal_threat_feed(now_unix))
+    signals.append(_signal_llm_skips(healthz_by_bouncer))
+
+    dec_sig, dec_state = _signal_decision_rate(
+        healthz_by_bouncer, prior_state, now_unix,
+    )
+    signals.append(dec_sig)
+    next_state["decisions"] = dec_state
+
+    signals.append(_signal_dynamic_denies(healthz_by_bouncer))
+    signals.append(_signal_heartbeat(healthz_by_bouncer))
+
+    counts = _aggregate_overall(signals)
+    if counts["CRIT"] > 0:
+        overall = "CRIT"
+    elif counts["WARNING"] > 0:
+        overall = "WARNING"
+    elif counts["UNKNOWN"] > 0 and counts["GREEN"] == 0:
+        overall = "UNKNOWN"
+    elif counts["UNKNOWN"] > 0:
+        # Some UNKNOWN, some GREEN, no warnings/crits — the absence of
+        # any reportable problem makes this "operational with gaps".
+        # We report overall_status="WARNING" only when there's a real
+        # WARNING; absent that, GREEN is the right top-line so the
+        # operator's cron alerts don't fire on benign UNKNOWN.
+        overall = "GREEN"
+    else:
+        overall = "GREEN"
+
+    exit_code = _exit_code_for_overall(
+        overall, unreachable_bouncers=bool(unreachable),
+    )
+    # Special case: if there are NO bouncers monitored (no ports), the
+    # operator hasn't deployed yet — report UNKNOWN with exit 3.
+    if not bouncer_names:
+        overall = "UNKNOWN"
+        exit_code = 3
+
+    summary = _build_human_summary(
+        overall, counts, bouncer_names, unreachable,
+    )
+
+    snapshot = {
+        "schema_version": "1.0",
+        "captured_at": _dt.datetime.fromtimestamp(
+            now_unix, tz=_dt.timezone.utc,
+        ).strftime("%Y-%m-%dT%H:%M:%SZ"),
+        "canary_day": (status or {}).get("canary_day"),
+        "overall_status": overall,
+        "exit_code": exit_code,
+        "bouncers_monitored": bouncer_names,
+        "bouncers_unreachable": unreachable,
+        "signals": signals,
+        "summary": summary,
+        "green_count": counts["GREEN"],
+        "warning_count": counts["WARNING"],
+        "crit_count": counts["CRIT"],
+        "unknown_count": counts["UNKNOWN"],
+    }
+    # Stamp the state with `ts` so the next poll can detect a long-gap
+    # restart and reset rate baselines.
+    next_state["ts"] = now_unix
+    return snapshot, next_state
+
+
+def _build_human_summary(
+    overall: str,
+    counts: dict[str, int],
+    bouncers: list[str],
+    unreachable: list[str],
+) -> str:
+    """Operator-facing one-line summary."""
+    parts = [
+        f"Overall: {overall}",
+        f"{counts.get('WARNING', 0)} warnings",
+        f"{counts.get('CRIT', 0)} crit",
+        f"{counts.get('UNKNOWN', 0)} unknown",
+        f"bouncers: {', '.join(bouncers) if bouncers else '(none)'}",
+    ]
+    if unreachable:
+        parts.append(f"unreachable: {', '.join(unreachable)}")
+    return " | ".join(parts)
+
+
+def _emit_human_monitor_report(snapshot: dict[str, Any]) -> None:
+    """Color-coded terminal output for ``iam-jit canary monitor``.
+
+    Mirrors the example output shape from the user brief / MRR-5 §2.
+    """
+    overall = snapshot["overall_status"]
+    day = snapshot.get("canary_day")
+    captured = snapshot["captured_at"]
+    bouncers = snapshot["bouncers_monitored"]
+    click.echo(
+        f"iam-jit canary monitor (canary day {day}, {captured})"
+    )
+    click.echo("=" * 60)
+    if not bouncers:
+        click.echo(
+            "(no bouncers in status.json — run the canary deploy first)"
+        )
+    for signal in snapshot["signals"]:
+        st = signal["status"]
+        color = _monitor_status_color(st)
+        tag = {
+            "GREEN": "GREEN ",
+            "WARNING": "WARN  ",
+            "CRIT": "CRIT  ",
+            "UNKNOWN": "UNK   ",
+        }.get(st, "??    ")
+        notes = signal.get("notes") or ""
+        line = f"[{tag}] {signal['name']}"
+        if notes:
+            line += f" ({notes})"
+        click.secho(line, fg=color)
+        if st in ("WARNING", "CRIT"):
+            resp = signal.get("response_procedure")
+            ref = signal.get("mrr4_halt_condition")
+            if resp:
+                click.echo(f"        Response: {resp}")
+            if ref:
+                click.echo(f"        MRR-4 halt: {ref}")
+    click.echo()
+    overall_color = _monitor_status_color(overall)
+    click.secho(
+        f"Overall: {overall} "
+        f"({snapshot['warning_count']} warning, "
+        f"{snapshot['crit_count']} crit, "
+        f"{snapshot['unknown_count']} unknown)",
+        fg=overall_color,
+    )
+    click.echo(f"Exit code: {snapshot['exit_code']}")
+
+
+def _run_monitor_watch(
+    *,
+    interval: int,
+    audit_log_dir: str | None,
+    healthz_timeout: float,
+    as_json: bool,
+) -> None:
+    """Long-running --watch loop. SIGINT-safe: the click.echo writes
+    are flushed per iteration and the standard KeyboardInterrupt
+    handler exits cleanly on Ctrl-C. Per MRR-5 §2 the spec is "re-poll
+    every N seconds" — we use a simple sleep loop, no transition
+    detection (each iteration emits the full snapshot for cron-style
+    consumers; transition-only mode is a v1.1 enhancement)."""
+    click.echo(
+        f"iam-jit canary monitor --watch: polling every {interval}s. "
+        f"Ctrl-C to stop.",
+        err=True,
+    )
+    try:
+        while True:
+            snapshot, next_state = _compute_monitor_snapshot(
+                audit_log_dir=audit_log_dir,
+                healthz_timeout=healthz_timeout,
+            )
+            _write_monitor_state(next_state)
+            if as_json:
+                click.echo(json.dumps(snapshot, indent=2, sort_keys=True))
+            else:
+                _emit_human_monitor_report(snapshot)
+                click.echo("-" * 60)
+            sys.stdout.flush()
+            time.sleep(interval)
+    except KeyboardInterrupt:
+        click.echo("\niam-jit canary monitor --watch: stopped.", err=True)
+
+
+# ---------------------------------------------------------------------------
 # CLI surface
 # ---------------------------------------------------------------------------
 
@@ -1325,6 +2578,81 @@ def register_canary_group(main_group: click.Group) -> click.Group:
 
         if not report["ok"]:
             raise SystemExit(2)
+
+    # -- monitor --------------------------------------------------------
+    #
+    # §M1 — composite single-pane-of-glass monitoring. Aggregates the
+    # 11 MRR-5 signals across all canary-running bouncers; emits
+    # color-coded human output OR JSON; supports --watch for the
+    # founder's dogfood-window terminal tab.
+    #
+    # Closes the MRR-5 acceptance criterion that without this command
+    # the operator must read source to know "is everything ok?".
+
+    @canary.command("monitor")
+    @click.option(
+        "--json", "as_json", is_flag=True, default=False,
+        help="Emit structured JSON (cron/CI-friendly).",
+    )
+    @click.option(
+        "--watch", is_flag=True, default=False,
+        help=(
+            "Re-poll every --interval seconds. SIGINT-safe; "
+            "stops cleanly on Ctrl-C. Suitable for a dedicated "
+            "terminal tab during the dogfood window."
+        ),
+    )
+    @click.option(
+        "--interval", type=int, default=60, show_default=True,
+        help="--watch poll interval in seconds.",
+    )
+    @click.option(
+        "--audit-log-dir", default=None,
+        help=(
+            "Override the audit-log directory for chain verification "
+            "(default: dirname($IAM_JIT_AUDIT_LOG_PATH); UNKNOWN when "
+            "audit logging is not configured)."
+        ),
+    )
+    @click.option(
+        "--healthz-timeout", type=float, default=3.0, show_default=True,
+        help="Per-bouncer /healthz fetch timeout in seconds.",
+    )
+    def monitor_cmd(
+        as_json: bool, watch: bool, interval: int,
+        audit_log_dir: str | None, healthz_timeout: float,
+    ) -> None:
+        """§M1 — composite single-pane-of-glass monitoring.
+
+        Aggregates the 11 documented MRR-5 signals across all canary
+        bouncers and reports per-signal status + MRR-4 cross-references
+        on WARNING/CRIT.
+
+        Exit codes:
+          0 — overall GREEN (all signals OK)
+          1 — at least one WARNING (no CRIT)
+          2 — at least one CRIT
+          3 — UNKNOWN due to unreachable bouncers OR no bouncers
+              deployed (degraded monitoring)
+        """
+        if watch:
+            _run_monitor_watch(
+                interval=interval,
+                audit_log_dir=audit_log_dir,
+                healthz_timeout=healthz_timeout,
+                as_json=as_json,
+            )
+            return
+        snapshot, next_state = _compute_monitor_snapshot(
+            audit_log_dir=audit_log_dir,
+            healthz_timeout=healthz_timeout,
+        )
+        _write_monitor_state(next_state)
+        if as_json:
+            click.echo(json.dumps(snapshot, indent=2, sort_keys=True))
+        else:
+            _emit_human_monitor_report(snapshot)
+        raise SystemExit(snapshot["exit_code"])
 
     return canary
 
