@@ -26,7 +26,16 @@ flags per design §4.3 + Phase 4 prep notes:
   dict carrying generator-shape keys (``allows`` / ``denies`` lists
   of dicts when present, or a non-empty ``bouncer`` field). Honest
   per `[[ibounce-honest-positioning]]`: structural validation, not
-  just ``isinstance(profile, dict)``.
+  just ``isinstance(profile, dict)``. Per
+  `[[cross-product-agent-parity]]`: rule-shape validation dispatches
+  per-bouncer (see :data:`SCHEMA_VALIDATORS`) because each bouncer
+  carries a different safety-floor rule shape — ibounce uses
+  ``actions[]``, kbounce uses ``verbs[]+resources[]``, dbounce uses
+  ``sql_patterns[]``, gbounce uses host-only ``target``/``host``/
+  ``host_pattern``. Allow rules from the lean-permissive generator
+  use the shared ``{target, actions}`` shape on every bouncer, so
+  each validator accepts EITHER the bouncer-native deny shape OR
+  the shared allow shape per rule.
 * ``narrows_vs_admin_baseline`` — TRUE iff against the supplied
   ``events`` there exists at least one event where the
   admin-everything baseline (``allows: [{target: "*", actions:
@@ -374,10 +383,158 @@ def _flag_allows_too_broad(
     )
 
 
-def _flag_schema_parses(profile: dict[str, Any]) -> GradingFlag:
+# Per-bouncer rule-shape acceptance per [[cross-product-agent-parity]].
+# Each accepts a rule dict and returns (ok, error_msg). The shared
+# allow-shape ``{target, actions}`` is accepted by every bouncer's
+# validator because the lean-permissive generator emits allows in that
+# shape on every bouncer (see ``_lean_permissive_fallback_profile``).
+# Bouncer-native deny shapes (kbounce verbs+resources, dbounce
+# sql_patterns, gbounce host-only target) are accepted ONLY by their
+# own validator — that's the per-bouncer awareness #571 Finding B
+# adds.
+
+
+def _check_actions_field(rule: dict[str, Any], section: str, idx: int) -> str | None:
+    """Validate the shared allow-shape ``actions[]`` field on a rule.
+
+    Returns an error message when the field is malformed, or None
+    when the rule carries a valid ``actions`` list. Returns a sentinel
+    error when the field is missing so callers can decide whether
+    that's fatal (ibounce) or merely "try the bouncer-native shape
+    next" (k/d/gbounce)."""
+    if "actions" not in rule:
+        return f"{section}[{idx}] missing required 'actions' field"
+    acts = rule["actions"]
+    if not isinstance(acts, list):
+        return (
+            f"{section}[{idx}].actions must be a list, got "
+            f"{type(acts).__name__}"
+        )
+    return None
+
+
+def _validate_ibounce_rule(
+    rule: dict[str, Any], section: str, idx: int,
+) -> list[str]:
+    """ibounce: every rule MUST carry an ``actions[]`` list. Target
+    may be omitted = match-all per simulator semantics. Matches the
+    pre-#571 ibounce-only behaviour exactly per
+    [[ibounce-honest-positioning]] regression discipline."""
+    err = _check_actions_field(rule, section, idx)
+    return [err] if err else []
+
+
+def _validate_kbounce_rule(
+    rule: dict[str, Any], section: str, idx: int,
+) -> list[str]:
+    """kbounce: rule MUST carry EITHER ``actions[]`` (lean-permissive
+    allows) OR ``verbs[]+resources[]`` (safety-floor denies). Mixed
+    shapes within a single profile are valid because
+    ``_lean_permissive_fallback_profile`` builds allows in the shared
+    shape but injects ``_SAFETY_FLOOR_DENIES["kbounce"]`` denies in
+    the verbs-form."""
+    if "actions" in rule:
+        err = _check_actions_field(rule, section, idx)
+        return [err] if err else []
+    # Try the kbounce-native verbs+resources shape.
+    missing: list[str] = []
+    if "verbs" not in rule:
+        missing.append(f"{section}[{idx}] missing 'verbs' field")
+    elif not isinstance(rule["verbs"], list):
+        missing.append(
+            f"{section}[{idx}].verbs must be a list, got "
+            f"{type(rule['verbs']).__name__}"
+        )
+    if "resources" not in rule:
+        missing.append(f"{section}[{idx}] missing 'resources' field")
+    elif not isinstance(rule["resources"], list):
+        missing.append(
+            f"{section}[{idx}].resources must be a list, got "
+            f"{type(rule['resources']).__name__}"
+        )
+    if missing:
+        return [
+            f"{section}[{idx}] kbounce rule has neither 'actions' nor "
+            f"'verbs'+'resources' shape: " + "; ".join(missing)
+        ]
+    return []
+
+
+def _validate_dbounce_rule(
+    rule: dict[str, Any], section: str, idx: int,
+) -> list[str]:
+    """dbounce: rule MUST carry EITHER ``actions[]`` (lean-permissive
+    allows) OR ``sql_patterns[]`` (safety-floor denies). Mirror
+    structure of ``_validate_kbounce_rule`` per
+    [[cross-product-agent-parity]] — same dispatch shape per bouncer."""
+    if "actions" in rule:
+        err = _check_actions_field(rule, section, idx)
+        return [err] if err else []
+    if "sql_patterns" not in rule:
+        return [
+            f"{section}[{idx}] dbounce rule has neither 'actions' nor "
+            f"'sql_patterns' field"
+        ]
+    if not isinstance(rule["sql_patterns"], list):
+        return [
+            f"{section}[{idx}].sql_patterns must be a list, got "
+            f"{type(rule['sql_patterns']).__name__}"
+        ]
+    return []
+
+
+def _validate_gbounce_rule(
+    rule: dict[str, Any], section: str, idx: int,
+) -> list[str]:
+    """gbounce: rule MUST carry EITHER ``actions[]`` (lean-permissive
+    allows) OR a host-shape field (``target`` / ``host`` /
+    ``host_pattern``). The gbounce safety floor emits host-only
+    denies (e.g. ``{target: 169.254.169.254}``) — see
+    ``_SAFETY_FLOOR_DENIES["gbounce"]``."""
+    if "actions" in rule:
+        err = _check_actions_field(rule, section, idx)
+        return [err] if err else []
+    # Host-shape acceptance. Any of target / host / host_pattern as a
+    # non-empty string counts as a valid host identifier.
+    for host_key in ("target", "host", "host_pattern"):
+        v = rule.get(host_key)
+        if isinstance(v, str) and v:
+            return []
+    return [
+        f"{section}[{idx}] gbounce rule has neither 'actions' nor "
+        f"a host field ('target' / 'host' / 'host_pattern')"
+    ]
+
+
+# Per-bouncer rule validators per [[cross-product-agent-parity]].
+# Unknown bouncer_kind values fall through to a sentinel that fails
+# the schema flag with an explicit rationale rather than silently
+# accepting anything.
+SCHEMA_VALIDATORS: dict[
+    str,
+    Any,  # Callable[[dict, str, int], list[str]] — kept loose to
+          # avoid an extra import for Callable typing in <py3.10 mode.
+] = {
+    "ibounce": _validate_ibounce_rule,
+    "kbounce": _validate_kbounce_rule,
+    "dbounce": _validate_dbounce_rule,
+    "gbounce": _validate_gbounce_rule,
+}
+
+
+def _flag_schema_parses(
+    profile: dict[str, Any], bouncer_kind: str,
+) -> GradingFlag:
     """Honest schema check per [[ibounce-honest-positioning]]: must
     YAML-round-trip AND carry generator-shape structure. Not just
-    ``isinstance(profile, dict)``."""
+    ``isinstance(profile, dict)``.
+
+    #571 Finding B: per-bouncer rule-shape dispatch via
+    :data:`SCHEMA_VALIDATORS`. Previously hard-coded ibounce's
+    ``actions[]`` requirement, which incorrectly failed every
+    kbounce / dbounce / gbounce profile whose safety-floor denies
+    use the bouncer-native shape (verbs+resources / sql_patterns /
+    host-only target)."""
     if not isinstance(profile, dict):
         return GradingFlag(
             name="schema_parses",
@@ -412,7 +569,23 @@ def _flag_schema_parses(profile: dict[str, Any]) -> GradingFlag:
             evidence=[f"loaded_type={type(loaded).__name__!r}"],
         )
 
-    # Generator-shape structural validation.
+    # Per-bouncer rule validator dispatch per #571 Finding B.
+    rule_validator = SCHEMA_VALIDATORS.get(bouncer_kind)
+    if rule_validator is None:
+        return GradingFlag(
+            name="schema_parses",
+            pass_=False,
+            rationale=(
+                f"no schema validator registered for "
+                f"bouncer_kind={bouncer_kind!r}; supported kinds: "
+                f"{sorted(SCHEMA_VALIDATORS.keys())}"
+            ),
+            evidence=[f"bouncer_kind={bouncer_kind!r}"],
+        )
+
+    # Generator-shape structural validation — list-of-dict containers
+    # are universal; per-rule field requirements dispatch via
+    # rule_validator.
     structural_errors: list[str] = []
     for key in ("allows", "denies"):
         val = loaded.get(key)
@@ -430,19 +603,7 @@ def _flag_schema_parses(profile: dict[str, Any]) -> GradingFlag:
                     f"{type(item).__name__}"
                 )
                 continue
-            # Each rule MUST have an actions list (target may be
-            # omitted = match-all per simulator semantics).
-            acts = item.get("actions")
-            if acts is None:
-                structural_errors.append(
-                    f"profile.{key}[{i}] missing required 'actions' "
-                    f"field"
-                )
-            elif not isinstance(acts, list):
-                structural_errors.append(
-                    f"profile.{key}[{i}].actions must be a list, got "
-                    f"{type(acts).__name__}"
-                )
+            structural_errors.extend(rule_validator(item, key, i))
 
     # A profile that has neither allows nor denies AND no bouncer
     # field is structurally indistinguishable from {} — not a usable
@@ -463,7 +624,8 @@ def _flag_schema_parses(profile: dict[str, Any]) -> GradingFlag:
             pass_=False,
             rationale=(
                 f"profile YAML round-trips but {len(structural_errors)} "
-                f"structural error(s) detected"
+                f"structural error(s) detected against "
+                f"bouncer_kind={bouncer_kind!r} schema"
             ),
             evidence=structural_errors,
         )
@@ -472,8 +634,8 @@ def _flag_schema_parses(profile: dict[str, Any]) -> GradingFlag:
         name="schema_parses",
         pass_=True,
         rationale=(
-            "profile YAML round-trips cleanly + carries generator-shape "
-            "structure"
+            f"profile YAML round-trips cleanly + carries valid "
+            f"{bouncer_kind} rule shape"
         ),
         evidence=[],
     )
@@ -700,8 +862,9 @@ def grade_profile_for_workflow(
 
     grading_warnings: list[str] = []
 
-    # Evaluate flags in canonical order.
-    schema_flag = _flag_schema_parses(profile)
+    # Evaluate flags in canonical order. Per #571 Finding B
+    # schema_parses dispatches per-bouncer through SCHEMA_VALIDATORS.
+    schema_flag = _flag_schema_parses(profile, bouncer_kind)
     if not schema_flag.pass_:
         grading_warnings.append(
             "profile schema_parses flag FAILED — other flags were "

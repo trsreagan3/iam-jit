@@ -13,11 +13,16 @@ description: |
   safety floor but NOT in KNOWN_ADVERSARIAL_PATTERNS — DROP TABLE
   is the intentional choice to exercise blocks_known_risk_shapes.
 
-  CALIBRATION FINDING (same shape as scenario-07): the grader's
-  schema_parses requires `actions` lists on every deny rule, but
-  the dbounce safety floor uses `{sql_patterns: [...]}` rules so
-  schema_parses FAILS on every lean-permissive-generated dbounce
-  profile. Same TODO follow-up as scenario-07.
+  HISTORY: pre-#571 the grader's schema_parses required `actions[]`
+  on every deny rule and this scenario expected schema_parses=FALSE
+  as a documented CALIBRATION FINDING. #571 Finding B fixed this:
+  the dbounce validator now accepts EITHER `actions[]`
+  (lean-permissive allows) OR `sql_patterns[]` (safety-floor
+  denies). expected_flags.schema_parses flipped to TRUE per
+  [[scorer-is-ground-truth]] — corpus follows reality. Overall
+  remains PARTIAL because narrows_vs_admin_baseline is still FALSE
+  (admin baseline also applies safety floor; DROP TABLE denies
+  under both).
 
 metadata:
   scenario_type: adversarial_mixed
@@ -28,10 +33,11 @@ metadata:
     blocks_known_risk_shapes: true
     under_friction_budget: true
     allows_too_broad: true
-    schema_parses: false
+    schema_parses: true
     narrows_vs_admin_baseline: false
   rationale: |
-    Per implementation: 3/5 flags pass = PARTIAL.
+    Per implementation post-#571 Finding B: 4/5 flags pass = PARTIAL
+    (MEANINGFUL requires 5/5).
 
     * blocks_known_risk_shapes: TRUE — DROP TABLE matches
       KNOWN_ADVERSARIAL_PATTERNS catalogue + safety floor denies
@@ -40,15 +46,17 @@ metadata:
       weekly denies, under 10.
     * allows_too_broad: TRUE — dbounce allows use exact
       table-name targets.
-    * schema_parses: FALSE — CALIBRATION FINDING. The dbounce
-      safety-floor denies emit `{sql_patterns: [...]}` shape
-      (no `actions` field). Documented in scenario-07 rationale;
-      same TODO follow-up issue.
-    * narrows_vs_admin_baseline: FALSE — same calibration finding
-      as scenarios 01/03/04: admin baseline also applies safety
-      floor; the DROP TABLE event denies under both.
+    * schema_parses: TRUE — #571 Finding B added per-bouncer
+      dispatch in grading._flag_schema_parses. The dbounce
+      validator accepts EITHER `actions[]` (lean-permissive
+      allows) OR `sql_patterns[]` (safety-floor denies) per rule,
+      so `{sql_patterns: [GRANT * TO PUBLIC, ...]}` no longer
+      fails as a structural error.
+    * narrows_vs_admin_baseline: FALSE — same finding as scenarios
+      01/03/04: admin baseline also applies safety floor; the
+      DROP TABLE event denies under both.
 
-    Overall = PARTIAL (3 passes per threshold).
+    Overall = PARTIAL (4 passes per threshold).
 
 input:
   mode: generated

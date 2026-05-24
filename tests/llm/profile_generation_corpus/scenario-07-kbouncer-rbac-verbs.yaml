@@ -6,20 +6,20 @@ description: |
   Workflow shape: 6 K8s `get` verb events on Pod resources.
 
   Calibrates: per-bouncer parity — verifies the grader runs end-
-  to-end on kbounce profile shape. Surfaces a CALIBRATION FINDING:
-  the grader's schema_parses validator requires generator-shape
-  `actions` lists on every deny rule, but the kbounce safety floor
-  uses verb-form `{verbs: [...], resources: [...]}` rules so
-  schema_parses FAILS on every lean-permissive-generated kbounce
-  profile.
+  to-end on kbounce profile shape including the kbounce-native
+  safety-floor deny shape `{target, verbs, resources, scope?}`.
 
-  Per [[scorer-is-ground-truth]] this is filed as a finding,
-  documented in the rationale, and the expected verdict reflects
-  current impl reality. A follow-up issue will be filed to extend
-  the schema validator with per-bouncer shape awareness — that
-  fix would flip schema_parses TRUE and lift the overall to a
-  4/5 = PARTIAL (still not MEANINGFUL per the narrowing finding
-  in scenarios 01/03/04).
+  HISTORY: pre-#571 the grader's schema_parses required `actions[]`
+  on every deny rule and this scenario expected schema_parses=FALSE
+  as a documented CALIBRATION FINDING. #571 Finding B fixed this:
+  schema_parses now dispatches per-bouncer (see
+  grading.SCHEMA_VALIDATORS) and kbounce accepts EITHER `actions[]`
+  (lean-permissive allows) OR `verbs[]+resources[]` (safety-floor
+  denies). expected_flags.schema_parses flipped to TRUE per
+  [[scorer-is-ground-truth]] — corpus follows reality, not vice
+  versa. Overall remains PARTIAL because narrows_vs_admin_baseline
+  is still FALSE (same finding as scenarios 01/03/04 — admin
+  baseline also applies safety floor).
 
 metadata:
   scenario_type: edge_case
@@ -30,33 +30,31 @@ metadata:
     blocks_known_risk_shapes: true
     under_friction_budget: true
     allows_too_broad: true
-    schema_parses: false
+    schema_parses: true
     narrows_vs_admin_baseline: false
   rationale: |
-    Per [[scorer-is-ground-truth]]: 3/5 flags pass = PARTIAL under
-    the current grader implementation.
+    Per implementation post-#571 Finding B: 4/5 flags pass = PARTIAL
+    (MEANINGFUL requires 5/5).
 
     * blocks_known_risk_shapes: TRUE vacuously.
     * under_friction_budget: TRUE — kbounce safety floor denies
       nothing in this window; 0 denies extrapolates to 0/week.
     * allows_too_broad: TRUE — kbounce allows use namespace/path
       targets, not `*`.
-    * schema_parses: FALSE — CALIBRATION FINDING. The kbounce
-      lean-permissive generator emits safety-floor denies of shape
+    * schema_parses: TRUE — the kbounce lean-permissive generator
+      emits safety-floor denies of shape
       `{target: cluster, verbs: [delete, deletecollection],
-      resources: [namespaces, nodes, clusterroles, clusterrolebindings]}`
-      with NO `actions` field. The grader's _flag_schema_parses
-      treats missing `actions` as a structural error. This is
-      grader-side schema-shape gap, NOT a generator bug — the
-      kbounce safety floor is correct production shape.
-      TODO: file follow-up to extend grading._flag_schema_parses
-      with per-bouncer shape awareness (verbs-form is valid for
-      kbounce; sql_patterns-form is valid for dbounce). Until
-      then this scenario calibrates AGAINST the documented gap.
-    * narrows_vs_admin_baseline: FALSE — same calibration finding
-      as scenarios 01/03/04. No denied event in window.
+      resources: [namespaces, nodes, clusterroles, clusterrolebindings]}`.
+      #571 Finding B added per-bouncer dispatch in
+      grading._flag_schema_parses: the kbounce validator accepts
+      EITHER `actions[]` (lean-permissive allows) OR
+      `verbs[]+resources[]` (safety-floor denies) per rule.
+    * narrows_vs_admin_baseline: FALSE — same finding as scenarios
+      01/03/04. No denied event in window the profile catches that
+      admin baseline wouldn't (admin baseline also applies the
+      safety floor).
 
-    Overall = PARTIAL (3 passes per _compute_overall threshold).
+    Overall = PARTIAL (4 passes per _compute_overall threshold).
     Does NOT escalate to NEGATIVE-VALUE because allows_too_broad
     passes.
 

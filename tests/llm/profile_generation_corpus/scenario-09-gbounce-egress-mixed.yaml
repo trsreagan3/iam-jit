@@ -13,18 +13,20 @@ description: |
   field). Confirms the universal IMDS safety floor fires
   regardless of profile.
 
-  CALIBRATION FINDING (same shape as scenarios 07 + 08): the
-  grader's schema_parses requires `actions` lists on every deny
-  rule, but gbounce safety floor uses `{target: <host>}` rules
-  with no actions field so schema_parses FAILS. Same TODO
-  follow-up.
+  HISTORY: pre-#571 the grader's schema_parses required `actions[]`
+  on every deny rule and this scenario expected schema_parses=FALSE
+  as a documented CALIBRATION FINDING. #571 Finding B fixed this:
+  the gbounce validator now accepts EITHER `actions[]`
+  (lean-permissive allows) OR a host field
+  (`target` / `host` / `host_pattern`) for safety-floor denies.
+  expected_flags.schema_parses flipped to TRUE per
+  [[scorer-is-ground-truth]] — corpus follows reality.
 
-  ADDITIONAL FINDING: gbounce lean-permissive generation emits no
-  allows for HTTP-shape events in this test data — the heuristic's
-  gbounce classifier returns UNKNOWN for `GET /path` shape strings
-  via `_aggregate_events_for_bouncer`. This is a separate generator-
-  side issue documented here for follow-up; the grader's behaviour
-  is correct given empty allows.
+  ADDITIONAL FINDING (still outstanding): gbounce lean-permissive
+  generation emits no allows for HTTP-shape events in this test data
+  — the heuristic's gbounce classifier returns UNKNOWN for
+  `GET /path` shape strings via `_aggregate_events_for_bouncer`.
+  Separate generator-side issue documented here for follow-up.
 
 metadata:
   scenario_type: adversarial_mixed
@@ -35,10 +37,11 @@ metadata:
     blocks_known_risk_shapes: true
     under_friction_budget: true
     allows_too_broad: true
-    schema_parses: false
+    schema_parses: true
     narrows_vs_admin_baseline: false
   rationale: |
-    Per implementation: 3/5 flags pass = PARTIAL.
+    Per implementation post-#571 Finding B: 4/5 flags pass = PARTIAL
+    (MEANINGFUL requires 5/5).
 
     * blocks_known_risk_shapes: TRUE vacuously — the IMDS HTTP
       GET is NOT in the KNOWN_ADVERSARIAL_PATTERNS catalogue
@@ -51,13 +54,16 @@ metadata:
       = ~1.4 weekly denies, under 10.
     * allows_too_broad: TRUE — generator emits no allows so
       vacuously narrow.
-    * schema_parses: FALSE — CALIBRATION FINDING. gbounce
-      safety-floor denies emit `{target: 169.254.169.254}` shape
-      with no `actions` field. Same TODO as scenarios 07 + 08.
+    * schema_parses: TRUE — #571 Finding B added per-bouncer
+      dispatch in grading._flag_schema_parses. The gbounce
+      validator accepts a host field (`target` / `host` /
+      `host_pattern`) in lieu of `actions[]`, so
+      `{target: 169.254.169.254}` denies no longer fail as a
+      structural error.
     * narrows_vs_admin_baseline: FALSE — IMDS event denies under
       both profile and admin baseline (universal safety floor).
 
-    Overall = PARTIAL (3 passes per threshold).
+    Overall = PARTIAL (4 passes per threshold).
 
 input:
   mode: generated

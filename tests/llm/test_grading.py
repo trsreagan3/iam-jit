@@ -915,3 +915,332 @@ def test_mcp_tool_appears_in_tools_list():
         f"new MCP tool missing from tools/list; got "
         f"{sorted(n for n in names if 'grade' in n.lower())}"
     )
+
+
+# ---------------------------------------------------------------------------
+# Tests 16-27 — #571 Finding B: per-bouncer schema validators.
+# State-verification per docs/CONTRIBUTING.md asserts BOTH the pass_
+# value AND the rationale / evidence so a regression that flips one
+# without the other is caught loudly.
+# ---------------------------------------------------------------------------
+
+
+def _grade_schema_only(
+    profile: dict[str, Any], bouncer_kind: str,
+) -> grading.GradingFlag:
+    """Invoke the full grader (which is the supported entry point —
+    `_flag_schema_parses` is private) and return the schema_parses
+    flag. Asserting via the public surface guards against accidental
+    drift between the private helper and the public dispatch path."""
+    report = grading.grade_profile_for_workflow(
+        profile=profile,
+        events=[],
+        bouncer_kind=bouncer_kind,
+        friction_budget=None,
+    )
+    by_name = {f.name: f for f in report.flags}
+    return by_name["schema_parses"]
+
+
+def test_schema_parses_ibounce_valid():
+    """ibounce profile with `actions[]` on every rule -> pass."""
+    profile = {
+        "bouncer": "ibounce",
+        "allows": [
+            {"target": "arn:aws:s3:::r/*", "actions": ["s3:GetObject"]},
+        ],
+        "denies": [
+            {"target": "arn:aws:iam::*:*", "actions": ["iam:CreateAccessKey"]},
+        ],
+    }
+    flag = _grade_schema_only(profile, "ibounce")
+    assert flag.pass_ is True, (
+        f"ibounce with actions[] must pass; rationale={flag.rationale!r}"
+    )
+    assert "ibounce" in flag.rationale
+    # Observable rationale carries the bouncer kind so an operator
+    # debugging a regression knows which validator ran.
+    assert flag.evidence == []
+
+
+def test_schema_parses_ibounce_missing_actions():
+    """ibounce profile with deny rule missing actions -> fail with
+    rationale citing the offending field."""
+    profile = {
+        "bouncer": "ibounce",
+        "allows": [],
+        "denies": [
+            # Missing 'actions' — this is the historical ibounce shape
+            # requirement that was hard-coded pre-#571 + that #571
+            # Finding B preserves for ibounce specifically.
+            {"target": "arn:aws:iam::*:*", "reason": "no actions"},
+        ],
+    }
+    flag = _grade_schema_only(profile, "ibounce")
+    assert flag.pass_ is False
+    joined = " ".join(flag.evidence)
+    assert "missing required 'actions' field" in joined, (
+        f"rationale must cite the missing actions field; "
+        f"evidence={flag.evidence!r}"
+    )
+    assert "ibounce" in flag.rationale
+
+
+def test_schema_parses_kbounce_native_verbs_resources_shape_passes():
+    """kbounce profile carrying the safety-floor shape
+    `{target, verbs, resources}` (no actions[]) -> pass per #571
+    Finding B."""
+    profile = {
+        "bouncer": "kbounce",
+        "allows": [
+            # Lean-permissive allow shape — uses actions[] on every
+            # bouncer.
+            {"target": "app-prod/pod-0", "actions": ["k8s:get"]},
+        ],
+        "denies": [
+            # Safety floor shape per
+            # _SAFETY_FLOOR_DENIES["kbounce"][0].
+            {
+                "target": "cluster",
+                "verbs": ["delete", "deletecollection"],
+                "resources": [
+                    "namespaces", "nodes",
+                    "clusterroles", "clusterrolebindings",
+                ],
+                "reason": "cluster-scoped destruction requires human approval",
+            },
+        ],
+    }
+    flag = _grade_schema_only(profile, "kbounce")
+    assert flag.pass_ is True, (
+        f"kbounce verbs+resources deny must pass post-#571; "
+        f"rationale={flag.rationale!r} evidence={flag.evidence!r}"
+    )
+    assert "kbounce" in flag.rationale
+
+
+def test_schema_parses_kbounce_missing_both_actions_and_verbs():
+    """kbounce rule with neither actions nor verbs+resources -> fail
+    with rationale that names both rejected shapes."""
+    profile = {
+        "bouncer": "kbounce",
+        "allows": [],
+        "denies": [
+            # Neither actions nor verbs+resources.
+            {"target": "cluster", "reason": "incomplete"},
+        ],
+    }
+    flag = _grade_schema_only(profile, "kbounce")
+    assert flag.pass_ is False
+    joined = " ".join(flag.evidence)
+    assert "kbounce rule" in joined
+    assert "actions" in joined
+    assert "verbs" in joined
+
+
+def test_schema_parses_kbounce_missing_resources_only():
+    """kbounce rule with verbs but missing resources -> fail with
+    rationale citing the missing resources field."""
+    profile = {
+        "bouncer": "kbounce",
+        "allows": [],
+        "denies": [
+            {"target": "cluster", "verbs": ["delete"], "reason": "half"},
+        ],
+    }
+    flag = _grade_schema_only(profile, "kbounce")
+    assert flag.pass_ is False
+    joined = " ".join(flag.evidence)
+    assert "resources" in joined
+
+
+def test_schema_parses_dbounce_native_sql_patterns_shape_passes():
+    """dbounce profile carrying the safety-floor shape
+    `{sql_patterns: [...]}` (no actions[]) -> pass per #571 Finding B."""
+    profile = {
+        "bouncer": "dbounce",
+        "allows": [
+            {"target": "public.events", "actions": ["postgres:SELECT"]},
+        ],
+        "denies": [
+            # Safety floor shape per
+            # _SAFETY_FLOOR_DENIES["dbounce"][0].
+            {
+                "sql_patterns": [
+                    "GRANT * TO PUBLIC",
+                    "GRANT ALL PRIVILEGES TO PUBLIC",
+                ],
+                "reason": "GRANT TO PUBLIC is silent privilege escalation",
+            },
+        ],
+    }
+    flag = _grade_schema_only(profile, "dbounce")
+    assert flag.pass_ is True, (
+        f"dbounce sql_patterns deny must pass post-#571; "
+        f"rationale={flag.rationale!r} evidence={flag.evidence!r}"
+    )
+    assert "dbounce" in flag.rationale
+
+
+def test_schema_parses_dbounce_missing_sql_patterns_and_actions():
+    """dbounce rule with neither actions nor sql_patterns -> fail with
+    rationale citing the missing fields."""
+    profile = {
+        "bouncer": "dbounce",
+        "allows": [],
+        "denies": [
+            {"reason": "no actionable field"},
+        ],
+    }
+    flag = _grade_schema_only(profile, "dbounce")
+    assert flag.pass_ is False
+    joined = " ".join(flag.evidence)
+    assert "dbounce rule" in joined
+    assert "sql_patterns" in joined
+
+
+def test_schema_parses_gbounce_host_target_passes():
+    """gbounce profile carrying the safety-floor shape
+    `{target: <host>}` (no actions[]) -> pass per #571 Finding B."""
+    profile = {
+        "bouncer": "gbounce",
+        "allows": [],
+        "denies": [
+            # Safety floor shape per
+            # _SAFETY_FLOOR_DENIES["gbounce"][0].
+            {
+                "target": "169.254.169.254",
+                "reason": "IMDS access from agent context is credential exfiltration",
+            },
+        ],
+    }
+    flag = _grade_schema_only(profile, "gbounce")
+    assert flag.pass_ is True, (
+        f"gbounce host-target deny must pass post-#571; "
+        f"rationale={flag.rationale!r} evidence={flag.evidence!r}"
+    )
+    assert "gbounce" in flag.rationale
+
+
+def test_schema_parses_gbounce_host_pattern_field_passes():
+    """gbounce rule using the alternative `host_pattern` field -> pass
+    (host / host_pattern / target are all accepted host-shape fields
+    per the gbounce validator)."""
+    profile = {
+        "bouncer": "gbounce",
+        "allows": [],
+        "denies": [
+            {"host_pattern": "*.dns.google", "reason": "DoH egress"},
+        ],
+    }
+    flag = _grade_schema_only(profile, "gbounce")
+    assert flag.pass_ is True, (
+        f"gbounce host_pattern deny must pass; "
+        f"rationale={flag.rationale!r} evidence={flag.evidence!r}"
+    )
+
+
+def test_schema_parses_gbounce_missing_actions_and_host():
+    """gbounce rule with neither actions nor any host field -> fail."""
+    profile = {
+        "bouncer": "gbounce",
+        "allows": [],
+        "denies": [
+            {"reason": "no host or actions"},
+        ],
+    }
+    flag = _grade_schema_only(profile, "gbounce")
+    assert flag.pass_ is False
+    joined = " ".join(flag.evidence)
+    assert "gbounce rule" in joined
+    assert "host" in joined or "target" in joined
+
+
+def test_schema_parses_unknown_bouncer_kind_fails():
+    """Unknown bouncer_kind -> fail with rationale listing supported
+    kinds so the operator knows how to fix it."""
+    profile = {
+        "bouncer": "unknown-product",
+        "allows": [
+            {"target": "*", "actions": ["whatever:Op"]},
+        ],
+        "denies": [],
+    }
+    flag = _grade_schema_only(profile, "unknown-product")
+    assert flag.pass_ is False
+    assert "no schema validator registered" in flag.rationale
+    # Surfaces the supported kinds so an operator can map their
+    # typo to a real bouncer name.
+    for k in ("ibounce", "kbounce", "dbounce", "gbounce"):
+        assert k in flag.rationale, (
+            f"rationale must list supported bouncer kinds; "
+            f"missing {k!r} in {flag.rationale!r}"
+        )
+
+
+def test_schema_parses_regression_scenario_01_corpus_profile_still_passes():
+    """Regression: an ibounce profile generated from the scenario-01
+    corpus shape (broad target, actions[] on every rule) still passes
+    schema_parses. Guards against #571 Finding B accidentally
+    loosening ibounce's strict actions[] requirement."""
+    profile = {
+        "bouncer": "ibounce",
+        "profile_name": "narrow-readonly",
+        "allows": [
+            {
+                "target": "arn:aws:s3:::reports/*",
+                "actions": ["s3:GetObject"],
+                "reason": "narrow read",
+            }
+        ],
+        # Include the ibounce safety-floor shape that exists in
+        # production. Pre-#571 this already passed; #571 must not
+        # regress it.
+        "denies": [
+            {
+                "target": "arn:aws:iam::*:*",
+                "actions": [
+                    "iam:CreateAccessKey", "iam:CreateUser",
+                ],
+                "reason": "agents must not create credentials",
+            },
+        ],
+    }
+    flag = _grade_schema_only(profile, "ibounce")
+    assert flag.pass_ is True, (
+        f"regression: ibounce corpus-shape profile must pass; "
+        f"rationale={flag.rationale!r} evidence={flag.evidence!r}"
+    )
+
+
+def test_schema_parses_kbounce_rejects_verbs_resources_under_ibounce_dispatch():
+    """Bouncer dispatch is load-bearing — the same `{verbs, resources}`
+    rule that passes under kbounce dispatch MUST fail under ibounce
+    dispatch (which doesn't accept that shape). Proves the dispatch
+    distinguishes per-bouncer rather than silently accepting any
+    known shape on every bouncer."""
+    profile = {
+        "bouncer": "kbounce",
+        "allows": [],
+        "denies": [
+            {
+                "target": "cluster",
+                "verbs": ["delete"],
+                "resources": ["namespaces"],
+            },
+        ],
+    }
+    # Same profile, opposite bouncer_kind -> must fail because ibounce
+    # validator only accepts actions[].
+    flag_under_ibounce = _grade_schema_only(profile, "ibounce")
+    assert flag_under_ibounce.pass_ is False, (
+        f"ibounce dispatch must reject verbs+resources shape; "
+        f"rationale={flag_under_ibounce.rationale!r}"
+    )
+    # And the same profile under correct kbounce dispatch passes —
+    # asserts the dispatch is the discriminator, not the rule shape.
+    flag_under_kbounce = _grade_schema_only(profile, "kbounce")
+    assert flag_under_kbounce.pass_ is True, (
+        f"kbounce dispatch must accept verbs+resources shape; "
+        f"rationale={flag_under_kbounce.rationale!r}"
+    )
