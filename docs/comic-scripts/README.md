@@ -12,7 +12,7 @@ This directory holds the SCRIPTS — text-only descriptions of panels
 
 - **Claude** — purple Anthropic logo character. Eager, helpful,
   unaware of consequences.
-- **Reagan** — the iam-jit founder character (avatar pending).
+- **Devon** — the developer protagonist character (avatar pending).
 - **Tux** — Linux penguin, when the scene is on a server / shell.
 - **Gopher** — Go gopher, when the scene involves backend infra
   (terraform, k8s, AWS SDK).

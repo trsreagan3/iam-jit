@@ -121,6 +121,6 @@ If you're running an IAM scorer in production and haven't subjected it to this k
 
 ---
 
-*Reagan Schiller, May 2026*
+*trsreagan3, May 2026*
 
 *Drafting notes: cut the methodology paragraph if HN length is an issue. The "surprising bypasses" section is the part that gets people to the bottom. The "what this doesn't mean" caveat is what wins trust with security skeptics — leave it in.*

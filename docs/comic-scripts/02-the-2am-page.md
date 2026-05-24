@@ -10,7 +10,7 @@ Lands the "iam-jit makes me sleep better" angle.
 
 ## Panel 1
 
-**VISUAL:** A bedroom at 2am. Reagan is in bed, phone vibrating
+**VISUAL:** A bedroom at 2am. Devon is in bed, phone vibrating
 violently on the nightstand. PagerDuty notification visible on the
 screen: "PROD ALERT — checkout-svc 500s rising". Cat on the bed
 looking unimpressed.
@@ -24,17 +24,17 @@ looking unimpressed.
 
 ## Panel 2
 
-**VISUAL:** Reagan at desk in pajamas, terminal open, blearily
+**VISUAL:** Devon at desk in pajamas, terminal open, blearily
 typing. A Slack channel sidebar shows "#incident-response" with a
-red dot. He's drafting a request to read prod CloudWatch logs and
+red dot. They're drafting a request to read prod CloudWatch logs and
 the prod DDB table.
 
 **DIALOGUE:**
-- Reagan (mumbling): "Need to see what the checkout service is
+- Devon (mumbling): "Need to see what the checkout service is
   actually doing in prod..."
-- Reagan: "...and our prod-access flow has me on the night
+- Devon: "...and our prod-access flow has me on the night
   approval list, which is staffed by..."
-- Reagan: *checks rotation* "...someone in Tokyo. Who is asleep."
+- Devon: *checks rotation* "...someone in Tokyo. Who is asleep."
 
 **CAPTION:** *The approval flow that protects prod also blocks the
 person fixing prod.*
@@ -43,18 +43,18 @@ person fixing prod.*
 
 ## Panel 3
 
-**VISUAL:** Split panel. LEFT: Reagan staring at "Pending approval"
+**VISUAL:** Split panel. LEFT: Devon staring at "Pending approval"
 status, the customer-impact chart climbing in the background. RIGHT:
 A small superimposed clock counting up — 14 min, 31 min, 42 min, 47
 min.
 
 **DIALOGUE:**
-- Reagan: "We are losing customers WHILE the system that's supposed
+- Devon: "We are losing customers WHILE the system that's supposed
   to protect customers..."
 - Slack notification appears: "Tanaka-san approved your request. Sorry,
   was asleep."
 
-**CAPTION:** *Reagan now has the read access. The customers do not
+**CAPTION:** *Devon now has the read access. The customers do not
 have the company.*
 
 ---
@@ -62,7 +62,7 @@ have the company.*
 ## Panel 4
 
 **VISUAL:** Same desk, but the next on-call rotation a week later.
-Reagan is using iam-jit via Claude. Claude is asking for
+Devon is using iam-jit via Claude. Claude is asking for
 `cloudwatch:GetMetricStatistics + logs:FilterLogEvents` on the
 checkout service, score 2/10. iam-jit shield is auto-approving with
 a green checkmark.
@@ -71,7 +71,7 @@ a green checkmark.
 - Claude: "checkout-svc 500s — pulling logs + metrics..."
 - iam-jit: "Read-only, score 2/10, audited as req-9b2. Granted
   15min."
-- Reagan: "Wait, I didn't... approve anything? Did anyone approve?"
+- Devon: "Wait, I didn't... approve anything? Did anyone approve?"
 - iam-jit: "Self-approval — you have admin authority. Audit
   records that you authorized it via the on-call session."
 
@@ -82,12 +82,12 @@ for a narrower thing." Reductions skip approval, not audit.*
 
 ## Panel 5
 
-**VISUAL:** Reagan back in bed. Cat is now between Reagan and the
+**VISUAL:** Devon back in bed. Cat is now between Devon and the
 phone. Phone shows the same 2am pager, but the next message is
 already "RESOLVED — root-caused to checkout-svc retry storm."
 
 **DIALOGUE:**
-- Reagan: "...okay, I can actually sleep this time."
+- Devon: "...okay, I can actually sleep this time."
 - Cat (thought bubble): *finally*
 
 **CAPTION:** *The on-call rotation didn't change. The friction did.*
@@ -101,7 +101,7 @@ already "RESOLVED — root-caused to checkout-svc retry storm."
 
 - Lead-out CTA panel can be cropped off for the social cut; the
   story works as a 4-panel without it.
-- Reagan's pajamas are intentional — readers should feel the
+- Devon's pajamas are intentional — readers should feel the
   "this is me" moment in panel 1.
 - Panel 4's "wait, I didn't approve anything?" is the educational
   moment for the `[[self-approve-reductions]]` feature; don't lose it.

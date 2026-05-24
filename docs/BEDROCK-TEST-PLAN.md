@@ -5,7 +5,7 @@ when the Lambda is configured with `LLMBackend=bedrock`. Today the
 deployed Lambda has only been exercised in `LLMBackend=none` mode;
 this test closes that gap.
 
-**Scheduled:** when the user (Reagan / `founder@example.com`) is
+**Scheduled:** when the user (trsreagan3 / `trsreagan3@gmail.com`) is
 available to monitor — explicitly NOT to be run unsupervised.
 
 **Hard constraints:**
