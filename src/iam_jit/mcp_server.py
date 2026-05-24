@@ -2013,6 +2013,66 @@ TOOLS.extend([
             },
         },
     },
+    {
+        "name": "bounce_grade_profile_for_workflow",
+        "description": (
+            "Phase 5 of profile-generation design (docs/PROFILE-"
+            "GENERATION-DESIGN.md §6 Phase 5 + §7). Score a profile "
+            "against a workflow of audit events using the 5-flag "
+            "rubric: blocks_known_risk_shapes / under_friction_budget "
+            "/ allows_too_broad / schema_parses / "
+            "narrows_vs_admin_baseline. Emits an overall verdict from "
+            "the canonical MEANINGFUL / PARTIAL / THEATER / "
+            "NEGATIVE-VALUE taxonomy borrowed from "
+            "[[role-effectiveness-corpus]]. Composes with Phase 4 "
+            "bounce_simulate_profile (consumes its SimulationVerdicts "
+            "under the hood). Provenance honest per "
+            "[[ibounce-honest-positioning]]: surfaces simulator "
+            "production_parity=False caveat so operators know grading "
+            "depends on simulator accuracy."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "required": ["profile", "events", "bouncer_kind"],
+            "properties": {
+                "profile": {
+                    "type": "object",
+                    "description": (
+                        "Parsed profile dict — generator-shape "
+                        "(allows / denies / bouncer / ...) emitted "
+                        "by `bounce_profile_generate_from_audit`."
+                    ),
+                },
+                "events": {
+                    "type": "array",
+                    "items": {"type": "object"},
+                    "description": (
+                        "OCSF audit events the grader replays via "
+                        "Phase 4 simulator + scores against the rubric."
+                    ),
+                },
+                "bouncer_kind": {
+                    "type": "string",
+                    "enum": [
+                        "ibounce", "kbouncer", "kbounce",
+                        "dbounce", "gbounce",
+                    ],
+                    "description": (
+                        "Which bouncer's rule semantics apply."
+                    ),
+                },
+                "friction_budget": {
+                    "description": (
+                        "Optional. Integer = max legitimate denies "
+                        "per week. Dict per §4.1. Omit -> "
+                        "under_friction_budget flag is N/A "
+                        "(rationale='no budget specified'); does NOT "
+                        "fail-by-default."
+                    ),
+                },
+            },
+        },
+    },
     # ---------------------------------------------------------------
     # #324e — Dynamic deny rules (cross-product Bounce suite).
     # ---------------------------------------------------------------
@@ -5596,6 +5656,20 @@ def _handle_request(req: dict[str, Any]) -> dict[str, Any] | None:
                 friction_budget=args.get("friction_budget"),
             )
             result_payload = serialize_simulation_verdicts(sv)
+        elif tool_name == "bounce_grade_profile_for_workflow":
+            # Phase 5 of profile-generation design (docs/PROFILE-
+            # GENERATION-DESIGN.md §6 Phase 5 + §7).
+            from .llm.grading import (
+                grade_profile_for_workflow,
+                serialize_grading_report,
+            )
+            gr = grade_profile_for_workflow(
+                profile=args.get("profile") or {},
+                events=list(args.get("events") or []),
+                bouncer_kind=str(args.get("bouncer_kind") or ""),
+                friction_budget=args.get("friction_budget"),
+            )
+            result_payload = serialize_grading_report(gr)
         elif tool_name == "bounce_deny_add":
             result_payload = _bounce_deny_add_for_mcp(args)
         elif tool_name == "bounce_deny_list":
