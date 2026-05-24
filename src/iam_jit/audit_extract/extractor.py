@@ -29,17 +29,55 @@ class PermissionAggregate:
     is the distinct set of resource ARNs / identifiers observed for
     this action in the window. ``count`` is the number of underlying
     events.
+
+    Phase 2 of ``docs/PROFILE-GENERATION-DESIGN.md`` §6 adds five
+    fields that the Phase 3 lean-permissive heuristic + the Phase 5
+    ``bounce_simulate_profile`` + the Phase 7 grading tool consume:
+
+    * ``action_class`` — the :class:`~iam_jit.profile_heuristic.ActionClass`
+      value as its string name (``"read"`` / ``"write-data"`` /
+      ``"admin"`` / ``"destructive-data"`` / ``"unknown"``). Pure
+      function of (bouncer, action, resource); cached on the
+      aggregate so downstream callers don't re-classify.
+    * ``first_seen`` / ``last_seen`` — ISO-8601 UTC timestamps of the
+      earliest and latest underlying event. Empty string when no
+      event carried a parseable timestamp.
+    * ``allow_count`` / ``deny_count`` — verdict breakdown derived from
+      the OCSF ``unmapped.iam_jit.verdict`` field (case-insensitive
+      ``"allow"`` / ``"deny"``). Sum may be less than ``count`` when
+      events lack a recognised verdict marker.
+
+    Backward-compatibility: existing fields (``action`` / ``resources``
+    / ``count``) keep their semantics. New fields are emitted as
+    additional keys in :meth:`as_dict`; legacy callers reading only the
+    old keys keep working.
     """
 
     action: str
     resources: tuple[str, ...]
     count: int
+    # Phase 2 — new fields. Default values keep
+    # ``PermissionAggregate(action=..., resources=..., count=...)``
+    # constructions in tests working without churn.
+    action_class: str = "unknown"
+    first_seen: str = ""
+    last_seen: str = ""
+    allow_count: int = 0
+    deny_count: int = 0
 
     def as_dict(self) -> dict[str, typing.Any]:
         return {
             "action": self.action,
             "resources": list(self.resources),
             "count": self.count,
+            # Phase 2 — additive; legacy callers that key on the
+            # three-field shape keep working because dict.get returns
+            # whatever they ask for and the new keys are extra.
+            "action_class": self.action_class,
+            "first_seen": self.first_seen,
+            "last_seen": self.last_seen,
+            "allow_count": self.allow_count,
+            "deny_count": self.deny_count,
         }
 
 
@@ -146,6 +184,49 @@ def _event_resources(ev: dict[str, typing.Any]) -> list[str]:
     return out
 
 
+def _event_time_iso(ev: dict[str, typing.Any]) -> str | None:
+    """Return the event's timestamp as ISO-8601 UTC, or None when no
+    parseable timestamp is present.
+
+    OCSF events carry ``time`` as Unix epoch milliseconds. A few
+    upstream emitters use seconds; we try the obvious thing first
+    (ms) and fall back to seconds when the millisecond reading would
+    place the event past the year 9999.
+    """
+    t = ev.get("time")
+    if isinstance(t, (int, float)) and t > 0:
+        # Heuristic: 13-digit Unix-ms is what OCSF emitters use; bare
+        # 10-digit seconds happens occasionally. Convert.
+        if t > 1e12:
+            secs = t / 1000.0
+        else:
+            secs = float(t)
+        try:
+            dt = _dt.datetime.fromtimestamp(secs, _dt.timezone.utc)
+        except (OverflowError, OSError, ValueError):
+            return None
+        return dt.replace(microsecond=0).isoformat().replace("+00:00", "Z")
+    # Fall back to a string ``time`` (some emitters use ISO strings).
+    if isinstance(t, str) and t:
+        return t
+    return None
+
+
+def _event_verdict(ev: dict[str, typing.Any]) -> str | None:
+    """Return the event's iam-jit verdict ("allow" / "deny") or None.
+
+    The verdict lives at ``unmapped.iam_jit.verdict`` per
+    :mod:`iam_jit.bouncer.audit_export.event`. Returned lowercase so
+    callers can compare without re-normalising.
+    """
+    v = _walk(ev, "unmapped.iam_jit.verdict")
+    if isinstance(v, str):
+        v = v.strip().lower()
+        if v in ("allow", "deny"):
+            return v
+    return None
+
+
 def _event_account_region(
     ev: dict[str, typing.Any],
     resources: list[str],
@@ -186,8 +267,22 @@ def extract_permissions_from_events(
     alphabetical; resources within each action alphabetical; scope
     values sorted) so the result is diff-friendly and snapshot-testable.
     """
+    # Late import to avoid a hard cycle if profile_heuristic ever needs
+    # the extractor at module-load time. The classifier is a pure
+    # function so import-time order doesn't affect behaviour.
+    from ..profile_heuristic import classify_action
+
     by_action: dict[str, dict[str, int]] = {}  # action -> resource -> count
     counts_by_action: dict[str, int] = {}
+    # Phase 2 — per-action verdict + temporal tracking.
+    allow_by_action: dict[str, int] = {}
+    deny_by_action: dict[str, int] = {}
+    first_seen_by_action: dict[str, str] = {}
+    last_seen_by_action: dict[str, str] = {}
+    # Track one representative resource per action so the Phase 2
+    # classifier can use it for K8s/HTTP-style classification (the
+    # destructive / admin escalations depend on the resource string).
+    rep_resource_by_action: dict[str, str] = {}
     account_ids: set[str] = set()
     regions: set[str] = set()
     events_analyzed = 0
@@ -208,6 +303,30 @@ def extract_permissions_from_events(
             by_resource["*"] = by_resource.get("*", 0) + 1
         for r in resources:
             by_resource[r] = by_resource.get(r, 0) + 1
+        # Phase 2 — verdict + temporal tracking. Verdict pulled from
+        # ``unmapped.iam_jit.verdict``; events lacking the field don't
+        # contribute to allow/deny counts (sum may be < count).
+        verdict = _event_verdict(ev)
+        if verdict == "allow":
+            allow_by_action[action] = allow_by_action.get(action, 0) + 1
+        elif verdict == "deny":
+            deny_by_action[action] = deny_by_action.get(action, 0) + 1
+        ts = _event_time_iso(ev)
+        if ts:
+            prior_first = first_seen_by_action.get(action)
+            if not prior_first or ts < prior_first:
+                first_seen_by_action[action] = ts
+            prior_last = last_seen_by_action.get(action)
+            if not prior_last or ts > prior_last:
+                last_seen_by_action[action] = ts
+        # Stash a representative resource — first concrete one wins.
+        # The classifier only needs ONE resource for verb-vs-resource
+        # escalation logic (e.g. ``delete deployment`` vs ``delete``).
+        if action not in rep_resource_by_action:
+            if resources:
+                rep_resource_by_action[action] = resources[0]
+            else:
+                rep_resource_by_action[action] = ""
         acct, region = _event_account_region(ev, resources)
         if acct:
             account_ids.add(acct)
@@ -219,6 +338,19 @@ def extract_permissions_from_events(
             action=action,
             resources=tuple(sorted(by_action[action].keys())),
             count=counts_by_action[action],
+            # Phase 2 — derived fields. ``action_class`` uses the
+            # representative resource to drive K8s/HTTP escalations;
+            # for ibounce + dbounce the resource doesn't change the
+            # classification.
+            action_class=classify_action(
+                bouncer,
+                action,
+                rep_resource_by_action.get(action) or None,
+            ).value,
+            first_seen=first_seen_by_action.get(action, ""),
+            last_seen=last_seen_by_action.get(action, ""),
+            allow_count=allow_by_action.get(action, 0),
+            deny_count=deny_by_action.get(action, 0),
         )
         for action in sorted(by_action.keys())
     )
