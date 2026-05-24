@@ -451,12 +451,40 @@ def create_app(
         except Exception:
             import logging as _logging
 
+            # MRR-2 F2 closure (CRIT from
+            # docs/MRR-2-ERROR-PATH-AUDIT-2026-05-24.md): the
+            # previous catch-all returned ``{"detail": "internal
+            # server error"}`` with no fields the operator could
+            # use to correlate the 500 with a server-side log
+            # entry. We now generate a stable error_id (ULID,
+            # zero-dependency Crockford base32 — same generator
+            # the dynamic-denies module uses) and surface it as a
+            # structured payload while logging the full traceback
+            # against the same id server-side. Inner exception
+            # text is NEVER returned to the client (info-disclosure
+            # mitigation for the work-AWS deploy).
+            from .dynamic_denies.store import new_rule_id
+
+            error_id = "err_" + new_rule_id().removeprefix("dd_")
+            route_path = request.url.path or "<unknown>"
             _logging.getLogger("iam_jit").exception(
-                "uncaught exception on %s — returning 500 with security headers",
-                request.url.path,
+                "uncaught exception on %s — returning 500 with security headers "
+                "(error_id=%s)",
+                route_path,
+                error_id,
             )
             response = JSONResponse(
-                {"detail": "internal server error"},
+                {
+                    "detail": "internal server error",
+                    "error_id": error_id,
+                    "error_code": "UNHANDLED_EXCEPTION",
+                    "route_path": route_path,
+                    "recommended_action": (
+                        f"Report error_id={error_id} to support; "
+                        f"server-side logs contain the full traceback "
+                        f"correlated by this error_id."
+                    ),
+                },
                 status_code=500,
             )
 

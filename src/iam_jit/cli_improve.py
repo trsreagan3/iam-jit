@@ -124,6 +124,8 @@ def register_improve_command(parent_group: click.Group) -> click.Command:
 def _render_human(result) -> None:
     color_by_status = {
         "auto_installed": "green",
+        "partial_install": "yellow",  # MRR-2 F1: honest amber
+        "no_install": "red",  # MRR-2 F1: honest red
         "pending_approval": "yellow",
         "no_change": "cyan",
         "dry_run": "cyan",
@@ -155,6 +157,24 @@ def _render_human(result) -> None:
         click.echo(f"  scope details:")
         for s in result.scope_changes:
             click.echo(f"    - {s}")
+    # MRR-2 F1: surface installed_rules / failed_rules / recommended_action
+    # so the operator can see WHICH rules landed (and WHY others didn't)
+    # without parsing the explanation paragraph.
+    failed = getattr(result, "failed_rules", None) or []
+    if failed:
+        click.secho(f"  failed_rules:     {len(failed)}", fg="red")
+        for f in failed:
+            click.echo(
+                f"    - {f.get('action')} @ {f.get('target') or '<no target>'}: "
+                f"{f.get('error_code')} — {f.get('error_message')}"
+            )
+    installed = getattr(result, "installed_rules", None) or []
+    if installed and result.status in {"partial_install", "auto_installed"}:
+        click.echo(f"  installed_rules:  {len(installed)}")
+    rec = getattr(result, "recommended_action", "") or ""
+    if rec:
+        click.echo()
+        click.secho(f"  recommended: {rec}", fg=color)
     if result.explanation:
         click.echo()
         click.secho(result.explanation, fg=color)

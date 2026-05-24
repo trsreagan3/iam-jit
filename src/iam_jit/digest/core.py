@@ -305,6 +305,23 @@ def _summarize_improve_results(
                     f"to review"
                 ),
             })
+        elif status in ("partial_install", "no_install"):
+            # MRR-2 F1: surface honest partial/no-install in the
+            # digest. The digest is THE operator-visible roll-up;
+            # silently dropping these would re-create the #448 shape
+            # at the digest layer.
+            failed = r.get("failed_rules") or []
+            installed = int(r.get("rules_added") or 0)
+            noteworthy.append({
+                "when": r.get("ran_at") or "",
+                "type": f"improve_{status}",
+                "description": (
+                    f"improve cycle reported {status}: "
+                    f"{installed} rule(s) landed, {len(failed)} failed — "
+                    f"inspect failed_rules in the cycle output and re-run "
+                    f"after addressing each error_code"
+                ),
+            })
     return auto_installed, pending, noteworthy
 
 

@@ -5597,6 +5597,55 @@ def _err(rid: object, code: int, message: str) -> dict[str, Any]:
     }
 
 
+def _err_structured(
+    rid: object,
+    *,
+    method: object = None,
+) -> dict[str, Any]:
+    """MRR-2 F3 — structured JSON-RPC -32603 (internal error) with a
+    correlatable error_id, an error_code agents can pattern-match
+    on, and a recommended_action. The inner exception text is
+    logged server-side with the same error_id; it is NEVER returned
+    to the client.
+
+    Per JSON-RPC 2.0 §5.1, the ``data`` field is an "additional
+    information about the error" container — agents can read
+    ``error.data.error_id`` to correlate with operator support.
+    """
+    import logging as _logging
+
+    from .dynamic_denies.store import new_rule_id
+
+    error_id = "err_" + new_rule_id().removeprefix("dd_")
+    method_str = str(method) if method is not None else "<unknown>"
+    _logging.getLogger("iam_jit.mcp_server").exception(
+        "MCP _handle_request raised — returning structured JSON-RPC "
+        "error (error_id=%s, method=%s, id=%r)",
+        error_id,
+        method_str,
+        rid,
+    )
+    return {
+        "jsonrpc": "2.0",
+        "id": rid,
+        "error": {
+            "code": -32603,
+            "message": "internal error",
+            "data": {
+                "error_id": error_id,
+                "error_code": "UNHANDLED_EXCEPTION",
+                "method": method_str,
+                "recommended_action": (
+                    f"Retry the request; if it still fails, report "
+                    f"error_id={error_id} to the operator. The server "
+                    f"log carries the full traceback correlated by "
+                    f"this id."
+                ),
+            },
+        },
+    }
+
+
 # ---------------------------------------------------------------------------
 # #324e — Dynamic deny rules (bounce_deny_*) MCP handlers.
 # ---------------------------------------------------------------------------
@@ -6471,8 +6520,18 @@ def main() -> int:
                 continue
             try:
                 resp = _handle_request(req)
-            except Exception as e:  # defensive — never crash the server
-                resp = _err(req.get("id"), -32603, f"internal error: {e}")
+            except Exception:  # defensive — never crash the server
+                # MRR-2 F3 closure (CRIT from
+                # docs/MRR-2-ERROR-PATH-AUDIT-2026-05-24.md): the
+                # previous catch-all emitted ``f"internal error: {e}"``
+                # which (a) leaked raw Python exception text into the
+                # MCP stream (info-disclosure for agents shared across
+                # workspaces) and (b) gave the agent nothing to
+                # pattern-match on for retry vs escalate decisions.
+                # We now return a structured JSON-RPC error with a
+                # stable error_id correlating to the server-side
+                # traceback; inner exception text stays in logs only.
+                resp = _err_structured(req.get("id"), method=req.get("method"))
             if resp is not None:
                 sys.stdout.write(json.dumps(resp) + "\n")
                 sys.stdout.flush()

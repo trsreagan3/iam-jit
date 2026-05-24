@@ -23,7 +23,8 @@ Algorithm (per [[ambient-autonomous-protection]] §A47):
   7. Return structured summary:
 
       {
-        status: 'auto_installed' | 'pending_approval' | 'no_change' |
+        status: 'auto_installed' | 'partial_install' | 'no_install' |
+                'pending_approval' | 'scope_only_change' | 'no_change' |
                 'managed_posture_refused' | 'error',
         bouncer: str,
         change_size: float,
@@ -33,8 +34,17 @@ Algorithm (per [[ambient-autonomous-protection]] §A47):
         requires_approval: bool,
         audit_event_ids: [str, ...],
         pending_entry_ids: [str, ...],
+        installed_rules: [{action, target, actor}, ...],  # MRR-2 F1
+        failed_rules: [{action, target, error_code, error_message}, ...],
+        recommended_action: str,  # set on partial_install / no_install
         explanation: str,
       }
+
+The ``partial_install`` / ``no_install`` statuses (MRR-2 F1) close
+the #448 shape on this surface: ``status="auto_installed"`` is
+NEVER returned when any per-rule add failed. See
+``docs/MRR-2-ERROR-PATH-AUDIT-2026-05-24.md`` + the runtime-side
+state-verification convention in ``docs/CONTRIBUTING.md``.
 
 Per [[creates-never-mutates]] this NEVER overwrites manually-authored
 allow rules — it ADDS to existing allow_rules via the same

@@ -66,10 +66,22 @@ class ImproveProfileResult:
     Status values (per [[ibounce-honest-positioning]] — each string
     matches observable reality):
 
-      * ``auto_installed`` — one or more allow rules were appended to
+      * ``auto_installed`` — ALL proposed allow rules were appended to
         the profile + admin_action audit events emitted (#452 fix:
         ONLY when ``rules_added > 0``; scope-only changes route to
-        ``scope_only_change`` instead).
+        ``scope_only_change`` instead). MRR-2 F1 invariant: only
+        returned when ``installed_rules`` count equals the requested
+        count and ``failed_rules`` is empty.
+      * ``partial_install`` (MRR-2 F1 / #448 shape) — at least one
+        rule was installed AND at least one rule failed. The
+        ``installed_rules`` array names what landed; ``failed_rules``
+        names what didn't (with per-rule ``error_code`` /
+        ``error_message``). ``recommended_action`` tells the
+        operator/agent how to retry the misses. Never collapses to
+        ``auto_installed`` per [[ibounce-honest-positioning]].
+      * ``no_install`` (MRR-2 F1) — every proposed rule failed to
+        install. ``failed_rules`` is fully populated; ``installed_rules``
+        is empty; ``recommended_action`` points at the retry path.
       * ``scope_only_change`` (#452) — generator proposed scope-floor
         tightening (e.g. ``only_account_ids``) but no new allow rules;
         scope-changes were enqueued to the pending JSONL so the
@@ -84,7 +96,7 @@ class ImproveProfileResult:
       * ``error`` — surfaced via :class:`ImproveProfileError` adapter.
     """
 
-    status: str  # auto_installed | pending_approval | scope_only_change | no_change | managed_posture_refused | error | dry_run
+    status: str  # auto_installed | partial_install | no_install | pending_approval | scope_only_change | no_change | managed_posture_refused | error | dry_run
     bouncer: str
     cadence_window: str
     rules_added: int = 0
@@ -96,6 +108,14 @@ class ImproveProfileResult:
     pending_entry_ids: list[str] = dataclasses.field(default_factory=list)
     proposed_allows: list[dict[str, Any]] = dataclasses.field(default_factory=list)
     proposed_removals: list[dict[str, Any]] = dataclasses.field(default_factory=list)
+    # MRR-2 F1 honest-install tracking (closes the #448 shape on the
+    # improve_profile surface). When auto-install runs, every proposed
+    # allow rule is attempted exactly once; ``installed_rules`` and
+    # ``failed_rules`` together describe what observably happened to
+    # the profile on disk — the reported ``status`` MUST match.
+    installed_rules: list[dict[str, Any]] = dataclasses.field(default_factory=list)
+    failed_rules: list[dict[str, Any]] = dataclasses.field(default_factory=list)
+    recommended_action: str = ""
     explanation: str = ""
     schema_version: str = "1.0"
     posture: str = "ambient"
@@ -636,13 +656,26 @@ def improve_profile(
 
     # -----------------------------------------------------------------
     # Below threshold + auto_install → apply via existing #345 path.
+    #
+    # MRR-2 F1: per-rule outcome tracking closes the #448 shape on
+    # this surface. Each proposed allow rule is attempted exactly once;
+    # the success / failure of every attempt is recorded so the final
+    # status accurately describes the on-disk state of the profile.
+    # The previous loop swallowed ProfileAllowError + Exception silently
+    # and returned ``status="auto_installed"`` regardless — that is the
+    # exact shape ``docs/CONTRIBUTING.md`` calls out as bug-class #448.
     # -----------------------------------------------------------------
-    audit_ids = []
+    audit_ids: list[str] = []
+    installed_rules: list[dict[str, Any]] = []
+    failed_rules: list[dict[str, Any]] = []
+    requested_count = len(proposed_allows)
     for entry in proposed_allows:
         action = entry["action"]
         # The #345 path refuses target="*" deliberately ([[creates-never-mutates]]
-        # specificity). When the generator didn't bind a target, skip the
-        # install + log — operator sees it in proposed_allows for review.
+        # specificity). When the generator didn't bind a target, we
+        # record the skip as an explicit failure (was silently
+        # continued before MRR-2 F1) so the operator sees ALL the
+        # reasons the requested vs installed counts differ.
         target = entry["target"]
         if not target:
             logger.info(
@@ -650,6 +683,16 @@ def improve_profile(
                 "without a specific target (would refuse target='*')",
                 action,
             )
+            failed_rules.append({
+                "action": action,
+                "target": target,
+                "error_code": "missing_target",
+                "error_message": (
+                    "generator did not bind a specific target; "
+                    "auto-install refuses target='*' per "
+                    "[[creates-never-mutates]] specificity."
+                ),
+            })
             continue
         try:
             from ..profile_allow.operations import (
@@ -679,15 +722,36 @@ def improve_profile(
             )
         except ProfileAllowError as e:
             # Refusing a single rule shouldn't fail the whole cycle —
-            # log + continue per [[ibounce-honest-positioning]].
+            # log + record the failure per MRR-2 F1 so the final
+            # ``status`` truthfully describes how many rules landed.
             logger.warning(
                 "improve-profile rule add refused: %s (code=%s)",
                 e, e.code,
             )
+            failed_rules.append({
+                "action": action,
+                "target": target,
+                "error_code": getattr(e, "code", "profile_allow_error"),
+                "error_message": str(e),
+            })
             continue
         except Exception as e:  # pragma: no cover
             logger.warning("improve-profile rule add raised: %s", e)
+            failed_rules.append({
+                "action": action,
+                "target": target,
+                "error_code": "unhandled_exception",
+                "error_message": (
+                    f"{type(e).__name__}: see server logs for full traceback."
+                ),
+            })
             continue
+        # The add succeeded — record what landed on disk.
+        installed_rules.append({
+            "action": action,
+            "target": target,
+            "actor": getattr(add_result, "actor", actor),
+        })
         # Emit admin_action audit (best-effort, may no-op out of
         # process; we still record the id locally).
         ev_id = _emit_improve_audit(
@@ -702,6 +766,40 @@ def improve_profile(
         )
         if ev_id:
             audit_ids.append(ev_id)
+
+    # MRR-2 F1: derive ``status`` from the OBSERVABLE install
+    # outcome — not from "we ran the loop without crashing." This is
+    # the runtime mirror of the state-verification convention in
+    # docs/CONTRIBUTING.md (the rule that catches the #448 shape on
+    # the TEST side; this enforces it on the RUNTIME side too).
+    install_success_count = len(installed_rules)
+    install_failure_count = len(failed_rules)
+    if requested_count == 0 or install_failure_count == 0:
+        # Full success path (or no allows requested at all). The
+        # block below builds the auto_installed result; preserve
+        # backward-compatible behaviour by leaving status untouched.
+        install_status_override: str | None = None
+        recommended_action = ""
+    elif install_success_count > 0:
+        install_status_override = "partial_install"
+        recommended_action = (
+            "some rules failed to install — inspect failed_rules[]; "
+            "re-run iam_jit_improve_profile after addressing each "
+            "error_code, OR add the rules manually via "
+            "`iam-jit profile allow add` so the on-disk profile "
+            "matches the operator's intent."
+        )
+    else:
+        # install_success_count == 0 and install_failure_count > 0
+        install_status_override = "no_install"
+        recommended_action = (
+            "every proposed rule failed to install — the active profile "
+            "was NOT modified. Inspect failed_rules[] for the per-rule "
+            "error_code + error_message; re-run iam_jit_improve_profile "
+            "after addressing the failures (the generator's proposed "
+            "allows are preserved in proposed_allows[] for direct "
+            "manual install via `iam-jit profile allow add`)."
+        )
 
     # Even when auto-installing allow rules, scope-floor changes route
     # through pending approval per [[creates-never-mutates]] (scope
@@ -723,22 +821,15 @@ def improve_profile(
             queue_path=queue_path,
         )
 
-    return ImproveProfileResult(
-        status="auto_installed",
-        bouncer=bouncer,
-        cadence_window=window,
-        posture=posture,
-        change_size=size,
-        rules_added=len(added),
-        rules_removed=len(removed),
-        scope_changes=scope_changes,
-        requires_approval=bool(pending_scope_ids),
-        audit_event_ids=audit_ids,
-        pending_entry_ids=pending_scope_ids,
-        proposed_allows=proposed_allows,
-        proposed_removals=proposed_removals,
-        explanation=(
-            f"auto-installed {len(added)} allow rule(s) for {bouncer} "
+    # MRR-2 F1: report the OBSERVABLE outcome. ``rules_added`` now
+    # reflects what landed on disk (install_success_count), not how
+    # many were proposed (len(added)). The previous value over-
+    # reported success when any rule add was silently swallowed —
+    # exactly the #448 shape.
+    final_status = install_status_override or "auto_installed"
+    if final_status == "auto_installed":
+        explanation = (
+            f"auto-installed {install_success_count} allow rule(s) for {bouncer} "
             f"(size={size:.3f} < threshold={threshold:.3f}). "
             f"{len(removed)} stale rule(s) flagged for operator review "
             f"but NOT removed per [[creates-never-mutates]]. "
@@ -748,7 +839,58 @@ def improve_profile(
                 if pending_scope_ids
                 else ""
             )
-        ).rstrip(),
+        ).rstrip()
+    elif final_status == "partial_install":
+        explanation = (
+            f"partial-install for {bouncer}: "
+            f"{install_success_count}/{requested_count} allow rule(s) "
+            f"landed on disk; {install_failure_count} failed "
+            f"(size={size:.3f} < threshold={threshold:.3f}). "
+            f"See failed_rules[] for per-rule error_code; the on-disk "
+            f"profile reflects ONLY the installed_rules — never the "
+            f"requested set per [[ibounce-honest-positioning]]. "
+            + (
+                f"Queued {len(pending_scope_ids)} scope-change "
+                f"entries for operator approval."
+                if pending_scope_ids
+                else ""
+            )
+        ).rstrip()
+    else:  # no_install
+        explanation = (
+            f"no-install for {bouncer}: every proposed allow rule "
+            f"({requested_count}) failed to land on disk "
+            f"(size={size:.3f} < threshold={threshold:.3f}). "
+            f"The active profile was NOT modified — see failed_rules[] "
+            f"for the per-rule error_code; "
+            f"{len(removed)} stale rule(s) untouched per "
+            f"[[creates-never-mutates]]. "
+            + (
+                f"Queued {len(pending_scope_ids)} scope-change "
+                f"entries for operator approval."
+                if pending_scope_ids
+                else ""
+            )
+        ).rstrip()
+
+    return ImproveProfileResult(
+        status=final_status,
+        bouncer=bouncer,
+        cadence_window=window,
+        posture=posture,
+        change_size=size,
+        rules_added=install_success_count,
+        rules_removed=len(removed),
+        scope_changes=scope_changes,
+        requires_approval=bool(pending_scope_ids),
+        audit_event_ids=audit_ids,
+        pending_entry_ids=pending_scope_ids,
+        proposed_allows=proposed_allows,
+        proposed_removals=proposed_removals,
+        installed_rules=installed_rules,
+        failed_rules=failed_rules,
+        recommended_action=recommended_action,
+        explanation=explanation,
     )
 
 
