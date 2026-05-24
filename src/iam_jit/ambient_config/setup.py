@@ -1177,18 +1177,31 @@ def apply_declaration(
         # warning when the named profile isn't found (operator likely
         # forgot to install it).
         if profile and profile != "auto":
+            # #560 — `load_profiles()` returns `dict[str, Profile]`. The
+            # previous code did `{p.name for p in profiles}` which
+            # iterated the dict's KEYS (already strings) and then tried
+            # `.name` on each one, raising AttributeError; the outer
+            # `except Exception: pass` swallowed it. Net effect: declaring
+            # a non-existent profile produced ZERO warning — exact MRR-2
+            # Pattern B (silently-degraded operator hint). Now: use
+            # `set(profiles)` directly to get the name set, and catch
+            # only the specific load-time errors load_profiles can
+            # raise (per its docstring: FileNotFoundError-equivalents +
+            # ValueError on malformed YAML). Unexpected exceptions
+            # propagate so future regressions don't re-hide.
             try:
                 from ..bouncer.profiles import load_profiles
                 profiles = load_profiles()
-                names = {p.name for p in profiles} if profiles else set()
+                names = set(profiles) if profiles else set()
                 if profile not in names:
                     result.warnings.append(
                         f"{name}: declaration pinned profile={profile!r} "
-                        f"but that profile is not in profiles.yaml. The "
-                        f"bouncer will reject the --profile flag at "
-                        f"startup. Install the profile first with "
-                        f"`iam-jit profile generate-from-audit` or add "
-                        f"it manually to profiles.yaml."
+                        f"but that profile is not in profiles.yaml "
+                        f"(available: {sorted(names)}). The bouncer "
+                        f"will reject the --profile flag at startup. "
+                        f"Install the profile first with `iam-jit "
+                        f"profile generate-from-audit` or add it "
+                        f"manually to profiles.yaml."
                     )
                 else:
                     result.profiles_installed.append({
@@ -1196,8 +1209,15 @@ def apply_declaration(
                         "profile_name": profile,
                         "source": "declared",
                     })
-            except Exception as e:  # pragma: no cover
-                logger.debug("profile presence check failed: %s", e)
+            except (FileNotFoundError, ValueError, OSError) as e:
+                # Specific exceptions only — don't swallow the
+                # AttributeError class of bug again.
+                result.warnings.append(
+                    f"{name}: profile presence check failed for "
+                    f"profile={profile!r}: {e}. Cannot confirm whether "
+                    f"the bouncer will accept the --profile flag at "
+                    f"startup; inspect profiles.yaml manually."
+                )
 
     # Recapture posture AFTER any startups so the caller sees the new
     # state. When execute=False we still emit a fresh capture (cheap)

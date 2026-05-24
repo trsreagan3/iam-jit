@@ -114,3 +114,120 @@ def test_mcp_setup_phase_b_warning_surfaces() -> None:
     })
     joined = " ".join(out["warnings"])
     assert "Phase B" in joined or "#401" in joined
+
+
+# ---------------------------------------------------------------------------
+# #561 — MCP tool schema MUST document `rollback_on_failure` so operators
+# can opt out of B6 transactional rollback via the canonical MCP surface
+# (not just the Python API).
+# ---------------------------------------------------------------------------
+
+
+def test_mcp_tool_input_schema_documents_rollback_on_failure() -> None:
+    """#561: the MCP tool schema must expose `rollback_on_failure` so
+    agents discover it via tools/list. Before this fix, operators
+    could only opt out of #538 transactional rollback by importing
+    `apply_declaration` directly in Python — not via the canonical
+    MCP interface."""
+    from iam_jit.mcp_server import TOOLS
+
+    tool = next(t for t in TOOLS if t["name"] == "iam_jit_setup_from_config")
+    props = tool["inputSchema"]["properties"]
+    assert "rollback_on_failure" in props, (
+        f"iam_jit_setup_from_config inputSchema missing "
+        f"rollback_on_failure parameter; operators cannot opt out via "
+        f"MCP. Properties: {sorted(props.keys())!r}"
+    )
+    rof = props["rollback_on_failure"]
+    assert rof["type"] == "boolean", (
+        f"rollback_on_failure should be boolean; got {rof['type']!r}"
+    )
+    assert rof["default"] is True, (
+        f"rollback_on_failure default MUST be True to preserve B6 "
+        f"transactional behavior for callers that don't pass it; "
+        f"got default={rof.get('default')!r}"
+    )
+    # Operator-actionable description: must explain consequences.
+    desc = rof.get("description", "")
+    assert "#538" in desc or "rollback" in desc.lower(), (
+        f"rollback_on_failure description doesn't explain what it "
+        f"does: {desc!r}"
+    )
+
+
+def test_mcp_dispatch_passes_rollback_on_failure_to_apply_declaration(
+    monkeypatch,
+) -> None:
+    """#561: when an MCP caller passes rollback_on_failure=False, the
+    flag MUST flow through `apply_config_for_mcp` → `apply_declaration`.
+    Before this fix the kwarg was silently dropped — apply_declaration
+    always got the True default regardless of what the operator
+    passed via MCP."""
+    captured: dict = {}
+
+    def _fake_apply_declaration(declaration, **kwargs):
+        captured["kwargs"] = kwargs
+        # Build a minimal SetupResult-shaped return for as_dict().
+        from iam_jit.ambient_config.setup import SetupResult
+        return SetupResult(
+            dry_run=False,
+            declaration_source=kwargs.get("source", "<test>"),
+        )
+
+    import iam_jit.cli_apply_config as cli_apply
+    monkeypatch.setattr(cli_apply, "apply_declaration", _fake_apply_declaration)
+
+    decl = {
+        "iam-jit": {
+            "enabled": True,
+            "bouncers": {"ibounce": {"enabled": True, "mode": "discovery"}},
+        }
+    }
+
+    # Case 1: explicit opt-out flows through.
+    apply_config_for_mcp({
+        "declaration": decl,
+        "rollback_on_failure": False,
+    })
+    assert captured["kwargs"].get("rollback_on_failure") is False, (
+        f"MCP caller passed rollback_on_failure=False but it did NOT "
+        f"reach apply_declaration; kwargs={captured['kwargs']!r}"
+    )
+
+    # Case 2: omitted defaults to True (preserves B6 behavior).
+    captured.clear()
+    apply_config_for_mcp({
+        "declaration": decl,
+    })
+    assert captured["kwargs"].get("rollback_on_failure") is True, (
+        f"MCP caller omitted rollback_on_failure; default should be "
+        f"True to preserve B6 transactional behavior. Got "
+        f"kwargs={captured['kwargs']!r}"
+    )
+
+    # Case 3: explicit True also flows through.
+    captured.clear()
+    apply_config_for_mcp({
+        "declaration": decl,
+        "rollback_on_failure": True,
+    })
+    assert captured["kwargs"].get("rollback_on_failure") is True
+
+
+def test_mcp_dispatch_rollback_on_failure_ignored_for_dry_run(monkeypatch) -> None:
+    """Backstop: dry_run uses plan_declaration which has no
+    rollback_on_failure parameter. The MCP dispatch must NOT crash
+    when rollback_on_failure is supplied alongside dry_run=True."""
+    out = apply_config_for_mcp({
+        "declaration": {
+            "iam-jit": {
+                "enabled": True,
+                "bouncers": {"ibounce": {"enabled": True}},
+            }
+        },
+        "dry_run": True,
+        "rollback_on_failure": False,
+    })
+    assert out["status"] == "ok", (
+        f"dry_run + rollback_on_failure crashed: {out!r}"
+    )

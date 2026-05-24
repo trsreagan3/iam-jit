@@ -303,11 +303,18 @@ def apply_config_for_mcp(args: dict[str, Any]) -> dict[str, Any]:
                   agents that want plan-only pass dry_run=True)
       * cwd: str — override auto-discovery cwd when declaration omitted
       * inspect: bool — validate only, no plan
+      * rollback_on_failure: bool (default True — #561) — flows through
+                  to `apply_declaration`. Default True preserves the
+                  #538 / B6 transactional behavior so existing callers
+                  without the parameter still get rollback protection.
+                  Pass False to keep pre-#538 semantics (partial state
+                  left for operator inspection).
     """
     declaration_arg = args.get("declaration")
     dry_run = bool(args.get("dry_run", False))
     inspect = bool(args.get("inspect", False))
     cwd = args.get("cwd")
+    rollback_on_failure = bool(args.get("rollback_on_failure", True))
 
     try:
         if isinstance(declaration_arg, dict):
@@ -347,7 +354,10 @@ def apply_config_for_mcp(args: dict[str, Any]) -> dict[str, Any]:
         result = plan_declaration(declaration, source=source_label)
     else:
         result = apply_declaration(
-            declaration, source=source_label, execute=True
+            declaration,
+            source=source_label,
+            execute=True,
+            rollback_on_failure=rollback_on_failure,
         )
     payload = result.as_dict()
     payload.setdefault("status", "ok")

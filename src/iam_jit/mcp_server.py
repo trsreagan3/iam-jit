@@ -2236,6 +2236,24 @@ TOOLS.extend([
                         "ignored when `declaration` is passed."
                     ),
                 },
+                "rollback_on_failure": {
+                    "type": "boolean",
+                    "default": True,
+                    "description": (
+                        "When True (#538 default), a partial-install "
+                        "(one bouncer starts, another fails mid-apply) "
+                        "triggers transactional rollback: SIGTERM the "
+                        "bouncers that DID start + restore the pre-"
+                        "apply config-file snapshot. The result's "
+                        "`rollback_outcome` field describes what the "
+                        "rollback observed. Pass False to keep pre-"
+                        "#538 semantics (leave partial state for "
+                        "operator inspection). Default True preserves "
+                        "B6 transactional behavior — existing callers "
+                        "without this parameter still get rollback "
+                        "protection."
+                    ),
+                },
             },
         },
     },
