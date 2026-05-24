@@ -1955,6 +1955,64 @@ TOOLS.extend([
             },
         },
     },
+    {
+        "name": "bounce_simulate_profile",
+        "description": (
+            "Phase 4 of profile-generation design (docs/PROFILE-"
+            "GENERATION-DESIGN.md §3 + §6 Phase 4). Dry-run a "
+            "profile against a stream of audit events. Returns "
+            "per-event verdicts (allow / deny / abstain) + a "
+            "summary block + friction-budget metrics + honest "
+            "provenance. Per [[ibounce-honest-positioning]] the "
+            "simulator is pure-Python over the generator-shape "
+            "profile dict; provenance.engine = 'simulation-python' "
+            "and provenance.warnings enumerates per-bouncer "
+            "divergence from production. Per "
+            "[[scorer-is-ground-truth]] the simulator must not be "
+            "tuned to flatter profiles — these verdicts feed Phase "
+            "5 grading."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "required": ["profile", "events", "bouncer_kind"],
+            "properties": {
+                "profile": {
+                    "type": "object",
+                    "description": (
+                        "Parsed profile dict — generator-shape "
+                        "(allows / denies / bouncer / ...) emitted "
+                        "by `bounce_profile_generate_from_audit`."
+                    ),
+                },
+                "events": {
+                    "type": "array",
+                    "items": {"type": "object"},
+                    "description": (
+                        "OCSF audit events the simulator will replay."
+                    ),
+                },
+                "bouncer_kind": {
+                    "type": "string",
+                    "enum": [
+                        "ibounce", "kbouncer", "kbounce",
+                        "dbounce", "gbounce",
+                    ],
+                    "description": (
+                        "Which bouncer's rule semantics to apply."
+                    ),
+                },
+                "friction_budget": {
+                    "description": (
+                        "Optional. Integer = max legitimate denies "
+                        "per week. Dict per §4.1 = "
+                        "{max_legitimate_denies_per_day, "
+                        "max_legitimate_denies_per_week, ...}. "
+                        "Omit to suppress friction_metrics."
+                    ),
+                },
+            },
+        },
+    },
     # ---------------------------------------------------------------
     # #324e — Dynamic deny rules (cross-product Bounce suite).
     # ---------------------------------------------------------------
@@ -5524,6 +5582,20 @@ def _handle_request(req: dict[str, Any]) -> dict[str, Any] | None:
         elif tool_name == "bounce_profile_save":
             from .cli_profile_generate import save_for_mcp
             result_payload = save_for_mcp(args)
+        elif tool_name == "bounce_simulate_profile":
+            # Phase 4 of profile-generation design (docs/PROFILE-
+            # GENERATION-DESIGN.md §3 + §6 Phase 4).
+            from .llm.simulator import (
+                evaluate_profile_against_events,
+                serialize_simulation_verdicts,
+            )
+            sv = evaluate_profile_against_events(
+                profile=args.get("profile") or {},
+                events=list(args.get("events") or []),
+                bouncer_kind=str(args.get("bouncer_kind") or ""),
+                friction_budget=args.get("friction_budget"),
+            )
+            result_payload = serialize_simulation_verdicts(sv)
         elif tool_name == "bounce_deny_add":
             result_payload = _bounce_deny_add_for_mcp(args)
         elif tool_name == "bounce_deny_list":
