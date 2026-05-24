@@ -5,20 +5,28 @@
 # construction: ports are in the 17400-17499 range (distinct from
 # the live canary's 7400-7499), profiles are explicit "discovery",
 # no real-AWS account IDs.
+#
+# Schema matches src/iam_jit/cli_canary.py::load_canary_yaml which
+# reads `iam-jit.bouncers.<name>`. Top-level `iam-jit:` key is REQUIRED;
+# Stage-B fix to the original Stage-A flat-schema fixture.
 
-schema_version: 1
-canary_day: 0
-bouncers:
-  ibounce:
-    enabled: true
-    mode: discovery
-    port: 17401
-    mgmt_port: 17402
-    daemon_args: []
-  gbounce:
-    enabled: true
-    mode: discovery
-    port: 17411
-    mgmt_port: 17412
-    daemon_args:
-      - "--no-mitm"
+iam-jit:
+  canary: true
+  mode: discovery
+  posture: ambient
+
+  bouncers:
+    ibounce:
+      enabled: true
+      port: 17401
+      # daily-dev mode = empty daemon_args (general proxy). Per §A102.
+      daemon_args: []
+    gbounce:
+      enabled: true
+      port: 17402
+      mgmt_port: 17412
+      # --allow-connect lets the bouncer act as general HTTPS forward
+      # proxy (CONNECT-only / no MITM); matches the live canary daily-
+      # dev shape recorded in this-machine-canary status.json.
+      daemon_args:
+        - "--allow-connect"
