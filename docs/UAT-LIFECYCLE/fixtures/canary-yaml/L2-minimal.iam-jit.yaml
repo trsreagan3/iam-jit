@@ -1,0 +1,24 @@
+# L2 fixture — minimal hand-written canary declaration.
+# Used by scenarios/L2/deterministic-harness.sh.
+#
+# Per docs/UAT-LIFECYCLE/HARNESS-SPEC.md this fixture is safe-by-
+# construction: ports are in the 17400-17499 range (distinct from
+# the live canary's 7400-7499), profiles are explicit "discovery",
+# no real-AWS account IDs.
+
+schema_version: 1
+canary_day: 0
+bouncers:
+  ibounce:
+    enabled: true
+    mode: discovery
+    port: 17401
+    mgmt_port: 17402
+    daemon_args: []
+  gbounce:
+    enabled: true
+    mode: discovery
+    port: 17411
+    mgmt_port: 17412
+    daemon_args:
+      - "--no-mitm"
