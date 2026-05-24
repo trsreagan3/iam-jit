@@ -2921,6 +2921,134 @@ TOOLS.extend([
 ])
 
 
+# ---------------------------------------------------------------------------
+# Phase 13 — iam_jit_consider_tightening MCP tool.
+# ---------------------------------------------------------------------------
+# Per docs/PROFILE-GENERATION-DESIGN.md §6 Phase 13 + §10.3 + §11.2 and
+# memory [[progressive-tightening-as-injection-detector]]: one tool, two
+# parallel output dimensions from the SAME data flow:
+#   * narrowing_proposals[]  — profile tightenings (reuses Phase 8
+#                              improve_profile pipeline; friction-
+#                              budget-aware refusal logic carries
+#                              through).
+#   * suspect_patterns[]     — prompt-injection-AWARE signals (§11
+#                              catalogue of 7 shapes).
+# Per [[bouncer-zero-llm-when-agent-in-loop]] the tool is deterministic:
+# it surfaces signals; the operator's agent reasons over them.
+# Per [[ibounce-honest-positioning]] suspect_patterns calibration corpus
+# is a follow-up (mirror of Phase 10 work); provenance carries the
+# warning.
+TOOLS.extend([
+    {
+        "name": "iam_jit_consider_tightening",
+        "description": (
+            "Analyse one audit window against a profile + trailing "
+            "history + (optional) operator signals; surface narrowing_"
+            "proposals[] (profile-tightening candidates from the "
+            "Phase 8 improve_profile pipeline, friction-budget-aware) "
+            "AND suspect_patterns[] (prompt-injection-AWARE signals "
+            "per design §11: sudden_friction_spike, unprecedented_"
+            "action, resource_pattern_drift, known_adversarial_"
+            "pattern_match, velocity_anomaly, time_of_day_anomaly, "
+            "attack_chain_signature). Per [[bouncer-zero-llm-when-"
+            "agent-in-loop]] deterministic — surfaces signals; the "
+            "operator's agent reasons. Per [[ibounce-honest-"
+            "positioning]] the surface is prompt-injection-AWARE, "
+            "NOT prompt-injection-PROOF; suspect-pattern calibration "
+            "corpus is a Phase 16 follow-up (warning carried in "
+            "provenance). Read-only — no profile mutation here; the "
+            "agent applies narrowings via iam_jit_improve_profile and "
+            "BLOCK_PROACTIVELY suspects via bounce_deny_add."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "required": ["profile", "audit_events", "bouncer_kind"],
+            "properties": {
+                "profile": {
+                    "type": "object",
+                    "description": (
+                        "Parsed profile dict (generator-shape or "
+                        "production-shape; the narrowing pipeline "
+                        "normalises)."
+                    ),
+                },
+                "audit_events": {
+                    "type": "array",
+                    "description": (
+                        "Events for the current audit window "
+                        "(the window being analysed for tightening "
+                        "+ suspect signals). OCSF-shape dicts."
+                    ),
+                    "items": {"type": "object"},
+                },
+                "bouncer_kind": {
+                    "type": "string",
+                    "enum": ["ibounce", "kbouncer", "dbounce", "gbounce"],
+                },
+                "friction_budget": {
+                    "description": (
+                        "Optional — same shape as iam_jit_improve_"
+                        "profile (int=weekly cap OR §4.1 dict). When "
+                        "supplied, candidate narrowings whose "
+                        "application would push estimated_weekly_"
+                        "denies over budget are refused upstream and "
+                        "DROPPED from narrowing_proposals[]."
+                    ),
+                    "oneOf": [
+                        {"type": "integer", "minimum": 0},
+                        {
+                            "type": "object",
+                            "properties": {
+                                "max_legitimate_denies_per_week": {
+                                    "type": "integer", "minimum": 0,
+                                },
+                                "max_legitimate_denies_per_day": {
+                                    "type": "integer", "minimum": 0,
+                                },
+                            },
+                        },
+                    ],
+                },
+                "history_depth_days": {
+                    "type": "integer",
+                    "minimum": 0,
+                    "default": 30,
+                    "description": (
+                        "Declared trailing-history depth in days. "
+                        "When supplied history_events span less than "
+                        "half this declared depth, provenance "
+                        "surfaces a reduced-confidence warning per "
+                        "[[ibounce-honest-positioning]]."
+                    ),
+                },
+                "history_events": {
+                    "type": "array",
+                    "description": (
+                        "Trailing-history events the baseline-"
+                        "comparing detectors (sudden_friction_spike "
+                        "/ unprecedented_action / resource_pattern_"
+                        "drift / velocity_anomaly) compare against. "
+                        "When omitted those detectors STAY SILENT "
+                        "per §11.5 (false-positive storm risk)."
+                    ),
+                    "items": {"type": "object"},
+                },
+                "operator_signals": {
+                    "type": "object",
+                    "description": (
+                        "Optional operator-supplied context per "
+                        "[[ambient-mode-progressive-tightening]] "
+                        "§10.6: typical_hours (e.g. [9, 18]), "
+                        "workflow declarations, friction tolerance, "
+                        "always-allow flags."
+                    ),
+                },
+            },
+        },
+    },
+])
+
+
 # #419 / §A58 — bounce_extract_permissions_from_audit MCP tool. Phase E
 # of [[bouncer-informs-agent-informs-iam-jit]]: agent calls this to
 # turn a window of bouncer audit events into a structured permission
@@ -5750,6 +5878,14 @@ def _handle_request(req: dict[str, Any]) -> dict[str, Any] | None:
             # #401 / §A47 — autonomous improve-profile cycle.
             from .improve import improve_profile_for_mcp
             result_payload = improve_profile_for_mcp(args)
+        elif tool_name == "iam_jit_consider_tightening":
+            # Phase 13 of profile-generation design (docs/PROFILE-
+            # GENERATION-DESIGN.md §6 Phase 13 + §10.3 + §11.2).
+            # Per [[progressive-tightening-as-injection-detector]]:
+            # single tool emits narrowing_proposals[] +
+            # suspect_patterns[] from the SAME data flow.
+            from .llm.tightening import consider_tightening_for_mcp
+            result_payload = consider_tightening_for_mcp(args)
         elif tool_name == "iam_jit_handle_deny":
             # #402 / §A48 — structured deny handler.
             from .structured_deny import handle_deny_for_mcp
