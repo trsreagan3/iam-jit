@@ -45,6 +45,11 @@ container_exec() {
 container_install_toolchain() {
   local name="$1"
   container_exec "${name}" "apt-get update -qq && apt-get install -y -qq python3 python3-pip python3-venv git curl ca-certificates sqlite3 iproute2 >/dev/null" 2>&1
+  # Ubuntu 22.04 ships pip 22.0.2 which lacks PEP 660 build_editable
+  # support for projects without setup.py. Upgrade pip to a modern
+  # release before iam-jit installs run. This matches what an operator
+  # would do on day-1 (the iam-jit README recommends a modern pip).
+  container_exec "${name}" "pip3 install --quiet --upgrade 'pip>=24' 'setuptools>=68' wheel" 2>&1
   container_exec "${name}" "curl -fsSL https://go.dev/dl/go${GO_VERSION}.linux-${GO_ARCH_LINUX}.tar.gz -o /tmp/go.tgz && tar -C /usr/local -xzf /tmp/go.tgz && rm /tmp/go.tgz && ln -sf /usr/local/go/bin/go /usr/local/bin/go && ln -sf /usr/local/go/bin/gofmt /usr/local/bin/gofmt" 2>&1
   # Copy source to /work (writable).
   container_exec "${name}" "mkdir -p /work && cp -a /src/iam-roles /work/iam-roles && cp -a /src/gbounce /work/gbounce" 2>&1

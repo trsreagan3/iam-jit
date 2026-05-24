@@ -69,9 +69,16 @@ fi
 CONTAINER_NAME="$(container_spawn "${SCENARIO_ID}")"
 container_install_toolchain "${CONTAINER_NAME}" >/dev/null
 
-# Phase 2: reset /work/iam-roles + /work/gbounce to PRE_SHA so update has
-# something to "advance" to. (container_install_toolchain copies from /src.)
-container_exec "${CONTAINER_NAME}" "cd /work/iam-roles && git checkout -q ${PRE_SHA} 2>&1 | tail -3" >/tmp/uat-L3-pre-checkout 2>&1 || true
+# Phase 2: reset /work/iam-roles + /work/gbounce to PRE_SHA. The
+# `iam-jit canary update` flow does git fetch + git pull, so we need
+# an `origin` remote pointing at a writable bare repo we control.
+# Set up a bare clone in /work/origin-iam-roles + /work/origin-gbounce
+# that contains both PRE and POST commits, then point /work/<repo>'s
+# origin at it. Then check out PRE_SHA in /work/<repo>.
+container_exec "${CONTAINER_NAME}" "cd /work && git clone --bare /src/iam-roles origin-iam-roles 2>&1 | tail -3" >/tmp/uat-L3-clone-iam 2>&1 || true
+container_exec "${CONTAINER_NAME}" "cd /work && git clone --bare /src/gbounce origin-gbounce 2>&1 | tail -3" >/tmp/uat-L3-clone-gb 2>&1 || true
+container_exec "${CONTAINER_NAME}" "cd /work/iam-roles && git remote remove origin 2>/dev/null; git remote add origin /work/origin-iam-roles && git fetch origin 2>&1 | tail -3 && git checkout -q ${PRE_SHA} && git branch -f main ${PRE_SHA} && git checkout -q main && git branch --set-upstream-to=origin/main main 2>&1 | tail -3" >/tmp/uat-L3-pre-checkout 2>&1 || true
+container_exec "${CONTAINER_NAME}" "cd /work/gbounce && git remote remove origin 2>/dev/null; git remote add origin /work/origin-gbounce && git fetch origin 2>&1 | tail -3 && git checkout -q ${GBOUNCE_SHA_HOST} && git branch -f main ${GBOUNCE_SHA_HOST} && git checkout -q main && git branch --set-upstream-to=origin/main main 2>&1 | tail -3" >/tmp/uat-L3-pre-gb-checkout 2>&1 || true
 
 # Phase 3: install iam-jit + gbounce at PRE_SHA.
 container_install_iam_jit "${CONTAINER_NAME}" >/dev/null 2>&1 || true
@@ -81,8 +88,8 @@ container_install_gbounce "${CONTAINER_NAME}" >/dev/null 2>&1 || true
 container_exec "${CONTAINER_NAME}" "mkdir -p /root/.iam-jit/canary"
 docker cp "${SCRIPT_DIR}/../../fixtures/canary-yaml/L2-minimal.iam-jit.yaml" \
   "${CONTAINER_NAME}:/root/.iam-jit/canary/.iam-jit.yaml" >/dev/null
-container_exec "${CONTAINER_NAME}" "nohup ibounce --port 17401 >/tmp/ibounce.log 2>&1 &"
-container_exec "${CONTAINER_NAME}" "export PATH=/usr/local/go/bin:/root/go/bin:\$PATH && nohup gbounce --port 17402 --mgmt-port 17412 --allow-connect >/tmp/gbounce.log 2>&1 &"
+container_exec "${CONTAINER_NAME}" "nohup ibounce run --port 17401 >/tmp/ibounce.log 2>&1 < /dev/null &" >/dev/null 2>&1 || true
+container_exec "${CONTAINER_NAME}" "nohup /root/go/bin/gbounce --port 17402 --mgmt-port 17412 --allow-connect >/tmp/gbounce.log 2>&1 < /dev/null &" >/dev/null 2>&1 || true
 sleep 3
 IBOUNCE_PID="$(container_exec "${CONTAINER_NAME}" "pgrep -f 'ibounce.*17401' | head -1" | tail -1 | tr -d '\r\n ')"
 GBOUNCE_PID="$(container_exec "${CONTAINER_NAME}" "pgrep -f 'gbounce.*17402' | head -1" | tail -1 | tr -d '\r\n ')"
@@ -120,12 +127,9 @@ POST_DRY_COMMIT="$(container_exec "${CONTAINER_NAME}" "python3 -c 'import json; 
 DRY_RUN_MUTATED="no"
 if [[ "${POST_DRY_COMMIT}" != "${PRE_SHA}" ]]; then DRY_RUN_MUTATED="yes"; fi
 
-# Phase 8: do the real update. The update command pulls from origin
-# (the container's /work/iam-roles checkout has no origin remote, so
-# this will likely fail — that's an honest finding worth recording).
-# To exercise the actual update mechanic, we manually fast-forward
-# the /work checkouts to POST_SHA and then invoke `iam-jit canary update`.
-container_exec "${CONTAINER_NAME}" "cd /work/iam-roles && git checkout -q ${POST_SHA} 2>&1 | tail -3" >/tmp/uat-L3-post-checkout 2>&1 || true
+# Phase 8: advance origin/main to POST_SHA so `iam-jit canary update`
+# (which does git fetch + git pull) actually sees a newer commit.
+container_exec "${CONTAINER_NAME}" "cd /work/origin-iam-roles && git branch -f main ${POST_SHA} 2>&1 | tail -3" >/tmp/uat-L3-origin-advance 2>&1 || true
 
 UPDATE_START="$(date +%s)"
 UPDATE_OUT="$(container_exec "${CONTAINER_NAME}" "iam-jit canary update 2>&1 | tail -50" 2>&1 || true)"

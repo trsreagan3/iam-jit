@@ -51,18 +51,29 @@ CONTAINER_NAME="$(container_spawn "${SCENARIO_ID}")"
 container_install_toolchain "${CONTAINER_NAME}" >/dev/null
 
 # Capture pip + go install exit codes (single invocation each).
-PIP_OUT="$(container_exec "${CONTAINER_NAME}" "cd /work/iam-roles && pip3 install -e . --quiet 2>&1 | tail -3; echo EXIT=\$?" 2>&1)"
+# Pipe + $? = tail's exit, not pip's. Use set -o pipefail + capture
+# directly to a tempfile so EXIT line reflects pip's real exit code.
+PIP_OUT="$(container_exec "${CONTAINER_NAME}" "set -o pipefail; cd /work/iam-roles && pip3 install -e . 2>&1 | tail -10; echo EXIT=\${PIPESTATUS[0]}" 2>&1)"
 PIP_EXIT="$(echo "${PIP_OUT}" | grep -oE 'EXIT=[0-9]+' | tail -1 | cut -d= -f2)"
 
-GO_OUT="$(container_exec "${CONTAINER_NAME}" "cd /work/gbounce && export PATH=/usr/local/go/bin:/root/go/bin:\$PATH && go install ./cmd/gbounce 2>&1 | tail -3; echo EXIT=\$?" 2>&1)"
+GO_OUT="$(container_exec "${CONTAINER_NAME}" "set -o pipefail; cd /work/gbounce && export PATH=/usr/local/go/bin:/root/go/bin:\$PATH && go install ./cmd/gbounce 2>&1 | tail -10; echo EXIT=\${PIPESTATUS[0]}" 2>&1)"
 GO_EXIT="$(echo "${GO_OUT}" | grep -oE 'EXIT=[0-9]+' | tail -1 | cut -d= -f2)"
+
+# Detect whether gbounce landed on the default PATH (a `go install`
+# drops binaries into $GOPATH/bin which defaults to ~/go/bin, NOT on
+# the default ubuntu PATH). This is an L1 finding worth recording: the
+# operator must add ~/go/bin to PATH (standard Go ergonomics) for the
+# install to be reachable. We probe via full path for the rest of the
+# assertions; the missing-PATH state is captured in evidence.
+GBOUNCE_ON_DEFAULT_PATH="$(container_exec "${CONTAINER_NAME}" "command -v gbounce >/dev/null 2>&1 && echo yes || echo no" | tail -1 | tr -d '\r\n ')"
+GBOUNCE_BIN_EXISTS="$(container_exec "${CONTAINER_NAME}" "test -x /root/go/bin/gbounce && echo yes || echo no" | tail -1 | tr -d '\r\n ')"
 
 # Check ~/.iam-jit/ NOT yet created (lazy).
 HOME_EXISTS_PRE="$(container_exec "${CONTAINER_NAME}" "test -d /root/.iam-jit && echo yes || echo no" | tail -1 | tr -d '\r\n ')"
 
 # --version (read-only, must not create state).
 IAM_JIT_VER="$(container_exec "${CONTAINER_NAME}" "iam-jit --version 2>&1 | head -3" | tail -1 | tr -d '\r\n')"
-GBOUNCE_VER="$(container_exec "${CONTAINER_NAME}" "export PATH=/usr/local/go/bin:/root/go/bin:\$PATH && gbounce --version 2>&1 | head -3" | tail -1 | tr -d '\r\n')"
+GBOUNCE_VER="$(container_exec "${CONTAINER_NAME}" "/root/go/bin/gbounce --version 2>&1 | head -3" | tail -1 | tr -d '\r\n')"
 
 HOME_EXISTS_POST_VERSION="$(container_exec "${CONTAINER_NAME}" "test -d /root/.iam-jit && echo yes || echo no" | tail -1 | tr -d '\r\n ')"
 
@@ -76,7 +87,7 @@ POSTURE_EXIT="${POSTURE_EXIT_RAW:-99}"
 POSTURE_MODE="$(container_exec "${CONTAINER_NAME}" "iam-jit posture --json 2>/dev/null | python3 -c 'import sys,json
 try:
     d=json.load(sys.stdin)
-    print(d.get(\"mode\", d.get(\"posture\", \"unknown\")))
+    print(d.get(\"overall_mode\", d.get(\"mode\", \"unknown\")))
 except Exception as e:
     print(\"unknown\")' 2>/dev/null || echo unknown" | tail -1 | tr -d '\r\n ')"
 
@@ -110,7 +121,7 @@ iam_jit_ver_esc="$(echo "${IAM_JIT_VER}" | sed 's/\\/\\\\/g; s/"/\\"/g')"
 gbounce_ver_esc="$(echo "${GBOUNCE_VER}" | sed 's/\\/\\\\/g; s/"/\\"/g')"
 
 evidence=$(cat <<EOF
-{"pip_install_exit_code":${PIP_EXIT:-99},"go_install_exit_code":${GO_EXIT:-99},"iam_jit_version":"${iam_jit_ver_esc}","gbounce_version":"${gbounce_ver_esc}","iam_jit_home_existed_pre_install":"${HOME_EXISTS_PRE}","iam_jit_home_created_after_version_cmd":"${HOME_EXISTS_POST_VERSION}","iam_jit_home_created_after_posture_cmd":"${HOME_EXISTS_POST_POSTURE}","posture_exit_code":${POSTURE_EXIT},"posture_reported_mode":"${POSTURE_MODE}","ps_count_before":${PS_BEFORE:-0},"ps_count_after":${PS_AFTER:-0},"background_processes_added":"${NEW_PROCS}"}
+{"pip_install_exit_code":${PIP_EXIT:-99},"go_install_exit_code":${GO_EXIT:-99},"iam_jit_version":"${iam_jit_ver_esc}","gbounce_version":"${gbounce_ver_esc}","gbounce_on_default_path":"${GBOUNCE_ON_DEFAULT_PATH}","gbounce_binary_at_gopath":"${GBOUNCE_BIN_EXISTS}","iam_jit_home_existed_pre_install":"${HOME_EXISTS_PRE}","iam_jit_home_created_after_version_cmd":"${HOME_EXISTS_POST_VERSION}","iam_jit_home_created_after_posture_cmd":"${HOME_EXISTS_POST_POSTURE}","posture_exit_code":${POSTURE_EXIT},"posture_reported_mode":"${POSTURE_MODE}","ps_count_before":${PS_BEFORE:-0},"ps_count_after":${PS_AFTER:-0},"background_processes_added":"${NEW_PROCS}"}
 EOF
 )
 evidence="$(echo "${evidence}" | tr -d '\n')"

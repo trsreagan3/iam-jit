@@ -70,18 +70,15 @@ docker cp "${SCRIPT_DIR}/../../fixtures/canary-yaml/L2-minimal.iam-jit.yaml" \
   "${CONTAINER_NAME}:/root/.iam-jit/canary/.iam-jit.yaml" >/dev/null
 
 # Phase 3: start ibounce + gbounce in discovery mode on declared ports.
-container_exec "${CONTAINER_NAME}" "ibounce --port 17401 >/tmp/ibounce.log 2>&1 &
-sleep 1
-echo \$!" >/tmp/uat-L2-pid-probe 2>&1 || true
+# ibounce lands on /usr/local/bin (Python entry-point); gbounce lands
+# in /root/go/bin (Go install default — NOT on default PATH; use full path).
+container_exec "${CONTAINER_NAME}" "nohup ibounce run --port 17401 >/tmp/ibounce.log 2>&1 < /dev/null &" >/dev/null 2>&1 || true
+container_exec "${CONTAINER_NAME}" "nohup /root/go/bin/gbounce --port 17402 --mgmt-port 17412 --allow-connect >/tmp/gbounce.log 2>&1 < /dev/null &" >/dev/null 2>&1 || true
+sleep 4
 IBOUNCE_PID="$(container_exec "${CONTAINER_NAME}" "pgrep -f 'ibounce.*17401' | head -1" | tail -1 | tr -d '\r\n ')"
-
-container_exec "${CONTAINER_NAME}" "export PATH=/usr/local/go/bin:/root/go/bin:\$PATH && gbounce --port 17402 --mgmt-port 17412 --allow-connect >/tmp/gbounce.log 2>&1 &
-sleep 1
-echo \$!" >/tmp/uat-L2-gpid-probe 2>&1 || true
 GBOUNCE_PID="$(container_exec "${CONTAINER_NAME}" "pgrep -f 'gbounce.*17402' | head -1" | tail -1 | tr -d '\r\n ')"
 
-# Give bouncers a moment to bind.
-sleep 3
+# (Bouncer bind already waited above with sleep 4.)
 
 # Phase 4: write status.json so verify-setup sees the bouncers.
 status_json=$(cat <<JSON
