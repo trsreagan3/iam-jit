@@ -2467,6 +2467,37 @@ TOOLS.extend([
                         "LLM backend override for the generator step."
                     ),
                 },
+                "friction_budget": {
+                    "description": (
+                        "Phase 8 (docs/PROFILE-GENERATION-DESIGN.md §6 "
+                        "Phase 8) — max legitimate denies-per-week "
+                        "tolerance. Integer = weekly cap; dict per §4.1 "
+                        "with `max_legitimate_denies_per_week` / "
+                        "`max_legitimate_denies_per_day` keys. When "
+                        "supplied, candidate narrowings "
+                        "(proposed_removals) whose application would "
+                        "push the simulator's estimated_weekly_denies "
+                        "over budget are REFUSED and surfaced on "
+                        "`refused_narrowings[]` with operator-visible "
+                        "rationale per [[ibounce-honest-positioning]]. "
+                        "Omitted (the default) preserves pre-Phase-8 "
+                        "behavior — no simulation runs, no refusal."
+                    ),
+                    "oneOf": [
+                        {"type": "integer", "minimum": 0},
+                        {
+                            "type": "object",
+                            "properties": {
+                                "max_legitimate_denies_per_week": {
+                                    "type": "integer", "minimum": 0,
+                                },
+                                "max_legitimate_denies_per_day": {
+                                    "type": "integer", "minimum": 0,
+                                },
+                            },
+                        },
+                    ],
+                },
             },
         },
     },

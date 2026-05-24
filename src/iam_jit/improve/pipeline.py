@@ -115,6 +115,28 @@ class ImproveProfileResult:
     # the profile on disk — the reported ``status`` MUST match.
     installed_rules: list[dict[str, Any]] = dataclasses.field(default_factory=list)
     failed_rules: list[dict[str, Any]] = dataclasses.field(default_factory=list)
+    # Phase 8 (docs/PROFILE-GENERATION-DESIGN.md §6 Phase 8) — friction-
+    # budget-aware narrowing. ``refused_narrowings`` carries the
+    # candidate narrowings (proposed_removals) the friction-budget gate
+    # REFUSED because applying them would push estimated_weekly_denies
+    # over budget. Each entry is operator-visible per
+    # [[ibounce-honest-positioning]] — silently dropping a narrowing
+    # without surfacing WHY is the shape this field forbids.
+    #
+    # Shape: [{
+    #   "proposed_change": "drop allow rule s3:GetObject@arn:aws:s3:::cache",
+    #   "estimated_weekly_denies_after": 42,
+    #   "estimated_weekly_denies_baseline": 0,
+    #   "friction_budget": 10,
+    #   "rationale": "would exceed budget by 32 denies/week",
+    # }, ...]
+    refused_narrowings: list[dict[str, Any]] = dataclasses.field(default_factory=list)
+    # Phase 8 — friction-metrics surface so operators see baseline +
+    # post-application state. Empty dicts when friction_budget=None
+    # (backward-compat: no friction_budget → no simulation runs).
+    friction_metrics_baseline: dict[str, Any] = dataclasses.field(default_factory=dict)
+    friction_metrics_if_applied: dict[str, Any] = dataclasses.field(default_factory=dict)
+    warnings: list[str] = dataclasses.field(default_factory=list)
     recommended_action: str = ""
     explanation: str = ""
     schema_version: str = "1.0"
@@ -323,6 +345,342 @@ def _change_size(
 
 
 # ---------------------------------------------------------------------------
+# Phase 8 — friction-budget narrowing helpers.
+# ---------------------------------------------------------------------------
+
+
+def _profile_dataclass_to_generator_shape(profile: Any) -> dict[str, Any]:
+    """Convert a bouncer ``Profile`` dataclass to the generator-shape
+    dict the Phase 4 simulator consumes.
+
+    Each :class:`ProfileAllowRule` becomes a generator-shape allow with
+    ``target=arn_scope or "*"`` and ``actions=[pattern]``. Per the
+    simulator divergence catalog
+    (``src/iam_jit/llm/simulator.py:_DIVERGENCE_WARNINGS["ibounce"]``)
+    only generator-shape ``allows`` / ``denies`` are replayed — the
+    scope-floor / deny_keywords / allow_baseline layers are NOT — so
+    the simulation produces a per-rule narrowing impact estimate but
+    underestimates impact when those layers are involved. The caller
+    surfaces this honestly via ``warnings``.
+    """
+    allows: list[dict[str, Any]] = []
+    for rule in getattr(profile, "allow_rules", ()) or ():
+        pattern = getattr(rule, "pattern", "") or ""
+        if not pattern:
+            continue
+        target = getattr(rule, "arn_scope", None) or "*"
+        allows.append({
+            "target": target,
+            "actions": [pattern],
+            "reason": f"profile {getattr(profile, 'name', '')} allow_rule",
+        })
+    denies: list[dict[str, Any]] = []
+    deny_actions = getattr(profile, "deny_actions", ()) or ()
+    if deny_actions:
+        denies.append({
+            "target": "*",
+            "actions": list(deny_actions),
+            "reason": "promoted from profile.deny_actions",
+        })
+    return {
+        "profile_name": getattr(profile, "name", ""),
+        "bouncer": "ibounce",
+        "allows": allows,
+        "denies": denies,
+    }
+
+
+def _narrowed_profile_dict(
+    *,
+    baseline_dict: dict[str, Any],
+    drop_action: str,
+    drop_target: str | None,
+) -> dict[str, Any]:
+    """Return a copy of ``baseline_dict`` with the matching allow rule
+    REMOVED. Match shape: ``actions`` contains ``drop_action`` and
+    ``target`` equals ``drop_target`` (after the ``_normalize_target``
+    convention so ``None``/``""``/``"*"`` all collapse).
+    """
+    drop_t = _normalize_target(drop_target)
+    new_allows: list[dict[str, Any]] = []
+    for rule in baseline_dict.get("allows", []) or []:
+        if not isinstance(rule, dict):
+            new_allows.append(rule)
+            continue
+        rule_target = _normalize_target(rule.get("target"))
+        rule_actions = rule.get("actions") or []
+        if isinstance(rule_actions, str):
+            rule_actions = [rule_actions]
+        # If THIS rule names exactly the dropped action on the matching
+        # target, drop the action; if no actions remain, drop the rule.
+        if rule_target == drop_t and drop_action in rule_actions:
+            remaining = [a for a in rule_actions if a != drop_action]
+            if remaining:
+                new_rule = dict(rule)
+                new_rule["actions"] = remaining
+                new_allows.append(new_rule)
+            # else: rule fully dropped — skip
+            continue
+        new_allows.append(rule)
+    out = dict(baseline_dict)
+    out["allows"] = new_allows
+    return out
+
+
+def _resolve_friction_budget_weekly_cap(
+    friction_budget: int | dict[str, Any],
+) -> int:
+    """Collapse ``friction_budget`` (int OR §4.1 dict) → weekly cap.
+    Mirrors simulator ``_compute_friction_metrics`` so the gate and
+    the simulator agree on what "budget" means."""
+    if isinstance(friction_budget, dict):
+        return int(
+            friction_budget.get("max_legitimate_denies_per_week")
+            or friction_budget.get("max_legitimate_denies_per_day", 0) * 7
+            or 0
+        )
+    return int(friction_budget)
+
+
+def _observation_span_days(events: list[dict[str, Any]]) -> float:
+    """Same span heuristic as simulator ``_compute_friction_metrics``
+    so the gate's weekly extrapolation tracks the simulator's
+    ``estimated_weekly_denies`` exactly."""
+    times_ms: list[int] = []
+    for ev in events or []:
+        t = ev.get("time")
+        if isinstance(t, (int, float)) and t > 0:
+            times_ms.append(int(t))
+    if len(times_ms) >= 2:
+        span_ms = max(times_ms) - min(times_ms)
+        return max(span_ms / (1000 * 60 * 60 * 24), 1.0 / 24.0)
+    return 1.0 / 24.0
+
+
+def _count_effective_denies(
+    *,
+    baseline_verdicts: list[Any],
+    narrowed_verdicts: list[Any],
+) -> int:
+    """Count events that flipped from ``allow`` -> ``deny|abstain`` after
+    the narrowing was applied. Production behavior post-allow-drop is
+    typically deny (because no allow_baseline or rule covers the event)
+    so abstain → effective deny is the honest reading per
+    [[ibounce-honest-positioning]]. Production engines may diverge
+    (allow_baseline catches some) — surface that as a warning, NOT a
+    silent under-count.
+    """
+    baseline_by_idx = {v.event_idx: v.verdict for v in baseline_verdicts}
+    delta = 0
+    for v in narrowed_verdicts:
+        baseline_verdict = baseline_by_idx.get(v.event_idx)
+        if baseline_verdict == "allow" and v.verdict in ("deny", "abstain"):
+            delta += 1
+    return delta
+
+
+def _apply_friction_budget_to_narrowings(
+    *,
+    current_profile: Any,
+    proposed_removals: list[dict[str, Any]],
+    friction_budget: int | dict[str, Any],
+    events: list[dict[str, Any]],
+    bouncer: str,
+) -> tuple[
+    list[dict[str, Any]],   # accepted_removals (post-refusal)
+    list[dict[str, Any]],   # refused_narrowings
+    dict[str, Any],         # friction_metrics_baseline
+    dict[str, Any],         # friction_metrics_if_applied
+    list[str],              # warnings
+]:
+    """Refuse candidate narrowings whose application would push
+    ``estimated_weekly_denies`` over budget. Returns the
+    post-refusal acceptance set + the refused list + baseline / if-
+    applied friction metrics + operator-visible warnings.
+
+    Per [[ibounce-honest-positioning]] the refusal MUST surface WHY
+    each narrowing was refused — silent drops are the bug shape this
+    guards against.
+
+    Per [[scorer-is-ground-truth]] we re-use Phase 4
+    ``evaluate_profile_against_events`` rather than re-implementing
+    the rule engine; the SAME simulator that grading reads from is
+    what drives this gate.
+
+    Per the simulator divergence catalog (allow_baseline / scope-floor
+    layers NOT replayed) the per-rule narrowing estimate is a LOWER
+    bound on production deny impact for ibounce profiles using
+    allow_baseline; we surface that honestly in ``warnings``.
+
+    Narrowing-impact computation: for each candidate, the gate counts
+    events that flipped from ``allow`` (baseline) → ``abstain|deny``
+    (post-narrowing) and extrapolates to weekly via the simulator's
+    span heuristic. Abstains count as denies because production's
+    common shape after dropping an allow is a deny (no fallback
+    allow_baseline or other rule covers the same event).
+    """
+    accepted: list[dict[str, Any]] = []
+    refused: list[dict[str, Any]] = []
+    warnings: list[str] = []
+
+    budget_max = _resolve_friction_budget_weekly_cap(friction_budget)
+
+    try:
+        from ..llm.simulator import evaluate_profile_against_events
+    except Exception as e:  # pragma: no cover
+        warnings.append(
+            f"friction-budget simulator unavailable ({e}); narrowing "
+            f"refusal SKIPPED — all proposed_removals pass through "
+            f"unfiltered (no refusal applied)"
+        )
+        return proposed_removals, refused, {}, {}, warnings
+
+    baseline_dict = _profile_dataclass_to_generator_shape(current_profile)
+    sim_bouncer = (bouncer or "ibounce").strip()
+
+    baseline_sv = evaluate_profile_against_events(
+        profile=baseline_dict,
+        events=events or [],
+        bouncer_kind=sim_bouncer,
+        friction_budget=friction_budget,
+    )
+    friction_metrics_baseline = dict(baseline_sv.friction_metrics or {})
+
+    span_days = _observation_span_days(events)
+    weekly_multiplier = 7.0 / max(span_days, 1.0 / 24.0)
+
+    baseline_estimated_weekly = float(
+        friction_metrics_baseline.get("estimated_weekly_denies", 0.0)
+    )
+
+    accepted_dict = dict(baseline_dict)
+    cumulative_extra_denies = 0
+    for removal in proposed_removals:
+        action = removal.get("action", "")
+        target = removal.get("target")
+        candidate_dict = _narrowed_profile_dict(
+            baseline_dict=accepted_dict,
+            drop_action=action,
+            drop_target=target,
+        )
+        sv = evaluate_profile_against_events(
+            profile=candidate_dict,
+            events=events or [],
+            bouncer_kind=sim_bouncer,
+            friction_budget=friction_budget,
+        )
+        # Count events that flipped allow→abstain/deny under this
+        # specific narrowing. Compare against the PREVIOUS accepted
+        # state (accepted_dict) so cumulative narrowings stack
+        # truthfully.
+        prev_sv = evaluate_profile_against_events(
+            profile=accepted_dict,
+            events=events or [],
+            bouncer_kind=sim_bouncer,
+            friction_budget=friction_budget,
+        )
+        extra_denies = _count_effective_denies(
+            baseline_verdicts=prev_sv.verdicts,
+            narrowed_verdicts=sv.verdicts,
+        )
+        total_extra_with_this = cumulative_extra_denies + extra_denies
+        extrapolated_extra_weekly = total_extra_with_this * weekly_multiplier
+        estimated_after = round(
+            baseline_estimated_weekly + extrapolated_extra_weekly, 3,
+        )
+        if budget_max > 0 and estimated_after > budget_max:
+            excess = round(estimated_after - budget_max, 3)
+            refused.append({
+                "proposed_change": (
+                    f"drop allow rule {action}@{target or '*'}"
+                ),
+                "action": action,
+                "target": target,
+                "estimated_weekly_denies_after": estimated_after,
+                "estimated_weekly_denies_baseline": baseline_estimated_weekly,
+                "friction_budget": budget_max,
+                "rationale": (
+                    f"would exceed budget by {excess} denies/week "
+                    f"(estimated_weekly_denies={estimated_after}, "
+                    f"budget={budget_max}); kept allow rule in place "
+                    f"per [[ibounce-honest-positioning]] "
+                    f"refused-narrowing surface"
+                ),
+            })
+            # Do NOT advance accepted_dict; do NOT add to cumulative —
+            # the rule stays in the profile.
+            continue
+        # Accepted: advance the running profile so the next candidate
+        # is evaluated against the post-this-narrowing baseline.
+        accepted.append(removal)
+        accepted_dict = candidate_dict
+        cumulative_extra_denies = total_extra_with_this
+
+    # Compute friction_metrics_if_applied from the post-accept state.
+    if accepted:
+        if_applied_sv = evaluate_profile_against_events(
+            profile=accepted_dict,
+            events=events or [],
+            bouncer_kind=sim_bouncer,
+            friction_budget=friction_budget,
+        )
+        if_applied_metrics = dict(if_applied_sv.friction_metrics or {})
+        # The simulator only counts events whose final verdict is
+        # "deny"; abstains-that-flipped-from-allow aren't counted.
+        # Surface the cumulative effective extra via a separate field
+        # so the operator sees the production-realistic estimate next
+        # to the simulator-strict count.
+        if_applied_metrics["effective_extra_weekly_denies_vs_baseline"] = round(
+            cumulative_extra_denies * weekly_multiplier, 3,
+        )
+        if_applied_metrics["effective_estimated_weekly_denies"] = round(
+            baseline_estimated_weekly
+            + cumulative_extra_denies * weekly_multiplier,
+            3,
+        )
+        friction_metrics_if_applied = if_applied_metrics
+    else:
+        # Nothing accepted → if_applied state == baseline state.
+        friction_metrics_if_applied = dict(friction_metrics_baseline)
+        friction_metrics_if_applied["effective_extra_weekly_denies_vs_baseline"] = 0.0
+        friction_metrics_if_applied["effective_estimated_weekly_denies"] = (
+            baseline_estimated_weekly
+        )
+
+    if refused:
+        warnings.append(
+            f"friction_budget gate refused {len(refused)} narrowing(s); "
+            f"see refused_narrowings[] for per-narrowing rationale per "
+            f"[[ibounce-honest-positioning]]"
+        )
+
+    warnings.append(
+        "narrowing-impact estimate counts events that flip from "
+        "allow→abstain|deny under the candidate-removed allow; "
+        "production engines with allow_baseline / global rules may "
+        "still allow some of these events (under-estimate); the gate "
+        "is conservative on the deny side (over-estimates production "
+        "deny rate, never under-estimates) per [[scorer-is-ground-truth]]"
+    )
+
+    # Surface simulator divergence so operators understand the limits
+    # of the estimate (per [[ibounce-honest-positioning]] + simulator
+    # provenance.warnings).
+    try:
+        warnings.extend(list(baseline_sv.provenance.get("warnings", [])))
+    except Exception:  # pragma: no cover
+        pass
+
+    return (
+        accepted,
+        refused,
+        friction_metrics_baseline,
+        friction_metrics_if_applied,
+        warnings,
+    )
+
+
+# ---------------------------------------------------------------------------
 # Main pipeline
 # ---------------------------------------------------------------------------
 
@@ -347,6 +705,7 @@ def improve_profile(
     queue_path: pathlib.Path | None = None,
     skip_fanout: bool = True,
     allow_agent_self_grant: bool | None = None,
+    friction_budget: int | dict[str, Any] | None = None,
 ) -> ImproveProfileResult:
     """Run one improve-profile cycle for a single bouncer.
 
@@ -365,6 +724,18 @@ def improve_profile(
     declaration's ``improve.auto_install_profiles`` is itself the
     operator's explicit consent (per ``[[agent-self-grant]]`` the
     declaration is the opt-in). The caller can override per-cycle.
+
+    Phase 8 (docs/PROFILE-GENERATION-DESIGN.md §6 Phase 8) — when
+    ``friction_budget`` is supplied (int = max legitimate denies/week,
+    or dict per §4.1 with ``max_legitimate_denies_per_week`` /
+    ``_per_day`` keys), each candidate narrowing (proposed_removal) is
+    simulated against the audit window via Phase 4
+    ``evaluate_profile_against_events``. Narrowings that would push
+    ``estimated_weekly_denies`` over budget are REFUSED with an
+    operator-visible rationale on the result's ``refused_narrowings[]``
+    field per ``[[ibounce-honest-positioning]]``. Backward-compat:
+    ``friction_budget=None`` (the default) preserves pre-Phase-8
+    behaviour — no simulation runs, no refusal logic fires.
     """
     window = cadence_window or _cadence_to_window(cadence, fallback="1h")
 
@@ -515,8 +886,72 @@ def improve_profile(
         for (a, t) in sorted(removed, key=lambda x: (x[0], x[1] or ""))
     ]
 
+    # -----------------------------------------------------------------
+    # Phase 8 (docs/PROFILE-GENERATION-DESIGN.md §6 Phase 8) — friction-
+    # budget-aware narrowing refusal. Runs ONLY when friction_budget is
+    # supplied (backward-compat: None preserves pre-Phase-8 behavior).
+    # For each candidate narrowing (proposed_removal), simulate the
+    # narrowed profile against the audit window via Phase 4 simulator.
+    # If estimated_weekly_denies after the narrowing > budget → refuse
+    # the narrowing with operator-visible rationale per
+    # [[ibounce-honest-positioning]].
+    #
+    # Narrowings are dropped from the operator-facing proposed_removals
+    # list (so the agent does not act on them) and surfaced in
+    # refused_narrowings with budget context. friction_metrics_baseline
+    # captures the current profile's projected denies; _if_applied
+    # captures the projection if EVERY accepted narrowing were applied.
+    # -----------------------------------------------------------------
+    refused_narrowings: list[dict[str, Any]] = []
+    friction_metrics_baseline: dict[str, Any] = {}
+    friction_metrics_if_applied: dict[str, Any] = {}
+    warnings: list[str] = []
+    if friction_budget is not None:
+        (
+            proposed_removals,
+            refused_narrowings,
+            friction_metrics_baseline,
+            friction_metrics_if_applied,
+            warnings,
+        ) = _apply_friction_budget_to_narrowings(
+            current_profile=current,
+            proposed_removals=proposed_removals,
+            friction_budget=friction_budget,
+            events=events,
+            bouncer=bouncer,
+        )
+        # Re-sync ``removed`` so downstream change-size + counters
+        # reflect the post-refusal narrowing set. Note: per
+        # [[creates-never-mutates]] removals are surfaced for review
+        # only — they don't drive change_size today — but we keep the
+        # in-memory ``removed`` set consistent with proposed_removals
+        # so the result dataclass + diff reporting stay coherent.
+        removed = set(
+            (e["action"], e["target"]) for e in proposed_removals
+        )
+
+    # Bundle the Phase 8 fields once so every return path that exists
+    # downstream of the diff carries them uniformly.
+    _phase8_extras: dict[str, Any] = {
+        "refused_narrowings": refused_narrowings,
+        "friction_metrics_baseline": friction_metrics_baseline,
+        "friction_metrics_if_applied": friction_metrics_if_applied,
+        "warnings": warnings,
+    }
+
     # No diff?
-    if not added and not removed and not scope_changes:
+    # Phase 8: refused_narrowings count as "we observed a diff but
+    # the friction-budget gate refused it" — that is NOT no_change.
+    # It is meaningful information the operator needs to see. So we
+    # only short-circuit to no_change when there is truly nothing to
+    # report (no added + no accepted removed + no scope_changes +
+    # no refusals).
+    if (
+        not added
+        and not removed
+        and not scope_changes
+        and not refused_narrowings
+    ):
         return ImproveProfileResult(
             status="no_change",
             bouncer=bouncer,
@@ -532,6 +967,7 @@ def improve_profile(
                 f"profile is already a subset of the active profile "
                 f"({current.name!r}). No-op."
             ),
+            **_phase8_extras,
         )
 
     # Dry-run path?
@@ -553,6 +989,7 @@ def improve_profile(
                 f"auto_install={auto_install}. Re-run with apply=True "
                 f"to act."
             ),
+            **_phase8_extras,
         )
 
     # -----------------------------------------------------------------
@@ -607,6 +1044,7 @@ def improve_profile(
                 f"Review with `iam-jit denies recent --pending` "
                 f"(or inspect ~/.iam-jit/bouncer/profile-allow-pending.jsonl)."
             ),
+            **_phase8_extras,
         )
 
     # -----------------------------------------------------------------
@@ -652,6 +1090,7 @@ def improve_profile(
                 f"[[creates-never-mutates]] (inspect "
                 f"~/.iam-jit/bouncer/profile-allow-pending.jsonl)."
             ),
+            **_phase8_extras,
         )
 
     # -----------------------------------------------------------------
@@ -891,6 +1330,7 @@ def improve_profile(
         failed_rules=failed_rules,
         recommended_action=recommended_action,
         explanation=explanation,
+        **_phase8_extras,
     )
 
 
@@ -1175,6 +1615,10 @@ def improve_profile_for_mcp(args: dict[str, Any]) -> dict[str, Any]:
       * preferred_backend: anthropic | openai | bedrock | ollama
       * actor: identity recorded in audit + pending entries
       * events: pre-fetched OCSF events (optional)
+      * friction_budget: Phase 8 — int (max legitimate denies/week) or
+        dict per design §4.1; refuses candidate narrowings that would
+        push estimated_weekly_denies over budget. Optional;
+        backward-compat default (None) preserves pre-Phase-8 behavior.
 
     Returns the :class:`ImproveProfileResult` dict.
     """
@@ -1198,6 +1642,7 @@ def improve_profile_for_mcp(args: dict[str, Any]) -> dict[str, Any]:
             actor=args.get("actor") or None,
             source="mcp",
             allow_agent_self_grant=args.get("allow_agent_self_grant"),
+            friction_budget=args.get("friction_budget"),
         )
     except ImproveProfileError as e:
         return {
