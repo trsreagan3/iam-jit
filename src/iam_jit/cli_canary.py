@@ -51,10 +51,15 @@ import json
 import os
 import pathlib
 import re
+import shlex
 import shutil
 import signal
 import subprocess
+import sys
 import time
+import urllib.error
+import urllib.request
+import warnings
 from collections import Counter
 from typing import Any
 
@@ -66,6 +71,11 @@ ISSUES_PATH = CANARY_DIR / "issues.jsonl"
 NOTES_PATH = CANARY_DIR / "notes.md"
 STATUS_PATH = CANARY_DIR / "status.json"
 URLS_PATH = CANARY_DIR / "urls.md"
+# §A102 — canary declaration; deploy script writes once, redeploys re-read.
+# Captures operator launch INTENT (per-bouncer `daemon_args`) so the
+# verify-setup + auto-relaunch paths can detect smoke-vs-daily-dev drift
+# without re-prompting the operator.
+CANARY_YAML_PATH = CANARY_DIR / ".iam-jit.yaml"
 
 # Repos the canary tracks. Per ``[[canary-redeploys-on-every-update]]``
 # the scope is currently ibounce (iam-roles) + gbounce; expand as the
@@ -251,6 +261,343 @@ def _curl_responsive(url: str, timeout: float = 3.0) -> tuple[bool, int | None]:
         return True, exc.code
     except (urllib.error.URLError, ConnectionResetError, TimeoutError, OSError):
         return False, None
+
+
+# ---------------------------------------------------------------------------
+# §A102 — canary YAML loader + daemon_args validation
+# ---------------------------------------------------------------------------
+#
+# Calibration-drift bug #18 (#525): the canary deploy left bouncers running
+# with smoke-test ``--upstream`` overrides (ibounce pinned to LocalStack,
+# gbounce pinned to api.github.com) when the OPERATOR intent was general
+# proxy daily-dev mode. The brief was unclear AND the code didn't enforce
+# general-proxy mode. Fix per ``[[this-machine-canary-brought-forward]]``
+# §A102: capture daemon_args per-bouncer in YAML + status, warn on
+# smoke-test ``--upstream`` pin under ``canary: true``, auto-relaunch on
+# restart using recorded daemon_args, expose ``verify-setup`` so the
+# operator can confirm intent matches reality.
+
+
+def load_canary_yaml(path: pathlib.Path | None = None) -> dict[str, Any]:
+    """Load ``.iam-jit.yaml`` for the canary deploy + emit warnings on
+    smoke-vs-daily-dev drift (§A102).
+
+    Returns the parsed YAML dict (empty if file is missing). Emits a
+    ``warnings.warn`` (UserWarning) when any bouncer's ``daemon_args``
+    contains ``--upstream`` AND ``iam-jit.canary: true`` — this is the
+    calibration-drift bug #18 shape: smoke-test pins leaking into
+    daily-dev mode. Daily-dev bouncers MUST run as general proxies
+    (no ``--upstream``).
+
+    Per ``[[this-machine-canary-brought-forward]]`` 2026-05-24 update.
+    """
+    import yaml  # local import to keep CLI startup snappy
+
+    target = path if path is not None else CANARY_YAML_PATH
+    if not target.exists():
+        return {}
+    try:
+        loaded = yaml.safe_load(target.read_text(encoding="utf-8")) or {}
+    except yaml.YAMLError:
+        return {}
+    if not isinstance(loaded, dict):
+        return {}
+
+    iam_jit_section = loaded.get("iam-jit") or {}
+    if not isinstance(iam_jit_section, dict):
+        return loaded
+    is_canary = bool(iam_jit_section.get("canary"))
+    bouncers = iam_jit_section.get("bouncers") or {}
+    if not isinstance(bouncers, dict):
+        return loaded
+
+    if is_canary:
+        for bname, bcfg in bouncers.items():
+            if not isinstance(bcfg, dict):
+                continue
+            daemon_args = bcfg.get("daemon_args") or []
+            if not isinstance(daemon_args, list):
+                continue
+            if any(
+                isinstance(a, str) and a == "--upstream"
+                for a in daemon_args
+            ):
+                warnings.warn(
+                    f"§A102 calibration-drift bug #18 shape: "
+                    f"bouncer {bname!r} has daemon_args containing "
+                    f"'--upstream' under iam-jit.canary: true. Smoke-test "
+                    f"--upstream pin detected; daily-dev bouncers should "
+                    f"run as general proxies (no --upstream). See "
+                    f"[[this-machine-canary-brought-forward]] §A102.",
+                    UserWarning,
+                    stacklevel=2,
+                )
+    return loaded
+
+
+def daemon_args_from_yaml(
+    yaml_doc: dict[str, Any], bouncer_name: str
+) -> list[str]:
+    """Extract ``daemon_args`` for ``bouncer_name`` from a parsed canary
+    YAML doc. Empty list means "general-proxy default; no --upstream".
+    Missing bouncer entry also returns empty list (most permissive default
+    — operator must explicitly opt in to flags).
+    """
+    iam_jit_section = (yaml_doc or {}).get("iam-jit") or {}
+    bouncers = iam_jit_section.get("bouncers") or {}
+    bcfg = bouncers.get(bouncer_name) or {}
+    if not isinstance(bcfg, dict):
+        return []
+    args = bcfg.get("daemon_args") or []
+    if not isinstance(args, list):
+        return []
+    return [str(a) for a in args]
+
+
+# ---------------------------------------------------------------------------
+# §A102 — relaunch bouncers with recorded daemon_args
+# ---------------------------------------------------------------------------
+
+
+def _bouncer_executable(name: str) -> str | None:
+    """Resolve the on-disk executable for a bouncer. Honours the canary
+    venv layout (~/.iam-jit/venv/bin/ibounce) first, then $PATH."""
+    venv_bin = pathlib.Path.home() / ".iam-jit" / "venv" / "bin" / name
+    if venv_bin.exists():
+        return str(venv_bin)
+    found = shutil.which(name)
+    return found  # may be None
+
+
+def _process_cmdline(pid: int) -> list[str]:
+    """Return the argv list for ``pid``. Empty list if the process is
+    gone or we can't read it. Portable on macOS + Linux.
+
+    macOS lacks /proc; use ``ps -p PID -o args=`` and shlex-split the
+    single-line output. Linux uses /proc/PID/cmdline (NUL-delimited).
+    """
+    proc_cmdline = pathlib.Path(f"/proc/{pid}/cmdline")
+    if proc_cmdline.exists():
+        try:
+            raw = proc_cmdline.read_bytes()
+        except OSError:
+            return []
+        parts = raw.split(b"\x00")
+        return [p.decode("utf-8", "replace") for p in parts if p]
+    # macOS fallback.
+    proc = subprocess.run(
+        ["ps", "-p", str(pid), "-o", "args="],
+        capture_output=True, text=True, check=False,
+    )
+    if proc.returncode != 0:
+        return []
+    line = proc.stdout.strip()
+    if not line:
+        return []
+    try:
+        return shlex.split(line)
+    except ValueError:
+        return line.split()
+
+
+def _pid_alive(pid: int) -> bool:
+    """Cheap liveness check. Returns False on ProcessLookupError."""
+    try:
+        os.kill(pid, 0)
+        return True
+    except (ProcessLookupError, PermissionError):
+        return False
+    except OSError:
+        return False
+
+
+def _relaunch_bouncer(
+    name: str,
+    port: int,
+    daemon_args: list[str],
+    mgmt_port: int | None = None,
+    *,
+    log_dir: pathlib.Path | None = None,
+    healthz_timeout: float = 30.0,
+) -> tuple[bool, int | None, str]:
+    """Spawn a fresh bouncer process with ``daemon_args``.
+
+    Returns ``(ok, pid, message)``. On success ``pid`` is the new PID +
+    ``message`` is the resolved command line. On failure ``pid`` is None.
+
+    Composition rule (§A102):
+
+      argv = [executable, "run", "--port", str(port),
+              *( ["--mgmt-port", str(mgmt_port)] if mgmt_port else [] ),
+              *daemon_args]
+
+    The ``daemon_args`` list is what the operator recorded in the canary
+    YAML; an empty list means "general-proxy default; no --upstream"
+    which is the daily-dev posture per §A102. A non-empty list
+    containing ``--upstream`` is permitted (callers may relaunch a smoke
+    process intentionally) but ``load_canary_yaml`` warns at YAML load
+    time if such args are seen under ``canary: true``.
+
+    State verification: waits up to ``healthz_timeout`` seconds for
+    ``/healthz`` (port for ibounce; mgmt_port for gbounce) to return
+    200 — the relaunch is only declared successful when the new process
+    is responsive. This is the observable side of the success claim
+    per ``docs/CONTRIBUTING.md``.
+    """
+    exe = _bouncer_executable(name)
+    if exe is None:
+        return False, None, f"executable {name!r} not found in venv or PATH"
+
+    argv: list[str] = [exe, "run", "--port", str(port)]
+    if mgmt_port is not None:
+        argv += ["--mgmt-port", str(mgmt_port)]
+    argv += list(daemon_args)
+
+    log_target = (log_dir or CANARY_DIR) / f"{name}.log"
+    try:
+        log_target.parent.mkdir(parents=True, exist_ok=True)
+        log_fh = log_target.open("a", encoding="utf-8")
+    except OSError as exc:
+        return False, None, f"could not open log {log_target}: {exc}"
+
+    try:
+        proc = subprocess.Popen(
+            argv,
+            stdout=log_fh,
+            stderr=subprocess.STDOUT,
+            stdin=subprocess.DEVNULL,
+            start_new_session=True,
+            close_fds=True,
+        )
+    except OSError as exc:
+        log_fh.close()
+        return False, None, f"spawn failed: {exc}"
+    finally:
+        # The child inherits the fd; the parent can close its own copy
+        # only after Popen returns (Popen has dup'd it). Closing immediately
+        # is safe; the child holds its own descriptor open.
+        try:
+            log_fh.close()
+        except Exception:
+            pass
+
+    # State verification: wait for /healthz on the appropriate port.
+    healthz_port = mgmt_port if mgmt_port is not None else port
+    healthz_url = f"http://127.0.0.1:{healthz_port}/healthz"
+    deadline = time.time() + healthz_timeout
+    while time.time() < deadline:
+        if not _pid_alive(proc.pid):
+            return False, None, (
+                f"process exited before /healthz responded; see {log_target}"
+            )
+        responsive, _status = _curl_responsive(healthz_url, timeout=1.0)
+        if responsive:
+            return True, proc.pid, " ".join(argv)
+        time.sleep(0.5)
+    return False, None, (
+        f"/healthz at {healthz_url} did not respond within "
+        f"{healthz_timeout}s; pid={proc.pid}; see {log_target}"
+    )
+
+
+# ---------------------------------------------------------------------------
+# §A102 — verify-setup correctness check
+# ---------------------------------------------------------------------------
+
+
+def _verify_one_bouncer(
+    *,
+    name: str,
+    pid: int | None,
+    port: int | None,
+    mgmt_port: int | None,
+    recorded_args: list[str],
+) -> tuple[bool, list[str]]:
+    """Return ``(ok, problems)`` for a single bouncer.
+
+    Checks (all per §A102):
+
+      1. PID is alive.
+      2. Process cmdline matches recorded daemon_args (catches operator
+         drift: relaunched without going through `_relaunch_bouncer`).
+      3. /healthz returns 200.
+      4. gbounce: mgmt /healthz `upstream` field is "" (general proxy).
+      5. ibounce: process cmdline does NOT contain ``--upstream``.
+
+    Each failing check appends a short reason to ``problems``.
+    """
+    problems: list[str] = []
+
+    if pid is None:
+        problems.append("no PID recorded in status.json")
+        return False, problems
+    if not _pid_alive(pid):
+        problems.append(f"PID {pid} not alive")
+        return False, problems
+
+    cmdline = _process_cmdline(pid)
+    if not cmdline:
+        problems.append(f"could not read cmdline for PID {pid}")
+    else:
+        # Compare ONLY the daemon-arg suffix: the executable path
+        # + 'run' + --port + --mgmt-port are deployment-shape, not
+        # operator-intent. We require every recorded arg to appear in
+        # the live cmdline in order, AND the live cmdline must not
+        # contain a `--upstream` arg that is NOT in recorded_args.
+        live_has_upstream = "--upstream" in cmdline
+        recorded_has_upstream = "--upstream" in recorded_args
+        if live_has_upstream and not recorded_has_upstream:
+            problems.append(
+                "live process has --upstream but recorded daemon_args "
+                "does not — smoke-test pin leaking into daily-dev "
+                "(§A102 calibration-drift bug #18 shape)"
+            )
+        if name == "ibounce" and live_has_upstream:
+            # ibounce daily-dev MUST be general-proxy per
+            # [[this-machine-canary-brought-forward]] step 4c.
+            problems.append(
+                "ibounce process has --upstream in cmdline; daily-dev "
+                "mode requires general proxy (no --upstream)"
+            )
+        # Catch operator drift: recorded a flag that didn't get applied.
+        for arg in recorded_args:
+            if arg.startswith("--") and arg not in cmdline:
+                problems.append(
+                    f"recorded daemon_args contains {arg!r} but live "
+                    f"cmdline does not"
+                )
+
+    # /healthz check.
+    healthz_port = mgmt_port if mgmt_port is not None else port
+    if healthz_port is None:
+        problems.append("no port recorded in status.json")
+    else:
+        healthz_url = f"http://127.0.0.1:{healthz_port}/healthz"
+        responsive, status = _curl_responsive(healthz_url, timeout=2.0)
+        if not responsive:
+            problems.append(f"/healthz at {healthz_url} not responsive")
+        elif status != 200:
+            problems.append(f"/healthz returned HTTP {status}")
+        elif name == "gbounce":
+            # Per gbounce healthz schema (mgmt port): "upstream" must be
+            # empty string for general-proxy daily-dev mode.
+            try:
+                with urllib.request.urlopen(
+                    healthz_url, timeout=2.0
+                ) as resp:
+                    body = json.loads(resp.read().decode("utf-8", "replace"))
+                upstream_field = body.get("upstream")
+                if upstream_field not in ("", None):
+                    problems.append(
+                        f"gbounce /healthz upstream={upstream_field!r} "
+                        f"(expected '' for general-proxy mode)"
+                    )
+            except (urllib.error.URLError, json.JSONDecodeError, OSError) as exc:
+                problems.append(
+                    f"could not parse gbounce /healthz body: {exc}"
+                )
+
+    return (len(problems) == 0), problems
 
 
 # ---------------------------------------------------------------------------
@@ -539,6 +886,112 @@ def register_canary_group(main_group: click.Group) -> click.Group:
             return
         _do_one_update(dry_run=dry_run)
 
+    # -- verify-setup ---------------------------------------------------
+    #
+    # §A102 — operator-runnable correctness check. Verifies the live
+    # bouncer state matches operator intent (.iam-jit.yaml +
+    # status.json). Catches calibration-drift bug #18 (smoke-test
+    # --upstream pin leaking into daily-dev mode).
+
+    @canary.command("verify-setup")
+    @click.option(
+        "--json", "as_json", is_flag=True, default=False,
+        help="Emit a structured JSON report (per-bouncer ok + problems).",
+    )
+    def verify_setup_cmd(as_json: bool) -> None:
+        """§A102 — verify canary bouncers match operator intent.
+
+        Per-bouncer checks: PID alive, cmdline matches recorded
+        daemon_args, /healthz returns 200, general-proxy mode (gbounce
+        upstream is "", ibounce cmdline lacks --upstream).
+
+        Exit code 0 if all green; non-zero if any check fails.
+        """
+        status = read_status()
+        if not status:
+            click.echo(
+                "No canary status yet — run the deploy script first.",
+                err=True,
+            )
+            raise SystemExit(1)
+
+        pids = status.get("pids") or {}
+        ports = status.get("ports") or {}
+        recorded_args = status.get("daemon_args") or {}
+        # Pull operator intent from YAML; falls back to status.json.
+        yaml_doc = load_canary_yaml()
+
+        # Proxy bouncers only — gbounce_mgmt is a sub-port, not a bouncer.
+        bouncer_names = sorted(
+            n for n in ports if not n.endswith("_mgmt")
+        )
+        if not bouncer_names:
+            click.echo(
+                "No bouncers recorded in status.json; nothing to verify.",
+                err=True,
+            )
+            raise SystemExit(1)
+
+        report: dict[str, Any] = {"bouncers": {}, "ok": True}
+        for name in bouncer_names:
+            pid_val = pids.get(name)
+            pid = int(pid_val) if pid_val else None
+            port_val = ports.get(name)
+            port = int(port_val) if port_val else None
+            mgmt_port_val = ports.get(f"{name}_mgmt")
+            mgmt_port = int(mgmt_port_val) if mgmt_port_val else None
+            # Operator intent: YAML wins; status.json mirrors.
+            yaml_args = daemon_args_from_yaml(yaml_doc, name)
+            args = yaml_args if yaml_args else list(
+                recorded_args.get(name) or []
+            )
+            ok, problems = _verify_one_bouncer(
+                name=name,
+                pid=pid,
+                port=port,
+                mgmt_port=mgmt_port,
+                recorded_args=args,
+            )
+            report["bouncers"][name] = {
+                "ok": ok,
+                "pid": pid,
+                "port": port,
+                "mgmt_port": mgmt_port,
+                "recorded_daemon_args": args,
+                "problems": problems,
+            }
+            if not ok:
+                report["ok"] = False
+
+        if as_json:
+            click.echo(json.dumps(report, indent=2, sort_keys=True))
+        else:
+            click.echo("iam-jit canary verify-setup")
+            click.echo("=" * 60)
+            for name in bouncer_names:
+                r = report["bouncers"][name]
+                tag = "OK  " if r["ok"] else "CRIT"
+                click.echo(
+                    f"  [{tag}] {name}: pid={r['pid']} port={r['port']} "
+                    f"args={r['recorded_daemon_args']!r}"
+                )
+                for p in r["problems"]:
+                    click.echo(f"        - {p}")
+            click.echo()
+            if report["ok"]:
+                click.echo("All bouncers match operator intent.")
+            else:
+                click.echo(
+                    "One or more bouncers diverged from intent. "
+                    "Run `iam-jit canary update` to relaunch with "
+                    "recorded daemon_args, or edit "
+                    "~/.iam-jit/canary/.iam-jit.yaml to declare new "
+                    "intent."
+                )
+
+        if not report["ok"]:
+            raise SystemExit(2)
+
     return canary
 
 
@@ -732,12 +1185,22 @@ def _fail(
 
 
 def _restart_bouncers(pre_status: dict[str, Any]) -> tuple[bool, str]:
-    """SIGTERM bouncers + wait healthy; restart per recipe.
+    """SIGTERM bouncers + auto-relaunch with recorded daemon_args (§A102).
 
-    This is intentionally LIGHT-TOUCH at v1.0 — the canary is the
-    founder's machine and the deploy script holds the supervisor
-    knowledge. We surface what the bouncer is doing so the founder can
-    manage it; we don't try to launchd-supervise from inside CLI code.
+    Pre-§A102 this only SIGTERMed + relied on the operator to manually
+    relaunch. That left the calibration-drift bug #18 shape latent —
+    smoke-test ``--upstream`` pins could survive across restart cycles
+    because the operator wasn't in the loop to notice the wrong
+    daemon args. §A102 closes the loop:
+
+      1. Read recorded daemon_args from ``.iam-jit.yaml`` (operator
+         intent) — falls back to ``status.json`` for back-compat.
+      2. SIGTERM each live bouncer on its recorded port.
+      3. Wait for the port to release (max 30s).
+      4. Spawn a fresh bouncer process with the recorded daemon_args.
+      5. Wait for /healthz on each new process (state verification).
+      6. Update status.json with the new PIDs + daemon_args.
+      7. File a CRIT issue if relaunch fails.
 
     Returns ``(True, "no bouncers running")`` if there's nothing to
     restart (which is a valid state — pre-deploy or after manual stop).
@@ -746,10 +1209,29 @@ def _restart_bouncers(pre_status: dict[str, Any]) -> tuple[bool, str]:
     if not ports:
         return True, "no ports recorded in status.json; skipping restart"
 
+    # §A102 — load operator-intent daemon_args from YAML (canonical
+    # source) with status.json as fallback for back-compat.
+    yaml_doc = load_canary_yaml()
+    status_daemon_args = (pre_status or {}).get("daemon_args") or {}
+
+    def _recorded_args(bname: str) -> list[str]:
+        yaml_args = daemon_args_from_yaml(yaml_doc, bname)
+        if yaml_args:
+            return yaml_args
+        sa = status_daemon_args.get(bname)
+        if isinstance(sa, list):
+            return [str(a) for a in sa]
+        return []
+
     # Send SIGTERM to anything listening on the recorded bouncer ports.
     # Use lsof to find PIDs; portable on macOS + Linux.
+    # NOTE: gbounce_mgmt is a SECONDARY port for the same process; skip it
+    # (the SIGTERM to the proxy port already terminates the process).
+    proxy_ports = {
+        n: p for n, p in ports.items() if not n.endswith("_mgmt")
+    }
     restarted: list[str] = []
-    for bouncer_name, port in ports.items():
+    for bouncer_name, port in proxy_ports.items():
         proc = subprocess.run(
             ["lsof", "-iTCP:%d" % int(port), "-sTCP:LISTEN", "-t"],
             capture_output=True,
@@ -770,7 +1252,7 @@ def _restart_bouncers(pre_status: dict[str, Any]) -> tuple[bool, str]:
 
     # Wait for ports to release (max 30s).
     deadline = time.time() + 30
-    for bouncer_name, port in ports.items():
+    for bouncer_name, port in proxy_ports.items():
         while time.time() < deadline:
             proc = subprocess.run(
                 ["lsof", "-iTCP:%d" % int(port), "-sTCP:LISTEN", "-t"],
@@ -784,12 +1266,57 @@ def _restart_bouncers(pre_status: dict[str, Any]) -> tuple[bool, str]:
         else:
             return False, f"port {port} ({bouncer_name}) didn't release in 30s"
 
-    # We don't auto-restart here — the deploy script owns supervisor
-    # launch (launchd / systemd / `nohup &`). Surface what we stopped so
-    # the operator (or deploy script wrapper) can re-launch.
+    # §A102 — auto-relaunch with recorded daemon_args.
+    new_pids: dict[str, int] = {}
+    new_daemon_args: dict[str, list[str]] = {}
+    relaunched: list[str] = []
+    for bouncer_name, port in proxy_ports.items():
+        recorded_args = _recorded_args(bouncer_name)
+        mgmt_port_val = ports.get(f"{bouncer_name}_mgmt")
+        mgmt_port = int(mgmt_port_val) if mgmt_port_val else None
+        ok, new_pid, msg = _relaunch_bouncer(
+            bouncer_name,
+            int(port),
+            recorded_args,
+            mgmt_port=mgmt_port,
+        )
+        if not ok:
+            # File a CRIT issue per §A102.
+            try:
+                append_issue(
+                    bouncer=bouncer_name,
+                    severity="CRIT",
+                    category="bouncer_error",
+                    observable=f"§A102 relaunch failed: {msg}",
+                    expected="bouncer relaunched + /healthz 200",
+                    repro_hint="iam-jit canary update",
+                    auto_generated=True,
+                    related_task="#525",
+                )
+            except Exception:
+                pass
+            return False, f"relaunch {bouncer_name} failed: {msg}"
+        new_pids[bouncer_name] = new_pid or 0
+        new_daemon_args[bouncer_name] = recorded_args
+        relaunched.append(f"{bouncer_name}(pid={new_pid})")
+
+    # Update status.json with the new PIDs + daemon_args (operator intent
+    # mirror so the cross-session view shows reality + intent together).
+    current = read_status()
+    if current:
+        current.setdefault("pids", {}).update(new_pids)
+        current.setdefault("daemon_args", {}).update(new_daemon_args)
+        current["last_relaunch_at"] = _now_iso()
+        write_status(current)
+
+    summary_parts = []
     if restarted:
-        return True, "stopped: " + ", ".join(restarted) + " (operator re-launches)"
-    return True, "no live bouncers found on recorded ports"
+        summary_parts.append("stopped: " + ", ".join(restarted))
+    if relaunched:
+        summary_parts.append("relaunched: " + ", ".join(relaunched))
+    if not summary_parts:
+        return True, "no live bouncers found on recorded ports"
+    return True, "; ".join(summary_parts)
 
 
 def _run_watch_loop(
