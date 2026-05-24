@@ -42,6 +42,7 @@ import logging
 import os
 import pathlib
 import shutil
+import signal
 import socket
 import subprocess
 import sys
@@ -53,6 +54,44 @@ from dataclasses import asdict, dataclass, field
 from typing import Any
 
 logger = logging.getLogger(__name__)
+
+
+# ---------------------------------------------------------------------------
+# #538 — transactional setup support (UC-20 / RB-B6)
+# ---------------------------------------------------------------------------
+#
+# Per docs/MRR-4-ROLLBACK-RUNBOOK.md RB-B6: pre-#538 a partial-install in
+# `iam_jit_setup_from_config` left an orphan state — some bouncers
+# started, others mid-install, the operator had to manually inspect
+# `status.json` vs `.iam-jit.yaml` and reconcile.
+#
+# #538 adds an OPT-OUT-able transactional path:
+#
+#   * `_capture_setup_state()` — snapshot the operator-owned state
+#     directory (config files + a synthetic process inventory derived
+#     from posture) BEFORE apply_declaration mutates anything.
+#   * `_restore_setup_state(snapshot, new_pids)` — SIGTERM newly-started
+#     bouncers + restore the config snapshot files; emits a verification
+#     re-snapshot and reports any drift that survived rollback.
+#   * `apply_declaration(..., rollback_on_failure=True)` — the default
+#     for #538-aware callers. When any bouncer step is recorded as
+#     "skipped" mid-apply (the partial-install surface), rollback runs
+#     automatically + the result's `rollback_outcome` field describes
+#     what happened.
+#
+# Per [[ibounce-honest-positioning]] the rollback always reports what
+# it observed; it never silently "succeeds" past a discrepancy.
+
+# Directories whose CONFIG state we snapshot. We deliberately skip
+# `~/.iam-jit/canary/` (operator-curated; restoring would clobber the
+# `.iam-jit.yaml` the operator is iterating on) and any *.db file
+# (audit + chain integrity per [[creates-never-mutates]] — DBs must
+# never be restored by setup rollback; if they need to be reverted
+# the operator runs `ibounce restore` explicitly).
+_SETUP_SNAPSHOT_CONFIG_FILES = (
+    pathlib.Path("~/.iam-jit/bouncer/profiles.yaml"),
+    pathlib.Path("~/.iam-jit/bouncer/profiles_state.yaml"),
+)
 
 
 # ---------------------------------------------------------------------------
@@ -286,9 +325,192 @@ class SetupResult:
     bouncer_mode_resolutions: list[dict[str, Any]] = field(
         default_factory=list
     )
+    # #538 — transactional rollback bookkeeping. None when rollback was
+    # not invoked (happy path OR rollback_on_failure=False). When set,
+    # carries the rollback verdict + per-step observations so the
+    # operator-facing result mirrors the on-disk side effects per
+    # docs/CONTRIBUTING.md state-verification convention.
+    rollback_outcome: dict[str, Any] | None = None
 
     def as_dict(self) -> dict[str, Any]:
         return asdict(self)
+
+
+def _capture_setup_state(
+    posture: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Snapshot the operator-owned state surface that `apply_declaration`
+    can mutate (#538).
+
+    Returns a dict shaped like::
+
+        {
+          "captured_at": <ts>,
+          "config_files": {
+            "<expanded_path>": {"exists": bool, "content": bytes | None,
+                                "mode": int | None},
+            ...
+          },
+          "posture_pids": {<bouncer>: <pid_or_None>, ...},
+          "posture_ports": {<bouncer>: <port_or_None>, ...},
+        }
+
+    The snapshot is a pure-Python dict (no on-disk artefact) — the
+    caller passes it to ``_restore_setup_state`` for revert.
+    """
+    config_files: dict[str, dict[str, Any]] = {}
+    for raw in _SETUP_SNAPSHOT_CONFIG_FILES:
+        path = raw.expanduser()
+        entry: dict[str, Any] = {"exists": path.exists(), "content": None,
+                                  "mode": None}
+        if path.exists() and path.is_file():
+            try:
+                entry["content"] = path.read_bytes()
+                entry["mode"] = path.stat().st_mode & 0o7777
+            except OSError as exc:
+                logger.warning("snapshot read failed for %s: %s", path, exc)
+        config_files[str(path)] = entry
+
+    posture_snap = posture if posture is not None else _capture_posture_safe()
+    pids: dict[str, int | None] = {}
+    ports: dict[str, int | None] = {}
+    for name, block in (posture_snap.get("bouncers") or {}).items():
+        if not isinstance(block, dict):
+            continue
+        pid_val = block.get("pid")
+        try:
+            pids[name] = int(pid_val) if pid_val is not None else None
+        except (TypeError, ValueError):
+            pids[name] = None
+        port_val = block.get("port")
+        try:
+            ports[name] = int(port_val) if port_val is not None else None
+        except (TypeError, ValueError):
+            ports[name] = None
+    return {
+        "captured_at": time.time(),
+        "config_files": config_files,
+        "posture_pids": pids,
+        "posture_ports": ports,
+    }
+
+
+def _restore_setup_state(
+    snapshot: dict[str, Any],
+    *,
+    new_pids: dict[str, int],
+) -> dict[str, Any]:
+    """Revert mutations applied since ``snapshot`` was captured (#538).
+
+    Steps:
+      1. SIGTERM every PID in ``new_pids`` that was NOT present in the
+         snapshot's posture_pids (new processes only — pre-existing
+         bouncers are left alone per [[creates-never-mutates]]).
+      2. Restore config files: when the snapshot recorded
+         ``exists: True`` we rewrite content + mode; when the snapshot
+         recorded ``exists: False`` we delete the file if present.
+      3. Re-capture state + diff against snapshot.
+
+    Returns a dict shaped like::
+
+        {
+          "status": "ok" | "incomplete",
+          "killed_pids": [int, ...],
+          "files_restored": [str, ...],
+          "files_deleted": [str, ...],
+          "verification_drift": [str, ...],  # diffs vs snapshot
+        }
+
+    The caller treats ``status == "incomplete"`` as a CRIT-worthy event
+    (the operator's state is not provably back to pre-install shape).
+    """
+    outcome: dict[str, Any] = {
+        "status": "ok",
+        "killed_pids": [],
+        "files_restored": [],
+        "files_deleted": [],
+        "verification_drift": [],
+        "kill_failures": [],
+        "restore_failures": [],
+    }
+
+    snap_pids = set(
+        pid for pid in (snapshot.get("posture_pids") or {}).values()
+        if pid is not None
+    )
+
+    # Step 1: SIGTERM newly-started PIDs only.
+    for name, pid in (new_pids or {}).items():
+        if not pid or pid in snap_pids:
+            continue
+        try:
+            os.kill(int(pid), signal.SIGTERM)
+            outcome["killed_pids"].append(int(pid))
+        except ProcessLookupError:
+            # Already dead — count as success (rollback goal met).
+            outcome["killed_pids"].append(int(pid))
+        except (PermissionError, OSError) as exc:
+            outcome["kill_failures"].append(f"{name}(pid={pid}): {exc}")
+            outcome["status"] = "incomplete"
+
+    # Step 2: Restore config files.
+    for path_str, entry in (snapshot.get("config_files") or {}).items():
+        path = pathlib.Path(path_str)
+        try:
+            if entry.get("exists"):
+                # Restore prior content + mode.
+                path.parent.mkdir(parents=True, exist_ok=True)
+                content = entry.get("content")
+                if content is not None:
+                    path.write_bytes(content)
+                    if entry.get("mode") is not None:
+                        try:
+                            path.chmod(int(entry["mode"]))
+                        except OSError:
+                            pass
+                    outcome["files_restored"].append(path_str)
+            else:
+                # Snapshot says file didn't exist; ensure it doesn't now.
+                if path.exists():
+                    path.unlink()
+                    outcome["files_deleted"].append(path_str)
+        except OSError as exc:
+            outcome["restore_failures"].append(f"{path_str}: {exc}")
+            outcome["status"] = "incomplete"
+
+    # Step 3: verification — re-snapshot + diff config files. We do NOT
+    # re-capture posture (pid liveness is racy + the SIGTERM may need
+    # >1s to take effect; the kill_failures list is the authoritative
+    # signal for that surface).
+    for path_str, entry in (snapshot.get("config_files") or {}).items():
+        path = pathlib.Path(path_str)
+        if entry.get("exists"):
+            if not path.exists():
+                outcome["verification_drift"].append(
+                    f"{path_str}: expected restored but file is missing"
+                )
+                outcome["status"] = "incomplete"
+                continue
+            try:
+                current = path.read_bytes()
+            except OSError as exc:
+                outcome["verification_drift"].append(
+                    f"{path_str}: read failed after restore ({exc})"
+                )
+                outcome["status"] = "incomplete"
+                continue
+            if current != (entry.get("content") or b""):
+                outcome["verification_drift"].append(
+                    f"{path_str}: content mismatch after restore"
+                )
+                outcome["status"] = "incomplete"
+        else:
+            if path.exists():
+                outcome["verification_drift"].append(
+                    f"{path_str}: snapshot said absent; still present after delete"
+                )
+                outcome["status"] = "incomplete"
+    return outcome
 
 
 # ---------------------------------------------------------------------------
@@ -648,6 +870,7 @@ def apply_declaration(
     posture: dict[str, Any] | None = None,
     env: dict[str, str] | None = None,
     execute: bool = False,
+    rollback_on_failure: bool = True,
 ) -> SetupResult:
     """Apply (or plan) a declaration.
 
@@ -660,12 +883,27 @@ def apply_declaration(
            Used by tests to drive the `when_X_present` resolvers.
       execute: when False (default), pure plan; when True, attempt to
                start bouncers + emit audit events.
+      rollback_on_failure: when True (#538 default), a partial-install
+               (any bouncer fails to start mid-apply) triggers
+               transactional rollback — SIGTERM the bouncers that DID
+               start + restore the pre-apply config-file snapshot. The
+               result's ``rollback_outcome`` field describes what the
+               rollback observed. Pass False to keep pre-#538 semantics
+               (leave partial state for operator inspection). Only
+               meaningful with ``execute=True``.
 
     Returns SetupResult (dict-serializable via .as_dict()).
     """
     env_map = env if env is not None else dict(os.environ)
     block = declaration.get("iam-jit") or {}
     result = SetupResult(dry_run=not execute, declaration_source=source)
+
+    # #538 — pre-apply snapshot. Captured even when rollback_on_failure
+    # is False so the result can still surface the pre-apply state for
+    # operator inspection (cheap; in-memory only).
+    state_snapshot: dict[str, Any] | None = None
+    if execute:
+        state_snapshot = _capture_setup_state(posture=posture)
 
     # Cross-field warnings stashed by validate_declaration (e.g.
     # ambient + fail_on_deny=true). Surface them up front so the
@@ -720,12 +958,17 @@ def apply_declaration(
             if isinstance(raw_enabled, str):
                 # `when_X_present` that came back false — record a
                 # transparent skip per [[ibounce-honest-positioning]].
+                # #538 — `kind: conditional_false` distinguishes this
+                # from start-failure skips so the rollback trigger
+                # doesn't fire on legitimate "you don't have a
+                # KUBECONFIG" skips.
                 result.bouncers_skipped.append({
                     "name": name,
                     "reason": (
                         f"conditional `{raw_enabled}` resolved to false: "
                         f"{evidence}"
                     ),
+                    "kind": "conditional_false",
                 })
             # explicit false → no skip record, just don't act.
             continue
@@ -786,6 +1029,9 @@ def apply_declaration(
             if probe_kind == "non_bouncer":
                 # The TCP port is occupied but the listener is NOT a
                 # bouncer. Don't claim "already running"; warn loudly.
+                # #538 — `kind: port_conflict` is operator-actionable
+                # but NOT a partial-install signal (we never started
+                # this bouncer).
                 result.bouncers_skipped.append({
                     "name": name,
                     "reason": (
@@ -795,6 +1041,7 @@ def apply_declaration(
                         f"declaration's `port:` field or stop the "
                         f"existing process."
                     ),
+                    "kind": "port_conflict",
                 })
                 result.warnings.append(
                     f"{name}: port {probe_port} is in use by a process "
@@ -816,7 +1063,9 @@ def apply_declaration(
             ):
                 # A DIFFERENT bouncer is on the port we wanted —
                 # transparent warning + skip per
-                # [[ibounce-honest-positioning]].
+                # [[ibounce-honest-positioning]]. #538: `kind:
+                # port_conflict` (operator-actionable, not a
+                # partial-install signal).
                 result.bouncers_skipped.append({
                     "name": name,
                     "reason": (
@@ -825,6 +1074,7 @@ def apply_declaration(
                         f"start {name} here. Choose a different port "
                         f"or stop the other bouncer."
                     ),
+                    "kind": "port_conflict",
                 })
                 result.warnings.append(
                     f"{name}: port {probe_port} is occupied by another "
@@ -901,9 +1151,14 @@ def apply_declaration(
         )
         result.bouncers_planned.append(record)
         if record.get("skipped"):
+            # #538 — mark this skip as a START-FAILURE (vs the conditional-
+            # false skip path above). The rollback trigger fires only when
+            # at least one declared bouncer was started AND at least one
+            # was a start-failure (true partial-install signal).
             result.bouncers_skipped.append({
                 "name": name,
                 "reason": record.get("reason", "skipped"),
+                "kind": "start_failure",
             })
             continue
         if record.get("started"):
@@ -972,6 +1227,81 @@ def apply_declaration(
             "the deny-obviousness surface should stay on by default."
         )
 
+    # #538 — transactional rollback trigger. Partial-install signal is:
+    # we both STARTED at least one bouncer AND had at least one
+    # `start_failure` skip. (Conditional-false skips or port-conflict
+    # skips are operator-actionable but not partial-install events;
+    # see the comments at each skip-emit site.)
+    if execute and rollback_on_failure and state_snapshot is not None:
+        start_failures = [
+            s for s in result.bouncers_skipped
+            if (s.get("kind") or "") == "start_failure"
+        ]
+        if result.bouncers_started and start_failures:
+            # Collect newly-started PIDs from the planned records (every
+            # _start_bouncer record stamps `pid` on success).
+            new_pids: dict[str, int] = {}
+            for rec in result.bouncers_planned:
+                if rec.get("started") and rec.get("pid"):
+                    try:
+                        new_pids[rec["name"]] = int(rec["pid"])
+                    except (TypeError, ValueError):
+                        continue
+            rollback = _restore_setup_state(
+                state_snapshot, new_pids=new_pids,
+            )
+            failed_names = ", ".join(s["name"] for s in start_failures)
+            rollback["trigger_reason"] = (
+                f"partial-install detected (#538): started="
+                f"{result.bouncers_started!r} but start-failures="
+                f"{failed_names!r}"
+            )
+            result.rollback_outcome = rollback
+            # Mark the overall status so callers can branch on it.
+            result.status = (
+                "rolled_back" if rollback["status"] == "ok"
+                else "rollback_incomplete"
+            )
+            result.warnings.append(
+                f"#538 partial-install rollback fired: "
+                f"{rollback['trigger_reason']}. "
+                f"Killed PIDs: {rollback['killed_pids']!r}. "
+                f"Files restored: {len(rollback['files_restored'])}. "
+                f"Verification status: {rollback['status']}."
+            )
+            # Side-effect honesty: the bouncers we just SIGTERMd are no
+            # longer running; clear them from `bouncers_started` so the
+            # operator-facing result doesn't claim they're live.
+            killed_pid_set = set(rollback["killed_pids"])
+            still_running: list[str] = []
+            for name in result.bouncers_started:
+                # Find the planned record's PID + check if we killed it.
+                for rec in result.bouncers_planned:
+                    if (
+                        rec.get("name") == name
+                        and rec.get("pid")
+                        and int(rec["pid"]) in killed_pid_set
+                    ):
+                        break
+                else:
+                    still_running.append(name)
+                    continue
+                # Bouncer was killed by rollback — DON'T keep in started.
+            result.bouncers_started = still_running
+
+            # CRIT-like warning if rollback verification itself failed.
+            if rollback["status"] != "ok":
+                result.warnings.append(
+                    f"#538 rollback INCOMPLETE: kill_failures="
+                    f"{rollback['kill_failures']!r}, restore_failures="
+                    f"{rollback['restore_failures']!r}, "
+                    f"verification_drift="
+                    f"{rollback['verification_drift']!r}. The operator's "
+                    f"state may not match the pre-apply snapshot; manual "
+                    f"inspection required per docs/MRR-4-ROLLBACK-RUNBOOK.md "
+                    f"RB-B6."
+                )
+
     return result
 
 
@@ -979,6 +1309,8 @@ __all__ = [
     "BOUNCER_DEFAULTS",
     "DECLARATION_TO_POSTURE_KEY",
     "SetupResult",
+    "_capture_setup_state",
+    "_restore_setup_state",
     "apply_declaration",
     "plan_declaration",
 ]

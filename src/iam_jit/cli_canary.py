@@ -1334,6 +1334,154 @@ def register_canary_group(main_group: click.Group) -> click.Group:
 # ---------------------------------------------------------------------------
 
 
+def _probe_new_code_schema_version(repo: pathlib.Path) -> tuple[int | None, str]:
+    """Probe the SCHEMA_VERSION constant from the post-pull iam-roles tree
+    via a subprocess so the answer reflects the NEW code on disk, not
+    the already-loaded module in this process (#540).
+
+    Returns ``(version, error_message)``. ``version`` is None on any
+    probe failure; ``error_message`` is empty on success.
+
+    Implementation: invokes the system python in a venv-agnostic way
+    so the probe doesn't require an updated venv. The subprocess
+    imports ``iam_jit.bouncer.store.SCHEMA_VERSION`` via a path
+    prepended to ``sys.path`` so we see what the NEW source defines,
+    even if the venv still has the OLD code installed.
+    """
+    if not repo.exists():
+        return None, f"repo path does not exist: {repo}"
+    src_dir = repo / "src"
+    if not src_dir.exists():
+        return None, f"src/ directory missing in repo: {src_dir}"
+    code = (
+        "import sys; sys.path.insert(0, %r); "
+        "from iam_jit.bouncer.store import SCHEMA_VERSION; "
+        "print(int(SCHEMA_VERSION))"
+    ) % str(src_dir)
+    try:
+        proc = subprocess.run(
+            [sys.executable, "-c", code],
+            capture_output=True,
+            text=True,
+            check=False,
+            timeout=10.0,
+        )
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        return None, f"subprocess failed: {exc}"
+    if proc.returncode != 0:
+        tail = (proc.stdout + proc.stderr).strip()[-200:]
+        return None, f"probe subprocess exit {proc.returncode}: {tail}"
+    out = proc.stdout.strip()
+    try:
+        return int(out), ""
+    except ValueError:
+        return None, f"probe output not an int: {out!r}"
+
+
+def _current_db_schema_version(
+    db_path: pathlib.Path | None = None,
+) -> tuple[int | None, str]:
+    """Read the bouncer's current SQLite ``schema_version.version`` (#540).
+
+    Returns ``(version, error_message)``. ``version`` is None when the
+    DB doesn't exist (fresh install — no schema to be incompatible with)
+    or when the read fails; ``error_message`` carries the diagnostic.
+
+    Honours ``IAM_JIT_BOUNCER_DB`` for parity with
+    ``iam_jit.bouncer.store.default_db_path``.
+    """
+    import sqlite3
+
+    if db_path is None:
+        override = os.environ.get("IAM_JIT_BOUNCER_DB")
+        db_path = (
+            pathlib.Path(override) if override
+            else pathlib.Path.home() / ".iam-jit" / "bouncer" / "state.db"
+        )
+    if not db_path.exists():
+        return None, f"db not present at {db_path}"
+    try:
+        conn = sqlite3.connect(
+            f"file:{db_path}?mode=ro", uri=True, timeout=2.0,
+        )
+    except sqlite3.Error as exc:
+        return None, f"sqlite open failed: {exc}"
+    try:
+        try:
+            cur = conn.execute("SELECT version FROM schema_version LIMIT 1")
+        except sqlite3.Error as exc:
+            # Includes OperationalError ("no such table") AND
+            # DatabaseError ("file is not a database") AND any subclass.
+            return None, f"schema_version table read failed: {exc}"
+        row = cur.fetchone()
+        if not row:
+            return None, "schema_version table empty"
+        try:
+            return int(row[0]), ""
+        except (TypeError, ValueError):
+            return None, f"schema_version.version not an int: {row[0]!r}"
+    finally:
+        conn.close()
+
+
+def _schema_precheck_halt(repo: pathlib.Path) -> str | None:
+    """Return a halt-reason string when the NEW code's SCHEMA_VERSION
+    diverges from the CURRENT DB's version (#540).
+
+    Returns None when:
+      * the operator opted out (``IAM_JIT_CANARY_SKIP_SCHEMA_CHECK=1``)
+      * the DB doesn't exist (fresh install — nothing to be incompatible with)
+      * the versions match (safe to proceed)
+      * either probe failed in a way that's informational only (we LOG
+        a click.echo notice but don't block; the update path itself
+        would surface a real schema problem on bouncer restart)
+
+    Returns a non-empty string halt-message when both probes succeeded
+    AND the versions differ. The message is suitable for the `_fail`
+    `msg` argument.
+    """
+    if (os.environ.get("IAM_JIT_CANARY_SKIP_SCHEMA_CHECK") or "").strip() == "1":
+        click.echo(
+            "  schema pre-check: SKIPPED (IAM_JIT_CANARY_SKIP_SCHEMA_CHECK=1)"
+        )
+        return None
+    new_ver, new_err = _probe_new_code_schema_version(repo)
+    if new_ver is None:
+        click.echo(
+            f"  schema pre-check: skipped (probe of new code failed: "
+            f"{new_err})"
+        )
+        return None
+    cur_ver, cur_err = _current_db_schema_version()
+    if cur_ver is None:
+        # Common case: fresh install. Report + proceed.
+        click.echo(
+            f"  schema pre-check: skipped (current DB unreadable: {cur_err}; "
+            f"new code expects SCHEMA_VERSION={new_ver})"
+        )
+        return None
+    if cur_ver == new_ver:
+        click.echo(
+            f"  schema pre-check: OK (current={cur_ver} == new={new_ver})"
+        )
+        return None
+    # Versions differ — HALT.
+    return (
+        f"#540 schema pre-check HALT: current bouncer DB schema_version="
+        f"{cur_ver} but the new code at {repo} expects SCHEMA_VERSION="
+        f"{new_ver}. Refusing to run `pip install -e .` against a DB "
+        f"whose migration path has not been operator-acked.\n\n"
+        f"Per docs/MRR-4-ROLLBACK-RUNBOOK.md RB-D6:\n"
+        f"  1. Back up the current DB:\n"
+        f"     ibounce backup --out ~/.iam-jit/backups/pre-v{new_ver}.db\n"
+        f"  2. Re-run the update with the schema check overridden:\n"
+        f"     IAM_JIT_CANARY_SKIP_SCHEMA_CHECK=1 iam-jit canary update\n"
+        f"  3. If the bouncer fails to open the DB after pip install, "
+        f"restore via:\n"
+        f"     ibounce restore --in ~/.iam-jit/backups/pre-v{new_ver}.db"
+    )
+
+
 def _do_one_update(*, dry_run: bool) -> None:
     """Execute one full update cycle. Logs outcome to issues.jsonl."""
     click.echo("== iam-jit canary update ==")
@@ -1355,7 +1503,13 @@ def _do_one_update(*, dry_run: bool) -> None:
     for name, repo in _CANARY_REPOS.items():
         rc, out = _git(repo, "status", "--porcelain")
         if rc != 0:
-            _fail(f"git status failed for {name}: {out}", pre_status, pre_shas, dry_run)
+            # Pre-mutation: nothing was installed; skip the pip/go/restart
+            # rollback chain.
+            _fail(
+                f"git status failed for {name}: {out}",
+                pre_status, pre_shas, dry_run,
+                pre_mutation=True,
+            )
             return
         if out.strip():
             dirty.append(name)
@@ -1366,6 +1520,7 @@ def _do_one_update(*, dry_run: bool) -> None:
                     pre_status,
                     pre_shas,
                     dry_run,
+                    pre_mutation=True,
                 )
                 return
 
@@ -1384,18 +1539,54 @@ def _do_one_update(*, dry_run: bool) -> None:
     for name, repo in _CANARY_REPOS.items():
         rc, out = _git(repo, "fetch", "--quiet")
         if rc != 0:
-            _fail(f"git fetch failed for {name}: {out}", pre_status, pre_shas, dry_run)
+            # Pre-mutation: fetch doesn't move the working tree.
+            _fail(
+                f"git fetch failed for {name}: {out}",
+                pre_status, pre_shas, dry_run,
+                pre_mutation=True,
+            )
             return
         rc, out = _git(repo, "pull", "--ff-only")
         if rc != 0:
-            _fail(f"git pull failed for {name}: {out}", pre_status, pre_shas, dry_run)
+            # Pull DOES move the working tree on partial success
+            # (e.g. it advances one repo before failing on the next).
+            # Use the full rollback chain — pre_mutation=False — so the
+            # advanced repos get reverted + bouncers restarted.
+            _fail(
+                f"git pull failed for {name}: {out}",
+                pre_status, pre_shas, dry_run,
+            )
             return
         rc, sha = _git(repo, "rev-parse", "HEAD")
         new_shas[name] = sha if rc == 0 else "(unknown)"
         click.echo(f"  {name}: post-pull HEAD={new_shas[name][:12]}")
 
-    # Reinstall per-repo.
+    # #540 — SQLite schema-migration pre-check (D6 halt condition).
+    # BEFORE running pip install we probe the NEW code's expected
+    # SCHEMA_VERSION (via subprocess against the post-pull tree) and
+    # compare against the CURRENT DB's recorded version. If they
+    # disagree we HALT the update BEFORE the pip install so the
+    # operator's state.db is never opened by a code version that
+    # doesn't know how to migrate it.
+    #
+    # Per docs/MRR-4-HALT-CONDITIONS.md D6 + RB-D6: a broken schema
+    # migration is a separate severity than a runtime crash; refusing
+    # to proceed until the operator explicitly backs up + acks the
+    # change is the conservative posture.
+    #
+    # Skipped when `IAM_JIT_CANARY_SKIP_SCHEMA_CHECK=1` (operator
+    # opt-out for the cross-version migration window).
     iam_roles_repo = _CANARY_REPOS["iam-roles"]
+    schema_halt = _schema_precheck_halt(iam_roles_repo)
+    if schema_halt is not None:
+        # Schema pre-check fires AFTER pull but BEFORE pip install — the
+        # working tree DID advance (pull moved it). Use the full rollback
+        # chain (pre_mutation=False) so the post-pull SHAs get reverted
+        # to pre_shas and any subsequent code-running surface is reset.
+        _fail(schema_halt, pre_status, pre_shas, dry_run)
+        return
+
+    # Reinstall per-repo.
     venv_pip = pathlib.Path.home() / ".iam-jit" / "venv" / "bin" / "pip"
     if venv_pip.exists():
         proc = subprocess.run(
@@ -1485,24 +1676,77 @@ def _fail(
     pre_status: dict[str, Any],
     pre_shas: dict[str, str],
     dry_run: bool,
+    *,
+    pre_mutation: bool = False,
 ) -> None:
-    """Log + announce a CRIT update failure. Best-effort rollback per repo."""
+    """Log + announce a CRIT update failure. Complete rollback chain (#539).
+
+    Args:
+      pre_mutation: when True, the failure happened BEFORE any
+        code/binary mutation (e.g. uncommitted-changes refusal,
+        git fetch/pull failure, schema pre-check halt). In that case
+        the pip/go reinstall + restart + verify steps are no-ops by
+        construction — the working tree was never advanced past
+        ``pre_shas`` so there is nothing for them to verify against
+        a different state. We still file the canonical CRIT + run a
+        best-effort git-checkout (idempotent since the tree never
+        moved), but skip the chain past that point.
+
+    Per docs/MRR-4-ROLLBACK-RUNBOOK.md RB-D2/RB-D5: pre-#539 this only ran
+    ``git checkout <pre_sha>`` per repo, leaving the venv/Go binaries +
+    bouncer processes pointing at code that no longer matched the rolled-back
+    sha. The operator then had to manually re-run ``pip install -e .`` +
+    relaunch bouncers, which the runbook explicitly flagged as a partial-
+    automation gap.
+
+    #539 closes that gap by extending the rollback chain to:
+
+      1. git checkout <pre_sha> per canary repo
+      2. pip install -e . to reinstall the rolled-back iam-roles code into venv
+      3. go install ./... to rebuild the rolled-back gbounce binary (if Go
+         + the gbounce repo are present)
+      4. _restart_bouncers against the rolled-back tree (per #525 daemon_args)
+      5. *bounce --version probe to verify each bouncer reports the rolled-
+         back SHA-shaped output (best-effort; degrades to "version probe
+         skipped" when the binary is absent)
+      6. _verify_one_bouncer check per recorded bouncer (mirrors
+         ``iam-jit canary verify-setup``)
+      7. If ANY post-rollback step fails: a second CRIT issue is appended
+         to issues.jsonl describing which step failed, so the operator's
+         next ``iam-jit canary report`` surfaces the incomplete rollback
+
+    Per [[ibounce-honest-positioning]] every step's outcome is echoed to
+    stderr so the operator sees the real shape of the rollback (not just a
+    green "FAIL" banner).
+    """
     click.echo(f"FAIL {msg}", err=True)
     if dry_run:
         return
-    # Best-effort rollback: git checkout each pre-update SHA. Don't
-    # restart if rollback fails — leave the operator in a known broken
-    # state so they can intervene.
-    rollback_notes = []
+
+    # Step 1: best-effort git rollback per repo. Don't restart if rollback
+    # fails — leave the operator in a known broken state so they can
+    # intervene.
+    rollback_notes: list[str] = []
+    git_checkout_ok = True
+    rolled_back_repos: list[str] = []
     for name, repo in _CANARY_REPOS.items():
         sha = pre_shas.get(name)
         if not sha or sha == "(unknown)":
             continue
         rc, out = _git(repo, "checkout", sha)
-        rollback_notes.append(
-            f"{name}: rollback to {sha[:12]} "
-            + ("OK" if rc == 0 else f"FAIL ({out[:80]})")
-        )
+        if rc == 0:
+            rollback_notes.append(f"{name}: git checkout {sha[:12]} OK")
+            rolled_back_repos.append(name)
+        else:
+            rollback_notes.append(
+                f"{name}: git checkout {sha[:12]} FAIL ({out[:80]})"
+            )
+            git_checkout_ok = False
+
+    # File the canonical CRIT for the original update failure. The
+    # post-rollback verification below files SEPARATE CRITs per failed
+    # step so the operator can triage incomplete rollback distinctly
+    # from the original update-failure event.
     append_issue(
         bouncer="iam-jit",
         severity="CRIT",
@@ -1513,9 +1757,271 @@ def _fail(
         auto_generated=True,
         related_task="#507",
     )
-    if rollback_notes:
+
+    # Pre-mutation halt (uncommitted-changes refusal, fetch fail, schema
+    # pre-check, …): nothing was actually installed/launched yet, so the
+    # pip/go/restart/verify chain has nothing to verify. Skip + return.
+    if pre_mutation:
         for note in rollback_notes:
             click.echo(f"  rollback: {note}", err=True)
+        return
+
+    # If git checkout failed for any repo, the rest of the rollback chain
+    # would operate on a half-reverted tree. Bail out + halt so the
+    # operator sees the partial-rollback state and can fix git first.
+    if not git_checkout_ok:
+        _emit_rollback_crit(
+            step="git_checkout",
+            detail=" / ".join(rollback_notes),
+        )
+        for note in rollback_notes:
+            click.echo(f"  rollback: {note}", err=True)
+        return
+
+    # Step 2: pip install -e . against the rolled-back iam-roles tree
+    # (only if iam-roles is in scope AND the venv exists).
+    if "iam-roles" in rolled_back_repos:
+        iam_roles_repo = _CANARY_REPOS["iam-roles"]
+        venv_pip = pathlib.Path.home() / ".iam-jit" / "venv" / "bin" / "pip"
+        if venv_pip.exists():
+            proc = subprocess.run(
+                [str(venv_pip), "install", "-e", "."],
+                cwd=str(iam_roles_repo),
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+            if proc.returncode != 0:
+                tail = (proc.stdout + proc.stderr)[-300:]
+                rollback_notes.append(
+                    f"iam-roles: pip install -e . FAIL ({tail!r})"
+                )
+                _emit_rollback_crit(
+                    step="pip_install",
+                    detail=f"pip install -e . failed after git rollback: {tail}",
+                )
+                for note in rollback_notes:
+                    click.echo(f"  rollback: {note}", err=True)
+                return
+            rollback_notes.append("iam-roles: pip install -e . OK")
+        else:
+            rollback_notes.append(
+                "iam-roles: pip install skipped (no venv at "
+                f"{venv_pip})"
+            )
+
+    # Step 3: go install ./... against the rolled-back gbounce tree
+    # (only if Go is installed + the gbounce repo exists).
+    if "gbounce" in rolled_back_repos:
+        gbounce_repo = _CANARY_REPOS["gbounce"]
+        if gbounce_repo.exists() and shutil.which("go"):
+            proc = subprocess.run(
+                ["go", "install", "./..."],
+                cwd=str(gbounce_repo),
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+            if proc.returncode != 0:
+                tail = (proc.stdout + proc.stderr)[-300:]
+                rollback_notes.append(
+                    f"gbounce: go install ./... FAIL ({tail!r})"
+                )
+                _emit_rollback_crit(
+                    step="go_install",
+                    detail=f"go install ./... failed after git rollback: {tail}",
+                )
+                for note in rollback_notes:
+                    click.echo(f"  rollback: {note}", err=True)
+                return
+            rollback_notes.append("gbounce: go install ./... OK")
+        else:
+            rollback_notes.append(
+                "gbounce: go install skipped (Go not installed or repo absent)"
+            )
+
+    # Step 4: restart bouncers against the rolled-back tree so the live
+    # processes match the post-rollback code (per [[ibounce-honest-positioning]]
+    # the operator should never end up with "version reported by --version
+    # ≠ version running in memory"; the restart closes that loop).
+    restart_ok, restart_msg = _restart_bouncers(pre_status)
+    if not restart_ok:
+        rollback_notes.append(f"restart_bouncers: FAIL ({restart_msg})")
+        _emit_rollback_crit(
+            step="restart_bouncers",
+            detail=(
+                "_restart_bouncers failed after pip/go reinstall: "
+                f"{restart_msg}"
+            ),
+        )
+        for note in rollback_notes:
+            click.echo(f"  rollback: {note}", err=True)
+        return
+    rollback_notes.append(f"restart_bouncers: OK ({restart_msg})")
+
+    # Step 5: version-check (best-effort). The bouncer's --version is
+    # advisory only (per [[update-release-strategy]] the version constant
+    # may lag the SHA); we surface a note but don't fail the rollback.
+    version_notes = _probe_bouncer_versions(pre_status)
+    rollback_notes.extend(version_notes)
+
+    # Step 6: post-rollback verify-setup (mirrors `iam-jit canary verify-setup`
+    # logic so the operator sees the same state-verification answer that
+    # the standalone CLI would give them).
+    verify_ok, verify_problems = _post_rollback_verify(pre_status)
+    if not verify_ok:
+        rollback_notes.append(
+            "verify-setup: FAIL (" + "; ".join(verify_problems[:3]) + ")"
+        )
+        _emit_rollback_crit(
+            step="verify_setup",
+            detail=(
+                "verify-setup failed after rollback chain completed: "
+                + "; ".join(verify_problems)
+            ),
+        )
+        for note in rollback_notes:
+            click.echo(f"  rollback: {note}", err=True)
+        return
+    rollback_notes.append("verify-setup: OK")
+
+    for note in rollback_notes:
+        click.echo(f"  rollback: {note}", err=True)
+
+
+def _emit_rollback_crit(*, step: str, detail: str) -> None:
+    """File a CRIT issue for a post-rollback step failure (#539).
+
+    Per docs/CONTRIBUTING.md state-verification: every step in the
+    rollback chain that the operator observes (echoed to stderr) must
+    also be queryable via ``iam-jit canary report``. This helper is
+    the persistent side of that contract.
+
+    Best-effort: never raises. If the issues.jsonl write itself fails
+    we already echoed the failure to stderr, so the operator sees the
+    incomplete-rollback state via the terminal — the goal is to ensure
+    *both* surfaces report it, not to abort the rollback because the
+    log file was unwritable.
+    """
+    try:
+        append_issue(
+            bouncer="iam-jit",
+            severity="CRIT",
+            category="update_failure",
+            observable=(
+                f"#539 rollback chain incomplete at step={step!r}: "
+                + detail[:400]
+            ),
+            expected=(
+                "complete rollback (git + pip + go + restart + verify) "
+                "succeeded"
+            ),
+            repro_hint="iam-jit canary update",
+            auto_generated=True,
+            related_task="#539",
+        )
+    except Exception:
+        # See the docstring: never raise from inside a rollback path.
+        pass
+
+
+def _probe_bouncer_versions(
+    pre_status: dict[str, Any],
+) -> list[str]:
+    """Run `*bounce --version` per recorded bouncer + return notes.
+
+    Best-effort: missing binaries / non-zero exits surface as a note but
+    are NEVER treated as rollback failures (the version constant lagging
+    the SHA is documented as DEGRADED-not-halt per docs/MRR-4-HALT-CONDITIONS.md
+    D4). The note string is plain text suitable for `click.echo` in the
+    rollback report.
+    """
+    out: list[str] = []
+    ports = (pre_status or {}).get("ports") or {}
+    seen: set[str] = set()
+    for pname in ports:
+        if not pname or pname.endswith("_mgmt"):
+            continue
+        if pname in seen:
+            continue
+        seen.add(pname)
+        exe = _bouncer_executable(pname)
+        if exe is None:
+            out.append(f"{pname}: version probe skipped (binary not found)")
+            continue
+        try:
+            proc = subprocess.run(
+                [exe, "--version"],
+                capture_output=True,
+                text=True,
+                check=False,
+                timeout=5.0,
+            )
+        except (OSError, subprocess.TimeoutExpired) as exc:
+            out.append(f"{pname}: version probe failed ({exc})")
+            continue
+        version_line = (proc.stdout or proc.stderr).strip().splitlines()
+        first = version_line[0] if version_line else "(empty)"
+        out.append(f"{pname}: --version => {first[:80]}")
+    return out
+
+
+def _post_rollback_verify(
+    pre_status: dict[str, Any],
+) -> tuple[bool, list[str]]:
+    """Run `_verify_one_bouncer` per recorded bouncer + aggregate problems.
+
+    Returns ``(ok, problems)``. ``ok`` is True only when every recorded
+    bouncer reports zero problems (matches the `iam-jit canary verify-setup`
+    CLI contract).
+    """
+    pids = (pre_status or {}).get("pids") or {}
+    ports = (pre_status or {}).get("ports") or {}
+    recorded_args = (pre_status or {}).get("daemon_args") or {}
+    yaml_doc = load_canary_yaml()
+
+    bouncer_names = sorted(
+        n for n in ports if n and not n.endswith("_mgmt")
+    )
+    if not bouncer_names:
+        return True, []
+
+    all_problems: list[str] = []
+    all_ok = True
+    for name in bouncer_names:
+        pid_val = pids.get(name)
+        try:
+            pid = int(pid_val) if pid_val is not None else None
+        except (TypeError, ValueError):
+            pid = None
+        port_val = ports.get(name)
+        try:
+            port = int(port_val) if port_val is not None else None
+        except (TypeError, ValueError):
+            port = None
+        mgmt_port_val = ports.get(f"{name}_mgmt")
+        try:
+            mgmt_port = (
+                int(mgmt_port_val) if mgmt_port_val is not None else None
+            )
+        except (TypeError, ValueError):
+            mgmt_port = None
+        yaml_args = daemon_args_from_yaml(yaml_doc, name)
+        args = yaml_args if yaml_args else list(
+            recorded_args.get(name) or []
+        )
+        ok, problems = _verify_one_bouncer(
+            name=name,
+            pid=pid,
+            port=port,
+            mgmt_port=mgmt_port,
+            recorded_args=args,
+        )
+        if not ok:
+            all_ok = False
+            for p in problems:
+                all_problems.append(f"{name}: {p}")
+    return all_ok, all_problems
 
 
 def _restart_bouncers(pre_status: dict[str, Any]) -> tuple[bool, str]:
