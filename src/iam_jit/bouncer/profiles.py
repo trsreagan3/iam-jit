@@ -281,7 +281,17 @@ def resolve_profiles_path(explicit: str | None = None) -> pathlib.Path:
 def load_profiles(path: str | pathlib.Path | None = None) -> dict[str, Profile]:
     """Read profiles.yaml + return name→Profile mapping. Returns the
     DEFAULT_PROFILES set if the file is absent (so first-run works).
-    Raises ValueError on malformed YAML — never silently degrades."""
+    Raises ValueError on malformed YAML — never silently degrades.
+
+    Per GH #6: when the user file IS present, DEFAULT_PROFILES are
+    merged in so callers (`/healthz`, `safe-default` lookups, etc.)
+    never crash with KeyError just because the user authored a
+    profiles.yaml that omits a default. User-defined entries win on
+    name collision — DEFAULT_PROFILES are the floor, not the ceiling.
+    Honest framing per [[ibounce-honest-positioning]]: the merge is
+    additive only; a malformed user file still raises ValueError
+    rather than silently falling back to defaults.
+    """
     resolved = resolve_profiles_path(str(path) if path else None)
     if not resolved.exists():
         return _build_default_profile_map()
@@ -290,17 +300,28 @@ def load_profiles(path: str | pathlib.Path | None = None) -> dict[str, Profile]:
         data = yaml.safe_load(resolved.read_text())
     except yaml.YAMLError as e:
         raise ValueError(f"profiles file at {resolved} is not valid YAML: {e}") from e
+    if data is None:
+        # Empty YAML file → treat as "user defined nothing"; fall back
+        # to pure DEFAULT_PROFILES (post-GH-#6 merge semantics).
+        return _build_default_profile_map()
     if not isinstance(data, dict):
         raise ValueError(f"profiles file at {resolved} must be a YAML object")
     raw = data.get("profiles", {})
     if not isinstance(raw, dict):
         raise ValueError(f"profiles file at {resolved} must have a 'profiles' object")
 
-    out: dict[str, Profile] = {}
+    user_profiles: dict[str, Profile] = {}
     for name, body in raw.items():
         if not isinstance(body, dict):
             raise ValueError(f"profile {name!r} must be a YAML object")
-        out[name] = _profile_from_dict(name, body)
+        user_profiles[name] = _profile_from_dict(name, body)
+
+    # Per GH #6: start with the full DEFAULT_PROFILES set so callers
+    # depending on `safe-default` / `full-user` / etc. always find
+    # them. User entries override on name collision.
+    out: dict[str, Profile] = _build_default_profile_map()
+    out.update(user_profiles)
+
     # Always ensure the default-active profile exists so callers can
     # fall back safely. `full-user` is the v1.0 canonical name (was
     # `none`); the alias is added below for v1.0 backward-compat and
