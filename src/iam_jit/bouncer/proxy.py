@@ -459,6 +459,40 @@ def register_audit_log_writer(writer: Any | None) -> None:
     _audit_log_writer = writer
 
 
+def audit_chain_initialized() -> bool:
+    """§A102+ / MRR-5 M2 — return True iff the audit hash-chain is
+    initialised + ready to stamp events. False covers both
+    "audit logging not configured at all" AND "audit log configured
+    but ``--audit-chain`` disabled" — i.e. ANY state where stamping
+    won't happen.
+
+    Source: the registered ``_audit_log_writer``'s ``status()['chain']``
+    block. Per the runbook §6 M2 spec this closes the B3 halt-condition
+    gap where audit-chain init failure surfaced in the bouncer log but
+    NOT on ``/healthz`` until the first event tried to write. Reading
+    the writer's chain block on every probe means cold-start init
+    failure (e.g. unwritable log_dir) surfaces immediately: writer
+    construction would have raised + ``_audit_log_writer`` would still
+    be ``None``.
+
+    Public so ``/healthz``, posture, MCP tools, and tests can
+    introspect without a circular import. Safe to call from any
+    thread (the writer's ``status()`` takes its own stats lock)."""
+    if _audit_log_writer is None:
+        return False
+    try:
+        stats = _audit_log_writer.status()
+    except Exception:
+        # Defensive: a degraded writer shouldn't crash /healthz. Per
+        # [[ibounce-honest-positioning]] surface the failure as
+        # "chain not initialised" rather than swallowing it silently
+        # — the audit_log block + status string still light up
+        # degraded so the operator sees the underlying error.
+        return False
+    chain_block = stats.get("chain") or {}
+    return bool(chain_block.get("configured", False))
+
+
 def register_audit_webhook_pusher(pusher: Any | None) -> None:
     """Install the HTTPS audit-webhook pusher. Pass None to clear."""
     global _audit_webhook_pusher
@@ -3839,6 +3873,26 @@ async def serve(config: ProxyConfig, *, store: BouncerStore) -> None:
                 "by_reason": {},
                 "last_skips": [],
             }
+        # §A102+ / MRR-5 M3 — per-process daily LLM-spend block. When
+        # side-LLM is OFF (the default per
+        # [[bouncer-zero-llm-when-agent-in-loop]]) reports
+        # {"enabled": false} honestly per [[ibounce-honest-positioning]]
+        # rather than omitting the field. Closes the C7 halt-condition
+        # gap noted in docs/MRR-5-MONITORING-RUNBOOK.md §4 (LLM
+        # cost-cap breach was only visible via autopilot.status.json
+        # .alerts before).
+        try:
+            from ..llm.llm_spend_tracker import spend_snapshot
+            llm_budget_block = spend_snapshot()
+        except Exception:  # pragma: no cover
+            llm_budget_block = {"enabled": False}
+        # §A102+ / MRR-5 M2 — top-level chain_initialized bool. Closes
+        # the B3 halt-condition gap (audit-chain init failure surfacing
+        # only in the bouncer log, not /healthz, until first event).
+        # Per [[ibounce-honest-positioning]] the bool is honest: False
+        # when audit logging is disabled OR --audit-chain is off OR the
+        # writer's chain block reports unconfigured.
+        chain_initialized_bool = audit_chain_initialized()
         return web.json_response({
             # #433 — bouncer_kind identifier so apply-config /
             # cross-product tooling can disambiguate "port is in use
@@ -3860,6 +3914,8 @@ async def serve(config: ProxyConfig, *, store: BouncerStore) -> None:
             "dynamic_denies": dynamic_denies_block,
             "anomaly_detection": anomaly_detection_block,
             "llm_skips": llm_skips_block,
+            "llm_budget": llm_budget_block,
+            "chain_initialized": chain_initialized_bool,
         }, status=http_status_code)
 
     # #324a — POST /admin/dynamic-denies/reload triggers an immediate
