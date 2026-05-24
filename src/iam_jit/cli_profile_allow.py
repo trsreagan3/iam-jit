@@ -395,18 +395,36 @@ def _classify_row(row) -> str:
 # Categorized header labels per [[ambient-value-prop-and-friction-framing]].
 # Operator scans the high-signal bucket (adversarial) first; the
 # legit-looking bucket carries an easy-allow nudge; the ambiguous
-# bucket is in the middle. Labels use plain ASCII glyphs (no emoji)
-# to keep the surface portable across terminals.
+# + pending buckets are in the middle. Labels use plain ASCII glyphs
+# (no emoji) to keep the surface portable across terminals.
+#
+# GH #10 fix per [[ibounce-honest-positioning]] +
+# [[ambient-value-prop-and-friction-framing]]: pending_classification
+# is the DEFAULT classifier output when no LLM backend is configured
+# (the agent-in-loop path — see [[bouncer-zero-llm-when-agent-in-loop]]).
+# Previously _format_denies_table iterated only the three "primary"
+# labels and silently dropped pending_classification rows. The header
+# count showed N, but the operator saw fewer rows — undermining
+# "your bouncer caught X" framing because N was the hidden count.
+# Pending rows now render in an explicit "ambiguous (pending agent
+# classifier)" bucket so the table row count equals len(rows) exactly
+# regardless of classifier mode.
 _CATEGORY_ORDER = (
     "appears_adversarial",
     "ambiguous",
+    "pending_classification",
     "appears_legitimate",
 )
 _CATEGORY_LABEL = {
     "appears_adversarial": "(!) likely-adversarial",
     "ambiguous": "(?) ambiguous",
+    "pending_classification": "(?) ambiguous (pending agent classifier)",
     "appears_legitimate": "(*) likely-legit",
 }
+# Fallback bucket label for any classifier value we don't know about
+# (defensive — keeps the "render every row" invariant even if a future
+# classifier adds a new label without updating _CATEGORY_ORDER).
+_UNKNOWN_BUCKET_LABEL = "(?) uncategorized"
 
 
 def _format_denies_table(rows: list, notes: list[str]) -> str:
@@ -416,19 +434,33 @@ def _format_denies_table(rows: list, notes: list[str]) -> str:
     Lead with the bouncer's action ("caught"), NEVER ERROR/DENIED/BLOCKED.
     Categorize by the structured-deny injection classifier so the
     operator scans high-signal rows first.
+
+    Per [[ibounce-honest-positioning]]: every row in ``rows`` renders.
+    No filter is applied by classifier label — the label is a column
+    /bucket heading, not a filter. The "caught N" header equals
+    ``len(rows)`` exactly so the operator-visible count matches reality.
     """
     if not rows:
         return "Your bouncer caught nothing in the requested window — clear.\n"
 
-    # Categorize.
+    # Categorize. Unknown classifier labels (future-proofing) land in
+    # an "unknown" bucket so they STILL render — never silently drop.
     by_cls: dict[str, list] = {c: [] for c in _CATEGORY_ORDER}
     for r in rows:
         by_cls.setdefault(_classify_row(r), []).append(r)
 
+    # Preserve operator-scanning order (adversarial first), then append
+    # any unknown-label buckets at the end so they still appear.
+    known = set(_CATEGORY_ORDER)
+    bucket_order = list(_CATEGORY_ORDER) + [
+        c for c in by_cls.keys() if c not in known
+    ]
+
     n = len(rows)
     counts_blurb = "  ".join(
-        f"{_CATEGORY_LABEL.get(c, c)} ({len(by_cls.get(c) or [])})"
-        for c in _CATEGORY_ORDER
+        f"{_CATEGORY_LABEL.get(c, _UNKNOWN_BUCKET_LABEL)} "
+        f"({len(by_cls.get(c) or [])})"
+        for c in bucket_order
         if (by_cls.get(c) or [])
     )
     header_line = (
@@ -449,11 +481,11 @@ def _format_denies_table(rows: list, notes: list[str]) -> str:
     )
     rule = "  " + ("-" * (len(col_header) - 2))
 
-    for cls in _CATEGORY_ORDER:
+    for cls in bucket_order:
         bucket = by_cls.get(cls) or []
         if not bucket:
             continue
-        label = _CATEGORY_LABEL.get(cls, cls)
+        label = _CATEGORY_LABEL.get(cls, _UNKNOWN_BUCKET_LABEL)
         lines.append(f"{label}  ({len(bucket)} of {n}):")
         lines.append(col_header)
         lines.append(rule)
@@ -474,7 +506,7 @@ def _format_denies_table(rows: list, notes: list[str]) -> str:
             if r.suggested_allow_command:
                 # Per [[ambient-value-prop-and-friction-framing]]:
                 # adversarial-classified rows lead with the halt
-                # nudge; legit/ambiguous lead with the allow.
+                # nudge; legit/ambiguous/pending lead with the allow.
                 if cls == "appears_adversarial":
                     lines.append(
                         "    recommended: halt + escalate — do NOT auto-allow"
@@ -572,9 +604,14 @@ def _do_denies_follow(
                     continue
                 seen.add(key)
                 cls = _classify_row(r)
+                # GH #10: pending_classification is the default-mode
+                # classifier output (no LLM backend); render it like
+                # ambiguous in the follow stream so it's never silently
+                # dropped. Per [[ibounce-honest-positioning]].
                 tag = {
                     "appears_adversarial": "(!)",
                     "ambiguous": "(?)",
+                    "pending_classification": "(?)",
                     "appears_legitimate": "(*)",
                 }.get(cls, "(?)")
                 click.echo(
