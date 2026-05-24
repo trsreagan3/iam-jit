@@ -31,7 +31,7 @@ cat policy.json | iam-risk-score --offline -
 | `--api-key KEY` | string | — | Bearer token. Authenticated callers bypass the rate limit. |
 | `--access-type` | choice | `read-only` | `read-only` or `read-write`. Affects scoring. |
 | `--duration-hours N` | int | 1 | Hypothetical grant duration. Longer = higher score for medium-risk policies. |
-| `--description "..."` | string | — | One-line context for the LLM narrative (paid tier only). |
+| `--description "..."` | string | — | One-line context the LLM narrative can reference (when a backend is configured). |
 | `--threshold N` | int | 5 | Score >= threshold → FAIL exit code |
 | `--format` | choice | `human` | `human`, `json`, or `github` |
 | `--version` | flag | — | Print version + exit |
@@ -137,10 +137,10 @@ fi
 ### Hosted API mode
 
 ```bash
-# Free tier — no key
+# Hosted API — no auth needed (rate-limited per IP)
 iam-risk-score --api-url https://api.iam-risk-score.com policy.json
 
-# Paid tier — set IAM_RISK_SCORE_API_KEY env var
-export IAM_RISK_SCORE_API_KEY=iamjit_...
-iam-risk-score --api-url https://api.iam-risk-score.com policy.json
+# Self-hosted deployment that configured IAM_JIT_SCORE_API_KEY
+export IAM_RISK_SCORE_API_KEY=...
+iam-risk-score --api-url https://api.your-deployment.example policy.json
 ```

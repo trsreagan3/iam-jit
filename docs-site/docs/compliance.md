@@ -29,12 +29,14 @@
 
 **Status**: SOC 2 Type 1 in progress (target: Q3 2026).
 
-The Enterprise tier ($2K+/mo) includes:
+For self-hosted deployments, the SAM stack ships with audit-trail
+evidence export (log retention, IAM principal mapping, access-grant
+lineage) as part of the v1.0 free + open source release.
 
-- Audit-trail evidence export (log retention, IAM principal mapping,
-  access-grant lineage)
-- DPA / BAA on request
-- Dedicated security review on integration
+Compliance consulting available for production deployments — DPA /
+BAA on request, dedicated security review on integration, and
+customer-specific evidence packs. Reach out via the GitHub repo
+issues to discuss scope.
 
 ## GDPR / privacy
 

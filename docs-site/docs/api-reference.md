@@ -12,7 +12,7 @@ Score an AWS IAM policy. Stateless, idempotent, JSON in / JSON out.
 POST /api/v1/score HTTP/1.1
 Host: api.iam-risk-score.com
 Content-Type: application/json
-Authorization: Bearer <api-key>   # optional for free tier
+Authorization: Bearer <api-key>   # optional; used by self-hosted deployments that configure IAM_JIT_SCORE_API_KEY
 
 {
   "policy": {
@@ -73,7 +73,7 @@ X-Policy-Fingerprint: sha256:abc...
 | `would_auto_approve_at_threshold_5` | bool | Convenience: `score < 5` |
 | `factors` | string[] | Human-readable rule-fire descriptions |
 | `suggestions` | string[] | Actionable risk-reduction recommendations |
-| `llm_narrative` | string\|null | Paid-tier LLM-generated explanation; null on free tier |
+| `llm_narrative` | string\|null | LLM-generated explanation when a backend is configured for the deployment; null otherwise |
 | `analyzer` | string | `deterministic` or `deterministic+<llm-backend>` |
 | `policy_fingerprint` | string | sha256 of the canonical policy JSON, prefixed `sha256:` |
 | `api_version` | string | API version that produced this response (`v1`) |
@@ -83,7 +83,7 @@ X-Policy-Fingerprint: sha256:abc...
 | Header | Value | Purpose |
 |---|---|---|
 | `Cache-Control` | `public, max-age=3600, s-maxage=86400` | Score is deterministic; safe to cache by content-hash |
-| `Vary` | `Authorization` | Don't share paid-tier responses with anonymous cache entries |
+| `Vary` | `Authorization` | Keep authenticated-caller responses separate from anonymous cache entries |
 | `X-Policy-Fingerprint` | `sha256:...` | Same as response body field; usable as cache key by CDNs |
 
 ## Status codes
@@ -92,16 +92,17 @@ X-Policy-Fingerprint: sha256:abc...
 |---|---|---|
 | 200 | OK | Successful scoring |
 | 400 | Bad Request | Malformed policy, invalid access_type, prompt-injection detected |
-| 401 | Unauthorized | API key required (paid tier) and missing/invalid |
-| 429 | Too Many Requests | Free-tier rate limit (30 req/min/IP); paid keys bypass |
+| 401 | Unauthorized | Deployment configured an API key (`IAM_JIT_SCORE_API_KEY`) and the request is missing/invalid |
+| 429 | Too Many Requests | Per-IP rate limit (30 req/min) on the hosted API; authenticated callers with `IAM_JIT_SCORE_API_KEY` configured bypass |
 | 503 | Service Unavailable | Self-hosted deploy not configured (rare) |
 
 ## Rate limits
 
-| Tier | Limit | Where enforced |
+| Caller | Limit | Where enforced |
 |---|---|---|
-| Free (anonymous) | 30 req/min/IP | In-Lambda (process-local) + CloudFront WAFv2 rate-based rule (edge) |
-| Paid (authenticated) | Per-tier (5K, 50K, 500K, unlimited per month) | Quota tracking |
+| Anonymous (hosted) | 30 req/min/IP burst + ~100 req/day/IP cap | In-Lambda sliding window (process-local) + CloudFront WAFv2 rate-based rule at the edge |
+| Authenticated (deployment API key) | Bypasses per-IP cap | `IAM_JIT_SCORE_API_KEY` env match |
+| Self-hosted | Unlimited (your AWS bill) | No quota gates ship in v1.0 |
 
 429 responses include a `Retry-After` header indicating the seconds
 to wait before retrying.

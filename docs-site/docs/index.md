@@ -1,7 +1,11 @@
 # iam-risk-score documentation
 
 A 1–10 risk score for any AWS IAM policy in under 100ms.
-**Deterministic, regression-tested, free up to 100 requests/month.**
+**Deterministic, regression-tested, free + open source at v1.0.**
+
+> v1.0 ships fully free + open source under Apache-2.0. Consulting
+> available for production deployments, custom integration, and
+> compliance audits. No paid tier at v1.0.
 
 ```bash
 $ pip install iam-risk-score
@@ -63,30 +67,29 @@ destructive verbs, access-type mismatch detection, IAM PassRole
 patterns, NotAction/NotResource handling, and grant-duration
 amplification.
 
-The optional LLM (paid tier) contributes a plain-English narrative
-explanation. By explicit safety contract, **the LLM never lowers
-the deterministic score** — verified by the `test_score_matches_
-calibration_corpus` regression test.
+An optional LLM backend (configured per deployment) contributes a
+plain-English narrative explanation. By explicit safety contract,
+**the LLM never lowers the deterministic score** — verified by the
+`test_score_matches_calibration_corpus` regression test.
 
 [:octicons-arrow-right-24: Calibration model deep-dive](calibration.md)
 
 ## Three deployment shapes
 
 1. **Offline CLI** (default) — `pip install iam-risk-score`. Runs the
-   deterministic engine locally; no network call. Free.
+   deterministic engine locally; no network call. Free + unlimited.
 2. **Hosted API** — `https://api.iam-risk-score.com/api/v1/score`.
-   Free for 100 req/month, paid tiers add LLM narrative.
+   Free + open source; rate-limited to 100 requests/day per IP at v1.0.
 3. **Self-hosted** — deploy the SAM stack into your own AWS account.
    See [self-hosting](self-hosting.md).
 
-## Free vs paid
+## v1.0 — free + open source
 
-| Tier | Price | Quota | What you get |
-|---|---|---|---|
-| Free | $0 | 100/mo per IP | Score, factors, suggestions. Deterministic. |
-| Indie | $19/mo | 5K/mo | + API key, no IP rate limit |
-| Pro | $99/mo | 50K/mo | + LLM narrative (Claude Opus 4.7) |
-| Team | $499/mo | 500K/mo | + admin context API, Slack notifications |
-| Enterprise | $2K+/mo | unlimited | + SOC 2 evidence export, SLA |
+iam-risk-score v1.0 ships fully free + open source under Apache-2.0.
+Every scoring feature is included: numeric 1–10 score, per-factor
+breakdown, suggestions, offline CLI, hosted API access, GitHub
+Action, self-hosted deploy. No tier comparison; no feature gates.
 
-[:octicons-arrow-right-24: Pricing details](pricing.md)
+Consulting engagements are available for production deployments,
+custom integration, and compliance audits — see
+[pricing](pricing.md) for how to engage.

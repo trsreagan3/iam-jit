@@ -16,9 +16,9 @@ circumstances:
 - "We never auto-process anything that touches CloudTrail."
 - "Account-closure / org-leave is admin-console-only, not JIT."
 
-If you want the request reviewed (just at a higher tier), use the
-risk score's threshold. The blacklist is for the "no, never, period"
-case.
+If you want the request reviewed (just at a higher risk level), use
+the risk score's threshold. The blacklist is for the "no, never,
+period" case.
 
 ## How to add rules
 
@@ -82,8 +82,8 @@ mitigation is built in:
 - **Audit log** records every hit (with source IP + matched action
   + rule_id) regardless of caller — operators can detect bisection
   patterns and respond.
-- **Rate limiting** (30 req/min/IP free tier) makes bisection against
-  AWS's ~400-service IAM action space prohibitively slow.
+- **Rate limiting** (30 req/min/IP on the hosted API) makes bisection
+  against AWS's ~400-service IAM action space prohibitively slow.
 
 You can tighten further by adding edge-WAF rules to harder-throttle
 sources that hit `400` responses repeatedly.
@@ -164,7 +164,7 @@ POST /api/v1/score
   ├─ 3. Prompt-injection scan
   ├─ 4. Blacklist check  ◄── you are here
   ├─ 5. Deterministic scoring
-  └─ 6. (Optional) LLM narrative on paid tiers
+  └─ 6. (Optional) LLM narrative when a backend is configured
 ```
 
 Blacklist fires BEFORE scoring — if a request is blacklisted, no

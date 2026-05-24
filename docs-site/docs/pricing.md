@@ -1,23 +1,50 @@
 # Pricing
 
-| Tier | Price | Quota | What you get |
-|---|---|---|---|
-| **Free** | $0 | 100 requests/month, by source IP | 1–10 score, factors, suggestions. Deterministic-only. Public API; no signup needed. |
-| **Indie** | $19/mo | 5,000 requests/month | + per-API-key auth (no IP rate-limit) |
-| **Pro** | $99/mo | 50,000 requests/month | + LLM narrative (Claude Opus 4.7) — plain-English explanation of every score |
-| **Team** | $499/mo | 500,000 requests/month | + admin context API (extend the scorer's rule set), Slack notifications, weekly digest |
-| **Enterprise** | from $2K/mo | unlimited | + SOC 2 evidence export, dedicated calibration tuning, SLA |
+## v1.0 — free + open source
+
+iam-risk-score (and the full iam-jit suite — ibounce / kbounce /
+dbounce / gbounce) is free + open source under Apache-2.0.
+**Every scoring feature ships in v1.0; no tier comparison, no
+feature gates, no signup.**
+
+- **Offline CLI** — `pip install iam-risk-score`. Unlimited.
+- **Hosted API** — `https://api.iam-risk-score.com/api/v1/score`.
+  Rate-limited to 100 requests/day per source IP (plus 30 req/min
+  burst-protect at the Lambda layer).
+- **Self-hosted** — deploy the SAM stack in your own AWS account.
+  Zero quotas; "your AWS bill" (~$6/mo idle, see [production hardening](production-hardening.md)).
+
+## Consulting available
+
+For production deployments, custom integration, compliance audits,
+or dedicated calibration support, we offer paid consulting
+engagements outside the open-source release.
+
+What consulting typically covers:
+
+- Production deploy walkthroughs (SAM stack hardening, edge
+  protection, log retention tuning, multi-region)
+- Custom rule + adversarial-corpus contribution for your sensitive
+  services / blacklist patterns
+- SOC 2 / PCI / HIPAA / FedRAMP evidence packs aligned with the
+  built-in retention defaults + tamper-evident logging
+- Integration with existing JIT/SSO/Slack/CI surfaces in your stack
+- Migration consulting (from Apono / Opal / Hoop / etc.)
+
+Reach out via the GitHub repo issues or the email on the README to
+discuss scope.
 
 ## The deterministic safety contract
 
-**The numeric score is identical in every tier.** The LLM only adds
-a plain-English narrative — by explicit safety contract (regression-
-tested in CI), the LLM can never lower the deterministic score. You
-pay for explanation, not for safety.
+**The numeric score is identical for every caller.** When the
+optional LLM backend produces a narrative, it adds explanation —
+by explicit safety contract (regression-tested in CI), the LLM can
+never lower the deterministic score. You get explanation as a
+narrative; the safety floor is the score itself.
 
-This means the **free tier is safety-equivalent to enterprise**.
-A free-tier integration that auto-approves at threshold 5 catches
-the same risks an enterprise customer would.
+This means a free-tier offline-CLI integration that auto-approves
+at threshold 5 catches the same risks any other configuration
+would.
 
 ## What counts as a request
 
@@ -25,29 +52,31 @@ One scoring call to `/api/v1/score` = one request. Identical
 policies (matched by `policy_fingerprint`) hitting CloudFront cache
 don't count — only origin hits.
 
-## Free tier limits
+## Hosted API rate limits
 
-Hardcoded: 30 requests / minute / source IP, plus a monthly cap
-on the order of 100 (enforced at the edge via WAFv2 for the hosted
-API). Self-hosted deploys remove the cap entirely.
+The hosted endpoint enforces:
 
-## Upgrading
+- **30 requests / minute / source IP** — in-Lambda sliding window;
+  defense-in-depth against bursts (configurable via
+  `IAM_JIT_SCORE_RATE_PER_MINUTE`).
+- **~100 requests / day / source IP** — edge-enforced via WAFv2 on
+  the hosted deployment; sized to support legitimate sample-and-
+  evaluate use without subsidizing scraping. Self-hosted deploys
+  remove the daily cap entirely.
 
-Self-serve via Stripe Checkout (Indie / Pro / Team).
-Enterprise: contact the team for setup.
+For higher throughput, run the offline CLI (`pip install`,
+unlimited) or self-host the SAM stack in your own AWS account.
+Both paths are zero-cost in software-license terms; the self-host
+path is "your AWS bill" (~$6/mo idle).
 
-After Checkout, an API key is auto-issued and emailed within
-seconds — Stripe webhook → Lambda → API key minted → SES email.
-Use the key in the `Authorization: Bearer <key>` header to bypass
-the IP rate limit and unlock the LLM narrative on Pro+.
+## Why no paid tier at v1.0
 
-## Self-hosting
+Following the Snyk / Semgrep / Sentry / HashiCorp pattern: v1.0
+ships fully free + open source. Adoption first; consulting funds
+the work; paid product tier only if/when adoption proves the need
+(12-18 months out, when 3+ orgs ask for capabilities that fit a
+paid-tier shape).
 
-If you want to keep traffic in-house, deploy the SAM stack in your
-own AWS account. The pricing is "your AWS bill" (~$6/mo idle,
-scales with usage — see [production hardening](production-hardening.md)
-for breakdown). Free under Apache 2.0.
-
-The hosted offering ($19+/mo) saves you the operational work, gives
-you the LLM narrative on the paid tiers, and contributes data
-back to the cross-org calibration corpus.
+The OSS scorer is the durable artifact. Every feature that ships
+in v1.0 stays free in perpetuity — future paid tiers (if added)
+would offer NEW capabilities, never gate v1.0 functionality.

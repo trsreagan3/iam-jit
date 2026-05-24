@@ -19,6 +19,11 @@ For organizations that want the scoring API behind their own VPN /
 firewall / SCP, or that want the LLM narrative without depending on
 the public hosted service.
 
+The full feature set (scoring engine + LLM narrative + approval
+flow + audit + auto-revocation) ships in the Apache-2.0 release —
+no license enforcement at v1.0. Bring your own LLM backend
+(Bedrock / Anthropic / local) per [LLM-BACKENDS.md](https://github.com/trsreagan3/iam-jit/blob/main/docs/LLM-BACKENDS.md).
+
 See [docs/GETTING-STARTED.md](https://github.com/trsreagan3/iam-jit/blob/main/docs/GETTING-STARTED.md)
 in the source repo for a 5-minute MVP deploy walkthrough.
 
@@ -45,12 +50,15 @@ top via subsequent stack updates. See
 If you don't want to operate the stack yourself,
 `https://api.iam-risk-score.com` is the hosted service:
 
-- Free tier: 100 req/month per IP
-- Indie / Pro / Team / Enterprise — see [pricing](pricing.md)
+- Free + open source at v1.0
+- Rate-limited to 100 req/day per source IP at the edge (30 req/min
+  burst-protect inside Lambda); see [pricing](pricing.md) for the
+  full picture
+- Consulting available for production deployments
 
 Same scoring engine as self-hosted. Same calibration. The hosted
-service adds the LLM narrative on paid tiers and the usual
-SaaS quality-of-life (uptime monitoring, logs, billing).
+service adds the optional LLM narrative (when configured) and the
+usual SaaS quality-of-life (uptime monitoring, logs, edge cache).
 
 ## What about the iam-jit provisioner?
 

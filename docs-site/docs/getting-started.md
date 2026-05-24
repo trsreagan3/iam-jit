@@ -30,7 +30,7 @@ Suggestions to reduce risk:
 
 Exit code 1 (above threshold) — usable in CI pipelines as a gate.
 
-## :material-cloud: Hosted API (free for 100 req/month)
+## :material-cloud: Hosted API (free + open source, 100 req/day per IP)
 
 ```bash
 curl -X POST https://api.iam-risk-score.com/api/v1/score \
@@ -54,9 +54,11 @@ Response:
 }
 ```
 
-No authentication required for free-tier traffic; rate limit is
-30 req/min per source IP. For higher quotas, paid tier API keys
-go in the `Authorization: Bearer <key>` header.
+No authentication required for the hosted API; rate limit is
+30 req/min per source IP (burst-protect) plus a ~100 req/day per
+IP cap at the edge. For unlimited throughput, run the offline CLI
+(`pip install`) or [self-host](self-hosting.md) the SAM stack
+(zero quotas).
 
 ## :material-github: GitHub Action
 
