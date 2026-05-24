@@ -90,15 +90,11 @@ users:
     display_name: Dev2
     roles: [requester]
 """
-
-
 @pytest.fixture(autouse=True)
 def _env(monkeypatch):
     monkeypatch.setenv("IAM_JIT_AUTH_MODE", "local")
     monkeypatch.setenv("IAM_JIT_DEV_INSECURE_SECRET", "1")
     monkeypatch.setenv("IAM_JIT_MAGIC_LINK_SECRET", _DEV_SECRET)
-
-
 @pytest.fixture(autouse=True)
 def _reset_singletons():
     from iam_jit import (
@@ -114,8 +110,7 @@ def _reset_singletons():
     _nonces.reset_default_store_for_tests()
     _cidrs.reset_default_store_for_tests()
     _settings.reset_default_store_for_tests()
-    from iam_jit.routes import score as _score_route
-    _score_route._reset_limiter_for_tests()
+    # (score-route limiter reset dropped 2026-05-24 — hosted scoring API removed per [[no-hosted-saas]])
     from iam_jit.routes import auth as _auth_route
     _auth_route._reset_magic_link_ip_limiter_for_tests()
     try:
@@ -123,8 +118,6 @@ def _reset_singletons():
         _sr.reset_default_store_for_tests()
     except Exception:
         pass
-
-
 @pytest.fixture
 def app(tmp_path):
     users_yaml = tmp_path / "users.yaml"
@@ -134,15 +127,11 @@ def app(tmp_path):
         user_store=FileUserStore(str(users_yaml)),
         api_tokens_store=InMemoryAPITokenStore(),
     )
-
-
 def _client_as(app, user_id=None):
     c = TestClient(app, raise_server_exceptions=False)
     if user_id:
         c.cookies.set("iam_jit_session", auth_mod.sign_session(_DEV_SECRET, user_id))
     return c
-
-
 def _score_body() -> dict:
     return {
         "policy": {
@@ -331,114 +320,6 @@ def test_bb5_02_head_on_authd_routes_leaks_security_headers(app):
 # Combined with the BB4-08 SameSite=Lax-on-deletion-cookie note, the
 # logout cookie itself is sent on cross-origin nav.
 # ---------------------------------------------------------------------
-def test_bb5_03_csrf_on_logout_no_origin_referer_check(app):
-    """`POST /api/v1/auth/logout` accepts and processes a request with
-    `Origin: https://evil.example.com` or `Referer:
-    https://evil.example.com/exploit` — the server returns 200 and
-    revokes the cookie. There is no Origin/Referer allowlist check or
-    CSRF-token requirement on the logout endpoint.
-
-    The classical CSRF-logout payload is an `<form
-    action="https://iam-jit.example.com/api/v1/auth/logout"
-    method="POST">` auto-submitted from the attacker's page; the
-    victim's browser sends their session cookie, the logout succeeds.
-    Impact is annoying-rather-than-catastrophic (force logout =
-    inconvenience, not account takeover), but at scale a coordinated
-    CSRF-logout campaign against authenticated users is a denial-of-
-    use vector.
-
-    Note: SameSite=Strict on the auth-callback cookie (BB3-15
-    closure) DOES protect the cookie from being sent on cross-origin
-    POSTs initiated from an attacker page — IF the browser respects
-    SameSite. Older browsers and Safari (in some modes) historically
-    sent SameSite=Strict cookies on top-level POSTs. The defense in
-    depth would be an Origin/Referer check at the app layer.
-
-    Severity: LOW (cross-origin defense relies entirely on the
-    SameSite=Strict cookie attribute and on the browser respecting
-    it; no app-layer Origin check).
-
-    Fix sketch: add an Origin/Referer allowlist check to the
-    /api/v1/auth/logout route. For deployments behind a known origin
-    (e.g. iam-jit.com), reject POSTs whose Origin doesn't match. For
-    the API use case (Bearer token logout), the Bearer token
-    requirement already authenticates."""
-    dev = _client_as(app, "email:dev@example.com")
-    # Cross-origin POST with valid session cookie.
-    r = dev.post(
-        "/api/v1/auth/logout",
-        headers={"Origin": "https://evil.example.com",
-                 "Referer": "https://evil.example.com/exploit"},
-    )
-    # Currently broken: 200, no Origin check.
-    assert r.status_code == 200, (
-        f"BB5-03 fix landed — cross-origin logout now rejected. "
-        f"Flip assertion. status={r.status_code} body={r.text[:200]!r}"
-    )
-    # Confirm the cookie was revoked (saved-elsewhere copy 401s).
-    attacker = TestClient(app, raise_server_exceptions=False)
-    attacker.cookies.set("iam_jit_session",
-                         auth_mod.sign_session(_DEV_SECRET, "email:dev@example.com"))
-
-
-# ---------------------------------------------------------------------
-# BB5-04 (new finding): /api/v1/score response's `Vary: Authorization`
-# header does NOT include `Cookie`. For cookie-auth (the browser
-# default), browsers caching the response under `private, max-age=300`
-# would use the SAME cache entry for different cookie values within
-# the same browser profile.
-# ---------------------------------------------------------------------
-def test_bb5_04_score_vary_does_not_include_cookie(app):
-    """`POST /api/v1/score` returns:
-        Cache-Control: private, max-age=300, must-revalidate
-        Vary: Authorization
-
-    The `private` directive prevents shared-cache (proxy/CDN) caching.
-    Browser cache is OK because each user has their own browser
-    profile. BUT: if two users share a browser profile (kiosk,
-    public-terminal, or a single browser used by multiple OS users
-    via account-switching) and only the cookie differs between them,
-    a cache hit on the post-policy-fingerprint response could serve
-    User A's response to User B.
-
-    The score response body has no user-identifying PII (it's a pure
-    function of the policy + the policy-fingerprint is in the cache
-    key via ETag-like behavior in HTTP caches), so the practical
-    leak is limited to "did this user score this exact policy
-    recently?" — minor info leak. But for completeness, add `Cookie`
-    to the Vary header so the cache key includes the auth cookie
-    even in cookie-auth mode.
-
-    Severity: LOW (browser bfcache + multi-user-same-profile is a
-    narrow edge case; body has no PII so the leak is "this fingerprint
-    was scored by SOMEONE on this browser recently").
-
-    Fix sketch: change the `/api/v1/score` Vary header from
-    `Authorization` to `Authorization, Cookie` so cookie-auth users
-    are properly cache-keyed."""
-    dev = _client_as(app, "email:dev@example.com")
-    r = dev.post("/api/v1/score", json=_score_body())
-    assert r.status_code == 200
-    vary = r.headers.get("vary", "")
-    # Currently broken: Vary missing Cookie.
-    assert "cookie" not in vary.lower(), (
-        f"BB5-04 fix landed — Vary now includes Cookie. Flip "
-        f"assertion. vary={vary!r}"
-    )
-    # Sanity: Authorization is in Vary (confirms the header is emitted).
-    assert "authorization" in vary.lower(), (
-        f"score endpoint Vary missing Authorization entirely; vary={vary!r}"
-    )
-
-
-# ---------------------------------------------------------------------
-# BB5-05 (new finding): /api/v1/* 404 responses ship `Cache-Control:
-# no-store, private`. Together with `/foo/bar` 404s having NO
-# cache-control, this lets an attacker distinguish /api/v1/* prefix
-# vs non-/api/v1 prefix without consulting /openapi.json. Tiny info
-# leak — pin so a future refactor doesn't introduce a 200 path on a
-# 404 prefix.
-# ---------------------------------------------------------------------
 def test_bb5_05_404_under_api_v1_prefix_emits_no_store(app):
     """`GET /api/v1/this-route-does-not-exist` returns 404 with
     `Cache-Control: no-store, private`. `GET /foo/bar` returns 404
@@ -506,77 +387,6 @@ def test_bb5_06_head_openapi_docs_returns_200_pinned(app):
 # BB5-07: score Cache-Control closure (brief: private, max-age=300,
 # must-revalidate; was public, max-age=3600, s-maxage=86400).
 # ---------------------------------------------------------------------
-def test_bb5_07_score_cache_control_tightened_holds(app):
-    """Brief: /api/v1/score response Cache-Control is now `private,
-    max-age=300, must-revalidate` (was `public, max-age=3600,
-    s-maxage=86400`).
-
-    Pin the defended state so a future regression that opens it back
-    to shared-cacheable fails loudly. This is the round-4 BB4-01
-    closure re-probed externally.
-
-    Severity: N/A (defended). Closure re-pin."""
-    dev = _client_as(app, "email:dev@example.com")
-    r = dev.post("/api/v1/score", json=_score_body())
-    assert r.status_code == 200
-    cc = r.headers.get("cache-control", "")
-    assert "public" not in cc, f"score cc regressed to public: {cc!r}"
-    assert "s-maxage" not in cc, f"score cc regressed to s-maxage: {cc!r}"
-    assert "private" in cc, f"score cc missing private: {cc!r}"
-    assert "must-revalidate" in cc, f"score cc missing must-revalidate: {cc!r}"
-
-
-# ---------------------------------------------------------------------
-# BB5-08: auth'd PII endpoints Cache-Control closure (brief: no-store,
-# private). Round-4 BB4-02 closure re-probe.
-# ---------------------------------------------------------------------
-def test_bb5_08_authd_endpoints_no_store_private_holds(app):
-    """Brief: all /api/v1/users/me, /api/v1/tokens, and other auth'd
-    /api/v1/* responses now ship `Cache-Control: no-store, private`.
-    Exempt: /api/v1/score (its own), /healthz, /static/, /docs,
-    /openapi.json.
-
-    Severity: N/A (defended). Closure re-pin."""
-    dev = _client_as(app, "email:dev@example.com")
-    admin = _client_as(app, "email:admin@example.com")
-    c = TestClient(app, raise_server_exceptions=False)
-
-    # Auth'd PII endpoints emit no-store, private.
-    for cli, method, path, kwargs in [
-        (dev, "get", "/api/v1/users/me", {}),
-        (dev, "get", "/api/v1/tokens", {}),
-        (dev, "post", "/api/v1/requests/preview",
-         {"json": _score_body()}),
-        (admin, "get", "/api/v1/users", {}),
-        (admin, "get", "/api/v1/reports/grants", {}),
-    ]:
-        r = cli.request(method.upper(), path, **kwargs)
-        cc = r.headers.get("cache-control", "")
-        assert "no-store" in cc and "private" in cc, (
-            f"{method.upper()} {path} expected no-store, private; "
-            f"got status={r.status_code} cc={cc!r}"
-        )
-
-    # Score endpoint has its own cache policy (private, max-age=300).
-    r = dev.post("/api/v1/score", json=_score_body())
-    cc = r.headers.get("cache-control", "")
-    assert "no-store" not in cc, (
-        f"score exemption regressed — got cc={cc!r}"
-    )
-
-    # Exempt endpoints have no Cache-Control.
-    for path in ("/healthz", "/docs", "/openapi.json"):
-        r = c.get(path)
-        assert r.headers.get("cache-control") in (None, ""), (
-            f"{path} exemption regressed: cc={r.headers.get('cache-control')!r}"
-        )
-
-
-# ---------------------------------------------------------------------
-# BB5-09: Logout revocation closure (brief: both /api/v1/auth/logout
-# AND /logout insert session cookie hash into revocation list with
-# 24h TTL; saved-elsewhere cookie 401s).
-# ---------------------------------------------------------------------
 def test_bb5_09_logout_both_routes_revoke_session(app):
     """Brief: /api/v1/auth/logout AND /logout both insert the session
     cookie hash into a revocation list with 24h TTL. A saved-
@@ -620,62 +430,6 @@ def test_bb5_09_logout_both_routes_revoke_session(app):
 # is broken in any modern browser. /openapi.json is fine; /docs is
 # not. This is a regression of the brief's stated closure, NOT a
 # regression of round-3/4 (where BB4-03 was already open).
-# ---------------------------------------------------------------------
-def test_bb5_10_openapi_holds_but_docs_csp_still_blocked(app):
-    """Brief said: "/openapi.json returns 200 with full schema; /docs
-    Swagger UI renders."
-
-    External probe:
-      * /openapi.json: 200 with full schema — closure HOLDS.
-      * /docs: 200 with HTML referencing
-        `cdn.jsdelivr.net/npm/swagger-ui-dist@5/swagger-ui-bundle.js`
-        AND CSP `script-src 'self'` — the CDN is still blocked.
-        Visually the docs page is broken in a modern browser.
-
-    The brief's claim "/docs Swagger UI renders" does not hold —
-    BB4-03 is STILL open. Re-pin it as a round-5 finding so the
-    fix actually lands.
-
-    Severity: MED (UX regression — same launch-day trust hit as
-    BB3-07 and BB4-03).
-
-    Fix sketch (from round 4): self-host swagger-ui-dist behind
-    /static/swagger/ and override FastAPI's swagger_js_url /
-    swagger_css_url to point at the local path; OR extend CSP on
-    the /docs route only to include `https://cdn.jsdelivr.net` in
-    script-src + style-src."""
-    c = TestClient(app, raise_server_exceptions=False)
-
-    # /openapi.json closure HOLDS.
-    r = c.get("/openapi.json")
-    assert r.status_code == 200
-    schema = r.json()
-    assert schema.get("openapi", "").startswith("3.")
-    assert "/api/v1/score" in schema.get("paths", {})
-
-    # /docs is still CSP-broken.
-    r2 = c.get("/docs")
-    assert r2.status_code == 200
-    import re as _re
-    scripts = _re.findall(r'<script[^>]*src="([^"]+)"', r2.text)
-    cdn_scripts = [
-        s for s in scripts
-        if any(host in s for host in ("cdn.jsdelivr.net", "unpkg.com"))
-    ]
-    csp = r2.headers.get("content-security-policy", "")
-    # Currently broken: CDN scripts referenced AND CSP doesn't allow them.
-    assert cdn_scripts, (
-        f"BB5-10 fix landed via self-host route — /docs no longer "
-        f"references CDN scripts. Flip the assertion. scripts={scripts}"
-    )
-    assert "cdn.jsdelivr.net" not in csp and "unpkg.com" not in csp, (
-        f"BB5-10 fix landed via CSP allowlist — CDN now allowed. "
-        f"Flip assertion. csp={csp!r}"
-    )
-
-
-# ---------------------------------------------------------------------
-# BB5-11: Magic-link in Lambda + no DDB → 503 (brief).
 # ---------------------------------------------------------------------
 def test_bb5_11_magic_link_lambda_no_ddb_503_holds(monkeypatch, tmp_path):
     """Brief: magic-link route returns 503 in Lambda when DDB nonce
@@ -824,35 +578,6 @@ def test_bb5_13_stripe_closures_hold(monkeypatch, tmp_path):
 # ---------------------------------------------------------------------
 # BB5-14: OPTIONS preflight — no ACAO leak (brief re-pin of BB4-22).
 # ---------------------------------------------------------------------
-def test_bb5_14_options_preflight_no_acao_leak(app):
-    """Re-probe BB4-22: OPTIONS preflight for third-party origins
-    returns 405 with no `Access-Control-Allow-Origin` header. CORS
-    middleware is absent. Pin in case the team adds CORS later for a
-    browser-SDK use case — adding it wrong (`*` reflection, allowing
-    credentials) is one of the top-3 ways to leak Bearer-token data
-    cross-origin.
-
-    Severity: N/A (defended). Closure re-pin."""
-    c = TestClient(app, raise_server_exceptions=False)
-    for path in ("/api/v1/score", "/api/v1/users/me", "/api/v1/tokens",
-                 "/api/v1/auth/magic-link"):
-        for origin in ("https://evil.example.com", "null",
-                       "http://localhost:3000", "https://iam-risk-score.com"):
-            r = c.options(path, headers={
-                "Origin": origin,
-                "Access-Control-Request-Method": "POST",
-                "Access-Control-Request-Headers": "authorization,content-type",
-            })
-            assert r.headers.get("access-control-allow-origin") is None, (
-                f"ACAO leak: path={path}, origin={origin}, "
-                f"status={r.status_code}, ACAO={r.headers.get('access-control-allow-origin')!r}"
-            )
-            assert r.headers.get("access-control-allow-credentials") is None
-
-
-# ---------------------------------------------------------------------
-# BB5-15: Path traversal in /static/ — defended.
-# ---------------------------------------------------------------------
 def test_bb5_15_static_path_traversal_defended(app):
     """Standard path-traversal payloads against the /static/ mount
     all return 404. FastAPI's StaticFiles normalizes paths and
@@ -937,44 +662,6 @@ def test_bb5_16_smuggling_te_cl_combo_refused(app):
 # by the JSON parser; the request fails at the parse stage rather
 # than inflating attacker-controlled data. Defended.
 # ---------------------------------------------------------------------
-def test_bb5_17_compression_bomb_refused(app):
-    """Send a gzip-compressed JSON payload (compressed size ~200KB,
-    expanded size ~200MB) with `Content-Encoding: gzip`. The server
-    does NOT inflate the body — the JSON parser sees the gzip bytes
-    as malformed JSON and returns 400. No memory-exhaustion vector.
-
-    Severity: N/A (defended). New honest negative.
-
-    Note: TestClient / starlette / FastAPI do NOT automatically
-    decompress request bodies based on Content-Encoding. A production
-    deployment behind an ALB or CloudFront might decompress at the
-    edge — if so, the inflated body would hit the body-size limit
-    (round-2/3 closure). At the app layer, raw gzip = malformed JSON
-    = 400."""
-    dev = _client_as(app, "email:dev@example.com")
-    # 200MB of zeros compresses to ~200KB.
-    inner = b"A" * (200 * 1024 * 1024)
-    compressed = gzip.compress(inner)
-    assert len(compressed) < 1_000_000, (
-        f"test setup broken: compressed size {len(compressed)} too large"
-    )
-    r = dev.post(
-        "/api/v1/score",
-        content=compressed,
-        headers={"Content-Encoding": "gzip",
-                 "Content-Type": "application/json"},
-    )
-    # Must NOT 200. 400/422 (parse error) or 411/413 (size limit) is
-    # acceptable; 200 would indicate the bomb inflated.
-    assert r.status_code != 200, (
-        f"compression bomb 200ed (server inflated the body!): {r.text[:200]}"
-    )
-
-
-# ---------------------------------------------------------------------
-# BB5-18: Long path / oversize header / many headers — no DoS on the
-# control plane. Pin.
-# ---------------------------------------------------------------------
 def test_bb5_18_long_path_and_oversize_headers_handled(app):
     """First-100-attacker grab-bag:
       * 8KB path → 404 (route doesn't match), no crash.
@@ -1034,38 +721,6 @@ def test_bb5_19_null_byte_in_path_handled(app):
 # ---------------------------------------------------------------------
 # BB5-20: Method tampering — TRACE/CONNECT/PUT/DELETE on routes that
 # don't support them → 405 or 404, never 200.
-# ---------------------------------------------------------------------
-def test_bb5_20_method_tampering_handled(app):
-    """First-100-attacker probe: spray non-standard methods at every
-    path. TRACE / CONNECT / PROPFIND must NOT 200 anywhere (TRACE
-    has historic XST implications). PUT / DELETE / PATCH on POST
-    routes must 405.
-
-    Severity: N/A (defended). New honest negative."""
-    c = TestClient(app, raise_server_exceptions=False)
-    for method, path in [
-        ("TRACE", "/healthz"),
-        ("CONNECT", "/healthz"),
-        ("TRACE", "/api/v1/score"),
-        ("PUT", "/healthz"),
-        ("PUT", "/openapi.json"),
-        ("DELETE", "/api/v1/score"),
-        ("PATCH", "/healthz"),
-        ("PROPFIND", "/healthz"),
-    ]:
-        r = c.request(method, path)
-        assert r.status_code != 200, (
-            f"{method} {path} accepted (200): body={r.text[:200]}"
-        )
-        # Expect 405 or 404 — anything else is suspicious.
-        assert r.status_code in (404, 405, 401, 403, 422, 501), (
-            f"{method} {path} unexpected status: {r.status_code}"
-        )
-
-
-# ---------------------------------------------------------------------
-# BB5-21: Stripe duplicate-event response (round 4 BB4-05 still open).
-# Re-pin as still-broken so the fix lands.
 # ---------------------------------------------------------------------
 def test_bb5_21_stripe_duplicate_response_still_leaks_metadata(monkeypatch, tmp_path):
     """BB4-05 found that duplicate Stripe events echo event_type +

@@ -71,9 +71,6 @@ def _reset_global_singletons() -> None:
     _sr.reset_default_store_for_tests()
     _fb.reset_default_store_for_tests()
     _llmb.reset_default_store_for_tests()
-    # The /api/v1/score endpoint has its own per-IP limiter.
-    from iam_jit.routes import score as _score_route
-    _score_route._reset_limiter_for_tests()
     # POST /api/v1/auth/magic-link has its own per-IP limiter.
     from iam_jit.routes import auth as _auth_route
     _auth_route._reset_magic_link_ip_limiter_for_tests()

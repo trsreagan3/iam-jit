@@ -65,15 +65,11 @@ users:
     display_name: Dev2
     roles: [requester]
 """
-
-
 @pytest.fixture(autouse=True)
 def _env(monkeypatch):
     monkeypatch.setenv("IAM_JIT_AUTH_MODE", "local")
     monkeypatch.setenv("IAM_JIT_DEV_INSECURE_SECRET", "1")
     monkeypatch.setenv("IAM_JIT_MAGIC_LINK_SECRET", _DEV_SECRET)
-
-
 @pytest.fixture(autouse=True)
 def _reset_singletons():
     """Reset module-level singletons so tests don't leak rate-limit
@@ -91,10 +87,7 @@ def _reset_singletons():
     _nonces.reset_default_store_for_tests()
     _cidrs.reset_default_store_for_tests()
     _settings.reset_default_store_for_tests()
-    from iam_jit.routes import score as _score_route
-    _score_route._reset_limiter_for_tests()
-
-
+    # (score-route limiter reset dropped 2026-05-24 — hosted scoring API removed per [[no-hosted-saas]])
 @pytest.fixture
 def app(tmp_path):
     users_yaml = tmp_path / "users.yaml"
@@ -104,15 +97,11 @@ def app(tmp_path):
         user_store=FileUserStore(str(users_yaml)),
         api_tokens_store=InMemoryAPITokenStore(),
     )
-
-
 def _client_as(app, user_id=None):
     c = TestClient(app, raise_server_exceptions=False)
     if user_id:
         c.cookies.set("iam_jit_session", auth_mod.sign_session(_DEV_SECRET, user_id))
     return c
-
-
 def _mk_request(client, description="ordinary request") -> str:
     r = client.post(
         "/api/v1/requests",
@@ -167,8 +156,6 @@ def test_bb_01_csrf_html_approve_succeeds_with_cookie_only(app):
     state = admin.get(f"/api/v1/requests/{rid}").json()["status"]["state"]
     # The CSRF "attack" succeeded — request transitioned out of pending.
     assert state in ("provisioning", "approved", "active"), state
-
-
 def test_bb_02_csrf_html_token_create_no_protection(app):
     """CSRF on token mint — POST /tokens (HTML form) creates an API
     token from a cookie-only request, leaking sensitive credentials
@@ -190,8 +177,6 @@ def test_bb_02_csrf_html_token_create_no_protection(app):
     assert r.status_code == 200, r.text
     after = dev.get("/api/v1/tokens").json()["count"]
     assert after == before + 1
-
-
 def test_bb_03_csrf_html_cancel_no_protection(app):
     """CSRF on HTML cancel — POST /requests/{id}/cancel cookie-only.
     Attacker can force-cancel an active grant request the victim is
@@ -208,8 +193,6 @@ def test_bb_03_csrf_html_cancel_no_protection(app):
     admin = _client_as(app, "email:admin@example.com")
     state = admin.get(f"/api/v1/requests/{rid}").json()["status"]["state"]
     assert state == "cancelled"
-
-
 def test_bb_04_csrf_html_token_revoke_no_protection(app):
     """CSRF on HTML token revoke — POST /tokens/{hash}/revoke cookie-only.
     Attacker can revoke the victim's CLI/agent token without warning,
@@ -712,8 +695,6 @@ def test_bb_20_xss_in_description_is_escaped(app):
         assert xss not in page, f"raw XSS leak: {xss}"
         # Verify it IS present in escaped form
         assert "&lt;" in page or "alert" in page  # at least encoded
-
-
 def test_bb_21_xss_in_comment_is_escaped(app):
     """Honest negative: comments render escaped."""
     dev = _client_as(app, "email:dev@example.com")
@@ -862,35 +843,6 @@ def test_bb_25_stripe_signature_verification_correct(app, monkeypatch):
 
 # ---------------------------------------------------------------------
 # BB-26: Score endpoint IS rate-limited (honest negative)
-# ---------------------------------------------------------------------
-def test_bb_26_score_endpoint_rate_limited(app):
-    """Honest negative: POST /api/v1/score throttles after ~30
-    requests/minute and returns 429. This is the model-cost-sink
-    endpoint and the app correctly protects it. (Magic-link, request-
-    create, etc. should mirror this — see BB-09 / BB-10.)
-
-    Severity: N/A (defended)."""
-    dev = _client_as(app, "email:dev@example.com")
-    cnt = Counter()
-    for _ in range(120):
-        r = dev.post(
-            "/api/v1/score",
-            json={
-                "description": "x",
-                "policy": {
-                    "Version": "2012-10-17",
-                    "Statement": [{"Effect": "Allow", "Action": "s3:GetObject", "Resource": "*"}],
-                },
-                "duration_hours": 1,
-                "access_type": "read-only",
-            },
-        )
-        cnt[r.status_code] += 1
-    assert cnt[429] > 0, cnt
-
-
-# ---------------------------------------------------------------------
-# BB-27: Magic-link single-use (honest negative)
 # ---------------------------------------------------------------------
 def test_bb_27_magic_link_single_use(app):
     """Honest negative: a magic-link token can only be used once. A

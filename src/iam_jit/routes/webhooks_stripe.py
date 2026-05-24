@@ -53,19 +53,20 @@ def _ses_mailer(email: str, raw_token: str, tier: str) -> None:
 
     import boto3  # imported lazily so unit tests don't need boto3
 
+    # Self-host operator template — the hosted iam-risk-score Lambda
+    # was dropped 2026-05-24 per [[no-hosted-saas]] restoration, so
+    # this email template no longer points at a public endpoint.
+    # Operators wiring Stripe to a self-hosted iam-jit deployment
+    # should customize this body to point at THEIR endpoint.
     body_text = (
-        f"Welcome to iam-risk-score — your {tier} tier is active.\n"
+        f"Welcome — your {tier} tier is active.\n"
         f"\n"
         f"Your API key (save this somewhere safe — you won't be shown it again):\n"
         f"\n"
         f"    {raw_token}\n"
         f"\n"
-        f"Use it via the Authorization header on every request:\n"
-        f"\n"
-        f"    curl https://api.iam-risk-score.com/api/v1/score \\\n"
-        f"      -H \"Authorization: Bearer {raw_token}\" \\\n"
-        f"      -H \"Content-Type: application/json\" \\\n"
-        f"      -d '{{\"policy\": {{...}}}}'\n"
+        f"Use it via the Authorization header on every request to your\n"
+        f"self-hosted iam-jit endpoint.\n"
         f"\n"
         f"Manage your subscription via the Stripe Customer Portal — link in\n"
         f"your Checkout receipt. Questions: reply to this email.\n"
@@ -74,7 +75,7 @@ def _ses_mailer(email: str, raw_token: str, tier: str) -> None:
         Source=sender,
         Destination={"ToAddresses": [email]},
         Message={
-            "Subject": {"Data": "Your iam-risk-score API key"},
+            "Subject": {"Data": "Your iam-jit API key"},
             "Body": {"Text": {"Data": body_text}},
         },
     )

@@ -19,7 +19,6 @@ import pytest
 
 from iam_jit import ddb_utils, trusted_proxy
 from iam_jit.routes import feedback as feedback_route
-from iam_jit.routes import score as score_route
 
 
 def _function_body_source(fn) -> str:
@@ -58,12 +57,9 @@ def test_wb7f_07_feedback_uses_shared_client_ip_helper() -> None:
     assert "request.client.host" not in body
 
 
-def test_wb7f_07_score_route_still_uses_shared_helper() -> None:
-    """The score-route closure has to keep using the shared helper
-    too — verifying the refactor didn't accidentally re-inline."""
-    body = _function_body_source(score_route._client_ip)
-    assert "trusted_proxy.client_ip" in body
-    assert "request.client.host" not in body
+# test_wb7f_07_score_route_still_uses_shared_helper deleted 2026-05-24
+# — the hosted /api/v1/score endpoint was removed per
+# [[no-hosted-saas]] restoration; its trusted-proxy helper went with it.
 
 
 def test_wb7f_07_helper_lives_in_one_place() -> None:

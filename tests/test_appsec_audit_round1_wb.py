@@ -33,130 +33,6 @@ import pytest
 # ---------------------------------------------------------------------------
 # 1. Score API key compared with `!=` (timing attack)
 # ---------------------------------------------------------------------------
-
-
-def test_finding_score_api_key_uses_nonconstant_time_compare() -> None:
-    """Finding: SCORE-API-KEY-TIMING.
-
-    CWE-208 (Observable Timing Discrepancy).
-    Severity: MED.
-    Location: src/iam_jit/routes/score.py:256 (`_require_api_key`).
-
-    The `score_policy` endpoint compares the user-supplied API key to
-    the configured `IAM_JIT_SCORE_API_KEY` with `if token != expected:`.
-    This is a non-constant-time comparison. Across many probes an
-    attacker can recover the key one character at a time by measuring
-    response-time deltas. Easy fix: replace with
-    `hmac.compare_digest(token, expected)`.
-    """
-    from iam_jit.routes import score as score_mod
-
-    src = inspect.getsource(score_mod._require_api_key)
-    assert "compare_digest" not in src, (
-        "score._require_api_key now uses constant-time compare — flip "
-        "this test to assert that behavior and delete this finding."
-    )
-    assert "token != expected" in src or "expected != token" in src
-
-
-# ---------------------------------------------------------------------------
-# 2. Public score endpoint trusts X-Forwarded-For for rate limiting
-# ---------------------------------------------------------------------------
-
-
-def test_finding_score_rate_limiter_trusts_unverified_xff(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """Finding: SCORE-XFF-RATELIMIT-BYPASS.
-
-    CWE-290 (Authentication Bypass by Spoofing) / CWE-348 (Use of Less
-    Trusted Source).
-    Severity: HIGH.
-    Location: src/iam_jit/routes/score.py:264-270 (`_client_ip`) +
-    line 392 (rate-limiter call site).
-
-    `_client_ip` always honors `X-Forwarded-For` if present and uses
-    the first token as the rate-limit key. The `/api/v1/score`
-    endpoint is anonymous-by-default with rate limit
-    `IAM_JIT_SCORE_RATE_PER_MINUTE` (default 30). Any caller that
-    sets an arbitrary `X-Forwarded-For` header per request bypasses
-    the rate limit entirely — `curl -H "X-Forwarded-For: 1.2.3.${N}"`
-    in a loop. WAFv2 / CloudFront in front of the Lambda may pin the
-    real client IP, but the doc string at line 220-244 of the same
-    file makes clear this is "defense-in-depth catching per-instance
-    bursts" — meaning the in-Lambda limit is meant to enforce too.
-
-    Fix: only trust XFF when the request arrives through a trusted
-    proxy (CloudFront / ALB), using the same env-gated logic as
-    `network_acl.py` (IAM_JIT_TRUST_FORWARDED_FOR). When un-trusted,
-    rate-key on `request.client.host` only.
-    """
-    from fastapi.testclient import TestClient
-
-    from iam_jit.app import create_app
-    from iam_jit.api_tokens_store import InMemoryAPITokenStore
-    from iam_jit.routes import score as score_mod
-    from iam_jit.store import FilesystemStore
-    from iam_jit.users_store import FileUserStore
-
-    # Tight cap so the test trips it quickly.
-    monkeypatch.setenv("IAM_JIT_SCORE_RATE_PER_MINUTE", "3")
-    monkeypatch.setenv("IAM_JIT_AUTH_MODE", "local")
-    monkeypatch.setenv("IAM_JIT_DEV_INSECURE_SECRET", "1")
-    monkeypatch.setenv("IAM_JIT_MAGIC_LINK_SECRET", "x" * 40)
-    score_mod._reset_limiter_for_tests()
-
-    import pathlib
-    import tempfile
-
-    tmp = pathlib.Path(tempfile.mkdtemp())
-    users_yaml = tmp / "u.yaml"
-    users_yaml.write_text(
-        "schema_version: 1\nauth_mode: local\nusers:\n"
-        "  - id: email:a@b.c\n    roles: [requester]\n"
-    )
-
-    app = create_app(
-        request_store=FilesystemStore(tmp / "requests"),
-        user_store=FileUserStore(str(users_yaml)),
-        api_tokens_store=InMemoryAPITokenStore(),
-    )
-    client = TestClient(app)
-
-    body = {
-        "policy": {
-            "Version": "2012-10-17",
-            "Statement": [{"Effect": "Allow", "Action": "s3:GetObject", "Resource": "*"}],
-        }
-    }
-
-    # Same physical client. By rotating only the XFF, we never hit the
-    # cap — proving the limiter is keyed on attacker-controlled input.
-    statuses: list[int] = []
-    for i in range(12):
-        r = client.post(
-            "/api/v1/score",
-            json=body,
-            headers={"X-Forwarded-For": f"203.0.113.{i}"},
-        )
-        statuses.append(r.status_code)
-
-    # FIXED — XFF is no longer trusted by default for rate-limit
-    # keying. Rotating the header per request no longer bypasses the
-    # limit (3 in this test). All requests share `request.client.host`
-    # so the cap kicks in after request 3.
-    over_cap = [s for s in statuses[3:] if s == 429]
-    assert len(over_cap) >= 5, (
-        f"Expected XFF rotation to be rate-limited, but got: {statuses}. "
-        f"If this is failing, the XFF-trust default may have regressed."
-    )
-
-
-# ---------------------------------------------------------------------------
-# 3. Bearer-token parsing: control whitespace tolerance
-# ---------------------------------------------------------------------------
-
-
 def test_finding_bearer_parsing_split_on_single_space() -> None:
     """Finding: BEARER-PARSE-SPLIT-NORMALIZATION.
 
@@ -196,8 +72,6 @@ def test_finding_bearer_parsing_split_on_single_space() -> None:
 # 4. magic-link nonce store is in-memory only (not shared across Lambda
 #    instances)
 # ---------------------------------------------------------------------------
-
-
 def test_finding_magic_link_nonce_store_in_memory_only(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -238,8 +112,6 @@ def test_finding_magic_link_nonce_store_in_memory_only(
 # ---------------------------------------------------------------------------
 # 5. Bans store in-memory by default — also multi-instance hole
 # ---------------------------------------------------------------------------
-
-
 def test_finding_bans_store_in_memory_default(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -277,8 +149,6 @@ def test_finding_bans_store_in_memory_default(
 # 6. Rate limiter is per-Lambda-instance (acknowledged in code, restated
 #    here so the finding has a single canonical record)
 # ---------------------------------------------------------------------------
-
-
 def test_finding_rate_limiter_in_memory_per_instance() -> None:
     """Finding: RATE-LIMIT-MULTI-INSTANCE-BYPASS.
 
@@ -308,8 +178,6 @@ def test_finding_rate_limiter_in_memory_per_instance() -> None:
 # ---------------------------------------------------------------------------
 # 7. Stripe webhook is not idempotent — same event mints multiple tokens
 # ---------------------------------------------------------------------------
-
-
 def test_finding_stripe_webhook_not_idempotent() -> None:
     """Finding: STRIPE-NO-IDEMPOTENCY.
 
@@ -378,8 +246,6 @@ def test_finding_stripe_webhook_not_idempotent() -> None:
 # ---------------------------------------------------------------------------
 # 8. Stripe webhook error response leaks signature-failure detail
 # ---------------------------------------------------------------------------
-
-
 def test_finding_stripe_webhook_leaks_signature_failure_detail() -> None:
     """Finding: STRIPE-VERBOSE-SIGNATURE-ERROR.
 
@@ -412,8 +278,6 @@ def test_finding_stripe_webhook_leaks_signature_failure_detail() -> None:
 # ---------------------------------------------------------------------------
 # 9. CSRF: state-changing web routes accept session cookie with no token
 # ---------------------------------------------------------------------------
-
-
 def test_finding_web_state_changing_routes_have_no_csrf_token() -> None:
     """Finding: WEB-NO-CSRF-TOKEN.
 
@@ -464,8 +328,6 @@ def test_finding_web_state_changing_routes_have_no_csrf_token() -> None:
 # ---------------------------------------------------------------------------
 # 10. Magic-link delivery via CloudWatch logs (production no-SES mode)
 # ---------------------------------------------------------------------------
-
-
 def test_finding_magic_link_logged_in_plaintext(
     monkeypatch: pytest.MonkeyPatch, caplog
 ) -> None:
@@ -522,8 +384,6 @@ def test_finding_magic_link_logged_in_plaintext(
 # 11. Token route exposes full token_hash to listing API (sensitive lookup
 #     key)
 # ---------------------------------------------------------------------------
-
-
 def test_finding_token_list_exposes_full_hash() -> None:
     """Finding: TOKEN-HASH-DISCLOSURE.
 
@@ -553,8 +413,6 @@ def test_finding_token_list_exposes_full_hash() -> None:
 # ---------------------------------------------------------------------------
 # 12. External-id for cross-account assume is deterministic per account
 # ---------------------------------------------------------------------------
-
-
 def test_finding_external_id_is_predictable_per_account() -> None:
     """Finding: EXTERNAL-ID-PREDICTABLE.
 
@@ -590,8 +448,6 @@ def test_finding_external_id_is_predictable_per_account() -> None:
 # ---------------------------------------------------------------------------
 # 13. Audit-log writer swallows OSError silently (chain integrity gap)
 # ---------------------------------------------------------------------------
-
-
 def test_finding_audit_emit_swallows_disk_write_failure() -> None:
     """Finding: AUDIT-WRITE-SILENT-FAILURE.
 
@@ -630,8 +486,6 @@ def test_finding_audit_emit_swallows_disk_write_failure() -> None:
 # ---------------------------------------------------------------------------
 # 14. /api/v1/auth/magic-link has no rate limit
 # ---------------------------------------------------------------------------
-
-
 def test_finding_magic_link_json_endpoint_has_no_rate_limit() -> None:
     """Finding: MAGIC-LINK-JSON-NO-RATELIMIT.
 
@@ -672,8 +526,6 @@ def test_finding_magic_link_json_endpoint_has_no_rate_limit() -> None:
 # ---------------------------------------------------------------------------
 # 15. CIDR allowlist allows last-entry removal when allowlist is empty
 # ---------------------------------------------------------------------------
-
-
 def test_finding_admin_cidr_remove_route_has_admin_check_only_via_dependency() -> None:
     """Finding: CIDR-REMOVE-NO-AUDIT-ON-EMPTY-START.
 
@@ -705,8 +557,6 @@ def test_finding_admin_cidr_remove_route_has_admin_check_only_via_dependency() -
 # 16. extract_iam_principal trusts event.requestContext.authorizer.iam.userArn
 #     without validating shape strongly
 # ---------------------------------------------------------------------------
-
-
 def test_finding_extract_iam_principal_minimal_validation() -> None:
     """Finding: IAM-PRINCIPAL-WEAK-VALIDATION.
 
@@ -746,8 +596,6 @@ def test_finding_extract_iam_principal_minimal_validation() -> None:
 # ---------------------------------------------------------------------------
 # 17. Stripe handler ties `user_id` to customer-supplied email
 # ---------------------------------------------------------------------------
-
-
 def test_finding_stripe_handler_uses_email_as_user_id() -> None:
     """Finding: STRIPE-EMAIL-COLLISION.
 
@@ -799,8 +647,6 @@ def test_finding_stripe_handler_uses_email_as_user_id() -> None:
 # ---------------------------------------------------------------------------
 # 18. MCP server has no per-message size limit
 # ---------------------------------------------------------------------------
-
-
 def test_finding_mcp_server_no_message_size_limit() -> None:
     """Finding: MCP-NO-MESSAGE-CAP.
 
@@ -831,37 +677,6 @@ def test_finding_mcp_server_no_message_size_limit() -> None:
 # ---------------------------------------------------------------------------
 # 19. Score route returns full Pydantic ValidationError detail (info disclosure)
 # ---------------------------------------------------------------------------
-
-
-def test_finding_score_error_path_returns_exception_repr() -> None:
-    """Finding: SCORE-EXC-REPR-LEAK.
-
-    CWE-209 (Information Exposure Through an Error Message).
-    Severity: LOW.
-    Location: src/iam_jit/routes/score.py:504-511.
-
-    On scorer crash, the endpoint returns
-    `detail=f"could not score policy: {type(e).__name__}: {e}"`.
-    For an internal exception this leaks the class name and string
-    repr — useful for an attacker reverse-engineering which input
-    shapes break the scorer. The scorer is documented as "supposed
-    to be defensive" so any crash is also a latent reliability bug;
-    leaking the message hints at where it lives.
-
-    Fix: log the exception server-side; return a generic
-    `"could not score policy"` (HTTP 400) to the caller.
-    """
-    from iam_jit.routes import score as score_mod
-
-    src = inspect.getsource(score_mod.score_policy)
-    assert 'detail=f"could not score policy: {type(e).__name__}: {e}"' in src
-
-
-# ---------------------------------------------------------------------------
-# 20. Session cookie max-age == 24h with no idle timeout
-# ---------------------------------------------------------------------------
-
-
 def test_finding_session_cookie_no_idle_timeout() -> None:
     """Finding: SESSION-NO-IDLE-TIMEOUT.
 
@@ -894,8 +709,6 @@ def test_finding_session_cookie_no_idle_timeout() -> None:
 # 21. Audit log path is reader-readable on misconfig (0o600 only if open
 #     succeeds with that mode flag)
 # ---------------------------------------------------------------------------
-
-
 def test_finding_audit_file_mode_applies_only_at_creation() -> None:
     """Finding: AUDIT-FILE-MODE-FOOTGUN.
 
@@ -925,8 +738,6 @@ def test_finding_audit_file_mode_applies_only_at_creation() -> None:
 # ---------------------------------------------------------------------------
 # 22. health endpoint exposes deployment posture without auth
 # ---------------------------------------------------------------------------
-
-
 def test_finding_healthz_leaks_deployment_posture_unauthenticated() -> None:
     """Finding: HEALTHZ-POSTURE-LEAK.
 
@@ -963,8 +774,6 @@ def test_finding_healthz_leaks_deployment_posture_unauthenticated() -> None:
 # 23. policy/analyze route loads arbitrary policy dict without size cap
 #     beyond the app-level 256 KiB
 # ---------------------------------------------------------------------------
-
-
 def test_finding_policy_analyze_no_per_field_caps() -> None:
     """Finding: POLICY-ANALYZE-NO-PER-FIELD-CAP.
 
@@ -997,8 +806,6 @@ def test_finding_policy_analyze_no_per_field_caps() -> None:
 # ---------------------------------------------------------------------------
 # 24. tokens.create_token allows label of unbounded length
 # ---------------------------------------------------------------------------
-
-
 def test_finding_token_label_unbounded() -> None:
     """Finding: TOKEN-LABEL-UNBOUNDED.
 

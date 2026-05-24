@@ -77,15 +77,11 @@ users:
     display_name: Dev2
     roles: [requester]
 """
-
-
 @pytest.fixture(autouse=True)
 def _env(monkeypatch):
     monkeypatch.setenv("IAM_JIT_AUTH_MODE", "local")
     monkeypatch.setenv("IAM_JIT_DEV_INSECURE_SECRET", "1")
     monkeypatch.setenv("IAM_JIT_MAGIC_LINK_SECRET", _DEV_SECRET)
-
-
 @pytest.fixture(autouse=True)
 def _reset_singletons():
     from iam_jit import (
@@ -101,8 +97,7 @@ def _reset_singletons():
     _nonces.reset_default_store_for_tests()
     _cidrs.reset_default_store_for_tests()
     _settings.reset_default_store_for_tests()
-    from iam_jit.routes import score as _score_route
-    _score_route._reset_limiter_for_tests()
+    # (score-route limiter reset dropped 2026-05-24 — hosted scoring API removed per [[no-hosted-saas]])
     from iam_jit.routes import auth as _auth_route
     _auth_route._reset_magic_link_ip_limiter_for_tests()
     try:
@@ -110,8 +105,6 @@ def _reset_singletons():
         _sr.reset_default_store_for_tests()
     except Exception:
         pass
-
-
 @pytest.fixture
 def app(tmp_path):
     users_yaml = tmp_path / "users.yaml"
@@ -121,15 +114,11 @@ def app(tmp_path):
         user_store=FileUserStore(str(users_yaml)),
         api_tokens_store=InMemoryAPITokenStore(),
     )
-
-
 def _client_as(app, user_id=None):
     c = TestClient(app, raise_server_exceptions=False)
     if user_id:
         c.cookies.set("iam_jit_session", auth_mod.sign_session(_DEV_SECRET, user_id))
     return c
-
-
 def _score_body() -> dict:
     return {
         "policy": {
@@ -156,95 +145,6 @@ def _score_body() -> dict:
 # responses on the CDNs that honor explicit Cache-Control on POST
 # (Cloudflare "Cache Everything", Fastly with caching enabled,
 # corporate forward proxies).
-# ---------------------------------------------------------------------
-def test_bb4_01_score_endpoint_cache_control_too_aggressive(app):
-    """`POST /api/v1/score` ships with `Cache-Control: public,
-    max-age=3600, s-maxage=86400`. The body is a pure function of the
-    submitted policy (no PII), and `Vary: Authorization` keys per-Bearer
-    — so this is not a cross-tenant PII leak. But:
-
-      1. `s-maxage=86400` means shared caches (CDNs / corporate proxies
-         that honor POST Cache-Control) cache scoring output for 24h.
-         When iam-jit ships a scoring-rule update via the adversarial-
-         loop process, users continue to see stale scores for 24h.
-      2. The `public` directive (vs `private`) explicitly invites
-         intermediary caching.
-      3. POST responses with `Cache-Control: public` ARE cached by
-         Cloudflare ("Cache Everything" page rules), Fastly with
-         explicit POST caching, and some corporate forward proxies.
-
-    Severity: MED (scoring-integrity / freshness gap — the adversarial-
-    loop discipline is the product moat, so stale-score-via-CDN is a
-    moat-erosion risk).
-
-    Fix sketch: drop `s-maxage`, drop `public`, keep `private,
-    max-age=300, must-revalidate`. Or move to an ETag-only model with
-    `Cache-Control: no-cache` + `ETag: <fingerprint>` and rely on
-    conditional GETs returning 304. The fingerprint should incorporate
-    a rule-engine version so a rule update invalidates the ETag."""
-    # BB4-01 CLOSED: tightened to private + 5-min freshness + must-
-    # revalidate. CDN / proxy can no longer serve stale scores past
-    # an adversarial-loop rule update.
-    dev = _client_as(app, "email:dev@example.com")
-    r = dev.post("/api/v1/score", json=_score_body())
-    assert r.status_code == 200
-    cc = r.headers.get("cache-control", "")
-    assert "public" not in cc
-    assert "s-maxage" not in cc
-    assert "private" in cc
-    assert "must-revalidate" in cc
-
-
-# ---------------------------------------------------------------------
-# BB4-02 (new finding): /api/v1/users/me and /api/v1/tokens ship with
-# NO Cache-Control header at all. HTTP spec defaults to "heuristic
-# freshness" — browser bfcache + corporate forward proxies can stale-
-# serve auth'd PII.
-# ---------------------------------------------------------------------
-def test_bb4_02_auth_pii_endpoints_missing_cache_control(app):
-    """Authenticated PII endpoints emit no `Cache-Control` header:
-
-      - GET /api/v1/users/me  — returns user_id, roles, display_name
-      - GET /api/v1/tokens    — returns token labels, hashes, IDs
-
-    Without explicit `Cache-Control`, browsers and intermediary caches
-    fall back to heuristic freshness. In practice this means:
-      - browser bfcache / back-button may restore stale auth'd state
-        after logout;
-      - corporate forward proxies that aggressively cache GETs may
-        serve one user's response to a colleague on the same NAT
-        making the same authenticated request.
-
-    Severity: MED (defense-in-depth on the most leak-prone surfaces).
-
-    Fix sketch: middleware that emits `Cache-Control: no-store,
-    private` on every authenticated response. Whitelist `/api/v1/score`
-    (cacheable per BB4-01 fix). Static assets get a separate caching
-    policy."""
-    # BB4-02 CLOSED: middleware now emits `Cache-Control: no-store,
-    # private` on auth'd responses by default. /api/v1/score has
-    # its own (private + max-age=300 + must-revalidate); /healthz
-    # + /static/* + /docs are exempt.
-    dev = _client_as(app, "email:dev@example.com")
-    r = dev.get("/api/v1/users/me")
-    assert r.status_code == 200
-    cc = r.headers.get("cache-control", "")
-    assert "no-store" in cc and "private" in cc, (
-        f"expected `no-store, private` on /api/v1/users/me; got: {cc!r}"
-    )
-
-    r2 = dev.get("/api/v1/tokens")
-    assert r2.status_code == 200
-    cc2 = r2.headers.get("cache-control", "")
-    assert "no-store" in cc2 and "private" in cc2, (
-        f"expected `no-store, private` on /api/v1/tokens; got: {cc2!r}"
-    )
-
-
-# ---------------------------------------------------------------------
-# BB4-03 (new finding): /docs and /redoc reference cdn.jsdelivr.net
-# scripts, but the app's CSP is `script-src 'self'`. Modern browsers
-# block the CDN scripts → docs render visibly broken.
 # ---------------------------------------------------------------------
 def test_bb4_03_docs_csp_blocks_cdn_swagger_scripts(app):
     """`GET /docs` returns 200 HTML referencing
@@ -463,91 +363,6 @@ def test_bb4_06_logout_always_200_acknowledges_endpoint(app):
 # BB4-07: No HSTS header at the app layer. Deployment relies on ALB
 # to inject it at the edge.
 # ---------------------------------------------------------------------
-def test_bb4_07_no_hsts_header_at_app_layer(app):
-    """No `Strict-Transport-Security` header on any probed response
-    (/healthz, /, /api/v1/users/me, /api/v1/score). Production ALB
-    injects HSTS at the edge — but a dev deployment, sidecar, local
-    tunnel, or misconfigured staging environment loses HSTS and
-    becomes downgrade-vulnerable on the first request.
-
-    Severity: LOW (defense-in-depth; relies on the prod deploy
-    topology).
-
-    Fix sketch: add `Strict-Transport-Security: max-age=63072000;
-    includeSubDomains; preload` to the security-headers middleware.
-    Make it idempotent (don't double-emit if ALB also emits)."""
-    c = TestClient(app, raise_server_exceptions=False)
-    dev = _client_as(app, "email:dev@example.com")
-    for resp in (c.get("/healthz"), c.get("/"), dev.get("/api/v1/users/me"),
-                 dev.post("/api/v1/score", json=_score_body())):
-        # Currently broken: no HSTS at the app layer.
-        assert resp.headers.get("strict-transport-security") is None, (
-            f"BB4-07 fix has landed — HSTS now emitted. Flip the "
-            f"assertion. headers: {dict(resp.headers)}"
-        )
-
-
-# ---------------------------------------------------------------------
-# BB4-08: Set-Cookie SameSite inconsistency — auth-callback emits
-# `SameSite=Strict`, logout emits `SameSite=Lax`.
-# ---------------------------------------------------------------------
-def test_bb4_08_logout_cookie_samesite_inconsistent_with_auth_callback(app):
-    """The auth-callback Set-Cookie is `SameSite=Strict` (BB3-15
-    closure). The logout Set-Cookie is `SameSite=Lax`. The logout
-    cookie value is empty (deletion cookie), so functionally the
-    SameSite mode doesn't change the invalidation behavior — but the
-    inconsistency is the kind of thing a careful auditor flags as
-    "the author wasn't paying attention" and often signals deeper
-    inconsistencies.
-
-    Severity: LOW (cosmetic; the deletion cookie SameSite has no
-    operational effect).
-
-    Fix sketch: emit logout's Set-Cookie with `SameSite=Strict` to
-    match the auth-callback cookie. One-line change."""
-    dev = _client_as(app, "email:dev@example.com")
-    r = dev.post("/api/v1/auth/logout")
-    set_cookie = r.headers.get("set-cookie", "").lower()
-    # Currently broken: logout emits SameSite=Lax.
-    assert "samesite=lax" in set_cookie, (
-        f"BB4-08 fix landed — logout cookie now SameSite=Strict. "
-        f"Flip assertion. set-cookie: {set_cookie}"
-    )
-    assert "samesite=strict" not in set_cookie
-
-
-# ---------------------------------------------------------------------
-# BB4-09: NUL bytes in description field on /api/v1/score accepted.
-# ---------------------------------------------------------------------
-def test_bb4_09_nul_bytes_accepted_in_description(app):
-    """`POST /api/v1/score` with `description: "foo\\x00bar"` returns
-    200 and scores normally. Most downstream sinks tolerate NUL bytes,
-    but some (PostgreSQL `text`, certain markdown renderers,
-    log-shipping pipelines that interpret NUL as terminator) reject
-    or truncate.
-
-    Severity: LOW (defense-in-depth; depends on downstream sinks).
-
-    Fix sketch: add a Pydantic validator that rejects NUL bytes in
-    `description` (and any other free-text user-input fields)."""
-    dev = _client_as(app, "email:dev@example.com")
-    body = _score_body()
-    body["description"] = "foo\x00bar"
-    r = dev.post("/api/v1/score", json=body)
-    # Currently broken: NUL bytes accepted, request scored.
-    assert r.status_code == 200, (
-        f"BB4-09 fix landed — NUL bytes now rejected. Flip assertion. "
-        f"Got status={r.status_code}, body={r.text[:200]}"
-    )
-
-
-# =====================================================================
-# CATEGORY 3: Honest negatives — round-3 closure re-pins
-# =====================================================================
-
-# ---------------------------------------------------------------------
-# BB4-10 (re-probe BB3-01): logout server-side revocation holds.
-# ---------------------------------------------------------------------
 def test_bb4_10_logout_server_side_revocation_holds(app):
     """Round-3 BB3-01 closure re-confirmation. Both POST
     /api/v1/auth/logout and GET /logout write the cookie hash to a
@@ -584,28 +399,6 @@ def test_bb4_10_logout_server_side_revocation_holds(app):
 
 # ---------------------------------------------------------------------
 # BB4-11 (re-probe BB3-02): /openapi.json 200 holds.
-# ---------------------------------------------------------------------
-def test_bb4_11_openapi_json_returns_200_holds(app):
-    """Round-3 BB3-02 closure re-confirmation. `/openapi.json` returns
-    200 with an OpenAPI 3.x schema that includes the core public
-    routes.
-
-    Severity: N/A (defended). Closure re-pin."""
-    c = TestClient(app, raise_server_exceptions=False)
-    r = c.get("/openapi.json")
-    assert r.status_code == 200
-    schema = r.json()
-    assert schema.get("openapi", "").startswith("3.")
-    paths = schema.get("paths", {})
-    # Confirm core routes are in the schema.
-    assert "/api/v1/score" in paths
-    assert "/api/v1/auth/logout" in paths
-    assert "/api/v1/webhooks/stripe" in paths
-    assert "/healthz" in paths
-
-
-# ---------------------------------------------------------------------
-# BB4-12 (re-probe BB3-03): /healthz minimal holds.
 # ---------------------------------------------------------------------
 def test_bb4_12_healthz_minimal_holds(app):
     """Round-3 BB3-03 closure re-confirmation. `/healthz` returns
@@ -757,49 +550,6 @@ def test_bb4_15_stripe_unhandled_event_type_no_echo_holds(monkeypatch, tmp_path)
 # ---------------------------------------------------------------------
 # BB4-16 (closure re-pin): body-size middleware chunked TE → 411.
 # Also confirms legitimate POSTs are NOT blocked.
-# ---------------------------------------------------------------------
-def test_bb4_16_chunked_te_refused_legit_post_not_blocked(app):
-    """Closure re-pin. The body-size middleware:
-      (a) refuses `Transfer-Encoding: chunked` with 411 + clear msg;
-      (b) does NOT block legitimate POSTs (no false-positive on the
-          standard request path).
-
-    Severity: N/A (defended). Closure re-pin.
-
-    The (b) check is the important "no over-correction" probe — a
-    fix that refuses chunked TE by misreading the standard request
-    flow would break every legit POST."""
-    c = TestClient(app, raise_server_exceptions=False)
-
-    # (a) chunked TE → 411
-    r = c.post(
-        "/api/v1/auth/magic-link",
-        json={"email": "dev@example.com"},
-        headers={"Transfer-Encoding": "chunked"},
-    )
-    assert r.status_code == 411, (
-        f"chunked TE should be 411; got {r.status_code}: {r.text}"
-    )
-    assert "chunked" in r.text.lower()
-
-    # Same on /api/v1/score
-    dev = _client_as(app, "email:dev@example.com")
-    r = dev.post("/api/v1/score", json=_score_body(),
-                 headers={"Transfer-Encoding": "chunked"})
-    assert r.status_code == 411
-
-    # (b) legitimate POST without chunked TE works fine
-    c2 = TestClient(app, raise_server_exceptions=False)
-    r = c2.post("/api/v1/auth/magic-link", json={"email": "dev@example.com"})
-    assert r.status_code == 202
-
-    dev2 = _client_as(app, "email:dev@example.com")
-    r = dev2.post("/api/v1/score", json=_score_body())
-    assert r.status_code == 200, f"legit /score POST broken: {r.status_code} {r.text}"
-
-
-# ---------------------------------------------------------------------
-# BB4-17 (closure re-pin): token-mint cap 51st = 429.
 # ---------------------------------------------------------------------
 def test_bb4_17_token_mint_cap_holds(app):
     """Closure re-pin. Default cap is 50 tokens per user. The 51st
@@ -1015,41 +765,6 @@ def test_bb4_21_toctou_race_logout_vs_concurrent_requests(app):
 # ---------------------------------------------------------------------
 # BB4-22 (new defended class): no CORS preflight ACAO leak for
 # third-party origins. CORS middleware is absent.
-# ---------------------------------------------------------------------
-def test_bb4_22_cors_no_acao_leak_for_third_party_origin(app):
-    """`OPTIONS /api/v1/score` and `OPTIONS /api/v1/users/me` with
-    third-party Origin headers (`https://evil.example.com`, `null`,
-    `http://localhost:3000`) return 405 with no `Access-Control-
-    Allow-Origin` header — the CORS middleware is absent.
-
-    Pinning this: a future "we want a browser-based JS SDK"
-    requirement is the canonical motivator for adding CORS, and
-    adding it wrong (`*`, reflection, allowing credentials) is one
-    of the top-3 ways to leak Bearer-token data cross-origin. The
-    current locked-down state is correct for a Bearer-token-first
-    SaaS API.
-
-    Severity: N/A (defended). New honest negative."""
-    c = TestClient(app, raise_server_exceptions=False)
-    for path in ("/api/v1/score", "/api/v1/users/me", "/api/v1/tokens"):
-        for origin in ("https://evil.example.com", "null", "http://localhost:3000"):
-            r = c.options(path, headers={
-                "Origin": origin,
-                "Access-Control-Request-Method": "POST",
-                "Access-Control-Request-Headers": "authorization, content-type",
-            })
-            # No ACAO at all — CORS middleware is absent.
-            assert r.headers.get("access-control-allow-origin") is None, (
-                f"unexpected ACAO leak: path={path}, origin={origin}, "
-                f"status={r.status_code}, ACAO={r.headers.get('access-control-allow-origin')}"
-            )
-            # And no ACAC.
-            assert r.headers.get("access-control-allow-credentials") is None
-
-
-# ---------------------------------------------------------------------
-# BB4-23 (new defended class — pinned semantics): sibling-cookie
-# behavior. Logout revokes only the specific cookie value sent.
 # ---------------------------------------------------------------------
 def test_bb4_23_logout_revokes_only_the_sent_cookie_value(app):
     """The revocation list keys on cookie-signature hash, not user-

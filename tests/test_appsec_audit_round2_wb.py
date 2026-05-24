@@ -38,8 +38,6 @@ import pytest
 #    concurrent webhook redelivery. Two redeliveries arriving in parallel
 #    can both see has_processed=False and both run the handler.
 # ---------------------------------------------------------------------------
-
-
 def test_finding_stripe_idempotency_toctou_under_concurrency() -> None:
     """Finding: STRIPE-IDEMPOTENCY-TOCTOU — CLOSED.
 
@@ -140,74 +138,6 @@ def test_finding_stripe_idempotency_toctou_under_concurrency() -> None:
 #    behind a trusted proxy. The proxy APPENDS the real client to the
 #    right; the leftmost token came from the attacker.
 # ---------------------------------------------------------------------------
-
-
-def test_finding_xff_leftmost_attacker_controlled_behind_trusted_proxy(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """Finding: SCORE-XFF-LEFTMOST-TRUSTED — CLOSED.
-
-    CWE-348 (Use of Less Trusted Source).
-    Severity: HIGH.
-    Location: src/iam_jit/routes/score.py — `_client_ip`.
-
-    Closure: when the immediate peer is in a configured trusted CIDR,
-    we now walk XFF RIGHT-TO-LEFT, skipping any tokens that fall in
-    `IAM_JIT_TRUSTED_PROXY_CIDRS`. The first non-trusted IP from the
-    right is the real client. Standard pattern (mirrors Django's
-    `SECURE_PROXY_SSL_HEADER` and AWS WAF `forwarded_ip_config`
-    docs).
-
-    Functional test below confirms the live behavior: an attacker
-    that spoofs `XFF: <victim-ip>` from behind a CloudFront-style
-    proxy now gets keyed on the proxy-appended IP, not on the
-    attacker-supplied leftmost token.
-    """
-    from iam_jit.routes import score as score_mod
-    from iam_jit import trusted_proxy as _tp
-
-    src = inspect.getsource(score_mod._client_ip)
-    # New shape: delegates to the shared trusted_proxy helper.
-    assert 'xff.split(",")[0].strip()' not in src, (
-        "_client_ip still takes the leftmost XFF token — regression"
-    )
-    assert "trusted_proxy" in src, (
-        "_client_ip should delegate to the shared trusted_proxy helper"
-    )
-    # The shared helper walks right-to-left.
-    helper_src = inspect.getsource(_tp.real_client_from_xff)
-    assert "reversed(" in helper_src
-
-    # Functional check: simulate the exact CloudFront-in-front-of-
-    # Lambda topology the audit described. Trusted proxy CIDR
-    # 10.0.0.0/8, immediate peer 10.0.0.5 (proxy), attacker-supplied
-    # XFF leftmost token 203.0.113.99, real-client appended at right
-    # as 198.51.100.7.
-    monkeypatch.setenv("IAM_JIT_TRUST_FORWARDED_FOR_FOR_SCORE", "1")
-    monkeypatch.setenv("IAM_JIT_TRUSTED_PROXY_CIDRS", "10.0.0.0/8")
-
-    class _FakeClient:
-        host = "10.0.0.5"
-
-    class _FakeRequest:
-        client = _FakeClient()
-        headers = {"x-forwarded-for": "203.0.113.99, 198.51.100.7"}
-
-    resolved = score_mod._client_ip(_FakeRequest())  # type: ignore[arg-type]
-    assert resolved == "198.51.100.7", (
-        f"expected the right-most non-trusted IP (198.51.100.7) to be "
-        f"the resolved client; got {resolved!r}"
-    )
-
-
-# ---------------------------------------------------------------------------
-# 3. XFF fix — IPv4-mapped IPv6 peer never matches an IPv4 trusted CIDR
-#    (operator wires "10.0.0.0/8" thinking it covers all 10.x clients,
-#    but the immediate peer arrives as "::ffff:10.x.y.z" and the
-#    ipaddress lib returns False on cross-family `in` checks).
-# ---------------------------------------------------------------------------
-
-
 def test_finding_xff_ipv4_mapped_ipv6_silently_rejects_trust() -> None:
     """Finding: SCORE-XFF-IPV4MAPPED-IPV6.
 
@@ -243,8 +173,6 @@ def test_finding_xff_ipv4_mapped_ipv6_silently_rejects_trust() -> None:
 #    atomic. Two concurrent claim POSTs with the valid email+key both
 #    pass the check then both write, producing N successful claims.
 # ---------------------------------------------------------------------------
-
-
 def test_finding_bootstrap_claim_toctou_race() -> None:
     """Finding: BOOTSTRAP-CLAIM-TOCTOU.
 
@@ -364,8 +292,6 @@ def test_finding_bootstrap_claim_toctou_race() -> None:
 # ---------------------------------------------------------------------------
 # 5. Middleware ban-check fails open on store exception
 # ---------------------------------------------------------------------------
-
-
 def test_finding_middleware_ban_check_fails_open_on_store_error() -> None:
     """Finding: BAN-CHECK-FAIL-OPEN — CLOSED.
 
@@ -393,8 +319,6 @@ def test_finding_middleware_ban_check_fails_open_on_store_error() -> None:
 # ---------------------------------------------------------------------------
 # 6. FilesystemBanStore swallows corrupted-JSON file as "not banned"
 # ---------------------------------------------------------------------------
-
-
 def test_finding_filesystem_ban_store_treats_corrupt_file_as_not_banned(
     tmp_path,
 ) -> None:
@@ -458,53 +382,6 @@ def test_finding_filesystem_ban_store_treats_corrupt_file_as_not_banned(
 # ---------------------------------------------------------------------------
 # 7. MCP server task description has no length cap
 # ---------------------------------------------------------------------------
-
-
-def test_finding_mcp_generate_no_task_description_cap() -> None:
-    """Finding: MCP-TASK-DESCRIPTION-UNBOUNDED.
-
-    CWE-770 (Allocation of Resources Without Limits or Throttling).
-    Severity: LOW (stdio transport; local-trust — but worth bounding).
-    Location: src/iam_jit/mcp_server.py:157-200 (`_generate_for_mcp`),
-    src/iam_jit/policy_gen/result.py:101 (`GenerationRequest.task_description`).
-
-    NOTE 2026-05-16: closed by deletion in [[no-nl-synthesis]]
-    Stage 3 (iam-jit 0.4.0). The policy_gen package is gone;
-    generate_iam_policy is a tombstone that returns null policy
-    + deprecation block. No task-description path exists to bound.
-
-    `_generate_for_mcp` accepts `args["task"]` as any non-empty
-    string — no length cap. The pattern matcher then tokenizes the
-    full string (re.findall over `[a-z0-9*][a-z0-9*\\-_]*`) and the
-    resource extractor runs every `_NAME_PATTERNS` regex against it.
-    Round-1's `MCP-NO-MESSAGE-CAP` covers the per-LINE cap on the
-    transport; this is the per-FIELD cap on the protocol payload,
-    which a 1 KB line can still spike via a single 900-byte `task`.
-
-    For the parallel HTTP `/api/v1/score` finding
-    (`POLICY-ANALYZE-NO-PER-FIELD-CAP`, round 1 #23) the score
-    request's `description` already has `max_length=500` —
-    `policy_gen` doesn't.
-
-    Fix sketch: cap `task` at 2000 chars; refuse with `-32602`
-    invalid-params if exceeded.
-    """
-    import pytest
-    pytest.skip(
-        "closed by deletion: policy_gen package removed in 0.4.0 "
-        "([[no-nl-synthesis]] Stage 3); finding documents historical "
-        "state. The replacement tools (list_templates, get_template, "
-        "submit_policy) carry their own input validation tested in "
-        "test_mcp_template_tools.py."
-    )
-
-
-# ---------------------------------------------------------------------------
-# 8. MCP server leaks internal exception detail in JSON-RPC error
-#    response
-# ---------------------------------------------------------------------------
-
-
 def test_finding_mcp_internal_error_leaks_exception_repr() -> None:
     """Finding: MCP-INTERNAL-ERROR-LEAK.
 
@@ -534,8 +411,6 @@ def test_finding_mcp_internal_error_leaks_exception_repr() -> None:
 # 9. MCP server: account_id / region / partition are interpolated into
 #    ARNs without validation
 # ---------------------------------------------------------------------------
-
-
 def test_finding_mcp_arn_segments_unvalidated() -> None:
     """Finding: MCP-ARN-SEGMENT-INJECTION.
 
@@ -572,8 +447,6 @@ def test_finding_mcp_arn_segments_unvalidated() -> None:
 # ---------------------------------------------------------------------------
 # 10. Tokens issuance has no per-user quota
 # ---------------------------------------------------------------------------
-
-
 def test_finding_tokens_no_per_user_mint_quota() -> None:
     """Finding: TOKENS-NO-PER-USER-MINT-QUOTA.
 
@@ -613,8 +486,6 @@ def test_finding_tokens_no_per_user_mint_quota() -> None:
 #     This gives a non-owner an oracle: "this hash exists, you can't
 #     touch it" vs "doesn't exist".
 # ---------------------------------------------------------------------------
-
-
 def test_finding_revoke_token_existence_oracle() -> None:
     """Finding: TOKEN-REVOKE-EXISTENCE-ORACLE.
 
@@ -651,8 +522,6 @@ def test_finding_revoke_token_existence_oracle() -> None:
 # 12. Score endpoint admits `null` partition / region / account into
 #     trusted-proxy CIDR parsing
 # ---------------------------------------------------------------------------
-
-
 def test_finding_trusted_proxy_cidr_no_malformed_entry_rejection() -> None:
     """Finding: SCORE-XFF-CIDR-PARSE-PERMISSIVE.
 
@@ -691,84 +560,6 @@ def test_finding_trusted_proxy_cidr_no_malformed_entry_rejection() -> None:
 # 13. Score-endpoint API key is a single static value with no rotation
 #     story — a leaked key needs an operator redeploy to revoke.
 # ---------------------------------------------------------------------------
-
-
-def test_finding_score_api_key_no_rotation_story() -> None:
-    """Finding: SCORE-API-KEY-NO-ROTATION.
-
-    CWE-321 (Use of Hard-coded Cryptographic Key) — adjacent class.
-    Severity: LOW.
-    Location: src/iam_jit/routes/score.py:239-261 (`_require_api_key`).
-
-    The score-endpoint API key is read from a single env var
-    `IAM_JIT_SCORE_API_KEY`. Only ONE value is accepted at any
-    time. Operator rotation requires a redeploy (or env-var
-    update) that immediately invalidates the previous key — every
-    caller breaks during the rotation window.
-
-    Fix sketch: accept a comma-separated list of valid keys;
-    consider the FIRST one as the "current" key; accept any value
-    in the list. Rotation procedure is then: add a new key, roll
-    callers, remove the old one. Each rotation has a non-zero
-    window where both keys work.
-    """
-    from iam_jit.routes import score as score_mod
-
-    src = inspect.getsource(score_mod._require_api_key)
-    assert "IAM_JIT_SCORE_API_KEY" in src
-    # Single-value compare — no list-style "any of these" check.
-    assert "in [" not in src
-    assert ".split(" not in src
-
-
-# ---------------------------------------------------------------------------
-# 14. policy_gen does NOT scan free-text fields for prompt-injection
-# ---------------------------------------------------------------------------
-
-
-def test_finding_policy_gen_no_prompt_injection_scan() -> None:
-    """Finding: POLICY-GEN-NO-INJECTION-SCAN.
-
-    CWE-20 (Improper Input Validation).
-    Severity: LOW (stdio transport only today; would be MED if
-    exposed via HTTP).
-    Location: src/iam_jit/policy_gen/generate.py,
-    src/iam_jit/mcp_server.py.
-
-    `generate_policy` accepts free-text `task_description` and
-    `refinement.rationale`. Neither is scanned by
-    `prompt_injection.detect` — the scanner that DOES fire on
-    `/api/v1/score` (description field), `/api/v1/intake/turn`
-    (every user message), and the request-submission path. The
-    pattern matcher uses fixed substrings so direct injection of
-    the matcher doesn't yield more actions, BUT the same task
-    description is recorded in
-    `GenerationResult.reasons[]` and surfaces in
-    audit logs and (eventually) admin UIs — a stored XSS vector
-    if the UI ever renders these unescaped, plus a steering
-    vector for any LLM-tier upgrade.
-
-    Fix sketch: when exposing policy_gen via an HTTP surface
-    (not just MCP stdio), wire `prompt_injection.detect` against
-    `task_description` and `rationale` with the same audit-log +
-    refuse pattern the score endpoint uses.
-    """
-    import pytest
-    pytest.skip(
-        "closed by deletion: policy_gen package removed in 0.4.0 "
-        "([[no-nl-synthesis]] Stage 3); no free-text task_description "
-        "is accepted by the MCP surface anymore. submit_policy takes "
-        "structured JSON; description field is bounded to 1024 chars "
-        "and never fed to an LLM."
-    )
-
-
-# ---------------------------------------------------------------------------
-# 15. Many audit.emit failures swallow silently (extends round-1
-#     AUDIT-WRITE-SILENT-FAILURE to the route-handler call sites)
-# ---------------------------------------------------------------------------
-
-
 def test_finding_audit_emit_callers_swallow_silently() -> None:
     """Finding: AUDIT-EMIT-CALLSITES-SWALLOW.
 
@@ -815,8 +606,6 @@ def test_finding_audit_emit_callers_swallow_silently() -> None:
 # 16. WEB-NO-CSRF-TOKEN still holds — re-state to confirm round-2 didn't
 #     ship the fix while a different fix landed.
 # ---------------------------------------------------------------------------
-
-
 def test_finding_web_csrf_still_missing_after_round1() -> None:
     """Finding: WEB-NO-CSRF-TOKEN (CARRY-FORWARD).
 

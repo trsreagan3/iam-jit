@@ -72,8 +72,6 @@ import pytest
 #    price (paths 1+2 of round-5 #3's fix sketch) still leak: claim
 #    is retained, customer paid, no token, no recovery.
 # ---------------------------------------------------------------------------
-
-
 def test_finding_handler_pre_write_error_closure_partial_return_none_paths() -> None:
     """Finding: HANDLER-PRE-WRITE-ERROR-CLOSURE-PARTIAL-RETURN-NONE-PATHS-STILL-DEAD.
     # ROUND5-PARTIAL-CLOSURE
@@ -175,8 +173,6 @@ def test_finding_handler_pre_write_error_closure_partial_return_none_paths() -> 
 #    — The round-5 MED finding in stripe_webhook re-appears
 #    byte-for-byte in the new llm_budget module. Sibling miss.
 # ---------------------------------------------------------------------------
-
-
 def test_finding_llm_budget_ddb_claim_exception_classification_string_fragile() -> None:
     """Finding: LLM-BUDGET-DDB-CLAIM-EXCEPTION-CLASSIFICATION-STRING-FRAGILE.
     # ROUND5-SIBLING-MISS
@@ -241,8 +237,6 @@ def test_finding_llm_budget_ddb_claim_exception_classification_string_fragile() 
 #    retry to increment again. Customer burns 2 budget units per 1
 #    actual LLM call.
 # ---------------------------------------------------------------------------
-
-
 def test_finding_llm_budget_ddb_network_retry_double_count_race() -> None:
     """Finding: LLM-BUDGET-DDB-NETWORK-RETRY-DOUBLE-COUNT-RACE.
     # NEW-CODE
@@ -340,8 +334,6 @@ def test_finding_llm_budget_ddb_network_retry_double_count_race() -> None:
 #    no-audit-emit + mass-assignment-gate halves of BB2-11 are still
 #    open.
 # ---------------------------------------------------------------------------
-
-
 def test_finding_patch_users_mass_assignment_no_audit_round6_carryover() -> None:
     """Finding: PATCH-USERS-MASS-ASSIGNMENT-NO-AUDIT.
     # BB2-11-SIBLING-CARRY-OVER
@@ -389,8 +381,6 @@ def test_finding_patch_users_mass_assignment_no_audit_round6_carryover() -> None
 #    IAM_JIT_LLM_BUDGET_TABLE leaks the DDB store into subsequent
 #    tests in the same xdist worker.
 # ---------------------------------------------------------------------------
-
-
 def test_finding_llm_budget_global_singleton_not_reset_in_conftest() -> None:
     """Finding: LLM-BUDGET-GLOBAL-SINGLETON-NOT-RESET-IN-CONFTEST.
     # NEW-CODE
@@ -471,8 +461,6 @@ def test_finding_llm_budget_global_singleton_not_reset_in_conftest() -> None:
 #    under uvicorn --workers N at first call. Not exploitable;
 #    causes flaky local-dev sessions.
 # ---------------------------------------------------------------------------
-
-
 def test_finding_ephemeral_dev_secret_not_thread_safe_at_first_call() -> None:
     """Finding: EPHEMERAL-DEV-SECRET-NOT-THREAD-SAFE-AT-FIRST-CALL.
 
@@ -564,8 +552,6 @@ def test_finding_ephemeral_dev_secret_not_thread_safe_at_first_call() -> None:
 #    rotate-out as Lambda scales. Documentary; requires explicit
 #    operator opt-in for the dev fallback to even reach Lambda.
 # ---------------------------------------------------------------------------
-
-
 def test_finding_ephemeral_dev_secret_lambda_container_rotation() -> None:
     """Finding: EPHEMERAL-DEV-SECRET-LAMBDA-CONTAINER-ROTATION-
     INVALIDATES-SESSIONS.
@@ -617,8 +603,6 @@ def test_finding_ephemeral_dev_secret_lambda_container_rotation() -> None:
 #    defaults to "claude-sonnet-4-6" on unknown tier; `_budget_for_tier`
 #    defaults to 0 on the same input. Asymmetric defaults.
 # ---------------------------------------------------------------------------
-
-
 def test_finding_model_for_tier_fail_open_default_is_sonnet() -> None:
     """Finding: MODEL-FOR-TIER-FAIL-OPEN-DEFAULT-IS-SONNET-NOT-NOOP.
 
@@ -661,8 +645,6 @@ def test_finding_model_for_tier_fail_open_default_is_sonnet() -> None:
 #    with every other boolean flag (including the SECOND flag in
 #    the same helper). Fails closed; documentary inconsistency only.
 # ---------------------------------------------------------------------------
-
-
 def test_finding_is_dev_insecure_active_strict_equals_1_inconsistent() -> None:
     """Finding: IS-DEV-INSECURE-ACTIVE-STRICT-EQUALS-1-INCONSISTENT-WITH-OTHER-FLAGS.
 
@@ -721,50 +703,6 @@ def test_finding_is_dev_insecure_active_strict_equals_1_inconsistent() -> None:
 #    Operator typo in STRIPE_PRICE_ID_TO_TIER silently coerces to
 #    "free". No metric / log signal.
 # ---------------------------------------------------------------------------
-
-
-def test_finding_llm_budget_tier_typo_silent_coercion_to_free() -> None:
-    """Finding: LLM-BUDGET-TIER-CASE-WHITESPACE-AT-API-BOUNDARY-WRAPPED-OK-AT-DEFAULT.
-
-    CWE-184.
-    Severity: LOW — fails to free-tier on operator typo. Not
-    exploitable; just a confused-support-ticket footgun.
-    Location: src/iam_jit/routes/score.py:303-311.
-
-    If STRIPE_PRICE_ID_TO_TIER has a typo (e.g.,
-    {"price_x":"premium"} when it should be "pro"), the stored
-    label is "stripe:premium", the strip-and-validate logic at
-    score.py:307 silently coerces "premium" → "free". The customer
-    pays for Pro but gets free-tier treatment. No metric, no log
-    signal at coercion time.
-
-    Fix sketch: emit a metric / log line on every unknown-tier
-    coercion, keyed by user_id + raw_label.
-    """
-    from iam_jit.routes import score
-
-    src = inspect.getsource(score._resolve_caller_tier)
-    # The silent-coerce-to-free shape.
-    assert "tier = \"free\"" in src
-    # No metric / log on coercion.
-    assert "metric" not in src.lower()
-    assert "unknown_tier" not in src.lower()
-    # The log lines that DO exist in the module are not at the
-    # coerce-to-free branch.
-    coerce_block_idx = src.index('tier not in {"free", "indie", "pro"')
-    coerce_block = src[coerce_block_idx:coerce_block_idx + 200]
-    assert "log" not in coerce_block.lower(), (
-        "the coerce-to-free branch now logs — flip this test."
-    )
-    assert "audit" not in coerce_block.lower()
-
-
-# ===========================================================================
-# Honest negatives — round-5 closures verification + new-code defended
-# regions. These tests assert the DEFENDED state (PASS = healthy).
-# ===========================================================================
-
-
 def test_hn6_01_model_for_tier_normalizes_case_and_whitespace() -> None:
     """HN6-01: tier-NAME normalization is consistent across the two
     resolvers. "Pro", "PRO ", " pro" all collapse to "pro" in both
@@ -783,8 +721,6 @@ def test_hn6_01_model_for_tier_normalizes_case_and_whitespace() -> None:
     assert llm_budget._budget_for_tier("Pro") == llm_budget._budget_for_tier("pro")
     assert llm_budget._budget_for_tier(" PRO ") == llm_budget._budget_for_tier("pro")
     assert llm_budget._budget_for_tier("ENTERPRISE") is None  # unlimited
-
-
 def test_hn6_02_get_secret_no_secret_no_dev_flag_raises_500() -> None:
     """HN6-02: When no IAM_JIT_MAGIC_LINK_SECRET is set AND the dev
     flag is not active, _get_secret raises HTTP 500 — does NOT
@@ -813,8 +749,6 @@ def test_hn6_02_get_secret_no_secret_no_dev_flag_raises_500() -> None:
                 os.environ.pop(k, None)
             else:
                 os.environ[k] = v
-
-
 def test_hn6_03_get_secret_never_logs_the_secret() -> None:
     """HN6-03: _get_secret does not log the returned secret anywhere.
     Defends against accidental %-formatting / .format() of the
@@ -825,8 +759,6 @@ def test_hn6_03_get_secret_never_logs_the_secret() -> None:
     assert "logger" not in src
     assert "logging" not in src
     assert "print(" not in src
-
-
 def test_hn6_04_update_user_self_demote_uses_strict_identity() -> None:
     """HN6-04: The self-demote check compares `user_id ==
     acting_admin.id` — same string both sides; no case/whitespace
@@ -838,8 +770,6 @@ def test_hn6_04_update_user_self_demote_uses_strict_identity() -> None:
     assert "existing.id == acting_admin.id" in src or \
            "acting_admin.id == existing.id" in src or \
            "user_id == acting_admin.id" in src
-
-
 def test_hn6_05_update_user_detects_disable_leg() -> None:
     """HN6-05: `losing_admin` correctly fires on the enabled→disabled
     transition AND the admin-role-removed transition. Disabling
@@ -851,8 +781,6 @@ def test_hn6_05_update_user_detects_disable_leg() -> None:
     assert "will_be_disabled" in src
     # The losing_admin computation includes the disable leg.
     assert "will_be_disabled" in src[src.index("losing_admin"):src.index("losing_admin") + 300]
-
-
 def test_hn6_06_update_user_fails_closed_on_list_error() -> None:
     """HN6-06: When `user_store.list(...)` raises (e.g. DDB error),
     update_user fails CLOSED with HTTP 409 — does not silently
@@ -887,8 +815,6 @@ def test_hn6_06_update_user_fails_closed_on_list_error() -> None:
             acting_admin=actor,
         )
     assert exc.value.status_code == 409
-
-
 def test_hn6_07_ddb_consume_or_reject_handles_delete_then_add() -> None:
     """HN6-07: DynamoDBLLMBudgetStore.consume_or_reject correctly
     handles the delete-then-add race via the `attribute_not_exists`
@@ -898,8 +824,6 @@ def test_hn6_07_ddb_consume_or_reject_handles_delete_then_add() -> None:
 
     src = inspect.getsource(llm_budget.DynamoDBLLMBudgetStore.consume_or_reject)
     assert "attribute_not_exists(#c) OR #c < :cap" in src
-
-
 def test_hn6_08_current_year_month_is_utc() -> None:
     """HN6-08: Month boundaries are in UTC — no timezone footgun
     where the counter rolls over at local midnight in some
@@ -909,8 +833,6 @@ def test_hn6_08_current_year_month_is_utc() -> None:
     src = inspect.getsource(llm_budget._current_year_month)
     # Uses datetime.now(_dt.UTC), not datetime.now() (local time).
     assert "_dt.UTC" in src or "datetime.UTC" in src or "timezone.utc" in src
-
-
 def test_hn6_09_unknown_tier_budget_is_zero_failsafe() -> None:
     """HN6-09: `_budget_for_tier` returns 0 for unknown tiers —
     fail-closed. A typo or future tier-name reaches this code
@@ -920,8 +842,6 @@ def test_hn6_09_unknown_tier_budget_is_zero_failsafe() -> None:
     assert llm_budget._budget_for_tier("platinum-deluxe") == 0
     assert llm_budget._budget_for_tier("") == 0
     assert llm_budget._budget_for_tier(None) == 0  # type: ignore[arg-type]
-
-
 def test_hn6_10_in_memory_consume_or_reject_uses_lock() -> None:
     """HN6-10: InMemoryLLMBudgetStore uses threading.Lock for the
     check-and-set, so two concurrent FastAPI worker threads can't
@@ -954,8 +874,6 @@ def test_hn6_10_in_memory_consume_or_reject_uses_lock() -> None:
         assert successes["n"] == 100
     finally:
         os.environ.pop("IAM_JIT_LLM_BUDGET_PRO", None)
-
-
 def test_hn6_11_sam_template_llm_budget_table_well_formed() -> None:
     """HN6-11: SAM template's LLMBudgetTable has the right key
     schema (HASH=customer_id, RANGE=year_month), TTL on ttl_at,
@@ -981,8 +899,6 @@ def test_hn6_11_sam_template_llm_budget_table_well_formed() -> None:
     assert "AttributeName: ttl_at" in block
     # Billing.
     assert "BillingMode: PAY_PER_REQUEST" in block
-
-
 def test_hn6_12_reserved_concurrency_parameter_defends_aws_account() -> None:
     """HN6-12: The new ReservedConcurrentExecutions parameter is
     wired into the function spec so a runaway iam-jit can't burn

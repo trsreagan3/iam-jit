@@ -9,9 +9,10 @@ middleware):
   POST   /api/v1/admin/blacklist/templates/{template_name}
                                             install all rules from a template
 
-The store currently used is the module-level singleton in
-`routes.score` (set via `score.set_blacklist_store`). This module
-reads it on every request — no need to inject anything else.
+The store is the module-level singleton in `iam_jit.blacklist` (set
+via `blacklist.set_blacklist_store`). Pre-2026-05-24 this singleton
+lived in `iam_jit.routes.score`; it moved when the hosted scoring
+Lambda was dropped per [[no-hosted-saas]] restoration.
 """
 
 from __future__ import annotations
@@ -25,7 +26,6 @@ from pydantic import BaseModel, Field
 from .. import audit, blacklist
 from ..middleware import current_user
 from ..users_store import User
-from . import score as score_mod
 
 router = APIRouter(prefix="/api/v1/admin/blacklist", tags=["admin", "blacklist"])
 
@@ -82,7 +82,7 @@ def list_blacklist(
     user: Annotated[User, Depends(current_user)],
 ) -> list[BlacklistRuleOut]:
     _require_admin(user)
-    store = score_mod.get_blacklist_store()
+    store = blacklist.get_blacklist_store()
     return [_rule_to_out(r) for r in store.list_rules()]
 
 
@@ -92,7 +92,7 @@ def add_blacklist_rule(
     user: Annotated[User, Depends(current_user)],
 ) -> BlacklistRuleOut:
     _require_admin(user)
-    store = score_mod.get_blacklist_store()
+    store = blacklist.get_blacklist_store()
     rule = blacklist.BlacklistRule(
         rule_id=payload.rule_id,
         pattern=payload.pattern,
@@ -129,7 +129,7 @@ def delete_blacklist_rule(
     user: Annotated[User, Depends(current_user)],
 ) -> None:
     _require_admin(user)
-    store = score_mod.get_blacklist_store()
+    store = blacklist.get_blacklist_store()
     store.delete_rule(rule_id)
     try:
         audit.emit(
@@ -163,7 +163,7 @@ def install_template(
                 + ", ".join(sorted(blacklist.TEMPLATES))
             ),
         )
-    store = score_mod.get_blacklist_store()
+    store = blacklist.get_blacklist_store()
     factory = blacklist.TEMPLATES[template_name]
     installed: list[blacklist.BlacklistRule] = []
     for rule in factory():

@@ -35,7 +35,6 @@ _JSON_POST_ROUTES = [
     "/api/v1/requests",
     "/api/v1/requests/preview",
     "/api/v1/intake/turn",
-    "/api/v1/score",
     "/api/v1/feedback/scoring",
     "/api/v1/blacklist",
     "/api/v1/policy/analyze",

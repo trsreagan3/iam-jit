@@ -53,7 +53,5 @@ def test_consumers_still_import_via_old_path() -> None:
     from iam_jit import review
 
     assert hasattr(review, "analyze_policy")
-    # routes/score.py uses get_backend_for_tier
-    from iam_jit.routes import score as score_route
-
-    assert hasattr(score_route, "router")
+    # (routes/score.py consumer-import check dropped 2026-05-24 —
+    # the hosted scoring API was removed per [[no-hosted-saas]].)

@@ -52,8 +52,6 @@ from iam_jit.api_tokens_store import InMemoryAPITokenStore
 from iam_jit.app import create_app
 from iam_jit.store import FilesystemStore
 from iam_jit.users_store import FileUserStore, User, UserNotFound
-
-
 class _WritableInMemoryUserStore:
     """Mimics DynamoDBUserStore (read/write) for tests that need to
     exercise admin-write paths (PATCH /api/v1/users/...).
@@ -130,15 +128,11 @@ users:
     display_name: Dev2
     roles: [requester]
 """
-
-
 @pytest.fixture(autouse=True)
 def _env(monkeypatch):
     monkeypatch.setenv("IAM_JIT_AUTH_MODE", "local")
     monkeypatch.setenv("IAM_JIT_DEV_INSECURE_SECRET", "1")
     monkeypatch.setenv("IAM_JIT_MAGIC_LINK_SECRET", _DEV_SECRET)
-
-
 @pytest.fixture(autouse=True)
 def _reset_singletons():
     from iam_jit import (
@@ -154,10 +148,7 @@ def _reset_singletons():
     _nonces.reset_default_store_for_tests()
     _cidrs.reset_default_store_for_tests()
     _settings.reset_default_store_for_tests()
-    from iam_jit.routes import score as _score_route
-    _score_route._reset_limiter_for_tests()
-
-
+    # (score-route limiter reset dropped 2026-05-24 — hosted scoring API removed per [[no-hosted-saas]])
 @pytest.fixture
 def app(tmp_path):
     users_yaml = tmp_path / "users.yaml"
@@ -167,8 +158,6 @@ def app(tmp_path):
         user_store=FileUserStore(str(users_yaml)),
         api_tokens_store=InMemoryAPITokenStore(),
     )
-
-
 @pytest.fixture
 def app_rw(tmp_path):
     """App fixture backed by a writable in-memory user store.
@@ -181,8 +170,6 @@ def app_rw(tmp_path):
         user_store=_WritableInMemoryUserStore(),
         api_tokens_store=InMemoryAPITokenStore(),
     )
-
-
 def _client_as(app, user_id=None):
     c = TestClient(app, raise_server_exceptions=False)
     if user_id:
@@ -207,46 +194,6 @@ def _client_as(app, user_id=None):
 #         Edge case: when `IAM_JIT_TRUST_FORWARDED_FOR_FOR_SCORE=1` is
 #         set but `IAM_JIT_TRUSTED_PROXY_CIDRS` is EMPTY, _client_ip
 #         falls back to real_client — also correct. Probe verifies.)
-# ---------------------------------------------------------------------
-def test_bb2_01_score_xff_ignored_when_no_trusted_proxy_cidrs(app, monkeypatch):
-    """The round-1 fix correctly gates XFF trust on BOTH env vars:
-    - IAM_JIT_TRUST_FORWARDED_FOR_FOR_SCORE=1 AND
-    - IAM_JIT_TRUSTED_PROXY_CIDRS=<some cidrs>
-
-    If only the first is set (an operator who reads docs poorly),
-    XFF must still be ignored — otherwise the bypass returns.
-
-    Severity: N/A (honest negative — verifies the gate holds under
-    misconfig)."""
-    monkeypatch.setenv("IAM_JIT_TRUST_FORWARDED_FOR_FOR_SCORE", "1")
-    monkeypatch.delenv("IAM_JIT_TRUSTED_PROXY_CIDRS", raising=False)
-    monkeypatch.setenv("IAM_JIT_SCORE_RATE_PER_MINUTE", "3")
-    # Re-init limiter to pick up new cap
-    from iam_jit.routes import score as _score_route
-    _score_route._reset_limiter_for_tests()
-
-    c = TestClient(app, raise_server_exceptions=False)
-    body = {"policy": {"Version": "2012-10-17", "Statement": [{"Effect": "Allow", "Action": "s3:GetObject", "Resource": "*"}]}}
-    statuses = []
-    for i in range(10):
-        r = c.post(
-            "/api/v1/score", json=body,
-            headers={"X-Forwarded-For": f"203.0.113.{i}"},  # rotating XFF
-        )
-        statuses.append(r.status_code)
-    # If XFF were honored, every entry would be a fresh bucket and we'd
-    # see 200 for all 10. With XFF gated, the real TestClient peer
-    # ("testclient" or 127.0.0.1) is the bucket key and we hit 429
-    # after the cap.
-    cnt = Counter(statuses)
-    assert cnt.get(429, 0) >= 5, (
-        f"XFF gate may be broken: got {cnt}; expected ≥5 429s after the "
-        f"limiter cap of 3/min."
-    )
-
-
-# ---------------------------------------------------------------------
-# BB2-02: NETWORK-ACL XFF still trusts unauthenticated XFF by default
 # ---------------------------------------------------------------------
 def test_bb2_02_network_acl_trusts_xff_by_default(app, monkeypatch):
     """BB2-02 — CLOSED. `IAM_JIT_TRUST_FORWARDED_FOR` now defaults
@@ -801,35 +748,6 @@ def test_bb2_14_session_secure_flag_gated_on_dev_env_only(monkeypatch, tmp_path)
 # BB2-15: /api/v1/intake/turn does not validate role enum strictly —
 #         arbitrary role string passes through pydantic regex
 # ---------------------------------------------------------------------
-def test_bb2_15_intake_role_field_pattern_holds(app):
-    import pytest
-    pytest.skip("closed by deletion: /requests/new/chat + /api/v1/intake/turn routes removed in 0.4.0 ([[no-nl-synthesis]] Stage 4).")
-# ---------------------------------------------------------------------
-# BB2-16: /api/v1/score 'description' field length-cap holds
-#         (regression — round 1 didn't probe this)
-# ---------------------------------------------------------------------
-def test_bb2_16_score_description_length_cap(app):
-    """The ScoreRequest pydantic model declares `description:
-    str | None = Field(default=None, max_length=500, ...)`.
-    Confirm the cap is actually enforced (a regression would let
-    LLM-narrative inputs go unbounded).
-
-    Severity: N/A (defended). Honest negative."""
-    c = TestClient(app, raise_server_exceptions=False)
-    r = c.post(
-        "/api/v1/score",
-        json={
-            "policy": {"Version": "2012-10-17", "Statement": [{"Effect": "Allow", "Action": "s3:GetObject", "Resource": "*"}]},
-            "description": "A" * 5000,
-        },
-    )
-    assert r.status_code in (400, 422), r.text
-
-
-# ---------------------------------------------------------------------
-# BB2-17: MCP server is stateless across `tools/call` invocations
-#         (verify no cross-session leak)
-# ---------------------------------------------------------------------
 def test_bb2_17_mcp_server_is_stateless(app):
     """The MCP server module imports policy_gen and exposes
     generate_iam_policy. We probe whether two back-to-back calls
@@ -1041,39 +959,6 @@ def test_bb2_22_admin_cannot_self_unban(app):
 # ---------------------------------------------------------------------
 # BB2-23: Re-test BB-XFF — XFF spoof on score endpoint is now correctly
 #         ignored
-# ---------------------------------------------------------------------
-def test_bb2_23_score_xff_spoof_ignored_no_env_set(app, monkeypatch):
-    """Round-1 WB SCORE-XFF-RATELIMIT-BYPASS — fix landed in
-    `routes/score.py:_client_ip` (gates XFF on
-    `IAM_JIT_TRUST_FORWARDED_FOR_FOR_SCORE=1` + a configured trusted-
-    proxy CIDR set). With neither env var set (the default), XFF must
-    be ignored entirely.
-
-    Severity: N/A (defended). Confirms the round-1 fix holds."""
-    monkeypatch.delenv("IAM_JIT_TRUST_FORWARDED_FOR_FOR_SCORE", raising=False)
-    monkeypatch.delenv("IAM_JIT_TRUSTED_PROXY_CIDRS", raising=False)
-    monkeypatch.setenv("IAM_JIT_SCORE_RATE_PER_MINUTE", "3")
-    from iam_jit.routes import score as _score_route
-    _score_route._reset_limiter_for_tests()
-
-    c = TestClient(app, raise_server_exceptions=False)
-    body = {"policy": {"Version": "2012-10-17", "Statement": [{"Effect": "Allow", "Action": "s3:GetObject", "Resource": "*"}]}}
-    statuses = [
-        c.post(
-            "/api/v1/score", json=body,
-            headers={"X-Forwarded-For": f"203.0.113.{i}"},
-        ).status_code
-        for i in range(10)
-    ]
-    cnt = Counter(statuses)
-    # The first 3 succeed; the rest are 429 (peer bucket, not XFF
-    # bucket). Round-1 fix confirmed.
-    assert cnt.get(429, 0) >= 5, cnt
-
-
-# ---------------------------------------------------------------------
-# BB2-24: Re-test BB-11 — Stripe idempotency works for HANDLED event
-#         types
 # ---------------------------------------------------------------------
 def test_bb2_24_stripe_idempotency_works_for_handled_events(monkeypatch, tmp_path):
     """Confirm the round-1 STRIPE-NO-IDEMPOTENCY fix HOLDS for handled

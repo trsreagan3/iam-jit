@@ -366,3 +366,31 @@ TEMPLATES: dict[str, Any] = {
     "ban-iam-escalation-primitives": template_ban_iam_escalation_primitives,
     "ban-audit-evasion": template_ban_audit_evasion,
 }
+
+
+# ---------------------------------------------------------------------
+# Process-wide blacklist-store singleton.
+#
+# Pre-2026-05-24 this lived in `iam_jit.routes.score` next to the
+# hosted /api/v1/score endpoint. When that endpoint was removed per
+# [[no-hosted-saas]] restoration the singleton moved here so the
+# self-host admin-blacklist routes (`routes/blacklist.py`) still have
+# a process-wide handle to read + write.
+#
+# Default is the InMemoryBlacklistStore — no rules — so deployments
+# without explicit blacklist config behave identically to the
+# pre-blacklist scorer.
+# ---------------------------------------------------------------------
+
+_blacklist_store: BlacklistStore = InMemoryBlacklistStore()
+
+
+def set_blacklist_store(store: BlacklistStore) -> None:
+    """Wire in a different blacklist store. Called at app startup;
+    also useful in tests to install rules for a specific assertion."""
+    global _blacklist_store
+    _blacklist_store = store
+
+
+def get_blacklist_store() -> BlacklistStore:
+    return _blacklist_store

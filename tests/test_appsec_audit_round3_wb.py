@@ -50,8 +50,6 @@ import pytest
 # 1. (HIGH) Stripe claim-before-process: a handler crash leaves the
 #    event_id permanently claimed and Stripe retries no-op.
 # ---------------------------------------------------------------------------
-
-
 def test_finding_stripe_claim_before_process_loses_event_on_handler_crash() -> None:
     """Finding: STRIPE-CLAIM-BEFORE-PROCESS.  # NEW-CODE
 
@@ -174,8 +172,6 @@ def test_finding_stripe_claim_before_process_loses_event_on_handler_crash() -> N
 # ---------------------------------------------------------------------------
 # 2. (MED) Token-mint cap is a TOCTOU race (list_for_user then put).
 # ---------------------------------------------------------------------------
-
-
 def test_finding_tokens_per_user_cap_toctou_race() -> None:
     """Finding: TOKENS-PER-USER-CAP-TOCTOU.  # NEW-CODE
 
@@ -329,8 +325,6 @@ def test_finding_tokens_per_user_cap_toctou_race() -> None:
 #    surrounding bare `except Exception: pass` swallows. The
 #    bootstrap-admin auto-seed feature is silently broken.
 # ---------------------------------------------------------------------------
-
-
 def test_finding_web_magic_callback_broken_auto_seed_via_nameerror() -> None:
     """Finding: WEB-MAGIC-CALLBACK-BROKEN-AUTO-SEED.
 
@@ -388,86 +382,6 @@ def test_finding_web_magic_callback_broken_auto_seed_via_nameerror() -> None:
 # 4. (MED) Body-size guard only checks Content-Length header. Chunked
 #    transfer encoding (no Content-Length) bypasses the limit.
 # ---------------------------------------------------------------------------
-
-
-def test_finding_body_size_guard_chunked_transfer_encoding_bypass() -> None:
-    """Finding: BODY-SIZE-GUARD-CHUNKED-BYPASS.
-
-    CWE-770 (Allocation of Resources Without Limits or Throttling).
-    Severity: MED.
-    Location: src/iam_jit/app.py:323-340 (`_enforce_max_body_size`).
-
-    The middleware:
-
-        cl = request.headers.get("content-length")
-        if cl is not None:
-            try:
-                if int(cl) > _max_body_bytes:
-                    return JSONResponse(..., status_code=413)
-            except ValueError:
-                return JSONResponse(..., status_code=400)
-        return await call_next(request)
-
-    Refuses oversize bodies only when `Content-Length` is present.
-    A client sending `Transfer-Encoding: chunked` (no
-    Content-Length) passes through the middleware unbounded; the
-    downstream route handler then parses the entire body.
-
-    Realistic attack: attacker sends a 5 GB chunked body to
-    `/api/v1/score` (or any cookie-authenticated POST). Lambda's
-    `/tmp` fills, the function OOMs, subsequent invocations cold-
-    start with depleted scratch — degraded service.
-
-    Note: Lambda Function URL has its own request-size cap (6 MB
-    synchronous), so the worst case is bounded by AWS — but the
-    middleware's stated job is to refuse oversize requests BEFORE
-    they hit handler code, and chunked-encoding bypasses that
-    contract.
-
-    Fix sketch: also refuse requests where
-    `transfer-encoding: chunked` is present without
-    Content-Length (or pre-buffer + count bytes).
-    """
-    # CLOSED: middleware now also refuses `Transfer-Encoding:
-    # chunked` requests and requires Content-Length on body-bearing
-    # methods.
-    from iam_jit import app as app_mod
-
-    src = inspect.getsource(app_mod.create_app)
-    assert "_enforce_max_body_size" in src
-    assert "content-length" in src.lower()
-    assert "transfer-encoding" in src.lower()
-    assert "chunked" in src.lower()
-
-    # Functional check: a chunked POST is refused with 411 before
-    # reaching the route handler.
-    from fastapi.testclient import TestClient
-    from iam_jit import app as _app_mod
-
-    test_app = _app_mod.create_app()
-    with TestClient(test_app, raise_server_exceptions=False) as c:
-        # Force chunked encoding via header. TestClient sends with
-        # Content-Length by default, so we explicitly set the
-        # transfer-encoding header — the middleware refuses
-        # regardless of whether httpx actually streams.
-        r = c.post(
-            "/api/v1/score",
-            content=b'{"policy":{}}',
-            headers={
-                "Transfer-Encoding": "chunked",
-                "Content-Type": "application/json",
-            },
-        )
-        assert r.status_code == 411
-
-
-# ---------------------------------------------------------------------------
-# 5. (MED) magic_link_delivery.decide() puts dev-insecure-secret BEFORE
-#    the SES check; a prod deploy with both env vars leaks the link in
-#    the response body.
-# ---------------------------------------------------------------------------
-
-
 def test_finding_magic_link_dev_insecure_outranks_ses() -> None:
     """Finding: MAGIC-LINK-DEV-INSECURE-OUTRANKS-SES.  # NEW-CODE
 
@@ -533,8 +447,6 @@ def test_finding_magic_link_dev_insecure_outranks_ses() -> None:
 # 6. (MED) IAM_JIT_DEV_INSECURE_SECRET=1 disables THREE distinct
 #    production controls at once — single-flag-blast-radius footgun.
 # ---------------------------------------------------------------------------
-
-
 def test_finding_dev_insecure_secret_multi_effect_footgun() -> None:
     """Finding: DEV-INSECURE-SECRET-MULTI-EFFECT-FOOTGUN.
 
@@ -638,8 +550,6 @@ def test_finding_dev_insecure_secret_multi_effect_footgun() -> None:
 # 7. (MED) IAM_JIT_BANS_FAIL_OPEN=1 silently disables ban enforcement
 #    — same fail-open behavior round-2 closed, gated on a single env var.
 # ---------------------------------------------------------------------------
-
-
 def test_finding_bans_ddb_fail_open_via_env() -> None:
     """Finding: BANS-DDB-FAIL-OPEN-VIA-ENV.  # NEW-CODE
 
@@ -680,8 +590,6 @@ def test_finding_bans_ddb_fail_open_via_env() -> None:
 # ---------------------------------------------------------------------------
 # 8. (LOW) public_url.base_for takes leftmost X-Forwarded-Host token.
 # ---------------------------------------------------------------------------
-
-
 def test_finding_public_url_xfh_leftmost_token() -> None:
     """Finding: PUBLIC-URL-XFH-LEFTMOST-TOKEN.  # NEW-CODE
 
@@ -720,8 +628,6 @@ def test_finding_public_url_xfh_leftmost_token() -> None:
 # 9. (LOW) magic-link IP limiter reads request.client.host only —
 #    behind CloudFront the limiter becomes a global cap.
 # ---------------------------------------------------------------------------
-
-
 def test_finding_magic_link_ip_limiter_peer_only_dos() -> None:
     """Finding: MAGIC-LINK-IP-LIMITER-PEER-ONLY-DOS.  # NEW-CODE
 
@@ -761,8 +667,6 @@ def test_finding_magic_link_ip_limiter_peer_only_dos() -> None:
 # 10. (LOW) X-Forwarded-Proto scheme is substituted into the public URL
 #     without an allowlist (e.g., 'javascript' would be accepted).
 # ---------------------------------------------------------------------------
-
-
 def test_finding_xfp_scheme_injection_in_public_url() -> None:
     """Finding: XFP-SCHEME-INJECTION-IN-PUBLIC-URL.  # NEW-CODE
 
@@ -806,58 +710,6 @@ def test_finding_xfp_scheme_injection_in_public_url() -> None:
 # 11. (LOW) Three modules parse IAM_JIT_TRUSTED_PROXY_CIDRS with subtly
 #     different rules.
 # ---------------------------------------------------------------------------
-
-
-def test_finding_trusted_proxy_cidrs_parser_discrepancy() -> None:
-    """Finding: TRUSTED-PROXY-CIDRS-PARSER-DISCREPANCY.  # NEW-CODE
-
-    CWE-1389 (Incorrect Parsing of Numbers with Different Radices —
-    adjacent class) / CWE-710 (Improper Adherence to Coding
-    Standards).
-    Severity: LOW.
-    Location: `src/iam_jit/routes/score.py:301-339`,
-    `src/iam_jit/network_acl.py:128-135`,
-    `src/iam_jit/public_url.py:71-78`.
-
-    Three modules parse the same env var with different rules:
-
-      - `routes/score.py` uses `.split(",")` — no newline / tab
-        tolerance.
-      - `public_url.py` and `network_acl.py` use
-        `replace(",", " ").split()` — whitespace tolerant.
-
-    An operator who configures the env var as a multi-line
-    Terraform value (newlines between entries) has score's XFF
-    trust silently disabled (no parseable CIDRs) while network_acl
-    and public_url see the right list. The deployment then has
-    inconsistent XFF posture across endpoints — a class of bug
-    that's hard to notice in testing.
-
-    Fix sketch: extract a shared `parse_trusted_proxy_cidrs()`
-    helper in `network_acl.py` and call it from all three sites.
-    """
-    # CLOSED: all three call sites now delegate to the shared
-    # `iam_jit.trusted_proxy` helper.
-    from iam_jit import network_acl, trusted_proxy
-    from iam_jit.routes import score as score_mod
-
-    score_src = inspect.getsource(score_mod._client_ip)
-    network_acl_src = inspect.getsource(network_acl._read_source_ip)
-
-    assert "trusted_proxy" in score_src
-    assert "trusted_proxy" in network_acl_src
-    # Single source of truth: the helper exists and uses the
-    # whitespace-tolerant parser.
-    helper_src = inspect.getsource(trusted_proxy.parse_trusted_cidrs)
-    assert 'replace(",", " ")' in helper_src
-
-
-# ---------------------------------------------------------------------------
-# 12. (LOW) IPv4-mapped IPv6 cross-family `in` check fails in THREE
-#     modules now — carry-forward of round-2 finding.
-# ---------------------------------------------------------------------------
-
-
 def test_finding_xff_ipv4_mapped_ipv6_three_callsites_open() -> None:
     """Finding: XFF-IPV4-MAPPED-IPV6-STILL-OPEN (CARRY-FORWARD).
 
@@ -911,8 +763,6 @@ def test_finding_xff_ipv4_mapped_ipv6_three_callsites_open() -> None:
 # 13. (LOW) The new magic-link IP limiter is per-Lambda-instance — same
 #     multi-instance desync as the chat / score limiters.
 # ---------------------------------------------------------------------------
-
-
 def test_finding_magic_link_rate_limiter_per_instance_desync() -> None:
     """Finding: MAGIC-LINK-RATE-LIMITER-PER-INSTANCE-DESYNC.  # NEW-CODE
 

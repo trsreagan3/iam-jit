@@ -39,7 +39,6 @@ from .routes.health import router as health_router
 from .routes.policy import router as policy_router
 from .routes.reports import router as reports_router
 from .routes.requests import router as requests_router
-from .routes.score import router as score_router
 from .routes.tokens import router as tokens_router
 from .routes.users import router as users_router
 from .routes.web import router as web_router
@@ -379,15 +378,18 @@ def create_app(
         """BB4-02 closure: auth'd PII responses get
         `Cache-Control: no-store, private` so browser bfcache /
         corporate proxies don't stale-serve one user's response to
-        another. /api/v1/score is exempt — it sets its own
-        scoring-safe Cache-Control (BB4-01 closure). Static
-        assets, /healthz, and the docs UI get no override.
+        another. Static assets, /healthz, and the docs UI get no
+        override.
+
+        (The previous /api/v1/score exemption was dropped on
+        2026-05-24 when the hosted scoring Lambda + REST endpoint
+        were removed per [[no-hosted-saas]] restoration. The
+        offline `iam-risk-score` CLI is the supported entry
+        point.)
         """
         response = await call_next(request)
         path = request.url.path
         # Exempt paths that have their own caching contract.
-        if path.startswith("/api/v1/score"):
-            return response
         if path.startswith("/static/") or path == "/healthz":
             return response
         if path in {"/openapi.json", "/docs", "/redoc", "/docs/oauth2-redirect"}:
@@ -552,7 +554,6 @@ def create_app(
     app.include_router(tokens_router)
     app.include_router(users_router)
     app.include_router(reports_router)
-    app.include_router(score_router)
     app.include_router(policy_router)
     app.include_router(accounts_router)
     app.include_router(admin_router)

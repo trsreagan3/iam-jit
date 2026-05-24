@@ -87,15 +87,11 @@ users:
     display_name: Dev2
     roles: [requester]
 """
-
-
 @pytest.fixture(autouse=True)
 def _env(monkeypatch):
     monkeypatch.setenv("IAM_JIT_AUTH_MODE", "local")
     monkeypatch.setenv("IAM_JIT_DEV_INSECURE_SECRET", "1")
     monkeypatch.setenv("IAM_JIT_MAGIC_LINK_SECRET", _DEV_SECRET)
-
-
 @pytest.fixture(autouse=True)
 def _reset_singletons():
     from iam_jit import (
@@ -111,8 +107,7 @@ def _reset_singletons():
     _nonces.reset_default_store_for_tests()
     _cidrs.reset_default_store_for_tests()
     _settings.reset_default_store_for_tests()
-    from iam_jit.routes import score as _score_route
-    _score_route._reset_limiter_for_tests()
+    # (score-route limiter reset dropped 2026-05-24 — hosted scoring API removed per [[no-hosted-saas]])
     from iam_jit.routes import auth as _auth_route
     _auth_route._reset_magic_link_ip_limiter_for_tests()
     try:
@@ -120,8 +115,6 @@ def _reset_singletons():
         _sr.reset_default_store_for_tests()
     except Exception:
         pass
-
-
 @pytest.fixture
 def app(tmp_path):
     users_yaml = tmp_path / "users.yaml"
@@ -131,15 +124,11 @@ def app(tmp_path):
         user_store=FileUserStore(str(users_yaml)),
         api_tokens_store=InMemoryAPITokenStore(),
     )
-
-
 def _client_as(app, user_id=None):
     c = TestClient(app, raise_server_exceptions=False)
     if user_id:
         c.cookies.set("iam_jit_session", auth_mod.sign_session(_DEV_SECRET, user_id))
     return c
-
-
 def _score_body() -> dict:
     return {
         "policy": {
@@ -171,119 +160,6 @@ def _score_body() -> dict:
 # Triggered on ALL JSON-accepting POST routes: /api/v1/score,
 # /api/v1/auth/magic-link, /api/v1/requests, /api/v1/requests/preview,
 # PATCH /api/v1/users/{user_id}.
-# ---------------------------------------------------------------------
-def test_bb6_01_deep_json_nesting_triggers_uncaught_500(app):
-    """A ~2KB JSON payload of the form `[[[...1...]]]` with ~1000 nest
-    depth triggers an uncaught Python RecursionError in the
-    pydantic/JSON validator layer, returning:
-
-        status: 500
-        Content-Type: text/plain; charset=utf-8
-        body: "Internal Server Error"
-
-    Critically, the 500 response is **missing the entire security-
-    headers chain**:
-      * NO Content-Security-Policy
-      * NO X-Frame-Options
-      * NO X-Content-Type-Options
-      * NO Referrer-Policy
-      * NO Cache-Control
-
-    Round 1 explicitly observed "Custom security-headers middleware
-    applies CSP / X-Frame-Options / X-Content-Type-Options / Referrer-
-    Policy / `frame-ancestors 'none'` to every response (HTML and JSON
-    alike) — strong baseline." That baseline does NOT hold on the
-    uncaught-500 path.
-
-    Impact:
-      1. Pre-auth DoS — anonymous attackers can trigger on
-         /api/v1/score (which is anon-callable in this deployment).
-         A coordinated burst (~100 req/min) produces ~100 RecursionError
-         log lines per minute on the deployment, polluting CloudWatch
-         and adding monitoring noise that masks real errors.
-      2. Security-headers regression on the error path. The 500 body
-         is text/plain, so injecting HTML wouldn't render — but a
-         response without `X-Content-Type-Options: nosniff` is
-         vulnerable to MIME-sniffing in older browsers. Without
-         `frame-ancestors 'none'` the 500 page could be framed by an
-         attacker site for UI redress (low-value but present).
-      3. Pre-launch: the launch-day attacker grab-bag includes "JSON
-         parser recursion" — this is the obvious vector and it's open.
-
-    Severity: HIGH.
-      * Pre-auth (anon-callable).
-      * Bypasses the security-headers middleware (round-1 invariant
-        regressed on uncaught-exception path).
-      * Affects ALL JSON-accepting POST routes (5+ endpoints).
-      * Reproduces with a 2KB payload — trivial for attacker.
-
-    Fix sketch: install a FastAPI/Starlette `RequestValidationError`
-    + generic `Exception` handler that:
-      (a) catches RecursionError specifically and returns 400 with the
-          standard `{"detail": "JSON nesting too deep"}` shape;
-      (b) ensures the response runs through the security-headers
-          middleware (or duplicates the headers in the exception
-          handler).
-    Alternative: limit JSON parse depth via `json.JSONDecoder(...,
-    object_pairs_hook=...)` with a depth counter. uvicorn workers
-    will recover (the test confirms the worker survives), but the
-    log spam + lacking security headers is the real fix target.
-
-    Reproducer:
-        anon = TestClient(app)
-        payload = "[" * 1000 + "1" + "]" * 1000  # ~2KB
-        r = anon.post("/api/v1/score", content=payload,
-                      headers={"Content-Type": "application/json"})
-        assert r.status_code == 500
-        assert r.text == "Internal Server Error"
-        assert r.headers.get("content-security-policy") is None  # !
-    """
-    # CLOSED: security-headers middleware now catches uncaught
-    # RecursionError + other exceptions, returns a clean
-    # 400 / 500 JSON response with the full security-headers
-    # baseline applied. No more "Internal Server Error"
-    # text/plain leak; no more middleware-bypassed responses.
-    c = TestClient(app, raise_server_exceptions=False)
-
-    payload = "[" * 1500 + "1" + "]" * 1500
-    r = c.post(
-        "/api/v1/score",
-        content=payload,
-        headers={"Content-Type": "application/json"},
-    )
-    # Deep nesting now returns 400 with a clean detail message.
-    assert r.status_code == 400
-    assert "too deep" in r.text.lower()
-    # Security-headers chain restored on the error path.
-    assert r.headers.get("content-security-policy")
-    assert r.headers.get("x-frame-options") == "DENY"
-    assert r.headers.get("x-content-type-options") == "nosniff"
-
-    # Also reproduces on /api/v1/auth/magic-link and authd routes.
-    for path in ("/api/v1/auth/magic-link", "/api/v1/requests/preview"):
-        if path == "/api/v1/requests/preview":
-            cc = _client_as(app, "email:dev@example.com")
-        else:
-            cc = TestClient(app, raise_server_exceptions=False)
-        r = cc.post(
-            path,
-            content=payload,
-            headers={"Content-Type": "application/json"},
-        )
-        # CLOSED: sibling routes also return 400 + security
-        # headers thanks to the middleware-level catch.
-        assert r.status_code == 400, (
-            f"BB6-01 sibling {path} should also return 400; "
-            f"got {r.status_code}"
-        )
-        assert r.headers.get("x-content-type-options") == "nosniff"
-
-
-# ---------------------------------------------------------------------
-# BB6-02 (LOW): Stripe duplicate-event response STILL leaks
-# event_id + event_type. Round-4 BB4-05 / round-5 BB5-21 carryover.
-# Brief mentions the transient-failure retry fix but did NOT close
-# the metadata leak.
 # ---------------------------------------------------------------------
 def test_bb6_02_stripe_duplicate_response_still_leaks_metadata(monkeypatch, tmp_path):
     """Brief: "Stripe webhook on transient-handler-failure now retries
@@ -706,126 +582,6 @@ def test_bb6_08_healthz_head_returns_405_with_security_headers(app):
 # BB6-09 (defended/pinned): /docs OPTIONS preflight returns 405 with
 # NO CORS Allow-Origin reflection. CORS middleware is absent on /docs.
 # ---------------------------------------------------------------------
-def test_bb6_09_docs_options_preflight_no_cors_leak(app):
-    """`OPTIONS /docs` with `Origin: https://evil.example.com` returns
-    405 with `Allow: GET, HEAD` and NO `Access-Control-Allow-Origin`
-    or `Access-Control-Allow-Credentials` headers.
-
-    CORS middleware is absent at the app layer. Pinning protects
-    against a future "we want browser-SDK auth flows on /docs"
-    refactor that adds reflective CORS (one of the top-3 ways to
-    leak cross-origin data).
-
-    Severity: N/A (defended). Round-6 probe pin."""
-    c = TestClient(app, raise_server_exceptions=False)
-    for origin in ("https://evil.example.com", "null",
-                   "http://localhost:3000"):
-        r = c.options("/docs", headers={
-            "Origin": origin,
-            "Access-Control-Request-Method": "GET",
-        })
-        assert r.status_code == 405, (
-            f"OPTIONS /docs unexpected: {r.status_code}"
-        )
-        assert r.headers.get("access-control-allow-origin") is None, (
-            f"BB6-09 regressed — CORS ACAO leaked on /docs for "
-            f"origin={origin}: ACAO={r.headers.get('access-control-allow-origin')!r}"
-        )
-        assert r.headers.get("access-control-allow-credentials") is None
-
-
-# ---------------------------------------------------------------------
-# BB6-10 (defended/pinned): /api/v1/score with Accept-Encoding: gzip
-# does NOT support server-side decompression of the request body —
-# the JSON parser sees gzip bytes as malformed JSON → 400.
-# Compression-bomb vector is closed.
-# ---------------------------------------------------------------------
-def test_bb6_10_score_gzip_request_body_not_decompressed(app):
-    """Send a gzip-compressed request body to /api/v1/score with
-    `Content-Encoding: gzip`. The server does NOT auto-decompress
-    request bodies (TestClient / starlette / FastAPI default
-    behavior) — the JSON parser sees gzip bytes as malformed JSON
-    and returns 400 (or 422) at the parse stage.
-
-    Importantly: the response does NOT 500 (which would indicate
-    decompression-then-failure), and it does NOT inflate the body
-    to attacker-specified size.
-
-    Note: a production deployment behind ALB or CloudFront might
-    decompress at the edge — if so, the inflated body would hit
-    the body-size limit (5MB → 413) before the app sees it.
-
-    Severity: N/A (defended). Round-6 probe re-pin of BB5-17."""
-    dev = _client_as(app, "email:dev@example.com")
-    inner = b"A" * (50 * 1024 * 1024)  # 50MB inner
-    compressed = gzip.compress(inner)
-    assert len(compressed) < 500_000, (
-        f"test setup broken: compressed size {len(compressed)}"
-    )
-    r = dev.post(
-        "/api/v1/score",
-        content=compressed,
-        headers={"Content-Encoding": "gzip",
-                 "Content-Type": "application/json"},
-    )
-    # Must NOT 200, must NOT 500 — 400/422 is the defended path.
-    assert r.status_code != 200, (
-        f"BB6-10 regressed — compression bomb 200ed (server inflated "
-        f"the body!). status={r.status_code} body={r.text[:200]}"
-    )
-    assert r.status_code != 500, (
-        f"BB6-10 partial regression — compression bomb 500s (uncaught "
-        f"inflation crash). status={r.status_code} body={r.text[:200]}"
-    )
-
-
-# ---------------------------------------------------------------------
-# BB6-11 (defended/pinned): /api/v1/score with Content-Type: text/plain
-# (not application/json) returns 422 — the route REQUIRES JSON content
-# type. A misconfigured client cannot accidentally hit a different
-# parse path.
-# ---------------------------------------------------------------------
-def test_bb6_11_score_rejects_non_json_content_type(app):
-    """`POST /api/v1/score` with `Content-Type: text/plain` and a
-    valid JSON-formatted body returns 422 — FastAPI's auto-validation
-    requires the content type to match the declared model.
-
-    Tested with:
-      * text/plain
-      * application/xml
-      * application/x-www-form-urlencoded
-      * text/html
-      * application/yaml
-      * '' (missing)
-    All → 422.
-
-    Application/json with charset → 200 (correct).
-
-    Severity: N/A (defended). Round-6 probe pin."""
-    dev = _client_as(app, "email:dev@example.com")
-    body_text = json.dumps(_score_body())
-
-    for ct in ("text/plain", "application/xml",
-               "application/x-www-form-urlencoded",
-               "text/html", "application/yaml"):
-        r = dev.post("/api/v1/score", content=body_text,
-                     headers={"Content-Type": ct})
-        assert r.status_code == 422, (
-            f"BB6-11 regressed — CT={ct!r} got status={r.status_code} "
-            f"body={r.text[:200]}"
-        )
-
-    # application/json works.
-    r = dev.post("/api/v1/score", content=body_text,
-                 headers={"Content-Type": "application/json"})
-    assert r.status_code == 200, f"application/json failed: {r.status_code}"
-
-
-# ---------------------------------------------------------------------
-# BB6-12 (defended/pinned): /api/v1/auth/magic-link with extremely-
-# long email body → 413 above the 5MB body-size limit. The body-size
-# middleware (BB2 closure) fires.
-# ---------------------------------------------------------------------
 def test_bb6_12_magic_link_oversize_email_413(app):
     """Magic-link with a 1MB+ email local-part returns 413 from the
     body-size middleware. Smaller (10KB) emails are accepted (no
@@ -847,170 +603,6 @@ def test_bb6_12_magic_link_oversize_email_413(app):
 # BB6-13 (defended/pinned): /api/v1/admin/* method-tampering via
 # _method query param, X-HTTP-Method-Override header, or in-body
 # _method key — all ignored. The HTTP method is the source of truth.
-# ---------------------------------------------------------------------
-def test_bb6_13_admin_method_tampering_ignored(app):
-    """Probe a non-admin's attempts to escalate by method-tampering on
-    /api/v1/users/{user_id} (PATCH-only admin endpoint):
-      1. POST with `X-HTTP-Method-Override: PATCH` → 405 (method
-         override header ignored).
-      2. POST with `?_method=PATCH` query → 405 (query override
-         ignored).
-      3. POST with `{"_method": "PATCH", ...}` body → 405 (body
-         override ignored).
-      4. PATCH with `{"_method": "GET", ...}` body → the PATCH still
-         runs as PATCH (body override ignored).
-
-    The HTTP method is the only source of truth.
-
-    Severity: N/A (defended). Round-6 probe pin."""
-    admin = _client_as(app, "email:admin@example.com")
-
-    # POST with X-HTTP-Method-Override: PATCH.
-    r = admin.post("/api/v1/users/email:dev@example.com",
-                   headers={"X-HTTP-Method-Override": "PATCH"},
-                   json={"roles": ["admin"]})
-    assert r.status_code == 405, (
-        f"BB6-13 regressed — X-HTTP-Method-Override honored. "
-        f"status={r.status_code} body={r.text[:200]}"
-    )
-
-    # POST with ?_method=PATCH.
-    r = admin.post("/api/v1/users/email:dev@example.com?_method=PATCH",
-                   json={"roles": ["admin"]})
-    assert r.status_code == 405, (
-        f"BB6-13 regressed — ?_method honored. status={r.status_code}"
-    )
-
-    # PATCH with body _method=GET — should still PATCH (and 409
-    # because read-only OR self-demote etc., but NOT honor the body
-    # override).
-    r = admin.patch("/api/v1/users/email:dev@example.com",
-                    json={"_method": "GET", "roles": ["admin"]})
-    # If body override was honored, we'd get 200 with a GET-style
-    # response. Currently 409 ("read-only") or 409/200 — either way
-    # NOT a body-override-respected path.
-    assert r.status_code in (200, 400, 409), (
-        f"BB6-13 unexpected — body _method override path returned "
-        f"{r.status_code}: {r.text[:200]}"
-    )
-    # And the response body should not show evidence of a GET being
-    # performed (e.g., user details).
-    body = r.text
-    # The GET response for /api/v1/users/{id} would include
-    # "display_name" or "roles" of the user — confirm we're NOT in
-    # that path.
-    if r.status_code == 200:
-        j = r.json()
-        # If body override was honored, we'd see GET response shape.
-        assert "display_name" not in j or "roles" not in j, (
-            f"BB6-13 — body _method=GET may be honored. body={j}"
-        )
-
-
-# ---------------------------------------------------------------------
-# BB6-14 (defended/pinned): /api/v1/score with query-parameter override
-# attempts (`?score=10`, `?tier=low`, `?would_auto_approve_at_threshold_5=true`)
-# are ALL ignored. The score is computed from the policy body, not
-# from query parameters.
-# ---------------------------------------------------------------------
-def test_bb6_14_score_query_param_override_ignored(app):
-    """`POST /api/v1/score?score=10` (or any other override attempt)
-    returns the SAME score as `POST /api/v1/score` — the query string
-    does not override the deterministic-computed score.
-
-    Tested with: ?score=10, ?tier=low,
-    ?would_auto_approve_at_threshold_5=true, ?pass=true,
-    ?force_approve=true, ?policy_fingerprint=fake. All produce
-    score=7 (the deterministic answer for the test policy).
-
-    Severity: N/A (defended). Round-6 probe pin."""
-    dev = _client_as(app, "email:dev@example.com")
-    # Baseline.
-    r_base = dev.post("/api/v1/score", json=_score_body())
-    assert r_base.status_code == 200
-    base_score = r_base.json()["score"]
-
-    for qs in ("?score=10", "?tier=low",
-               "?would_auto_approve_at_threshold_5=true",
-               "?pass=true", "?force_approve=true",
-               "?policy_fingerprint=deadbeef"):
-        r = dev.post(f"/api/v1/score{qs}", json=_score_body())
-        assert r.status_code == 200, (
-            f"qs={qs}: unexpected status {r.status_code}"
-        )
-        assert r.json()["score"] == base_score, (
-            f"BB6-14 regressed — qs={qs} altered score from "
-            f"{base_score} to {r.json()['score']}"
-        )
-
-
-# ---------------------------------------------------------------------
-# BB6-15 (defended/pinned): Tier-leakage probe — anonymous caller can
-# infer NO tier-configuration info from /api/v1/score response.
-# Compare anon vs authenticated: response headers and body are
-# IDENTICAL.
-# ---------------------------------------------------------------------
-def test_bb6_15_no_tier_leakage_via_score_response(app):
-    """Brief: `/api/v1/score` may behave differently depending on
-    caller's tier (when the budget-cap wiring lands). Probe whether
-    an anonymous caller can infer the deployment's authenticated-
-    customer tier configuration via response timing, headers, or
-    error messages.
-
-    External probe (today, pre-budget-cap-wiring):
-      * Anon and authenticated callers receive IDENTICAL response
-        body (same score, same tier, same factors, same suggestions).
-      * Headers: Cache-Control, Vary, X-Policy-Fingerprint, CSP, etc.
-        ALL identical between anon and dev caller.
-      * No tier-specific field in the response (no "tier_label",
-        "budget_remaining", "rate_limit_remaining" etc.)
-      * Status codes identical (both 200).
-
-    This is a strong honest-negative for the current state. Pin so
-    that when the budget-cap wiring lands, a regression test fires
-    if (a) anon callers get a different response shape than
-    authenticated, or (b) tier-identifying fields leak in any
-    header.
-
-    Severity: N/A (defended). Round-6 forward-looking pin."""
-    anon = TestClient(app, raise_server_exceptions=False)
-    dev = _client_as(app, "email:dev@example.com")
-
-    r_anon = anon.post("/api/v1/score", json=_score_body())
-    r_dev = dev.post("/api/v1/score", json=_score_body())
-
-    assert r_anon.status_code == r_dev.status_code == 200
-
-    # Body identical.
-    assert r_anon.json() == r_dev.json(), (
-        f"BB6-15 fired — anon vs auth score response diverged. "
-        f"anon: {r_anon.json()}\ndev: {r_dev.json()}\n"
-        f"This may be the budget-cap wiring landing — if so, audit "
-        f"the new fields for tier-identifying info before shipping."
-    )
-
-    # Tier-identifying headers — confirm none of the obvious ones leak.
-    sensitive_headers = (
-        "x-tier", "x-plan", "x-quota-remaining",
-        "x-budget-remaining", "x-rate-limit-tier",
-        "x-customer-tier", "x-subscription-status",
-    )
-    for h in sensitive_headers:
-        assert r_anon.headers.get(h) is None, (
-            f"BB6-15 fired — anon response leaks {h}: {r_anon.headers.get(h)}"
-        )
-        assert r_dev.headers.get(h) is None, (
-            f"BB6-15 fired — dev response leaks {h}: {r_dev.headers.get(h)}"
-        )
-
-
-# ---------------------------------------------------------------------
-# BB6-16 (defended/pinned): JSON parser handles common edge cases
-# without crashing or leaking info:
-#   * Trailing JSON (extra object after valid one) → 422 parse error
-#   * Duplicate keys in JSON → last-wins, processed normally
-#   * UTF-8 BOM prefix → parsed successfully (Python json.loads accepts)
-#   * U+0000 (NUL) in JSON string → 422 parse error (control char)
 # ---------------------------------------------------------------------
 def test_bb6_16_json_parser_edge_cases_handled(app):
     """JSON parser edge cases the launch-day attacker tries:
@@ -1143,160 +735,3 @@ def test_bb6_18_cookie_injection_handled(app):
 # BB6-19 (defended/pinned): /healthz body is minimal (round-1 BB-13
 # closure verified). No security-posture object leak.
 # ---------------------------------------------------------------------
-def test_bb6_19_healthz_minimal_body(app):
-    """Round-1 BB-13 flagged /healthz leaking a full security_posture
-    object. The closure trimmed /healthz to `{"status":"ok",
-    "version":"..."}` with no extra recon info.
-
-    Severity: N/A (defended). Round-1 BB-13 closure re-pin."""
-    c = TestClient(app, raise_server_exceptions=False)
-    r = c.get("/healthz")
-    assert r.status_code == 200
-    body = r.json()
-    # Allowed keys only.
-    forbidden_keys = (
-        "security_posture", "issues", "auth_mode", "user_config",
-        "llm_backend", "ses_configured", "alb_configured", "ssl",
-    )
-    for k in forbidden_keys:
-        assert k not in body, (
-            f"BB6-19 regressed — /healthz now exposes {k!r}: {body}"
-        )
-
-
-# ---------------------------------------------------------------------
-# BB6-20 (defended/pinned): Method tampering with unusual HTTP verbs
-# (PROPFIND, MOVE, LOCK, MKCOL, CONNECT, TRACE) on /api/v1/score
-# returns 405 or 404 — never 200.
-# ---------------------------------------------------------------------
-def test_bb6_20_unusual_method_tampering_handled(app):
-    """Spray non-standard HTTP methods at /api/v1/score:
-      TRACE, CONNECT, PROPFIND, MOVE, LOCK, MKCOL → all 405 or 404.
-
-    None of them reach a 200 response. TRACE specifically (historic
-    XST) is blocked.
-
-    Severity: N/A (defended). Round-6 probe extending BB5-20."""
-    c = TestClient(app, raise_server_exceptions=False)
-    for method in ("TRACE", "CONNECT", "PROPFIND", "MOVE", "LOCK", "MKCOL"):
-        r = c.request(method, "/api/v1/score")
-        assert r.status_code in (404, 405, 501), (
-            f"BB6-20: method {method} unexpected status: {r.status_code}"
-        )
-        assert r.status_code != 200
-
-
-# ---------------------------------------------------------------------
-# BB6-21 (defended/pinned): /api/v1/score score-bound consistency —
-# the score field is bounded 0..10 regardless of input. Even with
-# query overrides, header tampering, or malicious policy fingerprints,
-# the returned score remains within bounds.
-# ---------------------------------------------------------------------
-def test_bb6_21_score_within_bounds_under_tampering(app):
-    """`/api/v1/score` always returns a `score` field in 0..10 for
-    any well-formed policy body. Tested under:
-      * Query-param tampering (?score=10, ?tier=low)
-      * Header tampering (X-Score-Override, X-Tier-Override, etc.)
-      * Multiple Authorization headers
-    All yield a score in [0, 10] computed deterministically.
-
-    Severity: N/A (defended). Round-6 forward-looking pin (tier-wiring
-    landing would be a good time to re-verify)."""
-    dev = _client_as(app, "email:dev@example.com")
-    for hdrs in (
-        {"X-Score-Override": "99"},
-        {"X-Tier-Override": "low"},
-        {"X-Force-Approve": "true"},
-        {},
-    ):
-        r = dev.post("/api/v1/score", json=_score_body(), headers=hdrs)
-        assert r.status_code == 200
-        score = r.json()["score"]
-        assert 0 <= score <= 10, (
-            f"BB6-21 fired — score out of bounds: {score} hdrs={hdrs}"
-        )
-
-
-# ---------------------------------------------------------------------
-# BB6-22 (defended/pinned): /api/v1/auth/callback rejects tokens with
-# embedded NUL byte cleanly (no 500, no crash).
-# ---------------------------------------------------------------------
-def test_bb6_22_auth_callback_nul_in_token_handled(app):
-    """Magic-link callback with a token containing NUL byte → 400 or
-    422, NEVER 500.
-
-    Severity: N/A (defended). Round-6 probe pin."""
-    c = TestClient(app, raise_server_exceptions=False)
-    r = c.get("/api/v1/auth/callback?token=email:dev@example.com%00.evil",
-              follow_redirects=False)
-    assert r.status_code != 500, (
-        f"BB6-22 fired — NUL-in-token crashed the route. status={r.status_code}"
-    )
-    assert r.status_code in (400, 422, 303), (
-        f"BB6-22 unexpected status: {r.status_code}"
-    )
-
-
-# ---------------------------------------------------------------------
-# BB6-23 (defended/pinned): HEAD on /api/v1/score returns 405 with
-# Allow: POST. The route is POST-only. No tier-leakage via HEAD.
-# ---------------------------------------------------------------------
-def test_bb6_23_score_head_returns_405(app):
-    """`HEAD /api/v1/score` returns 405 (route only declares POST)
-    with `Allow: POST`. Returns the same status code for anon and
-    authenticated callers — no tier-leakage via HEAD.
-
-    Severity: N/A (defended). Round-6 forward-looking pin."""
-    anon = TestClient(app, raise_server_exceptions=False)
-    dev = _client_as(app, "email:dev@example.com")
-    r_anon = anon.head("/api/v1/score")
-    r_dev = dev.head("/api/v1/score")
-    assert r_anon.status_code == 405
-    assert r_dev.status_code == 405
-    assert r_anon.headers.get("allow") == r_dev.headers.get("allow")
-
-
-# ---------------------------------------------------------------------
-# BB6-24 (defended/pinned): /api/v1/score with malformed but small
-# JSON bodies (null, [], {}, "true", "0", "1.5") all return 422 —
-# never 500.
-# ---------------------------------------------------------------------
-def test_bb6_24_score_tiny_malformed_bodies_handled(app):
-    """Various tiny / malformed JSON bodies on /api/v1/score:
-      '', null, '{}', '[]', 'true', 'false', '0', '1.5'
-    All → 422 with a JSON error detail. Never 500.
-
-    Severity: N/A (defended). Round-6 probe pin."""
-    dev = _client_as(app, "email:dev@example.com")
-    for body in (b"", b" ", b"null", b"{}", b"[]",
-                 b"true", b"false", b"0", b"1.5"):
-        r = dev.post("/api/v1/score", content=body,
-                     headers={"Content-Type": "application/json"})
-        assert r.status_code != 500, (
-            f"BB6-24 fired — tiny body crashed: {body!r} → 500"
-        )
-        assert r.status_code == 422, (
-            f"BB6-24 unexpected — body={body!r}: status={r.status_code}"
-        )
-
-
-# =====================================================================
-# CATEGORY 3: Sanity — round-5 honest negatives re-pinned forward
-# =====================================================================
-
-# ---------------------------------------------------------------------
-# BB6-25 (defended/pinned): /api/v1/score response Cache-Control still
-# `private, max-age=300, must-revalidate` (BB5-07 holds forward).
-# ---------------------------------------------------------------------
-def test_bb6_25_score_cache_control_still_tightened(app):
-    """Re-pin round-5 BB5-07 closure forward to round 6."""
-    dev = _client_as(app, "email:dev@example.com")
-    r = dev.post("/api/v1/score", json=_score_body())
-    assert r.status_code == 200
-    cc = r.headers.get("cache-control", "")
-    assert "private" in cc and "must-revalidate" in cc, (
-        f"BB6-25 regressed — score Cache-Control loosened: {cc!r}"
-    )
-    assert "public" not in cc and "s-maxage" not in cc, (
-        f"BB6-25 regressed — score Cache-Control reopened public: {cc!r}"
-    )

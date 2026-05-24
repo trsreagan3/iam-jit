@@ -1,19 +1,15 @@
 """`iam-risk-score` CLI — score an IAM policy from the command line.
 
-Two modes:
+Offline-only: runs the deterministic scorer locally without any
+network call. Safe in pre-commit hooks, air-gapped CI runners, or
+any environment where a hosted scoring API isn't available.
 
-  1. **Hosted/remote** (default): POST the policy to a running
-     iam-jit scoring API. Use the public hosted service, your own
-     self-hosted deployment, or a local `iam-jit serve`.
+(The hosted remote API mode was removed on 2026-05-24 when the
+hosted iam-risk-score Lambda was dropped per [[no-hosted-saas]]
+restoration. The deterministic scorer is the moat; the hosted
+access shell is no longer maintained.)
 
-     iam-risk-score --api https://api.iam-jit.dev policy.json
-
-  2. **Offline**: run the deterministic scorer locally without
-     any network call. Useful for pre-commit hooks and air-gapped
-     CI runners. The LLM narrative is omitted in offline mode
-     (the deterministic score is the same).
-
-     iam-risk-score --offline policy.json
+  iam-risk-score policy.json
 
 Output formats:
 
@@ -22,20 +18,20 @@ Output formats:
   - `json`: programmatic JSON output for piping into other tools
   - `github`: GitHub Actions workflow command format (sets
     outputs, prints annotations)
+  - `sarif`: SARIF 2.1.0 output for GitHub Code Scanning, GitLab
+    Code Quality, and other security-CI consumers.
 
 Exit codes:
 
   - 0: scored successfully AND score is below threshold
   - 1: scored successfully but score >= threshold (CI gate fail)
   - 2: invalid input (bad policy file, malformed JSON)
-  - 3: API error (network, auth, server)
 
 Threshold defaults to 5 (matches iam-jit's default
 auto-approve threshold); override with `--threshold N`.
 
 The CLI is intentionally narrow. For full request workflows
-(provision, assume, revoke), use the iam-jit web UI or the
-broader `iam-jit` CLI.
+(provision, assume, revoke), use the broader `iam-jit` CLI.
 """
 
 from __future__ import annotations
@@ -46,7 +42,6 @@ import os
 import sys
 from pathlib import Path
 from typing import Any
-from urllib import error, request
 
 
 __version__ = "0.1.0"
@@ -65,31 +60,6 @@ def _read_policy(path: str) -> dict[str, Any]:
         return json.loads(text)
     except json.JSONDecodeError as e:
         raise ValueError(f"could not parse JSON from {path}: {e}")
-
-
-def _score_remote(
-    api_url: str,
-    api_key: str | None,
-    payload: dict[str, Any],
-    timeout: int,
-) -> dict[str, Any]:
-    """Call the hosted /api/v1/score endpoint."""
-    url = api_url.rstrip("/") + "/api/v1/score"
-    body = json.dumps(payload).encode("utf-8")
-    headers = {"Content-Type": "application/json", "User-Agent": f"iam-risk-score/{__version__}"}
-    if api_key:
-        headers["Authorization"] = f"Bearer {api_key}"
-    req = request.Request(url, data=body, headers=headers, method="POST")
-    try:
-        with request.urlopen(req, timeout=timeout) as resp:
-            return json.loads(resp.read().decode("utf-8"))
-    except error.HTTPError as e:
-        detail = e.read().decode("utf-8", errors="replace")
-        raise RuntimeError(
-            f"API returned HTTP {e.code}: {detail[:400]}"
-        )
-    except error.URLError as e:
-        raise RuntimeError(f"could not reach API at {url}: {e.reason}")
 
 
 def _score_offline(payload: dict[str, Any]) -> dict[str, Any]:
@@ -224,12 +194,15 @@ def _format_sarif(
                     "rates this policy on a 1-10 scale calibrated "
                     "against 1,489 AWS-managed policies and 217 "
                     "documented attack patterns. See "
-                    "https://iam-risk-score.com/scoring for the "
-                    "scoring rubric."
+                    "https://github.com/trsreagan3/iam-jit/blob/main/"
+                    "docs/scoring-bands.md for the scoring rubric."
                 )
             },
             "defaultConfiguration": {"level": sarif_level},
-            "helpUri": "https://iam-risk-score.com/scoring",
+            "helpUri": (
+                "https://github.com/trsreagan3/iam-jit/blob/main/"
+                "docs/scoring-bands.md"
+            ),
         }
     ]
 
@@ -301,7 +274,7 @@ def _format_sarif(
                     "driver": {
                         "name": "iam-risk-score",
                         "version": __version__,
-                        "informationUri": "https://iam-risk-score.com",
+                        "informationUri": "https://github.com/trsreagan3/iam-jit",
                         "rules": rules,
                     }
                 },
@@ -382,23 +355,15 @@ def main(argv: list[str] | None = None) -> int:
         "--threshold", type=int, default=5,
         help="Score threshold for the pass/fail exit code (default: 5)",
     )
-    parser.add_argument(
-        "--api", default=os.environ.get("IAM_RISK_SCORE_API_URL"),
-        help=(
-            "Hosted scoring API URL (default: $IAM_RISK_SCORE_API_URL). "
-            "Required unless --offline is set."
-        ),
-    )
-    parser.add_argument(
-        "--api-key", default=os.environ.get("IAM_RISK_SCORE_API_KEY"),
-        help="API key for the hosted service (default: $IAM_RISK_SCORE_API_KEY)",
-    )
+    # --offline / --api / --api-key were removed on 2026-05-24 when
+    # the hosted iam-risk-score Lambda was dropped per
+    # [[no-hosted-saas]] restoration. The CLI is now offline-only;
+    # `--offline` is silently accepted as a back-compat no-op so
+    # existing CI scripts that pass it keep working through the v1.0
+    # transition window. Remove in v1.1.
     parser.add_argument(
         "--offline", action="store_true",
-        help=(
-            "Run the deterministic scorer locally without a network "
-            "call. LLM narrative is unavailable in this mode."
-        ),
+        help=argparse.SUPPRESS,
     )
     parser.add_argument(
         "--format", choices=["human", "json", "github", "sarif"],
@@ -408,10 +373,6 @@ def main(argv: list[str] | None = None) -> int:
             "`sarif` emits SARIF 2.1.0 for GitHub Code Scanning, "
             "GitLab Code Quality, and other security-CI consumers."
         ),
-    )
-    parser.add_argument(
-        "--timeout", type=int, default=30,
-        help="API request timeout in seconds (default: 30)",
     )
     parser.add_argument(
         "--version", action="version", version=f"%(prog)s {__version__}",
@@ -433,19 +394,7 @@ def main(argv: list[str] | None = None) -> int:
         payload["description"] = args.description
 
     try:
-        if args.offline:
-            result = _score_offline(payload)
-        else:
-            if not args.api:
-                print(
-                    "ERROR: --api or IAM_RISK_SCORE_API_URL must be set, "
-                    "or use --offline",
-                    file=sys.stderr,
-                )
-                return 2
-            result = _score_remote(
-                args.api, args.api_key, payload, args.timeout,
-            )
+        result = _score_offline(payload)
     except RuntimeError as e:
         print(f"ERROR: {e}", file=sys.stderr)
         return 3

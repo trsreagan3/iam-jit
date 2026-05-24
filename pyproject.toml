@@ -51,7 +51,7 @@ dependencies = [
 ]
 
 [project.urls]
-Homepage = "https://iam-risk-score.com"
+Homepage = "https://github.com/trsreagan3/iam-jit"
 Documentation = "https://github.com/trsreagan3/iam-jit#readme"
 Source = "https://github.com/trsreagan3/iam-jit"
 Issues = "https://github.com/trsreagan3/iam-jit/issues"

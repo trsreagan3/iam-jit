@@ -74,15 +74,11 @@ users:
     display_name: Dev2
     roles: [requester]
 """
-
-
 @pytest.fixture(autouse=True)
 def _env(monkeypatch):
     monkeypatch.setenv("IAM_JIT_AUTH_MODE", "local")
     monkeypatch.setenv("IAM_JIT_DEV_INSECURE_SECRET", "1")
     monkeypatch.setenv("IAM_JIT_MAGIC_LINK_SECRET", _DEV_SECRET)
-
-
 @pytest.fixture(autouse=True)
 def _reset_singletons():
     from iam_jit import (
@@ -98,14 +94,11 @@ def _reset_singletons():
     _nonces.reset_default_store_for_tests()
     _cidrs.reset_default_store_for_tests()
     _settings.reset_default_store_for_tests()
-    from iam_jit.routes import score as _score_route
-    _score_route._reset_limiter_for_tests()
+    # (score-route limiter reset dropped 2026-05-24 — hosted scoring API removed per [[no-hosted-saas]])
     from iam_jit.routes import auth as _auth_route
     _auth_route._reset_magic_link_ip_limiter_for_tests()
     from iam_jit import session_revocation as _sr
     _sr.reset_default_store_for_tests()
-
-
 @pytest.fixture
 def app(tmp_path):
     users_yaml = tmp_path / "users.yaml"
@@ -115,15 +108,11 @@ def app(tmp_path):
         user_store=FileUserStore(str(users_yaml)),
         api_tokens_store=InMemoryAPITokenStore(),
     )
-
-
 def _client_as(app, user_id=None):
     c = TestClient(app, raise_server_exceptions=False)
     if user_id:
         c.cookies.set("iam_jit_session", auth_mod.sign_session(_DEV_SECRET, user_id))
     return c
-
-
 def _mk_request(client, description="ordinary request") -> str:
     r = client.post(
         "/api/v1/requests",
@@ -223,54 +212,6 @@ def test_bb3_01_logout_does_not_invalidate_cookie_server_side(app):
 # ---------------------------------------------------------------------
 # BB3-02: GET /openapi.json returns 500 — pydantic ForwardRef
 #         (Response) unresolved at schema-build time.
-# ---------------------------------------------------------------------
-def test_bb3_02_openapi_json_returns_500(app):
-    """`GET /openapi.json` returns 500 on every request. The underlying
-    pydantic error is `TypeAdapter[Annotated[ForwardRef('Response'),
-    ...]] is not fully defined`. Something in a route's return-type
-    annotation references `Response` without a `model_rebuild()` /
-    resolved typing namespace.
-
-    Severity: HIGH at launch.
-      - functional outage: API consumers (MCP server, GitHub Action,
-        SDK generators, OpenAPI Generator) cannot fetch the schema;
-      - downstream UX: `GET /docs` returns Swagger HTML 200 but the UI
-        fetches /openapi.json client-side and renders 'Failed to load
-        API definition' (see BB3-07);
-      - recon signal: an attacker hitting /openapi.json and seeing 500
-        immediately knows the deployment has unhandled exceptions on a
-        critical public route. Probes harder.
-
-    Fix sketch: find the route or pydantic model with the unresolved
-    `Response` ForwardRef. Either call `Model.model_rebuild()` at app
-    startup, or annotate with the resolved `starlette.responses.
-    Response` type."""
-    # BB3-02 CLOSED: routes with `-> Response` got an explicit
-    # `response_class=Response` to skip pydantic's body-schema
-    # inference, and `response: Response` parameters were refactored
-    # away. /openapi.json now returns 200.
-    c = TestClient(app, raise_server_exceptions=False)
-    r = c.get("/openapi.json")
-    assert r.status_code == 200, (
-        f"/openapi.json should return 200; got {r.status_code}. "
-        f"The pydantic ForwardRef issue may have regressed."
-    )
-    schema = r.json()
-    assert schema.get("openapi", "").startswith("3."), (
-        "expected an OpenAPI 3.x schema body"
-    )
-    # /api/v1/score is the core public route — its presence proves the
-    # schema generation reaches the real endpoints.
-    assert "/api/v1/score" in schema.get("paths", {})
-
-
-# ---------------------------------------------------------------------
-# BB3-03: /healthz STILL leaks the full security_posture object —
-#         BB-13 (round 1, LOW) was not fixed; round 3 retest bumps to
-#         MED because the issues[].detail strings now include
-#         operational hints like 'the link appears in any browser that
-#         observes the response, including via shoulder-surfing or
-#         browser history'.
 # ---------------------------------------------------------------------
 def test_bb3_03_healthz_leaks_full_security_posture(app):
     """Round-1 BB-13 asked for `/healthz` to shrink to
@@ -506,59 +447,6 @@ def test_bb3_07_docs_swagger_references_broken_openapi(app):
 # ---------------------------------------------------------------------
 # BB3-08: Score endpoint rate-limit keys on peer IP — authenticated
 #         users behind shared NAT share the bucket.
-# ---------------------------------------------------------------------
-def test_bb3_08_score_rate_limit_per_ip_not_per_user(app):
-    """`POST /api/v1/score` rate-limits by peer IP. Two authenticated
-    users behind the same corporate NAT / consumer CGNAT share the
-    bucket. A noisy neighbor (or an attacker who knows the target's
-    egress IP) can pin the bucket at 429 for everyone behind that
-    IP.
-
-    Severity: LOW (DoS-of-scoring; recoverable on next minute).
-
-    Probe: dev user bursts 100 score calls and exhausts the bucket.
-    A SECOND user (admin) issuing a request from the same client IP
-    via Bearer token also gets 429 — sharing the bucket.
-
-    Fix sketch: authenticated requests rate-limit by (user_id, IP)
-    tuple; unauthenticated by IP only. Add a per-user soft cap
-    independent of the per-IP cap."""
-    dev = _client_as(app, "email:dev@example.com")
-    body = {
-        "policy": {"Version": "2012-10-17", "Statement": [{"Effect": "Allow", "Action": "s3:GetObject", "Resource": "*"}]},
-        "description": "x",
-        "duration_hours": 1,
-        "access_type": "read-only",
-    }
-    cnt = Counter()
-    for _ in range(80):
-        r = dev.post("/api/v1/score", json=body)
-        cnt[r.status_code] += 1
-    assert cnt[429] > 0, f"expected some 429s after the burst; got {cnt}"
-
-    # Different user via Bearer token, SAME client IP.
-    admin = _client_as(app, "email:admin@example.com")
-    admin_tok = admin.post("/api/v1/tokens", json={"label": "x"}).json()["token"]
-    c = TestClient(app, raise_server_exceptions=False)
-    r = c.post(
-        "/api/v1/score",
-        json=body,
-        headers={"Authorization": f"Bearer {admin_tok}"},
-    )
-    # Currently broken: the new user is also 429 because they share
-    # the IP bucket.
-    assert r.status_code == 429, (
-        f"expected per-IP bucket sharing (current broken behavior); "
-        f"got {r.status_code}. If this is now 200, the score rate-"
-        f"limiter has been split per-user and this test should be "
-        f"flipped."
-    )
-
-
-# ---------------------------------------------------------------------
-# BB3-09: /api/v1/requests/preview reflects raw user input in JSON
-#         error body — not a browser-side XSS (Content-Type is JSON)
-#         but a downstream-log-renderer risk.
 # ---------------------------------------------------------------------
 def test_bb3_09_preview_reflects_raw_user_input_in_error(app):
     """`POST /api/v1/requests/preview` with a malformed body returns
