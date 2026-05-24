@@ -23,7 +23,7 @@ Per four-products-one-brand: iam-jit is four separate products that share a scor
 
 | # | Product | What it is | Who it's for | Install | Ships in |
 |---|---|---|---|---|---|
-| 1 | **[iam-risk-score](#iam-risk-score)** | 1–10 risk score for any AWS IAM policy in <100ms. API + CLI + GitHub Action. Free for the first 100 requests/month. | CI pipelines, IDE plugins, anyone who wants a verdict before granting permissions. | `pip install iam-risk-score` | **v1.0** |
+| 1 | **[iam-risk-score](#iam-risk-score)** | 1–10 risk score for any AWS IAM policy in <100ms. API + CLI + GitHub Action. Free + open source; hosted API rate-limited to 100 requests/day per IP (offline CLI + self-host are unlimited). | CI pipelines, IDE plugins, anyone who wants a verdict before granting permissions. | `pip install iam-risk-score` | **v1.0** |
 | 2 | **[ibounce](#ibounce)** *(was `iam-jit-bouncer`)* | Local proxy that gates every AWS API call against rules. Defense-in-depth over IAM scoping. v1.0 ships BOTH the agent-cooperative MCP path AND transparent HTTP-proxy interception (SigV4-preserving forwarding, cooperative + transparent modes, environment profiles, timed pause-for, async deny prompts). | Devs at companies with locked-down IAM (no `iam:CreateRole` for individuals); contractors on read-only credentials; anyone doing rapid iteration where IAM propagation delays hurt; agents that want defense-in-depth on top of role scoping. | `pip install iam-jit && ibounce init` | **v1.0** (CLI + MCP + HTTP proxy + profiles + pause + prompts) |
 | 3 | **[iam-jit local](#iam-jit-local)** | Local-only safety layer between your AI agent and AWS. Runs on your laptop. Zero SaaS dependency. Your AWS credentials never leave your machine. | Solo devs / individual admins who want Claude bounded. | `pip install iam-jit && iam-jit serve --local` | **v1.0** |
 | 4 | **[iam-jit self-host](#iam-jit-self-host)** | Full JIT-IAM provisioner: time-bound roles, scoring, approval workflow, Slack approval bot, OIDC SSO (Google + Okta), audit trail, auto-revocation — running in your own AWS account. | Teams + enterprises with shared audit + multi-user + compliance needs. | `git clone` + `sam deploy --guided` | **v1.0** |
@@ -86,7 +86,7 @@ Suggestions to reduce risk:
 ### Integration paths
 
 - **CLI** — `pip install iam-risk-score`. Works offline (no network call) or against any API URL. Good for pre-commit hooks + CI gates.
-- **HTTP API** — `POST https://api.iam-risk-score.com/api/v1/score`. Anonymous + free up to 100 requests/month per IP. The offline CLI is unlimited.
+- **HTTP API** — `POST https://api.iam-risk-score.com/api/v1/score`. Anonymous + free; rate-limited to 30 req/min/IP (Lambda burst-protect) + ~100 req/day/IP (edge cap). The offline CLI is unlimited.
 - **GitHub Action** — drops into CI; fails the workflow if a policy scores above your threshold. [Action](https://github.com/trsreagan3/iam-risk-score-action) · [SARIF output](docs/SARIF.md) for code-scanning integrations.
 
 ### What gets scored
@@ -101,7 +101,7 @@ Honest answer: **complementary, not a replacement.** They solve adjacent problem
 
 | | AWS IAM Access Analyzer | iam-risk-score |
 |---|---|---|
-| **Cost** | Free, built into AWS | Free under Apache-2.0 (offline CLI / `pip install`); 100/mo free via hosted API |
+| **Cost** | Free, built into AWS | Free under Apache-2.0 (offline CLI / `pip install`); hosted API rate-limited to 100/day per IP |
 | **What it answers** | "What does this policy allow? Is there unused permission? Is anything publicly accessible?" | "If this policy is granted + compromised, how bad is the blast radius? (1–10)" |
 | **Output shape** | Findings (pass/warning/error), policy validation, CloudTrail-based refinement suggestions | Numeric score 1–10 + per-factor breakdown |
 | **Runs where** | AWS API call from an AWS context | Offline CLI, local API, hosted API, GitHub Action — no AWS account needed |

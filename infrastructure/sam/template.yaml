@@ -362,9 +362,10 @@ Parameters:
            The in-Lambda limiter is process-local and resets on cold-
            start; the real cap must be at the edge. Default 2,000
            requests per 5-minute sliding window per source IP — well
-           above the documented free tier (100 req/month) so legitimate
-           traffic isn't throttled, but stops scraping / Show-HN-day
-           hammering before requests reach (and pay for) Lambda.
+           above the documented hosted-API limit (100 req/day per IP)
+           so legitimate traffic isn't throttled, but stops scraping
+           / Show-HN-day hammering before requests reach (and pay
+           for) Lambda.
 
         2. **HTTPS termination at AWS-managed cert** (no ACM cert
            required for the apex `*.cloudfront.net` URL). For a custom

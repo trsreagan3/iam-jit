@@ -2,7 +2,7 @@
 const title = "iam-risk-score — Score AWS IAM policies before you grant access";
 const description =
   "A deterministic + LLM scoring engine that grades any IAM policy 1-10 in under 100ms. " +
-  "API, CLI, GitHub Action. Free for the first 100 requests/month.";
+  "API, CLI, GitHub Action. Free + open source; hosted API rate-limited to 100 req/day per IP.";
 const cliSample = `$ iam-risk-score --offline my-policy.json
 
 IAM Policy Risk Score
@@ -72,7 +72,7 @@ const pricingCards: PricingCard[] = [
     name: "iam-risk-score — hosted API",
     price: "Free",
     features:
-      "Public API at api.iam-risk-score.com — 100 req/mo per IP. No auth, no sign-up. Every scoring feature, full per-factor breakdown.",
+      "Public API at api.iam-risk-score.com — 100 req/day per IP. No auth, no sign-up. Every scoring feature, full per-factor breakdown.",
     cta: "Try the API",
     href: "#install",
     featured: true,
@@ -355,8 +355,8 @@ const pricingCards: PricingCard[] = [
         <p class="sub">
           A deterministic-plus-LLM scoring engine that grades any IAM
           policy 1&ndash;10 in under 100ms. Drop into your CI pipeline,
-          your agent runtime, or your existing JIT IAM tool. Free for
-          the first 100 requests/month.
+          your agent runtime, or your existing JIT IAM tool. Free +
+          open source; hosted API rate-limited to 100 req/day per IP.
         </p>
         <div class="convergence" style="margin: 24px 0 28px; padding: 18px 20px; background: rgba(56, 189, 248, 0.06); border: 1px solid rgba(56, 189, 248, 0.25); border-radius: 8px;">
           <div style="font-size: 13px; color: var(--fg-muted); text-transform: uppercase; letter-spacing: 0.06em; margin-bottom: 10px;">Calibration as of May 2026</div>
