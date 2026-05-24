@@ -1,14 +1,28 @@
 # Launch plan — iam-risk-score
 
-> **SUPERSEDED 2026-05-23**: v1.0 ships fully free + open source per
-> `project_oss_only_launch_decision.md`. The tier/pricing sections
-> below (Indie / Pro / Team / Enterprise) are RETAINED FOR HISTORICAL
-> CONTEXT ONLY — they do NOT reflect v1.0 launch shape. v1.0 launch
-> copy lives in the README + landing-site. Pricing-page + Stripe
-> integration items in the pre-launch checklist are DEFERRED to a
-> future paid tier (no earlier than 12-18mo post-launch per the OSS
-> launch decision). Revenue motion at launch = consulting funnel +
-> EOR-supporting international remote opportunities.
+> **SUPERSEDED 2026-05-23 + further 2026-05-24**: v1.0 ships fully
+> free + open source per `project_oss_only_launch_decision.md`. The
+> tier/pricing sections below (Indie / Pro / Team / Enterprise) are
+> RETAINED FOR HISTORICAL CONTEXT ONLY — they do NOT reflect v1.0
+> launch shape. v1.0 launch copy lives in the README + landing-site.
+> Pricing-page + Stripe integration items in the pre-launch
+> checklist are DEFERRED to a future paid tier (no earlier than
+> 12-18mo post-launch per the OSS launch decision). Revenue motion
+> at launch = consulting funnel + EOR-supporting international
+> remote opportunities.
+>
+> **Further superseded 2026-05-24**: the hosted iam-risk-score
+> Lambda + `api.iam-risk-score.com` API were DROPPED per the
+> restoration of `[[no-hosted-saas]]` to 100%. References below to
+> "Hosted API", "production deploy of the scoring API at
+> api.iam-risk-score.com", domain registration, Route 53, ACM
+> certificate, CloudFront distribution for the hosted API, and
+> Stripe webhook endpoint at `api.iam-risk-score.com/api/v1/webhooks/stripe`
+> are HISTORICAL — the supported v1.0 access surface is the offline
+> CLI + Python library + GitHub Action only. The destination-
+> account CloudFormation template (`infrastructure/cloudformation/
+> destination-account-roles.yaml`) is the only operator-deployed
+> infrastructure.
 
 The standalone scoring product. Built to be the "API and CLI for
 scoring AWS IAM policy risk" — for AI agents submitting policies

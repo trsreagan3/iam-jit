@@ -19,25 +19,27 @@ iam-risk-score [OPTIONS] POLICY_FILE
 stdin:
 
 ```bash
-cat policy.json | iam-risk-score --offline -
+cat policy.json | iam-risk-score -
 ```
+
+The CLI is **offline-only** — runs the deterministic scorer locally
+without any network call. The previously-documented `--api-url` /
+`--api-key` remote mode was dropped on 2026-05-24 when the hosted
+`api.iam-risk-score.com` Lambda was removed (see `[[no-hosted-saas]]`).
+The `--offline` flag is silently accepted as a back-compat no-op
+until v1.1 so existing CI scripts keep working.
 
 ## Options
 
 | Flag | Type | Default | Description |
 |---|---|---|---|
-| `--offline` | flag | (mode required) | Run the deterministic scorer locally. No network call. |
-| `--api-url URL` | string | — | Hit a hosted iam-risk-score API. Pass `https://api.iam-risk-score.com` for the public service. |
-| `--api-key KEY` | string | — | Bearer token. Authenticated callers bypass the rate limit. |
 | `--access-type` | choice | `read-only` | `read-only` or `read-write`. Affects scoring. |
 | `--duration-hours N` | int | 1 | Hypothetical grant duration. Longer = higher score for medium-risk policies. |
-| `--description "..."` | string | — | One-line context the LLM narrative can reference (when a backend is configured). |
+| `--description "..."` | string | — | One-line context for the score (informational; the offline CLI does not emit an LLM narrative). |
 | `--threshold N` | int | 5 | Score >= threshold → FAIL exit code |
-| `--format` | choice | `human` | `human`, `json`, or `github` |
+| `--format` | choice | `human` | `human`, `json`, `github`, or `sarif` |
 | `--version` | flag | — | Print version + exit |
 | `--help` | flag | — | Print this help |
-
-One of `--offline` or `--api-url` is required.
 
 ## Exit codes
 
@@ -46,7 +48,7 @@ One of `--offline` or `--api-url` is required.
 | 0 | Pass — score < threshold |
 | 1 | Fail — score >= threshold |
 | 2 | Bad input (malformed JSON, unreadable file, etc.) |
-| 3 | API error (network failure, 5xx response, etc.) |
+| 3 | Internal scoring error |
 
 ## Output formats
 
@@ -109,7 +111,7 @@ see [GitHub Action docs](github-action.md).
 #!/usr/bin/env bash
 # .git/hooks/pre-commit
 for policy in $(git diff --cached --name-only --diff-filter=ACM | grep -E '/iam-.*\.json$'); do
-    iam-risk-score --offline --threshold 5 "$policy" || {
+    iam-risk-score --threshold 5 "$policy" || {
         echo "❌ $policy exceeds risk threshold; refusing commit"
         exit 1
     }
@@ -119,28 +121,28 @@ done
 ### CI gate
 
 ```bash
-iam-risk-score --offline --threshold 5 --format github iam/*.json
+iam-risk-score --threshold 5 --format github iam/*.json
 ```
 
 ### Cache scoring results across CI runs
 
 ```bash
-FP=$(iam-risk-score --offline --format json policy.json | jq -r .policy_fingerprint)
+FP=$(iam-risk-score --format json policy.json | jq -r .policy_fingerprint)
 if cache-has "$FP"; then
     echo "Skipping (cached): $FP"
 else
-    iam-risk-score --offline policy.json
+    iam-risk-score policy.json
     cache-store "$FP"
 fi
 ```
 
-### Hosted API mode
+### SARIF output for GitHub Code Scanning
 
 ```bash
-# Hosted API — no auth needed (rate-limited per IP)
-iam-risk-score --api-url https://api.iam-risk-score.com policy.json
-
-# Self-hosted deployment that configured IAM_JIT_SCORE_API_KEY
-export IAM_RISK_SCORE_API_KEY=...
-iam-risk-score --api-url https://api.your-deployment.example policy.json
+iam-risk-score --format sarif policy.json > findings.sarif
+# Then in your workflow:
+#   - uses: github/codeql-action/upload-sarif@v3
+#     with: { sarif_file: findings.sarif }
 ```
+
+Findings show up inline on the PR + on the Security tab.

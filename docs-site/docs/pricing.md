@@ -7,12 +7,22 @@ dbounce / gbounce) is free + open source under Apache-2.0.
 **Every scoring feature ships in v1.0; no tier comparison, no
 feature gates, no signup.**
 
-- **Offline CLI** — `pip install iam-risk-score`. Unlimited.
-- **Hosted API** — `https://api.iam-risk-score.com/api/v1/score`.
-  Rate-limited to 100 requests/day per source IP (plus 30 req/min
-  burst-protect at the Lambda layer).
-- **Self-hosted** — deploy the SAM stack in your own AWS account.
-  Zero quotas; "your AWS bill" (~$6/mo idle, see [production hardening](production-hardening.md)).
+- **Offline CLI** — `pip install iam-jit`. Unlimited, runs locally,
+  no network call.
+- **Python library** — `from iam_jit import review`. Same engine,
+  embedded in your process.
+- **GitHub Action** — `trsreagan3/iam-risk-score-action@v1`.
+  Unlimited. SARIF output for GitHub Code Scanning.
+- **Self-hosted suite** — deploy `infrastructure/cloudformation/
+  destination-account-roles.yaml` in your own AWS account; run
+  the bouncers + iam-jit local from `pip install`. Zero quotas;
+  "your AWS bill" (~$6/mo idle when running the destination-
+  account roles, see [production hardening](production-hardening.md)).
+
+> **No hosted scoring API.** The previously-documented
+> `api.iam-risk-score.com` endpoint was dropped on 2026-05-24 to
+> restore `[[no-hosted-saas]]` to 100%. The scorer is the moat; the
+> offline CLI + library + Action are the supported access surface.
 
 ## Consulting available
 
@@ -22,8 +32,8 @@ engagements outside the open-source release.
 
 What consulting typically covers:
 
-- Production deploy walkthroughs (SAM stack hardening, edge
-  protection, log retention tuning, multi-region)
+- Production deploy walkthroughs (destination-account CFN
+  hardening, log retention tuning, multi-region, multi-account)
 - Custom rule + adversarial-corpus contribution for your sensitive
   services / blacklist patterns
 - SOC 2 / PCI / HIPAA / FedRAMP evidence packs aligned with the
@@ -31,8 +41,7 @@ What consulting typically covers:
 - Integration with existing JIT/SSO/Slack/CI surfaces in your stack
 - Migration consulting (from Apono / Opal / Hoop / etc.)
 
-Reach out via the GitHub repo issues or the email on the README to
-discuss scope.
+Reach out via the GitHub repo issues to discuss scope.
 
 ## The deterministic safety contract
 
@@ -42,32 +51,8 @@ by explicit safety contract (regression-tested in CI), the LLM can
 never lower the deterministic score. You get explanation as a
 narrative; the safety floor is the score itself.
 
-This means a free-tier offline-CLI integration that auto-approves
-at threshold 5 catches the same risks any other configuration
-would.
-
-## What counts as a request
-
-One scoring call to `/api/v1/score` = one request. Identical
-policies (matched by `policy_fingerprint`) hitting CloudFront cache
-don't count — only origin hits.
-
-## Hosted API rate limits
-
-The hosted endpoint enforces:
-
-- **30 requests / minute / source IP** — in-Lambda sliding window;
-  defense-in-depth against bursts (configurable via
-  `IAM_JIT_SCORE_RATE_PER_MINUTE`).
-- **~100 requests / day / source IP** — edge-enforced via WAFv2 on
-  the hosted deployment; sized to support legitimate sample-and-
-  evaluate use without subsidizing scraping. Self-hosted deploys
-  remove the daily cap entirely.
-
-For higher throughput, run the offline CLI (`pip install`,
-unlimited) or self-host the SAM stack in your own AWS account.
-Both paths are zero-cost in software-license terms; the self-host
-path is "your AWS bill" (~$6/mo idle).
+This means an offline-CLI integration that auto-approves at
+threshold 5 catches the same risks any other configuration would.
 
 ## Why no paid tier at v1.0
 

@@ -8,6 +8,15 @@
 > sections REMAIN ACCURATE for v1.0. Revenue motion at launch =
 > consulting funnel + EOR-supporting international remote
 > opportunities.
+>
+> **Further superseded 2026-05-24 (Hosted API section)**: the
+> hosted `api.iam-risk-score.com` Lambda was DROPPED per the
+> restoration of `[[no-hosted-saas]]` to 100%. The "Hosted API"
+> section + the domain-registration / ACM cert / CloudFront /
+> Route 53 alias steps for `api.iam-risk-score.com` are HISTORICAL —
+> no hosted scoring endpoint ships in v1.0. The supported v1.0
+> access surface is the offline CLI + Python library + GitHub
+> Action only.
 
 Pre-launch steps to publish the standalone scoring product
 across three channels.

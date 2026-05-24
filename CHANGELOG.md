@@ -11,6 +11,23 @@ within the same release.
 
 ## Unreleased — v1.0 launch prep (2026-05)
 
+### Removed
+
+- **Dropped hosted iam-risk-score Lambda + REST endpoint** (2026-05-24) —
+  Per founder direction restoring `[[no-hosted-saas]]` to 100%. The
+  hosted `api.iam-risk-score.com` scoring API + Mangum/Lambda entry +
+  SAM template + 4 hosted-API test files are GONE. The scorer
+  (`review.analyze_policy` / `_deterministic` / `scoring/`) remains
+  in the CLI + library per `[[scorer-is-ground-truth]]` — only the
+  access shell was removed. Net: -6,518 LOC removed, +133 LOC added
+  in app.py / cli_score.py / blacklist.py / test scaffolding. The
+  `iam-risk-score` CLI is now offline-only (silently accepts
+  `--offline` as a back-compat no-op until v1.1). The blacklist
+  store singleton moved from `routes/score.py` to `iam_jit/blacklist.py`
+  where it belongs. README + landing-site + docs-site rewritten;
+  LAUNCH-PLAN + PUBLISHING + LANDING-PAGE-COPY carry SUPERSEDED
+  banners pointing at the 2026-05-24 cut.
+
 ### Changed
 
 - **Tier rescope: v1.0 ships fully free + open source** (2026-05-23) —

@@ -30,35 +30,31 @@ Suggestions to reduce risk:
 
 Exit code 1 (above threshold) — usable in CI pipelines as a gate.
 
-## :material-cloud: Hosted API (free + open source, 100 req/day per IP)
+## :material-language-python: Python library
 
-```bash
-curl -X POST https://api.iam-risk-score.com/api/v1/score \
-  -H "Content-Type: application/json" \
-  -d '{"policy":{"Version":"2012-10-17","Statement":[{"Effect":"Allow","Action":["s3:GetObject"],"Resource":["arn:aws:s3:::my-bucket/file"]}]}}'
-```
+```python
+from iam_jit import review
 
-Response:
-
-```json
-{
-  "score": 1,
-  "tier": "low",
-  "would_auto_approve_at_threshold_5": true,
-  "factors": ["All statements are scoped or limited; no broad patterns"],
-  "suggestions": [],
-  "llm_narrative": null,
-  "analyzer": "deterministic",
-  "policy_fingerprint": "sha256:abc...",
-  "api_version": "v1"
+policy = {
+    "Version": "2012-10-17",
+    "Statement": [
+        {"Effect": "Allow", "Action": ["s3:GetObject"], "Resource": ["arn:aws:s3:::my-bucket/file"]},
+    ],
 }
+request_shape = {"spec": {"access_type": "read-only", "duration": {"duration_hours": 1}, "resource_constraints": []}}
+
+analysis = review.analyze_policy(policy, request_shape)
+print(analysis.risk_score)        # 1
+print(analysis.risk_factors)      # ()
 ```
 
-No authentication required for the hosted API; rate limit is
-30 req/min per source IP (burst-protect) plus a ~100 req/day per
-IP cap at the edge. For unlimited throughput, run the offline CLI
-(`pip install`) or [self-host](self-hosting.md) the SAM stack
-(zero quotas).
+Same deterministic engine as the CLI. See the
+[library reference](api-reference.md) for the full surface.
+
+> **No hosted API.** The previously-documented `api.iam-risk-score.com`
+> endpoint was dropped on 2026-05-24 to restore `[[no-hosted-saas]]`
+> to 100%. The scorer is the moat; the offline CLI + library are
+> the supported access surface.
 
 ## :material-github: GitHub Action
 

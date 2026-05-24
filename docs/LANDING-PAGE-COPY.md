@@ -1,8 +1,16 @@
 # Landing page copy — iam-risk-score
 
-Draft copy for the public landing site at iam-risk-score.com. Designed
-to load fast and convert technical decision-makers (eng leaders,
-DevSecOps, AI platform teams).
+> **SUPERSEDED 2026-05-24**: this draft references the hosted
+> `api.iam-risk-score.com` API which was DROPPED on 2026-05-24 per
+> the restoration of `[[no-hosted-saas]]` to 100%. The live landing
+> site copy lives in `landing-site/src/pages/index.astro` and is the
+> source of truth. The "Try without installing" section + curl
+> snippet hitting `api.iam-risk-score.com/api/v1/score` are
+> HISTORICAL only — no hosted scoring endpoint ships in v1.0.
+
+Draft copy for the public landing site. Designed to load fast and
+convert technical decision-makers (eng leaders, DevSecOps, AI
+platform teams).
 
 ---
 

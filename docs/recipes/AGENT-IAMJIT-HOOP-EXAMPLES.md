@@ -205,8 +205,8 @@ fresh iam-jit grant.
 
 ### Situation
 
-> "We need to reconcile last week's settlements between Omise and
-> Kbank. The rake task is `rake settlements:reconcile`. Run it."
+> "We need to reconcile last week's settlements between AcmePay and
+> Bankco. The rake task is `rake settlements:reconcile`. Run it."
 
 ### Agent steps
 

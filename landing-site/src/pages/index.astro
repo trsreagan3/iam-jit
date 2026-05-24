@@ -1,9 +1,9 @@
 ---
 const title = "iam-risk-score — Score AWS IAM policies before you grant access";
 const description =
-  "A deterministic + LLM scoring engine that grades any IAM policy 1-10 in under 100ms. " +
-  "API, CLI, GitHub Action. Free + open source; hosted API rate-limited to 100 req/day per IP.";
-const cliSample = `$ iam-risk-score --offline my-policy.json
+  "A deterministic scoring engine that grades any IAM policy 1-10 in under 100ms. " +
+  "CLI, Python library, GitHub Action. Free + open source; runs offline (no network call, no hosted API).";
+const cliSample = `$ iam-risk-score my-policy.json
 
 IAM Policy Risk Score
 
@@ -20,16 +20,17 @@ Suggestions to reduce risk:
   - Scope \`s3:DeleteObject\` to specific resource ARNs
   - Consider adding \`resource_constraints\` for s3`;
 
-const curlSample = `curl -X POST https://api.iam-risk-score.com/api/v1/score \\
-  -H "Content-Type: application/json" \\
-  -d '{"policy": {"Version": "2012-10-17", "Statement": [...]}}'`;
+const libSample = `from iam_jit import review
 
-const apiResponse = `{
-  "score": 7,
-  "tier": "high",
-  "factors": ["Destructive action on wildcard", "..."],
-  "suggestions": ["Scope to specific ARNs", "..."],
-  "llm_narrative": "This policy gives the requester the ability to delete..."
+policy = {"Version": "2012-10-17", "Statement": [...]}
+analysis = review.analyze_policy(policy, request_shape={"spec": {"access_type": "read-only"}})
+print(analysis.risk_score)        # 7
+print(analysis.risk_factors)      # ["Destructive action on wildcard", ...]`;
+
+const sarifSample = `{
+  "$schema": "https://raw.githubusercontent.com/oasis-tcs/sarif-spec/master/Schemata/sarif-schema-2.1.0.json",
+  "version": "2.1.0",
+  "runs": [{"tool": {"driver": {"name": "iam-risk-score", "rules": [...]}}, "results": [...]}]
 }`;
 
 const agentSample = `# In your agent runtime
@@ -69,21 +70,21 @@ interface PricingCard {
 
 const pricingCards: PricingCard[] = [
   {
-    name: "iam-risk-score — hosted API",
-    price: "Free",
+    name: "iam-risk-score — offline CLI + library",
+    price: "Free + open source",
     features:
-      "Public API at api.iam-risk-score.com — 100 req/day per IP. No auth, no sign-up. Every scoring feature, full per-factor breakdown.",
-    cta: "Try the API",
+      "`pip install iam-jit` — unlimited offline scoring, no network call required, Apache-2.0. Drop into pre-commit hooks + CI gates + IDE plugins. SARIF output for GitHub Code Scanning / GitLab Code Quality.",
+    cta: "pip install iam-jit",
     href: "#install",
     featured: true,
   },
   {
-    name: "iam-risk-score — offline CLI",
+    name: "GitHub Action",
     price: "Free + open source",
     features:
-      "`pip install iam-risk-score` — unlimited offline scoring, no network call, Apache-2.0. Drop into pre-commit hooks + CI gates.",
-    cta: "pip install iam-risk-score",
-    href: "#install",
+      "Drop `trsreagan3/iam-risk-score-action@v1` into any workflow. Scores every IAM policy diff on PRs, sets required reviewers by tier, blocks destructive merges.",
+    cta: "See the Action",
+    href: "https://github.com/trsreagan3/iam-risk-score-action",
   },
   {
     name: "Self-host + consulting",
@@ -107,7 +108,7 @@ const pricingCards: PricingCard[] = [
     <meta property="og:title" content={title} />
     <meta property="og:description" content={description} />
     <meta property="og:type" content="website" />
-    <meta property="og:url" content="https://iam-risk-score.com" />
+    <meta property="og:url" content="https://github.com/trsreagan3/iam-jit" />
     <meta name="twitter:card" content="summary_large_image" />
     <title>{title}</title>
     <style>
@@ -350,13 +351,14 @@ const pricingCards: PricingCard[] = [
 
     <section class="hero">
       <div class="container">
-        <span class="pill">v0.1.0 · adversarially calibrated</span>
+        <span class="pill">v0.1.0 · adversarially calibrated · offline</span>
         <h1 style="margin-top: 16px;">Score AWS IAM policies before you grant access.</h1>
         <p class="sub">
-          A deterministic-plus-LLM scoring engine that grades any IAM
-          policy 1&ndash;10 in under 100ms. Drop into your CI pipeline,
-          your agent runtime, or your existing JIT IAM tool. Free +
-          open source; hosted API rate-limited to 100 req/day per IP.
+          A deterministic scoring engine that grades any IAM policy
+          1&ndash;10 in under 100ms. Drop into your CI pipeline, your
+          agent runtime, or your existing JIT IAM tool. Free + open
+          source; runs offline (no hosted API, no network call, no
+          phone-home).
         </p>
         <div class="convergence" style="margin: 24px 0 28px; padding: 18px 20px; background: rgba(56, 189, 248, 0.06); border: 1px solid rgba(56, 189, 248, 0.25); border-radius: 8px;">
           <div style="font-size: 13px; color: var(--fg-muted); text-transform: uppercase; letter-spacing: 0.06em; margin-bottom: 10px;">Calibration as of May 2026</div>
@@ -380,8 +382,8 @@ const pricingCards: PricingCard[] = [
           </div>
         </div>
         <div class="ctas">
-          <a class="btn primary" href="#how">Try it now</a>
-          <a class="btn" href="#install"><code>pip install iam-risk-score</code></a>
+          <a class="btn primary" href="#how">See how it works</a>
+          <a class="btn" href="#install"><code>pip install iam-jit</code></a>
         </div>
         <pre id="install">{cliSample}</pre>
       </div>
@@ -390,36 +392,38 @@ const pricingCards: PricingCard[] = [
     <section id="how">
       <div class="container">
         <h2>How it works</h2>
-        <p class="lead">Three integration shapes, one verdict.</p>
+        <p class="lead">Three integration shapes, one verdict — all offline.</p>
         <div class="grid-3">
           <div class="card">
-            <h3>1. Submit</h3>
+            <h3>1. CLI</h3>
             <p>
-              Send any IAM policy via API, CLI, or GitHub Action.
-              No SDK required &mdash; it&rsquo;s just JSON over HTTPS.
+              <code>iam-risk-score path/to/policy.json</code> — human
+              output, JSON, SARIF, or GitHub Actions workflow commands.
+              Pre-commit hooks, air-gapped CI runners, and
+              <code>--format sarif</code> for GitHub Code Scanning.
             </p>
-            <pre>{curlSample}</pre>
+            <pre>{cliSample}</pre>
           </div>
           <div class="card">
-            <h3>2. Score</h3>
+            <h3>2. Python library</h3>
             <p>
+              <code>from iam_jit import review</code> — embed the scorer
+              into your agent runtime, IDE plugin, or custom IaC checker.
               A deterministic scorer applies 200+ calibrated risk rules,
               regression-tested against 1,489 AWS-managed policies and
-              217 documented attack patterns &mdash; 3,392 tests in CI,
-              adversarially probed for 10 rounds.
-              An optional LLM (Claude Opus or your own Bedrock / Ollama)
-              generates a plain-English narrative.
+              217 documented attack patterns.
             </p>
-            <pre>{apiResponse}</pre>
+            <pre>{libSample}</pre>
           </div>
           <div class="card">
-            <h3>3. Act</h3>
+            <h3>3. GitHub Action + SARIF</h3>
             <p>
-              Auto-approve low-risk grants, route medium-risk to peer
-              review, block destructive policies before they merge.
-              Same score, three integration shapes &mdash; your existing
-              tools decide what to do.
+              <code>trsreagan3/iam-risk-score-action@v1</code> in any
+              workflow. Scores every IAM diff on PRs, blocks destructive
+              merges, emits SARIF for GitHub Code Scanning so findings
+              show up inline on the Security tab.
             </p>
+            <pre>{sarifSample}</pre>
           </div>
         </div>
       </div>
@@ -547,19 +551,22 @@ const pricingCards: PricingCard[] = [
             on the 100-policy reference set).
           </dd>
 
-          <dt>Can I self-host?</dt>
+          <dt>Is there a hosted API?</dt>
           <dd>
-            Yes. The OSS CLI is fully functional in offline mode (no
-            network call needed). For the API, deploy your own iam-jit
-            stack from the source repo on GitHub.
+            No. <code>iam-risk-score</code> is offline-only — every
+            invocation runs the deterministic scorer locally without
+            a network call. Policies never leave your machine. (A
+            hosted scoring API existed briefly in early 2026; it was
+            dropped on 2026-05-24 to align with the broader
+            <code>no-hosted-saas</code> stance — same blast-radius
+            philosophy as the rest of the suite.)
           </dd>
 
           <dt>What about my secrets / credentials?</dt>
           <dd>
-            The API receives the IAM policy JSON only. No credentials
-            are sent. Policies are processed in memory and never
-            persisted on our servers (audit logs record only
-            fingerprints, never the policy content itself).
+            No credentials are sent anywhere — the scorer is offline.
+            Even the IAM policy JSON stays on your machine; it never
+            reaches a third-party server.
           </dd>
 
           <dt>How do you handle SOC 2 / compliance?</dt>

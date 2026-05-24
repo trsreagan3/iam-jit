@@ -1,6 +1,6 @@
 site_name: iam-risk-score
-site_description: AWS IAM policy risk scoring API + CLI + GitHub Action. Documentation.
-site_url: https://docs.iam-risk-score.com/
+site_description: AWS IAM policy risk scoring — offline CLI + Python library + GitHub Action. Documentation.
+site_url: https://github.com/trsreagan3/iam-jit
 repo_url: https://github.com/trsreagan3/iam-jit
 repo_name: trsreagan3/iam-jit
 

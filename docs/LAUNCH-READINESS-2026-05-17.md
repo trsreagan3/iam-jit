@@ -164,8 +164,8 @@ Explicitly deferred to v1.1 per UAT-A doc-reframing:
 - **Pre-public-push hygiene** (per push-policy-public-repo): standing
   push auth; sensitive-data scan run before every push; repo will go
   public around launch. Today's scrub removed all `/Users/reagan/`
-  paths + `Omise` customer-name references + `1.8%` mentions in
-  product-surface code per no-one-eight-percent-mention.
+  paths + prior internal-customer-name references + `1.8%` mentions
+  in product-surface code per no-one-eight-percent-mention.
 
 ## Recommended ship order (updated from 2026-05-16)
 

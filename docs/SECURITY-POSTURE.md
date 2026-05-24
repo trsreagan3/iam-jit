@@ -27,8 +27,10 @@ What these tools do NOT do:
 
 - They do **not** operate a multi-tenant hosted SaaS. There is no
   shared infrastructure holding trust roles or credentials across
-  customers. (`iam-risk-score.com`, the stateless policy scorer, is
-  the only hosted surface; it accepts no credentials.)
+  customers. (The previously-hosted `api.iam-risk-score.com`
+  stateless scorer was dropped on 2026-05-24 to restore
+  `[[no-hosted-saas]]` to 100% — the scorer ships as an offline
+  CLI + Python library only.)
 - They do **not** phone home. There is no usage telemetry, no
   error reporting, and no licensing call-back. The Enterprise
   license is a signed local file (Ed25519); no server check happens

@@ -34,10 +34,13 @@ iam-jit admin blacklist apply --template ban-catastrophic-actions
 Templates are documented below. Each ships with sensible rule names
 and reasons that surface in audit logs.
 
-### Path 2: Add individual rules via API
+### Path 2: Add individual rules via API (self-hosted iam-jit)
 
 ```bash
-curl -X POST https://api.iam-risk-score.com/api/v1/admin/blacklist \
+# Replace https://iam-jit.your-domain.example with your self-hosted
+# iam-jit endpoint. The hosted api.iam-risk-score.com endpoint was
+# dropped 2026-05-24 — see [[no-hosted-saas]].
+curl -X POST https://iam-jit.your-domain.example/api/v1/admin/blacklist \
   -H "Authorization: Bearer <admin-key>" \
   -H "Content-Type: application/json" \
   -d '{

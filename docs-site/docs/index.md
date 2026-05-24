@@ -76,19 +76,27 @@ plain-English narrative explanation. By explicit safety contract,
 
 ## Three deployment shapes
 
-1. **Offline CLI** (default) — `pip install iam-risk-score`. Runs the
+1. **Offline CLI** (default) — `pip install iam-jit`. Runs the
    deterministic engine locally; no network call. Free + unlimited.
-2. **Hosted API** — `https://api.iam-risk-score.com/api/v1/score`.
-   Free + open source; rate-limited to 100 requests/day per IP at v1.0.
-3. **Self-hosted** — deploy the SAM stack into your own AWS account.
-   See [self-hosting](self-hosting.md).
+2. **Python library** — `from iam_jit import review` and call
+   `review.analyze_policy(...)` directly. Embed into your agent
+   runtime, IDE plugin, or custom IaC checker.
+3. **GitHub Action** — drop
+   [`trsreagan3/iam-risk-score-action@v1`](github-action.md) into any
+   workflow. Scores every IAM diff on PRs, blocks destructive merges,
+   emits SARIF for GitHub Code Scanning.
+
+> **No hosted API.** The previously-documented
+> `api.iam-risk-score.com` endpoint was dropped on 2026-05-24 to
+> restore `[[no-hosted-saas]]` to 100%. The scorer is the moat; the
+> offline CLI + library are the supported access surface.
 
 ## v1.0 — free + open source
 
 iam-risk-score v1.0 ships fully free + open source under Apache-2.0.
 Every scoring feature is included: numeric 1–10 score, per-factor
-breakdown, suggestions, offline CLI, hosted API access, GitHub
-Action, self-hosted deploy. No tier comparison; no feature gates.
+breakdown, suggestions, offline CLI, Python library, GitHub Action,
+SARIF output. No tier comparison; no feature gates.
 
 Consulting engagements are available for production deployments,
 custom integration, and compliance audits — see
