@@ -219,7 +219,7 @@ PGP key: published at `security@iam-jit.dev` before v1.0 launch.
 - Updates are **customer-driven**. No auto-update; the customer
   decides when to upgrade.
 - Update paths:
-  - `pip install --upgrade iam-jit` for `ibounce`
+  - `pip install --upgrade iam-jit` for `ibounce` (requires pip >= 22.3 for PEP 660 editable installs of source checkouts; published wheels work on older pip — `python3 -m pip install --upgrade pip` first if you hit a `build_editable`-shaped error; #548)
   - `brew upgrade kbounce` / GitHub Releases binary for `kbounce`
   - GitHub Releases binary for `dbounce` (when shipped)
 - The opt-in `ibounce version-check` / `kbounce version-check`

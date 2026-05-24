@@ -36,6 +36,7 @@ cd ~/repos
 git clone https://github.com/trsreagan3/iam-jit.git
 cd iam-jit
 python3.12 -m venv .venv
+.venv/bin/pip install --upgrade pip   # PEP 660 editable needs pip >= 22.3; venv ships older pip on some distros (#548)
 .venv/bin/pip install -e '.[dev]'
 make test   # 2,668 tests must pass — confirms your local env is healthy
 ```
@@ -292,3 +293,11 @@ https://us-east-1.console.aws.amazon.com/bedrock/home#/model-catalog
 **Tests fail after `pip install -e .`** — make sure you used
 `python3.12` specifically (the SAM build needs 3.12 too) and that
 you're inside the venv (`source .venv/bin/activate`).
+
+**`pip install -e .` fails with `error: Multiple top-level packages
+discovered` / `Backend subprocess exited` / `Cannot install editable
+project ... no setup.py`** — your pip is too old. PEP 660 editable
+installs need pip >= 22.3 (`build_editable` hook); stock `ubuntu:22.04`
+ships pip 22.0.2, and venv-created environments inherit whatever pip
+the system Python had. Fix: `.venv/bin/pip install --upgrade pip`, then
+re-run `pip install -e .` (closes #548 from UAT L1 2026-05-24).

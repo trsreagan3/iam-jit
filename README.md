@@ -65,7 +65,10 @@ The architecture:
 
 ### 30-second example
 
+> **Prerequisite — pip 22.3+.** `iam-jit` ships as a PEP 660 editable-capable wheel. Stock `ubuntu:22.04` ships pip 22.0.2 which is too old (no `build_editable` hook) and `pip install -e .` from source will fail with a cryptic build error. PyPI installs of the published wheel work on older pip, but the one-line upgrade is the safest path either way: `python3 -m pip install --upgrade pip` (closes #548 from UAT L1, 2026-05-24).
+
 ```bash
+$ python3 -m pip install --upgrade pip   # ensures pip >= 22.3 (PEP 660)
 $ pip install iam-jit
 $ iam-risk-score my-policy.json
 
