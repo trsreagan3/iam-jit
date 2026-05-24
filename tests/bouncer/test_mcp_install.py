@@ -32,6 +32,17 @@ from iam_jit.bouncer_cli import main
 
 
 def test_show_config_emits_valid_json_with_ibounce_entry() -> None:
+    """`show-config` MUST emit the documented env-hint keys per #308
+    + ``[[agent-identity-in-audit]]``: IBOUNCE_AGENT_NAME (defaults to
+    ``claude-code``) + IBOUNCE_AGENT_SESSION_ID (empty in the static
+    snippet; agent runtime mints a UUIDv7 at connect time).
+
+    Per #564 (stale-assertion fix, 2026-05-24): the prior assertion
+    ``env == {}`` was calibration-drift from a pre-#308 snippet shape.
+    Production now emits both keys + the test enumerates them
+    explicitly so a regression in either is caught at review time
+    (per ``[[scorer-is-ground-truth]]`` + the state-verification
+    convention in docs/CONTRIBUTING.md)."""
     runner = CliRunner()
     result = runner.invoke(main, ["mcp", "show-config"])
     assert result.exit_code == 0, result.output
@@ -44,7 +55,29 @@ def test_show_config_emits_valid_json_with_ibounce_entry() -> None:
     entry = cfg["mcpServers"]["ibounce"]
     assert entry["command"] == "ibounce"
     assert entry["args"] == ["mcp", "serve"]
-    assert entry["env"] == {}
+    # Explicit enumeration of expected env keys (the agent-identity
+    # header-injection hints documented in docs/AGENT-ATTRIBUTION.md).
+    # The values are the static defaults baked into the snippet:
+    # show-config is the vendor-neutral surface, so the default agent
+    # name is "claude-code" (install-cursor / install-codex override
+    # to their own agent names in the install-*-specific tests).
+    assert "IBOUNCE_AGENT_NAME" in entry["env"], (
+        "mcp show-config must emit IBOUNCE_AGENT_NAME so the agent "
+        "runtime stamps the X-Agent-Name header on outbound traffic "
+        "(per #308 + [[agent-identity-in-audit]])"
+    )
+    assert "IBOUNCE_AGENT_SESSION_ID" in entry["env"], (
+        "mcp show-config must emit IBOUNCE_AGENT_SESSION_ID for the "
+        "audit trail (per #308 + [[agent-identity-in-audit]])"
+    )
+    assert entry["env"]["IBOUNCE_AGENT_NAME"] == "claude-code"
+    assert entry["env"]["IBOUNCE_AGENT_SESSION_ID"] == ""
+    # No other keys creep in — keeps the snippet minimal so vendor
+    # MCP-host implementations don't choke on unknown env entries.
+    assert set(entry["env"].keys()) == {
+        "IBOUNCE_AGENT_NAME",
+        "IBOUNCE_AGENT_SESSION_ID",
+    }
 
 
 def test_show_config_yaml_shape() -> None:

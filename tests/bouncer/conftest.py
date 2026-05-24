@@ -16,25 +16,64 @@ DEFAULT_PROFILES also covers any test that writes its own user file).
 Any test that wants to provide its own profiles file simply overrides
 the env var via ``monkeypatch.setenv`` to point at the file it wrote —
 the standard pattern used throughout ``test_profiles_slice7.py``.
+
+Per GH #565 (env-isolation cluster, 2026-05-24): the same autouse
+fixture also strips ``IBOUNCE_AGENT_NAME`` + ``IBOUNCE_AGENT_SESSION_ID``
+from the test process environment, and points ``IBOUNCE_PROBE_PORT``
+at an ephemeral unused port. On a founder dogfood machine those env
+vars carry a live agent identity (and a real ibounce listens on
+``127.0.0.1:8767``), and either leak would silently change the
+observable behavior of tests like
+``test_show_config_emits_valid_json_with_ibounce_entry`` (which
+inspects emitted env for the MCP snippet — pre-fix the test asserted
+``env == {}`` and per #564 now asserts the production-emitted keys
+are present) and ``test_cli_export_then_import_round_trip`` (which
+refuses import when the probe sees a live listener).
+
+Any test that wants to exercise a specific value for these env vars
+should explicitly ``monkeypatch.setenv(...)`` in the test body — the
+autouse delenv composes cleanly with a subsequent setenv.
 """
 
 from __future__ import annotations
 
+import socket
 from collections.abc import Iterator
 
 import pytest
 
 
+def _find_unused_port() -> int:
+    """Bind a socket to port 0 to let the OS pick an unused port,
+    then release it. The returned port is suitable for use as a
+    probe-target that's guaranteed empty for the duration of the test
+    (test code runs fast enough that race-reuse is not a real concern
+    for this single-process-per-test pytest configuration)."""
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+        s.bind(("127.0.0.1", 0))
+        return s.getsockname()[1]
+
+
 @pytest.fixture(autouse=True)
-def _isolate_bouncer_profiles_file(
+def _isolate_bouncer_env(
     tmp_path: object,
     monkeypatch: pytest.MonkeyPatch,
 ) -> Iterator[None]:
-    """Force IAM_JIT_BOUNCER_PROFILES_FILE to a per-test tmpdir path.
+    """Isolate every bouncer-test from the developer's environment.
 
-    Per GH #5: prevents tests from leaking into the developer's actual
-    ``~/.iam-jit/bouncer/profiles.yaml`` (and vice versa).
+    Per GH #5: forces IAM_JIT_BOUNCER_PROFILES_FILE → per-test tmpdir
+    so tests never leak into ``~/.iam-jit/bouncer/profiles.yaml``.
+
+    Per GH #565: strips IBOUNCE_AGENT_NAME + IBOUNCE_AGENT_SESSION_ID
+    so a dogfood machine's agent-identity env doesn't change what
+    ``ibounce mcp show-config`` reports during tests; and sets
+    IBOUNCE_PROBE_PORT to an ephemeral unused port so the
+    "ibounce already running" probe doesn't false-positive against a
+    real running bouncer on 127.0.0.1:8767.
     """
     isolated = tmp_path / "isolated_profiles.yaml"  # type: ignore[operator]
     monkeypatch.setenv("IAM_JIT_BOUNCER_PROFILES_FILE", str(isolated))
+    monkeypatch.delenv("IBOUNCE_AGENT_NAME", raising=False)
+    monkeypatch.delenv("IBOUNCE_AGENT_SESSION_ID", raising=False)
+    monkeypatch.setenv("IBOUNCE_PROBE_PORT", str(_find_unused_port()))
     yield
