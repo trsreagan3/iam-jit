@@ -20,6 +20,21 @@ ingest / triage script reads identically across the suite.
 | dbounce   | `dbounce/schemas/dbounce-config.schema.json`                  | `https://github.com/trsreagan3/dbounce/schemas/dbounce-config.schema.json` |
 | gbounce   | `gbounce/schemas/gbounce-config.schema.json`                  | `https://github.com/trsreagan3/gbounce/blob/main/schemas/gbounce-config.schema.json` |
 
+## iam-jit ambient-config declaration schema
+
+The operator-authored ambient-config declaration (consumed by
+`iam_jit_setup_from_config` MCP + `iam-jit doctor apply-config` CLI per
+[[ambient-autonomous-protection]]) has its own schema:
+
+| Artifact                            | Schema (in-repo)                                | Wire ID                                                |
+|-------------------------------------|-------------------------------------------------|--------------------------------------------------------|
+| iam-jit ambient declaration (v1.0)  | `iam-roles/schemas/iam-jit-config.schema.json`  | `https://iam-jit.dev/schemas/iam-jit-config.v1.json`   |
+
+This is the schema for the top-level `.iam-jit.yaml` / `CLAUDE.md`
+codeblock declaration; it composes the per-product `bouncer_block` shape
+inline rather than $ref-ing the per-product schemas above (the
+declaration is operator-authored intent, not a per-bouncer export).
+
 Each product also serves its config schema at `GET /schemas/config` on
 the running bouncer's management port so an agent can fetch the
 authoritative shape without reaching out to GitHub.
