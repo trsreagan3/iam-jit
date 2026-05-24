@@ -874,45 +874,11 @@ def test_hn6_10_in_memory_consume_or_reject_uses_lock() -> None:
         assert successes["n"] == 100
     finally:
         os.environ.pop("IAM_JIT_LLM_BUDGET_PRO", None)
-def test_hn6_11_sam_template_llm_budget_table_well_formed() -> None:
-    """HN6-11: SAM template's LLMBudgetTable has the right key
-    schema (HASH=customer_id, RANGE=year_month), TTL on ttl_at,
-    PAY_PER_REQUEST billing. Defense against a typo in the table
-    schema invalidating the atomic-counter primitive."""
-    import pathlib
-    template_path = (
-        pathlib.Path(__file__).parent.parent
-        / "infrastructure" / "sam" / "template.yaml"
-    )
-    template = template_path.read_text()
-    # Locate the LLMBudgetTable block.
-    assert "LLMBudgetTable:" in template
-    start = template.index("LLMBudgetTable:")
-    block = template[start:start + 2000]
-    # Keys.
-    assert "AttributeName: customer_id" in block
-    assert "AttributeName: year_month" in block
-    assert "KeyType: HASH" in block
-    assert "KeyType: RANGE" in block
-    # TTL.
-    assert "TimeToLiveSpecification:" in block
-    assert "AttributeName: ttl_at" in block
-    # Billing.
-    assert "BillingMode: PAY_PER_REQUEST" in block
-def test_hn6_12_reserved_concurrency_parameter_defends_aws_account() -> None:
-    """HN6-12: The new ReservedConcurrentExecutions parameter is
-    wired into the function spec so a runaway iam-jit can't burn
-    the AWS account's full 1000-concurrency quota during a CI
-    burst."""
-    import pathlib
-    template_path = (
-        pathlib.Path(__file__).parent.parent
-        / "infrastructure" / "sam" / "template.yaml"
-    )
-    template = template_path.read_text()
-    assert "ReservedConcurrency:" in template
-    assert "ReservedConcurrentExecutions:" in template
-    # The function spec references the parameter.
-    func_idx = template.index("IAMJitFunction:")
-    func_block = template[func_idx:func_idx + 5000]
-    assert "ReservedConcurrentExecutions: !Ref ReservedConcurrency" in func_block
+# test_hn6_11_sam_template_llm_budget_table_well_formed and
+# test_hn6_12_reserved_concurrency_parameter_defends_aws_account
+# were removed on 2026-05-24 — both inspected the hosted SAM
+# template (infrastructure/sam/template.yaml) which was deleted
+# when the hosted iam-risk-score Lambda was dropped per
+# [[no-hosted-saas]] restoration. The LLM-budget atomic-counter
+# primitive (llm_budget.py) is still exercised by the surviving
+# unit-level checks in tests/llm_budget/.
