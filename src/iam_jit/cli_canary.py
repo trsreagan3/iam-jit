@@ -54,6 +54,7 @@ import re
 import shlex
 import shutil
 import signal
+import socket
 import subprocess
 import sys
 import time
@@ -409,6 +410,62 @@ def _pid_alive(pid: int) -> bool:
         return False
     except OSError:
         return False
+
+
+def _port_bound(port: int, host: str = "127.0.0.1") -> bool:
+    """Return True if ``host:port`` has a listener accepting connections.
+
+    Pure-stdlib alternative to ``lsof -iTCP:PORT -sTCP:LISTEN -t`` —
+    works on macOS + Linux + any minimal container (no external
+    command dependency). Used by ``_restart_bouncers`` for the
+    wait-for-port-release loop where Linux slim containers may not
+    have ``lsof`` installed.
+
+    State-verification: a True return means we observed a TCP
+    handshake succeed within ``timeout``; False means either no
+    listener or the listener refused/timed-out the probe. We treat
+    both False cases as "port is releasable" for the
+    wait-for-release loop (the next bind() will succeed; that's
+    the actual property the caller cares about).
+    """
+    try:
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+            s.settimeout(0.5)
+            return s.connect_ex((host, int(port))) == 0
+    except OSError:
+        return False
+
+
+def _lsof_pids_on_port(port: int) -> list[int]:
+    """Best-effort PID discovery for a listening port via ``lsof``.
+
+    Returns an empty list if ``lsof`` is not installed (slim Linux
+    containers) or returns no rows. Callers MUST handle the empty
+    case — the canonical PID source is ``status.json``; this helper
+    is a back-compat fallback only.
+    """
+    if shutil.which("lsof") is None:
+        return []
+    try:
+        proc = subprocess.run(
+            ["lsof", "-iTCP:%d" % int(port), "-sTCP:LISTEN", "-t"],
+            capture_output=True,
+            text=True,
+            check=False,
+            timeout=5.0,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return []
+    out: list[int] = []
+    for line in proc.stdout.splitlines():
+        s = line.strip()
+        if not s:
+            continue
+        try:
+            out.append(int(s))
+        except ValueError:
+            continue
+    return out
 
 
 def _relaunch_bouncer(
@@ -1223,27 +1280,39 @@ def _restart_bouncers(pre_status: dict[str, Any]) -> tuple[bool, str]:
             return [str(a) for a in sa]
         return []
 
-    # Send SIGTERM to anything listening on the recorded bouncer ports.
-    # Use lsof to find PIDs; portable on macOS + Linux.
+    # Send SIGTERM to recorded bouncer PIDs.
     # NOTE: gbounce_mgmt is a SECONDARY port for the same process; skip it
     # (the SIGTERM to the proxy port already terminates the process).
+    #
+    # PID source: ``status.json`` is the canonical record (written by
+    # ``_relaunch_bouncer`` + the deploy script). ``lsof`` is a
+    # back-compat fallback for canary state that predates the
+    # ``pids`` field — and is also absent in slim Linux containers
+    # (``python:3.11-slim``, ``alpine``), so we no longer rely on it
+    # being installed. Per ``docs/LINUX-SUPPORT-AUDIT-2026-05-24.md``
+    # finding #1.
     proxy_ports = {
         n: p for n, p in ports.items() if not n.endswith("_mgmt")
     }
+    recorded_pids: dict[str, int] = {}
+    raw_recorded = (pre_status or {}).get("pids") or {}
+    for bname, pv in raw_recorded.items():
+        try:
+            recorded_pids[bname] = int(pv)
+        except (TypeError, ValueError):
+            continue
+
     restarted: list[str] = []
     for bouncer_name, port in proxy_ports.items():
-        proc = subprocess.run(
-            ["lsof", "-iTCP:%d" % int(port), "-sTCP:LISTEN", "-t"],
-            capture_output=True,
-            text=True,
-            check=False,
-        )
-        pids = [p.strip() for p in proc.stdout.splitlines() if p.strip()]
-        for pid_str in pids:
-            try:
-                pid = int(pid_str)
-            except ValueError:
-                continue
+        # Prefer the recorded PID; fall back to lsof only if missing.
+        candidates: list[int] = []
+        rec = recorded_pids.get(bouncer_name)
+        if rec is not None and _pid_alive(rec):
+            candidates = [rec]
+        else:
+            # Back-compat path: try lsof (no-op on containers without it).
+            candidates = _lsof_pids_on_port(int(port))
+        for pid in candidates:
             try:
                 os.kill(pid, signal.SIGTERM)
                 restarted.append(f"{bouncer_name}(pid={pid})")
@@ -1251,16 +1320,12 @@ def _restart_bouncers(pre_status: dict[str, Any]) -> tuple[bool, str]:
                 return False, f"kill {bouncer_name} pid={pid}: {exc}"
 
     # Wait for ports to release (max 30s).
+    # Use pure-Python TCP-probe instead of lsof — works on every
+    # platform regardless of installed tools.
     deadline = time.time() + 30
     for bouncer_name, port in proxy_ports.items():
         while time.time() < deadline:
-            proc = subprocess.run(
-                ["lsof", "-iTCP:%d" % int(port), "-sTCP:LISTEN", "-t"],
-                capture_output=True,
-                text=True,
-                check=False,
-            )
-            if not proc.stdout.strip():
+            if not _port_bound(int(port)):
                 break
             time.sleep(0.5)
         else:

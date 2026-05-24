@@ -463,3 +463,108 @@ def test_verify_setup_subcommand_registered() -> None:
     result = runner.invoke(main, ["canary", "--help"])
     assert result.exit_code == 0, result.output
     assert "verify-setup" in result.output
+
+
+# ---------------------------------------------------------------------------
+# Linux portability — per docs/LINUX-SUPPORT-AUDIT-2026-05-24.md
+# ---------------------------------------------------------------------------
+
+
+def test_port_bound_pure_python_no_subprocess(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """`_port_bound` MUST be pure-stdlib (socket only) — no shelling
+    out to `lsof`. Linux slim containers don't ship `lsof` and the
+    canary update flow has to work there per LINUX-SUPPORT-AUDIT
+    finding #1.
+
+    State verification: monkeypatch subprocess.run to raise; if
+    `_port_bound` ever shells out the test fails loudly.
+    """
+    def _no_subprocess(*a: Any, **kw: Any) -> Any:
+        raise AssertionError(
+            "_port_bound shelled out to subprocess; must be pure-stdlib"
+        )
+
+    monkeypatch.setattr(cc.subprocess, "run", _no_subprocess)
+    # Probe a port that's definitely not bound. We don't care about
+    # the result — only that it returns without raising.
+    result = cc._port_bound(1)  # port 1 is reserved + not bound
+    assert result is False  # Observable: no listener → False.
+
+
+def test_lsof_pids_on_port_returns_empty_when_lsof_missing(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """`_lsof_pids_on_port` MUST silently return [] when `lsof` is not
+    on PATH — that's the Linux-slim-container shape. Callers (i.e.
+    `_restart_bouncers`) then fall back to status.json recorded PIDs.
+    """
+    monkeypatch.setattr(cc.shutil, "which", lambda name: None)
+    assert cc._lsof_pids_on_port(7401) == []
+
+
+def test_restart_bouncers_uses_recorded_pids_no_lsof(
+    isolated_canary: pathlib.Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """When status.json records a live PID, `_restart_bouncers` MUST
+    SIGTERM it directly without invoking `lsof` — works on Linux slim
+    containers where `lsof` is absent.
+
+    State verification: subprocess.run is monkeypatched to raise; the
+    test will fail if any code path tries to shell out for PID
+    discovery.
+    """
+    (isolated_canary / ".iam-jit.yaml").write_text(
+        "iam-jit:\n"
+        "  canary: true\n"
+        "  bouncers:\n"
+        "    ibounce:\n"
+        "      enabled: true\n"
+        "      port: 7401\n"
+        "      daemon_args: []\n",
+        encoding="utf-8",
+    )
+    cc.write_status({
+        "ports": {"ibounce": 7401},
+        "pids": {"ibounce": 12345},
+    })
+
+    # 1. PID-alive check returns True for the recorded PID.
+    monkeypatch.setattr(cc, "_pid_alive", lambda pid: pid == 12345)
+    # 2. SIGTERM is a no-op (we don't actually have PID 12345).
+    killed: list[tuple[int, int]] = []
+    monkeypatch.setattr(
+        cc.os, "kill",
+        lambda pid, sig: killed.append((pid, sig)),
+    )
+    # 3. Wait loop short-circuits: port is "released" immediately.
+    monkeypatch.setattr(cc, "_port_bound", lambda port, host="127.0.0.1": False)
+    monkeypatch.setattr(cc.time, "sleep", lambda *_a, **_kw: None)
+    # 4. No subprocess.run anywhere on the hot path.
+    monkeypatch.setattr(
+        cc.subprocess, "run",
+        lambda *a, **kw: (_ for _ in ()).throw(
+            AssertionError(
+                "_restart_bouncers shelled out (subprocess.run) "
+                "for PID discovery; must use status.json recorded "
+                "PIDs per LINUX-SUPPORT-AUDIT finding #1"
+            )
+        ),
+    )
+    # 5. _relaunch_bouncer is stubbed (we test it separately).
+    monkeypatch.setattr(
+        cc, "_relaunch_bouncer",
+        lambda name, port, args, mgmt_port=None, **kw: (True, 99999, "stub"),
+    )
+
+    pre = cc.read_status()
+    ok, msg = cc._restart_bouncers(pre)
+
+    # 1. Reported success.
+    assert ok, msg
+    # 2. Observable: SIGTERM went to the RECORDED PID (12345), not a
+    #    lsof-discovered one — proves the no-shell-out path is active.
+    assert (12345, cc.signal.SIGTERM) in killed, (
+        f"expected SIGTERM to recorded PID 12345; got {killed!r}"
+    )
