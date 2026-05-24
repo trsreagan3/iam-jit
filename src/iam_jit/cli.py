@@ -1854,5 +1854,16 @@ from .cli_canary import register_canary_group  # noqa: E402
 register_canary_group(main)
 
 
+# #541 — `iam-jit uninstall` command. Implements docs/MRR-4-UNINSTALL.md
+# end-to-end as a single CLI command so operators don't have to follow
+# a multi-step manual checklist. Halt conditions per
+# docs/MRR-4-HALT-CONDITIONS.md are auto-detected; --force bypasses with
+# audit flag. Per [[creates-never-mutates]] uninstall only removes
+# iam-jit-created resources (shell profiles, MCP config, browser
+# truststores surfaced as manual reminders).
+from .cli_uninstall import register_uninstall_command  # noqa: E402
+register_uninstall_command(main)
+
+
 if __name__ == "__main__":
     main()

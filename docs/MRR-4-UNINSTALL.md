@@ -12,8 +12,44 @@ path IS the terminal rollback — if everything else fails, the operator must be
 return the machine to a clean state.
 
 Per `[[ibounce-honest-positioning]]`: this doc is honest about which steps are
-**automated** vs **operator-manual**. iam-jit does NOT ship a single `iam-jit uninstall`
-command today; this runbook IS the documented sequence operators run by hand.
+**automated** vs **operator-manual**.
+
+**UPDATE 2026-05-24 (#541)**: iam-jit now ships `iam-jit uninstall` — a single
+CLI command that implements steps 1-9 end-to-end with auto-detected halt
+conditions. The manual 10-step sequence below is preserved as a fallback /
+explanatory reference; the canonical path is now:
+
+```bash
+# Inspect what would happen (always safe):
+iam-jit uninstall --dry-run
+
+# Full purge (with confirmation prompt):
+iam-jit uninstall
+
+# Non-interactive purge:
+iam-jit uninstall --yes
+
+# Preserve audit chain for compliance:
+iam-jit uninstall --yes --keep-audit-logs
+
+# Snapshot everything to a backup dir before removal:
+iam-jit uninstall --yes --backup-dir ~/iam-jit-backup-$(date +%s)
+
+# Bypass halt conditions (DANGEROUS — investigate first):
+iam-jit uninstall --yes --force
+```
+
+Halt conditions per `MRR-4-HALT-CONDITIONS.md` are auto-detected and surface
+with severity + reason. Without `--force` the command exits 2 and refuses to
+mutate state. Per `[[creates-never-mutates]]` the command DOES NOT touch:
+
+- Shell profiles (`~/.zshrc`, `~/.bashrc`, IDE env vars)
+- MCP config entries (`~/.claude.json`, `.mcp.json`)
+- Browser / OS-truststore-imported gbounce MITM CAs
+- systemd / launchd unit files
+
+These are surfaced as `manual_reminders` in both the human-readable summary
+and the `--json` output so the operator knows exactly what to clean up by hand.
 
 ## Pre-uninstall checklist
 
@@ -273,7 +309,7 @@ The smoke PASSED, but the runbook reveals known gaps for v1.0:
 
 | # | Gap | Severity | Mitigation today |
 |---|---|---|---|
-| U1 | **No single `iam-jit uninstall` command.** Operator must run 10 manual steps. | HIGH | This runbook documents the steps explicitly + the smoke test verifies they work in sequence. v1.1 should ship `iam-jit uninstall [--purge]`. |
+| ~~U1~~ | **No single `iam-jit uninstall` command.** Operator must run 10 manual steps. | ~~HIGH~~ CLOSED 2026-05-24 (#541) | `iam-jit uninstall` ships in v1.0; this runbook is now a fallback explanatory reference. |
 | U2 | **Shell-profile cleanup not automated.** `HTTPS_PROXY` env vars in `.zshrc` / `.bashrc` survive uninstall. | MED | Documented in per-product caveats. Operator-manual. |
 | U3 | **gbounce MITM CA truststore cleanup not automated.** Per `[[mitm-beta-pii-pci-concern]]` MITM is BETA. | MED | Documented in per-product caveats; matches the BETA framing. |
 | U4 | **`pip install -e .` editable installs may leave stale `.egg-link`.** | LOW | Documented in step 3 troubleshooting. |

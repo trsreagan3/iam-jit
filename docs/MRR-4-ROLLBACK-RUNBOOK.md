@@ -101,11 +101,23 @@ curl -fsS http://127.0.0.1:7401/healthz  # 200
 
 **When**: operator wants to start over (test machine; corrupted state).
 
-**Procedure**: follow [`MRR-4-UNINSTALL.md`](MRR-4-UNINSTALL.md) end-to-end. Re-install.
+**Procedure**:
 
-**Verification**: post-uninstall checks in MRR-4-UNINSTALL.md.
+```bash
+# Canonical (#541, 2026-05-24): single command.
+iam-jit uninstall --yes --keep-audit-logs --backup-dir ~/iam-jit-rollback-$(date +%s)
+# Or for full purge:
+iam-jit uninstall --yes
+```
 
-**Automated rollback today?** No.
+Falls back to the manual 10-step sequence in
+[`MRR-4-UNINSTALL.md`](MRR-4-UNINSTALL.md) if `iam-jit` is not on PATH.
+
+**Verification**: `iam-jit uninstall` prints `post_check.clean: true` (and
+in `--json` mode the `status` field reads `ok`).
+
+**Automated rollback today?** **Yes** for the local-state side of A5b as of
+#541. Re-install is still operator-driven (pip install / git pull).
 
 ---
 
