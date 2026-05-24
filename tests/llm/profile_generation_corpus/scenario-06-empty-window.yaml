@@ -1,0 +1,60 @@
+---
+name: scenario-06-empty-window
+description: |
+  Operator: a fresh enforce-mode install on day 0 — operator
+  installed a narrow profile but the audit window is empty (no
+  traffic has reached the bouncer yet). Bouncer: ibounce. Workflow
+  shape: zero events.
+
+  Calibrates: the empty-window edge case. Surfaces the
+  narrows_vs_admin_baseline flag's honest N/A rationale ("no events
+  supplied — cannot demonstrate narrowing"). Confirms that the
+  rubric does not silently default-pass: an empty window cannot
+  PROVE narrowing, so the flag reports FALSE with explicit
+  rationale per [[ibounce-honest-positioning]].
+
+  Mode: supplied — generated mode with zero events would return an
+  empty bundle (no profile to grade); this scenario tests that the
+  grader behaves sensibly when an already-saved profile is graded
+  against a still-empty audit window.
+
+metadata:
+  scenario_type: edge_case
+  bouncer_kind: ibounce
+  friction_budget: 10
+  expected_overall: PARTIAL
+  expected_flags:
+    blocks_known_risk_shapes: true
+    under_friction_budget: true
+    allows_too_broad: true
+    schema_parses: true
+    narrows_vs_admin_baseline: false
+  rationale: |
+    Per implementation: 4/5 flags pass = PARTIAL.
+
+    * blocks_known_risk_shapes: TRUE vacuously (no adversarial in
+      empty input).
+    * under_friction_budget: TRUE (zero denies).
+    * allows_too_broad: TRUE — narrow allow uses `arn:aws:s3:::reports/*`
+      not `*`.
+    * schema_parses: TRUE.
+    * narrows_vs_admin_baseline: FALSE — rationale="no events
+      supplied — cannot demonstrate narrowing vs admin baseline".
+      Per [[ibounce-honest-positioning]] the flag honestly reports
+      the limit rather than vacuously passing.
+
+    This is the expected day-0 grading outcome — operators see
+    PARTIAL with the explicit narrows-N/A rationale, which is the
+    signal to wait for audit traffic before re-grading.
+
+input:
+  mode: supplied
+  profile:
+    bouncer: ibounce
+    profile_name: day-0-narrow
+    allows:
+      - target: "arn:aws:s3:::reports/*"
+        actions: [s3:GetObject]
+        reason: narrow read on reports
+    denies: []
+  events: []

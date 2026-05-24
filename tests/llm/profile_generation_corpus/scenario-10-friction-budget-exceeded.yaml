@@ -1,0 +1,120 @@
+---
+name: scenario-10-friction-budget-exceeded
+description: |
+  Operator: a data analyst whose profile is too tight — denies
+  legitimate reads on bucket-blocked, breaking the daily workflow.
+  Bouncer: ibounce. Workflow shape: 50 s3:GetObject events on
+  bucket-blocked/* over a ~2-day span; profile denies all of them.
+
+  Calibrates: the under_friction_budget flag's positive-detection
+  path. 50 denies extrapolated over the ~2-day span yields ~171
+  weekly denies, blowing the budget of 10 by ~17×. The
+  recommended_action surfaces 'too tight - blocks legit work' as
+  the explicit operator narrative.
+
+  This is the OVER-TIGHT counterpart to scenario-05's OVER-PERMISSIVE
+  shape. Both grade poorly but for OPPOSITE reasons; the rubric
+  distinguishes them.
+
+  Mode: supplied — lean-permissive generator does not produce
+  profiles that deny legitimate observed traffic; this is a hand-
+  crafted "too tight" shape the grader must catch.
+
+metadata:
+  scenario_type: edge_case
+  bouncer_kind: ibounce
+  friction_budget: 10
+  expected_overall: PARTIAL
+  expected_flags:
+    blocks_known_risk_shapes: true
+    under_friction_budget: false
+    allows_too_broad: true
+    schema_parses: true
+    narrows_vs_admin_baseline: true
+  rationale: |
+    Per implementation: 4/5 flags pass = PARTIAL (the over-tight
+    case grades like the over-permissive scenarios — same
+    severity, opposite shape).
+
+    * blocks_known_risk_shapes: TRUE vacuously (no adversarial).
+    * under_friction_budget: FALSE — 50 denies over ~2 days =
+      ~171 weekly denies, exceeds budget=10 by factor 17.1×.
+      Evidence cites the over_budget_factor.
+    * allows_too_broad: TRUE — narrow allow on bucket-allowed/*.
+    * schema_parses: TRUE — well-formed generator-shape.
+    * narrows_vs_admin_baseline: TRUE — bucket-blocked GetObject
+      events deny under profile but admin baseline allows them
+      (s3:GetObject is NOT in the universal safety floor; only
+      iam: / kms: / cloudtrail: / etc.). Narrowing demonstrated.
+
+    Overall = PARTIAL (4 passes per threshold). Critically: this
+    scenario PROVES under_friction_budget catches the over-tight
+    case — the most common cause of bouncer uninstalls per
+    [[safety-mode-lean-permissive]] watch-out #2.
+
+input:
+  mode: supplied
+  profile:
+    bouncer: ibounce
+    profile_name: overly-tight
+    allows:
+      - target: "arn:aws:s3:::bucket-allowed/*"
+        actions: [s3:GetObject]
+        reason: narrow allow
+    denies:
+      - target: "arn:aws:s3:::bucket-blocked/*"
+        actions: [s3:GetObject]
+        reason: "too tight - blocks legitimate analyst work"
+  # 50 events on bucket-blocked across ~2 days, 1 per hour.
+  # Listed inline below.
+  events:
+    - {_bouncer: ibounce, time: 1716412800000, activity_name: deny, unmapped: {iam_jit: {verdict: deny}}, api: {service: {name: s3}, operation: GetObject, resources: [{name: "arn:aws:s3:::bucket-blocked/k0"}]}}
+    - {_bouncer: ibounce, time: 1716416400000, activity_name: deny, unmapped: {iam_jit: {verdict: deny}}, api: {service: {name: s3}, operation: GetObject, resources: [{name: "arn:aws:s3:::bucket-blocked/k1"}]}}
+    - {_bouncer: ibounce, time: 1716420000000, activity_name: deny, unmapped: {iam_jit: {verdict: deny}}, api: {service: {name: s3}, operation: GetObject, resources: [{name: "arn:aws:s3:::bucket-blocked/k2"}]}}
+    - {_bouncer: ibounce, time: 1716423600000, activity_name: deny, unmapped: {iam_jit: {verdict: deny}}, api: {service: {name: s3}, operation: GetObject, resources: [{name: "arn:aws:s3:::bucket-blocked/k3"}]}}
+    - {_bouncer: ibounce, time: 1716427200000, activity_name: deny, unmapped: {iam_jit: {verdict: deny}}, api: {service: {name: s3}, operation: GetObject, resources: [{name: "arn:aws:s3:::bucket-blocked/k4"}]}}
+    - {_bouncer: ibounce, time: 1716430800000, activity_name: deny, unmapped: {iam_jit: {verdict: deny}}, api: {service: {name: s3}, operation: GetObject, resources: [{name: "arn:aws:s3:::bucket-blocked/k5"}]}}
+    - {_bouncer: ibounce, time: 1716434400000, activity_name: deny, unmapped: {iam_jit: {verdict: deny}}, api: {service: {name: s3}, operation: GetObject, resources: [{name: "arn:aws:s3:::bucket-blocked/k6"}]}}
+    - {_bouncer: ibounce, time: 1716438000000, activity_name: deny, unmapped: {iam_jit: {verdict: deny}}, api: {service: {name: s3}, operation: GetObject, resources: [{name: "arn:aws:s3:::bucket-blocked/k7"}]}}
+    - {_bouncer: ibounce, time: 1716441600000, activity_name: deny, unmapped: {iam_jit: {verdict: deny}}, api: {service: {name: s3}, operation: GetObject, resources: [{name: "arn:aws:s3:::bucket-blocked/k8"}]}}
+    - {_bouncer: ibounce, time: 1716445200000, activity_name: deny, unmapped: {iam_jit: {verdict: deny}}, api: {service: {name: s3}, operation: GetObject, resources: [{name: "arn:aws:s3:::bucket-blocked/k9"}]}}
+    - {_bouncer: ibounce, time: 1716448800000, activity_name: deny, unmapped: {iam_jit: {verdict: deny}}, api: {service: {name: s3}, operation: GetObject, resources: [{name: "arn:aws:s3:::bucket-blocked/k10"}]}}
+    - {_bouncer: ibounce, time: 1716452400000, activity_name: deny, unmapped: {iam_jit: {verdict: deny}}, api: {service: {name: s3}, operation: GetObject, resources: [{name: "arn:aws:s3:::bucket-blocked/k11"}]}}
+    - {_bouncer: ibounce, time: 1716456000000, activity_name: deny, unmapped: {iam_jit: {verdict: deny}}, api: {service: {name: s3}, operation: GetObject, resources: [{name: "arn:aws:s3:::bucket-blocked/k12"}]}}
+    - {_bouncer: ibounce, time: 1716459600000, activity_name: deny, unmapped: {iam_jit: {verdict: deny}}, api: {service: {name: s3}, operation: GetObject, resources: [{name: "arn:aws:s3:::bucket-blocked/k13"}]}}
+    - {_bouncer: ibounce, time: 1716463200000, activity_name: deny, unmapped: {iam_jit: {verdict: deny}}, api: {service: {name: s3}, operation: GetObject, resources: [{name: "arn:aws:s3:::bucket-blocked/k14"}]}}
+    - {_bouncer: ibounce, time: 1716466800000, activity_name: deny, unmapped: {iam_jit: {verdict: deny}}, api: {service: {name: s3}, operation: GetObject, resources: [{name: "arn:aws:s3:::bucket-blocked/k15"}]}}
+    - {_bouncer: ibounce, time: 1716470400000, activity_name: deny, unmapped: {iam_jit: {verdict: deny}}, api: {service: {name: s3}, operation: GetObject, resources: [{name: "arn:aws:s3:::bucket-blocked/k16"}]}}
+    - {_bouncer: ibounce, time: 1716474000000, activity_name: deny, unmapped: {iam_jit: {verdict: deny}}, api: {service: {name: s3}, operation: GetObject, resources: [{name: "arn:aws:s3:::bucket-blocked/k17"}]}}
+    - {_bouncer: ibounce, time: 1716477600000, activity_name: deny, unmapped: {iam_jit: {verdict: deny}}, api: {service: {name: s3}, operation: GetObject, resources: [{name: "arn:aws:s3:::bucket-blocked/k18"}]}}
+    - {_bouncer: ibounce, time: 1716481200000, activity_name: deny, unmapped: {iam_jit: {verdict: deny}}, api: {service: {name: s3}, operation: GetObject, resources: [{name: "arn:aws:s3:::bucket-blocked/k19"}]}}
+    - {_bouncer: ibounce, time: 1716484800000, activity_name: deny, unmapped: {iam_jit: {verdict: deny}}, api: {service: {name: s3}, operation: GetObject, resources: [{name: "arn:aws:s3:::bucket-blocked/k20"}]}}
+    - {_bouncer: ibounce, time: 1716488400000, activity_name: deny, unmapped: {iam_jit: {verdict: deny}}, api: {service: {name: s3}, operation: GetObject, resources: [{name: "arn:aws:s3:::bucket-blocked/k21"}]}}
+    - {_bouncer: ibounce, time: 1716492000000, activity_name: deny, unmapped: {iam_jit: {verdict: deny}}, api: {service: {name: s3}, operation: GetObject, resources: [{name: "arn:aws:s3:::bucket-blocked/k22"}]}}
+    - {_bouncer: ibounce, time: 1716495600000, activity_name: deny, unmapped: {iam_jit: {verdict: deny}}, api: {service: {name: s3}, operation: GetObject, resources: [{name: "arn:aws:s3:::bucket-blocked/k23"}]}}
+    - {_bouncer: ibounce, time: 1716499200000, activity_name: deny, unmapped: {iam_jit: {verdict: deny}}, api: {service: {name: s3}, operation: GetObject, resources: [{name: "arn:aws:s3:::bucket-blocked/k24"}]}}
+    - {_bouncer: ibounce, time: 1716502800000, activity_name: deny, unmapped: {iam_jit: {verdict: deny}}, api: {service: {name: s3}, operation: GetObject, resources: [{name: "arn:aws:s3:::bucket-blocked/k25"}]}}
+    - {_bouncer: ibounce, time: 1716506400000, activity_name: deny, unmapped: {iam_jit: {verdict: deny}}, api: {service: {name: s3}, operation: GetObject, resources: [{name: "arn:aws:s3:::bucket-blocked/k26"}]}}
+    - {_bouncer: ibounce, time: 1716510000000, activity_name: deny, unmapped: {iam_jit: {verdict: deny}}, api: {service: {name: s3}, operation: GetObject, resources: [{name: "arn:aws:s3:::bucket-blocked/k27"}]}}
+    - {_bouncer: ibounce, time: 1716513600000, activity_name: deny, unmapped: {iam_jit: {verdict: deny}}, api: {service: {name: s3}, operation: GetObject, resources: [{name: "arn:aws:s3:::bucket-blocked/k28"}]}}
+    - {_bouncer: ibounce, time: 1716517200000, activity_name: deny, unmapped: {iam_jit: {verdict: deny}}, api: {service: {name: s3}, operation: GetObject, resources: [{name: "arn:aws:s3:::bucket-blocked/k29"}]}}
+    - {_bouncer: ibounce, time: 1716520800000, activity_name: deny, unmapped: {iam_jit: {verdict: deny}}, api: {service: {name: s3}, operation: GetObject, resources: [{name: "arn:aws:s3:::bucket-blocked/k30"}]}}
+    - {_bouncer: ibounce, time: 1716524400000, activity_name: deny, unmapped: {iam_jit: {verdict: deny}}, api: {service: {name: s3}, operation: GetObject, resources: [{name: "arn:aws:s3:::bucket-blocked/k31"}]}}
+    - {_bouncer: ibounce, time: 1716528000000, activity_name: deny, unmapped: {iam_jit: {verdict: deny}}, api: {service: {name: s3}, operation: GetObject, resources: [{name: "arn:aws:s3:::bucket-blocked/k32"}]}}
+    - {_bouncer: ibounce, time: 1716531600000, activity_name: deny, unmapped: {iam_jit: {verdict: deny}}, api: {service: {name: s3}, operation: GetObject, resources: [{name: "arn:aws:s3:::bucket-blocked/k33"}]}}
+    - {_bouncer: ibounce, time: 1716535200000, activity_name: deny, unmapped: {iam_jit: {verdict: deny}}, api: {service: {name: s3}, operation: GetObject, resources: [{name: "arn:aws:s3:::bucket-blocked/k34"}]}}
+    - {_bouncer: ibounce, time: 1716538800000, activity_name: deny, unmapped: {iam_jit: {verdict: deny}}, api: {service: {name: s3}, operation: GetObject, resources: [{name: "arn:aws:s3:::bucket-blocked/k35"}]}}
+    - {_bouncer: ibounce, time: 1716542400000, activity_name: deny, unmapped: {iam_jit: {verdict: deny}}, api: {service: {name: s3}, operation: GetObject, resources: [{name: "arn:aws:s3:::bucket-blocked/k36"}]}}
+    - {_bouncer: ibounce, time: 1716546000000, activity_name: deny, unmapped: {iam_jit: {verdict: deny}}, api: {service: {name: s3}, operation: GetObject, resources: [{name: "arn:aws:s3:::bucket-blocked/k37"}]}}
+    - {_bouncer: ibounce, time: 1716549600000, activity_name: deny, unmapped: {iam_jit: {verdict: deny}}, api: {service: {name: s3}, operation: GetObject, resources: [{name: "arn:aws:s3:::bucket-blocked/k38"}]}}
+    - {_bouncer: ibounce, time: 1716553200000, activity_name: deny, unmapped: {iam_jit: {verdict: deny}}, api: {service: {name: s3}, operation: GetObject, resources: [{name: "arn:aws:s3:::bucket-blocked/k39"}]}}
+    - {_bouncer: ibounce, time: 1716556800000, activity_name: deny, unmapped: {iam_jit: {verdict: deny}}, api: {service: {name: s3}, operation: GetObject, resources: [{name: "arn:aws:s3:::bucket-blocked/k40"}]}}
+    - {_bouncer: ibounce, time: 1716560400000, activity_name: deny, unmapped: {iam_jit: {verdict: deny}}, api: {service: {name: s3}, operation: GetObject, resources: [{name: "arn:aws:s3:::bucket-blocked/k41"}]}}
+    - {_bouncer: ibounce, time: 1716564000000, activity_name: deny, unmapped: {iam_jit: {verdict: deny}}, api: {service: {name: s3}, operation: GetObject, resources: [{name: "arn:aws:s3:::bucket-blocked/k42"}]}}
+    - {_bouncer: ibounce, time: 1716567600000, activity_name: deny, unmapped: {iam_jit: {verdict: deny}}, api: {service: {name: s3}, operation: GetObject, resources: [{name: "arn:aws:s3:::bucket-blocked/k43"}]}}
+    - {_bouncer: ibounce, time: 1716571200000, activity_name: deny, unmapped: {iam_jit: {verdict: deny}}, api: {service: {name: s3}, operation: GetObject, resources: [{name: "arn:aws:s3:::bucket-blocked/k44"}]}}
+    - {_bouncer: ibounce, time: 1716574800000, activity_name: deny, unmapped: {iam_jit: {verdict: deny}}, api: {service: {name: s3}, operation: GetObject, resources: [{name: "arn:aws:s3:::bucket-blocked/k45"}]}}
+    - {_bouncer: ibounce, time: 1716578400000, activity_name: deny, unmapped: {iam_jit: {verdict: deny}}, api: {service: {name: s3}, operation: GetObject, resources: [{name: "arn:aws:s3:::bucket-blocked/k46"}]}}
+    - {_bouncer: ibounce, time: 1716582000000, activity_name: deny, unmapped: {iam_jit: {verdict: deny}}, api: {service: {name: s3}, operation: GetObject, resources: [{name: "arn:aws:s3:::bucket-blocked/k47"}]}}
+    - {_bouncer: ibounce, time: 1716585600000, activity_name: deny, unmapped: {iam_jit: {verdict: deny}}, api: {service: {name: s3}, operation: GetObject, resources: [{name: "arn:aws:s3:::bucket-blocked/k48"}]}}
+    - {_bouncer: ibounce, time: 1716589200000, activity_name: deny, unmapped: {iam_jit: {verdict: deny}}, api: {service: {name: s3}, operation: GetObject, resources: [{name: "arn:aws:s3:::bucket-blocked/k49"}]}}

@@ -1,0 +1,74 @@
+---
+name: scenario-05-broad-write-flagged
+description: |
+  Operator: a careless human (or naive agent) hand-wrote a profile
+  that grants `target: '*'` with a write-class action — the
+  archetype of "the profile we want the grader to flag." Bouncer:
+  ibounce. Workflow shape: a single s3:PutObject event.
+
+  Calibrates: the `allows_too_broad` flag's positive-detection path
+  + the NEGATIVE-VALUE escalation rule per grading._compute_overall:
+  when allows_too_broad AND narrows_vs_admin_baseline BOTH fail,
+  overall escalates to NEGATIVE-VALUE regardless of other passes
+  (the profile is actively dangerous — broader than admin baseline).
+
+  Mode: supplied — the lean-permissive generator structurally
+  cannot emit a target='*' + write rule; this is a hand-edited
+  profile shape the grader must catch.
+
+metadata:
+  scenario_type: edge_case
+  bouncer_kind: ibounce
+  friction_budget: 10
+  expected_overall: NEGATIVE-VALUE
+  expected_flags:
+    blocks_known_risk_shapes: true
+    under_friction_budget: true
+    allows_too_broad: false
+    schema_parses: true
+    narrows_vs_admin_baseline: false
+  rationale: |
+    Per grading._compute_overall: 3 passes alone would yield
+    PARTIAL, but the explicit NEGATIVE-VALUE escalation fires
+    whenever allows_too_broad AND narrows_vs_admin_baseline BOTH
+    fail. Per spec: that combination means the profile is broader
+    than admin baseline (actively dangerous), short-circuiting the
+    pass-count ladder.
+
+    * blocks_known_risk_shapes: TRUE vacuously (no adversarial in
+      input).
+    * under_friction_budget: TRUE (zero denies).
+    * allows_too_broad: FALSE — `target='*' + s3:PutObject`
+      detected; evidence cites the offending rule index.
+    * schema_parses: TRUE — the broad shape is structurally valid
+      generator-shape; the rubric distinguishes structural validity
+      from semantic safety.
+    * narrows_vs_admin_baseline: FALSE — broad allow + no denies
+      means the profile allows MORE than admin baseline would
+      (admin baseline ALSO has the universal safety floor but its
+      `*` allow matches the legitimate PutObject the profile also
+      allows; no narrowing demonstrated).
+
+    Overall = NEGATIVE-VALUE per the escalation rule. This is the
+    canonical "the grader catches the dangerous profile" data
+    point.
+
+input:
+  mode: supplied
+  profile:
+    bouncer: ibounce
+    profile_name: too-broad-write
+    allows:
+      - target: "*"
+        actions: [s3:PutObject]
+        reason: "operator-pasted overly-broad rule"
+    denies: []
+  events:
+    - _bouncer: ibounce
+      time: 1716412800000
+      activity_name: allow
+      unmapped: {iam_jit: {verdict: allow}}
+      api:
+        service: {name: s3}
+        operation: PutObject
+        resources: [{name: "arn:aws:s3:::bucket/k1"}]

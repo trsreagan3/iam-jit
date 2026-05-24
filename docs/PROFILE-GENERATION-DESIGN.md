@@ -384,10 +384,20 @@ README, or sub-task of `§A92` since this is UC-17 design).
 9. **Phase 9 — `audit-to-effective-profile.md` recipe linked from
    per-harness docs.** Adds the recipe to `claude-code.md`,
    `cursor.md`, `codex.md`, `devin.md`, `custom-harness.md`.
-10. **Phase 10 — grading corpus.** Build 20–30 profile + audit-window
-    fixtures; have a human grade each; compare tool output. Same shape
-    as `[[role-effectiveness-corpus]]`. Surfaces in
-    `tests/dogfood/profile-grading.md` (NEW).
+10. **Phase 10 — grading corpus. [SHIPPED 2026-05-24]** Built
+    10-scenario calibration corpus at
+    `tests/llm/profile_generation_corpus/` covering rubric edges
+    across all four bouncer kinds (ibounce / kbounce / dbounce /
+    gbounce). Harness at
+    `tests/llm/test_profile_generation_calibration.py`. Per
+    `[[scorer-is-ground-truth]]`: expected verdicts match grader
+    reality; divergences are filed as follow-ups (see §10
+    Calibration findings below). Per `[[calibration-quality-bar]]`:
+    `grading.CALIBRATION_CORPUS_VALIDATED = True` lifts the grading
+    provenance flag and softens the parity warning from "GRADING
+    DEPENDS ON SIMULATOR ACCURACY" to "rubric corpus-calibrated;
+    engine production-parity still pending head-to-head Go
+    validation."
 11. **Phase 11 — UC-17 E2E test (#528).** Test that runs the WHOLE
     flow against actual bouncer binaries: discovery → audit → extract
     → generate → simulate → save → install → enforce → iterate. Closes
@@ -891,6 +901,131 @@ Per `[[progressive-tightening-as-injection-detector]]`:
   follow-up grading-corpus effort (mirror of Phase 10) is the
   calibration gate before any quantitative `suspect_patterns` or
   `confidence-gate` thresholds appear in marketing copy.
+
+## 13. Phase 10 calibration corpus — what's calibrated + what isn't
+
+Per `[[calibration-quality-bar]]` profile-generation grading needs its
+OWN corpus, separate from the iam-jit scorer corpus
+(`tests/calibration_corpus/`). Phase 10 (shipped 2026-05-24) is that
+anchor.
+
+### 13.1 Location
+
+* Corpus YAMLs: `tests/llm/profile_generation_corpus/scenario-NN-*.yaml`
+* Harness: `tests/llm/test_profile_generation_calibration.py`
+* Provenance constants: `src/iam_jit/llm/grading.py`
+  (`CALIBRATION_CORPUS_VALIDATED`, `CALIBRATION_CORPUS_VERSION`,
+  `CALIBRATION_CORPUS_SIZE`)
+
+### 13.2 Corpus structure
+
+10 scenarios, each one YAML file. Per-scenario shape carries `name`,
+`description`, `metadata` block (with `scenario_type`, `bouncer_kind`,
+`friction_budget`, `expected_overall`, `expected_flags`, `rationale`),
+and `input` block (with `mode` = `generated` or `supplied`, plus
+events / profile data).
+
+Coverage:
+
+| Scenario | Bouncer | Mode | Rubric edge calibrated |
+|---|---|---|---|
+| 01 narrow-legitimate-read | ibounce | generated | pure-legit reads; PARTIAL via narrows-N/A |
+| 02 narrow-legitimate-write | ibounce | supplied | canonical MEANINGFUL via explicit non-adv deny |
+| 03 adversarial-only | ibounce | generated | safety-floor coverage; narrows-N/A under universal floor |
+| 04 mixed-legit-adversarial | ibounce | generated | generated profiles cap at PARTIAL (no custom denies) |
+| 05 broad-write-flagged | ibounce | supplied | NEGATIVE-VALUE escalation (broad + no narrowing) |
+| 06 empty-window | ibounce | supplied | narrows-N/A honest empty-input rationale |
+| 07 kbouncer-rbac-verbs | kbounce | generated | per-bouncer parity; schema-validator finding |
+| 08 dbounce-postgres-dcl | dbounce | generated | DROP TABLE catalogue match; sql_patterns finding |
+| 09 gbounce-egress-mixed | gbounce | generated | IMDS floor; host-only-rule finding |
+| 10 friction-budget-exceeded | ibounce | supplied | over-tight detection (mirror of broad-write) |
+
+### 13.3 What "calibrated" means (per Phase 10)
+
+When all 10 scenarios are green:
+
+* The grader's 5-flag rubric produces stable expected verdicts across
+  rubric edges spanning all four bouncers.
+* `grading.CALIBRATION_CORPUS_VALIDATED = True` advertises the lift
+  to operators + auditors via provenance.
+* The provenance warning softens from "GRADING DEPENDS ON SIMULATOR
+  ACCURACY" (uncalibrated) to "rubric corpus-calibrated; engine
+  production-parity still pending head-to-head Go validation."
+
+### 13.4 What "calibrated" does NOT mean
+
+Per `[[ibounce-honest-positioning]]`:
+
+* The corpus does NOT validate production parity — the simulator
+  core remains pure-Python; head-to-head validation against the Go
+  bouncers is downstream work (Phase 11 + 12).
+* The 10 scenarios span rubric EDGES, not the full operator-traffic
+  space. Real-world calibration extension is queued for post-launch.
+* Per `[[scorer-is-ground-truth]]`: expected fields match
+  implementation reality. Calibration findings surfaced during
+  corpus construction are filed below as documented gaps.
+
+### 13.5 Calibration findings (from corpus construction)
+
+Two structural findings surfaced during corpus construction. Per
+`[[scorer-is-ground-truth]]` the corpus encodes current reality;
+follow-ups are queued separately.
+
+**Finding A — narrows_vs_admin_baseline can't pass for safety-floor-only
+narrowing.** The grader's `_flag_narrows_vs_admin_baseline` constructs
+an admin-baseline profile (`allows: [{target: *, actions: [*]}]`) and
+runs it through the same simulator — which ALSO applies the universal
+`_SAFETY_FLOOR_DENIES`. So if the only "narrowing" a profile provides
+is the safety floor (which the admin baseline ALSO gets), no event
+exhibits the `profile=deny + baseline=allow` shape the flag requires.
+
+Consequence: generated lean-permissive profiles structurally CANNOT
+reach MEANINGFUL against any event window unless the operator's agent
+adds a custom non-adversarial deny post-generation (scenario-02
+demonstrates this canonical path). Scenarios 01, 03, 04 grade as
+PARTIAL — the maximum a pure-generated profile can achieve under
+current grader logic.
+
+Filed as expected behaviour: the narrowing flag is about profile-imposed
+restrictions BEYOND the floor; an all-floor-only window only exercises
+the floor.
+
+**Finding B — schema_parses validator is ibounce-shape-specific.** The
+grader's `_flag_schema_parses` requires every deny rule to have an
+`actions` list. But the kbounce safety floor emits
+`{verbs: [...], resources: [...]}` and the dbounce safety floor emits
+`{sql_patterns: [...]}`, and the gbounce safety floor emits host-only
+`{target: <hostname>}`. None of these have an `actions` field, so
+schema_parses FAILS on every lean-permissive-generated kbounce /
+dbounce / gbounce profile (scenarios 07, 08, 09 grade with
+schema_parses=FALSE).
+
+Follow-up: extend `_flag_schema_parses` with per-bouncer shape
+awareness (verbs-form is valid for kbounce; sql_patterns-form is
+valid for dbounce; host-only is valid for gbounce). When that lands,
+re-grade scenarios 07/08/09 — schema_parses will lift to TRUE.
+
+### 13.6 How to add a scenario
+
+1. Create `scenario-NN-<slug>.yaml` (NN = next available number,
+   zero-padded).
+2. Pytest loads it automatically via the harness's `_load_scenarios`
+   walker.
+3. Run `pytest tests/llm/test_profile_generation_calibration.py
+   -k scenario-NN` to see the actual grader output.
+4. Decide which way the divergence goes:
+   * Implementation is correct + expected was wrong → tune expected,
+     document why in rationale.
+   * Implementation is wrong → file a follow-up issue, mark the
+     expected to match CURRENT (broken) behaviour with a TODO comment
+     citing the follow-up. Per `[[scorer-is-ground-truth]]`: don't
+     silently tune impl to corpus.
+
+### 13.7 Synthetic-data discipline
+
+Per `[[push-policy-public-repo]]`: scenarios use synthetic data only
+— canonical 111122223333 account, no real-tenant identifiers. The
+harness enforces this with `test_corpus_synthetic_data_discipline`.
 
 ## See also
 

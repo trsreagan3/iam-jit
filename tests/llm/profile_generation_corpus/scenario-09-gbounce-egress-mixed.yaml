@@ -1,0 +1,120 @@
+---
+name: scenario-09-gbounce-egress-mixed
+description: |
+  Operator: an automation worker fetching GitHub repo metadata,
+  with one IMDS exfil attempt mixed in (canonical credential-
+  exfiltration pattern). Bouncer: gbounce. Workflow shape: 5
+  legit HTTPS GETs to api.github.com + 1 HTTP GET to
+  169.254.169.254/latest/meta-data/iam.
+
+  Calibrates: per-bouncer parity — gbounce egress flow. The
+  IMDS attempt is caught by the gbounce safety floor's
+  target=169.254.169.254 rule (host-only floor, no actions
+  field). Confirms the universal IMDS safety floor fires
+  regardless of profile.
+
+  CALIBRATION FINDING (same shape as scenarios 07 + 08): the
+  grader's schema_parses requires `actions` lists on every deny
+  rule, but gbounce safety floor uses `{target: <host>}` rules
+  with no actions field so schema_parses FAILS. Same TODO
+  follow-up.
+
+  ADDITIONAL FINDING: gbounce lean-permissive generation emits no
+  allows for HTTP-shape events in this test data — the heuristic's
+  gbounce classifier returns UNKNOWN for `GET /path` shape strings
+  via `_aggregate_events_for_bouncer`. This is a separate generator-
+  side issue documented here for follow-up; the grader's behaviour
+  is correct given empty allows.
+
+metadata:
+  scenario_type: adversarial_mixed
+  bouncer_kind: gbounce
+  friction_budget: 10
+  expected_overall: PARTIAL
+  expected_flags:
+    blocks_known_risk_shapes: true
+    under_friction_budget: true
+    allows_too_broad: true
+    schema_parses: false
+    narrows_vs_admin_baseline: false
+  rationale: |
+    Per implementation: 3/5 flags pass = PARTIAL.
+
+    * blocks_known_risk_shapes: TRUE vacuously — the IMDS HTTP
+      GET is NOT in the KNOWN_ADVERSARIAL_PATTERNS catalogue
+      (the catalogue lists AWS API shapes, K8s, SQL; HTTP egress
+      patterns are NOT enumerated). The flag passes vacuously
+      with rationale citing the empty catalogue match. This is a
+      FINDING — the catalogue should arguably include IMDS HTTP
+      shape; queued for follow-up.
+    * under_friction_budget: TRUE — 1 deny (IMDS) over ~6 days
+      = ~1.4 weekly denies, under 10.
+    * allows_too_broad: TRUE — generator emits no allows so
+      vacuously narrow.
+    * schema_parses: FALSE — CALIBRATION FINDING. gbounce
+      safety-floor denies emit `{target: 169.254.169.254}` shape
+      with no `actions` field. Same TODO as scenarios 07 + 08.
+    * narrows_vs_admin_baseline: FALSE — IMDS event denies under
+      both profile and admin baseline (universal safety floor).
+
+    Overall = PARTIAL (3 passes per threshold).
+
+input:
+  mode: generated
+  lean_permissive: true
+  time_range: 7d
+  events:
+    - _bouncer: gbounce
+      time: 1716412800000
+      activity_name: get
+      unmapped: {iam_jit: {verdict: allow, ext: {}}}
+      api:
+        service: {name: api.github.com}
+        operation: "GET /repos/foo/bar"
+        resources: [{name: "/repos/foo/bar", uid: "https://api.github.com/repos/foo/bar"}]
+      dst_endpoint: {hostname: api.github.com, port: 443}
+    - _bouncer: gbounce
+      time: 1716499200000
+      activity_name: get
+      unmapped: {iam_jit: {verdict: allow, ext: {}}}
+      api:
+        service: {name: api.github.com}
+        operation: "GET /repos/foo/bar"
+        resources: [{name: "/repos/foo/bar", uid: "https://api.github.com/repos/foo/bar"}]
+      dst_endpoint: {hostname: api.github.com, port: 443}
+    - _bouncer: gbounce
+      time: 1716585600000
+      activity_name: get
+      unmapped: {iam_jit: {verdict: allow, ext: {}}}
+      api:
+        service: {name: api.github.com}
+        operation: "GET /repos/foo/bar"
+        resources: [{name: "/repos/foo/bar", uid: "https://api.github.com/repos/foo/bar"}]
+      dst_endpoint: {hostname: api.github.com, port: 443}
+    - _bouncer: gbounce
+      time: 1716672000000
+      activity_name: get
+      unmapped: {iam_jit: {verdict: allow, ext: {}}}
+      api:
+        service: {name: api.github.com}
+        operation: "GET /repos/baz/qux"
+        resources: [{name: "/repos/baz/qux", uid: "https://api.github.com/repos/baz/qux"}]
+      dst_endpoint: {hostname: api.github.com, port: 443}
+    - _bouncer: gbounce
+      time: 1716758400000
+      activity_name: get
+      unmapped: {iam_jit: {verdict: allow, ext: {}}}
+      api:
+        service: {name: api.github.com}
+        operation: "GET /repos/baz/qux"
+        resources: [{name: "/repos/baz/qux", uid: "https://api.github.com/repos/baz/qux"}]
+      dst_endpoint: {hostname: api.github.com, port: 443}
+    - _bouncer: gbounce
+      time: 1716931200000
+      activity_name: get
+      unmapped: {iam_jit: {verdict: deny, ext: {}}}
+      api:
+        service: {name: "169.254.169.254"}
+        operation: "GET /latest/meta-data/iam"
+        resources: [{name: "/latest/meta-data/iam", uid: "http://169.254.169.254/latest/meta-data/iam"}]
+      dst_endpoint: {hostname: "169.254.169.254", port: 80}

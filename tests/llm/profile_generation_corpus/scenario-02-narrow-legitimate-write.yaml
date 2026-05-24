@@ -1,0 +1,121 @@
+---
+name: scenario-02-narrow-legitimate-write
+description: |
+  Operator: an application service writing to DynamoDB tables for
+  routine order/user upserts. Bouncer: ibounce. Workflow shape:
+  dynamodb:PutItem on two specific tables (orders, users) +
+  attempts a write to the audit table (admin-controlled) AND an
+  adversarial iam:CreateAccessKey from a compromised session.
+
+  Calibrates: the "narrow write with explicit non-adversarial deny
+  + adversarial deny" path — the canonical MEANINGFUL shape. The
+  explicit deny on the audit table is what gives narrows_vs_admin
+  evidence (admin baseline would allow; profile denies).
+
+  Mode: supplied — the lean-permissive generator does NOT emit
+  custom non-adversarial denies (it only adds safety-floor denies +
+  observed allows). To exercise the full MEANINGFUL grade path, the
+  scenario supplies the profile directly with one extra deny rule
+  the operator's agent would add post-generation.
+
+metadata:
+  scenario_type: narrow_legitimate
+  bouncer_kind: ibounce
+  friction_budget: 10
+  expected_overall: MEANINGFUL
+  expected_flags:
+    blocks_known_risk_shapes: true
+    under_friction_budget: true
+    allows_too_broad: true
+    schema_parses: true
+    narrows_vs_admin_baseline: true
+  rationale: |
+    All 5 flags pass per implementation logic:
+
+    * blocks_known_risk_shapes: TRUE — the iam:CreateAccessKey
+      event is caught by the universal _SAFETY_FLOOR_DENIES via
+      the simulator's safety-floor check.
+    * under_friction_budget: TRUE — 2 denies extrapolated over 6
+      days = ~2.8 weekly denies, under budget of 10.
+    * allows_too_broad: TRUE — both allows use exact table ARNs,
+      no `target: *` + write combination.
+    * schema_parses: TRUE — generator-shape round-trips.
+    * narrows_vs_admin_baseline: TRUE — the audit-table deny fires
+      for an event admin baseline would allow (audit table is NOT
+      in any safety floor + no KNOWN_ADVERSARIAL match).
+
+    Overall = MEANINGFUL (all 5 pass).
+
+input:
+  mode: supplied
+  profile:
+    bouncer: ibounce
+    profile_name: analyst-write-narrow
+    allows:
+      - target: "arn:aws:dynamodb:us-east-1:111122223333:table/orders"
+        actions: [dynamodb:PutItem]
+        reason: routine orders write
+      - target: "arn:aws:dynamodb:us-east-1:111122223333:table/users"
+        actions: [dynamodb:PutItem]
+        reason: routine users write
+    denies:
+      - target: "arn:aws:dynamodb:us-east-1:111122223333:table/audit"
+        actions: [dynamodb:PutItem]
+        reason: audit table is append-only via a separate role
+  events:
+    - _bouncer: ibounce
+      time: 1716412800000
+      activity_name: allow
+      unmapped: {iam_jit: {verdict: allow}}
+      api:
+        service: {name: dynamodb}
+        operation: PutItem
+        resources: [{name: "arn:aws:dynamodb:us-east-1:111122223333:table/orders"}]
+    - _bouncer: ibounce
+      time: 1716499200000
+      activity_name: allow
+      unmapped: {iam_jit: {verdict: allow}}
+      api:
+        service: {name: dynamodb}
+        operation: PutItem
+        resources: [{name: "arn:aws:dynamodb:us-east-1:111122223333:table/orders"}]
+    - _bouncer: ibounce
+      time: 1716585600000
+      activity_name: allow
+      unmapped: {iam_jit: {verdict: allow}}
+      api:
+        service: {name: dynamodb}
+        operation: PutItem
+        resources: [{name: "arn:aws:dynamodb:us-east-1:111122223333:table/orders"}]
+    - _bouncer: ibounce
+      time: 1716672000000
+      activity_name: allow
+      unmapped: {iam_jit: {verdict: allow}}
+      api:
+        service: {name: dynamodb}
+        operation: PutItem
+        resources: [{name: "arn:aws:dynamodb:us-east-1:111122223333:table/users"}]
+    - _bouncer: ibounce
+      time: 1716758400000
+      activity_name: allow
+      unmapped: {iam_jit: {verdict: allow}}
+      api:
+        service: {name: dynamodb}
+        operation: PutItem
+        resources: [{name: "arn:aws:dynamodb:us-east-1:111122223333:table/users"}]
+    - _bouncer: ibounce
+      time: 1716758500000
+      activity_name: deny
+      unmapped: {iam_jit: {verdict: deny}}
+      api:
+        service: {name: dynamodb}
+        operation: PutItem
+        resources: [{name: "arn:aws:dynamodb:us-east-1:111122223333:table/audit"}]
+    - _bouncer: ibounce
+      time: 1716845200000
+      activity_name: deny
+      unmapped: {iam_jit: {verdict: deny}}
+      api:
+        service: {name: iam}
+        operation: CreateAccessKey
+        resources: [{name: "arn:aws:iam::111122223333:user/bot"}]

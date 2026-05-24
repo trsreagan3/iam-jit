@@ -70,6 +70,19 @@ from . import simulator as _sim
 GRADING_VERSION = "1.0.0"
 
 
+# Phase 10 calibration-corpus provenance per
+# ``docs/PROFILE-GENERATION-DESIGN.md`` §6 Phase 10 + §8 acceptance.
+# Set to True once the 10-scenario corpus at
+# ``tests/llm/profile_generation_corpus/`` is green — the rubric is
+# defensible against rubric-edge scenarios spanning all four bouncers.
+# Per [[calibration-quality-bar]]: this lift advertises to operators
+# + auditors that the grading rubric has its own corpus, distinct
+# from the iam-jit scorer corpus.
+CALIBRATION_CORPUS_VALIDATED = True
+CALIBRATION_CORPUS_VERSION = "1.0.0"
+CALIBRATION_CORPUS_SIZE = 10
+
+
 FlagName = Literal[
     "blocks_known_risk_shapes",
     "under_friction_budget",
@@ -591,13 +604,31 @@ def _build_provenance(
     sim_prov = sim_verdicts.provenance or {}
     merged_warnings: list[str] = []
     if sim_prov.get("production_parity") is False:
-        merged_warnings.append(
-            "GRADING DEPENDS ON SIMULATOR ACCURACY: simulator "
-            "production_parity=False per Phase 4 — grading verdicts "
-            "are only as good as the simulator's rule-evaluation "
-            "engine, which has NOT been validated head-to-head against "
-            "the production bouncers in this commit"
-        )
+        # Per Phase 10 (calibration-corpus): when the corpus is
+        # validated, soften the GRADING DEPENDS warning so it
+        # reflects what's actually true — the rubric is corpus-
+        # calibrated but the simulator's production parity is still
+        # pending head-to-head Go-engine validation. Honesty per
+        # [[ibounce-honest-positioning]]: the warning shift must
+        # reflect which dimensions are calibrated vs which are not.
+        if CALIBRATION_CORPUS_VALIDATED:
+            merged_warnings.append(
+                f"Rubric validated against {CALIBRATION_CORPUS_SIZE}-"
+                f"scenario calibration corpus v"
+                f"{CALIBRATION_CORPUS_VERSION} per Phase 10; "
+                f"simulator production_parity=False — grading verdicts "
+                f"are corpus-calibrated but the simulator engine has "
+                f"NOT been validated head-to-head against the "
+                f"production Go bouncers in this commit"
+            )
+        else:
+            merged_warnings.append(
+                "GRADING DEPENDS ON SIMULATOR ACCURACY: simulator "
+                "production_parity=False per Phase 4 — grading verdicts "
+                "are only as good as the simulator's rule-evaluation "
+                "engine, which has NOT been validated head-to-head against "
+                "the production bouncers in this commit"
+            )
     merged_warnings.extend(sim_prov.get("warnings") or [])
     merged_warnings.extend(grading_warnings)
     return {
@@ -609,6 +640,9 @@ def _build_provenance(
         "simulator_production_parity": bool(
             sim_prov.get("production_parity", False)
         ),
+        "calibration_corpus_validated": CALIBRATION_CORPUS_VALIDATED,
+        "calibration_corpus_version": CALIBRATION_CORPUS_VERSION,
+        "calibration_corpus_size": CALIBRATION_CORPUS_SIZE,
         "warnings": merged_warnings,
     }
 

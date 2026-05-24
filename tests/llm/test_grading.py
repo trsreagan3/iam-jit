@@ -617,10 +617,38 @@ def test_grade_provenance_surfaces_simulator_parity_warning():
     )
     assert report.provenance["simulator_production_parity"] is False
     joined = " ".join(report.provenance["warnings"])
-    assert "GRADING DEPENDS ON SIMULATOR ACCURACY" in joined, (
-        f"parity caveat must appear in warnings; got "
-        f"{report.provenance['warnings']!r}"
-    )
+    # Phase 10 calibration-corpus lift: when
+    # `grading.CALIBRATION_CORPUS_VALIDATED` is True the warning is
+    # softened to surface that the rubric IS calibrated (corpus) while
+    # the simulator engine is still pending production-parity. Per
+    # [[ibounce-honest-positioning]] the warning shift must reflect
+    # which dimensions are calibrated vs which are not.
+    if grading.CALIBRATION_CORPUS_VALIDATED:
+        assert "calibration corpus" in joined, (
+            f"corpus-calibrated warning must appear; got "
+            f"{report.provenance['warnings']!r}"
+        )
+        assert "production_parity=False" in joined, (
+            f"parity caveat must still appear; got "
+            f"{report.provenance['warnings']!r}"
+        )
+        # Provenance carries calibration metadata.
+        assert (
+            report.provenance["calibration_corpus_validated"] is True
+        )
+        assert (
+            report.provenance["calibration_corpus_version"]
+            == grading.CALIBRATION_CORPUS_VERSION
+        )
+        assert (
+            report.provenance["calibration_corpus_size"]
+            == grading.CALIBRATION_CORPUS_SIZE
+        )
+    else:
+        assert "GRADING DEPENDS ON SIMULATOR ACCURACY" in joined, (
+            f"parity caveat must appear in warnings; got "
+            f"{report.provenance['warnings']!r}"
+        )
     # Grading version + engine identity surfaced.
     assert report.provenance["grading_version"] == grading.GRADING_VERSION
     assert report.provenance["simulator_engine"] == "simulation-python"
@@ -859,9 +887,20 @@ def test_mcp_dispatch_bounce_grade_profile_returns_serialized_report():
     assert "simulation_summary" in sc
     assert "provenance" in sc
     assert sc["provenance"]["simulator_engine"] == "simulation-python"
-    # Parity warning surfaced.
+    # Parity warning surfaced. Phase 10 lift: when
+    # `CALIBRATION_CORPUS_VALIDATED` is True the warning is the
+    # softened "rubric calibrated; engine parity pending" form.
     joined = " ".join(sc["provenance"]["warnings"])
-    assert "GRADING DEPENDS ON SIMULATOR ACCURACY" in joined
+    if grading.CALIBRATION_CORPUS_VALIDATED:
+        assert "calibration corpus" in joined
+        assert "production_parity=False" in joined
+        assert sc["provenance"]["calibration_corpus_validated"] is True
+        assert (
+            sc["provenance"]["calibration_corpus_size"]
+            == grading.CALIBRATION_CORPUS_SIZE
+        )
+    else:
+        assert "GRADING DEPENDS ON SIMULATOR ACCURACY" in joined
 
 
 def test_mcp_tool_appears_in_tools_list():

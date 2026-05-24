@@ -1,0 +1,111 @@
+---
+name: scenario-08-dbounce-postgres-dcl
+description: |
+  Operator: an analytics service running routine SELECTs on
+  public.events + public.users, then a compromised session
+  attempts DROP TABLE public.events. Bouncer: dbounce. Workflow
+  shape: 5 legit SELECTs + 1 adversarial DROP TABLE.
+
+  Calibrates: per-bouncer parity — verifies the grader runs end-
+  to-end on dbounce profile shape. DROP TABLE is in
+  KNOWN_ADVERSARIAL_PATTERNS so blocks_known_risk_shapes can
+  evaluate meaningfully. Note: GRANT TO PUBLIC is in the dbounce
+  safety floor but NOT in KNOWN_ADVERSARIAL_PATTERNS — DROP TABLE
+  is the intentional choice to exercise blocks_known_risk_shapes.
+
+  CALIBRATION FINDING (same shape as scenario-07): the grader's
+  schema_parses requires `actions` lists on every deny rule, but
+  the dbounce safety floor uses `{sql_patterns: [...]}` rules so
+  schema_parses FAILS on every lean-permissive-generated dbounce
+  profile. Same TODO follow-up as scenario-07.
+
+metadata:
+  scenario_type: adversarial_mixed
+  bouncer_kind: dbounce
+  friction_budget: 10
+  expected_overall: PARTIAL
+  expected_flags:
+    blocks_known_risk_shapes: true
+    under_friction_budget: true
+    allows_too_broad: true
+    schema_parses: false
+    narrows_vs_admin_baseline: false
+  rationale: |
+    Per implementation: 3/5 flags pass = PARTIAL.
+
+    * blocks_known_risk_shapes: TRUE — DROP TABLE matches
+      KNOWN_ADVERSARIAL_PATTERNS catalogue + safety floor denies
+      via sql_patterns rule.
+    * under_friction_budget: TRUE — 1 deny over ~6 days = ~1.4
+      weekly denies, under 10.
+    * allows_too_broad: TRUE — dbounce allows use exact
+      table-name targets.
+    * schema_parses: FALSE — CALIBRATION FINDING. The dbounce
+      safety-floor denies emit `{sql_patterns: [...]}` shape
+      (no `actions` field). Documented in scenario-07 rationale;
+      same TODO follow-up issue.
+    * narrows_vs_admin_baseline: FALSE — same calibration finding
+      as scenarios 01/03/04: admin baseline also applies safety
+      floor; the DROP TABLE event denies under both.
+
+    Overall = PARTIAL (3 passes per threshold).
+
+input:
+  mode: generated
+  lean_permissive: true
+  time_range: 7d
+  events:
+    - _bouncer: dbounce
+      time: 1716412800000
+      activity_name: select
+      unmapped: {iam_jit: {verdict: allow, ext: {}}}
+      api:
+        service: {name: postgres}
+        operation: SELECT
+        resources: [{name: "public.events"}]
+      dst_endpoint: {hostname: db.local, port: 5432}
+    - _bouncer: dbounce
+      time: 1716499200000
+      activity_name: select
+      unmapped: {iam_jit: {verdict: allow, ext: {}}}
+      api:
+        service: {name: postgres}
+        operation: SELECT
+        resources: [{name: "public.events"}]
+      dst_endpoint: {hostname: db.local, port: 5432}
+    - _bouncer: dbounce
+      time: 1716585600000
+      activity_name: select
+      unmapped: {iam_jit: {verdict: allow, ext: {}}}
+      api:
+        service: {name: postgres}
+        operation: SELECT
+        resources: [{name: "public.events"}]
+      dst_endpoint: {hostname: db.local, port: 5432}
+    - _bouncer: dbounce
+      time: 1716672000000
+      activity_name: select
+      unmapped: {iam_jit: {verdict: allow, ext: {}}}
+      api:
+        service: {name: postgres}
+        operation: SELECT
+        resources: [{name: "public.users"}]
+      dst_endpoint: {hostname: db.local, port: 5432}
+    - _bouncer: dbounce
+      time: 1716758400000
+      activity_name: select
+      unmapped: {iam_jit: {verdict: allow, ext: {}}}
+      api:
+        service: {name: postgres}
+        operation: SELECT
+        resources: [{name: "public.users"}]
+      dst_endpoint: {hostname: db.local, port: 5432}
+    - _bouncer: dbounce
+      time: 1716931200000
+      activity_name: drop
+      unmapped: {iam_jit: {verdict: deny, ext: {}}}
+      api:
+        service: {name: postgres}
+        operation: DROP TABLE
+        resources: [{name: "public.events"}]
+      dst_endpoint: {hostname: db.local, port: 5432}

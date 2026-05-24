@@ -1,0 +1,110 @@
+---
+name: scenario-04-mixed-legit-adversarial
+description: |
+  Operator: a data analyst doing routine read work that includes
+  one attempted credential-creation event (presumed prompt-
+  injection or compromised tool-call). Bouncer: ibounce. Workflow
+  shape: 6 s3:GetObject events on reports + 1 iam:CreateAccessKey
+  attempt.
+
+  Calibrates: the canonical "operator-driven adoption" path where
+  the generator runs on real audit history. Confirms that with
+  the lean-permissive generator, even mixed-legit-adv windows
+  produce PARTIAL (not MEANINGFUL) because the generator does NOT
+  emit custom non-adversarial denies — the rubric edge that scenario-02
+  exercises via supplied-profile mode.
+
+metadata:
+  scenario_type: adversarial_mixed
+  bouncer_kind: ibounce
+  friction_budget: 10
+  expected_overall: PARTIAL
+  expected_flags:
+    blocks_known_risk_shapes: true
+    under_friction_budget: true
+    allows_too_broad: true
+    schema_parses: true
+    narrows_vs_admin_baseline: false
+  rationale: |
+    Per [[scorer-is-ground-truth]]: matches implementation reality
+    for generated profiles — 4/5 flags pass = PARTIAL:
+
+    * blocks_known_risk_shapes: TRUE — iam:CreateAccessKey denied
+      by safety floor.
+    * under_friction_budget: TRUE — 1 deny over ~6 days = ~1.2
+      weekly denies, well under 10.
+    * allows_too_broad: TRUE — generated allows use exact resource
+      ARNs only.
+    * schema_parses: TRUE.
+    * narrows_vs_admin_baseline: FALSE — same calibration finding
+      as scenarios 01 + 03: admin baseline also applies safety
+      floor, so the adversarial event denies under both. No
+      "profile=deny + baseline=allow" event exists in window.
+
+    This scenario is paired with scenario-02 (supplied mode,
+    MEANINGFUL) to document the calibration insight that the
+    generator alone cannot achieve MEANINGFUL — the operator's
+    agent must add at least one custom non-adversarial deny rule
+    post-generation to demonstrate narrowing beyond the floor.
+
+input:
+  mode: generated
+  lean_permissive: true
+  time_range: 7d
+  events:
+    - _bouncer: ibounce
+      time: 1716412800000
+      activity_name: allow
+      unmapped: {iam_jit: {verdict: allow}}
+      api:
+        service: {name: s3}
+        operation: GetObject
+        resources: [{name: "arn:aws:s3:::reports/q0.csv"}]
+    - _bouncer: ibounce
+      time: 1716499200000
+      activity_name: allow
+      unmapped: {iam_jit: {verdict: allow}}
+      api:
+        service: {name: s3}
+        operation: GetObject
+        resources: [{name: "arn:aws:s3:::reports/q1.csv"}]
+    - _bouncer: ibounce
+      time: 1716585600000
+      activity_name: allow
+      unmapped: {iam_jit: {verdict: allow}}
+      api:
+        service: {name: s3}
+        operation: GetObject
+        resources: [{name: "arn:aws:s3:::reports/q2.csv"}]
+    - _bouncer: ibounce
+      time: 1716672000000
+      activity_name: allow
+      unmapped: {iam_jit: {verdict: allow}}
+      api:
+        service: {name: s3}
+        operation: GetObject
+        resources: [{name: "arn:aws:s3:::reports/q3.csv"}]
+    - _bouncer: ibounce
+      time: 1716758400000
+      activity_name: allow
+      unmapped: {iam_jit: {verdict: allow}}
+      api:
+        service: {name: s3}
+        operation: GetObject
+        resources: [{name: "arn:aws:s3:::reports/q4.csv"}]
+    - _bouncer: ibounce
+      time: 1716844800000
+      activity_name: allow
+      unmapped: {iam_jit: {verdict: allow}}
+      api:
+        service: {name: s3}
+        operation: GetObject
+        resources: [{name: "arn:aws:s3:::archive/old.csv"}]
+    - _bouncer: ibounce
+      time: 1716931200000
+      activity_name: deny
+      unmapped: {iam_jit: {verdict: deny}}
+      api:
+        service: {name: iam}
+        operation: CreateAccessKey
+        resources: [{name: "arn:aws:iam::111122223333:user/bot"}]

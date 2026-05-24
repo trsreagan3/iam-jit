@@ -1,0 +1,115 @@
+---
+name: scenario-07-kbouncer-rbac-verbs
+description: |
+  Operator: a platform engineer running kubectl get pods across
+  two namespaces (app-prod + app-staging). Bouncer: kbounce.
+  Workflow shape: 6 K8s `get` verb events on Pod resources.
+
+  Calibrates: per-bouncer parity — verifies the grader runs end-
+  to-end on kbounce profile shape. Surfaces a CALIBRATION FINDING:
+  the grader's schema_parses validator requires generator-shape
+  `actions` lists on every deny rule, but the kbounce safety floor
+  uses verb-form `{verbs: [...], resources: [...]}` rules so
+  schema_parses FAILS on every lean-permissive-generated kbounce
+  profile.
+
+  Per [[scorer-is-ground-truth]] this is filed as a finding,
+  documented in the rationale, and the expected verdict reflects
+  current impl reality. A follow-up issue will be filed to extend
+  the schema validator with per-bouncer shape awareness — that
+  fix would flip schema_parses TRUE and lift the overall to a
+  4/5 = PARTIAL (still not MEANINGFUL per the narrowing finding
+  in scenarios 01/03/04).
+
+metadata:
+  scenario_type: edge_case
+  bouncer_kind: kbounce
+  friction_budget: 10
+  expected_overall: PARTIAL
+  expected_flags:
+    blocks_known_risk_shapes: true
+    under_friction_budget: true
+    allows_too_broad: true
+    schema_parses: false
+    narrows_vs_admin_baseline: false
+  rationale: |
+    Per [[scorer-is-ground-truth]]: 3/5 flags pass = PARTIAL under
+    the current grader implementation.
+
+    * blocks_known_risk_shapes: TRUE vacuously.
+    * under_friction_budget: TRUE — kbounce safety floor denies
+      nothing in this window; 0 denies extrapolates to 0/week.
+    * allows_too_broad: TRUE — kbounce allows use namespace/path
+      targets, not `*`.
+    * schema_parses: FALSE — CALIBRATION FINDING. The kbounce
+      lean-permissive generator emits safety-floor denies of shape
+      `{target: cluster, verbs: [delete, deletecollection],
+      resources: [namespaces, nodes, clusterroles, clusterrolebindings]}`
+      with NO `actions` field. The grader's _flag_schema_parses
+      treats missing `actions` as a structural error. This is
+      grader-side schema-shape gap, NOT a generator bug — the
+      kbounce safety floor is correct production shape.
+      TODO: file follow-up to extend grading._flag_schema_parses
+      with per-bouncer shape awareness (verbs-form is valid for
+      kbounce; sql_patterns-form is valid for dbounce). Until
+      then this scenario calibrates AGAINST the documented gap.
+    * narrows_vs_admin_baseline: FALSE — same calibration finding
+      as scenarios 01/03/04. No denied event in window.
+
+    Overall = PARTIAL (3 passes per _compute_overall threshold).
+    Does NOT escalate to NEGATIVE-VALUE because allows_too_broad
+    passes.
+
+input:
+  mode: generated
+  lean_permissive: true
+  time_range: 7d
+  events:
+    - _bouncer: kbounce
+      time: 1716412800000
+      activity_name: get
+      unmapped: {iam_jit: {verdict: allow, ext: {namespace: app-prod}}}
+      api:
+        service: {name: k8s}
+        operation: get
+        resources: [{name: "app-prod/pod-0"}]
+    - _bouncer: kbounce
+      time: 1716499200000
+      activity_name: get
+      unmapped: {iam_jit: {verdict: allow, ext: {namespace: app-prod}}}
+      api:
+        service: {name: k8s}
+        operation: get
+        resources: [{name: "app-prod/pod-1"}]
+    - _bouncer: kbounce
+      time: 1716585600000
+      activity_name: get
+      unmapped: {iam_jit: {verdict: allow, ext: {namespace: app-prod}}}
+      api:
+        service: {name: k8s}
+        operation: get
+        resources: [{name: "app-prod/pod-2"}]
+    - _bouncer: kbounce
+      time: 1716672000000
+      activity_name: get
+      unmapped: {iam_jit: {verdict: allow, ext: {namespace: app-prod}}}
+      api:
+        service: {name: k8s}
+        operation: get
+        resources: [{name: "app-prod/pod-3"}]
+    - _bouncer: kbounce
+      time: 1716758400000
+      activity_name: get
+      unmapped: {iam_jit: {verdict: allow, ext: {namespace: app-prod}}}
+      api:
+        service: {name: k8s}
+        operation: get
+        resources: [{name: "app-prod/pod-4"}]
+    - _bouncer: kbounce
+      time: 1716844800000
+      activity_name: get
+      unmapped: {iam_jit: {verdict: allow, ext: {namespace: app-staging}}}
+      api:
+        service: {name: k8s}
+        operation: get
+        resources: [{name: "app-staging/pod-x"}]

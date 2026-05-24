@@ -1,0 +1,100 @@
+---
+name: scenario-01-narrow-legitimate-read
+description: |
+  Operator: a data analyst running read-only S3 reporting work
+  across one week. Bouncer: ibounce. Workflow shape: only
+  s3:GetObject across two reports buckets, no writes, no admin,
+  no adversarial activity.
+
+  Calibrates: the rubric edge "all-legitimate-reads with no
+  out-of-pattern event." Surfaces the honest narrowing-evidence
+  limitation: a profile that ONLY allows what was observed cannot
+  demonstrate narrowing vs the admin baseline against THIS event
+  window because every event is also allowed under the baseline.
+
+metadata:
+  scenario_type: narrow_legitimate
+  bouncer_kind: ibounce
+  friction_budget: 10
+  expected_overall: PARTIAL
+  expected_flags:
+    blocks_known_risk_shapes: true
+    under_friction_budget: true
+    allows_too_broad: true
+    schema_parses: true
+    narrows_vs_admin_baseline: false
+  rationale: |
+    Per [[scorer-is-ground-truth]]: implementation reality drives the
+    expected verdict. 4 of 5 flags pass:
+
+    * blocks_known_risk_shapes: vacuously TRUE (no adversarial events
+      in input window — flag rationale surfaces the N/A explicitly).
+    * under_friction_budget: TRUE — profile denies zero events.
+    * allows_too_broad: TRUE — all allows use exact resource ARNs
+      (no `target: *` + write).
+    * schema_parses: TRUE — generator-shape YAML round-trips.
+    * narrows_vs_admin_baseline: FALSE — every observed event is
+      also allowed under admin baseline; no DENY emitted against
+      this window so narrowing is unprovable against this corpus
+      slice. Honest per [[ibounce-honest-positioning]]: the profile
+      DOES narrow in principle (only s3:GetObject allowed; everything
+      else default-denies in enforce mode); the rubric requires
+      practical narrowing PROOF against the events.
+
+    Overall threshold 4/5 = PARTIAL per
+    `grading._compute_overall`. NEGATIVE-VALUE escalation does NOT
+    fire (allows_too_broad passes).
+
+input:
+  mode: generated
+  lean_permissive: true
+  time_range: 7d
+  events:
+    - _bouncer: ibounce
+      time: 1716412800000
+      activity_name: allow
+      unmapped: {iam_jit: {verdict: allow}}
+      api:
+        service: {name: s3}
+        operation: GetObject
+        resources: [{name: "arn:aws:s3:::reports/q1.csv"}]
+    - _bouncer: ibounce
+      time: 1716499200000
+      activity_name: allow
+      unmapped: {iam_jit: {verdict: allow}}
+      api:
+        service: {name: s3}
+        operation: GetObject
+        resources: [{name: "arn:aws:s3:::reports/q2.csv"}]
+    - _bouncer: ibounce
+      time: 1716585600000
+      activity_name: allow
+      unmapped: {iam_jit: {verdict: allow}}
+      api:
+        service: {name: s3}
+        operation: GetObject
+        resources: [{name: "arn:aws:s3:::reports/q3.csv"}]
+    - _bouncer: ibounce
+      time: 1716672000000
+      activity_name: allow
+      unmapped: {iam_jit: {verdict: allow}}
+      api:
+        service: {name: s3}
+        operation: GetObject
+        resources: [{name: "arn:aws:s3:::reports/q4.csv"}]
+    - _bouncer: ibounce
+      time: 1716758400000
+      activity_name: allow
+      unmapped: {iam_jit: {verdict: allow}}
+      api:
+        service: {name: s3}
+        operation: GetObject
+        resources: [{name: "arn:aws:s3:::reports/q5.csv"}]
+    - _bouncer: ibounce
+      time: 1716931200000
+      activity_name: allow
+      unmapped: {iam_jit: {verdict: allow}}
+      api:
+        service: {name: s3}
+        operation: GetObject
+        resources: [{name: "arn:aws:s3:::reports-archive/old.csv"}]
