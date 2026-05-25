@@ -10,6 +10,32 @@
   </div>
   {% endif %}
 
+  {# #612 UAT-Web-Admin-07: when the dismiss action couldn't take
+     effect because the user store is read-only, render an honest
+     in-place error banner (NOT a misleading-success redirect with
+     `?error=`). Mirrors the disabled-button state below so the user
+     sees both why their click had no effect AND why the button
+     itself is now greyed out. #}
+  {% if dismiss_attempt_blocked %}
+  <div class="flash flash-warning dismiss-blocked"
+       data-warning-id="{{ dismiss_attempted_warning_id }}"
+       style="border-left: 6px solid #c80; background: #fff7e6; padding: 1rem 1.25rem; margin-bottom: 1.5rem;">
+    <strong>Dismissal not applied — user store is read-only.</strong>
+    <p style="margin: 0.5rem 0;">{{ dismiss_disabled_reason }}</p>
+    <p style="margin: 0.25rem 0; font-size: 0.9rem; opacity: 0.85;">
+      The warning below is still visible because no dismissal record
+      could be persisted. Fix the underlying posture issue instead, or
+      switch to a writable user store.
+    </p>
+  </div>
+  {% elif dismiss_disabled_reason %}
+  <div class="flash flash-info dismiss-disabled-note"
+       style="border-left: 4px solid #888; background: #f6f6f6; padding: 0.75rem 1rem; margin-bottom: 1rem; font-size: 0.9rem;">
+    <strong>Per-admin dismissal disabled.</strong>
+    {{ dismiss_disabled_reason }}
+  </div>
+  {% endif %}
+
   {# #609: self-lockout pre-validation — if the operator tried to add a
      CIDR that excludes their own source IP, the form-POST handler
      re-renders here WITHOUT mutating the store and asks for explicit
@@ -68,13 +94,27 @@
             <strong>Fix:</strong> {{ issue.fix }}
           </p>
         </div>
+        {# #612 UAT-Web-Admin-07: render the button disabled when the
+           user store is read-only so the user knows BEFORE clicking
+           that dismissal can't be persisted in this deployment. The
+           POST handler also rejects upfront (defense-in-depth) so
+           script-driven POSTs don't get the silent-failure shape. #}
         <form method="post" action="/admin/network/dismiss-warning" style="margin: 0;">
           <input type="hidden" name="warning_id" value="{{ issue.id }}" />
+          {% if dismiss_disabled_reason %}
+          <button type="submit" disabled
+                  data-disabled-reason="{{ dismiss_disabled_reason }}"
+                  style="background: transparent; border: 1px solid currentColor; padding: 0.25rem 0.65rem; font-size: 0.85rem; cursor: not-allowed; white-space: nowrap; opacity: 0.4;"
+                  title="{{ dismiss_disabled_reason }}">
+            dismiss for me (read-only store)
+          </button>
+          {% else %}
           <button type="submit"
                   style="background: transparent; border: 1px solid currentColor; padding: 0.25rem 0.65rem; font-size: 0.85rem; cursor: pointer; white-space: nowrap; opacity: 0.7;"
                   title="Hide this warning for your account only. Other admins still see it. Agents on /healthz still see it.">
             dismiss for me
           </button>
+          {% endif %}
         </form>
       </div>
     </div>

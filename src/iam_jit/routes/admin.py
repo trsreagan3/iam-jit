@@ -966,17 +966,146 @@ def get_log_retention(
     _: Annotated[User, Depends(require_admin)],
 ) -> dict[str, Any]:
     """Current CloudWatch retention on the iam-jit log group, plus
-    the deploy-time floor and the list of valid retention windows."""
+    the deploy-time floor and the list of valid retention windows.
+
+    #612 UAT-Web-Admin-09 closure: in `--local` mode (no AWS region,
+    no credentials) `boto3.client("logs")` raises `NoRegionError`
+    BEFORE any AWS API call is made. Previously that propagated as
+    a 500 with a raw boto3 traceback. Per
+    `[[ibounce-honest-positioning]]`: graceful degradation is the
+    correct shape. Return 200 with `enabled: false` + a `reason`
+    that tells the operator how to wire AWS, instead of crashing.
+    Matches the silent-degradation cluster posture (#326 / #448 /
+    #463) inverted: instead of silently succeeding when nothing
+    happened, honestly report "AWS isn't wired here" with 200 so
+    UI clients can render a degraded panel rather than a 500 banner.
+    """
     floor = log_retention_mod.RetentionFloor.from_env()
+
+    # #612 UAT-Web-Admin-09: catch NoRegionError / NoCredentialsError /
+    # EndpointConnectionError at client-construction time AND at the
+    # describe_log_groups call. RetentionError already wraps the
+    # describe_log_groups failure path; we extend coverage to client
+    # construction (the actual failure point in `--local` mode).
+    try:
+        from botocore.exceptions import (
+            ClientError as _ClientError,
+            EndpointConnectionError as _EndpointConnectionError,
+            NoCredentialsError as _NoCredentialsError,
+            NoRegionError as _NoRegionError,
+        )
+    except Exception:  # pragma: no cover — boto3 should always be present
+        _ClientError = _EndpointConnectionError = _NoCredentialsError = _NoRegionError = ()  # type: ignore[assignment]
+
+    try:
+        logs_client = get_logs_client()
+    except _NoRegionError as e:
+        return {
+            "enabled": False,
+            "reason": "no_aws_region_configured",
+            "detail": str(e),
+            "hint": (
+                "Set AWS_REGION (or AWS_DEFAULT_REGION) in the iam-jit "
+                "process environment, OR run iam-jit in an environment "
+                "with an IAM instance/role profile that supplies a "
+                "region. In `--local` mode without AWS wiring this "
+                "endpoint reports `enabled: false` rather than crashing."
+            ),
+            "floor": floor.to_dict(),
+            "valid_retention_days": list(log_retention_mod.VALID_RETENTION_DAYS),
+            "current_days": None,
+            "describe_error": None,
+        }
+    except _NoCredentialsError as e:
+        return {
+            "enabled": False,
+            "reason": "no_aws_credentials_configured",
+            "detail": str(e),
+            "hint": (
+                "Set AWS_PROFILE or run in an environment with IAM "
+                "role/instance credentials. In `--local` mode without "
+                "AWS wiring this endpoint reports `enabled: false` "
+                "rather than crashing."
+            ),
+            "floor": floor.to_dict(),
+            "valid_retention_days": list(log_retention_mod.VALID_RETENTION_DAYS),
+            "current_days": None,
+            "describe_error": None,
+        }
+    except Exception as e:
+        # Defensive catch-all for boto-session construction failures
+        # we haven't enumerated — still return 200 with a degraded
+        # shape rather than a 500.
+        return {
+            "enabled": False,
+            "reason": "boto3_client_construction_failed",
+            "detail": f"{type(e).__name__}: {e}",
+            "hint": (
+                "iam-jit could not construct an AWS Logs client. This "
+                "typically means AWS isn't wired in this deployment "
+                "(no region / no credentials / unsupported environment). "
+                "Wire AWS and retry."
+            ),
+            "floor": floor.to_dict(),
+            "valid_retention_days": list(log_retention_mod.VALID_RETENTION_DAYS),
+            "current_days": None,
+            "describe_error": None,
+        }
+
     try:
         current = log_retention_mod.get_current_retention(
-            get_logs_client(), floor.log_group_name,
+            logs_client, floor.log_group_name,
         )
         error = None
     except log_retention_mod.RetentionError as e:
+        # The describe call failed (log group missing, AccessDenied,
+        # endpoint unreachable). Classify access-denied / endpoint
+        # failures as "enabled: false" with a specific reason; other
+        # failures keep the legacy `describe_error` shape so the
+        # surface stays backward-compatible for callers that expect
+        # `current_days: null` + `describe_error: "..."`.
+        msg = str(e)
+        lower = msg.lower()
+        if "accessdenied" in lower or "access denied" in lower:
+            return {
+                "enabled": False,
+                "reason": "access_denied",
+                "detail": msg,
+                "hint": (
+                    "The Lambda/role used by iam-jit is missing "
+                    "logs:DescribeLogGroups on the iam-jit log group. "
+                    "See template Policies → self-log-retention."
+                ),
+                "floor": floor.to_dict(),
+                "valid_retention_days": list(
+                    log_retention_mod.VALID_RETENTION_DAYS
+                ),
+                "current_days": None,
+                "describe_error": msg,
+            }
+        if isinstance(
+            getattr(e, "__cause__", None),
+            (_EndpointConnectionError,),
+        ) or "endpoint" in lower:
+            return {
+                "enabled": False,
+                "reason": "endpoint_unreachable",
+                "detail": msg,
+                "hint": (
+                    "iam-jit could not reach the AWS Logs endpoint. "
+                    "Check the deployment's outbound network policy."
+                ),
+                "floor": floor.to_dict(),
+                "valid_retention_days": list(
+                    log_retention_mod.VALID_RETENTION_DAYS
+                ),
+                "current_days": None,
+                "describe_error": msg,
+            }
         current = None
-        error = str(e)
+        error = msg
     return {
+        "enabled": True,
         "current_days": current,
         "current_days_meaning": (
             "null = CloudWatch default (never expire). Set a finite "

@@ -93,7 +93,21 @@ def _render(
 
 
 def _try_current_user(request: Request) -> Any | None:
-    """Best-effort user resolution that returns None instead of raising."""
+    """Best-effort user resolution that returns None instead of raising.
+
+    #612 UAT-Web-Admin-04 closure: the web-side helper now ALSO consults
+    the server-side session revocation list. The JSON-API middleware
+    (`middleware._identify_user`) has always done this, but
+    `_try_current_user` was decoding the cookie + looking up the user
+    WITHOUT calling `session_revocation.is_revoked()`. The result: after
+    a `/logout` (which adds the cookie hash to the revocation list), an
+    attacker holding a copy of the cookie could still load `/`,
+    `/queue`, `/admin/*`, and every other web route that authenticates
+    via this helper. The fix mirrors the middleware's check — same
+    fail-closed-with-opt-out posture, same CRITICAL log line on
+    fail-open bypass — so the WEB surface gets the same revocation
+    enforcement as the JSON surface.
+    """
     user_store = getattr(request.app.state, "user_store", None)
     if user_store is None:
         return None
@@ -104,6 +118,43 @@ def _try_current_user(request: Request) -> Any | None:
         user_id = auth_mod.verify_session(_get_secret(), cookie)
     except (BadSignature, HTTPException):
         return None
+    # #612 UAT-Web-Admin-04 closure: server-side revocation check.
+    # Same fail-closed-with-opt-out treatment as middleware. A
+    # revoked cookie returns None (caller treats as not-logged-in)
+    # so the route's normal "no user → redirect to /login" path
+    # kicks in. We deliberately do NOT raise — keeping the helper's
+    # "best-effort, returns-None" contract — but a revoked-cookie
+    # rejection still trips the standard logout flow visually.
+    try:
+        from .. import session_revocation as _sr
+
+        if _sr.get_default_store().is_revoked(cookie):
+            return None
+    except Exception:
+        import logging as _logging
+        import os as _os
+
+        _logging.getLogger("iam_jit.session_revocation").exception(
+            "session-revocation check failed in _try_current_user for "
+            "user_id=%s",
+            user_id,
+        )
+        if (
+            _os.environ.get("IAM_JIT_SESSION_REVOCATION_FAIL_OPEN") or ""
+        ).lower() in {"1", "true", "yes"}:
+            _logging.getLogger("iam_jit.session_revocation").critical(
+                "SESSION_REVOCATION_FAIL_OPEN bypass invoked for "
+                "user_id=%s in _try_current_user — store error, but "
+                "revocation enforcement was skipped because "
+                "IAM_JIT_SESSION_REVOCATION_FAIL_OPEN=1 is set. "
+                "ALARM ON THIS LOG.",
+                user_id,
+            )
+        else:
+            # Fail-closed: revocation check broken → refuse to
+            # authenticate. The user re-logs in once the store
+            # recovers. Matches middleware's behavior.
+            return None
     try:
         user = user_store.get(user_id)
     except UserNotFound:
@@ -1442,6 +1493,38 @@ def tokens_revoke(token_hash: str, request: Request) -> Response:
 # ---- Provisioned / rediscover admin views ----
 
 
+def _dismiss_disabled_reason(user_store: Any) -> str | None:
+    """Return a human-readable explanation if the dismiss-warning button
+    should be DISABLED at render time, or None if dismissal works.
+
+    #612 UAT-Web-Admin-07 closure: a `FileUserStore`-backed deployment
+    can't persist per-admin dismissals (the YAML is the source of
+    truth + read-only at runtime by design — see
+    `users_store.FileUserStore.put`). Without this gate, the user
+    clicks "dismiss for me", the handler tries to `put` the updated
+    user record, hits `StoreReadOnly`, and silently redirects to
+    `?error=store_write_failed` — the warning stays visible AND the
+    redirect-shape looks like a successful action. Same shape as #326
+    / #448 / #463 (silent-degradation; reported success that hides a
+    failure underneath). Honest fix per
+    `[[ibounce-honest-positioning]]`: either persist OR error upfront.
+    Returns None when the store DOES accept writes (DynamoDB, in-
+    memory test stores).
+    """
+    from ..users_store import FileUserStore as _FileUserStore
+
+    if isinstance(user_store, _FileUserStore):
+        return (
+            "Dismissal requires a writable user store. This deployment "
+            "uses FileUserStore (YAML), which is read-only at runtime "
+            "by design — dismissals can't be persisted across requests. "
+            "To enable per-admin dismissal, switch to the DynamoDB user "
+            "store (IAM_JIT_USERS_TABLE) or accept that warnings remain "
+            "visible until the underlying posture is fixed."
+        )
+    return None
+
+
 @router.get("/admin/network", response_class=HTMLResponse)
 def admin_network_page(request: Request) -> Response:
     """Show the current source-IP posture and recommend hardening."""
@@ -1459,6 +1542,7 @@ def admin_network_page(request: Request) -> Response:
         i for i in posture["issues"]
         if not _sp.warning_dismissed_by(user.notes, i["id"])
     ]
+    user_store = request.app.state.user_store
     return _render(
         request,
         "admin_network.html",
@@ -1484,6 +1568,7 @@ def admin_network_page(request: Request) -> Response:
                 in {"1", "true", "yes"}
             ),
             "posture": posture,
+            "dismiss_disabled_reason": _dismiss_disabled_reason(user_store),
         },
     )
 
@@ -1495,10 +1580,27 @@ def admin_network_dismiss_warning(
 ) -> Response:
     """Form-POST shim that calls the JSON dismiss-warning admin
     endpoint, then redirects back to /admin/network. Keeps the
-    dismiss-button flow zero-JS."""
+    dismiss-button flow zero-JS.
+
+    #612 UAT-Web-Admin-07 closure: when the underlying user store is
+    read-only (FileUserStore), don't return a misleading 303-redirect
+    with `?error=store_write_failed` — that has the visual shape of a
+    successful action but the warning stays visible. Same shape as the
+    #326 / #448 / #463 silent-degradation cluster. Instead:
+      - Detect the read-only case UPFRONT via `_dismiss_disabled_reason`
+        and render the page in-place with an HTTP 409 + explicit
+        error banner, NOT a redirect; this matches the disabled-button
+        state the GET handler shows so the user understands why their
+        click couldn't take effect.
+      - Other unexpected `put` failures still redirect with
+        `?error=store_write_failed` so operator-visible errors aren't
+        lost — but the read-only case (the only one we can detect
+        upfront) gets the honest treatment.
+    """
     import dataclasses
     import datetime as _dt
-    from .. import security_posture as _sp
+    from .. import cidr_store as _cidr_store, network_acl, security_posture as _sp
+    from ..users_store import StoreReadOnly as _StoreReadOnly
 
     user, redir = _require_admin_or_redirect(request)
     if redir is not None:
@@ -1511,6 +1613,48 @@ def admin_network_dismiss_warning(
             url="/admin/network?error=unknown_warning_id",
             status_code=303,
         )
+
+    # #612 UAT-Web-Admin-07: upfront read-only refusal. If the store
+    # can't accept writes, render the page with an explicit error
+    # banner — do NOT redirect with a misleading-success shape.
+    upfront_reason = _dismiss_disabled_reason(user_store)
+    if upfront_reason is not None:
+        posture["issues_undismissed"] = [
+            i for i in posture["issues"]
+            if not _sp.warning_dismissed_by(user.notes, i["id"])
+        ]
+        return _render(
+            request,
+            "admin_network.html",
+            active="admin",
+            user=user,
+            status_code=409,
+            extra={
+                "runtime_cidrs": [
+                    {
+                        "cidr": e.cidr,
+                        "note": e.note,
+                        "added_by": e.added_by,
+                        "added_at": e.added_at,
+                    }
+                    for e in _cidr_store.get_default_store().list()
+                ],
+                "env_cidrs": network_acl.get_configured_cidrs(),
+                "trust_xff": (
+                    os.environ.get("IAM_JIT_TRUST_FORWARDED_FOR", "1").lower()
+                    in {"1", "true", "yes"}
+                ),
+                "public_exposure_opt_in": (
+                    os.environ.get("IAM_JIT_PUBLIC_EXPOSURE_OPT_IN", "false").lower()
+                    in {"1", "true", "yes"}
+                ),
+                "posture": posture,
+                "dismiss_disabled_reason": upfront_reason,
+                "dismiss_attempt_blocked": True,
+                "dismiss_attempted_warning_id": warning_id,
+            },
+        )
+
     try:
         fresh = user_store.get(user.id)
     except Exception:
@@ -1522,6 +1666,50 @@ def admin_network_dismiss_warning(
     updated_notes = _sp.append_dismissal(fresh.notes, warning_id, when)
     try:
         user_store.put(dataclasses.replace(fresh, notes=updated_notes))
+    except _StoreReadOnly:
+        # Belt-and-suspenders: if a store reports writable at
+        # `_dismiss_disabled_reason` time but still raises
+        # `StoreReadOnly` (e.g. permission flip mid-request), fall
+        # back to the same honest in-place error rather than a
+        # misleading-success redirect.
+        posture["issues_undismissed"] = [
+            i for i in posture["issues"]
+            if not _sp.warning_dismissed_by(user.notes, i["id"])
+        ]
+        return _render(
+            request,
+            "admin_network.html",
+            active="admin",
+            user=user,
+            status_code=409,
+            extra={
+                "runtime_cidrs": [
+                    {
+                        "cidr": e.cidr,
+                        "note": e.note,
+                        "added_by": e.added_by,
+                        "added_at": e.added_at,
+                    }
+                    for e in _cidr_store.get_default_store().list()
+                ],
+                "env_cidrs": network_acl.get_configured_cidrs(),
+                "trust_xff": (
+                    os.environ.get("IAM_JIT_TRUST_FORWARDED_FOR", "1").lower()
+                    in {"1", "true", "yes"}
+                ),
+                "public_exposure_opt_in": (
+                    os.environ.get("IAM_JIT_PUBLIC_EXPOSURE_OPT_IN", "false").lower()
+                    in {"1", "true", "yes"}
+                ),
+                "posture": posture,
+                "dismiss_disabled_reason": (
+                    "User store is read-only; dismissal could not be "
+                    "persisted."
+                ),
+                "dismiss_attempt_blocked": True,
+                "dismiss_attempted_warning_id": warning_id,
+            },
+        )
     except Exception:
         return RedirectResponse(
             url="/admin/network?error=store_write_failed",
@@ -1883,6 +2071,7 @@ def accounts_new_submit(
     account_id: Annotated[str, Form()],
     region: Annotated[str, Form()] = "us-east-1",
     account_alias: Annotated[str, Form()] = "",
+    alias: Annotated[str, Form()] = "",
     hub_account_id: Annotated[str, Form()] = "",
     provisioning_mode: Annotated[str, Form()] = "classic_iam",
     enable_discovery: Annotated[str, Form()] = "",
@@ -1890,10 +2079,20 @@ def accounts_new_submit(
     user, redir = _require_admin_or_redirect(request)
     if redir is not None:
         return redir
+    # #612 UAT-Web-Admin-05 closure: the web form uses `account_alias`
+    # but the JSON-API + POST /accounts/register both name the same
+    # field `alias`. Scripts / agents that POST with `alias=...` would
+    # silently lose the value at this step — the onboarding plan would
+    # render with a blank `<input type="hidden" name="alias" value="" />`
+    # and the subsequent Register click would persist an aliasless
+    # account. Accept both names with `account_alias` winning if both
+    # are present (the form-field is the authoritative name for the
+    # web surface).
+    effective_alias = (account_alias or "").strip() or (alias or "").strip()
     form = {
         "account_id": account_id,
         "region": region,
-        "account_alias": account_alias,
+        "account_alias": effective_alias,
         "hub_account_id": hub_account_id,
         "provisioning_mode": provisioning_mode,
         "enable_discovery": bool(enable_discovery),
@@ -1902,7 +2101,7 @@ def accounts_new_submit(
         plan = onboarding_mod.render_plan(
             account_id=account_id,
             region=region,
-            account_alias=account_alias or None,
+            account_alias=effective_alias or None,
             hub_account_id=hub_account_id or None,
             enable_discovery=bool(enable_discovery),
             provisioning_mode=provisioning_mode,
