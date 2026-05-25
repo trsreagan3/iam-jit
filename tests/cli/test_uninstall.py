@@ -16,6 +16,7 @@ import json
 import os
 import pathlib
 import shutil
+import socket
 import subprocess
 import sys
 import time
@@ -2446,6 +2447,377 @@ def test_621_argv1_flag_does_not_count_as_script_path(
         f"bouncer; running_bouncers={inv['running_bouncers']}"
     )
     assert foreign_pid in [u["pid"] for u in inv["unknown_port_owners"]]
+
+
+# ---------------------------------------------------------------------------
+# #615 — UAT-Lifecycle 2026-05-25 (HIGH-1): _lsof_pids_on_port must
+# detect IPv4-only loopback binds (the default ``lsof -iTCP:PORT``
+# invocation was IPv6-biased on some lsof versions and silently missed
+# 127.0.0.1:PORT listeners, defeating every #574 / #608 / #614 halt).
+# ---------------------------------------------------------------------------
+
+
+def _spawn_bind(family: int, host: str, port: int) -> subprocess.Popen[str]:
+    """Spawn a subprocess that binds + listens on (family, host, port)
+    and idles for 60s. Returns the Popen handle; caller terminates."""
+    script = (
+        "import socket, sys, time, os\n"
+        f"family = {family}\n"
+        f"s = socket.socket(family, socket.SOCK_STREAM)\n"
+        "s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)\n"
+        f"s.bind(({host!r}, {int(port)}))\n"
+        "s.listen(1)\n"
+        "sys.stdout.write('READY\\n'); sys.stdout.flush()\n"
+        "time.sleep(60)\n"
+    )
+    proc = subprocess.Popen(
+        [sys.executable, "-c", script],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+    )
+    # Wait for READY (up to 3s) so the bind is observable when we probe.
+    deadline = time.time() + 3.0
+    while time.time() < deadline:
+        if proc.poll() is not None:
+            break
+        line = proc.stdout.readline() if proc.stdout else ""
+        if "READY" in line:
+            break
+        if not line:
+            time.sleep(0.05)
+    return proc
+
+
+def _pick_free_port(family: int = socket.AF_INET) -> int:
+    """Reserve and release a free port; return it for the subprocess
+    to rebind under SO_REUSEADDR. NOTE: import socket at the top of
+    test module is already done."""
+    s = socket.socket(family, socket.SOCK_STREAM)
+    s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    s.bind(("127.0.0.1" if family == socket.AF_INET else "::1", 0))
+    port = s.getsockname()[1]
+    s.close()
+    return port
+
+
+def test_615_lsof_detects_ipv4_loopback_bind(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """#615 UAT-Lifecycle HIGH-1 REGRESSION (PRIMARY): an AF_INET
+    socket bound to ``127.0.0.1:PORT`` (no dual-stack ``[::]``
+    listener) MUST be detected by _lsof_pids_on_port. The pre-#615
+    default ``lsof -iTCP:PORT`` silently missed this on IPv6-biased
+    lsof versions, allowing foreign processes to bypass all uninstall
+    halts.
+    """
+    if shutil.which("lsof") is None:
+        pytest.skip("requires lsof on PATH")
+    # Restore the real helper (autouse fixture stubs it).
+    monkeypatch.setattr(cu, "_lsof_pids_on_port", _REAL_LSOF_PIDS_ON_PORT)
+
+    port = _pick_free_port(socket.AF_INET)
+    proc = _spawn_bind(socket.AF_INET, "127.0.0.1", port)
+    try:
+        if proc.poll() is not None:
+            stderr = proc.stderr.read() if proc.stderr else ""
+            pytest.skip(f"subprocess failed to bind: {stderr[:300]}")
+
+        pids = cu._lsof_pids_on_port(port)
+
+        # Observable: the bound PID appears in the result. This is the
+        # claim the production code makes; the assertion verifies the
+        # claim against reality (real socket + real lsof).
+        assert proc.pid in pids, (
+            f"#615: IPv4-only loopback bind on 127.0.0.1:{port} not "
+            f"detected — pid={proc.pid} missing from {pids}"
+        )
+    finally:
+        proc.terminate()
+        try:
+            proc.wait(timeout=2)
+        except subprocess.TimeoutExpired:
+            proc.kill()
+
+
+def test_615_lsof_detects_ipv4_wildcard_bind(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """#615 coverage: ``0.0.0.0:PORT`` (IPv4 wildcard) is the standard
+    server-side bind shape. Must be detected the same as loopback."""
+    if shutil.which("lsof") is None:
+        pytest.skip("requires lsof on PATH")
+    monkeypatch.setattr(cu, "_lsof_pids_on_port", _REAL_LSOF_PIDS_ON_PORT)
+
+    port = _pick_free_port(socket.AF_INET)
+    proc = _spawn_bind(socket.AF_INET, "0.0.0.0", port)
+    try:
+        if proc.poll() is not None:
+            stderr = proc.stderr.read() if proc.stderr else ""
+            pytest.skip(f"subprocess failed to bind: {stderr[:300]}")
+
+        pids = cu._lsof_pids_on_port(port)
+        assert proc.pid in pids, (
+            f"#615: IPv4 wildcard bind on 0.0.0.0:{port} not detected "
+            f"— pid={proc.pid} missing from {pids}"
+        )
+    finally:
+        proc.terminate()
+        try:
+            proc.wait(timeout=2)
+        except subprocess.TimeoutExpired:
+            proc.kill()
+
+
+def test_615_lsof_detects_ipv6_loopback_bind(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """#615 coverage: ``[::1]:PORT`` (IPv6 loopback) — the pre-#615
+    invocation also worked for this; the test pins parity so a future
+    regression that drops -i6 selection is caught immediately."""
+    if shutil.which("lsof") is None:
+        pytest.skip("requires lsof on PATH")
+    monkeypatch.setattr(cu, "_lsof_pids_on_port", _REAL_LSOF_PIDS_ON_PORT)
+
+    port = _pick_free_port(socket.AF_INET)  # ephemeral port reserved on v4
+    proc = _spawn_bind(socket.AF_INET6, "::1", port)
+    try:
+        if proc.poll() is not None:
+            stderr = proc.stderr.read() if proc.stderr else ""
+            pytest.skip(f"subprocess failed to bind: {stderr[:300]}")
+
+        pids = cu._lsof_pids_on_port(port)
+        assert proc.pid in pids, (
+            f"#615: IPv6 loopback bind on [::1]:{port} not detected "
+            f"— pid={proc.pid} missing from {pids}"
+        )
+    finally:
+        proc.terminate()
+        try:
+            proc.wait(timeout=2)
+        except subprocess.TimeoutExpired:
+            proc.kill()
+
+
+def test_615_lsof_detects_ipv6_wildcard_bind(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """#615 coverage: ``[::]:PORT`` (IPv6 wildcard, the python
+    http.server shape) — pre-#615 invocation worked here; pinned for
+    parity."""
+    if shutil.which("lsof") is None:
+        pytest.skip("requires lsof on PATH")
+    monkeypatch.setattr(cu, "_lsof_pids_on_port", _REAL_LSOF_PIDS_ON_PORT)
+
+    port = _pick_free_port(socket.AF_INET)
+    proc = _spawn_bind(socket.AF_INET6, "::", port)
+    try:
+        if proc.poll() is not None:
+            stderr = proc.stderr.read() if proc.stderr else ""
+            pytest.skip(f"subprocess failed to bind: {stderr[:300]}")
+
+        pids = cu._lsof_pids_on_port(port)
+        assert proc.pid in pids, (
+            f"#615: IPv6 wildcard bind on [::]:{port} not detected "
+            f"— pid={proc.pid} missing from {pids}"
+        )
+    finally:
+        proc.terminate()
+        try:
+            proc.wait(timeout=2)
+        except subprocess.TimeoutExpired:
+            proc.kill()
+
+
+def test_615_lsof_no_match_returns_empty(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """#615: a port with no listener returns ``[]`` (lsof exit code 1
+    is normal here and must NOT be treated as an error)."""
+    if shutil.which("lsof") is None:
+        pytest.skip("requires lsof on PATH")
+    monkeypatch.setattr(cu, "_lsof_pids_on_port", _REAL_LSOF_PIDS_ON_PORT)
+
+    # Reserve + immediately release a port so nothing is listening.
+    port = _pick_free_port(socket.AF_INET)
+
+    pids = cu._lsof_pids_on_port(port)
+    assert pids == [], (
+        f"#615: no-listener port :{port} must return []; got {pids}"
+    )
+
+
+def test_615_lsof_missing_returns_empty_with_ss_fallback(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str],
+) -> None:
+    """#615: when ``lsof`` is missing (slim Linux containers), the
+    helper falls back to ``ss`` if present; if neither is present,
+    returns [] without raising. We verify the "neither present" branch
+    by stubbing shutil.which to None for both."""
+    monkeypatch.setattr(cu, "_lsof_pids_on_port", _REAL_LSOF_PIDS_ON_PORT)
+
+    def _no_tool(name: str) -> str | None:
+        return None
+    monkeypatch.setattr(cu.shutil, "which", _no_tool)
+
+    pids = cu._lsof_pids_on_port(8767)
+    assert pids == [], (
+        f"#615: with no lsof + no ss, helper must return [] cleanly "
+        f"(no exceptions, no false positives); got {pids}"
+    )
+
+
+def test_615_uninstall_detects_ipv4_foreign_process_in_halts(
+    isolated_iam_jit_home: pathlib.Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """#615 UAT-Lifecycle HIGH-1 REGRESSION (END-TO-END): the exact
+    repro from the UAT report — spawn an IPv4-only foreign Python
+    process on a bouncer-default port, then run uninstall --dry-run
+    and assert the foreign PID surfaces in:
+      * inventory.bound_ports (TCP probe sees it)
+      * inventory.unknown_port_owners (multi-factor classifier rejects)
+      * halts U-2 + U-5 (operator-visible refusal-to-touch)
+    Per docs/CONTRIBUTING.md: each claim above is an observable state
+    assertion, not a status-string check."""
+    if shutil.which("lsof") is None or shutil.which("ps") is None:
+        pytest.skip("requires lsof + ps on PATH")
+
+    _seed_install(isolated_iam_jit_home)
+
+    # Reserve a free port + pin _BOUNCER_DEFAULT_PORTS to it so the
+    # inventory only scans this port (avoids picking up real dev-machine
+    # bouncers). Using ibounce slot for parity with #614 classifier tests.
+    port = _pick_free_port(socket.AF_INET)
+    monkeypatch.setattr(cu, "BOUNCER_PORTS", (port,))
+    monkeypatch.setattr(
+        cu, "_BOUNCER_DEFAULT_PORTS", {"ibounce": (port,)},
+    )
+    # Restore REAL helpers (autouse fixture stubs them).
+    monkeypatch.setattr(cu, "_port_bound", _REAL_PORT_BOUND)
+    monkeypatch.setattr(cu, "_lsof_pids_on_port", _REAL_LSOF_PIDS_ON_PORT)
+    monkeypatch.setattr(cu, "_read_cmdline", _REAL_READ_CMDLINE)
+    # Suppress pgrep-name lookup so foreign-only PIDs come solely from
+    # the lsof port-owner cross-reference (the surface under test).
+    monkeypatch.setattr(cu, "_find_pids_for_process", lambda name: [])
+
+    proc = _spawn_bind(socket.AF_INET, "127.0.0.1", port)
+    try:
+        if proc.poll() is not None:
+            stderr = proc.stderr.read() if proc.stderr else ""
+            pytest.skip(f"foreign subprocess failed to bind: {stderr[:300]}")
+
+        inv = cu._inventory_installed_state()
+
+        # 1. bound_ports: TCP probe sees the listener.
+        assert port in inv["bound_ports"], (
+            f"#615: foreign IPv4-only bind on :{port} missed by TCP "
+            f"probe — bound_ports={inv['bound_ports']}"
+        )
+
+        # 2. unknown_port_owners: lsof cross-reference recovered the
+        #    PID AND the multi-factor classifier (#614) rejected it
+        #    (Python interpreter + no bouncer flag signature).
+        unknown_pids = [u["pid"] for u in inv["unknown_port_owners"]]
+        assert proc.pid in unknown_pids, (
+            f"#615 PRIMARY FAILURE MODE: foreign IPv4-only PID "
+            f"{proc.pid} on :{port} silently bypassed lsof detection. "
+            f"unknown_port_owners={inv['unknown_port_owners']} "
+            f"running_bouncers={inv['running_bouncers']}"
+        )
+
+        # 3. running_bouncers MUST NOT include the foreign PID (would
+        #    mean the multi-factor classifier misfired and we're about
+        #    to SIGTERM a cross-domain process per [[creates-never-mutates]]).
+        all_running: list[int] = []
+        for pids in inv["running_bouncers"].values():
+            all_running.extend(pids)
+        assert proc.pid not in all_running, (
+            f"#615 CRIT: foreign PID {proc.pid} classified as a real "
+            f"bouncer — multi-factor classifier defeated. "
+            f"running_bouncers={inv['running_bouncers']}"
+        )
+
+        # 4. halts: U-2 (non-bouncer holding bouncer port) + U-5
+        #    (foreign multi-factor reject) MUST fire. These are the
+        #    operator-visible signals that uninstall is refusing to
+        #    touch a foreign process.
+        halts = cu._check_halt_conditions(inv)
+        halt_ids = {h["id"] for h in halts}
+        assert "U-2" in halt_ids, (
+            f"#615: U-2 halt (non-bouncer on bouncer port) did NOT "
+            f"fire despite foreign PID {proc.pid} on :{port}. "
+            f"halts={halts}"
+        )
+        assert "U-5" in halt_ids, (
+            f"#615: U-5 halt (foreign multi-factor reject) did NOT "
+            f"fire despite foreign PID {proc.pid} on :{port}. "
+            f"halts={halts}"
+        )
+    finally:
+        proc.terminate()
+        try:
+            proc.wait(timeout=2)
+        except subprocess.TimeoutExpired:
+            proc.kill()
+
+
+def test_615_sabotage_ipv4_skip_makes_primary_test_fail(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """#615 SABOTAGE CHECK per docs/CONTRIBUTING.md: prove the primary
+    IPv4-loopback test is load-bearing by simulating the pre-#615
+    failure mode — monkeypatch _lsof_pids_on_port to drop IPv4
+    results. The primary test would then fail to detect the bind.
+
+    This test asserts the inverse: with IPv4 filtered out, the helper
+    returns [] for an IPv4-only bind — proving the detection actually
+    depends on querying IPv4."""
+    if shutil.which("lsof") is None:
+        pytest.skip("requires lsof on PATH")
+
+    # Build a stub that mimics the pre-#615 IPv6-biased lsof: it ONLY
+    # queries -i6, not -i4. For an AF_INET bind, this returns [].
+    def _ipv6_only_lsof(port: int) -> list[int]:
+        try:
+            proc = subprocess.run(
+                ["lsof", "-nP", "-i6TCP:%d" % int(port),
+                 "-sTCP:LISTEN", "-t"],
+                capture_output=True, text=True, check=False, timeout=5.0,
+            )
+        except (OSError, subprocess.TimeoutExpired):
+            return []
+        return [int(s) for s in proc.stdout.splitlines() if s.strip().isdigit()]
+
+    port = _pick_free_port(socket.AF_INET)
+    proc = _spawn_bind(socket.AF_INET, "127.0.0.1", port)
+    try:
+        if proc.poll() is not None:
+            stderr = proc.stderr.read() if proc.stderr else ""
+            pytest.skip(f"subprocess failed to bind: {stderr[:300]}")
+
+        # Sabotaged (IPv6-only) lookup MUST return [] for IPv4 bind.
+        sabotaged = _ipv6_only_lsof(port)
+        assert proc.pid not in sabotaged, (
+            f"#615 sabotage smoke FAILED: the IPv6-only stub still "
+            f"detected the IPv4 bind, which means the primary IPv4 "
+            f"test is NOT load-bearing. pid={proc.pid} "
+            f"sabotaged_result={sabotaged}"
+        )
+
+        # Real fixed helper MUST detect it (positive control).
+        real = _REAL_LSOF_PIDS_ON_PORT(port)
+        assert proc.pid in real, (
+            f"#615 sabotage smoke (positive control): real helper "
+            f"failed to detect IPv4 bind that sabotaged version "
+            f"missed — pid={proc.pid} real={real}"
+        )
+    finally:
+        proc.terminate()
+        try:
+            proc.wait(timeout=2)
+        except subprocess.TimeoutExpired:
+            proc.kill()
 
 
 def test_621_relative_path_handled_safely(

@@ -192,19 +192,95 @@ def _find_pids_for_process(name: str) -> list[int]:
 
 
 def _lsof_pids_on_port(port: int) -> list[int]:
-    """Best-effort PID discovery for a TCP-listening port via ``lsof``.
+    """Return PIDs holding a TCP LISTEN socket on ``port`` (IPv4 + IPv6).
 
-    Mirrors ``cli_canary._lsof_pids_on_port``. Returns an empty list on
-    any error / when ``lsof`` is not installed (slim Linux containers).
-    Used by :func:`_inventory_installed_state` to cross-reference
-    bouncer-port owners back to PIDs — the #574 fix for ``pgrep -x``
-    missing Python console-script bouncers.
+    Mirrors ``cli_canary._lsof_pids_on_port``. Used by
+    :func:`_inventory_installed_state` to cross-reference bouncer-port
+    owners back to PIDs — the #574 fix for ``pgrep -x`` missing Python
+    console-script bouncers; later extended by #608 + #614 + #621.
+
+    Per UAT-Lifecycle 2026-05-25 (HIGH-1, #615): the prior default
+    ``lsof -iTCP:PORT`` invocation was IPv6-biased on some lsof
+    versions and missed IPv4-only loopback binds (``127.0.0.1:PORT``
+    without a dual-stack ``[::]`` listener). A foreign IPv4-only
+    Python process bound to 127.0.0.1:8767 silently bypassed every
+    #574 / #608 / #614 halt; re-install would later fail to bind the
+    port with no warning from uninstall.
+
+    Fix shape:
+      1. Primary: ``lsof -nP -i4TCP:PORT -i6TCP:PORT -sTCP:LISTEN -t``
+         — explicit dual-stack selection. ``-i4`` and ``-i6`` are
+         additive (UNION semantics on lsof 4.91+ macOS and the Linux
+         lsof builds we test against), and ``-sTCP:LISTEN`` filters out
+         ESTABLISHED / TIME_WAIT entries so the result is always the
+         listener PID set. ``-nP`` suppresses DNS + service-name
+         resolution to keep the call deterministic.
+      2. Fallback: when lsof is missing (slim containers, some Linux
+         distros), shell out to ``ss -tlnpH 'sport = :PORT'`` and parse
+         the ``users:(("name",pid=NNN,...))`` column.
+
+    Returns an empty list when the port has no listener OR when
+    neither tool is available. Per [[ibounce-honest-positioning]]:
+    when classification truly cannot be determined, default to
+    surfacing nothing — callers like :func:`_inventory_installed_state`
+    fire halt U-1 (bouncer ports bound but no PID found) which is the
+    operator-visible signal that a port is held by an unknown process.
     """
-    if shutil.which("lsof") is None:
+    lsof = shutil.which("lsof")
+    if lsof is not None:
+        try:
+            proc = subprocess.run(
+                [
+                    lsof, "-nP",
+                    "-i4TCP:%d" % int(port),
+                    "-i6TCP:%d" % int(port),
+                    "-sTCP:LISTEN",
+                    "-t",
+                ],
+                capture_output=True,
+                text=True,
+                check=False,
+                timeout=5.0,
+            )
+        except (OSError, subprocess.TimeoutExpired):
+            return []
+        # lsof exit conventions:
+        #   0 = matches found, 1 = no matches (NOT an error condition).
+        # Any other returncode is unexpected (permission denied, bad
+        # invocation, kernel error). We surface a one-line stderr
+        # notice per [[ibounce-honest-positioning]] so operators see
+        # silent-empty failures instead of guessing.
+        if proc.returncode not in (0, 1):
+            try:
+                sys.stderr.write(
+                    f"iam-jit: lsof returned exit {proc.returncode} for "
+                    f"port {int(port)}: {(proc.stderr or '').strip()[:200]}\n"
+                )
+            except Exception:
+                pass
+            return []
+        out: list[int] = []
+        for line in proc.stdout.splitlines():
+            s = line.strip()
+            if not s:
+                continue
+            try:
+                pid = int(s)
+            except ValueError:
+                continue
+            if pid not in out:
+                out.append(pid)
+        return out
+
+    # Linux-only fallback: ``ss`` ships with iproute2 on every modern
+    # distro and reports listeners with PID via -p. Sample line:
+    #   LISTEN 0 5 127.0.0.1:8767 0.0.0.0:* users:(("python",pid=1234,fd=3))
+    ss = shutil.which("ss")
+    if ss is None:
         return []
     try:
         proc = subprocess.run(
-            ["lsof", "-nP", "-iTCP:%d" % int(port), "-sTCP:LISTEN", "-t"],
+            [ss, "-tlnpH", "sport = :%d" % int(port)],
             capture_output=True,
             text=True,
             check=False,
@@ -212,15 +288,36 @@ def _lsof_pids_on_port(port: int) -> list[int]:
         )
     except (OSError, subprocess.TimeoutExpired):
         return []
-    out: list[int] = []
-    for line in proc.stdout.splitlines():
-        s = line.strip()
-        if not s:
-            continue
+    if proc.returncode != 0:
         try:
-            out.append(int(s))
-        except ValueError:
-            continue
+            sys.stderr.write(
+                f"iam-jit: ss returned exit {proc.returncode} for "
+                f"port {int(port)}: {(proc.stderr or '').strip()[:200]}\n"
+            )
+        except Exception:
+            pass
+        return []
+    out: list[int] = []
+    for line in (proc.stdout or "").splitlines():
+        # Extract every pid=NNN occurrence on the line (ss may report
+        # multiple processes per socket via SO_REUSEPORT).
+        idx = 0
+        while True:
+            marker = line.find("pid=", idx)
+            if marker == -1:
+                break
+            start = marker + 4
+            end = start
+            while end < len(line) and line[end].isdigit():
+                end += 1
+            if end > start:
+                try:
+                    pid = int(line[start:end])
+                    if pid not in out:
+                        out.append(pid)
+                except ValueError:
+                    pass
+            idx = end if end > marker else marker + 1
     return out
 
 
