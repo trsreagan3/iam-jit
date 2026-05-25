@@ -27,7 +27,7 @@
           "properties": {
             "name": { "type": "string", "minLength": 1, "maxLength": 200 },
             "email": { "type": "string", "format": "email", "maxLength": 254 },
-            "principal_arn": { "type": "string", "pattern": "^arn:aws:" }
+            "principal_arn": { "type": "string", "pattern": "^(arn:aws[a-z-]*:|email:|iam:)" }
           }
         },
         "created_at": { "type": "string", "format": "date-time" },
@@ -209,7 +209,7 @@
           "additionalProperties": false,
           "description": "Who will assume the provisioned role. If omitted, the requester's principal is used. Override this when the role will be assumed from a different identity than the one submitting the request (e.g. a CI runner role).",
           "properties": {
-            "principal_arn": { "type": "string", "pattern": "^arn:aws[a-z-]*:" },
+            "principal_arn": { "type": "string", "pattern": "^(arn:aws[a-z-]*:|email:|iam:)" },
             "session_name": { "type": "string", "minLength": 1, "maxLength": 64 }
           }
         },

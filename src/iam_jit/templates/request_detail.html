@@ -111,15 +111,15 @@
     {% endfor %}
   </details>
   {% endif %}
-  {% elif req.status.state in ("pending", "needs_changes", "approved") and not assumer_resolved %}
-  <p class="flash flash-warning">
-    <strong>No assumer principal set.</strong>
-    We couldn't infer which AWS identity will assume this role from your login,
-    and you haven't set one explicitly. Edit the request and set
-    <code>spec.assume_by.principal_arn</code> before approval, otherwise the trust
-    policy can't be locked down to a specific principal.
-  </p>
   {% endif %}
+  {# #594 — the "No assumer principal set" warning branch was removed
+     because principal_arn is now required at submit time (web POST
+     infers from current_user.id when blank; MCP/API submit-paths
+     already require it explicitly). The condition is impossible by
+     construction for requests created through any of the supported
+     entry points; if it ever fires it indicates DB corruption or a
+     skipped validation path, which is better surfaced as a hard
+     failure than a soft warning per [[ibounce-honest-positioning]]. #}
 
   {% if req.status.review %}
   <h2>Risk review</h2>

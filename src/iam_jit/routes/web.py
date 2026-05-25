@@ -112,6 +112,20 @@ def _try_current_user(request: Request) -> Any | None:
     return user
 
 
+def _infer_assumer_principal_from_user(user: Any) -> str:
+    """Derive a principal identifier for `assume_by.principal_arn` from
+    the logged-in user. Matches what the new-paste form's placeholder
+    promises: blank field defaults to `current_user.id`.
+
+    The user.id format is `email:<email>` (local mode) or `iam:<arn>`
+    (aws_iam mode) — both are accepted by the request schema's
+    `principal_arn` pattern. Returns "" if the user is None or has no
+    id (defensive — caller treats "" as a hard validation failure)."""
+    if user is None:
+        return ""
+    return getattr(user, "id", "") or ""
+
+
 # ---- Auth ----
 
 
@@ -875,13 +889,50 @@ def new_paste_submit(
             "provisioning": {"mode": "identity_center"},
         },
     }
+    # #594 — principal_arn is required at submit time. Match what the
+    # form's placeholder already promises: blank field with a valid
+    # session defaults to current_user.id. This closes the silent
+    # degradation per [[ibounce-honest-positioning]] where the request
+    # would be created with no principal and the detail page would
+    # later show a "blocking issue: no principal_arn" warning.
     assume_by: dict[str, Any] = {}
-    if assume_principal_arn.strip():
-        assume_by["principal_arn"] = assume_principal_arn.strip()
+    principal = assume_principal_arn.strip()
+    if not principal:
+        # user is guaranteed non-None here by the auth gate above; the
+        # no-session path is rejected upstream via redirect-to-login.
+        principal = _infer_assumer_principal_from_user(user)
+    if not principal:
+        # Defense in depth: an unauthenticated POST that somehow bypassed
+        # the redirect-to-login gate, or a session-user whose id is
+        # missing, must be rejected with a clear field-level error
+        # rather than silently accepted.
+        return _render(
+            request,
+            "new_paste.html",
+            active="new",
+            user=user,
+            status_code=400,
+            extra={
+                "form": {
+                    "description": description,
+                    "policy": policy,
+                    "access_type": access_type,
+                    "accounts": accounts,
+                    "duration_hours": duration_hours,
+                    "assume_principal_arn": assume_principal_arn,
+                    "assume_session_name": assume_session_name,
+                    "ticket": ticket,
+                },
+                "errors": [
+                    "assume_principal_arn: required when not submitting "
+                    "through a logged-in session"
+                ],
+            },
+        )
+    assume_by["principal_arn"] = principal
     if assume_session_name.strip():
         assume_by["session_name"] = assume_session_name.strip()
-    if assume_by:
-        req["spec"]["assume_by"] = assume_by
+    req["spec"]["assume_by"] = assume_by
     if ticket.strip():
         req["spec"]["ticket"] = ticket.strip()
     errors = schema.validate_request(req)
