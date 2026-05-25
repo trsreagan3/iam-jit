@@ -1,7 +1,7 @@
 # Security posture
 
 Technical reference for the `iam-jit` family + the Bounce-suite
-binaries (`ibounce`, `kbouncer`, `dbounce`, `gbounce` — all
+binaries (`ibounce`, `kbounce`, `dbounce`, `gbounce` — all
 shipped). Written for a SecOps procurement reviewer asking *"what
 does this binary actually do?"* — quotable from a security
 questionnaire. Pairs with [`SECURITY.md`](../SECURITY.md) (threat
@@ -17,7 +17,7 @@ For wiring the MCP surface into non-Claude-Code clients, see
 
 `iam-jit` is a self-hosted IAM credential issuer that creates short-
 lived, narrowly-scoped IAM principals in the customer's own AWS
-account. The Bounce suite (`ibounce` for AWS, `kbouncer` for
+account. The Bounce suite (`ibounce` for AWS, `kbounce` for
 Kubernetes, `dbounce` for SQL databases, `gbounce` for outbound
 HTTP — all shipped at v1.0) is a family of local transparent proxies
 that gate the traffic an operator's machine sends to those upstreams
@@ -146,7 +146,7 @@ shipper, no sync, no remote sink.
 
 ## 6. Code execution provenance
 
-- All Bounce binaries (`ibounce`, `kbouncer`, `dbounce`, `gbounce`)
+- All Bounce binaries (`ibounce`, `kbounce`, `dbounce`, `gbounce`)
   are Apache 2.0 and shipped at v1.0. Build-from-source is available;
   full commit history is public on GitHub.
 - `kbounce` and `dbounce` ship as single static Go binaries.

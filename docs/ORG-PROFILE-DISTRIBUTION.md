@@ -80,7 +80,7 @@ YAML files. The bundle declares:
 
 | Section | What it does | Required? |
 |---|---|---|
-| **Denies** | What the proxy refuses on every agent's behalf — across all four Bounce products (ibounce / kbouncer / dbounce / gbounce). Per [[dynamic-deny-rules]] denies are the load-bearing field. | Yes |
+| **Denies** | What the proxy refuses on every agent's behalf — across all four Bounce products (ibounce / kbounce / dbounce / gbounce). Per [[dynamic-deny-rules]] denies are the load-bearing field. | Yes |
 | **Audit-export config** | Webhook URL, preset (`splunk-hec`, `datadog`, etc.), alert routes (PagerDuty, Slack). Every decision the bouncer makes flows here. | Strongly recommended |
 | **Alert routes** | Conditional routes — `severity: critical` goes to PagerDuty; `severity: info` goes to a low-priority channel. | Optional |
 | **Minimum-TTL caps** | Floor on how long an agent's scoped credential can live. The bouncer issues TTLs shorter than the cap; never longer. | Optional |
@@ -430,7 +430,7 @@ at credential-use time. Defense-in-depth per
 The same shape applies cross-product:
 
 - **ibounce** → AWS-side IAM `Effect: Deny` statements
-- **kbouncer** → Kubernetes-side `NetworkPolicy` egress denies +
+- **kbounce** → Kubernetes-side `NetworkPolicy` egress denies +
   RBAC `deny`-equivalent (named cluster roles excluded from binding)
 - **dbounce** → database-side `REVOKE` on the matching object set
   (PostgreSQL grants, MySQL privileges)

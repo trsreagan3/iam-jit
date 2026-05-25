@@ -3,7 +3,7 @@
 **Status:** Shipped 2026-05-19. Enterprise-tier; license-gated.
 
 This is the canonical reference for the per-org notification routing
-engine. kbouncer + dbounce link back to this document for cross-product
+engine. kbounce + dbounce link back to this document for cross-product
 consistency.
 
 ## What it does

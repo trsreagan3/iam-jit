@@ -207,3 +207,27 @@ nearby observable-state assertion is tracked separately (#467); the
 intent here is to make the convention a first-class human discipline
 that the linter later enforces mechanically. Don't wait for the linter
 to land before adopting the convention.
+
+---
+
+## `assert` is for tests, not security-relevant invariants
+
+Python's `assert` is stripped under `python -O`. Don't use it for:
+
+- Security-relevant invariants (validation, auth checks, gate enforcement)
+- Production runtime checks that must always fire
+- Any check whose failure must always raise
+
+Use explicit `if not <condition>: raise <ExceptionType>(...)` instead.
+
+`assert` IS appropriate for:
+
+- Test-file assertions (pytest's collected tests)
+- Dev-time invariants that document author intent (not load-bearing)
+- Type-narrowing hints for static analyzers (e.g. `assert x is not None`
+  after a guard that already returned, where the assertion is purely
+  for mypy / pyright)
+
+The audit-sampled production surface as of 2026-05-25 shows no
+security-relevant `assert` uses, but the rule is worth pinning here
+so future contributors inherit the discipline by default.

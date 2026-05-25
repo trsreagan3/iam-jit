@@ -15,7 +15,7 @@ operator-observable surface (`iam-jit posture`, `/healthz`, OCSF
 event stream) reports the detector's state HONESTLY: enabled vs
 off, alert vs block, alert counts, last-emit timestamp.
 
-Status: **ibounce-only at v1.0**. kbouncer / dbounce / gbounce
+Status: **ibounce-only at v1.0**. kbounce / dbounce / gbounce
 Phase H parity ships in v1.0+1 (see task #508).
 
 ---

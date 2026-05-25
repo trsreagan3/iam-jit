@@ -299,7 +299,7 @@ pattern by shape and writes the destination(s) into the rule's
 | `arn:aws:*:*:*:*` (optionally with `*` wildcards on the resource segment)                      | ibounce              | Canonical AWS-call gate. ARN parser per `botocore.utils.ArnParser`; wildcards on resource only. |
 | `*.amazonaws.com`, `*.rds.amazonaws.com`, `<host>.<region>.rds.amazonaws.com`                  | dbounce + gbounce    | RDS endpoints land on BOTH (dbounce for the SQL session; gbounce for CONNECT during clients).   |
 | `*.<custom-domain>.com` / IP literal / CIDR                                                    | gbounce              | Generic egress block — reuses the gbounce `deny_hosts` glob from #314.                          |
-| Kubernetes namespace name (matches `^[a-z0-9-]+$`, no dots) OR `cluster:<name>`                | kbouncer             | Heuristic: hostname-shaped strings without dots OR explicit `cluster:` / `namespace:` prefix.   |
+| Kubernetes namespace name (matches `^[a-z0-9-]+$`, no dots) OR `cluster:<name>`                | kbounce              | Heuristic: hostname-shaped strings without dots OR explicit `cluster:` / `namespace:` prefix.   |
 | `secret:<arn or name>` (ARN OR plain Secrets Manager name)                                     | ibounce              | Convenience shortcut for the common "lock out a specific secret" pattern.                       |
 | `https://<host>/...`, `http://<host>/...`                                                      | gbounce              | URL form — exact path/glob matched per gbounce's URL-matcher.                                   |
 | Bare hostname (`api.openai.com`, `metadata.google.internal`)                                   | gbounce              | Defaults to gbounce since arbitrary hostnames imply HTTP egress.                                |
@@ -356,12 +356,12 @@ denies:
 
 Dynamic deny rules apply at TWO points:
 
-1. **Request time, in the bouncer.** The proxy (ibounce / kbouncer /
+1. **Request time, in the bouncer.** The proxy (ibounce / kbounce /
    dbounce / gbounce) consults its in-memory dynamic-deny set on every
    request. A match returns the appropriate per-protocol deny payload
    (`403` with `deny_reason: "dynamic-deny: <id> — <reason>"` for
    ibounce/gbounce; SQL session refused with the same string for
-   dbounce; admission webhook rejection for kbouncer) AND emits an
+   dbounce; admission webhook rejection for kbounce) AND emits an
    OCSF audit event with `unmapped.iam_jit.deny_reason` naming the
    rule id.
 

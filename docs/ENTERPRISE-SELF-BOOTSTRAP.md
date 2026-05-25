@@ -161,7 +161,7 @@ Enterprise features:
   naming heuristics; this drives whether the (paid) LLM scorer
   runs for grants touching each account.
 - **K8s bouncer integration** — proposed cluster ARNs are the
-  starting set for `kbouncer` admission-webhook anchors.
+  starting set for `kbounce` admission-webhook anchors.
 - **Agents-default-to-iam-jit** (`[[agents-default-to-iam-jit]]`) —
   bootstrap is the natural place for an admin's IDE agent to
   drive the discovery + review loop end-to-end; the proposal's
