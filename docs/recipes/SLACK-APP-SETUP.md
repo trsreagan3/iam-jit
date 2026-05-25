@@ -101,6 +101,35 @@ of choice, not in plaintext env vars committed to git. The SAM
 template references them via `SecretsManager:secret-arn:SecretString:key`
 syntax.
 
+### Optional: override the Slack API base URL
+
+Most operators don't need this. If you do need to point iam-jit at a
+non-default Slack endpoint, set:
+
+```
+IAM_JIT_SLACK_API_BASE=https://your-custom-slack-base/api
+```
+
+Default: `https://slack.com/api`. The override is read at call time
+so changes take effect without restarting the bot (useful in tests).
+
+Use cases:
+
+- **Local dev / E2E testing** — point at the bundled
+  `MockSlackServer` (`iam-jit dev-slack-mock` runs it on
+  `http://127.0.0.1:8766/api`) to exercise the full Slack code path
+  without a real workspace or ngrok tunnel
+- **Slack Enterprise Grid** — some Enterprise Grid deployments
+  expose a workspace-local API base
+- **Recording proxy** — forensics / replay testing through a proxy
+  that captures full request/response pairs
+
+If you set this to anything other than the default, iam-jit's
+outbound Slack calls (`chat.postMessage`, `chat.update`,
+`views.open`, `users.info`) all go through that base. Set this
+ONLY if you understand the implication; an incorrect override
+silently breaks every Slack-side surface.
+
 ## Step 6 — smoke test
 
 Submit a request that you know will route to approval (score over

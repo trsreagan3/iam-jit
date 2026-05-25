@@ -16,7 +16,8 @@ Two ways to use:
   (1) **As a pytest fixture** — `MockSlackServer.build()` returns a
       FastAPI app + an event log + a directory you can populate from
       tests. Mount it under `httpx.MockTransport` or run it on a
-      real localhost port and point `_SLACK_API_BASE` at it.
+      real localhost port and set `IAM_JIT_SLACK_API_BASE` to point
+      at it (the slack_bot reads that env var at call time).
 
   (2) **As a standalone process** — `iam-jit dev-slack-mock` runs
       this on a port. Useful when manually testing the bot from a
@@ -238,10 +239,10 @@ class MockSlackServer:
 def run_standalone(*, host: str = "127.0.0.1", port: int = 8766) -> int:
     """Run the mock as a standalone HTTP server on (host, port).
 
-    Use this when manually testing the bot from a laptop: point
-    iam-jit's slack_bot._SLACK_API_BASE at http://127.0.0.1:8766/api
-    (or set the env var below if/when the constant is parameterised)
-    and the bot's outbound calls will land here instead of Slack.
+    Use this when manually testing the bot from a laptop: set
+    `IAM_JIT_SLACK_API_BASE=http://127.0.0.1:8766/api` in the
+    environment iam-jit runs in, and the bot's outbound calls will
+    land here instead of Slack. No code edits required.
     """
     import uvicorn
 

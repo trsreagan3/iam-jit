@@ -42,7 +42,28 @@ logger = logging.getLogger("iam_jit.slack_bot")
 
 
 _REPLAY_WINDOW_SECONDS = 300  # Slack's documented max
-_SLACK_API_BASE = "https://slack.com/api"
+_DEFAULT_SLACK_API_BASE = "https://slack.com/api"
+
+
+def _get_slack_api_base() -> str:
+    """Return the Slack Web API base URL.
+
+    Reads `IAM_JIT_SLACK_API_BASE` at CALL TIME (not import time) so
+    tests + operators can override without reloading the module.
+    Empty-string env values fall back to the default — an empty
+    `IAM_JIT_SLACK_API_BASE=""` is treated as "unset" rather than
+    "use empty base" (which would produce malformed URLs).
+
+    Operator use cases for overriding:
+      1. Local dev / E2E — point at MockSlackServer
+      2. On-prem / air-gapped Slack-Enterprise-Grid with custom base
+      3. Recording proxy for forensics / replay testing
+
+    Most operators do NOT need to set this; the default is correct
+    for any standard Slack workspace.
+    """
+    override = os.environ.get("IAM_JIT_SLACK_API_BASE", "").strip()
+    return override or _DEFAULT_SLACK_API_BASE
 
 
 class SlackError(Exception):
@@ -575,7 +596,7 @@ def open_modal(
     """
     cli = client or HttpxSlackClient()
     resp = cli.post_json(
-        f"{_SLACK_API_BASE}/views.open",
+        f"{_get_slack_api_base()}/views.open",
         headers={
             "Authorization": f"Bearer {config.bot_token}",
             "Content-Type": "application/json; charset=utf-8",
@@ -621,7 +642,7 @@ class HttpxSlackClient:
         import httpx
 
         resp = httpx.get(
-            f"{_SLACK_API_BASE}/users.info",
+            f"{_get_slack_api_base()}/users.info",
             params={"user": user_id},
             headers={"Authorization": f"Bearer {bot_token}"},
             timeout=10.0,
@@ -661,7 +682,7 @@ def post_approval_message(
 
     cli = client or HttpxSlackClient()
     resp = cli.post_json(
-        f"{_SLACK_API_BASE}/chat.postMessage",
+        f"{_get_slack_api_base()}/chat.postMessage",
         headers={
             "Authorization": f"Bearer {config.bot_token}",
             "Content-Type": "application/json; charset=utf-8",
@@ -764,7 +785,7 @@ def post_mfa_step_up_nudge(
 
     cli = client or HttpxSlackClient()
     resp = cli.post_json(
-        f"{_SLACK_API_BASE}/chat.postMessage",
+        f"{_get_slack_api_base()}/chat.postMessage",
         headers={
             "Authorization": f"Bearer {config.bot_token}",
             "Content-Type": "application/json; charset=utf-8",

@@ -580,3 +580,231 @@ class TestSlackConfigFromEnv:
         cfg = slack_bot.SlackConfig.from_env()
         assert cfg is not None
         assert cfg.approval_channel is None
+
+
+# ---------------------------------------------------------------------------
+# 7. IAM_JIT_SLACK_API_BASE env-override (#597).
+#
+# Per PDF v2 build agent 2026-05-25: operators need to redirect Slack API
+# traffic for local dev / MockSlackServer / on-prem Enterprise Grid /
+# recording proxy use cases, without monkey-patching a module constant.
+#
+# These tests follow the state-verification convention in
+# docs/CONTRIBUTING.md: assert OBSERVABLE state (the URL the slack_bot
+# actually POSTs to) not internal config values alone.
+# ---------------------------------------------------------------------------
+
+
+class TestSlackApiBaseEnvOverride:
+    """#597 — IAM_JIT_SLACK_API_BASE env-driven override."""
+
+    def test_defaults_to_slack_com_when_env_unset(
+        self, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """No env var → canonical Slack URL. This is the safe default
+        every existing operator already relies on."""
+        monkeypatch.delenv("IAM_JIT_SLACK_API_BASE", raising=False)
+        assert slack_bot._get_slack_api_base() == "https://slack.com/api"
+
+    def test_env_override_changes_base_url(
+        self, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Setting the env var → that value is returned."""
+        monkeypatch.setenv("IAM_JIT_SLACK_API_BASE", "http://127.0.0.1:18766/api")
+        assert (
+            slack_bot._get_slack_api_base() == "http://127.0.0.1:18766/api"
+        )
+
+    def test_empty_string_env_falls_back_to_default(
+        self, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """An empty `IAM_JIT_SLACK_API_BASE=""` must be treated as
+        unset, not as "use empty base URL" (which would yield
+        malformed `/chat.postMessage` requests)."""
+        monkeypatch.setenv("IAM_JIT_SLACK_API_BASE", "")
+        assert slack_bot._get_slack_api_base() == "https://slack.com/api"
+
+    def test_whitespace_only_env_falls_back_to_default(
+        self, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Whitespace-only env (e.g. accidental copy-paste) → default."""
+        monkeypatch.setenv("IAM_JIT_SLACK_API_BASE", "   ")
+        assert slack_bot._get_slack_api_base() == "https://slack.com/api"
+
+    def test_env_override_takes_effect_in_post_approval_message(
+        self, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """End-to-end: env var → the bot's chat.postMessage call
+        actually goes to the overridden URL.
+
+        State verification per CONTRIBUTING.md: don't just check the
+        function returns the right string; assert the OBSERVABLE state
+        (the URL the HTTPClient receives) matches.
+        """
+        monkeypatch.setenv(
+            "IAM_JIT_SLACK_API_BASE", "http://127.0.0.1:18766/api",
+        )
+
+        recorded: dict[str, Any] = {}
+
+        class _RecordingClient:
+            def post_json(
+                self, url: str, *, headers: dict[str, str], json_body: dict[str, Any],
+            ) -> dict[str, Any]:
+                recorded["url"] = url
+                recorded["json_body"] = json_body
+                return {"ok": True, "channel": json_body.get("channel"), "ts": "1.0"}
+
+            def get_user_info(self, user_id: str, *, bot_token: str) -> dict[str, Any]:
+                raise NotImplementedError
+
+        cfg = slack_bot.SlackConfig(
+            bot_token="xoxb-test",
+            signing_secret="dummy",
+            approval_channel="C_TEST",
+        )
+        resp = slack_bot.post_approval_message(
+            request={
+                "id": "req-1",
+                "spec": {"description": "x", "access_type": "ro", "duration": {"duration_hours": 1}},
+                "status": {"owner": "alice"},
+                "review": {"risk_score": 3, "risk_factors": []},
+            },
+            config=cfg,
+            client=_RecordingClient(),
+        )
+
+        # 1. Reported status (the claim).
+        assert resp["ok"] is True
+
+        # 2. Observable state matches the claim — the URL is overridden.
+        assert recorded["url"] == "http://127.0.0.1:18766/api/chat.postMessage"
+        assert not recorded["url"].startswith("https://slack.com")
+
+    def test_env_override_takes_effect_in_mfa_step_up_nudge(
+        self, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Parity: the MFA-nudge path also honours the override.
+        Otherwise an operator who set the override for testing would
+        get half their Slack traffic hitting real Slack."""
+        monkeypatch.setenv(
+            "IAM_JIT_SLACK_API_BASE", "http://127.0.0.1:18766/api",
+        )
+
+        recorded: dict[str, Any] = {}
+
+        class _RecordingClient:
+            def post_json(
+                self, url: str, *, headers: dict[str, str], json_body: dict[str, Any],
+            ) -> dict[str, Any]:
+                recorded["url"] = url
+                return {"ok": True, "channel": json_body.get("channel"), "ts": "1.0"}
+
+            def get_user_info(self, user_id: str, *, bot_token: str) -> dict[str, Any]:
+                raise NotImplementedError
+
+        cfg = slack_bot.SlackConfig(
+            bot_token="xoxb-test",
+            signing_secret="dummy",
+            approval_channel="C_TEST",
+        )
+        slack_bot.post_mfa_step_up_nudge(
+            user_id="email:alice@example.com",
+            slack_user_id="U_ALICE",
+            request_id="req-mfa-1",
+            config=cfg,
+            client=_RecordingClient(),
+        )
+
+        # Observable: nudge POST went to the overridden base.
+        assert recorded["url"] == "http://127.0.0.1:18766/api/chat.postMessage"
+
+    def test_env_override_takes_effect_in_open_modal(
+        self, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Parity: views.open (modal opening) also honours override.
+        All 4 slack_bot.py outbound HTTP sites must read the same env."""
+        monkeypatch.setenv(
+            "IAM_JIT_SLACK_API_BASE", "http://127.0.0.1:18766/api",
+        )
+
+        recorded: dict[str, Any] = {}
+
+        class _RecordingClient:
+            def post_json(
+                self, url: str, *, headers: dict[str, str], json_body: dict[str, Any],
+            ) -> dict[str, Any]:
+                recorded["url"] = url
+                return {"ok": True, "view": {"id": "V_1"}}
+
+            def get_user_info(self, user_id: str, *, bot_token: str) -> dict[str, Any]:
+                raise NotImplementedError
+
+        cfg = slack_bot.SlackConfig(
+            bot_token="xoxb-test",
+            signing_secret="dummy",
+            approval_channel="C_TEST",
+        )
+        slack_bot.open_modal(
+            trigger_id="tid_123",
+            view={"type": "modal", "callback_id": "iamjit_request_changes_modal"},
+            config=cfg,
+            client=_RecordingClient(),
+        )
+
+        assert recorded["url"] == "http://127.0.0.1:18766/api/views.open"
+
+    def test_sabotage_check_override_is_load_bearing(
+        self, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Sabotage check per task spec: if we forced the env-read to
+        always return the default, the override-end-to-end test must
+        fail. Proves the override is doing actual work; not a
+        no-op that happens to coincide with the default.
+        """
+        # First confirm: env override DOES change the observable URL.
+        monkeypatch.setenv(
+            "IAM_JIT_SLACK_API_BASE", "http://127.0.0.1:18766/api",
+        )
+
+        recorded: dict[str, Any] = {}
+
+        class _RecordingClient:
+            def post_json(
+                self, url: str, *, headers: dict[str, str], json_body: dict[str, Any],
+            ) -> dict[str, Any]:
+                recorded["url"] = url
+                return {"ok": True, "channel": json_body.get("channel"), "ts": "1.0"}
+
+            def get_user_info(self, user_id: str, *, bot_token: str) -> dict[str, Any]:
+                raise NotImplementedError
+
+        cfg = slack_bot.SlackConfig(
+            bot_token="xoxb-test", signing_secret="dummy", approval_channel="C_TEST",
+        )
+
+        # SABOTAGE: patch the resolver to always ignore env + return
+        # the default. If the env-override mechanism weren't actually
+        # wired into the post-path, the assertion below would still
+        # pass (URL would still equal the override). It must fail.
+        monkeypatch.setattr(
+            slack_bot, "_get_slack_api_base",
+            lambda: slack_bot._DEFAULT_SLACK_API_BASE,
+        )
+
+        slack_bot.post_approval_message(
+            request={
+                "id": "req-sabotage",
+                "spec": {"description": "x", "access_type": "ro", "duration": {"duration_hours": 1}},
+                "status": {"owner": "alice"},
+                "review": {"risk_score": 3, "risk_factors": []},
+            },
+            config=cfg,
+            client=_RecordingClient(),
+        )
+
+        # With the sabotage in place, URL must NOT equal the override —
+        # because the post path now resolves to the default. This
+        # proves the override is load-bearing (not a coincidence).
+        assert recorded["url"] == "https://slack.com/api/chat.postMessage"
+        assert recorded["url"] != "http://127.0.0.1:18766/api/chat.postMessage"
