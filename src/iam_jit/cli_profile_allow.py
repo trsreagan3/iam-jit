@@ -15,6 +15,8 @@ new deny rule).
 
 from __future__ import annotations
 
+import contextlib
+import contextvars
 import json
 import sys
 from typing import Any
@@ -368,13 +370,45 @@ def register_profile_allow_command(profile_group: click.Group) -> click.Command:
 # ---------------------------------------------------------------------------
 
 
+# Per-invocation suppression flag for the structured_deny.classify
+# skip-report banner. The CLI denies surfaces classify every row to
+# bucket them (rendered list + JSON serializer + follow-stream tag) —
+# without suppression each row emits an identical "ran deterministic-
+# only" banner (#577 UAT-B G6: 21 banners per invocation observed).
+# The CLI command wraps the render in :func:`_suppress_classify_skip`
+# and emits ONE aggregated ``report_skip`` covering the whole batch.
+# ContextVar (not a plain bool) so concurrent classification in
+# threaded callers is isolated; the flag never leaks across
+# invocations.
+_SUPPRESS_CLASSIFY_SKIP: contextvars.ContextVar[bool] = (
+    contextvars.ContextVar("iam_jit_suppress_classify_skip", default=False)
+)
+
+
+@contextlib.contextmanager
+def _suppress_classify_skip():
+    """Suppress per-row ``structured_deny.classify`` skip banners for
+    the duration of the ``with`` block. The CLI denies command uses
+    this to wrap its render so N rows produce 1 aggregated banner
+    instead of N identical ones (#577)."""
+    tok = _SUPPRESS_CLASSIFY_SKIP.set(True)
+    try:
+        yield
+    finally:
+        _SUPPRESS_CLASSIFY_SKIP.reset(tok)
+
+
 def _classify_row(row) -> str:
     """Return one of 'appears_legitimate' / 'ambiguous' /
-    'appears_adversarial' for a DenyRow. Uses
-    :func:`iam_jit.structured_deny.classify_injection_likelihood` so
-    the categorization matches the agent-facing 403 wire body
+    'appears_adversarial' / 'pending_classification' for a DenyRow.
+    Uses :func:`iam_jit.structured_deny.classify_injection_likelihood`
+    so the categorization matches the agent-facing 403 wire body
     (consistent operator + agent mental model per
-    [[cross-product-agent-parity]])."""
+    [[cross-product-agent-parity]]).
+
+    Honors :data:`_SUPPRESS_CLASSIFY_SKIP` so the CLI denies command
+    can aggregate the deterministic-only banner across N rows (#577).
+    """
     try:
         from .structured_deny import classify_injection_likelihood
     except Exception:
@@ -386,6 +420,7 @@ def _classify_row(row) -> str:
             deny_source=row.deny_source or "",
             deny_reason=row.deny_reason or "",
             agent_session_id=row.agent_session_id or "",
+            suppress_skip_report=_SUPPRESS_CLASSIFY_SKIP.get(),
         )
     except Exception:
         return "ambiguous"
@@ -563,6 +598,46 @@ def _format_denies_table(rows: list, notes: list[str]) -> str:
     return "\n".join(lines) + "\n"
 
 
+def _emit_aggregated_classify_skip_banner(
+    pending_count: int, total_count: int
+) -> None:
+    """Emit ONE aggregated ``report_skip`` for a denies render covering
+    ``pending_count`` rows that landed in ``pending_classification``
+    (deterministic-only mode, no LLM backend / opt-in classifier).
+
+    Replaces the N-banners-per-invocation shape #577 UAT-B caught (one
+    banner per pending row). Counter snapshot under /healthz +
+    ``iam-jit posture`` still reflects the skip; it's now ONE skip
+    event with a ``llm_skip_pending_rows`` extra field instead of N.
+
+    No-op when ``pending_count <= 0`` — the operator either configured
+    an LLM backend OR the rows the bouncer caught all sorted into the
+    structural-heuristic buckets without needing classifier fallback.
+    """
+    if pending_count <= 0:
+        return
+    try:
+        from .llm.report_skip import REASON_NO_LLM_BACKEND, report_skip
+        report_skip(
+            feature="structured_deny.classify",
+            reason=REASON_NO_LLM_BACKEND,
+            mode_hint=(
+                f"denies recent classified {pending_count} of "
+                f"{total_count} row(s) deterministically (no LLM backend). "
+                "Your agent can call iam_jit_classify_deny (MCP) on any "
+                "deny_event_id for LLM-augmented classification using "
+                "its own LLM. For synchronous bouncer-side LLM (standalone "
+                "/ CI), set IAM_JIT_ENABLE_SIDE_LLM=1 + IAM_JIT_LLM=..."
+            ),
+            extra={
+                "llm_skip_pending_rows": pending_count,
+                "llm_skip_total_rows": total_count,
+            },
+        )
+    except Exception:  # pragma: no cover
+        pass
+
+
 def _do_denies_recent(
     *,
     since: str,
@@ -596,21 +671,39 @@ def _do_denies_recent(
         click.echo(f"denies recent: {e}", err=True)
         return 1
 
-    if as_json:
-        # Per #575 + [[cross-product-agent-parity]]: every JSON row
-        # carries classifier_label so agent consumers see the same
-        # signal the human text output groups rows by.
-        payload = {
-            "status": "ok",
-            "since": since,
-            "count": len(rows),
-            "rows": [_row_to_json_dict(r) for r in rows],
-            "notes": notes,
-        }
-        click.echo(json.dumps(payload, indent=2, default=str))
+    # #577: one aggregated banner per invocation instead of one per row.
+    # Suppress per-row banners while we render; pre-compute classifier
+    # labels under suppression so we can emit a single aggregated
+    # report_skip with the pending-row count BEFORE the renderer fires.
+    with _suppress_classify_skip():
+        pending_count = sum(
+            1 for r in rows if _classify_row(r) == "pending_classification"
+        )
+        _emit_aggregated_classify_skip_banner(pending_count, len(rows))
+
+        if as_json:
+            # Per #575 + [[cross-product-agent-parity]]: every JSON row
+            # carries classifier_label so agent consumers see the same
+            # signal the human text output groups rows by.
+            payload = {
+                "status": "ok",
+                "since": since,
+                "count": len(rows),
+                "rows": [_row_to_json_dict(r) for r in rows],
+                "notes": notes,
+            }
+            click.echo(json.dumps(payload, indent=2, default=str))
+            return 0
+        click.echo(_format_denies_table(rows, notes))
         return 0
-    click.echo(_format_denies_table(rows, notes))
-    return 0
+
+
+# Periodic-reminder cadence for the follow-stream classify-skip
+# banner. A live tail can run for hours; a single startup banner is
+# easy to lose to scrollback, but a per-row banner is the #577 noise
+# bug. Emit one banner per N pending rows seen this session so the
+# operator gets an honest periodic reminder without terminal-fill.
+_FOLLOW_PENDING_REMINDER_INTERVAL = 25
 
 
 def _do_denies_follow(
@@ -622,7 +715,15 @@ def _do_denies_follow(
     audit_events_token: str | None,
 ) -> int:
     """Tail-mode poller. Polls every 2 s; emits new denies as they
-    appear; ignores rows already shown this run."""
+    appear; ignores rows already shown this run.
+
+    Per #577: per-row ``structured_deny.classify`` skip banners are
+    suppressed inside the render hot-path. An aggregated banner fires
+    once at session start (if the first poll batch contains any
+    pending rows) and once per :data:`_FOLLOW_PENDING_REMINDER_INTERVAL`
+    new pending rows thereafter — long-running tails get an honest
+    periodic recall without terminal-fill noise.
+    """
     import time as _time
 
     from .profile_allow.denies import fetch_recent_denies
@@ -635,6 +736,9 @@ def _do_denies_follow(
         f"Watching your bouncer (since={since!r}); Ctrl-C to stop. "
         f"You'll see a one-line summary each time we catch something."
     )
+    pending_seen_total = 0
+    pending_since_last_reminder = 0
+    first_poll = True
     try:
         while True:
             rows, notes = fetch_recent_denies(
@@ -644,39 +748,60 @@ def _do_denies_follow(
                 bouncer_names=list(bouncer_names) if bouncer_names else None,
                 audit_events_token=audit_events_token,
             )
-            for r in reversed(rows):  # oldest first in the follow stream
-                key = (r.when, r.bouncer, r.action + ":" + r.resource)
-                if key in seen:
-                    continue
-                seen.add(key)
-                cls = _classify_row(r)
-                # GH #10: pending_classification is the default-mode
-                # classifier output (no LLM backend); render it like
-                # ambiguous in the follow stream so it's never silently
-                # dropped. Per [[ibounce-honest-positioning]].
-                tag = {
-                    "appears_adversarial": "(!)",
-                    "ambiguous": "(?)",
-                    "pending_classification": "(?)",
-                    "appears_legitimate": "(*)",
-                }.get(cls, "(?)")
-                click.echo(
-                    f"[{r.when}] {tag} Your {r.bouncer} bouncer caught: "
-                    f"{r.action} on {r.resource} "
-                    f"(source={r.deny_source})"
+            # Render under suppression — same shape as denies recent
+            # so the streaming tail doesn't emit one banner per row
+            # (#577).
+            poll_pending_new = 0
+            with _suppress_classify_skip():
+                for r in reversed(rows):  # oldest first in the follow stream
+                    key = (r.when, r.bouncer, r.action + ":" + r.resource)
+                    if key in seen:
+                        continue
+                    seen.add(key)
+                    cls = _classify_row(r)
+                    if cls == "pending_classification":
+                        poll_pending_new += 1
+                    # GH #10: pending_classification is the default-mode
+                    # classifier output (no LLM backend); render it like
+                    # ambiguous in the follow stream so it's never silently
+                    # dropped. Per [[ibounce-honest-positioning]].
+                    tag = {
+                        "appears_adversarial": "(!)",
+                        "ambiguous": "(?)",
+                        "pending_classification": "(?)",
+                        "appears_legitimate": "(*)",
+                    }.get(cls, "(?)")
+                    click.echo(
+                        f"[{r.when}] {tag} Your {r.bouncer} bouncer caught: "
+                        f"{r.action} on {r.resource} "
+                        f"(source={r.deny_source})"
+                    )
+                    if r.deny_reason:
+                        click.echo(f"    why caught: {r.deny_reason[:160]}")
+                    if r.suggested_allow_command:
+                        if cls == "appears_adversarial":
+                            click.echo(
+                                "    recommended: halt + escalate — do NOT auto-allow"
+                            )
+                            click.echo(
+                                f"    (if reviewed + still safe: {r.suggested_allow_command})"
+                            )
+                        else:
+                            click.echo(f"    allow if legit: {r.suggested_allow_command}")
+            pending_seen_total += poll_pending_new
+            pending_since_last_reminder += poll_pending_new
+            # Aggregated banner: emit once on the first poll IF any
+            # pending rows arrived, and again every N new pending rows
+            # thereafter. Long-running tails get periodic recall; the
+            # short tail that catches nothing pending gets ZERO banners.
+            if (first_poll and poll_pending_new > 0) or (
+                pending_since_last_reminder >= _FOLLOW_PENDING_REMINDER_INTERVAL
+            ):
+                _emit_aggregated_classify_skip_banner(
+                    pending_since_last_reminder, len(seen)
                 )
-                if r.deny_reason:
-                    click.echo(f"    why caught: {r.deny_reason[:160]}")
-                if r.suggested_allow_command:
-                    if cls == "appears_adversarial":
-                        click.echo(
-                            "    recommended: halt + escalate — do NOT auto-allow"
-                        )
-                        click.echo(
-                            f"    (if reviewed + still safe: {r.suggested_allow_command})"
-                        )
-                    else:
-                        click.echo(f"    allow if legit: {r.suggested_allow_command}")
+                pending_since_last_reminder = 0
+            first_poll = False
             for n_msg in notes:
                 click.echo(f"  (note) {n_msg}", err=True)
             # After the first poll narrow the window so subsequent

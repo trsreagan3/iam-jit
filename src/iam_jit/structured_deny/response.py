@@ -265,6 +265,7 @@ def classify_injection_likelihood(
     deny_source: str,
     deny_reason: str,
     agent_session_id: str = "",
+    suppress_skip_report: bool = False,
 ) -> tuple[str, str]:
     """Return ``(classification, hook_name)``.
 
@@ -290,6 +291,17 @@ def classify_injection_likelihood(
          ``/healthz`` show the local-dev mode. The agent receives the
          ``deny_event_id`` on the 403 + can call ``iam_jit_classify_deny``
          (MCP) for agent-mediated enrichment using its OWN LLM.
+
+    Args:
+      suppress_skip_report: when True, suppress the per-call
+        ``report_skip`` invocation in the deterministic-only +
+        opt-in-failure paths. The caller takes responsibility for
+        emitting a SINGLE aggregated ``report_skip`` (e.g. ``denies
+        recent`` classifies N rows in one invocation and would otherwise
+        emit N identical banners — one per row — per #577 UAT-B finding
+        G6). The caller's aggregated banner increments the same counters
+        + ring buffer ``/healthz`` reads so the snapshot stays honest
+        (one aggregated skip rather than N noisy ones).
     """
     hook = _load_classifier_hook()
     if hook is not None:
@@ -352,24 +364,26 @@ def classify_injection_likelihood(
                     if cls in (INJECTION_APPEARS_LEGITIMATE, INJECTION_APPEARS_ADVERSARIAL):
                         return cls, f"deny_classifier:{backend or 'fallback'}"
                     # LLM said ambiguous OR returned a safe-fallback;
-                    # report_skip to surface the degradation.
-                    try:
-                        from ..llm.report_skip import (
-                            REASON_BACKEND_UNAVAILABLE,
-                            report_skip,
-                        )
-                        report_skip(
-                            feature="structured_deny.classify",
-                            reason=REASON_BACKEND_UNAVAILABLE,
-                            extra={
-                                "llm_skip_backend": backend,
-                                "llm_skip_classifier_note": str(
-                                    cls_result.get("note") or ""
-                                ),
-                            },
-                        )
-                    except Exception:  # pragma: no cover
-                        pass
+                    # report_skip to surface the degradation. Suppressed
+                    # when the caller is aggregating banners (#577).
+                    if not suppress_skip_report:
+                        try:
+                            from ..llm.report_skip import (
+                                REASON_BACKEND_UNAVAILABLE,
+                                report_skip,
+                            )
+                            report_skip(
+                                feature="structured_deny.classify",
+                                reason=REASON_BACKEND_UNAVAILABLE,
+                                extra={
+                                    "llm_skip_backend": backend,
+                                    "llm_skip_classifier_note": str(
+                                        cls_result.get("note") or ""
+                                    ),
+                                },
+                            )
+                        except Exception:  # pragma: no cover
+                            pass
                     return (
                         INJECTION_AMBIGUOUS,
                         f"deny_classifier:{backend or 'fallback'}",
@@ -377,45 +391,49 @@ def classify_injection_likelihood(
             except Exception as e:  # pragma: no cover
                 logger.debug("deny_classifier call failed: %s", e)
         # Opt-in set but classifier module unavailable; still skip.
-        try:
-            from ..llm.report_skip import (
-                REASON_BACKEND_UNAVAILABLE,
-                report_skip,
-            )
-            report_skip(
-                feature="structured_deny.classify",
-                reason=REASON_BACKEND_UNAVAILABLE,
-                mode_hint=(
-                    "IAM_JIT_ENABLE_SIDE_LLM is set but the deny_classifier "
-                    "module is not importable. Install iam-jit with the "
-                    "LLM extras or unset IAM_JIT_ENABLE_SIDE_LLM."
-                ),
-            )
-        except Exception:  # pragma: no cover
-            pass
+        # Caller-aggregation path (#577) suppresses the per-row warning.
+        if not suppress_skip_report:
+            try:
+                from ..llm.report_skip import (
+                    REASON_BACKEND_UNAVAILABLE,
+                    report_skip,
+                )
+                report_skip(
+                    feature="structured_deny.classify",
+                    reason=REASON_BACKEND_UNAVAILABLE,
+                    mode_hint=(
+                        "IAM_JIT_ENABLE_SIDE_LLM is set but the deny_classifier "
+                        "module is not importable. Install iam-jit with the "
+                        "LLM extras or unset IAM_JIT_ENABLE_SIDE_LLM."
+                    ),
+                )
+            except Exception:  # pragma: no cover
+                pass
         return INJECTION_PENDING_CLASSIFICATION, ""
 
     # Local-dev / agent-in-loop default: defer to the agent. Emit a
     # structured warning so operators see the deferral in their logs +
     # /healthz; agents see deny_event_id on the 403 body and can call
     # iam_jit_classify_deny (MCP) for enrichment using their own LLM.
-    try:
-        from ..llm.report_skip import REASON_NO_LLM_BACKEND, report_skip
-        report_skip(
-            feature="structured_deny.classify",
-            reason=REASON_NO_LLM_BACKEND,
-            mode_hint=(
-                "Local-dev / agent-in-loop default: your agent can call "
-                "the iam_jit_classify_deny MCP tool (with its own LLM) "
-                "using the deny_event_id from the 403 response. To run "
-                "the synchronous bouncer-side classifier instead "
-                "(standalone / CI deployments), set "
-                "IAM_JIT_ENABLE_SIDE_LLM=1 + IAM_JIT_LLM=anthropic|"
-                "openai|bedrock|ollama with credentials."
-            ),
-        )
-    except Exception:  # pragma: no cover
-        pass
+    # Caller-aggregation path (#577) suppresses the per-row warning.
+    if not suppress_skip_report:
+        try:
+            from ..llm.report_skip import REASON_NO_LLM_BACKEND, report_skip
+            report_skip(
+                feature="structured_deny.classify",
+                reason=REASON_NO_LLM_BACKEND,
+                mode_hint=(
+                    "Local-dev / agent-in-loop default: your agent can call "
+                    "the iam_jit_classify_deny MCP tool (with its own LLM) "
+                    "using the deny_event_id from the 403 response. To run "
+                    "the synchronous bouncer-side classifier instead "
+                    "(standalone / CI deployments), set "
+                    "IAM_JIT_ENABLE_SIDE_LLM=1 + IAM_JIT_LLM=anthropic|"
+                    "openai|bedrock|ollama with credentials."
+                ),
+            )
+        except Exception:  # pragma: no cover
+            pass
     return INJECTION_PENDING_CLASSIFICATION, ""
 
 
