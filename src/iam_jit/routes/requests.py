@@ -35,6 +35,7 @@ from .._auto_approve_helpers import (
     attempt_provisioning as _attempt_provisioning_helper,
     safe_mark_failed as _safe_mark_failed_helper,
 )
+from .._outstanding_request_cap import check_outstanding_cap as _check_outstanding_cap
 from ..lifecycle import IllegalTransition, NotAuthorized
 from ..middleware import (
     current_user,
@@ -529,6 +530,26 @@ def submit_request(
     """
     if not isinstance(payload, dict):
         raise HTTPException(status_code=400, detail="body must be a JSON object")
+
+    # #613 — per-user outstanding-request cap. Refuse BEFORE any
+    # expensive work (injection scan, schema validation, scorer,
+    # compatibility gate) so a runaway agent loop cannot waste cycles
+    # AND cannot fill the approver queue. Per
+    # [[cross-product-agent-parity]]: the same shared helper runs in
+    # routes/web.py new_paste_submit so web + API paths see identical
+    # cap behavior. Per [[ibounce-honest-positioning]]: 429 body
+    # names the cap, the count, the user, the cap source, a recovery
+    # hint, and the list of currently-blocking requests. Per
+    # [[ambient-value-prop-and-friction-framing]]: the cap-fire emits
+    # an audit event so the operator sees "your iam-jit caught a
+    # runaway agent" as a positive signal.
+    _cap_result = _check_outstanding_cap(user, store)
+    if _cap_result.would_exceed:
+        raise HTTPException(
+            status_code=429,
+            detail=_cap_result.to_response_body(),
+            headers={"Retry-After": "60"},
+        )
 
     # Defense in depth: scan free-form text fields for prompt-injection
     # patterns BEFORE we accept the submission. These fields all flow

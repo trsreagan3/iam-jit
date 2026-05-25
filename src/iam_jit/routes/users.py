@@ -228,6 +228,12 @@ def update_user(
         enabled=bool(enabled) if enabled is not None else existing.enabled,
         display_name=display_name if display_name is not None else existing.display_name,
         notes=notes if notes is not None else existing.notes,
+        # #613 — preserve the per-user outstanding-request cap across
+        # admin edits; the PATCH route doesn't expose this field
+        # today (set via users.yaml or DDB direct), but dropping it
+        # silently on any unrelated edit would let an admin
+        # accidentally un-raise a service-account's cap.
+        outstanding_request_cap=existing.outstanding_request_cap,
     )
     try:
         user_store.put(updated)
@@ -256,6 +262,9 @@ def _serialize(u: User) -> dict[str, Any]:
         "enabled": u.enabled,
         "display_name": u.display_name,
         "notes": u.notes,
+        # #613 — surface the per-user outstanding-request cap when
+        # set. None / missing means "use env / default".
+        "outstanding_request_cap": u.outstanding_request_cap,
     }
 
 
@@ -274,10 +283,26 @@ def _user_from_payload(payload: dict[str, Any]) -> User:
     for r in roles:
         if r not in valid_roles:
             raise HTTPException(status_code=400, detail=f"invalid role: {r!r}")
+    # #613 — accept optional outstanding_request_cap from admin
+    # create-user payload. None / missing → defer to env/default at
+    # check time. Must be a non-negative int when provided.
+    raw_cap = payload.get("outstanding_request_cap")
+    cap_value: int | None = None
+    if raw_cap is not None:
+        if not isinstance(raw_cap, int) or isinstance(raw_cap, bool) or raw_cap < 0:
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    "outstanding_request_cap must be a non-negative integer "
+                    "(omit for default behavior)"
+                ),
+            )
+        cap_value = raw_cap
     return User(
         id=user_id,
         roles=tuple(roles),
         enabled=bool(payload.get("enabled", True)),
         display_name=payload.get("display_name"),
         notes=payload.get("notes"),
+        outstanding_request_cap=cap_value,
     )

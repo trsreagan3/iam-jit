@@ -367,18 +367,34 @@ def test_bb_09_no_rate_limit_on_magic_link(app, monkeypatch):
 
 
 # ---------------------------------------------------------------------
-# BB-10: No rate limit on POST /api/v1/requests (request creation)
+# BB-10: Outstanding-request cap on POST /api/v1/requests
 # ---------------------------------------------------------------------
 def test_bb_10_no_rate_limit_on_request_creation(app):
-    """An authenticated dev can create 150 role-requests in a tight
-    loop with no throttling. This is a quota / spam vector against
-    approvers (queue flood DoS) and storage exhaustion.
+    """ASSERTION FLIPPED 2026-05-25 (#613 closure): per the original
+    test header, "when fixing, flip the assertion as part of the fix
+    PR." This now asserts the OBSERVABLE PROTECTION rather than the
+    original vulnerability.
 
-    Severity: MED.
+    Original finding (BB-10): an authenticated dev could create 150
+    role-requests in a tight loop with no throttling — a queue-flood
+    DoS against approvers + storage exhaustion. Severity MED.
 
-    Fix sketch: per-user token-bucket on POST /api/v1/requests."""
+    Fix shipped: per-user outstanding-request cap (#613).
+    `iam_jit._outstanding_request_cap` refuses fresh submissions when
+    the user has cap-or-more pending+provisioning requests. Default
+    cap = 20. Configurable via `IAM_JIT_MAX_OUTSTANDING_PER_USER` env
+    OR per-user `outstanding_request_cap` in `users.yaml`.
+
+    State verification:
+      - The first ~20 requests succeed (201)
+      - Every subsequent request returns 429 with
+        `cap_source=default`
+      - The 429 body is actionable (names cap + count + recovery hint)
+    """
+    from iam_jit._outstanding_request_cap import DEFAULT_CAP
     dev = _client_as(app, "email:dev@example.com")
     statuses = []
+    last_429_body = None
     for i in range(150):
         r = dev.post(
             "/api/v1/requests",
@@ -398,8 +414,24 @@ def test_bb_10_no_rate_limit_on_request_creation(app):
             },
         )
         statuses.append(r.status_code)
+        if r.status_code == 429:
+            last_429_body = r.json().get("detail")
     cnt = Counter(statuses)
-    assert cnt.get(429, 0) == 0, cnt
+    # Cap fires: the bulk of 150 submissions are 429s once the user
+    # crosses cap. (Some 201s land first; the exact split depends on
+    # auto-approve outcomes — auto-approved requests transition to
+    # active and stop counting against the cap, so more 201s slip
+    # through than DEFAULT_CAP. Either way, the count of 429s must
+    # be substantial and the body must name the cap.)
+    assert cnt.get(429, 0) > 0, (
+        f"#613 regression: expected the per-user outstanding cap to "
+        f"fire under flood; got {cnt}"
+    )
+    assert last_429_body is not None
+    assert last_429_body["cap"] == DEFAULT_CAP
+    assert last_429_body["cap_source"] == "default"
+    assert "recovery_hint" in last_429_body
+    assert "outstanding_count" in last_429_body
 
 
 # ---------------------------------------------------------------------

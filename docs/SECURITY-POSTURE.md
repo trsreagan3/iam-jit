@@ -237,6 +237,41 @@ PGP key: published at `security@iam-jit.dev` before v1.0 launch.
 
 ---
 
+## 9a. Per-user resource limits (DoS guards)
+
+iam-jit ships two structural caps on per-user resource consumption
+so a rogue / buggy agent cannot DoS the deployment by submitting in
+a tight loop:
+
+| Cap | Default | Knob | Behavior |
+|---|---|---|---|
+| Outstanding requests per user (#613) | 20 | `IAM_JIT_MAX_OUTSTANDING_PER_USER` env, OR per-user `outstanding_request_cap: N` in `users.yaml` | HTTP 429 with `Retry-After: 60` + structured body naming the cap, the count, and the blocking request IDs. Emits an `iam_jit.request_cap_exceeded` audit event so the operator sees the cap-fire as a positive signal. |
+| Per-user `/preview` rate-limit | (see `src/iam_jit/rate_limit.py`) | settings store | HTTP 429 with `Retry-After`; advisory message guiding scripted callers to batch. |
+
+The outstanding-request cap counts `pending` and `provisioning`
+states only. Terminal / not-consuming-approver-queue states
+(`active`, `rejected`, `cancelled`, `expired`, `revoked`,
+`provisioning_failed`, `needs_changes`) do not count — so a user
+who has completed 1,000 requests over time is unaffected.
+
+Both POST surfaces (the JSON API at `POST /api/v1/requests` and
+the web paste-form at `POST /requests/new/paste`) consult the same
+shared helper, so the cap fires identically regardless of which
+client an agent uses. The cap-fire response is actionable: it
+names the current outstanding count, the resolved cap, the cap
+source (`default` / `env_override` / `user_override`), a recovery
+hint, and the list of currently-blocking request IDs so the
+operator can immediately cancel the rogue submissions if needed.
+
+The cap is a denial-of-service guard, not a security boundary —
+it fails open if the request-store backend is unreachable (the
+store outage will surface in the subsequent `store.put()` call
+anyway). The companion structural protections are the auto-
+approve gate, the MFA step-up, and the `creates-never-mutates`
+floor.
+
+---
+
 ## 10. Compliance posture
 
 One-line per framework; detail in

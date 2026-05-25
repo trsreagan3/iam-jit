@@ -39,6 +39,11 @@ class User:
     display_name: str | None = None
     notes: str | None = None
     last_action: str | None = None  # ISO-8601 of last user action
+    # #613 — per-user override of the outstanding-request cap. When
+    # None, the deployment falls back to the env var
+    # IAM_JIT_MAX_OUTSTANDING_PER_USER (or the built-in default of 20).
+    # See iam_jit._outstanding_request_cap.
+    outstanding_request_cap: int | None = None
 
     @property
     def is_admin(self) -> bool:
@@ -86,6 +91,7 @@ def _user_from_dict(d: dict[str, Any]) -> User:
         enabled=bool(d.get("enabled", True)),
         display_name=d.get("display_name"),
         notes=d.get("notes"),
+        outstanding_request_cap=d.get("outstanding_request_cap"),
     )
 
 
@@ -238,6 +244,9 @@ class DynamoDBUserStore:
             item["display_name"] = user.display_name
         if user.notes:
             item["notes"] = user.notes
+        # #613 — persist the per-user outstanding cap when set.
+        if user.outstanding_request_cap is not None:
+            item["outstanding_request_cap"] = int(user.outstanding_request_cap)
         return item
 
     @staticmethod
@@ -248,6 +257,7 @@ class DynamoDBUserStore:
             enabled=bool(item.get("enabled", True)),
             display_name=item.get("display_name"),
             notes=item.get("notes"),
+            outstanding_request_cap=item.get("outstanding_request_cap"),
         )
 
     def get(self, user_id: str) -> User:

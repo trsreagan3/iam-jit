@@ -50,6 +50,11 @@
           "notes": {
             "type": "string",
             "description": "Free-form notes for admin reference (e.g., 'left team 2026-08'). Not surfaced to non-admins."
+          },
+          "outstanding_request_cap": {
+            "type": "integer",
+            "minimum": 0,
+            "description": "#613 — per-user override of the outstanding-request cap. When omitted, deployment falls back to IAM_JIT_MAX_OUTSTANDING_PER_USER env or the built-in default (20). Pending+provisioning are counted; terminal states are not. Set to 0 to refuse all submissions from this user."
           }
         }
       }

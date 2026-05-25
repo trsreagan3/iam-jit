@@ -40,6 +40,7 @@ from ..middleware import (
 )
 from ..store import NotFoundError, RequestStore
 from ..users_store import UserNotFound, UserStore
+from .._outstanding_request_cap import check_outstanding_cap as _check_outstanding_cap
 from .requests import _generate_id
 
 _TEMPLATES_DIR = pathlib.Path(__file__).resolve().parent.parent / "templates"
@@ -847,6 +848,49 @@ def new_paste_submit(
     user = _try_current_user(request)
     if user is None:
         return RedirectResponse(url="/login", status_code=303)
+    # #613 — per-user outstanding-request cap. Refuse BEFORE parsing
+    # policy or validating the form so a runaway agent loop cannot
+    # waste cycles AND cannot fill the approver queue. Shared helper
+    # with routes/requests.py per [[cross-product-agent-parity]].
+    # Per [[ibounce-honest-positioning]]: render the form back to the
+    # user with a 429 + structured error explaining the cap, the
+    # current outstanding count, and how to unblock (cancel existing
+    # / wait / admin raise cap). NOT a redirect — keeps the form
+    # contents intact so the user doesn't lose their typed policy.
+    request_store: RequestStore = request.app.state.request_store
+    _cap_result = _check_outstanding_cap(user, request_store)
+    if _cap_result.would_exceed:
+        _cap_body = _cap_result.to_response_body()
+        return _render(
+            request,
+            "new_paste.html",
+            active="new",
+            user=user,
+            status_code=429,
+            extra={
+                "form": {
+                    "description": description,
+                    "policy": policy,
+                    "access_type": access_type,
+                    "accounts": accounts,
+                    "duration_hours": duration_hours,
+                    "assume_principal_arn": assume_principal_arn,
+                    "assume_session_name": assume_session_name,
+                    "ticket": ticket,
+                },
+                "errors": [
+                    f"outstanding_request_cap_exceeded: you have "
+                    f"{_cap_result.outstanding_count} outstanding "
+                    f"requests (cap = {_cap_result.cap}, source = "
+                    f"{_cap_result.cap_source}). Wait for some to "
+                    f"complete or cancel existing requests at /. "
+                    f"Admin can raise your cap via users.yaml "
+                    f"(outstanding_request_cap: N) or via the "
+                    f"IAM_JIT_MAX_OUTSTANDING_PER_USER env var."
+                ],
+                "outstanding_request_cap_exceeded": _cap_body,
+            },
+        )
     accounts_list = [{"account_id": a.strip()} for a in accounts.split(",") if a.strip()]
     parsed_policy: Any
     try:
@@ -967,7 +1011,7 @@ def new_paste_submit(
     if isinstance(parsed_policy, dict):
         analysis = review.analyze_policy(parsed_policy, req)
         req.setdefault("status", {})["review"] = analysis.to_dict()
-    store: RequestStore = request.app.state.request_store
+    store: RequestStore = request_store  # already resolved at #613 cap-check
     # #598 — web paste-form submit MUST evaluate the auto-approve gate
     # identically to the API submit path. Without this, the request
     # lands silently in pending even when the deterministic scorer
