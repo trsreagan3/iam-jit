@@ -238,9 +238,38 @@
 
   <h2>Actions</h2>
   <div class="actions">
+    {# #610 — block-with-override flash. When the admin clicked Approve
+       on a request with blocking issues and did NOT check the override
+       box, the web _action redirected back here with the structured
+       reason. We render it loudly so the admin understands why the
+       state didn't advance (per [[ibounce-honest-positioning]] — no
+       silent zombie + no silent refusal). #}
+    {% if approve_blocked %}
+    <div class="flash flash-error">
+      <strong>Approval blocked: {{ approve_blocked }}.</strong>
+      Approving this request will fail at provisioning because:
+      <ul>
+        {% for issue in approve_blocked_issues %}<li>{{ issue }}</li>{% endfor %}
+      </ul>
+      To proceed anyway (e.g. to test the failure path, or because
+      you've separately confirmed the issue is benign), check the
+      <em>Override blocking issues</em> box on the approve form below.
+      The request will transition to <code>provisioning_failed</code>
+      with Cancel + Retry buttons surfaced.
+    </div>
+    {% endif %}
     {% if req.status.state == "pending" and current_user.is_approver and current_user.id != req.status.owner %}
     <form method="post" action="/requests/{{ req.metadata.id }}/approve" class="inline">
       <input type="text" name="comment" placeholder="optional comment" />
+      {# #610 — override checkbox is always present on the approve
+         form. When the pre-approve gate finds blocking issues the
+         operator must explicitly opt in to proceed; otherwise the
+         checkbox is harmless (the gate finds zero issues and ignores
+         the field). #}
+      <label class="muted small">
+        <input type="checkbox" name="override_blocking_issues" value="1" />
+        Override blocking issues (request will likely transition to provisioning_failed)
+      </label>
       <button type="submit" class="primary">Approve</button>
     </form>
     <form method="post" action="/requests/{{ req.metadata.id }}/reject" class="inline">
@@ -253,7 +282,11 @@
     </form>
     {% endif %}
 
-    {% if req.status.owner == current_user.id and req.status.state in ["pending", "needs_changes", "provisioning_failed"] %}
+    {# #610 — `provisioning` is now an allowed cancel-from state (was
+       previously only `pending` / `needs_changes` / `provisioning_failed`).
+       Recovery surface for the case where the synchronous provisioning
+       call hasn't returned yet AND the watchdog hasn't fired yet. #}
+    {% if req.status.owner == current_user.id and req.status.state in ["pending", "needs_changes", "provisioning", "provisioning_failed"] %}
     <form method="post" action="/requests/{{ req.metadata.id }}/cancel" class="inline">
       <button type="submit">Cancel</button>
     </form>

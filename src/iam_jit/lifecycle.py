@@ -54,6 +54,15 @@ _TRANSITIONS: dict[tuple[str, str], dict[str, Any]] = {
     ("needs_changes", "cancel"): {"to": "cancelled", "actor": "owner"},
     ("provisioning", "active"): {"to": "active", "actor": "system"},
     ("provisioning", "provisioning_failed"): {"to": "provisioning_failed", "actor": "system"},
+    # #610 — `cancel` allowed from `provisioning` is a recovery surface.
+    # Pre-fix the web admin approve flow could leave a request stuck in
+    # `provisioning` indefinitely (Gap UAT-WEB-ADMIN-01, 2026-05-25);
+    # even with that race closed via the synchronous provisioning call,
+    # operator may still want to abandon a request that gets wedged
+    # mid-flight (network blip, watchdog hasn't fired yet). Per
+    # [[ibounce-honest-positioning]] "no silent zombie" — give the
+    # owner a way out without admin intervention.
+    ("provisioning", "cancel"): {"to": "cancelled", "actor": "owner"},
     ("provisioning_failed", "retry"): {"to": "provisioning", "actor": "approver"},
     ("provisioning_failed", "cancel"): {"to": "cancelled", "actor": "owner"},
     ("active", "expire"): {"to": "expired", "actor": "system"},

@@ -1064,6 +1064,16 @@ def detail_page(request_id: str, request: Request) -> Response:
             cli_preview = provision_mod.preview(req, accounts_store=accounts_store)
         except Exception:
             cli_preview = None
+    # #610 — surface the block-with-override flash when the web approve
+    # path refused due to blocking issues (the redirect lands here with
+    # `?approve_blocked=...&issues=...`). Template renders a structured
+    # error + the override checkbox on the approve form.
+    approve_blocked = request.query_params.get("approve_blocked") or None
+    approve_blocked_issues_raw = request.query_params.get("issues") or ""
+    approve_blocked_issues = (
+        [s.strip() for s in approve_blocked_issues_raw.split(";") if s.strip()]
+        if approve_blocked_issues_raw else []
+    )
     return _render(
         request,
         "request_detail.html",
@@ -1075,6 +1085,8 @@ def detail_page(request_id: str, request: Request) -> Response:
             "assumer_resolved": assumer_resolved,
             "managed_refs": managed_refs,
             "cli_preview": cli_preview,
+            "approve_blocked": approve_blocked,
+            "approve_blocked_issues": approve_blocked_issues,
         },
     )
 
@@ -1086,6 +1098,7 @@ def _action(action: str, role: str):
         comment: Annotated[str | None, Form()] = None,
         reason: Annotated[str | None, Form()] = None,
         suggestions: Annotated[str | None, Form()] = None,
+        override_blocking_issues: Annotated[str | None, Form()] = None,
     ) -> Response:
         user = _try_current_user(request)
         if user is None:
@@ -1104,6 +1117,56 @@ def _action(action: str, role: str):
         extra: dict[str, Any] = {}
         if action == "request_changes" and suggestions:
             extra["suggestions"] = [s.strip() for s in suggestions.split(",") if s.strip()]
+
+        # #610 — pre-approve block-with-override gate. When the admin
+        # clicks Approve on a request whose `provision.preview()` reports
+        # blocking issues (e.g. `assume_principal_arn` is not an ARN,
+        # account not registered, empty policy), and they have NOT
+        # checked the "Override blocking issues" box, refuse the approval
+        # at the front door. Per [[ibounce-honest-positioning]] the
+        # state machine is honest about what just happened: the request
+        # stays `pending`, the admin sees a flash error explaining what
+        # would have failed at provisioning, and they choose between
+        # fixing the issue OR opting in to "approve anyway and watch
+        # it land in provisioning_failed."
+        if action == "approve":
+            try:
+                from .. import provision as provision_mod_local
+                accounts_store_for_preview = request.app.state.accounts_store
+                _preview = provision_mod_local.preview(
+                    req, accounts_store=accounts_store_for_preview,
+                )
+                blocking_issues = list(_preview.blocking_issues)
+            except Exception:
+                # Preview failure must not block approval — surface as
+                # zero blocking issues so the existing approve path
+                # runs and any real provisioning failure shows up via
+                # _attempt_provisioning_helper below (which transitions
+                # to provisioning_failed honestly).
+                blocking_issues = []
+            _override = (override_blocking_issues or "").strip().lower() in {
+                "1", "true", "on", "yes",
+            }
+            if blocking_issues and not _override:
+                # 303 back to detail page with a flash query param so
+                # the template can render the structured error. Per
+                # [[cross-product-agent-parity]] the API path's
+                # equivalent behavior (block-with-override) is
+                # documented in the same #610 commit; both surfaces
+                # refuse to silently advance state.
+                from urllib.parse import quote
+                _issues_param = quote(
+                    " ; ".join(blocking_issues)[:512], safe="",
+                )
+                return RedirectResponse(
+                    url=(
+                        f"/requests/{request_id}"
+                        f"?approve_blocked=would_fail_at_provisioning"
+                        f"&issues={_issues_param}"
+                    ),
+                    status_code=303,
+                )
+
         try:
             lifecycle.apply_transition(req, action=action, actor=user, reason=body_reason, extra=extra)
         except lifecycle.IllegalTransition:
@@ -1112,6 +1175,47 @@ def _action(action: str, role: str):
             raise HTTPException(status_code=403)
         if comment:
             lifecycle.add_comment(req, author=user, message=comment)
+
+        # #610 — after the pending→provisioning transition for `approve`,
+        # synchronously invoke provisioning. Pre-fix, the web admin path
+        # called `lifecycle.apply_transition("approve")` (which only
+        # advances state) and never called `_attempt_provisioning_helper`,
+        # so admin-approving any other user's request landed in zombie
+        # `provisioning` forever (Gap UAT-WEB-ADMIN-01, 2026-05-25).
+        # The API path in `routes/requests.py::_transition_endpoint`
+        # already did this; the web path was the divergent twin. Per
+        # [[cross-product-agent-parity]] both surfaces now produce
+        # identical observable behavior (state transitions to either
+        # `active` on success or `provisioning_failed` on any exception).
+        if action == "approve":
+            from .. import (
+                assume as assume_mod_local,
+                provision as provision_mod_local,
+            )
+            from .._auto_approve_helpers import (
+                attempt_provisioning as _attempt_provisioning_helper,
+                safe_mark_failed as _safe_mark_failed_helper,
+            )
+            accounts_store_local = request.app.state.accounts_store
+            try:
+                _attempt_provisioning_helper(
+                    req,
+                    accounts_store=accounts_store_local,
+                    provision_mod=provision_mod_local,
+                    assume_mod=assume_mod_local,
+                    lifecycle=lifecycle,
+                )
+            except Exception as e:  # pragma: no cover — defense in depth
+                # _attempt_provisioning_helper is documented as
+                # NEVER-raises but if it does anyway we still must
+                # force the request out of `provisioning` so the UI
+                # surfaces Cancel + Retry buttons.
+                _safe_mark_failed_helper(
+                    req,
+                    f"provisioning crashed: {e}",
+                    lifecycle=lifecycle,
+                )
+
         store.put(request_id, req)
         return RedirectResponse(url=f"/requests/{request_id}", status_code=303)
 
@@ -1123,6 +1227,66 @@ router.post("/requests/{request_id}/approve")(_action("approve", role="approver"
 router.post("/requests/{request_id}/reject")(_action("reject", role="approver"))
 router.post("/requests/{request_id}/request-changes")(_action("request_changes", role="approver"))
 router.post("/requests/{request_id}/cancel")(_action("cancel", role="owner"))
+
+
+# #610 — web-form `/retry-provisioning` endpoint. The template's
+# Retry-provisioning button (request_detail.html:263) posts to this
+# path; pre-fix only the JSON API at `/api/v1/requests/{id}/retry-
+# provisioning` existed, so clicking the button from the web UI
+# 404'd (or hit an unrelated route in browser routing). Parity with
+# the approve / cancel / reject web actions.
+@router.post("/requests/{request_id}/retry-provisioning")
+def web_retry_provisioning(
+    request_id: str,
+    request: Request,
+) -> Response:
+    user = _try_current_user(request)
+    if user is None:
+        return RedirectResponse(url="/login", status_code=303)
+    banned = _check_banned(user)
+    if banned is not None:
+        return banned
+    if not user.is_approver:
+        raise HTTPException(status_code=403)
+    store: RequestStore = request.app.state.request_store
+    try:
+        req = store.get(request_id)
+    except NotFoundError:
+        raise HTTPException(status_code=404)
+    try:
+        lifecycle.apply_transition(
+            req, action="retry", actor=user, reason="re-running provisioning",
+        )
+    except lifecycle.IllegalTransition:
+        raise HTTPException(status_code=409)
+    except lifecycle.NotAuthorized:
+        raise HTTPException(status_code=403)
+
+    from .. import (
+        assume as assume_mod_local,
+        provision as provision_mod_local,
+    )
+    from .._auto_approve_helpers import (
+        attempt_provisioning as _attempt_provisioning_helper,
+        safe_mark_failed as _safe_mark_failed_helper,
+    )
+    accounts_store_local = request.app.state.accounts_store
+    try:
+        _attempt_provisioning_helper(
+            req,
+            accounts_store=accounts_store_local,
+            provision_mod=provision_mod_local,
+            assume_mod=assume_mod_local,
+            lifecycle=lifecycle,
+        )
+    except Exception as e:  # pragma: no cover — defense in depth
+        _safe_mark_failed_helper(
+            req,
+            f"provisioning crashed: {e}",
+            lifecycle=lifecycle,
+        )
+    store.put(request_id, req)
+    return RedirectResponse(url=f"/requests/{request_id}", status_code=303)
 
 
 @router.post("/requests/{request_id}/comments")

@@ -1,4 +1,4 @@
-"""Shared MFA-enforcement + provisioning-attempt helpers.
+"""Shared MFA-enforcement + provisioning-attempt + stuck-provisioning sweep.
 
 These were previously duplicated between `routes/requests.py` (the API
 submit + approver paths) and `auto_approve_evaluator.py` (the centralised
@@ -35,10 +35,21 @@ Test discipline (per `docs/CONTRIBUTING.md`):
 
 from __future__ import annotations
 
+import datetime as _dt
 import logging
+import os
 from typing import Any
 
 logger = logging.getLogger("iam_jit.auto_approve_helpers")
+
+
+# #610 — provisioning_timeout watchdog default. Operators can override
+# via `IAM_JIT_PROVISIONING_TIMEOUT_MINUTES`. 15 minutes is a generous
+# upper bound for the synchronous provisioning path (which usually
+# completes in <2s); anything stuck past this is almost certainly a
+# crashed background task / wedged STS call / lost-then-recovered
+# network partition that left the request dict mid-update.
+DEFAULT_PROVISIONING_TIMEOUT_MINUTES = 15
 
 
 def apply_mfa_and_self_approve_enforcement(
@@ -309,3 +320,173 @@ def safe_mark_failed(
                 "an indeterminate state (error_message=%r)",
                 error,
             )
+
+
+def _parse_iso8601_z(value: str) -> _dt.datetime | None:
+    """Parse the ISO8601 'Z' timestamps lifecycle._now() emits.
+
+    Returns None on any parse failure so callers can treat the request
+    as "no timestamp available" rather than blowing up the sweep on a
+    single malformed record.
+    """
+    if not isinstance(value, str) or not value:
+        return None
+    try:
+        # Accept both `...Z` (lifecycle._now shape) and `+00:00`.
+        if value.endswith("Z"):
+            value = value[:-1] + "+00:00"
+        parsed = _dt.datetime.fromisoformat(value)
+        if parsed.tzinfo is None:
+            parsed = parsed.replace(tzinfo=_dt.UTC)
+        return parsed
+    except (ValueError, TypeError):
+        return None
+
+
+def _last_state_change_at(req: dict[str, Any]) -> _dt.datetime | None:
+    """Find when the request entered its current state.
+
+    Prefers the most recent history entry's `at` (which is the canonical
+    "when did state change" record). Falls back to status.last_updated_at,
+    then status.submitted_at. None means "no parseable timestamp."
+    """
+    status = req.get("status") or {}
+    history = status.get("history") or []
+    if isinstance(history, list) and history:
+        # Walk backwards for the most recent transition into the current
+        # state (any entry, since the latest one IS the current state
+        # given _commit_system appends in order).
+        for ev in reversed(history):
+            if not isinstance(ev, dict):
+                continue
+            parsed = _parse_iso8601_z(str(ev.get("at") or ""))
+            if parsed is not None:
+                return parsed
+    for fallback_key in ("last_updated_at", "submitted_at"):
+        parsed = _parse_iso8601_z(str(status.get(fallback_key) or ""))
+        if parsed is not None:
+            return parsed
+    return None
+
+
+def sweep_stuck_provisioning(
+    store: Any,
+    *,
+    lifecycle: Any,
+    now: _dt.datetime | None = None,
+    timeout_minutes: int | None = None,
+) -> list[dict[str, Any]]:
+    """Transition any request stuck in `provisioning` past the timeout
+    to `provisioning_failed` with a `provisioning_timeout` reason.
+
+    Per `[[ibounce-honest-positioning]]` (no silent zombie): even with
+    the synchronous approve path always invoking provisioning, async
+    edge cases (process crashed mid-provision, background task lost
+    its handle, retry hung on STS) can leave requests wedged in
+    `provisioning`. The watchdog is the floor that guarantees a
+    request can NEVER stay in `provisioning` indefinitely; it bounds
+    the worst-case time-to-actionable-state at `timeout_minutes`.
+
+    Returns the list of summary dicts for swept requests so callers
+    (CLI sweep command, periodic background worker) can log + report.
+    NEVER raises — bad timestamps / store errors are logged and
+    skipped. Per #599 we surface partial failures loudly so a
+    fully-broken request leaves operator trace.
+
+    Configurable per-deployment via
+    `IAM_JIT_PROVISIONING_TIMEOUT_MINUTES` env var (default 15).
+    """
+    if timeout_minutes is None:
+        try:
+            timeout_minutes = int(
+                os.environ.get("IAM_JIT_PROVISIONING_TIMEOUT_MINUTES")
+                or DEFAULT_PROVISIONING_TIMEOUT_MINUTES
+            )
+        except (ValueError, TypeError):
+            timeout_minutes = DEFAULT_PROVISIONING_TIMEOUT_MINUTES
+    if timeout_minutes <= 0:
+        # 0 / negative disables the sweep — useful for ops who want to
+        # turn it off without modifying code.
+        return []
+
+    if now is None:
+        now = _dt.datetime.now(_dt.UTC)
+    timeout = _dt.timedelta(minutes=timeout_minutes)
+    swept: list[dict[str, Any]] = []
+
+    try:
+        ids = list(store.list_ids())
+    except Exception:
+        logger.exception("sweep_stuck_provisioning: store.list_ids() raised")
+        return []
+
+    for rid in ids:
+        try:
+            req = store.get(rid)
+        except Exception:
+            logger.exception(
+                "sweep_stuck_provisioning: store.get(%r) raised; skipping", rid,
+            )
+            continue
+        status = req.get("status") or {}
+        if status.get("state") != "provisioning":
+            continue
+        entered_at = _last_state_change_at(req)
+        if entered_at is None:
+            # Can't determine age. Conservatively skip so we don't
+            # falsely fail a freshly-submitted request whose
+            # timestamps are mid-write. The operator-facing dashboard
+            # will still surface it as "stuck" via state==provisioning.
+            continue
+        if (now - entered_at) < timeout:
+            continue
+        # Stuck past the timeout — transition to provisioning_failed
+        # with a structured reason so the audit chain captures the
+        # watchdog decision (operators can grep for the literal
+        # "provisioning_timeout" string in the audit log).
+        reason = (
+            f"provisioning_timeout: request was in 'provisioning' for "
+            f"more than {timeout_minutes} minutes; the synchronous "
+            f"provisioning call did not complete. Inspect the "
+            f"`iam_jit.provisioning` log around {entered_at.isoformat()} "
+            f"for the original failure."
+        )
+        safe_mark_failed(req, reason, lifecycle=lifecycle)
+        try:
+            store.put(rid, req)
+        except Exception:
+            logger.exception(
+                "sweep_stuck_provisioning: store.put(%r) raised after "
+                "marking failed; the in-memory state is updated but the "
+                "persisted record may be stale", rid,
+            )
+            continue
+        try:
+            from . import audit as _audit
+            _audit.emit(
+                actor="system:provisioning_timeout_sweep",
+                kind="request.provisioning_timeout",
+                summary=(
+                    f"swept stuck provisioning request {rid} "
+                    f"(>{timeout_minutes}min)"
+                ),
+                details={
+                    "request_id": rid,
+                    "entered_provisioning_at": entered_at.isoformat(),
+                    "timeout_minutes": timeout_minutes,
+                    "reason": "provisioning_timeout",
+                },
+            )
+        except Exception:
+            logger.exception(
+                "sweep_stuck_provisioning: audit.emit for %r raised", rid,
+            )
+        swept.append(
+            {
+                "request_id": rid,
+                "entered_provisioning_at": entered_at.isoformat(),
+                "timeout_minutes": timeout_minutes,
+                "new_state": (req.get("status") or {}).get("state"),
+            }
+        )
+    return swept

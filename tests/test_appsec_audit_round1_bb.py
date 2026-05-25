@@ -144,18 +144,44 @@ def test_bb_01_csrf_html_approve_succeeds_with_cookie_only(app):
     verify it on every `/requests/{id}/*` POST. Alternatively, require
     `SameSite=Strict` on the session cookie AND a non-bearable header
     (`X-Requested-With: XMLHttpRequest`) for the HTML routes — but the
-    classic anti-CSRF token is the safer ground."""
+    classic anti-CSRF token is the safer ground.
+
+    #610 (2026-05-25) — partial-mitigation note: the pre-approve gate
+    that landed for the zombie-provisioning fix means that an
+    AssumerPrincipalMissing request (like this one, with no
+    `assume_by.principal_arn`) gets refused at the front door and the
+    state stays `pending` — even when the CSRF POST is accepted. The
+    CSRF VULNERABILITY itself (cookie-only POST accepted) is still
+    present, but the state-advance side-effect that BB-01 originally
+    asserted is now gated behind `override_blocking_issues=1`. We
+    update the assertion to reflect the new honest behavior: the
+    request transitions to a provisioning failure (or gets blocked
+    at the pre-approve gate); either way the CSRF surface is real
+    and a full fix (anti-CSRF token) is still required."""
     dev = _client_as(app, "email:dev@example.com")
     rid = _mk_request(dev, "csrf approve victim")
 
     appr = _client_as(app, "email:approver@example.com")
-    r = appr.post(f"/requests/{rid}/approve", follow_redirects=False)
+    # With override=1 we follow the same shape as the original BB-01
+    # repro (the CSRF attacker form can trivially include any field).
+    r = appr.post(
+        f"/requests/{rid}/approve",
+        data={"override_blocking_issues": "1"},
+        follow_redirects=False,
+    )
     assert r.status_code == 303, r.text
 
     admin = _client_as(app, "email:admin@example.com")
     state = admin.get(f"/api/v1/requests/{rid}").json()["status"]["state"]
     # The CSRF "attack" succeeded — request transitioned out of pending.
-    assert state in ("provisioning", "approved", "active"), state
+    # Post-#610: provisioning_failed is the honest end-state (the
+    # request had no resolvable assumer principal, so provisioning
+    # raised AssumerPrincipalMissing and the helper recorded the
+    # failure synchronously). `provisioning` would be the zombie shape
+    # #610 closes, so we exclude it from the acceptable set.
+    assert state in (
+        "provisioning_failed", "approved", "active",
+    ), state
 def test_bb_02_csrf_html_token_create_no_protection(app):
     """CSRF on token mint — POST /tokens (HTML form) creates an API
     token from a cookie-only request, leaking sensitive credentials
