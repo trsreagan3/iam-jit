@@ -957,10 +957,35 @@ def new_paste_submit(
             },
         )
     lifecycle.init_status(req, owner=user)
-    if review.is_review_enabled() and isinstance(parsed_policy, dict):
+    # Always compute the deterministic risk-review block — the scorer
+    # has no LLM dependency and the score drives the auto-approve gate
+    # below. Pre-#598 this branch only ran when `review.is_review_enabled()`
+    # (the LLM-narrative toggle), which kept the auto-approve path
+    # silently dark on every web submit because review_block was None
+    # and the evaluator no-op'd. Match the API path's
+    # `_build_review_block`: score always, narrate optionally.
+    if isinstance(parsed_policy, dict):
         analysis = review.analyze_policy(parsed_policy, req)
         req.setdefault("status", {})["review"] = analysis.to_dict()
     store: RequestStore = request.app.state.request_store
+    # #598 — web paste-form submit MUST evaluate the auto-approve gate
+    # identically to the API submit path. Without this, the request
+    # lands silently in pending even when the deterministic scorer
+    # would have auto-approved. Shared helper guarantees parity with
+    # routes/requests.py submit_request per
+    # [[cross-product-agent-parity]]. Same silent-degradation shape
+    # as #596 (web→Slack notification gap, just fixed). Helper logs +
+    # swallows evaluation failures so a gate bug cannot block
+    # submission per [[ibounce-honest-positioning]].
+    from .. import auto_approve_evaluator
+    accounts_store = getattr(request.app.state, "accounts_store", None)
+    cookie_value = request.cookies.get("iam_jit_session_mfa")
+    auto_approve_evaluator.evaluate_and_apply_for_new_request(
+        request=req,
+        user=user,
+        accounts_store=accounts_store,
+        cookie_value=cookie_value,
+    )
     store.put(req["metadata"]["id"], req)
     # #596 — web paste-form submit MUST notify approvers identically to
     # the API submit path. Without this, the request lands silently in
@@ -969,7 +994,10 @@ def new_paste_submit(
     # [[cross-product-agent-parity]]; the silent gap closed here is
     # the same shape as #560 / #594 / MRR-2 Pattern B per
     # [[ibounce-honest-positioning]]. Helper logs + swallows channel
-    # failures so a Slack outage cannot block submission.
+    # failures so a Slack outage cannot block submission. Note the
+    # state check is AFTER the auto-approve evaluator runs — if the
+    # gate fired, the request is no longer in pending and we correctly
+    # skip the approver notification.
     if req.get("status", {}).get("state") == "pending":
         from .. import approval_notifier
         approval_notifier.notify_approvers_for_new_request(req)

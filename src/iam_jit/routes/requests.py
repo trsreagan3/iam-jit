@@ -886,224 +886,28 @@ def submit_request(
     # per-hour quota. Any failure leaves the request in pending for
     # human review. Audit captures the gate that fired so a reviewer
     # can answer "why didn't this auto-approve?" in one click.
-    auto_decision = None
-    _mfa_block_response: dict[str, Any] | None = None
-    _auto_audit_actor = "system:auto-approver"
-    if review_block:
-        from .. import auto_approve as auto_approve_mod
-        from .. import settings_store as settings_mod
-        from .. import rate_limit as rate_limit_mod
-
-        settings = settings_mod.get_default_store().get()
-        quota = rate_limit_mod.get_default_limiter()
-        # Safety-mode threshold resolution per [[safety-mode-two-modes]].
-        # Mirrors the preview-route logic above. Multi-account requests
-        # use the MOST RESTRICTIVE mode across the set (WB10-03);
-        # threshold is clamped to the platform-team floor (WB10-02).
-        from .. import safety_mode as _safety_mode
-        _submit_spec = req.get("spec") or {}
-        _submit_access_type = (_submit_spec.get("access_type") or "read-write").strip()
-        _submit_accounts = _submit_spec.get("accounts") or []
-        _submit_account_ids = [
-            a.get("account_id") for a in _submit_accounts
-            if isinstance(a, dict) and a.get("account_id")
-        ]
-        _submit_accounts_store = getattr(request.app.state, "accounts_store", None)
-        _submit_mode = _safety_mode.resolve_mode_for_accounts(
-            account_ids=_submit_account_ids,
-            accounts_store=_submit_accounts_store,
-        )
-        _submit_effective_threshold = _safety_mode.auto_approve_threshold_for(
-            _submit_mode, access_type=_submit_access_type,
-        )
-        _submit_safety_thresholds = _safety_mode.thresholds_for(_submit_mode)
-        _submit_floors = settings_mod.Floors.from_env()
-
-        # MFA + self-approve evaluation runs BEFORE auto_decision so
-        # the enforcement override can use both verdicts. Each block
-        # is wrapped in try/except so a bug in the gate code never
-        # blocks a grant — failure mode is "annotation missing", not
-        # "request stuck".
-        _mfa_audit: dict[str, Any] = {"mfa_gate_evaluated": False}
-        try:
-            from .. import mfa_gate as _mfa_gate
-            from ..middleware import _get_secret as _auth_secret_getter  # type: ignore[attr-defined]
-            mfa_cookie = request.cookies.get("iam_jit_session_mfa") if hasattr(request, "cookies") else None
-            _mfa_audit = _mfa_gate.evaluate_for_route(
-                cookie_value=mfa_cookie,
-                secret=_auth_secret_getter(),
-                user_id=user.id,
-                risk_score=review_block.get("risk_score", 0),
-                api_token_record=getattr(
-                    getattr(request, "state", None), "api_token_record", None,
-                ),
-            )
-        except Exception:
-            pass
-
-        _self_approve_audit: dict[str, Any] = {"self_approve_evaluated": False}
-        try:
-            from .. import self_approve_reductions as _sar
-            sar_decision = _sar.evaluate(
-                request=req,
-                user_id=user.id,
-                user_is_admin=getattr(user, "is_admin", False),
-                blocked_services=tuple(settings.never_auto_approve_services),
-            )
-            _self_approve_audit = {
-                "self_approve_evaluated": True,
-                "self_approve_eligible": sar_decision.self_approved,
-                "self_approve_reason": sar_decision.reason,
-            }
-        except Exception:
-            pass
-
-        auto_decision = auto_approve_mod.evaluate(
-            request=req,
-            analysis_score=review_block.get("risk_score", 10),
-            user_id=user.id,
-            effective_threshold=_submit_effective_threshold,
-            settings=settings,
-            quota_limiter=quota,
-            floor_max_auto_approve_risk_below=(
-                _submit_floors.max_auto_approve_risk_below
-            ),
-            safety_thresholds=_submit_safety_thresholds,
-        )
-
-        # Apply MFA + self-approve enforcement on top of the score-gate
-        # decision. MFA stale + high-risk → block (downgrade to review).
-        # Admin self-approve eligible + above-threshold → flip to approve
-        # with actor `self_approve_reduction:<user.id>`.
-        auto_decision, _auto_audit_actor, _mfa_block_response = (
-            _apply_mfa_and_self_approve_enforcement(
-                auto_decision,
-                mfa_audit=_mfa_audit,
-                self_approve_audit=_self_approve_audit,
-                analysis_score=review_block.get("risk_score", 10),
-                user_id=user.id,
-            )
-        )
-
-        try:
-            # WB10-05: include safety-mode context so a compliance
-            # auditor can prove a grant was made under strict mode
-            # (or wasn't). `mode_source` says whether the effective
-            # threshold came from the resolver (per-account /
-            # safety-mode) or the deployment-wide setting.
-            _mode_source = (
-                "safety_mode_resolver"
-                if _submit_effective_threshold is not None
-                else "deployment_setting"
-            )
-            audit_mod.emit(
-                actor=_auto_audit_actor,
-                kind=(
-                    "request.auto_approved"
-                    if auto_decision.auto_approve
-                    else "request.auto_approve_skipped"
-                ),
-                summary=(
-                    f"auto-approve evaluated for {metadata['id']}: "
-                    f"{auto_decision.reason} "
-                    f"(mode={_submit_mode}, actor={_auto_audit_actor})"
-                ),
-                details={
-                    "request_id": metadata["id"],
-                    "owner_id": user.id,
-                    "safety_mode": _submit_mode,
-                    "mode_source": _mode_source,
-                    "allow_action_wildcards": (
-                        _submit_safety_thresholds.allow_action_wildcards
-                    ),
-                    "allow_admin_fallback": (
-                        _submit_safety_thresholds.allow_admin_fallback
-                    ),
-                    "floor_max_auto_approve_risk_below": (
-                        _submit_floors.max_auto_approve_risk_below
-                    ),
-                    **_mfa_audit,
-                    **_self_approve_audit,
-                    **auto_decision.details,
-                },
-            )
-        except Exception:
-            pass
-
-        # Shadow mode: when IAM_JIT_SHADOW_MODE=1 the scorer runs
-        # and the decision is recorded in the audit trail, but
-        # the request state stays at `pending` regardless of the
-        # auto-approve verdict. Use this to deploy iam-jit
-        # alongside a customer's existing approval workflow —
-        # they observe the scorer's verdicts for N weeks before
-        # turning it on for real. Critical gate to enterprise
-        # adoption (security teams won't trust auto-approve they
-        # haven't watched in action).
-        if os.environ.get("IAM_JIT_SHADOW_MODE") == "1":
-            try:
-                audit_mod.emit(
-                    actor="system:shadow-mode",
-                    kind=(
-                        "shadow.would_auto_approve"
-                        if auto_decision.auto_approve
-                        else "shadow.would_route_to_review"
-                    ),
-                    summary=(
-                        f"shadow-mode decision for {metadata['id']}: "
-                        f"would_auto_approve="
-                        f"{auto_decision.auto_approve}; "
-                        f"score={review_block.get('risk_score') if review_block else None}; "
-                        f"reason={auto_decision.reason}"
-                    ),
-                    details={
-                        "request_id": metadata["id"],
-                        "owner_id": user.id,
-                        "would_auto_approve": auto_decision.auto_approve,
-                        "would_reason": auto_decision.reason,
-                        "would_details": auto_decision.details,
-                        "shadow_mode": True,
-                    },
-                )
-            except Exception:
-                pass
-            # IMPORTANT: do NOT mutate state. The request stays
-            # at `pending` and will be reviewed by a human via the
-            # customer's existing process. Skip directly to store.put.
-
-        elif auto_decision.auto_approve:
-            # Bypass the lifecycle.transition() check (which would
-            # require an "approver" actor distinct from the owner).
-            # System-driven approval has its own audit actor and
-            # doesn't carry the separation-of-duties invariant —
-            # there's no human approver to puppet here.
-            #
-            # Target state is `provisioning` (the same state a
-            # manual approve would land in via lifecycle's pending
-            # → provisioning transition). After the state flip we
-            # immediately call _attempt_provisioning so the role
-            # is created synchronously; the request lands at
-            # `active` (success) or `provisioning_failed`
-            # (failure). The legacy code wrote state="approved"
-            # which was NOT a valid state in lifecycle's state
-            # machine — it left auto-approved requests stuck
-            # outside the normal flow with no provisioned role.
-            status = req["status"]
-            status["state"] = "provisioning"
-            history = status.setdefault("history", [])
-            history.append({
-                "actor": _auto_audit_actor,
-                "action": "auto_approve",
-                "to_state": "provisioning",
-                "at": _now_iso_z(),
-                "reason": auto_decision.reason,
-                "details": auto_decision.details,
-            })
-            try:
-                _attempt_provisioning(req, accounts_store=accounts_store)
-            except Exception as e:  # pragma: no cover — defense in depth
-                _safe_mark_failed(
-                    req, f"auto-approve provisioning crashed: {e}",
-                )
+    #
+    # #598 — both API and web paste-form submit paths flow through
+    # the SAME shared helper per [[cross-product-agent-parity]]. The
+    # helper mutates `req["status"]` in place when the gate fires
+    # (state→provisioning + history entry + sync provisioning) and
+    # returns the structured decision + MFA block response for the
+    # API to splat into its response body.
+    from .. import auto_approve_evaluator
+    _eval_result = auto_approve_evaluator.evaluate_and_apply_for_new_request(
+        request=req,
+        user=user,
+        accounts_store=accounts_store,
+        cookie_value=(
+            request.cookies.get("iam_jit_session_mfa")
+            if hasattr(request, "cookies") else None
+        ),
+        api_token_record=getattr(
+            getattr(request, "state", None), "api_token_record", None,
+        ),
+    )
+    auto_decision = _eval_result["auto_decision"]
+    _mfa_block_response = _eval_result["mfa_block_response"]
 
     store.put(metadata["id"], req)
 
