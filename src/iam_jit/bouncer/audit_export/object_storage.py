@@ -69,7 +69,9 @@ import io
 import json
 import logging
 import os
+import platform
 import socket
+import stat
 import threading
 import time
 from pathlib import Path
@@ -105,6 +107,67 @@ class ObjectStorageCredentialsError(Exception):
     """Raised when neither env vars nor the credentials file yield
     usable credentials. Surfaced at ``start()`` time so the operator
     sees the misconfiguration immediately."""
+
+
+class InsecureCredentialsError(ObjectStorageCredentialsError):
+    """Raised when a credentials file on disk is group-readable or
+    world-readable (any of mode bits ``0o077`` set).
+
+    Mirrors the posture SSH (``ssh -i ~/.ssh/id_ed25519``) and the
+    AWS CLI (``~/.aws/credentials``) enforce: a credentials file with
+    loose perms is refused at load time rather than silently accepted.
+
+    Per ``[[scorer-is-ground-truth]]`` we fail-CLOSED at load time —
+    a loose-perms creds file is a posture violation the operator must
+    fix before the bouncer will start. Per
+    ``[[ibounce-honest-positioning]]`` the error message NAMES the
+    offending mode bits and gives the exact remediation command
+    (``chmod 600 <path>``).
+
+    Subclasses ``ObjectStorageCredentialsError`` so callers that already
+    catch the parent error type (e.g. the proxy startup path) surface
+    insecure-perms refusals through the same channel as other creds
+    failures, while operators / tests that want to handle this
+    specific case can still catch the narrower type.
+    """
+
+
+def _enforce_creds_file_perms(
+    path: Path, *, who: str = "object_storage_credentials",
+) -> None:
+    """Refuse credential files with group/world-readable perms.
+
+    Mirrors SSH (refuses keys with mode ``0o644``) + the AWS CLI
+    convention (warns / refuses on loose creds file perms). iam-jit
+    was previously silent — #484 audit WB-5.
+
+    Raises :class:`InsecureCredentialsError` when any of the
+    group/world bits (mask ``0o077``) are set. The error message names
+    the offending mode and gives the exact remediation command so
+    the operator can fix it without grepping docs.
+
+    Windows is skipped because NTFS uses ACL-based access control and
+    POSIX mode bits there are simulated by the runtime; the WB-5
+    posture is a POSIX-only invariant by design (other audit_export
+    helpers — ``cli_canary.py``, ``local_server.py`` — take the same
+    skip).
+    """
+    if platform.system() == "Windows":
+        return
+    try:
+        st = path.stat()
+    except FileNotFoundError:
+        # Caller's parse path raises its own "file not found" message
+        # with the same exception type; let that path own the error.
+        return
+    mode = stat.S_IMODE(st.st_mode)
+    if mode & 0o077:
+        raise InsecureCredentialsError(
+            f"refuses to load {who}: {path} has mode 0o{mode:o} "
+            f"(group/world-readable). SSH and the AWS CLI refuse "
+            f"creds files with loose perms; iam-jit applies the same "
+            f"posture. Run: chmod 600 '{path}'"
+        )
 
 
 @dataclasses.dataclass(frozen=True)
@@ -161,12 +224,24 @@ def _load_credentials_file(path: str) -> ObjectStorageCredentials:
     """Parse a credentials file (YAML or INI). The shape is detected
     by the first non-blank, non-comment line — a ``[default]`` line
     signals INI; a ``key: value`` line signals YAML. Both formats
-    accept the same three keys."""
+    accept the same three keys.
+
+    Per #524 WB-5 the file's POSIX mode is enforced BEFORE the file
+    is read: a creds file with any group/world bits set is refused
+    with ``InsecureCredentialsError`` and an operator-actionable
+    remediation hint (``chmod 600 <path>``). This mirrors SSH +
+    AWS CLI posture and matches ``[[scorer-is-ground-truth]]`` —
+    fail-CLOSED on insecure creds rather than silently accept them.
+    """
     p = Path(path)
     if not p.is_file():
         raise ObjectStorageCredentialsError(
             f"credentials file not found: {path}"
         )
+    # #524 WB-5: enforce strict perms BEFORE reading the file so an
+    # insecure file never gets parsed (and so its contents never enter
+    # process memory through this path).
+    _enforce_creds_file_perms(p)
     raw = p.read_text(encoding="utf-8")
     data: dict[str, str] = {}
     in_default_section = False

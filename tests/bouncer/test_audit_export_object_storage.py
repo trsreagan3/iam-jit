@@ -97,6 +97,10 @@ def test_load_credentials_yaml_file_overrides_env(tmp_path) -> None:
         "session_token: file-token\n",
         encoding="utf-8",
     )
+    # #524 WB-5: creds file must be 0o600 or tighter for the loader to
+    # accept it. Test-fixture write inherits the process umask (often
+    # 0o022 -> 0o644 file mode) so we explicitly tighten here.
+    os.chmod(creds_path, 0o600)
     c = load_object_storage_credentials(str(creds_path), env=env)
     # File wins.
     assert c.access_key_id == "file-key"
@@ -112,6 +116,9 @@ def test_load_credentials_ini_file(tmp_path) -> None:
         "secret_access_key=ini-secret\n",
         encoding="utf-8",
     )
+    # #524 WB-5: creds file must be 0o600 or tighter — see the YAML
+    # variant above for context.
+    os.chmod(creds_path, 0o600)
     c = load_object_storage_credentials(str(creds_path), env={})
     assert c.access_key_id == "ini-key"
     assert c.secret_access_key == "ini-secret"
@@ -125,6 +132,10 @@ def test_load_credentials_file_missing_raises(tmp_path) -> None:
 def test_load_credentials_file_incomplete_raises(tmp_path) -> None:
     creds_path = tmp_path / "creds.yaml"
     creds_path.write_text("access_key_id: only-key\n", encoding="utf-8")
+    # #524 WB-5: tighten perms so the incomplete-shape failure mode
+    # (the thing this test actually verifies) is reached rather than
+    # the perm-check refusal getting there first.
+    os.chmod(creds_path, 0o600)
     with pytest.raises(ObjectStorageCredentialsError):
         load_object_storage_credentials(str(creds_path), env={})
 
