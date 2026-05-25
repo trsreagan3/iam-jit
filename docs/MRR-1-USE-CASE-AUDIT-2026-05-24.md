@@ -244,7 +244,7 @@ Same as UC-11. HIGH.
 
 #### UC-26 Fresh install → observe → use (canary live)
 
-* **Pieces**: `cli_canary.py`; `scripts/deploy-canary.sh`.
+* **Pieces**: `cli_canary.py` (see `docs/CANARY.md` for the manual canary bring-up sequence; #489 will ship `iam-jit init` as a single-command future entry point).
 * **Tests**: ✅ `test_cli_canary.py`, `test_cli_canary_watch.py`, `test_cli_canary_daemon_args.py`.
 * **Composition**: **VERIFIED-E2E** on author's macOS; **VERIFIED-INDIVIDUAL-ONLY** on Linux. `LINUX-SUPPORT-AUDIT-2026-05-24.md` exists (Phase 1 findings); the `lsof` fix in HEAD is the most recent Linux fix.
 * **Severity**: DEPLOY-READY for macOS; MED for Linux (the founder's work-machine OS should be verified).

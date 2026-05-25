@@ -7,9 +7,9 @@
 # `iam-jit canary verify-setup`.
 #
 # Notes:
-#   * The canary's "deploy" surface (scripts/deploy-canary.sh) is
-#     referenced in docs but is NOT present in the repo (see L2
-#     finding). This harness emulates the deploy artifact by
+#   * There is no `scripts/deploy-canary.sh` — bring-up is the manual
+#     `iam-jit canary` subcommand sequence documented in
+#     `docs/CANARY.md`. This harness emulates that sequence by
 #     starting bouncers + writing status.json by hand.
 set -euo pipefail
 

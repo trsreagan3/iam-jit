@@ -30,8 +30,9 @@ follow-up work).
 ## Category A — Pre-deploy halt conditions
 
 Fire BEFORE any iam-jit / bouncer process starts. Triggered while running
-`iam-jit canary deploy`, `iam_jit_setup_from_config` (UC-20), or the
-`scripts/deploy-canary.sh` bootstrap.
+the manual canary bring-up sequence (see `docs/CANARY.md`),
+`iam_jit_setup_from_config` (UC-20), or the future single-command
+`iam-jit init` flow (#489 pending).
 
 | # | Condition | What the operator sees | Detection command | Halt action |
 |---|---|---|---|---|

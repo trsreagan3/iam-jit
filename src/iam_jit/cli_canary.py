@@ -40,8 +40,9 @@ The 4 artifacts under ``~/.iam-jit/canary/`` are:
 * ``urls.md`` — log + UI URLs for daily-dev access
 
 This module owns the read/print/append surface for those files. The
-deploy script (``scripts/deploy-canary.sh`` or this session's setup
-flow) is the one that initialises them; the CLI re-reads + extends.
+manual canary bring-up sequence (see ``docs/CANARY.md``) initialises
+them; the CLI re-reads + extends. A future ``iam-jit init`` (#489)
+will subsume the manual sequence into a single command.
 """
 
 from __future__ import annotations
