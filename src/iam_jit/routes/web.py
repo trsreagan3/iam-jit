@@ -874,6 +874,67 @@ def _enforce_no_injection(
     return None
 
 
+# #605 — write-action classification helper for the access_type vs
+# policy preview-check at form-submit time. Reuses the scorer's
+# `_action_level` (IAM-level lookup backed by policy_sentry) so this
+# module does NOT reinvent the read-vs-write classification per
+# [[scorer-is-ground-truth]]. The single source of truth for which
+# actions count as "Write" lives in `review._service_action_levels`;
+# this helper is a thin "list the offenders" wrapper around it.
+_WRITE_LEVELS = frozenset({"Write", "Tagging", "Permissions management"})
+
+
+def _classify_write_actions(parsed_policy: Any) -> list[str]:
+    """Return the deduped list of write-class actions found in an Allow
+    statement of `parsed_policy`.
+
+    "Write-class" means the scorer (via policy_sentry) classifies the
+    action's IAM access level as one of `_WRITE_LEVELS`. Wildcards
+    (`*`, `s3:*`, `iam:?reateRole`, etc.) are treated as write
+    conservatively because a wildcard can match any mutating action in
+    the service — the same conservative treatment the read-only
+    scoring path in `review.py` already applies (score 8 hard
+    mismatch for wildcards under read-only).
+
+    The list is order-preserved by first appearance so the UX names
+    the same actions the user wrote (rather than a sorted/shuffled
+    list that hides which Statement holds the offender). Returns an
+    empty list when `parsed_policy` is not a dict or has no
+    Statements.
+    """
+    if not isinstance(parsed_policy, dict):
+        return []
+    statements = parsed_policy.get("Statement") or []
+    if isinstance(statements, dict):
+        statements = [statements]
+    if not isinstance(statements, list):
+        return []
+    offenders: list[str] = []
+    seen: set[str] = set()
+    for stmt in statements:
+        if not isinstance(stmt, dict):
+            continue
+        if not review._effect_is_allow(stmt):
+            continue
+        for action in review._as_list(stmt.get("Action")):
+            if not isinstance(action, str) or not action:
+                continue
+            if action in seen:
+                continue
+            # Wildcards: treat as write (defense-in-depth — `s3:*`
+            # includes `s3:DeleteObject` and friends). Matches the
+            # conservative read-only scoring posture in review.py.
+            if review._has_wildcard(action):
+                offenders.append(action)
+                seen.add(action)
+                continue
+            level = review._action_level(action)
+            if level in _WRITE_LEVELS:
+                offenders.append(action)
+                seen.add(action)
+    return offenders
+
+
 @router.get("/requests/new/paste", response_class=HTMLResponse)
 def new_paste_form(request: Request) -> Response:
     user = _try_current_user(request)
@@ -1051,6 +1112,77 @@ def new_paste_submit(
                 "errors": errors,
             },
         )
+
+    # #605 — preview-check access_type vs policy. Founder Q 2026-05-25:
+    # "what if someone marks a role as read-only, but actually puts
+    # write privileges in the policy?" Pre-fix: the form accepted the
+    # mismatch and only the scorer's later analysis flagged it (and the
+    # request could still slip through depending on the auto-approve
+    # config and threshold). The user had lied (intentionally or by
+    # mistake) about the request shape and the system silently moved on.
+    #
+    # Post-fix: when access_type is "read-only" but the policy contains
+    # write-class actions, refuse the submission at the form with a
+    # 403 + a structured error naming the specific offending actions
+    # (first 5 + "+N more" truncation). The user must either change
+    # the access_type to "read-write" (honest about writes) or remove
+    # the write actions from the policy (honest about read-only).
+    #
+    # Per [[scorer-is-ground-truth]] the write-vs-read classification
+    # is delegated to `_classify_write_actions`, which reuses the
+    # scorer's `_action_level` helper — this module does NOT reinvent
+    # the IAM access-level table. Per [[ibounce-honest-positioning]]
+    # the rejection NAMES the specific write actions rather than
+    # saying "policy is wrong" generically, so the user can act on it.
+    # Schema validation above guarantees access_type is one of
+    # {"read-only", "read-write"}; the check therefore only fires on
+    # the "read-only + writes" combination, never on the "read-write"
+    # honest case.
+    _at_normalized = (access_type or "").strip().lower()
+    if _at_normalized in {"read-only", "read_only", "readonly"}:
+        _write_actions = _classify_write_actions(parsed_policy)
+        if _write_actions:
+            _shown = _write_actions[:5]
+            _more = len(_write_actions) - len(_shown)
+            _names = ", ".join(_shown)
+            if _more > 0:
+                _names = f"{_names} (+{_more} more)"
+            return _render(
+                request,
+                "new_paste.html",
+                active="new",
+                user=user,
+                status_code=403,
+                extra={
+                    "form": {
+                        "description": description,
+                        "policy": policy,
+                        "access_type": access_type,
+                        "accounts": accounts,
+                        "duration_hours": duration_hours,
+                        "assume_principal_arn": assume_principal_arn,
+                        "assume_session_name": assume_session_name,
+                        "ticket": ticket,
+                    },
+                    "errors": [
+                        (
+                            f"access_type is 'read-only' but the policy "
+                            f"contains write actions: {_names}. Either "
+                            f"change access_type to 'read-write' (and "
+                            f"re-justify in description), or remove the "
+                            f"write actions from the policy. Per "
+                            f"[[scorer-is-ground-truth]] the write "
+                            f"classification comes from the same "
+                            f"policy_sentry table the deterministic "
+                            f"scorer uses, so this rejection matches "
+                            f"how the scorer would later flag the "
+                            f"mismatch — caught up front so it can't "
+                            f"slip silently through auto-approve."
+                        ),
+                    ],
+                },
+            )
+
     lifecycle.init_status(req, owner=user)
     # Always compute the deterministic risk-review block — the scorer
     # has no LLM dependency and the score drives the auto-approve gate

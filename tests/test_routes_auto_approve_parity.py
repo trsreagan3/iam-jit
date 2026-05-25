@@ -116,16 +116,25 @@ _HIGH_RISK_POLICY = json.dumps(
 )
 
 
-def _paste_form_fields(*, policy_json: str) -> dict[str, str]:
+def _paste_form_fields(
+    *, policy_json: str, access_type: str = "read-only",
+) -> dict[str, str]:
     """Form fields for POST /requests/new/paste — mirrors the real
     HTML form. principal_arn is blank: handler infers from session
-    per #594."""
+    per #594.
+
+    `access_type` defaults to "read-only" matching the HTML form's
+    default. Tests that submit a write-class policy must pass
+    `access_type="read-write"` to clear the #605 access_type-vs-policy
+    preview-check (which correctly rejects the read-only-but-writes
+    mismatch).
+    """
     return {
         "description": "Read S3 config files for service X (web paste).",
         "policy": policy_json,
         "accounts": "060392206767",
         "duration_hours": "24",
-        "access_type": "read-only",
+        "access_type": access_type,
         "assume_principal_arn": "",
         "assume_session_name": "",
         "ticket": "",
@@ -324,10 +333,23 @@ def test_web_paste_high_risk_stays_pending(
     """High-risk policy (s3:* on *) scores above the threshold; the
     request must land in pending awaiting a human approver. Verifies
     the evaluator runs but correctly DOESN'T fire for above-threshold
-    requests."""
+    requests.
+
+    NOTE 2026-05-25 #605: this test uses `access_type=read-write`
+    rather than the form-default `read-only` because the high-risk
+    policy contains wildcard write actions (`s3:*` on `*`). The
+    #605 access_type-vs-policy preview-check correctly refuses
+    `read-only` + write-policy at the form (HTTP 403); to exercise
+    the auto-approve gate's above-threshold path this test must
+    honestly declare `read-write`, then assert the gate doesn't
+    auto-approve. Founder framing: a user lying about read-only on
+    a write policy is the bug #605 fixed.
+    """
     resp = as_dev.post(
         "/requests/new/paste",
-        data=_paste_form_fields(policy_json=_HIGH_RISK_POLICY),
+        data=_paste_form_fields(
+            policy_json=_HIGH_RISK_POLICY, access_type="read-write",
+        ),
         follow_redirects=False,
     )
     assert resp.status_code == 303, resp.text
