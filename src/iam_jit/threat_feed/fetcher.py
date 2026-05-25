@@ -222,11 +222,123 @@ def _now_iso() -> str:
     )
 
 
+def _validate_feed_url_ssrf(url: str, *, allow_internal: bool) -> None:
+    """#524 WB-3 — gate the threat-feed URL through the same SSRF
+    primitives the webhook + ``profile install --from URL`` surfaces
+    use (``_hostname_has_internal_suffix`` + ``_is_internal_ip`` from
+    ``bouncer.audit_export.webhook``).
+
+    The fetcher accepts an operator-configured URL and the signature
+    verification on the response payload mitigates RCE risk, but the
+    fetcher itself could be coerced to probe internal IPs /
+    cloud-metadata services / private network addresses (standard
+    SSRF). This gate refuses those URLs BEFORE the network call.
+
+    Categories rejected (per the underlying helper's categorisation):
+      * loopback (127.0.0.0/8, ::1)
+      * link-local (169.254.0.0/16) — includes AWS metadata 169.254.169.254
+      * RFC1918 private (10/8, 172.16/12, 192.168/16)
+      * IPv6 ULA (fc00::/7) — `ipaddress.is_private` covers this
+      * multicast / unspecified / reserved
+      * intranet hostname suffixes (.internal / .local / .home.arpa /
+        .lan / .intranet / .corp / .localhost)
+
+    file:// is NOT gated here (no network) — caller pre-checks scheme.
+
+    Raises :class:`FeedFetchError` on a refusal — same error shape the
+    fetcher uses for other INPUT-side rejections (so callers'
+    try/except FeedFetchError continues to work).
+
+    Per [[scorer-is-ground-truth]] this REUSES the existing helper
+    primitives + does not reinvent SSRF logic. Per
+    [[ibounce-honest-positioning]] the error message names the IP
+    class rejected + the offending URL so the operator understands
+    WHY the fetch was refused.
+    """
+    if allow_internal:
+        return
+    # Local import keeps the threat_feed package importable in
+    # environments that don't load the audit_export module (e.g. some
+    # unit tests).
+    from ..bouncer.audit_export.webhook import (
+        _hostname_has_internal_suffix,
+        _is_internal_ip,
+    )
+    import socket
+    import urllib.parse as _urlparse
+
+    parsed = _urlparse.urlparse(url)
+    hostname = parsed.hostname or ""
+    if not hostname:
+        # Fail-CLOSED per [[scorer-is-ground-truth]]: a URL the caller
+        # passed in that we can't parse to a hostname is refused.
+        raise FeedFetchError(
+            f"refusing to fetch from {url!r}: missing hostname (SSRF gate)"
+        )
+    if _hostname_has_internal_suffix(hostname):
+        raise FeedFetchError(
+            f"refusing to fetch from {url!r}: hostname {hostname!r} "
+            f"matches an intranet suffix (.internal / .local / "
+            f".home.arpa / .lan / .intranet / .corp / .localhost). "
+            f"SSRF gate; pass allow_internal=True for legitimate "
+            f"internal distribution servers."
+        )
+    try:
+        _, _, ip_list = socket.gethostbyname_ex(hostname)
+    except socket.gaierror as e:
+        raise FeedFetchError(
+            f"refusing to fetch from {url!r}: could not resolve "
+            f"hostname {hostname!r} (SSRF gate fails CLOSED on "
+            f"unresolvable hosts): {e}"
+        ) from e
+    if not ip_list:
+        raise FeedFetchError(
+            f"refusing to fetch from {url!r}: hostname {hostname!r} "
+            f"resolved to no IPs (SSRF gate)"
+        )
+    for ip in ip_list:
+        if _is_internal_ip(ip):
+            # Categorise the rejection so the operator sees WHY.
+            # `_is_internal_ip` returns True for any of: private /
+            # loopback / link-local / unspecified / reserved /
+            # multicast. We name them explicitly to satisfy
+            # [[ibounce-honest-positioning]].
+            import ipaddress as _ipaddr
+            try:
+                parsed_ip = _ipaddr.ip_address(ip)
+            except ValueError:
+                category = "unparseable"
+            else:
+                if parsed_ip.is_loopback:
+                    category = "loopback"
+                elif parsed_ip.is_link_local:
+                    category = "link-local (includes AWS metadata 169.254.169.254)"
+                elif parsed_ip.is_private:
+                    # ipaddress.is_private covers RFC1918 + IPv6 ULA
+                    # (fc00::/7) per the stdlib spec.
+                    category = "private (RFC1918 or IPv6 ULA)"
+                elif parsed_ip.is_multicast:
+                    category = "multicast"
+                elif parsed_ip.is_unspecified:
+                    category = "unspecified"
+                elif parsed_ip.is_reserved:
+                    category = "reserved"
+                else:
+                    category = "internal"
+            raise FeedFetchError(
+                f"refusing to fetch from {url!r}: hostname "
+                f"{hostname!r} resolves to {category} IP {ip}. "
+                f"SSRF gate; pass allow_internal=True for legitimate "
+                f"internal distribution servers on a trusted segment."
+            )
+
+
 def fetch_feed(
     url: str,
     *,
     cache_dir: pathlib.Path | None = None,
     allow_insecure_http: bool = False,
+    allow_internal: bool = False,
     timeout_s: float = _FETCH_TIMEOUT_S,
     use_cache_on_failure: bool = True,
 ) -> FeedFetchResult:
@@ -244,6 +356,12 @@ def fetch_feed(
     surfaces the failure reason so the operator's
     ``iam-jit updates last-fetch`` shows BOTH "last good fetch was X
     minutes ago" AND "last attempt failed with Y".
+
+    #524 WB-3 — http(s) URLs are gated through the SSRF helper before
+    any network call. Reject categories: loopback / link-local /
+    RFC1918 / IPv6 ULA / intranet suffixes. file:// is exempt (no
+    network). Pass ``allow_internal=True`` to bypass (only for
+    legitimate internal distribution servers on a trusted segment).
     """
     if not url:
         raise FeedFetchError("url is required")
@@ -257,6 +375,13 @@ def fetch_feed(
             f"file:// allowed for air-gap, HTTP requires "
             f"allow_insecure_http=True"
         )
+
+    # #524 WB-3 — SSRF gate fires BEFORE any network call. file:// is
+    # exempt (no network surface). The gate covers both http + https
+    # because an attacker who controls the operator's declarative
+    # config can point either at internal IPs / metadata services.
+    if is_http or is_https:
+        _validate_feed_url_ssrf(url, allow_internal=allow_internal)
 
     fetched_at = _now_iso()
     http_status: int | None = None
@@ -272,6 +397,19 @@ def fetch_feed(
             req, timeout=timeout_s,
         ) as resp:
             http_status = getattr(resp, "status", None) or resp.getcode()
+            # #524 WB-3 — urllib follows 3xx redirects by default (up
+            # to ~10 hops), so an attacker can publish a URL that
+            # 302s to http://169.254.169.254/... and slip past the
+            # initial-URL gate. By the time urlopen returns, the
+            # redirect chain has already completed — so we re-validate
+            # the final URL. If the chain hit an internal IP, the gate
+            # fires (we drop the already-fetched body). Mirrors the
+            # ``bouncer_cli._fetch_install_payload`` redirect handling.
+            final_url = resp.geturl()
+            if final_url != url and (is_http or is_https):
+                _validate_feed_url_ssrf(
+                    final_url, allow_internal=allow_internal,
+                )
             # Read up to the cap. urllib doesn't enforce a max — we do.
             body_bytes = resp.read(_MAX_FEED_BYTES + 1)
             if body_bytes and len(body_bytes) > _MAX_FEED_BYTES:
@@ -279,6 +417,10 @@ def fetch_feed(
                     f"feed body exceeded {_MAX_FEED_BYTES} bytes cap"
                 )
                 body_bytes = None
+    except FeedFetchError:
+        # SSRF gate raised on the post-redirect URL. Re-raise so the
+        # caller sees the same rejection shape as the pre-network gate.
+        raise
     except urllib.error.HTTPError as e:
         http_status = e.code
         error_reason = f"http_error:{e.code}:{e.reason}"
@@ -374,6 +516,7 @@ __all__ = [
     "CACHE_DIR_ENV",
     "FeedFetchError",
     "FeedFetchResult",
+    "_validate_feed_url_ssrf",
     "fetch_feed",
     "load_cached_feed",
     "resolve_cache_dir",
