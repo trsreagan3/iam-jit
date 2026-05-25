@@ -1,0 +1,47 @@
+---
+name: 06-mixed-sequence
+description: |
+  Sequence of three events: a legit read (allow), a denied write
+  (production deny_actions floor), and an unrelated query (abstain).
+  Exercises sim + production in lockstep across multiple events with
+  different verdicts each.
+profile:
+  profile_name: parity-06
+  bouncer: ibounce
+  allows:
+    - target: "arn:aws:s3:::reports/*"
+      actions: ["s3:GetObject"]
+      reason: "reads"
+  denies:
+    - target: "*"
+      actions: ["s3:DeleteObject", "s3:PutObject"]
+      reason: "no writes"
+events:
+  - _bouncer: ibounce
+    time: 1716412800000
+    activity_name: allow
+    unmapped: {iam_jit: {verdict: allow}}
+    api:
+      service: {name: s3}
+      operation: GetObject
+      resources: [{name: "arn:aws:s3:::reports/q1.csv"}]
+  - _bouncer: ibounce
+    time: 1716416400000
+    activity_name: deny
+    unmapped: {iam_jit: {verdict: deny}}
+    api:
+      service: {name: s3}
+      operation: DeleteObject
+      resources: [{name: "arn:aws:s3:::reports/q1.csv"}]
+  - _bouncer: ibounce
+    time: 1716420000000
+    activity_name: allow
+    unmapped: {iam_jit: {verdict: allow}}
+    api:
+      service: {name: dynamodb}
+      operation: Query
+      resources: [{name: "arn:aws:dynamodb:us-east-1:123456789012:table/orders"}]
+expected_verdicts:
+  - allow
+  - deny
+  - abstain

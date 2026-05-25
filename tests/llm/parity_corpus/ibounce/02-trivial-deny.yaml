@@ -1,0 +1,26 @@
+---
+name: 02-trivial-deny
+description: |
+  Profile carries an explicit deny rule on s3:DeleteObject; production
+  engine consumes the rule via deny_actions promotion (generator-shape
+  translator in profiles.py::_translate_generator_shape). Simulator
+  matches via its own deny_rules path. Both must emit `deny`.
+profile:
+  profile_name: parity-02
+  bouncer: ibounce
+  allows: []
+  denies:
+    - target: "*"
+      actions: ["s3:DeleteObject"]
+      reason: "no deletes from this agent"
+events:
+  - _bouncer: ibounce
+    time: 1716412800000
+    activity_name: deny
+    unmapped: {iam_jit: {verdict: deny}}
+    api:
+      service: {name: s3}
+      operation: DeleteObject
+      resources: [{name: "arn:aws:s3:::reports/q1.csv"}]
+expected_verdicts:
+  - deny

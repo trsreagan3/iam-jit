@@ -765,7 +765,18 @@ def _build_provenance(
     only as good as the simulator."""
     sim_prov = sim_verdicts.provenance or {}
     merged_warnings: list[str] = []
-    if sim_prov.get("production_parity") is False:
+    # `production_parity` evolved (#562) from a single bool to a
+    # per-bouncer dict {ibounce: bool, kbounce: bool, ...}. Compute the
+    # effective parity for THIS report's bouncer_kind. Backwards-
+    # compatible: if the simulator still hands back a bool we treat it
+    # as the universal answer.
+    parity_field = sim_prov.get("production_parity")
+    if isinstance(parity_field, dict):
+        bk = sim_verdicts.bouncer_kind or ""
+        effective_parity = bool(parity_field.get(bk, False))
+    else:
+        effective_parity = bool(parity_field)
+    if not effective_parity:
         # Per Phase 10 (calibration-corpus): when the corpus is
         # validated, soften the GRADING DEPENDS warning so it
         # reflects what's actually true — the rubric is corpus-
@@ -799,8 +810,13 @@ def _build_provenance(
         "simulator_engine_version": sim_prov.get(
             "engine_version", "unknown",
         ),
-        "simulator_production_parity": bool(
-            sim_prov.get("production_parity", False)
+        "simulator_production_parity": effective_parity,
+        # Also surface the full per-bouncer parity map so a grading
+        # consumer reading multiple bouncers can see the gradient
+        # without recomputing it. Always a dict; empty when the
+        # simulator still emits the legacy bool shape.
+        "simulator_production_parity_map": (
+            dict(parity_field) if isinstance(parity_field, dict) else {}
         ),
         "calibration_corpus_validated": CALIBRATION_CORPUS_VALIDATED,
         "calibration_corpus_version": CALIBRATION_CORPUS_VERSION,

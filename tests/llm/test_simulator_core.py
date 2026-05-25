@@ -400,7 +400,15 @@ def test_evaluate_provenance_engine_honest():
     """provenance.engine MUST be 'simulation-python' (not 'production-
     parity' or similar) for ALL bouncers per [[ibounce-honest-
     positioning]]. provenance.warnings MUST enumerate per-bouncer
-    divergence so operators see the gap."""
+    divergence so operators see the gap.
+
+    Per #562: ``production_parity`` evolved from a single bool to a
+    per-bouncer dict. Each bouncer's flag is True ONLY when its
+    canonical parity corpus passes 100% (see
+    :mod:`iam_jit.llm.simulator_parity`). Bouncers whose Go production
+    engine isn't subprocess-callable in this commit (kbounce/gbounce —
+    no CLI decide; dbounce — schema mismatch) stay at False.
+    """
     profile = {"bouncer": "ibounce", "allows": [], "denies": []}
     events = [_ibounce_event(
         action="s3:GetObject", resource="arn:aws:s3:::bucket/key",
@@ -414,9 +422,26 @@ def test_evaluate_provenance_engine_honest():
             f"engine field must be honest about non-production-parity; "
             f"got {result.provenance['engine']!r} for bouncer {bk}"
         )
-        assert result.provenance["production_parity"] is False, (
-            "production_parity flag must remain False until a real "
-            "cross-engine harness lands"
+        # Per #562 production_parity is a per-bouncer dict.
+        parity = result.provenance["production_parity"]
+        assert isinstance(parity, dict), (
+            f"production_parity must be a per-bouncer dict; "
+            f"got {type(parity).__name__} for bouncer {bk}"
+        )
+        assert set(parity.keys()) >= {
+            "ibounce", "kbounce", "dbounce", "gbounce",
+        }, (
+            f"production_parity dict must cover all four bouncers; "
+            f"got keys {sorted(parity.keys())} for bouncer {bk}"
+        )
+        # ibounce can be lifted (Python production engine, direct call);
+        # Go bouncers MUST stay False until their CLI decide path
+        # accepts a (profile, event) tuple.
+        assert parity["kbounce"] is False
+        assert parity["gbounce"] is False
+        # parity_corpus_version is present + non-empty.
+        assert result.provenance.get("parity_corpus_version"), (
+            "parity_corpus_version must be populated"
         )
         warnings = result.provenance.get("warnings") or []
         # State verification: warnings list is NON-EMPTY + the strings

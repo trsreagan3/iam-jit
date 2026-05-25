@@ -1,0 +1,25 @@
+---
+name: 02-gbounce-safety-floor-imds
+description: |
+  GET against 169.254.169.254 (IMDS) hits the gbounce safety floor
+  ("credential exfiltration"). Simulator denies; production parity
+  blocked until gbounce CLI exposes `decide --json`.
+profile:
+  profile_name: gbounce-parity-02
+  bouncer: gbounce
+  allows: []
+  denies: []
+events:
+  - _bouncer: gbounce
+    time: 1716412800000
+    activity_name: get
+    unmapped: {iam_jit: {verdict: deny, ext: {}}}
+    api:
+      service: {name: "169.254.169.254"}
+      operation: "GET /latest/meta-data/iam/security-credentials/"
+      resources:
+        - name: "/latest/meta-data/iam/security-credentials/"
+          uid: "http://169.254.169.254/latest/meta-data/iam/security-credentials/"
+    dst_endpoint: {hostname: "169.254.169.254", port: 80}
+expected_verdicts:
+  - deny

@@ -1,0 +1,26 @@
+---
+name: 07-known-adversarial-pattern
+description: |
+  Trigger the KNOWN_ADVERSARIAL_PATTERNS cross-bouncer floor via
+  cloudtrail:StopLogging — the simulator's safety-floor matcher catches
+  this (also covered by the explicit _SAFETY_FLOOR_DENIES ibounce entry
+  for cloudtrail destruction). Both engines must deny.
+profile:
+  profile_name: parity-07
+  bouncer: ibounce
+  allows:
+    - target: "*"
+      actions: ["cloudtrail:StopLogging"]
+      reason: "intentionally permissive for the parity test"
+  denies: []
+events:
+  - _bouncer: ibounce
+    time: 1716412800000
+    activity_name: deny
+    unmapped: {iam_jit: {verdict: deny}}
+    api:
+      service: {name: cloudtrail}
+      operation: StopLogging
+      resources: [{name: "arn:aws:cloudtrail:us-east-1:123456789012:trail/main"}]
+expected_verdicts:
+  - deny

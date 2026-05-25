@@ -1,0 +1,26 @@
+---
+name: 01-dbounce-trivial-select
+description: |
+  SELECT against an allowed table. Reserved for when dbounce CLI
+  exposes a `decide --json` subcommand. Currently SKIPped per
+  simulator_parity._validate_go_bouncer.
+profile:
+  profile_name: dbounce-parity-01
+  bouncer: dbounce
+  allows:
+    - target: "orders"
+      actions: ["SELECT"]
+      reason: "read orders"
+  denies: []
+events:
+  - _bouncer: dbounce
+    time: 1716412800000
+    activity_name: select
+    unmapped: {iam_jit: {verdict: allow, ext: {}}}
+    api:
+      service: {name: postgres}
+      operation: SELECT
+      resources: [{name: "orders"}]
+    dst_endpoint: {hostname: "db.local", port: 5432}
+expected_verdicts:
+  - allow

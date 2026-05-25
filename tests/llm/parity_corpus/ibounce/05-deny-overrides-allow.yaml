@@ -1,0 +1,35 @@
+---
+name: 05-deny-overrides-allow
+description: |
+  Broad allow (s3:*) + targeted deny (s3:GetObject on sensitive-*).
+  Both engines must surface `deny` for the sensitive-bucket read.
+
+  IMPORTANT — engine shape divergence note: ibounce production's
+  evaluate_profile only sees deny_actions (no per-target denies), so
+  the deny rule must use action "s3:GetObject" with target "*" for both
+  engines to agree. Use of a target-narrower deny would surface a
+  legitimate divergence (production would allow the read while
+  simulator denies) — out of scope for this fixture; see scenario 02
+  for the trivial deny.
+profile:
+  profile_name: parity-05
+  bouncer: ibounce
+  allows:
+    - target: "*"
+      actions: ["s3:GetObject"]
+      reason: "broad reads"
+  denies:
+    - target: "*"
+      actions: ["s3:GetObject"]
+      reason: "actually we don't allow GetObject; deny wins"
+events:
+  - _bouncer: ibounce
+    time: 1716412800000
+    activity_name: deny
+    unmapped: {iam_jit: {verdict: deny}}
+    api:
+      service: {name: s3}
+      operation: GetObject
+      resources: [{name: "arn:aws:s3:::sensitive-payroll/data"}]
+expected_verdicts:
+  - deny

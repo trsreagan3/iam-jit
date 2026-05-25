@@ -1,0 +1,25 @@
+---
+name: 01-trivial-passthrough
+description: |
+  Single allow rule matches a single read event. Simulator + production
+  engine must both emit `allow` for the event. Validates the basic
+  matching path on both sides.
+profile:
+  profile_name: parity-01
+  bouncer: ibounce
+  allows:
+    - target: "arn:aws:s3:::reports/*"
+      actions: ["s3:GetObject"]
+      reason: "data analyst reads"
+  denies: []
+events:
+  - _bouncer: ibounce
+    time: 1716412800000
+    activity_name: allow
+    unmapped: {iam_jit: {verdict: allow}}
+    api:
+      service: {name: s3}
+      operation: GetObject
+      resources: [{name: "arn:aws:s3:::reports/q1.csv"}]
+expected_verdicts:
+  - allow

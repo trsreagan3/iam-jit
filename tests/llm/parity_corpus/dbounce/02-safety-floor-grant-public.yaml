@@ -1,0 +1,23 @@
+---
+name: 02-dbounce-safety-floor-grant-public
+description: |
+  GRANT ALL PRIVILEGES TO PUBLIC hits the dbounce sql_patterns floor
+  ("silent privilege escalation"). Simulator denies; production parity
+  blocked until dbounce CLI exposes `decide --json`.
+profile:
+  profile_name: dbounce-parity-02
+  bouncer: dbounce
+  allows: []
+  denies: []
+events:
+  - _bouncer: dbounce
+    time: 1716412800000
+    activity_name: grant
+    unmapped: {iam_jit: {verdict: deny, ext: {}}}
+    api:
+      service: {name: postgres}
+      operation: "GRANT ALL PRIVILEGES TO PUBLIC"
+      resources: [{name: "public"}]
+    dst_endpoint: {hostname: "db.local", port: 5432}
+expected_verdicts:
+  - deny

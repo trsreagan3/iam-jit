@@ -60,6 +60,25 @@ def _ibounce_event(
     }
 
 
+def _kbounce_event(
+    *, verb: str, resource: str, namespace: str = "default",
+    time_ms: int = 1716412800000,
+) -> dict[str, Any]:
+    return {
+        "_bouncer": "kbounce",
+        "time": time_ms,
+        "activity_name": verb,
+        "unmapped": {"iam_jit": {"verdict": "allow", "ext": {
+            "namespace": namespace,
+        }}},
+        "api": {
+            "service": {"name": "k8s"},
+            "operation": verb,
+            "resources": [{"name": f"{namespace}/{resource}"}],
+        },
+    }
+
+
 # ---------------------------------------------------------------------------
 # Test 1 — MEANINGFUL: narrow profile + adversarial event all denied.
 # ---------------------------------------------------------------------------
@@ -598,9 +617,23 @@ def test_grade_narrows_vs_admin_baseline():
 
 
 def test_grade_provenance_surfaces_simulator_parity_warning():
-    """When SimulationVerdicts.provenance.production_parity=False
-    (currently always per Phase 4), grading provenance.warnings
-    MUST surface a warning making operators aware."""
+    """Per #562 (Phase 4 parity harness): ``production_parity`` evolved
+    from a single bool to a per-bouncer dict. ibounce can now lift to
+    True (Python production engine, direct call, 100% canonical corpus
+    pass); kbounce/dbounce/gbounce stay False until their CLI surfaces
+    a JSON-stable decide path that accepts a (profile, event) tuple.
+
+    Grading provenance therefore:
+      * surfaces the per-bouncer parity map under
+        ``simulator_production_parity_map``
+      * sets ``simulator_production_parity`` to the value for THIS
+        report's bouncer_kind (True for ibounce, False for the Go
+        bouncers in this commit)
+      * appends the parity-caveat warning ONLY when the effective
+        per-bouncer parity is False (so an ibounce grading report no
+        longer carries the warning, while a kbounce grading report
+        still does — honest per [[ibounce-honest-positioning]])
+    """
     profile = {
         "bouncer": "ibounce",
         "allows": [],
@@ -615,43 +648,52 @@ def test_grade_provenance_surfaces_simulator_parity_warning():
         events=events,
         bouncer_kind="ibounce",
     )
-    assert report.provenance["simulator_production_parity"] is False
+    # ibounce lifted to True per #562.
+    assert report.provenance["simulator_production_parity"] is True
+    # Per-bouncer map carries the gradient.
+    parity_map = report.provenance["simulator_production_parity_map"]
+    assert parity_map["ibounce"] is True
+    assert parity_map["kbounce"] is False
+    assert parity_map["dbounce"] is False
+    assert parity_map["gbounce"] is False
     joined = " ".join(report.provenance["warnings"])
-    # Phase 10 calibration-corpus lift: when
-    # `grading.CALIBRATION_CORPUS_VALIDATED` is True the warning is
-    # softened to surface that the rubric IS calibrated (corpus) while
-    # the simulator engine is still pending production-parity. Per
-    # [[ibounce-honest-positioning]] the warning shift must reflect
-    # which dimensions are calibrated vs which are not.
-    if grading.CALIBRATION_CORPUS_VALIDATED:
-        assert "calibration corpus" in joined, (
-            f"corpus-calibrated warning must appear; got "
-            f"{report.provenance['warnings']!r}"
-        )
-        assert "production_parity=False" in joined, (
-            f"parity caveat must still appear; got "
-            f"{report.provenance['warnings']!r}"
-        )
-        # Provenance carries calibration metadata.
-        assert (
-            report.provenance["calibration_corpus_validated"] is True
-        )
-        assert (
-            report.provenance["calibration_corpus_version"]
-            == grading.CALIBRATION_CORPUS_VERSION
-        )
-        assert (
-            report.provenance["calibration_corpus_size"]
-            == grading.CALIBRATION_CORPUS_SIZE
-        )
-    else:
-        assert "GRADING DEPENDS ON SIMULATOR ACCURACY" in joined, (
-            f"parity caveat must appear in warnings; got "
-            f"{report.provenance['warnings']!r}"
-        )
-    # Grading version + engine identity surfaced.
+    # ibounce parity True → no "GRADING DEPENDS" warning + no
+    # "corpus-calibrated; parity pending" warning. (Both warnings are
+    # gated on effective_parity == False.)
+    assert "GRADING DEPENDS ON SIMULATOR ACCURACY" not in joined, (
+        f"ibounce parity is True — the GRADING DEPENDS warning must "
+        f"NOT appear; got {report.provenance['warnings']!r}"
+    )
+    # Grading version + engine identity surfaced regardless.
     assert report.provenance["grading_version"] == grading.GRADING_VERSION
     assert report.provenance["simulator_engine"] == "simulation-python"
+
+
+def test_grade_provenance_kbounce_still_carries_parity_warning():
+    """Companion to test_grade_provenance_surfaces_simulator_parity_warning:
+    for a Go bouncer whose parity is still False, the warning MUST
+    appear. Locks in the honest gradient — lifting ibounce parity does
+    NOT silently suppress the warning for unvalidated bouncers."""
+    profile = {
+        "bouncer": "kbounce",
+        "allows": [],
+        "denies": [],
+    }
+    events = [_kbounce_event(
+        verb="get", resource="pod-a", namespace="default",
+    )]
+    report = grading.grade_profile_for_workflow(
+        profile=profile,
+        events=events,
+        bouncer_kind="kbounce",
+    )
+    assert report.provenance["simulator_production_parity"] is False
+    joined = " ".join(report.provenance["warnings"])
+    if grading.CALIBRATION_CORPUS_VALIDATED:
+        assert "calibration corpus" in joined
+        assert "production_parity=False" in joined
+    else:
+        assert "GRADING DEPENDS ON SIMULATOR ACCURACY" in joined
 
 
 # ---------------------------------------------------------------------------
@@ -887,20 +929,22 @@ def test_mcp_dispatch_bounce_grade_profile_returns_serialized_report():
     assert "simulation_summary" in sc
     assert "provenance" in sc
     assert sc["provenance"]["simulator_engine"] == "simulation-python"
-    # Parity warning surfaced. Phase 10 lift: when
-    # `CALIBRATION_CORPUS_VALIDATED` is True the warning is the
-    # softened "rubric calibrated; engine parity pending" form.
+    # Per #562: ibounce parity lifted to True via Phase 4 harness.
+    # The "GRADING DEPENDS ON SIMULATOR ACCURACY" / "rubric calibrated
+    # but parity pending" warnings are gated on effective_parity =
+    # False. For ibounce that's no longer true → neither warning fires.
+    assert sc["provenance"]["simulator_production_parity"] is True
     joined = " ".join(sc["provenance"]["warnings"])
-    if grading.CALIBRATION_CORPUS_VALIDATED:
-        assert "calibration corpus" in joined
-        assert "production_parity=False" in joined
-        assert sc["provenance"]["calibration_corpus_validated"] is True
-        assert (
-            sc["provenance"]["calibration_corpus_size"]
-            == grading.CALIBRATION_CORPUS_SIZE
-        )
-    else:
-        assert "GRADING DEPENDS ON SIMULATOR ACCURACY" in joined
+    assert "GRADING DEPENDS ON SIMULATOR ACCURACY" not in joined, (
+        f"ibounce parity True → GRADING DEPENDS warning must NOT "
+        f"appear; got {sc['provenance']['warnings']!r}"
+    )
+    # Calibration metadata still carried (corpus validation lift is
+    # independent of parity lift).
+    assert (
+        sc["provenance"]["calibration_corpus_validated"]
+        == grading.CALIBRATION_CORPUS_VALIDATED
+    )
 
 
 def test_mcp_tool_appears_in_tools_list():

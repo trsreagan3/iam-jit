@@ -1,0 +1,26 @@
+---
+name: 01-kbounce-trivial-passthrough
+description: |
+  Single allow rule matches a single get pods event. Reserved for when
+  kbounce CLI exposes a `decide --json` subcommand; the harness
+  currently SKIPs Go-bouncer parity validation with skipped_reason
+  "CLI decide-missing" per the structured stub in simulator_parity.
+profile:
+  profile_name: kbounce-parity-01
+  bouncer: kbounce
+  allows:
+    - target: "default/*"
+      actions: ["get"]
+      reason: "read access to default ns"
+  denies: []
+events:
+  - _bouncer: kbounce
+    time: 1716412800000
+    activity_name: get
+    unmapped: {iam_jit: {verdict: allow, ext: {namespace: default}}}
+    api:
+      service: {name: k8s}
+      operation: get
+      resources: [{name: "default/pod-a"}]
+expected_verdicts:
+  - allow

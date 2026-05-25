@@ -1,0 +1,26 @@
+---
+name: 01-gbounce-trivial-egress
+description: |
+  HTTPS GET to an allowed host. Reserved for when gbounce CLI exposes
+  a `decide --json` subcommand. Currently SKIPped per
+  simulator_parity._validate_go_bouncer.
+profile:
+  profile_name: gbounce-parity-01
+  bouncer: gbounce
+  allows:
+    - target: "api.github.com"
+      actions: ["GET *"]
+      reason: "github API reads"
+  denies: []
+events:
+  - _bouncer: gbounce
+    time: 1716412800000
+    activity_name: get
+    unmapped: {iam_jit: {verdict: allow, ext: {}}}
+    api:
+      service: {name: "api.github.com"}
+      operation: "GET /repos/foo/bar"
+      resources: [{name: "/repos/foo/bar", uid: "https://api.github.com/repos/foo/bar"}]
+    dst_endpoint: {hostname: "api.github.com", port: 443}
+expected_verdicts:
+  - allow

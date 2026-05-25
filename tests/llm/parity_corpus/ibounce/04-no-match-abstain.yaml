@@ -1,0 +1,25 @@
+---
+name: 04-no-match-abstain
+description: |
+  Event action is dynamodb:Query; profile only knows about s3:GetObject.
+  Both the simulator and the production engine (allow_rules path) must
+  return `abstain` — no rule matches, no deny floor fires.
+profile:
+  profile_name: parity-04
+  bouncer: ibounce
+  allows:
+    - target: "*"
+      actions: ["s3:GetObject"]
+      reason: "reads only"
+  denies: []
+events:
+  - _bouncer: ibounce
+    time: 1716412800000
+    activity_name: allow
+    unmapped: {iam_jit: {verdict: allow}}
+    api:
+      service: {name: dynamodb}
+      operation: Query
+      resources: [{name: "arn:aws:dynamodb:us-east-1:123456789012:table/orders"}]
+expected_verdicts:
+  - abstain

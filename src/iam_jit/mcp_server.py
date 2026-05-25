@@ -2048,9 +2048,12 @@ TOOLS.extend([
             "[[role-effectiveness-corpus]]. Composes with Phase 4 "
             "bounce_simulate_profile (consumes its SimulationVerdicts "
             "under the hood). Provenance honest per "
-            "[[ibounce-honest-positioning]]: surfaces simulator "
-            "production_parity=False caveat so operators know grading "
-            "depends on simulator accuracy."
+            "[[ibounce-honest-positioning]]: surfaces a per-bouncer "
+            "production_parity map (#562). ibounce lifted to True via "
+            "direct Python call to the production engine; kbounce / "
+            "dbounce / gbounce stay False until their CLI exposes a "
+            "(profile, event)-shape decide path. Warnings still appear "
+            "for any bouncer whose parity is False."
         ),
         "inputSchema": {
             "type": "object",

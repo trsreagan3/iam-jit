@@ -1,0 +1,28 @@
+---
+name: 03-safety-floor-iam-createaccesskey
+description: |
+  iam:CreateAccessKey is in _SAFETY_FLOOR_DENIES even when the profile
+  permissively allows it. Simulator's safety-floor layer fires and
+  emits `deny`. The ibounce production engine has the same universal
+  floor at the proxy layer (NOT inside evaluate_profile itself), so the
+  parity harness treats safety-floor denies as automatically matching
+  production (see simulator_parity._ibounce_parity_one_scenario).
+profile:
+  profile_name: parity-03
+  bouncer: ibounce
+  allows:
+    - target: "*"
+      actions: ["iam:CreateAccessKey"]
+      reason: "intentionally permissive for the parity test"
+  denies: []
+events:
+  - _bouncer: ibounce
+    time: 1716412800000
+    activity_name: deny
+    unmapped: {iam_jit: {verdict: deny}}
+    api:
+      service: {name: iam}
+      operation: CreateAccessKey
+      resources: [{name: "arn:aws:iam::123456789012:user/svc"}]
+expected_verdicts:
+  - deny

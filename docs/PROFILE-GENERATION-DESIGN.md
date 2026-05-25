@@ -369,7 +369,23 @@ README, or sub-task of `§A92` since this is UC-17 design).
    rule-evaluation core into a callable
    `evaluate_profile_against_events(profile, events) -> Verdicts`.
    This is the engine the new `bounce_simulate_profile` MCP tool wraps.
-   Reuses existing rule-evaluation logic.
+   Reuses existing rule-evaluation logic. **Production-parity harness
+   (#562):** ships alongside the simulator at
+   `src/iam_jit/llm/simulator_parity.py` + canonical fixture corpus
+   under `tests/llm/parity_corpus/<bouncer>/*.yaml`. Per-bouncer
+   parity is exercised through both the simulator + the production
+   engine (Python direct-call for ibounce; subprocess CLI dry-run for
+   the Go bouncers when available). `provenance.production_parity`
+   evolves from a single bool to a per-bouncer dict; a bouncer's flag
+   lifts to True only when its corpus passes 100% per
+   `[[calibration-quality-bar]]`. As of #562: **ibounce True**;
+   kbounce / dbounce / gbounce stay False until their CLI exposes a
+   `decide --json` path that accepts a (profile, event) tuple
+   (follow-up tasks filed inline in `simulator_parity.py`). Extending
+   the fixture corpus: drop a `<scenario>.yaml` under the per-bouncer
+   directory; the harness auto-discovers; rerun
+   `tests/llm/test_simulator_parity_harness.py` to confirm 100% pass
+   before merging.
 5. **Phase 5 — `bounce_simulate_profile` MCP tool.** Wire the simulator
    into `mcp_server.py`. Per §3 spec. State-verification test +
    schema test.

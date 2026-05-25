@@ -43,6 +43,15 @@ divergence shapes per bouncer so operators see this isn't
 production parity. The intent matches [[scorer-is-ground-truth]] —
 don't tune the simulator to flatter profiles; surface the gap.
 
+Per #562 (Phase 4 parity harness) ``provenance.production_parity`` is
+a per-bouncer dict, populated from
+:mod:`iam_jit.llm.simulator_parity`. ibounce lifted to True via direct
+Python call to the production engine (100% canonical fixtures pass);
+kbounce / dbounce / gbounce stay False until their CLI exposes a
+(profile, event)-shape decide subcommand. Lift discipline is gated by
+the on-disk corpus at ``tests/llm/parity_corpus/<bouncer>/`` per
+[[calibration-quality-bar]].
+
 Friction-budget integration (Phase 3 plumbed kwarg, Phase 4 wires
 it): when ``friction_budget`` is supplied, ``friction_metrics``
 extrapolates observed deny count to a weekly rate using a
@@ -66,6 +75,39 @@ from .profile_generator import _SAFETY_FLOOR_DENIES
 
 
 VerdictLiteral = Literal["allow", "deny", "abstain"]
+
+
+# Per-bouncer production-parity state — computed lazily on first
+# `evaluate_profile_against_events` call, cached for the lifetime of
+# the process. Lazy because :mod:`iam_jit.llm.simulator_parity`
+# imports THIS module; computing at import time would create a cycle.
+# See :mod:`iam_jit.llm.simulator_parity` for the lift discipline.
+# Failure mode: harness crash → every bouncer reports parity=False,
+# the safe conservative default per [[ibounce-honest-positioning]].
+_PARITY_MAP_CACHE: dict[str, bool] | None = None
+_PARITY_CORPUS_VERSION = "1.0.0"
+
+
+def _get_parity_map() -> dict[str, bool]:
+    global _PARITY_MAP_CACHE
+    if _PARITY_MAP_CACHE is None:
+        try:
+            from . import simulator_parity as _sp
+            _PARITY_MAP_CACHE = _sp.compute_per_bouncer_parity_map()
+        except Exception:
+            _PARITY_MAP_CACHE = {
+                "ibounce": False, "kbounce": False,
+                "dbounce": False, "gbounce": False,
+            }
+    return _PARITY_MAP_CACHE
+
+
+def _reset_parity_map_cache_for_tests() -> None:
+    """Test-only hook. Tests that monkeypatch parity-affecting state
+    (e.g. inject a synthetic divergence) must call this before invoking
+    `evaluate_profile_against_events` so the cached map is rebuilt."""
+    global _PARITY_MAP_CACHE
+    _PARITY_MAP_CACHE = None
 
 
 @dataclasses.dataclass(frozen=True)
@@ -591,10 +633,19 @@ def evaluate_profile_against_events(
             "(single-timestamp events assume a 1h slice)"
         )
 
+    # Per-bouncer production_parity dict (#562). Lifted to True per
+    # bouncer when its canonical parity corpus passes 100% (see
+    # :mod:`iam_jit.llm.simulator_parity`). Honest gradient per
+    # [[ibounce-honest-positioning]]: bouncers whose harness can't
+    # exercise their production engine (Go bouncers without CLI
+    # `decide`) stay at False until that gap closes. Cached at module
+    # scope (`_PARITY_MAP`) so the lookup is O(1) per call and the
+    # corpus is only re-walked when the process restarts.
     provenance = {
         "engine": "simulation-python",
         "engine_version": "1.0.0",
-        "production_parity": False,
+        "production_parity": dict(_get_parity_map()),
+        "parity_corpus_version": _PARITY_CORPUS_VERSION,
         "warnings": warnings,
     }
 
