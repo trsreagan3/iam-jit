@@ -53,12 +53,90 @@ import click
 
 # Mirror cli_canary.CANARY_DIR convention so tests can isolate via
 # monkeypatch (parallel to test_cli_canary.py's isolated_canary fixture).
+#
+# #617 MED-1: these module-level constants are the DEFAULT — when no
+# ``--data-dir`` flag / ``IAM_JIT_DATA_DIR`` env is provided. When the
+# operator targets a different data directory (parity with
+# ``iam-jit serve --data-dir``), the per-call paths are derived from
+# the resolved data dir via :func:`_derive_paths` rather than these
+# globals. Existing tests that monkeypatch ``IAM_JIT_HOME`` etc. still
+# work because ``_inventory_installed_state(data_dir=None)`` continues
+# to read the module-level constants (the path-derivation branch only
+# fires when a non-None data dir is passed).
 IAM_JIT_HOME = pathlib.Path.home() / ".iam-jit"
 VENV_DIR = IAM_JIT_HOME / "venv"
 BOUNCER_DIR = IAM_JIT_HOME / "bouncer"
 AUDIT_PATH = IAM_JIT_HOME / "audit.jsonl"
 ANOMALY_BASELINE_PATH = IAM_JIT_HOME / "anomaly-baseline.db"
 CANARY_DIR = IAM_JIT_HOME / "canary"
+
+# Env var name used by ``iam-jit uninstall --data-dir`` resolution
+# (parity with the ``--data-dir`` flag on ``iam-jit serve``). The
+# precedence chain is: CLI flag > env > module-level default
+# (``~/.iam-jit/``).
+IAM_JIT_DATA_DIR_ENV = "IAM_JIT_DATA_DIR"
+
+
+def resolve_data_dir(
+    cli_flag: pathlib.Path | str | None = None,
+    env_var: str | None = IAM_JIT_DATA_DIR_ENV,
+    default: pathlib.Path | None = None,
+) -> pathlib.Path:
+    """Resolve the iam-jit data dir using the documented precedence.
+
+    Precedence:
+      1. ``cli_flag`` (``--data-dir`` on the uninstall CLI)
+      2. ``env_var`` (``IAM_JIT_DATA_DIR`` by default)
+      3. ``default`` (or the module-level :data:`IAM_JIT_HOME` if None)
+
+    Mirrors the resolution shape required for parity with
+    ``iam-jit serve --data-dir`` per [[ibounce-honest-positioning]] —
+    CLI surfaces that target the same state must be symmetric so the
+    operator can uninstall the same data directory they installed
+    against. Without this, operators who ran ``serve --data-dir
+    /opt/iam-jit-prod`` had no symmetric way to uninstall (they had to
+    hack ``$HOME`` redirects).
+
+    Per [[ibounce-honest-positioning]]: the resolved path is surfaced
+    in the pre-check + result output so operators can verify they're
+    acting on the right tree before destruction.
+    """
+    if cli_flag is not None and str(cli_flag) != "":
+        return pathlib.Path(cli_flag).expanduser().resolve()
+    if env_var:
+        env_val = os.environ.get(env_var)
+        if env_val:
+            return pathlib.Path(env_val).expanduser().resolve()
+    if default is not None:
+        return pathlib.Path(default).expanduser().resolve()
+    # Fall back to the module-level default. Resolve so the returned
+    # path is absolute + symlink-clean (matches the flag/env branches).
+    return IAM_JIT_HOME.expanduser().resolve()
+
+
+def _derive_paths(
+    data_dir: pathlib.Path | None,
+) -> tuple[pathlib.Path, pathlib.Path, pathlib.Path]:
+    """Compute ``(home, venv, bouncer)`` paths for a given data dir.
+
+    When ``data_dir`` is None, returns the module-level globals so
+    existing callers + tests (which monkeypatch IAM_JIT_HOME / VENV_DIR
+    etc.) continue to work unchanged.
+
+    When ``data_dir`` is provided, derives venv + bouncer paths from
+    it directly. This is the #617 MED-1 path: operator passed
+    ``--data-dir`` or ``IAM_JIT_DATA_DIR``, so the entire uninstall
+    operates on that tree instead of the default.
+
+    Per [[creates-never-mutates]]: uninstall must operate on the
+    operator's actual data dir, not a guessed one — a silently-wrong
+    home means we either miss state (orphan risk) or destroy
+    out-of-domain state (cross-domain SIGTERM, same shape as #614).
+    """
+    if data_dir is None:
+        return IAM_JIT_HOME, VENV_DIR, BOUNCER_DIR
+    home = pathlib.Path(data_dir)
+    return home, home / "venv", home / "bouncer"
 
 # Per MRR-4-UNINSTALL.md step 1 — bouncer process names.
 BOUNCER_PROCESS_NAMES = ("ibounce", "gbounce", "kbounce", "kbouncer", "dbounce")
@@ -822,12 +900,15 @@ def _resolve_go_bin_dir() -> pathlib.Path:
 # ---------------------------------------------------------------------------
 
 
-def _inventory_installed_state() -> dict[str, Any]:
+def _inventory_installed_state(
+    data_dir: pathlib.Path | None = None,
+) -> dict[str, Any]:
     """Build an honest inventory of what's currently installed.
 
     Returns a dict shaped like::
 
         {
+          "data_dir": str,            # #617 MED-1 — resolved home
           "iam_jit_home_exists": bool,
           "venv_exists": bool,
           "running_bouncers": {name: [pid, ...], ...},
@@ -842,10 +923,18 @@ def _inventory_installed_state() -> dict[str, Any]:
     cleanup items (shell-profile env vars, MCP config entries, browser
     truststores for the gbounce MITM CA) up-front so the operator knows
     what uninstall does NOT do for them.
+
+    Per #617 MED-1: ``data_dir`` is the resolved iam-jit data
+    directory (from ``--data-dir`` flag or ``IAM_JIT_DATA_DIR`` env or
+    default ``~/.iam-jit/``). When None, the module-level globals are
+    used (existing-caller / test compatibility). When set, the
+    inventory probes that tree instead.
     """
+    home, venv_dir, _bouncer_dir = _derive_paths(data_dir)
     inv: dict[str, Any] = {
-        "iam_jit_home_exists": IAM_JIT_HOME.exists(),
-        "venv_exists": VENV_DIR.exists(),
+        "data_dir": str(home),
+        "iam_jit_home_exists": home.exists(),
+        "venv_exists": venv_dir.exists(),
         "running_bouncers": {},
         "bound_ports": [],
         # #574: port owners that bind a bouncer-typical port but whose
@@ -941,8 +1030,8 @@ def _inventory_installed_state() -> dict[str, Any]:
                 })
 
     # Console scripts (step 3).
-    if VENV_DIR.exists():
-        bin_dir = VENV_DIR / "bin"
+    if venv_dir.exists():
+        bin_dir = venv_dir / "bin"
         for script in CONSOLE_SCRIPTS:
             if (bin_dir / script).exists():
                 inv["console_scripts_present"].append(str(bin_dir / script))
@@ -956,7 +1045,7 @@ def _inventory_installed_state() -> dict[str, Any]:
 
     # Audit-bearing files (step 8 / 9).
     for rel in AUDIT_BEARING_PATHS_REL:
-        p = IAM_JIT_HOME / rel
+        p = home / rel
         if p.exists():
             inv["audit_bearing_files"].append(str(p))
 
@@ -1227,13 +1316,18 @@ def _step_stop_bouncers(
 
 def _step_pip_uninstall(
     *, dry_run: bool,
+    data_dir: pathlib.Path | None = None,
 ) -> dict[str, Any]:
     """Step 2 — `pip uninstall -y iam-jit` inside the venv if it exists.
 
     Returns ``{"executed": bool, "venv_pip_present": bool,
               "stdout": str, "returncode": int | None}``.
+
+    Per #617 MED-1: when ``data_dir`` is set, the venv is derived from
+    it; else the module-level :data:`VENV_DIR` is used.
     """
-    pip = VENV_DIR / "bin" / "pip"
+    _home, venv_dir, _bouncer = _derive_paths(data_dir)
+    pip = venv_dir / "bin" / "pip"
     out: dict[str, Any] = {
         "executed": False,
         "venv_pip_present": pip.exists(),
@@ -1299,32 +1393,37 @@ def _step_remove_go_binaries(
 
 def _step_remove_venv(
     *, dry_run: bool,
+    data_dir: pathlib.Path | None = None,
 ) -> dict[str, Any]:
-    """Step 7 — remove ``~/.iam-jit/venv/``.
+    """Step 7 — remove ``~/.iam-jit/venv/`` (or ``${data_dir}/venv/``).
 
     Returns ``{"removed": bool, "path": str, "failed": str | None}``.
-    State verification: post-call, ``VENV_DIR.exists()`` must be False.
+    State verification: post-call, ``venv_dir.exists()`` must be False.
+
+    Per #617 MED-1: ``data_dir`` overrides the module-level
+    :data:`VENV_DIR` when set.
     """
+    _home, venv_dir, _bouncer = _derive_paths(data_dir)
     out: dict[str, Any] = {
         "removed": False,
-        "path": str(VENV_DIR),
+        "path": str(venv_dir),
         "failed": None,
     }
-    if not VENV_DIR.exists():
+    if not venv_dir.exists():
         return out
     if dry_run:
         out["removed"] = True
         return out
     try:
-        shutil.rmtree(VENV_DIR)
-        if VENV_DIR.exists():
+        shutil.rmtree(venv_dir)
+        if venv_dir.exists():
             out["failed"] = (
-                f"{VENV_DIR}: rmtree returned but path still present"
+                f"{venv_dir}: rmtree returned but path still present"
             )
         else:
             out["removed"] = True
     except OSError as exc:
-        out["failed"] = f"{VENV_DIR}: {exc}"
+        out["failed"] = f"{venv_dir}: {exc}"
     return out
 
 
@@ -1333,9 +1432,10 @@ def _step_remove_iam_jit_home(
     dry_run: bool,
     keep_audit_logs: bool,
     backup_dir: pathlib.Path | None,
+    data_dir: pathlib.Path | None = None,
 ) -> dict[str, Any]:
-    """Step 9 — purge ``~/.iam-jit/`` (with optional audit-log preserve
-    + backup-dir snapshot).
+    """Step 9 — purge ``~/.iam-jit/`` (or ``${data_dir}``) (with
+    optional audit-log preserve + backup-dir snapshot).
 
     Returns ``{"removed_paths": [...], "preserved_paths": [...],
               "backed_up_paths": [...], "failed": [...]}``.
@@ -1346,14 +1446,18 @@ def _step_remove_iam_jit_home(
         ``.exists()`` must be True post-call.
       * if ``--backup-dir``, each "backed_up_paths" entry must be
         present under the backup root.
+
+    Per #617 MED-1: ``data_dir`` overrides :data:`IAM_JIT_HOME` when
+    set (operator passed ``--data-dir`` or ``IAM_JIT_DATA_DIR``).
     """
+    home, _venv, _bouncer = _derive_paths(data_dir)
     out: dict[str, Any] = {
         "removed_paths": [],
         "preserved_paths": [],
         "backed_up_paths": [],
         "failed": [],
     }
-    if not IAM_JIT_HOME.exists():
+    if not home.exists():
         return out
 
     # Backup phase — best-effort copy BEFORE any removal.
@@ -1365,7 +1469,7 @@ def _step_remove_iam_jit_home(
             except OSError as exc:
                 out["failed"].append(f"backup mkdir {backup_root}: {exc}")
                 return out
-        for child in sorted(IAM_JIT_HOME.iterdir()):
+        for child in sorted(home.iterdir()):
             target = backup_root / child.name
             if dry_run:
                 out["backed_up_paths"].append(str(target))
@@ -1383,13 +1487,13 @@ def _step_remove_iam_jit_home(
     preserve_paths: set[pathlib.Path] = set()
     if keep_audit_logs:
         for rel in AUDIT_BEARING_PATHS_REL:
-            p = IAM_JIT_HOME / rel
+            p = home / rel
             if p.exists():
                 preserve_paths.add(p)
 
     # Walk and remove top-level entries; preserve audit-bearing files
     # by leaving their parent dirs in place.
-    for child in sorted(IAM_JIT_HOME.iterdir()):
+    for child in sorted(home.iterdir()):
         # Decide if this entire subtree can be removed wholesale.
         # If any preserved file lives under it, skip the wholesale
         # rmtree + walk entries individually.
@@ -1446,15 +1550,15 @@ def _step_remove_iam_jit_home(
     # Finally, if nothing preserved + dir is empty, remove root too.
     if not dry_run and not preserve_paths:
         try:
-            if IAM_JIT_HOME.exists():
+            if home.exists():
                 # Remove root only if empty (preserved file dirs may still
                 # contain non-emptied subdirs we did not touch).
-                contents = list(IAM_JIT_HOME.iterdir())
+                contents = list(home.iterdir())
                 if not contents:
-                    IAM_JIT_HOME.rmdir()
-                    out["removed_paths"].append(str(IAM_JIT_HOME))
+                    home.rmdir()
+                    out["removed_paths"].append(str(home))
         except OSError as exc:
-            out["failed"].append(f"{IAM_JIT_HOME}: {exc}")
+            out["failed"].append(f"{home}: {exc}")
     return out
 
 
@@ -1465,6 +1569,7 @@ def _step_remove_iam_jit_home(
 
 def _verify_clean_state(
     *, keep_audit_logs: bool,
+    data_dir: pathlib.Path | None = None,
 ) -> dict[str, Any]:
     """Re-inventory after uninstall + report any leftover state.
 
@@ -1475,18 +1580,32 @@ def _verify_clean_state(
     Per ``[[ibounce-honest-positioning]]`` (#617 HIGH-3): every field
     here must reflect filesystem reality, not the operator's intent at
     flag-set time. Specifically, ``iam_jit_home_exists`` probes the
-    actual ``IAM_JIT_HOME`` directory — if ``--keep-audit-logs``
-    preserved files on disk, the directory still exists and we must
-    report it. The ``preserved_paths`` field enumerates exactly which
-    audit-bearing files are still on disk so the operator can audit
-    what was kept.
+    actual data directory — if ``--keep-audit-logs`` preserved files
+    on disk, the directory still exists and we must report it. The
+    ``preserved_paths`` field enumerates exactly which audit-bearing
+    files are still on disk so the operator can audit what was kept.
 
     The ``clean`` flag is true when EITHER (a) the directory was fully
     removed AND nothing else is leftover, OR (b) ``--keep-audit-logs``
-    was set AND the only remaining items under ``IAM_JIT_HOME`` are
+    was set AND the only remaining items under the data directory are
     audit-bearing files we intentionally preserved.
+
+    Per #617 MED-1: probes the resolved data directory (from the
+    ``--data-dir`` flag / ``IAM_JIT_DATA_DIR`` env). When None, falls
+    back to the module-level :data:`IAM_JIT_HOME` (existing-caller +
+    test compatibility).
     """
-    inv = _inventory_installed_state()
+    home, _venv, _bouncer = _derive_paths(data_dir)
+    # When no data_dir is passed, call _inventory_installed_state
+    # without kwargs so existing test sabotages that monkeypatch the
+    # inventory probe with a zero-arg replacement (per
+    # test_uninstall_post_check_honesty_617's sabotage test) keep
+    # working. When data_dir IS passed (the #617 MED-1 path), pass it
+    # through so the probe targets the right tree.
+    if data_dir is None:
+        inv = _inventory_installed_state()
+    else:
+        inv = _inventory_installed_state(data_dir=data_dir)
     leftover: dict[str, Any] = {
         "running_bouncers": inv["running_bouncers"],
         "bound_ports": inv["bound_ports"],
@@ -1505,16 +1624,16 @@ def _verify_clean_state(
     preserved_paths: list[str] = []
     if keep_audit_logs:
         for rel in AUDIT_BEARING_PATHS_REL:
-            p = IAM_JIT_HOME / rel
+            p = home / rel
             if p.exists():
                 preserved_paths.append(str(p))
     leftover["preserved_paths"] = preserved_paths
 
-    # #617 HIGH-3: an existing IAM_JIT_HOME counts as leftover UNLESS
+    # #617 HIGH-3: an existing data home counts as leftover UNLESS
     # the operator opted in to keep-audit-logs AND the only thing
     # remaining is preserved audit-bearing content. Detect that by
-    # walking IAM_JIT_HOME and checking that every file present is on
-    # the preserved-paths list.
+    # walking the home and checking that every file present is on the
+    # preserved-paths list.
     home_is_intentional_preserve = False
     if (
         keep_audit_logs
@@ -1524,7 +1643,7 @@ def _verify_clean_state(
         try:
             preserved_set = {pathlib.Path(p).resolve() for p in preserved_paths}
             unexpected = []
-            for entry in IAM_JIT_HOME.rglob("*"):
+            for entry in home.rglob("*"):
                 if entry.is_file():
                     if entry.resolve() not in preserved_set:
                         unexpected.append(str(entry))
@@ -1565,6 +1684,7 @@ def run_uninstall(
     force: bool = False,
     keep_audit_logs: bool = False,
     backup_dir: pathlib.Path | None = None,
+    data_dir: pathlib.Path | None = None,
 ) -> dict[str, Any]:
     """Orchestrate the full uninstall sequence.
 
@@ -1581,6 +1701,13 @@ def run_uninstall(
       * ``"incomplete"`` — uninstall ran but post-check found leftover
         state (operator must investigate).
       * ``"dry_run"`` — nothing executed; plan returned.
+
+    Per #617 MED-1: ``data_dir`` is the resolved iam-jit data
+    directory (from ``--data-dir`` flag or ``IAM_JIT_DATA_DIR`` env).
+    When None, the module-level :data:`IAM_JIT_HOME` is targeted
+    (existing-caller + test compatibility). Surfaced in the result as
+    ``inventory.data_dir`` so callers can see what tree was operated
+    on.
     """
     result: dict[str, Any] = {
         "status": "ok",
@@ -1588,13 +1715,25 @@ def run_uninstall(
         "force": force,
         "keep_audit_logs": keep_audit_logs,
         "backup_dir": str(backup_dir) if backup_dir else None,
+        # #617 MED-1: record the resolved data dir in the top-level
+        # result so JSON consumers + the operator-facing summary can
+        # surface it (operator-trust per [[ibounce-honest-positioning]]).
+        "data_dir": (
+            str(_derive_paths(data_dir)[0])
+        ),
         "inventory": {},
         "halts": [],
         "steps": {},
         "post_check": {},
     }
 
-    inventory = _inventory_installed_state()
+    # Same compat shape as _verify_clean_state: don't pass data_dir
+    # kwarg when None so test sabotages that replace the inventory
+    # probe with a zero-arg function still work.
+    if data_dir is None:
+        inventory = _inventory_installed_state()
+    else:
+        inventory = _inventory_installed_state(data_dir=data_dir)
     result["inventory"] = inventory
 
     halts = _check_halt_conditions(inventory)
@@ -1615,15 +1754,20 @@ def run_uninstall(
     result["steps"]["stop_bouncers"] = _step_stop_bouncers(
         inventory, dry_run=dry_run,
     )
-    result["steps"]["pip_uninstall"] = _step_pip_uninstall(dry_run=dry_run)
+    result["steps"]["pip_uninstall"] = _step_pip_uninstall(
+        dry_run=dry_run, data_dir=data_dir,
+    )
     result["steps"]["remove_go_binaries"] = _step_remove_go_binaries(
         inventory, dry_run=dry_run,
     )
-    result["steps"]["remove_venv"] = _step_remove_venv(dry_run=dry_run)
+    result["steps"]["remove_venv"] = _step_remove_venv(
+        dry_run=dry_run, data_dir=data_dir,
+    )
     result["steps"]["remove_iam_jit_home"] = _step_remove_iam_jit_home(
         dry_run=dry_run,
         keep_audit_logs=keep_audit_logs,
         backup_dir=backup_dir,
+        data_dir=data_dir,
     )
 
     if dry_run:
@@ -1631,7 +1775,9 @@ def run_uninstall(
         return result
 
     # Post-check: observable state matches the success claim.
-    post = _verify_clean_state(keep_audit_logs=keep_audit_logs)
+    post = _verify_clean_state(
+        keep_audit_logs=keep_audit_logs, data_dir=data_dir,
+    )
     result["post_check"] = post
     if not post["clean"]:
         result["status"] = "incomplete"
@@ -1695,6 +1841,17 @@ def register_uninstall_command(main_group: click.Group) -> click.Command:
         ),
     )
     @click.option(
+        "--data-dir",
+        type=click.Path(file_okay=False, dir_okay=True, path_type=pathlib.Path),
+        default=None,
+        help=(
+            "Operate on this iam-jit data directory (default: "
+            "$IAM_JIT_DATA_DIR env, then ~/.iam-jit/). Mirrors "
+            "`iam-jit serve --data-dir` so operators can uninstall the "
+            "same tree they installed against. #617 MED-1."
+        ),
+    )
+    @click.option(
         "--json",
         "as_json",
         is_flag=True,
@@ -1707,6 +1864,7 @@ def register_uninstall_command(main_group: click.Group) -> click.Command:
         force: bool,
         keep_audit_logs: bool,
         backup_dir: pathlib.Path | None,
+        data_dir: pathlib.Path | None,
         as_json: bool,
     ) -> None:
         """Uninstall iam-jit + all bouncers (MRR-4 procedure).
@@ -1725,11 +1883,38 @@ def register_uninstall_command(main_group: click.Group) -> click.Command:
         iam-jit-created resources. Shell-profile env vars, MCP config
         entries, and browser-trusted MITM CAs are surfaced as
         ``manual_reminders`` — operator must remove those by hand.
+
+        Per #617 MED-1: ``--data-dir`` (and ``IAM_JIT_DATA_DIR`` env)
+        mirror ``iam-jit serve --data-dir`` so operators who installed
+        against a non-default home (e.g. ``/opt/iam-jit-prod``) can
+        uninstall symmetrically without HOME-redirect workarounds.
         """
+        # #617 MED-1: resolve the data dir up-front so every downstream
+        # surface (inventory print + halt check + run_uninstall + post
+        # output) operates on the same tree. The resolver records WHY
+        # this path was chosen so we can surface it to the operator.
+        env_val_set = bool(os.environ.get(IAM_JIT_DATA_DIR_ENV))
+        resolved_data_dir = resolve_data_dir(cli_flag=data_dir)
+        if data_dir is not None:
+            data_dir_source = "--data-dir flag"
+        elif env_val_set:
+            data_dir_source = f"${IAM_JIT_DATA_DIR_ENV} env"
+        else:
+            data_dir_source = "default (~/.iam-jit/)"
+
         # Pre-flight inventory so the confirmation prompt is honest.
-        inventory = _inventory_installed_state()
+        inventory = _inventory_installed_state(data_dir=resolved_data_dir)
 
         if not as_json:
+            # Surface the resolved data dir up-front per
+            # [[ibounce-honest-positioning]] — operator can verify they
+            # are about to destroy the right tree before confirming.
+            click.secho(
+                f"iam-jit uninstall — operating on: {resolved_data_dir}",
+                bold=True,
+            )
+            click.echo(f"  (resolved from: {data_dir_source})")
+            click.echo()
             _print_inventory_summary(inventory, dry_run=dry_run)
 
         # Halt-condition pre-check — even in dry-run we surface halts
@@ -1771,7 +1956,11 @@ def register_uninstall_command(main_group: click.Group) -> click.Command:
             force=force,
             keep_audit_logs=keep_audit_logs,
             backup_dir=backup_dir,
+            data_dir=resolved_data_dir,
         )
+        # #617 MED-1: record the source so JSON consumers can see how
+        # the path was chosen (flag vs env vs default).
+        result["data_dir_source"] = data_dir_source
 
         if as_json:
             click.echo(json.dumps(result, indent=2, sort_keys=True, default=str))
@@ -1908,8 +2097,10 @@ __all__ = [
     "GO_BINARIES",
     "AUDIT_BEARING_PATHS_REL",
     "IAM_JIT_HOME",
+    "IAM_JIT_DATA_DIR_ENV",
     "VENV_DIR",
     "register_uninstall_command",
+    "resolve_data_dir",
     "run_uninstall",
 ]
 
