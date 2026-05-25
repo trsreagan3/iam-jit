@@ -29,8 +29,8 @@ for AI-team buyers; the first one converts best for DevSecOps.
 
 > A deterministic-plus-LLM scoring engine that grades any IAM
 > policy 1-10 in under 100ms. Drop into your CI pipeline, your
-> agent runtime, or your existing JIT IAM tool. Free for the
-> first 100 requests/month.
+> agent runtime, or your existing JIT IAM tool. Free + open source
+> — runs locally, no hosted API, no rate limit.
 
 ### Above-the-fold CTAs
 

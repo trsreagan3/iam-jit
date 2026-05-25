@@ -767,7 +767,10 @@ def register_audit_query_group(parent_group: click.Group) -> click.Group:
         "--since",
         default=None,
         help="ISO 8601 / RFC 3339 lower time bound. Forwarded to each "
-             "bouncer verbatim. Example: `--since 2026-05-18T00:00:00Z`.",
+             "bouncer verbatim. Example: `--since 2026-05-18T00:00:00Z`. "
+             "Also accepts short-form tokens (`2y`, `6M`, `30d`, `24h`, "
+             "`60m`, `30s`) — years use a 365-day approximation + months "
+             "use 30-day (not calendar-boundary). (#498)",
     )
     @click.option(
         "--until",
@@ -823,7 +826,15 @@ def register_audit_query_group(parent_group: click.Group) -> click.Group:
              "events from all bouncers (cross-product correlation in a "
              "single SIEM-ingestible artifact). `csv` = tabular with "
              "the per-bouncer column. `summary` = per-bouncer + total "
-             "counts (no event bodies).",
+             "counts (no event bodies). `--json` is a convenience alias "
+             "for `--format jsonl` (#496).",
+    )
+    @click.option(
+        "--json", "json_alias",
+        is_flag=True,
+        default=False,
+        help="Convenience alias for `--format jsonl` (#496). Mutually "
+             "exclusive with `--format` set to anything other than `jsonl`.",
     )
     @click.option(
         "--audit-events-token",
@@ -904,6 +915,7 @@ def register_audit_query_group(parent_group: click.Group) -> click.Group:
         kind: str | None,
         limit: int,
         fmt: str,
+        json_alias: bool,
         audit_events_token: str | None,
         timeout: float,
         extract_permissions: bool,
@@ -960,6 +972,20 @@ def register_audit_query_group(parent_group: click.Group) -> click.Group:
         # per-bouncer parsers with HTTP 400; this expansion closes the
         # gap without requiring per-bouncer changes.
         filter_exprs = _expand_short_form_filters(filter_exprs)
+
+        # #496 §A72b — `--json` is a convenience alias for `--format jsonl`.
+        # Bare `--json` (default fmt='jsonl') is a no-op. `--json` combined
+        # with a non-jsonl explicit `--format` is a contradiction; reject
+        # rather than silently picking one (operator must clarify intent).
+        if json_alias:
+            if fmt != "jsonl":
+                raise click.UsageError(
+                    f"--json is a convenience alias for `--format jsonl`; "
+                    f"do not combine it with `--format {fmt}`. Drop "
+                    f"`--json` or change `--format` to `jsonl`.",
+                )
+            # fmt is already 'jsonl' (default or explicit) — alias is a no-op
+            # other than signaling intent in --help.
 
         # #436 / §A70 — parse the scope-filter classifier (None when
         # not provided so the existing call sites behave unchanged).

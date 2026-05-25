@@ -66,20 +66,16 @@ Each channel ships TODAY; the launch is making them visible.
 4. **Anyone using Terraform with IAM** — the GitHub Action is a
    self-serve adoption channel.
 
-## Pricing (proposed, draft)
+## Pricing — SUPERSEDED 2026-05-24
 
-| Tier | Price | Quota | Features |
-|---|---|---|---|
-| Free | $0 | 100 requests/month, by IP | Public API, all scoring features, no auth |
-| Indie | $19/mo | 5K requests/month | API key, deterministic scoring |
-| Pro | $99/mo | 50K requests/month | API key, LLM narrative (Opus), basic dashboard |
-| Team | $499/mo | 500K requests/month | + admin context API, Slack notifications, weekly digest |
-| Enterprise | $2K+/mo | Unlimited | + SOC 2 evidence export, dedicated calibration, SLA |
+The hosted-API pricing table that lived here was retired per
+`[[no-hosted-saas]]` (restored to 100% 2026-05-24, see #511/#512).
+The scorer ships as an offline CLI + Python library + GitHub Action;
+there is no hosted API and therefore no rate-limited free tier.
+There is no paid tier today either — v1.0 is OSS-only.
 
-Notes on pricing:
-- Free tier is generous enough for any solo dev / hobby project
-- Indie/Pro pricing matches the indie SaaS market for similar tools
-- Enterprise has room to negotiate up based on integration depth
+Original draft preserved in git history at commit `<pre-#511>` for
+reference if a hosted offering is ever revisited (no current plans).
 
 ## Pre-launch checklist
 
