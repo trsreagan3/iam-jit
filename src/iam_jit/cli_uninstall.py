@@ -250,6 +250,283 @@ def _read_cmdline(pid: int) -> str:
     return (proc.stdout or "").strip()
 
 
+# ---------------------------------------------------------------------------
+# #614 — multi-factor bouncer classification
+#
+# Per UAT-Lifecycle 2026-05-25 HIGH-2: a foreign process at
+# /tmp/dbounce-test (a TEST artifact from a different shell session)
+# was substring-classified as a "real dbounce" because its cmdline
+# contained the word "dbounce", then SIGTERM'd by uninstall. This is a
+# CRIT under [[creates-never-mutates]]: uninstall destroyed a process
+# OUTSIDE iam-jit's domain.
+#
+# Tighten classification to require ALL of:
+#   1. Executable path resolves to a known iam-jit install location
+#      (~/.iam-jit/venv/bin/, ~/go/bin/, /opt/iam-jit/bin/, etc.)
+#   2. Cmdline contains a bouncer-specific FLAG signature (not just
+#      the substring "dbounce" — e.g. `--dialect postgres` or
+#      `--mode discovery` or `--apiserver-url`)
+#   3. PID is owned by the current OS user (no cross-user destruction)
+#
+# If ANY check fails (including "could not determine"), the PID is
+# classified as ``unknown_port_owners`` (surfaced for operator review)
+# and U-5 halt fires. Per [[ibounce-honest-positioning]]: when
+# classification is uncertain, default to surfacing rather than
+# silently including/excluding.
+# ---------------------------------------------------------------------------
+
+
+# Install-path roots considered "ours" (any executable resolving under
+# one of these paths is a candidate for bouncer classification, given
+# the flag-signature + same-user checks also pass).
+_BOUNCER_INSTALL_PATH_ROOTS = (
+    pathlib.Path.home() / ".iam-jit" / "venv" / "bin",
+    pathlib.Path.home() / "go" / "bin",
+    pathlib.Path.home() / ".iam-jit" / "bouncer",
+    pathlib.Path("/opt/iam-jit/bin"),
+    pathlib.Path("/usr/local/bin"),
+)
+
+
+# Per-bouncer flag signatures. A cmdline must contain at least ONE of
+# the listed substrings to be classified as that bouncer kind. These
+# are bouncer-distinctive CLI flags (not generic words like "dbounce"
+# that arbitrary processes might mention).
+_BOUNCER_FLAG_SIGNATURES: dict[str, tuple[str, ...]] = {
+    "ibounce": (
+        "--mode discovery",
+        "--mode cooperative",
+        "--mode transparent",
+        "--proxy-port",
+        "--audit-log-path",
+    ),
+    "kbounce": (
+        "--apiserver-url",
+        "--rbac-mode",
+    ),
+    "kbouncer": (
+        "--apiserver-url",
+        "--rbac-mode",
+    ),
+    "dbounce": (
+        "--dialect postgres",
+        "--dialect mysql",
+        "--upstream-conn-string",
+    ),
+    "gbounce": (
+        "--http-mode",
+        "--allow-host",
+    ),
+}
+
+
+def _resolve_executable_path(pid: int) -> pathlib.Path | None:
+    """Resolve the on-disk executable path for ``pid``.
+
+    Returns the resolved path (with symlinks followed) or ``None`` if
+    the path cannot be determined for any reason — permission denied,
+    PID gone, platform without /proc, lsof unavailable, etc. Per
+    [[ibounce-honest-positioning]] callers should treat ``None`` as
+    "unknown" — never as "matches anything".
+
+    Linux: reads ``/proc/<pid>/exe`` symlink.
+    macOS / fallback: uses ``lsof -p <pid> -Fn`` and looks for the
+    ``txt`` (text segment / executable) entry.
+    """
+    # Linux fast-path: /proc/<pid>/exe symlink resolves to the binary.
+    proc_exe = pathlib.Path(f"/proc/{int(pid)}/exe")
+    if proc_exe.exists() or proc_exe.is_symlink():
+        try:
+            real = os.readlink(str(proc_exe))
+            return pathlib.Path(real).resolve()
+        except (OSError, PermissionError):
+            return None
+
+    # macOS / fallback: parse lsof -Fn output for the "txt" (executable
+    # text segment) entry. Format: alternating "p<PID>", "f<fd>",
+    # "n<name>" lines per file. The executable is the file whose fd
+    # field is literally "txt".
+    lsof = shutil.which("lsof")
+    if lsof is None:
+        return None
+    try:
+        proc = subprocess.run(
+            [lsof, "-p", str(int(pid)), "-Fftn"],
+            capture_output=True,
+            text=True,
+            check=False,
+            timeout=5.0,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+    current_fd: str | None = None
+    for line in (proc.stdout or "").splitlines():
+        if not line:
+            continue
+        tag = line[0]
+        val = line[1:]
+        if tag == "f":
+            current_fd = val
+        elif tag == "n" and current_fd == "txt":
+            try:
+                return pathlib.Path(val).resolve()
+            except (OSError, RuntimeError):
+                return pathlib.Path(val)
+    return None
+
+
+def _pid_owner_uid(pid: int) -> int | None:
+    """Return the UID that owns ``pid``, or ``None`` if undetermined.
+
+    Linux: stat ``/proc/<pid>``.
+    macOS / fallback: ``ps -o uid= -p <pid>``.
+
+    Per [[ibounce-honest-positioning]] callers should treat ``None`` as
+    "unknown — assume not ours" (the safer default for the cross-user
+    check).
+    """
+    proc_dir = pathlib.Path(f"/proc/{int(pid)}")
+    if proc_dir.exists():
+        try:
+            return proc_dir.stat().st_uid
+        except (OSError, PermissionError):
+            return None
+    ps = shutil.which("ps")
+    if ps is None:
+        return None
+    try:
+        proc = subprocess.run(
+            [ps, "-p", str(int(pid)), "-o", "uid="],
+            capture_output=True,
+            text=True,
+            check=False,
+            timeout=5.0,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+    raw = (proc.stdout or "").strip()
+    if not raw:
+        return None
+    try:
+        return int(raw.split()[0])
+    except (ValueError, IndexError):
+        return None
+
+
+def _path_under_known_install_root(p: pathlib.Path) -> bool:
+    """True iff ``p`` resolves under any entry in
+    :data:`_BOUNCER_INSTALL_PATH_ROOTS`."""
+    try:
+        p_resolved = p.resolve()
+    except (OSError, RuntimeError):
+        p_resolved = p
+    p_str = str(p_resolved)
+    for root in _BOUNCER_INSTALL_PATH_ROOTS:
+        try:
+            root_resolved = root.resolve()
+        except (OSError, RuntimeError):
+            root_resolved = root
+        root_str = str(root_resolved)
+        # Match if p is the root itself OR is under it.
+        if p_str == root_str or p_str.startswith(root_str + os.sep):
+            return True
+    return False
+
+
+def _classify_bouncer_pid_multifactor(
+    pid: int,
+    cmdline: str,
+) -> tuple[str | None, list[str]]:
+    """Multi-factor bouncer classification per #614.
+
+    Returns ``(kind, failed_checks)`` where:
+      * ``kind`` is the bouncer kind (one of "ibounce" / "kbounce" /
+        "kbouncer" / "dbounce" / "gbounce") if ALL THREE factors hold,
+        else ``None``.
+      * ``failed_checks`` is a list of human-readable reasons describing
+        which factor(s) failed — surfaced in the unknown_port_owners
+        entry so operators can see WHY a process wasn't classified
+        ("path not under known install root" / "no bouncer flag
+        signature" / "cross-user PID").
+
+    Per [[creates-never-mutates]]: we only classify (and ultimately
+    SIGTERM) a process as ours if we have positive evidence on all
+    three independent axes. Substring-matching the cmdline alone is
+    insufficient because foreign processes can incidentally contain
+    bouncer names (e.g. /tmp/dbounce-test from a different session).
+    """
+    failed: list[str] = []
+
+    # Factor 1: executable path under a known install root.
+    exe_path = _resolve_executable_path(pid)
+    path_ok = False
+    matched_kind_from_path: str | None = None
+    if exe_path is None:
+        failed.append("could not resolve executable path")
+    elif not _path_under_known_install_root(exe_path):
+        failed.append(
+            f"executable path {exe_path} not under known install root"
+        )
+    else:
+        path_ok = True
+        # Derive candidate kind from the basename of the executable.
+        basename = exe_path.name
+        for k in ("kbouncer", "ibounce", "kbounce", "dbounce", "gbounce"):
+            if basename == k:
+                matched_kind_from_path = k
+                break
+
+    # Factor 2: cmdline contains a bouncer-specific flag signature.
+    # If the path gave us a candidate kind, only check that kind's
+    # flags. Otherwise try every kind so a path-but-no-basename match
+    # (e.g. python interpreter executing console-script) still has a
+    # chance to pin a kind via flags.
+    flag_ok = False
+    matched_kind_from_flags: str | None = None
+    candidate_kinds: tuple[str, ...]
+    if matched_kind_from_path is not None:
+        candidate_kinds = (matched_kind_from_path,)
+    else:
+        candidate_kinds = tuple(_BOUNCER_FLAG_SIGNATURES.keys())
+    for kind in candidate_kinds:
+        for sig in _BOUNCER_FLAG_SIGNATURES.get(kind, ()):
+            if sig in cmdline:
+                flag_ok = True
+                matched_kind_from_flags = kind
+                break
+        if flag_ok:
+            break
+    if not flag_ok:
+        failed.append("no bouncer-specific flag signature in cmdline")
+
+    # Factor 3: same-user check (cross-user safety).
+    user_ok = False
+    try:
+        my_uid = os.geteuid()
+    except AttributeError:
+        # Windows — skip the user check (degrade gracefully).
+        my_uid = None
+    if my_uid is None:
+        user_ok = True  # platform without uid concept
+    else:
+        owner_uid = _pid_owner_uid(pid)
+        if owner_uid is None:
+            failed.append("could not determine PID owner UID")
+        elif owner_uid != my_uid:
+            failed.append(
+                f"PID owned by uid={owner_uid} (current uid={my_uid})"
+            )
+        else:
+            user_ok = True
+
+    if path_ok and flag_ok and user_ok:
+        # Prefer path-derived kind (more specific), fall back to flag-
+        # derived kind.
+        kind = matched_kind_from_path or matched_kind_from_flags
+        return kind, []
+    return None, failed
+
+
 def _infer_bouncer_kind_from_cmdline(cmdline: str) -> str | None:
     """Classify a process cmdline as one of our bouncer kinds.
 
@@ -410,7 +687,16 @@ def _inventory_installed_state() -> dict[str, Any]:
             if pid in seen_pids:
                 continue
             cmdline = _read_cmdline(pid)
-            kind = _infer_bouncer_kind_from_cmdline(cmdline)
+            # #614 — multi-factor classification (path + flag + user).
+            # Substring-matching the cmdline alone is insufficient
+            # because foreign processes (e.g. /tmp/dbounce-test from a
+            # different shell) can incidentally contain bouncer names.
+            # Per [[creates-never-mutates]] we only classify as ours
+            # when path-origin AND flag-signature AND same-user all
+            # hold; anything else lands in unknown_port_owners.
+            kind, failed_checks = _classify_bouncer_pid_multifactor(
+                pid, cmdline,
+            )
             if kind is not None:
                 inv["running_bouncers"].setdefault(kind, []).append(pid)
                 seen_pids.add(pid)
@@ -420,6 +706,8 @@ def _inventory_installed_state() -> dict[str, Any]:
                 # include the expected bouncer for this port so the
                 # operator sees "pid 1234 on :8766 (expected
                 # kbounce)" instead of just "pid 1234 on :8766".
+                # Per #614 also include failed_checks so the operator
+                # sees WHY classification failed.
                 inv["unknown_port_owners"].append({
                     "pid": pid,
                     "port": port,
@@ -427,6 +715,7 @@ def _inventory_installed_state() -> dict[str, Any]:
                         expected_kinds[0] if expected_kinds else None
                     ),
                     "cmdline": cmdline,
+                    "failed_checks": failed_checks,
                 })
 
     # Console scripts (step 3).
@@ -529,6 +818,42 @@ def _check_halt_conditions(
                 f"non-bouncer process(es) holding bouncer-typical "
                 f"port(s): {descs}. Manual inspection recommended "
                 f"per [[ibounce-honest-positioning]] before --force."
+            ),
+        })
+
+    # #614 U-5: foreign processes detected on bouncer-default ports
+    # AND those processes do NOT pass the multi-factor classification
+    # check. This is the stronger sibling of U-2: U-2 surfaces the
+    # unknown owner; U-5 records that destruction is REFUSED because
+    # at least one cross-domain process exists. The operator MUST
+    # --force to proceed; default behavior protects foreign processes
+    # per [[creates-never-mutates]].
+    #
+    # Per UAT-Lifecycle 2026-05-25 HIGH-2: this is the halt that
+    # would have prevented uninstall from SIGTERM'ing /tmp/dbounce-test
+    # in the first place.
+    if unknowns:
+        # Build operator-friendly suggested-next-steps text.
+        suggestions: list[str] = []
+        for u in unknowns:
+            cmd_snippet = (u.get("cmdline") or "")[:120]
+            suggestions.append(
+                f"pid={u['pid']} port=:{u['port']} cmdline={cmd_snippet}"
+            )
+        halts.append({
+            "id": "U-5",
+            "severity": "CRIT",
+            "reason": (
+                f"foreign process(es) on bouncer-default ports failed "
+                f"multi-factor bouncer classification per #614 "
+                f"(path + flag + user). Refusing to SIGTERM "
+                f"cross-domain processes per [[creates-never-mutates]]. "
+                f"Foreign: {'; '.join(suggestions)}. "
+                f"Either (a) kill those processes manually if you know "
+                f"what they are, OR (b) re-run with --force to bypass "
+                f"this halt (DANGEROUS — uninstall does NOT SIGTERM "
+                f"unknown_port_owners even with --force; but the halt "
+                f"will no longer block the rest of the uninstall)."
             ),
         })
 

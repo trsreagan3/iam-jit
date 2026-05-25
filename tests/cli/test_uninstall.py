@@ -60,6 +60,14 @@ def _default_isolation(monkeypatch: pytest.MonkeyPatch) -> None:
     U-3 posture-uninstall parity halt calls into posture's detector;
     without a stub, posture would see the dev machine's running
     bouncers and fire U-3 in tests that intend a clean baseline.
+
+    #614: also stub the multi-factor classifier helpers
+    (_resolve_executable_path + _pid_owner_uid) so they don't shell
+    out to lsof / ps on the dev machine. Default: path resolves under
+    ``~/.iam-jit/venv/bin/<derived-from-cmdline>`` AND owner UID is
+    current user — i.e. the "happy path" expected by pre-#614 tests
+    that just want a positive classification. Tests that exercise the
+    multi-factor logic itself override these.
     """
     monkeypatch.setattr(cu, "_find_pids_for_process", lambda name: [])
     monkeypatch.setattr(cu, "_port_bound", lambda port, host="127.0.0.1": False)
@@ -72,6 +80,27 @@ def _default_isolation(monkeypatch: pytest.MonkeyPatch) -> None:
         "_loopback_port_open",
         lambda port, host="127.0.0.1", timeout=0.25: False,
     )
+    # #614: by default, multi-factor checks PASS for any port-owner
+    # the test seeds (so existing tests that only stub _read_cmdline
+    # continue to classify positively). The flag-signature check still
+    # gates classification; tests that want a positive result must
+    # provide a cmdline containing a real bouncer flag, OR override
+    # these stubs.
+    import pathlib as _pathlib
+    fake_install_dir = _pathlib.Path.home() / ".iam-jit" / "venv" / "bin"
+    def _fake_exe(pid: int) -> _pathlib.Path | None:
+        # Map "obviously kbounce" / "obviously ibounce" cmdlines to a
+        # binary under the install root. Caller may override with a
+        # tighter monkeypatch.
+        cmd = cu._read_cmdline(pid) or ""
+        for k in ("kbouncer", "ibounce", "kbounce", "dbounce", "gbounce"):
+            if k in cmd:
+                return fake_install_dir / k
+        # Default: pretend it's under the install root anyway, so the
+        # flag-signature check is the deciding factor.
+        return fake_install_dir / "ibounce"
+    monkeypatch.setattr(cu, "_resolve_executable_path", _fake_exe)
+    monkeypatch.setattr(cu, "_pid_owner_uid", lambda pid: os.geteuid())
 
 
 @pytest.fixture
@@ -776,11 +805,14 @@ def test_uninstall_dry_run_detects_python_module_invocation(
 
     # ps -p PID -o command= reveals a `python ... ibounce run --port 7401`
     # invocation — exactly the shape that defeats `pgrep -x ibounce`.
+    # #614: include a bouncer-specific flag signature so the multi-
+    # factor classifier accepts it.
     monkeypatch.setattr(
         cu, "_read_cmdline",
         lambda pid: (
             "/opt/homebrew/bin/python3.12 "
-            "/Users/reagan/.iam-jit/venv/bin/ibounce run --port 7401"
+            "/Users/reagan/.iam-jit/venv/bin/ibounce run "
+            "--mode discovery --proxy-port 7401"
             if pid == fake_pid else ""
         ),
     )
@@ -835,9 +867,12 @@ def test_uninstall_dry_run_port_owner_cross_referenced_multi_port(
     def fake_cmdline(pid: int) -> str:
         for p, owner_pid in port_to_pid.items():
             if pid == owner_pid:
+                # #614: bouncer-specific flag (--proxy-port) required
+                # for multi-factor classification.
                 return (
                     f"/opt/homebrew/bin/python3.12 "
-                    f"/Users/reagan/.iam-jit/venv/bin/ibounce run --port {p}"
+                    f"/Users/reagan/.iam-jit/venv/bin/ibounce run "
+                    f"--mode discovery --proxy-port {p}"
                 )
         return ""
 
@@ -909,7 +944,10 @@ def test_uninstall_dry_run_dedup_pid_from_both_methods(
     )
     monkeypatch.setattr(
         cu, "_read_cmdline",
-        lambda pid: f"ibounce run --port 7401" if pid == same_pid else "",
+        lambda pid: (
+            "ibounce run --mode discovery --proxy-port 7401"
+            if pid == same_pid else ""
+        ),
     )
 
     inv = cu._inventory_installed_state()
@@ -1009,7 +1047,8 @@ def test_uninstall_sabotage_no_op_cross_reference_is_load_bearing(
         cu, "_read_cmdline",
         lambda pid: (
             "/opt/homebrew/bin/python3.12 "
-            "/Users/reagan/.iam-jit/venv/bin/ibounce run --port 7401"
+            "/Users/reagan/.iam-jit/venv/bin/ibounce run "
+            "--mode discovery --proxy-port 7401"
         ),
     )
 
@@ -1085,12 +1124,33 @@ def test_uninstall_dry_run_real_lsof_and_ps_end_to_end(
     )
     fake_ibounce.chmod(0o755)
 
+    # #614: include bouncer-specific flag signature so the multi-
+    # factor classifier accepts the subprocess. The real python
+    # interpreter at sys.executable is NOT under a known install root,
+    # so we override _resolve_executable_path to claim it IS under
+    # ~/.iam-jit/venv/bin/ibounce for this specific PID (the rest of
+    # the lsof + ps + TCP-probe pipeline stays REAL).
     proc = subprocess.Popen(
-        [sys.executable, str(fake_ibounce), "run", "--port", str(test_port)],
+        [
+            sys.executable, str(fake_ibounce),
+            "run", "--port", str(test_port),
+            "--mode", "discovery", "--proxy-port", str(test_port),
+        ],
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
         text=True,
     )
+    # Override path-check to PASS for our spawned PID only (other PIDs
+    # see real-lookup so a foreign process can't sneak in).
+    spawned_pid = proc.pid
+    fake_install_dir = pathlib.Path.home() / ".iam-jit" / "venv" / "bin"
+    monkeypatch.setattr(
+        cu, "_resolve_executable_path",
+        lambda pid: (
+            fake_install_dir / "ibounce" if pid == spawned_pid else None
+        ),
+    )
+    monkeypatch.setattr(cu, "_pid_owner_uid", lambda pid: os.geteuid())
     try:
         # Wait for READY signal (up to 5s) — use line buffering.
         ready_deadline = time.time() + 5.0
@@ -1150,10 +1210,22 @@ def test_uninstall_dry_run_real_lsof_and_ps_end_to_end(
 
 
 def _fake_cmdline_for(kind: str, port: int) -> str:
-    """Helper: cmdline shape that _infer_bouncer_kind_from_cmdline
-    will positively classify as ``kind``."""
+    """Helper: cmdline shape that the multi-factor classifier (#614)
+    will positively classify as ``kind``.
+
+    Each kind needs at least ONE bouncer-specific flag signature from
+    :data:`cu._BOUNCER_FLAG_SIGNATURES` to pass the flag-check.
+    """
+    flag_per_kind = {
+        "ibounce": "--mode discovery --proxy-port 7401",
+        "kbounce": "--apiserver-url https://kube.local",
+        "kbouncer": "--apiserver-url https://kube.local",
+        "dbounce": "--dialect postgres --upstream-conn-string ignored",
+        "gbounce": "--http-mode --allow-host example.com",
+    }
+    flags = flag_per_kind.get(kind, "")
     return (
-        f"/Users/op/go/bin/{kind} run --port {port}"
+        f"/Users/op/go/bin/{kind} run --port {port} {flags}"
     )
 
 
@@ -1463,7 +1535,8 @@ def test_uninstall_regression_ibounce_still_detected_after_608(
         cu, "_read_cmdline",
         lambda pid: (
             "/opt/homebrew/bin/python3.12 "
-            "/Users/op/.iam-jit/venv/bin/ibounce run --port 7401"
+            "/Users/op/.iam-jit/venv/bin/ibounce run "
+            "--mode discovery --proxy-port 7401"
             if pid == fake_pid else ""
         ),
     )
@@ -1561,4 +1634,399 @@ def test_uninstall_sabotage_default_ports_strip_kbounce_loses_detection(
         f"sabotage smoke: :8766 should not be in bound_ports when "
         f"kbounce is stripped from _BOUNCER_DEFAULT_PORTS; "
         f"got bound_ports={inv['bound_ports']}"
+    )
+
+
+# ---------------------------------------------------------------------------
+# #614 CRIT — multi-factor bouncer classification (path + flag + user)
+#
+# Per UAT-Lifecycle 2026-05-25 HIGH-2: substring-classification of a
+# foreign /tmp/dbounce-test process led to SIGTERM outside iam-jit's
+# domain. These tests prove the multi-factor check protects foreign
+# processes per [[creates-never-mutates]].
+# ---------------------------------------------------------------------------
+
+
+def _seed_unknown_port_owner(
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    port: int,
+    pid: int,
+    cmdline: str,
+    exe_path: pathlib.Path | None,
+    owner_uid: int | None,
+) -> None:
+    """Helper: wire up the four monkeypatches that drive multi-factor
+    classification for ``pid`` on ``port``. Tests vary one factor at a
+    time to drive specific failure paths."""
+    monkeypatch.setattr(cu, "_find_pids_for_process", lambda name: [])
+    monkeypatch.setattr(
+        cu, "_port_bound", lambda p, host="127.0.0.1": p == port,
+    )
+    monkeypatch.setattr(
+        cu, "_lsof_pids_on_port",
+        lambda p: [pid] if p == port else [],
+    )
+    monkeypatch.setattr(
+        cu, "_read_cmdline",
+        lambda p: cmdline if p == pid else "",
+    )
+    monkeypatch.setattr(
+        cu, "_resolve_executable_path",
+        lambda p: exe_path if p == pid else None,
+    )
+    monkeypatch.setattr(
+        cu, "_pid_owner_uid",
+        lambda p: owner_uid if p == pid else None,
+    )
+
+
+def test_foreign_process_with_bouncer_name_in_cmdline_not_killed(
+    isolated_iam_jit_home: pathlib.Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """#614 CRIT: a foreign process whose cmdline incidentally contains
+    "dbounce" (e.g. /tmp/dbounce-test from a different shell session)
+    must NOT be classified as a real dbounce.
+
+    Pre-#614: substring-match said "this is dbounce" → uninstall
+    SIGTERM'd it. This is the EXACT scenario UAT-Lifecycle 2026-05-25
+    HIGH-2 caught.
+    """
+    _seed_install(isolated_iam_jit_home)
+
+    # /tmp/dbounce-test on port 5433 — cmdline contains "dbounce" but:
+    #   - executable path is /tmp/dbounce-test (NOT under install root)
+    #   - cmdline has no bouncer-specific flag signature
+    foreign_pid = 99001
+    _seed_unknown_port_owner(
+        monkeypatch,
+        port=5433,
+        pid=foreign_pid,
+        cmdline="/tmp/dbounce-test run --audit-log-path /tmp/foo.jsonl",
+        # NOTE: --audit-log-path is an ibounce flag, not a dbounce flag.
+        # Even though the cmdline contains "dbounce" (in the path) AND
+        # an ibounce flag, the path-origin check must STILL fail
+        # because /tmp/dbounce-test is not under any known install root.
+        exe_path=pathlib.Path("/tmp/dbounce-test"),
+        owner_uid=os.geteuid(),
+    )
+
+    inv = cu._inventory_installed_state()
+
+    # Observable: NOT in running_bouncers.
+    flat_pids: list[int] = []
+    for pids in inv["running_bouncers"].values():
+        flat_pids.extend(pids)
+    assert foreign_pid not in flat_pids, (
+        f"#614 CRIT: foreign /tmp/dbounce-test (pid={foreign_pid}) "
+        f"silently classified as bouncer; running_bouncers="
+        f"{inv['running_bouncers']}"
+    )
+
+    # Observable: IS in unknown_port_owners.
+    unknown_pids = [u["pid"] for u in inv["unknown_port_owners"]]
+    assert foreign_pid in unknown_pids, (
+        f"#614 CRIT: foreign PID must surface in unknown_port_owners "
+        f"for operator review; got {inv['unknown_port_owners']}"
+    )
+    # Observable: failed_checks field explains WHY classification failed.
+    foreign_entry = next(
+        u for u in inv["unknown_port_owners"] if u["pid"] == foreign_pid
+    )
+    assert foreign_entry.get("failed_checks"), (
+        f"failed_checks must be present so operator sees why: {foreign_entry}"
+    )
+    failed_text = " ".join(foreign_entry["failed_checks"])
+    assert "install root" in failed_text or "executable" in failed_text, (
+        f"failed_checks should call out the path failure: {failed_text}"
+    )
+
+    # Observable: U-5 halt fires (refuses uninstall without --force).
+    halts = cu._check_halt_conditions(inv)
+    halt_ids = [h["id"] for h in halts]
+    assert "U-5" in halt_ids, (
+        f"#614 U-5 halt must fire when foreign process detected; "
+        f"got halts={halts}"
+    )
+
+    # Observable end-to-end: run_uninstall halts (no destructive steps).
+    result = cu.run_uninstall(dry_run=False, force=False)
+    assert result["status"] == "halted"
+    # Observable: the seeded install state is INTACT (nothing removed).
+    assert (isolated_iam_jit_home / "bouncer" / "state.db").exists()
+    assert (isolated_iam_jit_home / "venv" / "bin" / "ibounce").exists()
+
+
+def test_real_bouncer_install_path_correctly_classified(
+    isolated_iam_jit_home: pathlib.Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """#614: a REAL dbounce at ~/go/bin/dbounce with --dialect postgres
+    flag, owned by current user, must classify correctly (regression
+    guard against over-tightening)."""
+    _seed_install(isolated_iam_jit_home)
+
+    real_pid = 99002
+    real_exe = pathlib.Path.home() / "go" / "bin" / "dbounce"
+    _seed_unknown_port_owner(
+        monkeypatch,
+        port=5433,
+        pid=real_pid,
+        cmdline=(
+            f"{real_exe} run --dialect postgres "
+            "--upstream-conn-string postgres://x"
+        ),
+        exe_path=real_exe,
+        owner_uid=os.geteuid(),
+    )
+
+    inv = cu._inventory_installed_state()
+
+    # Observable: classified as dbounce.
+    assert "dbounce" in inv["running_bouncers"], (
+        f"real dbounce at {real_exe} with --dialect postgres flag "
+        f"should classify; got {inv['running_bouncers']} unknown="
+        f"{inv['unknown_port_owners']}"
+    )
+    assert real_pid in inv["running_bouncers"]["dbounce"]
+    # Observable: NOT in unknown_port_owners.
+    unknown_pids = [u["pid"] for u in inv["unknown_port_owners"]]
+    assert real_pid not in unknown_pids
+
+
+def test_path_check_fails_defaults_to_unknown(
+    isolated_iam_jit_home: pathlib.Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """#614: when _resolve_executable_path returns None (permission
+    denied / race / etc.) the safer default is to classify as
+    unknown — never as bouncer-by-cmdline-alone."""
+    _seed_install(isolated_iam_jit_home)
+
+    unknown_pid = 99003
+    _seed_unknown_port_owner(
+        monkeypatch,
+        port=8766,
+        pid=unknown_pid,
+        cmdline="kbounce run --apiserver-url https://kube.local",
+        exe_path=None,  # path lookup failed
+        owner_uid=os.geteuid(),
+    )
+
+    inv = cu._inventory_installed_state()
+    # Observable: NOT classified despite a matching cmdline + flag.
+    flat_pids: list[int] = []
+    for pids in inv["running_bouncers"].values():
+        flat_pids.extend(pids)
+    assert unknown_pid not in flat_pids, (
+        "path-check failure must default to unknown — never trust "
+        "cmdline alone; got running_bouncers={inv['running_bouncers']}"
+    )
+    # Observable: surfaced in unknown_port_owners.
+    assert unknown_pid in [u["pid"] for u in inv["unknown_port_owners"]]
+    # Observable: failed_checks names the path failure.
+    entry = next(
+        u for u in inv["unknown_port_owners"] if u["pid"] == unknown_pid
+    )
+    failed_text = " ".join(entry["failed_checks"])
+    assert "executable" in failed_text or "path" in failed_text
+
+
+def test_cross_user_process_not_killed(
+    isolated_iam_jit_home: pathlib.Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """#614: a process owned by a different OS user must NEVER be
+    classified as ours — cross-user destruction is the worst-case
+    [[creates-never-mutates]] violation."""
+    _seed_install(isolated_iam_jit_home)
+
+    other_user_pid = 99004
+    real_exe = pathlib.Path.home() / "go" / "bin" / "dbounce"
+    # uid 0 = root; clearly NOT current user.
+    _seed_unknown_port_owner(
+        monkeypatch,
+        port=5433,
+        pid=other_user_pid,
+        cmdline=f"{real_exe} run --dialect postgres",
+        exe_path=real_exe,
+        owner_uid=0,
+    )
+
+    inv = cu._inventory_installed_state()
+    flat_pids: list[int] = []
+    for pids in inv["running_bouncers"].values():
+        flat_pids.extend(pids)
+    assert other_user_pid not in flat_pids, (
+        "cross-user PID must never be classified as ours per "
+        "[[creates-never-mutates]]; got "
+        f"running_bouncers={inv['running_bouncers']}"
+    )
+    assert other_user_pid in [
+        u["pid"] for u in inv["unknown_port_owners"]
+    ]
+    entry = next(
+        u for u in inv["unknown_port_owners"]
+        if u["pid"] == other_user_pid
+    )
+    failed_text = " ".join(entry["failed_checks"])
+    assert "uid" in failed_text or "owner" in failed_text
+
+
+def test_bouncer_flag_signature_required(
+    isolated_iam_jit_home: pathlib.Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """#614: process at correct install path + correct user but WITHOUT
+    a bouncer-specific flag signature must NOT classify. This catches
+    the "someone built a script called ibounce at ~/go/bin/ibounce
+    that does something else entirely" scenario."""
+    _seed_install(isolated_iam_jit_home)
+
+    impostor_pid = 99005
+    real_exe = pathlib.Path.home() / "go" / "bin" / "ibounce"
+    _seed_unknown_port_owner(
+        monkeypatch,
+        port=8767,
+        pid=impostor_pid,
+        # Path matches AND user matches BUT no bouncer flag — just
+        # generic "run" + a non-bouncer flag.
+        cmdline=f"{real_exe} run --some-other-flag",
+        exe_path=real_exe,
+        owner_uid=os.geteuid(),
+    )
+
+    inv = cu._inventory_installed_state()
+    flat_pids: list[int] = []
+    for pids in inv["running_bouncers"].values():
+        flat_pids.extend(pids)
+    assert impostor_pid not in flat_pids, (
+        "process without bouncer flag signature must not classify; "
+        f"got running_bouncers={inv['running_bouncers']}"
+    )
+    entry = next(
+        u for u in inv["unknown_port_owners"] if u["pid"] == impostor_pid
+    )
+    failed_text = " ".join(entry["failed_checks"])
+    assert "flag" in failed_text or "signature" in failed_text
+
+
+def test_all_4_bouncers_with_proper_paths_classified(
+    isolated_iam_jit_home: pathlib.Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """#614: all 4 bouncers at correct install paths with correct flag
+    signatures classify correctly (parity regression guard)."""
+    _seed_install(isolated_iam_jit_home)
+    monkeypatch.setattr(cu, "_find_pids_for_process", lambda name: [])
+
+    # Layout: each bouncer at ~/go/bin/<name>, port from
+    # _BOUNCER_DEFAULT_PORTS, cmdline with a flag from
+    # _BOUNCER_FLAG_SIGNATURES.
+    go_bin = pathlib.Path.home() / "go" / "bin"
+    layout: dict[int, tuple[str, int]] = {
+        8767: ("ibounce", 51001),
+        8766: ("kbounce", 52001),
+        5433: ("dbounce", 53001),
+        8080: ("gbounce", 54001),
+    }
+    cmdline_per_kind = {
+        "ibounce": "--mode discovery --proxy-port 8767",
+        "kbounce": "--apiserver-url https://kube.local",
+        "dbounce": "--dialect postgres --upstream-conn-string ignored",
+        "gbounce": "--http-mode --allow-host example.com",
+    }
+    exe_per_pid = {p: go_bin / k for (k, p) in layout.values()}
+    cmdline_per_pid = {
+        p: f"{go_bin / k} run {cmdline_per_kind[k]}"
+        for (k, p) in layout.values()
+    }
+    monkeypatch.setattr(
+        cu, "_port_bound",
+        lambda port, host="127.0.0.1": port in layout,
+    )
+    monkeypatch.setattr(
+        cu, "_lsof_pids_on_port",
+        lambda port: [layout[port][1]] if port in layout else [],
+    )
+    monkeypatch.setattr(
+        cu, "_read_cmdline",
+        lambda pid: cmdline_per_pid.get(pid, ""),
+    )
+    monkeypatch.setattr(
+        cu, "_resolve_executable_path",
+        lambda pid: exe_per_pid.get(pid),
+    )
+    monkeypatch.setattr(cu, "_pid_owner_uid", lambda pid: os.geteuid())
+
+    inv = cu._inventory_installed_state()
+    detected = set(inv["running_bouncers"].keys())
+    for kind in ("ibounce", "kbounce", "dbounce", "gbounce"):
+        assert kind in detected, (
+            f"#614 parity: {kind} not classified; running_bouncers="
+            f"{inv['running_bouncers']} unknown={inv['unknown_port_owners']}"
+        )
+    # Observable: no foreign-process halt fires (all classified).
+    halts = cu._check_halt_conditions(inv)
+    halt_ids = [h["id"] for h in halts]
+    assert "U-5" not in halt_ids, (
+        f"U-5 should NOT fire when all 4 bouncers classify; got {halts}"
+    )
+
+
+def test_614_sabotage_path_check_made_lenient_breaks_foreign_protection(
+    isolated_iam_jit_home: pathlib.Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """#614 sabotage-check per CONTRIBUTING.md: prove the path-check is
+    LOAD-BEARING. If we monkeypatch the path-check to always pass,
+    the foreign /tmp/dbounce-test process MUST get classified — which
+    would re-introduce the CRIT bug. The fact that classification flips
+    when ONLY the path-check is sabotaged proves the path-check is
+    doing the protection work (not some unrelated coincidence)."""
+    _seed_install(isolated_iam_jit_home)
+
+    foreign_pid = 99006
+    # Set up the foreign-process scenario from
+    # test_foreign_process_with_bouncer_name_in_cmdline_not_killed
+    # BUT add a real ibounce flag so the flag-check passes (only the
+    # path-check should be the gate).
+    _seed_unknown_port_owner(
+        monkeypatch,
+        port=5433,
+        pid=foreign_pid,
+        cmdline=(
+            "/tmp/dbounce-test run --dialect postgres "
+            "--upstream-conn-string ignored"
+        ),
+        exe_path=pathlib.Path("/tmp/dbounce-test"),
+        owner_uid=os.geteuid(),
+    )
+
+    # Baseline: foreign process is NOT classified (path-check failing).
+    inv_real = cu._inventory_installed_state()
+    flat_real: list[int] = []
+    for pids in inv_real["running_bouncers"].values():
+        flat_real.extend(pids)
+    assert foreign_pid not in flat_real, (
+        "baseline: foreign process should not be classified (path "
+        "check is doing its job)"
+    )
+
+    # SABOTAGE: make path-check unconditionally pass.
+    monkeypatch.setattr(
+        cu, "_path_under_known_install_root", lambda p: True,
+    )
+
+    inv_sabotaged = cu._inventory_installed_state()
+    flat_sabotaged: list[int] = []
+    for pids in inv_sabotaged["running_bouncers"].values():
+        flat_sabotaged.extend(pids)
+    assert foreign_pid in flat_sabotaged, (
+        "#614 sabotage: with the path-check stubbed to always pass, "
+        "the foreign /tmp/dbounce-test SHOULD now classify (which is "
+        "exactly the CRIT we're preventing). If it does NOT classify, "
+        "some other check is doing the protection work — meaning the "
+        "path-check isn't the load-bearing gate the brief claims."
     )
