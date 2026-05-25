@@ -324,10 +324,23 @@ def sibling_action_prefixes(action: str) -> set[str]:
 
     Per ``docs/PROFILE-GENERATION-DESIGN.md`` §2.2 adjacency: if the
     operator observed ``s3:GetObject``, lean-permissive should consider
-    including ``s3:ListObject*`` / ``s3:DescribeObject*`` /
-    ``s3:HeadObject`` as low-blast-radius sibling reads.
+    including the OTHER real ``Get*`` shapes that touch the same noun
+    (``s3:GetObjectAcl``, ``s3:GetObjectTagging``, …) as low-blast-
+    radius sibling reads.
 
-    Pure function — same inputs always produce the same output. No I/O.
+    Per #580 GAP-1 (UAT-A 2026-05-25): pattern-generated candidates
+    are filtered through the real AWS IAM action catalogue via
+    :func:`iam_jit.profile_heuristic.aws_catalog.is_real_aws_action`.
+    Patterns that do NOT match any real action are dropped. The pre-
+    fix code emitted shapes like ``s3:CheckObject*`` / ``s3:HasObject*``
+    that don't exist in AWS — installed in a profile those allows would
+    be silent no-ops, defeating the [[ibounce-honest-positioning]]
+    contract that an allow rule means "this will actually allow
+    something." Per [[scorer-is-ground-truth]] the AWS catalogue is the
+    ground truth here; the heuristic anchors to it.
+
+    Pure function (modulo the policy_sentry-backed catalogue lookup,
+    which is deterministic). No network I/O.
 
     Args:
         action: an AWS-shape action (``service:Action``). Non-AWS
@@ -335,12 +348,11 @@ def sibling_action_prefixes(action: str) -> set[str]:
             because their action grammar isn't verb-prefix based.
 
     Returns:
-        A set of ``service:VerbPrefix*`` patterns (the trailing ``*`` is
-        intentional — the Phase 3 caller can either match exactly the
-        observed object suffix or widen, per its disposition).
-
-        Returns the empty set when the verb isn't in any known sibling
-        band, or when the action isn't AWS-shape.
+        A set of ``service:VerbPrefix*`` patterns. Each pattern is
+        guaranteed to match at least one real AWS IAM action at the
+        time of the bundled policy_sentry catalogue. Patterns whose
+        verb isn't in any sibling band, or whose service is unknown to
+        AWS, return an empty set.
     """
     if not isinstance(action, str) or ":" not in action:
         return set()
@@ -358,19 +370,25 @@ def sibling_action_prefixes(action: str) -> set[str]:
 
     # Strip the original verb from the name to get the "object" suffix
     # (e.g. GetObject -> Object). Phase 3 callers want patterns like
-    # s3:ListObject* / s3:DescribeObject* that retain the noun.
+    # s3:GetObject* / s3:PutObject* that retain the noun.
     object_suffix = name[len(verb):]
+
+    # Lazy import to avoid a module-load-time dependency cycle (the
+    # aws_catalog module sits in the same package).
+    from .aws_catalog import is_real_aws_action
 
     out: set[str] = set()
     for sibling_verb in siblings:
         if object_suffix:
-            # Emit ``s3:ListObject*`` rather than ``s3:List*`` so the
-            # Phase 3 caller stays narrow (sibling adjacency, NOT
-            # service-wide verb widening). The trailing ``*`` covers
-            # the natural variation (ListObjects vs ListObjectV2 etc.).
-            out.add(f"{service}:{sibling_verb}{object_suffix}*")
+            # Emit narrow noun-anchored pattern. Stays within sibling
+            # adjacency (NOT service-wide verb widening).
+            candidate = f"{service}:{sibling_verb}{object_suffix}*"
         else:
-            # Bare verb (e.g. action was ``s3:Get``) — emit
-            # ``s3:List*`` etc.
-            out.add(f"{service}:{sibling_verb}*")
+            # Bare verb (e.g. action was ``s3:Get``) — emit ``s3:List*``.
+            candidate = f"{service}:{sibling_verb}*"
+        # #580 GAP-1: drop pattern-generated candidates that don't
+        # match any real AWS action. Per [[ibounce-honest-positioning]]
+        # silent-no-op allows aren't acceptable.
+        if is_real_aws_action(candidate):
+            out.add(candidate)
     return out

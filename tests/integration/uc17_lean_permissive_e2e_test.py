@@ -335,26 +335,27 @@ def test_uc17_happy_path_lean_permissive_via_real_mcp(
         for a in rule.get("actions") or []:
             all_actions.add(a)
 
-    # ===== STRONG READ s3:GetObject + sibling expansion =====
+    # ===== STRONG READ s3:GetObject — exact-action allow only =====
     assert "s3:GetObject" in all_actions, (
         f"STRONG READ s3:GetObject missing from allows; got {all_actions}"
     )
-    # Sibling expansion produces s3:ListObject* / s3:DescribeObject* /
-    # s3:HeadObject* per the unit tests + sibling_action_prefixes contract.
-    s3_siblings_found = {
-        a for a in all_actions
-        if a.startswith("s3:") and a != "s3:GetObject"
-    }
-    assert s3_siblings_found, (
-        f"STRONG READ should expand siblings; got s3-actions only: "
-        f"{[a for a in all_actions if a.startswith('s3:')]}"
-    )
-    # Specifically the canonical sibling shapes the unit tests pin.
-    assert "s3:ListObject*" in all_actions, (
-        f"s3:ListObject* sibling missing; got {all_actions}"
-    )
+    # Per #580 GAP-1 (UAT-A 2026-05-25): s3:GetObject has NO catalogue-
+    # anchored siblings because AWS S3 reads are all Get*-shape (Get is
+    # the source verb, excluded from its own sibling set). Pre-fix this
+    # block asserted ``s3:ListObject*`` / ``s3:DescribeObject*`` /
+    # ``s3:HeadObject*`` — none exist in AWS. Per
+    # [[ibounce-honest-positioning]] silent no-ops are unacceptable; the
+    # catalogue gate drops them. Verify the hallucinations are absent.
+    for halluc in (
+        "s3:ListObject*", "s3:DescribeObject*", "s3:HeadObject*",
+        "s3:CheckObject*", "s3:HasObject*", "s3:CountObject*",
+    ):
+        assert halluc not in all_actions, (
+            f"hallucinated sibling {halluc} present; catalogue gate "
+            f"broken: {all_actions}"
+        )
 
-    # ===== STRONG READ dynamodb:Query + sibling expansion =====
+    # ===== STRONG READ dynamodb:Query + catalogue-anchored siblings =====
     assert "dynamodb:Query" in all_actions, (
         f"STRONG READ dynamodb:Query missing; got {all_actions}"
     )
@@ -365,6 +366,14 @@ def test_uc17_happy_path_lean_permissive_via_real_mcp(
     assert dynamodb_siblings, (
         f"STRONG READ dynamodb:Query should expand siblings; got: "
         f"{[a for a in all_actions if a.startswith('dynamodb:')]}"
+    )
+    # Catalogue-anchored: dynamodb:Get*/List*/Describe*/Scan* all map to
+    # real AWS DynamoDB actions, so the globs survive the catalogue gate.
+    assert "dynamodb:Get*" in all_actions, (
+        f"dynamodb:Get* sibling missing; got {all_actions}"
+    )
+    assert "dynamodb:List*" in all_actions, (
+        f"dynamodb:List* sibling missing; got {all_actions}"
     )
 
     # ===== WEAK WRITE s3:PutObject SKIPPED =====
@@ -424,9 +433,12 @@ def test_uc17_happy_path_lean_permissive_via_real_mcp(
     assert "safety_floor_applied=True" in summary, (
         f"provenance must show safety_floor_applied=True; got: {summary!r}"
     )
-    # Two STRONG READ actions (s3:GetObject + dynamodb:Query) → at least
-    # 2 sibling expansions. (siblings_expanded_count counts STRONG READ
-    # actions that produced ≥ 1 sibling action — per the implementation.)
+    # Per #580 GAP-1: siblings_expanded counts only the STRONG READ
+    # actions that produced >= 1 catalogue-anchored sibling. s3:GetObject
+    # produces empty siblings (S3 reads are all Get*-shape), so only
+    # dynamodb:Query contributes. Pre-fix this asserted >= 2 on the
+    # assumption that s3:GetObject pattern-generated siblings would
+    # count — those were hallucinations + are correctly dropped now.
     import re as _re
     m = _re.search(r"siblings_expanded=(\d+)", summary)
     assert m is not None, (
@@ -434,9 +446,10 @@ def test_uc17_happy_path_lean_permissive_via_real_mcp(
         f"{summary!r}"
     )
     siblings_count = int(m.group(1))
-    assert siblings_count >= 2, (
-        f"two STRONG READ actions should each contribute to "
-        f"siblings_expanded; got {siblings_count} in: {summary!r}"
+    assert siblings_count >= 1, (
+        f"at least one STRONG READ (dynamodb:Query) should contribute "
+        f"catalogue-anchored siblings; got {siblings_count} in: "
+        f"{summary!r}"
     )
 
     # ===== Honest: STARTING POINT header in rendered YAML =====
@@ -501,9 +514,14 @@ def test_uc17_happy_path_sabotage_check_siblings_assertion(
 
     monkeypatch.setattr(pg, "_lean_permissive_fallback_profile", _no_siblings)
 
-    events = _strong_ibounce("s3:GetObject", [
-        "arn:aws:s3:::bucket-a/k1",
-        "arn:aws:s3:::bucket-b/k2",
+    # Use dynamodb:Query — its catalogue-anchored siblings ARE non-empty
+    # under the post-#580-GAP-1 contract, so stripping them is a
+    # meaningful sabotage (vs s3:GetObject whose siblings are correctly
+    # empty post-fix and would make the sabotage indistinguishable from
+    # the natural behaviour).
+    events = _strong_ibounce("dynamodb:Query", [
+        "arn:aws:dynamodb:us-east-1:111122223333:table/orders",
+        "arn:aws:dynamodb:us-east-1:111122223333:table/customers",
     ])
     result = _mcp_call_generate_from_audit({
         "events": events,
@@ -520,19 +538,19 @@ def test_uc17_happy_path_sabotage_check_siblings_assertion(
     # when siblings were stripped. If this passes silently, the happy-path
     # test is broken (it would also silently pass on a regressed
     # implementation).
-    s3_siblings_found = {
+    dynamodb_siblings_found = {
         a for a in all_actions
-        if a.startswith("s3:") and a != "s3:GetObject"
+        if a.startswith("dynamodb:") and a != "dynamodb:Query"
     }
     with pytest.raises(AssertionError):
-        assert s3_siblings_found, (
+        assert dynamodb_siblings_found, (
             "this is the load-bearing sibling-expansion assertion from "
             "the happy-path test; verifying it actually fires when "
             "siblings are absent"
         )
-    # Also sabotage the specific s3:ListObject* check.
+    # Also sabotage a specific catalogue-anchored sibling check.
     with pytest.raises(AssertionError):
-        assert "s3:ListObject*" in all_actions, (
+        assert "dynamodb:Get*" in all_actions, (
             "sibling sub-assertion must also fire when siblings stripped"
         )
 
@@ -875,9 +893,12 @@ def test_uc17_provenance_honesty_via_real_mcp(
     monkeypatch.delenv("IAM_JIT_ENABLE_SIDE_LLM", raising=False)
 
     events: list[dict[str, Any]] = []
-    # STRONG READ — s3:GetObject across 2 resources, ≥5 obs.
-    events.extend(_strong_ibounce("s3:GetObject", [
-        "arn:aws:s3:::a/k1", "arn:aws:s3:::b/k2",
+    # STRONG READ — dynamodb:Query across 2 resources, ≥5 obs. Per #580
+    # GAP-1 use a source whose catalogue-anchored siblings are non-empty
+    # so the siblings_expanded == 1 honesty check is meaningful.
+    events.extend(_strong_ibounce("dynamodb:Query", [
+        "arn:aws:dynamodb:us-east-1:111122223333:table/orders",
+        "arn:aws:dynamodb:us-east-1:111122223333:table/customers",
     ]))
     # WEAK READ — single observation of s3:GetBucketLocation.
     events.extend(_weak_ibounce(
@@ -914,7 +935,7 @@ def test_uc17_provenance_honesty_via_real_mcp(
     weak_count = _grab("weak")
     siblings_count = _grab("siblings_expanded")
 
-    # Two STRONG actions (s3:GetObject + s3:PutObject) → strong >= 2.
+    # Two STRONG actions (dynamodb:Query + s3:PutObject) → strong >= 2.
     assert strong_count >= 2, (
         f"input had 2 STRONG actions; provenance reports "
         f"strong={strong_count}; honesty violation in: {summary!r}"
@@ -924,8 +945,9 @@ def test_uc17_provenance_honesty_via_real_mcp(
         f"input had 1 WEAK READ action; provenance reports "
         f"weak={weak_count}; honesty violation in: {summary!r}"
     )
-    # Only the STRONG READ s3:GetObject expands siblings (the WEAK READ
+    # Only the STRONG READ dynamodb:Query expands siblings (the WEAK READ
     # goes through narrow path; the STRONG WRITE never expands siblings).
+    # Per #580 GAP-1 dynamodb:Query's siblings survive the catalogue gate.
     assert siblings_count == 1, (
         f"only 1 STRONG READ should expand siblings; provenance reports "
         f"siblings_expanded={siblings_count} in: {summary!r}"
@@ -941,14 +963,14 @@ def test_uc17_provenance_honesty_via_real_mcp(
     ).get("_provenance") or {}
     assert prov.get("mode") == "lean_permissive"
     assert prov.get("safety_floor_applied") is True
-    # Concrete claim: input had 2 STRONG (Get + Put) + 1 WEAK (Bucket).
+    # Concrete claim: input had 2 STRONG (Query + Put) + 1 WEAK (Bucket).
     assert prov["confidence_distribution"]["strong"] == 2, (
         f"provenance strong count mismatch: {prov}"
     )
     assert prov["confidence_distribution"]["weak"] == 1, (
         f"provenance weak count mismatch: {prov}"
     )
-    # action_class_distribution: 2 READ (Get + GetBucketLocation) +
+    # action_class_distribution: 2 READ (Query + GetBucketLocation) +
     # 1 WRITE_DATA (Put).
     assert prov["action_class_distribution"]["read"] == 2, (
         f"provenance read count mismatch: {prov}"

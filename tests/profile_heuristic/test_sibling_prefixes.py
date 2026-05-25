@@ -28,38 +28,66 @@ from iam_jit.profile_heuristic.ibounce_classes import (
 # ---------------------------------------------------------------------------
 
 
-def test_s3_get_object_includes_list_describe_head_siblings() -> None:
-    """Spec example: ``s3:GetObject`` siblings include ``s3:ListObject*``,
-    ``s3:DescribeObject*``, ``s3:HeadObject*``."""
+def test_s3_get_object_returns_only_real_catalog_anchored_siblings() -> None:
+    """Spec example pinned post-#580 GAP-1: ``s3:GetObject`` has no real
+    sibling shapes under the per-verb adjacency because AWS S3 read-side
+    extensions are all ``Get*`` shapes (``GetObjectAcl``,
+    ``GetObjectTagging``, …) — and Get is the SOURCE verb (excluded from
+    its own sibling set per the band contract).
+
+    Other sibling verbs (List/Describe/Head/…) do not produce real
+    ``s3:*Object*`` actions in the AWS IAM catalogue, so the filter
+    drops them. Pre-#580 the unfiltered output emitted hallucinated
+    shapes like ``s3:ListObject*`` / ``s3:DescribeObject*`` /
+    ``s3:HeadObject*`` that don't exist in AWS — installed as allow
+    rules they would silently no-op in production per
+    [[ibounce-honest-positioning]].
+    """
     siblings = sibling_action_prefixes("s3:GetObject")
-    assert "s3:ListObject*" in siblings
-    assert "s3:DescribeObject*" in siblings
-    assert "s3:HeadObject*" in siblings
-    # Source verb itself is NOT in the sibling set — caller already
-    # has it.
-    assert "s3:GetObject*" not in siblings
+    # Per the filter contract: every returned pattern matches at least
+    # one real AWS action. For s3:GetObject, the real catalogue has no
+    # non-Get verb that produces an ``*Object*`` action — so empty.
+    assert siblings == set(), (
+        f"s3:GetObject siblings should be empty post-catalogue-filter; "
+        f"got {siblings}"
+    )
 
 
-def test_ec2_describe_instances_includes_get_list_siblings() -> None:
-    """Spec example: ``ec2:DescribeInstances`` siblings include
-    ``ec2:GetInstance*``, ``ec2:ListInstances*``."""
+def test_ec2_describe_instances_returns_only_real_catalog_anchored_siblings() -> None:
+    """Post-#580 GAP-1: ``ec2:DescribeInstances`` has no real sibling
+    shapes — the AWS EC2 catalogue uses ``Describe*`` exclusively for
+    instance reads (no ``GetInstances`` / ``ListInstances`` / etc), so
+    the pattern-generated siblings all fail the real-catalogue gate.
+
+    Pre-#580 the unfiltered output emitted ``ec2:GetInstances*``,
+    ``ec2:ListInstances*``, ``ec2:HeadInstances*`` — none of which exist
+    in AWS. Per [[scorer-is-ground-truth]] we anchor to reality.
+    """
     siblings = sibling_action_prefixes("ec2:DescribeInstances")
-    assert "ec2:GetInstances*" in siblings
-    assert "ec2:ListInstances*" in siblings
-    assert "ec2:HeadInstances*" in siblings
-    # Source verb absent.
-    assert "ec2:DescribeInstances*" not in siblings
+    assert siblings == set(), (
+        f"ec2:DescribeInstances siblings should be empty post-"
+        f"catalogue-filter (AWS uses Describe* for instances exclusively); "
+        f"got {siblings}"
+    )
 
 
-def test_dynamodb_query_returns_read_siblings() -> None:
-    """``dynamodb:Query`` is a Query-shape read; siblings should include
-    other read verbs paired with the same noun. Verifies Query is in
-    the READ band."""
+def test_dynamodb_query_returns_real_catalog_read_siblings() -> None:
+    """``dynamodb:Query`` has empty noun-suffix, so sibling shape is
+    ``dynamodb:Get*``, ``dynamodb:Scan*``, etc. DynamoDB's catalogue
+    DOES include real read actions for Get/List/Describe/Scan/Read
+    verbs — those globs match real actions and survive the catalogue
+    gate."""
     siblings = sibling_action_prefixes("dynamodb:Query")
-    # Query has no noun suffix in this case, so sibling shape is
-    # ``dynamodb:Get*`` etc.
-    assert any(s.startswith("dynamodb:Get") for s in siblings)
-    assert any(s.startswith("dynamodb:Scan") for s in siblings)
+    # Per real AWS DynamoDB catalogue: dynamodb:GetItem, dynamodb:Scan,
+    # dynamodb:ListTables, dynamodb:DescribeTable etc. all exist — so
+    # the corresponding ``dynamodb:Get*`` / ``dynamodb:Scan*`` /
+    # ``dynamodb:List*`` / ``dynamodb:Describe*`` globs survive the gate.
+    assert "dynamodb:Get*" in siblings, (
+        f"dynamodb:Get* should survive catalogue gate; got {siblings}"
+    )
+    assert "dynamodb:Scan*" in siblings
+    assert "dynamodb:List*" in siblings
+    assert "dynamodb:Describe*" in siblings
 
 
 # ---------------------------------------------------------------------------
@@ -67,39 +95,62 @@ def test_dynamodb_query_returns_read_siblings() -> None:
 # ---------------------------------------------------------------------------
 
 
-def test_iam_put_role_policy_includes_update_create_siblings() -> None:
-    """Spec example: ``iam:PutRolePolicy`` siblings include
-    ``iam:UpdateRolePolicy``, ``iam:CreateRolePolicy``.
+def test_iam_put_role_policy_returns_only_real_catalog_anchored_siblings() -> None:
+    """Post-#580 GAP-1: ``iam:PutRolePolicy`` has no real sibling shapes
+    under WRITE/CREATE-band adjacency. AWS IAM has ``PutRolePolicy``,
+    ``DeleteRolePolicy``, ``GetRolePolicy``, ``AttachRolePolicy``,
+    ``DetachRolePolicy`` for the noun ``RolePolicy`` — but ``Delete*`` /
+    ``Get*`` / ``Attach*`` / ``Detach*`` are NOT in
+    WRITE_SIBLING_VERBS or CREATE_SIBLING_VERBS, so the bands don't
+    consider them.
 
-    Verifies the WRITE band bridges to the CREATE band — Put/Update/Create
-    commonly co-occur on the same resource and the operator typically
-    needs all three to complete a write flow.
+    Pre-#580 the unfiltered output emitted hallucinated shapes
+    ``iam:UpdateRolePolicy*``, ``iam:CreateRolePolicy*``,
+    ``iam:ModifyRolePolicy*``, ``iam:SetRolePolicy*`` — none exist in
+    AWS. Per [[ibounce-honest-positioning]] silent-no-op allows are
+    unacceptable; per [[scorer-is-ground-truth]] we anchor to reality.
     """
     siblings = sibling_action_prefixes("iam:PutRolePolicy")
-    assert "iam:UpdateRolePolicy*" in siblings
-    assert "iam:CreateRolePolicy*" in siblings
-    # Other write verbs also surface (Modify / Set / Patch / Replace).
-    assert "iam:ModifyRolePolicy*" in siblings
-    assert "iam:SetRolePolicy*" in siblings
+    assert siblings == set(), (
+        f"iam:PutRolePolicy siblings should be empty post-catalogue-"
+        f"filter; got {siblings}"
+    )
 
 
-def test_lambda_create_function_includes_put_update_siblings() -> None:
+def test_lambda_create_function_includes_real_put_update_function_siblings() -> None:
     """``lambda:CreateFunction`` siblings include
-    ``lambda:UpdateFunction*``, ``lambda:PutFunction*`` (Create bridges
-    to Write band)."""
+    ``lambda:UpdateFunction*`` + ``lambda:PutFunction*`` — both real
+    AWS catalogue globs (``UpdateFunctionCode``,
+    ``UpdateFunctionConfiguration``, ``PutFunctionConcurrency``, …).
+    Create bridges to Write band."""
     siblings = sibling_action_prefixes("lambda:CreateFunction")
-    assert "lambda:UpdateFunction*" in siblings
-    assert "lambda:PutFunction*" in siblings
+    assert "lambda:UpdateFunction*" in siblings, (
+        f"lambda:UpdateFunction* survives catalogue gate "
+        f"(matches UpdateFunctionCode etc); got {siblings}"
+    )
+    assert "lambda:PutFunction*" in siblings, (
+        f"lambda:PutFunction* survives catalogue gate "
+        f"(matches PutFunctionConcurrency etc); got {siblings}"
+    )
     # Source verb absent.
     assert "lambda:CreateFunction*" not in siblings
 
 
-def test_s3_update_object_includes_put_create_siblings() -> None:
-    """``Update``-shape source verb returns ``Put`` + ``Create``
-    siblings."""
+def test_s3_update_object_includes_only_real_put_object_sibling() -> None:
+    """Post-#580 GAP-1: ``s3:UpdateObject`` (note: itself not a real AWS
+    action — used here to exercise the Update sibling band) returns only
+    ``s3:PutObject*`` because that's the only WRITE+CREATE-band sibling
+    that has a real ``*Object*`` action in the catalogue.
+
+    Pre-#580 also emitted ``s3:CreateObject*`` / ``s3:SetObject*`` /
+    ``s3:ModifyObject*`` / ``s3:PatchObject*`` / ``s3:ReplaceObject*``
+    — none of which exist in AWS S3.
+    """
     siblings = sibling_action_prefixes("s3:UpdateObject")
-    assert "s3:PutObject*" in siblings
-    assert "s3:CreateObject*" in siblings
+    assert siblings == {"s3:PutObject*"}, (
+        f"s3:UpdateObject siblings should be exactly {{s3:PutObject*}} "
+        f"post-catalogue-filter; got {siblings}"
+    )
 
 
 # ---------------------------------------------------------------------------

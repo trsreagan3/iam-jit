@@ -136,11 +136,20 @@ def test_default_off_matches_legacy(monkeypatch: pytest.MonkeyPatch):
 def test_lean_permissive_includes_read_with_siblings(
     monkeypatch: pytest.MonkeyPatch,
 ):
-    """STRONG-confidence Get* action → output includes sibling List* +
-    Describe* + Head* actions in the same allow rule."""
-    events = _strong_events("s3:GetObject", [
-        "arn:aws:s3:::bucket-a/k1",
-        "arn:aws:s3:::bucket-b/k2",
+    """STRONG-confidence Query-shape READ → output includes catalogue-
+    anchored sibling globs (``dynamodb:Get*``, ``dynamodb:List*``,
+    ``dynamodb:Describe*``, ``dynamodb:Scan*``) in the same allow rule.
+
+    Per #580 GAP-1 (UAT-A 2026-05-25): pre-fix this test asserted
+    ``s3:ListObject*`` / ``s3:DescribeObject*`` / ``s3:HeadObject*`` for
+    a ``s3:GetObject`` source — none of which exist in AWS. Updated to
+    ``dynamodb:Query`` source which has real catalogue siblings under
+    the per-verb adjacency. Per [[scorer-is-ground-truth]] we anchor to
+    the AWS catalogue.
+    """
+    events = _strong_events("dynamodb:Query", [
+        "arn:aws:dynamodb:us-east-1:111122223333:table/orders",
+        "arn:aws:dynamodb:us-east-1:111122223333:table/customers",
     ])
     monkeypatch.delenv("IAM_JIT_ENABLE_SIDE_LLM", raising=False)
 
@@ -153,17 +162,31 @@ def test_lean_permissive_includes_read_with_siblings(
     assert len(result.bundle) == 1
     actions = _find_allow_actions(result.bundle[0])
 
-    # State verification: siblings explicitly present in the YAML.
-    assert "s3:GetObject" in actions, f"original action missing; got {actions}"
-    assert "s3:ListObject*" in actions, (
-        f"sibling s3:ListObject* missing for STRONG READ; got {actions}"
+    # State verification: original + catalogue-anchored siblings present.
+    assert "dynamodb:Query" in actions, (
+        f"original action missing; got {actions}"
     )
-    assert "s3:DescribeObject*" in actions, (
-        f"sibling s3:DescribeObject* missing for STRONG READ; got {actions}"
+    # Real AWS DynamoDB catalogue includes Get*/List*/Describe*/Scan*
+    # actions, so these globs survive the catalogue gate.
+    assert "dynamodb:Get*" in actions, (
+        f"sibling dynamodb:Get* missing for STRONG READ; got {actions}"
     )
-    assert "s3:HeadObject*" in actions, (
-        f"sibling s3:HeadObject* missing for STRONG READ; got {actions}"
+    assert "dynamodb:List*" in actions, (
+        f"sibling dynamodb:List* missing for STRONG READ; got {actions}"
     )
+    assert "dynamodb:Describe*" in actions, (
+        f"sibling dynamodb:Describe* missing for STRONG READ; got {actions}"
+    )
+    assert "dynamodb:Scan*" in actions, (
+        f"sibling dynamodb:Scan* missing for STRONG READ; got {actions}"
+    )
+    # #580 GAP-1 negative assertion: no hallucinated globs leak through.
+    for halluc in ("dynamodb:CheckObject*", "dynamodb:HasObject*",
+                   "dynamodb:CountObject*"):
+        assert halluc not in actions, (
+            f"hallucinated sibling {halluc} present; "
+            f"catalogue gate broken: {actions}"
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -493,10 +516,14 @@ def test_provenance_block_populated(monkeypatch: pytest.MonkeyPatch):
     first entry surfaces the mode + distributions for operator
     visibility per [[ibounce-honest-positioning]] no hidden tightening)."""
     # Build a mix: STRONG read + WEAK read + STRONG write to exercise
-    # multiple confidence bands and action classes.
+    # multiple confidence bands and action classes. Per #580 GAP-1 use
+    # ``dynamodb:Query`` as the STRONG READ — it has real catalogue-
+    # anchored siblings (s3:GetObject's siblings are correctly empty
+    # post-fix because S3 reads are all Get*-shape).
     events: list[dict[str, Any]] = []
-    events.extend(_strong_events("s3:GetObject", [
-        "arn:aws:s3:::a/k1", "arn:aws:s3:::b/k2",
+    events.extend(_strong_events("dynamodb:Query", [
+        "arn:aws:dynamodb:us-east-1:111122223333:table/orders",
+        "arn:aws:dynamodb:us-east-1:111122223333:table/customers",
     ]))
     events.extend(_weak_events("s3:GetBucketLocation", "arn:aws:s3:::c"))
     events.extend(_strong_events("s3:PutObject", [
@@ -547,13 +574,15 @@ def test_provenance_block_populated(monkeypatch: pytest.MonkeyPatch):
     assert isinstance(prov.get("action_class_distribution"), dict)
     assert isinstance(prov.get("siblings_expanded_count"), int)
     # Concrete count checks:
-    #   s3:GetObject (READ STRONG)        -> contributes to read + strong
+    #   dynamodb:Query (READ STRONG)      -> contributes to read + strong
     #   s3:GetBucketLocation (READ WEAK)  -> contributes to read + weak
     #   s3:PutObject (WRITE_DATA STRONG)  -> contributes to write + strong
     assert prov["confidence_distribution"]["strong"] == 2
     assert prov["confidence_distribution"]["weak"] == 1
     assert prov["action_class_distribution"]["read"] == 2
     assert prov["action_class_distribution"]["write_data"] == 1
-    # Only the s3:GetObject STRONG READ gets sibling expansion (the
+    # Only the dynamodb:Query STRONG READ gets sibling expansion (the
     # WEAK READ uses the narrow path; the STRONG WRITE is not expanded).
+    # Per #580 GAP-1 the dynamodb sibling globs survive the catalogue
+    # gate (real DynamoDB read actions exist for Get/List/Describe/Scan).
     assert prov["siblings_expanded_count"] == 1
