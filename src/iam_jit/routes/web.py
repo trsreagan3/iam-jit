@@ -962,6 +962,17 @@ def new_paste_submit(
         req.setdefault("status", {})["review"] = analysis.to_dict()
     store: RequestStore = request.app.state.request_store
     store.put(req["metadata"]["id"], req)
+    # #596 — web paste-form submit MUST notify approvers identically to
+    # the API submit path. Without this, the request lands silently in
+    # the queue and no Slack approver is paged. Shared helper guarantees
+    # parity with routes/requests.py submit_request per
+    # [[cross-product-agent-parity]]; the silent gap closed here is
+    # the same shape as #560 / #594 / MRR-2 Pattern B per
+    # [[ibounce-honest-positioning]]. Helper logs + swallows channel
+    # failures so a Slack outage cannot block submission.
+    if req.get("status", {}).get("state") == "pending":
+        from .. import approval_notifier
+        approval_notifier.notify_approvers_for_new_request(req)
     return RedirectResponse(url=f"/requests/{req['metadata']['id']}", status_code=303)
 
 

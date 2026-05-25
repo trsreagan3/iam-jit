@@ -1107,26 +1107,14 @@ def submit_request(
 
     store.put(metadata["id"], req)
 
-    # Fire-and-forget Slack approval-card post when the request lands
-    # in pending state (i.e., did NOT auto-approve). Failures are
-    # logged and SWALLOWED — a Slack outage must not block iam-jit
-    # submissions.
+    # Fire-and-forget approver-notification dispatch when the request
+    # lands in pending state (i.e., did NOT auto-approve). The helper
+    # logs + swallows channel failures — a Slack outage must not
+    # block iam-jit submissions. #596: the web paste-form submit path
+    # in routes/web.py calls the SAME helper to guarantee parity.
     if req.get("status", {}).get("state") == "pending":
-        try:
-            from .. import slack_bot
-
-            slack_cfg = slack_bot.SlackConfig.from_env()
-            if slack_cfg is not None:
-                slack_bot.post_approval_message(
-                    request=req,
-                    config=slack_cfg,
-                    deployment_url=os.environ.get("IAM_JIT_PUBLIC_URL"),
-                )
-        except Exception as e:
-            import logging
-            logging.getLogger("iam_jit.routes.requests").warning(
-                "slack approval post failed (request still submitted): %s", e
-            )
+        from .. import approval_notifier
+        approval_notifier.notify_approvers_for_new_request(req)
 
     response: dict[str, Any] = {
         "request": req,
