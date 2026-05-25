@@ -43,6 +43,12 @@ import logging
 import os
 from typing import Any
 
+from ._auto_approve_helpers import (
+    apply_mfa_and_self_approve_enforcement as _apply_mfa_and_self_approve,
+    attempt_provisioning as _attempt_provisioning_helper,
+    safe_mark_failed as _safe_mark_failed_helper,
+)
+
 logger = logging.getLogger("iam_jit.auto_approve_evaluator")
 
 
@@ -264,10 +270,15 @@ def _evaluate_and_apply_inner(
     )
 
     # Apply MFA + self-approve enforcement on top of the score-gate
-    # decision. Implemented inline so this module has no inbound
-    # dependency on routes/* (would create a circular import); kept
-    # structurally identical to routes/requests.py
-    # `_apply_mfa_and_self_approve_enforcement`.
+    # decision. Implementation lives in `_auto_approve_helpers` (leaf
+    # module) so this module + `routes/requests.py` share one source
+    # of truth — closes the #601 HIGH-4 "structurally identical twin"
+    # finding from the 2026-05-25 independent code review.
+    #
+    # The module-level alias `_apply_mfa_and_self_approve` lets the
+    # sabotage test in `tests/test_auto_approve_evaluator_mfa_fail_closed.py`
+    # monkeypatch the call site (proves the fail-CLOSED default is
+    # load-bearing).
     auto_decision, audit_actor, mfa_block_response = (
         _apply_mfa_and_self_approve(
             auto_decision,
@@ -388,7 +399,7 @@ def _evaluate_and_apply_inner(
             "details": auto_decision.details,
         })
         try:
-            _attempt_provisioning(
+            _attempt_provisioning_helper(
                 request,
                 accounts_store=accounts_store,
                 provision_mod=provision_mod,
@@ -396,7 +407,7 @@ def _evaluate_and_apply_inner(
                 lifecycle=lifecycle,
             )
         except Exception as e:  # pragma: no cover — defense in depth
-            _safe_mark_failed(
+            _safe_mark_failed_helper(
                 request,
                 f"auto-approve provisioning crashed: {e}",
                 lifecycle=lifecycle,
@@ -408,174 +419,10 @@ def _evaluate_and_apply_inner(
     }
 
 
-def _apply_mfa_and_self_approve(
-    auto_decision: Any,
-    *,
-    mfa_audit: dict[str, Any],
-    self_approve_audit: dict[str, Any],
-    analysis_score: int,
-    user_id: str,
-) -> tuple[Any, str, dict[str, Any] | None]:
-    """Apply MFA + self-approve enforcement on top of the score-gate
-    decision. Structurally identical to the routes/requests.py helper
-    of the same name — kept in sync deliberately. See that function's
-    docstring for the enforcement-ordering rationale (WB12-04 +
-    WB12-08 + WB12-11 + WB13-08 + WB13-09 closures).
-    """
-    would_require_mfa = bool(mfa_audit.get("would_require_mfa"))
-    mfa_present = bool(mfa_audit.get("mfa_present"))
-    self_approve_eligible = bool(self_approve_audit.get("self_approve_eligible"))
-
-    effective_decision = auto_decision
-    audit_actor = "system:auto-approver"
-
-    override_eligible_reasons = ("above_threshold", "feature_disabled")
-    if (
-        not bool(getattr(effective_decision, "auto_approve", False))
-        and getattr(effective_decision, "reason", "") in override_eligible_reasons
-        and self_approve_eligible
-    ):
-        original_reason = getattr(effective_decision, "reason", "")
-        from .auto_approve import AutoApproveDecision
-        from . import self_approve_reductions as _sar_mod
-        effective_decision = AutoApproveDecision(
-            auto_approve=True,
-            reason="self_approve_reduction",
-            details={
-                "score": analysis_score,
-                "original_reason": original_reason,
-                "self_approve_reason": self_approve_audit.get("self_approve_reason"),
-                "details_pre_override": dict(getattr(auto_decision, "details", {}) or {}),
-            },
-        )
-        audit_actor = _sar_mod.audit_actor_for(user_id)
-
-    if (
-        bool(getattr(effective_decision, "auto_approve", False))
-        and would_require_mfa
-        and not mfa_present
-    ):
-        from .auto_approve import AutoApproveDecision
-        blocked = AutoApproveDecision(
-            auto_approve=False,
-            reason="mfa_required_for_high_risk",
-            details={
-                "mfa_step_up_required": True,
-                "mfa_step_up_at_score": mfa_audit.get("mfa_step_up_floor"),
-                "client_action": "re_authenticate_via_oidc",
-            },
-        )
-        block_response = {
-            "mfa_step_up_required": True,
-            "reason": "fresh_mfa_required",
-            "redirect_to": "/api/v1/auth/oidc/login",
-        }
-        return blocked, "system:auto-approver", block_response
-
-    return effective_decision, audit_actor, None
-
-
-def _attempt_provisioning(
-    req: dict[str, Any],
-    *,
-    accounts_store: Any,
-    provision_mod: Any,
-    assume_mod: Any,
-    lifecycle: Any,
-) -> None:
-    """Synchronously provision after auto-approve, persist result/error.
-
-    Same guarantee as the routes/requests.py twin: NEVER raises. The
-    request is left in one of: 'active' (success), 'provisioning_failed'
-    (failure), or unchanged.
-
-    The duplication here vs routes/requests.py is deliberate — pulling
-    that helper out of routes/* would create a circular dependency
-    (routes → evaluator → routes). The two implementations are
-    structurally identical and any future divergence should be
-    triaged as a parity bug (per [[cross-product-agent-parity]]).
-    """
-    logger_p = logging.getLogger("iam_jit.provisioning")
-    try:
-        result = provision_mod.provision(req, accounts_store=accounts_store)
-    except provision_mod.ProvisioningError as e:
-        logger_p.warning("provisioning failed: %s", e)
-        _safe_mark_failed(req, str(e), lifecycle=lifecycle)
-        return
-    except Exception as e:
-        logger_p.exception("unexpected error during provisioning")
-        _safe_mark_failed(req, f"unexpected error: {e}", lifecycle=lifecycle)
-        return
-
-    try:
-        instructions = assume_mod.render_instructions(
-            req,
-            role_arn=result.role_arn,
-            external_id=result.external_id,
-        )
-        provisioned = {
-            "role_arn": result.role_arn,
-            "role_name": result.role_name,
-            "account_id": result.account_id,
-            "external_id": result.external_id,
-            "assumer_principal_arn": result.assumer_principal_arn,
-            "session_name": result.session_name,
-            "expires_at": result.expires_at,
-            "assume_instructions": instructions["assume_instructions"],
-            "aws_cli_replay": list(result.aws_cli_replay),
-            "creation_succeeded": True,
-            "embedded_dynamic_denies": list(
-                getattr(result, "embedded_dynamic_denies", []) or []
-            ),
-        }
-    except Exception as e:
-        logger_p.exception("post-provision result rendering failed")
-        _safe_mark_failed(
-            req,
-            f"role created but result rendering failed: {e}. "
-            "Check audit log; manual cleanup may be needed.",
-            lifecycle=lifecycle,
-        )
-        return
-
-    try:
-        lifecycle.mark_provisioned(req, provisioned=provisioned)
-    except Exception as e:
-        logger_p.exception("mark_provisioned failed")
-        _safe_mark_failed(
-            req, f"role created but state transition failed: {e}",
-            lifecycle=lifecycle,
-        )
-
-
-def _safe_mark_failed(
-    req: dict[str, Any], error: str, *, lifecycle: Any
-) -> None:
-    """Set state=provisioning_failed without ever raising. Twin of the
-    routes/requests.py helper of the same name (deliberate duplication
-    per the _attempt_provisioning rationale)."""
-    logger_p = logging.getLogger("iam_jit.provisioning")
-    try:
-        lifecycle.mark_provisioning_failed(req, error=error)
-    except lifecycle.IllegalTransition:
-        try:
-            req.setdefault("status", {})["provisioning_error"] = error
-        except Exception:
-            logger_p.exception("failed to record provisioning error on request")
-    except Exception:
-        logger_p.exception("mark_provisioning_failed itself raised")
-        try:
-            req.setdefault("status", {})["provisioning_error"] = error
-            req["status"]["state"] = "provisioning_failed"
-        except Exception:
-            # #599: last-resort fallback after both transition + manual
-            # dict mutation failed. Cannot raise (caller contract is
-            # "NEVER raises"), but the silent pass that used to live
-            # here meant a totally broken request dict left zero
-            # operator trace. Log loudly even though we can't recover.
-            logger_p.exception(
-                "auto_approve_evaluator: last-resort manual status "
-                "mutation in _safe_mark_failed also raised; the request "
-                "dict is in an indeterminate state (error_message=%r)",
-                error,
-            )
+# #601 (2026-05-25): the local twins `_apply_mfa_and_self_approve`,
+# `_attempt_provisioning`, and `_safe_mark_failed` were extracted to
+# `_auto_approve_helpers` (leaf module) so that this module and
+# `routes/requests.py` share one source of truth. The module-level
+# alias `_apply_mfa_and_self_approve` at the top of this file is the
+# monkeypatch surface for
+# `tests/test_auto_approve_evaluator_mfa_fail_closed.py`.

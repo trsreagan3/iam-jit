@@ -30,6 +30,11 @@ def _now_iso_z() -> str:
 from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response, status
 
 from .. import assume as assume_mod, audit as audit_mod, bans as bans_mod, lifecycle, prompt_injection, provision as provision_mod, review, schema
+from .._auto_approve_helpers import (
+    apply_mfa_and_self_approve_enforcement as _apply_mfa_and_self_approve_enforcement,
+    attempt_provisioning as _attempt_provisioning_helper,
+    safe_mark_failed as _safe_mark_failed_helper,
+)
 from ..lifecycle import IllegalTransition, NotAuthorized
 from ..middleware import (
     current_user,
@@ -52,153 +57,12 @@ def _generate_id() -> str:
     return secrets.token_urlsafe(8).lower().replace("_", "").replace("-", "")[:12] or secrets.token_urlsafe(8)
 
 
-def _apply_mfa_and_self_approve_enforcement(
-    auto_decision: "Any",  # AutoApproveDecision; quoted to dodge late-binding
-    *,
-    mfa_audit: dict[str, Any],
-    self_approve_audit: dict[str, Any],
-    analysis_score: int,
-    user_id: str,
-):
-    """Apply MFA + self-approve enforcement on top of the score-gate decision.
-
-    Returns `(effective_decision, audit_actor, mfa_block_response)` where
-      - `effective_decision` is the (possibly-overridden) AutoApproveDecision
-        the rest of the route should treat as authoritative.
-      - `audit_actor` is the string written to the audit log
-        ("system:auto-approver" by default; "self_approve_reduction:<id>"
-        when the self-approve override fired).
-      - `mfa_block_response` is a dict with structured fields the route
-        can splat into the response body so the API client knows to
-        re-authenticate. None when no MFA override fired.
-
-    Enforcement order is deliberate:
-
-    1. MFA freshness gate runs FIRST. A high-risk grant requires recent
-       MFA regardless of whether the user is otherwise an admin who
-       could self-approve. Admin self-approval is a reduction-of-
-       authority gate, not a "skip security checks" gate.
-
-    2. Self-approve override runs SECOND. If MFA didn't block AND the
-       score gate said "above_threshold" AND the user qualifies for
-       self-approve-reductions (admin + owns request + not blocklisted),
-       flip auto_decision to approve with actor
-       `self_approve_reduction:<user.id>`.
-
-    3. Otherwise return the original decision unchanged.
-    """
-    # WB12-04 closure: use truthy-vs-falsy comparison rather than
-    # `is True` / `is False`. Any falsy / truthy values returned by
-    # the audit dicts (e.g., a future mfa_gate that returns a
-    # bool-like object, or a missing key returning None) are handled
-    # safely. Old `is True` check would reject any non-True truthy.
-    _would_require_mfa = bool(mfa_audit.get("would_require_mfa"))
-    _mfa_present = bool(mfa_audit.get("mfa_present"))
-    _self_approve_eligible = bool(self_approve_audit.get("self_approve_eligible"))
-
-    # Track the audit actor through the override chain.
-    effective_decision = auto_decision
-    audit_actor = "system:auto-approver"
-
-    # ------------------------------------------------------------------
-    # STAGE 1: Self-approve override. If the user qualifies as an admin
-    # doing a reduction of their OWN authority, flip to approve here.
-    # The MFA gate (stage 2) will then run against this FLIPPED decision
-    # so a self-approved high-risk request still requires fresh MFA.
-    #
-    # Override-eligible auto_approve reasons (the cases where the user
-    # would otherwise be deadlocked into human review):
-    #   - "above_threshold"  — score-gate denial; self-approve flips it
-    #   - "feature_disabled" — auto-approve disabled or unconfigured
-    #     (the solo-mode default: `auto_approve_risk_below` is None).
-    #     Without this, the solo-founder UX deadlocks: admin submits
-    #     reduction, lands in pending, four-eyes refuses approver==
-    #     owner. The self-approve gate's whole purpose is to short-
-    #     circuit that case for admins reducing their own authority.
-    #
-    # WB13-08 closure: previously MFA ran first and only fired when
-    # auto_decision.auto_approve was originally True. Score-gate
-    # denial bypassed MFA, then self-approve flipped to True
-    # unconditionally — an admin with stale MFA could auto-provision
-    # a high-risk role. Reordering self-approve → MFA closes that
-    # gap so MFA is the final word regardless of intermediate flips.
-    #
-    # NOT override-eligible (platform-team floors / explicit denies):
-    #   - strict_mode_action_wildcard, strict_mode_admin_fallback —
-    #     deploy-time policy ceiling admins cannot individually override
-    #     (per WB12-08).
-    #   - toggle_force_review — admin-curated "always send to review"
-    #     toggle; flipping would defeat its purpose.
-    #   - service_blocked, account_blocked — blocklist floors. The SAR
-    #     gate already enforces service_blocked (returns not-eligible);
-    #     account_blocked is enforced here.
-    #   - over_quota — anti-composability defense; chained low-risk
-    #     reductions should still surface at the cap.
-    #   - no_policy — nothing to grant; not actionable.
-    # ------------------------------------------------------------------
-    _override_eligible_reasons = ("above_threshold", "feature_disabled")
-    if (
-        not bool(getattr(effective_decision, "auto_approve", False))
-        and getattr(effective_decision, "reason", "") in _override_eligible_reasons
-        and _self_approve_eligible
-    ):
-        _original_reason = getattr(effective_decision, "reason", "")
-        from ..auto_approve import AutoApproveDecision
-        from .. import self_approve_reductions as _sar_mod
-        effective_decision = AutoApproveDecision(
-            auto_approve=True,
-            reason="self_approve_reduction",
-            details={
-                "score": analysis_score,
-                "original_reason": _original_reason,
-                "self_approve_reason": self_approve_audit.get("self_approve_reason"),
-                "details_pre_override": dict(getattr(auto_decision, "details", {}) or {}),
-            },
-        )
-        audit_actor = _sar_mod.audit_actor_for(user_id)
-
-    # ------------------------------------------------------------------
-    # STAGE 2: MFA enforcement. Runs on the (possibly self-approve-
-    # flipped) decision. If the effective decision is approve AND the
-    # request is high-risk AND MFA is missing/stale → BLOCK with
-    # mfa_required_for_high_risk. Audit actor reverts to system since
-    # MFA is a system gate (not a user action).
-    # ------------------------------------------------------------------
-    if (
-        bool(getattr(effective_decision, "auto_approve", False))
-        and _would_require_mfa
-        and not _mfa_present
-    ):
-        from ..auto_approve import AutoApproveDecision
-        # WB12-11 closure: do NOT leak the original (would-have-been)
-        # reason or score back to the caller. A stale-MFA attacker
-        # probing for "what was the score" by submitting variations
-        # benefits from the oracle. Audit chain still captures
-        # everything; the response body strips it.
-        blocked = AutoApproveDecision(
-            auto_approve=False,
-            reason="mfa_required_for_high_risk",
-            details={
-                "mfa_step_up_required": True,
-                # WB13-09 closure: this field is the score-floor at
-                # or above which MFA is required, not a duration. Was
-                # mis-labeled `_max_age_seconds` previously (copy/paste
-                # from the cookie max-age field).
-                "mfa_step_up_at_score": mfa_audit.get("mfa_step_up_floor"),
-                "client_action": "re_authenticate_via_oidc",
-            },
-        )
-        block_response = {
-            "mfa_step_up_required": True,
-            "reason": "fresh_mfa_required",
-            "redirect_to": "/api/v1/auth/oidc/login",
-        }
-        # Actor reverts to system: MFA is a platform gate, not a user
-        # decision. Even if self-approve fired first, the MFA block
-        # takes precedence in the actor field.
-        return blocked, "system:auto-approver", block_response
-
-    return effective_decision, audit_actor, None
+# #601 (2026-05-25): the local `_apply_mfa_and_self_approve_enforcement`
+# was extracted to `iam_jit._auto_approve_helpers` (leaf module) so this
+# module and `auto_approve_evaluator.py` share one source of truth. The
+# module-level alias imported at the top of this file preserves the name
+# `_apply_mfa_and_self_approve_enforcement` for downstream test imports
+# (e.g., `tests/test_mfa_self_approve_enforcement.py`).
 
 
 def _scan_submission_for_injection(
@@ -1163,12 +1027,22 @@ def _transition_endpoint(action: str, *, role: str):
 
         if action == "approve":
             try:
-                _attempt_provisioning(req, accounts_store=accounts_store)
+                _attempt_provisioning_helper(
+                    req,
+                    accounts_store=accounts_store,
+                    provision_mod=provision_mod,
+                    assume_mod=assume_mod,
+                    lifecycle=lifecycle,
+                )
             except Exception as e:  # pragma: no cover — defense in depth
                 # _attempt_provisioning is supposed to never raise. If it
                 # does anyway, force the request to provisioning_failed
                 # rather than leaving it stuck.
-                _safe_mark_failed(req, f"provisioning crashed: {e}")
+                _safe_mark_failed_helper(
+                    req,
+                    f"provisioning crashed: {e}",
+                    lifecycle=lifecycle,
+                )
 
         # ALWAYS persist the post-transition state — even if something
         # above went sideways, the user should never see a request stuck
@@ -1180,107 +1054,14 @@ def _transition_endpoint(action: str, *, role: str):
     return endpoint
 
 
-def _attempt_provisioning(
-    req: dict[str, Any],
-    *,
-    accounts_store: Any,
-) -> None:
-    """Synchronously provision after approval, persist result/error.
-
-    GUARANTEE: this function NEVER raises. The state of the request
-    after this returns is one of:
-      - 'active' (provisioning succeeded, provisioned details populated)
-      - 'provisioning_failed' (with provisioning_error set in status)
-      - unchanged (only if the request wasn't in 'provisioning' to begin
-        with, which means apply_transition didn't move it — that's fine)
-
-    The all-failures-must-land-somewhere guarantee is what keeps requests
-    from getting stuck in 'provisioning' and forces the UI to surface
-    the failure to the approver. Callers (the approve route) MUST be
-    able to call store.put() after this returns and rely on the state
-    being terminal-or-actionable.
-    """
-    import logging
-
-    logger = logging.getLogger("iam_jit.provisioning")
-    try:
-        result = provision_mod.provision(req, accounts_store=accounts_store)
-    except provision_mod.ProvisioningError as e:
-        logger.warning("provisioning failed: %s", e)
-        _safe_mark_failed(req, str(e))
-        return
-    except Exception as e:
-        logger.exception("unexpected error during provisioning")
-        _safe_mark_failed(req, f"unexpected error: {e}")
-        return
-
-    # Result-building can also raise (template render, dataclass access).
-    # Belt and suspenders.
-    try:
-        instructions = assume_mod.render_instructions(
-            req,
-            role_arn=result.role_arn,
-            external_id=result.external_id,
-        )
-        provisioned = {
-            "role_arn": result.role_arn,
-            "role_name": result.role_name,
-            "account_id": result.account_id,
-            "external_id": result.external_id,
-            "assumer_principal_arn": result.assumer_principal_arn,
-            "session_name": result.session_name,
-            "expires_at": result.expires_at,
-            "assume_instructions": instructions["assume_instructions"],
-            "aws_cli_replay": list(result.aws_cli_replay),
-            "creation_succeeded": True,
-            # #324f — surface embedded dynamic-deny rule ids so the
-            # UI / `iam-jit show` / audit replay sees which rules
-            # contributed to the role's policy without re-parsing the
-            # inline policy JSON.
-            "embedded_dynamic_denies": list(
-                getattr(result, "embedded_dynamic_denies", []) or []
-            ),
-        }
-    except Exception as e:
-        logger.exception("post-provision result rendering failed")
-        _safe_mark_failed(
-            req,
-            f"role created but result rendering failed: {e}. "
-            "Check audit log; manual cleanup may be needed.",
-        )
-        return
-
-    try:
-        lifecycle.mark_provisioned(req, provisioned=provisioned)
-    except Exception as e:
-        logger.exception("mark_provisioned failed")
-        _safe_mark_failed(req, f"role created but state transition failed: {e}")
-
-
-def _safe_mark_failed(req: dict[str, Any], error: str) -> None:
-    """Set state=provisioning_failed without ever raising.
-
-    If the request isn't in 'provisioning' state (e.g., a bug elsewhere
-    advanced it already), we can't transition — but we can still record
-    the error in status.provisioning_error so the UI sees something."""
-    import logging
-
-    logger = logging.getLogger("iam_jit.provisioning")
-    try:
-        lifecycle.mark_provisioning_failed(req, error=error)
-    except lifecycle.IllegalTransition:
-        # Already moved past 'provisioning'. Record the error anyway.
-        try:
-            req.setdefault("status", {})["provisioning_error"] = error
-        except Exception:
-            logger.exception("failed to record provisioning error on request")
-    except Exception:
-        logger.exception("mark_provisioning_failed itself raised")
-        try:
-            req.setdefault("status", {})["provisioning_error"] = error
-            req["status"]["state"] = "provisioning_failed"
-        except Exception:
-            pass
+# #601 (2026-05-25): the local `_attempt_provisioning` and
+# `_safe_mark_failed` were extracted to `iam_jit._auto_approve_helpers`
+# (leaf module). Both call sites in this file now import them with the
+# `_helper` suffix to avoid name shadowing during the migration. The
+# leaf helpers also incorporate the #599 last-resort logging
+# improvement (the pre-extraction routes/* version used silent `pass`
+# in the last-resort manual-mutation fallback; the leaf version logs
+# loudly so a fully-broken request dict leaves operator trace).
 
 
 @router.post("/{request_id}/retry-provisioning")
@@ -1304,7 +1085,13 @@ def retry_provisioning(
         raise HTTPException(status_code=409, detail=str(e))
     except NotAuthorized as e:
         raise HTTPException(status_code=403, detail=str(e))
-    _attempt_provisioning(req, accounts_store=accounts_store)
+    _attempt_provisioning_helper(
+        req,
+        accounts_store=accounts_store,
+        provision_mod=provision_mod,
+        assume_mod=assume_mod,
+        lifecycle=lifecycle,
+    )
     store.put(request_id, req)
     return {"request": req}
 
