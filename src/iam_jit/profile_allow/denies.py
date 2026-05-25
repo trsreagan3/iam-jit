@@ -244,7 +244,15 @@ def _format_event_time(ev: dict[str, typing.Any]) -> str:
 def parse_since(spec: str | None) -> str | None:
     """Convert a ``--since`` short form (``5m`` / ``1h`` / ``2d``) into
     an ISO 8601 lower bound usable by the audit-query fan-out. Pass-
-    through for an explicit ISO string."""
+    through for an explicit ISO string.
+
+    Lenient by design: unknown shapes pass through so the bouncer's own
+    parser can surface the canonical error. See :func:`validate_since`
+    for the strict CLI-time gate (#606 Gap A) which rejects invalid
+    shapes BEFORE the fan-out — silent pass-through to a degraded HTTP
+    400 was the silent-degradation bug per
+    ``[[ibounce-honest-positioning]]``.
+    """
     if not spec:
         return None
     s = spec.strip()
@@ -270,18 +278,121 @@ def parse_since(spec: str | None) -> str | None:
     return lower.replace(microsecond=0).isoformat().replace("+00:00", "Z")
 
 
-def fetch_recent_denies(
+# Short-form duration tokens accepted by --since on the CLI gate.
+# Same s/m/h/d/w set :func:`parse_since` honors — keep these in lockstep
+# so the validator's accept-set matches the resolver's accept-set.
+_SHORT_FORM_DURATION_UNITS = ("s", "m", "h", "d", "w")
+
+
+def validate_since(spec: str | None) -> str | None:
+    """Strict CLI-time validation gate for ``--since`` (#606 Gap A).
+
+    Raises :class:`ValueError` with an operator-actionable message when
+    ``spec`` is non-empty AND doesn't look like one of:
+
+      * short-form duration token: ``5m`` / ``1h`` / ``2d`` (s/m/h/d/w)
+      * ISO 8601 / RFC 3339 timestamp: ``2026-05-25T10:00:00Z``
+
+    Per ``[[ibounce-honest-positioning]]`` this is the up-front gate
+    that turns the pre-#606 silent-degradation shape (invalid value
+    passed through to the bouncer -> HTTP 400 -> hidden in notes[]
+    while the CLI cheerfully claimed "caught nothing") into an honest
+    exit-with-error at the CLI layer.
+
+    Returns ``spec`` unchanged on success (caller can use the return
+    value to thread through to :func:`parse_since`). Returns ``None``
+    when ``spec`` is None or empty (the default-behavior path).
+    """
+    if not spec:
+        return None
+    s = spec.strip()
+    if not s:
+        return None
+    # ISO 8601 / RFC 3339 shape: contains a 'T' OR starts with a date
+    # (YYYY-MM-DD prefix). Use the same heuristic parse_since uses then
+    # actually verify it parses as a real timestamp — pass-through here
+    # was the Gap A bug (parse_since lets junk like ``2026-bad`` pass
+    # under the heuristic and the bouncer's HTTP 400 was swallowed).
+    if "T" in s or "-" in s[:10]:
+        norm = s
+        if norm.endswith("Z"):
+            norm = norm[:-1] + "+00:00"
+        try:
+            _dt.datetime.fromisoformat(norm)
+        except ValueError as exc:
+            raise ValueError(
+                f"want RFC 3339 / ISO 8601 timestamp "
+                f"(e.g. 2026-05-25T10:00:00Z); got {spec!r}: {exc}"
+            ) from exc
+        return s
+    # Short-form duration: must be <digits><unit> with unit in s/m/h/d/w.
+    if len(s) < 2 or not s[:-1].isdigit() or s[-1] not in _SHORT_FORM_DURATION_UNITS:
+        raise ValueError(
+            f"want a duration like '5m' / '1h' / '2d' (units: "
+            f"{'/'.join(_SHORT_FORM_DURATION_UNITS)}) OR an ISO 8601 "
+            f"timestamp (e.g. 2026-05-25T10:00:00Z); got {spec!r}"
+        )
+    return s
+
+
+@dataclasses.dataclass(frozen=True)
+class BouncerQueryError:
+    """One bouncer's failure shape from the deny fan-out (#606 Gap A).
+
+    Distinct from the existing ``notes`` list (free-form strings) so the
+    CLI / MCP layer can:
+
+      * count how many bouncers were attempted vs how many failed
+      * exit non-zero when ALL failed (or partial-warn when SOME failed)
+      * surface a machine-readable error array in the ``--json`` shape
+
+    Per ``[[ibounce-honest-positioning]]`` this is the wire-shape that
+    turns "denies recent claimed zero" into "denies recent claimed
+    zero because N of M bouncers were unreachable, here's why" — the
+    operator can tell the difference between "no denies happened" and
+    "we couldn't tell".
+    """
+
+    bouncer: str
+    """The bouncer's short name (ibounce / kbounce / dbounce / gbounce)."""
+
+    error: str
+    """The error string from :class:`_BouncerQueryResult` (HTTP 400,
+    unreachable: <reason>, NDJSON parse: <reason>, etc.). The leading
+    classifier (``HTTP 400``, ``unreachable``) tells the operator
+    whether to fix the input or fix the bouncer."""
+
+
+def _fan_out_query(
     *,
-    since: str | None = "5m",
-    agent_session_id: str | None = None,
-    limit: int = 50,
-    bouncer_names: typing.Sequence[str] | None = None,
-    audit_events_token: str | None = None,
-    timeout: float = 5.0,
-) -> tuple[list[DenyRow], list[str]]:
-    """Fan out to every default bouncer, query /audit/events with a
-    verdict=deny filter, project hits to :class:`DenyRow`. Returns
-    ``(rows, notes)``. Notes lists per-bouncer skips for stderr."""
+    since: str | None,
+    agent_session_id: str | None,
+    limit: int,
+    bouncer_names: typing.Sequence[str] | None,
+    audit_events_token: str | None,
+    timeout: float,
+) -> tuple[list[DenyRow], list[str], list[BouncerQueryError], int]:
+    """Shared fan-out helper used by both :func:`fetch_recent_denies`
+    and :func:`fetch_recent_denies_with_errors` (#606 Gap B).
+
+    Returns ``(rows, notes, errors, attempted_count)``:
+
+      * ``rows`` — list of :class:`DenyRow` projected from successful
+        bouncer responses (newest-first; sliced to ``limit``).
+      * ``notes`` — list of free-form ``"<bouncer> skipped (<reason>)"``
+        strings, preserved for backward-compat with the existing
+        text-render path.
+      * ``errors`` — structured per-bouncer error list (#606 Gap A);
+        empty when every bouncer responded.
+      * ``attempted_count`` — number of bouncers we attempted to query.
+        The CLI uses this to distinguish "all failed" (exit 1) from
+        "partial failure" (exit 2) from "all ok" (exit 0).
+
+    Single fan-out implementation per ``[[cross-product-agent-parity]]``
+    so the CLI text-mode + CLI JSON-mode + MCP tool can't drift on
+    which bouncers were queried, how filters were built, or how
+    failures surface. Mirrors the leaf-helper pattern from #601.
+    """
     from ..cli_audit_query import (
         _query_one_bouncer,
         _resolve_bouncer_set,
@@ -296,6 +407,7 @@ def fetch_recent_denies(
         )
     resolved_since = parse_since(since)
     notes: list[str] = []
+    errors: list[BouncerQueryError] = []
     rows: list[DenyRow] = []
     for endpoint in bouncers:
         r = _query_one_bouncer(
@@ -309,6 +421,9 @@ def fetch_recent_denies(
         )
         if r.error:
             notes.append(f"{r.bouncer} skipped ({r.error})")
+            errors.append(
+                BouncerQueryError(bouncer=r.bouncer, error=r.error)
+            )
             continue
         for ev in r.events:
             row = event_to_deny_row(ev, bouncer_hint=endpoint.name)
@@ -316,14 +431,87 @@ def fetch_recent_denies(
                 rows.append(row)
     # Most recent first.
     rows.sort(key=lambda x: x.when, reverse=True)
-    return rows[:limit], notes
+    return rows[:limit], notes, errors, len(bouncers)
+
+
+def fetch_recent_denies(
+    *,
+    since: str | None = "5m",
+    agent_session_id: str | None = None,
+    limit: int = 50,
+    bouncer_names: typing.Sequence[str] | None = None,
+    audit_events_token: str | None = None,
+    timeout: float = 5.0,
+) -> tuple[list[DenyRow], list[str]]:
+    """Fan out to every default bouncer, query /audit/events with a
+    verdict=deny filter, project hits to :class:`DenyRow`. Returns
+    ``(rows, notes)``. Notes lists per-bouncer skips for stderr.
+
+    Backward-compat wrapper around :func:`_fan_out_query` (#606). The
+    structured per-bouncer error shape lives on
+    :func:`fetch_recent_denies_with_errors`; this function keeps the
+    pre-#606 signature for the digest / autopilot / structured_deny
+    callers that don't need the structured shape.
+    """
+    rows, notes, _errors, _attempted = _fan_out_query(
+        since=since,
+        agent_session_id=agent_session_id,
+        limit=limit,
+        bouncer_names=bouncer_names,
+        audit_events_token=audit_events_token,
+        timeout=timeout,
+    )
+    return rows, notes
+
+
+def fetch_recent_denies_with_errors(
+    *,
+    since: str | None = "5m",
+    agent_session_id: str | None = None,
+    limit: int = 50,
+    bouncer_names: typing.Sequence[str] | None = None,
+    audit_events_token: str | None = None,
+    timeout: float = 5.0,
+) -> tuple[list[DenyRow], list[str], list[BouncerQueryError], int]:
+    """Per-bouncer structured-error variant of :func:`fetch_recent_denies`
+    (#606 Gap A).
+
+    Returns ``(rows, notes, errors, attempted)`` where ``errors`` is a
+    list of :class:`BouncerQueryError` (one per failed bouncer) and
+    ``attempted`` is the total number of bouncers we tried.
+
+    Callers use these to:
+
+      * distinguish "0 denies; all queries succeeded" (honest empty
+        window) from "0 denies; all queries failed" (no data, full
+        degradation -> exit 1) from "0 denies; some queried OK"
+        (partial degradation -> exit 2)
+      * surface a machine-readable ``query_errors`` array in the
+        ``--json`` shape so downstream agents can react to failure
+        modes instead of seeing an empty ``rows: []``
+
+    The new shape never silently drops error context — the existing
+    free-form ``notes`` are kept too for the human-text path and for
+    backward compat with the existing render code.
+    """
+    return _fan_out_query(
+        since=since,
+        agent_session_id=agent_session_id,
+        limit=limit,
+        bouncer_names=bouncer_names,
+        audit_events_token=audit_events_token,
+        timeout=timeout,
+    )
 
 
 __all__ = [
+    "BouncerQueryError",
     "DenyRow",
     "classify_deny_source",
     "event_to_deny_row",
     "fetch_recent_denies",
+    "fetch_recent_denies_with_errors",
     "parse_since",
     "synth_suggested_allow_command",
+    "validate_since",
 ]

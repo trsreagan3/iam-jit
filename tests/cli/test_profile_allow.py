@@ -472,7 +472,16 @@ def test_synth_suggested_allow_command_emits_for_ibounce() -> None:
 def test_denies_recent_cli_lists_rows(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """End-to-end: fan-out stubbed; CLI table renders deny rows."""
+    """End-to-end: fan-out stubbed; CLI table renders deny rows.
+
+    Post-#606 the test scopes the fan-out to ``--bouncer ibounce`` so
+    the only bouncer queried succeeds — exercising the happy-path
+    exit-0 invariant. The partial-failure (some-fail-some-succeed)
+    invariant is now covered by
+    ``tests/cli/test_denies_recent_honest_validation_606.py::
+    test_denies_recent_partial_bouncer_failure_warns``; that test
+    expects exit 2 per the #606 honest-exit-code contract.
+    """
     from iam_jit.cli_audit_query import _BouncerQueryResult, BouncerEndpoint
 
     def _fake_one(endpoint: BouncerEndpoint, **kw):
@@ -496,7 +505,14 @@ def test_denies_recent_cli_lists_rows(
     )
 
     runner = CliRunner()
-    result = runner.invoke(main, ["denies", "recent", "--since", "1h"])
+    # #606: scope to ibounce so the fan-out has zero failures (exit 0).
+    # Pre-#606 this test relied on unreachable bouncers being silently
+    # treated as success; the honest exit-code contract now flags those
+    # as partial failure (exit 2), which is the right behavior — the
+    # happy-path assertion just needs to scope away from them.
+    result = runner.invoke(
+        main, ["denies", "recent", "--since", "1h", "--bouncer", "ibounce"],
+    )
     assert result.exit_code == 0, result.output
     # Post-#413 (§A57) the table leads with "Your bouncer caught" not
     # "N deny row(s)" per [[ambient-value-prop-and-friction-framing]].
@@ -504,8 +520,6 @@ def test_denies_recent_cli_lists_rows(
     assert "Your bouncer caught 1 thing(s)" in result.output
     assert "iam:CreateAccessKey" in result.output
     assert "iam-jit profile allow" in result.output  # suggested fix
-    # Per-bouncer note for the unreachable ones.
-    assert "connection refused" in result.output or "skipped" in result.output
 
 
 def test_denies_recent_filters_by_since(

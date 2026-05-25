@@ -505,7 +505,9 @@ def _row_to_json_dict(row: Any) -> dict[str, Any]:
     return payload
 
 
-def _format_denies_table(rows: list, notes: list[str]) -> str:
+def _format_denies_table(
+    rows: list, notes: list[str], *, status: str = "ok",
+) -> str:
     """Render denies rows as categorized output per
     [[ambient-value-prop-and-friction-framing]] §A57.
 
@@ -517,9 +519,27 @@ def _format_denies_table(rows: list, notes: list[str]) -> str:
     No filter is applied by classifier label — the label is a column
     /bucket heading, not a filter. The "caught N" header equals
     ``len(rows)`` exactly so the operator-visible count matches reality.
+
+    ``status`` is the per-call worst-observable verdict from the fan-out
+    (one of ``ok`` / ``degraded`` / ``all_bouncers_failed``). The empty-
+    rows phrasing is GATED by ``status == "ok"`` (#606 Gap A): when the
+    queries failed we MUST NOT claim "caught nothing — clear" because
+    we don't actually know. The fall-through emits a warning header so
+    the empty result is honestly framed as "we couldn't tell".
     """
     if not rows:
-        return "Your bouncer caught nothing in the requested window — clear.\n"
+        if status == "ok":
+            return (
+                "Your bouncer caught nothing in the requested window "
+                "— clear.\n"
+            )
+        # #606 Gap A: degraded / all_bouncers_failed -> NEVER the
+        # "caught nothing" line. The CLI emits a follow-on stderr
+        # WARNING with per-bouncer detail.
+        return (
+            "WARNING: query failed — no honest count available. "
+            "See the per-bouncer detail emitted to stderr.\n"
+        )
 
     # Categorize. Unknown classifier labels (future-proofing) land in
     # an "unknown" bucket so they STILL render — never silently drop.
@@ -648,7 +668,29 @@ def _do_denies_recent(
     as_json: bool,
     follow: bool,
 ) -> int:
-    from .profile_allow.denies import fetch_recent_denies
+    from .profile_allow.denies import (
+        fetch_recent_denies_with_errors,
+        validate_since,
+    )
+
+    # #606 Gap A: validate --since BEFORE the fan-out.
+    # Pre-#606 the invalid value passed through to each bouncer, each
+    # bouncer returned HTTP 400, the CLI tucked the error into notes[],
+    # and the human text + JSON paths cheerfully claimed
+    # "Your bouncer caught nothing — clear" with status=ok / count=0.
+    # Per ``[[ibounce-honest-positioning]]`` the operator's primary
+    # admin lens must NEVER claim success when the query was malformed.
+    try:
+        validate_since(since)
+    except ValueError as exc:
+        click.echo(
+            f"ERROR: --since {since!r} is invalid: {exc}", err=True,
+        )
+        click.echo(
+            "Examples: --since 24h, --since 2026-05-25T10:00:00Z",
+            err=True,
+        )
+        return 2
 
     if follow:
         return _do_denies_follow(
@@ -660,7 +702,7 @@ def _do_denies_recent(
         )
 
     try:
-        rows, notes = fetch_recent_denies(
+        rows, notes, errors, attempted = fetch_recent_denies_with_errors(
             since=since,
             agent_session_id=agent_session_id,
             limit=limit,
@@ -670,6 +712,22 @@ def _do_denies_recent(
     except Exception as e:
         click.echo(f"denies recent: {e}", err=True)
         return 1
+
+    # #606 Gap A: distinguish "all failed" (exit 1) from "partial
+    # failure" (exit 2; still emit what we have) from "all ok"
+    # (exit 0). Pre-#606 every shape returned exit 0 — the
+    # silent-degradation bug per ``[[ibounce-honest-positioning]]``.
+    if attempted > 0 and len(errors) == attempted:
+        # ALL bouncers failed; we cannot honestly say what was caught.
+        status = "all_bouncers_failed"
+        exit_code = 1
+    elif errors:
+        # SOME bouncers failed; partial truth — surface clearly.
+        status = "degraded"
+        exit_code = 2
+    else:
+        status = "ok"
+        exit_code = 0
 
     # #577: one aggregated banner per invocation instead of one per row.
     # Suppress per-row banners while we render; pre-compute classifier
@@ -685,17 +743,50 @@ def _do_denies_recent(
             # Per #575 + [[cross-product-agent-parity]]: every JSON row
             # carries classifier_label so agent consumers see the same
             # signal the human text output groups rows by.
+            #
+            # #606 Gap A: add a top-level ``query_errors`` array carrying
+            # the structured per-bouncer error shape AND surface the
+            # bouncer-attempted-vs-succeeded ratio so downstream agents
+            # can react to "partial / all-failed" without parsing notes
+            # strings. ``status`` reflects the worst observable outcome:
+            # ok / degraded / all_bouncers_failed.
             payload = {
-                "status": "ok",
+                "status": status,
                 "since": since,
                 "count": len(rows),
                 "rows": [_row_to_json_dict(r) for r in rows],
                 "notes": notes,
+                "query_errors": [
+                    {"bouncer": e.bouncer, "error": e.error}
+                    for e in errors
+                ],
+                "bouncers_attempted": attempted,
+                "bouncers_succeeded": attempted - len(errors),
             }
             click.echo(json.dumps(payload, indent=2, default=str))
-            return 0
-        click.echo(_format_denies_table(rows, notes))
-        return 0
+            return exit_code
+        # #606 Gap A: don't claim "caught nothing — clear" when the
+        # query failed. The text renderer below honors ``status`` so
+        # the empty-window phrasing only fires on a HONEST empty
+        # result; degraded / all-failed paths get a warning instead.
+        click.echo(_format_denies_table(rows, notes, status=status))
+        if errors:
+            failed = len(errors)
+            click.echo(
+                f"WARNING: {failed}/{attempted} bouncer(s) failed "
+                f"(see --json for structured details):",
+                err=True,
+            )
+            for err in errors:
+                click.echo(f"  - {err.bouncer}: {err.error}", err=True)
+            if status == "all_bouncers_failed":
+                click.echo(
+                    "ERROR: every bouncer query failed; the 'caught "
+                    "nothing' line above is NOT a reliable signal — "
+                    "fix the bouncer(s) above and re-run.",
+                    err=True,
+                )
+        return exit_code
 
 
 # Periodic-reminder cadence for the follow-stream classify-skip
@@ -726,7 +817,22 @@ def _do_denies_follow(
     """
     import time as _time
 
-    from .profile_allow.denies import fetch_recent_denies
+    from .profile_allow.denies import fetch_recent_denies, validate_since
+
+    # #606 Gap A: validate --since up-front for the follow path too —
+    # the long-running tail would otherwise loop forever swallowing
+    # HTTP 400s on every poll.
+    try:
+        validate_since(since)
+    except ValueError as exc:
+        click.echo(
+            f"ERROR: --since {since!r} is invalid: {exc}", err=True,
+        )
+        click.echo(
+            "Examples: --since 24h, --since 2026-05-25T10:00:00Z",
+            err=True,
+        )
+        return 2
 
     seen: set[tuple[str, str, str]] = set()
     current_since = since
