@@ -55,11 +55,23 @@ def _default_isolation(monkeypatch: pytest.MonkeyPatch) -> None:
     inventory now cross-references bound-port owners back to PIDs.
     Without stubs, tests that set ``_port_bound=True`` would shell out
     to the dev machine's lsof + ps and pick up real bouncer PIDs.
+
+    #608: also stub posture.bouncers._loopback_port_open since the
+    U-3 posture-uninstall parity halt calls into posture's detector;
+    without a stub, posture would see the dev machine's running
+    bouncers and fire U-3 in tests that intend a clean baseline.
     """
     monkeypatch.setattr(cu, "_find_pids_for_process", lambda name: [])
     monkeypatch.setattr(cu, "_port_bound", lambda port, host="127.0.0.1": False)
     monkeypatch.setattr(cu, "_lsof_pids_on_port", lambda port: [])
     monkeypatch.setattr(cu, "_read_cmdline", lambda pid: "")
+    # #608: isolate posture's loopback probes too.
+    from iam_jit.posture import bouncers as _posture_bouncers
+    monkeypatch.setattr(
+        _posture_bouncers,
+        "_loopback_port_open",
+        lambda port, host="127.0.0.1", timeout=0.25: False,
+    )
 
 
 @pytest.fixture
@@ -1044,8 +1056,13 @@ def test_uninstall_dry_run_real_lsof_and_ps_end_to_end(
     sock.close()
 
     # Pin the inventory to ONLY this port so we don't pick up other
-    # bouncers on the dev machine.
+    # bouncers on the dev machine. #608: also pin
+    # _BOUNCER_DEFAULT_PORTS (the per-bouncer map is the authoritative
+    # scan list now, not BOUNCER_PORTS).
     monkeypatch.setattr(cu, "BOUNCER_PORTS", (test_port,))
+    monkeypatch.setattr(
+        cu, "_BOUNCER_DEFAULT_PORTS", {"ibounce": (test_port,)},
+    )
     # Restore the REAL helpers (default-isolation fixture stubs them
     # to no-ops); this test EXERCISES the real lsof + ps + TCP-probe
     # pipeline against our subprocess.
@@ -1124,3 +1141,424 @@ def test_uninstall_dry_run_real_lsof_and_ps_end_to_end(
                 proc.kill()
             except Exception:
                 pass
+
+
+# ---------------------------------------------------------------------------
+# #608 — cross-product parity: kbounce / dbounce / gbounce on their own
+# default ports must be detected the same way #574 detects ibounce
+# ---------------------------------------------------------------------------
+
+
+def _fake_cmdline_for(kind: str, port: int) -> str:
+    """Helper: cmdline shape that _infer_bouncer_kind_from_cmdline
+    will positively classify as ``kind``."""
+    return (
+        f"/Users/op/go/bin/{kind} run --port {port}"
+    )
+
+
+def test_uninstall_detects_kbouncer_on_default_port(
+    isolated_iam_jit_home: pathlib.Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """#608 Gap D: kbounce on its default port :8766 must be detected
+    via the port-owner cross-reference, the same way #574 catches
+    ibounce on :7401 / :8767.
+    """
+    _seed_install(isolated_iam_jit_home)
+
+    monkeypatch.setattr(cu, "_find_pids_for_process", lambda name: [])
+    monkeypatch.setattr(
+        cu, "_resolve_go_bin_dir", lambda: isolated_iam_jit_home / "nogo",
+    )
+
+    # Only kbounce default port :8766 is bound.
+    monkeypatch.setattr(
+        cu, "_port_bound", lambda port, host="127.0.0.1": port == 8766,
+    )
+    fake_pid = 12345
+    monkeypatch.setattr(
+        cu, "_lsof_pids_on_port",
+        lambda port: [fake_pid] if port == 8766 else [],
+    )
+    monkeypatch.setattr(
+        cu, "_read_cmdline",
+        lambda pid: _fake_cmdline_for("kbounce", 8766) if pid == fake_pid else "",
+    )
+
+    inv = cu._inventory_installed_state()
+    assert 8766 in inv["bound_ports"], (
+        f"kbounce default port :8766 not detected as bound; "
+        f"bound_ports={inv['bound_ports']}"
+    )
+    assert "kbounce" in inv["running_bouncers"], (
+        f"kbounce PID {fake_pid} on :8766 not detected via port-owner "
+        f"cross-reference; got running_bouncers={inv['running_bouncers']}"
+    )
+    assert fake_pid in inv["running_bouncers"]["kbounce"]
+
+
+def test_uninstall_detects_dbounce_on_default_ports(
+    isolated_iam_jit_home: pathlib.Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """#608 Gap D: dbounce on its default ports :5433 (wire) and
+    :8768 (mgmt) must both be detected.
+    """
+    _seed_install(isolated_iam_jit_home)
+
+    monkeypatch.setattr(cu, "_find_pids_for_process", lambda name: [])
+    monkeypatch.setattr(
+        cu, "_resolve_go_bin_dir", lambda: isolated_iam_jit_home / "nogo",
+    )
+
+    port_to_pid = {5433: 22221, 8768: 22222}
+    monkeypatch.setattr(
+        cu, "_port_bound",
+        lambda port, host="127.0.0.1": port in port_to_pid,
+    )
+    monkeypatch.setattr(
+        cu, "_lsof_pids_on_port",
+        lambda port: [port_to_pid[port]] if port in port_to_pid else [],
+    )
+
+    def fake_cmdline(pid: int) -> str:
+        for p, owner_pid in port_to_pid.items():
+            if pid == owner_pid:
+                return _fake_cmdline_for("dbounce", p)
+        return ""
+
+    monkeypatch.setattr(cu, "_read_cmdline", fake_cmdline)
+
+    inv = cu._inventory_installed_state()
+    assert 5433 in inv["bound_ports"]
+    assert 8768 in inv["bound_ports"]
+    assert "dbounce" in inv["running_bouncers"]
+    pids = inv["running_bouncers"]["dbounce"]
+    assert 22221 in pids, f"dbounce :5433 owner missing; got {pids}"
+    assert 22222 in pids, f"dbounce :8768 owner missing; got {pids}"
+
+
+def test_uninstall_detects_gbounce_on_default_ports(
+    isolated_iam_jit_home: pathlib.Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """#608 Gap D: gbounce on its default ports :8080 (wire) and
+    :8769 (mgmt) must both be detected.
+    """
+    _seed_install(isolated_iam_jit_home)
+
+    monkeypatch.setattr(cu, "_find_pids_for_process", lambda name: [])
+    monkeypatch.setattr(
+        cu, "_resolve_go_bin_dir", lambda: isolated_iam_jit_home / "nogo",
+    )
+
+    port_to_pid = {8080: 33331, 8769: 33332}
+    monkeypatch.setattr(
+        cu, "_port_bound",
+        lambda port, host="127.0.0.1": port in port_to_pid,
+    )
+    monkeypatch.setattr(
+        cu, "_lsof_pids_on_port",
+        lambda port: [port_to_pid[port]] if port in port_to_pid else [],
+    )
+
+    def fake_cmdline(pid: int) -> str:
+        for p, owner_pid in port_to_pid.items():
+            if pid == owner_pid:
+                return _fake_cmdline_for("gbounce", p)
+        return ""
+
+    monkeypatch.setattr(cu, "_read_cmdline", fake_cmdline)
+
+    inv = cu._inventory_installed_state()
+    assert 8080 in inv["bound_ports"]
+    assert 8769 in inv["bound_ports"]
+    assert "gbounce" in inv["running_bouncers"]
+    pids = inv["running_bouncers"]["gbounce"]
+    assert 33331 in pids, f"gbounce :8080 owner missing; got {pids}"
+    assert 33332 in pids, f"gbounce :8769 owner missing; got {pids}"
+
+
+def test_uninstall_all_4_bouncers_simultaneously_detected(
+    isolated_iam_jit_home: pathlib.Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """#608 Gap D: when all 4 bouncers are running on their default
+    ports, the uninstall plan must enumerate ALL of them — not just
+    ibounce (the #574 fix's regression direction).
+    """
+    _seed_install(isolated_iam_jit_home)
+
+    monkeypatch.setattr(cu, "_find_pids_for_process", lambda name: [])
+    monkeypatch.setattr(
+        cu, "_resolve_go_bin_dir", lambda: isolated_iam_jit_home / "nogo",
+    )
+
+    # Per-bouncer + per-port owner map.
+    port_to_kind_pid: dict[int, tuple[str, int]] = {
+        8767: ("ibounce", 41111),
+        8766: ("kbounce", 42222),
+        5433: ("dbounce", 43331),
+        8768: ("dbounce", 43332),
+        8080: ("gbounce", 44441),
+        8769: ("gbounce", 44442),
+    }
+    monkeypatch.setattr(
+        cu, "_port_bound",
+        lambda port, host="127.0.0.1": port in port_to_kind_pid,
+    )
+    monkeypatch.setattr(
+        cu, "_lsof_pids_on_port",
+        lambda port: (
+            [port_to_kind_pid[port][1]] if port in port_to_kind_pid else []
+        ),
+    )
+
+    def fake_cmdline(pid: int) -> str:
+        for p, (kind, owner_pid) in port_to_kind_pid.items():
+            if pid == owner_pid:
+                return _fake_cmdline_for(kind, p)
+        return ""
+
+    monkeypatch.setattr(cu, "_read_cmdline", fake_cmdline)
+
+    inv = cu._inventory_installed_state()
+    detected_kinds = set(inv["running_bouncers"].keys())
+    # Observable: ALL 4 bouncer kinds appear.
+    for expected_kind in ("ibounce", "kbounce", "dbounce", "gbounce"):
+        assert expected_kind in detected_kinds, (
+            f"{expected_kind} missing from running_bouncers; "
+            f"got {detected_kinds}"
+        )
+    # Observable: every PID we seeded appears in the plan.
+    flat_pids = []
+    for pids in inv["running_bouncers"].values():
+        flat_pids.extend(pids)
+    for _, expected_pid in port_to_kind_pid.values():
+        assert expected_pid in flat_pids, (
+            f"PID {expected_pid} missing; got flat_pids={flat_pids}"
+        )
+
+    # Observable: the stop_bouncers dry-run plan targets every PID.
+    result = cu.run_uninstall(dry_run=True)
+    stop = result["steps"]["stop_bouncers"]
+    for _, expected_pid in port_to_kind_pid.values():
+        assert expected_pid in stop["sigterm_pids"], (
+            f"dry-run plan did not enumerate PID {expected_pid}; "
+            f"stop_bouncers={stop}"
+        )
+
+
+def test_uninstall_posture_parity_check_detects_uninstall_blind_spot(
+    isolated_iam_jit_home: pathlib.Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """#608 U-3: when posture detects a bouncer that uninstall does
+    NOT (the actual UAT-Admin-CLI Gap D shape), the parity check must
+    fire and halt uninstall. This is defense-in-depth against future
+    _BOUNCER_DEFAULT_PORTS drift.
+    """
+    _seed_install(isolated_iam_jit_home)
+
+    monkeypatch.setattr(cu, "_find_pids_for_process", lambda name: [])
+    monkeypatch.setattr(
+        cu, "_resolve_go_bin_dir", lambda: isolated_iam_jit_home / "nogo",
+    )
+    # Simulate uninstall's port-scan missing kbounce (e.g. because
+    # _BOUNCER_DEFAULT_PORTS got mistakenly stripped).
+    monkeypatch.setattr(cu, "_port_bound", lambda port, host="127.0.0.1": False)
+
+    # Simulate posture detecting kbounce on :8766 (its actual default).
+    from iam_jit.posture import bouncers as _posture_bouncers
+    monkeypatch.setattr(
+        _posture_bouncers,
+        "_loopback_port_open",
+        lambda port, host="127.0.0.1", timeout=0.25: (
+            port == _posture_bouncers.KBOUNCE_DEFAULT_PORT
+        ),
+    )
+
+    inv = cu._inventory_installed_state()
+    halts = cu._check_halt_conditions(inv)
+    halt_ids = [h["id"] for h in halts]
+    assert "U-3" in halt_ids, (
+        f"posture sees kbounce on :8766 but uninstall doesn't — "
+        f"U-3 halt should fire; got halts={halts}"
+    )
+    # Observable: the halt reason names the missing bouncer.
+    u3 = next(h for h in halts if h["id"] == "U-3")
+    assert "kbounce" in u3["reason"], (
+        f"U-3 reason should name the missing bouncer; got {u3['reason']}"
+    )
+
+
+def test_uninstall_posture_parity_check_does_not_fire_when_aligned(
+    isolated_iam_jit_home: pathlib.Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """#608 U-3 negative case: when uninstall + posture agree, no
+    parity halt fires. (Guards against false-positive U-3 noise.)
+    """
+    _seed_install(isolated_iam_jit_home)
+
+    monkeypatch.setattr(cu, "_find_pids_for_process", lambda name: [])
+    monkeypatch.setattr(
+        cu, "_resolve_go_bin_dir", lambda: isolated_iam_jit_home / "nogo",
+    )
+    # Uninstall sees kbounce.
+    monkeypatch.setattr(
+        cu, "_port_bound", lambda port, host="127.0.0.1": port == 8766,
+    )
+    fake_pid = 51234
+    monkeypatch.setattr(
+        cu, "_lsof_pids_on_port",
+        lambda port: [fake_pid] if port == 8766 else [],
+    )
+    monkeypatch.setattr(
+        cu, "_read_cmdline",
+        lambda pid: _fake_cmdline_for("kbounce", 8766) if pid == fake_pid else "",
+    )
+    # Posture sees the same kbounce.
+    from iam_jit.posture import bouncers as _posture_bouncers
+    monkeypatch.setattr(
+        _posture_bouncers,
+        "_loopback_port_open",
+        lambda port, host="127.0.0.1", timeout=0.25: (
+            port == _posture_bouncers.KBOUNCE_DEFAULT_PORT
+        ),
+    )
+
+    inv = cu._inventory_installed_state()
+    halts = cu._check_halt_conditions(inv)
+    halt_ids = [h["id"] for h in halts]
+    assert "U-3" not in halt_ids, (
+        f"U-3 should NOT fire when both surfaces agree on kbounce; "
+        f"got halts={halts}"
+    )
+
+
+def test_uninstall_regression_ibounce_still_detected_after_608(
+    isolated_iam_jit_home: pathlib.Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """#608 regression: #574's original ibounce-on-:7401 detection
+    path must still work after the per-bouncer port refactor.
+    """
+    _seed_install(isolated_iam_jit_home)
+
+    monkeypatch.setattr(cu, "_find_pids_for_process", lambda name: [])
+    monkeypatch.setattr(
+        cu, "_resolve_go_bin_dir", lambda: isolated_iam_jit_home / "nogo",
+    )
+    monkeypatch.setattr(
+        cu, "_port_bound", lambda port, host="127.0.0.1": port == 7401,
+    )
+    fake_pid = 61234
+    monkeypatch.setattr(
+        cu, "_lsof_pids_on_port",
+        lambda port: [fake_pid] if port == 7401 else [],
+    )
+    monkeypatch.setattr(
+        cu, "_read_cmdline",
+        lambda pid: (
+            "/opt/homebrew/bin/python3.12 "
+            "/Users/op/.iam-jit/venv/bin/ibounce run --port 7401"
+            if pid == fake_pid else ""
+        ),
+    )
+
+    inv = cu._inventory_installed_state()
+    assert 7401 in inv["bound_ports"]
+    assert "ibounce" in inv["running_bouncers"]
+    assert fake_pid in inv["running_bouncers"]["ibounce"]
+
+
+def test_uninstall_unknown_port_owner_includes_expected_bouncer(
+    isolated_iam_jit_home: pathlib.Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """#608: when a foreign process holds a bouncer-default port, the
+    unknown_port_owners entry must include the expected bouncer name
+    so the operator can investigate ("expected kbounce on :8766;
+    found python http.server instead").
+    """
+    _seed_install(isolated_iam_jit_home)
+
+    monkeypatch.setattr(cu, "_find_pids_for_process", lambda name: [])
+    monkeypatch.setattr(
+        cu, "_resolve_go_bin_dir", lambda: isolated_iam_jit_home / "nogo",
+    )
+    monkeypatch.setattr(
+        cu, "_port_bound", lambda port, host="127.0.0.1": port == 8766,
+    )
+    monkeypatch.setattr(
+        cu, "_lsof_pids_on_port",
+        lambda port: [98765] if port == 8766 else [],
+    )
+    monkeypatch.setattr(
+        cu, "_read_cmdline",
+        lambda pid: "python -m http.server 8766" if pid == 98765 else "",
+    )
+
+    inv = cu._inventory_installed_state()
+    unknowns = inv["unknown_port_owners"]
+    assert len(unknowns) == 1
+    u = unknowns[0]
+    assert u["pid"] == 98765
+    assert u["port"] == 8766
+    assert u["expected_bouncer"] == "kbounce", (
+        f"expected_bouncer should be 'kbounce' for :8766; got {u}"
+    )
+
+
+def test_uninstall_sabotage_default_ports_strip_kbounce_loses_detection(
+    isolated_iam_jit_home: pathlib.Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """#608 sabotage-check per CONTRIBUTING.md: prove the
+    _BOUNCER_DEFAULT_PORTS extension is load-bearing. If we
+    monkeypatch the constant to strip kbounce's entry, a kbounce
+    process on :8766 must DISAPPEAR from the inventory — proving the
+    per-bouncer port set is what's catching it (not some other
+    coincidental path).
+    """
+    _seed_install(isolated_iam_jit_home)
+
+    monkeypatch.setattr(cu, "_find_pids_for_process", lambda name: [])
+    monkeypatch.setattr(
+        cu, "_resolve_go_bin_dir", lambda: isolated_iam_jit_home / "nogo",
+    )
+    fake_pid = 71234
+    monkeypatch.setattr(
+        cu, "_port_bound", lambda port, host="127.0.0.1": port == 8766,
+    )
+    monkeypatch.setattr(
+        cu, "_lsof_pids_on_port",
+        lambda port: [fake_pid] if port == 8766 else [],
+    )
+    monkeypatch.setattr(
+        cu, "_read_cmdline",
+        lambda pid: _fake_cmdline_for("kbounce", 8766),
+    )
+
+    # Sabotage: strip kbounce from the per-bouncer map. Now :8766 is
+    # no longer scanned.
+    sabotaged = {
+        k: v for k, v in cu._BOUNCER_DEFAULT_PORTS.items()
+        if k not in ("kbounce", "kbouncer")
+    }
+    monkeypatch.setattr(cu, "_BOUNCER_DEFAULT_PORTS", sabotaged)
+
+    inv = cu._inventory_installed_state()
+    assert "kbounce" not in inv["running_bouncers"], (
+        "sabotage smoke: with kbounce stripped from "
+        "_BOUNCER_DEFAULT_PORTS, kbounce on :8766 should NOT be "
+        "detected. If it IS, some other code path (not the per-"
+        "bouncer port map) is finding it — the #608 fix isn't isolated."
+    )
+    assert 8766 not in inv["bound_ports"], (
+        f"sabotage smoke: :8766 should not be in bound_ports when "
+        f"kbounce is stripped from _BOUNCER_DEFAULT_PORTS; "
+        f"got bound_ports={inv['bound_ports']}"
+    )

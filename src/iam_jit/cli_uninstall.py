@@ -64,7 +64,39 @@ CANARY_DIR = IAM_JIT_HOME / "canary"
 BOUNCER_PROCESS_NAMES = ("ibounce", "gbounce", "kbounce", "kbouncer", "dbounce")
 
 # Per MRR-4-UNINSTALL.md step 6 — bouncer ports.
-BOUNCER_PORTS = (7401, 7402, 7412, 8767)
+# Aggregated flat tuple kept for backward-compat (older code that
+# iterates BOUNCER_PORTS without caring which bouncer owns each port).
+# Authoritative per-bouncer mapping lives in _BOUNCER_DEFAULT_PORTS
+# below.
+BOUNCER_PORTS = (7401, 7402, 7412, 8767, 8766, 5433, 8768, 8080, 8769)
+
+# #608 — per-bouncer default ports. Without this, the port-owner
+# cross-reference added by #574 only catches ibounce-default ports
+# (8767 / 7401 / 7402 / 7412); kbounce on :8766, dbounce on
+# :5433+:8768, and gbounce on :8080+:8769 stay invisible to uninstall
+# even though `iam-jit posture` correctly identifies them as RUNNING.
+#
+# Two surfaces disagreeing about ground truth on the same machine
+# violates [[ibounce-honest-positioning]]: if a bouncer is running,
+# uninstall MUST detect it; silent miss = orphan risk on uninstall.
+#
+# Source of truth for the canonical defaults: posture/bouncers.py
+# (IBOUNCE_DEFAULT_PORT / KBOUNCE_DEFAULT_PORT /
+# DBOUNCE_DEFAULT_WIRE_PORT + DBOUNCE_DEFAULT_MGMT_PORT /
+# GBOUNCE_DEFAULT_WIRE_PORT + GBOUNCE_DEFAULT_MGMT_PORT). When those
+# change, update here too — the posture-uninstall parity check in
+# :func:`_check_halt_conditions` will surface drift.
+#
+# Legacy ibounce ports 7401 / 7402 / 7412 retained from the
+# historical local-proxy era (MRR-4-UNINSTALL.md docs still reference
+# them) so we don't regress operators who started ibounce on those.
+_BOUNCER_DEFAULT_PORTS: dict[str, tuple[int, ...]] = {
+    "ibounce": (8767, 7401, 7402, 7412),
+    "kbounce": (8766,),
+    "kbouncer": (8766,),
+    "dbounce": (5433, 8768),
+    "gbounce": (8080, 8769),
+}
 
 # Per MRR-4-UNINSTALL.md step 3 — pip-installed console scripts.
 CONSOLE_SCRIPTS = (
@@ -337,25 +369,43 @@ def _inventory_installed_state() -> dict[str, Any]:
         if pids:
             inv["running_bouncers"][name] = pids
 
-    # Bound ports (step 6).
-    for port in BOUNCER_PORTS:
+    # #608: per-bouncer port scan. Each entry in bound_ports records
+    # both the port number AND the expected bouncer (so the operator
+    # can see "port 5433 belongs to dbounce" in the plan summary).
+    # Without per-bouncer tracking, the #574 cross-reference pass only
+    # caught ibounce-default ports — kbounce/dbounce/gbounce on their
+    # own defaults stayed invisible despite posture seeing them.
+    #
+    # bound_ports retains the legacy int-only shape AS WELL AS the new
+    # structured form via expected_bouncer_for_port for callers that
+    # need it. This keeps the existing post-check + halt path
+    # compatible while enabling per-bouncer awareness.
+    expected_bouncer_for_port: dict[int, list[str]] = {}
+    for kind, ports in _BOUNCER_DEFAULT_PORTS.items():
+        for port in ports:
+            expected_bouncer_for_port.setdefault(int(port), []).append(kind)
+    # Stable ordered list of unique ports across all bouncers.
+    all_ports = sorted(expected_bouncer_for_port.keys())
+    for port in all_ports:
         if _port_bound(port):
             inv["bound_ports"].append(port)
 
-    # #574: second pass — cross-reference bound-port owners back to
-    # PIDs. This catches Python console-script bouncers (``ibounce``
-    # under ~/.iam-jit/venv/bin/) which pgrep -x misses because their
-    # kernel-reported basename is the Python interpreter, not
-    # "ibounce". Without this, dry-run plan honestly enumerates the
-    # bound ports but silently undercounts the PIDs that
-    # _step_stop_bouncers will reach -> real execution leaves orphans.
-    # Per [[ibounce-honest-positioning]] the plan must accurately
-    # describe what WILL happen.
+    # #574 + #608: second pass — cross-reference bound-port owners
+    # back to PIDs. This catches Python console-script bouncers
+    # (``ibounce`` under ~/.iam-jit/venv/bin/) which pgrep -x misses
+    # because their kernel-reported basename is the Python
+    # interpreter, not "ibounce". #608 extends the scan to all 4
+    # bouncers' default ports (not just ibounce's) so kbounce on
+    # :8766, dbounce on :5433+:8768, gbounce on :8080+:8769 are also
+    # detected. Per [[ibounce-honest-positioning]] the plan must
+    # accurately describe what WILL happen — silent miss = orphan
+    # risk.
     seen_pids: set[int] = set()
     for pids in inv["running_bouncers"].values():
         for pid in pids:
             seen_pids.add(int(pid))
     for port in inv["bound_ports"]:
+        expected_kinds = expected_bouncer_for_port.get(port, [])
         for pid in _lsof_pids_on_port(port):
             if pid in seen_pids:
                 continue
@@ -366,10 +416,16 @@ def _inventory_installed_state() -> dict[str, Any]:
                 seen_pids.add(pid)
             else:
                 # Foreign process on a bouncer-typical port. Surface
-                # rather than silently include/exclude.
+                # rather than silently include/exclude. Per #608
+                # include the expected bouncer for this port so the
+                # operator sees "pid 1234 on :8766 (expected
+                # kbounce)" instead of just "pid 1234 on :8766".
                 inv["unknown_port_owners"].append({
                     "pid": pid,
                     "port": port,
+                    "expected_bouncer": (
+                        expected_kinds[0] if expected_kinds else None
+                    ),
                     "cmdline": cmdline,
                 })
 
@@ -475,6 +531,68 @@ def _check_halt_conditions(
                 f"per [[ibounce-honest-positioning]] before --force."
             ),
         })
+
+    # #608 U-3: posture-uninstall parity check. Defense-in-depth
+    # against future _BOUNCER_DEFAULT_PORTS drift — if `iam-jit
+    # posture` sees a bouncer the uninstall inventory does NOT, halt
+    # and surface the divergence so the operator investigates rather
+    # than uninstalls a system whose ground truth is internally
+    # inconsistent. The actual UAT-Admin-CLI 2026-05-25 Gap D bug was
+    # exactly this shape — posture saw kbounce on :8766; uninstall
+    # did not.
+    #
+    # ONE-WAY check (posture-sees-but-uninstall-misses): the reverse
+    # (uninstall sees but posture doesn't) is a legitimate state —
+    # `pgrep -x ibounce` can find a stopped/quiesced bouncer process
+    # that posture's loopback probe can't reach because it isn't
+    # listening yet. Only the missing-from-uninstall direction
+    # represents the orphan-risk scenario.
+    #
+    # The check is best-effort: if posture itself raises (in tests or
+    # restricted environments) we skip silently rather than blocking
+    # uninstall on a meta-detector.
+    try:
+        from .posture.bouncers import detect_all_bouncers
+        posture_view = detect_all_bouncers()
+        # Names posture reports as RUNNING.
+        posture_running = {
+            name for name, block in posture_view.items()
+            if block.get("running")
+        }
+        # Names uninstall inventory reports as running. Normalize
+        # `kbouncer` -> `kbounce` so the two surfaces use the same
+        # vocabulary (posture only knows `kbounce`).
+        inv_running_raw = set(
+            (inventory.get("running_bouncers") or {}).keys()
+        )
+        inv_running = {
+            "kbounce" if n == "kbouncer" else n for n in inv_running_raw
+        }
+        # Restrict comparison to the four canonical bouncer kinds
+        # posture reports on.
+        posture_kinds = set(posture_view.keys())
+        inv_in_scope = inv_running & posture_kinds
+
+        missing_from_inv = posture_running - inv_in_scope
+        if missing_from_inv:
+            halts.append({
+                "id": "U-3",
+                "severity": "HIGH",
+                "reason": (
+                    f"posture-uninstall parity check failed: "
+                    f"posture sees {sorted(missing_from_inv)} but "
+                    f"uninstall inventory does NOT. Two detection "
+                    f"surfaces disagree about ground truth — "
+                    f"proceeding would leave orphans. Investigate "
+                    f"before --force (check _BOUNCER_DEFAULT_PORTS "
+                    f"covers the bouncer's actual port)."
+                ),
+            })
+    except Exception:
+        # Posture itself failed (e.g. import error in stripped test
+        # environment). Don't block uninstall on a meta-check
+        # failure; the primary detection path still ran.
+        pass
 
     return halts
 
@@ -1101,8 +1219,12 @@ def _print_inventory_summary(
             fg="yellow",
         )
         for u in unknowns:
+            # #608 — surface expected_bouncer when present so the
+            # operator sees "pid 1234 on :8766 (expected kbounce)".
+            expected = u.get("expected_bouncer")
+            expected_tag = f" (expected {expected})" if expected else ""
             click.echo(
-                f"    pid={u['pid']:<8} port={u['port']:<6} "
+                f"    pid={u['pid']:<8} port={u['port']:<6}{expected_tag} "
                 f"cmdline={u['cmdline'][:120]}"
             )
     if inv["console_scripts_present"]:
@@ -1190,3 +1312,8 @@ __all__ = [
     "register_uninstall_command",
     "run_uninstall",
 ]
+
+# #608: exposed for tests + the sabotage-check that monkeypatches
+# the per-bouncer port set. Not in __all__ because the leading
+# underscore signals "internal — subject to change without a deprecation
+# cycle"; tests import it by name explicitly.
