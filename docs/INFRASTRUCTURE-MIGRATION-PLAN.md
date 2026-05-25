@@ -1,5 +1,16 @@
 # Infrastructure migration plan: Cloudflare + Google Workspace
 
+> **PARTIALLY SUPERSEDED 2026-05-24.** The DNS / domain / Cloudflare
+> Pages landing-site / Google Workspace inbox portions of this plan
+> are still current — those build the marketing surface, not a
+> hosted-SaaS API tier. The references below to hosting an `api.iam-
+> risk-score.com` Lambda or any other multi-tenant scoring endpoint
+> are HISTORICAL per the restoration of [[no-hosted-saas]] to 100%
+> on 2026-05-24: the scorer ships as offline CLI + Python library +
+> GitHub Action only, with no operator-deployed scoring API. The
+> domain + landing site + email aliases still serve the marketing
+> + consulting-funnel motion; just the API-hosting parts are out.
+
 **Context:** AWS Bedrock denied 2026-05-19 for 30-60d. AWS account 590519617224 remains conditionally usable (per #293 AWS-usage builder) but treated as fragile. Original DNS / domain / email plans relied on Route 53 + SES; this plan moves them off AWS entirely so launch doesn't block on re-evaluation.
 
 Per [[self-host-zero-billing-dependency]] and the broader Bedrock-pivot decision: the AWS dependency for our brand infrastructure was always optional. The pivot makes it explicit.

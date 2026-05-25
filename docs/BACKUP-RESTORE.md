@@ -4,7 +4,7 @@
 gated structured restore so an operator can move ibounce state between
 hosts, snapshot before a risky change, or recover from disaster.
 
-Sibling commands `kbounce backup`/`restore` (kbouncer) and
+Sibling commands `kbounce backup`/`restore` (kbounce) and
 `dbounce backup`/`restore` (dbounce) ship the same CLI shape + the
 same metadata-table format. The product-namespaced metadata table
 inside each backup file is `ibounce_backup_metadata` /

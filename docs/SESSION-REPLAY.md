@@ -5,7 +5,7 @@
 
 ## What this is
 
-Every Bounce product (`ibounce` / `kbouncer` / `dbounce` / `gbounce`) can
+Every Bounce product (`ibounce` / `kbounce` / `dbounce` / `gbounce`) can
 record one NDJSON file per agent session when run with
 `--record-sessions-dir`. The cross-product `iam-jit session replay <FILE>`
 CLI then walks the recording event-by-event, optionally pausing in real
@@ -123,11 +123,11 @@ emits a yellow stderr note and continues with the replay sans the diff:
 
 ```
 --what-if-profile is only wired for ibounce recordings; this
-recording is from 'kbouncer'. Replay continues without re-evaluation.
+recording is from 'kbounce'. Replay continues without re-evaluation.
 See docs/SESSION-REPLAY.md for the cross-product gap + plan.
 ```
 
-**Plan:** the kbouncer / dbounce / gbounce bouncers will each ship a
+**Plan:** the kbounce / dbounce / gbounce bouncers will each ship a
 `--what-if-evaluate` subcommand that takes a recording file +
 profile-name + emits a verdict-diff JSON. The replay CLI will shell
 out to the right product based on the recording's

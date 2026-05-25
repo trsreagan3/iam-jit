@@ -243,13 +243,15 @@ enforced by the deployment shape:
   no egress to anything outside AWS APIs
 
 The `IAM_JIT_LLM_BUDGET_*` per-tier monthly call caps that exist in
-the code default to multi-tenant SaaS values (Pro=1500/mo,
-Team=2500/mo). For a single-tenant self-hosted deployment, those
-defaults are typically too low — they exist to protect iam-jit's
-hosted-SaaS wallet from a single noisy customer, not yours from
-yourself. **For self-hosted, either raise the caps far above your
-expected volume, or disable them and use AWS Budgets as your
-real spending control:**
+the code default to historical multi-tenant values (Pro=1500/mo,
+Team=2500/mo) from a pre-[[no-hosted-saas]] era; **iam-jit no longer
+operates any multi-tenant hosted SaaS** per [[no-hosted-saas]] (restored
+to 100% 2026-05-24). For your self-hosted deployment those defaults
+are typically too low — they were originally sized to protect a
+hosted-SaaS wallet from one noisy customer, not yours from yourself.
+**For self-hosted (the only deployment shape iam-jit ships at v1.0):
+either raise the caps far above your expected volume, or disable them
+and use AWS Budgets as your real spending control:**
 
 ```bash
 # Disable the per-tier LLM call caps (recommend AWS Budgets for spend

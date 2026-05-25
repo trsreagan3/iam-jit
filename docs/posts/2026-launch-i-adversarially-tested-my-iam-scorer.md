@@ -2,9 +2,15 @@
 
 *Draft — May 2026. Target: HN front page, Twitter/X, /r/aws, security mailing lists. Cut hard before publishing.*
 
+> **Pre-publish edit 2026-05-24.** Original draft framed the scorer as "free up to 100 requests/month at the hosted API, paid tiers add an LLM-generated narrative on top." Both halves of that sentence are out of date:
+> - Per [[no-hosted-saas]] (restored to 100% 2026-05-24), there is no hosted scoring API. The scorer ships as offline CLI + Python library + GitHub Action — runs locally, no network call, no rate limit.
+> - Per [[oss-only-launch-decision]] (2026-05-23), v1.0 ships fully free + open source — no paid tiers. The LLM-generated narrative is available; agents in the loop use their own LLM credentials per [[bouncer-zero-llm-when-agent-in-loop]].
+>
+> Rewrite the opening before publishing.
+
 ---
 
-I built a deterministic AWS IAM policy risk scorer. The kind of thing that takes a JSON IAM policy and tells you "this is a 7 out of 10, here's why, don't auto-approve." Open source under Apache 2.0, free up to 100 requests/month at the hosted API, paid tiers add an LLM-generated narrative on top.
+I built a deterministic AWS IAM policy risk scorer. The kind of thing that takes a JSON IAM policy and tells you "this is a 7 out of 10, here's why, don't auto-approve." Open source under Apache 2.0, free + offline — runs locally with no network call.
 
 The interesting part isn't that I built a scorer. The interesting part is what happened when I stopped trusting myself and ran an adversarial loop against my own engine for 10 rounds.
 

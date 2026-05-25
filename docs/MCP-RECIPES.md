@@ -168,7 +168,7 @@ Generic config shape:
 }
 ```
 
-`dbounce mcp install-*` subcommands mirror the ibounce / kbouncer
+`dbounce mcp install-*` subcommands mirror the ibounce / kbounce
 installer surface. See the "Go Bouncer Tools" section below for the
 full tool catalog.
 
@@ -258,7 +258,7 @@ tool above delegates LLM reasoning to the agent's own LLM — iam-jit
 
 ## Go Bouncer Tools
 
-Per `[[cross-product-agent-parity]]` the Go bouncers (kbouncer /
+Per `[[cross-product-agent-parity]]` the Go bouncers (kbounce /
 dbounce / gbounce) expose the same agent-friendly UX surface as
 ibounce, with product-specific verbs underneath. Each bouncer's
 MCP server speaks its own tool prefix; agents that learn one
@@ -268,12 +268,12 @@ changes).
 For the authoritative per-bouncer tool list, run:
 
 ```bash
-kbouncer mcp list-tools
+kbounce  mcp list-tools
 dbounce  mcp list-tools
 gbounce  mcp list-tools
 ```
 
-### kbouncer (K8s API gating)
+### kbounce (K8s API gating)
 
 | Tool | Purpose |
 |---|---|
@@ -287,7 +287,7 @@ gbounce  mcp list-tools
 | `kbounce_apply_preset` | Apply a curated rule pack (`cluster-admin-minus-destructive`, etc.) |
 | `kbounce_denies_recent` | Recent deny events with classification context |
 | `kbounce_tail_decisions` | Live tail of K8s-API decisions (compose with `iam_jit_request_role_from_synthesis` when k8s SA ↔ IAM role mapping is needed) |
-| `kbounce_scope_self_for_task` | Compose a task-scoped K8s RBAC posture (agent declares task; kbouncer narrows) |
+| `kbounce_scope_self_for_task` | Compose a task-scoped K8s RBAC posture (agent declares task; kbounce narrows) |
 
 ### dbounce (SQL bouncer)
 
@@ -330,7 +330,7 @@ multi-bouncer flow is:
 3. `iam_jit_request_role_from_synthesis` — agent synthesizes the
    role request from observed bouncer activity, iam-jit provisions
 
-Worked example: "Based on the staging-cluster activity my kbouncer
+Worked example: "Based on the staging-cluster activity my kbounce
 caught this week, request a prod-scoped IAM role narrowed to the
 exact actions the staging pod actually used."
 

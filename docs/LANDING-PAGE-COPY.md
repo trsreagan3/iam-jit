@@ -34,8 +34,12 @@ for AI-team buyers; the first one converts best for DevSecOps.
 
 ### Above-the-fold CTAs
 
-  - **Primary:** "Try it now" → links to the live API playground
-  - **Secondary:** "Install the CLI" → `pip install iam-risk-score`
+  - **Primary:** "Install the CLI" → `pip install iam-jit` (the
+    scorer ships in the `iam-jit` wheel as the `iam-risk-score`
+    console script; there is no separate `iam-risk-score` PyPI
+    package per [[no-hosted-saas]] restoration — the hosted API
+    playground was dropped 2026-05-24)
+  - **Secondary:** "Read the docs" → links to `docs/GETTING-STARTED.md`
 
 ### Above-the-fold code sample (the one thing visitors actually read)
 
@@ -64,14 +68,20 @@ Suggestions to reduce risk:
 
 **Box 1: Submit**
 
-> Send any IAM policy via API, CLI, or GitHub Action. No SDK
-> required — it's just JSON over HTTPS.
+> Send any IAM policy via the offline CLI, Python library, or
+> GitHub Action. No SDK required — JSON in, score out, runs
+> locally.
 
 ```bash
-curl -X POST https://api.iam-risk-score.com/api/v1/score \
-  -H "Content-Type: application/json" \
-  -d '{"policy": {"Version": "2012-10-17", "Statement": [...]}}'
+# Offline CLI — no network call
+iam-risk-score my-policy.json
 ```
+
+> **HISTORICAL — DROPPED.** The previously-hosted
+> `api.iam-risk-score.com/api/v1/score` endpoint was retired
+> 2026-05-24 to restore [[no-hosted-saas]] to 100%. The offline
+> CLI + Python library + GitHub Action are the supported access
+> surface at v1.0.
 
 **Box 2: Score**
 

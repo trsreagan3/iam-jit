@@ -116,7 +116,7 @@ hours later.
 In the AWS Security Lake console (or via `aws securitylake create-
 custom-log-source`), register a custom source with:
 
-- Source name: `iam-jit-bouncer`
+- Source name: `iam-jit-bounce` (or any string you choose; this is the registered custom-source label in your Security Lake account, not a tool name)
 - OCSF event class: `API_ACTIVITY` (6003)
 - S3 source location: `s3://iam-jit-bounce-security-lake/`
 - IAM role: the role that grants Security Lake's Glue crawler read

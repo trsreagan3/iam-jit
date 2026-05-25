@@ -106,7 +106,7 @@ the gap is documented + a fix-task is proposed in §6.
 
 | Field | Value |
 |---|---|
-| **Source** | `GET /healthz` → `.anomaly_detection.alerts_emitted_total` + `.anomaly_detection.last_alert_at_unix` (per ibounce; null on kbouncer/dbounce/gbounce — Phase H is ibounce-only per `[[anomaly-detection-mode-phase-h]]`) |
+| **Source** | `GET /healthz` → `.anomaly_detection.alerts_emitted_total` + `.anomaly_detection.last_alert_at_unix` (per ibounce; null on kbounce/dbounce/gbounce — Phase H is ibounce-only per `[[anomaly-detection-mode-phase-h]]`) |
 | **CLI mirror** | `iam-jit anomaly status --format json` (baseline DB inspection; does NOT show alert rate over time) |
 | **Healthy** | `alerts_emitted_total` baseline derived from operator's normal workload (no fixed default — anomaly is per-deployment) |
 | **WARNING** | `alerts_emitted_total` delta over 1 minute > 10 — possible storm or adversarial probing |
@@ -216,7 +216,7 @@ Exit codes:
   "captured_at": "2026-05-24T18:00:00Z",
   "overall_status": "ok|warning|crit",
   "exit_code": 0,
-  "bouncers_checked": ["ibounce", "gbounce", "kbouncer", "dbounce"],
+  "bouncers_checked": ["ibounce", "gbounce", "kbounce", "dbounce"],
   "signals": {
     "disk_pressure": {
       "status": "ok|warning|crit",
@@ -260,7 +260,7 @@ Exit codes:
   `as_json=True` against an in-memory click context.
 - Color-coded human output uses `click.secho` with green / yellow / red.
 - Cross-bouncer aggregation: if Signal X is CRIT on ibounce + OK on
-  kbouncer, overall_status = CRIT (worst wins).
+  kbounce, overall_status = CRIT (worst wins).
 
 ### Cron-friendly invocation
 

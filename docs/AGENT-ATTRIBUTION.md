@@ -115,7 +115,7 @@ under `unmapped.iam_jit.ext.agent_header_rejection`. SOC analysts use
 this to diagnose "which agent's collector is misconfigured?" —
 pre-§A18 the only signal was the `/healthz` counter
 `total_agent_headers_rejected` (too coarse) + the truncated-stderr
-line `gbounce/kbouncer/dbounce/ibounce: rejected invalid X-Agent-...
+line `gbounce/kbounce/dbounce/ibounce: rejected invalid X-Agent-...
 header (value=<truncated>) — request will be audited as anonymous`
 (not queryable from the audit log).
 

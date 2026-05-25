@@ -1,46 +1,148 @@
 # Agent + iam-jit + Hoop: end-to-end examples
 
-> Five concrete scenarios showing how an AI agent (Claude Code, Cursor,
-> etc.) uses iam-jit to get scoped AWS credentials and then opens a
-> Hoop session with those credentials. **Zero changes to either iam-jit
-> or Hoop** — the integration relies on Hoop's existing AWS Secrets
-> Manager secret-source and iam-jit's existing grant API.
+> **Rewritten 2026-05-25** to lead with the AssumeRole / IRSA pattern
+> per Hoop's own [EKS quickstart](https://hoop.dev/docs/quickstart/cloud-services/kubernetes/kubernetes-eks)
+> and [[create-not-assume-pattern]]. The previous draft of this doc
+> led with a Secrets-Manager-rotated wrapper script; that pattern is
+> kept as Pattern 2 (fallback) for Hoop deployments that don't have
+> IRSA configured, but Pattern 1 (AssumeRole) is what the recipe
+> recommends and what every scenario below uses by default.
+>
+> Scenarios showing how an AI agent (Claude Code, Cursor, etc.) uses
+> iam-jit to get a scoped AWS role and then opens a Hoop session
+> that assumes that role. **Zero changes to either iam-jit or Hoop**
+> — the integration relies on Hoop's existing `EKS_ROLE_ARN`
+> connection option and iam-jit's existing grant API. **No held
+> credentials. No Secrets Manager dependency.**
 
 ## How the integration works (in 60 seconds)
 
-Hoop already supports AWS Secrets Manager as a secret source for
-connection credentials (`_aws:<secret-id>:KEY` in connection envs).
-iam-jit issues short-lived STS credentials per request. A small
-wrapper script bridges the two:
+Hoop's EKS quickstart configures connections to **assume an IAM
+role at session-open** rather than hold static credentials. The
+Hoop agent runs in EKS with an IRSA-attached service account (call
+its role `RoleX`); each connection lists an `EKS_ROLE_ARN` env var
+(call it `RoleY`). When a session opens, the Hoop agent does
+`sts:AssumeRole(RoleY)` using `RoleX`'s identity.
+
+iam-jit slots into that flow by **creating `RoleY` on demand**,
+scoped to the requested task, with `RoleX` in its trust policy.
+The agent never holds AWS credentials; the Hoop agent never holds
+credentials beyond its IRSA-issued token; the only thing that
+crosses the wire is a role ARN.
 
 ```
-agent ──► iam-jit /api/v1/grant ──► STS creds (e.g. 1hr TTL)
+agent ──► iam-jit /api/v1/grant ──► role ARN (e.g. iam-jit/grant-rq-abc)
                                          │
                                          ▼
-                          wrapper writes creds → AWS Secrets Manager
-                          (path: /iam-jit/hoop-session/<connection-id>)
+                          iam-jit creates role with:
+                            trust:  { Principal: RoleX_ARN, Action: sts:AssumeRole }
+                            inline: scoped task policy
+                            TTL:    1h (iam-jit auto-deletes at expiry)
                                          │
                                          ▼
-agent ──► hoop session open <connection-id>
+agent ──► hoop session open <connection-id> --env EKS_ROLE_ARN=<roleY>
                                          │
                                          ▼
-       Hoop reads from Secrets Manager → injects into session env
+       Hoop agent (RoleX/IRSA) ──► sts:AssumeRole(RoleY) ──► STS creds
                                          │
                                          ▼
-                        agent's session has scoped, time-bound creds
+              session-scoped, time-bound creds in the session env
 ```
 
-**No iam-jit code changes. No Hoop fork. No plugin.** Just the
-wrapper script and a Hoop connection configured to read from
-Secrets Manager.
+**No iam-jit code changes. No Hoop fork. No plugin. No Secrets
+Manager. No held credentials anywhere in the path** — the only
+long-lived identity is Hoop's IRSA service-account token, and that
+identity can only AssumeRole on roles iam-jit creates under
+`role/iam-jit/*` (the iam-jit naming prefix).
 
-The wrapper script is ~50 lines of Python — see
-[`infrastructure/recipes/hoop-credential-bridge.py`](#wrapper-script-skeleton)
-at the bottom of this doc.
+This composes directly with [[create-not-assume-pattern]] — the
+pattern where iam-jit CREATES roles in the customer account but
+never holds credentials to use them, and the caller (here: Hoop
+agent's IRSA identity) does the AssumeRole directly.
 
 ---
 
-## Scenario 1: agent debugs a payment failure
+## Pattern 1 (RECOMMENDED): AssumeRole + IRSA
+
+For any Hoop connection where the Hoop agent runs in EKS with IRSA
+configured (the default for EKS deployments per Hoop's docs), use
+this pattern. Zero held credentials anywhere.
+
+### One-time setup per Hoop deployment
+
+1. **Confirm Hoop agent is IRSA-attached.** Per Hoop's
+   [EKS quickstart](https://hoop.dev/docs/quickstart/cloud-services/kubernetes/kubernetes-eks),
+   the Hoop agent's K8s service account has an annotation:
+   ```yaml
+   eks.amazonaws.com/role-arn: arn:aws:iam::123456789012:role/HoopAgentRole
+   ```
+   Record that ARN — that's `RoleX`. Every iam-jit-created role
+   trusts this principal.
+
+2. **Grant iam-jit permission to create scoped roles.** iam-jit's
+   own AWS principal needs:
+   ```json
+   {
+     "Effect": "Allow",
+     "Action": [
+       "iam:CreateRole",
+       "iam:PutRolePolicy",
+       "iam:DeleteRole",
+       "iam:DeleteRolePolicy"
+     ],
+     "Resource": "arn:aws:iam::*:role/iam-jit/*",
+     "Condition": {
+       "StringEquals": {
+         "iam:PermissionsBoundary":
+           "arn:aws:iam::ACCT:policy/iam-jit-boundary"
+       }
+     }
+   }
+   ```
+   The PermissionsBoundary condition is mandatory — every role
+   iam-jit creates must attach the customer-controlled boundary
+   per [[create-not-assume-pattern]].
+
+3. **iam-jit does NOT need `sts:AssumeRole` on anything.** Per
+   [[create-not-assume-pattern]] — iam-jit never holds credentials;
+   the Hoop agent assumes the role directly.
+
+That's it. No Secrets Manager secret to pre-provision, no per-
+connection plumbing.
+
+### Per-grant flow
+
+When an agent requests a grant:
+
+1. **Agent calls iam-jit `/api/v1/grant`** with the task intent
+   (actions, resources, duration).
+2. **iam-jit scores + creates `RoleY`** with:
+   - Name: `iam-jit/grant-rq-<id>`
+   - Trust policy: principal = `RoleX` (the Hoop agent's IRSA role)
+   - Inline policy: the scored, scoped task policy
+   - PermissionsBoundary: `iam-jit-boundary` (customer-controlled)
+   - Tags: `iam-jit:grant-id=...`, `iam-jit:ttl-expires=...`
+3. **iam-jit returns the role ARN** in the grant response —
+   `role_arn` field; no `credentials` field.
+4. **Agent (or operator) sets `EKS_ROLE_ARN` on the Hoop session**
+   (either ad-hoc via `hoop connect ... --env EKS_ROLE_ARN=...`
+   or via a Hoop connection update).
+5. **Hoop opens the session.** The Hoop agent does
+   `sts:AssumeRole(RoleY)` using its IRSA identity; injects the
+   resulting STS triple into the session env.
+6. **Session runs the task.** Every AWS call uses the scoped
+   credentials.
+7. **At TTL expiry**, iam-jit calls `iam:DeleteRole` on `RoleY`.
+   Future AssumeRole attempts (by any principal, including Hoop)
+   fail closed — the role no longer exists.
+
+No credentials live anywhere outside of the active session. No
+secret to rotate. No wrapper script. The grant API is the single
+point of authorization.
+
+---
+
+## Scenario 1: agent debugs a payment failure (Pattern 1)
 
 ### Situation
 
@@ -80,7 +182,7 @@ exact ARNs and actions it inferred from source, not just a vague
 "I need payment debugging access."
 
 ```bash
-curl -sS -X POST https://iam-jit.omise.internal/api/v1/grant \
+curl -sS -X POST https://iam-jit.acme.internal/api/v1/grant \
   -H "Authorization: Bearer $IAMJIT_TOKEN" \
   -H "Content-Type: application/json" \
   -d '{
@@ -101,70 +203,60 @@ curl -sS -X POST https://iam-jit.omise.internal/api/v1/grant \
         ]
       }
     },
-    "principal": {"kind": "human", "identifier": "alice@omise.com"},
+    "principal": {"kind": "human", "identifier": "alice@acme.com"},
     "duration_seconds": 3600,
-    "caller": {"source": "mcp", "session_id": "claude-code-..." }
+    "caller": {"source": "mcp", "session_id": "claude-code-..." },
+    "integration": {"kind": "hoop", "trust_principal": "arn:aws:iam::123456789012:role/HoopAgentRole"}
   }'
 ```
 
-**3. iam-jit scores and auto-approves.**
+The `integration` field signals iam-jit to set the trust principal
+on the created role to the Hoop agent's IRSA role (`RoleX`).
+
+**3. iam-jit scores, auto-approves, and creates the role.**
 
 ```json
 {
   "status": "success",
   "grant_id": "G-2026-05-15-abc123",
-  "policy": { /* the synthesized least-privilege policy */ },
+  "policy": { /* the scored least-privilege policy */ },
   "score": 0.18,
   "score_explanation": "Read-only with narrow ARN scoping. Below auto-approve threshold (0.5).",
-  "credentials": {
-    "access_key_id": "ASIA...",
-    "secret_access_key": "...",
-    "session_token": "...",
-    "expires_at": 1747007200
-  },
+  "role_arn": "arn:aws:iam::123456789012:role/iam-jit/grant-rq-abc123",
+  "role_expires_at": 1747007200,
   "audit_id": "..."
 }
 ```
 
 Score is 0.18 — well below the 0.5 auto-approve threshold (read-only,
-narrow resource ARNs, no IAM-modify actions). Auto-issued.
+narrow resource ARNs, no IAM-modify actions). Role created. No
+credentials are returned — iam-jit does not hold any.
 
-**4. Wrapper script writes creds to Secrets Manager.**
-
-```bash
-# The agent (or a helper alias) pipes the grant response through
-# the wrapper, which updates the Hoop connection's secret:
-curl ... | python3 hoop-credential-bridge.py \
-  --connection payments-debug \
-  --secret-path /iam-jit/hoop-session/payments-debug
-```
-
-Internally the wrapper:
-1. Pulls the STS triple from the grant response
-2. Calls `secretsmanager:PutSecretValue` on
-   `arn:aws:secretsmanager:ap-southeast-1:123456789012:secret:/iam-jit/hoop-session/payments-debug`
-3. The secret value is a JSON object with `AWS_ACCESS_KEY_ID`,
-   `AWS_SECRET_ACCESS_KEY`, `AWS_SESSION_TOKEN`
-
-**5. Hoop session opens with the rotated creds.**
+**4. Agent opens the Hoop session with `EKS_ROLE_ARN` set.**
 
 ```bash
-hoop connect payments-debug
+hoop connect payments-debug \
+  --env EKS_ROLE_ARN=arn:aws:iam::123456789012:role/iam-jit/grant-rq-abc123
 ```
 
-The Hoop connection `payments-debug` is configured (in Hoop's UI or
-config file) with envs:
+Or, if the Hoop connection `payments-debug` is configured to read
+`EKS_ROLE_ARN` from a Hoop variable that the agent sets via Hoop's
+API, the role ARN flows that way instead. Either path: the role ARN
+is the only thing handed off.
 
-```yaml
-envs:
-  AWS_ACCESS_KEY_ID: "_aws:/iam-jit/hoop-session/payments-debug:AWS_ACCESS_KEY_ID"
-  AWS_SECRET_ACCESS_KEY: "_aws:/iam-jit/hoop-session/payments-debug:AWS_SECRET_ACCESS_KEY"
-  AWS_SESSION_TOKEN: "_aws:/iam-jit/hoop-session/payments-debug:AWS_SESSION_TOKEN"
+**5. Hoop opens the session; agent does the AssumeRole.**
+
+Hoop's agent (running as `RoleX` via IRSA) calls:
+```
+sts:AssumeRole(
+  RoleArn=arn:aws:iam::123456789012:role/iam-jit/grant-rq-abc123,
+  RoleSessionName=hoop-payments-debug-...,
+  DurationSeconds=3600
+)
 ```
 
-Hoop reads the secret at session-open and injects the values into
-the engineer's shell. Their AWS-SDK calls now use the iam-jit-issued
-credentials.
+STS issues a triple; Hoop injects `AWS_ACCESS_KEY_ID`,
+`AWS_SECRET_ACCESS_KEY`, `AWS_SESSION_TOKEN` into the session env.
 
 **6. Agent uses the session.**
 
@@ -183,21 +275,22 @@ aws logs filter-log-events \
 aws s3 cp s3://payment-events/payment-4521-attempt-1.json - | jq .
 ```
 
-Each command succeeds because the iam-jit-issued credentials grant
+Each command succeeds because the iam-jit-created role grants
 exactly these actions on exactly these resources. The agent
 correlates the data, finds the issue (rejected by upstream gateway,
 not retried), and reports back.
 
 **7. Cleanup.**
 
-When the grant TTL expires (1 hour), iam-jit automatically:
-- Marks the grant as expired
-- Calls `secretsmanager:UpdateSecret` to overwrite the secret with
-  a sentinel value (or empty JSON) so future Hoop sessions read
-  invalid creds and fail closed
+When the grant TTL expires (1 hour), iam-jit's sweeper:
+- Calls `iam:DeleteRole` on `arn:aws:iam::123456789012:role/iam-jit/grant-rq-abc123`
+- Marks the grant as expired in audit
+- Any new Hoop session-open against `payments-debug` would attempt
+  `sts:AssumeRole` on the deleted role and get an explicit STS
+  failure → fails closed
 
-The next session-open by anyone for `payments-debug` will require a
-fresh iam-jit grant.
+The next session-open requires a fresh iam-jit grant. No orphan
+role, no stale secret value.
 
 ---
 
@@ -247,8 +340,9 @@ why the agent should expect iam-jit to flag this as needing approval.
       ]
     }
   },
-  "principal": {"kind": "human", "identifier": "alice@omise.com"},
-  "duration_seconds": 7200
+  "principal": {"kind": "human", "identifier": "alice@acme.com"},
+  "duration_seconds": 7200,
+  "integration": {"kind": "hoop", "trust_principal": "arn:aws:iam::123456789012:role/HoopAgentRole"}
 }
 ```
 
@@ -288,22 +382,27 @@ The agent picks (a) and tells the engineer:
 
 Admin sees the request with the agent's natural-language description,
 the exact actions and ARNs the agent inferred from source, and the
-score breakdown. Approves with a 2-hour TTL.
+score breakdown. Approves with a 2-hour TTL. iam-jit creates the
+role (with the cross-account write permissions and the Hoop agent's
+trust principal) and returns the role ARN.
 
-**5. iam-jit issues credentials, wrapper rotates Hoop secret, agent
-runs the task.**
+**5. Agent runs the task via Hoop.**
 
 ```bash
-hoop connect rake-runner -- rake settlements:reconcile
+hoop connect rake-runner \
+  --env EKS_ROLE_ARN=arn:aws:iam::123456789012:role/iam-jit/grant-rq-def456 \
+  -- rake settlements:reconcile
 ```
 
 The Hoop `rake-runner` connection is configured to spawn a Ruby
-container with the iam-jit-issued AWS creds in the env, run the
-provided command, capture output, then exit.
+container with the assumed-role creds in the env, run the provided
+command, capture output, then exit. Hoop's agent assumes the
+iam-jit-created role at session-open.
 
 Output streams back; the agent summarizes results.
 
-**6. Cleanup happens automatically at TTL expiry.**
+**6. Cleanup happens automatically at TTL expiry** — iam-jit's
+sweeper deletes the role.
 
 ---
 
@@ -358,20 +457,22 @@ incident-context and emit a notification to the SRE channel.
       ]
     }
   },
-  "principal": {"kind": "human", "identifier": "alice@omise.com"},
+  "principal": {"kind": "human", "identifier": "alice@acme.com"},
   "duration_seconds": 1800,
-  "caller": {"source": "incident-response", "incident_id": "INC-2026-05-15-001"}
+  "caller": {"source": "incident-response", "incident_id": "INC-2026-05-15-001"},
+  "integration": {"kind": "hoop", "trust_principal": "arn:aws:iam::123456789012:role/HoopAgentRole"}
 }
 ```
 
-**4. iam-jit auto-approves (read-only + narrow ARNs).**
+**4. iam-jit auto-approves (read-only + narrow ARNs) and creates the role.**
 
-Score: 0.12. Issued in <500ms.
+Score: 0.12. Role created in <500ms.
 
-**5. Wrapper rotates Hoop secret; on-call kubectls into the debug pod.**
+**5. On-call connects via Hoop; assumes the iam-jit role; kubectls into the debug pod.**
 
 ```bash
-hoop connect kube-debug-prod
+hoop connect kube-debug-prod \
+  --env EKS_ROLE_ARN=arn:aws:iam::123456789012:role/iam-jit/grant-rq-inc001
 # Inside the pod:
 kubectl logs -n wallet -l app=wallet-svc --tail=500
 kubectl exec -it wallet-svc-7b9f4-xyzqp -- /bin/sh
@@ -383,13 +484,16 @@ node OOM'd; failover hadn't completed.
 **6. Fix path requires more access.**
 
 The fix requires `elasticache:DescribeReplicationGroups` +
-`elasticache:CompleteFailover`. Agent submits a follow-up grant.
+`elasticache:CompleteFailover`. Agent submits a follow-up grant
+(iam-jit creates a second role, returns its ARN; agent re-opens a
+Hoop session with the new role).
 
 This second grant gets caught by the same-purpose retry lockout
 (layer 2 anti-spam) → routes to admin. SRE manager approves
 in 30 seconds (incident context = high priority).
 
-Failover completes. Service recovers.
+Failover completes. Service recovers. Both roles auto-delete at
+TTL.
 
 ---
 
@@ -441,16 +545,18 @@ volume than humans, but boundary-probe detection is still active).
   },
   "principal": {"kind": "agent", "identifier": "slack-alert-investigator-bot"},
   "duration_seconds": 900,
-  "caller": {"source": "alert-router", "alarm_name": "ECS-task-failures-payments"}
+  "caller": {"source": "alert-router", "alarm_name": "ECS-task-failures-payments"},
+  "integration": {"kind": "hoop", "trust_principal": "arn:aws:iam::123456789012:role/HoopAgentRole"}
 }
 ```
 
-**4. iam-jit auto-approves; wrapper rotates Hoop secret.**
+**4. iam-jit auto-approves and creates the role.**
 
 **5. Bot opens Hoop session, gathers data, summarizes.**
 
 ```bash
-hoop connect ecs-investigate
+hoop connect ecs-investigate \
+  --env EKS_ROLE_ARN=arn:aws:iam::123456789012:role/iam-jit/grant-rq-ecs01
 # Bot runs:
 aws ecs describe-services --cluster prod --services payments | jq '.services[0].events[:5]'
 aws ecs list-tasks --cluster prod --service-name payments --desired-status STOPPED \
@@ -467,11 +573,11 @@ Bot posts a summary to `#alerts`:
 > `ResourceInitializationError: failed to invoke EFS utils command`.
 > EFS mount issue. Page on-call."
 
-**6. Cleanup at TTL.**
+**6. Cleanup at TTL** — iam-jit deletes the role.
 
 ---
 
-## Scenario 5: rotate one Secrets Manager secret
+## Scenario 5: rotate one secret (write to one secret only)
 
 ### Situation
 
@@ -506,8 +612,9 @@ Confirmed name: `prod/external/payment-gateway`.
       ]
     }
   },
-  "principal": {"kind": "human", "identifier": "alice@omise.com"},
-  "duration_seconds": 900
+  "principal": {"kind": "human", "identifier": "alice@acme.com"},
+  "duration_seconds": 900,
+  "integration": {"kind": "hoop", "trust_principal": "arn:aws:iam::123456789012:role/HoopAgentRole"}
 }
 ```
 
@@ -526,27 +633,32 @@ secret ARNs.
 ```
 
 No narrowing hints because the request is already minimal — there's
-no way to "make it less risky" while still doing the rotation.
+no way to "make it less risky" while still doing the rotation. The
+single-secret resource scope is already as tight as the action
+allows; the production-scope flag is what drives the score.
 
 **4. Admin (security on-call) reviews and approves.**
 
 The natural-language description is clear; the resource is one
 secret; the actions are the minimum needed for rotation; the TTL is
-15 minutes. Approved in seconds.
+15 minutes. Approved in seconds. iam-jit creates the role and
+returns the ARN.
 
 **5. Agent rotates the secret via Hoop session.**
 
 ```bash
-hoop connect secret-rotate -- bash -c '
-  NEW_KEY=$(curl -sS -H "Authorization: Bearer $UPSTREAM_TOKEN" \
-    https://gateway.example.com/api-keys/rotate | jq -r .new_key)
-  aws secretsmanager put-secret-value \
-    --secret-id prod/external/payment-gateway \
-    --secret-string "{\"api_key\":\"$NEW_KEY\"}"
-  aws secretsmanager update-secret-version-stage \
-    --secret-id prod/external/payment-gateway \
-    --version-stage AWSCURRENT \
-    --move-to-version-id $(aws secretsmanager describe-secret --secret-id prod/external/payment-gateway --query VersionIdsToStages --output json | jq -r "to_entries[] | select(.value[] == \"AWSPENDING\") | .key")
+hoop connect secret-rotate \
+  --env EKS_ROLE_ARN=arn:aws:iam::123456789012:role/iam-jit/grant-rq-rot01 \
+  -- bash -c '
+    NEW_KEY=$(curl -sS -H "Authorization: Bearer $UPSTREAM_TOKEN" \
+      https://gateway.example.com/api-keys/rotate | jq -r .new_key)
+    aws secretsmanager put-secret-value \
+      --secret-id prod/external/payment-gateway \
+      --secret-string "{\"api_key\":\"$NEW_KEY\"}"
+    aws secretsmanager update-secret-version-stage \
+      --secret-id prod/external/payment-gateway \
+      --version-stage AWSCURRENT \
+      --move-to-version-id $(aws secretsmanager describe-secret --secret-id prod/external/payment-gateway --query VersionIdsToStages --output json | jq -r "to_entries[] | select(.value[] == \"AWSPENDING\") | .key")
 '
 ```
 
@@ -596,15 +708,20 @@ we:
 
 1. Give the bot's pod NO standing AWS credentials
 2. Give the bot iam-jit API access (a single scoped token to call
-   `/api/v1/grant`)
+   `/api/v1/grant`) AND IRSA-bind a trust principal the bot itself
+   can assume (call it `BotIRSARole`)
 3. When the bot needs AWS data to answer a question, it requests a
-   narrow, short-lived grant per query
-4. iam-jit scores, gates, and issues credentials with a 5-15 minute
-   TTL
-5. The bot uses those creds for the specific query, then discards them
+   narrow, short-lived grant per query — iam-jit creates a role
+   trusting `BotIRSARole`
+4. The bot's pod assumes the created role using IRSA-issued STS
+   credentials (no standing AWS keys involved)
+5. The bot uses those assumed creds for the specific query, then
+   lets them expire
 
-The bot's ambient AWS posture stays **zero**. Each query carves out
-a tiny, audit-logged window of access just for that question.
+The bot's ambient AWS posture stays **zero standing credentials**.
+Each query carves out a tiny, audit-logged window of access just
+for that question. The IRSA token is short-lived and pod-scoped —
+not a long-lived AWS access key.
 
 ### Concrete flow
 
@@ -640,29 +757,37 @@ A user asks in Slack:
     "source": "slack-bot",
     "slack_user_id": "U01ABC...",
     "slack_question_id": "..."
-  }
+  },
+  "integration": {"kind": "irsa-direct", "trust_principal": "arn:aws:iam::123456789012:role/BotIRSARole"}
 }
 ```
 
 Note: `duration_seconds: 300` — five minutes is plenty for a single
 metric lookup. The narrower the time window, the lower the score
-contribution from duration.
+contribution from duration. `integration.kind: irsa-direct` signals
+the bot will assume the role directly (no Hoop in this path).
 
-**3. iam-jit auto-approves.**
+**3. iam-jit auto-approves and creates the role.**
 
 Score: 0.08. Read-only metadata + metric read on one bucket / one
 service. Below threshold.
 
-**4. Bot uses creds directly (no Hoop session needed for read-only
-out-of-cluster API calls).**
+**4. Bot assumes the iam-jit-created role and runs the query.**
 
 ```python
 # Inside the bot's request handler:
-creds = grant["credentials"]
+import boto3
+sts = boto3.client("sts")  # uses pod's IRSA-issued identity
+assumed = sts.assume_role(
+    RoleArn=grant["role_arn"],
+    RoleSessionName="bot-query-..." + grant["grant_id"],
+    DurationSeconds=300,
+)
+creds = assumed["Credentials"]
 session = boto3.Session(
-    aws_access_key_id=creds["access_key_id"],
-    aws_secret_access_key=creds["secret_access_key"],
-    aws_session_token=creds["session_token"],
+    aws_access_key_id=creds["AccessKeyId"],
+    aws_secret_access_key=creds["SecretAccessKey"],
+    aws_session_token=creds["SessionToken"],
 )
 cw = session.client("cloudwatch", region_name="ap-southeast-1")
 result = cw.get_metric_statistics(
@@ -677,20 +802,21 @@ size_gb = result["Datapoints"][0]["Average"] / (1024**3)
 bot.respond(f"payment-events is {size_gb:.1f} GB as of yesterday's metric.")
 ```
 
-**5. Creds are discarded; grant expires at TTL.**
+**5. Creds expire; role auto-deletes at TTL.**
 
 The bot doesn't write the creds to disk, doesn't cache them
-beyond the request, and lets them expire. If the same user asks a
-similar question 10 minutes later, the bot makes a fresh grant
-request.
+beyond the request, and lets them expire. iam-jit deletes the role
+at TTL. If the same user asks a similar question 10 minutes later,
+the bot makes a fresh grant request.
 
 ### Why this is the highest-leverage use case for iam-jit at scale
 
 It demonstrates the **default-to-iam-jit** posture for agents in
-production: the bot's normal state is "no AWS access at all," and
-every interaction-with-AWS is a discrete, audited, scored, and
-short-lived grant. This is the structural posture iam-jit makes
-practical and that nothing else in the market does well today.
+production: the bot's normal state is "no standing AWS access at
+all," and every interaction-with-AWS is a discrete, audited,
+scored, and short-lived grant. This is the structural posture
+iam-jit makes practical and that nothing else in the market does
+well today.
 
 It also opens up an entire category of agent capability that today
 gets refused at the InfoSec review: bots that can introspect AWS
@@ -715,20 +841,74 @@ section.
 
 ---
 
-## Wrapper script skeleton
+## Pattern 2 (FALLBACK): Wrapper script + Secrets Manager
+
+> **Use this only if your Hoop deployment doesn't have IRSA set up
+> yet** OR the Hoop connection type doesn't natively accept an
+> `EKS_ROLE_ARN`. For any EKS-hosted Hoop agent, Pattern 1 above is
+> what Hoop's own docs recommend and what this recipe leads with.
+
+The original draft of this doc used a small wrapper that bridged
+iam-jit's grant response into a Secrets Manager secret that a Hoop
+connection reads via Hoop's `_aws:secret:KEY` source. That pattern
+still works in v1.0 and is documented here as a fallback for the
+deployments where Pattern 1 isn't an option (older Hoop configs,
+non-EKS Hoop deployments without IRSA configured).
+
+### When to use Pattern 2
+
+- Hoop agent runs OUTSIDE EKS (Docker on a VM, bare-metal, etc.)
+  and doesn't have an IRSA equivalent
+- Hoop connection type only accepts static credentials via
+  `_aws:secret:KEY` source (older connection types)
+- You're migrating from an existing Secrets-Manager-based Hoop
+  config and don't want to flip it yet
+
+For everything else, prefer Pattern 1 — no held credentials, no
+secret rotation, no wrapper.
+
+### How Pattern 2 works
+
+iam-jit issues STS credentials (instead of returning a role ARN)
+via the legacy `/api/v1/grant?issue_credentials=true` query
+parameter. A small wrapper script writes the STS triple to a
+Secrets Manager secret. Hoop's connection envs reference that
+secret via `_aws:<secret>:KEY` syntax.
+
+```
+agent ──► iam-jit /api/v1/grant?issue_credentials=true ──► STS triple
+                                         │
+                                         ▼
+                          wrapper writes creds → AWS Secrets Manager
+                          (path: /iam-jit/hoop-session/<connection-id>)
+                                         │
+                                         ▼
+agent ──► hoop session open <connection-id>
+                                         │
+                                         ▼
+       Hoop reads from Secrets Manager → injects into session env
+```
+
+### Wrapper script skeleton (Pattern 2 only)
 
 `infrastructure/recipes/hoop-credential-bridge.py` (one file, ~60
-lines):
+lines — kept here as a reference; not currently shipped under
+`infrastructure/recipes/` in the repo because Pattern 1 supersedes
+it):
 
 ```python
 """Bridge: iam-jit grant response → AWS Secrets Manager → Hoop session.
+
+PATTERN 2 FALLBACK — only use this when Pattern 1 (AssumeRole) is
+not possible. Pattern 1 is what Hoop's EKS quickstart documents and
+what this recipe leads with.
 
 Reads a grant response on stdin (or via --grant-id arg + iam-jit
 fetch), writes the STS triple as JSON to a Secrets Manager secret
 that a Hoop connection is configured to read from.
 
 Usage:
-  curl ... | python3 hoop-credential-bridge.py --secret-path /iam-jit/hoop-session/<connection-id>
+  curl ...?issue_credentials=true | python3 hoop-credential-bridge.py --secret-path /iam-jit/hoop-session/<connection-id>
   python3 hoop-credential-bridge.py --grant-id G-... --secret-path ...
 """
 import argparse
@@ -760,7 +940,9 @@ def main():
 
     creds = grant.get("credentials")
     if not creds:
-        sys.exit(f"grant has no credentials field: status={grant.get('status')}")
+        sys.exit(f"grant has no credentials field: status={grant.get('status')}. "
+                 "Pattern 1 (role ARN handoff) is recommended; this wrapper only "
+                 "works with the issue_credentials=true legacy path.")
 
     payload = {
         "AWS_ACCESS_KEY_ID":     creds["access_key_id"],
@@ -780,7 +962,7 @@ def main():
         sm.create_secret(
             Name=args.secret_path,
             SecretString=json.dumps(payload),
-            Description="iam-jit-issued ephemeral creds for Hoop session",
+            Description="iam-jit-issued ephemeral creds for Hoop session (Pattern 2 fallback)",
         )
     print(f"wrote creds to {args.secret_path} (expires_at={creds['expires_at']})")
 
@@ -789,9 +971,7 @@ if __name__ == "__main__":
     main()
 ```
 
-### One-time setup per Hoop connection
-
-For each Hoop connection that should use iam-jit-issued credentials:
+### One-time setup per Hoop connection (Pattern 2 only)
 
 1. Create a Secrets Manager secret with a placeholder value:
    ```bash
@@ -813,38 +993,71 @@ For each Hoop connection that should use iam-jit-issued credentials:
      AWS_SESSION_TOKEN:     "_aws:/iam-jit/hoop-session/<connection-id>:AWS_SESSION_TOKEN"
    ```
 
-That's it. Each session-open reads the latest creds from Secrets
-Manager. iam-jit rotates the secret per grant.
+That's the Pattern 2 setup. Each session-open reads the latest
+creds from Secrets Manager. iam-jit rotates the secret per grant
+(via the wrapper).
+
+### Why Pattern 1 is preferred over Pattern 2
+
+| | Pattern 1 (AssumeRole / IRSA) | Pattern 2 (Wrapper + Secrets Manager) |
+|---|---|---|
+| Held credentials | None | STS triple in Secrets Manager |
+| iam-jit holds creds | No | No (wrapper writes them) |
+| Secret rotation | N/A — no secret | Wrapper rewrites per grant |
+| Required infra | IRSA + iam-jit role-create perms | Secrets Manager + wrapper + Hoop secret config |
+| Hoop docs alignment | Yes (EKS quickstart) | Legacy / no longer the documented path |
+| Failure mode | Role deleted → session fails closed | Stale secret → session may briefly use old creds |
+| Operator complexity | One-time IRSA binding | Per-connection secret setup |
 
 ---
 
 ## Failure modes + how the recipe handles them
+
+### Pattern 1 (recommended)
+
+| Failure | Behavior |
+|---|---|
+| iam-jit unreachable | Grant request fails; agent reports the error. No role gets created; Hoop session-open has nothing to assume. No stale creds anywhere. |
+| iam-jit returns role ARN but role-create races with session-open | AssumeRole retries briefly (STS eventual consistency); usually clears within 1-2 seconds. Hoop's session-open will surface the failure cleanly if it persists. |
+| Grant TTL expires mid-session | Already-fetched STS triple continues to work until STS rejects it (~at TTL boundary). Next API call after TTL fails with `ExpiredToken`. Engineer requests a new grant; iam-jit creates a fresh role. |
+| Multiple agents request grants simultaneously | Each gets a different role ARN. No shared mutable state. Both sessions work independently. |
+| iam-jit deletes role before session ends | Active sessions keep working until STS-issued triple expires (STS doesn't re-check the role). Next session-open against the same role fails (role gone). |
+
+### Pattern 2 (fallback)
 
 | Failure | Behavior |
 |---|---|
 | iam-jit unreachable | Wrapper exits non-zero; agent reports the error. Hoop session has no fresh creds; previous grant's creds still in secret may work IF still within TTL, otherwise session-open fails closed. |
 | Secrets Manager write fails | Wrapper exits non-zero; agent retries OR reports. Old creds still in secret; old session may still work briefly. |
 | Hoop session-open while wrapper is mid-write | Hoop reads the current secret value (atomic in Secrets Manager). Either gets old creds (still valid if pre-TTL) or new creds. No partial reads. |
-| Grant TTL expires mid-session | The session's already-fetched creds continue to work until STS rejects them (~at TTL boundary). The next API call after TTL fails with `ExpiredToken`. Engineer requests a new grant if more time needed. |
+| Grant TTL expires mid-session | Same as Pattern 1 — STS triple continues until rejected. |
 | Multiple agents request grants for the same connection simultaneously | Each gets a different grant_id; whoever's wrapper writes to Secrets Manager last wins (the secret holds the latest). The "loser" can detect this by reading back and seeing a different `GRANT_ID` than they wrote. Anti-spam layer 2 (same-purpose retry lockout) catches genuine same-purpose duplicates. |
 
 ## What this recipe deliberately does NOT do
 
 - **No protocol change to Hoop.** Uses Hoop's existing
-  `_aws:secret:KEY` source.
+  `EKS_ROLE_ARN` connection env (Pattern 1) or `_aws:secret:KEY`
+  source (Pattern 2).
 - **No iam-jit code change.** Uses iam-jit's existing
   `/api/v1/grant` endpoint.
-- **No fork of either tool.** Just a wrapper script and config.
-- **No vendor coupling.** The same shape (write STS triple →
-  named-secret) works with Teleport, StrongDM, Boundary, or any
-  other proxy that reads creds from Secrets Manager / Vault / file.
+- **No fork of either tool.** Just a one-time IRSA binding (Pattern
+  1) or a wrapper script (Pattern 2).
+- **No vendor coupling.** The same Pattern-1 shape (iam-jit creates
+  role + caller assumes it) works with Teleport (`AssumeRoleArn`),
+  StrongDM (workload identity), Boundary, or any other proxy that
+  supports per-session role assumption. The same Pattern-2 shape
+  (wrapper writes STS triple to a secret) works with anything that
+  reads creds from Secrets Manager / Vault / file.
 
 ## Related docs
 
 - [`docs/RECOMMENDER-API-SPEC.md`](../RECOMMENDER-API-SPEC.md) — the
   recommender API the agent calls
-- [`docs/integrations/HOOP-IAMJIT.md`](../integrations/HOOP-IAMJIT.md)
-  — the Hoop integration runbook (this recipe extends it)
+- [Hoop EKS quickstart](https://hoop.dev/docs/quickstart/cloud-services/kubernetes/kubernetes-eks)
+  — the upstream pattern Pattern 1 is built on
+- [[create-not-assume-pattern]] (memory) — the architectural
+  pattern (iam-jit creates roles; caller assumes them; iam-jit
+  never holds creds)
 - [[agent-context-primacy]] (memory) — why agent-supplied
   parameters produce better recommendations than iam-jit guessing
 - [[recommender-context-boundary]] (memory) — what context channels

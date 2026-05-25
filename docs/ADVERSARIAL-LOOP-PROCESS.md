@@ -269,7 +269,9 @@ The marketable artifact is the **calibration-confidence number**:
 
 Update this number after every quarterly pass. Publish it in:
 - README header
-- docs.iam-risk-score.com landing page
+- the landing site (`landing-site/`) — the v1.0 marketing surface;
+  hosted `docs.iam-risk-score.com` was dropped per [[no-hosted-saas]]
+  (2026-05-24)
 - Blog post per quarter ("Quarterly calibration report")
 - Sales materials
 

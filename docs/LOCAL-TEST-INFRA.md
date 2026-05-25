@@ -1,6 +1,6 @@
 # Local test infrastructure
 
-How to run iam-jit, kbouncer, and dbounce integration tests against
+How to run iam-jit, kbounce, and dbounce integration tests against
 real service containers on your laptop — no cloud account required.
 
 ## Why this exists
@@ -30,7 +30,7 @@ LocalStack / Keycloak / kind / Postgres-in-Docker, it MUST be.
 | S3 GetObject, PutObject, ListBucket          | yes    | LocalStack S3 is the most-mature service                                         |
 | Lambda invoke / deploy (SAM)                 | yes    | LocalStack Lambda + the SAM CLI talk to each other                               |
 | OIDC discovery + JWKS                        | yes    | Keycloak 25 is a standards-compliant OIDC provider                               |
-| K8s apiserver round-trip (kbouncer proxy)    | yes    | kind brings up a real apiserver in seconds                                       |
+| K8s apiserver round-trip (kbounce proxy)     | yes    | kind brings up a real apiserver in seconds                                       |
 | Postgres + MySQL wire protocols (dbounce)    | yes    | Real engines in Docker; same protocol bytes as a hosted instance                 |
 | **Real STS cross-account trust**             | NO     | LocalStack runs one "account"; cross-account `sts:AssumeRole` semantics are mocked, not enforced |
 | **Real CloudTrail event latency**            | NO     | LocalStack emits CloudTrail events synchronously; production has 5-15min lag the Live-Action-Tail UX must handle |
@@ -89,7 +89,7 @@ safe to run.
 > `AWS_ENDPOINT_URL_<SERVICE>` form is the cleanest fix because it
 > leaves real-AWS calls untouched.
 
-## kbouncer (`kbouncer` repo)
+## kbounce (binary in the `kbouncer` repo)
 
 kind cluster (real kube-apiserver in a Docker container).
 
@@ -152,8 +152,8 @@ skips when its target engine isn't reachable.
 | ---------- | -------------------- | -------------------------------------------------- |
 | Docker     | all three repos      | https://docs.docker.com/get-docker/ (or Colima on macOS) |
 | docker compose | iam-jit, dbounce | bundled with modern Docker Desktop                 |
-| kind       | kbouncer only        | https://kind.sigs.k8s.io                           |
-| Go 1.26+   | kbouncer, dbounce    | https://go.dev/dl/                                 |
+| kind       | kbounce only         | https://kind.sigs.k8s.io                           |
+| Go 1.26+   | kbounce, dbounce     | https://go.dev/dl/                                 |
 | Python 3.12+ + venv | iam-jit     | https://www.python.org/downloads/                  |
 
 On macOS specifically, `colima start` is the standard alternative to

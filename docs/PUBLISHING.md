@@ -79,7 +79,7 @@ The action lives at `github-action/action.yml`. To publish:
 ### Steps
 
 - [ ] Move the action to its own repo: `github.com/trsreagan3/iam-risk-score-action`. Reason: GitHub Marketplace requires the action at the repo root. The action repo will be tiny — just `action.yml` + `README.md` + a `LICENSE` file.
-- [ ] In the new repo, the `action.yml` should reference the published PyPI package: `pip install iam-risk-score>=0.1.0` (no `git+https://` fallback).
+- [ ] In the new repo, the `action.yml` should reference the published PyPI package: `pip install iam-jit>=0.1.0` (the `iam-risk-score` console script ships inside the `iam-jit` wheel; there is no separate `iam-risk-score` package on PyPI per [[no-hosted-saas]] restoration). No `git+https://` fallback.
 - [ ] Tag a release `v0.1.0` AND a `v1` floating tag. Marketplace conventions: users reference `@v1`, you push patches via the floating tag.
 - [ ] Submit for Marketplace review at github.com/marketplace/new. Requires `branding` block (already in action.yml).
 - [ ] After approval, the action shows up in the marketplace search.

@@ -2,7 +2,7 @@
 
 Status: SHIPPED 2026-05-22 (task #321 / KNOWN-CAVEATS §A19).
 
-Applies to: ibounce, kbouncer, dbounce, gbounce (v1.0 doctor is a no-op
+Applies to: ibounce, kbounce, dbounce, gbounce (v1.0 doctor is a no-op
 on gbounce per the architectural-honesty note below).
 
 ## Updated 2026-05-22 — DEFAULT MODE FLIPPED TO DISCOVERY
@@ -22,7 +22,7 @@ What this means for the upgrade path:
   silently must explicitly opt in** to keep that behavior post-upgrade:
   - ibounce: `ibounce run --profile safe-default` OR
     `export IAM_JIT_BOUNCER_PROFILE=safe-default`
-  - kbouncer: `kbounce run --profile safe-default` OR
+  - kbounce: `kbounce run --profile safe-default` OR
     `export KBOUNCER_PROFILE=safe-default`
   - dbounce: `dbounce run --profile safe-default` OR
     `export DBOUNCE_PROFILE=safe-default`
@@ -46,7 +46,7 @@ each bouncer writes its embedded default profile to the operator's
 home directory:
 
 - ibounce → `~/.iam-jit/bouncer/profiles.yaml`
-- kbouncer → `~/.kbouncer/profiles.yaml`
+- kbounce → `~/.kbouncer/profiles.yaml` (state dir kept its original name; only the binary was renamed)
 - dbounce → `~/.dbounce/profiles.yaml`
 - gbounce → no shipped profiles.yaml in v1.0 (rules are explicit-file
   via `--profile-rules-file`; see §gbounce-special-case below)
@@ -96,7 +96,7 @@ banner warning** on `*bounce run`:
 
 | Category | Triggers startup banner? | Examples |
 | --- | --- | --- |
-| `safety-floor` | YES | `deny_dcl_targets_public` (dbounce); `deny_subresource_writes` (kbouncer); `allow_baseline` (ibounce) |
+| `safety-floor` | YES | `deny_dcl_targets_public` (dbounce); `deny_subresource_writes` (kbounce); `allow_baseline` (ibounce) |
 | `detection` | no | burst-detector, prompt-injection sniffers |
 | `audit` | no | preset versions, decision_source extensions |
 | `convenience` | no | TTL defaults, profile naming, UX flags |
@@ -238,7 +238,7 @@ $ gbounce profile doctor
 
 gbounce: profile doctor — installed profile matches shipped defaults (version 2026-05-22-321).
 
-gbounce v1.0 does not ship a default profiles.yaml; profile rules are loaded explicitly via --profile-rules-file (JSON) or --deny-host / --deny-hosts-file (newline / YAML list). There are no shipped defaults to be behind. G-Slice 2 will introduce a YAML profiles surface alongside the existing shapes; this surface will populate the doctor catalog at that time so older installs surface missing safety floors the same way dbounce / kbouncer / ibounce do today.
+gbounce v1.0 does not ship a default profiles.yaml; profile rules are loaded explicitly via --profile-rules-file (JSON) or --deny-host / --deny-hosts-file (newline / YAML list). There are no shipped defaults to be behind. G-Slice 2 will introduce a YAML profiles surface alongside the existing shapes; this surface will populate the doctor catalog at that time so older installs surface missing safety floors the same way dbounce / kbounce / ibounce do today.
 ```
 
 The doctor subcommand exists on gbounce for cross-product CLI parity
