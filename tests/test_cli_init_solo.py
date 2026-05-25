@@ -78,7 +78,10 @@ def test_init_solo_idempotent(
     isolated_data_dir: pathlib.Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Running init-solo twice doesn't corrupt anything or rotate the token."""
+    """Running init-solo twice doesn't corrupt anything or rotate the
+    token. Second invocation must pass `--reuse-existing` per #617
+    MED-3 fail-CLOSED preflight; idempotency is then preserved.
+    """
     monkeypatch.setattr("boto3.client", lambda *a, **k: (_ for _ in ()).throw(
         Exception("no creds")
     ))
@@ -91,7 +94,9 @@ def test_init_solo_idempotent(
     users_1 = (isolated_data_dir / "users.yaml").read_text()
 
     r2 = runner.invoke(
-        main, ["init-solo", "--data-dir", str(isolated_data_dir)],
+        main,
+        ["init-solo", "--data-dir", str(isolated_data_dir),
+         "--reuse-existing"],
     )
     assert r2.exit_code == 0
     token_2 = (isolated_data_dir / "cli-token").read_text()

@@ -344,6 +344,121 @@ def serve(local: bool, host: str, port: int, data_dir: pathlib.Path | None) -> N
     sys.exit(run(host=host, port=port, data_dir=data_dir))
 
 
+# ---------------------------------------------------------------------------
+# init-solo preflight — #617 MED-3
+#
+# Per [[creates-never-mutates]] + [[ibounce-honest-positioning]]:
+# `init-solo` against a populated `~/.iam-jit/` MUST surface what's
+# being re-used vs created. Pre-fix UAT 2026-05-25 found a second
+# `init-solo` invocation silently carried prior state forward — operator
+# could believe they got a fresh init.
+#
+# Default behavior: fail-CLOSED (exit 2) when pre-existing data found.
+# Operators explicitly opt in to reuse with `--reuse-existing`.
+# ---------------------------------------------------------------------------
+
+
+def _preflight_check_existing_data(
+    data_dir: pathlib.Path,
+) -> dict[str, list[str]]:
+    """Return mapping of category -> list of absolute paths that already
+    exist in `data_dir` and would be re-used (not re-created) by
+    `init-solo`.
+
+    Categories mirror the audit-bearing + identity-bearing files
+    enumerated by `cli_uninstall.AUDIT_BEARING_PATHS_REL` plus the
+    identity files that `local_server._seed_local_*` would otherwise
+    create from scratch on a fresh run.
+
+    Empty mapping (or a mapping whose only entries are empty lists)
+    means the dir is fresh and `init-solo` can proceed silently.
+    """
+    findings: dict[str, list[str]] = {
+        "accounts": [],
+        "users": [],
+        "cli_token": [],
+        "audit_logs": [],
+        "bouncer_state": [],
+        "canary": [],
+    }
+
+    if not data_dir.exists():
+        return findings
+
+    accounts = data_dir / "accounts.yaml"
+    if accounts.exists():
+        findings["accounts"].append(str(accounts))
+
+    users = data_dir / "users.yaml"
+    if users.exists():
+        findings["users"].append(str(users))
+
+    cli_token = data_dir / "cli-token"
+    if cli_token.exists():
+        findings["cli_token"].append(str(cli_token))
+
+    # Audit logs ship in two shapes (JSONL + SQLite) depending on
+    # how the operator wired audit storage. Either presence counts.
+    for name in ("audit.jsonl", "audit.db"):
+        p = data_dir / name
+        if p.exists():
+            findings["audit_logs"].append(str(p))
+
+    bouncer_state = data_dir / "bouncer" / "state.db"
+    if bouncer_state.exists():
+        findings["bouncer_state"].append(str(bouncer_state))
+
+    canary_issues = data_dir / "canary" / "issues.jsonl"
+    if canary_issues.exists():
+        findings["canary"].append(str(canary_issues))
+
+    return findings
+
+
+def _print_preflight_warning(
+    pre_existing: dict[str, list[str]],
+    *,
+    will_continue: bool,
+) -> None:
+    """Print the [WARN] block to stderr. When `will_continue` is True
+    (operator passed `--reuse-existing`) the trailing line confirms
+    we're proceeding. Otherwise we surface the operator options.
+    """
+    click.echo(
+        "[WARN] Pre-existing iam-jit data detected — init-solo will "
+        "REUSE these files (not re-initialize them):",
+        err=True,
+    )
+    for category, paths in pre_existing.items():
+        click.echo(f"  - {category}:", err=True)
+        for p in paths:
+            click.echo(f"      {p}", err=True)
+    click.echo("", err=True)
+    if will_continue:
+        click.echo(
+            "Continuing because --reuse-existing was passed.",
+            err=True,
+        )
+        return
+    click.echo("Options:", err=True)
+    click.echo(
+        "  - Continue reusing: re-run with --reuse-existing "
+        "(explicitly acknowledge)",
+        err=True,
+    )
+    click.echo(
+        "  - Start fresh:     'iam-jit uninstall --yes' then re-run "
+        "'iam-jit init-solo'",
+        err=True,
+    )
+    click.echo(
+        "  - Reset state but keep audit history: "
+        "'iam-jit uninstall --keep-audit-logs --yes' then "
+        "'iam-jit init-solo --reuse-existing'",
+        err=True,
+    )
+
+
 @main.command("init-solo")
 @click.option(
     "--data-dir",
@@ -364,10 +479,20 @@ def serve(local: bool, host: str, port: int, data_dir: pathlib.Path | None) -> N
     default=False,
     help="Print the Claude Code MCP server config snippet only (no setup).",
 )
+@click.option(
+    "--reuse-existing",
+    is_flag=True,
+    default=False,
+    help="Explicitly acknowledge pre-existing iam-jit data in the data "
+         "directory and re-use it. Without this flag, init-solo "
+         "fail-CLOSED with exit 2 when prior state is detected "
+         "(per [[creates-never-mutates]] + [[ibounce-honest-positioning]]).",
+)
 def init_solo(
     data_dir: pathlib.Path | None,
     port: int,
     print_mcp_config: bool,
+    reuse_existing: bool,
 ) -> None:
     """One-command setup for solo-dev / agent-safety mode.
 
@@ -392,6 +517,18 @@ def init_solo(
     if print_mcp_config:
         _print_mcp_snippets(cfg)
         return
+
+    # #617 MED-3 preflight — surface what we'd re-use BEFORE we touch
+    # the data dir. Default fail-CLOSED so operators explicitly
+    # acknowledge reuse (matches uninstall's --yes pattern).
+    findings = _preflight_check_existing_data(cfg.data_dir)
+    pre_existing = {k: v for k, v in findings.items() if v}
+    if pre_existing:
+        _print_preflight_warning(
+            pre_existing, will_continue=reuse_existing,
+        )
+        if not reuse_existing:
+            sys.exit(2)
 
     click.echo("iam-jit init-solo")
     click.echo("")
