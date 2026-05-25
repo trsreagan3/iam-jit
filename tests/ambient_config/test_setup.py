@@ -17,10 +17,32 @@ Tests:
 from __future__ import annotations
 
 from typing import Any
+from unittest.mock import patch
 
 import pytest
 
 from iam_jit.ambient_config import apply_declaration, plan_declaration
+
+
+# ---------------------------------------------------------------------------
+# Helper — ibounce can be invoked as either the native console script OR
+# `python -m iam_jit.bouncer_cli` when the script isn't on PATH (common in
+# dev / wheel-only installs). Per [[ibounce-honest-positioning]] both are
+# valid execution methods; assertions about ibounce's planned command must
+# accept either shape. See #569.
+# ---------------------------------------------------------------------------
+
+
+def _is_ibounce_command(command_parts: list[str]) -> bool:
+    """True iff ``command_parts`` invokes ibounce via either the native
+    console script (``ibounce …``) OR the python module fallback
+    (``python -m iam_jit.bouncer_cli …``). Both are honest execution
+    methods per [[ibounce-honest-positioning]]; tests must accept both
+    so the suite is robust to whether the console-script is on PATH in
+    the current dev environment.
+    """
+    joined = " ".join(command_parts).lower()
+    return "ibounce" in joined or "iam_jit.bouncer_cli" in joined
 
 
 # ---------------------------------------------------------------------------
@@ -75,7 +97,13 @@ def test_setup_dry_run_returns_plan_without_executing() -> None:
     assert result.bouncers_started == []  # nothing executed
     assert len(result.bouncers_planned) == 1
     assert result.bouncers_planned[0]["name"] == "ibounce"
-    assert "ibounce" in str(result.bouncers_planned[0]["command"]).lower()
+    # #569: accept BOTH console-script (`ibounce …`) and python-module
+    # fallback (`python -m iam_jit.bouncer_cli …`); both are valid
+    # execution methods per [[ibounce-honest-positioning]].
+    assert _is_ibounce_command(result.bouncers_planned[0]["command"]), (
+        f"command is neither ibounce nor python -m iam_jit.bouncer_cli: "
+        f"{result.bouncers_planned[0]['command']!r}"
+    )
     # env-var advisory populated
     assert "AWS_ENDPOINT_URL" in result.env_vars_to_set
     assert "8767" in result.env_vars_to_set["AWS_ENDPOINT_URL"]
@@ -378,3 +406,112 @@ def test_setup_apply_declaration_is_idempotent_with_running_bouncer() -> None:
     result2 = plan_declaration(declaration, posture=posture, env={})
     assert result1.bouncers_already_running == result2.bouncers_already_running
     assert result1.env_vars_to_set == result2.env_vars_to_set
+
+
+# ---------------------------------------------------------------------------
+# #569 — state-verification tests for both ibounce execution shapes.
+# Per CONTRIBUTING.md state-verification convention these assert observable
+# state of the planned command list (not function return shape).
+# ---------------------------------------------------------------------------
+
+
+def test_setup_dry_run_accepts_console_script_form() -> None:
+    """When `ibounce` is on PATH, the planned command uses the native
+    console-script form (`ibounce run …`) and the result's friendly
+    label says so. The `_is_ibounce_command` helper recognizes it.
+    """
+    declaration = {
+        "iam-jit": {
+            "enabled": True,
+            "bouncers": {
+                "ibounce": {"enabled": True, "mode": "discovery"},
+            },
+        }
+    }
+    # Mock shutil.which to return a fake `ibounce` path. The module
+    # under test calls shutil.which directly via _find_binary, so patch
+    # the import site.
+    with patch(
+        "iam_jit.ambient_config.setup.shutil.which",
+        return_value="/usr/local/bin/ibounce",
+    ):
+        result = plan_declaration(
+            declaration, posture=_posture_with(), env={}
+        )
+    assert len(result.bouncers_planned) == 1
+    record = result.bouncers_planned[0]
+    cmd = record["command"]
+    # Native console-script form: first arg is the `ibounce` binary path.
+    assert cmd[0] == "/usr/local/bin/ibounce", (
+        f"expected console-script form; got command={cmd!r}"
+    )
+    assert "iam_jit.bouncer_cli" not in " ".join(cmd), (
+        f"console-script form should not include python module; got {cmd!r}"
+    )
+    # Helper accepts the shape.
+    assert _is_ibounce_command(cmd)
+    # Friendly label + resolution attribute the path honestly.
+    assert record["binary_resolution"] == "console_script"
+    assert record["dry_run_command_friendly_label"] == "ibounce"
+
+
+def test_setup_dry_run_accepts_python_module_form() -> None:
+    """When `ibounce` is NOT on PATH, _find_binary falls back to
+    `python -m iam_jit.bouncer_cli` and the resulting planned command
+    must still be recognized as a valid ibounce invocation. This is the
+    pre-existing #569 fix that closes the original assertion gap.
+    """
+    declaration = {
+        "iam-jit": {
+            "enabled": True,
+            "bouncers": {
+                "ibounce": {"enabled": True, "mode": "discovery"},
+            },
+        }
+    }
+    with patch(
+        "iam_jit.ambient_config.setup.shutil.which",
+        return_value=None,
+    ):
+        result = plan_declaration(
+            declaration, posture=_posture_with(), env={}
+        )
+    assert len(result.bouncers_planned) == 1
+    record = result.bouncers_planned[0]
+    cmd = record["command"]
+    # Python module form: contains `-m` + `iam_jit.bouncer_cli`.
+    assert "-m" in cmd, f"expected python -m form; got command={cmd!r}"
+    assert "iam_jit.bouncer_cli" in cmd, (
+        f"expected iam_jit.bouncer_cli module; got command={cmd!r}"
+    )
+    # Helper accepts the shape.
+    assert _is_ibounce_command(cmd)
+    # Friendly label + resolution attribute the fallback honestly per
+    # [[ibounce-honest-positioning]].
+    assert record["binary_resolution"] == "python_module_fallback"
+    assert "via python -m" in record["dry_run_command_friendly_label"]
+    # The bouncer was NOT skipped — fallback is a valid execution method.
+    assert record["skipped"] is False
+
+
+def test_setup_dry_run_helper_accepts_both_shapes() -> None:
+    """Direct unit test for the test-local `_is_ibounce_command` helper.
+    Both honest execution shapes must be recognized; unrelated commands
+    must not.
+    """
+    # Native console-script forms.
+    assert _is_ibounce_command(["ibounce", "run", "--port", "8767"])
+    assert _is_ibounce_command(["/usr/local/bin/ibounce", "run"])
+    # Python module fallback forms (with various python interpreter paths).
+    assert _is_ibounce_command(
+        ["/usr/bin/python3", "-m", "iam_jit.bouncer_cli", "run"]
+    )
+    assert _is_ibounce_command(
+        ["/Users/dev/.venv/bin/python3.12", "-m", "iam_jit.bouncer_cli",
+         "run", "--port", "8767"]
+    )
+    # Negative cases: unrelated commands must not match.
+    assert not _is_ibounce_command(["kbouncer", "run"])
+    assert not _is_ibounce_command(["python", "-c", "print(1)"])
+    assert not _is_ibounce_command(["dbounce", "run", "--port", "5433"])
+    assert not _is_ibounce_command([])

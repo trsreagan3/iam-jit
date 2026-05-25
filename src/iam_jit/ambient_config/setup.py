@@ -679,10 +679,27 @@ def _start_bouncer(
     resolved_port = port or defaults["default_port"]
     binary = _find_binary(defaults["binary_candidates"])
 
+    # Track which resolution path produced `cmd` so the operator-facing
+    # record can report it honestly per [[ibounce-honest-positioning]].
+    # Two valid shapes for ibounce: native console script (`ibounce …`)
+    # OR python module form (`python -m iam_jit.bouncer_cli …`) when the
+    # console script isn't on PATH. Both are honest execution methods;
+    # surface which one is in play so the operator isn't surprised when
+    # dry-run output shows a long python path instead of `ibounce`.
+    binary_resolution: str
+    friendly_label: str
     # ibounce-specific fallback: invoke the in-tree CLI via python -m.
     if binary is None and name == "ibounce":
         binary = sys.executable
         cmd = [binary, "-m", "iam_jit.bouncer_cli", "run"]
+        binary_resolution = "python_module_fallback"
+        friendly_label = "ibounce (via python -m iam_jit.bouncer_cli)"
+        logger.info(
+            "ibounce console-script not found on PATH; falling back to "
+            "`%s -m iam_jit.bouncer_cli` (both are valid execution "
+            "methods per [[ibounce-honest-positioning]])",
+            binary,
+        )
     elif binary is None:
         return {
             "name": name,
@@ -695,6 +712,8 @@ def _start_bouncer(
         }
     else:
         cmd = [binary, "run"]
+        binary_resolution = "console_script"
+        friendly_label = name
 
     cmd.extend(["--port", str(resolved_port)])
     # Mode mapping: declaration's `discovery` is the bouncer's default
@@ -739,6 +758,13 @@ def _start_bouncer(
         "mode_declared": mode,
         "mode_runtime": declared_runtime_alias(mode),
         "profile": profile,
+        # Per UAT-D GAP-3: operator-readable label that names the
+        # execution method even when the raw command is a long python
+        # path. Per [[ibounce-honest-positioning]] both `ibounce` and
+        # `python -m iam_jit.bouncer_cli` are valid execution shapes;
+        # the label says which one is in play.
+        "binary_resolution": binary_resolution,
+        "dry_run_command_friendly_label": friendly_label,
     }
 
     if not execute:
