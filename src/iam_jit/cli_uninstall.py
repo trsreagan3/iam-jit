@@ -126,6 +126,12 @@ def _find_pids_for_process(name: str) -> list[int]:
     NOTE: we match by exact basename + against ``ps``-style argv on
     macOS to catch ``python -m iam_jit.autopilot.daemon`` style children
     that share the same proxy port.
+
+    KNOWN LIMITATION (#574): ``pgrep -x`` matches the kernel-reported
+    process basename (argv[0]) — which for Python console-script
+    bouncers is the Python interpreter, NOT "ibounce". The matching
+    cross-reference pass in :func:`_inventory_installed_state` covers
+    that gap by going via bound-port ownership.
     """
     pgrep = shutil.which("pgrep")
     if pgrep is None:
@@ -151,6 +157,111 @@ def _find_pids_for_process(name: str) -> list[int]:
         except ValueError:
             continue
     return out
+
+
+def _lsof_pids_on_port(port: int) -> list[int]:
+    """Best-effort PID discovery for a TCP-listening port via ``lsof``.
+
+    Mirrors ``cli_canary._lsof_pids_on_port``. Returns an empty list on
+    any error / when ``lsof`` is not installed (slim Linux containers).
+    Used by :func:`_inventory_installed_state` to cross-reference
+    bouncer-port owners back to PIDs — the #574 fix for ``pgrep -x``
+    missing Python console-script bouncers.
+    """
+    if shutil.which("lsof") is None:
+        return []
+    try:
+        proc = subprocess.run(
+            ["lsof", "-nP", "-iTCP:%d" % int(port), "-sTCP:LISTEN", "-t"],
+            capture_output=True,
+            text=True,
+            check=False,
+            timeout=5.0,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return []
+    out: list[int] = []
+    for line in proc.stdout.splitlines():
+        s = line.strip()
+        if not s:
+            continue
+        try:
+            out.append(int(s))
+        except ValueError:
+            continue
+    return out
+
+
+def _read_cmdline(pid: int) -> str:
+    """Best-effort cmdline read for ``pid``.
+
+    Uses ``ps -p PID -o command=`` which works identically on macOS +
+    Linux (vs. ``/proc/PID/cmdline`` which is Linux-only). Returns the
+    empty string on any failure (PID gone, ps unavailable). Used by
+    :func:`_infer_bouncer_kind_from_cmdline` to validate that a
+    port-owning PID is actually a bouncer process before adding it to
+    the uninstall plan.
+    """
+    ps = shutil.which("ps")
+    if ps is None:
+        return ""
+    try:
+        proc = subprocess.run(
+            [ps, "-p", str(int(pid)), "-o", "command="],
+            capture_output=True,
+            text=True,
+            check=False,
+            timeout=5.0,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return ""
+    return (proc.stdout or "").strip()
+
+
+def _infer_bouncer_kind_from_cmdline(cmdline: str) -> str | None:
+    """Classify a process cmdline as one of our bouncer kinds.
+
+    Returns one of ``BOUNCER_PROCESS_NAMES`` (or ``"iam-jit"`` for the
+    iam-jit autopilot daemon variants) if the cmdline contains a
+    bouncer marker; ``None`` otherwise.
+
+    Per [[ibounce-honest-positioning]]: we ONLY return a name when we
+    can positively identify the process as ours. Foreign processes on
+    bouncer-typical ports are reported separately as "unknown" so the
+    operator can investigate rather than uninstall silently
+    including OR silently excluding them.
+
+    Detection signals (case-sensitive on the path-shape; case-insensitive
+    on the iam_jit module marker):
+
+      * ``iam_jit.`` module import (covers ``python -m iam_jit.<x>``)
+      * ``/iam-jit/venv/bin/<name>`` (covers console-script bouncers)
+      * ``ibounce run``, ``gbounce run``, ``kbounce run``, ``kbouncer run``,
+        ``dbounce run`` substrings (covers native binary invocations
+        even when the kernel-reported basename is the interpreter)
+    """
+    if not cmdline:
+        return None
+    lc = cmdline.lower()
+    # Strong positive: any iam_jit-namespaced module import. The
+    # specific kind defaults to "iam-jit" unless a bouncer name appears
+    # later in the argv.
+    iam_jit_marker = "iam_jit." in cmdline or "iam-jit/" in cmdline
+    # Order matters: kbouncer before kbounce so the more specific
+    # name wins (kbouncer cmdline contains the substring "kbounce").
+    for kind in ("kbouncer", "ibounce", "gbounce", "kbounce", "dbounce"):
+        marker_run = f"{kind} run"
+        marker_path = f"/{kind}"
+        marker_module = f"iam_jit.bouncer_cli"
+        if (
+            marker_run in cmdline
+            or marker_path in cmdline
+            or (kind == "ibounce" and marker_module in cmdline)
+        ):
+            return kind
+    if iam_jit_marker:
+        return "iam-jit"
+    return None
 
 
 def _resolve_go_bin_dir() -> pathlib.Path:
@@ -206,6 +317,11 @@ def _inventory_installed_state() -> dict[str, Any]:
         "venv_exists": VENV_DIR.exists(),
         "running_bouncers": {},
         "bound_ports": [],
+        # #574: port owners that bind a bouncer-typical port but whose
+        # cmdline does NOT look like a bouncer (or whose cmdline could
+        # not be read). Surfaced separately so the operator can decide
+        # whether to investigate or --force.
+        "unknown_port_owners": [],
         "console_scripts_present": [],
         "go_binaries_present": [],
         "audit_bearing_files": [],
@@ -213,6 +329,9 @@ def _inventory_installed_state() -> dict[str, Any]:
     }
 
     # Running bouncers (per MRR-4-UNINSTALL.md step 1 + step 5).
+    # First pass: pgrep on each canonical name (catches native Go
+    # binaries gbounce/kbounce/dbounce + the rare iam-jit-as-process
+    # case where argv[0] basename matches).
     for name in BOUNCER_PROCESS_NAMES:
         pids = _find_pids_for_process(name)
         if pids:
@@ -222,6 +341,37 @@ def _inventory_installed_state() -> dict[str, Any]:
     for port in BOUNCER_PORTS:
         if _port_bound(port):
             inv["bound_ports"].append(port)
+
+    # #574: second pass — cross-reference bound-port owners back to
+    # PIDs. This catches Python console-script bouncers (``ibounce``
+    # under ~/.iam-jit/venv/bin/) which pgrep -x misses because their
+    # kernel-reported basename is the Python interpreter, not
+    # "ibounce". Without this, dry-run plan honestly enumerates the
+    # bound ports but silently undercounts the PIDs that
+    # _step_stop_bouncers will reach -> real execution leaves orphans.
+    # Per [[ibounce-honest-positioning]] the plan must accurately
+    # describe what WILL happen.
+    seen_pids: set[int] = set()
+    for pids in inv["running_bouncers"].values():
+        for pid in pids:
+            seen_pids.add(int(pid))
+    for port in inv["bound_ports"]:
+        for pid in _lsof_pids_on_port(port):
+            if pid in seen_pids:
+                continue
+            cmdline = _read_cmdline(pid)
+            kind = _infer_bouncer_kind_from_cmdline(cmdline)
+            if kind is not None:
+                inv["running_bouncers"].setdefault(kind, []).append(pid)
+                seen_pids.add(pid)
+            else:
+                # Foreign process on a bouncer-typical port. Surface
+                # rather than silently include/exclude.
+                inv["unknown_port_owners"].append({
+                    "pid": pid,
+                    "port": port,
+                    "cmdline": cmdline,
+                })
 
     # Console scripts (step 3).
     if VENV_DIR.exists():
@@ -284,16 +434,15 @@ def _check_halt_conditions(
     """
     halts: list[dict[str, str]] = []
 
-    # U-1: a bouncer port is bound by an unexpected PID (i.e. one
-    # NOT reported by our pgrep sweep). Suggests a non-bouncer service
-    # has claimed the port — proceeding could surprise the operator.
+    # U-1: a bouncer port is bound but our combined detection
+    # (pgrep + lsof port-owner cross-reference per #574) could not
+    # identify any owning bouncer process. Suggests a non-bouncer
+    # service has claimed the port — proceeding could surprise the
+    # operator.
     expected_pids: set[int] = set()
     for pids in (inventory.get("running_bouncers") or {}).values():
         for pid in pids:
             expected_pids.add(int(pid))
-    # We don't try to map ports→pids (lsof may be absent); just flag
-    # the asymmetric case where ports are bound but no bouncer process
-    # was found.
     bound_ports = inventory.get("bound_ports") or []
     if bound_ports and not expected_pids:
         halts.append({
@@ -301,8 +450,29 @@ def _check_halt_conditions(
             "severity": "HIGH",
             "reason": (
                 f"bouncer ports bound ({bound_ports}) but no bouncer "
-                f"processes found via pgrep — a non-bouncer process "
-                f"may hold the port. Investigate before --force."
+                f"processes found via pgrep + lsof cross-reference — "
+                f"a non-bouncer process may hold the port. "
+                f"Investigate before --force."
+            ),
+        })
+
+    # U-2: explicit foreign processes detected on bouncer-typical
+    # ports (#574 unknown_port_owners). This is the "honest report"
+    # case — the operator should investigate before allowing
+    # uninstall to proceed. Surfaced even when other bouncers WERE
+    # found, because each unknown process is its own decision point.
+    unknowns = inventory.get("unknown_port_owners") or []
+    if unknowns:
+        descs = ", ".join(
+            f"pid={u['pid']} on :{u['port']}" for u in unknowns
+        )
+        halts.append({
+            "id": "U-2",
+            "severity": "MED",
+            "reason": (
+                f"non-bouncer process(es) holding bouncer-typical "
+                f"port(s): {descs}. Manual inspection recommended "
+                f"per [[ibounce-honest-positioning]] before --force."
             ),
         })
 
@@ -922,6 +1092,19 @@ def _print_inventory_summary(
         click.echo("  running bouncers:        none")
     if inv["bound_ports"]:
         click.echo(f"  bouncer ports bound:     {inv['bound_ports']}")
+    unknowns = inv.get("unknown_port_owners") or []
+    if unknowns:
+        click.secho(
+            f"  unknown port owners:     {len(unknowns)} "
+            "(non-bouncer process(es) on bouncer-typical ports — "
+            "manual inspection recommended)",
+            fg="yellow",
+        )
+        for u in unknowns:
+            click.echo(
+                f"    pid={u['pid']:<8} port={u['port']:<6} "
+                f"cmdline={u['cmdline'][:120]}"
+            )
     if inv["console_scripts_present"]:
         click.echo(
             f"  pip console scripts:     "

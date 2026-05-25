@@ -313,7 +313,7 @@ The smoke PASSED, but the runbook reveals known gaps for v1.0:
 | U2 | **Shell-profile cleanup not automated.** `HTTPS_PROXY` env vars in `.zshrc` / `.bashrc` survive uninstall. | MED | Documented in per-product caveats. Operator-manual. |
 | U3 | **gbounce MITM CA truststore cleanup not automated.** Per `[[mitm-beta-pii-pci-concern]]` MITM is BETA. | MED | Documented in per-product caveats; matches the BETA framing. |
 | U4 | **`pip install -e .` editable installs may leave stale `.egg-link`.** | LOW | Documented in step 3 troubleshooting. |
-| U5 | **No detection of partial uninstall** (e.g. pip uninstall succeeded but bouncer process orphaned). | MED | Step 5 + step 6 catch this if operator runs them; not enforced. |
+| ~~U5~~ | ~~**No detection of partial uninstall** (e.g. pip uninstall succeeded but bouncer process orphaned).~~ | ~~MED~~ CLOSED 2026-05-25 (#574) | `iam-jit uninstall` now cross-references bound-port owners back to PIDs via `lsof -t` + `ps -p PID -o command=`, catching Python console-script bouncers (`python ... ibounce run ...`) that `pgrep -x ibounce` misses. Foreign processes on bouncer-typical ports surface as `unknown_port_owners` with the U-2 halt. |
 | U6 | **macOS LaunchAgent / Linux systemd unit cleanup not in scope.** If operator installed via launchd/systemd (per `docs/HARDENING-AGAINST-PROMPT-INJECTION.md`), the unit file must be removed manually. | MED | The canary deploy in scope today does NOT use launchd/systemd; if MRR-6 adds operator-runbook coverage for those, this gap re-opens. |
 | U7 | **Backup-before-purge prompt not automated.** Step 9 is destructive; operator must remember to step 8 first. | LOW | Documented prominently in step 8. |
 

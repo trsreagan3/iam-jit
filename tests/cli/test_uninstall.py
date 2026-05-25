@@ -15,6 +15,7 @@ from __future__ import annotations
 import json
 import os
 import pathlib
+import shutil
 import subprocess
 import sys
 import time
@@ -26,6 +27,13 @@ from click.testing import CliRunner
 
 import iam_jit.cli_uninstall as cu
 from iam_jit.cli import main
+
+
+# Capture real implementations BEFORE the autouse isolation fixture
+# stubs them, so end-to-end tests can restore the real pipeline.
+_REAL_PORT_BOUND = cu._port_bound
+_REAL_LSOF_PIDS_ON_PORT = cu._lsof_pids_on_port
+_REAL_READ_CMDLINE = cu._read_cmdline
 
 
 # ---------------------------------------------------------------------------
@@ -42,9 +50,16 @@ def _default_isolation(monkeypatch: pytest.MonkeyPatch) -> None:
     Without this, the dev machine's actually-running ibounce / gbounce
     would trip halt conditions on EVERY test that doesn't explicitly
     stub `_port_bound` + `_find_pids_for_process`.
+
+    #574: also stub `_lsof_pids_on_port` + `_read_cmdline` since the
+    inventory now cross-references bound-port owners back to PIDs.
+    Without stubs, tests that set ``_port_bound=True`` would shell out
+    to the dev machine's lsof + ps and pick up real bouncer PIDs.
     """
     monkeypatch.setattr(cu, "_find_pids_for_process", lambda name: [])
     monkeypatch.setattr(cu, "_port_bound", lambda port, host="127.0.0.1": False)
+    monkeypatch.setattr(cu, "_lsof_pids_on_port", lambda port: [])
+    monkeypatch.setattr(cu, "_read_cmdline", lambda pid: "")
 
 
 @pytest.fixture
@@ -709,3 +724,403 @@ def test_uninstall_surfaces_manual_reminders(
     assert "mcp" in joined
     assert "gbounce mitm ca" in joined or "truststore" in joined
     assert "systemd" in joined or "launchd" in joined
+
+
+# ---------------------------------------------------------------------------
+# #574 — port-owner cross-reference catches Python console-script bouncers
+# that pgrep -x misses
+# ---------------------------------------------------------------------------
+
+
+def test_uninstall_dry_run_detects_python_module_invocation(
+    isolated_iam_jit_home: pathlib.Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """#574 root case: ibounce launched as `python -m iam_jit.bouncer_cli`
+    is invisible to ``pgrep -x ibounce`` (kernel-reported basename is
+    the Python interpreter). Cross-referencing bound-port owners via
+    ``lsof -t`` then ``ps -p PID -o command=`` recovers the real PID.
+    """
+    _seed_install(isolated_iam_jit_home)
+
+    # No matches via the pgrep path.
+    monkeypatch.setattr(cu, "_find_pids_for_process", lambda name: [])
+    monkeypatch.setattr(
+        cu, "_resolve_go_bin_dir", lambda: isolated_iam_jit_home / "nogo",
+    )
+
+    # Bouncer port 7401 is bound.
+    monkeypatch.setattr(
+        cu, "_port_bound",
+        lambda port, host="127.0.0.1": port == 7401,
+    )
+
+    # lsof reveals PID 54321 as the owner.
+    fake_pid = 54321
+    monkeypatch.setattr(
+        cu, "_lsof_pids_on_port",
+        lambda port: [fake_pid] if port == 7401 else [],
+    )
+
+    # ps -p PID -o command= reveals a `python ... ibounce run --port 7401`
+    # invocation — exactly the shape that defeats `pgrep -x ibounce`.
+    monkeypatch.setattr(
+        cu, "_read_cmdline",
+        lambda pid: (
+            "/opt/homebrew/bin/python3.12 "
+            "/Users/reagan/.iam-jit/venv/bin/ibounce run --port 7401"
+            if pid == fake_pid else ""
+        ),
+    )
+
+    # Observable: the plan's running_bouncers includes our PID under
+    # the inferred bouncer name.
+    inv = cu._inventory_installed_state()
+    assert 7401 in inv["bound_ports"]
+    assert "ibounce" in inv["running_bouncers"], (
+        f"port-owner cross-reference failed to find PID {fake_pid} "
+        f"behind bound port 7401; got running_bouncers={inv['running_bouncers']}"
+    )
+    assert fake_pid in inv["running_bouncers"]["ibounce"]
+    # No unknown owners (this PID was positively identified as a bouncer).
+    assert not inv.get("unknown_port_owners")
+
+    # Observable: the dry-run plan's stop_bouncers step targets our PID.
+    result = cu.run_uninstall(dry_run=True)
+    assert result["status"] == "dry_run"
+    stop = result["steps"]["stop_bouncers"]
+    assert fake_pid in stop["sigterm_pids"], (
+        f"dry-run plan did not enumerate PID {fake_pid} for SIGTERM; "
+        f"got stop_bouncers={stop}"
+    )
+
+
+def test_uninstall_dry_run_port_owner_cross_referenced_multi_port(
+    isolated_iam_jit_home: pathlib.Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """#574 dev-machine shape: two ibounce instances on two ports
+    (the founder's machine had PIDs 99225 on :7401 and 94660 on :8767).
+    BOTH PIDs must appear in the plan.
+    """
+    _seed_install(isolated_iam_jit_home)
+
+    monkeypatch.setattr(cu, "_find_pids_for_process", lambda name: [])
+    monkeypatch.setattr(
+        cu, "_resolve_go_bin_dir", lambda: isolated_iam_jit_home / "nogo",
+    )
+
+    port_to_pid = {7401: 99225, 8767: 94660}
+    monkeypatch.setattr(
+        cu, "_port_bound",
+        lambda port, host="127.0.0.1": port in port_to_pid,
+    )
+    monkeypatch.setattr(
+        cu, "_lsof_pids_on_port",
+        lambda port: [port_to_pid[port]] if port in port_to_pid else [],
+    )
+
+    def fake_cmdline(pid: int) -> str:
+        for p, owner_pid in port_to_pid.items():
+            if pid == owner_pid:
+                return (
+                    f"/opt/homebrew/bin/python3.12 "
+                    f"/Users/reagan/.iam-jit/venv/bin/ibounce run --port {p}"
+                )
+        return ""
+
+    monkeypatch.setattr(cu, "_read_cmdline", fake_cmdline)
+
+    inv = cu._inventory_installed_state()
+    # Observable: BOTH PIDs appear under "ibounce".
+    assert "ibounce" in inv["running_bouncers"]
+    pids = inv["running_bouncers"]["ibounce"]
+    assert 99225 in pids, f"PID 99225 (port 7401) missing; got {pids}"
+    assert 94660 in pids, f"PID 94660 (port 8767) missing; got {pids}"
+
+    # Observable: the stop plan targets both.
+    result = cu.run_uninstall(dry_run=True)
+    stop = result["steps"]["stop_bouncers"]
+    assert 99225 in stop["sigterm_pids"]
+    assert 94660 in stop["sigterm_pids"]
+
+
+def test_uninstall_dry_run_detects_native_ibounce_binary(
+    isolated_iam_jit_home: pathlib.Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """#574 regression: native binary invocations (pgrep -x DOES match)
+    keep working after the port-owner cross-reference is added.
+    """
+    _seed_install(isolated_iam_jit_home)
+
+    # pgrep finds ibounce as the native binary (e.g. compiled console
+    # script with argv[0] == "ibounce").
+    monkeypatch.setattr(
+        cu, "_find_pids_for_process",
+        lambda name: [11111] if name == "ibounce" else [],
+    )
+    monkeypatch.setattr(
+        cu, "_resolve_go_bin_dir", lambda: isolated_iam_jit_home / "nogo",
+    )
+    monkeypatch.setattr(cu, "_port_bound", lambda port, host="127.0.0.1": False)
+    monkeypatch.setattr(cu, "_lsof_pids_on_port", lambda port: [])
+    monkeypatch.setattr(cu, "_read_cmdline", lambda pid: "")
+
+    inv = cu._inventory_installed_state()
+    assert inv["running_bouncers"].get("ibounce") == [11111]
+
+
+def test_uninstall_dry_run_dedup_pid_from_both_methods(
+    isolated_iam_jit_home: pathlib.Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """#574: if BOTH pgrep AND port-owner cross-reference report the
+    same PID, the inventory must deduplicate (no double-SIGTERM).
+    """
+    _seed_install(isolated_iam_jit_home)
+
+    same_pid = 77777
+    monkeypatch.setattr(
+        cu, "_find_pids_for_process",
+        lambda name: [same_pid] if name == "ibounce" else [],
+    )
+    monkeypatch.setattr(
+        cu, "_resolve_go_bin_dir", lambda: isolated_iam_jit_home / "nogo",
+    )
+    monkeypatch.setattr(
+        cu, "_port_bound", lambda port, host="127.0.0.1": port == 7401,
+    )
+    monkeypatch.setattr(
+        cu, "_lsof_pids_on_port",
+        lambda port: [same_pid] if port == 7401 else [],
+    )
+    monkeypatch.setattr(
+        cu, "_read_cmdline",
+        lambda pid: f"ibounce run --port 7401" if pid == same_pid else "",
+    )
+
+    inv = cu._inventory_installed_state()
+    # Observable: PID appears EXACTLY ONCE across all running_bouncers.
+    flat_pids: list[int] = []
+    for pids in inv["running_bouncers"].values():
+        flat_pids.extend(pids)
+    assert flat_pids.count(same_pid) == 1, (
+        f"PID {same_pid} appeared {flat_pids.count(same_pid)}x — must be "
+        f"deduped. running_bouncers={inv['running_bouncers']}"
+    )
+
+    # Observable: stop plan also lists once.
+    result = cu.run_uninstall(dry_run=True)
+    stop = result["steps"]["stop_bouncers"]
+    assert stop["sigterm_pids"].count(same_pid) == 1
+
+
+def test_uninstall_dry_run_excludes_unrelated_python_procs_on_ports(
+    isolated_iam_jit_home: pathlib.Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """#574 honest framing: a foreign python process holding a
+    bouncer-typical port is NOT silently included in stop_bouncers
+    (uninstall would SIGTERM a stranger's process). It's surfaced as
+    an "unknown_port_owners" entry instead, and trips the U-2 halt.
+    """
+    _seed_install(isolated_iam_jit_home)
+
+    monkeypatch.setattr(cu, "_find_pids_for_process", lambda name: [])
+    monkeypatch.setattr(
+        cu, "_resolve_go_bin_dir", lambda: isolated_iam_jit_home / "nogo",
+    )
+
+    foreign_pid = 88888
+    monkeypatch.setattr(
+        cu, "_port_bound", lambda port, host="127.0.0.1": port == 7401,
+    )
+    monkeypatch.setattr(
+        cu, "_lsof_pids_on_port",
+        lambda port: [foreign_pid] if port == 7401 else [],
+    )
+    # Cmdline does NOT match any bouncer pattern (unrelated python
+    # web server on the same port).
+    monkeypatch.setattr(
+        cu, "_read_cmdline",
+        lambda pid: (
+            "python -m http.server 7401" if pid == foreign_pid else ""
+        ),
+    )
+
+    inv = cu._inventory_installed_state()
+    # Observable: foreign PID NOT in running_bouncers (no SIGTERM).
+    flat_pids: list[int] = []
+    for pids in inv["running_bouncers"].values():
+        flat_pids.extend(pids)
+    assert foreign_pid not in flat_pids, (
+        f"foreign PID {foreign_pid} on port 7401 was silently included "
+        f"in running_bouncers; got {inv['running_bouncers']}"
+    )
+
+    # Observable: foreign PID IS surfaced in unknown_port_owners with
+    # its cmdline (so operator can investigate).
+    unknowns = inv["unknown_port_owners"]
+    assert len(unknowns) == 1
+    assert unknowns[0]["pid"] == foreign_pid
+    assert unknowns[0]["port"] == 7401
+    assert "http.server" in unknowns[0]["cmdline"]
+
+    # Observable: U-2 halt fires (the canonical "investigate before
+    # --force" signal per [[ibounce-honest-positioning]]).
+    halts = cu._check_halt_conditions(inv)
+    halt_ids = [h["id"] for h in halts]
+    assert "U-2" in halt_ids, f"U-2 halt missing; got halts={halts}"
+
+
+def test_uninstall_sabotage_no_op_cross_reference_is_load_bearing(
+    isolated_iam_jit_home: pathlib.Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Sabotage-check per CONTRIBUTING.md: prove the port-owner
+    cross-reference is load-bearing. If we monkeypatch
+    ``_lsof_pids_on_port`` to a no-op, the Python console-script
+    bouncer at PID 54321 should disappear from the plan — proving the
+    detection-via-port-owner code path is what's catching it (not some
+    other coincidental path).
+    """
+    _seed_install(isolated_iam_jit_home)
+    monkeypatch.setattr(cu, "_find_pids_for_process", lambda name: [])
+    monkeypatch.setattr(
+        cu, "_resolve_go_bin_dir", lambda: isolated_iam_jit_home / "nogo",
+    )
+    monkeypatch.setattr(
+        cu, "_port_bound", lambda port, host="127.0.0.1": port == 7401,
+    )
+    monkeypatch.setattr(
+        cu, "_read_cmdline",
+        lambda pid: (
+            "/opt/homebrew/bin/python3.12 "
+            "/Users/reagan/.iam-jit/venv/bin/ibounce run --port 7401"
+        ),
+    )
+
+    # Sabotage: _lsof_pids_on_port returns nothing despite port bound.
+    monkeypatch.setattr(cu, "_lsof_pids_on_port", lambda port: [])
+
+    inv = cu._inventory_installed_state()
+    # The OBSERVABLE failure: ibounce is NOT in running_bouncers (the
+    # bug we're fixing). If this assertion FAILS, the new code path
+    # isn't the load-bearing one and another mechanism is finding the
+    # PID — meaning the fix isn't isolated.
+    assert "ibounce" not in inv["running_bouncers"], (
+        "sabotage smoke: with _lsof_pids_on_port no-op, ibounce should "
+        "NOT be detected. If it IS detected, some other mechanism "
+        "(not the #574 fix) is finding it — the fix isn't isolated."
+    )
+    # And the port-bound-without-owner case still trips U-1 halt
+    # (no foreign cmdline returned since lsof is no-op).
+    halts = cu._check_halt_conditions(inv)
+    assert any(h["id"] == "U-1" for h in halts)
+
+
+def test_uninstall_dry_run_real_lsof_and_ps_end_to_end(
+    isolated_iam_jit_home: pathlib.Path,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: pathlib.Path,
+) -> None:
+    """#574 end-to-end smoke: spawn a real Python subprocess that
+    binds a high port AND has an ibounce-like cmdline, then verify the
+    REAL lsof + ps pipeline finds it (no stubs on _lsof_pids_on_port
+    / _read_cmdline / _port_bound). This is the "actually-shells-out"
+    version of the unit tests above.
+    """
+    if shutil.which("lsof") is None or shutil.which("ps") is None:
+        pytest.skip("requires lsof + ps on PATH")
+
+    # Reserve a free high port via ephemeral allocation; hand it to
+    # the subprocess via SO_REUSEADDR so the kernel rebind succeeds.
+    import socket as _socket
+    sock = _socket.socket(_socket.AF_INET, _socket.SOCK_STREAM)
+    sock.setsockopt(_socket.SOL_SOCKET, _socket.SO_REUSEADDR, 1)
+    sock.bind(("127.0.0.1", 0))
+    test_port = sock.getsockname()[1]
+    sock.close()
+
+    # Pin the inventory to ONLY this port so we don't pick up other
+    # bouncers on the dev machine.
+    monkeypatch.setattr(cu, "BOUNCER_PORTS", (test_port,))
+    # Restore the REAL helpers (default-isolation fixture stubs them
+    # to no-ops); this test EXERCISES the real lsof + ps + TCP-probe
+    # pipeline against our subprocess.
+    monkeypatch.setattr(cu, "_port_bound", _REAL_PORT_BOUND)
+    monkeypatch.setattr(cu, "_lsof_pids_on_port", _REAL_LSOF_PIDS_ON_PORT)
+    monkeypatch.setattr(cu, "_read_cmdline", _REAL_READ_CMDLINE)
+
+    # Write a fake "ibounce" launcher script + spawn it. The script
+    # name in argv lets _read_cmdline -> ps see "ibounce run --port N".
+    fake_ibounce = tmp_path / "ibounce"
+    fake_ibounce.write_text(
+        "#!/usr/bin/env python3\n"
+        "import socket, sys, time\n"
+        "port = int(sys.argv[sys.argv.index('--port') + 1])\n"
+        "s = socket.socket()\n"
+        "s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)\n"
+        "s.bind(('127.0.0.1', port)); s.listen(1)\n"
+        "sys.stdout.write('READY\\n'); sys.stdout.flush()\n"
+        "time.sleep(60)\n"
+    )
+    fake_ibounce.chmod(0o755)
+
+    proc = subprocess.Popen(
+        [sys.executable, str(fake_ibounce), "run", "--port", str(test_port)],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+    )
+    try:
+        # Wait for READY signal (up to 5s) — use line buffering.
+        ready_deadline = time.time() + 5.0
+        ready = False
+        while time.time() < ready_deadline:
+            if proc.poll() is not None:
+                break
+            line = proc.stdout.readline() if proc.stdout else ""
+            if "READY" in line:
+                ready = True
+                break
+            if not line:
+                time.sleep(0.05)
+        if not ready:
+            stderr = proc.stderr.read() if proc.stderr else ""
+            pytest.skip(
+                f"fake bouncer did not bind port {test_port} in time; "
+                f"poll={proc.poll()} stderr={stderr[:300]}"
+            )
+
+        # Keep _find_pids_for_process stubbed so we don't pick up real
+        # bouncers on the dev machine — we only want our subprocess.
+        monkeypatch.setattr(cu, "_find_pids_for_process", lambda name: [])
+
+        inv = cu._inventory_installed_state()
+
+        # Observable: the test_port shows in bound_ports (real TCP probe).
+        assert test_port in inv["bound_ports"], (
+            f"port {test_port} should be bound by our subprocess; "
+            f"got {inv['bound_ports']}"
+        )
+        # Observable: our PID was cross-referenced via real lsof+ps
+        # and identified as ibounce.
+        all_detected = []
+        for pids in inv["running_bouncers"].values():
+            all_detected.extend(pids)
+        assert proc.pid in all_detected, (
+            f"end-to-end lsof+ps did NOT detect PID {proc.pid} on port "
+            f"{test_port}; running_bouncers={inv['running_bouncers']}, "
+            f"unknown_port_owners={inv.get('unknown_port_owners')}"
+        )
+    finally:
+        try:
+            proc.terminate()
+            proc.wait(timeout=2)
+        except Exception:
+            try:
+                proc.kill()
+            except Exception:
+                pass
