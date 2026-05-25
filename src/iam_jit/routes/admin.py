@@ -14,7 +14,7 @@ from __future__ import annotations
 
 from typing import Annotated, Any
 
-from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi import APIRouter, Depends, HTTPException, Query, Request
 
 from .. import (
     audit as audit_mod,
@@ -311,20 +311,31 @@ def list_cidrs(
 @router.post("/network/cidrs", status_code=201)
 def add_cidr(
     actor: Annotated[User, Depends(require_admin)],
+    request: Request,
     payload: dict[str, Any],
 ) -> dict[str, Any]:
     """Add a CIDR / IP to the runtime allowlist.
 
     Body:
-      { "cidr": "203.0.113.0/24", "note": "office WAN" }
+      { "cidr": "203.0.113.0/24", "note": "office WAN",
+        "confirm_lockout": false }
 
     Bare IPs auto-promote to /32 or /128. Existing entry with the
     same CIDR is replaced (note/added_by updated). On the next
-    request the new entry is enforced — no redeploy needed."""
+    request the new entry is enforced — no redeploy needed.
+
+    Per #609 CRIT: if the resulting allowlist would not cover the
+    caller's own source IP, refuse with HTTP 409 unless the request
+    body sets `confirm_lockout: true`. Mirrors the form-POST
+    self-preservation gate in `web.admin_network_add_cidr`."""
+    import ipaddress
     import time
+
+    from .. import network_acl as _network_acl
 
     raw = (payload or {}).get("cidr") or ""
     note = (payload or {}).get("note") or ""
+    confirm_lockout = bool((payload or {}).get("confirm_lockout"))
     normalized = cidr_store.normalize_cidr(raw)
     if not normalized:
         raise HTTPException(
@@ -336,6 +347,32 @@ def add_cidr(
             status_code=400,
             detail="note must be a string ≤200 chars",
         )
+
+    # Self-preservation gate per #609.
+    if not confirm_lockout:
+        client_host = request.client.host if request.client else None
+        caller_ip = _network_acl._read_source_ip(
+            client_host, request.headers.get("x-forwarded-for")
+        )
+        proposed = [e.cidr for e in cidr_store.get_default_store().list()]
+        proposed.append(normalized)
+        if not _caller_covered_by_cidrs(caller_ip, proposed):
+            raise HTTPException(
+                status_code=409,
+                detail={
+                    "code": "would_lock_you_out",
+                    "message": (
+                        f"Applying this allowlist would lock YOU out — "
+                        f"your source IP {caller_ip} is not covered by "
+                        f"any proposed CIDR. Re-submit with "
+                        f"`confirm_lockout: true` to proceed anyway, or "
+                        f"add {caller_ip}/32 first."
+                    ),
+                    "caller_ip": caller_ip,
+                    "proposed_allowlist": proposed,
+                },
+            )
+
     entry = cidr_store.CIDREntry(
         cidr=normalized,
         note=note.strip(),
@@ -348,11 +385,42 @@ def add_cidr(
             actor=actor.id,
             kind="security.cidr_added",
             summary=f"added {normalized} to network allowlist",
-            details={"cidr": normalized, "note": entry.note},
+            details={
+                "cidr": normalized,
+                "note": entry.note,
+                "confirm_lockout": confirm_lockout,
+            },
         )
     except Exception:
         pass
     return {"cidr": entry.cidr, "note": entry.note, "added_by": entry.added_by}
+
+
+def _caller_covered_by_cidrs(caller_ip: str | None, cidrs: list[str]) -> bool:
+    """Shared helper for self-lockout pre-validation. True iff
+    `caller_ip` falls inside any of `cidrs`. Returns False on any parse
+    failure — fail-safe so an uncertain check NAGS the operator rather
+    than silently allowing the change."""
+    import ipaddress
+
+    if not caller_ip:
+        return False
+    try:
+        addr = ipaddress.ip_address(caller_ip)
+    except ValueError:
+        return False
+    for c in cidrs:
+        try:
+            net = ipaddress.ip_network(c, strict=False)
+        except ValueError:
+            continue
+        if isinstance(addr, ipaddress.IPv4Address) != isinstance(
+            net.network_address, ipaddress.IPv4Address
+        ):
+            continue
+        if addr in net:
+            return True
+    return False
 
 
 @router.delete("/network/cidrs/{cidr:path}")

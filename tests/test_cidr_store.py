@@ -171,9 +171,15 @@ def test_admin_list_cidrs(as_admin: TestClient, monkeypatch: pytest.MonkeyPatch)
 
 
 def test_admin_add_cidr(as_admin: TestClient) -> None:
+    # confirm_lockout=True opts in to the lockout risk per #609 —
+    # this test isn't exercising the lockout flow itself.
     r = as_admin.post(
         "/api/v1/admin/network/cidrs",
-        json={"cidr": "203.0.113.0/24", "note": "office WAN"},
+        json={
+            "cidr": "203.0.113.0/24",
+            "note": "office WAN",
+            "confirm_lockout": True,
+        },
     )
     assert r.status_code == 201, r.text
     assert r.json()["cidr"] == "203.0.113.0/24"
@@ -184,7 +190,11 @@ def test_admin_add_cidr(as_admin: TestClient) -> None:
 def test_admin_add_cidr_normalizes_bare_ip(as_admin: TestClient) -> None:
     r = as_admin.post(
         "/api/v1/admin/network/cidrs",
-        json={"cidr": "203.0.113.5", "note": "single host"},
+        json={
+            "cidr": "203.0.113.5",
+            "note": "single host",
+            "confirm_lockout": True,
+        },
     )
     assert r.status_code == 201
     assert r.json()["cidr"] == "203.0.113.5/32"

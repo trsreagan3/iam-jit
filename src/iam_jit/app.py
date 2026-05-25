@@ -195,11 +195,22 @@ def create_app(
                 "blocked request: path=%s source_ip=%s reason=%s",
                 request.url.path, decision.source_ip, decision.reason,
             )
+            # Per #609: if the operator just locked themselves out
+            # via /admin/network, give them the recovery procedure in
+            # the response body rather than leaving them stranded with
+            # a bare "denied" message.
             return JSONResponse(
                 {
                     "detail": "source IP is not in the configured allowlist",
                     "source_ip": decision.source_ip,
                     "reason": decision.reason,
+                    "recovery_hint": (
+                        "If you locked yourself out via /admin/network, "
+                        "restart iam-jit with --skip-network-allowlist "
+                        "OR edit ~/.iam-jit/network-allowlist.yaml (or "
+                        "your --data-dir/network_cidrs.json) and restart. "
+                        "See docs/MRR-4-UNINSTALL.md for full recovery."
+                    ),
                 },
                 status_code=403,
             )

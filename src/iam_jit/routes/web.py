@@ -1336,20 +1336,57 @@ def admin_network_add_cidr(
     request: Request,
     cidr: Annotated[str, Form()],
     note: Annotated[str, Form()] = "",
+    confirm_lockout: Annotated[str, Form()] = "",
 ) -> Response:
-    """Form-POST handler for adding a CIDR from the /admin/network UI."""
+    """Form-POST handler for adding a CIDR from the /admin/network UI.
+
+    Per #609 CRIT (UAT-WEB-ADMIN-02 2026-05-25): pre-validate that the
+    caller's own source IP would still be covered by the resulting
+    allowlist. If not, refuse the change unless the operator explicitly
+    ticks `confirm_lockout` — friction-as-feature per
+    [[ambient-value-prop-and-friction-framing]] + [[ibounce-honest-positioning]].
+    Without this gate, an admin could silently lock themselves out of the
+    very page they'd need to remove the bad CIDR; only recovery was a
+    server restart."""
+    import ipaddress
     import time
 
     user, redir = _require_admin_or_redirect(request)
     if redir is not None:
         return redir
-    from .. import cidr_store as _cidr_store
+    from .. import cidr_store as _cidr_store, network_acl as _network_acl
 
     normalized = _cidr_store.normalize_cidr(cidr)
     if not normalized:
         return RedirectResponse(
             url="/admin/network?error=invalid_cidr", status_code=303
         )
+
+    # Self-preservation gate — does the proposed allowlist cover the
+    # operator's current source IP? Skip if they explicitly opted in to
+    # the lockout risk via the confirm checkbox.
+    confirmed = confirm_lockout.strip().lower() in {"1", "on", "true", "yes"}
+    if not confirmed:
+        client_host = request.client.host if request.client else None
+        caller_ip = _network_acl._read_source_ip(
+            client_host, request.headers.get("x-forwarded-for")
+        )
+        proposed_cidrs = [e.cidr for e in _cidr_store.get_default_store().list()]
+        proposed_cidrs.append(normalized)
+        caller_covered = _caller_covered_by(caller_ip, proposed_cidrs)
+        if not caller_covered:
+            # Render the page with a form-level error AND a hidden form
+            # that lets the operator re-submit with the confirm gate set
+            # — no allowlist mutation happens on this code path.
+            return _render_admin_network_lockout_warning(
+                request,
+                user=user,
+                proposed_cidr=normalized,
+                note=note.strip()[:200],
+                caller_ip=caller_ip,
+                proposed_allowlist=proposed_cidrs,
+            )
+
     entry = _cidr_store.CIDREntry(
         cidr=normalized,
         note=note.strip()[:200],
@@ -1368,11 +1405,108 @@ def admin_network_add_cidr(
             actor=user.id,
             kind="security.cidr_added",
             summary=f"added {normalized} via UI",
-            details={"cidr": normalized, "note": entry.note},
+            details={
+                "cidr": normalized,
+                "note": entry.note,
+                "confirm_lockout": confirmed,
+            },
         )
     except Exception:
         pass
     return RedirectResponse(url="/admin/network", status_code=303)
+
+
+def _caller_covered_by(caller_ip: str | None, cidrs: list[str]) -> bool:
+    """True if `caller_ip` is inside any of `cidrs`. Returns False on any
+    parse failure (fail-safe — better to nag the operator than to assume
+    coverage we can't verify)."""
+    import ipaddress
+
+    if not caller_ip:
+        return False
+    try:
+        addr = ipaddress.ip_address(caller_ip)
+    except ValueError:
+        return False
+    for c in cidrs:
+        try:
+            net = ipaddress.ip_network(c, strict=False)
+        except ValueError:
+            continue
+        # Skip IPv4-vs-IPv6 mismatch (avoids TypeError).
+        if isinstance(addr, ipaddress.IPv4Address) != isinstance(
+            net.network_address, ipaddress.IPv4Address
+        ):
+            continue
+        if addr in net:
+            return True
+    return False
+
+
+def _render_admin_network_lockout_warning(
+    request: Request,
+    *,
+    user: Any,
+    proposed_cidr: str,
+    note: str,
+    caller_ip: str | None,
+    proposed_allowlist: list[str],
+) -> Response:
+    """Re-render /admin/network with a form-level "this would lock you
+    out" error + a confirm-anyway resubmit form. NO mutation happens
+    here; the operator must explicitly tick `confirm_lockout` to proceed."""
+    from .. import cidr_store as _cidr_store, network_acl
+    from .. import security_posture as _sp
+
+    runtime_entries = _cidr_store.get_default_store().list()
+    posture = _sp.compute()
+    posture["issues_undismissed"] = [
+        i for i in posture["issues"]
+        if not _sp.warning_dismissed_by(user.notes, i["id"])
+    ]
+    return _render(
+        request,
+        "admin_network.html",
+        status_code=400,
+        active="admin",
+        user=user,
+        extra={
+            "runtime_cidrs": [
+                {
+                    "cidr": e.cidr,
+                    "note": e.note,
+                    "added_by": e.added_by,
+                    "added_at": e.added_at,
+                }
+                for e in runtime_entries
+            ],
+            "env_cidrs": network_acl.get_configured_cidrs(),
+            "trust_xff": (
+                os.environ.get("IAM_JIT_TRUST_FORWARDED_FOR", "1").lower()
+                in {"1", "true", "yes"}
+            ),
+            "public_exposure_opt_in": (
+                os.environ.get("IAM_JIT_PUBLIC_EXPOSURE_OPT_IN", "false").lower()
+                in {"1", "true", "yes"}
+            ),
+            "posture": posture,
+            "lockout_warning": {
+                "code": "would_lock_you_out",
+                "proposed_cidr": proposed_cidr,
+                "note": note,
+                "caller_ip": caller_ip or "(unknown)",
+                "proposed_allowlist": proposed_allowlist,
+                "message": (
+                    f"Applying this allowlist would lock YOU out — your "
+                    f"source IP {caller_ip or '(unknown)'} is not covered "
+                    f"by any proposed CIDR. Either (a) add "
+                    f"{caller_ip or '<your-ip>'}/32 first, or (b) tick "
+                    f"the 'I confirm this change may lock me out' "
+                    f"checkbox to proceed anyway."
+                ),
+            },
+        },
+    )
 
 
 @router.post("/admin/network/cidrs/{cidr:path}/delete", response_class=HTMLResponse)

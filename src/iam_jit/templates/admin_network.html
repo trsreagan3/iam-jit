@@ -10,6 +10,43 @@
   </div>
   {% endif %}
 
+  {# #609: self-lockout pre-validation — if the operator tried to add a
+     CIDR that excludes their own source IP, the form-POST handler
+     re-renders here WITHOUT mutating the store and asks for explicit
+     confirmation. Friction-as-feature per
+     [[ambient-value-prop-and-friction-framing]]. #}
+  {% if lockout_warning %}
+  <div class="flash flash-critical lockout-warning"
+       data-code="{{ lockout_warning.code }}"
+       style="border-left: 6px solid #c00; background: #fee; padding: 1rem 1.25rem; margin-bottom: 1.5rem;">
+    <strong style="font-size: 1.05rem;">
+      Would lock you out — change NOT applied
+    </strong>
+    <p style="margin: 0.5rem 0;">{{ lockout_warning.message }}</p>
+    <p style="margin: 0.25rem 0; font-size: 0.9rem;">
+      <strong>Your source IP:</strong> <code>{{ lockout_warning.caller_ip }}</code>
+    </p>
+    <p style="margin: 0.25rem 0; font-size: 0.9rem;">
+      <strong>Proposed allowlist:</strong>
+      {% for c in lockout_warning.proposed_allowlist %}<code>{{ c }}</code>{% if not loop.last %}, {% endif %}{% endfor %}
+    </p>
+    <form method="post" action="/admin/network/cidrs" style="margin-top: 1rem;">
+      <input type="hidden" name="cidr" value="{{ lockout_warning.proposed_cidr }}" />
+      <input type="hidden" name="note" value="{{ lockout_warning.note }}" />
+      <label style="display: block; margin: 0.5rem 0;">
+        <input type="checkbox" name="confirm_lockout" value="on" required />
+        I confirm this change may lock me out
+      </label>
+      <p style="margin: 0.5rem 0; font-size: 0.85rem; opacity: 0.85;">
+        If you check this, the change will apply even if your current
+        source IP isn't in the new allowlist. You'll need to restart
+        iam-jit OR edit the YAML file manually to recover.
+      </p>
+      <button type="submit" class="danger">apply anyway (will lock me out)</button>
+    </form>
+  </div>
+  {% endif %}
+
   {# Security posture banner. Critical issues (e.g. ALB ingress
      0.0.0.0/0 AND HTTP-only) render as a loud red banner that
      blocks the visual flow until the admin either fixes the
