@@ -249,8 +249,12 @@ def test_autopilot_status_reports_healthy(
     quiet_improve,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """After a successful start, status reports running=True + bouncers
-    detected as RUNNING in the payload."""
+    """After foreground exit + status check, the status file MUST show
+    the supervisor's last-observed bouncer wiring (ibounce present in
+    the bouncers map) but EVERY ``running`` field MUST read false —
+    autopilot is no longer alive, and per #619 status MUST match
+    reality. The prior assertion shape (bouncers.ibounce.running is
+    True after foreground exit) codified the bug."""
     cfg = write_config({
         "iam-jit": {
             "enabled": True,
@@ -269,9 +273,18 @@ def test_autopilot_status_reports_healthy(
     )
     out = autopilot_status()
     # Foreground exit means the daemon ISN'T running by the time we
-    # check, but the status file from the last tick IS present.
+    # check, AND per #619 the persisted status file MUST reflect that.
     assert out["status_file_present"] is True
-    assert out["status"]["bouncers"]["ibounce"]["running"] is True
+    assert out["running"] is False
+    assert out["pid"] is None
+    nested = out["status"]
+    assert nested["running"] is False
+    assert nested["pid"] is None
+    # The bouncers map is preserved so an operator can see what WAS
+    # configured, but every per-bouncer ``running`` field MUST be
+    # false post-shutdown.
+    assert "ibounce" in nested["bouncers"]
+    assert nested["bouncers"]["ibounce"]["running"] is False
 
 
 def test_autopilot_stop_terminates_cleanly(

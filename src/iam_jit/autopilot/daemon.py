@@ -217,13 +217,78 @@ def _read_status_file() -> dict[str, Any] | None:
 
 
 def _write_status_file(status: AutopilotStatus) -> None:
+    _atomic_write_status_dict(status.as_dict())
+
+
+def _atomic_write_status_dict(payload: dict[str, Any]) -> None:
+    """Write ``payload`` to the status file atomically.
+
+    Per #619: ``status.json`` is the source of truth for every consumer
+    asking "is autopilot running?". A half-written file (open-truncate-
+    write interrupted by SIGKILL / power loss / OOM) could leave it in
+    a state where readers see partial JSON or stale claims. We write to
+    a sibling tempfile + ``os.replace`` so any successful read returns
+    a complete payload from EITHER the old OR new version — never a
+    mix.
+    """
     p = _status_path()
     p.parent.mkdir(parents=True, exist_ok=True)
-    p.write_text(json.dumps(status.as_dict(), indent=2, default=str))
+    tmp = p.with_suffix(p.suffix + ".tmp")
+    tmp.write_text(json.dumps(payload, indent=2, default=str))
     try:
-        p.chmod(0o600)
+        tmp.chmod(0o600)
     except OSError:
         pass
+    os.replace(tmp, p)
+
+
+def _read_status_dict() -> dict[str, Any]:
+    """Read the status file as a dict; empty dict on any error.
+
+    Distinct from :func:`_read_status_file` (which returns ``None`` to
+    signal "no file"): this returns an empty dict so callers can mutate
+    it in-place during the shutdown / self-correct path.
+    """
+    raw = _read_status_file()
+    return raw if isinstance(raw, dict) else {}
+
+
+def _shutdown_cleanup_status_file() -> None:
+    """#619 — atomically invalidate ``status.json`` on autopilot exit.
+
+    Marks ``running=false`` + ``pid=null`` at the top level AND for
+    every per-bouncer entry, and records a ``stopped_at`` ISO
+    timestamp. Preserves all other fields so the operator can still
+    inspect the LAST observed state (improve.last_results,
+    threat_feed.last_results, alerts, etc.) post-shutdown.
+
+    Per [[ibounce-honest-positioning]]: status MUST match reality. Two
+    values for "is autopilot running?" = caller confusion. After
+    autopilot exits, EVERY ``running`` field in the file MUST read
+    false.
+
+    Hooked from:
+      * normal foreground exit (``autopilot_start`` finally block)
+      * SIGTERM / SIGINT handler (``_handle_term``)
+      * explicit ``autopilot stop`` command (``autopilot_stop``)
+      * detached-spawn entry point (``_main_entry`` atexit)
+    """
+    current = _read_status_dict()
+    if not current:
+        # No prior status file — nothing to invalidate. (A daemon that
+        # never wrote a status file has nothing claiming "running=true"
+        # in the first place.)
+        return
+    current["running"] = False
+    current["pid"] = None
+    current["stopped_at"] = _now_iso()
+    bouncers = current.get("bouncers")
+    if isinstance(bouncers, dict):
+        for entry in bouncers.values():
+            if isinstance(entry, dict):
+                entry["running"] = False
+                entry["pid"] = None
+    _atomic_write_status_dict(current)
 
 
 # ---------------------------------------------------------------------------
@@ -808,7 +873,21 @@ class AutopilotSupervisor:
             if running:
                 state.last_seen_running = True
                 state.alert_emitted = False  # reset alert on healthy
-                entry["pid"] = block.get("pid")
+                # #619 G2 — posture detectors (port-probe based) don't
+                # always return a PID. Fall back to the PID we captured
+                # at spawn time in ``_attempt_restart`` if it's still
+                # alive. Per [[ibounce-honest-positioning]] a
+                # ``pid: null`` for a bouncer we know we started is
+                # dishonest reporting; capture it where we can.
+                entry_pid = block.get("pid")
+                if entry_pid is None and state.last_pid:
+                    if _is_pid_alive(state.last_pid):
+                        entry_pid = state.last_pid
+                    else:
+                        # Captured PID is dead — drop it; the next
+                        # restart attempt will refresh.
+                        state.last_pid = None
+                entry["pid"] = entry_pid
                 entry["port"] = block.get("port")
                 # #453 (§A49b) — pull /healthz on each tick to surface
                 # per-bouncer decisions_count + active-profile + mode.
@@ -1181,6 +1260,14 @@ class AutopilotSupervisor:
 
     def _handle_term(self, *_args: Any) -> None:
         self.stopped = True
+        # #619 — invalidate status.json immediately on signal so a
+        # status read concurrent with shutdown sees running=false
+        # without waiting for the (possibly long) sweep tick to finish.
+        # Best-effort: failures here MUST NOT crash the signal handler.
+        try:
+            _shutdown_cleanup_status_file()
+        except Exception:  # pragma: no cover
+            pass
 
 
 # ---------------------------------------------------------------------------
@@ -1362,13 +1449,26 @@ def autopilot_start(
         supervisor.run_forever(max_ticks=max_ticks)
     finally:
         _remove_pid_file()
-    final = supervisor.run_once()
+        # #619 — invalidate status.json on every exit path. Previously
+        # this code called ``supervisor.run_once()`` here which RE-WROTE
+        # status with ``running=true, pid=<self>``, so after foreground
+        # exit the status file falsely claimed the autopilot was still
+        # live. Per [[ibounce-honest-positioning]] post-exit status
+        # MUST read running=false everywhere.
+        try:
+            _shutdown_cleanup_status_file()
+        except Exception:  # pragma: no cover
+            pass
+    # Read back the invalidated final state for the caller (the in-
+    # process return shape preserves backwards compatibility with prior
+    # callers that read ``final_status``).
+    final_dict = _read_status_dict()
     return {
         "status": "stopped",
         "pid": os.getpid(),
         "config_source": source_label,
         "ticks_at_exit": supervisor._improve_count,
-        "final_status": final.as_dict(),
+        "final_status": final_dict,
     }
 
 
@@ -1427,10 +1527,51 @@ def _spawn_detached(
 
 def autopilot_status() -> dict[str, Any]:
     """Return the current autopilot status (combines the PID + the
-    last-written status file)."""
+    last-written status file).
+
+    Per #619: even when the shutdown cleanup path was missed (crash
+    mid-shutdown, SIGKILL, OOM), the read path self-corrects. Every
+    ``pid`` field in the status blob is validated via ``os.kill(0)``;
+    stale claims are rewritten BEFORE we return them to the caller AND
+    persisted back to status.json so the next reader inherits the
+    correction. This prevents the "two values for is-it-running" shape
+    the original bug caused — top-level + nested MUST agree.
+    """
     pid = _read_pid_file()
     alive = bool(pid and _is_pid_alive(pid))
-    status_blob = _read_status_file() or {}
+    status_blob = _read_status_dict()
+
+    corrected = False
+    if status_blob:
+        top_pid = status_blob.get("pid")
+        if isinstance(top_pid, int) and not _is_pid_alive(top_pid):
+            status_blob["running"] = False
+            status_blob["pid"] = None
+            status_blob["stale_detected_at"] = _now_iso()
+            corrected = True
+        # Even if top_pid is None, the top-level ``running`` field can
+        # still be True from a prior crash. If the resolved daemon is
+        # not actually alive, the status MUST read running=false.
+        elif top_pid is None and status_blob.get("running") and not alive:
+            status_blob["running"] = False
+            status_blob["stale_detected_at"] = _now_iso()
+            corrected = True
+        bouncers = status_blob.get("bouncers")
+        if isinstance(bouncers, dict):
+            for entry in bouncers.values():
+                if not isinstance(entry, dict):
+                    continue
+                bpid = entry.get("pid")
+                if isinstance(bpid, int) and not _is_pid_alive(bpid):
+                    entry["running"] = False
+                    entry["pid"] = None
+                    corrected = True
+        if corrected:
+            try:
+                _atomic_write_status_dict(status_blob)
+            except Exception:  # pragma: no cover
+                pass
+
     return {
         "running": alive,
         "pid": pid if alive else None,
@@ -1449,9 +1590,15 @@ def autopilot_stop(
     """
     pid = _read_pid_file()
     if not pid:
+        # No PID file means no live daemon — but the status file may
+        # still falsely claim running=true (e.g. a prior crash skipped
+        # cleanup). Invalidate it so a subsequent ``status`` read
+        # doesn't lie. #619.
+        _shutdown_cleanup_status_file()
         return {"status": "not_running", "previous_pid": None}
     if not _is_pid_alive(pid):
         _remove_pid_file()
+        _shutdown_cleanup_status_file()  # #619
         return {"status": "stale_pid_cleaned", "previous_pid": pid}
     try:
         os.kill(pid, signal.SIGTERM)
@@ -1469,6 +1616,14 @@ def autopilot_stop(
         except (OSError, ProcessLookupError):
             pass
     _remove_pid_file()
+    # #619 — invalidate status.json after the target is dead. The
+    # daemon's own SIGTERM handler ALSO calls _shutdown_cleanup_status_file
+    # but we re-invalidate here for two reasons: (1) defensive — the
+    # daemon may have been SIGKILL'd and never ran its handler; (2) the
+    # daemon may be in a different IAM_JIT_AUTOPILOT_DIR / cwd than the
+    # stop caller — calling it from here uses the caller's dir, which
+    # is the only one consumers in this shell will read.
+    _shutdown_cleanup_status_file()
     return {
         "status": "stopped",
         "previous_pid": pid,
@@ -1712,6 +1867,7 @@ def register_autopilot_command(parent_group: click.Group) -> click.Group:
 def _main_entry() -> None:
     """Entry point invoked by the detached-spawn path."""
     import argparse
+    import atexit
 
     parser = argparse.ArgumentParser(prog="iam_jit.autopilot.daemon")
     parser.add_argument("--foreground", action="store_true", default=False)
@@ -1723,6 +1879,11 @@ def _main_entry() -> None:
     parser.add_argument("--digest-webhook", action="store_true", default=False)
     parser.add_argument("--enable-side-llm", action="store_true", default=False)
     args = parser.parse_args()
+    # #619 — belt-and-suspenders: even with the supervisor's signal
+    # handler + autopilot_start's finally block, register one more
+    # cleanup hook so an interpreter-shutdown path (uncaught exception,
+    # sys.exit) still invalidates status.json before the process dies.
+    atexit.register(_shutdown_cleanup_status_file)
     try:
         autopilot_start(
             config_path=args.config,
