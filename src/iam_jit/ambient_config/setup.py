@@ -32,7 +32,7 @@ is the profile-generation surface).
 Per [[ibounce-honest-positioning]] every `when_X_present` heuristic
 resolves with its inputs visible: the result block records what the
 detector saw (e.g., `"kbouncer: enabled=when_kubeconfig_present →
-KUBECONFIG=/Users/x/.kube/config → enabled=true"`).
+KUBECONFIG=~/.kube/config → enabled=true"`).
 """
 
 from __future__ import annotations
