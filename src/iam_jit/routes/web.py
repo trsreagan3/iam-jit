@@ -1075,12 +1075,101 @@ def new_paste_submit(
     from .. import auto_approve_evaluator
     accounts_store = getattr(request.app.state, "accounts_store", None)
     cookie_value = request.cookies.get("iam_jit_session_mfa")
-    auto_approve_evaluator.evaluate_and_apply_for_new_request(
+    _eval_result = auto_approve_evaluator.evaluate_and_apply_for_new_request(
         request=req,
         user=user,
         accounts_store=accounts_store,
         cookie_value=cookie_value,
     )
+    # #604 — inline MFA gate at form-submit. Founder Q 2026-05-25:
+    # "if I haven't 2FA'd, what happens?" Pre-fix, when the auto-
+    # approve evaluator's MFA gate fired (per #599 fail-CLOSED logic),
+    # the request was stored in pending and the user was redirected to
+    # the detail page with no inline signal that MFA was the blocker.
+    # The user couldn't tell why their high-risk request wasn't
+    # approved without chasing the audit log.
+    #
+    # Post-fix: detect mfa_block_response from the shared evaluator
+    # (the API path already surfaces this in its response body — same
+    # signal, different rendering for HTML callers). Render the form
+    # back with HTTP 403, the user's typed input preserved, and a
+    # structured error listing the risk score, the MFA threshold, the
+    # OIDC re-auth link, and the admin-fallback hint. Do NOT persist
+    # the request (no queue clutter for a submission the user must
+    # re-trigger after stepping up MFA).
+    #
+    # Per [[mfa-compliance-strategy]] this is the Layer C step-up
+    # surface: an OIDC re-auth refreshes the iam_jit_session_mfa
+    # cookie, after which a resubmit of the same form will pass the
+    # gate. Per [[ibounce-honest-positioning]] the user sees one
+    # honest rejection at submit time rather than a silent
+    # "stuck-in-pending" surprise. Per [[scorer-is-ground-truth]] this
+    # module does NOT recompute the score or threshold — it consumes
+    # the evaluator's verdict and renders it.
+    _mfa_block_response = (_eval_result or {}).get("mfa_block_response")
+    if _mfa_block_response is not None:
+        _auto_decision = (_eval_result or {}).get("auto_decision")
+        _score = (
+            (req.get("status") or {}).get("review") or {}
+        ).get("risk_score")
+        _floor = None
+        if _auto_decision is not None:
+            _details = getattr(_auto_decision, "details", {}) or {}
+            _floor = _details.get("mfa_step_up_at_score")
+        _redirect_to = _mfa_block_response.get(
+            "redirect_to", "/api/v1/auth/oidc/login",
+        )
+        _err_lines = [
+            (
+                f"mfa_required_for_high_risk: this request scored "
+                f"score: {_score} which meets or exceeds the MFA "
+                f"step-up threshold "
+                f"(score: {_floor if _floor is not None else 'unknown'}). "
+                f"Per your deployment's MFA policy, high-risk requests "
+                f"require fresh multi-factor authentication before "
+                f"they can be auto-approved."
+            ),
+            (
+                f"Action: re-authenticate via OIDC at {_redirect_to} "
+                f"and resubmit this form. Your IdP's MFA challenge "
+                f"refreshes the iam_jit_session_mfa cookie; iam-jit "
+                f"does not run its own TOTP/WebAuthn enrollment in "
+                f"this deployment."
+            ),
+            (
+                "Admin alternative: if your deployment does not have "
+                "an OIDC provider configured for MFA, an admin can "
+                "approve this request via the human-review path "
+                "(submit a lower-risk variant, or ask an admin to "
+                "enroll OIDC MFA so step-up works for everyone)."
+            ),
+        ]
+        return _render(
+            request,
+            "new_paste.html",
+            active="new",
+            user=user,
+            status_code=403,
+            extra={
+                "form": {
+                    "description": description,
+                    "policy": policy,
+                    "access_type": access_type,
+                    "accounts": accounts,
+                    "duration_hours": duration_hours,
+                    "assume_principal_arn": assume_principal_arn,
+                    "assume_session_name": assume_session_name,
+                    "ticket": ticket,
+                },
+                "errors": _err_lines,
+                "mfa_step_up": {
+                    "required": True,
+                    "redirect_to": _redirect_to,
+                    "risk_score": _score,
+                    "threshold": _floor,
+                },
+            },
+        )
     store.put(req["metadata"]["id"], req)
     # #596 — web paste-form submit MUST notify approvers identically to
     # the API submit path. Without this, the request lands silently in
