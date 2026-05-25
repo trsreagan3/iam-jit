@@ -2519,6 +2519,35 @@ TOOLS.extend([
                         },
                     ],
                 },
+                "events": {
+                    "type": "array",
+                    "items": {"type": "object"},
+                    "description": (
+                        "Optional inline OCSF audit events. When "
+                        "provided, friction-budget evaluation (Phase 8) "
+                        "+ the generator step use these events directly "
+                        "instead of querying the live bouncer audit "
+                        "tail via `cadence_window`. Same shape as "
+                        "Phase 4 `bounce_simulate_profile.events[]` "
+                        "per [[cross-product-agent-parity]] — agents "
+                        "need not translate between tools. Use this in "
+                        "demo / test / agent-driven contexts where no "
+                        "live bouncer is running, or to exercise the "
+                        "friction-budget refusal logic end-to-end "
+                        "deterministically (UAT-A 2026-05-25 #581: "
+                        "without this, friction_budget=0 vs 999 "
+                        "produced identical `no_change` when no audit "
+                        "tail existed). Per [[ibounce-honest-"
+                        "positioning]]: production deployments should "
+                        "prefer the audit-tail path (omit `events`) so "
+                        "the cycle reflects real traffic. When BOTH "
+                        "`events` and audit-tail data exist, inline "
+                        "events win (caller intent is explicit). "
+                        "Omitted (the default) preserves pre-fix "
+                        "behaviour — audit-tail query via "
+                        "`cadence_window`."
+                    ),
+                },
             },
         },
     },
