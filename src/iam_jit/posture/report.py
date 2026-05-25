@@ -54,6 +54,18 @@ def capture_posture(*, sanitize: bool = True) -> dict[str, Any]:
         llm_skips = skip_counter_snapshot()
     except Exception:  # pragma: no cover
         llm_skips = {"total": 0, "counts": {}, "by_reason": {}, "last_skips": []}
+    # MRR-2 R2 — generic silent-degradation visibility. Closes
+    # Pattern B from docs/MRR-2-ERROR-PATH-AUDIT-2026-05-24.md so
+    # an operator running ``iam-jit posture`` sees env-var typos /
+    # missing sub-modules / failed audit emits at a glance, not
+    # buried in WARNING log lines.
+    try:
+        from ..degraded_capability import snapshot as _deg_snapshot
+        degraded_capabilities = _deg_snapshot()
+    except Exception:  # pragma: no cover
+        degraded_capabilities = {
+            "total": 0, "counts": {}, "by_reason": {}, "last_events": [],
+        }
     snapshot: dict[str, Any] = {
         "schema_version": POSTURE_SCHEMA_VERSION,
         "captured_at": _dt.datetime.now(_dt.timezone.utc).isoformat(
@@ -66,6 +78,7 @@ def capture_posture(*, sanitize: bool = True) -> dict[str, Any]:
         "unprotected_traffic_present": has_unprotected_traffic(effective),
         "tips": tips,
         "llm_skips": llm_skips,
+        "degraded_capabilities": degraded_capabilities,
     }
     if sanitize:
         snapshot = sanitize_posture(snapshot)

@@ -3171,10 +3171,27 @@ async def _forward_after_sync_allow(
         )
     except Exception as e:
         logger.warning("ibounce sync-allow forward failed: %s", e)
+        # MRR-2 R4 — add ``code`` + ``recommended_action`` so agents
+        # can pattern-match on retry vs escalate vs check-IAM
+        # decisions without LLM-parsing the message string. The
+        # taxonomy is a coarse first cut: timeouts / DNS / TLS
+        # warrant retry-with-backoff; everything else escalates.
+        exc_type = type(e).__name__
+        recommended = (
+            "retry_with_backoff"
+            if any(
+                tok in exc_type.lower()
+                for tok in ("timeout", "connection", "dns", "ssl", "tls")
+            )
+            else "escalate"
+        )
         return web.json_response(
             {
                 "error": "ibounce forward to AWS failed",
+                "code": "UPSTREAM_FORWARD_FAILED",
+                "recommended_action": recommended,
                 "upstream_error": str(e),
+                "upstream_exc_type": exc_type,
                 "service": obs.parsed_service,
                 "action": obs.parsed_action,
             },
@@ -3502,10 +3519,24 @@ async def _handle_request(request, *, store, config: ProxyConfig, session):
         # Forward failed (timeout, DNS, TLS, etc). Return 502 with
         # ibounce-shaped explanation.
         logger.warning("ibounce forward failed: %s", e)
+        # MRR-2 R4 — same code + recommended_action shape as the
+        # sync-allow branch above. See comment there for taxonomy.
+        exc_type = type(e).__name__
+        recommended = (
+            "retry_with_backoff"
+            if any(
+                tok in exc_type.lower()
+                for tok in ("timeout", "connection", "dns", "ssl", "tls")
+            )
+            else "escalate"
+        )
         return web.json_response(
             {
                 "error": "ibounce forward to AWS failed",
+                "code": "UPSTREAM_FORWARD_FAILED",
+                "recommended_action": recommended,
                 "upstream_error": str(e),
+                "upstream_exc_type": exc_type,
                 "service": obs.parsed_service,
                 "action": obs.parsed_action,
             },
@@ -3886,6 +3917,23 @@ async def serve(config: ProxyConfig, *, store: BouncerStore) -> None:
             llm_budget_block = spend_snapshot()
         except Exception:  # pragma: no cover
             llm_budget_block = {"enabled": False}
+        # MRR-2 R2 — generic silent-degradation visibility. Distinct
+        # from ``llm_skips`` (which is the EXPECTED local-dev shape):
+        # ``degraded_capabilities`` surfaces sites that actually
+        # failed to run as intended (env-var typos, missing sub-
+        # modules, audit-emit died, etc.) and the operator should
+        # investigate. Per
+        # docs/MRR-2-ERROR-PATH-AUDIT-2026-05-24.md Pattern B.
+        try:
+            from ..degraded_capability import snapshot as _deg_snapshot
+            degraded_capabilities_block = _deg_snapshot()
+        except Exception:  # pragma: no cover
+            degraded_capabilities_block = {
+                "total": 0,
+                "counts": {},
+                "by_reason": {},
+                "last_events": [],
+            }
         # §A102+ / MRR-5 M2 — top-level chain_initialized bool. Closes
         # the B3 halt-condition gap (audit-chain init failure surfacing
         # only in the bouncer log, not /healthz, until first event).
@@ -3915,6 +3963,7 @@ async def serve(config: ProxyConfig, *, store: BouncerStore) -> None:
             "anomaly_detection": anomaly_detection_block,
             "llm_skips": llm_skips_block,
             "llm_budget": llm_budget_block,
+            "degraded_capabilities": degraded_capabilities_block,
             "chain_initialized": chain_initialized_bool,
         }, status=http_status_code)
 

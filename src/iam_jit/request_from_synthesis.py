@@ -86,6 +86,30 @@ def _max_lookback_days() -> int:
             raise ValueError("must be positive")
         return v
     except ValueError as e:
+        # MRR-2 F6 (HIGH from
+        # docs/MRR-2-ERROR-PATH-AUDIT-2026-05-24.md): the previous
+        # ``_logger.warning`` was invisible to default log config —
+        # the operator's intended 90-day audit window silently
+        # truncated to the 7-day default and downstream synthesis
+        # requests started getting ``invalid_audit_window_too_old``
+        # rejections for events they thought were in scope. Emit a
+        # structured degraded_capability event so /healthz +
+        # posture surface the typo loudly.
+        from .degraded_capability import (
+            REASON_BAD_ENV_VAR_VALUE,
+            emit as _deg_emit,
+        )
+        _deg_emit(
+            feature="synthesis.max_lookback_env",
+            reason=REASON_BAD_ENV_VAR_VALUE,
+            hint=(
+                f"IAM_JIT_SYNTHESIS_MAX_LOOKBACK_DAYS={raw!r} is "
+                f"invalid; falling back to default "
+                f"{DEFAULT_MAX_LOOKBACK_DAYS} days. Set a positive "
+                f"integer to override."
+            ),
+            extra={"degraded_env_var_value": raw[:64]},
+        )
         _logger.warning(
             "IAM_JIT_SYNTHESIS_MAX_LOOKBACK_DAYS=%r is invalid (%s); "
             "falling back to default %d days",

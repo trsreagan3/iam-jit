@@ -5322,8 +5322,24 @@ def _tail_grant_for_mcp(args: dict[str, Any]) -> dict[str, Any]:
             event_count=len(result.events),
             actor=_current_user_id(),
         )
-    except Exception:
-        pass
+    except Exception as _ae_exc:
+        # MRR-2 F8 — record-tail-read history is best-effort
+        # audit-trail. Surface failures via degraded_capability so
+        # operators see cumulative audit-emit health rather than
+        # silently losing this row.
+        from .degraded_capability import (
+            REASON_AUDIT_EMIT_FAILED,
+            emit as _deg_emit,
+        )
+        _deg_emit(
+            feature="mcp.admin_action.tail_read_history",
+            reason=REASON_AUDIT_EMIT_FAILED,
+            hint=(
+                "tail-read history record failed to persist; the "
+                "primary tail-read returned successfully."
+            ),
+            extra={"degraded_exc_type": type(_ae_exc).__name__},
+        )
 
     return {
         "grant_id": grant_id,
@@ -5541,8 +5557,24 @@ def _submit_policy_for_mcp(args: dict[str, Any]) -> dict[str, Any]:
                     summary="submit_policy invoked without a workload arg",
                     detail={"description_preview": str(args.get("description") or "")[:140]},
                 )
-            except Exception:
-                pass
+            except Exception as _ae_exc:
+                # MRR-2 F8 — compatibility-check audit sink record
+                # is best-effort. Surface failures via
+                # degraded_capability so operators see cumulative
+                # audit-emit health.
+                from .degraded_capability import (
+                    REASON_AUDIT_EMIT_FAILED,
+                    emit as _deg_emit,
+                )
+                _deg_emit(
+                    feature="mcp.admin_action.compatibility_audit",
+                    reason=REASON_AUDIT_EMIT_FAILED,
+                    hint=(
+                        "compatibility-check audit record failed to "
+                        "persist; submit_policy itself proceeded."
+                    ),
+                    extra={"degraded_exc_type": type(_ae_exc).__name__},
+                )
 
     policy = args.get("policy")
     description = args.get("description")
@@ -6173,9 +6205,30 @@ def _bounce_deny_add_for_mcp(args: dict[str, Any]) -> dict[str, Any]:
                 "applies_to_recommender": rule.get("applies_to_recommender"),
             },
         )
-    except Exception:
-        # Out-of-process; emit hook isn't wired. Honest no-op.
-        pass
+    except Exception as _ae_exc:
+        # MRR-2 F8 (HIGH from docs/MRR-2-ERROR-PATH-AUDIT-2026-05-24.md):
+        # the previous bare ``except: pass`` made admin-action
+        # audit-emit failures invisible — the PRIMARY action
+        # succeeded but its audit-trail witness was missing, which
+        # cumulatively is the #475 shape ("audit_event_ids returned
+        # but events were write-only"). Surface via degraded_capability
+        # so /healthz + posture carry a counter; the rule_add itself
+        # still succeeds (audit emit is best-effort by design — the
+        # bouncer may be out-of-process).
+        from .degraded_capability import (
+            REASON_AUDIT_EMIT_FAILED,
+            emit as _deg_emit,
+        )
+        _deg_emit(
+            feature="mcp.admin_action.dynamic_deny_added",
+            reason=REASON_AUDIT_EMIT_FAILED,
+            hint=(
+                "the dynamic-deny rule was added but its audit-trail "
+                "emit failed (often: bouncer out-of-process / audit "
+                "sink not configured). Inspect server log."
+            ),
+            extra={"degraded_exc_type": type(_ae_exc).__name__},
+        )
 
     rule = result["rule"]
     summary = (
@@ -6318,8 +6371,23 @@ def _bounce_deny_remove_for_mcp(args: dict[str, Any]) -> dict[str, Any]:
                         "applied_to": rule.get("applied_to"),
                     },
                 )
-        except Exception:
-            pass
+        except Exception as _ae_exc:
+            # MRR-2 F8 — see comment at the dynamic_deny.added emit
+            # site above. Same shape: the remove itself succeeded;
+            # only the audit-trail emit failed.
+            from .degraded_capability import (
+                REASON_AUDIT_EMIT_FAILED,
+                emit as _deg_emit,
+            )
+            _deg_emit(
+                feature="mcp.admin_action.dynamic_deny_removed",
+                reason=REASON_AUDIT_EMIT_FAILED,
+                hint=(
+                    "dynamic-deny rule(s) were removed but the "
+                    "audit-trail emit failed. Inspect server log."
+                ),
+                extra={"degraded_exc_type": type(_ae_exc).__name__},
+            )
 
     if result.get("refused_org_distributed"):
         return {
@@ -6449,8 +6517,23 @@ def _bounce_profile_allow_for_mcp(args: dict[str, Any]) -> dict[str, Any]:
                 "profile_name": result.profile_name,
             },
         )
-    except Exception:
-        pass
+    except Exception as _ae_exc:
+        # MRR-2 F8 — see comment at the dynamic_deny.added emit
+        # site above. Same shape: profile-allow either applied or
+        # was requested; only the audit-trail emit failed.
+        from .degraded_capability import (
+            REASON_AUDIT_EMIT_FAILED,
+            emit as _deg_emit,
+        )
+        _deg_emit(
+            feature="mcp.admin_action.profile_allow",
+            reason=REASON_AUDIT_EMIT_FAILED,
+            hint=(
+                "profile-allow request succeeded but the audit-trail "
+                "emit failed. Inspect server log."
+            ),
+            extra={"degraded_exc_type": type(_ae_exc).__name__},
+        )
 
     if result.status == "pending_approval":
         entry = result.pending_entry or {}
@@ -6935,9 +7018,27 @@ def _emit_session_ended_on_close() -> None:
         return
     try:
         _emit_audit_event(session_ended_event(prior))
-    except Exception:
-        # Audit-export channel may not be configured (common — the
-        # MCP server runs everywhere, audit-export is opt-in).
+    except Exception as _ae_exc:
+        # MRR-2 F8 — session-end audit emit is best-effort (the
+        # audit-export channel may not be configured; MCP server
+        # runs everywhere but audit-export is opt-in). Surface via
+        # degraded_capability so an operator who DID configure
+        # audit-export sees failures rather than losing the
+        # session-ended forensic marker silently.
+        from .degraded_capability import (
+            REASON_AUDIT_EMIT_FAILED,
+            emit as _deg_emit,
+        )
+        _deg_emit(
+            feature="mcp.admin_action.session_end",
+            reason=REASON_AUDIT_EMIT_FAILED,
+            hint=(
+                "session_ended forensic marker emit failed (often: "
+                "audit-export channel not configured). If "
+                "audit-export IS configured, inspect the server log."
+            ),
+            extra={"degraded_exc_type": type(_ae_exc).__name__},
+        )
         return
 
 

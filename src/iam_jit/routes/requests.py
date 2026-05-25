@@ -557,8 +557,36 @@ def preview_request(
                 "self_approve_eligible": _sar_dec.self_approved,
                 "self_approve_reason": _sar_dec.reason,
             }
-        except Exception:
-            pass
+        except Exception as _sar_exc:
+            # MRR-2 F7 (HIGH from
+            # docs/MRR-2-ERROR-PATH-AUDIT-2026-05-24.md): the bare
+            # ``except: pass`` made the self-approve gate silently
+            # go inert — the response carried
+            # ``self_approve_evaluated: False`` with no diagnostic,
+            # so an operator couldn't tell "this user isn't eligible"
+            # from "the evaluator crashed". Emit a structured event
+            # to /healthz + posture AND surface a reason in the
+            # audit dict so the response is honest about WHY the
+            # eval didn't run.
+            from ..degraded_capability import (
+                REASON_EVAL_RAISED,
+                emit as _deg_emit,
+            )
+            _deg_emit(
+                feature="self_approve.eval",
+                reason=REASON_EVAL_RAISED,
+                hint=(
+                    "the self-approve evaluator raised — the request "
+                    "fell back to ``self_approve_evaluated=False`` "
+                    "and will follow the normal approval flow. "
+                    "Inspect the server log traceback."
+                ),
+                extra={"degraded_exc_type": type(_sar_exc).__name__},
+            )
+            _preview_sar_audit = {
+                "self_approve_evaluated": False,
+                "self_approve_eval_error": "eval_raised",
+            }
 
         auto_decision, _, _ = _apply_mfa_and_self_approve_enforcement(
             auto_decision,
@@ -1332,11 +1360,53 @@ def revoke_active_request(
             },
         )
     except provision_mod.ProvisioningError as e:
-        logger.warning("revoke failed: %s", e)
-        raise HTTPException(status_code=502, detail=f"revoke failed: {e}")
-    except Exception as e:
-        logger.exception("unexpected error during revoke")
-        raise HTTPException(status_code=500, detail=f"unexpected error during revoke: {e}")
+        # MRR-2 F4 (HIGH from docs/MRR-2-ERROR-PATH-AUDIT-2026-05-24.md):
+        # the previous shape leaked raw exception text into the HTTP
+        # response body (info-disclosure for the work-AWS deploy where
+        # compliance teams + proxy logs capture response bodies). The
+        # ProvisioningError carries useful operator context (op + msg)
+        # but it goes via the structured envelope now; the bare ``e``
+        # stays in the server log only.
+        from ..errors import log_and_make
+        logger.warning("revoke failed via ProvisioningError: %s", e)
+        payload = log_and_make(
+            logger=logger,
+            error_code="REVOKE_PROVISIONING_FAILED",
+            message=(
+                "revoke failed at the IAM provisioning layer; the role "
+                "may still exist in the destination account."
+            ),
+            recommended_action=(
+                "Re-attempt the revoke once the provisioning condition "
+                "clears (e.g. AWS API throttling); if it still fails, "
+                "contact your iam-jit operator with the error_id so "
+                "they can correlate the server-side traceback."
+            ),
+            log_message="revoke 502 — ProvisioningError",
+            context={"phase": "provisioning"},
+            exc_info=False,
+        )
+        raise HTTPException(status_code=502, detail=payload)
+    except Exception:
+        # MRR-2 F4 — same structured-envelope shape for the 500 catch-
+        # all. The inner exception text is logged server-side
+        # (logger.exception attaches the traceback via exc_info=True
+        # by default — log_and_make=True here) and correlated by
+        # error_id; it is NEVER returned to the client.
+        from ..errors import log_and_make
+        payload = log_and_make(
+            logger=logger,
+            error_code="REVOKE_INTERNAL_ERROR",
+            message="unexpected error during revoke",
+            recommended_action=(
+                "Re-attempt the revoke; if it still fails, contact "
+                "your iam-jit operator with the error_id so they can "
+                "correlate the server-side traceback."
+            ),
+            log_message="revoke 500 — unhandled exception",
+            context={"phase": "internal"},
+        )
+        raise HTTPException(status_code=500, detail=payload)
 
     revocation = {
         "role_arn": result.role_arn,

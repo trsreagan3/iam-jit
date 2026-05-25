@@ -564,6 +564,36 @@ class AutopilotSupervisor:
                 )
                 results.append(r.as_dict())
             except Exception as e:
+                # MRR-2 F5 (HIGH from
+                # docs/MRR-2-ERROR-PATH-AUDIT-2026-05-24.md): the
+                # alert previously was the ONLY visible signal of
+                # an improve-cycle blow-up — operators had to poll
+                # /healthz autopilot.alerts to notice. The alert
+                # stays for back-compat (existing monitors read
+                # it), but we ALSO emit a structured
+                # degraded_capability event so /healthz top-level
+                # ``degraded_capabilities`` + ``iam-jit posture``
+                # surface the failure with a stable
+                # ``feature=autopilot.improve_cycle`` key the agent
+                # can pattern-match on.
+                from ..degraded_capability import (
+                    REASON_CYCLE_RAISED,
+                    emit as _deg_emit,
+                )
+                _deg_emit(
+                    feature="autopilot.improve_cycle",
+                    reason=REASON_CYCLE_RAISED,
+                    hint=(
+                        f"bouncer={name}: this cycle's improvements "
+                        "were lost; the next scheduled cycle will "
+                        "retry. Inspect autopilot.status.json + "
+                        "server log for the traceback."
+                    ),
+                    extra={
+                        "degraded_bouncer": name,
+                        "degraded_exc_type": type(e).__name__,
+                    },
+                )
                 self.alerts.append(
                     f"improve cycle for {name} raised: {e}"
                 )
@@ -594,6 +624,28 @@ class AutopilotSupervisor:
             subs, _block = load_subscriptions_from_declaration(self.declaration)
             return list(subs)
         except Exception as e:
+            # MRR-2 F5 (HIGH from
+            # docs/MRR-2-ERROR-PATH-AUDIT-2026-05-24.md): the
+            # previous ``logger.debug`` was invisible to default log
+            # config — the operator's threat-feed went silently
+            # inactive after a declaration typo / module move. Emit
+            # a structured degraded_capability event so /healthz +
+            # posture surface it.
+            from ..degraded_capability import (
+                REASON_SUB_LOAD_FAILED,
+                emit as _deg_emit,
+            )
+            _deg_emit(
+                feature="autopilot.threat_feed_sub_load",
+                reason=REASON_SUB_LOAD_FAILED,
+                hint=(
+                    "threat-feed subscriptions failed to load — "
+                    "threat-feed updates will NOT apply this tick. "
+                    "Check the ``threat_feed:`` block in your "
+                    "declaration for syntax / module-path errors."
+                ),
+                extra={"degraded_exc_type": type(e).__name__},
+            )
             logger.debug("threat-feed sub load failed: %s", e)
             return []
 
