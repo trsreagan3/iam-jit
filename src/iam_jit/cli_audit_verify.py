@@ -90,11 +90,57 @@ def _parse_since(value: str | None, *, now: float) -> float | None:
 def _default_log_dir() -> str:
     """Resolve the audit log dir from the standard env var, falling
     back to ``./``. The bouncer's CLI sets IAM_JIT_AUDIT_LOG_PATH
-    via ``--audit-log-path``; we derive the directory from it."""
+    via ``--audit-log-path``; we derive the directory from it.
+
+    Used by the retention command; the verify command uses the
+    stricter :func:`_resolve_verify_log_dir` per #607 (CWD default is
+    a silent-degradation footgun for a security verifier)."""
     env_path = os.environ.get("IAM_JIT_AUDIT_LOG_PATH")
     if env_path:
         return str(pathlib.Path(env_path).parent)
     return "."
+
+
+# Default auto-detect candidates the verify command consults when the
+# operator passes neither --log-dir nor sets $IAM_JIT_AUDIT_LOG_PATH.
+# Listed in priority order. Per #607 we explicitly do NOT fall back to
+# CWD — running `iam-jit audit verify` in a random directory and
+# getting "ok — chain verified clean" is the silent-degradation bug
+# UAT-Admin-CLI 2026-05-25 (Gap C) flagged.
+_VERIFY_AUTO_DETECT_CANDIDATES = (
+    "~/.iam-jit/bouncer",
+    "~/.iam-jit/audit",
+    "~/.iam-jit",
+    "./audit-log",
+)
+
+
+def _resolve_verify_log_dir(
+    log_dir: pathlib.Path | None,
+    *,
+    env: dict[str, str] | None = None,
+    candidates: tuple[str, ...] = _VERIFY_AUTO_DETECT_CANDIDATES,
+) -> tuple[pathlib.Path | None, str]:
+    """Resolve the verify command's log directory per #607.
+
+    Returns ``(path_or_none, reason)``. ``reason`` is one of:
+      * ``"explicit"`` — operator passed --log-dir
+      * ``"env_var"`` — derived from $IAM_JIT_AUDIT_LOG_PATH
+      * ``"auto_detect:<path>"`` — first existing candidate
+      * ``"none_found"`` — no flag, no env var, no candidate exists;
+         caller must error out (NOT default to CWD, per #607)
+    """
+    env = env if env is not None else dict(os.environ)
+    if log_dir is not None:
+        return pathlib.Path(log_dir), "explicit"
+    env_path = env.get("IAM_JIT_AUDIT_LOG_PATH")
+    if env_path:
+        return pathlib.Path(env_path).parent, "env_var"
+    for c in candidates:
+        p = pathlib.Path(c).expanduser()
+        if p.is_dir():
+            return p, f"auto_detect:{p}"
+    return None, "none_found"
 
 
 def register_audit_verify_command(audit_group: click.Group) -> click.Command:
@@ -140,28 +186,77 @@ def register_audit_verify_command(audit_group: click.Group) -> click.Command:
         default=False,
         help="Skip manifest signature verification (chain-only).",
     )
+    @click.option(
+        "--explain",
+        is_flag=True,
+        default=False,
+        help="Print the scope (resolved --log-dir, files that would "
+             "be verified, manifest count) WITHOUT actually verifying. "
+             "Useful for confirming auto-detection picked the right "
+             "directory before running a long verification.",
+    )
     def verify_cmd(
         log_dir: pathlib.Path | None,
         since: str | None,
         public_key_b64: str | None,
         as_json: bool,
         skip_manifests: bool,
+        explain: bool,
     ) -> None:
         """Verify the bouncer audit chain + signed manifests.
 
-        Exit 0 = chain clean + all manifest signatures verified.
-        Exit 1 = at least one finding (chain inconsistency OR bad
-        manifest signature). The structured output (or human report)
-        details each finding so the operator can pinpoint the row /
-        manifest that broke trust.
+        Exit codes:
+          * 0 — events were checked AND chain clean AND all manifest
+                signatures verified.
+          * 1 — at least one finding (chain inconsistency OR bad
+                manifest signature).
+          * 2 — bad arguments (e.g. invalid --since, no --log-dir
+                resolvable, --log-dir does not exist).
+          * 3 — nothing was checked (zero events, zero files). Per #607
+                this is treated as a verification failure: a security
+                verifier that returns OK on an empty input has zero
+                signal. Specify --log-dir explicitly or check the path.
+
+        Per ``[[ibounce-honest-positioning]]`` the success path
+        ("RESULT: ok") fires only when something was actually verified.
         """
-        resolved_dir = str(log_dir) if log_dir else _default_log_dir()
+        # --- resolve log dir per #607 (no silent CWD fallback) ---
+        resolved_path, resolve_reason = _resolve_verify_log_dir(log_dir)
+        if resolved_path is None:
+            click.echo(
+                "audit verify: no --log-dir specified and no default "
+                "found. Try:\n"
+                "  iam-jit audit verify --log-dir ~/.iam-jit/bouncer\n"
+                "Auto-detect candidates (in order):\n"
+                + "\n".join(f"  - {c}" for c in _VERIFY_AUTO_DETECT_CANDIDATES),
+                err=True,
+            )
+            sys.exit(2)
+        if not resolved_path.is_dir():
+            click.echo(
+                f"audit verify: --log-dir does not exist: {resolved_path} "
+                f"(resolved via {resolve_reason})",
+                err=True,
+            )
+            sys.exit(2)
+        resolved_dir = str(resolved_path)
         now = time.time()
         try:
             since_unix = _parse_since(since, now=now)
         except click.BadParameter as e:
             click.echo(f"audit verify: {e.message}", err=True)
             sys.exit(2)
+        # --- --explain path: preview scope + exit without verifying ---
+        if explain:
+            _emit_explain_report(
+                resolved_dir=resolved_dir,
+                resolve_reason=resolve_reason,
+                since=since,
+                since_unix=since_unix,
+                skip_manifests=skip_manifests,
+                as_json=as_json,
+            )
+            sys.exit(0)
         # Chain state file presence signals whether the chain was
         # ever wired; surfaces in the report so operators know if a
         # missing state file is the gap or whether the chain truly
@@ -198,13 +293,67 @@ def register_audit_verify_command(audit_group: click.Group) -> click.Command:
                         "seq_start": m.seq_start,
                         "seq_end": m.seq_end,
                     })
+        # Per #607: "events_checked == 0 AND files_checked == 0 AND
+        # zero manifests checked" means we verified literally nothing.
+        # That is NOT a clean-chain result; it is a no-op masquerading
+        # as one. Emit a distinct warn + exit 3 so cron / CI / compliance
+        # pipelines can distinguish "verified clean" from "verified
+        # nothing" without re-parsing human text.
+        chain_dict = chain_result.to_dict()
+        nothing_checked = (
+            chain_dict["events_checked"] == 0
+            and chain_dict["files_checked"] == 0
+            and manifests_checked == 0
+        )
+        if nothing_checked:
+            warn_reason = (
+                f"no events, no files, no manifests checked at "
+                f"log-dir={resolved_dir} (resolved via {resolve_reason})"
+                + (f" since={since}" if since else "")
+                + ". Possible causes: (a) wrong --log-dir, (b) no audit "
+                "chain configured at that path, (c) bouncer never wrote "
+                "audit logs yet. Common locations to try: "
+                + ", ".join(_VERIFY_AUTO_DETECT_CANDIDATES)
+                + "."
+            )
+            report = {
+                "log_dir": resolved_dir,
+                "resolved_via": resolve_reason,
+                "since": since,
+                "chain": chain_dict,
+                "manifests_checked": manifests_checked,
+                "manifest_findings": manifest_findings,
+                "ok": False,
+                "nothing_checked": True,
+                "warning": warn_reason,
+            }
+            if as_json:
+                click.echo(json.dumps(report, indent=2, sort_keys=True))
+            else:
+                click.echo(
+                    f"iam-jit audit verify — log_dir={resolved_dir} "
+                    f"(resolved via {resolve_reason})"
+                )
+                if since:
+                    click.echo(f"  filter: since={since}")
+                click.echo(
+                    "  chain: 0 events across 0 file(s); 0 manifests checked"
+                )
+                click.echo(
+                    "RESULT: warn — no events checked. Specify --log-dir "
+                    "or check the location."
+                )
+            click.echo(f"WARN: {warn_reason}", err=True)
+            sys.exit(3)
         report = {
             "log_dir": resolved_dir,
+            "resolved_via": resolve_reason,
             "since": since,
-            "chain": chain_result.to_dict(),
+            "chain": chain_dict,
             "manifests_checked": manifests_checked,
             "manifest_findings": manifest_findings,
             "ok": chain_result.ok and not manifest_findings,
+            "nothing_checked": False,
         }
         if as_json:
             click.echo(json.dumps(report, indent=2, sort_keys=True))
@@ -213,6 +362,79 @@ def register_audit_verify_command(audit_group: click.Group) -> click.Command:
         sys.exit(0 if report["ok"] else 1)
 
     return verify_cmd
+
+
+def _emit_explain_report(
+    *,
+    resolved_dir: str,
+    resolve_reason: str,
+    since: str | None,
+    since_unix: float | None,
+    skip_manifests: bool,
+    as_json: bool,
+) -> None:
+    """Preview scope without verifying. Per #607 spec step 4."""
+    log_dir_path = pathlib.Path(resolved_dir)
+    jsonl_files: list[dict[str, Any]] = []
+    if log_dir_path.is_dir():
+        for f in sorted(log_dir_path.iterdir()):
+            if f.is_file() and (
+                f.name.endswith(".jsonl")
+                or f.name.endswith(".jsonl.gz")
+                or ".ndjson" in f.name
+            ):
+                try:
+                    st = f.stat()
+                    jsonl_files.append({
+                        "path": str(f),
+                        "size_bytes": st.st_size,
+                        "mtime": st.st_mtime,
+                    })
+                except OSError:
+                    continue
+    manifest_count = 0
+    if not skip_manifests:
+        try:
+            manifest_count = sum(1 for _ in list_manifests(resolved_dir))
+        except Exception:
+            manifest_count = 0
+    state_file = chain_state_path(resolved_dir)
+    state_file_present = state_file.is_file()
+    payload = {
+        "explain": True,
+        "log_dir": resolved_dir,
+        "resolved_via": resolve_reason,
+        "since": since,
+        "since_unix": since_unix,
+        "candidate_files": jsonl_files,
+        "manifest_count": manifest_count,
+        "skip_manifests": skip_manifests,
+        "state_file_present": state_file_present,
+        "would_run": True,
+    }
+    if as_json:
+        click.echo(json.dumps(payload, indent=2, sort_keys=True))
+        return
+    click.echo(f"iam-jit audit verify --explain")
+    click.echo(f"Will verify:")
+    click.echo(f"  log-dir: {resolved_dir} (resolved via {resolve_reason})")
+    if since:
+        click.echo(f"  since: {since}")
+    click.echo(f"  state file present: {state_file_present}")
+    if jsonl_files:
+        click.echo(f"Files found ({len(jsonl_files)}):")
+        for f in jsonl_files:
+            click.echo(
+                f"  - {f['path']} ({f['size_bytes']} bytes)"
+            )
+    else:
+        click.echo("Files found: 0 — verifying this directory would WARN "
+                   "(see exit 3 in `iam-jit audit verify --help`).")
+    if not skip_manifests:
+        click.echo(f"Manifests to verify: {manifest_count}")
+    else:
+        click.echo("Manifests: skipped (--skip-manifests)")
+    click.echo("Run without --explain to actually verify.")
 
 
 def _emit_human_report(report: dict[str, Any]) -> None:
