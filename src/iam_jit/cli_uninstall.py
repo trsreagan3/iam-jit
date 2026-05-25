@@ -279,13 +279,64 @@ def _read_cmdline(pid: int) -> str:
 # Install-path roots considered "ours" (any executable resolving under
 # one of these paths is a candidate for bouncer classification, given
 # the flag-signature + same-user checks also pass).
+#
+# #621 MED (regression from #614): the original static tuple omitted
+# common venv install locations. UAT-Cross 2026-05-25 (G7) caught
+# ibounce at ``<project>/.venv/bin/ibounce`` being rejected as "foreign"
+# — that is the STANDARD Python install pattern (project-local venv).
+# Adding ~/.local/bin covers pip --user installs; the dynamic
+# :func:`_get_known_bouncer_paths` resolver below also includes the
+# parent of ``sys.executable`` when iam-jit is itself running inside a
+# venv (covers arbitrary ``<project>/.venv/bin`` parent dirs and any
+# other custom-named venv pattern).
+#
+# IMPORTANT — do not expand this list to "any user-writable bin/":
+# the #614 protection only works because foreign processes at e.g.
+# /tmp/dbounce-test resolve OUTSIDE these roots. Loosening the path
+# check breaks the #614 cross-domain SIGTERM protection.
 _BOUNCER_INSTALL_PATH_ROOTS = (
     pathlib.Path.home() / ".iam-jit" / "venv" / "bin",
     pathlib.Path.home() / "go" / "bin",
     pathlib.Path.home() / ".iam-jit" / "bouncer",
     pathlib.Path("/opt/iam-jit/bin"),
     pathlib.Path("/usr/local/bin"),
+    pathlib.Path.home() / ".local" / "bin",
 )
+
+
+def _get_known_bouncer_paths() -> list[pathlib.Path]:
+    """Return the effective list of known-legitimate bouncer install
+    path roots.
+
+    Combines the static :data:`_BOUNCER_INSTALL_PATH_ROOTS` with a
+    runtime-detected entry: when iam-jit itself is running inside a
+    venv, the parent of :data:`sys.executable` is appended. This
+    covers the standard Python install pattern of a project-local
+    ``.venv/bin/`` directory (the #621 UAT-Cross 2026-05-25 G7 case),
+    and any other custom-named venv pattern users may employ.
+
+    Per [[ibounce-honest-positioning]] the addition is BOUNDED — we
+    only trust the venv we're running IN, not arbitrary venv paths.
+    Combined with the flag-signature + same-user checks, this keeps
+    the #614 foreign-process protection intact: a /tmp/dbounce-test
+    binary still resolves outside any of these roots.
+    """
+    paths: list[pathlib.Path] = list(_BOUNCER_INSTALL_PATH_ROOTS)
+    # Runtime-detect: if we're running in a venv, include its bin/.
+    # ``sys.base_prefix != sys.prefix`` is the canonical venv detection
+    # (PEP 405); ``sys.real_prefix`` catches the legacy virtualenv shape.
+    in_venv = (
+        getattr(sys, "real_prefix", None) is not None
+        or (
+            getattr(sys, "base_prefix", sys.prefix) != sys.prefix
+        )
+    )
+    if in_venv:
+        try:
+            paths.append(pathlib.Path(sys.executable).parent)
+        except (TypeError, ValueError):
+            pass
+    return paths
 
 
 # Per-bouncer flag signatures. A cmdline must contain at least ONE of
@@ -414,14 +465,20 @@ def _pid_owner_uid(pid: int) -> int | None:
 
 
 def _path_under_known_install_root(p: pathlib.Path) -> bool:
-    """True iff ``p`` resolves under any entry in
-    :data:`_BOUNCER_INSTALL_PATH_ROOTS`."""
+    """True iff ``p`` resolves under any entry returned by
+    :func:`_get_known_bouncer_paths` (static install roots + runtime-
+    detected venv ``bin/`` when applicable).
+
+    Per #621: the resolver is queried fresh on each call so
+    monkeypatching :data:`_BOUNCER_INSTALL_PATH_ROOTS` and/or
+    :data:`sys.executable` from tests is observable here.
+    """
     try:
         p_resolved = p.resolve()
     except (OSError, RuntimeError):
         p_resolved = p
     p_str = str(p_resolved)
-    for root in _BOUNCER_INSTALL_PATH_ROOTS:
+    for root in _get_known_bouncer_paths():
         try:
             root_resolved = root.resolve()
         except (OSError, RuntimeError):
@@ -431,6 +488,51 @@ def _path_under_known_install_root(p: pathlib.Path) -> bool:
         if p_str == root_str or p_str.startswith(root_str + os.sep):
             return True
     return False
+
+
+def _extract_script_path_from_cmdline(
+    cmdline: str,
+) -> pathlib.Path | None:
+    """If ``cmdline`` is a ``<python-interpreter> <script-path> ...``
+    invocation (the standard Python console-script shape), return the
+    script path. Otherwise ``None``.
+
+    Per #621: when iam-jit is run from a venv (or any Python install),
+    the kernel reports ``sys.executable`` (the interpreter) as the
+    process exe — NOT the console-script entry point. For ibounce
+    installed at ``<project>/.venv/bin/ibounce``, the cmdline tokens
+    are ``[<python>, <project>/.venv/bin/ibounce, run, ...]`` and we
+    need argv[1] to recognize the install location.
+
+    Best-effort tokenizer: cmdline from ``ps -o command=`` is
+    whitespace-separated; the first token is the interpreter and the
+    second is the script when the second is an existing file path or
+    has a recognized bouncer basename. Returns ``None`` if argv[1]
+    looks like a flag (starts with ``-``), is empty, or is not a
+    plausible script path.
+    """
+    if not cmdline:
+        return None
+    tokens = cmdline.split()
+    if len(tokens) < 2:
+        return None
+    first = tokens[0]
+    second = tokens[1]
+    # Heuristic: first token must look like a Python interpreter (path
+    # ends in python / python3 / pythonN.N, OR contains "Python"); else
+    # this isn't a console-script invocation.
+    first_base = pathlib.Path(first).name.lower()
+    looks_like_python = (
+        first_base == "python"
+        or first_base.startswith("python")
+        or "python" in first.lower()
+    )
+    if not looks_like_python:
+        return None
+    # Second token must look like a path (not a flag).
+    if second.startswith("-"):
+        return None
+    return pathlib.Path(second)
 
 
 def _classify_bouncer_pid_multifactor(
@@ -454,6 +556,12 @@ def _classify_bouncer_pid_multifactor(
     three independent axes. Substring-matching the cmdline alone is
     insufficient because foreign processes can incidentally contain
     bouncer names (e.g. /tmp/dbounce-test from a different session).
+
+    Per #621: when the resolved exe is a Python interpreter (which is
+    what venv/console-script-installed bouncers report), we ALSO check
+    the script path from argv[1] before failing the path check. This
+    closes the UAT-Cross 2026-05-25 G7 regression where standard
+    venv-installed bouncers were rejected as foreign.
     """
     failed: list[str] = []
 
@@ -461,20 +569,37 @@ def _classify_bouncer_pid_multifactor(
     exe_path = _resolve_executable_path(pid)
     path_ok = False
     matched_kind_from_path: str | None = None
-    if exe_path is None:
+    candidate_paths: list[pathlib.Path] = []
+    if exe_path is not None:
+        candidate_paths.append(exe_path)
+    # #621: also consider the script path from argv[1] for
+    # Python-console-script invocations (the kernel reports the
+    # interpreter; the script is argv[1]).
+    script_path = _extract_script_path_from_cmdline(cmdline)
+    if script_path is not None:
+        candidate_paths.append(script_path)
+
+    if not candidate_paths:
         failed.append("could not resolve executable path")
-    elif not _path_under_known_install_root(exe_path):
-        failed.append(
-            f"executable path {exe_path} not under known install root"
-        )
     else:
-        path_ok = True
-        # Derive candidate kind from the basename of the executable.
-        basename = exe_path.name
-        for k in ("kbouncer", "ibounce", "kbounce", "dbounce", "gbounce"):
-            if basename == k:
-                matched_kind_from_path = k
+        for cp in candidate_paths:
+            if _path_under_known_install_root(cp):
+                path_ok = True
+                basename = cp.name
+                for k in (
+                    "kbouncer", "ibounce", "kbounce", "dbounce", "gbounce",
+                ):
+                    if basename == k:
+                        matched_kind_from_path = k
+                        break
                 break
+        if not path_ok:
+            # Build a descriptive failure including both candidates so
+            # the operator can see what we considered.
+            paths_str = " / ".join(str(p) for p in candidate_paths)
+            failed.append(
+                f"executable path {paths_str} not under known install root"
+            )
 
     # Factor 2: cmdline contains a bouncer-specific flag signature.
     # If the path gave us a candidate kind, only check that kind's

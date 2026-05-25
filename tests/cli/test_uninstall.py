@@ -2030,3 +2030,468 @@ def test_614_sabotage_path_check_made_lenient_breaks_foreign_protection(
         "some other check is doing the protection work — meaning the "
         "path-check isn't the load-bearing gate the brief claims."
     )
+
+
+# ---------------------------------------------------------------------------
+# #621 MED — extend bouncer-classifier install path roots (regression
+# from #614). UAT-Cross 2026-05-25 (G7): #614 multi-factor classifier
+# rejected venv-installed bouncers (.venv/bin/ibounce) as "foreign,"
+# blocking uninstall for every venv-install operator. Fix: include
+# ~/.local/bin (pip --user) + runtime-detected sys.executable parent
+# when running in a venv. Tests must show:
+#   * venv-installed bouncer NOW classifies correctly
+#   * sys.executable detection is wired
+#   * ~/.local/bin (pip --user) is recognized
+# Regression tests must show:
+#   * #614 foreign /tmp/dbounce-test STILL rejected
+#   * cross-user venv binary STILL rejected
+# ---------------------------------------------------------------------------
+
+
+def test_621_venv_installed_bouncer_classified_correctly(
+    isolated_iam_jit_home: pathlib.Path,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: pathlib.Path,
+) -> None:
+    """#621 MED: a bouncer installed in a project-local .venv/bin/
+    must classify correctly. Pre-#621: #614's static path list omitted
+    venv patterns → ibounce at ``<project>/.venv/bin/ibounce`` was
+    rejected as foreign → uninstall blocked for every venv-install
+    operator (the STANDARD Python install pattern).
+    """
+    _seed_install(isolated_iam_jit_home)
+
+    # Simulate iam-jit running inside a project-local .venv (the UAT
+    # scenario). Point sys.executable at a synthetic venv layout so the
+    # runtime-detection branch of _get_known_bouncer_paths kicks in.
+    fake_venv = tmp_path / ".venv"
+    fake_venv_bin = fake_venv / "bin"
+    fake_venv_bin.mkdir(parents=True)
+    fake_python = fake_venv_bin / "python"
+    fake_python.write_text("#!/bin/sh\nexit 0\n")
+    fake_python.chmod(0o755)
+    monkeypatch.setattr(sys, "executable", str(fake_python))
+    # Make sys look like it's in a venv (base_prefix != prefix).
+    monkeypatch.setattr(sys, "prefix", str(fake_venv))
+    monkeypatch.setattr(sys, "base_prefix", "/usr")
+
+    # ibounce binary installed at the venv-detected bin/.
+    venv_ibounce = fake_venv_bin / "ibounce"
+    venv_ibounce.write_text("#!/bin/sh\nexit 0\n")
+    venv_ibounce.chmod(0o755)
+
+    venv_pid = 62101
+    _seed_unknown_port_owner(
+        monkeypatch,
+        port=8767,
+        pid=venv_pid,
+        cmdline=f"{venv_ibounce} run --mode discovery --proxy-port 8767",
+        exe_path=venv_ibounce,
+        owner_uid=os.geteuid(),
+    )
+
+    inv = cu._inventory_installed_state()
+
+    # Observable: classified as ibounce (NOT foreign).
+    assert "ibounce" in inv["running_bouncers"], (
+        f"#621: venv-installed ibounce at {venv_ibounce} should classify; "
+        f"running_bouncers={inv['running_bouncers']} "
+        f"unknown_port_owners={inv['unknown_port_owners']}"
+    )
+    assert venv_pid in inv["running_bouncers"]["ibounce"]
+    # Observable: NOT in unknown_port_owners.
+    unknown_pids = [u["pid"] for u in inv["unknown_port_owners"]]
+    assert venv_pid not in unknown_pids
+    # Observable: U-5 halt does NOT fire (no foreign processes).
+    halts = cu._check_halt_conditions(inv)
+    halt_ids = [h["id"] for h in halts]
+    assert "U-5" not in halt_ids, (
+        f"#621: U-5 must NOT fire for legitimate venv-installed bouncer; "
+        f"got halts={halts}"
+    )
+
+
+def test_621_sys_executable_parent_recognized_as_install_root(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: pathlib.Path,
+) -> None:
+    """#621: when running in a venv, _get_known_bouncer_paths must
+    include the parent of sys.executable. Without this, any non-standard
+    venv path (e.g. ``my_project/.venv/bin/``, ``~/envs/foo/bin/``) is
+    invisible to the classifier."""
+    fake_venv = tmp_path / "custom_env"
+    fake_venv_bin = fake_venv / "bin"
+    fake_venv_bin.mkdir(parents=True)
+    fake_python = fake_venv_bin / "python"
+    fake_python.write_text("#!/bin/sh\nexit 0\n")
+    fake_python.chmod(0o755)
+
+    monkeypatch.setattr(sys, "executable", str(fake_python))
+    monkeypatch.setattr(sys, "prefix", str(fake_venv))
+    monkeypatch.setattr(sys, "base_prefix", "/usr")
+
+    paths = cu._get_known_bouncer_paths()
+    # Observable: sys.executable's parent (the venv bin/) is in the list.
+    assert fake_venv_bin in paths or fake_venv_bin.resolve() in [
+        p.resolve() for p in paths if p.exists() or True
+    ], (
+        f"#621: sys.executable parent {fake_venv_bin} must appear in "
+        f"_get_known_bouncer_paths(); got {paths}"
+    )
+
+    # Observable: a binary at that location passes the path-under-root check.
+    fake_ibounce = fake_venv_bin / "ibounce"
+    fake_ibounce.write_text("#!/bin/sh\nexit 0\n")
+    fake_ibounce.chmod(0o755)
+    assert cu._path_under_known_install_root(fake_ibounce), (
+        f"#621: ibounce at {fake_ibounce} should pass path check via "
+        f"sys.executable parent detection"
+    )
+
+    # Sabotage check: when NOT in a venv (base_prefix == prefix), the
+    # runtime addition is skipped, and an arbitrary tmp path must NOT
+    # pass.
+    monkeypatch.setattr(sys, "base_prefix", str(fake_venv))  # not a venv
+    monkeypatch.setattr(sys, "prefix", str(fake_venv))
+    # Need a totally unrelated path that isn't under any static root.
+    foreign_exe = tmp_path / "totally_unrelated" / "ibounce"
+    foreign_exe.parent.mkdir(parents=True, exist_ok=True)
+    foreign_exe.write_text("#!/bin/sh\nexit 0\n")
+    foreign_exe.chmod(0o755)
+    assert not cu._path_under_known_install_root(foreign_exe), (
+        f"#621 sabotage: outside venv-detection, an arbitrary path "
+        f"{foreign_exe} must NOT pass the install-root check (otherwise "
+        f"the #614 foreign-process protection is broken)"
+    )
+
+
+def test_621_user_local_bin_recognized_as_install_root(
+    isolated_iam_jit_home: pathlib.Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """#621: a bouncer installed via ``pip install --user`` lands in
+    ``~/.local/bin/``. The classifier must recognize that location."""
+    _seed_install(isolated_iam_jit_home)
+
+    user_local = pathlib.Path.home() / ".local" / "bin"
+    user_local_ibounce = user_local / "ibounce"
+
+    pid = 62301
+    _seed_unknown_port_owner(
+        monkeypatch,
+        port=8767,
+        pid=pid,
+        cmdline=(
+            f"{user_local_ibounce} run --mode discovery "
+            "--proxy-port 8767"
+        ),
+        exe_path=user_local_ibounce,
+        owner_uid=os.geteuid(),
+    )
+
+    # Observable: ~/.local/bin appears in _get_known_bouncer_paths().
+    paths_str = [str(p) for p in cu._get_known_bouncer_paths()]
+    assert str(user_local) in paths_str, (
+        f"#621: ~/.local/bin must be in install-path roots; got {paths_str}"
+    )
+
+    inv = cu._inventory_installed_state()
+    # Observable: classified as ibounce.
+    assert "ibounce" in inv["running_bouncers"], (
+        f"#621: pip --user installed ibounce at {user_local_ibounce} "
+        f"should classify; running_bouncers={inv['running_bouncers']} "
+        f"unknown={inv['unknown_port_owners']}"
+    )
+    assert pid in inv["running_bouncers"]["ibounce"]
+
+
+def test_621_foreign_tmp_process_still_rejected_regression_614(
+    isolated_iam_jit_home: pathlib.Path,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: pathlib.Path,
+) -> None:
+    """#621 REGRESSION (#614): the venv-path extension must NOT undo
+    #614's foreign-process protection. A process at /tmp/dbounce-test
+    must STILL be classified as foreign — even when iam-jit is itself
+    running in a venv (the new runtime-detection branch must not loosen
+    classification for unrelated paths)."""
+    _seed_install(isolated_iam_jit_home)
+
+    # Simulate iam-jit running in a venv (so the runtime detection
+    # path is active — proving it doesn't accidentally whitelist /tmp).
+    fake_venv = tmp_path / ".venv"
+    fake_venv_bin = fake_venv / "bin"
+    fake_venv_bin.mkdir(parents=True)
+    fake_python = fake_venv_bin / "python"
+    fake_python.write_text("#!/bin/sh\nexit 0\n")
+    fake_python.chmod(0o755)
+    monkeypatch.setattr(sys, "executable", str(fake_python))
+    monkeypatch.setattr(sys, "prefix", str(fake_venv))
+    monkeypatch.setattr(sys, "base_prefix", "/usr")
+
+    foreign_pid = 62401
+    # The original #614 scenario — verbatim.
+    _seed_unknown_port_owner(
+        monkeypatch,
+        port=5433,
+        pid=foreign_pid,
+        cmdline=(
+            "/tmp/dbounce-test run --dialect postgres "
+            "--upstream-conn-string ignored"
+        ),
+        exe_path=pathlib.Path("/tmp/dbounce-test"),
+        owner_uid=os.geteuid(),
+    )
+
+    inv = cu._inventory_installed_state()
+
+    # Observable: foreign PID is NOT in running_bouncers.
+    flat_pids: list[int] = []
+    for pids in inv["running_bouncers"].values():
+        flat_pids.extend(pids)
+    assert foreign_pid not in flat_pids, (
+        f"#621 regression: #614 foreign /tmp/dbounce-test "
+        f"(pid={foreign_pid}) was re-classified as bouncer by the "
+        f"#621 venv-extension change. The #614 protection has been "
+        f"broken. running_bouncers={inv['running_bouncers']}"
+    )
+    # Observable: foreign PID IS in unknown_port_owners.
+    unknown_pids = [u["pid"] for u in inv["unknown_port_owners"]]
+    assert foreign_pid in unknown_pids, (
+        f"#621 regression: foreign PID must STILL surface in "
+        f"unknown_port_owners; got {inv['unknown_port_owners']}"
+    )
+    # Observable: U-5 halt STILL fires.
+    halts = cu._check_halt_conditions(inv)
+    halt_ids = [h["id"] for h in halts]
+    assert "U-5" in halt_ids, (
+        f"#621 regression: U-5 halt must STILL fire for foreign "
+        f"process even after #621 venv-extension; got halts={halts}"
+    )
+
+
+def test_621_cross_user_venv_still_rejected_regression_614(
+    isolated_iam_jit_home: pathlib.Path,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: pathlib.Path,
+) -> None:
+    """#621 REGRESSION (#614): a venv binary owned by a DIFFERENT OS
+    user must STILL be rejected. Cross-user destruction was the
+    worst-case #614 violation; the venv-path extension must NOT relax
+    the same-user check for processes that just happen to live under a
+    venv-shape path."""
+    _seed_install(isolated_iam_jit_home)
+
+    fake_venv = tmp_path / ".venv"
+    fake_venv_bin = fake_venv / "bin"
+    fake_venv_bin.mkdir(parents=True)
+    fake_python = fake_venv_bin / "python"
+    fake_python.write_text("#!/bin/sh\nexit 0\n")
+    fake_python.chmod(0o755)
+    monkeypatch.setattr(sys, "executable", str(fake_python))
+    monkeypatch.setattr(sys, "prefix", str(fake_venv))
+    monkeypatch.setattr(sys, "base_prefix", "/usr")
+
+    venv_ibounce = fake_venv_bin / "ibounce"
+    venv_ibounce.write_text("#!/bin/sh\nexit 0\n")
+    venv_ibounce.chmod(0o755)
+
+    cross_user_pid = 62501
+    # owner_uid=0 (root) — clearly NOT current user.
+    _seed_unknown_port_owner(
+        monkeypatch,
+        port=8767,
+        pid=cross_user_pid,
+        cmdline=f"{venv_ibounce} run --mode discovery --proxy-port 8767",
+        exe_path=venv_ibounce,
+        owner_uid=0,
+    )
+
+    inv = cu._inventory_installed_state()
+
+    # Observable: cross-user PID NOT in running_bouncers even though
+    # the path is now a recognized install root.
+    flat_pids: list[int] = []
+    for pids in inv["running_bouncers"].values():
+        flat_pids.extend(pids)
+    assert cross_user_pid not in flat_pids, (
+        f"#621 regression: cross-user PID at recognized venv path "
+        f"was classified as ours. #614 cross-user check broken. "
+        f"running_bouncers={inv['running_bouncers']}"
+    )
+    # Observable: surfaced for operator review.
+    assert cross_user_pid in [
+        u["pid"] for u in inv["unknown_port_owners"]
+    ]
+    entry = next(
+        u for u in inv["unknown_port_owners"] if u["pid"] == cross_user_pid
+    )
+    failed_text = " ".join(entry.get("failed_checks") or [])
+    assert "uid" in failed_text or "owner" in failed_text, (
+        f"#621 regression: failed_checks should still call out the "
+        f"uid mismatch; got {entry}"
+    )
+
+
+def test_621_python_console_script_argv1_resolved(
+    isolated_iam_jit_home: pathlib.Path,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: pathlib.Path,
+) -> None:
+    """#621: when the resolved exe is a Python interpreter (the typical
+    case for venv-installed console scripts on macOS), the classifier
+    must extract the script path from argv[1] and check THAT against
+    install roots — not the interpreter.
+
+    The UAT scenario: ``Python .venv/bin/ibounce run --mode discovery``.
+    Pre-fix: only the Homebrew Python path was checked → fail → foreign.
+    Post-fix: argv[1] (.venv/bin/ibounce) is also checked + recognized
+    via the runtime sys.executable parent detection.
+    """
+    _seed_install(isolated_iam_jit_home)
+
+    fake_venv = tmp_path / ".venv"
+    fake_venv_bin = fake_venv / "bin"
+    fake_venv_bin.mkdir(parents=True)
+    fake_python = fake_venv_bin / "python"
+    fake_python.write_text("#!/bin/sh\nexit 0\n")
+    fake_python.chmod(0o755)
+    monkeypatch.setattr(sys, "executable", str(fake_python))
+    monkeypatch.setattr(sys, "prefix", str(fake_venv))
+    monkeypatch.setattr(sys, "base_prefix", "/usr")
+
+    venv_ibounce = fake_venv_bin / "ibounce"
+    venv_ibounce.write_text("#!/bin/sh\nexit 0\n")
+    venv_ibounce.chmod(0o755)
+
+    pid = 62701
+    # Mimic the exact UAT-Cross G7 cmdline shape: kernel reports the
+    # interpreter (Homebrew Python); argv[1] is the venv script.
+    homebrew_python = pathlib.Path(
+        "/opt/homebrew/Cellar/python@3.12/3.12.13_2/"
+        "Frameworks/Python.framework/Versions/3.12/Resources/Python.app/"
+        "Contents/MacOS/Python"
+    )
+    _seed_unknown_port_owner(
+        monkeypatch,
+        port=8767,
+        pid=pid,
+        cmdline=(
+            f"{homebrew_python} {venv_ibounce} run --mode discovery "
+            f"--port 8767"
+        ),
+        exe_path=homebrew_python,  # what lsof / /proc/exe reports
+        owner_uid=os.geteuid(),
+    )
+
+    inv = cu._inventory_installed_state()
+
+    # Observable: classified as ibounce despite exe being Homebrew Python.
+    assert "ibounce" in inv["running_bouncers"], (
+        f"#621: Python-console-script invocation must classify via "
+        f"argv[1]; running_bouncers={inv['running_bouncers']} "
+        f"unknown={inv['unknown_port_owners']}"
+    )
+    assert pid in inv["running_bouncers"]["ibounce"]
+
+
+def test_621_argv1_flag_does_not_count_as_script_path(
+    isolated_iam_jit_home: pathlib.Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """#621 REGRESSION (#614): the argv[1]-extraction must NOT treat
+    a flag (starts with ``-``) as a script path. The classic foreign
+    case is ``Python -c <inline-code>`` — argv[1] is ``-c``, NOT a
+    bouncer script. This must STILL classify as foreign."""
+    _seed_install(isolated_iam_jit_home)
+
+    foreign_pid = 62801
+    homebrew_python = pathlib.Path(
+        "/opt/homebrew/Cellar/python@3.12/3.12.13_2/"
+        "Frameworks/Python.framework/Versions/3.12/Resources/Python.app/"
+        "Contents/MacOS/Python"
+    )
+    # cmdline is `Python -c <script>` — the foreign process pattern.
+    # Even though "ibounce" appears in the inline code (incidental
+    # substring), neither the interpreter NOR argv[1]=='-c' resolves to
+    # an install root.
+    _seed_unknown_port_owner(
+        monkeypatch,
+        port=8767,
+        pid=foreign_pid,
+        cmdline=(
+            f"{homebrew_python} -c "
+            "import socket;s=socket.socket();s.bind(('ibounce-mimic',0))"
+        ),
+        exe_path=homebrew_python,
+        owner_uid=os.geteuid(),
+    )
+
+    # Observable: _extract_script_path_from_cmdline returns None for
+    # the flag argv[1].
+    extracted = cu._extract_script_path_from_cmdline(
+        f"{homebrew_python} -c some-script"
+    )
+    assert extracted is None, (
+        f"#621: argv[1] starting with '-' must not be extracted as "
+        f"a script path; got {extracted}"
+    )
+
+    inv = cu._inventory_installed_state()
+    flat_pids: list[int] = []
+    for pids in inv["running_bouncers"].values():
+        flat_pids.extend(pids)
+    assert foreign_pid not in flat_pids, (
+        f"#621 regression: Python -c foreign process classified as "
+        f"bouncer; running_bouncers={inv['running_bouncers']}"
+    )
+    assert foreign_pid in [u["pid"] for u in inv["unknown_port_owners"]]
+
+
+def test_621_relative_path_handled_safely(
+    isolated_iam_jit_home: pathlib.Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """#621 edge case: an executable path that comes in as a relative
+    path (e.g. ``./ibounce`` from an unusual ps reading) must be
+    handled cleanly without crashing. The resolver must not raise; the
+    process simply lands in unknown_port_owners if it doesn't resolve
+    to a known root."""
+    _seed_install(isolated_iam_jit_home)
+
+    edge_pid = 62601
+    relative_path = pathlib.Path("./some_relative_dir/ibounce")
+
+    _seed_unknown_port_owner(
+        monkeypatch,
+        port=8767,
+        pid=edge_pid,
+        cmdline=f"./some_relative_dir/ibounce run --mode discovery",
+        exe_path=relative_path,
+        owner_uid=os.geteuid(),
+    )
+
+    # Observable: inventory builds without raising.
+    inv = cu._inventory_installed_state()
+
+    # Observable: the path-check helper itself doesn't raise.
+    # Result MAY be True or False (depends on cwd resolution); the
+    # important property is "doesn't crash". Surfacing in
+    # unknown_port_owners is the safe default if it doesn't resolve.
+    result = cu._path_under_known_install_root(relative_path)
+    assert isinstance(result, bool), (
+        f"#621: _path_under_known_install_root must return bool even "
+        f"for relative paths; got {type(result).__name__}={result!r}"
+    )
+
+    # Observable: PID is either correctly classified OR surfaced as
+    # unknown. The crash-safety is the load-bearing property here.
+    flat_pids: list[int] = []
+    for pids in inv["running_bouncers"].values():
+        flat_pids.extend(pids)
+    unknown_pids = [u["pid"] for u in inv["unknown_port_owners"]]
+    assert edge_pid in flat_pids or edge_pid in unknown_pids, (
+        f"#621: edge-case relative path PID disappeared entirely. "
+        f"running_bouncers={inv['running_bouncers']} "
+        f"unknown={inv['unknown_port_owners']}"
+    )
