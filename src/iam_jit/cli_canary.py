@@ -130,8 +130,105 @@ _CATEGORIES = (
 # ---------------------------------------------------------------------------
 
 
-def _ensure_dir() -> None:
-    CANARY_DIR.mkdir(parents=True, exist_ok=True)
+def _ensure_dir(path: pathlib.Path | None = None) -> None:
+    """Create the canary state directory with restrictive perms (0o700).
+
+    #524 WB-4: the canary surface holds audit metadata, deploy URLs,
+    operator notes, and bouncer logs. Default 0o755 leaves these
+    world-readable on a shared host. Mirror the perms posture used by
+    the bouncer audit + manifest writers (``audit.py`` 0o600 file mode +
+    ``compatibility_allowlist.py`` 0o700 dir mode).
+
+    ``path`` defaults to ``CANARY_DIR``; callers pass an alternate dir
+    (e.g. a log subdir) so the same hardening covers every directory
+    the canary surface creates. Re-applies the 0o700 mode via
+    ``chmod`` after ``mkdir`` because ``mkdir(mode=...)`` is a no-op on
+    a directory that already exists, and the operator may have
+    pre-created the dir with broad perms. ``chmod`` failures are
+    swallowed (filesystems like FAT don't support POSIX modes) per the
+    "best-effort tighten" pattern in ``local_server.py:293``.
+    """
+    target = path if path is not None else CANARY_DIR
+    target.mkdir(parents=True, exist_ok=True, mode=0o700)
+    try:
+        os.chmod(target, 0o700)
+    except OSError:
+        # FAT / Windows-mapped volumes may not honour POSIX chmod;
+        # the operator gets the most-restrictive mode the FS supports.
+        pass
+
+
+def _atomic_write_canary_file(
+    path: pathlib.Path, contents: str,
+) -> None:
+    """Write ``contents`` to ``path`` atomically with 0o600 perms.
+
+    #524 WB-4: mirrors the os.open + O_CREAT-mode pattern from
+    ``local_server.py:286`` and ``bouncer/audit_export/manifest.py:276``.
+    Establishing the mode at creation time avoids the write_text-then-
+    chmod race that briefly leaves the file 0o644-readable. The atomic
+    rename ensures readers never see a partial write.
+
+    Best-effort ``chmod`` afterwards covers the case where the operator's
+    umask masked the 0o600 (the audit-log write at audit.py:205 takes
+    the same posture).
+    """
+    _ensure_dir(path.parent)
+    tmp = path.with_suffix(path.suffix + ".tmp")
+    flags = os.O_WRONLY | os.O_CREAT | os.O_TRUNC
+    try:
+        flags |= os.O_NOFOLLOW  # POSIX-only; refuse to write through symlinks
+    except AttributeError:
+        pass
+    fd = os.open(str(tmp), flags, 0o600)
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as fh:
+            fh.write(contents)
+    except Exception:
+        try:
+            tmp.unlink()
+        except FileNotFoundError:
+            pass
+        raise
+    # Defensive chmod for the umask-masked case before the rename;
+    # the final file inherits the tmp's mode.
+    try:
+        os.chmod(tmp, 0o600)
+    except OSError:
+        pass
+    os.replace(tmp, path)
+
+
+def _append_canary_jsonl(path: pathlib.Path, line: str) -> None:
+    """Append ``line`` to ``path`` (JSONL); enforce 0o600 perms.
+
+    #524 WB-4: the ``O_CREAT`` mode is only honoured on first creation,
+    so we ALSO ``chmod`` after the write to tighten any pre-existing
+    broad-perms file the operator may have created manually. The
+    audit-log write at ``audit.py:205`` uses the same flag triple
+    (``O_WRONLY | O_CREAT | O_APPEND``) for the equivalent JSONL surface.
+    """
+    _ensure_dir(path.parent)
+    flags = os.O_WRONLY | os.O_CREAT | os.O_APPEND
+    try:
+        flags |= os.O_NOFOLLOW
+    except AttributeError:
+        pass
+    fd = os.open(str(path), flags, 0o600)
+    try:
+        with os.fdopen(fd, "a", encoding="utf-8") as fh:
+            if not line.endswith("\n"):
+                line = line + "\n"
+            fh.write(line)
+    except Exception:
+        raise
+    # Tighten an already-existing file that may have been created with
+    # broader perms before this helper was wired (or by a pre-#524
+    # version of the code).
+    try:
+        os.chmod(path, 0o600)
+    except OSError:
+        pass
 
 
 def _now_iso() -> str:
@@ -177,9 +274,12 @@ def append_issue(
         "auto_generated": auto_generated,
         "related_task": related_task,
     }
-    with ISSUES_PATH.open("a", encoding="utf-8") as fh:
-        fh.write(json.dumps(entry, separators=(",", ":"), sort_keys=True))
-        fh.write("\n")
+    # #524 WB-4: route through the perms-hardening helper so the JSONL
+    # is created 0o600 on first write + tightened on subsequent appends.
+    _append_canary_jsonl(
+        ISSUES_PATH,
+        json.dumps(entry, separators=(",", ":"), sort_keys=True),
+    )
     return entry
 
 
@@ -213,9 +313,10 @@ def read_status() -> dict[str, Any]:
 
 
 def write_status(status: dict[str, Any]) -> None:
-    _ensure_dir()
-    STATUS_PATH.write_text(
-        json.dumps(status, indent=2, sort_keys=True) + "\n", encoding="utf-8"
+    # #524 WB-4: route through 0o600 atomic-write helper.
+    _atomic_write_canary_file(
+        STATUS_PATH,
+        json.dumps(status, indent=2, sort_keys=True) + "\n",
     )
 
 
@@ -770,8 +871,22 @@ def _relaunch_bouncer(
 
     log_target = (log_dir or CANARY_DIR) / f"{name}.log"
     try:
-        log_target.parent.mkdir(parents=True, exist_ok=True)
-        log_fh = log_target.open("a", encoding="utf-8")
+        # #524 WB-4: harden log-dir perms (0o700) + create log file 0o600.
+        # Bouncer logs include audit context; the dir lives inside
+        # CANARY_DIR so it inherits the same security posture as the
+        # other state files.
+        _ensure_dir(log_target.parent)
+        flags = os.O_WRONLY | os.O_CREAT | os.O_APPEND
+        try:
+            flags |= os.O_NOFOLLOW
+        except AttributeError:
+            pass
+        log_fd = os.open(str(log_target), flags, 0o600)
+        try:
+            os.chmod(log_target, 0o600)
+        except OSError:
+            pass
+        log_fh = os.fdopen(log_fd, "a", encoding="utf-8")
     except OSError as exc:
         return False, None, f"could not open log {log_target}: {exc}"
 
@@ -984,10 +1099,10 @@ def _write_monitor_state(state: dict[str, Any]) -> None:
     UNKNOWN) but never blocks the report. Per [[ibounce-honest-positioning]]
     we don't fail the read path on a state-file write hiccup."""
     try:
-        _ensure_dir()
-        MONITOR_STATE_PATH.write_text(
+        # #524 WB-4: route through 0o600 atomic-write helper.
+        _atomic_write_canary_file(
+            MONITOR_STATE_PATH,
             json.dumps(state, indent=2, sort_keys=True) + "\n",
-            encoding="utf-8",
         )
     except OSError:
         pass
