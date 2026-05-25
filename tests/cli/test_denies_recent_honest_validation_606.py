@@ -179,17 +179,23 @@ def test_denies_recent_invalid_since_does_not_claim_caught_nothing(
 def test_denies_recent_all_bouncers_failed_exits_nonzero(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """When EVERY bouncer query fails, the CLI MUST exit 1 (full
-    degradation) — we cannot honestly say "caught nothing" because
-    we never saw the data. The text mode emits a follow-on WARNING
-    + ERROR cluster on stderr; the JSON mode sets
+    """When EVERY surface in the fan-out fails, the CLI MUST exit 1
+    (full degradation) — we cannot honestly say "caught nothing"
+    because we never saw the data. The text mode emits a follow-on
+    WARNING + ERROR cluster on stderr; the JSON mode sets
     ``status: "all_bouncers_failed"``.
+
+    Post-#620 the fan-out has FIVE surfaces (the four bouncers + the
+    iam-jit serve audit log); all five must fail for the exit-1 path
+    to fire — any success collapses the outcome to "partial" (exit 2).
     """
     failing_results = {
         name: _BouncerQueryResult(
             bouncer=name, events=[], error="unreachable: connection refused",
         )
-        for name in ("ibounce", "kbounce", "dbounce", "gbounce")
+        for name in (
+            "ibounce", "kbounce", "dbounce", "gbounce", "iam-jit-serve",
+        )
     }
     _wire_results(monkeypatch, per_bouncer=failing_results)
 
@@ -420,7 +426,9 @@ def test_denies_recent_human_text_warns_on_query_errors(
             events=[],
             error="HTTP 400: since='FOO': want RFC3339 / ISO 8601",
         )
-        for name in ("ibounce", "kbounce", "dbounce", "gbounce")
+        for name in (
+            "ibounce", "kbounce", "dbounce", "gbounce", "iam-jit-serve",
+        )
     }
     _wire_results(monkeypatch, per_bouncer=per_bouncer)
 
@@ -428,7 +436,8 @@ def test_denies_recent_human_text_warns_on_query_errors(
     result = runner.invoke(
         main, ["denies", "recent", "--since", "1h", "--limit", "5"],
     )
-    # all-failed -> exit 1
+    # all-failed -> exit 1 (post-#620 fan-out has 5 surfaces; all 5
+    # must fail to take the all-failed path)
     assert result.exit_code == 1, (
         f"all-failed exit code; got {result.exit_code}"
     )
@@ -481,14 +490,20 @@ def test_sabotage_check_validation_gate_is_load_bearing(
     and Test 1 is no longer a meaningful regression guard. That's a
     signal to investigate — not a tolerable state.
     """
-    # Re-wire bouncer to return an HTTP 400 like a real bouncer would
-    # for invalid --since (mirrors the pre-#606 swallowed-error shape).
+    # Re-wire EVERY fan-out surface (the 4 bouncers + iam-jit serve per
+    # #620) to return an HTTP 400 like a real bouncer would for invalid
+    # --since (mirrors the pre-#606 swallowed-error shape). All 5 must
+    # fail so the post-sabotage exit collapses to exit 1 (all-failed),
+    # not exit 2 (partial — which would re-collide with Test 1's
+    # exit-2 invariant and confuse the sabotage signal).
     failing_all = {
         name: _BouncerQueryResult(
             bouncer=name, events=[],
             error="HTTP 400: since='FOO': want RFC3339 / ISO 8601",
         )
-        for name in ("ibounce", "kbounce", "dbounce", "gbounce")
+        for name in (
+            "ibounce", "kbounce", "dbounce", "gbounce", "iam-jit-serve",
+        )
     }
     _wire_results(monkeypatch, per_bouncer=failing_all)
 
