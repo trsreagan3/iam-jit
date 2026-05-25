@@ -426,6 +426,49 @@ _CATEGORY_LABEL = {
 # classifier adds a new label without updating _CATEGORY_ORDER).
 _UNKNOWN_BUCKET_LABEL = "(?) uncategorized"
 
+# Wire-level classifier_label sentinel for the JSON output path
+# (#575). The JSON-side counterpart to _UNKNOWN_BUCKET_LABEL. Mirrors
+# the text-output union-of-categories pattern from GH #10: any
+# classifier value not in _CATEGORY_ORDER collapses to this sentinel
+# so downstream agents see a stable, enumerable label set instead of
+# having to defend against arbitrary future strings.
+_JSON_UNKNOWN_CLASSIFIER_LABEL = "uncategorized"
+
+
+def _row_to_json_dict(row: Any) -> dict[str, Any]:
+    """Serialize a DenyRow for the ``--json`` wire shape.
+
+    Adds a ``classifier_label`` field on top of the dataclass shape so
+    JSON consumers (downstream agents per
+    ``[[bouncer-zero-llm-when-agent-in-loop]]``) see the same signal
+    the human text output groups rows by. Without this, agents have to
+    reverse-engineer classifier intent from ``deny_reason`` strings —
+    brittle + opaque.
+
+    Wire values are the same identifiers the classifier returns and
+    that ``_format_denies_table`` groups by:
+
+      * ``appears_adversarial`` — (!) likely-adversarial bucket
+      * ``ambiguous`` — (?) ambiguous bucket
+      * ``pending_classification`` — (?) ambiguous (pending agent
+        classifier) bucket; the default deterministic-only output
+        when no LLM backend is configured
+      * ``appears_legitimate`` — (*) likely-legit bucket
+      * ``uncategorized`` — JSON-side fallback that mirrors the text
+        renderer's union-of-categories pattern; any future
+        classifier label outside ``_CATEGORY_ORDER`` lands here so
+        the wire shape stays stable
+
+    JSON-parity counterpart to the GH #10 text-side fix per
+    ``[[cross-product-agent-parity]]``.
+    """
+    payload = row.as_dict()
+    label = _classify_row(row)
+    if label not in _CATEGORY_ORDER:
+        label = _JSON_UNKNOWN_CLASSIFIER_LABEL
+    payload["classifier_label"] = label
+    return payload
+
 
 def _format_denies_table(rows: list, notes: list[str]) -> str:
     """Render denies rows as categorized output per
@@ -554,11 +597,14 @@ def _do_denies_recent(
         return 1
 
     if as_json:
+        # Per #575 + [[cross-product-agent-parity]]: every JSON row
+        # carries classifier_label so agent consumers see the same
+        # signal the human text output groups rows by.
         payload = {
             "status": "ok",
             "since": since,
             "count": len(rows),
-            "rows": [r.as_dict() for r in rows],
+            "rows": [_row_to_json_dict(r) for r in rows],
             "notes": notes,
         }
         click.echo(json.dumps(payload, indent=2, default=str))

@@ -6466,6 +6466,7 @@ def _bounce_profile_allow_for_mcp(args: dict[str, Any]) -> dict[str, Any]:
 
 def _bounce_denies_recent_for_mcp(args: dict[str, Any]) -> dict[str, Any]:
     """MCP backend for `bounce_denies_recent`. Mirrors `iam-jit denies recent`."""
+    from .cli_profile_allow import _row_to_json_dict
     from .profile_allow.denies import fetch_recent_denies
 
     since = args.get("since", "5m")
@@ -6497,7 +6498,11 @@ def _bounce_denies_recent_for_mcp(args: dict[str, Any]) -> dict[str, Any]:
             "message": str(e),
         }
 
-    row_dicts = [r.as_dict() for r in rows]
+    # Per #575 + [[cross-product-agent-parity]] +
+    # [[bouncer-zero-llm-when-agent-in-loop]]: every agent-facing JSON
+    # row carries classifier_label so agents see the same signal the
+    # human text output groups rows by.
+    row_dicts = [_row_to_json_dict(r) for r in rows]
     summary_lines = [
         f"{len(row_dicts)} deny row(s) in window since={since!r}"
     ]
