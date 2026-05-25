@@ -30,6 +30,7 @@ from .accounts_store import (
 from .api_tokens_store import APITokenStore, InMemoryAPITokenStore
 from .routes.accounts import router as accounts_router
 from .routes.admin import router as admin_router
+from .routes.audit_events import router as audit_events_router
 from .routes.auth import router as auth_router
 # NOTE: intake_router deleted in Stage 4 of [[no-nl-synthesis]].
 # Conversational LLM intake was part of the synthesis-from-prompt
@@ -596,6 +597,11 @@ def create_app(
     app.include_router(policy_router)
     app.include_router(accounts_router)
     app.include_router(admin_router)
+    # #620 — `/audit/events` on iam-jit serve mirrors the bouncer wire
+    # shape so `iam-jit audit query` can fan-out to serve as one more
+    # surface (closes the doc-lie from #613's OUTSTANDING-REQUEST-CAP
+    # recipe + the parallel UAT-Web-Admin-06 gap).
+    app.include_router(audit_events_router)
     # intake_router removed in Stage 4 of [[no-nl-synthesis]]
     app.include_router(webhooks_stripe_router)
     app.include_router(blacklist_router)

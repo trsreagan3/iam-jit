@@ -39,6 +39,7 @@ import csv as _csv
 import datetime as _dt
 import io
 import json
+import os as _os
 import re as _re
 import sys
 import time as _time
@@ -223,6 +224,34 @@ Bounce-suite product ships a known mgmt port.
 
 Operators with non-default ports pass ``--bouncer
 name=http://host:port`` to override one entry."""
+
+
+# #620 — iam-jit serve is the FIFTH surface in the fan-out.  Per
+# ``[[cross-product-agent-parity]]`` it ships the same /audit/events
+# wire shape so the fan-out + merge layer treats it identically to
+# the four bouncers.  Its audit log (cap-fire events from #613, admin
+# actions per UAT-Web-Admin-06, context-change events, etc.) was
+# unreachable from the cross-product query before this; the literal
+# recipe in docs/recipes/OUTSTANDING-REQUEST-CAP.md
+# (`iam-jit audit query --kind request_cap_exceeded --since 1h`)
+# returned 0 events even after the cap fired.  This entry closes
+# that doc-lie surface.
+IAM_JIT_SERVE_DEFAULT_URL = "http://127.0.0.1:8000"
+"""Default iam-jit serve URL when ``IAM_JIT_URL`` is unset.  Matches
+the default uvicorn port used by ``iam-jit serve``."""
+
+
+def _resolve_serve_endpoint() -> BouncerEndpoint:
+    """Build the iam-jit serve endpoint for the cross-product fan-out.
+
+    The URL comes from ``IAM_JIT_URL`` (the same env var
+    ``cli_remote.py`` and ``mcp_server.py`` already read), falling
+    back to the local-dev default.  Operators who run iam-jit serve
+    on a non-default host/port set ``IAM_JIT_URL`` and the fan-out
+    follows.
+    """
+    url = (_os.environ.get("IAM_JIT_URL") or IAM_JIT_SERVE_DEFAULT_URL).rstrip("/")
+    return BouncerEndpoint(name="iam-jit-serve", mgmt_url=url)
 
 
 # Module-level so tests can monkeypatch — gives a hook to swap out the
@@ -672,11 +701,24 @@ def _parse_bouncer_override(raw: str) -> BouncerEndpoint:
 
 def _resolve_bouncer_set(
     raw: tuple[str, ...] | None,
+    *,
+    include_serve: bool = True,
 ) -> list[BouncerEndpoint]:
     """Resolve the operator's ``--bouncer`` flags into the probe set.
-    Empty input = probe all four DEFAULT_BOUNCERS."""
+    Empty input = probe all four DEFAULT_BOUNCERS PLUS the iam-jit
+    serve endpoint (#620).
+
+    ``include_serve=False`` is the test-only escape hatch — the
+    standard CLI path keeps serve in the probe set unconditionally.
+    Per ``[[ibounce-honest-positioning]]`` if serve isn't running
+    the fan-out surfaces it as an "unreachable" note rather than
+    silently excluding the surface.
+    """
     if not raw:
-        return list(DEFAULT_BOUNCERS.values())
+        out_default: list[BouncerEndpoint] = list(DEFAULT_BOUNCERS.values())
+        if include_serve:
+            out_default.append(_resolve_serve_endpoint())
+        return out_default
     out: list[BouncerEndpoint] = []
     for one in raw:
         # Allow comma-separated within one flag value:
@@ -747,6 +789,17 @@ def register_audit_query_group(parent_group: click.Group) -> click.Group:
              "/audit/events?filter= so the filter runs server-side. "
              "See each product's docs/QUERYING-AUDIT-LOGS.md for the "
              "full supported field catalog.",
+    )
+    @click.option(
+        "--kind", "kind",
+        default=None,
+        metavar="KIND",
+        help="#620 — short-form for the iam-jit serve audit log's "
+             "`kind` field (e.g. `--kind request_cap_exceeded` for the "
+             "#613 cap-fire recipe).  Expands client-side to "
+             "`--filter unmapped.iam_jit.kind=KIND` and is forwarded "
+             "verbatim to every fan-out surface; bouncers ignore it "
+             "(they have no `kind` field) while iam-jit serve uses it.",
     )
     @click.option(
         "--limit",
@@ -848,6 +901,7 @@ def register_audit_query_group(parent_group: click.Group) -> click.Group:
         since: str | None,
         until: str | None,
         filter_exprs: tuple[str, ...],
+        kind: str | None,
         limit: int,
         fmt: str,
         audit_events_token: str | None,
@@ -886,6 +940,17 @@ def register_audit_query_group(parent_group: click.Group) -> click.Group:
         """
         if limit < 1 or limit > 10_000:
             raise click.BadParameter("--limit must be in 1..10000")
+
+        # #620 — `--kind X` is shorthand for
+        # `--filter unmapped.iam_jit.kind=X`.  The expansion has to
+        # happen BEFORE the short-form alias map so bouncers see a
+        # canonical OCSF path (they ignore the `kind` field; iam-jit
+        # serve consumes it).  This closes the docs/recipes/
+        # OUTSTANDING-REQUEST-CAP.md command shape.
+        if kind:
+            filter_exprs = filter_exprs + (
+                f"unmapped.iam_jit.kind={kind}",
+            )
 
         # #320 / §A18: expand short-form filter aliases (e.g.
         # `agent.session_id=X` → `unmapped.iam_jit.agent.session_id=X`)
