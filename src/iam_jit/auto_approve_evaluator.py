@@ -187,7 +187,24 @@ def _evaluate_and_apply_inner(
     # enforcement override can use both verdicts. Each block is wrapped
     # in try/except so a bug in the gate code never blocks a grant —
     # failure mode is "annotation missing", not "request stuck".
-    mfa_audit: dict[str, Any] = {"mfa_gate_evaluated": False}
+    #
+    # FAIL-CLOSED on MFA per [[ibounce-honest-positioning]] + #599: the
+    # initial mfa_audit MUST set `would_require_mfa: True` so that if
+    # `_mfa_gate.evaluate_for_route` raises, the downstream enforcement
+    # in `_apply_mfa_and_self_approve` treats the request as if it
+    # required MFA — which routes high-risk requests to the human-
+    # approval path rather than silently auto-approving them. The pre-
+    # #599 default of `{"mfa_gate_evaluated": False}` left
+    # `would_require_mfa` absent, which `bool(...get(...))` coerced to
+    # False, which silently bypassed MFA enforcement on gate crash. The
+    # success path below OVERWRITES mfa_audit with the real gate result,
+    # so the fail-CLOSED default only applies when evaluation crashes.
+    mfa_audit: dict[str, Any] = {
+        "mfa_gate_evaluated": False,
+        "would_require_mfa": True,
+        "mfa_present": False,
+        "mfa_reason": "evaluator_init_default_fail_closed",
+    }
     try:
         mfa_audit = _mfa_gate.evaluate_for_route(
             cookie_value=cookie_value,
@@ -197,7 +214,18 @@ def _evaluate_and_apply_inner(
             api_token_record=api_token_record,
         )
     except Exception:
-        pass
+        # #599 fail-CLOSED: log the exception so SecOps can chase the
+        # gate failure out-of-band. mfa_audit retains the fail-CLOSED
+        # default initialised above, which forces high-risk requests
+        # through human approval. Silent pass would mean a gate crash
+        # auto-approves without MFA verification.
+        logger.exception(
+            "auto_approve_evaluator: mfa_gate.evaluate_for_route raised; "
+            "retaining fail-CLOSED defaults (would_require_mfa=True, "
+            "mfa_present=False) so high-risk requests route to human "
+            "approval (request_id=%s, user_id=%s)",
+            request_id, user.id,
+        )
 
     self_approve_audit: dict[str, Any] = {"self_approve_evaluated": False}
     try:
@@ -213,7 +241,16 @@ def _evaluate_and_apply_inner(
             "self_approve_reason": sar_decision.reason,
         }
     except Exception:
-        pass
+        # #599: log so SecOps can see self-approve gate failures.
+        # self_approve_audit retains `{"self_approve_evaluated": False}`
+        # which makes the override fall through (i.e., the request goes
+        # through normal score-gate evaluation, not via self-approve).
+        logger.exception(
+            "auto_approve_evaluator: self_approve_reductions.evaluate "
+            "raised; self-approve override will not fire for this "
+            "request (request_id=%s, user_id=%s)",
+            request_id, user.id,
+        )
 
     auto_decision = auto_approve_mod.evaluate(
         request=request,
@@ -274,7 +311,16 @@ def _evaluate_and_apply_inner(
             },
         )
     except Exception:
-        pass
+        # #599: audit-emit failure must NOT block the decision flow
+        # (the request's auto-approve verdict is already computed), but
+        # it MUST be visible — a silent audit-emit failure means the
+        # operator's audit trail is missing entries.
+        logger.exception(
+            "auto_approve_evaluator: audit.emit for the auto-approve "
+            "verdict raised; audit trail may be missing this entry "
+            "(request_id=%s, user_id=%s, auto_approve=%s)",
+            request_id, user.id, auto_decision.auto_approve,
+        )
 
     # Shadow mode: when IAM_JIT_SHADOW_MODE=1 the scorer runs and the
     # decision is recorded in the audit trail, but the request state
@@ -307,7 +353,17 @@ def _evaluate_and_apply_inner(
                 },
             )
         except Exception:
-            pass
+            # #599: shadow-mode audit-emit failure is the same shape as
+            # the production audit-emit failure above — the request
+            # stays in pending regardless (shadow mode never mutates),
+            # but the operator needs visibility into the failure so the
+            # shadow-mode evaluation can be re-run.
+            logger.exception(
+                "auto_approve_evaluator: shadow-mode audit.emit raised; "
+                "shadow trail may be missing this entry (request_id=%s, "
+                "user_id=%s, would_auto_approve=%s)",
+                request_id, user.id, auto_decision.auto_approve,
+            )
         # IMPORTANT: do NOT mutate state. The request stays at `pending`.
         return {
             "auto_decision": auto_decision,
@@ -512,4 +568,14 @@ def _safe_mark_failed(
             req.setdefault("status", {})["provisioning_error"] = error
             req["status"]["state"] = "provisioning_failed"
         except Exception:
-            pass
+            # #599: last-resort fallback after both transition + manual
+            # dict mutation failed. Cannot raise (caller contract is
+            # "NEVER raises"), but the silent pass that used to live
+            # here meant a totally broken request dict left zero
+            # operator trace. Log loudly even though we can't recover.
+            logger_p.exception(
+                "auto_approve_evaluator: last-resort manual status "
+                "mutation in _safe_mark_failed also raised; the request "
+                "dict is in an indeterminate state (error_message=%r)",
+                error,
+            )

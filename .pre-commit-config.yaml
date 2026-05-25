@@ -1,0 +1,27 @@
+# #600: structural prevention for personal-path leaks in non-test
+# source per [[push-policy-public-repo]]. The script doubles as a
+# CI lint (runnable standalone over staged file lists).
+#
+# Install locally with:
+#   pip install pre-commit && pre-commit install
+#
+# Run ad-hoc with:
+#   pre-commit run --all-files
+repos:
+  - repo: local
+    hooks:
+      - id: no-personal-paths
+        name: Ban /Users/ and /home/ in non-test source
+        entry: scripts/check_no_personal_paths.sh
+        language: script
+        types_or: [python, go, shell, yaml, markdown]
+        # The script also excludes these, but listing them here makes
+        # the rule visible to humans reading the config.
+        exclude: |
+          (?x)^(
+            tests/.*
+            |.*/test_.*
+            |.*/fixtures/.*
+            |fixtures/.*
+            |docs/security/AUDIT-.*
+          )$

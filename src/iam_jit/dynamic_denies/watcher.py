@@ -3,7 +3,7 @@
 ``~/.iam-jit/dynamic-denies.yaml``.
 
 Architecture mirrors the gbounce reference at
-``/Users/reagan/repos/gbounce/internal/dynamicdeny/watcher.go``:
+``gbounce: internal/dynamicdeny/watcher.go``:
 
   * Watch the PARENT DIRECTORY (not the file inode) so atomic-rename
     writes (write-tmp + rename) survive — fsnotify on a file inode
