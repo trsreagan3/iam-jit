@@ -328,6 +328,15 @@ class SetupResult:
     #                          persists. result.warnings will include
     #                          code="partial_install_no_rollback" naming
     #                          the failure count + cleanup path.
+    #   failed               — #616: every declared+enabled bouncer
+    #                          recorded a start_failure AND none ended
+    #                          up running. Pre-#616 this corner returned
+    #                          "ok" with bouncers_started=[] (silent-
+    #                          degradation cluster, 14th recurrence).
+    #                          Per [[ibounce-honest-positioning]] +
+    #                          [[scorer-is-ground-truth]] fail-CLOSED.
+    #                          result.warnings will include code=
+    #                          "all_bouncers_failed_to_start".
     status: str = "ok"
     dry_run: bool = True
     declaration_source: str = ""
@@ -799,18 +808,78 @@ def _start_bouncer(
             close_fds=True,
             env=child_env,
         )
-        record["started"] = True
         record["pid"] = proc.pid
         # Give the process a moment to bind its port. We do NOT block
         # on a healthz probe here — the caller's posture-recapture
         # below is the truthful check.
         time.sleep(0.20)
+        # #616 — post-Popen liveness verification. Popen succeeding only
+        # proves the kernel allocated a PID + ran exec; the child can die
+        # in milliseconds (port collision, missing config file, invalid
+        # CLI arg). Pre-#616 we set started=True purely on Popen success,
+        # which made `apply-config` return status=ok even when the
+        # bouncer crashed immediately — 14th silent-degradation
+        # recurrence (prev: #560 #594 #596 #598 #592 #606 #607 #610
+        # #618 #619). Per [[ibounce-honest-positioning]] +
+        # [[scorer-is-ground-truth]] we now state-verify: if the PID
+        # already exited inside the start-grace window, record the
+        # failure HONESTLY so the existing #538/#592 partial-install
+        # path can flip top-level status to partial_install /
+        # rolled_back instead of silently "ok".
+        if not _is_pid_alive_for_start(proc):
+            exit_code = proc.returncode if hasattr(proc, "returncode") else None
+            record["started"] = False
+            record["skipped"] = True
+            record["reason"] = (
+                f"bouncer process exited immediately after start "
+                f"(pid={proc.pid}, exit_code={exit_code}). "
+                f"Common causes: port already in use, missing config "
+                f"file, invalid CLI arg, missing binary dependency. "
+                f"Run the command directly to see the bouncer's own "
+                f"startup error: {' '.join(cmd)!r}"
+            )
+            logger.warning(
+                "_start_bouncer: %s (pid=%s) exited immediately after "
+                "Popen (#616 — silent-degradation guard); marking "
+                "start_failure so apply-config returns honest status",
+                name, proc.pid,
+            )
+        else:
+            record["started"] = True
     except (OSError, FileNotFoundError) as e:
         record["started"] = False
         record["skipped"] = True
         record["reason"] = f"subprocess.Popen failed: {e}"
 
     return record
+
+
+def _is_pid_alive_for_start(proc: subprocess.Popen[bytes]) -> bool:
+    """#616 — verify a Popen'd child is still alive after the start
+    grace window.
+
+    Honest, fail-CLOSED semantics:
+      * If ``poll()`` returns a non-None value, the child has exited;
+        return False.
+      * If ``poll()`` returns None, the child is still running; return
+        True.
+      * Any exception from poll() (defensive: zombie reap races, etc.)
+        is treated as "could not confirm alive" → return False per
+        [[scorer-is-ground-truth]] (fail-CLOSED on uncertainty).
+
+    We use proc.poll() rather than os.kill(pid, 0) because Popen owns
+    the child + poll() reaps zombies; os.kill on a zombie returns True
+    which would falsely report "alive".
+    """
+    try:
+        return proc.poll() is None
+    except (OSError, ValueError, AttributeError) as e:
+        logger.warning(
+            "_is_pid_alive_for_start: proc.poll() raised %s; treating "
+            "as DEAD per [[scorer-is-ground-truth]] fail-CLOSED",
+            e,
+        )
+        return False
 
 
 def _env_var_for(
@@ -1421,6 +1490,45 @@ def apply_declaration(
                 f"running. To clean up, run `iam-jit uninstall` or "
                 f"re-apply the declaration with rollback_on_failure=True."
             )
+
+    # #616 — all-bouncers-failed honest-status path. The pre-#616
+    # partial-install branches above (#538 / #592) only fire when at
+    # least one bouncer STARTED AND at least one FAILED. The third
+    # corner case — every declared+enabled bouncer failed to start —
+    # silently returned status="ok" with bouncers_started=[]; agents
+    # reading only top-level status believed setup succeeded.
+    #
+    # Per [[ibounce-honest-positioning]] + [[scorer-is-ground-truth]]
+    # fail-CLOSED on uncertainty: if we attempted to start any bouncer
+    # and EVERY attempt resulted in a start_failure, status MUST be
+    # "failed" not "ok". This is structurally the same silent-
+    # degradation bug as #560 / #592 / #594 / #596 / #598 — just the
+    # all-failures corner that prior fixes left uncovered.
+    #
+    # Fires only when we ran apply (execute=True), at least one
+    # start_failure was recorded, AND no bouncers ended up in
+    # bouncers_started (whether they were never started or were rolled
+    # back to empty). The rolled_back / rollback_incomplete / partial_
+    # install branches above set their own status BEFORE this check, so
+    # we only flip to "failed" if status is still the default "ok".
+    if (
+        execute
+        and result.status == "ok"
+        and start_failures
+        and not result.bouncers_started
+        and not result.bouncers_already_running
+    ):
+        result.status = "failed"
+        failed_names = ", ".join(s["name"] for s in start_failures)
+        failed_count = len(start_failures)
+        result.warnings.append(
+            f"all_bouncers_failed_to_start: {failed_count} declared "
+            f"bouncer(s) failed to start ({failed_names}); no bouncers "
+            f"are running. Inspect the per-bouncer `reason` field in "
+            f"bouncers_skipped for the underlying error + re-run after "
+            f"resolving (e.g. free the port, fix the config, install "
+            f"the missing binary)."
+        )
 
     return result
 

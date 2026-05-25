@@ -182,15 +182,50 @@ def register_apply_config_command(doctor_group: click.Group) -> click.Command:
 
         if as_json:
             click.echo(_json.dumps(result.as_dict(), indent=2, default=str))
-            # Exit 1 if any warnings + dry-run for CI gating?
-            # No — default exit 0; operators wanting strictness can
-            # parse the JSON.
-            return
+        else:
+            _render_human(result, dry_run=dry_run)
 
-        # Human renderer.
-        _render_human(result, dry_run=dry_run)
+        # #616 — honest exit-code contract. Dry-run is always exit 0
+        # (planner doesn't actually apply). When we did execute, the
+        # exit code must reflect the SetupResult.status enum so callers
+        # (CI gating, agent harnesses) can branch on success without
+        # parsing JSON. Mirrors #606's tri-state convention:
+        #   0 = ok / disabled (declared no-op is a success)
+        #   1 = failed (every declared bouncer failed to start)
+        #   2 = partial (rolled_back / rollback_incomplete / partial_install)
+        # Per [[ibounce-honest-positioning]] + [[scorer-is-ground-truth]].
+        if dry_run:
+            return
+        exit_code = _exit_code_for_status(result.status)
+        if exit_code != 0:
+            sys.exit(exit_code)
 
     return apply_config_cmd
+
+
+# Status → exit-code map per #616 honest-exit contract. Exposed at module
+# scope so MCP backend + tests can reuse without duplicating the table.
+_STATUS_EXIT_CODE: dict[str, int] = {
+    "ok": 0,
+    "disabled": 0,
+    "failed": 1,
+    "rolled_back": 2,
+    "rollback_incomplete": 2,
+    "partial_install": 2,
+    "error": 2,
+}
+
+
+def _exit_code_for_status(status: str | None) -> int:
+    """Translate a SetupResult.status to a CLI exit code per #616.
+
+    Unknown statuses map to 2 (fail-CLOSED per [[scorer-is-ground-truth]])
+    rather than 0 — a status the CLI doesn't recognize MUST NOT silently
+    pass as success.
+    """
+    if not isinstance(status, str):
+        return 2
+    return _STATUS_EXIT_CODE.get(status, 2)
 
 
 def _render_human(result: Any, *, dry_run: bool) -> None:
