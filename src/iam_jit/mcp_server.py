@@ -6245,18 +6245,49 @@ def _bounce_deny_add_for_mcp(args: dict[str, Any]) -> dict[str, Any]:
     fanout_summary = []
     for r in result.get("fanout", []):
         if r.get("reloaded"):
-            fanout_summary.append(
+            base = (
                 f"{r['bouncer']} reloaded ({r.get('rules_applied_to_self')} "
                 f"applied / {r.get('rules_count')} total)"
             )
+            # #618 — surface path mismatch in the per-bouncer summary
+            # so an MCP agent reading the fanout_summary list catches
+            # the divergence without having to walk the structured
+            # fanout array.
+            if r.get("path_mismatch_severity") == "hard":
+                base += (
+                    f"; PATH MISMATCH: bouncer reads "
+                    f"{r.get('source_path')!r}, NOT "
+                    f"{result.get('written_to')!r} -- rule will NOT apply"
+                )
+            elif r.get("path_mismatch"):
+                base += (
+                    "; path unverified (bouncer did not report source_path)"
+                )
+            fanout_summary.append(base)
         else:
             fanout_summary.append(
                 f"{r['bouncer']} unreachable ({r.get('error')}); rule is in "
                 f"YAML — watcher will pick it up"
             )
 
+    # #618 — flip status to "degraded" when any bouncer is reading a
+    # different file. Per [[agents-default-to-iam-jit]] agent-facing
+    # silent failures are the highest-priority leak class — the
+    # status string is what most agents branch on, so the divergence
+    # MUST appear there (not buried in fanout details). Soft mismatch
+    # (unknown source_path) stays "ok" because we can't actually
+    # verify divergence — but the path_mismatch fields are still
+    # populated so agents can inspect.
+    any_hard_path_mismatch = bool(result.get("any_hard_path_mismatch"))
+    status = "degraded" if any_hard_path_mismatch else "ok"
+    if any_hard_path_mismatch:
+        summary += (
+            " WARNING: rule WILL NOT apply at one or more bouncers "
+            "reading a different file (see fanout[].path_mismatch)."
+        )
+
     return {
-        "status": "ok",
+        "status": status,
         "id": rule["id"],
         "rule": rule,
         "applied_to": result.get("applied_to", []),
@@ -6266,6 +6297,11 @@ def _bounce_deny_add_for_mcp(args: dict[str, Any]) -> dict[str, Any]:
         "summary": summary,
         "fanout_summary": fanout_summary,
         "written_to": result.get("written_to"),
+        # #618 — top-level aggregates so the MCP layer is wire-parity
+        # with the CLI's `--json` shape.
+        "any_path_mismatch": bool(result.get("any_path_mismatch")),
+        "any_hard_path_mismatch": any_hard_path_mismatch,
+        "path_mismatches": result.get("path_mismatches", []),
     }
 
 

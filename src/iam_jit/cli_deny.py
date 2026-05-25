@@ -179,7 +179,15 @@ def _parse_bouncer_url_overrides(
 
 
 def _format_fanout(results: list[dict[str, Any]]) -> list[str]:
-    """Pretty-print fan-out outcomes for the human banner."""
+    """Pretty-print fan-out outcomes for the human banner.
+
+    Per #618: when a bouncer reports a ``source_path`` that diverges
+    from the CLI's write path, emit a loud ``[FAIL] path mismatch``
+    line in addition to the existing ``[OK] reloaded`` line. The OK
+    line still appears because the reload itself succeeded — the bug
+    is that the reload re-read a DIFFERENT file from the one the CLI
+    wrote to, so the rule is not in effect at this bouncer.
+    """
     lines: list[str] = []
     if not results:
         lines.append("  fanout:      (skipped)")
@@ -199,6 +207,27 @@ def _format_fanout(results: list[dict[str, Any]]) -> list[str]:
             lines.append(
                 f"    [OK]  {bouncer:<8} {url}  {applied_str}".rstrip()
             )
+            # #618 — path-divergence diagnostic. Even when reload
+            # succeeded, the bouncer may be reading a different file
+            # than the one we wrote to. Severity decides the prefix:
+            #   hard -> [FAIL] (drives non-zero exit)
+            #   soft -> [WARN] (older bouncer; can't verify; exit 0)
+            severity = r.get("path_mismatch_severity")
+            if r.get("path_mismatch"):
+                bouncer_path = r.get("source_path") or "(unknown)"
+                if severity == "hard":
+                    lines.append(
+                        f"    [FAIL] {bouncer:<8} path mismatch: "
+                        f"bouncer reads {bouncer_path}"
+                    )
+                else:
+                    lines.append(
+                        f"    [WARN] {bouncer:<8} path unverified: "
+                        f"bouncer reads {bouncer_path}"
+                    )
+                reason = r.get("path_mismatch_reason") or ""
+                if reason:
+                    lines.append(f"           {reason}")
         else:
             err = r.get("error") or "reload failed"
             status = r.get("status_code")
@@ -273,9 +302,21 @@ def _do_add(
         },
     )
 
+    # #618 — HARD path-divergence is a non-zero-exit failure even
+    # when the YAML write + reload both reported success individually.
+    # The rule landed on disk + the bouncer cheerfully reloaded, but
+    # the bouncer is reading a different file than the one we wrote
+    # to, so the deny will not actually apply.
+    #
+    # SOFT divergence (bouncer didn't report source_path; older build
+    # or test stub) is a WARN — preserves backward-compat with pre-
+    # #618 bouncer builds + the dozens of existing CLI tests that
+    # stub the fan-out.
+    any_hard_path_mismatch = bool(result.get("any_hard_path_mismatch"))
+
     if as_json:
         click.echo(json.dumps(_add_json_shape(result), indent=2))
-        return 0
+        return 2 if any_hard_path_mismatch else 0
 
     rule = result["rule"]
     click.echo(f"OK  added {rule['id']}")
@@ -304,12 +345,39 @@ def _do_add(
     click.echo("")
     for line in _format_fanout(result.get("fanout", [])):
         click.echo(line)
+    # #618 — when any bouncer is reading a DIFFERENT file from the one
+    # we wrote to (severity=hard), emit a loud trailing summary line
+    # to stderr (in addition to the per-bouncer [FAIL] lines in the
+    # fanout block) AND exit non-zero so wrappers can react. The text
+    # shape mirrors the JSON shape's `any_hard_path_mismatch` field.
+    if any_hard_path_mismatch:
+        mismatched = [
+            m for m in (result.get("path_mismatches") or [])
+            if m.get("path_mismatch_severity") == "hard"
+        ]
+        names = [m.get("bouncer", "?") for m in mismatched]
+        click.echo(
+            f"ERROR  rule {rule['id']} did NOT apply at "
+            f"{len(mismatched)} bouncer(s) reading a different file: "
+            f"{', '.join(names)}. The rule IS in "
+            f"{result.get('written_to')!r}; either point the bouncer(s) "
+            f"at that file (restart with --dynamic-denies-path) or "
+            f"re-run `iam-jit deny add --path <bouncer's path>`.",
+            err=True,
+        )
+        return 2
     return 0
 
 
 def _add_json_shape(result: dict[str, Any]) -> dict[str, Any]:
     """Stable JSON wire shape for `iam-jit deny add --json`. Mirrors
     the design doc's sample.
+
+    Per #618: ``any_path_mismatch`` + ``path_mismatches`` surface the
+    write/read path divergence that pre-#618 was silently dropped on
+    the floor. Each entry in ``fanout`` also gets a ``source_path`` +
+    ``path_mismatch`` + ``path_mismatch_reason`` field so JSON
+    consumers can react per-bouncer.
     """
     rule = result["rule"]
     return {
@@ -327,6 +395,11 @@ def _add_json_shape(result: dict[str, Any]) -> dict[str, Any]:
         "per_target_rationale": result.get("per_target_rationale", []),
         "fanout": result.get("fanout", []),
         "written_to": result.get("written_to"),
+        "any_path_mismatch": bool(result.get("any_path_mismatch")),
+        "any_hard_path_mismatch": bool(
+            result.get("any_hard_path_mismatch"),
+        ),
+        "path_mismatches": result.get("path_mismatches", []),
     }
 
 
@@ -488,10 +561,18 @@ def _do_remove(
             },
         )
 
+    # #618 — parity with deny add: HARD path divergence is a non-zero
+    # exit even when the YAML write + reload reported success. The
+    # remove landed on disk + the bouncer reloaded, but if the
+    # bouncer is reading a different file then the rule the operator
+    # just "removed" is still LIVE at the bouncer's matcher. SOFT
+    # mismatch (no source_path reported) preserves exit 0.
+    any_hard_path_mismatch = bool(result.get("any_hard_path_mismatch"))
+
     if as_json:
         click.echo(json.dumps(result, indent=2, default=str))
         # Non-empty `not_found` is a soft warning, not an exit-error.
-        return 0
+        return 2 if any_hard_path_mismatch else 0
 
     removed = result.get("removed_count", 0)
     if removed == 0:
@@ -529,6 +610,23 @@ def _do_remove(
     click.echo("")
     for line in _format_fanout(result.get("fanout", [])):
         click.echo(line)
+    # #618 — same loud trailing stderr line + non-zero exit as deny add.
+    if any_hard_path_mismatch:
+        mismatched = [
+            m for m in (result.get("path_mismatches") or [])
+            if m.get("path_mismatch_severity") == "hard"
+        ]
+        names = [m.get("bouncer", "?") for m in mismatched]
+        click.echo(
+            f"ERROR  removal did NOT apply at {len(mismatched)} "
+            f"bouncer(s) reading a different file: "
+            f"{', '.join(names)}. The remove DID land in "
+            f"{result.get('written_to')!r}; either point the bouncer(s) "
+            f"at that file (restart with --dynamic-denies-path) or "
+            f"re-run `iam-jit deny remove --path <bouncer's path>`.",
+            err=True,
+        )
+        return 2
     return 0
 
 

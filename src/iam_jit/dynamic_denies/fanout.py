@@ -89,6 +89,26 @@ class ReloadResult:
     string when the bouncer returned 200 but the body wasn't the
     expected shape."""
 
+    source_path: str | None = None
+    """The path the bouncer reports it actually reloaded from (#618).
+
+    Distinct from the CLI's write path: a bouncer may have been started
+    with ``--dynamic-denies-path /elsewhere`` or under a different
+    ``IAM_JIT_DYNAMIC_DENIES_PATH`` env, in which case the CLI's write
+    AND the bouncer's reload both succeed individually — but the rule
+    never actually applies because the bouncer is reading a different
+    file from the one the CLI wrote to.
+
+    Pre-#618 the wire field was silently dropped; the operator saw
+    "OK reloaded" and an `iam-jit deny list` showed the rule, but the
+    bouncer's matcher never saw it. Now the CLI compares this against
+    its own ``written_to`` path and surfaces a ``path_mismatch`` deny
+    when they differ (exit non-zero).
+
+    ``None`` when the bouncer's reload response didn't include
+    ``source_path`` (older bouncer build) — the CLI surfaces "unknown"
+    rather than asserting parity it can't verify."""
+
 
 def fanout_reload(
     affected_bouncers: typing.Iterable[str],
@@ -250,6 +270,17 @@ def _parse_reload_response(
     if not reloaded:
         error = str(payload.get("error") or "reload returned reloaded=false")
 
+    # #618 — capture the bouncer's reported source_path so the caller
+    # can detect write/read path divergence. Missing field surfaces as
+    # ``None``; we never invent a default (would mask the legitimate
+    # "older bouncer build" case from a real mismatch).
+    raw_source_path = payload.get("source_path")
+    source_path: str | None
+    if isinstance(raw_source_path, str) and raw_source_path.strip():
+        source_path = raw_source_path
+    else:
+        source_path = None
+
     return ReloadResult(
         bouncer=bouncer,
         url=url,
@@ -258,6 +289,7 @@ def _parse_reload_response(
         rules_count=rules_count,
         rules_applied_to_self=rules_applied_to_self,
         error=error,
+        source_path=source_path,
     )
 
 

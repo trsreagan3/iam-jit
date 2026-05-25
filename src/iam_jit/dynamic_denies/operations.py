@@ -15,6 +15,7 @@ human-readable banner (CLI default / MCP ``content[].text``).
 from __future__ import annotations
 
 import datetime as _dt
+import os
 import re
 import typing
 
@@ -155,6 +156,10 @@ def add_rule(
             overrides=bouncer_url_overrides,
         )
 
+    fanout_dicts = [
+        _serialise_reload(r, written_to=written_path)
+        for r in fanout_results
+    ]
     return {
         "id": rule["id"],
         "rule": rule,
@@ -168,8 +173,29 @@ def add_rule(
             }
             for c in resolution.classifications
         ],
-        "fanout": [_serialise_reload(r) for r in fanout_results],
+        "fanout": fanout_dicts,
         "written_to": written_path,
+        # #618 — top-level aggregates so the CLI/MCP layer can branch
+        # without re-walking the per-bouncer fanout list.
+        # ``path_mismatches`` lists the bouncer dicts whose
+        # ``path_mismatch`` is True (any severity).
+        # ``any_path_mismatch`` is True iff any bouncer flagged
+        # (soft OR hard) — drives the WARN banner.
+        # ``any_hard_path_mismatch`` is True iff any bouncer flagged
+        # with severity ``hard`` — drives the non-zero exit code.
+        # Soft (unknown source_path) is intentionally NOT an exit-
+        # failure so backward-compat with pre-#618 bouncer builds +
+        # existing test stubs is preserved.
+        "path_mismatches": [
+            f for f in fanout_dicts if f.get("path_mismatch")
+        ],
+        "any_path_mismatch": any(
+            f.get("path_mismatch") for f in fanout_dicts
+        ),
+        "any_hard_path_mismatch": any(
+            f.get("path_mismatch_severity") == _PATH_DIVERGENCE_HARD
+            for f in fanout_dicts
+        ),
     }
 
 
@@ -184,8 +210,20 @@ def _routing_explanation(resolution: ResolutionResult) -> str:
     return "; ".join(lines)
 
 
-def _serialise_reload(r: ReloadResult) -> dict[str, typing.Any]:
-    return {
+def _serialise_reload(
+    r: ReloadResult,
+    *,
+    written_to: str | None = None,
+) -> dict[str, typing.Any]:
+    """Project a :class:`ReloadResult` into the wire-stable dict shape.
+
+    When ``written_to`` is supplied, also computes the #618 path-
+    divergence fields (``source_path``, ``path_mismatch``,
+    ``path_mismatch_reason``). The CLI / MCP layer uses these to
+    surface a warning + exit non-zero when the bouncer is reading a
+    file other than the one the CLI just wrote to.
+    """
+    out: dict[str, typing.Any] = {
         "bouncer": r.bouncer,
         "url": r.url,
         "reloaded": r.reloaded,
@@ -193,7 +231,99 @@ def _serialise_reload(r: ReloadResult) -> dict[str, typing.Any]:
         "rules_count": r.rules_count,
         "rules_applied_to_self": r.rules_applied_to_self,
         "error": r.error,
+        "source_path": r.source_path,
     }
+    if written_to is not None:
+        mismatch, reason, severity = _classify_path_divergence(
+            written_to=written_to,
+            bouncer_source_path=r.source_path,
+            reloaded=r.reloaded,
+        )
+        out["path_mismatch"] = mismatch
+        out["path_mismatch_reason"] = reason
+        out["path_mismatch_severity"] = severity
+    return out
+
+
+def _normalise_path_for_compare(p: str) -> str:
+    """Normalise a filesystem path for the path-divergence check.
+
+    Resolves ``..`` segments + symlinks + relative -> absolute so a
+    bouncer that reports ``/home/op/.iam-jit/dynamic-denies.yaml``
+    compares equal to a CLI that wrote ``~/.iam-jit/dynamic-denies.yaml``
+    (and the same on a Mac where ``/Users/op`` may be a symlink target
+    of ``/private/var/...``).
+
+    realpath is best-effort: if it raises (broken symlink, perms) we
+    fall back to the abspath so the comparison still happens — better
+    a false-positive mismatch (operator can verify) than a false-
+    negative silent-pass.
+    """
+    if not p:
+        return ""
+    try:
+        return os.path.realpath(os.path.expanduser(p))
+    except OSError:
+        return os.path.abspath(os.path.expanduser(p))
+
+
+# #618 — classification severities. HARD = "the rule definitively will
+# not apply at this bouncer" (CLI exits non-zero). SOFT = "we can't
+# verify either way" (warn-and-continue; preserves backward-compat
+# with bouncer builds that pre-date the source_path field).
+_PATH_DIVERGENCE_NONE = "none"
+_PATH_DIVERGENCE_SOFT = "soft"
+_PATH_DIVERGENCE_HARD = "hard"
+
+
+def _classify_path_divergence(
+    *,
+    written_to: str,
+    bouncer_source_path: str | None,
+    reloaded: bool,
+) -> tuple[bool, str | None, str]:
+    """Return ``(is_mismatch, human_reason_or_none, severity)``.
+
+    Severity is one of:
+
+      * ``"none"`` — no mismatch (or no data to compare). Exit 0.
+      * ``"soft"`` — bouncer didn't report ``source_path`` (older
+        build / stub). Warn but exit 0. Backward-compat.
+      * ``"hard"`` — bouncer's ``source_path`` differs from the CLI's
+        ``written_to`` after normalisation. The rule did not land at
+        the bouncer's read path. Exit non-zero. This is the #618 bug
+        shape.
+
+    The split keeps the new check from breaking every existing test
+    + integration that mocks the fan-out without a source_path field,
+    while still hard-failing the genuine "wrote to /tmp/a, bouncer
+    reads /tmp/b" case the UAT-Cross G5 caught.
+    """
+    if not reloaded:
+        # The reload itself failed; the existing `error` field already
+        # surfaces this. Don't double-count as a path mismatch.
+        return False, None, _PATH_DIVERGENCE_NONE
+    if not bouncer_source_path:
+        return True, (
+            "bouncer did not report source_path; cannot verify the "
+            "rule will apply (likely an older bouncer build; restart "
+            "with a current iam-jit serve to re-check)"
+        ), _PATH_DIVERGENCE_SOFT
+    if not written_to:
+        # We don't know our own write path — degenerate; don't flag.
+        return False, None, _PATH_DIVERGENCE_NONE
+    a = _normalise_path_for_compare(written_to)
+    b = _normalise_path_for_compare(bouncer_source_path)
+    if a == b:
+        return False, None, _PATH_DIVERGENCE_NONE
+    return True, (
+        f"bouncer is reading {bouncer_source_path!r} but the CLI wrote "
+        f"to {written_to!r}; the rule WILL NOT apply at this bouncer "
+        f"until either (a) the bouncer is restarted pointing at the "
+        f"CLI's path, or (b) the CLI is re-run with "
+        f"--path={bouncer_source_path} (or the matching "
+        f"IAM_JIT_DYNAMIC_DENIES_PATH env)"
+    ), _PATH_DIVERGENCE_HARD
 
 
 # ---------------------------------------------------------------------------
@@ -405,15 +535,34 @@ def remove_rules(
             overrides=bouncer_url_overrides,
         )
 
+    fanout_dicts = [
+        _serialise_reload(r, written_to=written_path)
+        for r in fanout_results
+    ]
     return {
         "removed_count": len(removed_rules),
         "removed_ids": [r["id"] for r in removed_rules],
         "removed_rules": removed_rules,
         "not_found": not_found,
         "refused_org_distributed": refused_org_distributed,
-        "fanout": [_serialise_reload(r) for r in fanout_results],
+        "fanout": fanout_dicts,
         "written_to": written_path,
         "actor_reason": actor_reason,
+        # #618 — parity with add_rule: surface path divergence so a
+        # `deny remove` against a different file than the bouncer is
+        # reading from doesn't silently report success while the rule
+        # stays live at the bouncer's read path. See add_rule()'s
+        # aggregate doc for the soft-vs-hard severity split.
+        "path_mismatches": [
+            f for f in fanout_dicts if f.get("path_mismatch")
+        ],
+        "any_path_mismatch": any(
+            f.get("path_mismatch") for f in fanout_dicts
+        ),
+        "any_hard_path_mismatch": any(
+            f.get("path_mismatch_severity") == _PATH_DIVERGENCE_HARD
+            for f in fanout_dicts
+        ),
     }
 
 
