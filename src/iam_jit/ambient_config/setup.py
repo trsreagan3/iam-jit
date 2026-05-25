@@ -303,7 +303,32 @@ class SetupResult:
     """Structured return of ``apply_declaration`` / ``plan_declaration``."""
 
     schema_version: str = "1.0"
-    status: str = "ok"  # ok | disabled | error
+    # status enum:
+    #   ok                   — happy path; all declared+enabled bouncers
+    #                          either started or were already running.
+    #   disabled             — declaration's iam-jit.enabled is false.
+    #   error                — top-level apply failure (reserved; not
+    #                          emitted by current paths — surfaced by
+    #                          MCP/CLI wrappers on exception).
+    #   rolled_back          — partial-install detected AND
+    #                          rollback_on_failure=True; rollback ran
+    #                          + verified clean (rollback_outcome.status
+    #                          == "ok").
+    #   rollback_incomplete  — partial-install detected AND
+    #                          rollback_on_failure=True; rollback ran
+    #                          but verification surfaced drift / kill
+    #                          failures (rollback_outcome.status !=
+    #                          "ok"); operator triage required.
+    #   partial_install      — #592: partial-install detected AND
+    #                          rollback_on_failure=False; started
+    #                          bouncers remain live, failed bouncers
+    #                          do not. Per [[ibounce-honest-positioning]]
+    #                          the top-level status MUST reflect this —
+    #                          NEVER returns "ok" when partial state
+    #                          persists. result.warnings will include
+    #                          code="partial_install_no_rollback" naming
+    #                          the failure count + cleanup path.
+    status: str = "ok"
     dry_run: bool = True
     declaration_source: str = ""
     bouncers_started: list[str] = field(default_factory=list)
@@ -886,11 +911,23 @@ def apply_declaration(
       rollback_on_failure: when True (#538 default), a partial-install
                (any bouncer fails to start mid-apply) triggers
                transactional rollback — SIGTERM the bouncers that DID
-               start + restore the pre-apply config-file snapshot. The
-               result's ``rollback_outcome`` field describes what the
-               rollback observed. Pass False to keep pre-#538 semantics
-               (leave partial state for operator inspection). Only
-               meaningful with ``execute=True``.
+               start + restore the pre-apply config-file snapshot.
+               ``result.status`` will be ``"rolled_back"`` (or
+               ``"rollback_incomplete"`` if verification surfaced
+               drift). The result's ``rollback_outcome`` field
+               describes what the rollback observed.
+
+               When False, started bouncers remain running; failed
+               bouncers do not. ``result.status`` will be
+               ``"partial_install"`` (NOT ``"ok"``) + ``result.warnings``
+               will include code ``"partial_install_no_rollback"``
+               naming the failure count + the cleanup path (#592).
+
+               Per [[ibounce-honest-positioning]]: top-level status
+               honestly reflects state. Agents reading only
+               ``result.status`` will not mistakenly believe setup
+               succeeded when it partially failed. Only meaningful with
+               ``execute=True``.
 
     Returns SetupResult (dict-serializable via .as_dict()).
     """
@@ -1247,16 +1284,29 @@ def apply_declaration(
             "the deny-obviousness surface should stay on by default."
         )
 
-    # #538 — transactional rollback trigger. Partial-install signal is:
-    # we both STARTED at least one bouncer AND had at least one
-    # `start_failure` skip. (Conditional-false skips or port-conflict
-    # skips are operator-actionable but not partial-install events;
-    # see the comments at each skip-emit site.)
-    if execute and rollback_on_failure and state_snapshot is not None:
+    # #538 / #592 — partial-install detection. Signal is: we both
+    # STARTED at least one bouncer AND had at least one `start_failure`
+    # skip. (Conditional-false skips or port-conflict skips are
+    # operator-actionable but not partial-install events; see the
+    # comments at each skip-emit site.)
+    #
+    # Two branches:
+    #   * rollback_on_failure=True  → run transactional rollback +
+    #     report status="rolled_back" / "rollback_incomplete".
+    #   * rollback_on_failure=False → leave partial state in place +
+    #     report status="partial_install" + a `partial_install_no_rollback`
+    #     warning naming the cleanup path. Per [[ibounce-honest-positioning]]
+    #     the top-level status MUST reflect reality — pre-#592 this path
+    #     returned status="ok", which was the silent-degradation bug
+    #     same shape as #560 / #594 / #596 / #598.
+    if execute:
         start_failures = [
             s for s in result.bouncers_skipped
             if (s.get("kind") or "") == "start_failure"
         ]
+    else:
+        start_failures = []
+    if execute and rollback_on_failure and state_snapshot is not None:
         if result.bouncers_started and start_failures:
             # Collect newly-started PIDs from the planned records (every
             # _start_bouncer record stamps `pid` on success).
@@ -1321,6 +1371,30 @@ def apply_declaration(
                     f"inspection required per docs/MRR-4-ROLLBACK-RUNBOOK.md "
                     f"RB-B6."
                 )
+    elif execute and not rollback_on_failure:
+        # #592 — partial-install with rollback opted-out. Pre-#592 this
+        # path silently returned status="ok" even though some bouncers
+        # failed to start; agents reading only top-level status thought
+        # setup succeeded. Per [[ibounce-honest-positioning]] the top-
+        # level status must reflect state honestly: started bouncers
+        # remain live, failed ones do not — that's a partial install,
+        # not "ok". Emit a coded warning naming the failure count + the
+        # cleanup path so operators know what to do next.
+        if result.bouncers_started and start_failures:
+            result.status = "partial_install"
+            failed_names = ", ".join(s["name"] for s in start_failures)
+            started_count = len(result.bouncers_started)
+            failed_count = len(start_failures)
+            result.warnings.append(
+                f"partial_install_no_rollback: "
+                f"{started_count} bouncer(s) started "
+                f"({', '.join(result.bouncers_started)}); "
+                f"{failed_count} skipped due to start_failure "
+                f"({failed_names}). Rollback skipped per "
+                f"rollback_on_failure=False — started bouncers remain "
+                f"running. To clean up, run `iam-jit uninstall` or "
+                f"re-apply the declaration with rollback_on_failure=True."
+            )
 
     return result
 

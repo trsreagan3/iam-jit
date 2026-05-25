@@ -323,7 +323,12 @@ def test_apply_declaration_opt_out_keeps_partial_state(
     tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """With rollback_on_failure=False (opt-out), the same partial-install
-    leaves bouncers_started intact + rollback_outcome=None."""
+    leaves bouncers_started intact + rollback_outcome=None — but per
+    #592 the top-level status MUST be "partial_install" (not the
+    pre-#592 silent "ok") so agents reading only `result.status` cannot
+    mistakenly believe setup succeeded. The pre-#592 pin asserting
+    status=="ok" here WAS the bug per [[ibounce-honest-positioning]] /
+    [[scorer-is-ground-truth]]."""
     _isolate_snapshot_files(monkeypatch, tmp_path)
 
     killed: list[int] = []
@@ -366,14 +371,373 @@ def test_apply_declaration_opt_out_keeps_partial_state(
         rollback_on_failure=False,
     )
 
-    # 1. Reported: rollback_outcome stays None.
+    # 1. Reported: rollback_outcome stays None (operator opted out).
     assert result.rollback_outcome is None
     # 2. Observable: pid 8888 was NOT killed.
     assert killed == []
     # 3. Observable: ibounce stays in bouncers_started (partial-install left).
     assert result.bouncers_started == ["ibounce"]
-    # 4. Observable: status is still "ok" (legacy semantics).
+    # 4. #592: status honestly reflects the partial state — NOT "ok".
+    assert result.status == "partial_install", (
+        f"top-level status must honestly reflect partial-install when "
+        f"rollback was opted out (#592 / [[ibounce-honest-positioning]]); "
+        f"got status={result.status!r}"
+    )
+    # 5. Observable: warning surface includes the coded
+    #    partial_install_no_rollback entry naming the cleanup path.
+    assert any(
+        "partial_install_no_rollback" in w for w in result.warnings
+    ), f"missing partial_install_no_rollback warning; warnings={result.warnings!r}"
+
+
+# ---------------------------------------------------------------------------
+# 4b. #592 — rollback_on_failure=False status contract (extended coverage)
+# ---------------------------------------------------------------------------
+
+
+def test_rollback_disabled_partial_install_returns_partial_install_status(
+    tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """#592: rollback=false + 1 start_failure → status="partial_install"
+    AND warnings non-empty AND a warning carries code
+    `partial_install_no_rollback`. This is the load-bearing contract
+    that closes the silent-degradation cluster (#560 / #594 / #596 /
+    #598 / #592)."""
+    _isolate_snapshot_files(monkeypatch, tmp_path)
+    monkeypatch.setattr(setup_mod.os, "kill", lambda *a, **kw: None)
+
+    def fake_start(name, *, port, mode, profile, extra_args, execute):
+        if name == "ibounce":
+            return {
+                "name": "ibounce", "started": True, "skipped": False,
+                "pid": 1234, "port": 8767, "command": ["ibounce"],
+                "mode": mode, "mode_declared": mode,
+                "mode_runtime": "cooperative", "profile": profile,
+            }
+        return {
+            "name": name, "started": False, "skipped": True,
+            "reason": "binary not found", "command": [], "port": 8080,
+            "mode": mode, "mode_declared": mode, "mode_runtime": mode,
+            "profile": profile,
+        }
+
+    monkeypatch.setattr(setup_mod, "_start_bouncer", fake_start)
+
+    declaration = {
+        "iam-jit": {
+            "enabled": True,
+            "bouncers": {
+                "ibounce": {"enabled": True, "mode": "discovery"},
+                "gbounce": {"enabled": True, "mode": "discovery"},
+            },
+        }
+    }
+    result = apply_declaration(
+        declaration,
+        posture=_posture_with_running_pids(),
+        env={},
+        execute=True,
+        rollback_on_failure=False,
+    )
+
+    # 1. Reported status reflects reality (NOT the pre-#592 silent "ok").
+    assert result.status == "partial_install"
+    # 2. Warnings list is non-empty.
+    assert result.warnings, "warnings list must be non-empty on partial install"
+    # 3. Warning carries the documented code prefix.
+    coded = [w for w in result.warnings if "partial_install_no_rollback" in w]
+    assert coded, (
+        f"expected a warning with code partial_install_no_rollback; "
+        f"got warnings={result.warnings!r}"
+    )
+    # 4. Observable: ibounce stays alive (we opted out of rollback).
+    assert result.bouncers_started == ["ibounce"]
+
+
+def test_rollback_disabled_warning_names_failure_count(
+    tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """#592: when 2 bouncers hit start_failure, the warning text MUST
+    correctly cite "2 skipped" so operators see the magnitude."""
+    _isolate_snapshot_files(monkeypatch, tmp_path)
+    monkeypatch.setattr(setup_mod.os, "kill", lambda *a, **kw: None)
+
+    def fake_start(name, *, port, mode, profile, extra_args, execute):
+        if name == "ibounce":
+            return {
+                "name": "ibounce", "started": True, "skipped": False,
+                "pid": 2222, "port": 8767, "command": ["ibounce"],
+                "mode": mode, "mode_declared": mode,
+                "mode_runtime": "cooperative", "profile": profile,
+            }
+        # gbounce + dbounce both fail.
+        return {
+            "name": name, "started": False, "skipped": True,
+            "reason": "binary not found", "command": [], "port": 8080,
+            "mode": mode, "mode_declared": mode, "mode_runtime": mode,
+            "profile": profile,
+        }
+
+    monkeypatch.setattr(setup_mod, "_start_bouncer", fake_start)
+
+    declaration = {
+        "iam-jit": {
+            "enabled": True,
+            "bouncers": {
+                "ibounce": {"enabled": True, "mode": "discovery"},
+                "gbounce": {"enabled": True, "mode": "discovery"},
+                "dbounce": {"enabled": True, "mode": "discovery"},
+            },
+        }
+    }
+    result = apply_declaration(
+        declaration,
+        posture=_posture_with_running_pids(),
+        env={},
+        execute=True,
+        rollback_on_failure=False,
+    )
+
+    assert result.status == "partial_install"
+    coded = [w for w in result.warnings if "partial_install_no_rollback" in w]
+    assert coded
+    # Observable: the coded warning cites the failure count "2 skipped".
+    msg = coded[0]
+    assert "2 skipped" in msg, (
+        f"warning must cite failure count '2 skipped'; got msg={msg!r}"
+    )
+    # Observable: both failed names appear in the warning text.
+    assert "gbounce" in msg and "dbounce" in msg, (
+        f"warning must name both failed bouncers; got msg={msg!r}"
+    )
+
+
+def test_rollback_disabled_all_success_returns_ok(
+    tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """#592 regression — happy path: rollback=false + all bouncers start
+    cleanly → status="ok" (unchanged contract). The status change MUST
+    fire ONLY on partial install, not on every rollback=false call."""
+    _isolate_snapshot_files(monkeypatch, tmp_path)
+    monkeypatch.setattr(setup_mod.os, "kill", lambda *a, **kw: None)
+
+    def fake_start(name, *, port, mode, profile, extra_args, execute):
+        return {
+            "name": name, "started": True, "skipped": False,
+            "pid": 3000 + len(name), "port": port or 8767,
+            "command": [name], "mode": mode, "mode_declared": mode,
+            "mode_runtime": "cooperative", "profile": profile,
+        }
+
+    monkeypatch.setattr(setup_mod, "_start_bouncer", fake_start)
+
+    declaration = {
+        "iam-jit": {
+            "enabled": True,
+            "bouncers": {
+                "ibounce": {"enabled": True, "mode": "discovery"},
+                "gbounce": {"enabled": True, "mode": "discovery"},
+            },
+        }
+    }
+    result = apply_declaration(
+        declaration,
+        posture=_posture_with_running_pids(),
+        env={},
+        execute=True,
+        rollback_on_failure=False,
+    )
+
+    # 1. Reported: happy path stays "ok".
     assert result.status == "ok"
+    # 2. Observable: no partial_install warning when nothing failed.
+    assert not any(
+        "partial_install_no_rollback" in w for w in result.warnings
+    )
+    # 3. Observable: both bouncers in bouncers_started.
+    assert sorted(result.bouncers_started) == ["gbounce", "ibounce"]
+    # 4. Observable: no start_failure skips.
+    start_failures = [
+        s for s in result.bouncers_skipped
+        if (s.get("kind") or "") == "start_failure"
+    ]
+    assert start_failures == []
+
+
+def test_rollback_enabled_partial_install_returns_rolled_back(
+    tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """#592 regression: rollback=true + 1 start_failure → status=
+    "rolled_back" (unchanged). The #592 partial_install status MUST NOT
+    leak into the rollback=true path — that path still uses the #538
+    rolled_back / rollback_incomplete enum."""
+    _isolate_snapshot_files(monkeypatch, tmp_path)
+    monkeypatch.setattr(setup_mod.os, "kill", lambda *a, **kw: None)
+
+    def fake_start(name, *, port, mode, profile, extra_args, execute):
+        if name == "ibounce":
+            return {
+                "name": "ibounce", "started": True, "skipped": False,
+                "pid": 4444, "port": 8767, "command": ["ibounce"],
+                "mode": mode, "mode_declared": mode,
+                "mode_runtime": "cooperative", "profile": profile,
+            }
+        return {
+            "name": name, "started": False, "skipped": True,
+            "reason": "binary not found", "command": [], "port": 8080,
+            "mode": mode, "mode_declared": mode, "mode_runtime": mode,
+            "profile": profile,
+        }
+
+    monkeypatch.setattr(setup_mod, "_start_bouncer", fake_start)
+
+    declaration = {
+        "iam-jit": {
+            "enabled": True,
+            "bouncers": {
+                "ibounce": {"enabled": True, "mode": "discovery"},
+                "gbounce": {"enabled": True, "mode": "discovery"},
+            },
+        }
+    }
+    result = apply_declaration(
+        declaration,
+        posture=_posture_with_running_pids(),
+        env={},
+        execute=True,
+        rollback_on_failure=True,
+    )
+
+    # Reported: rollback fired with verified-clean status.
+    assert result.status == "rolled_back"
+    # Observable: rollback_outcome populated.
+    assert result.rollback_outcome is not None
+    # Observable: NO partial_install warning (that's the rollback=false code path).
+    assert not any(
+        "partial_install_no_rollback" in w for w in result.warnings
+    )
+
+
+def test_rollback_enabled_all_success_returns_ok(
+    tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """#592 regression: rollback=true + all bouncers start cleanly →
+    status="ok" + rollback_outcome=None (happy path unchanged)."""
+    _isolate_snapshot_files(monkeypatch, tmp_path)
+    monkeypatch.setattr(setup_mod.os, "kill", lambda *a, **kw: None)
+
+    def fake_start(name, *, port, mode, profile, extra_args, execute):
+        return {
+            "name": name, "started": True, "skipped": False,
+            "pid": 5000 + len(name), "port": port or 8767,
+            "command": [name], "mode": mode, "mode_declared": mode,
+            "mode_runtime": "cooperative", "profile": profile,
+        }
+
+    monkeypatch.setattr(setup_mod, "_start_bouncer", fake_start)
+
+    declaration = {
+        "iam-jit": {
+            "enabled": True,
+            "bouncers": {
+                "ibounce": {"enabled": True, "mode": "discovery"},
+                "gbounce": {"enabled": True, "mode": "discovery"},
+            },
+        }
+    }
+    result = apply_declaration(
+        declaration,
+        posture=_posture_with_running_pids(),
+        env={},
+        execute=True,
+        rollback_on_failure=True,
+    )
+
+    assert result.status == "ok"
+    assert result.rollback_outcome is None
+    assert sorted(result.bouncers_started) == ["gbounce", "ibounce"]
+
+
+def test_rollback_disabled_partial_install_status_is_load_bearing(
+    tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """#592 sabotage-check: if the status-computation path is broken
+    (e.g. the new partial_install branch removed), this test's assertion
+    that status=="partial_install" MUST fail — proving the status logic
+    is load-bearing and not a no-op. We simulate the regression by
+    monkeypatching the apply_declaration function so that the
+    rollback_on_failure=False + start_failure path returns status="ok"
+    instead of "partial_install"; the assertion below must catch it.
+    """
+    _isolate_snapshot_files(monkeypatch, tmp_path)
+    monkeypatch.setattr(setup_mod.os, "kill", lambda *a, **kw: None)
+
+    def fake_start(name, *, port, mode, profile, extra_args, execute):
+        if name == "ibounce":
+            return {
+                "name": "ibounce", "started": True, "skipped": False,
+                "pid": 7000, "port": 8767, "command": ["ibounce"],
+                "mode": mode, "mode_declared": mode,
+                "mode_runtime": "cooperative", "profile": profile,
+            }
+        return {
+            "name": name, "started": False, "skipped": True,
+            "reason": "binary not found", "command": [], "port": 8080,
+            "mode": mode, "mode_declared": mode, "mode_runtime": mode,
+            "profile": profile,
+        }
+
+    monkeypatch.setattr(setup_mod, "_start_bouncer", fake_start)
+
+    # Wrap apply_declaration so it sets status back to "ok" — simulating
+    # the pre-#592 silent-degradation regression.
+    real_apply = setup_mod.apply_declaration
+
+    def sabotaged_apply(*args, **kwargs):
+        result = real_apply(*args, **kwargs)
+        # Sabotage: force status back to "ok" the way the bug used to.
+        result.status = "ok"
+        return result
+
+    declaration = {
+        "iam-jit": {
+            "enabled": True,
+            "bouncers": {
+                "ibounce": {"enabled": True, "mode": "discovery"},
+                "gbounce": {"enabled": True, "mode": "discovery"},
+            },
+        }
+    }
+
+    sabotaged_result = sabotaged_apply(
+        declaration,
+        posture=_posture_with_running_pids(),
+        env={},
+        execute=True,
+        rollback_on_failure=False,
+    )
+    # Sabotage confirmed observable: the sabotaged result reports "ok"
+    # despite the start failure (this is what the contract MUST catch).
+    assert sabotaged_result.status == "ok", (
+        "sabotage harness did not actually override status; "
+        "the load-bearing check below is meaningless without it"
+    )
+    # Now run the REAL path + assert the partial_install contract holds —
+    # this proves the new branch is what makes the difference between
+    # honest reporting and the silent-degradation bug.
+    real_result = real_apply(
+        declaration,
+        posture=_posture_with_running_pids(),
+        env={},
+        execute=True,
+        rollback_on_failure=False,
+    )
+    assert real_result.status == "partial_install", (
+        f"#592 contract regression: real apply_declaration must return "
+        f"status='partial_install' on this same input; got "
+        f"status={real_result.status!r}. The partial_install branch in "
+        f"apply_declaration is what closes the silent-degradation bug."
+    )
 
 
 # ---------------------------------------------------------------------------
