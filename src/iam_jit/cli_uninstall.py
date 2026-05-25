@@ -1471,6 +1471,20 @@ def _verify_clean_state(
     Per ``docs/CONTRIBUTING.md`` state-verification: this is the
     observable side of the "uninstall succeeded" claim. Returns a dict
     of leftover items + a boolean ``clean`` flag.
+
+    Per ``[[ibounce-honest-positioning]]`` (#617 HIGH-3): every field
+    here must reflect filesystem reality, not the operator's intent at
+    flag-set time. Specifically, ``iam_jit_home_exists`` probes the
+    actual ``IAM_JIT_HOME`` directory — if ``--keep-audit-logs``
+    preserved files on disk, the directory still exists and we must
+    report it. The ``preserved_paths`` field enumerates exactly which
+    audit-bearing files are still on disk so the operator can audit
+    what was kept.
+
+    The ``clean`` flag is true when EITHER (a) the directory was fully
+    removed AND nothing else is leftover, OR (b) ``--keep-audit-logs``
+    was set AND the only remaining items under ``IAM_JIT_HOME`` are
+    audit-bearing files we intentionally preserved.
     """
     inv = _inventory_installed_state()
     leftover: dict[str, Any] = {
@@ -1480,17 +1494,56 @@ def _verify_clean_state(
         "console_scripts_present": inv["console_scripts_present"],
         "go_binaries_present": inv["go_binaries_present"],
     }
-    # In keep-audit-logs mode, IAM_JIT_HOME existing is EXPECTED.
-    leftover["iam_jit_home_exists"] = (
-        inv["iam_jit_home_exists"] if not keep_audit_logs else False
-    )
+    # #617 HIGH-3: probe the real directory; do NOT lie based on the
+    # operator's flag. Pre-fix this returned False whenever
+    # keep_audit_logs was set, even if the directory still contained
+    # preserved files.
+    leftover["iam_jit_home_exists"] = inv["iam_jit_home_exists"]
+
+    # #617 HIGH-3: enumerate exactly which audit-bearing files are
+    # still on disk so the operator can audit what was preserved.
+    preserved_paths: list[str] = []
+    if keep_audit_logs:
+        for rel in AUDIT_BEARING_PATHS_REL:
+            p = IAM_JIT_HOME / rel
+            if p.exists():
+                preserved_paths.append(str(p))
+    leftover["preserved_paths"] = preserved_paths
+
+    # #617 HIGH-3: an existing IAM_JIT_HOME counts as leftover UNLESS
+    # the operator opted in to keep-audit-logs AND the only thing
+    # remaining is preserved audit-bearing content. Detect that by
+    # walking IAM_JIT_HOME and checking that every file present is on
+    # the preserved-paths list.
+    home_is_intentional_preserve = False
+    if (
+        keep_audit_logs
+        and leftover["iam_jit_home_exists"]
+        and preserved_paths
+    ):
+        try:
+            preserved_set = {pathlib.Path(p).resolve() for p in preserved_paths}
+            unexpected = []
+            for entry in IAM_JIT_HOME.rglob("*"):
+                if entry.is_file():
+                    if entry.resolve() not in preserved_set:
+                        unexpected.append(str(entry))
+            if not unexpected:
+                home_is_intentional_preserve = True
+        except OSError:
+            # If we can't walk, fall back to honest "leftover" — the
+            # post-check should never falsely report clean.
+            home_is_intentional_preserve = False
+
     has_leftover = any([
         leftover["running_bouncers"],
         leftover["bound_ports"],
         leftover["venv_exists"],
         leftover["console_scripts_present"],
         leftover["go_binaries_present"],
-        leftover["iam_jit_home_exists"],
+        # iam_jit_home_exists only counts as leftover if it ISN'T the
+        # intentional --keep-audit-logs preserve case.
+        leftover["iam_jit_home_exists"] and not home_is_intentional_preserve,
     ])
     return {
         "clean": not has_leftover,
