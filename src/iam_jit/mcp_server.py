@@ -65,6 +65,27 @@ SERVER_VERSION = "0.4.0"
 MCP_PROTOCOL_VERSION = "2024-11-05"
 
 
+# #582 HIGH — bouncer-kind validation contract.
+# Maps MCP tool name -> (field_name, required_in_schema). The dispatch
+# loop validates this field via `validate_bouncer_kind` before entering
+# the per-tool handler so typos surface as JSON-RPC -32602 errors (NOT
+# as silent no_change / no-op statuses per the UAT-A 2026-05-25 #582
+# finding). Per [[cross-product-agent-parity]] adding a new MCP tool to
+# the contract is one-line: append it here.
+#
+# ``required_in_schema=False`` preserves the handler's default for
+# missing/empty values (iam_jit_improve_profile.bouncer has
+# ``default: ibounce`` so omission is legitimate and must NOT be
+# rejected). The validator still fires whenever a non-empty value is
+# present — which is exactly the UAT-A shape (explicit typo'd value).
+_BOUNCER_KIND_VALIDATION_FIELDS: dict[str, tuple[str, bool]] = {
+    "iam_jit_improve_profile": ("bouncer", False),
+    "iam_jit_consider_tightening": ("bouncer_kind", True),
+    "bounce_simulate_profile": ("bouncer_kind", True),
+    "bounce_grade_profile_for_workflow": ("bouncer_kind", True),
+}
+
+
 # Tool definition the agent will discover via the `tools/list` MCP call.
 # The `inputSchema` follows JSON Schema; MCP hosts (Claude Code/Desktop)
 # use it to validate before invoking the tool.
@@ -5706,6 +5727,41 @@ def _handle_request(req: dict[str, Any]) -> dict[str, Any] | None:
         # handler only knows its `bouncer_*` lookup string.
         if isinstance(tool_name, str) and tool_name.startswith("ibounce_"):
             tool_name = "bouncer_" + tool_name[len("ibounce_"):]
+        # #582 HIGH — surface bouncer-kind typos at dispatch entry per
+        # [[ibounce-honest-positioning]]. UAT-A 2026-05-25 caught
+        # iam_jit_improve_profile({bouncer: "nonexistent"}) silently
+        # returning status="no_change" (same MRR-2 Pattern B shape as
+        # the #448 silent-success bugs). Belt-and-suspenders runtime
+        # validation closes the hole regardless of whether the MCP host
+        # enforced the inputSchema enum. See mcp_bouncer_validation.py
+        # for the canonical accepted set + typo suggestions.
+        if tool_name in _BOUNCER_KIND_VALIDATION_FIELDS:
+            from .mcp_bouncer_validation import (
+                InvalidBouncerKindError,
+                JSON_RPC_INVALID_PARAMS,
+                validate_bouncer_kind,
+            )
+            _validate_field, _required = _BOUNCER_KIND_VALIDATION_FIELDS[tool_name]
+            _bouncer_value = args.get(_validate_field)
+            # When the field is OPTIONAL (e.g. iam_jit_improve_profile.bouncer
+            # has `default: ibounce` in its inputSchema), let
+            # missing/empty fall through to the handler's default —
+            # changing that would break existing callers relying on the
+            # documented default. Validate ONLY when a non-empty value
+            # was supplied (which catches the UAT-A 2026-05-25 #582
+            # silent-no-op shape: an explicit-but-typo'd bouncer name).
+            _should_validate = _required or (
+                _bouncer_value is not None and _bouncer_value != ""
+            )
+            if _should_validate:
+                try:
+                    validate_bouncer_kind(
+                        _bouncer_value,
+                        tool_name=tool_name,
+                        field_name=_validate_field,
+                    )
+                except InvalidBouncerKindError as _exc:
+                    return _err(rid, JSON_RPC_INVALID_PARAMS, str(_exc))
         if tool_name == "generate_iam_policy":
             result_payload = _generate_for_mcp(args)
         elif tool_name == "score_iam_policy":
