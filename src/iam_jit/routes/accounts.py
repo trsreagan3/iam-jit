@@ -150,6 +150,11 @@ def register_account(
         store.put(account)
     except AccountStoreReadOnly as e:
         raise HTTPException(status_code=409, detail=str(e))
+    except OSError as e:
+        raise HTTPException(
+            status_code=500,
+            detail=f"account registry write failed: {e}",
+        )
     audit.emit(
         actor=user.id,
         kind="account.registered",
@@ -161,6 +166,28 @@ def register_account(
             "has_discovery": account.has_discovery,
         },
     )
+    # OCSF v1.1.0 class 6003 admin-action event (#278).
+    try:
+        from ..bouncer.audit_export.admin_action import (
+            ADMIN_ACTION_SOURCE_API,
+            emit_admin_action_direct,
+        )
+        from ..bouncer.proxy import _emit_audit_event
+        emit_admin_action_direct(
+            _emit_audit_event,
+            kind="account.registered",
+            actor=user.id,
+            target_kind="aws_account",
+            target_id=account.account_id,
+            source=ADMIN_ACTION_SOURCE_API,
+            extra={
+                "alias": account.alias,
+                "provisioning_mode": account.provisioning_mode,
+                "has_discovery": account.has_discovery,
+            },
+        )
+    except Exception:
+        pass
     return _to_response(account)
 
 
@@ -206,10 +233,32 @@ def deregister_account(
         raise HTTPException(status_code=404, detail=f"no account registered with id {account_id}")
     except AccountStoreReadOnly as e:
         raise HTTPException(status_code=409, detail=str(e))
+    except OSError as e:
+        raise HTTPException(
+            status_code=500,
+            detail=f"account registry write failed: {e}",
+        )
     audit.emit(
         actor=user.id,
         kind="account.deregistered",
         summary=f"deregistered account {account_id}",
         details={"account_id": account_id},
     )
+    # OCSF v1.1.0 class 6003 admin-action event (#278).
+    try:
+        from ..bouncer.audit_export.admin_action import (
+            ADMIN_ACTION_SOURCE_API,
+            emit_admin_action_direct,
+        )
+        from ..bouncer.proxy import _emit_audit_event
+        emit_admin_action_direct(
+            _emit_audit_event,
+            kind="account.deregistered",
+            actor=user.id,
+            target_kind="aws_account",
+            target_id=account_id,
+            source=ADMIN_ACTION_SOURCE_API,
+        )
+    except Exception:
+        pass
     return {"deregistered": True, "account_id": account_id}

@@ -2344,6 +2344,9 @@ def accounts_new_submit(
     )
 
 
+_ACCOUNT_ID_RE = re.compile(r"^[0-9]{12}$")
+
+
 @router.post("/accounts/register", response_class=HTMLResponse)
 def accounts_register(
     request: Request,
@@ -2359,6 +2362,13 @@ def accounts_register(
     user, redir = _require_admin_or_redirect(request)
     if redir is not None:
         return redir
+    # Structured validation — a bad account-ID must never reach the
+    # store and risk a confusing 500 or silent data corruption.
+    if not _ACCOUNT_ID_RE.match(account_id):
+        raise HTTPException(
+            status_code=422,
+            detail=f"account_id must be a 12-digit AWS account number; got {account_id!r}",
+        )
     store: AccountStore = request.app.state.accounts_store
     try:
         existing = store.get(account_id)
@@ -2382,6 +2392,11 @@ def accounts_register(
         store.put(account)
     except AccountStoreReadOnly as e:
         raise HTTPException(status_code=409, detail=str(e))
+    except OSError as e:
+        raise HTTPException(
+            status_code=500,
+            detail=f"account registry write failed: {e}",
+        )
     audit.emit(
         actor=user.id,
         kind="account.registered",
@@ -2393,6 +2408,28 @@ def accounts_register(
             "via": "web",
         },
     )
+    # OCSF v1.1.0 class 6003 admin-action event (#278).
+    try:
+        from ..bouncer.audit_export.admin_action import (
+            ADMIN_ACTION_SOURCE_API,
+            emit_admin_action_direct,
+        )
+        from ..bouncer.proxy import _emit_audit_event
+        emit_admin_action_direct(
+            _emit_audit_event,
+            kind="account.registered",
+            actor=user.id,
+            target_kind="aws_account",
+            target_id=account.account_id,
+            source=ADMIN_ACTION_SOURCE_API,
+            extra={
+                "alias": account.alias,
+                "provisioning_mode": account.provisioning_mode,
+                "via": "web",
+            },
+        )
+    except Exception:
+        pass
     return RedirectResponse(url=f"/accounts/{account_id}", status_code=303)
 
 
@@ -2427,10 +2464,33 @@ def account_deregister(account_id: str, request: Request) -> Response:
         raise HTTPException(status_code=404)
     except AccountStoreReadOnly as e:
         raise HTTPException(status_code=409, detail=str(e))
+    except OSError as e:
+        raise HTTPException(
+            status_code=500,
+            detail=f"account registry write failed: {e}",
+        )
     audit.emit(
         actor=user.id,
         kind="account.deregistered",
         summary=f"deregistered account {account_id}",
         details={"account_id": account_id, "via": "web"},
     )
+    # OCSF v1.1.0 class 6003 admin-action event (#278).
+    try:
+        from ..bouncer.audit_export.admin_action import (
+            ADMIN_ACTION_SOURCE_API,
+            emit_admin_action_direct,
+        )
+        from ..bouncer.proxy import _emit_audit_event
+        emit_admin_action_direct(
+            _emit_audit_event,
+            kind="account.deregistered",
+            actor=user.id,
+            target_kind="aws_account",
+            target_id=account_id,
+            source=ADMIN_ACTION_SOURCE_API,
+            extra={"via": "web"},
+        )
+    except Exception:
+        pass
     return RedirectResponse(url="/accounts", status_code=303)

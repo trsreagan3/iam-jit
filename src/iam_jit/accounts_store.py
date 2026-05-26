@@ -8,8 +8,10 @@ of that bootstrap so iam-jit knows which accounts to trust as targets.
 
 Two backends, mirroring the user store:
 
-  - `FileAccountStore`: read-only at runtime; YAML on local disk or S3.
-    Updates happen by editing/uploading the file. ETag-based refresh.
+  - `FileAccountStore`: writable for local-path files (atomic write via
+    tmp + fsync + rename). S3-backed instances are read-only at runtime
+    — updates there happen by editing/uploading the file. ETag-based
+    refresh on all reads.
 
   - `DynamoDBAccountStore`: read/write; admin operations write to DDB.
 
@@ -22,7 +24,9 @@ import dataclasses
 import datetime as _dt
 import io
 import json
+import os
 import pathlib
+import threading
 import time
 from typing import Any, Protocol
 
@@ -170,7 +174,16 @@ def utcnow_iso() -> str:
 
 
 class FileAccountStore:
-    """Read-only-at-runtime store backed by a YAML file."""
+    """Local-file-backed account store — writable when backed by a local path.
+
+    Reads are ETag-cached (TTL-based refresh). Writes use an atomic
+    tmp → fsync → rename sequence to prevent partial-write corruption.
+
+    S3-backed instances (``location`` starts with ``s3://``) are still
+    read-only at runtime — S3 writes require a separate upload workflow.
+    Attempts to call ``put`` or ``delete`` on an S3-backed instance raise
+    ``AccountStoreReadOnly``.
+    """
 
     name = "file"
 
@@ -186,6 +199,9 @@ class FileAccountStore:
         self._cache: dict[str, Account] | None = None
         self._cache_at: float = 0.0
         self._cache_etag: str | None = None
+        # Per-instance write lock: concurrent writes share a single lock
+        # so the tmp → rename dance is serialized per store instance.
+        self._write_lock = threading.Lock()
         if location.startswith("s3://"):
             if s3_client is None:
                 import boto3
@@ -240,6 +256,46 @@ class FileAccountStore:
             raise FileNotFoundError(self.location)
         return path.read_bytes(), None
 
+    def _write_local(self, accounts: dict[str, Account]) -> None:
+        """Atomically write ``accounts`` to disk (tmp → fsync → rename).
+
+        All fields are preserved on round-trip via ``_account_to_dict``.
+        The tmp file is written in the same directory as the target so
+        the rename is an atomic single-filesystem operation (POSIX
+        guarantees os.rename is atomic within one filesystem).
+
+        Raises ``OSError`` on disk-full or permission-denied; the caller
+        is responsible for surfacing the error to the operator.
+        """
+        path = pathlib.Path(self.location)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        doc: dict[str, Any] = {
+            "apiVersion": "iam-jit.dev/v1alpha1",
+            "kind": "AccountList",
+            "accounts": [
+                _account_to_dict(a)
+                for a in sorted(accounts.values(), key=lambda a: a.account_id)
+            ],
+        }
+        yaml_writer = YAML()
+        yaml_writer.default_flow_style = False
+        buf = io.BytesIO()
+        yaml_writer.dump(doc, buf)
+        payload = buf.getvalue()
+
+        tmp_path = path.parent / (path.name + ".tmp")
+        fd = os.open(
+            str(tmp_path),
+            os.O_WRONLY | os.O_CREAT | os.O_TRUNC,
+            0o600,
+        )
+        try:
+            os.write(fd, payload)
+            os.fsync(fd)
+        finally:
+            os.close(fd)
+        os.replace(str(tmp_path), str(path))  # atomic on POSIX
+
     def get(self, account_id: str) -> Account:
         self._maybe_reload()
         assert self._cache is not None
@@ -256,14 +312,48 @@ class FileAccountStore:
         return sorted(accounts, key=lambda a: a.account_id)
 
     def put(self, account: Account) -> None:
-        raise AccountStoreReadOnly(
-            "FileAccountStore is read-only at runtime. Edit the YAML file and re-upload."
-        )
+        """Add or replace ``account`` in the registry.
+
+        Raises ``AccountStoreReadOnly`` when backed by S3.
+        Raises ``OSError`` on write failure (disk full, permission denied).
+        """
+        if self._s3 is not None:
+            raise AccountStoreReadOnly(
+                "FileAccountStore backed by S3 is read-only at runtime. "
+                "Upload a new accounts.yaml to S3 instead."
+            )
+        with self._write_lock:
+            # Reload before mutating so concurrent writers don't lose each other's data.
+            self._maybe_reload()
+            assert self._cache is not None
+            updated = dict(self._cache)
+            updated[account.account_id] = account
+            self._write_local(updated)
+            # Update in-memory cache to reflect the new state immediately.
+            self._cache = updated
+            self._cache_at = time.monotonic()
 
     def delete(self, account_id: str) -> None:
-        raise AccountStoreReadOnly(
-            "FileAccountStore is read-only at runtime. Edit the YAML file and re-upload."
-        )
+        """Remove an account from the registry by account_id.
+
+        Raises ``AccountNotFound`` when the account is not registered.
+        Raises ``AccountStoreReadOnly`` when backed by S3.
+        Raises ``OSError`` on write failure (disk full, permission denied).
+        """
+        if self._s3 is not None:
+            raise AccountStoreReadOnly(
+                "FileAccountStore backed by S3 is read-only at runtime. "
+                "Upload a new accounts.yaml to S3 instead."
+            )
+        with self._write_lock:
+            self._maybe_reload()
+            assert self._cache is not None
+            if account_id not in self._cache:
+                raise AccountNotFound(account_id)
+            updated = {k: v for k, v in self._cache.items() if k != account_id}
+            self._write_local(updated)
+            self._cache = updated
+            self._cache_at = time.monotonic()
 
 
 class InMemoryAccountStore:
