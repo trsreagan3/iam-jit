@@ -30,8 +30,19 @@ inspects emitted env for the MCP snippet — pre-fix the test asserted
 are present) and ``test_cli_export_then_import_round_trip`` (which
 refuses import when the probe sees a live listener).
 
-Any test that wants to exercise a specific value for these env vars
-should explicitly ``monkeypatch.setenv(...)`` in the test body — the
+Per GH #665 (audit-log isolation, 2026-05-26): the same autouse
+fixture also points ``IAM_JIT_BOUNCER_AUDIT_LOG`` at a per-test
+non-existent path so ``default_audit_log_path()`` in the
+``/audit/events`` handler never falls back to the developer's real
+``~/.iam-jit/audit.jsonl``. On a dogfooded machine that file carries
+live audit events; without isolation every test that passes
+``audit_log_path=None`` to the handler silently reads those events
+instead of the seeded fixture data (the root cause of
+``test_audit_events_endpoint_store_ocsf_bundle_format`` returning 77
+events vs the expected 3).
+
+Any test that wants to provide its own profiles file simply overrides
+the env var via ``monkeypatch.setenv(...)`` in the test body — the
 autouse delenv composes cleanly with a subsequent setenv.
 """
 
@@ -76,4 +87,10 @@ def _isolate_bouncer_env(
     monkeypatch.delenv("IBOUNCE_AGENT_NAME", raising=False)
     monkeypatch.delenv("IBOUNCE_AGENT_SESSION_ID", raising=False)
     monkeypatch.setenv("IBOUNCE_PROBE_PORT", str(_find_unused_port()))
+    # GH #665: prevent default_audit_log_path() from falling back to the
+    # developer's real ~/.iam-jit/audit.jsonl. Point at a per-test path
+    # that never exists so tests seeding their own stores get exactly the
+    # events they wrote, not 77+ live dogfood events.
+    isolated_audit_log = tmp_path / "isolated_audit.jsonl"  # type: ignore[operator]
+    monkeypatch.setenv("IAM_JIT_BOUNCER_AUDIT_LOG", str(isolated_audit_log))
     yield
