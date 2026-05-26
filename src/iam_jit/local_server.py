@@ -368,6 +368,14 @@ def _set_local_env_defaults(config: LocalServerConfig, admin_user_id: str) -> No
     os.environ.setdefault("IAM_JIT_SAFETY_MODE", "read_write_swap")
     os.environ.setdefault("IAM_JIT_DEPLOYMENT_MODE", "solo")
 
+    # #632 CRIT: wire the audit log path so audit.emit() persists events.
+    # Without this, every audit.emit() no-ops because it gates on
+    # `os.environ.get("IAM_JIT_AUDIT_LOG")` being truthy. Operators who
+    # deliberately override via env var are unaffected (setdefault semantics).
+    # data_dir already exists here — _ensure_data_dir() runs before this
+    # function in serve_local(), so the parent directory is guaranteed.
+    os.environ.setdefault("IAM_JIT_AUDIT_LOG", str(config.data_dir / "audit.jsonl"))
+
     # Audit retention generous for solo dev (local SQLite).
     os.environ.setdefault("IAM_JIT_AUDIT_RETENTION_DAYS", "365")
 

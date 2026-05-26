@@ -249,6 +249,7 @@ def test_set_local_env_defaults(
         "IAM_JIT_AUTH_MODE",
         "IAM_JIT_SAFETY_MODE", "IAM_JIT_DEPLOYMENT_MODE",
         "IAM_JIT_MAGIC_LINK_SECRET", "IAM_JIT_LLM_BACKEND",
+        "IAM_JIT_AUDIT_LOG",  # #632: must now be wired to <data_dir>/audit.jsonl
     ]:
         monkeypatch.delenv(var, raising=False)
 
@@ -263,6 +264,8 @@ def test_set_local_env_defaults(
     assert os.environ["IAM_JIT_SAFETY_MODE"] == "read_write_swap"
     assert os.environ["IAM_JIT_DEPLOYMENT_MODE"] == "solo"
     assert os.environ["IAM_JIT_LLM_BACKEND"] == "none"
+    # #632 CRIT: IAM_JIT_AUDIT_LOG must now be wired so audit.emit() persists.
+    assert os.environ["IAM_JIT_AUDIT_LOG"] == str(tmp_data_dir / "audit.jsonl")
     # A magic-link secret was generated.
     assert len(os.environ["IAM_JIT_MAGIC_LINK_SECRET"]) >= 32
 
