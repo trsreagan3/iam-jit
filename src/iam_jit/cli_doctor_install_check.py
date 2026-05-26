@@ -80,28 +80,77 @@ def _python_install_hint(
     detection is ambiguous.
 
     Detection priority:
-      1. macOS + Homebrew Python  → pipx flow  (PEP 668 blocks pip --user)
-      2. macOS + system Python    → venv flow   (system pip is restricted)
-      3. Linux + apt-managed      → pip --upgrade-pip + --user
-      4. Generic fallback         → pip install --user git+https://github.com/trsreagan3/iam-jit.git
+      1. pyenv Python             → pyenv-specific hint (any platform)
+      2. nix-store Python         → nix-shell hint (any platform)
+      3. macOS + Homebrew Python  → pipx flow  (PEP 668 blocks pip --user)
+      4. macOS + system Python    → venv flow   (system pip is restricted)
+      5. Linux + apt-managed      → pip --upgrade-pip + --user
+      6. Generic fallback         → pip install --user git+https://github.com/trsreagan3/iam-jit.git
 
     NOTE (#654): iam-jit is not yet on PyPI. All hints use the git+https://
     source install until the PyPI publish task (#235) is complete.
 
+    NOTE (#655): Symlinks are resolved before pattern-matching so that
+    Intel Mac Homebrew Python invoked via /usr/local/bin/python3 (a symlink
+    into /usr/local/Cellar/) is correctly classified as Homebrew rather than
+    falling through to the generic hint.
+
+    NOTE (#656): pyenv and nix-store paths are detected explicitly with
+    environment-specific hints, as pip --user and pipx behave differently in
+    those environments.
+
     The detector uses ``sys.executable`` as the truth source (the
     Python actually running the install-check, not a hypothetical one).
-    Platform detection uses ``sys.platform`` (not ``os.uname()`` which
-    can be shadowed); apt detection uses a non-mutating ``dpkg --show``
+    Symlinks in sys.executable are resolved via pathlib so Intel Mac
+    Homebrew symlinks (/usr/local/bin/python3 → /usr/local/Cellar/...) are
+    caught. Platform detection uses ``sys.platform`` (not ``os.uname()``
+    which can be shadowed); apt detection uses a non-mutating ``dpkg --show``
     probe that returns instantly even without dpkg.
     """
-    exe = sys.executable  # e.g. /opt/homebrew/Cellar/python@3.12/.../bin/python3.12
+    raw_exe = sys.executable  # e.g. /usr/local/bin/python3 (may be a symlink)
     platform = sys.platform  # "darwin" | "linux" | "win32" | …
 
     try:
+        # Resolve symlinks first (#655 fix): Intel Mac Homebrew Python is
+        # typically invoked via /usr/local/bin/python3, which is a symlink
+        # to /usr/local/Cellar/python@X.Y/.../bin/python3.X. Resolving the
+        # symlink lets the Cellar-prefix check below catch it correctly.
+        exe = str(pathlib.Path(raw_exe).resolve())
+    except Exception:  # pragma: no cover — resolve can fail on exotic FSes
+        exe = raw_exe
+
+    try:
+        exe_str = exe  # resolved path string for prefix/substring checks
+
+        # --- pyenv detection (#656) ---
+        # pyenv Python lives at ~/.pyenv/versions/X.Y.Z/bin/python (user)
+        # or /root/.pyenv/, /opt/pyenv/ (system-wide). The "/" boundary
+        # ensures we match /.pyenv/ and /pyenv/ substrings in the path.
+        if "/.pyenv/" in exe_str or "/pyenv/" in exe_str:
+            return (
+                "# pyenv detected. Two options — pick one:\n"
+                "#   Option A (recommended): install pipx outside pyenv, then:\n"
+                "pipx install git+https://github.com/trsreagan3/iam-jit.git\n"
+                "#   Option B: use pyenv's current Python via pyenv exec:\n"
+                "pyenv exec pip install --user git+https://github.com/trsreagan3/iam-jit.git"
+                f"  # ensure {local_bin_display} is in PATH"
+            )
+
+        # --- nix-store detection (#656) ---
+        # Nix Python lives at /nix/store/<hash>-python3.../bin/python3.
+        if "/nix/store/" in exe_str:
+            return (
+                "# nix detected. iam-jit is not yet a nix package.\n"
+                "nix-shell -p python3Packages.pipx"
+                " --run 'pipx install git+https://github.com/trsreagan3/iam-jit.git'"
+                "  # or add to home-manager / configuration.nix"
+            )
+
         if platform == "darwin":
             # Homebrew Python: binary lives under /opt/homebrew/ (Apple Silicon)
-            # or /usr/local/Cellar/ (Intel).
-            if exe.startswith("/opt/homebrew/") or exe.startswith(
+            # or /usr/local/Cellar/ (Intel). After symlink resolution, Intel
+            # /usr/local/bin/python3 resolves to the Cellar path (#655).
+            if exe_str.startswith("/opt/homebrew/") or exe_str.startswith(
                 "/usr/local/Cellar/",
             ):
                 return (
@@ -109,16 +158,16 @@ def _python_install_hint(
                     "  # pipx manages a dedicated venv; avoids PEP 668 wall"
                 )
             # macOS system Python (/usr/bin/python3) — pip is externally managed too.
-            if exe.startswith("/usr/bin/"):
+            if exe_str.startswith("/usr/bin/"):
                 return (
                     "python3 -m venv ~/.venv-iam-jit"
                     " && ~/.venv-iam-jit/bin/pip install git+https://github.com/trsreagan3/iam-jit.git"
                     " && ln -sf ~/.venv-iam-jit/bin/iam-jit"
                     f" {local_bin_display}/iam-jit"
                 )
-            # macOS with pipx-managed or pyenv Python — pipx is still the
-            # cleanest path.
-            if exe.startswith("/Users/") or exe.startswith("/home/"):
+            # macOS with pipx-managed or other user-space Python — pipx is still
+            # the cleanest path.
+            if exe_str.startswith("/Users/") or exe_str.startswith("/home/"):
                 return (
                     "pipx install git+https://github.com/trsreagan3/iam-jit.git"
                     "  # add ~/.local/bin to PATH if not already present"

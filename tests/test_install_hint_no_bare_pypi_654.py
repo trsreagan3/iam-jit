@@ -64,6 +64,10 @@ _PLATFORM_EXE_PAIRS = [
     ("darwin", "/Users/someuser/.local/share/pipx/venvs/iam-jit/bin/python3"),
     ("linux", "/usr/bin/python3"),   # apt-managed branch (dpkg mock)
     ("win32", "/some/unknown/python3"),  # generic fallback
+    # #655 + #656 new paths
+    ("darwin", "/Users/someuser/.pyenv/versions/3.12.0/bin/python"),  # pyenv macOS
+    ("linux", "/root/.pyenv/versions/3.11.5/bin/python3"),            # pyenv Linux
+    ("linux", "/nix/store/abc123-python3-3.12.0/bin/python3"),        # nix-store
 ]
 
 

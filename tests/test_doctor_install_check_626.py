@@ -733,3 +733,165 @@ def test_os_aware_hint_wired_into_check_path(
         "macOS Homebrew Fix must reference pipx (PEP 668 blocks pip --user).\n"
         f"Fix lines found:\n" + "\n".join(fix_lines)
     )
+
+
+# ---------------------------------------------------------------------------
+# Tests for #655 — Intel Mac Homebrew symlink detection
+# ---------------------------------------------------------------------------
+
+
+def test_hint_intel_mac_homebrew_symlink_resolves_to_pipx(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """#655: Intel Mac Homebrew Python invoked via the symlink
+    /usr/local/bin/python3 must resolve to the Cellar path and return a
+    pipx hint — not fall through to the generic 'pip install --user' hint.
+
+    The fix: pathlib.Path(sys.executable).resolve() converts the symlink
+    to /usr/local/Cellar/python@3.12/.../bin/python3.12, which the
+    existing Cellar-prefix check catches.
+    """
+    # Simulate sys.executable == /usr/local/bin/python3 (the symlink)
+    # and pathlib.Path.resolve() returning the Cellar path.
+    import pathlib as _pathlib
+
+    cellar_path = _pathlib.Path(
+        "/usr/local/Cellar/python@3.12/3.12.9/bin/python3.12",
+    )
+
+    class _FakePath:
+        """Minimal Path surrogate that returns cellar_path from resolve()."""
+
+        def __init__(self, p: str) -> None:
+            self._p = p
+
+        def resolve(self) -> _pathlib.Path:
+            return cellar_path
+
+    monkeypatch.setattr(
+        "iam_jit.cli_doctor_install_check.sys.executable",
+        "/usr/local/bin/python3",
+    )
+    monkeypatch.setattr(
+        "iam_jit.cli_doctor_install_check.sys.platform",
+        "darwin",
+    )
+    monkeypatch.setattr(
+        "iam_jit.cli_doctor_install_check.pathlib.Path",
+        _FakePath,
+    )
+
+    hint = dic._python_install_hint()
+    assert "pipx" in hint, (
+        f"Intel Mac symlink /usr/local/bin/python3 must resolve to Cellar "
+        f"path and emit pipx hint (#655). Got: {hint!r}"
+    )
+    assert "pip install --user" not in hint or "upgrade" not in hint, (
+        f"Intel Mac symlink must NOT fall through to the generic pip --user "
+        f"hint (#655). Got: {hint!r}"
+    )
+
+
+# ---------------------------------------------------------------------------
+# Tests for #656 — pyenv + nix-store + Homebrew opt-symlink detection
+# ---------------------------------------------------------------------------
+
+
+def test_hint_pyenv_emits_pyenv_specific_text(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """#656: pyenv Python (~/.pyenv/versions/X.Y.Z/bin/python) must emit
+    a pyenv-specific hint that mentions 'pyenv exec' or 'pyenv', not the
+    generic 'pip install --user' that would silently install into the wrong
+    environment or fail due to shim wrapping.
+    """
+    monkeypatch.setattr(
+        "iam_jit.cli_doctor_install_check.sys.executable",
+        "/Users/someuser/.pyenv/versions/3.12.0/bin/python",
+    )
+    monkeypatch.setattr(
+        "iam_jit.cli_doctor_install_check.sys.platform",
+        "darwin",
+    )
+
+    hint = dic._python_install_hint()
+    assert "pyenv" in hint.lower(), (
+        f"pyenv Python path must produce a pyenv-specific hint (#656).\n"
+        f"Got: {hint!r}"
+    )
+    assert "git+https://github.com/trsreagan3/iam-jit.git" in hint, (
+        f"pyenv hint must include the canonical git+https:// URL (#654).\n"
+        f"Got: {hint!r}"
+    )
+
+
+def test_hint_pyenv_linux_path_emits_pyenv_text(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """#656: Linux system-wide pyenv (/root/.pyenv/ or /opt/pyenv/) must
+    also produce a pyenv-specific hint.
+    """
+    monkeypatch.setattr(
+        "iam_jit.cli_doctor_install_check.sys.executable",
+        "/root/.pyenv/versions/3.11.5/bin/python3",
+    )
+    monkeypatch.setattr(
+        "iam_jit.cli_doctor_install_check.sys.platform",
+        "linux",
+    )
+
+    hint = dic._python_install_hint()
+    assert "pyenv" in hint.lower(), (
+        f"Linux pyenv path must produce a pyenv-specific hint (#656).\n"
+        f"Got: {hint!r}"
+    )
+
+
+def test_hint_nix_store_emits_nix_specific_text(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """#656: nix-store Python (/nix/store/<hash>/bin/python3) must emit a
+    nix-specific hint that mentions 'nix-shell', not the generic
+    'pip install --user' which won't work in nix's read-only store.
+    """
+    monkeypatch.setattr(
+        "iam_jit.cli_doctor_install_check.sys.executable",
+        "/nix/store/abc123-python3-3.12.0/bin/python3",
+    )
+    monkeypatch.setattr(
+        "iam_jit.cli_doctor_install_check.sys.platform",
+        "linux",
+    )
+
+    hint = dic._python_install_hint()
+    assert "nix" in hint.lower(), (
+        f"nix-store Python path must produce a nix-specific hint (#656).\n"
+        f"Got: {hint!r}"
+    )
+    assert "git+https://github.com/trsreagan3/iam-jit.git" in hint, (
+        f"nix hint must include the canonical git+https:// URL (#654).\n"
+        f"Got: {hint!r}"
+    )
+
+
+def test_hint_apple_silicon_homebrew_still_works_after_655_fix(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Regression guard for #655: Apple Silicon Homebrew Python
+    (/opt/homebrew/...) must still hit the Homebrew branch and return
+    a pipx hint. The symlink-resolve fix must not break this path.
+    """
+    monkeypatch.setattr(
+        "iam_jit.cli_doctor_install_check.sys.executable",
+        "/opt/homebrew/Cellar/python@3.12/3.12.9/bin/python3.12",
+    )
+    monkeypatch.setattr(
+        "iam_jit.cli_doctor_install_check.sys.platform",
+        "darwin",
+    )
+
+    hint = dic._python_install_hint()
+    assert "pipx" in hint, (
+        f"Apple Silicon Homebrew must still emit pipx hint after #655 fix.\n"
+        f"Got: {hint!r}"
+    )
