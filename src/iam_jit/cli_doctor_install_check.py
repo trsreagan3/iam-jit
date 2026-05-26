@@ -406,7 +406,7 @@ def _check_path(section: _Section, paths: dict[str, str] | None = None) -> None:
                     f"deployments)"
                 ),
                 fix=(
-                    f"go install {repo}  "
+                    f"go install {repo} "
                     f"&& ensure {gobin_display} is in PATH"
                 ),
             )

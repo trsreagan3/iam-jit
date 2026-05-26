@@ -52,7 +52,7 @@ pip install --user git+https://github.com/trsreagan3/iam-jit.git
 ### Go bouncers (kbounce / dbounce / gbounce)
 
 Optional — only needed if you use K8s, database, or generic-HTTP interception.
-Requires Go ≥ 1.22 ([install Go](https://go.dev/dl/)).
+Requires Go ≥ 1.26 (auto-fetched via GOTOOLCHAIN on Go 1.21+; older runtimes need toolchain access or a fresh Go install — see [go.dev/dl](https://go.dev/dl/)).
 
 ```bash
 go install github.com/trsreagan3/kbouncer/cmd/kbounce@latest

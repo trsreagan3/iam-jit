@@ -152,15 +152,20 @@ def render_shellinit(
     # window so operators who run shellinit immediately after starting
     # a bouncer know what to do — without suppressing the "not running"
     # line that makes the comment-only output honest.
+    # #658: list the ACTUAL missing bouncer names (not hard-coded "ibounce").
+    # #657: track which bouncers are covered here so per-bouncer fallback
+    #        can skip them and avoid duplicate noise.
+    _header_race_hint_covered: set[str] = set()
     if all_missed and stopped:
+        missing_names = " + ".join(stopped)
         lines.append(
             _comment(
                 shell,
-                "(no AWS_ENDPOINT_URL export — ibounce not running. "
-                "If you JUST started a bouncer, run shellinit again "
-                "in a few seconds.)",
+                f"If you JUST started {missing_names}, run shellinit again "
+                "in a few seconds.",
             ),
         )
+        _header_race_hint_covered = set(stopped)
 
     # Per-bouncer export emission. Each bouncer has its own canonical
     # env-var name + port shape; see posture.bouncers for the source
@@ -182,7 +187,9 @@ def render_shellinit(
                     shell, "AWS_ENDPOINT_URL", f"http://127.0.0.1:{port}",
                 ),
             )
-    else:
+    elif "ibounce" not in _header_race_hint_covered:
+        # Only emit the per-bouncer fallback when the header race-hint
+        # has NOT already covered ibounce (#657 dedupe).
         lines.append(
             _comment(shell, "(no AWS_ENDPOINT_URL export — ibounce not running)"),
         )

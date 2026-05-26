@@ -120,7 +120,13 @@ def test_all_probes_fail_emits_startup_race_hint() -> None:
     assert "run shellinit again" in out, (
         "startup-race hint must be present when all_missed=True"
     )
-    assert "If you JUST started a bouncer" in out
+    # #658: hint must mention the actual missing bouncer names (not hard-coded).
+    assert "If you JUST started" in out
+    # All four bouncers are stopped in this snapshot, so all four names appear.
+    for name in ("ibounce", "kbounce", "dbounce", "gbounce"):
+        assert name in out, (
+            f"hint must list missing bouncer {name!r} by name (#658)"
+        )
 
     # Output must still be comment-only (no export lines).
     for line in out.splitlines():
@@ -184,3 +190,81 @@ def test_render_shellinit_all_missed_defaults_false() -> None:
     out_explicit = si.render_shellinit(snapshot, shell="bash", all_missed=False)
     assert out_default == out_explicit
     assert "run shellinit again" not in out_default
+
+
+# ---------------------------------------------------------------------------
+# Test 6 — #657: header race-hint fires for ibounce; per-bouncer fallback
+#           for ibounce must NOT also fire (dedupe)
+# ---------------------------------------------------------------------------
+
+
+def _snapshot_kbounce_only() -> dict[str, Any]:
+    """kbounce is the only stopped bouncer; ibounce is running."""
+    return {
+        "bouncers": {
+            "ibounce": {"running": True, "port": 8767},
+            "kbounce": {"running": False, "port": 8766},
+            "dbounce": {"running": False, "port": 5433},
+            "gbounce": {"running": False, "port": 8080},
+        }
+    }
+
+
+def test_header_hint_fires_ibounce_per_bouncer_fallback_skipped() -> None:
+    """When all_missed=True AND all bouncers stopped, the header race-hint
+    covers ibounce. The per-bouncer fallback comment
+    '(no AWS_ENDPOINT_URL export — ibounce not running)' must NOT appear
+    a second time, preventing duplicate noise (#657).
+    """
+    snapshot = _snapshot_no_bouncers()
+    out = si.render_shellinit(snapshot, shell="bash", all_missed=True)
+
+    # The header race-hint should be present.
+    assert "run shellinit again" in out, "header race-hint must be present"
+
+    # The per-bouncer fallback duplicate must not fire.
+    assert out.count("ibounce not running") == 0, (
+        "Per-bouncer ibounce fallback must be suppressed when header race-hint "
+        "already covers it (#657). Found redundant 'ibounce not running' in output."
+    )
+
+
+# ---------------------------------------------------------------------------
+# Test 7 — #658: kbounce-only setup uses dynamic bouncer name in hint
+# ---------------------------------------------------------------------------
+
+
+def test_header_hint_names_only_actually_missing_bouncers() -> None:
+    """When only kbounce + dbounce + gbounce are stopped (ibounce running),
+    the race-hint must name those bouncers specifically, NOT hard-code 'ibounce'
+    (#658).
+    """
+    # Manually craft a snapshot where only kbounce/dbounce/gbounce are stopped.
+    snapshot: dict[str, Any] = {
+        "bouncers": {
+            "ibounce": {"running": True, "port": 8767},
+            "kbounce": {"running": False, "port": 8766},
+            "dbounce": {"running": False, "port": 5433},
+            "gbounce": {"running": False, "port": 8080},
+        }
+    }
+    # Simulate all_missed=True (e.g., user started kbounce/dbounce/gbounce
+    # simultaneously but ibounce was already up from a prior session).
+    out = si.render_shellinit(snapshot, shell="bash", all_missed=True)
+
+    # ibounce IS running — its export line must be present.
+    assert "export AWS_ENDPOINT_URL" in out, (
+        "ibounce is running; export must appear"
+    )
+
+    # The race hint must name the actually-missing bouncers.
+    assert "kbounce" in out, "missing kbounce must appear in race hint (#658)"
+    assert "dbounce" in out, "missing dbounce must appear in race hint (#658)"
+    assert "gbounce" in out, "missing gbounce must appear in race hint (#658)"
+
+    # The hint must NOT hard-code 'ibounce' in the race-hint area since
+    # ibounce is running.  ibounce appears in the export line, so we check
+    # that the 'not running' phrase is absent for ibounce specifically.
+    assert "ibounce not running" not in out, (
+        "ibounce is running; 'ibounce not running' must not appear (#658)"
+    )
