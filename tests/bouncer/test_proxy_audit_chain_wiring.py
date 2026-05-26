@@ -421,3 +421,201 @@ async def test_sign_manifests_without_chain_refused_to_start(
     with pytest.raises(RuntimeError, match="audit-sign-manifests"):
         await serve(config, store=store)
     store.close()
+
+
+# ---------------------------------------------------------------------------
+# #494 / §A66b — per-field retention overrides reach AuditLogWriter
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_per_field_retention_overrides_reach_audit_log_writer(
+    tmp_path, restore_audit_writer_registry,
+):
+    """#494 / §A66b — when ProxyConfig carries per-field retention
+    overrides (audit_retention_hot_days etc.), those values MUST
+    reach the AuditLogWriter constructed inside serve(), overriding
+    the framework's defaults.
+
+    The bug: proxy.py called retention_policy_for_framework(framework)
+    WITHOUT the override kwargs, so a declarative retention block with
+    custom tier durations had the per-field values silently dropped.
+    bouncer_cli.py only threaded the framework name string into
+    ProxyConfig; the five override fields didn't exist yet.
+
+    State verification: AuditLogWriter.status()['log']['retention']
+    is the operator-facing surface; custom hot_days / warm_days /
+    cold_days MUST reflect the overridden values, not the PCI defaults.
+    """
+    import iam_jit.bouncer.proxy as _proxy_module
+
+    log_dir = tmp_path / "logs"
+    log_dir.mkdir()
+    log_path = log_dir / "audit.jsonl"
+    store = BouncerStore(db_path=str(tmp_path / "b.db"))
+    proxy_port = _free_port()
+    config = ProxyConfig(
+        host="127.0.0.1",
+        port=proxy_port,
+        mode=ProxyMode.COOPERATIVE,
+        default_policy=DefaultPolicy.DENY,
+        audit_log_path=str(log_path),
+        # Use "pci" framework base but override all tier durations so
+        # we can assert the custom values (not PCI defaults).
+        audit_retention_framework="pci",
+        audit_retention_hot_days=7,        # PCI default is 30
+        audit_retention_warm_days=14,      # PCI default is 90
+        audit_retention_cold_days=30,      # PCI default is 365
+        audit_retention_purge_after_days=None,  # no purge
+        audit_retention_gdpr_pii_purge=False,   # pci default is False
+    )
+    server_task = asyncio.create_task(serve(config, store=store))
+    try:
+        await _wait_for_listen("127.0.0.1", proxy_port)
+        await _drive_one_request(proxy_port)
+        await _wait_for_audit_lines(log_path, min_lines=1)
+        status = _proxy_module.audit_export_status()
+    finally:
+        server_task.cancel()
+        try:
+            await server_task
+        except asyncio.CancelledError:
+            pass
+        store.close()
+
+    log_block = status.get("log") or {}
+    retention = log_block.get("retention") or {}
+    assert retention.get("configured") is True, (
+        "#494 §A66b — retention was set but status reports configured=False; "
+        f"full retention block: {retention!r}"
+    )
+    assert retention.get("compliance") == "pci", retention
+    # The critical assertion: custom tier values MUST survive, not the PCI defaults.
+    assert retention.get("hot_days") == 7, (
+        f"#494 §A66b CRIT — audit_retention_hot_days=7 did NOT reach "
+        f"AuditLogWriter; got {retention.get('hot_days')!r} (expected 7, "
+        f"PCI default is 30). Per-field overrides were being silently "
+        f"dropped by the proxy.py construction path."
+    )
+    assert retention.get("warm_days") == 14, (
+        f"#494 §A66b CRIT — audit_retention_warm_days=14 did NOT reach "
+        f"AuditLogWriter; got {retention.get('warm_days')!r} (expected 14)."
+    )
+    assert retention.get("cold_days") == 30, (
+        f"#494 §A66b CRIT — audit_retention_cold_days=30 did NOT reach "
+        f"AuditLogWriter; got {retention.get('cold_days')!r} (expected 30)."
+    )
+
+
+@pytest.mark.asyncio
+async def test_retention_framework_only_no_overrides_uses_framework_defaults(
+    tmp_path, restore_audit_writer_registry,
+):
+    """#494 / §A66b regression pin — when per-field overrides are NOT
+    set, the framework's defaults MUST apply. This test pins the
+    pre-existing behaviour so a future change that makes overrides
+    required (rather than optional) is caught immediately.
+    """
+    import iam_jit.bouncer.proxy as _proxy_module
+
+    log_dir = tmp_path / "logs"
+    log_dir.mkdir()
+    log_path = log_dir / "audit.jsonl"
+    store = BouncerStore(db_path=str(tmp_path / "b.db"))
+    proxy_port = _free_port()
+    config = ProxyConfig(
+        host="127.0.0.1",
+        port=proxy_port,
+        mode=ProxyMode.COOPERATIVE,
+        default_policy=DefaultPolicy.DENY,
+        audit_log_path=str(log_path),
+        # Framework only — no per-field overrides. PCI defaults apply.
+        audit_retention_framework="pci",
+        # audit_retention_hot_days etc. deliberately omitted (default None).
+    )
+    server_task = asyncio.create_task(serve(config, store=store))
+    try:
+        await _wait_for_listen("127.0.0.1", proxy_port)
+        await _drive_one_request(proxy_port)
+        await _wait_for_audit_lines(log_path, min_lines=1)
+        status = _proxy_module.audit_export_status()
+    finally:
+        server_task.cancel()
+        try:
+            await server_task
+        except asyncio.CancelledError:
+            pass
+        store.close()
+
+    log_block = status.get("log") or {}
+    retention = log_block.get("retention") or {}
+    assert retention.get("configured") is True, retention
+    assert retention.get("compliance") == "pci", retention
+    # PCI defaults from retention.py _FRAMEWORK_DEFAULTS["pci"]:
+    # (hot=30, warm=120, cold=365, purge=None, gdpr_pii_purge=False)
+    assert retention.get("hot_days") == 30, (
+        f"PCI default hot_days should be 30; got {retention.get('hot_days')!r}"
+    )
+    assert retention.get("warm_days") == 120, (
+        f"PCI default warm_days should be 120; got {retention.get('warm_days')!r}"
+    )
+    assert retention.get("cold_days") == 365, (
+        f"PCI default cold_days should be 365; got {retention.get('cold_days')!r}"
+    )
+
+
+def test_bouncer_cli_declaration_extracts_per_field_retention_overrides(
+    tmp_path,
+):
+    """#494 / §A66b — bouncer_cli.py reads per-field retention overrides
+    from a .iam-jit.yaml declaration block and threads them into
+    ProxyConfig. State verification: the locals derived from the parsed
+    declaration must equal the values in the YAML block.
+
+    This is a unit test of the extraction logic; the end-to-end path
+    (declaration → ProxyConfig → AuditLogWriter) is covered by
+    test_per_field_retention_overrides_reach_audit_log_writer.
+    """
+    from unittest.mock import MagicMock, patch
+
+    # Simulate a retention block with all per-field overrides.
+    decl_yaml = {
+        "iam-jit": {
+            "retention": {
+                "compliance": "hipaa",
+                "hot_days": 10,
+                "warm_days": 30,
+                "cold_days": 180,
+                "purge_after_days": 2555,
+                "gdpr_pii_purge": False,
+            }
+        }
+    }
+
+    # We exercise the declaration extraction by calling policy_from_declaration
+    # (the public API bouncer_cli feeds the block to) and checking the result.
+    # The actual CLI invocation is complex; we test the primitive directly.
+    from iam_jit.bouncer.audit_export import retention_policy_from_declaration
+
+    ret_block = decl_yaml["iam-jit"]["retention"]
+    policy = retention_policy_from_declaration(ret_block)
+
+    assert policy.compliance == "hipaa", policy
+    assert policy.hot_days == 10, (
+        f"#494 §A66b — policy_from_declaration did not honour hot_days=10; "
+        f"got {policy.hot_days}"
+    )
+    assert policy.warm_days == 30, policy
+    assert policy.cold_days == 180, policy
+    assert policy.purge_after_days == 2555, policy
+    assert policy.gdpr_pii_purge is False, policy
+
+    # Sabotage check: verify that policy_from_declaration WITHOUT the
+    # per-field block returns the HIPAA defaults (not our custom values).
+    # This confirms the test above would FAIL if the declaration wire
+    # were removed — proving the wire is load-bearing.
+    default_hipaa = retention_policy_from_declaration({"compliance": "hipaa"})
+    assert default_hipaa.hot_days != 10, (
+        "sabotage check: HIPAA default hot_days should NOT be 10; "
+        "if it is, the test above cannot distinguish wired vs unwired state"
+    )

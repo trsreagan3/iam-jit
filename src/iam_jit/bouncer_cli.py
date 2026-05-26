@@ -4866,6 +4866,19 @@ def run_cmd(
     # fatal (log + continue) so a malformed YAML never blocks `ibounce
     # run` from starting — the dedicated `iam-jit doctor` path is where
     # we surface declaration errors loudly.
+    #
+    # #494 / §A66b — per-field retention overrides. Initialise locals
+    # to None; the declaration block below overwrites them when present.
+    # These are declaration-only (no CLI flags for fine-grained tier
+    # durations at the CLI level; the framework name + the `iam-jit audit
+    # retention apply` offline mover handle that). Propagated into
+    # ProxyConfig.audit_retention_{hot,warm,cold,purge_after,gdpr}_*
+    # below so proxy.py serve() passes them to policy_for_framework().
+    _retention_decl_hot_days: int | None = None
+    _retention_decl_warm_days: int | None = None
+    _retention_decl_cold_days: int | None = None
+    _retention_decl_purge_after_days: int | None = None
+    _retention_decl_gdpr_pii_purge: bool | None = None
     if (
         not audit_chain_enabled
         or not audit_sign_manifests
@@ -4897,7 +4910,13 @@ def run_cmd(
                         and _sign_block.get("enabled") is True
                     ):
                         audit_sign_manifests = True
-                    # retention.compliance: NAME
+                    # retention.compliance: NAME + per-field overrides.
+                    # #494 / §A66b: previously only `compliance` was
+                    # extracted here; hot_days / warm_days / cold_days /
+                    # purge_after_days / gdpr_pii_purge were silently
+                    # dropped. Now all five per-field overrides are read
+                    # and stored as locals so ProxyConfig construction
+                    # below can thread them into the writer.
                     _ret_block = _ij_block.get("retention") or {}
                     _ret_framework = _ret_block.get("compliance")
                     if (
@@ -4906,6 +4925,25 @@ def run_cmd(
                         and _ret_framework
                     ):
                         audit_retention_framework = _ret_framework
+                    # Per-field overrides — only applied when not already
+                    # set by a CLI flag (CLI flag wins per §A66c precedence).
+                    # We use a dict key set to propagate "was declared" vs
+                    # "not present" from this block into the ProxyConfig.
+                    _decl_hot = _ret_block.get("hot_days")
+                    if isinstance(_decl_hot, int) and _decl_hot > 0:
+                        _retention_decl_hot_days = _decl_hot
+                    _decl_warm = _ret_block.get("warm_days")
+                    if isinstance(_decl_warm, int) and _decl_warm > 0:
+                        _retention_decl_warm_days = _decl_warm
+                    _decl_cold = _ret_block.get("cold_days")
+                    if isinstance(_decl_cold, int) and _decl_cold > 0:
+                        _retention_decl_cold_days = _decl_cold
+                    _decl_purge = _ret_block.get("purge_after_days")
+                    if isinstance(_decl_purge, int) and _decl_purge > 0:
+                        _retention_decl_purge_after_days = _decl_purge
+                    _decl_gdpr = _ret_block.get("gdpr_pii_purge")
+                    if isinstance(_decl_gdpr, bool):
+                        _retention_decl_gdpr_pii_purge = _decl_gdpr
                     # #499 / §A76b — anomaly_detection declarative
                     # block. Same precedence as audit-chain: CLI flag
                     # wins (operator explicit intent); declaration
@@ -4994,6 +5032,18 @@ def run_cmd(
         audit_manifest_interval_events=audit_manifest_interval_events,
         audit_manifest_keypair_dir=audit_manifest_keypair_dir,
         audit_retention_framework=audit_retention_framework,
+        # #494 / §A66b — per-field retention overrides from declaration.
+        # Only propagated when the declaration block supplied them; None
+        # means "use the framework default" (policy_for_framework handles
+        # the None→default substitution). CLI operators who want custom
+        # tier durations should use --audit-retention-framework + declare
+        # the full block in .iam-jit.yaml; no separate CLI flags for
+        # individual tiers (too many knobs for a CLI surface).
+        audit_retention_hot_days=_retention_decl_hot_days,
+        audit_retention_warm_days=_retention_decl_warm_days,
+        audit_retention_cold_days=_retention_decl_cold_days,
+        audit_retention_purge_after_days=_retention_decl_purge_after_days,
+        audit_retention_gdpr_pii_purge=_retention_decl_gdpr_pii_purge,
         # #499 / §A76b — Phase H anomaly-detection wiring. CLI flag
         # OR declarative `iam-jit.anomaly_detection.enabled: true`
         # (resolved above) sets the mode. Default OFF per

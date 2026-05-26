@@ -1364,6 +1364,42 @@ class ProxyConfig:
     Opt in via `--audit-retention-framework NAME` CLI flag or
     `iam-jit.retention.compliance: NAME` in `.iam-jit.yaml`."""
 
+    # #494 / §A66b — per-field retention overrides. These carry the
+    # hot_days / warm_days / cold_days / purge_after_days /
+    # gdpr_pii_purge values that an operator may declare alongside
+    # `retention.compliance` in `.iam-jit.yaml`. The declarative
+    # `policy_from_declaration()` helper handles all five; previously
+    # only `compliance` was threaded into ProxyConfig so the per-field
+    # overrides were silently dropped at serve() startup. All default
+    # None = "use the framework default". Only meaningful when
+    # `audit_retention_framework` is also set.
+    audit_retention_hot_days: int | None = None
+    """#494 / §A66b — override the framework's hot-tier duration (days).
+    None = use the framework default. Declared via
+    `iam-jit.retention.hot_days: N` in `.iam-jit.yaml`."""
+
+    audit_retention_warm_days: int | None = None
+    """#494 / §A66b — override the framework's warm-tier duration (days).
+    None = use the framework default. Declared via
+    `iam-jit.retention.warm_days: N` in `.iam-jit.yaml`."""
+
+    audit_retention_cold_days: int | None = None
+    """#494 / §A66b — override the framework's cold-tier duration (days).
+    None = use the framework default. Declared via
+    `iam-jit.retention.cold_days: N` in `.iam-jit.yaml`."""
+
+    audit_retention_purge_after_days: int | None = None
+    """#494 / §A66b — override the framework's purge-after duration
+    (days). None = use the framework default (no purge for most
+    frameworks). Declared via `iam-jit.retention.purge_after_days: N`
+    in `.iam-jit.yaml`."""
+
+    audit_retention_gdpr_pii_purge: bool | None = None
+    """#494 / §A66b — override the framework's write-time PII-redaction
+    flag. None = use the framework default (True for gdpr, False for
+    others). Declared via `iam-jit.retention.gdpr_pii_purge: true` in
+    `.iam-jit.yaml`."""
+
     # #499 / §A76b — Phase H anomaly-detection wiring. Mirrors the
     # §A66c audit-chain pattern: each gate default OFF per
     # [[creates-never-mutates]]; the hook is installed at serve()
@@ -4291,9 +4327,21 @@ async def serve(config: ProxyConfig, *, store: BouncerStore) -> None:
             # policy_for_framework raises ValueError on unknown framework;
             # surface it as a startup RuntimeError so the operator sees
             # the typo immediately.
+            #
+            # #494 / §A66b — pass per-field overrides so declarative
+            # hot_days / warm_days / cold_days / purge_after_days /
+            # gdpr_pii_purge values from .iam-jit.yaml actually reach
+            # the writer. Previously only the framework name was threaded
+            # so per-field overrides were silently ignored at serve()
+            # startup despite being parsed in bouncer_cli.py.
             try:
                 _retention_policy = retention_policy_for_framework(
                     config.audit_retention_framework,
+                    hot_days=config.audit_retention_hot_days,
+                    warm_days=config.audit_retention_warm_days,
+                    cold_days=config.audit_retention_cold_days,
+                    purge_after_days=config.audit_retention_purge_after_days,
+                    gdpr_pii_purge=config.audit_retention_gdpr_pii_purge,
                 )
             except ValueError as _ret_err:
                 raise RuntimeError(
