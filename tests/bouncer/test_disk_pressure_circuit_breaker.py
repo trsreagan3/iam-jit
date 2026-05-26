@@ -480,7 +480,23 @@ async def test_healthz_includes_audit_log_block(tmp_path: pathlib.Path) -> None:
     audit_log block. When the bouncer is configured with
     --audit-log-path the block has real disk telemetry; otherwise it
     surfaces status=ok with disk_free_pct=null so monitoring parsers
-    can branch on a single field."""
+    can branch on a single field.
+
+    #625 — patch shutil.disk_usage to return a healthy (50%-used)
+    snapshot so the test is stable regardless of the CI/dev-machine
+    disk fill level.  Without the patch the initial probe fires against
+    the real filesystem; on machines at or above the default crit_pct
+    (95 %) the probe sets refuse_requests=True and the assertion fails.
+    The contract under test is the /healthz block shape, not real-disk
+    behaviour — real-disk reactions are covered by the mode-behaviour
+    tests above which use the statvfs injection seam directly.
+    """
+    import collections
+    _safe_usage = collections.namedtuple("usage", ["total", "used", "free"])(
+        total=1_000_000,
+        used=500_000,
+        free=500_000,
+    )
     audit_log_path = tmp_path / "audit" / "ibounce.jsonl"
     audit_log_path.parent.mkdir(parents=True, exist_ok=True)
     audit_log_path.write_text("")
@@ -494,33 +510,37 @@ async def test_healthz_includes_audit_log_block(tmp_path: pathlib.Path) -> None:
         audit_log_path=str(audit_log_path),
         disk_pressure_mode=DISK_PRESSURE_MODE_PAUSE_REQUESTS,
     )
-    task = asyncio.create_task(serve(config, store=store))
-    try:
-        await _wait_for_listen("127.0.0.1", port)
-        await asyncio.sleep(0.2)  # let initial probe fire
-        import aiohttp
-        async with aiohttp.ClientSession() as session:
-            async with session.get(
-                f"http://127.0.0.1:{port}/healthz"
-            ) as resp:
-                body = await resp.json()
-        assert "audit_log" in body
-        block = body["audit_log"]
-        assert block["status"] in ("ok", "degraded", "critical", "emergency")
-        assert block["disk_pressure_mode"] == DISK_PRESSURE_MODE_PAUSE_REQUESTS
-        assert block["warn_pct"] == 85
-        assert block["crit_pct"] == 95
-        assert block["emergency_pct"] == 98
-        assert block["path"] is not None
-        assert block["refuse_requests"] is False
-    finally:
-        task.cancel()
+    with patch(
+        "iam_jit.bouncer.audit_export.rotation.shutil.disk_usage",
+        return_value=_safe_usage,
+    ):
+        task = asyncio.create_task(serve(config, store=store))
         try:
-            await task
-        except asyncio.CancelledError:
-            pass
-        store.close()
-        register_disk_pressure_state(None)
+            await _wait_for_listen("127.0.0.1", port)
+            await asyncio.sleep(0.2)  # let initial probe fire
+            import aiohttp
+            async with aiohttp.ClientSession() as session:
+                async with session.get(
+                    f"http://127.0.0.1:{port}/healthz"
+                ) as resp:
+                    body = await resp.json()
+            assert "audit_log" in body
+            block = body["audit_log"]
+            assert block["status"] in ("ok", "degraded", "critical", "emergency")
+            assert block["disk_pressure_mode"] == DISK_PRESSURE_MODE_PAUSE_REQUESTS
+            assert block["warn_pct"] == 85
+            assert block["crit_pct"] == 95
+            assert block["emergency_pct"] == 98
+            assert block["path"] is not None
+            assert block["refuse_requests"] is False
+        finally:
+            task.cancel()
+            try:
+                await task
+            except asyncio.CancelledError:
+                pass
+            store.close()
+            register_disk_pressure_state(None)
 
 
 @pytest.mark.asyncio
