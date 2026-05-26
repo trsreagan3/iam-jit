@@ -19,6 +19,7 @@ from fastapi.templating import Jinja2Templates
 from itsdangerous import BadSignature
 
 from .. import __version__, assume as assume_mod, audit, auth as auth_mod, bans as bans_mod, health as health_mod, lifecycle, magic_link_nonces, onboarding as onboarding_mod, prompt_injection, rate_limit as rate_limit_mod, review, schema
+from ..audit_admin_action import emit_iam_jit_admin_action
 from ..api_tokens_store import APITokenRecord, APITokenStore
 from ..auth import issue_api_token
 from ..accounts_store import (
@@ -2408,28 +2409,22 @@ def accounts_register(
             "via": "web",
         },
     )
-    # OCSF v1.1.0 class 6003 admin-action event (#278).
-    try:
-        from ..bouncer.audit_export.admin_action import (
-            ADMIN_ACTION_SOURCE_API,
-            emit_admin_action_direct,
-        )
-        from ..bouncer.proxy import _emit_audit_event
-        emit_admin_action_direct(
-            _emit_audit_event,
-            kind="account.registered",
-            actor=user.id,
-            target_kind="aws_account",
-            target_id=account.account_id,
-            source=ADMIN_ACTION_SOURCE_API,
-            extra={
-                "alias": account.alias,
-                "provisioning_mode": account.provisioning_mode,
-                "via": "web",
-            },
-        )
-    except Exception:
-        pass
+    # OCSF v1.1.0 class 6003 admin-action event (#278 / #660).
+    # #660: replaced bouncer.proxy-only emit with emit_iam_jit_admin_action()
+    # so the OCSF event also lands in audit.jsonl in local mode (per #632).
+    # #661: logger.warning on failure instead of silent except-pass.
+    emit_iam_jit_admin_action(
+        kind="account.registered",
+        actor=user.id,
+        target_kind="aws_account",
+        target_id=account.account_id,
+        source="api",
+        extra={
+            "alias": account.alias,
+            "provisioning_mode": account.provisioning_mode,
+            "via": "web",
+        },
+    )
     return RedirectResponse(url=f"/accounts/{account_id}", status_code=303)
 
 
@@ -2475,22 +2470,16 @@ def account_deregister(account_id: str, request: Request) -> Response:
         summary=f"deregistered account {account_id}",
         details={"account_id": account_id, "via": "web"},
     )
-    # OCSF v1.1.0 class 6003 admin-action event (#278).
-    try:
-        from ..bouncer.audit_export.admin_action import (
-            ADMIN_ACTION_SOURCE_API,
-            emit_admin_action_direct,
-        )
-        from ..bouncer.proxy import _emit_audit_event
-        emit_admin_action_direct(
-            _emit_audit_event,
-            kind="account.deregistered",
-            actor=user.id,
-            target_kind="aws_account",
-            target_id=account_id,
-            source=ADMIN_ACTION_SOURCE_API,
-            extra={"via": "web"},
-        )
-    except Exception:
-        pass
+    # OCSF v1.1.0 class 6003 admin-action event (#278 / #660).
+    # #660: replaced bouncer.proxy-only emit with emit_iam_jit_admin_action()
+    # so the OCSF event also lands in audit.jsonl in local mode (per #632).
+    # #661: logger.warning on failure instead of silent except-pass.
+    emit_iam_jit_admin_action(
+        kind="account.deregistered",
+        actor=user.id,
+        target_kind="aws_account",
+        target_id=account_id,
+        source="api",
+        extra={"via": "web"},
+    )
     return RedirectResponse(url="/accounts", status_code=303)

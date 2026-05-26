@@ -26,6 +26,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel, Field
 
 from .. import audit, onboarding
+from ..audit_admin_action import emit_iam_jit_admin_action
 from ..accounts_store import (
     Account,
     AccountAlreadyExists,
@@ -166,28 +167,22 @@ def register_account(
             "has_discovery": account.has_discovery,
         },
     )
-    # OCSF v1.1.0 class 6003 admin-action event (#278).
-    try:
-        from ..bouncer.audit_export.admin_action import (
-            ADMIN_ACTION_SOURCE_API,
-            emit_admin_action_direct,
-        )
-        from ..bouncer.proxy import _emit_audit_event
-        emit_admin_action_direct(
-            _emit_audit_event,
-            kind="account.registered",
-            actor=user.id,
-            target_kind="aws_account",
-            target_id=account.account_id,
-            source=ADMIN_ACTION_SOURCE_API,
-            extra={
-                "alias": account.alias,
-                "provisioning_mode": account.provisioning_mode,
-                "has_discovery": account.has_discovery,
-            },
-        )
-    except Exception:
-        pass
+    # OCSF v1.1.0 class 6003 admin-action event (#278 / #660).
+    # #660: replaced bouncer.proxy-only emit with emit_iam_jit_admin_action()
+    # so the OCSF event also lands in audit.jsonl in local mode (per #632).
+    # #661: logger.warning on failure instead of silent except-pass.
+    emit_iam_jit_admin_action(
+        kind="account.registered",
+        actor=user.id,
+        target_kind="aws_account",
+        target_id=account.account_id,
+        source="api",
+        extra={
+            "alias": account.alias,
+            "provisioning_mode": account.provisioning_mode,
+            "has_discovery": account.has_discovery,
+        },
+    )
     return _to_response(account)
 
 
@@ -244,21 +239,15 @@ def deregister_account(
         summary=f"deregistered account {account_id}",
         details={"account_id": account_id},
     )
-    # OCSF v1.1.0 class 6003 admin-action event (#278).
-    try:
-        from ..bouncer.audit_export.admin_action import (
-            ADMIN_ACTION_SOURCE_API,
-            emit_admin_action_direct,
-        )
-        from ..bouncer.proxy import _emit_audit_event
-        emit_admin_action_direct(
-            _emit_audit_event,
-            kind="account.deregistered",
-            actor=user.id,
-            target_kind="aws_account",
-            target_id=account_id,
-            source=ADMIN_ACTION_SOURCE_API,
-        )
-    except Exception:
-        pass
+    # OCSF v1.1.0 class 6003 admin-action event (#278 / #660).
+    # #660: replaced bouncer.proxy-only emit with emit_iam_jit_admin_action()
+    # so the OCSF event also lands in audit.jsonl in local mode (per #632).
+    # #661: logger.warning on failure instead of silent except-pass.
+    emit_iam_jit_admin_action(
+        kind="account.deregistered",
+        actor=user.id,
+        target_kind="aws_account",
+        target_id=account_id,
+        source="api",
+    )
     return {"deregistered": True, "account_id": account_id}
