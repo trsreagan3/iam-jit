@@ -37,6 +37,7 @@ from __future__ import annotations
 
 import os
 import pathlib
+import time
 from typing import Any
 
 import click
@@ -84,12 +85,20 @@ def _comment(shell: str, text: str) -> str:
 
 
 def render_shellinit(
-    snapshot: dict[str, Any], *, shell: str,
+    snapshot: dict[str, Any],
+    *,
+    shell: str,
+    all_missed: bool = False,
 ) -> str:
     """Render the shellinit text from a posture snapshot. Pure
     function; no IO. Per [[ibounce-honest-positioning]] this NEVER
     emits an export for a bouncer that's misconfigured — instead it
     comments the line with the misconfig note so `eval` is safe.
+
+    ``all_missed`` should be True when every retry attempt in
+    ``_capture_posture_with_retry`` found no running bouncer — triggers
+    an additional hint comment pointing operators at the start-up-race
+    window per [[ibounce-honest-positioning]].
     """
     if shell not in _SHELL_SYNTAX:
         # Defensive: caller validated, but keep render_shellinit
@@ -136,6 +145,20 @@ def render_shellinit(
             _comment(
                 shell,
                 f"Detected NOT running: {', '.join(stopped)}",
+            ),
+        )
+    # Per [[ibounce-honest-positioning]]: when EVERY retry attempt
+    # found no running bouncer, surface a hint about the start-up race
+    # window so operators who run shellinit immediately after starting
+    # a bouncer know what to do — without suppressing the "not running"
+    # line that makes the comment-only output honest.
+    if all_missed and stopped:
+        lines.append(
+            _comment(
+                shell,
+                "(no AWS_ENDPOINT_URL export — ibounce not running. "
+                "If you JUST started a bouncer, run shellinit again "
+                "in a few seconds.)",
             ),
         )
 
@@ -210,6 +233,48 @@ def render_shellinit(
     return "\n".join(lines) + "\n"
 
 
+# Retry schedule (seconds between attempts).  Cumulative: 0 + 0.25 + 0.5 + 1.0 = 1.75 s max.
+_RETRY_DELAYS: tuple[float, ...] = (0.25, 0.5, 1.0)
+
+
+def _capture_posture_with_retry() -> tuple[dict[str, Any], bool]:
+    """Run capture_posture() with exponential backoff.
+
+    Retries up to len(_RETRY_DELAYS) more times after the initial
+    attempt, sleeping _RETRY_DELAYS[i] between attempts.  Stops
+    early as soon as at least one bouncer is detected running.
+
+    Returns a 2-tuple:
+      (snapshot, all_missed)
+
+    ``all_missed`` is True when EVERY attempt returned no running
+    bouncers — callers use this to decide whether to emit the
+    start-up-race hint comment.
+    """
+    from .posture import capture_posture
+
+    snapshot = capture_posture()
+    bouncers = snapshot.get("bouncers", {})
+    any_running = any(
+        b.get("running") for b in bouncers.values() if isinstance(b, dict)
+    )
+    if any_running:
+        return snapshot, False
+
+    for delay in _RETRY_DELAYS:
+        time.sleep(delay)
+        snapshot = capture_posture()
+        bouncers = snapshot.get("bouncers", {})
+        any_running = any(
+            b.get("running") for b in bouncers.values() if isinstance(b, dict)
+        )
+        if any_running:
+            return snapshot, False
+
+    # All attempts exhausted with no bouncer found.
+    return snapshot, True
+
+
 def register_shellinit_command(main_group: click.Group) -> click.Command:
     """Attach `shellinit` to the top-level iam-jit Click group.
 
@@ -244,10 +309,11 @@ def register_shellinit_command(main_group: click.Group) -> click.Command:
         if shell not in _SHELL_SYNTAX:
             shell = "bash"
 
-        from .posture import capture_posture
-
-        snapshot = capture_posture()
-        click.echo(render_shellinit(snapshot, shell=shell), nl=False)
+        snapshot, all_missed = _capture_posture_with_retry()
+        click.echo(
+            render_shellinit(snapshot, shell=shell, all_missed=all_missed),
+            nl=False,
+        )
 
     return shellinit_cmd
 

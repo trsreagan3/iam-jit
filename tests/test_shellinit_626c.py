@@ -210,7 +210,7 @@ def test_sabotage_render_shellinit_proves_snapshot_drives_output(
     """
     _no_bouncers(monkeypatch)
 
-    def _fake_render(snap: dict, *, shell: str) -> str:  # noqa: ARG001
+    def _fake_render(snap: dict, *, shell: str, **_kw: object) -> str:  # noqa: ARG001
         return "export AWS_ENDPOINT_URL='http://example.invalid'\n"
     monkeypatch.setattr(si, "render_shellinit", _fake_render)
 
