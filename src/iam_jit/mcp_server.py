@@ -3102,6 +3102,194 @@ TOOLS.extend([
 ])
 
 
+# #444 / §A75 — iam_jit_audit_search MCP tool (Sysdig Sage pattern).
+#
+# Exposes the full cross-bouncer audit-query surface (built by #419 /
+# #436 / #496 / #498 / #620) as a single agent-callable MCP tool with
+# a STRUCTURED input schema.  The calling agent — which already has an
+# LLM — does the NL→structured translation; this tool does NOT call an
+# LLM per [[bouncer-zero-llm-when-agent-in-loop]] (Interpretation A).
+# The tool description is rich enough for any MCP-aware LLM to map an
+# operator NL prompt ("show me failed S3 PutObject in the last hour")
+# to the correct structured field values without iam-jit touching the
+# LLM chain.
+#
+# This wraps the helpers already tested by the CLI surface
+# (_query_one_bouncer, _resolve_bouncer_set, _resolve_serve_endpoint,
+# _parse_since_long_range, _expand_short_form_filters,
+# extract_permissions_via_fanout, _format_ocsf_bundle, etc.) so zero
+# query-logic is duplicated.
+TOOLS.extend([
+    {
+        "name": "iam_jit_audit_search",
+        "description": (
+            "Search iam-jit + bouncer audit events across ibounce, "
+            "kbounce, dbounce, gbounce, and iam-jit-serve. Accepts "
+            "structured query parameters; returns OCSF events / "
+            "summary counts / ocsf-bundle / permission-set shape. "
+            "Read-only. Per [[bouncer-zero-llm-when-agent-in-loop]] "
+            "this tool does NOT call an LLM — the CALLING AGENT does "
+            "the NL→structured translation using its own LLM before "
+            "invoking this tool. "
+            "\n\n"
+            "NL-to-structured translation guide (for agents): "
+            "'show me failed S3 PutObject in last hour' → "
+            "{since: '1h', action: ['s3:PutObject'], outcome: 'deny'}. "
+            "'all events from agent session X' → "
+            "{agent_session_id: 'X'}. "
+            "'IAM role creations today' → "
+            "{since: '24h', action: ['iam:CreateRole']}. "
+            "'prod S3 bucket writes' → "
+            "{resource_arn_glob: 'arn:aws:s3:::prod-*', "
+            "action: ['s3:Put*', 's3:Delete*']}. "
+            "translate to the structured fields below before calling. "
+            "\n\n"
+            "Pairs with `bounce_extract_permissions_from_audit` "
+            "(single-bouncer permission-set extraction) and "
+            "`iam_jit_request_role_from_synthesis` (role provisioning "
+            "from the extracted set). Use `format: 'ocsf-bundle'` "
+            "when attaching results to a Claude conversation for "
+            "cross-bouncer investigation."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "since": {
+                    "type": "string",
+                    "description": (
+                        "Time lower bound. Short-form tokens: `1h`, "
+                        "`30m`, `2d`, `1w`, `6M`, `2y`. Or ISO 8601 "
+                        "UTC: `2026-05-25T00:00:00Z`. Default: no "
+                        "lower bound (bouncer's full window)."
+                    ),
+                },
+                "until": {
+                    "type": "string",
+                    "description": (
+                        "Optional time upper bound. Same format as "
+                        "`since`."
+                    ),
+                },
+                "action": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": (
+                        "AWS API actions to filter for (exact-match or "
+                        "glob). Examples: ['s3:PutObject'], "
+                        "['iam:CreateRole', 'iam:AttachRolePolicy'], "
+                        "['s3:Put*']. Each item is forwarded as a "
+                        "`api.operation=VALUE` filter. Omit to return "
+                        "all actions."
+                    ),
+                },
+                "resource_arn_glob": {
+                    "type": "string",
+                    "description": (
+                        "Optional ARN glob to filter by resource. "
+                        "Example: `arn:aws:s3:::prod-*`. Applied "
+                        "client-side against the OCSF `resources` "
+                        "array after the per-bouncer query."
+                    ),
+                },
+                "outcome": {
+                    "type": "string",
+                    "enum": ["allow", "deny", "any"],
+                    "default": "any",
+                    "description": (
+                        "Filter by verdict/outcome. `deny` = only "
+                        "blocked calls; `allow` = only permitted; "
+                        "`any` = no outcome filter (default). "
+                        "Forwarded as `unmapped.iam_jit.verdict=VALUE` "
+                        "filter."
+                    ),
+                },
+                "agent_session_id": {
+                    "type": "string",
+                    "description": (
+                        "Optional agent session ID for cross-bouncer "
+                        "correlation. Forwarded as the "
+                        "`agent.session_id=VALUE` short-form filter "
+                        "(expanded to the canonical "
+                        "`unmapped.iam_jit.agent.session_id=VALUE` "
+                        "path before forwarding per #320 / §A18)."
+                    ),
+                },
+                "kind": {
+                    "type": "string",
+                    "description": (
+                        "#620 — iam-jit serve event kind short-form "
+                        "(e.g. `request_cap_exceeded`, `grant_issued`, "
+                        "`admin_action`). Expands to "
+                        "`unmapped.iam_jit.kind=VALUE` filter; bouncers "
+                        "ignore it, iam-jit serve consumes it."
+                    ),
+                },
+                "bouncer": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": (
+                        "Which bouncers to include in the fan-out. "
+                        "Default: all four default bouncers PLUS "
+                        "iam-jit-serve (#620). Each entry is either "
+                        "a short name (`ibounce`, `kbounce`, `dbounce`, "
+                        "`gbounce`) or a `name=URL` override. "
+                        "Pass `['ibounce']` to restrict to one surface."
+                    ),
+                },
+                "limit": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "maximum": 10000,
+                    "default": 100,
+                    "description": (
+                        "Per-bouncer event cap. Each reachable bouncer "
+                        "returns up to this many events; the merged "
+                        "stream is the union sorted by timestamp."
+                    ),
+                },
+                "format": {
+                    "type": "string",
+                    "enum": [
+                        "events", "summary", "ocsf-bundle",
+                    ],
+                    "default": "events",
+                    "description": (
+                        "`events` (default) — list of OCSF event "
+                        "dicts, merged + sorted by timestamp. "
+                        "`summary` — per-bouncer + total counts; no "
+                        "event bodies (cheap probe). "
+                        "`ocsf-bundle` — ONE Detection Finding "
+                        "wrapping all events (drop into Claude for "
+                        "cross-bouncer investigation)."
+                    ),
+                },
+                "extract_permissions": {
+                    "type": "boolean",
+                    "default": False,
+                    "description": (
+                        "#419 / §A58 — when true, return a structured "
+                        "permission set "
+                        "({time_window, bouncer, events_analyzed, "
+                        "permissions, observed_scope}) ready for "
+                        "`iam_jit_request_role_from_synthesis`. "
+                        "Requires exactly ONE entry in `bouncer` "
+                        "(single-bouncer semantics per #419)."
+                    ),
+                },
+                "audit_events_token": {
+                    "type": "string",
+                    "description": (
+                        "Bearer token for bouncer /audit/events "
+                        "endpoints bound off-loopback. Loopback "
+                        "queries don't need this."
+                    ),
+                },
+            },
+        },
+    },
+])
+
+
 # #419 / §A58 — bounce_extract_permissions_from_audit MCP tool. Phase E
 # of [[bouncer-informs-agent-informs-iam-jit]]: agent calls this to
 # turn a window of bouncer audit events into a structured permission
@@ -6064,6 +6252,12 @@ def _handle_request(req: dict[str, Any]) -> dict[str, Any] | None:
             result_payload = (
                 _bounce_deployment_targets_for_filter_for_mcp(args)
             )
+        elif tool_name == "iam_jit_audit_search":
+            # #444 / §A75 — NL-to-query MCP wrapper for
+            # `iam-jit audit query` (Sysdig Sage pattern). Accepts
+            # structured input; the calling agent does NL→structured
+            # translation per [[bouncer-zero-llm-when-agent-in-loop]].
+            result_payload = _iam_jit_audit_search_for_mcp(args)
         else:
             return _err(rid, -32601, f"unknown tool: {tool_name}")
         # MCP tool result format: { content: [{type: "text", text: "..."}] }
@@ -7098,6 +7292,262 @@ def _emit_session_ended_on_close() -> None:
             extra={"degraded_exc_type": type(_ae_exc).__name__},
         )
         return
+
+
+def _iam_jit_audit_search_for_mcp(
+    args: dict[str, Any],
+) -> dict[str, Any]:
+    """MCP backend for ``iam_jit_audit_search`` (#444 / §A75).
+
+    Sysdig Sage pattern: structured input wrapper around the full
+    cross-bouncer ``iam-jit audit query`` surface.  The calling agent
+    does NL→structured translation using its own LLM; this function
+    does NOT call an LLM per [[bouncer-zero-llm-when-agent-in-loop]].
+
+    Reuses all existing query helpers from ``cli_audit_query``:
+
+    * ``_parse_since_long_range``  — #498 short-form expansion
+    * ``_expand_short_form_filters`` — #320/§A18 agent alias map
+    * ``_resolve_bouncer_set``     — #620 serve fan-out included
+    * ``_query_one_bouncer``       — parallel fan-out
+    * ``_format_ocsf_bundle``      — #271 bundle shape
+    * ``_format_summary``          — per-bouncer counts
+    * ``extract_permissions_via_fanout`` — #419 permission-set shape
+
+    Per [[creates-never-mutates]] read-only.
+    Per [[self-host-zero-billing-dependency]] no phone-home.
+    """
+    from .cli_audit_query import (
+        DEFAULT_BOUNCERS,
+        _BouncerQueryResult,
+        _event_time_key,
+        _expand_short_form_filters,
+        _format_ocsf_bundle,
+        _format_summary,
+        _parse_bouncer_override,
+        _parse_since_long_range,
+        _query_one_bouncer,
+        _resolve_bouncer_set,
+        _resolve_serve_endpoint,
+    )
+    from concurrent.futures import ThreadPoolExecutor, as_completed as _as_completed
+
+    # --- time window ---
+    since_raw = args.get("since")
+    until_raw = args.get("until")
+    since = _parse_since_long_range(str(since_raw)) if since_raw else None
+    until = _parse_since_long_range(str(until_raw)) if until_raw else None
+
+    # --- build filter list ---
+    filter_exprs: tuple[str, ...] = ()
+
+    # action → forward as api.operation= filter (per-bouncer field)
+    action_list = args.get("action") or []
+    if isinstance(action_list, list):
+        for act in action_list:
+            if isinstance(act, str) and act.strip():
+                filter_exprs = filter_exprs + (
+                    f"api.operation={act.strip()}",
+                )
+
+    # outcome → forward as unmapped.iam_jit.verdict= filter
+    outcome = (args.get("outcome") or "any").lower()
+    if outcome in ("allow", "deny"):
+        filter_exprs = filter_exprs + (
+            f"unmapped.iam_jit.verdict={outcome}",
+        )
+
+    # agent_session_id → short-form (expanded by _expand_short_form_filters)
+    agent_session_id = args.get("agent_session_id")
+    if isinstance(agent_session_id, str) and agent_session_id.strip():
+        filter_exprs = filter_exprs + (
+            f"agent.session_id={agent_session_id.strip()}",
+        )
+
+    # kind → #620 iam-jit serve event kind
+    kind = args.get("kind")
+    if isinstance(kind, str) and kind.strip():
+        filter_exprs = filter_exprs + (
+            f"unmapped.iam_jit.kind={kind.strip()}",
+        )
+
+    # Expand short-form aliases (#320/§A18)
+    filter_exprs = _expand_short_form_filters(filter_exprs)
+
+    # --- per-bouncer limit ---
+    limit_raw = args.get("limit", 100)
+    try:
+        limit = int(limit_raw)
+    except (TypeError, ValueError):
+        limit = 100
+    if limit < 1:
+        limit = 1
+    if limit > 10000:
+        limit = 10000
+
+    # --- bearer token ---
+    audit_events_token = args.get("audit_events_token")
+
+    # --- bouncer set ---
+    bouncer_list = args.get("bouncer") or []
+    if isinstance(bouncer_list, list) and bouncer_list:
+        # Convert list to tuple for _resolve_bouncer_set
+        bouncers_raw: tuple[str, ...] = tuple(str(b) for b in bouncer_list)
+    else:
+        # Default: all four + serve (include_serve=True)
+        bouncers_raw = ()
+
+    try:
+        bouncers = _resolve_bouncer_set(bouncers_raw, include_serve=True)
+    except Exception as e:
+        return {
+            "status": "error",
+            "code": "invalid_bouncer",
+            "message": str(e),
+        }
+
+    # --- format ---
+    fmt = (args.get("format") or "events").lower()
+    extract_permissions = bool(args.get("extract_permissions", False))
+
+    # #419 single-bouncer guard for extract_permissions
+    if extract_permissions and len(bouncers) != 1:
+        return {
+            "status": "error",
+            "code": "extract_permissions_requires_one_bouncer",
+            "message": (
+                "`extract_permissions: true` requires exactly one entry "
+                f"in `bouncer` (got {len(bouncers)}). "
+                "Pass `bouncer: ['ibounce']` (or the relevant bouncer) "
+                "to restrict to a single source."
+            ),
+        }
+
+    # --- fan-out ---
+    results: list[_BouncerQueryResult] = []
+    try:
+        with ThreadPoolExecutor(max_workers=max(1, len(bouncers))) as pool:
+            futures = {
+                pool.submit(
+                    _query_one_bouncer,
+                    ep,
+                    since=since,
+                    until=until,
+                    filters=filter_exprs,
+                    limit=limit,
+                    bearer_token=(
+                        str(audit_events_token)
+                        if audit_events_token else None
+                    ),
+                ): ep
+                for ep in bouncers
+            }
+            for fut in _as_completed(futures):
+                results.append(fut.result())
+    except Exception as e:
+        return {
+            "status": "error",
+            "code": "fanout_failed",
+            "message": str(e),
+        }
+
+    # Collect per-bouncer notes for unreachable surfaces
+    notes: list[str] = [
+        f"{r.bouncer} skipped ({r.error})"
+        for r in sorted(results, key=lambda x: x.bouncer)
+        if r.error
+    ]
+
+    # --- summary fast-path ---
+    if fmt == "summary":
+        ordered = sorted(results, key=lambda x: x.bouncer)
+        summary_text = _format_summary(ordered)
+        counts: dict[str, Any] = {}
+        total = 0
+        for r in ordered:
+            if r.error:
+                counts[r.bouncer] = {"error": r.error}
+            else:
+                counts[r.bouncer] = len(r.events)
+                total += len(r.events)
+        return {
+            "status": "ok",
+            "format": "summary",
+            "total_events": total,
+            "per_bouncer": counts,
+            "notes": notes,
+            "summary_text": summary_text,
+        }
+
+    # --- merge + sort ---
+    merged: list[dict[str, Any]] = []
+    for r in results:
+        merged.extend(r.events)
+    merged.sort(key=_event_time_key)
+
+    # --- client-side resource_arn_glob filter ---
+    resource_arn_glob = args.get("resource_arn_glob")
+    if isinstance(resource_arn_glob, str) and resource_arn_glob.strip():
+        from .cli_audit_query import _glob_match
+        glob = resource_arn_glob.strip()
+        filtered: list[dict[str, Any]] = []
+        for ev in merged:
+            resources = ev.get("resources") or []
+            if not isinstance(resources, list):
+                resources = []
+            # Match if ANY resource ARN matches the glob
+            if any(
+                _glob_match(str(r.get("uid") or r.get("arn") or ""), glob)
+                for r in resources
+                if isinstance(r, dict)
+            ) or any(
+                _glob_match(str(r), glob)
+                for r in resources
+                if isinstance(r, str)
+            ):
+                filtered.append(ev)
+        merged = filtered
+
+    # --- extract_permissions path (#419) ---
+    if extract_permissions:
+        from .audit_extract import extract_permissions_from_events
+        window = {"from": since or "", "to": until or ""}
+        extracted = extract_permissions_from_events(
+            merged,
+            bouncer=bouncers[0].name,
+            time_window=window,
+            notes=tuple(notes),
+        )
+        payload = extracted.as_dict()
+        payload["status"] = "ok"
+        payload["format"] = "permissions"
+        return payload
+
+    # --- ocsf-bundle path ---
+    if fmt == "ocsf-bundle":
+        bundle_str = _format_ocsf_bundle(merged)
+        try:
+            bundle_obj = json.loads(bundle_str)
+        except Exception:
+            bundle_obj = {"raw": bundle_str}
+        return {
+            "status": "ok",
+            "format": "ocsf-bundle",
+            "events_total": len(merged),
+            "bouncers_queried": [ep.name for ep in bouncers],
+            "notes": notes,
+            "bundle": bundle_obj,
+        }
+
+    # --- default: events list ---
+    return {
+        "status": "ok",
+        "format": "events",
+        "events_total": len(merged),
+        "bouncers_queried": [ep.name for ep in bouncers],
+        "notes": notes,
+        "events": merged,
+    }
 
 
 def main() -> int:
