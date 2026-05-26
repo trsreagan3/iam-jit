@@ -525,6 +525,12 @@ _BOUNCER_FLAG_SIGNATURES: dict[str, tuple[str, ...]] = {
         "--mode transparent",
         "--proxy-port",
         "--audit-log-path",
+        # #638: `python -m iam_jit.bouncer_cli` is the standard dev
+        # launch pattern. The module name in argv IS a strong ibounce
+        # signal — at least as distinctive as the CLI flags. Also
+        # include the legacy module name for older installs.
+        "iam_jit.bouncer_cli",
+        "iam_jit_bouncer",
     ),
     "kbounce": (
         "--apiserver-url",
@@ -776,6 +782,22 @@ def _classify_bouncer_pid_multifactor(
                 f"executable path {paths_str} not under known install root"
             )
 
+    # #638: `python -m iam_jit.bouncer_cli` launch pattern — the module
+    # namespace in argv IS a path-origin substitute. When the interpreter
+    # is foreign (not under install root) but the cmdline contains a
+    # project-namespaced module token ("iam_jit." or "iam_jit_bouncer"),
+    # we treat that as sufficient origin evidence for Factor 1, because
+    # the namespace is specific to this project and cannot coincidentally
+    # appear in an unrelated foreign process.
+    # We only override path_ok here — the flag check (Factor 2) and
+    # user check (Factor 3) still independently gate on their own signals.
+    _IAM_JIT_MODULE_TOKENS = ("iam_jit.", "iam_jit_bouncer")
+    if not path_ok and any(tok in cmdline for tok in _IAM_JIT_MODULE_TOKENS):
+        path_ok = True
+        # Remove the "path not under known install root" failure we just
+        # added — it's superseded by the module-namespace origin evidence.
+        failed = [f for f in failed if "not under known install root" not in f]
+
     # Factor 2: cmdline contains a bouncer-specific flag signature.
     # If the path gave us a candidate kind, only check that kind's
     # flags. Otherwise try every kind so a path-but-no-basename match
@@ -997,6 +1019,23 @@ def _all_listening_ports() -> list[tuple[int, int]]:
 
                 # NAME is the last column (index -1 or 8+).
                 name_field = parts[-1]
+                # #637: macOS lsof appends the TCP state as an extra
+                # column — e.g. "(LISTEN)" — AFTER the NAME field.
+                # Real macOS output (lsof 4.91+):
+                #   Python 42678 reagan 17u IPv4 0xa76... 0t0 TCP \
+                #     127.0.0.1:18769 (LISTEN)
+                # parts[-1] == "(LISTEN)", parts[-2] == "127.0.0.1:18769".
+                # We must step back one column to get the address:port.
+                if (
+                    name_field.startswith("(")
+                    and name_field.endswith(")")
+                    and len(parts) >= 10
+                ):
+                    name_field = parts[-2]
+                elif name_field.startswith("(") and name_field.endswith(")"):
+                    # Extra state column but not enough total columns —
+                    # cannot reliably find the NAME field; skip.
+                    continue
                 # NAME field is ``<addr>:<port>`` or ``[<addr>]:<port>``.
                 # Split on the LAST colon to isolate port (handles
                 # IPv6 addresses like ``[::1]:8767``).
