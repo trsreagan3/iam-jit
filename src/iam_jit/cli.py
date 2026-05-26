@@ -1910,6 +1910,18 @@ from .cli_apply_config import register_apply_config_command  # noqa: E402
 register_apply_config_command(doctor)
 
 
+# #489 + #532 CRIT (§A89 LAUNCH-BLOCKER + UC-30) — `iam-jit init`
+# interactive bootstrap interview. Canonical first-time-operator
+# onboarding path per MRR-6; `init-solo` (above) is the narrower
+# predecessor and stays unchanged. Non-TTY callers (agents, CI) auto-
+# fall to non-interactive defaults per
+# [[bouncer-zero-llm-when-agent-in-loop]]. Reuses existing helpers:
+# AWS-account detection from local_server, MCP shape from
+# _mcp_server_config_dict, doctor apply-config from cli_apply_config.
+from .cli_init import register_init_command  # noqa: E402
+register_init_command(main)
+
+
 # #401 / §A47 — register `iam-jit improve-profile` autonomous profile
 # improvement. Mirrors the `iam_jit_improve_profile` MCP tool per
 # [[cross-product-agent-parity]]: same backend, same shape; CLI default
