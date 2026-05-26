@@ -52,7 +52,7 @@ flips that.
 ### `bedrock`
 
 ```bash
-pip install iam-jit[bedrock]      # boto3 is base; this is a no-op extra
+pip install "git+https://github.com/trsreagan3/iam-jit.git#egg=iam-jit[bedrock]"      # boto3 is base; this is a no-op extra
 export IAM_JIT_LLM_BACKEND=bedrock
 export IAM_JIT_BEDROCK_MODEL=anthropic.claude-sonnet-4-6-v1:0
 export AWS_REGION=us-east-1
@@ -66,7 +66,7 @@ live for customers.
 ### `anthropic`
 
 ```bash
-pip install iam-jit[anthropic]
+pip install "git+https://github.com/trsreagan3/iam-jit.git#egg=iam-jit[anthropic]"
 export IAM_JIT_LLM_BACKEND=anthropic
 export ANTHROPIC_API_KEY=sk-ant-...
 # Optional — defaults to claude-sonnet-4-6
@@ -76,7 +76,7 @@ export IAM_JIT_LLM_MODEL=claude-opus-4-7
 ### `openai`
 
 ```bash
-pip install iam-jit[openai]
+pip install "git+https://github.com/trsreagan3/iam-jit.git#egg=iam-jit[openai]"
 export IAM_JIT_LLM_BACKEND=openai
 export OPENAI_API_KEY=sk-...
 # Optional — for OpenRouter / Azure OpenAI / proxied keys
@@ -93,7 +93,7 @@ parseable JSON). If your provider doesn't support that, set
 ### `ollama`
 
 ```bash
-pip install iam-jit[ollama]   # httpx is base; this is a no-op extra
+pip install "git+https://github.com/trsreagan3/iam-jit.git#egg=iam-jit[ollama]"   # httpx is base; this is a no-op extra
 # In another shell:
 ollama serve
 ollama pull llama3.2:3b
@@ -136,8 +136,10 @@ score call (defense-in-depth: never crash a score because of a typo).
 For local dev or test rigs that want every backend importable:
 
 ```bash
-pip install iam-jit[all-llm-backends]
+pip install "git+https://github.com/trsreagan3/iam-jit.git#egg=iam-jit[all-llm-backends]"
 ```
+
+> **Note:** Will switch to `pip install iam-jit[<backend>]` once we publish to PyPI (#235).
 
 This pulls `anthropic` + `openai` SDKs. `boto3` (bedrock) and `httpx`
 (ollama) are already base deps.

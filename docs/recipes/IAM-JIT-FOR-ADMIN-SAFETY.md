@@ -33,7 +33,7 @@ After ~5 minutes of setup:
 
 ```bash
 # 1. Install + bootstrap
-$ pip install iam-jit
+$ pip install git+https://github.com/trsreagan3/iam-jit.git
 $ iam-jit init-solo
 
 # 2. Start local mode
@@ -48,6 +48,8 @@ $ iam-jit mcp install-claude-code
 
 # Then restart Claude Desktop / Claude Code so it re-reads the config.
 ```
+
+> **Note:** Will switch to `pip install iam-jit` once we publish to PyPI (#235).
 
 Done. Next time you start Claude Code, iam-jit is the AWS access
 layer.

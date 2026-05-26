@@ -670,7 +670,7 @@ aws sts get-caller-identity   # flows through ibounce, gets logged + scored
 
 **A few intentional things about this image:**
 
-- It is a **packaging convenience**, not a different product. Same binary as `pip install iam-jit`, same opt-in `ibounce version-check`, no phone-home, no telemetry.
+- It is a **packaging convenience**, not a different product. Same binary as `pip install git+https://github.com/trsreagan3/iam-jit.git`, same opt-in `ibounce version-check`, no phone-home, no telemetry.
 - The image does **not** include the AWS CLI. Mount `~/.aws` from the host so `AWS_PROFILE` / SSO sessions work.
 - The audit DB lives at `~/.iam-jit/bouncer/state.db` inside the container. Mount `~/.iam-jit` from the host (as above) to persist your rules + decision log across `docker run` invocations.
 - The container binds **loopback only by default** for the same security reasons the binary refuses external binds without an explicit acknowledgement flag. To make the proxy reachable from outside the container you need both `-p 127.0.0.1:8767:8767` (host → container port forward) *and* `--host 0.0.0.0 --i-know-this-binds-externally` (binary refuses external bind otherwise). The example above publishes only on the host loopback, which is the sane default.

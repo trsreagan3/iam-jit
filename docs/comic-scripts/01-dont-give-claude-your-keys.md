@@ -57,7 +57,7 @@ relaxed. The S3 bucket on the right shows green checkmarks.
 **CAPTION:** *Day 30: iam-jit. Reads auto-approve. Writes ask first.
 Audit log says exactly what Claude touched.*
 
-**FOOTER (small text):** `pip install iam-jit && iam-jit init-solo`
+**FOOTER (small text):** `pip install git+https://github.com/trsreagan3/iam-jit.git && iam-jit init-solo`
 
 ---
 

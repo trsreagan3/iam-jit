@@ -189,7 +189,7 @@ the safety floor" is two commands:
 
 ```bash
 # 1. Install the binary (one of: brew, pip, go install, docker)
-pip install iam-jit
+pip install git+https://github.com/trsreagan3/iam-jit.git
 
 # 2. Apply the org safety floor
 ibounce profile install \
@@ -203,6 +203,8 @@ ibounce profile install \
 # 3. Start the proxy (normal day-1 workflow from here on)
 ibounce run
 ```
+
+> **Note:** Will switch to `pip install iam-jit` once we publish to PyPI (#235).
 
 Properties of this handoff:
 
@@ -225,10 +227,12 @@ When `bounce init --org-url` ships, the day-1 flow collapses to:
 
 ```bash
 # PLANNED — v1.1; NOT invokable in v1.0
-pip install iam-jit
+pip install git+https://github.com/trsreagan3/iam-jit.git
 bounce init --org-url https://internal.example.com/bounce-profiles/index.yaml
 ibounce run
 ```
+
+> **Note:** Will switch to `pip install iam-jit` once we publish to PyPI (#235).
 
 The v1.1 form is idempotent (re-runs become sync-checks) and pulls
 the entire bundle (multiple profiles + index-level metadata) in one
@@ -334,7 +338,7 @@ v1.0 shape:
 # .github/workflows/agent-run.yml
 - name: install bouncer + apply org safety floor
   run: |
-    pip install iam-jit
+    pip install git+https://github.com/trsreagan3/iam-jit.git
     # v1.0: per-profile install loop
     ibounce profile install \
         --from ${{ secrets.ORG_BOUNCE_PROFILE_URL }} \
@@ -344,6 +348,8 @@ v1.0 shape:
     ibounce run --background --profile ci-runner
     # ... agent runs here, all AWS calls gated by the org floor
 ```
+
+> **Note:** Will switch to `pip install iam-jit` once we publish to PyPI (#235).
 
 When `bounce init --org-url` ships in v1.1, the install step
 collapses to a single line — see §4 PLANNED block.

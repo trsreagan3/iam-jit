@@ -3,9 +3,10 @@
 This doc walks you from "git clone" to a working deploy in 5 minutes
 (MVP path), then shows what to layer on top for a production launch.
 
-If you only want the offline CLI (`pip install iam-jit` — the scorer
+If you only want the offline CLI (`pip install git+https://github.com/trsreagan3/iam-jit.git` — the scorer
 ships as the `iam-risk-score` console script inside the `iam-jit`
-wheel; there is no separate `iam-risk-score` PyPI package), stop
+wheel; there is no separate `iam-risk-score` PyPI package; will switch
+to `pip install iam-jit` once published to PyPI, #235), stop
 reading — that's already covered in the main [README](../README.md).
 This doc is for the **self-hosted deploy** of the full iam-jit stack
 (scoring API + provisioning workflow).

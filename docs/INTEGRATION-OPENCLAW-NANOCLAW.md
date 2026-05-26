@@ -42,7 +42,7 @@ Existing agent dashboards (openclaw-mission-control, qwibitai/nanoclaw-dashboard
 # Python — upgrade pip first (stock ubuntu:22.04 ships pip 22.0.2; PEP 660
 # editable builds need pip >= 22.3; closes #548 from UAT L1 2026-05-24).
 python3 -m pip install --upgrade pip
-pip install iam-jit         # ships `ibounce` for AWS gating
+pip install git+https://github.com/trsreagan3/iam-jit.git         # ships `ibounce` for AWS gating
 
 # Go-based bouncers — `go install` lands the binary in $(go env GOPATH)/bin
 # (defaults to ~/go/bin). That directory is NOT on the default Ubuntu PATH
@@ -53,6 +53,8 @@ go install github.com/trsreagan3/kbouncer/cmd/kbounce@latest
 go install github.com/trsreagan3/dbounce/cmd/dbounce@latest
 go install github.com/trsreagan3/gbounce/cmd/gbounce@latest
 ```
+
+> **Note:** Will switch to `pip install iam-jit` once we publish to PyPI (#235).
 
 ### 2. Start the bouncers in background
 

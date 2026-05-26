@@ -34,11 +34,12 @@ for AI-team buyers; the first one converts best for DevSecOps.
 
 ### Above-the-fold CTAs
 
-  - **Primary:** "Install the CLI" → `pip install iam-jit` (the
+  - **Primary:** "Install the CLI" → `pip install git+https://github.com/trsreagan3/iam-jit.git` (the
     scorer ships in the `iam-jit` wheel as the `iam-risk-score`
     console script; there is no separate `iam-risk-score` PyPI
     package per [[no-hosted-saas]] restoration — the hosted API
-    playground was dropped 2026-05-24)
+    playground was dropped 2026-05-24; will switch to `pip install iam-jit`
+    once published to PyPI, #235)
   - **Secondary:** "Read the docs" → links to `docs/GETTING-STARTED.md`
 
 ### Above-the-fold code sample (the one thing visitors actually read)

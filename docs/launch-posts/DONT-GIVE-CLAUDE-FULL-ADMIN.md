@@ -88,7 +88,7 @@ writes is how you make iam-jit not a thing you regret.
 
 iam-jit ships in two shapes:
 
-1. **Local mode** — `pip install iam-jit && iam-jit serve --local`.
+1. **Local mode** — `pip install git+https://github.com/trsreagan3/iam-jit.git && iam-jit serve --local`.
    Runs on your laptop, uses your local AWS credentials, audits
    to a SQLite file. Zero iam-jit-the-company involvement. Trust
    model is "trust the binary," same as `aws-cli` and `kubectl`.
@@ -147,7 +147,7 @@ both for different layers.
 ## The install (90 seconds, no kidding)
 
 ```bash
-$ pip install iam-jit
+$ pip install git+https://github.com/trsreagan3/iam-jit.git
 $ iam-jit init-solo
   Data dir:  /Users/you/.iam-jit
   Admin:     email:you@your-laptop.local
@@ -159,6 +159,8 @@ Next steps:
      {"mcpServers": {"iam-jit": {"command": "iam-jit", ...}}}
   3. Ask Claude for what you need.
 ```
+
+> **Note:** Will switch to `pip install iam-jit` once we publish to PyPI (#235).
 
 The MCP config tells Claude where iam-jit is. The token is the
 local API credential — iam-jit-the-company never sees it,

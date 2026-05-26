@@ -18,9 +18,9 @@ Per four-products-one-brand: iam-jit is four separate products that share a scor
 
 | # | Product | What it is | Who it's for | Install | Ships in |
 |---|---|---|---|---|---|
-| 1 | **[iam-risk-score](#iam-risk-score)** | 1–10 risk score for any AWS IAM policy in <100ms. Offline CLI + Python library + GitHub Action. Free + open source; runs locally with no network call. | CI pipelines, IDE plugins, anyone who wants a verdict before granting permissions. | `pip install iam-jit` | **v1.0** |
-| 2 | **[ibounce](#ibounce)** *(was `iam-jit-bouncer`)* | Local proxy that gates every AWS API call against rules. Defense-in-depth over IAM scoping. v1.0 ships BOTH the agent-cooperative MCP path AND transparent HTTP-proxy interception (SigV4-preserving forwarding, cooperative + transparent modes, environment profiles, timed pause-for, async deny prompts). | Devs at companies with locked-down IAM (no `iam:CreateRole` for individuals); contractors on read-only credentials; anyone doing rapid iteration where IAM propagation delays hurt; agents that want defense-in-depth on top of role scoping. | `pip install iam-jit && ibounce init` | **v1.0** (CLI + MCP + HTTP proxy + profiles + pause + prompts) |
-| 3 | **[iam-jit local](#iam-jit-local)** | Local-only safety layer between your AI agent and AWS. Runs on your laptop. Zero SaaS dependency. Your AWS credentials never leave your machine. | Solo devs / individual admins who want Claude bounded. | `pip install iam-jit && iam-jit serve --local` | **v1.0** |
+| 1 | **[iam-risk-score](#iam-risk-score)** | 1–10 risk score for any AWS IAM policy in <100ms. Offline CLI + Python library + GitHub Action. Free + open source; runs locally with no network call. | CI pipelines, IDE plugins, anyone who wants a verdict before granting permissions. | `pip install git+https://github.com/trsreagan3/iam-jit.git` | **v1.0** |
+| 2 | **[ibounce](#ibounce)** *(was `iam-jit-bouncer`)* | Local proxy that gates every AWS API call against rules. Defense-in-depth over IAM scoping. v1.0 ships BOTH the agent-cooperative MCP path AND transparent HTTP-proxy interception (SigV4-preserving forwarding, cooperative + transparent modes, environment profiles, timed pause-for, async deny prompts). | Devs at companies with locked-down IAM (no `iam:CreateRole` for individuals); contractors on read-only credentials; anyone doing rapid iteration where IAM propagation delays hurt; agents that want defense-in-depth on top of role scoping. | `pip install git+https://github.com/trsreagan3/iam-jit.git && ibounce init` | **v1.0** (CLI + MCP + HTTP proxy + profiles + pause + prompts) |
+| 3 | **[iam-jit local](#iam-jit-local)** | Local-only safety layer between your AI agent and AWS. Runs on your laptop. Zero SaaS dependency. Your AWS credentials never leave your machine. | Solo devs / individual admins who want Claude bounded. | `pip install git+https://github.com/trsreagan3/iam-jit.git && iam-jit serve --local` | **v1.0** |
 | 4 | **[iam-jit self-host](#iam-jit-self-host)** | Full JIT-IAM provisioner: time-bound roles, scoring, approval workflow, Slack approval bot, OIDC SSO (Google + Okta), audit trail, auto-revocation — running in your own AWS account. | Teams + enterprises with shared audit + multi-user + compliance needs. | `git clone` + deploy via `infrastructure/cloudformation/destination-account-roles.yaml` | **v1.0** |
 
 All four share the same deterministic scoring engine. Open source under Apache 2.0.
@@ -64,7 +64,7 @@ The architecture:
 
 ```bash
 $ python3 -m pip install --upgrade pip   # ensures pip >= 22.3 (PEP 660)
-$ pip install iam-jit
+$ pip install git+https://github.com/trsreagan3/iam-jit.git
 $ iam-risk-score my-policy.json
 
 IAM Policy Risk Score
@@ -81,9 +81,11 @@ Suggestions to reduce risk:
   - Scope `s3:DeleteObject` to specific resource ARNs
 ```
 
+> **Note:** Will switch to `pip install iam-jit` once we publish to PyPI (#235).
+
 ### Integration paths
 
-- **CLI** — `pip install iam-jit`. Offline-only: runs the deterministic scorer locally without a network call. Good for pre-commit hooks + CI gates + air-gapped runners.
+- **CLI** — `pip install git+https://github.com/trsreagan3/iam-jit.git`. Offline-only: runs the deterministic scorer locally without a network call. Good for pre-commit hooks + CI gates + air-gapped runners.
 - **Python library** — `from iam_jit import review` then call `review.analyze_policy(...)`. Embed into your agent runtime, IDE plugin, or custom IaC checker.
 - **GitHub Action** — drops into CI; fails the workflow if a policy scores above your threshold. [Action](https://github.com/trsreagan3/iam-risk-score-action) · SARIF 2.1.0 output via `iam-risk-score --format sarif` for GitHub Code Scanning + GitLab Code Quality integrations.
 
@@ -101,7 +103,7 @@ Honest answer: **complementary, not a replacement.** They solve adjacent problem
 
 | | AWS IAM Access Analyzer | iam-risk-score |
 |---|---|---|
-| **Cost** | Free, built into AWS | Free under Apache-2.0 (`pip install iam-jit`); offline CLI + library only — no hosted API |
+| **Cost** | Free, built into AWS | Free under Apache-2.0 (`pip install git+https://github.com/trsreagan3/iam-jit.git`); offline CLI + library only — no hosted API |
 | **What it answers** | "What does this policy allow? Is there unused permission? Is anything publicly accessible?" | "If this policy is granted + compromised, how bad is the blast radius? (1–10)" |
 | **Output shape** | Findings (pass/warning/error), policy validation, CloudTrail-based refinement suggestions | Numeric score 1–10 + per-factor breakdown |
 | **Runs where** | AWS API call from an AWS context | Offline CLI, Python library, GitHub Action — no network call, no AWS account needed |
@@ -132,7 +134,7 @@ Honest answer: **complementary, not a replacement.** They solve adjacent problem
 Per `[[discovery-first-default]]` (2026-05-22) the default shape is **discovery mode** — observe + audit + pass-through. Named profiles (e.g. `safe-default`) are first-class opt-in via `--profile <name>`. This matches the gbounce reference model + closes the NEGATIVE-VALUE over-blocking that the pre-pivot safe-default-as-default caused on legit DevOps workflows (see KNOWN-CAVEATS §A21 + the role-effectiveness re-grade at `tests/dogfood/role-effectiveness-grades-post-pivot.md`).
 
 ```bash
-$ pip install iam-jit
+$ pip install git+https://github.com/trsreagan3/iam-jit.git
 $ ibounce run          # default: discovery mode (no profile applied)
 ibounce proxy starting on http://127.0.0.1:8767 (mode=cooperative, default-policy=deny, profile=full-user, default_mode=discovery)
   default mode: discovery — observing all requests, denying none.
@@ -145,12 +147,14 @@ $ aws s3 ls
 # ... your buckets, forwarded verbatim; the bouncer logs every call to ~/.iam-jit/state.db + the configured OCSF channels.
 ```
 
+> **Note:** Will switch to `pip install iam-jit` once we publish to PyPI (#235).
+
 To pin pre-pivot behavior (the readonly-admin-minus floor): `ibounce run --profile safe-default`.
 
 ### 30-second example (v1.0 — MCP path)
 
 ```bash
-$ pip install iam-jit
+$ pip install git+https://github.com/trsreagan3/iam-jit.git
 $ ibounce init     # smart default: admin-minus-sensitive baseline rules
 ✓ initialized at ~/.iam-jit/bouncer/state.db
 ✓ applied 17 protective rules (block secrets reads, billing changes, audit-infra destruction)
@@ -168,6 +172,8 @@ $ ibounce tasks start \
     --duration 60
 ✓ task abc123 active until 2026-05-17T16:00:00Z
 ```
+
+> **Note:** Will switch to `pip install iam-jit` once we publish to PyPI (#235).
 
 Then the agent (Claude Code, Cursor, etc.) calls `iam_jit_scope_self_for_task` via MCP and gets scoped STS credentials gated by the task scope above.
 
@@ -241,11 +247,13 @@ Read before you install — knowing the boundaries up-front saves debugging time
 ### Setup
 
 ```bash
-$ pip install iam-jit
+$ pip install git+https://github.com/trsreagan3/iam-jit.git
 $ iam-jit init-solo                       # bootstraps ~/.iam-jit/, admin user, API token
 $ iam-jit serve --local                    # starts the local HTTP + MCP backend on 127.0.0.1
 $ iam-jit mcp install-claude-code          # writes the MCP entry into Claude Desktop config
 ```
+
+> **Note:** Will switch to `pip install iam-jit` once we publish to PyPI (#235).
 
 Then restart Claude Desktop / Claude Code so it re-reads the config. Use `iam-jit mcp show-config` instead if you're wiring a different MCP client (Cursor, Codex MCP, Devin, custom) — paste the JSON snippet into your agent's MCP config.
 

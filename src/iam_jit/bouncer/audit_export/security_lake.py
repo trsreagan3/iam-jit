@@ -270,7 +270,7 @@ def _build_parquet_schema() -> Any:
     pyarrow is imported lazily (and only when this function is
     called) so the audit_export package import path stays cheap when
     Security Lake is not enabled. The Security Lake extra
-    (`pip install iam-jit[security-lake]`) brings pyarrow in; the
+    (`pip install "git+https://github.com/trsreagan3/iam-jit.git#egg=iam-jit[security-lake]"`) brings pyarrow in; the
     base package does not.
     """
     import pyarrow as pa  # noqa: PLC0415  — lazy on purpose
