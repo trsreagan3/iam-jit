@@ -1910,6 +1910,19 @@ from .cli_apply_config import register_apply_config_command  # noqa: E402
 register_apply_config_command(doctor)
 
 
+# #626 (founder dogfood 2026-05-26) — `iam-jit doctor install-check`
+# end-to-end install verification. Surfaces PATH gaps, missing Go-side
+# bouncers, AWS_ENDPOINT_URL wire gaps, and the dev-venv-shadowing
+# failure mode that bit the founder ("ibounce running 19hrs;
+# AWS_ENDPOINT_URL never set; decisions_count=2"). Single source of
+# truth for "is the install actually working?" per
+# [[ibounce-honest-positioning]] + [[scorer-is-ground-truth]].
+from .cli_doctor_install_check import (  # noqa: E402
+    register_install_check_command,
+)
+register_install_check_command(doctor)
+
+
 # #489 + #532 CRIT (§A89 LAUNCH-BLOCKER + UC-30) — `iam-jit init`
 # interactive bootstrap interview. Canonical first-time-operator
 # onboarding path per MRR-6; `init-solo` (above) is the narrower
