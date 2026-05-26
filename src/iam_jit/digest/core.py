@@ -224,6 +224,15 @@ def _classify_deny_rows(rows: Iterable[Any]) -> dict[str, int]:
     Reuses :mod:`iam_jit.structured_deny` so the digest's per-deny
     classification matches the agent-facing 403 + the
     ``--notify-denies stderr`` output (single source of truth).
+
+    #631 — per-event ``report_skip`` spam fix: ``suppress_skip_report=True``
+    is passed to ``classify_injection_likelihood`` for every row so the
+    logger doesn't emit one identical "ran deterministic-only" line per
+    event (6 lines for 3 events, etc.). A SINGLE aggregated
+    ``report_skip`` is emitted ONCE per digest invocation when at least
+    one row ran in deterministic-only mode. Mirrors the per-row
+    suppression + one-aggregated-emit pattern from
+    ``cli_profile_allow.py:_suppress_classify_skip`` (#577).
     """
     counts = {
         "appears_legitimate": 0,
@@ -231,34 +240,50 @@ def _classify_deny_rows(rows: Iterable[Any]) -> dict[str, int]:
         "appears_adversarial": 0,
     }
     try:
-        from ..structured_deny import build_structured_deny
+        from ..structured_deny.response import classify_injection_likelihood
     except Exception:
         # Best-effort: if the classifier isn't importable, dump
         # everything to ambiguous so the operator still sees a count.
         for _ in rows:
             counts["ambiguous"] += 1
         return counts
+    ran_deterministic_only = False
     for row in rows:
         try:
-            sd = build_structured_deny(
-                bouncer=getattr(row, "bouncer", None) or "unknown",
+            # suppress_skip_report=True silences the per-row WARNING;
+            # we emit one aggregated report_skip below after the loop.
+            cls, _hook = classify_injection_likelihood(
                 action=getattr(row, "action", "") or "",
                 resource=getattr(row, "resource", "") or "",
-                deny_reason=getattr(row, "deny_reason", "") or "",
                 deny_source=getattr(row, "deny_source", "") or "",
-                rule_id_if_dynamic=getattr(row, "rule_id_if_dynamic", None),
-                suggested_allow_command=getattr(
-                    row, "suggested_allow_command", ""
-                ) or "",
+                deny_reason=getattr(row, "deny_reason", "") or "",
                 agent_session_id=getattr(row, "agent_session_id", "") or "",
-                when=getattr(row, "when", "") or "",
+                suppress_skip_report=True,
             )
-            cls = sd.is_likely_injection_classification or "ambiguous"
+            if cls == "pending_classification":
+                ran_deterministic_only = True
+                cls = "ambiguous"
         except Exception:
             cls = "ambiguous"
         if cls not in counts:
             cls = "ambiguous"
         counts[cls] += 1
+    # #631 — emit at most ONE aggregated skip report per digest invocation.
+    if ran_deterministic_only:
+        try:
+            from ..llm.report_skip import REASON_NO_LLM_BACKEND, report_skip
+            report_skip(
+                feature="structured_deny.classify",
+                reason=REASON_NO_LLM_BACKEND,
+                mode_hint=(
+                    "digest ran deterministic-only; set IAM_JIT_ENABLE_SIDE_LLM=1 "
+                    "+ IAM_JIT_LLM=anthropic|openai|bedrock|ollama for LLM-enriched "
+                    "classification, or let your agent call iam_jit_classify_deny "
+                    "(MCP) for post-hoc enrichment."
+                ),
+            )
+        except Exception:
+            pass
     return counts
 
 

@@ -3898,8 +3898,16 @@ async def serve(config: ProxyConfig, *, store: BouncerStore) -> None:
                 if status_str == "ok":
                     status_str = "degraded"
         else:
+            # #627 — when audit logging is unconfigured the status MUST be
+            # "not_configured", NOT "ok". SOC parsers branching on
+            # audit_log.status == "ok" would otherwise silently believe the
+            # audit chain is healthy when it was never started.
+            # Per [[ibounce-honest-positioning]]: "ok"/"GREEN"/"exit 0" are
+            # claims; if they don't correspond to actual healthy state they're
+            # lies. The `reason` field is preserved for backward-compat — both
+            # fields together give the full picture to existing consumers.
             audit_log_block = {
-                "status": "ok",
+                "status": "not_configured",
                 "disk_free_pct": None,
                 "used_pct": None,
                 "warn_pct": None,

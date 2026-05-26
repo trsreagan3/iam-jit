@@ -1786,12 +1786,24 @@ def register_autopilot_command(parent_group: click.Group) -> click.Group:
     def autopilot_status_cmd(as_json: bool) -> None:
         """Show autopilot status."""
         out = autopilot_status()
+        running = bool(out.get("running"))
         if as_json:
             click.echo(json.dumps(out, indent=2, default=str))
+            # #629 — exit 1 when not running so $? is scriptable even
+            # in JSON mode. JSON output is already emitted above; exit
+            # after so the caller can combine jq piping with $? checks.
+            if not running:
+                sys.exit(1)
             return
-        if not out["running"]:
+        if not running:
+            # #629 — exit 1 so scripts can distinguish running vs not-running
+            # via $? without parsing human-readable output. Pre-#629 this
+            # path returned (exit 0) — identical $? to the healthy path,
+            # making shell guards like `if ! iam-jit autopilot status`
+            # silently wrong. Per [[ibounce-honest-positioning]]: exit 0 is
+            # a claim of success; "not running" is NOT success.
             click.secho("Autopilot is NOT running.", fg="yellow")
-            return
+            sys.exit(1)
         click.secho(
             f"Autopilot RUNNING (pid={out['pid']})",
             fg="green",

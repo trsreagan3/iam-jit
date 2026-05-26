@@ -1773,9 +1773,19 @@ def _signal_decision_rate(
     """
     per_bouncer: dict[str, dict[str, Any]] = {}
     next_state: dict[str, Any] = {}
-    worst = "GREEN"
     notes_parts: list[str] = []
     prior_dr = (prior_state or {}).get("decisions") or {}
+    # #630 — when no bouncers are present in status.json the loop never
+    # runs; initializing `worst` to "GREEN" would claim a healthy signal
+    # with literally nothing to monitor. Per [[ibounce-honest-positioning]]:
+    # "GREEN" is a claim; empty = UNKNOWN. The note below surfaces the
+    # "nothing to monitor" condition explicitly so the operator can tell
+    # "canary not yet deployed" from "everything is healthy".
+    worst = "UNKNOWN" if not healthz_by_bouncer else "GREEN"
+    if not healthz_by_bouncer:
+        notes_parts.append(
+            "no bouncers in status.json — canary may not be deployed yet"
+        )
     for bname, body in healthz_by_bouncer.items():
         if body is None:
             per_bouncer[bname] = {"status": "UNKNOWN"}

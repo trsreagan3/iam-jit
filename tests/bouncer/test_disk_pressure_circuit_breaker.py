@@ -549,8 +549,12 @@ async def test_healthz_audit_log_block_absent_when_no_log_path(
 ) -> None:
     """When audit logging is disabled, /healthz still surfaces the
     audit_log block (always-present convention) but with null disk
-    telemetry + status=ok + a 'not configured' reason so monitoring
-    parsers don't have to branch on block-presence."""
+    telemetry + status="not_configured" + a 'not configured' reason so
+    monitoring parsers don't have to branch on block-presence.
+
+    #627: status MUST be "not_configured" (not "ok") so SOC parsers
+    branching on status=="ok" don't silently believe the audit chain is
+    healthy when it was never started."""
     store = BouncerStore(db_path=str(tmp_path / "b.db"))
     port = _free_port()
     config = ProxyConfig(host="127.0.0.1", port=port)
@@ -566,7 +570,8 @@ async def test_healthz_audit_log_block_absent_when_no_log_path(
                 body = await resp.json()
         assert "audit_log" in body
         block = body["audit_log"]
-        assert block["status"] == "ok"
+        # #627: unconfigured audit log must report "not_configured", not "ok".
+        assert block["status"] == "not_configured"
         assert block["disk_free_pct"] is None
         assert block["disk_pressure_mode"] is None
         assert "not configured" in (block["reason"] or "")

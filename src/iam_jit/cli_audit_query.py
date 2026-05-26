@@ -74,6 +74,57 @@ long-range path. Calendar units (`y`, `M`) are added on top of the
 existing s/m/h/d/w set so operators can write `--since 2y` directly
 instead of `--since 730d`."""
 
+_VALID_SINCE_UNITS = frozenset("smhdwMy")
+
+
+def _validate_since_spec(spec: str | None, flag: str = "--since") -> None:
+    """#628 — pre-fan-out gate for ``--since`` / ``--until`` values.
+
+    Raises :class:`click.UsageError` (exit 2) when ``spec`` is non-empty
+    AND doesn't look like:
+
+      * a short/long-form duration token: ``5m`` / ``1h`` / ``2d`` /
+        ``90d`` / ``6M`` / ``2y`` (units: s/m/h/d/w/M/y)
+      * an ISO 8601 / RFC 3339 timestamp: ``2026-05-25T10:00:00Z``
+
+    Per [[ibounce-honest-positioning]]: an invalid ``--since`` that
+    passes through to the fan-out causes every bouncer to return HTTP 400;
+    the CLI previously tucked those into "skipped" notes and exited 0,
+    silently claiming "no events found". That is a lie. This gate turns
+    the lie into an honest exit 2 before a single network call is made.
+
+    Mirrors the pattern from ``cli_profile_allow.py:676`` (#606 Gap A /
+    #623 Gap B) so the validate-then-fan-out discipline is consistent
+    across every CLI that fans out to bouncers.
+    """
+    if not spec:
+        return
+    s = spec.strip()
+    if not s:
+        return
+    # Short/long-form duration: <digits><unit>
+    if _LONG_RANGE_TOKEN_RE.match(s):
+        return
+    # ISO 8601 / RFC 3339 shape: contains 'T' OR starts with a date
+    # (YYYY-MM-DD prefix). Actually parse it — pure heuristic match
+    # was the pre-#606 gap that let junk like "2026-bad" slip through.
+    if "T" in s or "-" in s[:10]:
+        norm = s
+        if norm.endswith("Z"):
+            norm = norm[:-1] + "+00:00"
+        try:
+            _dt.datetime.fromisoformat(norm)
+            return
+        except ValueError:
+            pass  # fall through to the error below
+    valid_units = "/".join(sorted(_VALID_SINCE_UNITS))
+    raise click.UsageError(
+        f"{flag} {spec!r} is not a valid duration or timestamp.\n"
+        f"  Duration examples: 5m, 1h, 2d, 90d, 6M, 2y  (units: {valid_units})\n"
+        f"  Timestamp example: 2026-05-25T10:00:00Z  (ISO 8601 / RFC 3339)\n"
+        f"  Fix {flag} and re-run."
+    )
+
 
 def _parse_since_long_range(spec: str | None) -> str | None:
     """Convert a long-form `--since` shorthand (`2y`, `6M`, `90d`,
@@ -991,6 +1042,17 @@ def register_audit_query_group(parent_group: click.Group) -> click.Group:
         # not provided so the existing call sites behave unchanged).
         scope_filter = _parse_scope_filter(scope_filter_raw)
 
+        # #628 — validate --since / --until BEFORE the fan-out.
+        # Pre-#628: an invalid value passed through to every bouncer,
+        # each returned HTTP 400, the CLI tucked the error into "skipped"
+        # notes, and exited 0 — silently claiming "no events found" when
+        # the query was malformed. Per [[ibounce-honest-positioning]] this
+        # gate turns that lie into an honest exit 2. Mirrors the
+        # validate-then-fan-out pattern from cli_profile_allow.py:676
+        # (#606 Gap A / #623 Gap B).
+        _validate_since_spec(since, "--since")
+        _validate_since_spec(until, "--until")
+
         # #436 / §A70 — long-range `--since` shorthand (`2y`, `6M`)
         # expansion. The bouncer's `/audit/events` accepts ISO 8601
         # so we reduce calendar units locally before forwarding.
@@ -1057,6 +1119,22 @@ def register_audit_query_group(parent_group: click.Group) -> click.Group:
                     f"note: {r.bouncer} skipped ({r.error})",
                     err=True,
                 )
+
+        # #628 — post-fan-out: if ALL bouncers errored AND we got zero
+        # events, exit 1 (not 0). Pre-#628 the CLI exited 0 here with
+        # empty output — indistinguishable from "no events in range", so
+        # the operator had no $? signal that the query totally failed.
+        # Per [[ibounce-honest-positioning]] zero events from a totally-
+        # failed fan-out is NOT the same as a healthy "nothing found".
+        all_failed = bool(results) and all(r.error for r in results)
+        total_events = sum(len(r.events) for r in results)
+        if all_failed and total_events == 0:
+            click.echo(
+                "error: all bouncers returned errors; 0 events retrieved. "
+                "Check stderr notes above for per-bouncer error details.",
+                err=True,
+            )
+            sys.exit(1)
 
         if fmt == "summary":
             # Stable name order for predictable output across runs.
