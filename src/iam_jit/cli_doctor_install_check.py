@@ -83,7 +83,10 @@ def _python_install_hint(
       1. macOS + Homebrew Python  → pipx flow  (PEP 668 blocks pip --user)
       2. macOS + system Python    → venv flow   (system pip is restricted)
       3. Linux + apt-managed      → pip --upgrade-pip + --user
-      4. Generic fallback         → pip install --user iam-jit
+      4. Generic fallback         → pip install --user git+https://github.com/trsreagan3/iam-jit.git
+
+    NOTE (#654): iam-jit is not yet on PyPI. All hints use the git+https://
+    source install until the PyPI publish task (#235) is complete.
 
     The detector uses ``sys.executable`` as the truth source (the
     Python actually running the install-check, not a hypothetical one).
@@ -102,14 +105,14 @@ def _python_install_hint(
                 "/usr/local/Cellar/",
             ):
                 return (
-                    "brew install pipx && pipx install iam-jit"
+                    "brew install pipx && pipx install git+https://github.com/trsreagan3/iam-jit.git"
                     "  # pipx manages a dedicated venv; avoids PEP 668 wall"
                 )
             # macOS system Python (/usr/bin/python3) — pip is externally managed too.
             if exe.startswith("/usr/bin/"):
                 return (
                     "python3 -m venv ~/.venv-iam-jit"
-                    " && ~/.venv-iam-jit/bin/pip install iam-jit"
+                    " && ~/.venv-iam-jit/bin/pip install git+https://github.com/trsreagan3/iam-jit.git"
                     " && ln -sf ~/.venv-iam-jit/bin/iam-jit"
                     f" {local_bin_display}/iam-jit"
                 )
@@ -117,7 +120,7 @@ def _python_install_hint(
             # cleanest path.
             if exe.startswith("/Users/") or exe.startswith("/home/"):
                 return (
-                    "pipx install iam-jit"
+                    "pipx install git+https://github.com/trsreagan3/iam-jit.git"
                     "  # add ~/.local/bin to PATH if not already present"
                 )
         elif platform.startswith("linux"):
@@ -133,7 +136,7 @@ def _python_install_hint(
                 if result.returncode == 0:
                     return (
                         "pip install --upgrade pip"
-                        " && pip install --user iam-jit"
+                        " && pip install --user git+https://github.com/trsreagan3/iam-jit.git"
                         f"  # ensure {local_bin_display} is in PATH"
                     )
             except (FileNotFoundError, subprocess.TimeoutExpired, OSError):
@@ -143,7 +146,7 @@ def _python_install_hint(
 
     # Generic fallback — works on most setups where pip --user is available.
     return (
-        f"pip install --user iam-jit"
+        f"pip install --user git+https://github.com/trsreagan3/iam-jit.git"
         f"  # then ensure {local_bin_display} is in PATH"
         f" (add to your ~/.zshrc or ~/.bashrc)"
     )

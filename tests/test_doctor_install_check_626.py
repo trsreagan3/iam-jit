@@ -655,8 +655,9 @@ def test_hint_generic_fallback_contains_pip_user(
         "win32",
     )
     hint = dic._python_install_hint()
-    assert "pip install --user iam-jit" in hint, (
-        f"Generic-fallback hint must contain 'pip install --user iam-jit'.\n"
+    # #654: iam-jit not on PyPI yet; hint must use git+https:// source install.
+    assert "pip install --user git+https://github.com/trsreagan3/iam-jit.git" in hint, (
+        f"Generic-fallback hint must contain 'pip install --user git+https://github.com/trsreagan3/iam-jit.git'.\n"
         f"Got: {hint!r}"
     )
 

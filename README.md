@@ -23,25 +23,31 @@ Open corpus, open methodology, open commit history.
 
 ```bash
 brew install pipx
-pipx install iam-jit
+pipx install git+https://github.com/trsreagan3/iam-jit.git
 ```
 
 > **Why pipx?** macOS's Homebrew Python enforces [PEP 668](https://peps.python.org/pep-0668/), which blocks `pip install --user` with an "externally-managed-environment" error. `pipx` manages an isolated venv per tool and is the path PEP 668 itself recommends. The `iam-jit` binary lands in `~/.local/bin/` (automatically on `PATH` after `brew install pipx`).
+
+> **Note:** Will switch to `pipx install iam-jit` once we publish to PyPI (#235).
 
 ### Linux — Ubuntu / Debian
 
 ```bash
 pip install --upgrade pip      # PEP 660 editable needs pip >= 22.3 (#548)
-pip install --user iam-jit
+pip install --user git+https://github.com/trsreagan3/iam-jit.git
 # ensure ~/.local/bin is in PATH (add to ~/.bashrc if not already there):
 # export PATH="$HOME/.local/bin:$PATH"
 ```
 
+> **Note:** Will switch to `pip install --user iam-jit` once we publish to PyPI (#235).
+
 ### Windows / generic Python
 
 ```bash
-pip install --user iam-jit
+pip install --user git+https://github.com/trsreagan3/iam-jit.git
 ```
+
+> **Note:** Will switch to `pip install --user iam-jit` once we publish to PyPI (#235).
 
 ### Go bouncers (kbounce / dbounce / gbounce)
 
