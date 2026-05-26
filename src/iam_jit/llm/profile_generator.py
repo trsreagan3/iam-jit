@@ -70,6 +70,7 @@ from typing import Any
 
 from . import default_score_backend
 from ._core import NoOpBackend, get_backend
+from ..profile_heuristic.aws_catalog import is_real_aws_action as _is_real_aws_action
 
 logger = logging.getLogger("iam_jit.llm.profile_generator")
 
@@ -1333,10 +1334,34 @@ def _parse_llm_response(
         denies_raw = entry.get("denies") or []
         flagged_raw = entry.get("flagged_for_review") or []
         skipped_raw = entry.get("skipped") or []
-        allows = [r for r in allows_raw if isinstance(r, dict)]
+        allows_unfiltered = [r for r in allows_raw if isinstance(r, dict)]
         denies = [r for r in denies_raw if isinstance(r, dict)]
         flagged = [str(f) for f in flagged_raw if isinstance(f, (str, dict))]
         skipped = [str(s) for s in skipped_raw if isinstance(s, (str, dict))]
+
+        # #633 — filter hallucinated IAM action names from LLM output.
+        # Extends the #580 fix (which only applied to sibling_action_prefixes)
+        # to the LLM-output parser path. Dropped actions surface in
+        # flagged_for_review so the operator sees what was removed.
+        allows: list[dict[str, Any]] = []
+        for _rule in allows_unfiltered:
+            _actions = _rule.get("actions") or []
+            _bad = [
+                a for a in _actions
+                if isinstance(a, str) and ":" in a and not _is_real_aws_action(a)
+            ]
+            if _bad:
+                flagged.append(
+                    f"dropped hallucinated actions (not in AWS catalog): {_bad}"
+                )
+                _rule = dict(_rule)
+                _rule["actions"] = [
+                    a for a in _actions
+                    if not (isinstance(a, str) and ":" in a and not _is_real_aws_action(a))
+                ]
+                if not _rule["actions"]:
+                    continue  # rule had only hallucinated actions; drop entirely
+            allows.append(_rule)
 
         # §A38 #370 — parse scope dimensions the LLM emitted (per
         # _SYSTEM_PROMPT_AUDIT). _enrich_scope_from_events below adds

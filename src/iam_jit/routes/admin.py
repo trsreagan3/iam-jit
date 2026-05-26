@@ -39,6 +39,7 @@ from ..middleware import (
 )
 from ..store import RequestStore
 from ..users_store import User, UserNotFound, UserStore
+from ..users_store import StoreReadOnly as _StoreReadOnly
 
 
 router = APIRouter(prefix="/api/v1/admin", tags=["admin"])
@@ -718,7 +719,24 @@ def dismiss_warning(
     updated_notes = security_posture.append_dismissal(
         fresh.notes, warning_id, when
     )
-    user_store.put(dataclasses.replace(fresh, notes=updated_notes))
+    # #635 — FileUserStore is read-only at runtime by design. Catch the
+    # StoreReadOnly exception and return 409 with a helpful explanation
+    # rather than letting it propagate as an opaque 500. Mirrors the
+    # _dismiss_disabled_reason() check in web.py:1717 per
+    # [[cross-product-agent-parity]].
+    try:
+        user_store.put(dataclasses.replace(fresh, notes=updated_notes))
+    except _StoreReadOnly:
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                "dismissal not supported with FileUserStore — the YAML file "
+                "is read-only at runtime by design. Switch to the DynamoDB "
+                "user store (IAM_JIT_USERS_TABLE) to enable per-admin "
+                "dismissal, or fix the underlying posture issue so the "
+                "warning no longer appears."
+            ),
+        )
 
     try:
         audit_mod.emit(
@@ -1162,16 +1180,61 @@ def update_log_retention(
             },
         )
 
+    # #636 — mirror the GET handler's botocore-exception guard.
+    # Both get_logs_client() calls below raise NoRegionError (or
+    # NoCredentialsError) BEFORE any AWS API call in local-no-region
+    # setups; previously those propagated as opaque 500s. Return 503 +
+    # a structured reason+hint per [[ibounce-honest-positioning]] /
+    # [[cross-product-agent-parity]] to match the GET handler at
+    # admin.py:1001-1034.
+    try:
+        from botocore.exceptions import (
+            NoCredentialsError as _NoCredentialsError,
+            NoRegionError as _NoRegionError,
+        )
+    except Exception:  # pragma: no cover — boto3 should always be present
+        _NoCredentialsError = _NoRegionError = ()  # type: ignore[assignment]
+
+    def _get_logs_client_or_503():  # type: ignore[return]
+        try:
+            return get_logs_client()
+        except _NoRegionError:
+            raise HTTPException(
+                status_code=503,
+                detail={
+                    "reason": "no_aws_region_configured",
+                    "hint": (
+                        "Set AWS_REGION (or AWS_DEFAULT_REGION) in the "
+                        "iam-jit process environment, OR run iam-jit in "
+                        "an environment with an IAM instance/role profile "
+                        "that supplies a region. In `--local` mode without "
+                        "AWS wiring this endpoint is unavailable."
+                    ),
+                },
+            )
+        except _NoCredentialsError:
+            raise HTTPException(
+                status_code=503,
+                detail={
+                    "reason": "no_aws_credentials_configured",
+                    "hint": (
+                        "Set AWS_PROFILE or run in an environment with IAM "
+                        "role/instance credentials. In `--local` mode without "
+                        "AWS wiring this endpoint is unavailable."
+                    ),
+                },
+            )
+
     try:
         previous = log_retention_mod.get_current_retention(
-            get_logs_client(), floor.log_group_name,
+            _get_logs_client_or_503(), floor.log_group_name,
         )
     except log_retention_mod.RetentionError:
         previous = None
 
     try:
         log_retention_mod.set_retention(
-            get_logs_client(), floor.log_group_name, v, floor,
+            _get_logs_client_or_503(), floor.log_group_name, v, floor,
         )
     except log_retention_mod.RetentionError as e:
         raise HTTPException(status_code=500, detail=str(e))

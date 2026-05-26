@@ -3467,6 +3467,11 @@ async def _handle_request(request, *, store, config: ProxyConfig, session):
                 "classifier_hook": structured.classifier_hook,
                 "deny_source_classified": structured.deny_source,
                 "structured_deny_schema_version": structured.schema_version,
+                # #634 — include agent_session_id in 403 body so callers
+                # can correlate this deny to their session without re-reading
+                # the request headers. Was populated in StructuredDenyResponse
+                # but dropped during serialization.
+                "agent_session_id": structured.agent_session_id,
             },
             status=403,
             # Wire-protocol response headers retain the
