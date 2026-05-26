@@ -786,11 +786,16 @@ def request_role_from_synthesis(
     #    "here's what's done + here's what's next", not an error.
     notes_list: list[str] = []
     if status == "auto_approved" and credentials is None:
+        # #473 / §A60b — credential_factory not wired at call site.
+        # Surface an actionable note so the agent knows how to proceed
+        # rather than silently receiving null. Per
+        # [[ambient-value-prop-and-friction-framing]] this is framed as
+        # "here's what's done + here's what's next", not an error.
         notes_list.append(
-            "Synthesis approved; credential issuance not yet wired in "
-            "this v1.0 release. To mint actual STS credentials, run "
-            f"`iam-jit request --from-synthesis {request_id}` OR wait "
-            "for the credential-factory MCP wiring (filed as #473)."
+            "Synthesis approved; credential issuance not available in "
+            "this invocation. To mint actual STS credentials, run "
+            f"`iam-jit request --from-synthesis {request_id}` OR use "
+            "the MCP server (which wires credential_factory via #473)."
         )
         notes_list.append(
             "Your audit chain is preserved: query via "
@@ -1081,12 +1086,251 @@ def request_role_from_synthesis_for_mcp(
     return verdict.as_dict()
 
 
+# ---------------------------------------------------------------------------
+# #473 / §A60b — local credential factory
+# ---------------------------------------------------------------------------
+#
+# The MCP server is a stateless stdio process with no AccountStore or
+# ProvisionerRole mechanism. This factory uses the CALLER'S own ambient
+# AWS credentials (from the environment / ~/.aws / instance-metadata) to:
+#
+#   1. Create a short-lived IAM role in the caller's account with the
+#      synthesised policy (per [[creates-never-mutates]] — a NEW role,
+#      not a mutation of an existing one).
+#   2. Call sts:AssumeRole to issue STS credentials for that role.
+#   3. Return the credentials dict to the synthesis surface.
+#
+# This is the "local safety mode" shape (per [[local-only-safety-mode]])
+# appropriate for the MCP path. Cross-account provisioning is handled by
+# the server-side `provision()` module (separate trust boundary per
+# [[create-not-assume-pattern]]).
+#
+# The factory MUST raise on any failure — the synthesis surface catches
+# the exception + flips the verdict to pending_operator_approval, so
+# the agent always gets an honest response (never silently null).
+#
+# Env vars that influence the factory:
+#   IAM_JIT_SYNTHESIS_ROLE_PATH  — IAM path prefix (default /iam-jit/synthesis/)
+#   IAM_JIT_SYNTHESIS_SESSION_DURATION — STS session seconds (default 3600)
+
+
+_SYNTHESIS_ROLE_PATH_ENV = "IAM_JIT_SYNTHESIS_ROLE_PATH"
+_SYNTHESIS_SESSION_DURATION_ENV = "IAM_JIT_SYNTHESIS_SESSION_DURATION"
+_DEFAULT_SYNTHESIS_ROLE_PATH = "/iam-jit/synthesis/"
+_DEFAULT_SYNTHESIS_SESSION_DURATION = 3600  # 1 hour
+
+
+def build_local_credential_factory(
+    *,
+    iam_client: typing.Any | None = None,
+    sts_client: typing.Any | None = None,
+) -> typing.Callable[[dict[str, typing.Any]], dict[str, typing.Any]]:
+    """Return a credential_factory that creates a role + issues STS creds.
+
+    The factory is a closure over the boto3 clients (or None, in which
+    case boto3 is imported at call time using ambient credentials).
+    Injecting ``iam_client`` / ``sts_client`` lets tests pass moto-backed
+    clients without touching env vars.
+
+    Raises :class:`RuntimeError` if boto3 is not installed — the caller
+    (the MCP server) should catch this and return a graceful response
+    rather than crashing the stdio loop.
+
+    Per [[creates-never-mutates]]: this factory CREATES a new IAM role for
+    every synthesis request. It never modifies existing roles.
+    """
+    try:
+        import boto3 as _boto3  # type: ignore[import]
+    except ImportError as e:
+        raise RuntimeError(
+            "boto3 is required for credential issuance but is not "
+            "installed. Install it with `pip install boto3` or run "
+            "`iam-jit` in the standard virtualenv."
+        ) from e
+
+    _iam = iam_client
+    _sts = sts_client
+
+    def _factory(spec: dict[str, typing.Any]) -> dict[str, typing.Any]:
+        """Create an IAM role + return STS creds for the synthesis request.
+
+        ``spec`` is the payload provided by :func:`request_role_from_synthesis`:
+        ``{request_id, policy, observed_scope, requested_duration, evidence}``.
+
+        Returns a dict with ``AccessKeyId``, ``SecretAccessKey``,
+        ``SessionToken``, ``Expiration``, ``RoleArn`` — the stable
+        contract the synthesis surface serialises into the agent's verdict.
+
+        Raises on any AWS API error so the synthesis surface can flip
+        the verdict to pending_operator_approval (per
+        [[scorer-is-ground-truth]] + [[ibounce-honest-positioning]]:
+        fail-CLOSED on issuance failure).
+        """
+        import json as _json_local
+        import datetime as _dt_local
+
+        iam = _iam if _iam is not None else _boto3.client("iam")
+        sts = _sts if _sts is not None else _boto3.client("sts")
+
+        request_id = str(spec.get("request_id") or "")
+        policy = spec.get("policy") or {"Version": "2012-10-17", "Statement": []}
+
+        # Derive role name from request_id: IAM role names are ≤64 chars,
+        # must match [\w+=,.@-]. Use "ijsynth-" prefix + last 52 chars of
+        # the rfs_ id (strips "rfs_" prefix + truncates).
+        safe_id = request_id.replace("_", "").replace("-", "")[-52:]
+        role_name = f"ijsynth-{safe_id}"[:64]
+
+        role_path = _os.environ.get(
+            _SYNTHESIS_ROLE_PATH_ENV, _DEFAULT_SYNTHESIS_ROLE_PATH
+        )
+        session_duration = int(
+            _os.environ.get(
+                _SYNTHESIS_SESSION_DURATION_ENV,
+                str(_DEFAULT_SYNTHESIS_SESSION_DURATION),
+            )
+        )
+
+        # Determine the current principal ARN for the trust policy.
+        # The role trusts the caller's own identity so sts:AssumeRole
+        # works immediately without additional IAM plumbing.
+        try:
+            caller = sts.get_caller_identity()
+            caller_arn = caller["Arn"]
+        except Exception as e:
+            raise RuntimeError(
+                f"sts:GetCallerIdentity failed — check that AWS "
+                f"credentials are configured: {e}"
+            ) from e
+
+        trust = {
+            "Version": "2012-10-17",
+            "Statement": [{
+                "Effect": "Allow",
+                "Principal": {"AWS": caller_arn},
+                "Action": "sts:AssumeRole",
+            }],
+        }
+
+        # Resolve expiry from requested_duration (ISO-8601 duration like
+        # PT1H). Fall back to the env-var session duration.
+        requested_duration = str(spec.get("requested_duration") or "PT1H")
+        expires_at_iso = _resolve_expiry_from_duration(requested_duration)
+
+        # Create the role. If a role with the same name already exists
+        # (e.g. concurrent retry), re-use it — idempotency keeps the
+        # synthesis surface safe under concurrent calls.
+        try:
+            iam.create_role(
+                RoleName=role_name,
+                Path=role_path,
+                AssumeRolePolicyDocument=_json_local.dumps(trust),
+                Description=f"iam-jit synthesis grant {request_id}"[:1000],
+                MaxSessionDuration=session_duration,
+                Tags=[
+                    {"Key": "managed-by", "Value": "iam-jit"},
+                    {"Key": "request-id", "Value": request_id[:256]},
+                    {"Key": "synthesis", "Value": "true"},
+                    {"Key": "expires-at", "Value": expires_at_iso[:256]},
+                ],
+            )
+        except Exception as e:
+            if "EntityAlreadyExists" not in str(e) and "already exists" not in str(e):
+                raise RuntimeError(
+                    f"iam:CreateRole for synthesis role {role_name!r} failed: {e}"
+                ) from e
+
+        # Attach the synthesised policy as an inline policy.
+        try:
+            iam.put_role_policy(
+                RoleName=role_name,
+                PolicyName="iam-jit-synthesis-grant",
+                PolicyDocument=_json_local.dumps(policy),
+            )
+        except Exception as e:
+            raise RuntimeError(
+                f"iam:PutRolePolicy for synthesis role {role_name!r} failed: {e}"
+            ) from e
+
+        # Resolve the role ARN.
+        try:
+            role_resp = iam.get_role(RoleName=role_name)
+            role_arn = role_resp["Role"]["Arn"]
+        except Exception as e:
+            raise RuntimeError(
+                f"iam:GetRole for synthesis role {role_name!r} failed: {e}"
+            ) from e
+
+        # Assume the role to mint STS credentials.
+        session_name = f"iam-jit-synth-{request_id[-32:]}"[:64]
+        try:
+            assume_resp = sts.assume_role(
+                RoleArn=role_arn,
+                RoleSessionName=session_name,
+                DurationSeconds=session_duration,
+            )
+        except Exception as e:
+            raise RuntimeError(
+                f"sts:AssumeRole into {role_arn!r} failed: {e}"
+            ) from e
+
+        creds = assume_resp["Credentials"]
+        expiration = creds.get("Expiration")
+        if hasattr(expiration, "isoformat"):
+            expiration = expiration.isoformat()
+        else:
+            expiration = str(expiration)
+
+        return {
+            "AccessKeyId": creds["AccessKeyId"],
+            "SecretAccessKey": creds["SecretAccessKey"],
+            "SessionToken": creds["SessionToken"],
+            "Expiration": expiration,
+            "RoleArn": role_arn,
+        }
+
+    return _factory
+
+
+def _resolve_expiry_from_duration(iso_duration: str) -> str:
+    """Parse a simple ISO-8601 duration string (PTxH / PTxM / PTxS) into
+    an absolute UTC timestamp.
+
+    Only handles the PT<n>H / PT<n>M / PT<n>S forms that the synthesis
+    surface uses (not full P1Y2M3DT... forms). Falls back to 1 hour on
+    any parse failure — the fallback is safe because the IAM role's
+    MaxSessionDuration gate enforces the wall-clock limit independently.
+    """
+    import re as _re
+    import datetime as _dt_local
+
+    s = iso_duration.strip().upper()
+    # Match PT<n>H, PT<n>M, PT<n>S or combinations.
+    hours = minutes = seconds = 0
+    m = _re.search(r"(\d+)H", s)
+    if m:
+        hours = int(m.group(1))
+    m = _re.search(r"(\d+)M", s)
+    if m:
+        minutes = int(m.group(1))
+    m = _re.search(r"(\d+)S", s)
+    if m:
+        seconds = int(m.group(1))
+    if not (hours or minutes or seconds):
+        hours = 1  # fallback
+
+    delta = _dt_local.timedelta(hours=hours, minutes=minutes, seconds=seconds)
+    expires_at = _dt_local.datetime.now(_dt_local.timezone.utc) + delta
+    return expires_at.strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
 __all__ = [
     "DEFAULT_AUTO_APPROVE_THRESHOLD",
     "DEFAULT_MAX_LOOKBACK_DAYS",
     "SYNTHESIS_EVENT_TYPE",
     "SynthesisRequestError",
     "SynthesisVerdict",
+    "build_local_credential_factory",
     "default_synthesis_audit_sink",
     "request_role_from_synthesis",
     "request_role_from_synthesis_for_mcp",

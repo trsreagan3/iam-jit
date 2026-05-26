@@ -884,3 +884,184 @@ def test_synthesis_row_to_ocsf_rejection_marks_failure() -> None:
     assert ocsf["unmapped"]["iam_jit"]["rejection_code"] == (
         "missing_evidence_block"
     )
+
+
+# ---- #473 / §A60b — credential_factory wire-through tests -----------------
+#
+# State-verification per CONTRIBUTING.md: assert OBSERVABLE STATE matches
+# reported status, not just the status string. The #476 anti-pattern
+# was status=auto_approved + credentials:null silently — these tests
+# close the regression gap.
+
+
+def test_473_happy_path_credentials_populated(monkeypatch) -> None:
+    """Happy path with credential_factory wired: auto-approved synthesis
+    returns credentials.AccessKeyId + SecretAccessKey + SessionToken
+    populated (NOT None); request.state == auto_approved.
+
+    This is the PRIMARY regression test for #473 / §A60b — the wiring
+    gap that made auto-approved verdicts return credentials:null."""
+    import iam_jit.request_from_synthesis as rfs
+
+    monkeypatch.setattr(rfs, "_score_policy_safely", lambda _p: (1, ()))
+
+    fake_creds = {
+        "AccessKeyId": "AKIAIOSFODNN7EXAMPLE",
+        "SecretAccessKey": "wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY",
+        "SessionToken": "AQoDYXdzEJr//////////wEaoAK1",
+        "Expiration": "2026-05-26T18:00:00Z",
+        "RoleArn": "arn:aws:iam::123456789012:role/ijsynth-test",
+    }
+    factory_calls: list[dict[str, Any]] = []
+
+    def _stub_factory(spec: dict[str, Any]) -> dict[str, Any]:
+        factory_calls.append(spec)
+        return fake_creds
+
+    verdict = rfs.request_role_from_synthesis(
+        permissions=_narrow_permissions(),
+        observed_scope={},
+        justification="473 happy path",
+        evidence=_good_evidence(),
+        credential_factory=_stub_factory,
+    )
+    # Observable state 1: status must be auto_approved.
+    assert verdict.status == "auto_approved", verdict
+    # Observable state 2: credentials must be populated — NOT None.
+    assert verdict.credentials is not None, (
+        "#476 regression — auto_approved but credentials:null"
+    )
+    # Observable state 3: individual fields present + non-empty.
+    assert verdict.credentials.get("AccessKeyId") == "AKIAIOSFODNN7EXAMPLE"
+    assert verdict.credentials.get("SecretAccessKey")
+    assert verdict.credentials.get("SessionToken")
+    # Observable state 4: factory was actually called (proves the wire).
+    assert len(factory_calls) == 1
+
+
+def test_473_credential_creation_failure_fail_closed(monkeypatch) -> None:
+    """Credential factory raises → fail-CLOSED: verdict flips to
+    pending_operator_approval, NOT auto_approved with credentials:null.
+
+    Per [[scorer-is-ground-truth]] + [[ibounce-honest-positioning]]:
+    fail-CLOSED on credential creation failure — no silent null."""
+    import iam_jit.request_from_synthesis as rfs
+
+    monkeypatch.setattr(rfs, "_score_policy_safely", lambda _p: (1, ()))
+
+    def _exploding_factory(_spec: dict[str, Any]) -> dict[str, Any]:
+        raise RuntimeError("STS rate-limit hit")
+
+    verdict = rfs.request_role_from_synthesis(
+        permissions=_narrow_permissions(),
+        observed_scope={},
+        justification="473 fail-closed",
+        evidence=_good_evidence(),
+        credential_factory=_exploding_factory,
+    )
+    # Observable state 1: status MUST be pending, not auto_approved.
+    assert verdict.status == "pending_operator_approval", (
+        f"expected pending_operator_approval on factory failure; got "
+        f"{verdict.status!r}"
+    )
+    # Observable state 2: credentials must be None (no partial state).
+    assert verdict.credentials is None
+    # Observable state 3: the rejection_code is NOT set (this is a
+    # demotion, not a rejection — the request is queued for review).
+    assert verdict.rejection_code is None
+
+
+def test_473_backward_compat_notes_field_still_populated(monkeypatch) -> None:
+    """#476 backward-compat: the notes field is still populated and
+    queryable alongside the #473 credential fix.
+
+    When credentials ARE returned (factory wired + success), the
+    "not yet wired" note MUST NOT appear (that would be misleading).
+    When credentials are null (factory absent), notes MUST still
+    surface the actionable next-step."""
+    import iam_jit.request_from_synthesis as rfs
+
+    monkeypatch.setattr(rfs, "_score_policy_safely", lambda _p: (1, ()))
+
+    # Case A: factory wired → creds present → "not wired" note absent.
+    verdict_with_creds = rfs.request_role_from_synthesis(
+        permissions=_narrow_permissions(),
+        observed_scope={},
+        justification="notes compat — with creds",
+        evidence=_good_evidence(),
+        credential_factory=lambda _: {
+            "AccessKeyId": "AKIAtest",
+            "SecretAccessKey": "sec",
+            "SessionToken": "tok",
+            "Expiration": "2026-05-26T18:00:00Z",
+        },
+    )
+    assert verdict_with_creds.credentials is not None
+    # notes is always a tuple (possibly empty) — backward-compat wire shape.
+    assert isinstance(verdict_with_creds.notes, tuple)
+    joined_with = " ".join(verdict_with_creds.notes).lower()
+    assert "credential issuance not available" not in joined_with, (
+        "misleading 'not available' note surfaced when creds were returned"
+    )
+
+    # Case B: no factory → creds null → actionable note present.
+    verdict_no_creds = rfs.request_role_from_synthesis(
+        permissions=_narrow_permissions(),
+        observed_scope={},
+        justification="notes compat — no factory",
+        evidence=_good_evidence(),
+        # NO credential_factory — the pre-#473 state.
+    )
+    assert verdict_no_creds.credentials is None
+    assert isinstance(verdict_no_creds.notes, tuple)
+    joined_none = " ".join(verdict_no_creds.notes)
+    # #476 notes still appear: the audit_event_id + iam-jit audit query.
+    assert verdict_no_creds.audit_event_id in joined_none
+    assert "iam-jit audit query" in joined_none
+
+
+def test_473_sabotage_dropping_credential_factory_fails_test_1(
+    monkeypatch,
+) -> None:
+    """Sabotage check: if credential_factory is forcibly dropped (not
+    passed to request_role_from_synthesis), test_473_happy_path_ would
+    fail — proves the wire from the MCP handler is load-bearing.
+
+    This test monkeypatches request_role_from_synthesis to DROP the
+    credential_factory argument, then asserts the observable state
+    (credentials:null) contradicts what test 1 asserts."""
+    import iam_jit.request_from_synthesis as rfs
+
+    monkeypatch.setattr(rfs, "_score_policy_safely", lambda _p: (1, ()))
+
+    fake_creds = {
+        "AccessKeyId": "AKIAIOSFODNN7EXAMPLE",
+        "SecretAccessKey": "wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY",
+        "SessionToken": "AQoDYXdzEJr//////////wEaoAK1",
+        "Expiration": "2026-05-26T18:00:00Z",
+    }
+
+    _original = rfs.request_role_from_synthesis
+
+    def _factory_dropping_wrapper(**kwargs: Any) -> Any:
+        # Simulate the pre-#473 state: drop credential_factory.
+        kwargs.pop("credential_factory", None)
+        return _original(**kwargs)
+
+    monkeypatch.setattr(rfs, "request_role_from_synthesis",
+                        _factory_dropping_wrapper)
+
+    verdict = rfs.request_role_from_synthesis(
+        permissions=_narrow_permissions(),
+        observed_scope={},
+        justification="sabotage",
+        evidence=_good_evidence(),
+        credential_factory=lambda _: fake_creds,
+    )
+    # With factory dropped, credentials MUST be None — this proves that
+    # threading the factory argument through is the load-bearing change.
+    assert verdict.credentials is None, (
+        "Sabotage check failed: credentials were non-null even after "
+        "credential_factory was dropped from the call. The wire-through "
+        "may not be the actual issuance path."
+    )

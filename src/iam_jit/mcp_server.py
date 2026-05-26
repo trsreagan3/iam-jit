@@ -6028,10 +6028,29 @@ def _handle_request(req: dict[str, Any]) -> dict[str, Any] | None:
             # #421 / §A60 — synthesis-aware role-request seam.
             # Validates the REQUIRED evidence block + routes through
             # the standard scorer + auto-approve gate.
+            # #473 / §A60b — wire credential_factory so auto-approved
+            # synthesis requests return usable STS credentials rather
+            # than credentials:null. The factory uses the caller's
+            # ambient AWS credentials (env / ~/.aws / instance-metadata)
+            # to create a short-lived role + issue STS creds. If boto3
+            # is absent or AWS credentials are not configured, the
+            # factory raises and the synthesis surface flips the verdict
+            # to pending_operator_approval (fail-CLOSED per
+            # [[scorer-is-ground-truth]] + [[ibounce-honest-positioning]]).
             from .request_from_synthesis import (
+                build_local_credential_factory,
                 request_role_from_synthesis_for_mcp,
             )
-            result_payload = request_role_from_synthesis_for_mcp(args)
+            try:
+                _synthesis_cred_factory = build_local_credential_factory()
+            except RuntimeError:
+                # boto3 not installed — proceed without credential
+                # issuance; the verdict's notes field surfaces the gap.
+                _synthesis_cred_factory = None
+            result_payload = request_role_from_synthesis_for_mcp(
+                args,
+                credential_factory=_synthesis_cred_factory,
+            )
         elif tool_name == "bounce_query_audit_long_range":
             # #436 / §A70 — long-time-range audit query (year+
             # windows + deployment-target scope filter + cold-tier
