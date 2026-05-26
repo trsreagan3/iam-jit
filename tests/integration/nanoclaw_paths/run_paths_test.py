@@ -47,8 +47,8 @@ from .oncecli_mock import start_mock, OneCLIMock
 # ---------- repo / binary paths ----------
 
 REPO_ROOT = Path(__file__).resolve().parents[3]
-IAM_ROLES_ROOT = REPO_ROOT  # /Users/reagan/repos/iam-roles
-WORKSPACE_ROOT = REPO_ROOT.parent  # /Users/reagan/repos
+IAM_ROLES_ROOT = REPO_ROOT  # ${HOME}/repos/iam-roles
+WORKSPACE_ROOT = REPO_ROOT.parent  # ${HOME}/repos
 
 GBOUNCE_BIN = WORKSPACE_ROOT / "gbounce" / "bin" / "gbounce"
 KBOUNCE_BIN = WORKSPACE_ROOT / "kbouncer" / "bin" / "kbounce"

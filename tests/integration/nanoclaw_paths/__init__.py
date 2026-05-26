@@ -8,7 +8,7 @@ postgres on :5432, plus a working build of every bouncer binary.
 
 Bring local infrastructure up with:
 
-    docker compose -f /Users/reagan/repos/dogfood/docker-compose.yml up -d
+    docker compose -f ${HOME}/repos/dogfood/docker-compose.yml up -d
 
 Run with:
 

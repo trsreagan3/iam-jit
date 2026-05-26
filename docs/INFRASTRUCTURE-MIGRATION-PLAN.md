@@ -72,7 +72,7 @@ Order .com first because it's what the landing post + README references already 
 After purchase + DNS configured, search the repos for any `iam-risk-score.com` references and verify they point at the right path:
 
 ```bash
-cd /Users/reagan/repos
+cd ${HOME}/repos
 for repo in iam-jit kbouncer dbounce gbounce homebrew-tap helm-charts bounce-profiles; do
   grep -rln "iam-risk-score.com" "$repo/" 2>/dev/null | grep -v ".git/"
 done

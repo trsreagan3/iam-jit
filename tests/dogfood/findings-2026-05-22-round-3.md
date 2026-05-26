@@ -36,7 +36,7 @@ Repo HEAD at sweep time: `9a8606c` (after #319 + #320 + #317 + #298 fix cycle on
 
 **What I did**
 ```bash
-/Users/reagan/repos/iam-roles/.venv/bin/iam-jit-bouncer run \
+<repo>/.venv/bin/iam-jit-bouncer run \
     --port 19087 --audit-log-path /tmp/uat-r3/ibounce/audit.jsonl
 ```
 Tried with and without `--audit-log-max-size-mb` — same crash either way.
@@ -48,7 +48,7 @@ ibounce starts cleanly, listens on the port, emits caveat lines.
 
 **What happened**
 ```
-File "/Users/reagan/repos/iam-roles/src/iam_jit/bouncer_cli.py", line 4147, in run_cmd
+File "<repo>/src/iam_jit/bouncer_cli.py", line 4147, in run_cmd
     config = ProxyConfig(
 TypeError: ProxyConfig.__init__() got an unexpected keyword argument 'audit_log_max_size_mb'
 ```
@@ -84,7 +84,7 @@ curl -s "http://127.0.0.1:19084/audit/events?limit=20"
 Per #320 / §A18 + `[[cross-product-agent-parity]]`, `/audit/events` on every bouncer threads the agent block — same shape as the JSONL writer. The round-2 dbounce CRIT was the exact same defect; #320 was supposed to close it cross-product.
 
 **What happened**
-gbounce's `/audit/events` reconstructs events from SQLite via `rowsToAuditEvents` in `/Users/reagan/repos/gbounce/internal/proxy/audit_events.go:270`. The `store.DecisionRow` does carry `AgentSessionID` + `AgentName` (`internal/store/store.go:216-217`) — they get persisted on insert and selected by `RecentDecisions` — but the reconstruction never copies them into `RequestInput`:
+gbounce's `/audit/events` reconstructs events from SQLite via `rowsToAuditEvents` in `gbounce: internal/proxy/audit_events.go:270`. The `store.DecisionRow` does carry `AgentSessionID` + `AgentName` (`internal/store/store.go:216-217`) — they get persisted on insert and selected by `RecentDecisions` — but the reconstruction never copies them into `RequestInput`:
 
 ```go
 in := audit.RequestInput{

@@ -290,7 +290,7 @@ Same as UC-11. HIGH.
 
 #### UC-33 Multi-cluster K8s (kbouncer)
 
-* **Pieces**: kbouncer (separate Go repo at `/Users/reagan/repos/kbouncer/`).
+* **Pieces**: kbouncer (separate Go repo at `${HOME}/repos/kbouncer/`).
 * **Tests**: ✅ Go test suite per kbouncer repo. From iam-roles vantage: integration via cross-product audit-tail.
 * **Composition**: **VERIFIED-INDIVIDUAL-ONLY**. No multi-cluster fixture test.
 * **Severity**: MED.
@@ -322,7 +322,7 @@ DEPLOY-READY (canary live).
 
 #### UC-38 CI/CD standalone with `--enable-side-llm`
 
-* **Pieces**: `autopilot/daemon.py` `--enable-side-llm` flag (B1 of LLM audit); GH Action at `/Users/reagan/repos/iam-risk-score-action/`.
+* **Pieces**: `autopilot/daemon.py` `--enable-side-llm` flag (B1 of LLM audit); GH Action at `${HOME}/repos/iam-risk-score-action/`.
 * **Tests**: ✅ `tests/autopilot/test_daemon_side_llm_flag.py`; `test_improve_pipeline_side_llm_gate.py`.
 * **Composition**: **VERIFIED-INDIVIDUAL-ONLY**. No CI-shaped test (GH Actions workflow + bouncer + side-LLM).
 * **Severity**: MED for v1.0 deploy (CI/CD is a separate audience; founder's work-machine is local-dev shape).
@@ -335,7 +335,7 @@ DEPLOY-READY (canary live).
 
 #### UC-40 Helm K8s install
 
-* **Pieces**: `/Users/reagan/repos/helm-charts/`.
+* **Pieces**: `${HOME}/repos/helm-charts/`.
 * **Status**: Helm chart published but not exercised in CI on a real kind/k3s cluster.
 * **Severity**: MED (not founder's deploy target).
 
@@ -412,7 +412,7 @@ Noted during the audit; flagged for the MRR-2 error-path review:
 
 1. **Every LLM-augmented surface lacks its own calibration corpus.** UC-2, 17, 18, 19, 22 all ship judgment-quality claims with no measurement. Per `[[calibration-quality-bar]]` this is the single largest cross-cutting gap. Build ONE corpus framework (per `[[role-effectiveness-corpus]]` shape, MEANINGFUL / PARTIAL / THEATER / NEGATIVE-VALUE grades) and run all four surfaces against it. MRR-3 should produce this as a primary deliverable.
 2. **"Reported status without observable state" is the recurring bug shape.** CONTRIBUTING.md catalogued 7 such bugs (#326, #448, #462, #463, #475, #476, #477). The state-verification convention now exists but post-convention NEW SURFACES (UC-17, UC-20, UC-19) lack the same E2E discipline applied. MRR-2 should add state-verification assertions to the 5 CRIT surfaces.
-3. **Cross-bouncer composition is consistently mocked.** UC-10, 11, 17, 23, 24, 28 all have "integration" tests that mock the per-bouncer HTTP transport. Real four-process fan-out has never been exercised in CI. Recommend a `tests/integration_live_bouncers/` tier that spawns real bouncer binaries (the dogfood orchestration scaffold at `/Users/reagan/repos/dogfood/` is the closest existing artifact — adopt its pattern into the iam-roles CI matrix).
+3. **Cross-bouncer composition is consistently mocked.** UC-10, 11, 17, 23, 24, 28 all have "integration" tests that mock the per-bouncer HTTP transport. Real four-process fan-out has never been exercised in CI. Recommend a `tests/integration_live_bouncers/` tier that spawns real bouncer binaries (the dogfood orchestration scaffold at `${HOME}/repos/dogfood/` is the closest existing artifact — adopt its pattern into the iam-roles CI matrix).
 4. **dbounce's H3 + gbounce's H4 represent the worst-of-both: known-bypass + missing-audit.** Per `[[ibounce-honest-positioning]]` the FRAMING ("dev loop, not security boundary") covers the dbounce-bypass risk for development workloads — but on a WORK AWS account these are dependably-exploitable holes. Either fix or document loudly that "if you have RDS Postgres / IMDS-reachable subnets, do not enable dbounce/gbounce on prod data plane yet."
 5. **The "ambient-autonomous-protection" pitch is load-bearing AND structurally untested.** UC-20 `iam_jit_setup_from_config` is the single command that closes the loop from `docs/HARNESS-RECIPES/`. Today it works in unit tests; nobody has run the actual MCP-agent install flow against the actual bouncers. The pitch is the v1.0 differentiator (per `[[ambient-autonomous-protection]]` LAUNCH-BLOCKER promotion); the verification is missing.
 6. **MRR-6 is blocked on a CRIT (#489).** Operator-runbook prose cannot reference `iam-jit init` until the command exists. Sequence accordingly: either land #489 OR rewrite MRR-6 around `init-solo + manual YAML + iam-jit doctor apply-config`.

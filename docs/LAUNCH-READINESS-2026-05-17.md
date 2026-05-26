@@ -163,7 +163,7 @@ Explicitly deferred to v1.1 per UAT-A doc-reframing:
   buckets. Not launch-blocking but maximizes funnel reinforcement.
 - **Pre-public-push hygiene** (per push-policy-public-repo): standing
   push auth; sensitive-data scan run before every push; repo will go
-  public around launch. Today's scrub removed all `/Users/reagan/`
+  public around launch. Today's scrub removed all personal home-dir
   paths + prior internal-customer-name references + `1.8%` mentions
   in product-surface code per no-one-eight-percent-mention.
 

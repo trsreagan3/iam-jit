@@ -130,7 +130,7 @@ projection lift from PARTIAL to MEANINGFUL.
 
 ```
 $ ibounce profile install --from /tmp/dogfood-final/test-bundle.yaml
-installed 1 profile(s) into /Users/reagan/.iam-jit/bouncer/profiles.yaml:
+installed 1 profile(s) into ~/.iam-jit/bouncer/profiles.yaml:
   measurement-test-f1
 
 $ ibounce profile show measurement-test-f1

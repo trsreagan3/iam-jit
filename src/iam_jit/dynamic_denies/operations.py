@@ -249,10 +249,10 @@ def _normalise_path_for_compare(p: str) -> str:
     """Normalise a filesystem path for the path-divergence check.
 
     Resolves ``..`` segments + symlinks + relative -> absolute so a
-    bouncer that reports ``/home/op/.iam-jit/dynamic-denies.yaml``
+    bouncer that reports ``${HOME}/.iam-jit/dynamic-denies.yaml``
     compares equal to a CLI that wrote ``~/.iam-jit/dynamic-denies.yaml``
-    (and the same on a Mac where ``/Users/op`` may be a symlink target
-    of ``/private/var/...``).
+    (and the same on a Mac where the home-dir prefix may be a symlink
+    target of ``/private/var/...``).
 
     realpath is best-effort: if it raises (broken symlink, perms) we
     fall back to the abspath so the comparison still happens — better
