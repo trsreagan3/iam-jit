@@ -21,6 +21,14 @@ Tests cover:
   7. Sabotage check: monkeypatched ``_build_config`` returning ``{}``
      causes init to REFUSE the write (proves validation is load-bearing
      per CONTRIBUTING.md anti-pattern guidance).
+
+UAT #13 gap-closers (5 new tests appended below existing suite):
+  10. IAM_JIT_DATA_DIR env var honored by `iam-jit init --data-dir`.
+  11. --data-dir flag wins over $IAM_JIT_DATA_DIR env var.
+  12. Next steps block includes shellinit when a bouncer is detected running.
+  13. Next steps block omits shellinit when no bouncers are detected.
+  14. --no-doctor-check emits stderr warning per [[ibounce-honest-positioning]].
+  15. Generated YAML "Apply with" comment uses resolved --data-dir path.
 """
 
 from __future__ import annotations
@@ -440,3 +448,186 @@ def test_invalid_bouncer_name_rejected_with_actionable_error(
 
     # Observable: nothing landed.
     assert not (isolated_data_dir / "iam-jit.yaml").exists()
+
+
+# ---------------------------------------------------------------------------
+# UAT #13 gap-closer tests (tests 10-15)
+# ---------------------------------------------------------------------------
+
+
+def test_iam_jit_data_dir_env_var_honored(
+    tmp_path: pathlib.Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """IAM_JIT_DATA_DIR env var must route the config to that path —
+    was silently ignored before (HIGH gap, [[cross-product-agent-parity]]
+    with serve + uninstall which already honor it)."""
+    custom = tmp_path / "env-driven-dir"
+    monkeypatch.setenv("IAM_JIT_DATA_DIR", str(custom))
+
+    result = _runner().invoke(
+        main,
+        ["init", "--non-interactive", "--no-doctor-check"],
+        catch_exceptions=False,
+    )
+    assert result.exit_code == 0, result.output
+
+    # Config must be at the env-var-specified path.
+    expected = custom / "iam-jit.yaml"
+    assert expected.exists(), (
+        f"Expected {expected} to exist; IAM_JIT_DATA_DIR was not honored"
+    )
+    # Default ~/.iam-jit path must NOT have been written.
+    default_path = pathlib.Path.home() / ".iam-jit" / "iam-jit.yaml"
+    assert not default_path.exists()
+
+
+def test_data_dir_flag_wins_over_env_var(
+    tmp_path: pathlib.Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """When both $IAM_JIT_DATA_DIR and --data-dir are set, the explicit
+    --data-dir flag must win (Click envvar= precedence)."""
+    env_dir = tmp_path / "env-dir"
+    flag_dir = tmp_path / "flag-dir"
+    monkeypatch.setenv("IAM_JIT_DATA_DIR", str(env_dir))
+
+    result = _runner().invoke(
+        main,
+        [
+            "init", "--non-interactive", "--no-doctor-check",
+            "--data-dir", str(flag_dir),
+        ],
+        catch_exceptions=False,
+    )
+    assert result.exit_code == 0, result.output
+
+    # Flag-dir wins.
+    assert (flag_dir / "iam-jit.yaml").exists()
+    # Env-dir was NOT touched.
+    assert not (env_dir / "iam-jit.yaml").exists()
+
+
+def test_next_steps_includes_shellinit_when_bouncer_running(
+    isolated_data_dir: pathlib.Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """When at least one bouncer is detected running, the Next steps
+    block must include `eval "$(iam-jit shellinit)"` as the first
+    action per [[ibounce-honest-positioning]]."""
+    # Monkeypatch posture detection to report ibounce as running.
+    monkeypatch.setattr(
+        "iam_jit.cli_init._any_bouncer_running",
+        lambda: True,
+    )
+
+    result = _runner().invoke(
+        main,
+        [
+            "init", "--non-interactive", "--no-doctor-check",
+            "--data-dir", str(isolated_data_dir),
+        ],
+        catch_exceptions=False,
+    )
+    assert result.exit_code == 0, result.output
+
+    # shellinit must appear in Next steps.
+    assert "shellinit" in result.output
+    assert "eval" in result.output
+
+    # It must appear BEFORE "Apply the config" (i.e. as the first step).
+    shellinit_pos = result.output.find("shellinit")
+    apply_pos = result.output.find("Apply the config")
+    assert shellinit_pos < apply_pos, (
+        "shellinit hint must be the FIRST next-step, before 'Apply the config'"
+    )
+
+
+def test_next_steps_omits_shellinit_when_no_bouncers_running(
+    isolated_data_dir: pathlib.Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """When no bouncers are running, the Next steps block must NOT
+    include a shellinit line (no-op wiring would mislead the operator)."""
+    monkeypatch.setattr(
+        "iam_jit.cli_init._any_bouncer_running",
+        lambda: False,
+    )
+
+    result = _runner().invoke(
+        main,
+        [
+            "init", "--non-interactive", "--no-doctor-check",
+            "--data-dir", str(isolated_data_dir),
+        ],
+        catch_exceptions=False,
+    )
+    assert result.exit_code == 0, result.output
+
+    # Check only the Next steps block (after the summary header).
+    next_steps_pos = result.output.find("Next steps:")
+    assert next_steps_pos != -1
+    next_steps_block = result.output[next_steps_pos:]
+    assert "shellinit" not in next_steps_block
+
+
+def test_no_doctor_check_emits_stderr_warning(
+    isolated_data_dir: pathlib.Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """--no-doctor-check must emit a visible warning so operators who
+    passed the flag know they opted out of verification. Per
+    [[ibounce-honest-positioning]] opt-outs must be visible.
+
+    CliRunner merges stderr into result.output; assert the warning
+    text appears in the combined stream. The implementation writes to
+    sys.stderr so it reaches the operator's terminal even in piped usage.
+    """
+    result = _runner().invoke(
+        main,
+        [
+            "init", "--non-interactive", "--no-doctor-check",
+            "--data-dir", str(isolated_data_dir),
+        ],
+        catch_exceptions=False,
+    )
+    assert result.exit_code == 0, result.output
+
+    # CliRunner merges stderr into output. The warning must be visible.
+    combined = result.output
+    assert "[warn]" in combined, (
+        f"Expected [warn] warning in output; got:\n{combined}"
+    )
+    assert "install-check suppressed" in combined
+    assert "iam-jit doctor install-check" in combined
+
+
+def test_yaml_comment_uses_resolved_config_path(
+    tmp_path: pathlib.Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The 'Apply with' comment in the generated YAML must reference the
+    resolved --data-dir path, NOT the hardcoded ~/.iam-jit/ fallback.
+    Operators using custom paths were seeing wrong paths in the comment."""
+    custom_dir = tmp_path / "custom-data"
+    expected_config = custom_dir / "iam-jit.yaml"
+
+    result = _runner().invoke(
+        main,
+        [
+            "init", "--non-interactive", "--no-doctor-check",
+            "--data-dir", str(custom_dir),
+        ],
+        catch_exceptions=False,
+    )
+    assert result.exit_code == 0, result.output
+    assert expected_config.exists()
+
+    raw = expected_config.read_text()
+    # The "Apply with" comment must reference the custom path.
+    assert str(expected_config) in raw, (
+        f"Expected 'Apply with' comment to reference {expected_config}; "
+        f"got:\n{raw[:500]}"
+    )
+    # Must NOT reference the hardcoded default path.
+    assert "~/.iam-jit/iam-jit.yaml" not in raw

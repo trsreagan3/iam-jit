@@ -107,11 +107,22 @@ def render_shellinit(
         else:
             stopped.append(name)
 
+    # Build a shell-appropriate eval hint for the header comment.
+    # Fish uses `eval (iam-jit shellinit)` (no dollar-paren);
+    # PowerShell uses `iam-jit shellinit | Invoke-Expression`;
+    # bash / zsh / sh use `eval "$(iam-jit shellinit)"`.
+    if shell == "fish":
+        eval_hint = "eval (iam-jit shellinit)"
+    elif shell == "powershell":
+        eval_hint = "iam-jit shellinit | Invoke-Expression"
+    else:
+        eval_hint = 'eval "$(iam-jit shellinit)"'
+
     lines: list[str] = []
     lines.append(
         _comment(
             shell,
-            f'iam-jit shellinit — paste this OR `eval "$(iam-jit shellinit)"`',
+            f"iam-jit shellinit — paste this OR `{eval_hint}`",
         ),
     )
     if running:

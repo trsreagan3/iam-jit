@@ -15,6 +15,11 @@ Tests cover:
   7. Sabotage: monkeypatch render_shellinit to always emit a fake
      export; assert the no-bouncer case now wrongly contains a real
      export — proves the snapshot-driven probe is load-bearing.
+
+UAT #13 gap-closers (3 new tests appended):
+  8. Fish shell comment header uses fish syntax (eval (iam-jit shellinit)).
+  9. Bash shell comment header uses bash syntax (eval "$(iam-jit shellinit)").
+  10. PowerShell comment header uses pipe-to-IEX syntax.
 """
 
 from __future__ import annotations
@@ -213,3 +218,54 @@ def test_sabotage_render_shellinit_proves_snapshot_drives_output(
     # Without the real render, the bogus export is present despite
     # no bouncers running — proving render_shellinit is load-bearing.
     assert "http://example.invalid" in result.output
+
+
+# ---------------------------------------------------------------------------
+# UAT #13 gap-closer tests 8-10 — shell-specific comment header syntax
+# ---------------------------------------------------------------------------
+
+
+def test_fish_shell_header_uses_fish_eval_syntax(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Fish shell comment header must use `eval (iam-jit shellinit)`
+    (no dollar-paren) — bash syntax doesn't work in fish."""
+    _no_bouncers(monkeypatch)
+    result = _invoke("--shell", "fish")
+    assert result.exit_code == 0, result.output
+
+    # Fish eval form must be present.
+    assert "eval (iam-jit shellinit)" in result.output
+    # Bash dollar-paren form must NOT appear.
+    assert 'eval "$(iam-jit shellinit)"' not in result.output
+    assert "eval $(iam-jit shellinit)" not in result.output
+
+
+def test_bash_shell_header_uses_bash_eval_syntax(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Bash shell comment header must use `eval "$(iam-jit shellinit)"`
+    (dollar-paren form); fish syntax must not appear."""
+    _no_bouncers(monkeypatch)
+    result = _invoke("--shell", "bash")
+    assert result.exit_code == 0, result.output
+
+    # Bash eval form must be present.
+    assert 'eval "$(iam-jit shellinit)"' in result.output
+    # Fish eval form (no dollar) must not appear.
+    assert "eval (iam-jit shellinit)" not in result.output
+
+
+def test_powershell_shell_header_uses_invoke_expression(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """PowerShell comment header must use
+    `iam-jit shellinit | Invoke-Expression` — not bash or fish syntax."""
+    _no_bouncers(monkeypatch)
+    result = _invoke("--shell", "powershell")
+    assert result.exit_code == 0, result.output
+
+    assert "Invoke-Expression" in result.output
+    # Neither bash nor fish eval form should appear.
+    assert 'eval "$(iam-jit shellinit)"' not in result.output
+    assert "eval (iam-jit shellinit)" not in result.output
