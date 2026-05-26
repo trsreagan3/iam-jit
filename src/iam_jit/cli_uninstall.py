@@ -1270,6 +1270,76 @@ def _resolve_go_bin_dir() -> pathlib.Path:
 # ---------------------------------------------------------------------------
 
 
+# ---------------------------------------------------------------------------
+# #617 MED-2 — read autopilot.status.json for known-running ports
+# ---------------------------------------------------------------------------
+
+
+def _read_autopilot_ports(
+    data_dir: pathlib.Path | None = None,
+) -> dict[str, list[int]]:
+    """Return per-bouncer port hints from ``autopilot.status.json``.
+
+    #617 MED-2: When autopilot is running and has launched bouncers, it
+    records each bouncer's ``port`` in its status snapshot. Reading this
+    file BEFORE the port-scan loop lets us augment the default port list
+    with KNOWN running ports from the autopilot daemon's perspective —
+    so a bouncer started by autopilot on a custom port (e.g.
+    ``ibounce run --port 9876``) gets probed even if 9876 is outside the
+    hardcoded default-port list.
+
+    Return value: ``{bouncer_kind: [port, ...], ...}`` with only the
+    kinds + ports that autopilot recorded as running. Empty dict when the
+    file doesn't exist, cannot be parsed, or autopilot isn't active.
+
+    Per [[ibounce-honest-positioning]]: best-effort read — parse failure
+    or missing file is NOT a halt condition. The ``_all_listening_ports``
+    full-scan pass runs regardless, so autopilot hints are ADDITIVE (they
+    speed up detection for known ports; they do not gate correctness).
+
+    ``data_dir``: when set, look for the file under that directory.
+    Otherwise fall back to the module-level :data:`IAM_JIT_HOME`.
+    """
+    home, _, _ = _derive_paths(data_dir)
+    status_path = home / "autopilot.status.json"
+    if not status_path.exists():
+        return {}
+    try:
+        raw = status_path.read_text(encoding="utf-8", errors="replace")
+        data = json.loads(raw)
+    except (OSError, json.JSONDecodeError):
+        return {}
+
+    # Schema: data["bouncers"][name] = {"port": <int>, "running": <bool>, ...}
+    bouncers_block = data.get("bouncers")
+    if not isinstance(bouncers_block, dict):
+        return {}
+
+    result: dict[str, list[int]] = {}
+    for name, block in bouncers_block.items():
+        if not isinstance(block, dict):
+            continue
+        # Only include bouncers autopilot considers active (running=true
+        # OR no running field — treat missing as unknown/assume running
+        # since we'd rather check a port that isn't bound than skip one
+        # that is). Per [[safety-mode-lean-permissive]]: prefer to check
+        # rather than miss.
+        is_running = block.get("running")
+        if is_running is False:
+            continue
+        port_val = block.get("port")
+        if port_val is None:
+            continue
+        try:
+            port = int(port_val)
+        except (ValueError, TypeError):
+            continue
+        if port <= 0 or port > 65535:
+            continue
+        result.setdefault(name, []).append(port)
+    return result
+
+
 def _inventory_installed_state(
     data_dir: pathlib.Path | None = None,
 ) -> dict[str, Any]:
@@ -1342,6 +1412,23 @@ def _inventory_installed_state(
     for kind, ports in _BOUNCER_DEFAULT_PORTS.items():
         for port in ports:
             expected_bouncer_for_port.setdefault(int(port), []).append(kind)
+
+    # #617 MED-2: augment the default port map with ports recorded by
+    # the autopilot daemon in ``autopilot.status.json``. This ensures
+    # that a bouncer started on a custom port by autopilot (e.g.
+    # ``ibounce run --port 9876``) is probed here even before the
+    # full ``_all_listening_ports`` enumeration pass. ADDITIVE: does
+    # not replace the default-port list; adds known-autopilot ports to
+    # the candidate probe set so the lsof cross-reference fires on them.
+    for autopilot_kind, autopilot_ports in _read_autopilot_ports(
+        data_dir=data_dir,
+    ).items():
+        for ap in autopilot_ports:
+            if ap not in expected_bouncer_for_port:
+                expected_bouncer_for_port.setdefault(ap, []).append(
+                    autopilot_kind,
+                )
+
     # Stable ordered list of unique ports across all bouncers.
     all_ports = sorted(expected_bouncer_for_port.keys())
     for port in all_ports:
@@ -1880,6 +1967,10 @@ def _step_remove_iam_jit_home(
         "preserved_paths": [],
         "backed_up_paths": [],
         "failed": [],
+        # #617 MED-5: CANARY.md files that were detected + preserved.
+        # Always populated (even when empty) so callers can enumerate
+        # which CANARY.md artifacts were intentionally kept.
+        "canary_md_preserved": [],
     }
     if not home.exists():
         return out
@@ -1914,6 +2005,23 @@ def _step_remove_iam_jit_home(
             p = home / rel
             if p.exists():
                 preserve_paths.add(p)
+
+    # #617 MED-5: CANARY.md artifacts are ALWAYS preserved, regardless
+    # of --keep-audit-logs. Operators on canary deploys (#492) use
+    # CANARY.md to record post-mortem notes + uncommitted findings;
+    # auto-deleting them would silently destroy operator-authored notes.
+    # Safer default: preserve + surface in remaining_artifacts so the
+    # operator decides.
+    #
+    # Locations checked:
+    #   1. ``<data_dir>/canary/CANARY.md``  (primary per-install location)
+    #   2. ``<data_dir>/CANARY.md``         (root-level fallback some
+    #      canary deployments use, e.g. when data_dir IS the repo root)
+    for canary_rel in ("canary/CANARY.md", "CANARY.md"):
+        cp = home / canary_rel
+        if cp.exists():
+            preserve_paths.add(cp)
+            out.setdefault("canary_md_preserved", []).append(str(cp))
 
     # Walk and remove top-level entries; preserve audit-bearing files
     # by leaving their parent dirs in place.
@@ -1984,6 +2092,56 @@ def _step_remove_iam_jit_home(
         except OSError as exc:
             out["failed"].append(f"{home}: {exc}")
     return out
+
+
+# ---------------------------------------------------------------------------
+# #617 MED-5 — CANARY.md artifact detection
+# ---------------------------------------------------------------------------
+
+
+def _detect_canary_md_artifacts(
+    data_dir: pathlib.Path | None = None,
+) -> list[dict[str, str]]:
+    """Detect CANARY.md files that should be preserved after uninstall.
+
+    #617 MED-5: Operators on canary deploys (#492) use CANARY.md to
+    record post-mortem notes and uncommitted findings. Auto-deleting
+    them would silently destroy operator-authored data.
+
+    Checks two locations:
+      1. ``<data_dir>/canary/CANARY.md`` — primary per-install location
+      2. ``<data_dir>/CANARY.md``        — root-level fallback
+
+    Returns a list of ``{"type": "canary_md", "location": str,
+    "hint": str}`` dicts for files that EXIST on disk.
+
+    Per [[creates-never-mutates]]: this function only detects; it does
+    NOT delete. CANARY.md artifacts are ALWAYS preserved by
+    :func:`_step_remove_iam_jit_home` regardless of flags.
+
+    Per [[ibounce-honest-positioning]]: we surface them in
+    ``remaining_artifacts`` so the operator can review + remove manually
+    when they are confident the notes are no longer needed.
+
+    ``data_dir``: when set, probe under that directory. Otherwise fall
+    back to the module-level :data:`IAM_JIT_HOME`.
+    """
+    home, _, _ = _derive_paths(data_dir)
+    artifacts: list[dict[str, str]] = []
+    for rel in ("canary/CANARY.md", "CANARY.md"):
+        p = home / rel
+        if p.exists():
+            artifacts.append({
+                "type": "canary_md",
+                "location": str(p),
+                "hint": (
+                    f"CANARY.md preserved at {p} — this file may contain "
+                    f"operator post-mortem notes from a canary deploy. "
+                    f"Review and remove manually when no longer needed: "
+                    f"rm {p}"
+                ),
+            })
+    return artifacts
 
 
 # ---------------------------------------------------------------------------
@@ -2417,14 +2575,51 @@ def _verify_clean_state(
             claude_json_path=claude_json_path,
         )
 
+    # (e) #617 MED-5: CANARY.md artifacts — always preserved by
+    # _step_remove_iam_jit_home; surface in remaining_artifacts so the
+    # operator knows they exist and can review + remove manually.
+    # These are INTENTIONALLY left behind (not a leftover-state error)
+    # but must appear in remaining_artifacts per the MED-5 spec.
+    canary_md_artifacts = _detect_canary_md_artifacts(data_dir=data_dir)
+
     # Aggregate remaining_artifacts in a stable order:
     #   binaries → bouncer_config_dirs → shell_rc_lines → mcp_entries
+    #   → canary_md (#617 MED-5)
     remaining_artifacts: list[dict[str, str]] = (
         path_binary_artifacts
         + bouncer_config_artifacts
         + shell_rc_artifacts
         + mcp_artifacts
+        + canary_md_artifacts
     )
+
+    # #617 MED-5: CANARY.md preservation counts as an intentional
+    # preserve (like --keep-audit-logs). If the ONLY leftover under
+    # home is a CANARY.md, the home_is_intentional_preserve flag must
+    # account for it — otherwise the post-check marks clean=False
+    # even though we deliberately kept the file.
+    canary_paths = {
+        pathlib.Path(a["location"]).resolve() for a in canary_md_artifacts
+    }
+    if (
+        not home_is_intentional_preserve
+        and leftover["iam_jit_home_exists"]
+        and canary_paths
+    ):
+        try:
+            preserved_set_with_canary = (
+                {pathlib.Path(p).resolve() for p in preserved_paths}
+                | canary_paths
+            )
+            unexpected_excl_canary = []
+            for entry in home.rglob("*"):
+                if entry.is_file():
+                    if entry.resolve() not in preserved_set_with_canary:
+                        unexpected_excl_canary.append(str(entry))
+            if not unexpected_excl_canary:
+                home_is_intentional_preserve = True
+        except OSError:
+            pass
 
     has_leftover = any([
         leftover["running_bouncers"],
@@ -2436,7 +2631,15 @@ def _verify_clean_state(
         # intentional --keep-audit-logs preserve case.
         leftover["iam_jit_home_exists"] and not home_is_intentional_preserve,
         # Cross-product artifacts: ANY remaining artifact → not clean.
-        bool(remaining_artifacts),
+        # NOTE: canary_md_artifacts are intentional preserves so we do
+        # NOT count them as "unclean" — they appear in remaining_artifacts
+        # for operator awareness but don't flip has_leftover.
+        bool(
+            path_binary_artifacts
+            + bouncer_config_artifacts
+            + shell_rc_artifacts
+            + mcp_artifacts
+        ),
     ])
     return {
         "clean": not has_leftover,
@@ -2508,6 +2711,12 @@ def run_uninstall(
         ),
         "inventory": {},
         "halts": [],
+        # #617 MED-4: version-drift warn — populated when the binary on
+        # PATH reports a different version from iam_jit.__version__. A
+        # half-applied pip upgrade can leave the binary stale. Surfaced
+        # in the dry-run report so the operator can investigate before
+        # confirming destruction. None = no drift detected.
+        "version_drift_warn": None,
         "steps": {},
         "post_check": {},
     }
@@ -2520,6 +2729,12 @@ def run_uninstall(
     else:
         inventory = _inventory_installed_state(data_dir=data_dir)
     result["inventory"] = inventory
+
+    # #617 MED-4: check for version drift between the iam-jit binary on
+    # PATH and the installed iam_jit Python package. Surface as a WARN
+    # rather than a halt — a stale binary is concerning but not always
+    # uninstall-blocking.
+    result["version_drift_warn"] = _check_version_drift()
 
     halts = _check_halt_conditions(inventory)
     result["halts"] = halts
@@ -2807,6 +3022,86 @@ def register_uninstall_command(main_group: click.Group) -> click.Command:
     return uninstall_cmd
 
 
+# ---------------------------------------------------------------------------
+# #617 MED-4 — version-drift check (binary vs package version)
+# ---------------------------------------------------------------------------
+
+
+def _check_version_drift() -> dict[str, Any] | None:
+    """Compare ``iam-jit --version`` stdout with ``iam_jit.__version__``.
+
+    #617 MED-4: After a partial ``pip install --upgrade iam-jit``, the
+    installed Python package may be at a newer version than the
+    ``iam-jit`` binary on PATH (the console-script shebang still points
+    at the OLD venv's interpreter). Uninstall running against a
+    half-applied upgrade may fail to remove all artifacts or may clean
+    up the wrong paths.
+
+    Mechanism: shell out to ``iam-jit --version`` (the binary on PATH)
+    and compare the version string with :data:`iam_jit.__version__`
+    (the Python package version in the current interpreter). Any
+    mismatch → surface as a WARN in the dry-run plan so the operator
+    sees it before confirming destruction.
+
+    Return value:
+      ``None``                        — versions match (or could not check)
+      ``{"pkg": str, "bin": str}``    — version mismatch detected
+
+    Per [[ibounce-honest-positioning]]: a WARN is not a halt — version
+    drift is not always catastrophic (e.g. the operator may be using a
+    wrapper script). We surface it so they can investigate; we do not
+    block uninstall.
+
+    Per [[creates-never-mutates]]: this function is read-only (no side
+    effects).
+    """
+    # Resolve iam_jit package version.
+    try:
+        from iam_jit import __version__ as pkg_version
+    except ImportError:
+        return None
+
+    # Shell out to the binary on PATH.
+    iam_jit_bin = shutil.which("iam-jit")
+    if iam_jit_bin is None:
+        # Binary not on PATH — can't compare; skip silently.
+        return None
+    try:
+        proc = subprocess.run(
+            [iam_jit_bin, "--version"],
+            capture_output=True,
+            text=True,
+            check=False,
+            timeout=10.0,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+
+    raw = (proc.stdout or proc.stderr or "").strip()
+    if not raw:
+        return None
+
+    # ``iam-jit --version`` output shape varies by Click config but
+    # typically is one of:
+    #   "iam-jit, version 1.0.0"
+    #   "iam-jit 1.0.0"
+    #   "1.0.0"
+    # We extract the first whitespace-separated token that looks like a
+    # semantic version (digits + dots), trying the last token first.
+    bin_version: str | None = None
+    for token in reversed(raw.split()):
+        # Must contain at least one digit and one dot.
+        if any(c.isdigit() for c in token) and "." in token:
+            bin_version = token.strip(",").strip()
+            break
+    if bin_version is None:
+        return None
+
+    if bin_version == pkg_version:
+        return None
+    return {"pkg": pkg_version, "bin": bin_version}
+
+
 def _print_inventory_summary(
     inv: dict[str, Any], *, dry_run: bool,
 ) -> None:
@@ -2876,6 +3171,18 @@ def _print_result_summary(result: dict[str, Any]) -> None:
     click.echo()
     click.secho(f"uninstall status: {status}", fg=color, bold=True)
 
+    # #617 MED-4: surface version-drift WARN when present.
+    drift = result.get("version_drift_warn")
+    if drift:
+        click.secho(
+            f"  WARN: version drift detected — binary on PATH reports "
+            f"v{drift['bin']} but installed iam_jit package is "
+            f"v{drift['pkg']}. This may indicate a half-applied upgrade; "
+            f"uninstall may miss stale artifacts. Resolve with "
+            f"`pip install --upgrade iam-jit` before uninstalling.",
+            fg="yellow",
+        )
+
     steps = result.get("steps") or {}
     for sname, sresult in steps.items():
         # Per [[ibounce-honest-positioning]] surface failures explicitly.
@@ -2927,6 +3234,41 @@ def _print_result_summary(result: dict[str, Any]) -> None:
         if post.get("audit_logs_preserved"):
             click.secho(
                 "  audit_logs_preserved: YES (per --keep-audit-logs)",
+                fg="cyan",
+            )
+
+    # #617 MED-3: re-init hint — surface after a successful (ok /
+    # incomplete) non-dry-run uninstall so the operator knows they can
+    # start fresh with `iam-jit init`. Without this, operators who
+    # uninstall then re-install don't realise their previous state was
+    # wiped and may be surprised by a clean slate.
+    #
+    # Two flavours:
+    #   a) no --keep-audit-logs: generic re-init tip noting that
+    #      accounts/profiles/audit log were removed.
+    #   b) --keep-audit-logs: tip points at the preserved log location
+    #      so the operator knows where their forensic data lives.
+    if status in ("ok", "incomplete") and not result.get("dry_run"):
+        keep = result.get("keep_audit_logs", False)
+        post = result.get("post_check") or {}
+        if keep:
+            preserved = (
+                post.get("leftover", {}).get("preserved_paths") or []
+            )
+            loc_hint = (
+                f" Preserved audit log(s): {', '.join(preserved)}."
+                if preserved else ""
+            )
+            click.secho(
+                f"\nTip: To set up iam-jit again, run `iam-jit init` — "
+                f"your previous accounts and profiles have been removed."
+                f"{loc_hint}",
+                fg="cyan",
+            )
+        else:
+            click.secho(
+                "\nTip: To set up iam-jit again, run `iam-jit init` — "
+                "your previous accounts/profiles/audit log have been removed.",
                 fg="cyan",
             )
 

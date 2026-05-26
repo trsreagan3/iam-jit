@@ -3337,3 +3337,141 @@ def test_617_med2_sabotage_all_listening_ports_proves_load_bearing(
         f"bound_ports when _all_listening_ports is empty; "
         f"got bound_ports={inv['bound_ports']}"
     )
+
+
+# ---------------------------------------------------------------------------
+# #617 MED-2 — autopilot.status.json port augmentation
+# ---------------------------------------------------------------------------
+
+
+# Capture real _read_autopilot_ports BEFORE the autouse fixture stubs it.
+_REAL_READ_AUTOPILOT_PORTS = cu._read_autopilot_ports
+
+
+def test_617_med2_autopilot_status_json_augments_port_list(
+    isolated_iam_jit_home: pathlib.Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """#617 MED-2: When ``autopilot.status.json`` is present and lists
+    ibounce on port 9876, the inventory detects ibounce on that port
+    (probes it + cross-references via lsof), not just the default ports.
+
+    This covers the AUTOPILOT-DRIVEN path: a bouncer launched by the
+    autopilot daemon on a custom port IS in the port-probe list via the
+    status file, even before the _all_listening_ports full scan.
+
+    Per the #617 MED-2 brief: "read ~/.iam-jit/autopilot.status.json
+    (if present) for the actual running ports + augment the default
+    port list."
+    """
+    _seed_install(isolated_iam_jit_home)
+
+    # Write an autopilot.status.json fixture with ibounce on port 9876.
+    status = {
+        "schema_version": "1.1",
+        "running": True,
+        "bouncers": {
+            "ibounce": {
+                "running": True,
+                "port": 9876,
+                "config": {"mode": "discovery"},
+            }
+        },
+    }
+    (isolated_iam_jit_home / "autopilot.status.json").write_text(
+        json.dumps(status), encoding="utf-8",
+    )
+
+    # Restore the real _read_autopilot_ports (autouse stub returns {}).
+    monkeypatch.setattr(cu, "_read_autopilot_ports", _REAL_READ_AUTOPILOT_PORTS)
+
+    # Simulate port 9876 being bound (autopilot hinted it would be).
+    monkeypatch.setattr(
+        cu, "_port_bound",
+        lambda port, host="127.0.0.1": port == 9876,
+    )
+
+    # ibounce PID 71900 owns port 9876 (returned by lsof).
+    fake_pid = 71900
+    fake_cmdline = (
+        "/Users/testop/.iam-jit/venv/bin/ibounce run "
+        "--mode discovery --proxy-port 9876"
+    )
+    fake_install_dir = pathlib.Path("/Users/testop/.iam-jit/venv/bin")
+    monkeypatch.setattr(
+        cu, "_lsof_pids_on_port",
+        lambda port: [fake_pid] if port == 9876 else [],
+    )
+    monkeypatch.setattr(
+        cu, "_read_cmdline",
+        lambda pid: fake_cmdline if pid == fake_pid else "",
+    )
+    monkeypatch.setattr(
+        cu, "_resolve_executable_path",
+        lambda pid: fake_install_dir / "ibounce" if pid == fake_pid else None,
+    )
+    monkeypatch.setattr(
+        cu, "_pid_owner_uid",
+        lambda pid: os.geteuid() if pid == fake_pid else None,
+    )
+    monkeypatch.setattr(
+        cu, "_BOUNCER_INSTALL_PATH_ROOTS",
+        cu._BOUNCER_INSTALL_PATH_ROOTS + (fake_install_dir,),
+    )
+
+    inv = cu._inventory_installed_state(data_dir=isolated_iam_jit_home)
+
+    # Observable: port 9876 appears in bound_ports (autopilot hint caused probe).
+    assert 9876 in inv["bound_ports"], (
+        f"#617 MED-2 autopilot: port 9876 from autopilot.status.json "
+        f"not in bound_ports; got {inv['bound_ports']}"
+    )
+
+    # Observable: ibounce PID detected via the lsof cross-reference.
+    assert "ibounce" in inv["running_bouncers"], (
+        f"#617 MED-2 autopilot: ibounce not in running_bouncers; "
+        f"got {inv['running_bouncers']}"
+    )
+    assert fake_pid in inv["running_bouncers"]["ibounce"], (
+        f"#617 MED-2 autopilot: pid={fake_pid} missing from running_bouncers; "
+        f"got {inv['running_bouncers']['ibounce']}"
+    )
+
+    # Observable: NOT in unknown_port_owners (correctly classified).
+    unknown_pids = [u["pid"] for u in inv["unknown_port_owners"]]
+    assert fake_pid not in unknown_pids, (
+        f"#617 MED-2 autopilot: correctly-classified ibounce pid={fake_pid} "
+        f"must NOT be in unknown_port_owners"
+    )
+
+
+def test_617_med2_autopilot_status_missing_gracefully_skipped(
+    isolated_iam_jit_home: pathlib.Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """#617 MED-2: When autopilot.status.json is absent, _read_autopilot_ports
+    returns {} and inventory falls back to default-port list + full scan.
+    No halt or error.
+    """
+    _seed_install(isolated_iam_jit_home)
+
+    # Ensure the status file does NOT exist.
+    status_path = isolated_iam_jit_home / "autopilot.status.json"
+    assert not status_path.exists(), "pre-condition: status file must be absent"
+
+    monkeypatch.setattr(cu, "_read_autopilot_ports", _REAL_READ_AUTOPILOT_PORTS)
+
+    # No ports bound, no bouncers running → inventory is clean.
+    monkeypatch.setattr(cu, "_port_bound", lambda port, host="127.0.0.1": False)
+
+    inv = cu._inventory_installed_state(data_dir=isolated_iam_jit_home)
+
+    # Observable: no halt, no error, empty running_bouncers + bound_ports.
+    assert not inv["running_bouncers"], (
+        f"#617 MED-2 autopilot: missing status file caused stray "
+        f"running_bouncers: {inv['running_bouncers']}"
+    )
+    assert not inv["bound_ports"], (
+        f"#617 MED-2 autopilot: missing status file caused stray "
+        f"bound_ports: {inv['bound_ports']}"
+    )
