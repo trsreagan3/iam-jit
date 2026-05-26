@@ -1,4 +1,6 @@
 """#489 + #532 CRIT — `iam-jit init` interactive bootstrap interview.
+#490 §A90 LAUNCH-BLOCKER — `iam-jit init --managed` non-interactive
+corp mode (extends #489).
 
 Per founder direction 2026-05-26 (§A89 LAUNCH-BLOCKER + UC-30 CRIT):
 `iam-jit init` is the canonical first-time-operator onboarding path.
@@ -16,6 +18,25 @@ The interview walks a fresh operator through:
   6. Generate + write declarative config to ``~/.iam-jit/iam-jit.yaml``
   7. Offer to run ``iam-jit doctor apply-config --config <path>``
   8. Print next-step summary
+
+#490 MANAGED MODE: ``iam-jit init --managed --org-policy URL`` is the
+non-interactive corp deployment shape per
+``[[enterprise-profile-distribution]]``. IT pre-builds
+``org-policy.yaml`` + Ed25519-signs it; engineers run the command and
+the tool:
+
+  1. Fetches the URL (HTTPS only; SSRF-gated per #522).
+  2. Fetches the companion ``.sig`` URL (raw Ed25519 signature).
+  3. Verifies the signature against the operator-pinned public key
+     (resolved from ``--org-public-key`` / ``$IAM_JIT_ORG_PUBLIC_KEY``
+     / ``$XDG_CONFIG_HOME/iam-jit/org.pub`` / ``~/.iam-jit/org.pub``).
+  4. If valid: writes ``iam-jit.yaml`` + runs ``iam-jit doctor
+     apply-config``.
+  5. If INVALID: refuses + errors; ZERO partial state written.
+
+Per ``[[scorer-is-ground-truth]]`` + ``[[ibounce-honest-positioning]]``
+fail-CLOSED at every gate (non-HTTPS / loopback / invalid sig /
+missing pubkey all hard-fail with a clear error).
 
 For non-TTY callers (agents) per
 ``[[bouncer-zero-llm-when-agent-in-loop]]`` ``stdin.isatty() == False``
@@ -35,6 +56,10 @@ Reuses existing helpers — does NOT reinvent:
   ``cli._preflight_check_existing_data`` /
   ``cli._print_preflight_warning`` (#617 MED-3)
 * Declarative-config validation from ``ambient_config.load_declaration``
+* SSRF gate from ``bouncer.audit_export.webhook.validate_webhook_url``
+  (reused for org-policy URL fetch per #522)
+* Ed25519 verify from ``threat_feed.signing._load_ed25519_public``
+  (reused for org-policy signature verify per #407)
 
 Per ``[[creates-never-mutates]]`` init writes new files but refuses to
 clobber pre-existing ``~/.iam-jit/iam-jit.yaml`` without an explicit
@@ -43,10 +68,15 @@ clobber pre-existing ``~/.iam-jit/iam-jit.yaml`` without an explicit
 
 from __future__ import annotations
 
+import base64
 import dataclasses
 import json
+import os
 import pathlib
 import sys
+import urllib.error
+import urllib.parse
+import urllib.request
 from typing import Any
 
 import click
@@ -476,6 +506,315 @@ def _print_summary(
 
 
 # ---------------------------------------------------------------------------
+# #490 §A90 — Managed-mode helpers (SSRF gate + Ed25519 verify + fetch)
+# ---------------------------------------------------------------------------
+
+
+class ManagedPolicyError(click.ClickException):
+    """Raised when the managed-mode org-policy fetch / verify pipeline
+    fails. Surfaces a human-readable error + exits non-zero per the
+    fail-CLOSED discipline of [[scorer-is-ground-truth]] +
+    [[ibounce-honest-positioning]].
+
+    No partial state is written; the calling code checks for this
+    exception BEFORE touching the filesystem.
+    """
+
+
+_ORG_PUBLIC_KEY_ENV = "IAM_JIT_ORG_PUBLIC_KEY"
+_FETCH_TIMEOUT_S = 15.0
+_MAX_ORG_POLICY_BYTES = 1 * 1024 * 1024  # 1 MB hard cap
+
+
+def _resolve_org_public_key(
+    explicit_path: str | None,
+) -> str:
+    """Return the operator's Ed25519 public key (PEM or base64).
+
+    Resolution order (first hit wins, fail-CLOSED if nothing found):
+
+      1. ``--org-public-key <path>`` flag (explicit_path).
+      2. ``$IAM_JIT_ORG_PUBLIC_KEY`` env var (path to key file OR raw
+         PEM/base64 string).
+      3. ``$XDG_CONFIG_HOME/iam-jit/org.pub`` if ``$XDG_CONFIG_HOME``
+         is set.
+      4. ``~/.iam-jit/org.pub`` (default XDG-equivalent location).
+
+    Raises :class:`ManagedPolicyError` when no key can be found /
+    read. Per [[scorer-is-ground-truth]] fail-CLOSED: a missing key
+    means the operator hasn't pinned trust + we MUST refuse.
+    """
+    # Priority 1: explicit path flag.
+    if explicit_path:
+        p = pathlib.Path(explicit_path)
+        try:
+            return p.read_text(encoding="ascii").strip()
+        except OSError as e:
+            raise ManagedPolicyError(
+                f"--org-public-key: could not read key file "
+                f"{p}: {e}"
+            ) from e
+
+    # Priority 2: env var (path or literal PEM/b64).
+    env_val = (os.environ.get(_ORG_PUBLIC_KEY_ENV) or "").strip()
+    if env_val:
+        ep = pathlib.Path(env_val)
+        if ep.exists():
+            try:
+                return ep.read_text(encoding="ascii").strip()
+            except OSError as e:
+                raise ManagedPolicyError(
+                    f"{_ORG_PUBLIC_KEY_ENV} points to file "
+                    f"{ep} which cannot be read: {e}"
+                ) from e
+        # Treat the env value itself as the raw key material.
+        return env_val
+
+    # Priority 3: $XDG_CONFIG_HOME/iam-jit/org.pub.
+    xdg = (os.environ.get("XDG_CONFIG_HOME") or "").strip()
+    if xdg:
+        xp = pathlib.Path(xdg) / "iam-jit" / "org.pub"
+        if xp.exists():
+            try:
+                return xp.read_text(encoding="ascii").strip()
+            except OSError as e:
+                raise ManagedPolicyError(
+                    f"could not read org public key at {xp}: {e}"
+                ) from e
+
+    # Priority 4: ~/.iam-jit/org.pub.
+    default = pathlib.Path.home() / ".iam-jit" / "org.pub"
+    if default.exists():
+        try:
+            return default.read_text(encoding="ascii").strip()
+        except OSError as e:
+            raise ManagedPolicyError(
+                f"could not read org public key at {default}: {e}"
+            ) from e
+
+    raise ManagedPolicyError(
+        "no operator public key found. Pass --org-public-key <path>, "
+        f"set ${_ORG_PUBLIC_KEY_ENV}, or place the key at "
+        f"{default}. Per [[enterprise-profile-distribution]] the key "
+        "must be pinned before `--managed` can proceed (fail-CLOSED)."
+    )
+
+
+def _ssrf_gate_url(url: str) -> None:
+    """Gate `url` through the same SSRF primitives the webhook pusher +
+    threat-feed fetcher use. Reuses the implementation from
+    ``bouncer.audit_export.webhook`` per [[scorer-is-ground-truth]]
+    (no reinvented SSRF logic).
+
+    Raises :class:`ManagedPolicyError` on:
+      - Non-HTTPS scheme (http:// or anything else).
+      - Loopback / RFC1918 / link-local / multicast / intranet-suffix host.
+      - Unresolvable hostname.
+    """
+    # Import lazily so this module stays importable in test envs that
+    # don't load the full audit_export stack.
+    from .bouncer.audit_export.webhook import (
+        SSRFRejectedError,
+        _hostname_has_internal_suffix,
+        _is_internal_ip,
+    )
+    import socket as _socket
+
+    try:
+        parsed = urllib.parse.urlparse(url)
+    except Exception as e:
+        raise ManagedPolicyError(
+            f"could not parse org-policy URL {url!r}: {e}"
+        ) from e
+
+    if parsed.scheme != "https":
+        raise ManagedPolicyError(
+            f"org-policy URL must use https:// (got scheme "
+            f"{parsed.scheme!r}). Non-HTTPS URLs are refused "
+            "per SSRF gate (#522)."
+        )
+
+    hostname = parsed.hostname or ""
+    if not hostname:
+        raise ManagedPolicyError(
+            f"org-policy URL {url!r} is missing a hostname."
+        )
+
+    if _hostname_has_internal_suffix(hostname):
+        raise ManagedPolicyError(
+            f"org-policy URL hostname {hostname!r} matches an "
+            "intranet suffix. SSRF gate refuses internal URLs "
+            "(#522). Use an external HTTPS host."
+        )
+
+    try:
+        _, _, ip_list = _socket.gethostbyname_ex(hostname)
+    except _socket.gaierror as e:
+        raise ManagedPolicyError(
+            f"could not resolve org-policy hostname {hostname!r}: "
+            f"{e}. SSRF gate fails CLOSED on unresolvable hosts."
+        ) from e
+
+    if not ip_list:
+        raise ManagedPolicyError(
+            f"org-policy hostname {hostname!r} resolved to no IPs. "
+            "SSRF gate refused."
+        )
+
+    for ip in ip_list:
+        if _is_internal_ip(ip):
+            raise ManagedPolicyError(
+                f"org-policy hostname {hostname!r} resolves to "
+                f"internal IP {ip}. SSRF gate refuses internal "
+                "addresses (#522)."
+            )
+
+
+def _fetch_url_bytes(url: str) -> bytes:
+    """Fetch `url` via HTTPS and return the raw body bytes.
+
+    Hard cap: ``_MAX_ORG_POLICY_BYTES``. Raises
+    :class:`ManagedPolicyError` on every failure (network, HTTP error,
+    oversized body).
+    """
+    req = urllib.request.Request(
+        url,
+        method="GET",
+        headers={"User-Agent": "iam-jit-managed-init/1.0"},
+    )
+    try:
+        with urllib.request.urlopen(  # noqa: S310 — scheme checked by _ssrf_gate_url
+            req, timeout=_FETCH_TIMEOUT_S,
+        ) as resp:
+            status = getattr(resp, "status", None) or resp.getcode()
+            if status != 200:
+                raise ManagedPolicyError(
+                    f"org-policy URL returned HTTP {status} (expected 200)."
+                )
+            body = resp.read(_MAX_ORG_POLICY_BYTES + 1)
+    except ManagedPolicyError:
+        raise
+    except urllib.error.HTTPError as e:
+        raise ManagedPolicyError(
+            f"org-policy URL returned HTTP {e.code}: {e.reason}"
+        ) from e
+    except urllib.error.URLError as e:
+        raise ManagedPolicyError(
+            f"org-policy URL network error: {e.reason}"
+        ) from e
+    except (OSError, TimeoutError) as e:
+        raise ManagedPolicyError(
+            f"org-policy URL fetch failed: {e}"
+        ) from e
+
+    if len(body) > _MAX_ORG_POLICY_BYTES:
+        raise ManagedPolicyError(
+            f"org-policy body exceeds {_MAX_ORG_POLICY_BYTES} byte cap. "
+            "Refusing to continue (possible OOM attack vector)."
+        )
+    return body
+
+
+def _verify_ed25519_signature(
+    payload_bytes: bytes,
+    signature_bytes: bytes,
+    public_key_pem_or_b64: str,
+) -> None:
+    """Verify an Ed25519 signature over `payload_bytes`.
+
+    Reuses ``_load_ed25519_public`` from
+    ``threat_feed.signing`` per [[scorer-is-ground-truth]] — no
+    reinvented crypto. Raises :class:`ManagedPolicyError` on any
+    failure (bad key, bad sig, mismatch) so the caller can fail-CLOSED
+    without touching the filesystem.
+
+    The signature bytes must be the raw 64-byte Ed25519 signature
+    (NOT base64 — the caller decoded it; OR pass base64 and the
+    function will detect + decode if the raw 64-byte check fails).
+    """
+    from .threat_feed.signing import VerificationFailed, _load_ed25519_public
+
+    try:
+        pubkey = _load_ed25519_public(public_key_pem_or_b64)
+    except VerificationFailed as e:
+        raise ManagedPolicyError(
+            f"org-policy public key is invalid: {e}. "
+            "Per [[enterprise-profile-distribution]] the operator must "
+            "pin a valid Ed25519 public key."
+        ) from e
+    except Exception as e:
+        raise ManagedPolicyError(
+            f"org-policy public key could not be loaded: {e}"
+        ) from e
+
+    try:
+        pubkey.verify(signature_bytes, payload_bytes)
+    except Exception:
+        raise ManagedPolicyError(
+            "org-policy Ed25519 signature verification FAILED. "
+            "The downloaded policy does not match the signed document. "
+            "Refusing to write config (fail-CLOSED per "
+            "[[scorer-is-ground-truth]])."
+        )
+
+
+def _fetch_managed_policy(
+    org_policy_url: str,
+    org_public_key_path: str | None,
+) -> str:
+    """Top-level managed-mode pipeline.
+
+    1. SSRF-gate the URL.
+    2. Fetch policy YAML body.
+    3. Fetch companion ``.sig`` body (raw base64-encoded Ed25519 sig).
+    4. Resolve the operator public key.
+    5. Verify signature.
+    6. Return the verified YAML text.
+
+    Raises :class:`ManagedPolicyError` at any failed gate — no partial
+    state is returned.
+
+    The ``.sig`` URL is the policy URL with ``.sig`` appended (standard
+    convention matching the threat-feed publisher pattern in #407).
+    """
+    sig_url = org_policy_url + ".sig"
+
+    # Gate both URLs before any network call.
+    _ssrf_gate_url(org_policy_url)
+    _ssrf_gate_url(sig_url)
+
+    # Fetch the policy YAML.
+    policy_bytes = _fetch_url_bytes(org_policy_url)
+
+    # Fetch the companion signature.
+    sig_raw = _fetch_url_bytes(sig_url)
+
+    # Decode the signature — the convention is base64-encoded raw bytes
+    # (same as the threat-feed signing.py publisher emits).
+    try:
+        sig_bytes = base64.b64decode(sig_raw.strip(), validate=True)
+    except Exception as e:
+        raise ManagedPolicyError(
+            f"org-policy signature at {sig_url!r} is not valid base64: "
+            f"{e}"
+        ) from e
+
+    # Resolve the operator public key (fail-CLOSED if absent).
+    pubkey = _resolve_org_public_key(org_public_key_path)
+
+    # Verify — raises ManagedPolicyError on mismatch.
+    _verify_ed25519_signature(policy_bytes, sig_bytes, pubkey)
+
+    # Decode + return the verified YAML text.
+    try:
+        return policy_bytes.decode("utf-8")
+    except UnicodeDecodeError as e:
+        raise ManagedPolicyError(
+            f"org-policy YAML is not valid UTF-8: {e}"
+        ) from e
+
+
+# ---------------------------------------------------------------------------
 # Public CLI entry-point
 # ---------------------------------------------------------------------------
 
@@ -558,6 +897,33 @@ def register_init_command(main_group: click.Group) -> click.Command:
              "`iam-jit doctor apply-config`. Non-interactive default: "
              "off (operator runs it explicitly).",
     )
+    @click.option(
+        "--managed",
+        is_flag=True,
+        default=False,
+        help="#490 §A90 — Non-interactive corp mode. Fetches + "
+             "Ed25519-verifies + writes config + runs doctor apply. "
+             "Requires --org-policy URL. Implies --non-interactive. "
+             "Per [[enterprise-profile-distribution]].",
+    )
+    @click.option(
+        "--org-policy",
+        "org_policy_url",
+        default=None,
+        help="HTTPS URL to org-signed iam-jit policy YAML. Required "
+             "with --managed. The companion signature is fetched from "
+             "<URL>.sig (raw Ed25519 sig, base64-encoded). Per #490.",
+    )
+    @click.option(
+        "--org-public-key",
+        "org_public_key_path",
+        default=None,
+        type=click.Path(exists=True, dir_okay=False),
+        help="Path to operator's Ed25519 public key file for verifying "
+             "--org-policy. Defaults to $IAM_JIT_ORG_PUBLIC_KEY env var, "
+             "then $XDG_CONFIG_HOME/iam-jit/org.pub, then "
+             "~/.iam-jit/org.pub. Per #490 §A90.",
+    )
     def init_cmd(
         non_interactive: bool,
         data_dir: pathlib.Path | None,
@@ -568,6 +934,9 @@ def register_init_command(main_group: click.Group) -> click.Command:
         dry_run: bool,
         overwrite: bool,
         apply_now: bool,
+        managed: bool,
+        org_policy_url: str | None,
+        org_public_key_path: str | None,
     ) -> None:
         """Bootstrap iam-jit on a fresh machine via guided interview.
 
@@ -580,10 +949,67 @@ def register_init_command(main_group: click.Group) -> click.Command:
         defaulted decision is logged to stdout so the caller can
         audit the choices.
 
+        ``--managed`` enables the corp deployment shape (#490 §A90):
+        fetches + Ed25519-verifies + writes an IT-curated org-policy.yaml
+        without any prompts. All decisions come from the policy file.
+
         `init-solo` (older + narrower) remains available for the
         legacy "just one user, just my laptop" path. `init` is the
         recommended entry point.
         """
+        # ------------------------------------------------------------------
+        # #490 §A90 — Managed-mode fast-path. Bypasses the full interview.
+        # ------------------------------------------------------------------
+        if managed:
+            if not org_policy_url:
+                raise click.UsageError(
+                    "--managed requires --org-policy URL. "
+                    "Provide the HTTPS URL to the IT-curated org-policy.yaml "
+                    "file. See [[enterprise-profile-distribution]]."
+                )
+
+            # Fetch + SSRF-gate + verify signature — raises ManagedPolicyError
+            # on ANY failure. Zero partial state written before this returns.
+            policy_yaml = _fetch_managed_policy(
+                org_policy_url, org_public_key_path,
+            )
+
+            resolved_data_dir = (
+                data_dir if data_dir is not None else _default_data_dir()
+            )
+            config_path = _resolve_config_path(data_dir)
+
+            if dry_run:
+                click.echo(policy_yaml)
+                click.echo(
+                    f"\n(managed dry-run; would write to {config_path})"
+                )
+                return
+
+            _write_config_atomic(
+                config_path=config_path,
+                body=policy_yaml,
+                interactive=False,  # --managed is always non-interactive
+                overwrite=overwrite,
+            )
+
+            click.echo(
+                f"[managed] org-policy verified + written to {config_path}"
+            )
+
+            rc = _run_doctor_apply(config_path)
+            if rc != 0:
+                click.secho(
+                    f"\n[warn] doctor apply-config exited {rc}; "
+                    "config written but not applied. Re-run "
+                    "`iam-jit doctor apply-config` manually.",
+                    fg="yellow",
+                )
+            return
+
+        # ------------------------------------------------------------------
+        # #489 — Standard interactive / non-interactive interview flow.
+        # ------------------------------------------------------------------
         interactive = _is_interactive(non_interactive)
 
         # Step 1 — deployment shape
@@ -723,5 +1149,10 @@ def register_init_command(main_group: click.Group) -> click.Command:
 
 
 __all__ = [
+    "ManagedPolicyError",
+    "_fetch_managed_policy",
+    "_resolve_org_public_key",
+    "_ssrf_gate_url",
+    "_verify_ed25519_signature",
     "register_init_command",
 ]
