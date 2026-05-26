@@ -1,16 +1,22 @@
 """Tests for `iam-jit mcp show-config` + `iam-jit mcp install-claude-code`
 (UAT-D B1 closure: the install path the README + serve banner reference
 must actually exist + work).
+
+#652 parity tests: default path detection ladder must match ibounce's:
+  1. ~/.claude.json  (Claude Code, preferred)
+  2. ~/.config/claude-code/mcp.json
+  3. Platform Desktop fallback
 """
 
 from __future__ import annotations
 
 import json
 import pathlib
+import unittest.mock
 
 from click.testing import CliRunner
 
-from iam_jit.cli import main
+from iam_jit.cli import main, _candidate_claude_code_paths, _pick_claude_code_default
 
 
 def test_mcp_show_config_emits_valid_json() -> None:
@@ -132,3 +138,98 @@ def test_mcp_install_print_only_does_not_write(tmp_path: pathlib.Path) -> None:
     assert "target config path" in result.output
     assert "would write" in result.output
     assert not target.exists()
+
+
+# ---------------------------------------------------------------------------
+# #652 — default path detection ladder parity with ibounce
+# ---------------------------------------------------------------------------
+
+
+def test_candidate_paths_first_entry_is_claude_json(tmp_path: pathlib.Path) -> None:
+    """_candidate_claude_code_paths() MUST list ~/.claude.json first."""
+    with unittest.mock.patch("pathlib.Path.home", return_value=tmp_path):
+        candidates = _candidate_claude_code_paths()
+    assert candidates[0] == tmp_path / ".claude.json"
+
+
+def test_candidate_paths_second_entry_is_config_claude_code(tmp_path: pathlib.Path) -> None:
+    """Second candidate MUST be ~/.config/claude-code/mcp.json."""
+    with unittest.mock.patch("pathlib.Path.home", return_value=tmp_path):
+        candidates = _candidate_claude_code_paths()
+    assert candidates[1] == tmp_path / ".config" / "claude-code" / "mcp.json"
+
+
+def test_pick_default_no_existing_files_returns_claude_json(tmp_path: pathlib.Path) -> None:
+    """When NO candidate exists, default falls back to ~/.claude.json (slot 0)."""
+    with unittest.mock.patch("pathlib.Path.home", return_value=tmp_path):
+        default = _pick_claude_code_default()
+    assert default == tmp_path / ".claude.json"
+
+
+def test_pick_default_claude_json_exists_returns_it(tmp_path: pathlib.Path) -> None:
+    """When ~/.claude.json EXISTS, _pick_claude_code_default must return it."""
+    claude_json = tmp_path / ".claude.json"
+    claude_json.touch()
+    with unittest.mock.patch("pathlib.Path.home", return_value=tmp_path):
+        default = _pick_claude_code_default()
+    assert default == claude_json
+
+
+def test_pick_default_only_config_claude_code_exists(tmp_path: pathlib.Path) -> None:
+    """If only ~/.config/claude-code/mcp.json exists (not ~/.claude.json),
+    _pick_claude_code_default picks it over the fallback Desktop path."""
+    alt = tmp_path / ".config" / "claude-code" / "mcp.json"
+    alt.parent.mkdir(parents=True)
+    alt.touch()
+    with unittest.mock.patch("pathlib.Path.home", return_value=tmp_path):
+        default = _pick_claude_code_default()
+    assert default == alt
+
+
+def test_install_explicit_path_overrides_default(tmp_path: pathlib.Path) -> None:
+    """Passing --path /tmp/foo.json MUST write there regardless of which
+    candidate files exist."""
+    target = tmp_path / "custom" / "mcp_config.json"
+    runner = CliRunner()
+    result = runner.invoke(main, [
+        "mcp", "install-claude-code", "--path", str(target),
+    ])
+    assert result.exit_code == 0, result.output
+    assert target.exists()
+    cfg = json.loads(target.read_text())
+    assert cfg["mcpServers"]["iam-jit"]["command"] == "iam-jit"
+
+
+def test_default_no_flag_targets_claude_json_when_no_files_exist(tmp_path: pathlib.Path) -> None:
+    """When invoked without --path in a clean HOME (no candidate files),
+    the command writes to ~/.claude.json (slot 0, the Claude Code default)
+    rather than the Desktop path."""
+    runner = CliRunner()
+    # Patch home() so the detection ladder looks inside tmp_path.
+    with unittest.mock.patch("pathlib.Path.home", return_value=tmp_path):
+        result = runner.invoke(main, ["mcp", "install-claude-code"])
+    assert result.exit_code == 0, result.output
+    expected = tmp_path / ".claude.json"
+    assert expected.exists(), (
+        "With no candidate files present the command must default to "
+        "~/.claude.json, not the Desktop path"
+    )
+    cfg = json.loads(expected.read_text())
+    assert cfg["mcpServers"]["iam-jit"]["command"] == "iam-jit"
+
+
+def test_default_no_flag_uses_existing_claude_json(tmp_path: pathlib.Path) -> None:
+    """When ~/.claude.json already exists in HOME, the no-flag default
+    picks it (adds the iam-jit entry, preserving any other content)."""
+    claude_json = tmp_path / ".claude.json"
+    claude_json.write_text(json.dumps({
+        "mcpServers": {"other-tool": {"command": "other", "args": []}},
+    }, indent=2))
+    runner = CliRunner()
+    with unittest.mock.patch("pathlib.Path.home", return_value=tmp_path):
+        result = runner.invoke(main, ["mcp", "install-claude-code"])
+    assert result.exit_code == 0, result.output
+    cfg = json.loads(claude_json.read_text())
+    assert cfg["mcpServers"]["iam-jit"]["command"] == "iam-jit"
+    # Pre-existing entry preserved
+    assert cfg["mcpServers"]["other-tool"]["command"] == "other"

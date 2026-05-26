@@ -1115,23 +1115,54 @@ def mcp_show_config(pretty: bool) -> None:
     )
 
 
-def _claude_desktop_config_path() -> pathlib.Path:
-    """Best-effort detection of the Claude Desktop / Claude Code MCP
-    config path on this platform. Returns the path even if the file
-    doesn't exist yet (caller creates it).
+def _candidate_claude_code_paths() -> list[pathlib.Path]:
+    """Default Claude Code / Claude Desktop MCP config locations, in
+    detection priority order. We prefer the Claude Code CLI path
+    (``~/.claude.json``) over Claude Desktop because the target audience
+    is CLI-first developers; Desktop paths fall through for users on the
+    Anthropic Desktop app only.
+
+    Detection order (mirrors ibounce mcp install-claude-code):
+      1. ~/.claude.json            — Claude Code v1.0, most common
+      2. ~/.config/claude-code/mcp.json — Claude Code alt location
+      3. Platform-specific Claude Desktop fallback
     """
     import platform as _platform
+
     home = pathlib.Path.home()
     sysname = _platform.system()
+    candidates: list[pathlib.Path] = [
+        # Claude Code CLI (cross-platform — preferred for our audience)
+        home / ".claude.json",
+        home / ".config" / "claude-code" / "mcp.json",
+    ]
     if sysname == "Darwin":
-        return home / "Library" / "Application Support" / "Claude" / "claude_desktop_config.json"
-    if sysname == "Windows":
+        candidates.append(
+            home / "Library" / "Application Support" / "Claude" / "claude_desktop_config.json"
+        )
+    elif sysname == "Windows":
         appdata = os.environ.get("APPDATA")
         if appdata:
-            return pathlib.Path(appdata) / "Claude" / "claude_desktop_config.json"
-        return home / "AppData" / "Roaming" / "Claude" / "claude_desktop_config.json"
-    # Linux + other
-    return home / ".config" / "Claude" / "claude_desktop_config.json"
+            candidates.append(
+                pathlib.Path(appdata) / "Claude" / "claude_desktop_config.json"
+            )
+        candidates.append(
+            home / "AppData" / "Roaming" / "Claude" / "claude_desktop_config.json"
+        )
+    else:
+        candidates.append(
+            home / ".config" / "Claude" / "claude_desktop_config.json"
+        )
+    return candidates
+
+
+def _pick_claude_code_default() -> pathlib.Path:
+    """Return the first candidate path that already exists; fall back
+    to the first candidate (~/.claude.json) if none exist yet."""
+    for candidate in _candidate_claude_code_paths():
+        if candidate.exists():
+            return candidate
+    return _candidate_claude_code_paths()[0]
 
 
 @mcp_group.command("install-claude-code")
@@ -1140,9 +1171,10 @@ def _claude_desktop_config_path() -> pathlib.Path:
     "explicit_path",
     type=click.Path(dir_okay=False),
     default=None,
-    help="Override the default Claude Desktop config path. "
-         "Default: ~/Library/Application Support/Claude/claude_desktop_config.json "
-         "(macOS) / ~/.config/Claude/... (Linux) / %APPDATA%/Claude/... (Windows).",
+    help="Override the auto-detected Claude Code MCP config path. "
+         "Default detection order: ~/.claude.json, "
+         "~/.config/claude-code/mcp.json, then the Claude Desktop path "
+         "for the host OS.",
 )
 @click.option(
     "--dry-run",
@@ -1161,22 +1193,21 @@ def mcp_install_claude_code(
     dry_run: bool,
     print_only: bool,
 ) -> None:
-    """Install iam-jit as an MCP server in Claude Desktop / Claude Code config.
+    """Install iam-jit as an MCP server in Claude Code config (Claude Desktop as fallback).
 
-    Best-effort: detects the platform-appropriate config path,
-    creates the parent directory if missing, and adds (or updates)
-    the `mcpServers.iam-jit` entry. If you already have other
-    mcpServers entries they are preserved. Existing iam-jit entries
-    are OVERWRITTEN.
+    Detection order: ~/.claude.json (Claude Code v1.0, preferred),
+    ~/.config/claude-code/mcp.json, then the platform-specific Claude
+    Desktop path. Creates the parent directory if missing, and adds
+    (or updates) the `mcpServers.iam-jit` entry. Existing entries for
+    other servers are preserved. Existing iam-jit entries are OVERWRITTEN.
 
-    After running, restart Claude Desktop / Claude Code so it
-    re-reads the config.
+    After running, restart Claude Code so it re-reads the config.
 
     For other MCP clients (Cursor, Codex MCP, Devin, custom), use
     `iam-jit mcp show-config` and paste the snippet into your
     client's MCP config.
     """
-    target = pathlib.Path(explicit_path) if explicit_path else _claude_desktop_config_path()
+    target = pathlib.Path(explicit_path) if explicit_path else _pick_claude_code_default()
     snippet = _mcp_server_config_dict()
 
     if print_only or dry_run:
@@ -1228,7 +1259,7 @@ def mcp_install_claude_code(
     else:
         click.secho(f"✓ added iam-jit MCP server to {target}", fg="green")
     click.echo(
-        "  Restart Claude Desktop / Claude Code so it re-reads the config. "
+        "  Restart Claude Code so it re-reads the config. "
         "If you don't see iam-jit's tools after restart, run "
         "`iam-jit mcp show-config` and merge the snippet by hand."
     )
