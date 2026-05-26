@@ -185,7 +185,7 @@ def test_missing_path_entries_exit_2_with_remediation(
     assert "iam-jit" in result.output  # the binary name in the fix
     # Go bouncers warned, not failed.
     assert "[WARN] kbounce NOT on PATH" in result.output
-    assert "go install github.com/trsreagan3/kbouncer" in result.output
+    assert "go install github.com/trsreagan3/kbouncer/cmd/kbounce@latest" in result.output
     # Overall verdict surfaces NOT PROTECTING.
     assert "Overall: NOT PROTECTING" in result.output
 

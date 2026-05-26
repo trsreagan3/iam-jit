@@ -43,6 +43,24 @@ pip install --user iam-jit
 pip install --user iam-jit
 ```
 
+### Go bouncers (kbounce / dbounce / gbounce)
+
+Optional — only needed if you use K8s, database, or generic-HTTP interception.
+Requires Go ≥ 1.22 ([install Go](https://go.dev/dl/)).
+
+```bash
+go install github.com/trsreagan3/kbouncer/cmd/kbounce@latest
+go install github.com/trsreagan3/dbounce/cmd/dbounce@latest
+go install github.com/trsreagan3/gbounce/cmd/gbounce@latest
+```
+
+Binaries land in `$GOPATH/bin` (defaults to `$HOME/go/bin`). Add that directory to
+your `PATH` if it is not already present.
+
+> **Note:** `kbounce` lives in the `kbouncer` repo; `dbounce` and `gbounce` live in
+> same-named repos. These are the canonical install commands — confirmed against the
+> public module proxy.
+
 ---
 
 Four products ship under the iam-jit brand. Pick the one that fits.
