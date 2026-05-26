@@ -141,13 +141,75 @@ def _gopath_bin() -> pathlib.Path:
     return pathlib.Path("~/go/bin").expanduser()
 
 
-def _check_path(section: _Section) -> None:
+def _resolve_paths(data_dir: str | None = None) -> dict[str, str]:
+    """Return resolved + display forms for all probe paths.
+
+    Per [[ibounce-honest-positioning]] labels must reflect the ACTUAL
+    probed path (honors IAM_JIT_DATA_DIR env var + HOME). The display
+    form uses the ``~/`` shorthand when the path equals the
+    HOME-default; otherwise the full resolved path is shown so the
+    operator knows exactly what was checked.
+
+    Args:
+        data_dir: If not None (e.g. from ``--data-dir`` flag), use
+            this path for the iam-jit data directory instead of the
+            env var / HOME default.
+
+    Returns a dict with keys:
+        ``iam_jit_dir``         — resolved absolute path (str)
+        ``iam_jit_dir_display`` — ``~/.iam-jit`` when HOME-default,
+                                   else full path
+        ``local_bin``           — resolved ``~/.local/bin`` (str)
+        ``local_bin_display``   — ``~/.local/bin`` shorthand always
+                                   (the actual PATH resolution is done
+                                   by shutil.which; this is label-only)
+    """
+    home = pathlib.Path.home()
+
+    if data_dir is not None:
+        iam_jit_dir = pathlib.Path(data_dir).expanduser().resolve()
+    else:
+        env = os.environ.get("IAM_JIT_DATA_DIR")
+        if env:
+            iam_jit_dir = pathlib.Path(env).expanduser().resolve()
+        else:
+            iam_jit_dir = home / ".iam-jit"
+
+    home_default_dir = home / ".iam-jit"
+    iam_jit_dir_display = (
+        "~/.iam-jit"
+        if iam_jit_dir == home_default_dir
+        else str(iam_jit_dir)
+    )
+
+    local_bin = home / ".local" / "bin"
+    # label-only shorthand — shutil.which handles actual resolution
+    local_bin_display = "~/.local/bin"
+
+    return {
+        "iam_jit_dir": str(iam_jit_dir),
+        "iam_jit_dir_display": iam_jit_dir_display,
+        "local_bin": str(local_bin),
+        "local_bin_display": local_bin_display,
+    }
+
+
+def _check_path(section: _Section, paths: dict[str, str] | None = None) -> None:
     """Section 1: every required binary is on PATH; every optional
     binary is reported as warn (with install command) when missing.
 
     Uses ``shutil.which`` so we match the operator's actual resolution
     (PATH order, exec bit, etc.) — not a synthetic check.
+
+    ``paths`` is the dict from ``_resolve_paths``. Both the Python
+    binary ``detail`` hint and the Go binary ``detail`` use the same
+    substitution style (resolved HOME) so Section 1 is internally
+    consistent per #647.
     """
+    if paths is None:
+        paths = _resolve_paths()
+    local_bin_display = paths["local_bin_display"]
+
     for name, kind in _PYTHON_BINARIES:
         resolved = shutil.which(name)
         if resolved:
@@ -161,12 +223,12 @@ def _check_path(section: _Section) -> None:
                 label=f"{name} NOT on PATH",
                 severity=_SEV_ERR,
                 detail=(
-                    f"expected: ~/.local/bin/{name} (pip install --user) "
+                    f"expected: {local_bin_display}/{name} (pip install --user) "
                     f"OR pipx-managed shim"
                 ),
                 fix=(
                     f"pip install --user iam-jit  "
-                    f"# then ensure ~/.local/bin is in PATH "
+                    f"# then ensure {local_bin_display} is in PATH "
                     f"(add to your ~/.zshrc or ~/.bashrc)"
                 ),
             )
@@ -518,45 +580,66 @@ def _default_data_dir() -> pathlib.Path:
     return pathlib.Path("~/.iam-jit/").expanduser()
 
 
-def _check_config_files(section: _Section, data_dir: pathlib.Path) -> None:
+def _check_config_files(
+    section: _Section,
+    data_dir: pathlib.Path,
+    paths: dict[str, str] | None = None,
+) -> None:
+    """Section 6: config files exist + are readable.
+
+    Per #647: labels use the display form (``~/.iam-jit`` when
+    HOME-default, else full path); missing-file rows include a
+    ``detail`` with the resolved path so operators with custom
+    IAM_JIT_DATA_DIR see exactly what was probed.
+    """
+    if paths is None:
+        paths = _resolve_paths()
+    d = paths["iam_jit_dir_display"]  # e.g. "~/.iam-jit" or "/tmp/foo"
+
     accounts = data_dir / "accounts.yaml"
     if accounts.exists():
         section.add(
-            label="~/.iam-jit/accounts.yaml exists",
+            label=f"{d}/accounts.yaml exists",
             severity=_SEV_OK,
             detail=f"at {accounts}",
         )
     else:
         section.add(
-            label="~/.iam-jit/accounts.yaml missing",
+            label=f"{d}/accounts.yaml missing",
             severity=_SEV_WARN,
-            detail="iam-jit can still run, but no accounts pre-configured",
+            detail=(
+                f"probed: {accounts}; "
+                f"iam-jit can still run, but no accounts pre-configured"
+            ),
             fix="iam-jit init  # or iam-jit init-solo",
         )
     users = data_dir / "users.yaml"
     if users.exists():
         section.add(
-            label="~/.iam-jit/users.yaml exists",
+            label=f"{d}/users.yaml exists",
             severity=_SEV_OK,
             detail=f"at {users}",
         )
     else:
         section.add(
-            label="~/.iam-jit/users.yaml missing",
+            label=f"{d}/users.yaml missing",
             severity=_SEV_WARN,
-            detail="no users seeded; requests will fail",
+            detail=(
+                f"probed: {users}; "
+                f"no users seeded; requests will fail"
+            ),
             fix="iam-jit init  # or iam-jit init-solo",
         )
     cfg = data_dir / "iam-jit.yaml"
     if cfg.exists():
         section.add(
-            label="~/.iam-jit/iam-jit.yaml exists",
+            label=f"{d}/iam-jit.yaml exists",
             severity=_SEV_OK,
             detail="declarative config present (#400 ambient)",
         )
     else:
         section.add(
-            label="~/.iam-jit/iam-jit.yaml not present",
+            label=f"{d}/iam-jit.yaml not present",
             severity=_SEV_INFO,
             detail="declarative-config slice optional",
         )
@@ -574,19 +657,33 @@ _DISK_CRIT_BYTES = 500 * 1024 * 1024
 
 
 def _check_audit_writability(
-    section: _Section, data_dir: pathlib.Path,
+    section: _Section,
+    data_dir: pathlib.Path,
+    paths: dict[str, str] | None = None,
 ) -> None:
+    """Section 7: audit.jsonl is writable + disk has headroom.
+
+    Per #647: labels use the display form (``~/.iam-jit`` when
+    HOME-default, else full path); every row that references a
+    non-existent path includes a ``detail`` with the resolved probe
+    path so operators with custom IAM_JIT_DATA_DIR see exactly what
+    was checked.
+    """
+    if paths is None:
+        paths = _resolve_paths()
+    d = paths["iam_jit_dir_display"]  # e.g. "~/.iam-jit" or "/tmp/foo"
+
     audit = data_dir / "audit.jsonl"
     if audit.exists():
         if os.access(audit, os.W_OK):
             section.add(
-                label="~/.iam-jit/audit.jsonl writable",
+                label=f"{d}/audit.jsonl writable",
                 severity=_SEV_OK,
                 detail=f"at {audit}",
             )
         else:
             section.add(
-                label="~/.iam-jit/audit.jsonl NOT writable",
+                label=f"{d}/audit.jsonl NOT writable",
                 severity=_SEV_ERR,
                 detail="audit writes will fail; install will degrade silently",
                 fix=f"chmod u+w {audit}",
@@ -595,22 +692,25 @@ def _check_audit_writability(
         # No file yet — confirm we can write to the dir.
         if os.access(data_dir, os.W_OK):
             section.add(
-                label="~/.iam-jit/ writable (audit.jsonl not yet created)",
+                label=f"{d}/ writable (audit.jsonl not yet created)",
                 severity=_SEV_OK,
                 detail=f"will be created on first audit event",
             )
         else:
             section.add(
-                label="~/.iam-jit/ NOT writable",
+                label=f"{d}/ NOT writable",
                 severity=_SEV_ERR,
-                detail="audit events will fail to persist",
+                detail=(
+                    f"probed: {data_dir}; "
+                    f"audit events will fail to persist"
+                ),
                 fix=f"chmod u+w {data_dir}",
             )
     else:
         section.add(
-            label="~/.iam-jit/ does not exist",
+            label=f"{d}/ does not exist",
             severity=_SEV_WARN,
-            detail="will be created on first iam-jit init",
+            detail=f"probed: {data_dir}; will be created on first iam-jit init",
             fix="iam-jit init",
         )
 
@@ -681,15 +781,31 @@ def _check_overall_summary(
 # ---------------------------------------------------------------------------
 
 
-def run_install_check(*, run_self_test: bool = True) -> list[_Section]:
+def run_install_check(
+    *,
+    run_self_test: bool = True,
+    data_dir: str | None = None,
+) -> list[_Section]:
     """Assemble the 8-section install-check report.
 
     Always safe to call — every sub-check is fail-soft. Returns the
     sections so the caller renders them (human or JSON). Pure
     function: no side effects beyond loopback TCP probes + reading
     env / filesystem.
+
+    Args:
+        run_self_test: When False, Section 5 (routing self-test) is
+            skipped. Useful inside CI where loopback behavior may
+            differ.
+        data_dir: Override the data directory (mirrors ``--data-dir``
+            CLI flag per [[cross-product-agent-parity]]). When None,
+            falls back to ``$IAM_JIT_DATA_DIR`` then ``~/.iam-jit/``.
     """
     sections: list[_Section] = []
+
+    # Resolve paths once; thread through all sections that display
+    # path labels (Sections 1, 6, 7) so labels are consistent.
+    paths = _resolve_paths(data_dir)
 
     # Posture snapshot — reused by sections 3 / 4 / 5.
     try:
@@ -700,7 +816,7 @@ def run_install_check(*, run_self_test: bool = True) -> list[_Section]:
         snapshot = {"bouncers": {}, "effective_protection": {}}
 
     s1 = _Section(num=1, total=8, title="PATH check")
-    _check_path(s1)
+    _check_path(s1, paths=paths)
     sections.append(s1)
 
     s2 = _Section(num=2, total=8, title="Binary versions")
@@ -721,13 +837,13 @@ def run_install_check(*, run_self_test: bool = True) -> list[_Section]:
     )
     sections.append(s5)
 
-    data_dir = _default_data_dir()
+    resolved_data_dir = pathlib.Path(paths["iam_jit_dir"])
     s6 = _Section(num=6, total=8, title="Config files")
-    _check_config_files(s6, data_dir)
+    _check_config_files(s6, resolved_data_dir, paths=paths)
     sections.append(s6)
 
     s7 = _Section(num=7, total=8, title="Audit log writability")
-    _check_audit_writability(s7, data_dir)
+    _check_audit_writability(s7, resolved_data_dir, paths=paths)
     sections.append(s7)
 
     s8 = _Section(num=8, total=8, title="Posture summary")
@@ -850,7 +966,22 @@ def register_install_check_command(
              "when running install-check inside CI where loopback "
              "behavior may differ.",
     )
-    def install_check_cmd(as_json: bool, no_routing_test: bool) -> None:
+    @click.option(
+        "--data-dir",
+        "data_dir",
+        type=click.Path(),
+        default=None,
+        envvar="IAM_JIT_DATA_DIR",
+        help="Operate on this data directory instead of the default "
+             "``~/.iam-jit/``. Mirrors ``serve`` / ``uninstall`` / "
+             "``init`` per [[cross-product-agent-parity]]. Also "
+             "honored via $IAM_JIT_DATA_DIR env var.",
+    )
+    def install_check_cmd(
+        as_json: bool,
+        no_routing_test: bool,
+        data_dir: str | None,
+    ) -> None:
         """End-to-end install verification: PATH, binaries, running
         bouncers, env-var wiring, routing self-test, config files,
         audit writability, posture summary.
@@ -867,7 +998,10 @@ def register_install_check_command(
         NEVER mutates PATH / shell rc / config; only reports +
         suggests remediation.
         """
-        sections = run_install_check(run_self_test=not no_routing_test)
+        sections = run_install_check(
+            run_self_test=not no_routing_test,
+            data_dir=data_dir,
+        )
         if as_json:
             click.echo(_render_json(sections))
         else:

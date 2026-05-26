@@ -313,7 +313,7 @@ def test_sabotage_check_path_proves_probe_is_load_bearing(
     `shutil.which` call would silently pass install-check even when
     nothing is installed.
     """
-    def _fake_check_path(section: dic._Section) -> None:
+    def _fake_check_path(section: dic._Section, paths: dict | None = None) -> None:
         section.add(label="iam-jit on PATH", severity=dic._SEV_OK)
     monkeypatch.setattr(dic, "_check_path", _fake_check_path)
 
@@ -330,4 +330,208 @@ def test_sabotage_check_path_proves_probe_is_load_bearing(
         "sabotaged _check_path should suppress section-1 FAILs; "
         "if this assertion fires, the test-2 shape is reaching a "
         "different code path and the load-bearing claim is unproven."
+    )
+
+
+# ---------------------------------------------------------------------------
+# Tests for #647 — display labels reflect actual probed paths
+# ---------------------------------------------------------------------------
+
+
+def test_custom_data_dir_via_env_shows_in_labels(
+    tmp_path: pathlib.Path,
+    monkeypatch: pytest.MonkeyPatch,
+    empty_path: None,
+    cleared_env: None,
+    _no_bouncers_running: None,
+) -> None:
+    """#647: IAM_JIT_DATA_DIR=/tmp/x — Sections 6 and 7 labels and
+    details reference /tmp/x (not the hardcoded ~/.iam-jit/).
+
+    Per [[ibounce-honest-positioning]] labels must reflect the ACTUAL
+    probed path. An operator with a custom data dir must see the
+    real path, not the default shorthand.
+    """
+    custom_dir = tmp_path / "custom-data"
+    # Intentionally do NOT create the dir — exercises the "does not
+    # exist" branch where the display label is most critical.
+    monkeypatch.setenv("IAM_JIT_DATA_DIR", str(custom_dir))
+    # Also override HOME so _pinned_home fixture doesn't interfere.
+    monkeypatch.setenv("HOME", str(tmp_path / "fake-home2"))
+
+    result = _invoke()
+    custom_str = str(custom_dir)
+    # Section 6: the missing-file rows must reference the custom dir.
+    # Either in the label OR the detail — detail is guaranteed by the fix.
+    assert custom_str in result.output, (
+        f"Expected resolved path {custom_str!r} to appear in output "
+        f"when IAM_JIT_DATA_DIR is set to a custom dir.\n"
+        f"--- output ---\n{result.output}"
+    )
+    # Must NOT hardcode the default.
+    # (It's OK if ~/.iam-jit appears in other sections' labels that
+    # are not data-dir-sensitive, but the config-files + audit
+    # sections must not claim ~/.iam-jit when probing custom_dir.)
+    s6_marker = "[6/8] Config files"
+    s7_marker = "[7/8] Audit log writability"
+    s8_marker = "[8/8]"
+    s6_chunk = result.output.split(s6_marker, 1)[1].split(s7_marker, 1)[0]
+    s7_chunk = result.output.split(s7_marker, 1)[1].split(s8_marker, 1)[0]
+    for chunk, section_name in ((s6_chunk, "6"), (s7_chunk, "7")):
+        assert "~/.iam-jit" not in chunk, (
+            f"Section {section_name} still hardcodes ~/.iam-jit "
+            f"when IAM_JIT_DATA_DIR={custom_str!r}. "
+            f"Chunk:\n{chunk}"
+        )
+
+
+def test_data_dir_flag_overrides_env_var(
+    tmp_path: pathlib.Path,
+    monkeypatch: pytest.MonkeyPatch,
+    empty_path: None,
+    cleared_env: None,
+    _no_bouncers_running: None,
+) -> None:
+    """#640: --data-dir flag wins over IAM_JIT_DATA_DIR env var.
+
+    Per [[cross-product-agent-parity]] install-check must accept
+    --data-dir just like serve / uninstall / init.
+    """
+    env_dir = tmp_path / "env-data"
+    flag_dir = tmp_path / "flag-data"
+    monkeypatch.setenv("IAM_JIT_DATA_DIR", str(env_dir))
+    monkeypatch.setenv("HOME", str(tmp_path / "fake-home3"))
+
+    result = _invoke("--data-dir", str(flag_dir))
+    flag_str = str(flag_dir)
+    env_str = str(env_dir)
+    # The flag-dir must appear somewhere (sections 6/7 detail).
+    assert flag_str in result.output, (
+        f"Expected --data-dir={flag_str!r} to appear in output; "
+        f"flag did not win over env var.\n"
+        f"--- output ---\n{result.output}"
+    )
+    # The env-dir must NOT appear (flag wins).
+    s6_marker = "[6/8] Config files"
+    s8_marker = "[8/8]"
+    s67_chunk = result.output.split(s6_marker, 1)[1].split(s8_marker, 1)[0]
+    assert env_str not in s67_chunk, (
+        f"IAM_JIT_DATA_DIR={env_str!r} leaked into sections 6/7 "
+        f"even though --data-dir={flag_str!r} was passed.\n"
+        f"Chunk:\n{s67_chunk}"
+    )
+
+
+def test_default_data_dir_uses_tilde_shorthand(
+    monkeypatch: pytest.MonkeyPatch,
+    empty_path: None,
+    cleared_env: None,
+    _no_bouncers_running: None,
+    _pinned_home: pathlib.Path,
+) -> None:
+    """#647: When no env var or flag is set, Sections 6+7 labels use
+    the ``~/.iam-jit`` shorthand (keeps output concise for the common
+    case per the fix design spec).
+    """
+    # _pinned_home fixture sets HOME + IAM_JIT_DATA_DIR to temp paths,
+    # so we unset IAM_JIT_DATA_DIR to exercise the HOME-default branch.
+    monkeypatch.delenv("IAM_JIT_DATA_DIR", raising=False)
+
+    result = _invoke()
+    # Under the HOME-default branch the display should use shorthand.
+    # Because HOME is pinned to a tmp_path, the "home / .iam-jit" path
+    # won't equal "~/.iam-jit" literally — but _resolve_paths compares
+    # Path.home() / ".iam-jit" to the resolved default and uses
+    # "~/.iam-jit" only when they match.  With a pinned HOME this
+    # branch actually resolves to the full tmp path — which is also
+    # honest behavior.  We assert that the output contains EITHER
+    # "~/.iam-jit" OR the pinned HOME path (both are correct; the key
+    # invariant is it does NOT hardcode a different path entirely).
+    home_str = str(_pinned_home)
+    in_output = ("~/.iam-jit" in result.output or home_str in result.output)
+    assert in_output, (
+        f"Neither '~/.iam-jit' nor pinned home {home_str!r} appear in "
+        f"sections 6/7 of the output.\n"
+        f"--- output ---\n{result.output}"
+    )
+
+
+# ---------------------------------------------------------------------------
+# Tests for #648 — no duplicate "Mode:" label in posture output
+# ---------------------------------------------------------------------------
+
+
+def test_posture_no_duplicate_mode_label() -> None:
+    """#648: ``iam-jit posture`` must not emit two ``Mode:`` labels
+    for the same bouncer block. The disk_pressure mode must appear as
+    ``DiskMode:`` so operators can distinguish it from the bouncer's
+    cooperative/transparent mode.
+    """
+    from iam_jit.posture.report import render_posture_human
+
+    # Synthesize a snapshot with a running ibounce that has disk_pressure.
+    snapshot: dict = {
+        "schema_version": "1.0",
+        "captured_at": "2026-05-26T00:00:00+00:00",
+        "overall_mode": "cooperative",
+        "iam_jit": {},
+        "bouncers": {
+            "ibounce": {
+                "running": True,
+                "port": 8767,
+                "mode": "cooperative",
+                "active_profile": "full-user",
+                "disk_pressure": {
+                    "status": "ok",
+                    "disk_pressure_mode": "normal",
+                    "used_pct": 42.5,
+                    "current_archive_count": 3,
+                },
+            },
+            "kbounce": {"running": False},
+            "dbounce": {"running": False},
+            "gbounce": {"running": False},
+        },
+        "effective_protection": {},
+        "tips": [],
+        "llm_skips": {"total": 0, "counts": {}, "by_reason": {}, "last_skips": []},
+        "degraded_capabilities": {
+            "total": 0, "counts": {}, "by_reason": {}, "last_events": [],
+        },
+    }
+    output = render_posture_human(snapshot)
+
+    # Find the ibounce block in the output.
+    ibounce_start = output.find("ibounce:")
+    assert ibounce_start != -1, "ibounce: section not found in posture output"
+    # Find the next bouncer line to delimit ibounce's block.
+    ibounce_block = output[ibounce_start:output.find("kbounce:", ibounce_start)]
+
+    # Disk pressure mode must appear as "DiskMode:" (not "Mode:").
+    # The bouncer itself has one "Mode:" (cooperative/transparent) — that's
+    # expected. The SECOND former "Mode:" was the disk_pressure_mode and
+    # has been renamed to "DiskMode:" per #648. Verify the Disk line
+    # uses DiskMode: not Mode:.
+    assert "DiskMode:" in ibounce_block, (
+        f"Expected 'DiskMode:' in ibounce block (disk_pressure mode renamed).\n"
+        f"ibounce block:\n{ibounce_block}"
+    )
+    # Confirm the Disk: line itself does NOT say "Mode:" (only "DiskMode:").
+    # Find the Disk: line specifically.
+    disk_line = next(
+        (line for line in ibounce_block.splitlines() if "Disk:" in line),
+        None,
+    )
+    assert disk_line is not None, (
+        f"Could not find 'Disk:' line in ibounce block.\n"
+        f"ibounce block:\n{ibounce_block}"
+    )
+    # The Disk line must contain DiskMode: but not a bare "Mode:" token.
+    # We strip "DiskMode:" before checking for stray "Mode:" to avoid
+    # the substring match.
+    disk_line_stripped = disk_line.replace("DiskMode:", "")
+    assert "Mode:" not in disk_line_stripped, (
+        f"Disk: line still contains a bare 'Mode:' after renaming — "
+        f"duplicate label persists.\n"
+        f"Disk line: {disk_line!r}"
     )

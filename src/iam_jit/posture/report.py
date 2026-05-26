@@ -148,7 +148,7 @@ def _fmt_bouncers_block(bouncers: dict[str, Any]) -> list[str]:
             )
             lines.append(
                 f"    Disk: {_dp_status} ({_used_str})  "
-                f"Mode: {_dp_mode}  "
+                f"DiskMode: {_dp_mode}  "
                 f"Archives: {_dp_archives}"
             )
             _dp_rec = b.get("disk_pressure_recommendation")
