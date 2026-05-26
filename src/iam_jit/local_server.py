@@ -136,7 +136,13 @@ class LocalServerConfig:
         # re-append uniformly. Keeps the identity stable across
         # platforms.
         host_clean = host_safe.rstrip(".").removesuffix(".local")
-        return f"{user_safe}@{host_clean}.local"
+        # #670: lowercase the auto-derived email so the stored user_id
+        # ("email:user@host.local") matches the lowercased login lookup
+        # that _normalize_login_email() produces. Hostnames on macOS
+        # often contain uppercase (e.g. "Example-Host") which caused a
+        # silent lookup miss when the operator typed the magic-link email
+        # in all lowercase.
+        return f"{user_safe}@{host_clean}.local".lower()
 
 
 def _ensure_data_dir(config: LocalServerConfig) -> None:

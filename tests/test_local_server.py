@@ -53,6 +53,24 @@ def test_admin_email_from_user_and_hostname(monkeypatch: pytest.MonkeyPatch) -> 
     assert email == "alice@alice-laptop.local"
 
 
+def test_admin_email_mixed_case_hostname_lowercased(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """#670: macOS hostnames often contain uppercase (e.g. "Example-Host").
+    resolve_admin_email must lowercase the result so the auto-seeded
+    user_id matches the lowercased email that _normalize_login_email
+    produces at login time."""
+    cfg = local_server.LocalServerConfig()
+    monkeypatch.setattr("getpass.getuser", lambda: "DevUser")
+    monkeypatch.setattr("socket.gethostname", lambda: "Example-Host")
+    email = cfg.resolve_admin_email()
+    # Both the user part and the hostname part must be lowercased.
+    assert email == "devuser@example-host.local", (
+        f"expected 'devuser@example-host.local', got {email!r}"
+    )
+    assert email == email.lower(), "resolve_admin_email must return a lowercase string"
+
+
 def test_admin_email_explicit_override() -> None:
     """If admin_email is explicitly set on config, it wins."""
     cfg = local_server.LocalServerConfig(admin_email="real@email.com")

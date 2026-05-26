@@ -7,7 +7,15 @@ for unauthenticated requests.
 
 from __future__ import annotations
 
+import pathlib
+
+import pytest
 from fastapi.testclient import TestClient
+
+from iam_jit.api_tokens_store import InMemoryAPITokenStore
+from iam_jit.app import create_app
+from iam_jit.store import FilesystemStore
+from iam_jit.users_store import FileUserStore
 
 pytest_plugins = ["tests.conftest_routes"]
 
@@ -62,6 +70,158 @@ def test_magic_callback_invalid_token_redirects_to_login(client: TestClient) -> 
     cb = client.get("/auth/magic-callback?token=garbage", follow_redirects=False)
     assert cb.status_code == 303
     assert cb.headers["location"].startswith("/login")
+
+
+# ---- #670: case-insensitive login lookup ----
+# macOS hostnames often contain uppercase (e.g. "MacBook-Pro"), so the
+# auto-seeded user_id preserves mixed case while _normalize_login_email
+# lowercases the typed email. The case-insensitive fallback must bridge that.
+
+
+_MIXED_CASE_USERS_YAML = """\
+schema_version: 1
+auth_mode: local
+users:
+  - id: email:DevUser@test-Host.local
+    display_name: Mixed-case local admin
+    roles: [admin, approver, requester]
+    enabled: true
+"""
+
+_DISABLED_MIXED_CASE_USERS_YAML = """\
+schema_version: 1
+auth_mode: local
+users:
+  - id: email:DevUser@test-Host.local
+    display_name: Disabled mixed-case user
+    roles: [admin]
+    enabled: false
+"""
+
+_DEV_SECRET_670 = "test-secret-for-670-case-insensitive-aa"
+
+
+@pytest.fixture
+def mixed_case_client(
+    tmp_path: pathlib.Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> TestClient:
+    """App seeded with a mixed-case user id, simulating a macOS
+    machine whose hostname contained uppercase letters."""
+    monkeypatch.setenv("IAM_JIT_AUTH_MODE", "local")
+    monkeypatch.setenv("IAM_JIT_DEV_INSECURE_SECRET", "1")
+    monkeypatch.setenv("IAM_JIT_MAGIC_LINK_SECRET", _DEV_SECRET_670)
+    users_yaml = tmp_path / "users.yaml"
+    users_yaml.write_text(_MIXED_CASE_USERS_YAML)
+    app = create_app(
+        request_store=FilesystemStore(tmp_path / "requests"),
+        user_store=FileUserStore(str(users_yaml)),
+        api_tokens_store=InMemoryAPITokenStore(),
+    )
+    return TestClient(app, raise_server_exceptions=True, client=("127.0.0.1", 50000))
+
+
+@pytest.fixture
+def disabled_mixed_case_client(
+    tmp_path: pathlib.Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> TestClient:
+    """App seeded with a disabled mixed-case user id."""
+    monkeypatch.setenv("IAM_JIT_AUTH_MODE", "local")
+    monkeypatch.setenv("IAM_JIT_DEV_INSECURE_SECRET", "1")
+    monkeypatch.setenv("IAM_JIT_MAGIC_LINK_SECRET", _DEV_SECRET_670)
+    users_yaml = tmp_path / "users.yaml"
+    users_yaml.write_text(_DISABLED_MIXED_CASE_USERS_YAML)
+    app = create_app(
+        request_store=FilesystemStore(tmp_path / "requests"),
+        user_store=FileUserStore(str(users_yaml)),
+        api_tokens_store=InMemoryAPITokenStore(),
+    )
+    return TestClient(app, raise_server_exceptions=True, client=("127.0.0.1", 50000))
+
+
+def test_login_case_insensitive_uppercase_stored_lowercase_typed(
+    mixed_case_client: TestClient,
+) -> None:
+    """#670: user stored with mixed-case id (e.g. DevUser@test-Host.local),
+    operator types lowercase email → login must succeed (dev_link rendered)."""
+    resp = mixed_case_client.post(
+        "/login",
+        data={"email": "devuser@test-host.local"},
+        follow_redirects=False,
+    )
+    assert resp.status_code == 200
+    # The dev_link is only rendered when the user is found and enabled.
+    assert "auth/magic-callback" in resp.text, (
+        "case-insensitive lookup failed: no magic-link rendered for lowercase "
+        "login against a mixed-case stored user id"
+    )
+
+
+def test_login_case_insensitive_lowercase_stored_uppercase_typed(
+    tmp_path: pathlib.Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """#670 symmetric: user stored lowercase, operator types mixed-case → succeeds."""
+    monkeypatch.setenv("IAM_JIT_AUTH_MODE", "local")
+    monkeypatch.setenv("IAM_JIT_DEV_INSECURE_SECRET", "1")
+    monkeypatch.setenv("IAM_JIT_MAGIC_LINK_SECRET", _DEV_SECRET_670)
+    yaml_content = (
+        "schema_version: 1\nauth_mode: local\nusers:\n"
+        "  - id: email:alice@test-host.local\n"
+        "    display_name: Alice\n"
+        "    roles: [admin]\n"
+        "    enabled: true\n"
+    )
+    users_yaml = tmp_path / "users.yaml"
+    users_yaml.write_text(yaml_content)
+    app = create_app(
+        request_store=FilesystemStore(tmp_path / "requests"),
+        user_store=FileUserStore(str(users_yaml)),
+        api_tokens_store=InMemoryAPITokenStore(),
+    )
+    c = TestClient(app, raise_server_exceptions=True, client=("127.0.0.1", 50000))
+    # Operator types mixed-case version of a lowercase-stored email.
+    resp = c.post(
+        "/login",
+        data={"email": "Alice@Test-Host.local"},
+        follow_redirects=False,
+    )
+    assert resp.status_code == 200
+    assert "auth/magic-callback" in resp.text, (
+        "case-insensitive lookup failed: no magic-link rendered for mixed-case "
+        "login against a lowercase stored user id"
+    )
+
+
+def test_login_case_insensitive_no_false_positive(
+    mixed_case_client: TestClient,
+) -> None:
+    """#670: a completely different email must NOT match (no false-positive)."""
+    resp = mixed_case_client.post(
+        "/login",
+        data={"email": "other@test-host.local"},
+        follow_redirects=False,
+    )
+    assert resp.status_code == 200
+    assert "auth/magic-callback" not in resp.text, (
+        "case-insensitive lookup produced a false-positive match"
+    )
+
+
+def test_login_case_insensitive_disabled_user_no_link(
+    disabled_mixed_case_client: TestClient,
+) -> None:
+    """#670: case-insensitive match of a DISABLED user must not render a link."""
+    resp = disabled_mixed_case_client.post(
+        "/login",
+        data={"email": "devuser@test-host.local"},
+        follow_redirects=False,
+    )
+    assert resp.status_code == 200
+    assert "auth/magic-callback" not in resp.text, (
+        "disabled user with mixed-case id incorrectly received a magic link"
+    )
 
 
 def test_logout_clears_cookie(as_admin: TestClient) -> None:

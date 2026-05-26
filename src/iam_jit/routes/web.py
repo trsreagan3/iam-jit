@@ -370,7 +370,26 @@ def login_submit(
         user = user_store.get(user_id)
         known = user.enabled
     except UserNotFound:
-        known = False
+        # #670: case-insensitive fallback for existing installs where the
+        # auto-seeded user_id preserves the mixed-case OS username / hostname
+        # (e.g. "email:DevUser@Example-Host.local") but _normalize_login_email
+        # lowercases the typed email before lookup. Compare lower-folded IDs
+        # and, if a unique match is found, use that user's canonical id.
+        # This never creates or modifies stored data — read-only scan only.
+        folded = user_id.lower()
+        try:
+            candidates = [
+                u for u in user_store.list(include_disabled=True)
+                if u.id.lower() == folded
+            ]
+        except Exception:
+            candidates = []
+        if len(candidates) == 1:
+            user = candidates[0]
+            user_id = user.id  # use canonical (stored) id for token signing
+            known = user.enabled
+        else:
+            known = False
 
     if known:
         token = auth_mod.sign_magic_link(_get_secret(), user_id)
