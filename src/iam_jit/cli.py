@@ -2014,5 +2014,17 @@ from .cli_uninstall import register_uninstall_command  # noqa: E402
 register_uninstall_command(main)
 
 
+# #491 / §A91 LAUNCH-BLOCKER — `iam-jit org-policy {sign,verify}`.
+# IT-side counterpart to #490's engineer-side `init --managed`. Sign
+# an org-policy YAML + verify before publish. Reuses Ed25519 primitives
+# from #409 (signing.py) and #490 (_verify_ed25519_signature from
+# cli_init.py) — no new crypto. Per [[enterprise-profile-distribution]]
+# IT curates + publishes the policy; engineers consume via init --managed.
+# Per [[no-hosted-saas]] IT publishes to their OWN HTTPS endpoint (S3 /
+# static site / Nginx); iam-jit ships no hosted publish service.
+from .cli_org_policy import register_org_policy_group  # noqa: E402
+register_org_policy_group(main)
+
+
 if __name__ == "__main__":
     main()
