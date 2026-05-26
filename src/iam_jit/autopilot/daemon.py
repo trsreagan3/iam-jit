@@ -300,6 +300,13 @@ _DEFAULT_SWEEP_INTERVAL_S = 5.0
 _DEFAULT_IMPROVE_INTERVAL_S = 30 * 60  # 30 minutes for per_session
 _RESTART_WINDOW_S = 60.0
 _MAX_RESTARTS_PER_WINDOW = 3
+# #644 — no-traffic warning threshold. If a bouncer has been running
+# longer than this many hours with zero decisions, the env var is
+# likely not wired and we surface a warn-level alert so operators
+# discover the misconfiguration during ongoing operation (not just
+# at install-check time via `iam-jit doctor install-check`).
+# Per [[install-ux-gap-2026-05-26]] this is strategically important.
+_NO_TRAFFIC_WARN_HOURS = 1.0
 
 
 def _skip_counter_snapshot_safe() -> dict[str, Any]:
@@ -431,6 +438,10 @@ class AutopilotSupervisor:
     stopped: bool = False
     alerts: list[str] = dataclasses.field(default_factory=list)
     _improve_count: int = 0
+    # #642 — sweep tick counter (independent of improve cycle count).
+    # ticks_at_exit uses this so the exit report is honest even when
+    # improve is disabled (where _improve_count stays 0 the whole run).
+    _sweep_count: int = 0
     # #453 (§A49b) — preserve the last improve cycle's results across
     # ticks so the operator (+ #412 weekly digest) can read what
     # changed even when the most recent sweep tick didn't run improve.
@@ -843,6 +854,22 @@ class AutopilotSupervisor:
                 "entry_count": len(fetch.feed.entries),
                 **counts,
             })
+            # #643 — promote sig-verify failures to supervisor.alerts so
+            # operators watching the alerts channel are not blind to
+            # tampering attempts. A non-zero refused count means entries
+            # failed signature verification; this warrants operator attention
+            # regardless of how many entries were successfully applied.
+            if counts["refused"] > 0:
+                self.alerts.append({
+                    "severity": "warn",
+                    "category": "threat_feed_integrity",
+                    "message": (
+                        f"threat-feed {sub.label()}: {counts['refused']} "
+                        f"entries refused (signature verification failed) "
+                        f"— investigate feed integrity"
+                    ),
+                    "timestamp": _now_iso(),
+                })
 
         self.last_threat_feed_at = time.time()
         self._last_threat_feed_results = list(results)
@@ -898,6 +925,14 @@ class AutopilotSupervisor:
                 )
                 if healthz is not None:
                     entry["healthz"] = healthz
+                    # #644 — no-traffic warning: if a bouncer has been up
+                    # longer than _NO_TRAFFIC_WARN_HOURS with zero decisions,
+                    # the env var is almost certainly not wired. Emit once per
+                    # tick so operators monitoring the alerts channel see it
+                    # without having to run `iam-jit doctor install-check`.
+                    # Per [[install-ux-gap-2026-05-26]]: catch this during
+                    # ongoing operation, not just at install time.
+                    _check_no_traffic_warn(name, healthz, self.alerts)
             else:
                 # Not running — try to restart (subject to throttle).
                 if state.alert_emitted:
@@ -1227,6 +1262,7 @@ class AutopilotSupervisor:
             while not self.stopped:
                 self.run_once()
                 ticks += 1
+                self._sweep_count += 1  # #642 — track actual sweep ticks
                 if max_ticks is not None and ticks >= max_ticks:
                     break
                 if self.stopped:
@@ -1467,7 +1503,7 @@ def autopilot_start(
         "status": "stopped",
         "pid": os.getpid(),
         "config_source": source_label,
-        "ticks_at_exit": supervisor._improve_count,
+        "ticks_at_exit": supervisor._sweep_count,  # #642 — sweep ticks, not improve count
         "final_status": final_dict,
     }
 
@@ -1556,16 +1592,39 @@ def autopilot_status() -> dict[str, Any]:
             status_blob["running"] = False
             status_blob["stale_detected_at"] = _now_iso()
             corrected = True
+        # #641 CRIT — when the daemon is determined dead (corrected=True
+        # above), ALL per-bouncer running fields MUST be reset to False
+        # regardless of whether bpid is an int or None. The original code
+        # only fired when isinstance(bpid, int), so the common case (bpid
+        # is None — posture detectors don't always return a PID) left
+        # bouncers.*.running=true while top-level running=false. Per
+        # [[ibounce-honest-positioning]] two values for the same daemon
+        # state must agree — this is the #619 invariant: if the daemon's
+        # dead, nothing the daemon was tracking is alive.
+        #
+        # We also still check individual bpid liveness when the top-level
+        # is NOT already corrected, to handle the edge case where a
+        # per-bouncer PID outlives the daemon PID-file entry.
         bouncers = status_blob.get("bouncers")
         if isinstance(bouncers, dict):
             for entry in bouncers.values():
                 if not isinstance(entry, dict):
                     continue
-                bpid = entry.get("pid")
-                if isinstance(bpid, int) and not _is_pid_alive(bpid):
-                    entry["running"] = False
-                    entry["pid"] = None
-                    corrected = True
+                if corrected:
+                    # Daemon already confirmed dead above — unconditionally
+                    # reset every per-bouncer running field.
+                    if entry.get("running"):
+                        entry["running"] = False
+                        entry["pid"] = None
+                        # corrected already True; no need to set again
+                else:
+                    # Daemon not yet confirmed dead by top-level PID check.
+                    # Still validate per-bouncer PIDs individually.
+                    bpid = entry.get("pid")
+                    if isinstance(bpid, int) and not _is_pid_alive(bpid):
+                        entry["running"] = False
+                        entry["pid"] = None
+                        corrected = True
         if corrected:
             try:
                 _atomic_write_status_dict(status_blob)
@@ -1914,6 +1973,56 @@ def _main_entry() -> None:
 
 def _now_iso() -> str:
     return _dt.datetime.now(_dt.timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z")
+
+
+def _check_no_traffic_warn(
+    bouncer_name: str,
+    healthz: dict[str, Any],
+    alerts: list[Any],
+) -> None:
+    """#644 — emit a no-traffic warn alert when a bouncer has been
+    running longer than ``_NO_TRAFFIC_WARN_HOURS`` with zero decisions.
+
+    The most common cause is a missing env-var wire (e.g. HTTP_PROXY /
+    HTTPS_PROXY not pointed at ibounce, or KUBECONFIG not routed via
+    kbounce). Surfacing this here catches the install-UX-gap scenario
+    during ongoing operation — not just at install-check time via
+    ``iam-jit doctor install-check``.
+
+    Per [[install-ux-gap-2026-05-26]] + [[ambient-autonomous-protection]]
+    this is strategically important: the daemon should notice the bouncer
+    is effectively invisible to traffic and tell the operator.
+
+    Best-effort: any parse error is silently ignored so a malformed
+    healthz doesn't crash the supervisor tick.
+    """
+    try:
+        start_iso = healthz.get("started_at") or healthz.get("start_time")
+        if not start_iso:
+            return
+        start = _dt.datetime.fromisoformat(
+            str(start_iso).replace("Z", "+00:00")
+        )
+        now_utc = _dt.datetime.now(_dt.timezone.utc)
+        uptime_hours = (now_utc - start).total_seconds() / 3600.0
+        if uptime_hours <= _NO_TRAFFIC_WARN_HOURS:
+            return
+        decisions = int(healthz.get("decisions_count") or 0)
+        if decisions != 0:
+            return
+        alerts.append({
+            "severity": "warn",
+            "category": "no_traffic_through_bouncer",
+            "bouncer": bouncer_name,
+            "message": (
+                f"{bouncer_name} running {uptime_hours:.1f}h with 0 decisions "
+                f"— env var likely not wired "
+                f"(run `iam-jit doctor install-check`)"
+            ),
+            "timestamp": _now_iso(),
+        })
+    except Exception:  # pragma: no cover
+        pass
 
 
 # ---------------------------------------------------------------------------
