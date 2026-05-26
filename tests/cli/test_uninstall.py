@@ -74,6 +74,11 @@ def _default_isolation(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(cu, "_port_bound", lambda port, host="127.0.0.1": False)
     monkeypatch.setattr(cu, "_lsof_pids_on_port", lambda port: [])
     monkeypatch.setattr(cu, "_read_cmdline", lambda pid: "")
+    # #617 MED-2: also stub _all_listening_ports so the custom-port scan
+    # doesn't shell out to the dev machine's lsof/ss. Default: empty list
+    # (no custom-port bouncers visible). Tests that exercise custom-port
+    # detection override this stub per-test.
+    monkeypatch.setattr(cu, "_all_listening_ports", lambda: [])
     # #608: isolate posture's loopback probes too.
     from iam_jit.posture import bouncers as _posture_bouncers
     monkeypatch.setattr(
@@ -2866,4 +2871,440 @@ def test_621_relative_path_handled_safely(
         f"#621: edge-case relative path PID disappeared entirely. "
         f"running_bouncers={inv['running_bouncers']} "
         f"unknown={inv['unknown_port_owners']}"
+    )
+
+
+# ---------------------------------------------------------------------------
+# #617 MED-2 — detect bouncers on custom (non-default) ports
+#
+# Per UAT-Lifecycle 2026-05-25: `iam-jit uninstall --dry-run` only probed
+# BOUNCER_DEFAULT_PORTS. A bouncer started with `ibounce run --port 18767`
+# (custom port) was invisible to inventory → orphan risk on uninstall.
+#
+# Fix: _all_listening_ports() enumerates ALL loopback TCP listeners owned
+# by the current user; _classify_bouncer_pid_multifactor (#614) then gates
+# which ones are actually ours. Custom-port bouncers appear in
+# running_bouncers + bound_ports; foreign processes don't.
+# ---------------------------------------------------------------------------
+
+
+def _seed_custom_port_bouncer(
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    pid: int,
+    port: int,
+    bouncer_kind: str,
+    cmdline: str,
+) -> None:
+    """Wire up monkeypatches to simulate a bouncer on a custom (non-default)
+    port, visible ONLY through _all_listening_ports (not via _port_bound on
+    the default port list).
+
+    Per the #617 MED-2 fix: _all_listening_ports is the load-bearing path for
+    custom-port detection. _port_bound + _lsof_pids_on_port remain stubbed to
+    return nothing for this port (they're only called on default ports).
+
+    Uses /Users/testop/ convention per #537 follow-up (test fixture paths
+    must not leak real user paths).
+    """
+    fake_install_dir = pathlib.Path("/Users/testop/.iam-jit/venv/bin")
+    exe_path = fake_install_dir / bouncer_kind
+
+    # _all_listening_ports returns (pid, port) for the custom port.
+    monkeypatch.setattr(
+        cu, "_all_listening_ports",
+        lambda: [(pid, port)],
+    )
+    # _read_cmdline returns the bouncer cmdline for this PID.
+    monkeypatch.setattr(
+        cu, "_read_cmdline",
+        lambda p: cmdline if p == pid else "",
+    )
+    # _resolve_executable_path: exe under a known install root.
+    monkeypatch.setattr(
+        cu, "_resolve_executable_path",
+        lambda p: exe_path if p == pid else None,
+    )
+    # _pid_owner_uid: owned by current user.
+    monkeypatch.setattr(
+        cu, "_pid_owner_uid",
+        lambda p: os.geteuid() if p == pid else None,
+    )
+    # Patch _path_under_known_install_root to accept /Users/testop/.iam-jit/venv/bin
+    # by adding that root to _BOUNCER_INSTALL_PATH_ROOTS for the test.
+    monkeypatch.setattr(
+        cu, "_BOUNCER_INSTALL_PATH_ROOTS",
+        cu._BOUNCER_INSTALL_PATH_ROOTS + (fake_install_dir,),
+    )
+
+
+def test_617_med2_ibounce_on_custom_port_18767_detected(
+    isolated_iam_jit_home: pathlib.Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """#617 MED-2: ibounce running on non-default port 18767 must appear
+    in running_bouncers + bound_ports.
+
+    Pre-fix: inventory only probed default ports (8767/7401/7402/7412).
+    ibounce on 18767 was invisible → orphan risk per [[ibounce-honest-positioning]].
+    """
+    _seed_install(isolated_iam_jit_home)
+
+    pid = 71801
+    port = 18767
+    _seed_custom_port_bouncer(
+        monkeypatch,
+        pid=pid,
+        port=port,
+        bouncer_kind="ibounce",
+        cmdline=(
+            "/Users/testop/.iam-jit/venv/bin/ibounce run "
+            "--mode discovery --proxy-port 18767"
+        ),
+    )
+
+    inv = cu._inventory_installed_state()
+
+    # Observable: ibounce appears in running_bouncers.
+    assert "ibounce" in inv["running_bouncers"], (
+        f"#617 MED-2: ibounce on custom port {port} not in running_bouncers; "
+        f"got {inv['running_bouncers']}"
+    )
+    assert pid in inv["running_bouncers"]["ibounce"], (
+        f"#617 MED-2: pid={pid} not in running_bouncers['ibounce']; "
+        f"got {inv['running_bouncers']['ibounce']}"
+    )
+
+    # Observable: custom port appears in bound_ports.
+    assert port in inv["bound_ports"], (
+        f"#617 MED-2: custom port {port} not in bound_ports; "
+        f"got {inv['bound_ports']}"
+    )
+
+    # Observable: NOT in unknown_port_owners (it classified correctly).
+    unknown_pids = [u["pid"] for u in inv["unknown_port_owners"]]
+    assert pid not in unknown_pids, (
+        f"#617 MED-2: correctly-classified ibounce pid={pid} must NOT "
+        f"be in unknown_port_owners; got {inv['unknown_port_owners']}"
+    )
+
+
+def test_617_med2_kbouncer_on_custom_port_28766_detected(
+    isolated_iam_jit_home: pathlib.Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """#617 MED-2: kbouncer running on non-default port 28766 must appear
+    in running_bouncers + bound_ports.
+
+    Per [[cross-product-agent-parity]]: detection applies to all 4 bouncers;
+    this test covers the Go binary (kbouncer) shape.
+    """
+    _seed_install(isolated_iam_jit_home)
+
+    pid = 71802
+    port = 28766
+    _seed_custom_port_bouncer(
+        monkeypatch,
+        pid=pid,
+        port=port,
+        bouncer_kind="kbouncer",
+        cmdline=(
+            "/Users/testop/.iam-jit/venv/bin/kbouncer run "
+            "--apiserver-url https://127.0.0.1:28766 --rbac-mode audit"
+        ),
+    )
+
+    inv = cu._inventory_installed_state()
+
+    # Observable: kbouncer appears in running_bouncers.
+    assert "kbouncer" in inv["running_bouncers"], (
+        f"#617 MED-2: kbouncer on custom port {port} not in running_bouncers; "
+        f"got {inv['running_bouncers']}"
+    )
+    assert pid in inv["running_bouncers"]["kbouncer"], (
+        f"#617 MED-2: pid={pid} not in running_bouncers['kbouncer']; "
+        f"got {inv['running_bouncers']['kbouncer']}"
+    )
+
+    # Observable: custom port appears in bound_ports.
+    assert port in inv["bound_ports"], (
+        f"#617 MED-2: custom port {port} not in bound_ports; "
+        f"got {inv['bound_ports']}"
+    )
+
+    # Observable: NOT in unknown_port_owners.
+    unknown_pids = [u["pid"] for u in inv["unknown_port_owners"]]
+    assert pid not in unknown_pids, (
+        f"#617 MED-2: correctly-classified kbouncer pid={pid} must NOT "
+        f"be in unknown_port_owners"
+    )
+
+
+def test_617_med2_default_port_detection_preserved_regression(
+    isolated_iam_jit_home: pathlib.Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """#617 MED-2 regression-pin: ibounce on default port 8767 is still
+    detected via the existing _lsof_pids_on_port path (not broken by the
+    custom-port addition).
+
+    This test keeps the default-port path honest — _all_listening_ports
+    returns empty, yet the default-port scan finds the bouncer.
+    """
+    _seed_install(isolated_iam_jit_home)
+
+    pid = 71803
+    port = 8767  # ibounce default port
+
+    fake_install_dir = pathlib.Path("/Users/testop/.iam-jit/venv/bin")
+    cmdline = (
+        "/Users/testop/.iam-jit/venv/bin/ibounce run "
+        "--mode discovery --proxy-port 8767"
+    )
+
+    # Simulate ibounce on default port 8767 via the standard path.
+    monkeypatch.setattr(
+        cu, "_port_bound",
+        lambda p, host="127.0.0.1": p == port,
+    )
+    monkeypatch.setattr(
+        cu, "_lsof_pids_on_port",
+        lambda p: [pid] if p == port else [],
+    )
+    monkeypatch.setattr(
+        cu, "_read_cmdline",
+        lambda p: cmdline if p == pid else "",
+    )
+    monkeypatch.setattr(
+        cu, "_resolve_executable_path",
+        lambda p: fake_install_dir / "ibounce" if p == pid else None,
+    )
+    monkeypatch.setattr(
+        cu, "_pid_owner_uid",
+        lambda p: os.geteuid() if p == pid else None,
+    )
+    monkeypatch.setattr(
+        cu, "_BOUNCER_INSTALL_PATH_ROOTS",
+        cu._BOUNCER_INSTALL_PATH_ROOTS + (fake_install_dir,),
+    )
+    # _all_listening_ports returns empty (already stubbed by autouse fixture).
+    # Explicit for clarity:
+    monkeypatch.setattr(cu, "_all_listening_ports", lambda: [])
+
+    inv = cu._inventory_installed_state()
+
+    # Observable: ibounce still found on default port.
+    assert "ibounce" in inv["running_bouncers"], (
+        f"#617 MED-2 regression: ibounce on default port {port} disappeared; "
+        f"got {inv['running_bouncers']}"
+    )
+    assert pid in inv["running_bouncers"]["ibounce"]
+    assert port in inv["bound_ports"]
+
+
+def test_617_med2_foreign_process_on_custom_port_not_classified(
+    isolated_iam_jit_home: pathlib.Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """#617 MED-2 + #614: a foreign process on a custom non-default port
+    (19999) must NOT be classified as a bouncer.
+
+    The multi-factor classifier (#614) still gates: if the process doesn't
+    have a bouncer-specific flag in its cmdline, it's neither in
+    running_bouncers NOR in unknown_port_owners (since its cmdline is not
+    bouncer-shaped, there's no signal to surface for the operator).
+
+    Per [[creates-never-mutates]]: uninstall never SIGTERMs processes it
+    cannot positively identify as its own.
+    """
+    _seed_install(isolated_iam_jit_home)
+
+    foreign_pid = 71804
+    foreign_port = 19999
+
+    # Foreign process on a custom port — no bouncer flag signature.
+    monkeypatch.setattr(
+        cu, "_all_listening_ports",
+        lambda: [(foreign_pid, foreign_port)],
+    )
+    monkeypatch.setattr(
+        cu, "_read_cmdline",
+        lambda p: "/usr/local/bin/nginx -g 'daemon off;'" if p == foreign_pid else "",
+    )
+    monkeypatch.setattr(
+        cu, "_resolve_executable_path",
+        lambda p: pathlib.Path("/usr/local/bin/nginx") if p == foreign_pid else None,
+    )
+    monkeypatch.setattr(
+        cu, "_pid_owner_uid",
+        lambda p: os.geteuid() if p == foreign_pid else None,
+    )
+
+    inv = cu._inventory_installed_state()
+
+    # Observable: foreign PID NOT in running_bouncers.
+    flat_pids: list[int] = []
+    for pids in inv["running_bouncers"].values():
+        flat_pids.extend(pids)
+    assert foreign_pid not in flat_pids, (
+        f"#617 MED-2 + #614: foreign nginx pid={foreign_pid} on port "
+        f"{foreign_port} must NOT be in running_bouncers; "
+        f"got {inv['running_bouncers']}"
+    )
+
+    # Observable: NOT in unknown_port_owners either (cmdline not bouncer-shaped).
+    unknown_pids = [u["pid"] for u in inv["unknown_port_owners"]]
+    assert foreign_pid not in unknown_pids, (
+        f"#617 MED-2: nginx on custom port must not flood unknown_port_owners; "
+        f"got {inv['unknown_port_owners']}"
+    )
+
+    # Observable: custom port NOT added to bound_ports.
+    assert foreign_port not in inv["bound_ports"], (
+        f"#617 MED-2: custom port {foreign_port} for nginx should not appear "
+        f"in bound_ports; got {inv['bound_ports']}"
+    )
+
+
+def test_617_med2_halt_u1_u2_fire_on_custom_port_bouncer(
+    isolated_iam_jit_home: pathlib.Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """#617 MED-2: halt conditions U-1/U-2 fire correctly when a custom-port
+    bouncer is in unknown_port_owners (bouncer-shaped cmdline but fails
+    multi-factor — e.g. executable path outside install root).
+
+    Verifies the halt machinery wires up correctly even when the port
+    was discovered via _all_listening_ports (not the default-port list).
+    """
+    _seed_install(isolated_iam_jit_home)
+
+    # Bouncer-shaped cmdline (has --proxy-port flag) but executable path
+    # is outside install root → fails factor 1 → lands in unknown_port_owners.
+    ambiguous_pid = 71805
+    ambiguous_port = 28767  # custom non-default port
+    ambiguous_cmdline = (
+        "/tmp/ibounce-staging run --mode discovery --proxy-port 28767"
+    )
+
+    monkeypatch.setattr(
+        cu, "_all_listening_ports",
+        lambda: [(ambiguous_pid, ambiguous_port)],
+    )
+    monkeypatch.setattr(
+        cu, "_read_cmdline",
+        lambda p: ambiguous_cmdline if p == ambiguous_pid else "",
+    )
+    # Executable path is outside install root → path check fails.
+    monkeypatch.setattr(
+        cu, "_resolve_executable_path",
+        lambda p: pathlib.Path("/tmp/ibounce-staging") if p == ambiguous_pid else None,
+    )
+    monkeypatch.setattr(
+        cu, "_pid_owner_uid",
+        lambda p: os.geteuid() if p == ambiguous_pid else None,
+    )
+
+    inv = cu._inventory_installed_state()
+
+    # Observable: ambiguous PID is in unknown_port_owners (bouncer-shaped
+    # cmdline but failed path check → surfaced for operator review).
+    unknown_pids = [u["pid"] for u in inv["unknown_port_owners"]]
+    assert ambiguous_pid in unknown_pids, (
+        f"#617 MED-2: ambiguous pid={ambiguous_pid} with bouncer-shaped "
+        f"cmdline but wrong path should be in unknown_port_owners; "
+        f"got {inv['unknown_port_owners']}"
+    )
+
+    # Observable: custom port IS in bound_ports (it was reported via
+    # unknown_port_owners which adds it).
+    assert ambiguous_port in inv["bound_ports"], (
+        f"#617 MED-2: custom port {ambiguous_port} for ambiguous bouncer "
+        f"should be in bound_ports; got {inv['bound_ports']}"
+    )
+
+    # Observable: U-2 halt fires (unknown port owners).
+    halts = cu._check_halt_conditions(inv)
+    halt_ids = [h["id"] for h in halts]
+    assert "U-2" in halt_ids, (
+        f"#617 MED-2: U-2 halt must fire for unknown_port_owners; "
+        f"got halts={halts}"
+    )
+
+    # Observable: U-5 halt fires (foreign process classification refused).
+    assert "U-5" in halt_ids, (
+        f"#617 MED-2: U-5 halt must fire for ambiguous bouncer-path process; "
+        f"got halts={halts}"
+    )
+
+    # Observable end-to-end: run_uninstall halts without --force.
+    result = cu.run_uninstall(dry_run=False, force=False)
+    assert result["status"] == "halted", (
+        f"#617 MED-2: run_uninstall must halt when ambiguous process on "
+        f"custom port is detected; got status={result['status']}"
+    )
+
+
+def test_617_med2_sabotage_all_listening_ports_proves_load_bearing(
+    isolated_iam_jit_home: pathlib.Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """#617 MED-2 sabotage check: monkeypatch _all_listening_ports to return
+    only default ports (empty for the custom port), and confirm the
+    custom-port bouncer is NOT detected.
+
+    This proves _all_listening_ports is the load-bearing code path for
+    custom-port detection — without it, the bouncer is invisible.
+    """
+    _seed_install(isolated_iam_jit_home)
+
+    pid = 71806
+    port = 18767  # custom non-default port
+
+    fake_install_dir = pathlib.Path("/Users/testop/.iam-jit/venv/bin")
+    cmdline = (
+        "/Users/testop/.iam-jit/venv/bin/ibounce run "
+        "--mode discovery --proxy-port 18767"
+    )
+
+    # Setup all the helpers that would classify this correctly IF
+    # _all_listening_ports returned the custom port.
+    monkeypatch.setattr(
+        cu, "_read_cmdline",
+        lambda p: cmdline if p == pid else "",
+    )
+    monkeypatch.setattr(
+        cu, "_resolve_executable_path",
+        lambda p: fake_install_dir / "ibounce" if p == pid else None,
+    )
+    monkeypatch.setattr(
+        cu, "_pid_owner_uid",
+        lambda p: os.geteuid() if p == pid else None,
+    )
+    monkeypatch.setattr(
+        cu, "_BOUNCER_INSTALL_PATH_ROOTS",
+        cu._BOUNCER_INSTALL_PATH_ROOTS + (fake_install_dir,),
+    )
+
+    # SABOTAGE: _all_listening_ports returns empty (simulates only
+    # default ports being visible — the pre-fix behavior).
+    monkeypatch.setattr(cu, "_all_listening_ports", lambda: [])
+
+    inv = cu._inventory_installed_state()
+
+    # Sabotage observable: ibounce on custom port IS NOT detected.
+    flat_pids: list[int] = []
+    for pids in inv["running_bouncers"].values():
+        flat_pids.extend(pids)
+    assert pid not in flat_pids, (
+        f"#617 MED-2 sabotage: expected custom-port ibounce pid={pid} to "
+        f"be invisible when _all_listening_ports is sabotaged to return []; "
+        f"got running_bouncers={inv['running_bouncers']}. "
+        f"This would mean another code path is detecting custom ports "
+        f"— investigate whether the fix is truly load-bearing."
+    )
+    assert port not in inv["bound_ports"], (
+        f"#617 MED-2 sabotage: custom port {port} should NOT be in "
+        f"bound_ports when _all_listening_ports is empty; "
+        f"got bound_ports={inv['bound_ports']}"
     )

@@ -873,6 +873,221 @@ def _infer_bouncer_kind_from_cmdline(cmdline: str) -> str | None:
     return None
 
 
+def _all_listening_ports() -> list[tuple[int, int]]:
+    """Return ``(pid, port)`` tuples for ALL loopback TCP listeners owned
+    by the current OS user.
+
+    #617 MED-2: the per-bouncer default-port scan in
+    :func:`_inventory_installed_state` misses bouncers started on
+    non-default ports (e.g. ``ibounce run --port 18767``). An operator
+    who starts ibounce on a custom port then runs ``iam-jit uninstall
+    --dry-run`` sees ``running_bouncers: {}`` even though ibounce IS
+    running — orphan risk on uninstall per [[ibounce-honest-positioning]].
+
+    Fix: enumerate ALL loopback TCP listeners. The existing
+    :func:`_classify_bouncer_pid_multifactor` (multi-factor: path + flag
+    + user) then gates which listeners are actually OURS — foreign
+    processes on arbitrary ports are still classified as
+    ``unknown_port_owners`` if they don't pass the path+flag+user checks,
+    preserving the #614 protection against cross-domain SIGTERM.
+
+    Implementation:
+      1. Primary: ``lsof -nP -i4TCP -i6TCP -sTCP:LISTEN`` (no port
+         filter) then parse the NAME field for ``<host>:<port>`` to
+         extract the port number. Filter to loopback addresses
+         (127.x.x.x / ::1) so we don't surface externally-bound listeners
+         that are unlikely to be local bouncers. ``-nP`` suppresses DNS +
+         service-name resolution; ``-sTCP:LISTEN`` drops ESTABLISHED /
+         TIME_WAIT noise.
+
+         lsof without ``-t`` emits columns:
+           COMMAND PID USER   FD TYPE DEVICE SIZE/OFF NODE NAME
+         NAME field for a TCP listener is ``<host>:<port>`` or
+         ``*:<port>`` (wildcard bind).  We parse the last ``:``-separated
+         segment as the port number.
+
+      2. Fallback: ``ss -tlnpH`` (Linux iproute2) — parse all LISTEN
+         lines; extract ``<addr>:<port>`` from the local-address column
+         (column 3) and ``pid=NNN`` from the users column.
+
+    Returns an empty list when:
+      - neither lsof nor ss is available (slim containers)
+      - no loopback listeners exist
+      - output cannot be parsed
+
+    Per [[ibounce-honest-positioning]]: on parse failure, surface nothing
+    from THIS helper — the default-port scan in
+    :func:`_inventory_installed_state` still runs as before.
+
+    Platform note: tested on macOS (lsof 4.91+) and Linux (lsof 4.89 /
+    ss from iproute2 6.x). If lsof output format diverges from expected,
+    we fall back to the default-port scan silently — this helper is
+    ADDITIVE; a parse failure is not a correctness regression.
+    """
+    my_uid: int | None
+    try:
+        my_uid = os.geteuid()
+    except AttributeError:
+        my_uid = None  # Windows — degrade gracefully
+
+    results: list[tuple[int, int]] = []
+
+    # -------------------------------------------------------------------------
+    # Loopback-address filter (covers both IPv4 and IPv6).
+    # -------------------------------------------------------------------------
+    def _is_loopback_or_wildcard(addr: str) -> bool:
+        """True iff ``addr`` looks like loopback or wildcard.
+
+        We include wildcard (``*`` / ``0.0.0.0`` / ``[::]``) because
+        many bouncers bind ``0.0.0.0:<port>`` but are only reachable
+        locally in practice; excluding them would miss the common
+        non-loopback-bind case.
+        """
+        if addr in ("*", "0.0.0.0", "[::]", "::"):
+            return True
+        if addr.startswith("127."):
+            return True
+        # IPv6 loopback: ::1 or [::1].
+        if addr in ("::1", "[::1]"):
+            return True
+        return False
+
+    # -------------------------------------------------------------------------
+    # Primary: lsof (macOS + Linux).
+    # -------------------------------------------------------------------------
+    lsof = shutil.which("lsof")
+    if lsof is not None:
+        try:
+            proc = subprocess.run(
+                [
+                    lsof, "-nP",
+                    "-i4TCP",
+                    "-i6TCP",
+                    "-sTCP:LISTEN",
+                ],
+                capture_output=True,
+                text=True,
+                check=False,
+                timeout=10.0,
+            )
+        except (OSError, subprocess.TimeoutExpired):
+            proc = None  # type: ignore[assignment]
+
+        if proc is not None and proc.returncode in (0, 1):
+            for line in (proc.stdout or "").splitlines():
+                # Header line starts with "COMMAND" — skip.
+                if line.startswith("COMMAND"):
+                    continue
+                parts = line.split()
+                # Minimum columns: COMMAND PID USER FD TYPE DEVICE SIZE NODE NAME
+                #                    0     1   2   3   4     5      6    7    8
+                if len(parts) < 9:
+                    continue
+                # PID is column 1.
+                try:
+                    pid = int(parts[1])
+                except (ValueError, IndexError):
+                    continue
+
+                # Same-user filter: skip if owned by a different user.
+                if my_uid is not None:
+                    owner = _pid_owner_uid(pid)
+                    if owner is not None and owner != my_uid:
+                        continue
+
+                # NAME is the last column (index -1 or 8+).
+                name_field = parts[-1]
+                # NAME field is ``<addr>:<port>`` or ``[<addr>]:<port>``.
+                # Split on the LAST colon to isolate port (handles
+                # IPv6 addresses like ``[::1]:8767``).
+                colon_idx = name_field.rfind(":")
+                if colon_idx == -1:
+                    continue
+                addr_part = name_field[:colon_idx]
+                port_part = name_field[colon_idx + 1:]
+                if not _is_loopback_or_wildcard(addr_part):
+                    continue
+                try:
+                    port = int(port_part)
+                except ValueError:
+                    continue
+                if port <= 0 or port > 65535:
+                    continue
+                entry = (pid, port)
+                if entry not in results:
+                    results.append(entry)
+            return results
+
+    # -------------------------------------------------------------------------
+    # Fallback: ss (Linux iproute2).
+    # -------------------------------------------------------------------------
+    ss = shutil.which("ss")
+    if ss is None:
+        return []
+    try:
+        proc = subprocess.run(
+            [ss, "-tlnpH"],
+            capture_output=True,
+            text=True,
+            check=False,
+            timeout=10.0,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return []
+    if proc.returncode != 0:
+        return []
+    for line in (proc.stdout or "").splitlines():
+        # ss -tlnpH sample:
+        # LISTEN 0 128 127.0.0.1:8767 0.0.0.0:* users:(("python",pid=1234,fd=5))
+        # LISTEN 0 128 [::1]:8767 [::]*      users:(("go",pid=5678,fd=3))
+        parts = line.split()
+        if len(parts) < 4:
+            continue
+        # Local address is column 3 (0-indexed).
+        local_addr = parts[3]
+        colon_idx = local_addr.rfind(":")
+        if colon_idx == -1:
+            continue
+        addr_part = local_addr[:colon_idx]
+        port_part = local_addr[colon_idx + 1:]
+        if not _is_loopback_or_wildcard(addr_part):
+            continue
+        try:
+            port = int(port_part)
+        except ValueError:
+            continue
+        if port <= 0 or port > 65535:
+            continue
+        # Extract pid=NNN occurrences from the rest of the line.
+        rest = " ".join(parts[4:])
+        idx = 0
+        while True:
+            marker = rest.find("pid=", idx)
+            if marker == -1:
+                break
+            start = marker + 4
+            end = start
+            while end < len(rest) and rest[end].isdigit():
+                end += 1
+            if end > start:
+                try:
+                    pid = int(rest[start:end])
+                except ValueError:
+                    idx = end if end > marker else marker + 1
+                    continue
+                # Same-user filter.
+                if my_uid is not None:
+                    owner = _pid_owner_uid(pid)
+                    if owner is not None and owner != my_uid:
+                        idx = end if end > marker else marker + 1
+                        continue
+                entry = (pid, port)
+                if entry not in results:
+                    results.append(entry)
+            idx = end if end > marker else marker + 1
+    return results
+
+
 def _resolve_go_bin_dir() -> pathlib.Path:
     """Resolve $GOBIN with fallback to ~/go/bin per MRR-4-UNINSTALL.md
     step 4. Honoured via `go env GOBIN` when `go` is on PATH; else the
@@ -1025,6 +1240,60 @@ def _inventory_installed_state(
                     "expected_bouncer": (
                         expected_kinds[0] if expected_kinds else None
                     ),
+                    "cmdline": cmdline,
+                    "failed_checks": failed_checks,
+                })
+
+    # #617 MED-2: third pass — scan ALL loopback TCP listeners (not
+    # just the known default ports). This catches bouncers started with
+    # a custom ``--port`` / ``--proxy-port`` flag (e.g.
+    # ``ibounce run --port 18767``) that the default-port list above
+    # would miss. Per [[ibounce-honest-positioning]]: if a bouncer is
+    # running, uninstall MUST detect it; silent miss = orphan risk.
+    #
+    # Reuses the same #614 multi-factor classifier (path + flag + user)
+    # so foreign processes on arbitrary ports are still gated correctly —
+    # only bouncer-shaped processes (under a known install root, with a
+    # bouncer-specific flag, owned by the current user) are included in
+    # running_bouncers. Everything else lands in unknown_port_owners.
+    #
+    # bound_ports is extended for any custom port where a classified
+    # bouncer is found so the halt-condition checks (U-1/U-2/U-5) and
+    # the operator-facing summary remain accurate.
+    for pid, port in _all_listening_ports():
+        if pid in seen_pids:
+            continue
+        # Skip ports already covered by the default-port pass above so
+        # we don't double-classify a PID we already found via lsof on a
+        # default port (which would incorrectly add it to
+        # unknown_port_owners a second time).
+        if port in inv["bound_ports"]:
+            continue
+        cmdline = _read_cmdline(pid)
+        kind, failed_checks = _classify_bouncer_pid_multifactor(
+            pid, cmdline,
+        )
+        if kind is not None:
+            # New custom-port bouncer discovered.
+            inv["running_bouncers"].setdefault(kind, []).append(pid)
+            seen_pids.add(pid)
+            if port not in inv["bound_ports"]:
+                inv["bound_ports"].append(port)
+        else:
+            # Foreign process on a custom port. Only surface in
+            # unknown_port_owners when the cmdline looks bouncer-shaped
+            # (contains a bouncer process name or install-path marker)
+            # — otherwise every system listener would flood the output.
+            # Per [[ibounce-honest-positioning]]: we surface what we
+            # cannot resolve; we don't silently flood with noise.
+            infer_kind = _infer_bouncer_kind_from_cmdline(cmdline)
+            if infer_kind is not None:
+                if port not in inv["bound_ports"]:
+                    inv["bound_ports"].append(port)
+                inv["unknown_port_owners"].append({
+                    "pid": pid,
+                    "port": port,
+                    "expected_bouncer": infer_kind,
                     "cmdline": cmdline,
                     "failed_checks": failed_checks,
                 })
@@ -2108,3 +2377,7 @@ __all__ = [
 # the per-bouncer port set. Not in __all__ because the leading
 # underscore signals "internal — subject to change without a deprecation
 # cycle"; tests import it by name explicitly.
+#
+# #617 MED-2: _all_listening_ports exposed for sabotage-check that
+# monkeypatches it to prove it's the load-bearing path for custom-port
+# detection. Tests import it by name explicitly.
