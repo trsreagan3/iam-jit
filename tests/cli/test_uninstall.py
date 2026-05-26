@@ -812,7 +812,7 @@ def test_uninstall_dry_run_detects_python_module_invocation(
         cu, "_read_cmdline",
         lambda pid: (
             "/opt/homebrew/bin/python3.12 "
-            "/Users/reagan/.iam-jit/venv/bin/ibounce run "
+            "/Users/testop/.iam-jit/venv/bin/ibounce run "
             "--mode discovery --proxy-port 7401"
             if pid == fake_pid else ""
         ),
@@ -872,7 +872,7 @@ def test_uninstall_dry_run_port_owner_cross_referenced_multi_port(
                 # for multi-factor classification.
                 return (
                     f"/opt/homebrew/bin/python3.12 "
-                    f"/Users/reagan/.iam-jit/venv/bin/ibounce run "
+                    f"/Users/testop/.iam-jit/venv/bin/ibounce run "
                     f"--mode discovery --proxy-port {p}"
                 )
         return ""
@@ -1048,7 +1048,7 @@ def test_uninstall_sabotage_no_op_cross_reference_is_load_bearing(
         cu, "_read_cmdline",
         lambda pid: (
             "/opt/homebrew/bin/python3.12 "
-            "/Users/reagan/.iam-jit/venv/bin/ibounce run "
+            "/Users/testop/.iam-jit/venv/bin/ibounce run "
             "--mode discovery --proxy-port 7401"
         ),
     )
