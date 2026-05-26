@@ -1901,10 +1901,21 @@ def test_bouncer_flag_signature_required(
     isolated_iam_jit_home: pathlib.Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """#614: process at correct install path + correct user but WITHOUT
-    a bouncer-specific flag signature must NOT classify. This catches
-    the "someone built a script called ibounce at ~/go/bin/ibounce
-    that does something else entirely" scenario."""
+    """#614 (updated per #666): process at correct install path + correct
+    user must still fail when the cmdline contains NO known subcommand or
+    flag signature at all — e.g. `ibounce --some-other-flag` (no subcommand).
+
+    #666 context: the original test used `ibounce run --some-other-flag`
+    and expected NOT to classify. That premise is now wrong — `" run"` was
+    added as a valid signature in #666 (because `ibounce run` IS the
+    canonical default-launch form from `iam-jit init`). A process at the
+    correct install path running with `run` as its first argument IS ours.
+
+    The #614 protection still applies for processes with NO subcommand and
+    NO bouncer-specific flag at all (e.g. `ibounce --some-other-flag` with
+    no recognized subcommand). Those must remain unknown_port_owners because
+    they could be a different tool coincidentally named ibounce at our path.
+    """
     _seed_install(isolated_iam_jit_home)
 
     impostor_pid = 99005
@@ -1913,9 +1924,10 @@ def test_bouncer_flag_signature_required(
         monkeypatch,
         port=8767,
         pid=impostor_pid,
-        # Path matches AND user matches BUT no bouncer flag — just
-        # generic "run" + a non-bouncer flag.
-        cmdline=f"{real_exe} run --some-other-flag",
+        # Path matches AND user matches BUT no known bouncer subcommand
+        # or flag — only a completely foreign flag with no subcommand.
+        # This is the tightest "no recognized signal at all" scenario.
+        cmdline=f"{real_exe} --some-other-flag",
         exe_path=real_exe,
         owner_uid=os.geteuid(),
     )
@@ -1925,7 +1937,7 @@ def test_bouncer_flag_signature_required(
     for pids in inv["running_bouncers"].values():
         flat_pids.extend(pids)
     assert impostor_pid not in flat_pids, (
-        "process without bouncer flag signature must not classify; "
+        "process with NO recognized bouncer subcommand/flag must not classify; "
         f"got running_bouncers={inv['running_bouncers']}"
     )
     entry = next(

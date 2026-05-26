@@ -582,6 +582,35 @@ def _get_known_bouncer_paths() -> list[pathlib.Path]:
 # the listed substrings to be classified as that bouncer kind. These
 # are bouncer-distinctive CLI flags (not generic words like "dbounce"
 # that arbitrary processes might mention).
+#
+# #666 CRIT: the default-launch pattern `ibounce run` (bare subcommand,
+# no mode flags) was missing from ibounce's signatures. When `iam-jit
+# init` installs ibounce and the operator runs `nohup ibounce run` (or
+# the installer's canonical launch), the cmdline from ps is:
+#   <python> /Users/<user>/.local/bin/ibounce run
+# Factor 1 (path check) passes; Factor 2 (flag signatures) FAILED —
+# none of the then-existing signatures matched the bare `run` token.
+# Result: classifier returned unknown_port_owner → U-2/U-5/U-3 halt
+# fired → clean non-forced uninstall blocked even when the bouncer IS
+# ours. Same silent-degradation shape as #621 (venv path regression)
+# and #638 (python -m dev launch regression).
+#
+# Fix: add the `" run"` subcommand pattern (with leading space to
+# require a word-boundary — prevents false matches on args containing
+# "run" as a substring). The leading-space requirement means this
+# pattern ONLY fires when " run" appears as a token in the cmdline,
+# not in e.g. `--upstream-run-mode`. Also add `" serve"` and `" mcp"`
+# for completeness (ibounce ships all three as launch subcommands per
+# bouncer_cli.py). Same treatment for kbounce/dbounce/gbounce which
+# all ship a `run` subcommand as their primary launch form.
+#
+# Safety: these patterns are only evaluated AFTER Factor 1 (path check)
+# has already passed AND after `matched_kind_from_path` has narrowed
+# `candidate_kinds` to a single bouncer name. So `" run"` in ibounce's
+# list is only evaluated for processes whose exe path resolves to an
+# ibounce binary under a known install root — not for arbitrary
+# processes. Per [[creates-never-mutates]]: the three-factor gate
+# (path + flag + user) remains intact.
 _BOUNCER_FLAG_SIGNATURES: dict[str, tuple[str, ...]] = {
     "ibounce": (
         "--mode discovery",
@@ -595,23 +624,46 @@ _BOUNCER_FLAG_SIGNATURES: dict[str, tuple[str, ...]] = {
         # include the legacy module name for older installs.
         "iam_jit.bouncer_cli",
         "iam_jit_bouncer",
+        # #666 CRIT: bare subcommand patterns for default-launch
+        # (`ibounce run`, `ibounce serve`, `ibounce mcp`).
+        # Leading space enforces word-boundary (prevents matching
+        # within longer tokens like `--upstream-runner`).
+        " run",
+        " serve",
+        " mcp",
     ),
     "kbounce": (
         "--apiserver-url",
         "--rbac-mode",
+        # #666: kbounce ships `kbounce run` and `kbounce serve` as its
+        # primary launch subcommands (verified in kbouncer/internal/cli/cli.go).
+        " run",
+        " serve",
     ),
     "kbouncer": (
         "--apiserver-url",
         "--rbac-mode",
+        # #666: kbouncer is a deprecation shim for kbounce; same
+        # subcommand surface.
+        " run",
+        " serve",
     ),
     "dbounce": (
         "--dialect postgres",
         "--dialect mysql",
         "--upstream-conn-string",
+        # #666: dbounce ships `dbounce run` as its primary launch
+        # subcommand (verified in dbounce/internal/cli/cli.go).
+        " run",
+        " mcp",
     ),
     "gbounce": (
         "--http-mode",
         "--allow-host",
+        # #666: gbounce ships `gbounce run` as its primary launch
+        # subcommand (verified in gbounce/internal/cli/cli.go).
+        " run",
+        " mcp",
     ),
 }
 
