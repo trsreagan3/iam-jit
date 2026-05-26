@@ -72,6 +72,17 @@ def _default_isolation(monkeypatch: pytest.MonkeyPatch) -> None:
     # Make sure env doesn't leak from the host into the tests that
     # explicitly want "no env set".
     monkeypatch.delenv(cu.IAM_JIT_DATA_DIR_ENV, raising=False)
+    # #617 HIGH-3: stub cross-product artifact checkers so these tests
+    # don't walk the dev machine's real PATH / filesystem / shell RCs /
+    # ~/.claude.json.
+    monkeypatch.setattr(cu, "_check_path_binaries", lambda: [])
+    monkeypatch.setattr(cu, "_check_bouncer_config_dirs", lambda: [])
+    monkeypatch.setattr(cu, "_detect_shell_rc_lines", lambda: [])
+    monkeypatch.setattr(
+        cu, "_check_mcp_entries",
+        lambda claude_json_path=None: [],
+    )
+    monkeypatch.setattr(cu, "_all_listening_ports", lambda: [])
 
 
 # ---------------------------------------------------------------------------

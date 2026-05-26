@@ -198,6 +198,70 @@ AUDIT_BEARING_PATHS_REL = (
     "canary/issues.jsonl",
 )
 
+# #617 HIGH-3 — cross-product bouncer config directories.
+# Each bouncer stores its own config in a separate ~/.{name}/ directory;
+# uninstall must detect (and NOT auto-remove — those are per-product
+# concerns) but MUST surface as remaining_artifacts when present after
+# the main data-dir wipe. Per [[creates-never-mutates]]: we do not
+# auto-delete bouncer config directories because the operator may have
+# customized them; we report them so the operator can remove manually.
+BOUNCER_CONFIG_DIRS: dict[str, pathlib.Path] = {
+    "gbounce": pathlib.Path.home() / ".gbounce",
+    "kbounce": pathlib.Path.home() / ".kbounce",
+    "dbounce": pathlib.Path.home() / ".dbounce",
+}
+
+# #617 HIGH-3 — all binary names the suite installs on PATH.
+# Used by _check_path_binaries() to detect stale binaries that remain
+# after pip-uninstall / go-bin removal (e.g. symlinks left in ~/.local/bin
+# or /usr/local/bin that the removal steps didn't catch).
+# Combines CONSOLE_SCRIPTS + GO_BINARIES deduplicated.
+ALL_BINARY_NAMES: tuple[str, ...] = (
+    "iam-jit",
+    "iam-risk-score",
+    "ibounce",
+    "iam-jit-bouncer",
+    "iam-jit-feed-publish",
+    "kbounce",
+    "kbouncer",
+    "dbounce",
+    "gbounce",
+)
+
+# #617 HIGH-3 — MCP server names written by `iam-jit mcp install`.
+# Used by _step_remove_mcp_entries() + _check_mcp_entries() to detect /
+# remove iam-jit-owned entries in ~/.claude.json mcpServers blocks.
+# Per the brief: uninstall MAY remove these automatically (they are
+# iam-jit-owned artifacts); add --keep-mcp-entries for operators who
+# want to preserve them.
+MCP_SERVER_NAMES: tuple[str, ...] = (
+    "iam-jit",
+    "ibounce",
+    "kbounce",
+    "dbounce",
+    "gbounce",
+)
+
+# #617 HIGH-3 — shell-rc files to scan for stale shellinit lines.
+# Per [[creates-never-mutates]]: we do NOT edit these files; we report
+# found lines as remaining_artifacts with file:line hints.
+SHELL_RC_FILES: tuple[pathlib.Path, ...] = (
+    pathlib.Path.home() / ".zshrc",
+    pathlib.Path.home() / ".bashrc",
+    pathlib.Path.home() / ".bash_profile",
+    pathlib.Path.home() / ".profile",
+)
+
+# Patterns that indicate a stale iam-jit shellinit line.
+# We look for the shellinit eval pattern + direct env var exports.
+_SHELLINIT_PATTERNS = (
+    "iam-jit shellinit",
+    "iam_jit shellinit",
+    "IAM_JIT_",
+    "HTTPS_PROXY=http://127.0.0.1:74",  # ibounce legacy proxy
+    "AWS_ENDPOINT_URL.*iam.jit",
+)
+
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -1871,19 +1935,321 @@ def _step_remove_iam_jit_home(
 
 
 # ---------------------------------------------------------------------------
+# #617 HIGH-3 — post-uninstall artifact detection helpers
+# ---------------------------------------------------------------------------
+
+
+def _check_path_binaries() -> list[dict[str, str]]:
+    """Detect iam-jit suite binaries that remain on PATH after uninstall.
+
+    Uses :func:`shutil.which` for each name in :data:`ALL_BINARY_NAMES`.
+    Returns a list of ``{"type": "binary_on_path", "location": str,
+    "hint": str}`` dicts for the operator to act on.
+
+    Per [[ibounce-honest-positioning]]: if a binary is on PATH it IS
+    detectable and must be reported under remaining_artifacts, not
+    silently ignored.
+
+    Per [[creates-never-mutates]]: this function only detects; it does
+    NOT remove. The removal of binaries is done earlier in the uninstall
+    sequence (pip-uninstall removes console scripts; go-bin removal
+    removes Go binaries). This check catches anything the removal steps
+    missed (e.g. manual symlinks, pip --user installs the removal step
+    didn't know about, /usr/local/bin copies).
+    """
+    artifacts: list[dict[str, str]] = []
+    for name in ALL_BINARY_NAMES:
+        found = shutil.which(name)
+        if found is not None:
+            artifacts.append({
+                "type": "binary_on_path",
+                "location": found,
+                "hint": (
+                    f"Binary '{name}' still found at {found}. "
+                    f"Remove manually: rm -f {found}"
+                ),
+            })
+    return artifacts
+
+
+def _check_bouncer_config_dirs() -> list[dict[str, str]]:
+    """Detect per-bouncer config directories that remain after uninstall.
+
+    Checks each entry in :data:`BOUNCER_CONFIG_DIRS`. Returns a list
+    of ``{"type": "bouncer_config_dir", "location": str, "hint": str}``
+    dicts for directories that exist on disk.
+
+    Per [[creates-never-mutates]]: we do NOT auto-remove these
+    directories — the operator may have customized them. We report them
+    so the operator can clean up manually.
+
+    Per [[ibounce-honest-positioning]]: their existence after uninstall
+    means the machine is not clean; ``clean:true`` would be a lie.
+    """
+    artifacts: list[dict[str, str]] = []
+    for name, path in BOUNCER_CONFIG_DIRS.items():
+        if path.exists():
+            artifacts.append({
+                "type": "bouncer_config_dir",
+                "location": str(path),
+                "hint": (
+                    f"{name} config directory still exists at {path}. "
+                    f"Remove manually: rm -rf {path}"
+                ),
+            })
+    return artifacts
+
+
+def _detect_shell_rc_lines() -> list[dict[str, str]]:
+    """Detect stale iam-jit shellinit lines in common shell RC files.
+
+    Reads each file in :data:`SHELL_RC_FILES` and looks for lines
+    matching any pattern in :data:`_SHELLINIT_PATTERNS`. Returns a
+    list of ``{"type": "shell_rc_line", "location": "<file>:<line>",
+    "hint": str}`` dicts.
+
+    Per [[creates-never-mutates]]: we NEVER edit the operator's shell RC
+    files. We only DETECT and REPORT.
+
+    Per [[ibounce-honest-positioning]]: a stale shellinit line means
+    future shells will try to initialise a removed installation; the
+    operator MUST be told so they can clean it up.
+    """
+    artifacts: list[dict[str, str]] = []
+    import re
+    for rc_file in SHELL_RC_FILES:
+        try:
+            text = rc_file.read_text(errors="replace")
+        except (OSError, PermissionError):
+            continue
+        for lineno, line in enumerate(text.splitlines(), start=1):
+            stripped = line.strip()
+            if not stripped or stripped.startswith("#"):
+                continue
+            for pattern in _SHELLINIT_PATTERNS:
+                if pattern in line:
+                    artifacts.append({
+                        "type": "shell_rc_line",
+                        "location": f"{rc_file}:{lineno}",
+                        "hint": (
+                            f"Stale iam-jit shell initialisation at "
+                            f"{rc_file}:{lineno} — remove manually. "
+                            f"Line: {stripped[:120]}"
+                        ),
+                    })
+                    break  # one artifact per line
+    return artifacts
+
+
+def _read_claude_json(
+    claude_json_path: pathlib.Path,
+) -> dict[str, Any] | None:
+    """Read + parse ~/.claude.json. Returns None on any failure.
+
+    Per [[ibounce-honest-positioning]]: parse failure is not a
+    correctness blocker — we report "could not parse" in the hint
+    rather than crashing uninstall.
+    """
+    try:
+        text = claude_json_path.read_text(errors="replace")
+        return json.loads(text)
+    except (OSError, json.JSONDecodeError):
+        return None
+
+
+def _check_mcp_entries(
+    *,
+    claude_json_path: pathlib.Path | None = None,
+) -> list[dict[str, str]]:
+    """Detect iam-jit MCP server entries in ~/.claude.json.
+
+    Checks the top-level ``mcpServers`` block AND any per-project
+    ``projects[*].mcpServers`` blocks for entries whose key matches
+    any name in :data:`MCP_SERVER_NAMES`.
+
+    Returns a list of ``{"type": "mcp_entry", "location": str,
+    "hint": str}`` dicts.
+
+    Per the brief: uninstall MAY remove MCP entries automatically
+    (treated as iam-jit-owned artifacts, same as config files). The
+    actual removal is done in :func:`_step_remove_mcp_entries`.
+    This function is the detection-only path used by the post-check
+    to confirm removal succeeded.
+
+    ``claude_json_path`` defaults to ``~/.claude.json``; tests pass a
+    tmp_path override.
+    """
+    if claude_json_path is None:
+        claude_json_path = pathlib.Path.home() / ".claude.json"
+    if not claude_json_path.exists():
+        return []
+    data = _read_claude_json(claude_json_path)
+    if data is None:
+        return []
+    artifacts: list[dict[str, str]] = []
+
+    # Top-level mcpServers.
+    top_mcp = data.get("mcpServers") or {}
+    if isinstance(top_mcp, dict):
+        for key in list(top_mcp.keys()):
+            if key in MCP_SERVER_NAMES:
+                artifacts.append({
+                    "type": "mcp_entry",
+                    "location": f"{claude_json_path}:mcpServers.{key}",
+                    "hint": (
+                        f"MCP server entry '{key}' still present in "
+                        f"{claude_json_path}. Remove manually or re-run "
+                        f"without --keep-mcp-entries."
+                    ),
+                })
+
+    # Per-project mcpServers.
+    projects = data.get("projects") or {}
+    if isinstance(projects, dict):
+        for proj_key, proj_val in projects.items():
+            if not isinstance(proj_val, dict):
+                continue
+            proj_mcp = proj_val.get("mcpServers") or {}
+            if not isinstance(proj_mcp, dict):
+                continue
+            for key in list(proj_mcp.keys()):
+                if key in MCP_SERVER_NAMES:
+                    artifacts.append({
+                        "type": "mcp_entry",
+                        "location": (
+                            f"{claude_json_path}:"
+                            f"projects.{proj_key}.mcpServers.{key}"
+                        ),
+                        "hint": (
+                            f"MCP server entry '{key}' still present in "
+                            f"{claude_json_path} (project: {proj_key}). "
+                            f"Remove manually or re-run without "
+                            f"--keep-mcp-entries."
+                        ),
+                    })
+    return artifacts
+
+
+def _step_remove_mcp_entries(
+    *,
+    dry_run: bool,
+    claude_json_path: pathlib.Path | None = None,
+) -> dict[str, Any]:
+    """Step: remove iam-jit-owned MCP server entries from ~/.claude.json.
+
+    Per the brief: MCP entries are iam-jit-owned artifacts (like config
+    files); uninstall removes them unless ``--keep-mcp-entries`` is
+    passed by the operator. This is analogous to removing the venv or
+    the data directory.
+
+    Edits ``mcpServers`` at the top-level AND inside any per-project
+    blocks. Rewrites the file atomically (write to temp + rename).
+
+    Returns ``{"removed": [...], "kept": [...], "failed": str|None,
+    "skipped": bool}``.
+
+    ``claude_json_path`` defaults to ``~/.claude.json``; tests pass a
+    tmp_path override.
+    """
+    if claude_json_path is None:
+        claude_json_path = pathlib.Path.home() / ".claude.json"
+
+    out: dict[str, Any] = {
+        "removed": [],
+        "kept": [],
+        "failed": None,
+        "skipped": False,
+    }
+
+    if not claude_json_path.exists():
+        out["skipped"] = True
+        return out
+
+    data = _read_claude_json(claude_json_path)
+    if data is None:
+        out["failed"] = f"could not parse {claude_json_path}"
+        return out
+
+    changed = False
+
+    # Top-level mcpServers.
+    top_mcp = data.get("mcpServers") or {}
+    if isinstance(top_mcp, dict):
+        for key in list(top_mcp.keys()):
+            if key in MCP_SERVER_NAMES:
+                if dry_run:
+                    out["removed"].append(
+                        f"mcpServers.{key} (dry-run)"
+                    )
+                else:
+                    del top_mcp[key]
+                    out["removed"].append(f"mcpServers.{key}")
+                    changed = True
+        if not dry_run:
+            data["mcpServers"] = top_mcp
+
+    # Per-project mcpServers.
+    projects = data.get("projects") or {}
+    if isinstance(projects, dict):
+        for proj_key, proj_val in projects.items():
+            if not isinstance(proj_val, dict):
+                continue
+            proj_mcp = proj_val.get("mcpServers") or {}
+            if not isinstance(proj_mcp, dict):
+                continue
+            for key in list(proj_mcp.keys()):
+                if key in MCP_SERVER_NAMES:
+                    if dry_run:
+                        out["removed"].append(
+                            f"projects.{proj_key}.mcpServers.{key} (dry-run)"
+                        )
+                    else:
+                        del proj_mcp[key]
+                        out["removed"].append(
+                            f"projects.{proj_key}.mcpServers.{key}"
+                        )
+                        changed = True
+            if not dry_run:
+                proj_val["mcpServers"] = proj_mcp
+
+    if dry_run or not changed:
+        return out
+
+    # Atomic write: write to tmp sibling then rename so a crash mid-write
+    # doesn't corrupt the config file.
+    tmp_path = claude_json_path.with_suffix(".claude.json.uninstall-tmp")
+    try:
+        tmp_path.write_text(
+            json.dumps(data, indent=2, sort_keys=False),
+            encoding="utf-8",
+        )
+        tmp_path.replace(claude_json_path)
+    except OSError as exc:
+        out["failed"] = f"write {claude_json_path}: {exc}"
+        try:
+            tmp_path.unlink(missing_ok=True)
+        except OSError:
+            pass
+    return out
+
+
+# ---------------------------------------------------------------------------
 # Post-uninstall verification
 # ---------------------------------------------------------------------------
 
 
 def _verify_clean_state(
     *, keep_audit_logs: bool,
+    keep_mcp_entries: bool = False,
     data_dir: pathlib.Path | None = None,
+    claude_json_path: pathlib.Path | None = None,
 ) -> dict[str, Any]:
     """Re-inventory after uninstall + report any leftover state.
 
     Per ``docs/CONTRIBUTING.md`` state-verification: this is the
     observable side of the "uninstall succeeded" claim. Returns a dict
-    of leftover items + a boolean ``clean`` flag.
+    of leftover items + a boolean ``clean`` flag + a structured
+    ``remaining_artifacts`` list.
 
     Per ``[[ibounce-honest-positioning]]`` (#617 HIGH-3): every field
     here must reflect filesystem reality, not the operator's intent at
@@ -1896,12 +2262,25 @@ def _verify_clean_state(
     The ``clean`` flag is true when EITHER (a) the directory was fully
     removed AND nothing else is leftover, OR (b) ``--keep-audit-logs``
     was set AND the only remaining items under the data directory are
-    audit-bearing files we intentionally preserved.
+    audit-bearing files we intentionally preserved — AND the full
+    cross-product checklist below also passes.
+
+    Cross-product checklist (#617 HIGH-3):
+      1. Main data dir (``~/.iam-jit/`` or ``--data-dir``)
+      2. Binaries on PATH (via ``shutil.which``)
+      3. MCP entries in ``~/.claude.json`` (unless ``keep_mcp_entries``)
+      4. Stale shell-rc lines in ``~/.zshrc`` etc. (detect-only)
+      5. Per-bouncer config dirs (``~/.gbounce/``, ``~/.kbounce/``,
+         ``~/.dbounce/``) (detect-only)
+      6. Running processes / listening ports (from inventory)
 
     Per #617 MED-1: probes the resolved data directory (from the
     ``--data-dir`` flag / ``IAM_JIT_DATA_DIR`` env). When None, falls
     back to the module-level :data:`IAM_JIT_HOME` (existing-caller +
     test compatibility).
+
+    ``claude_json_path`` defaults to ``~/.claude.json``; tests pass a
+    tmp_path override.
     """
     home, _venv, _bouncer = _derive_paths(data_dir)
     # When no data_dir is passed, call _inventory_installed_state
@@ -1962,6 +2341,39 @@ def _verify_clean_state(
             # post-check should never falsely report clean.
             home_is_intentional_preserve = False
 
+    # #617 HIGH-3 — cross-product artifact checks.
+    # These run unconditionally after the main data-dir wipe so the
+    # post-check reflects ALL remaining iam-jit artifacts, not just the
+    # primary data directory.
+
+    # (a) Stale binaries on PATH (via shutil.which).
+    path_binary_artifacts = _check_path_binaries()
+
+    # (b) Per-bouncer config directories (~/.gbounce/, etc.).
+    bouncer_config_artifacts = _check_bouncer_config_dirs()
+
+    # (c) Stale shell-rc lines (detect-only; never auto-edit).
+    shell_rc_artifacts = _detect_shell_rc_lines()
+
+    # (d) MCP entries in ~/.claude.json — only detect here; removal
+    # happens in _step_remove_mcp_entries() before the post-check.
+    # When --keep-mcp-entries was passed, we do NOT report these as
+    # remaining_artifacts (the operator deliberately kept them).
+    mcp_artifacts: list[dict[str, str]] = []
+    if not keep_mcp_entries:
+        mcp_artifacts = _check_mcp_entries(
+            claude_json_path=claude_json_path,
+        )
+
+    # Aggregate remaining_artifacts in a stable order:
+    #   binaries → bouncer_config_dirs → shell_rc_lines → mcp_entries
+    remaining_artifacts: list[dict[str, str]] = (
+        path_binary_artifacts
+        + bouncer_config_artifacts
+        + shell_rc_artifacts
+        + mcp_artifacts
+    )
+
     has_leftover = any([
         leftover["running_bouncers"],
         leftover["bound_ports"],
@@ -1971,10 +2383,13 @@ def _verify_clean_state(
         # iam_jit_home_exists only counts as leftover if it ISN'T the
         # intentional --keep-audit-logs preserve case.
         leftover["iam_jit_home_exists"] and not home_is_intentional_preserve,
+        # Cross-product artifacts: ANY remaining artifact → not clean.
+        bool(remaining_artifacts),
     ])
     return {
         "clean": not has_leftover,
         "leftover": leftover,
+        "remaining_artifacts": remaining_artifacts,
         "audit_logs_preserved": (
             keep_audit_logs and inv["audit_bearing_files"]
         ),
@@ -1991,8 +2406,10 @@ def run_uninstall(
     dry_run: bool = False,
     force: bool = False,
     keep_audit_logs: bool = False,
+    keep_mcp_entries: bool = False,
     backup_dir: pathlib.Path | None = None,
     data_dir: pathlib.Path | None = None,
+    claude_json_path: pathlib.Path | None = None,
 ) -> dict[str, Any]:
     """Orchestrate the full uninstall sequence.
 
@@ -2016,12 +2433,20 @@ def run_uninstall(
     (existing-caller + test compatibility). Surfaced in the result as
     ``inventory.data_dir`` so callers can see what tree was operated
     on.
+
+    ``keep_mcp_entries``: when True, MCP server entries are NOT removed
+    from ``~/.claude.json`` and are NOT reported as remaining_artifacts.
+    Default False (remove MCP entries as iam-jit-owned artifacts).
+
+    ``claude_json_path``: override for ``~/.claude.json`` location;
+    tests use this to isolate from the dev machine's real config.
     """
     result: dict[str, Any] = {
         "status": "ok",
         "dry_run": dry_run,
         "force": force,
         "keep_audit_logs": keep_audit_logs,
+        "keep_mcp_entries": keep_mcp_entries,
         "backup_dir": str(backup_dir) if backup_dir else None,
         # #617 MED-1: record the resolved data dir in the top-level
         # result so JSON consumers + the operator-facing summary can
@@ -2053,12 +2478,13 @@ def run_uninstall(
         result["status"] = "halted"
         return result
 
-    # Execute the 4 destructive steps (in MRR-4 order):
-    #  1. stop bouncers   (steps 1 + 5)
-    #  2. pip uninstall   (steps 2 + 3)
-    #  3. remove go bins  (step 4)
-    #  4. remove venv     (step 7)
-    #  5. remove iam-jit-home  (step 9; honours --keep-audit-logs)
+    # Execute the destructive steps (in MRR-4 order):
+    #  1. stop bouncers          (steps 1 + 5)
+    #  2. pip uninstall          (steps 2 + 3)
+    #  3. remove go bins         (step 4)
+    #  4. remove venv            (step 7)
+    #  5. remove iam-jit-home    (step 9; honours --keep-audit-logs)
+    #  6. remove MCP entries     (#617 HIGH-3; unless --keep-mcp-entries)
     result["steps"]["stop_bouncers"] = _step_stop_bouncers(
         inventory, dry_run=dry_run,
     )
@@ -2077,14 +2503,32 @@ def run_uninstall(
         backup_dir=backup_dir,
         data_dir=data_dir,
     )
+    # #617 HIGH-3: remove MCP entries unless operator opts to keep them.
+    if not keep_mcp_entries:
+        result["steps"]["remove_mcp_entries"] = _step_remove_mcp_entries(
+            dry_run=dry_run,
+            claude_json_path=claude_json_path,
+        )
+    else:
+        result["steps"]["remove_mcp_entries"] = {
+            "removed": [],
+            "kept": [],
+            "failed": None,
+            "skipped": True,
+        }
 
     if dry_run:
         result["status"] = "dry_run"
         return result
 
     # Post-check: observable state matches the success claim.
+    # #617 HIGH-3: pass keep_mcp_entries + claude_json_path so the
+    # post-check uses the SAME fixture path as the removal step above.
     post = _verify_clean_state(
-        keep_audit_logs=keep_audit_logs, data_dir=data_dir,
+        keep_audit_logs=keep_audit_logs,
+        keep_mcp_entries=keep_mcp_entries,
+        data_dir=data_dir,
+        claude_json_path=claude_json_path,
     )
     result["post_check"] = post
     if not post["clean"]:
@@ -2160,6 +2604,19 @@ def register_uninstall_command(main_group: click.Group) -> click.Command:
         ),
     )
     @click.option(
+        "--keep-mcp-entries",
+        is_flag=True,
+        default=False,
+        help=(
+            "Do NOT remove iam-jit MCP server entries from ~/.claude.json. "
+            "By default, uninstall removes iam-jit-owned mcpServers entries "
+            "(iam-jit, ibounce, kbounce, dbounce, gbounce) because they are "
+            "iam-jit-created artifacts. Pass this flag to preserve them "
+            "(e.g. if you have a custom agent config that references these "
+            "servers). #617 HIGH-3."
+        ),
+    )
+    @click.option(
         "--json",
         "as_json",
         is_flag=True,
@@ -2173,6 +2630,7 @@ def register_uninstall_command(main_group: click.Group) -> click.Command:
         keep_audit_logs: bool,
         backup_dir: pathlib.Path | None,
         data_dir: pathlib.Path | None,
+        keep_mcp_entries: bool,
         as_json: bool,
     ) -> None:
         """Uninstall iam-jit + all bouncers (MRR-4 procedure).
@@ -2187,15 +2645,22 @@ def register_uninstall_command(main_group: click.Group) -> click.Command:
         ``docs/MRR-4-HALT-CONDITIONS.md`` are auto-detected; bypass
         with ``--force`` after investigating.
 
-        Per ``[[creates-never-mutates]]``: uninstall only removes
-        iam-jit-created resources. Shell-profile env vars, MCP config
-        entries, and browser-trusted MITM CAs are surfaced as
-        ``manual_reminders`` — operator must remove those by hand.
+        Per ``[[creates-never-mutates]]``: uninstall removes iam-jit-created
+        resources including MCP entries in ~/.claude.json. Shell-profile env
+        vars (shellinit lines) and browser-trusted MITM CAs are surfaced as
+        ``remaining_artifacts`` — operator must remove those by hand.
 
         Per #617 MED-1: ``--data-dir`` (and ``IAM_JIT_DATA_DIR`` env)
         mirror ``iam-jit serve --data-dir`` so operators who installed
         against a non-default home (e.g. ``/opt/iam-jit-prod``) can
         uninstall symmetrically without HOME-redirect workarounds.
+
+        Per #617 HIGH-3: ``clean:true`` in the post-check means ALL of
+        the following are absent: main data dir (unless --keep-audit-logs),
+        binaries on PATH, MCP entries (unless --keep-mcp-entries), running
+        bouncers, listening bouncer ports, stale shell-rc lines, and
+        per-bouncer config dirs. ``remaining_artifacts`` lists any that
+        remain with operator hints.
         """
         # #617 MED-1: resolve the data dir up-front so every downstream
         # surface (inventory print + halt check + run_uninstall + post
@@ -2262,6 +2727,7 @@ def register_uninstall_command(main_group: click.Group) -> click.Command:
         result = run_uninstall(
             dry_run=dry_run,
             force=force,
+            keep_mcp_entries=keep_mcp_entries,
             keep_audit_logs=keep_audit_logs,
             backup_dir=backup_dir,
             data_dir=resolved_data_dir,
@@ -2391,6 +2857,21 @@ def _print_result_summary(result: dict[str, Any]) -> None:
             for k, v in leftover.items():
                 if v:
                     click.secho(f"    {k}: {v}", fg="red")
+            # #617 HIGH-3: surface remaining_artifacts with operator hints.
+            artifacts = post.get("remaining_artifacts") or []
+            if artifacts:
+                click.secho(
+                    f"  remaining_artifacts ({len(artifacts)} item(s) "
+                    f"require manual cleanup):",
+                    fg="red",
+                )
+                for art in artifacts:
+                    click.secho(
+                        f"    [{art.get('type', '?')}] "
+                        f"{art.get('location', '?')}",
+                        fg="red",
+                    )
+                    click.echo(f"      hint: {art.get('hint', '')}")
         if post.get("audit_logs_preserved"):
             click.secho(
                 "  audit_logs_preserved: YES (per --keep-audit-logs)",

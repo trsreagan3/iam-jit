@@ -69,6 +69,13 @@ def _default_isolation(monkeypatch: pytest.MonkeyPatch) -> None:
     current user — i.e. the "happy path" expected by pre-#614 tests
     that just want a positive classification. Tests that exercise the
     multi-factor logic itself override these.
+
+    #617 HIGH-3: also stub the four cross-product artifact checkers
+    (_check_path_binaries, _check_bouncer_config_dirs,
+    _detect_shell_rc_lines, _check_mcp_entries) so they don't walk
+    the dev machine's real PATH / filesystem / shell RCs / claude.json.
+    Tests that exercise these checkers pass fixture overrides via
+    ``claude_json_path`` or monkeypatch these stubs directly.
     """
     monkeypatch.setattr(cu, "_find_pids_for_process", lambda name: [])
     monkeypatch.setattr(cu, "_port_bound", lambda port, host="127.0.0.1": False)
@@ -107,6 +114,16 @@ def _default_isolation(monkeypatch: pytest.MonkeyPatch) -> None:
         return fake_install_dir / "ibounce"
     monkeypatch.setattr(cu, "_resolve_executable_path", _fake_exe)
     monkeypatch.setattr(cu, "_pid_owner_uid", lambda pid: os.geteuid())
+    # #617 HIGH-3: stub cross-product artifact checkers so tests don't
+    # walk the dev machine's real PATH / filesystem / shell RCs /
+    # ~/.claude.json. Default: no artifacts found (clean baseline).
+    monkeypatch.setattr(cu, "_check_path_binaries", lambda: [])
+    monkeypatch.setattr(cu, "_check_bouncer_config_dirs", lambda: [])
+    monkeypatch.setattr(cu, "_detect_shell_rc_lines", lambda: [])
+    monkeypatch.setattr(
+        cu, "_check_mcp_entries",
+        lambda claude_json_path=None: [],
+    )
 
 
 @pytest.fixture
