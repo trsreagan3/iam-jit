@@ -19,9 +19,31 @@ Open corpus, open methodology, open commit history.
 
 ## Install
 
+### macOS — Homebrew Python (most common dev setup)
+
 ```bash
-pip install iam-jit
+brew install pipx
+pipx install iam-jit
 ```
+
+> **Why pipx?** macOS's Homebrew Python enforces [PEP 668](https://peps.python.org/pep-0668/), which blocks `pip install --user` with an "externally-managed-environment" error. `pipx` manages an isolated venv per tool and is the path PEP 668 itself recommends. The `iam-jit` binary lands in `~/.local/bin/` (automatically on `PATH` after `brew install pipx`).
+
+### Linux — Ubuntu / Debian
+
+```bash
+pip install --upgrade pip      # PEP 660 editable needs pip >= 22.3 (#548)
+pip install --user iam-jit
+# ensure ~/.local/bin is in PATH (add to ~/.bashrc if not already there):
+# export PATH="$HOME/.local/bin:$PATH"
+```
+
+### Windows / generic Python
+
+```bash
+pip install --user iam-jit
+```
+
+---
 
 Four products ship under the iam-jit brand. Pick the one that fits.
 

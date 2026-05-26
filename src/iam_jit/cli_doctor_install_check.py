@@ -68,6 +68,88 @@ from . import __version__
 
 
 # ---------------------------------------------------------------------------
+# OS-aware install hint (Part A — #649 macOS PEP 668 fix)
+# ---------------------------------------------------------------------------
+
+
+def _python_install_hint(
+    local_bin_display: str = "~/.local/bin",
+) -> str:
+    """Return a paste-ready install hint appropriate for the host OS +
+    Python provenance. Never raises — falls through to generic hint if
+    detection is ambiguous.
+
+    Detection priority:
+      1. macOS + Homebrew Python  → pipx flow  (PEP 668 blocks pip --user)
+      2. macOS + system Python    → venv flow   (system pip is restricted)
+      3. Linux + apt-managed      → pip --upgrade-pip + --user
+      4. Generic fallback         → pip install --user iam-jit
+
+    The detector uses ``sys.executable`` as the truth source (the
+    Python actually running the install-check, not a hypothetical one).
+    Platform detection uses ``sys.platform`` (not ``os.uname()`` which
+    can be shadowed); apt detection uses a non-mutating ``dpkg --show``
+    probe that returns instantly even without dpkg.
+    """
+    exe = sys.executable  # e.g. /opt/homebrew/Cellar/python@3.12/.../bin/python3.12
+    platform = sys.platform  # "darwin" | "linux" | "win32" | …
+
+    try:
+        if platform == "darwin":
+            # Homebrew Python: binary lives under /opt/homebrew/ (Apple Silicon)
+            # or /usr/local/Cellar/ (Intel).
+            if exe.startswith("/opt/homebrew/") or exe.startswith(
+                "/usr/local/Cellar/",
+            ):
+                return (
+                    "brew install pipx && pipx install iam-jit"
+                    "  # pipx manages a dedicated venv; avoids PEP 668 wall"
+                )
+            # macOS system Python (/usr/bin/python3) — pip is externally managed too.
+            if exe.startswith("/usr/bin/"):
+                return (
+                    "python3 -m venv ~/.venv-iam-jit"
+                    " && ~/.venv-iam-jit/bin/pip install iam-jit"
+                    " && ln -sf ~/.venv-iam-jit/bin/iam-jit"
+                    f" {local_bin_display}/iam-jit"
+                )
+            # macOS with pipx-managed or pyenv Python — pipx is still the
+            # cleanest path.
+            if exe.startswith("/Users/") or exe.startswith("/home/"):
+                return (
+                    "pipx install iam-jit"
+                    "  # add ~/.local/bin to PATH if not already present"
+                )
+        elif platform.startswith("linux"):
+            # Detect apt-managed Python via dpkg (non-mutating, fast).
+            try:
+                result = subprocess.run(  # noqa: S603
+                    ["dpkg", "--show", "python3"],
+                    capture_output=True,
+                    text=True,
+                    timeout=2.0,
+                    check=False,
+                )
+                if result.returncode == 0:
+                    return (
+                        "pip install --upgrade pip"
+                        " && pip install --user iam-jit"
+                        f"  # ensure {local_bin_display} is in PATH"
+                    )
+            except (FileNotFoundError, subprocess.TimeoutExpired, OSError):
+                pass  # dpkg not available (Alpine, Arch, etc.) — fall through
+    except Exception:  # pragma: no cover — defensive; never crash the doctor
+        pass
+
+    # Generic fallback — works on most setups where pip --user is available.
+    return (
+        f"pip install --user iam-jit"
+        f"  # then ensure {local_bin_display} is in PATH"
+        f" (add to your ~/.zshrc or ~/.bashrc)"
+    )
+
+
+# ---------------------------------------------------------------------------
 # Section result model
 # ---------------------------------------------------------------------------
 
@@ -125,20 +207,43 @@ _PYTHON_BINARIES = (
 # Go bouncer binaries shipped by SEPARATE repos. "optional" because a
 # Python-only deployment (e.g. an operator who only uses iam-jit +
 # ibounce for AWS) doesn't need them; we WARN not ERROR.
+# Each tuple is (binary_name, full_module_install_path).
+# CANONICAL: <repo>/cmd/<binary>@latest — verified against public module proxy
+# 2026-05-26. kbounce lives in the *kbouncer* repo; dbounce + gbounce live in
+# same-named repos. Any change here must also be reflected in README.md and
+# tests/test_doctor_hints_match_readme.py which CI-enforces parity.
 _GO_BOUNCER_BINARIES = (
-    ("kbounce", "github.com/trsreagan3/kbouncer@latest"),
-    ("dbounce", "github.com/trsreagan3/dbouncer@latest"),
-    ("gbounce", "github.com/trsreagan3/gbouncer@latest"),
+    ("kbounce", "github.com/trsreagan3/kbouncer/cmd/kbounce@latest"),
+    ("dbounce", "github.com/trsreagan3/dbounce/cmd/dbounce@latest"),
+    ("gbounce", "github.com/trsreagan3/gbounce/cmd/gbounce@latest"),
 )
 
 
 def _gopath_bin() -> pathlib.Path:
-    """Resolve ``$GOPATH/bin`` for help-text rendering. Falls back to
-    ``~/go/bin`` (the Go default). Never raises."""
+    """Resolve ``$GOPATH/bin`` for binary probing. Falls back to
+    ``~/go/bin`` (the Go default). Never raises.
+
+    Returns the *expanded* absolute path so callers can do path existence
+    checks. For display in hint strings use ``_gopath_bin_display()``
+    which emits the shell-portable ``$GOPATH/bin`` or ``$HOME/go/bin``
+    form (no literal home dir, so hints are public-safe and relocatable).
+    """
     gopath = os.environ.get("GOPATH")
     if gopath:
         return pathlib.Path(gopath).expanduser() / "bin"
     return pathlib.Path("~/go/bin").expanduser()
+
+
+def _gopath_bin_display() -> str:
+    """Shell-portable display form for the Go bin directory hint strings.
+
+    Used inside ``fix:`` hint text so the operator can paste the hint
+    verbatim AND it works on any machine regardless of their actual
+    home-dir path.  Never embeds a literal ``/Users/<name>`` path.
+    """
+    if os.environ.get("GOPATH"):
+        return "$GOPATH/bin"
+    return "$HOME/go/bin"
 
 
 def _resolve_paths(data_dir: str | None = None) -> dict[str, str]:
@@ -226,14 +331,11 @@ def _check_path(section: _Section, paths: dict[str, str] | None = None) -> None:
                     f"expected: {local_bin_display}/{name} (pip install --user) "
                     f"OR pipx-managed shim"
                 ),
-                fix=(
-                    f"pip install --user iam-jit  "
-                    f"# then ensure {local_bin_display} is in PATH "
-                    f"(add to your ~/.zshrc or ~/.bashrc)"
-                ),
+                fix=_python_install_hint(local_bin_display),
             )
 
-    gobin = _gopath_bin()
+    gobin = _gopath_bin()           # expanded absolute path — used in detail
+    gobin_display = _gopath_bin_display()  # shell-portable — used in fix hint
     for name, repo in _GO_BOUNCER_BINARIES:
         resolved = shutil.which(name)
         if resolved:
@@ -253,7 +355,7 @@ def _check_path(section: _Section, paths: dict[str, str] | None = None) -> None:
                 ),
                 fix=(
                     f"go install {repo}  "
-                    f"&& ensure {gobin} is in PATH"
+                    f"&& ensure {gobin_display} is in PATH"
                 ),
             )
 
@@ -1014,4 +1116,5 @@ def register_install_check_command(
 __all__ = [
     "register_install_check_command",
     "run_install_check",
+    "_python_install_hint",
 ]

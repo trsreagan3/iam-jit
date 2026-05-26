@@ -177,11 +177,15 @@ def test_missing_path_entries_exit_2_with_remediation(
     # Required Python binaries failed.
     assert "[FAIL] iam-jit NOT on PATH" in result.output
     assert "[FAIL] ibounce NOT on PATH" in result.output
-    # Remediation present + concrete.
-    assert "pip install --user iam-jit" in result.output
+    # Remediation present + concrete. The exact command is OS-aware
+    # (#649: macOS Homebrew → pipx; Linux apt → pip --user; generic →
+    # pip --user). Assert the Fix: line is present for the iam-jit binary;
+    # the specific command is verified by the #649 unit tests below.
+    assert "Fix:" in result.output
+    assert "iam-jit" in result.output  # the binary name in the fix
     # Go bouncers warned, not failed.
     assert "[WARN] kbounce NOT on PATH" in result.output
-    assert "go install github.com/trsreagan3/kbouncer@latest" in result.output
+    assert "go install github.com/trsreagan3/kbouncer" in result.output
     # Overall verdict surfaces NOT PROTECTING.
     assert "Overall: NOT PROTECTING" in result.output
 
@@ -534,4 +538,197 @@ def test_posture_no_duplicate_mode_label() -> None:
         f"Disk: line still contains a bare 'Mode:' after renaming — "
         f"duplicate label persists.\n"
         f"Disk line: {disk_line!r}"
+    )
+
+
+# ---------------------------------------------------------------------------
+# Tests for #649 — OS-aware install hint (_python_install_hint)
+# ---------------------------------------------------------------------------
+
+
+def test_hint_homebrew_python_suggests_pipx(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """macOS + Homebrew Python (Apple Silicon path) → hint must contain
+    'pipx'. A raw 'pip install --user' on this setup hits PEP 668 and
+    fails — the doctor's Fix must be paste-ready and actually work.
+    """
+    monkeypatch.setattr(
+        "iam_jit.cli_doctor_install_check.sys.executable",
+        "/opt/homebrew/Cellar/python@3.12/3.12.9/bin/python3.12",
+    )
+    monkeypatch.setattr(
+        "iam_jit.cli_doctor_install_check.sys.platform",
+        "darwin",
+    )
+    hint = dic._python_install_hint()
+    assert "pipx" in hint, (
+        f"Homebrew-Python hint must reference pipx (PEP 668 blocks pip --user).\n"
+        f"Got: {hint!r}"
+    )
+
+
+def test_hint_homebrew_intel_python_suggests_pipx(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """macOS + Homebrew Python (Intel path /usr/local/Cellar/) → pipx."""
+    monkeypatch.setattr(
+        "iam_jit.cli_doctor_install_check.sys.executable",
+        "/usr/local/Cellar/python@3.12/3.12.9/bin/python3.12",
+    )
+    monkeypatch.setattr(
+        "iam_jit.cli_doctor_install_check.sys.platform",
+        "darwin",
+    )
+    hint = dic._python_install_hint()
+    assert "pipx" in hint, (
+        f"Intel-Homebrew-Python hint must reference pipx.\nGot: {hint!r}"
+    )
+
+
+def test_hint_macos_system_python_suggests_venv(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """macOS system Python (/usr/bin/python3) → hint must contain 'venv'.
+    System Python is also externally managed; a venv is the safe path.
+    """
+    monkeypatch.setattr(
+        "iam_jit.cli_doctor_install_check.sys.executable",
+        "/usr/bin/python3",
+    )
+    monkeypatch.setattr(
+        "iam_jit.cli_doctor_install_check.sys.platform",
+        "darwin",
+    )
+    hint = dic._python_install_hint()
+    assert "venv" in hint, (
+        f"System-Python hint must reference venv.\nGot: {hint!r}"
+    )
+
+
+def test_hint_linux_apt_suggests_upgrade_pip(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Linux + apt-managed Python → hint must contain '--upgrade pip'
+    (per #548 fix). We mock dpkg so the test doesn't need a real dpkg.
+    """
+    monkeypatch.setattr(
+        "iam_jit.cli_doctor_install_check.sys.executable",
+        "/usr/bin/python3",
+    )
+    monkeypatch.setattr(
+        "iam_jit.cli_doctor_install_check.sys.platform",
+        "linux",
+    )
+
+    # Stub subprocess.run to simulate a successful `dpkg --show python3`.
+    import subprocess as _subprocess
+
+    def _fake_run(args, **kwargs):  # noqa: ANN001
+        if args == ["dpkg", "--show", "python3"]:
+            return _subprocess.CompletedProcess(args=args, returncode=0, stdout="python3\t3.12.0\n", stderr="")
+        return _subprocess.CompletedProcess(args=args, returncode=1, stdout="", stderr="")
+
+    monkeypatch.setattr(
+        "iam_jit.cli_doctor_install_check.subprocess.run",
+        _fake_run,
+    )
+
+    hint = dic._python_install_hint()
+    assert "--upgrade pip" in hint, (
+        f"apt-Linux hint must contain '--upgrade pip' per #548.\nGot: {hint!r}"
+    )
+
+
+def test_hint_generic_fallback_contains_pip_user(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Unknown platform → fall through to generic 'pip install --user' hint.
+    The fallback must never crash and must return something paste-ready.
+    """
+    monkeypatch.setattr(
+        "iam_jit.cli_doctor_install_check.sys.executable",
+        "/some/unknown/python3",
+    )
+    monkeypatch.setattr(
+        "iam_jit.cli_doctor_install_check.sys.platform",
+        "win32",
+    )
+    hint = dic._python_install_hint()
+    assert "pip install --user iam-jit" in hint, (
+        f"Generic-fallback hint must contain 'pip install --user iam-jit'.\n"
+        f"Got: {hint!r}"
+    )
+
+
+def test_hint_survives_dpkg_not_found(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Linux without dpkg (Alpine, Arch, etc.) — FileNotFoundError from
+    subprocess.run must be caught and fall through to the generic hint.
+    The doctor must never crash when dpkg is absent.
+    """
+    monkeypatch.setattr(
+        "iam_jit.cli_doctor_install_check.sys.executable",
+        "/usr/bin/python3",
+    )
+    monkeypatch.setattr(
+        "iam_jit.cli_doctor_install_check.sys.platform",
+        "linux",
+    )
+
+    def _raise_fnf(*args, **kwargs):  # noqa: ANN001, ANN002, ANN003
+        raise FileNotFoundError("dpkg not found")
+
+    monkeypatch.setattr(
+        "iam_jit.cli_doctor_install_check.subprocess.run",
+        _raise_fnf,
+    )
+
+    # Must not raise; must return a non-empty string.
+    hint = dic._python_install_hint()
+    assert isinstance(hint, str) and hint, (
+        "hint must be a non-empty string even when dpkg is absent"
+    )
+
+
+def test_os_aware_hint_wired_into_check_path(
+    monkeypatch: pytest.MonkeyPatch,
+    empty_path: None,
+    cleared_env: None,
+    _no_bouncers_running: None,
+) -> None:
+    """Integration: when the doctor's Section 1 PATH check fires and the
+    OS is macOS + Homebrew, the Fix line in the output must contain
+    'pipx' (not the old generic 'pip install --user iam-jit').
+
+    This is the actual user-visible regression test for #649: a founder
+    on macOS with Homebrew Python who runs 'iam-jit doctor install-check'
+    must see a working Fix command.
+    """
+    monkeypatch.setattr(
+        "iam_jit.cli_doctor_install_check.sys.executable",
+        "/opt/homebrew/Cellar/python@3.12/3.12.9/bin/python3.12",
+    )
+    monkeypatch.setattr(
+        "iam_jit.cli_doctor_install_check.sys.platform",
+        "darwin",
+    )
+
+    result = _invoke()
+
+    assert result.exit_code == 2
+    assert "[FAIL] iam-jit NOT on PATH" in result.output
+    # The Fix line must now contain pipx, not a bare pip install --user.
+    fix_lines = [
+        line for line in result.output.splitlines()
+        if "Fix:" in line and "iam-jit" in line
+    ]
+    assert fix_lines, (
+        "Expected at least one 'Fix:' line referencing iam-jit in the output.\n"
+        f"--- output ---\n{result.output}"
+    )
+    assert any("pipx" in line for line in fix_lines), (
+        "macOS Homebrew Fix must reference pipx (PEP 668 blocks pip --user).\n"
+        f"Fix lines found:\n" + "\n".join(fix_lines)
     )
