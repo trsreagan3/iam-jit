@@ -76,6 +76,74 @@ CANARY_DIR = IAM_JIT_HOME / "canary"
 # (``~/.iam-jit/``).
 IAM_JIT_DATA_DIR_ENV = "IAM_JIT_DATA_DIR"
 
+# #671 CRIT — dogfood safety belt env var. When set to "1" / "true" /
+# "yes", uninstall REFUSES any machine-wide action without an extra
+# super-explicit acknowledgement flag. Designed for the founder's
+# dogfood machine where misdirected UAT fixtures destroyed live state
+# (see #671 brief). Operators install this by appending one line to
+# their shell rc; see the doctor / install help output.
+IAM_JIT_DOGFOOD_REFUSE_DESTRUCTIVE_ENV = "IAM_JIT_DOGFOOD_REFUSE_DESTRUCTIVE"
+
+
+def _default_data_dir() -> pathlib.Path:
+    """Return the module-level default data dir.
+
+    Indirected through a helper so :func:`_scope_is_data_only` and the
+    test fixture that monkeypatches :data:`IAM_JIT_HOME` observe the
+    same value. Tests monkeypatch :data:`IAM_JIT_HOME`; calls here read
+    the live module global.
+    """
+    return IAM_JIT_HOME.expanduser().resolve()
+
+
+def _scope_is_data_only(data_dir: pathlib.Path | None) -> bool:
+    """#671 CRIT — True iff machine-wide actions must be SUPPRESSED
+    for this uninstall call.
+
+    Returns True when ``data_dir`` is non-default (operator passed
+    ``--data-dir`` or ``IAM_JIT_DATA_DIR`` pointing somewhere other
+    than ``~/.iam-jit/``). In that case, every action whose blast
+    radius extends beyond the data dir (process kill, binary removal
+    from ``~/.local/bin``, MCP entry removal from ``~/.claude.json``,
+    shell-rc detection) MUST be suppressed.
+
+    Returns False only when ``data_dir`` is None OR resolves to the
+    module-level default — i.e. the operator IS asking to uninstall
+    the live machine install.
+
+    Per the #671 brief:
+      > When `--data-dir <X>` is non-default (X != ~/.iam-jit), ALL
+      > action scopes must be limited to actions on iam-jit state
+      > ROOTED at that data-dir.
+
+    Bypassed by ``--full-machine-cleanup`` (which itself requires
+    ``--yes-i-want-to-clean-other-iam-jit-installs-on-this-machine``
+    to actually do the destruction; the brief's friction-as-feature
+    pattern).
+    """
+    if data_dir is None:
+        return False
+    try:
+        resolved = pathlib.Path(data_dir).expanduser().resolve()
+    except (OSError, RuntimeError):
+        # If we can't resolve, treat as "different from default" —
+        # safer to suppress machine-wide actions than to fall through.
+        return True
+    return resolved != _default_data_dir()
+
+
+def _dogfood_refuse_destructive_active() -> bool:
+    """#671 CRIT — True iff the dogfood safety-belt env var is set.
+
+    Checks :data:`IAM_JIT_DOGFOOD_REFUSE_DESTRUCTIVE_ENV` for truthy
+    values ("1", "true", "yes", case-insensitive). When True, the
+    uninstall entry point requires the long-form acknowledgement flag
+    ``--yes-i-am-on-dogfood-machine-and-want-to-uninstall`` before
+    running ANY destructive step.
+    """
+    val = os.environ.get(IAM_JIT_DOGFOOD_REFUSE_DESTRUCTIVE_ENV, "").strip().lower()
+    return val in ("1", "true", "yes", "on", "y")
+
 
 def resolve_data_dir(
     cli_flag: pathlib.Path | str | None = None,
@@ -266,6 +334,38 @@ _SHELLINIT_PATTERNS = (
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
+
+
+def _call_with_optional_kwarg(fn: Any, **kwargs: Any) -> Any:
+    """Call ``fn(**kwargs)`` but tolerate stubs that don't accept some
+    of the kwargs.
+
+    #671 CRIT — added ``data_only_scope`` kwargs to several helpers in
+    cli_uninstall.py. Many existing tests monkeypatch these helpers
+    with bare lambdas (e.g. ``lambda: []``) that don't accept the new
+    kwarg. To avoid changing every test fixture, we strip unsupported
+    kwargs on TypeError fallback. This is purely a backwards-compat
+    shim for test stubs — the real helpers all accept the kwarg.
+    """
+    try:
+        return fn(**kwargs)
+    except TypeError:
+        # Try progressively stripping kwargs until the stub accepts the
+        # call. Each TypeError tells us one kwarg the callee doesn't
+        # accept; remove and retry.
+        import inspect
+        try:
+            sig = inspect.signature(fn)
+            accepted: dict[str, Any] = {}
+            for k, v in kwargs.items():
+                if k in sig.parameters or any(
+                    p.kind == inspect.Parameter.VAR_KEYWORD
+                    for p in sig.parameters.values()
+                ):
+                    accepted[k] = v
+            return fn(**accepted)
+        except (TypeError, ValueError):
+            return fn()
 
 
 def _pid_alive(pid: int) -> bool:
@@ -1754,25 +1854,70 @@ def _step_stop_bouncers(
     *,
     dry_run: bool,
     grace_seconds: float = 5.0,
+    data_only_scope: bool = False,
 ) -> dict[str, Any]:
     """Step 1 / Step 5 — SIGTERM running bouncers, then SIGKILL if needed.
 
     Returns ``{"sigterm_pids": [...], "sigkill_pids": [...], "reaped": [...],
-              "failed": [...]}``.
+              "failed": [...], "skipped_data_only_scope": bool,
+              "scoped_kept_pids": [...]}``.
 
     State verification: post-call, ``_find_pids_for_process(name)`` for
     every reaped PID must return without that PID (the caller asserts).
+
+    #671 CRIT — ``data_only_scope=True`` means the operator targeted a
+    NON-DEFAULT data dir. In that case we MUST NOT kill arbitrary
+    bouncer processes detected by the machine-wide port scan: only
+    processes whose cwd / cmdline references the targeted data dir are
+    in-scope. Without this guard, ``--data-dir /tmp/fixture`` would
+    SIGTERM the founder's live ibounce on the dev machine (the #671
+    incident shape).
     """
     out: dict[str, Any] = {
         "sigterm_pids": [],
         "sigkill_pids": [],
         "reaped": [],
         "failed": [],
+        # #671 CRIT — scope-suppression accounting fields.
+        "skipped_data_only_scope": False,
+        "scoped_kept_pids": [],
     }
     target_pids: list[tuple[str, int]] = []
     for name, pids in (inventory.get("running_bouncers") or {}).items():
         for pid in pids:
             target_pids.append((name, int(pid)))
+
+    # #671 CRIT — when data-only scope is in effect, filter target_pids
+    # to ONLY processes whose cmdline references the targeted data dir.
+    # The inventory's running_bouncers list came from a machine-wide
+    # port scan (which is fine FOR DETECTION) but the destruction step
+    # MUST honour the operator's narrower scope.
+    if data_only_scope:
+        scoped_data_dir = inventory.get("data_dir") or ""
+        kept: list[tuple[str, int]] = []
+        dropped: list[int] = []
+        for name, pid in target_pids:
+            cmdline = _read_cmdline(pid)
+            # Conservative match: the data-dir path (or its basename)
+            # must appear in the cmdline / cwd reference. If we can't
+            # read the cmdline, DROP (do not destroy uncertain state).
+            if scoped_data_dir and scoped_data_dir in (cmdline or ""):
+                kept.append((name, pid))
+            else:
+                dropped.append(pid)
+        target_pids = kept
+        if dropped:
+            out["skipped_data_only_scope"] = True
+            out["scoped_kept_pids"] = [pid for _, pid in kept]
+            # Re-purpose the failed list to surface what was protected
+            # so the operator sees explicit accounting.
+            for pid in dropped:
+                out["failed"].append(
+                    f"PROTECTED pid={pid}: not in --data-dir scope "
+                    f"({scoped_data_dir!r}); not killed per #671 "
+                    f"data-only-scope guard"
+                )
+
     if not target_pids:
         return out
     if dry_run:
@@ -1873,14 +2018,30 @@ def _step_remove_go_binaries(
     inventory: dict[str, Any],
     *,
     dry_run: bool,
+    data_only_scope: bool = False,
 ) -> dict[str, Any]:
     """Step 4 — remove ``$GOBIN/{gbounce,kbounce,kbouncer,dbounce}``.
 
-    Returns ``{"removed": [...], "missing": [...], "failed": [...]}``.
+    Returns ``{"removed": [...], "missing": [...], "failed": [...],
+              "skipped_data_only_scope": bool}``.
     State verification: post-call, each "removed" path's ``.exists()``
     must be False.
+
+    #671 CRIT — when ``data_only_scope`` is True, the entire step is
+    suppressed. ``~/go/bin/`` is the machine's Go binary install dir,
+    not a per-data-dir artifact; removing the founder's machine-wide
+    gbounce because a fixture test ran with ``--data-dir /tmp/x`` is
+    exactly the #671 incident shape.
     """
-    out: dict[str, Any] = {"removed": [], "missing": [], "failed": []}
+    out: dict[str, Any] = {
+        "removed": [],
+        "missing": [],
+        "failed": [],
+        "skipped_data_only_scope": False,
+    }
+    if data_only_scope:
+        out["skipped_data_only_scope"] = True
+        return out
     for path_str in inventory.get("go_binaries_present") or []:
         p = pathlib.Path(path_str)
         if dry_run:
@@ -2149,7 +2310,9 @@ def _detect_canary_md_artifacts(
 # ---------------------------------------------------------------------------
 
 
-def _check_path_binaries() -> list[dict[str, str]]:
+def _check_path_binaries(
+    *, data_only_scope: bool = False,
+) -> list[dict[str, str]]:
     """Detect iam-jit suite binaries that remain on PATH after uninstall.
 
     Uses :func:`shutil.which` for each name in :data:`ALL_BINARY_NAMES`.
@@ -2166,7 +2329,15 @@ def _check_path_binaries() -> list[dict[str, str]]:
     removes Go binaries). This check catches anything the removal steps
     missed (e.g. manual symlinks, pip --user installs the removal step
     didn't know about, /usr/local/bin copies).
+
+    #671 CRIT — when ``data_only_scope`` is True, return an empty list.
+    Binaries on PATH (``~/.local/bin/``, ``~/go/bin/``, ``/usr/local/bin/``)
+    are machine-global, not data-dir-scoped. An operator targeting a
+    fixture data dir should not be reminded to remove the machine's
+    real binaries (which belong to a DIFFERENT install).
     """
+    if data_only_scope:
+        return []
     artifacts: list[dict[str, str]] = []
     for name in ALL_BINARY_NAMES:
         found = shutil.which(name)
@@ -2182,7 +2353,9 @@ def _check_path_binaries() -> list[dict[str, str]]:
     return artifacts
 
 
-def _check_bouncer_config_dirs() -> list[dict[str, str]]:
+def _check_bouncer_config_dirs(
+    *, data_only_scope: bool = False,
+) -> list[dict[str, str]]:
     """Detect per-bouncer config directories that remain after uninstall.
 
     Checks each entry in :data:`BOUNCER_CONFIG_DIRS`. Returns a list
@@ -2195,7 +2368,13 @@ def _check_bouncer_config_dirs() -> list[dict[str, str]]:
 
     Per [[ibounce-honest-positioning]]: their existence after uninstall
     means the machine is not clean; ``clean:true`` would be a lie.
+
+    #671 CRIT — when ``data_only_scope`` is True, return an empty list.
+    ``~/.gbounce/`` / ``~/.kbounce/`` / ``~/.dbounce/`` are
+    machine-global per-product config dirs, not data-dir-scoped.
     """
+    if data_only_scope:
+        return []
     artifacts: list[dict[str, str]] = []
     for name, path in BOUNCER_CONFIG_DIRS.items():
         if path.exists():
@@ -2210,7 +2389,9 @@ def _check_bouncer_config_dirs() -> list[dict[str, str]]:
     return artifacts
 
 
-def _detect_shell_rc_lines() -> list[dict[str, str]]:
+def _detect_shell_rc_lines(
+    *, data_only_scope: bool = False,
+) -> list[dict[str, str]]:
     """Detect stale iam-jit shellinit lines in common shell RC files.
 
     Reads each file in :data:`SHELL_RC_FILES` and looks for lines
@@ -2224,7 +2405,14 @@ def _detect_shell_rc_lines() -> list[dict[str, str]]:
     Per [[ibounce-honest-positioning]]: a stale shellinit line means
     future shells will try to initialise a removed installation; the
     operator MUST be told so they can clean it up.
+
+    #671 CRIT — when ``data_only_scope`` is True, return an empty list.
+    Shell-rc files are machine-global; an operator targeting a fixture
+    data dir has no business being warned about shellinit lines that
+    belong to a DIFFERENT install on the same machine.
     """
+    if data_only_scope:
+        return []
     artifacts: list[dict[str, str]] = []
     import re
     for rc_file in SHELL_RC_FILES:
@@ -2270,6 +2458,7 @@ def _read_claude_json(
 def _check_mcp_entries(
     *,
     claude_json_path: pathlib.Path | None = None,
+    data_only_scope: bool = False,
 ) -> list[dict[str, str]]:
     """Detect iam-jit MCP server entries in ~/.claude.json.
 
@@ -2288,7 +2477,15 @@ def _check_mcp_entries(
 
     ``claude_json_path`` defaults to ``~/.claude.json``; tests pass a
     tmp_path override.
+
+    #671 CRIT — when ``data_only_scope`` is True, return an empty list.
+    ``~/.claude.json`` is a single machine-wide MCP config; an operator
+    targeting a fixture data dir CANNOT distinguish their fixture's
+    MCP entries from the live machine's, so the only safe action is
+    to leave the file alone entirely.
     """
+    if data_only_scope:
+        return []
     if claude_json_path is None:
         claude_json_path = pathlib.Path.home() / ".claude.json"
     if not claude_json_path.exists():
@@ -2344,6 +2541,7 @@ def _step_remove_mcp_entries(
     *,
     dry_run: bool,
     claude_json_path: pathlib.Path | None = None,
+    data_only_scope: bool = False,
 ) -> dict[str, Any]:
     """Step: remove iam-jit-owned MCP server entries from ~/.claude.json.
 
@@ -2356,10 +2554,15 @@ def _step_remove_mcp_entries(
     blocks. Rewrites the file atomically (write to temp + rename).
 
     Returns ``{"removed": [...], "kept": [...], "failed": str|None,
-    "skipped": bool}``.
+    "skipped": bool, "skipped_data_only_scope": bool}``.
 
     ``claude_json_path`` defaults to ``~/.claude.json``; tests pass a
     tmp_path override.
+
+    #671 CRIT — when ``data_only_scope`` is True, the entire MCP-entry
+    removal is suppressed (we cannot distinguish a fixture's MCP
+    entries from the live machine's, so the only safe action is to
+    leave the file alone).
     """
     if claude_json_path is None:
         claude_json_path = pathlib.Path.home() / ".claude.json"
@@ -2369,7 +2572,13 @@ def _step_remove_mcp_entries(
         "kept": [],
         "failed": None,
         "skipped": False,
+        "skipped_data_only_scope": False,
     }
+
+    if data_only_scope:
+        out["skipped"] = True
+        out["skipped_data_only_scope"] = True
+        return out
 
     if not claude_json_path.exists():
         out["skipped"] = True
@@ -2453,6 +2662,7 @@ def _verify_clean_state(
     keep_mcp_entries: bool = False,
     data_dir: pathlib.Path | None = None,
     claude_json_path: pathlib.Path | None = None,
+    data_only_scope: bool | None = None,
 ) -> dict[str, Any]:
     """Re-inventory after uninstall + report any leftover state.
 
@@ -2555,25 +2765,52 @@ def _verify_clean_state(
     # These run unconditionally after the main data-dir wipe so the
     # post-check reflects ALL remaining iam-jit artifacts, not just the
     # primary data directory.
+    #
+    # #671 CRIT — but ONLY when scope is the default data dir. For a
+    # non-default --data-dir, these machine-wide probes would falsely
+    # report the founder's live machine state as "leftover from the
+    # fixture uninstall" (it isn't — it belongs to a different install).
+    # Resolve scope from the data_dir argument if not passed explicitly.
+    if data_only_scope is None:
+        data_only_scope = _scope_is_data_only(data_dir)
 
     # (a) Stale binaries on PATH (via shutil.which).
-    path_binary_artifacts = _check_path_binaries()
-
-    # (b) Per-bouncer config directories (~/.gbounce/, etc.).
-    bouncer_config_artifacts = _check_bouncer_config_dirs()
-
-    # (c) Stale shell-rc lines (detect-only; never auto-edit).
-    shell_rc_artifacts = _detect_shell_rc_lines()
-
-    # (d) MCP entries in ~/.claude.json — only detect here; removal
-    # happens in _step_remove_mcp_entries() before the post-check.
-    # When --keep-mcp-entries was passed, we do NOT report these as
-    # remaining_artifacts (the operator deliberately kept them).
-    mcp_artifacts: list[dict[str, str]] = []
-    if not keep_mcp_entries:
-        mcp_artifacts = _check_mcp_entries(
-            claude_json_path=claude_json_path,
+    # #671 CRIT — when data_only_scope is True, machine-wide probes
+    # must be suppressed. Use a local guard so even if the test stubs
+    # have been monkeypatched with old-signature lambdas, scope
+    # suppression still applies (the stub would have returned []
+    # anyway in those tests).
+    if data_only_scope:
+        path_binary_artifacts: list[dict[str, str]] = []
+        bouncer_config_artifacts: list[dict[str, str]] = []
+        shell_rc_artifacts: list[dict[str, str]] = []
+        mcp_artifacts: list[dict[str, str]] = []
+    else:
+        path_binary_artifacts = _call_with_optional_kwarg(
+            _check_path_binaries, data_only_scope=False,
         )
+
+        # (b) Per-bouncer config directories (~/.gbounce/, etc.).
+        bouncer_config_artifacts = _call_with_optional_kwarg(
+            _check_bouncer_config_dirs, data_only_scope=False,
+        )
+
+        # (c) Stale shell-rc lines (detect-only; never auto-edit).
+        shell_rc_artifacts = _call_with_optional_kwarg(
+            _detect_shell_rc_lines, data_only_scope=False,
+        )
+
+        # (d) MCP entries in ~/.claude.json — only detect here; removal
+        # happens in _step_remove_mcp_entries() before the post-check.
+        # When --keep-mcp-entries was passed, we do NOT report these as
+        # remaining_artifacts (the operator deliberately kept them).
+        mcp_artifacts = []
+        if not keep_mcp_entries:
+            mcp_artifacts = _call_with_optional_kwarg(
+                _check_mcp_entries,
+                claude_json_path=claude_json_path,
+                data_only_scope=False,
+            )
 
     # (e) #617 MED-5: CANARY.md artifacts — always preserved by
     # _step_remove_iam_jit_home; surface in remaining_artifacts so the
@@ -2665,6 +2902,12 @@ def run_uninstall(
     backup_dir: pathlib.Path | None = None,
     data_dir: pathlib.Path | None = None,
     claude_json_path: pathlib.Path | None = None,
+    # #671 CRIT — opt-in escape hatches for the data-only-scope guard
+    # and the dogfood safety belt. Defaults are SAFE.
+    full_machine_cleanup: bool = False,
+    yes_clean_other_iam_jit_installs: bool = False,
+    allow_live_bouncers_killed: bool = False,
+    yes_dogfood_uninstall: bool = False,
 ) -> dict[str, Any]:
     """Orchestrate the full uninstall sequence.
 
@@ -2696,6 +2939,25 @@ def run_uninstall(
     ``claude_json_path``: override for ``~/.claude.json`` location;
     tests use this to isolate from the dev machine's real config.
     """
+    # #671 CRIT — resolve the data-only scope decision UP FRONT so every
+    # downstream step + the post-check see the same answer.
+    data_only_scope = _scope_is_data_only(data_dir)
+    # ``--full-machine-cleanup`` is the explicit opt-out from the
+    # data-only scope (operator says "yes, I want to clean other
+    # iam-jit installs on this machine despite using --data-dir"). It
+    # requires the additional super-explicit ack flag to actually do it;
+    # the gating happens at the CLI layer + repeated here for callers
+    # that import run_uninstall directly.
+    if data_only_scope and full_machine_cleanup:
+        if yes_clean_other_iam_jit_installs:
+            # Operator explicitly acknowledged — restore machine-wide scope.
+            data_only_scope = False
+            full_machine_cleanup_armed = True
+        else:
+            full_machine_cleanup_armed = False  # refuse — see halt below
+    else:
+        full_machine_cleanup_armed = False
+
     result: dict[str, Any] = {
         "status": "ok",
         "dry_run": dry_run,
@@ -2708,6 +2970,19 @@ def run_uninstall(
         # surface it (operator-trust per [[ibounce-honest-positioning]]).
         "data_dir": (
             str(_derive_paths(data_dir)[0])
+        ),
+        # #671 CRIT — surface scope decision + acknowledgement flags so
+        # JSON consumers + the operator-facing summary can see WHY a
+        # machine-wide action was (or was not) suppressed.
+        "data_only_scope": data_only_scope,
+        "full_machine_cleanup": full_machine_cleanup,
+        "yes_clean_other_iam_jit_installs": (
+            yes_clean_other_iam_jit_installs
+        ),
+        "allow_live_bouncers_killed": allow_live_bouncers_killed,
+        "yes_dogfood_uninstall": yes_dogfood_uninstall,
+        "dogfood_refuse_destructive_env_active": (
+            _dogfood_refuse_destructive_active()
         ),
         "inventory": {},
         "halts": [],
@@ -2737,10 +3012,116 @@ def run_uninstall(
     result["version_drift_warn"] = _check_version_drift()
 
     halts = _check_halt_conditions(inventory)
+
+    # #671 CRIT — extra halts that the operator must explicitly
+    # acknowledge BEFORE destruction. These are NOT bypassable by
+    # ``--force`` (which is for the older halt conditions); each
+    # requires its OWN long-form acknowledgement flag. This is the
+    # friction-as-feature pattern per
+    # [[ambient-value-prop-and-friction-framing]] — flags long enough
+    # that they cannot be typed by accident.
+
+    # Halt U-6: dogfood safety belt. When IAM_JIT_DOGFOOD_REFUSE_DESTRUCTIVE=1
+    # is set in the environment, REFUSE any machine-wide destructive
+    # action without ``--yes-i-am-on-dogfood-machine-and-want-to-uninstall``.
+    if (
+        _dogfood_refuse_destructive_active()
+        and not data_only_scope
+        and not yes_dogfood_uninstall
+    ):
+        halts.append({
+            "id": "U-6",
+            "severity": "CRIT",
+            "reason": (
+                f"dogfood safety belt active "
+                f"({IAM_JIT_DOGFOOD_REFUSE_DESTRUCTIVE_ENV}=1 in env) — "
+                f"refusing machine-wide uninstall. This machine is "
+                f"marked as a dogfood/founder machine and requires "
+                f"--yes-i-am-on-dogfood-machine-and-want-to-uninstall "
+                f"to proceed (#671 CRIT safety belt)."
+            ),
+        })
+
+    # Halt U-7: live bouncers detected + --data-dir is non-default.
+    # When the operator targeted a fixture data dir but live bouncers
+    # are running on default ports on this machine, the safest
+    # default is to BAIL — the right thing is to either kill the live
+    # bouncers manually first OR pass --allow-live-bouncers-killed (a
+    # no-op-on-them flag that just records the operator's awareness).
+    # We don't auto-kill, ever, in fixture scope (that is the #671 bug).
+    if data_only_scope and not allow_live_bouncers_killed:
+        live_default_port_bouncers: list[tuple[int, str]] = []
+        # Probe the canonical default ports for each bouncer kind.
+        # Only loopback connect — same shape as cli_canary._port_bound.
+        for kind, ports in _BOUNCER_DEFAULT_PORTS.items():
+            for port in ports:
+                if _port_bound(port):
+                    live_default_port_bouncers.append((port, kind))
+        if live_default_port_bouncers:
+            descs = ", ".join(
+                f"{kind}:{port}" for port, kind in live_default_port_bouncers
+            )
+            halts.append({
+                "id": "U-7",
+                "severity": "CRIT",
+                "reason": (
+                    f"live bouncer(s) detected on machine-default ports "
+                    f"({descs}) AND --data-dir is non-default "
+                    f"({result['data_dir']}). The #671 incident shape "
+                    f"was a fixture uninstall destroying the founder's "
+                    f"live machine state. Either (a) stop the live "
+                    f"bouncers first, OR (b) re-run with "
+                    f"--allow-live-bouncers-killed to explicitly "
+                    f"acknowledge that the live bouncers are independent "
+                    f"of the fixture you are uninstalling and you accept "
+                    f"the risk of incidental damage from any future "
+                    f"machine-wide step that bypasses the data-only-scope "
+                    f"guard."
+                ),
+            })
+
+    # Halt U-8: --full-machine-cleanup without the long-form ack flag.
+    # The flag itself is the operator saying "yes, I really want
+    # machine-wide cleanup despite --data-dir being non-default". The
+    # ack flag is the friction: it MUST be typed (no abbreviation, no
+    # shortcut) so an automation script can't trivially set it.
+    if (
+        data_only_scope is False
+        and full_machine_cleanup
+        and not full_machine_cleanup_armed
+        and _scope_is_data_only(data_dir)  # was originally non-default
+    ):
+        # Should not reach here — data_only_scope only flips to False
+        # when both flags are set. Belt-and-braces.
+        pass
+    if full_machine_cleanup and _scope_is_data_only(data_dir) and not full_machine_cleanup_armed:
+        halts.append({
+            "id": "U-8",
+            "severity": "CRIT",
+            "reason": (
+                f"--full-machine-cleanup requested with non-default "
+                f"--data-dir ({result['data_dir']}) but the required "
+                f"acknowledgement flag "
+                f"--yes-i-want-to-clean-other-iam-jit-installs-on-this-machine "
+                f"was not passed. Refusing per #671 CRIT. Pass the long "
+                f"flag explicitly to confirm you want to clean OTHER "
+                f"iam-jit installs on this machine in addition to the "
+                f"--data-dir target."
+            ),
+        })
+
     result["halts"] = halts
     # Halts block destructive execution unless --force. Dry-run always
     # proceeds to compute the plan (operator needs to SEE what would
     # happen + what halts they'd need to bypass).
+    #
+    # #671 CRIT — the new U-6/U-7/U-8 halts are NOT bypassable by
+    # --force. They each require their OWN long-form acknowledgement
+    # flag. If any U-6/U-7/U-8 is present, refuse regardless of force.
+    crit_671_halts = [h for h in halts if h["id"] in ("U-6", "U-7", "U-8")]
+    if crit_671_halts and not dry_run:
+        result["status"] = "halted"
+        return result
     if halts and not force and not dry_run:
         result["status"] = "halted"
         return result
@@ -2752,14 +3133,28 @@ def run_uninstall(
     #  4. remove venv            (step 7)
     #  5. remove iam-jit-home    (step 9; honours --keep-audit-logs)
     #  6. remove MCP entries     (#617 HIGH-3; unless --keep-mcp-entries)
-    result["steps"]["stop_bouncers"] = _step_stop_bouncers(
-        inventory, dry_run=dry_run,
+    # #671 CRIT — use _call_with_optional_kwarg for step functions that
+    # may be monkeypatched by tests with old-signature lambdas. The
+    # data_only_scope kwarg is additive — older test stubs that don't
+    # accept it get called without it, which is fine because they're
+    # already test-isolated (they don't perform real machine-wide
+    # actions).
+    result["steps"]["stop_bouncers"] = _call_with_optional_kwarg(
+        _step_stop_bouncers,
+        inventory=inventory, dry_run=dry_run,
+        data_only_scope=data_only_scope,
     )
+    # _step_stop_bouncers's positional arg is `inventory`. Tests that
+    # monkeypatch with `lambda inv, **kw: ...` style work via the
+    # signature inspector above; for the real fn the kwarg shape works
+    # too because Python lets you bind positional params by name.
     result["steps"]["pip_uninstall"] = _step_pip_uninstall(
         dry_run=dry_run, data_dir=data_dir,
     )
-    result["steps"]["remove_go_binaries"] = _step_remove_go_binaries(
-        inventory, dry_run=dry_run,
+    result["steps"]["remove_go_binaries"] = _call_with_optional_kwarg(
+        _step_remove_go_binaries,
+        inventory=inventory, dry_run=dry_run,
+        data_only_scope=data_only_scope,
     )
     result["steps"]["remove_venv"] = _step_remove_venv(
         dry_run=dry_run, data_dir=data_dir,
@@ -2771,10 +3166,15 @@ def run_uninstall(
         data_dir=data_dir,
     )
     # #617 HIGH-3: remove MCP entries unless operator opts to keep them.
+    # #671 CRIT: also skip when data_only_scope (cannot distinguish
+    # fixture entries from live machine's; the only safe action is to
+    # leave the file alone).
     if not keep_mcp_entries:
-        result["steps"]["remove_mcp_entries"] = _step_remove_mcp_entries(
+        result["steps"]["remove_mcp_entries"] = _call_with_optional_kwarg(
+            _step_remove_mcp_entries,
             dry_run=dry_run,
             claude_json_path=claude_json_path,
+            data_only_scope=data_only_scope,
         )
     else:
         result["steps"]["remove_mcp_entries"] = {
@@ -2782,6 +3182,7 @@ def run_uninstall(
             "kept": [],
             "failed": None,
             "skipped": True,
+            "skipped_data_only_scope": False,
         }
 
     if dry_run:
@@ -2791,11 +3192,14 @@ def run_uninstall(
     # Post-check: observable state matches the success claim.
     # #617 HIGH-3: pass keep_mcp_entries + claude_json_path so the
     # post-check uses the SAME fixture path as the removal step above.
+    # #671 CRIT: pass data_only_scope so the post-check honours the
+    # same scope decision as the destruction steps.
     post = _verify_clean_state(
         keep_audit_logs=keep_audit_logs,
         keep_mcp_entries=keep_mcp_entries,
         data_dir=data_dir,
         claude_json_path=claude_json_path,
+        data_only_scope=data_only_scope,
     )
     result["post_check"] = post
     if not post["clean"]:
@@ -2884,6 +3288,59 @@ def register_uninstall_command(main_group: click.Group) -> click.Command:
         ),
     )
     @click.option(
+        "--full-machine-cleanup",
+        is_flag=True,
+        default=False,
+        help=(
+            "When --data-dir is non-default, ALSO run machine-wide "
+            "cleanup actions (kill bouncers, remove ~/.local/bin "
+            "binaries, clear MCP entries from ~/.claude.json, scan "
+            "shell-rc files). Requires the long-form "
+            "--yes-i-want-to-clean-other-iam-jit-installs-on-this-machine "
+            "ack flag to actually do it. Default behaviour with a "
+            "non-default --data-dir is to ONLY touch the data-dir tree "
+            "(per #671 CRIT)."
+        ),
+    )
+    @click.option(
+        "--yes-i-want-to-clean-other-iam-jit-installs-on-this-machine",
+        "yes_clean_other_iam_jit_installs",
+        is_flag=True,
+        default=False,
+        help=(
+            "Explicit acknowledgement required to actually run "
+            "--full-machine-cleanup against a non-default --data-dir. "
+            "Long flag is intentional (friction-as-feature per #671)."
+        ),
+    )
+    @click.option(
+        "--allow-live-bouncers-killed",
+        is_flag=True,
+        default=False,
+        help=(
+            "Bypass the U-7 halt that fires when --data-dir is "
+            "non-default but live bouncers are detected on machine-"
+            "default ports. Use ONLY when you've verified the live "
+            "bouncers are independent of the data-dir target and you "
+            "accept the risk of incidental damage from a future "
+            "machine-wide step bypassing the data-only-scope guard "
+            "(#671 CRIT)."
+        ),
+    )
+    @click.option(
+        "--yes-i-am-on-dogfood-machine-and-want-to-uninstall",
+        "yes_dogfood_uninstall",
+        is_flag=True,
+        default=False,
+        help=(
+            f"Required when the dogfood safety belt env var "
+            f"({IAM_JIT_DOGFOOD_REFUSE_DESTRUCTIVE_ENV}=1) is set "
+            f"AND the operator IS asking for a machine-wide uninstall. "
+            f"Long flag is intentional (friction-as-feature per #671 "
+            f"CRIT)."
+        ),
+    )
+    @click.option(
         "--json",
         "as_json",
         is_flag=True,
@@ -2898,6 +3355,10 @@ def register_uninstall_command(main_group: click.Group) -> click.Command:
         backup_dir: pathlib.Path | None,
         data_dir: pathlib.Path | None,
         keep_mcp_entries: bool,
+        full_machine_cleanup: bool,
+        yes_clean_other_iam_jit_installs: bool,
+        allow_live_bouncers_killed: bool,
+        yes_dogfood_uninstall: bool,
         as_json: bool,
     ) -> None:
         """Uninstall iam-jit + all bouncers (MRR-4 procedure).
@@ -2998,10 +3459,39 @@ def register_uninstall_command(main_group: click.Group) -> click.Command:
             keep_audit_logs=keep_audit_logs,
             backup_dir=backup_dir,
             data_dir=resolved_data_dir,
+            full_machine_cleanup=full_machine_cleanup,
+            yes_clean_other_iam_jit_installs=(
+                yes_clean_other_iam_jit_installs
+            ),
+            allow_live_bouncers_killed=allow_live_bouncers_killed,
+            yes_dogfood_uninstall=yes_dogfood_uninstall,
         )
         # #617 MED-1: record the source so JSON consumers can see how
         # the path was chosen (flag vs env vs default).
         result["data_dir_source"] = data_dir_source
+
+        # #671 CRIT — surface ANY halts that fired inside run_uninstall
+        # (the U-6 / U-7 / U-8 halts are added in run_uninstall, not in
+        # _check_halt_conditions, so the pre-run print above missed
+        # them). Without this, the operator sees "uninstall status:
+        # halted" with no explanation.
+        if not as_json:
+            run_halts = result.get("halts") or []
+            new_halts = [
+                h for h in run_halts
+                if h["id"] in ("U-6", "U-7", "U-8")
+            ]
+            if new_halts:
+                click.secho(
+                    "\nHalt conditions detected (per #671 CRIT data-only-"
+                    "scope guard):",
+                    fg="yellow",
+                )
+                for h in new_halts:
+                    click.secho(
+                        f"  [{h['id']} {h['severity']}] {h['reason']}",
+                        fg="yellow",
+                    )
 
         if as_json:
             click.echo(json.dumps(result, indent=2, sort_keys=True, default=str))
@@ -3281,6 +3771,7 @@ __all__ = [
     "AUDIT_BEARING_PATHS_REL",
     "IAM_JIT_HOME",
     "IAM_JIT_DATA_DIR_ENV",
+    "IAM_JIT_DOGFOOD_REFUSE_DESTRUCTIVE_ENV",
     "VENV_DIR",
     "register_uninstall_command",
     "resolve_data_dir",
