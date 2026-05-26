@@ -699,6 +699,7 @@ def _run_harness_mcp_installs(
     harness: str,
     bouncers: tuple[str, ...],
     claude_code_path: str | None = None,
+    cursor_path: str | None = None,
 ) -> list[_McpInstallResult]:
     """Invoke the correct install subcommand(s) for *harness* × *bouncers*.
 
@@ -711,8 +712,9 @@ def _run_harness_mcp_installs(
          surfaces as a WARN row, not a crash.)
 
     For ``cursor``:
-      Same shape with ``install-cursor`` (no explicit path needed —
-      ibounce auto-detects ~/.cursor/mcp.json).
+      Same shape with ``install-cursor --path ~/.cursor/mcp.json``.
+      ``cursor_path`` lets callers override the target for project-scoped
+      Cursor configs (``<project>/.cursor/mcp.json``) or UAT isolation.
 
     For ``codex``:
       Codex config path is unstable; print the snippet + a WARN that
@@ -728,9 +730,11 @@ def _run_harness_mcp_installs(
     returned as a failed ``_McpInstallResult`` — NEVER raises + NEVER
     silently swallows. The caller surfaces them as WARN rows.
 
-    The ``claude_code_path`` parameter lets tests override the target
-    path without touching the real ~/.claude.json. Production code
-    always passes ``str(pathlib.Path.home() / ".claude.json")``.
+    The ``claude_code_path`` parameter lets callers override the target
+    path for claude-code installs (default: ``~/.claude.json``).
+    The ``cursor_path`` parameter lets callers override the target path
+    for cursor installs (default: ``~/.cursor/mcp.json``). Both are used
+    for project-scoped configs + UAT isolation.
     """
     results: list[_McpInstallResult] = []
 
@@ -764,10 +768,21 @@ def _run_harness_mcp_installs(
         "install-claude-code" if harness == "claude-code" else "install-cursor"
     )
 
+    # Resolve the target path for path-aware harnesses.
+    # claude-code: explicit override or default ~/.claude.json (per #652).
+    # cursor: explicit override or default ~/.cursor/mcp.json.
+    if harness == "claude-code":
+        path: str | None = (
+            claude_code_path or str(pathlib.Path.home() / ".claude.json")
+        )
+    elif harness == "cursor":
+        path = cursor_path or str(pathlib.Path.home() / ".cursor" / "mcp.json")
+    else:
+        path = None
+
     # 1. iam-jit mcp install-<harness>
     iam_jit_cmd = ["iam-jit", "mcp", install_sub]
-    if harness == "claude-code":
-        path = claude_code_path or str(pathlib.Path.home() / ".claude.json")
+    if path is not None:
         iam_jit_cmd += ["--path", path]
 
     try:
@@ -796,7 +811,7 @@ def _run_harness_mcp_installs(
     # 2. <bouncer> mcp install-<harness> for each enabled bouncer.
     for bouncer in bouncers:
         bouncer_cmd = [bouncer, "mcp", install_sub]
-        if harness == "claude-code":
+        if path is not None:
             bouncer_cmd += ["--path", path]
 
         try:
@@ -1297,6 +1312,23 @@ def register_init_command(main_group: click.Group) -> click.Command:
              "after writing the config. Pass this flag in CI / scripted "
              "callers that manage harness config separately.",
     )
+    @click.option(
+        "--claude-code-path",
+        type=click.Path(dir_okay=False, path_type=pathlib.Path),
+        default=None,
+        help="#659 — Override Claude Code MCP config path (default: "
+             "auto-detect via ladder; falls back to ~/.claude.json). "
+             "Useful for project-scoped configs (<project>/.claude/mcp.json) "
+             "and UAT isolation.",
+    )
+    @click.option(
+        "--cursor-path",
+        type=click.Path(dir_okay=False, path_type=pathlib.Path),
+        default=None,
+        help="#659 — Override Cursor MCP config path (default: "
+             "~/.cursor/mcp.json). Useful for workspace-scoped configs "
+             "(<project>/.cursor/mcp.json) and UAT isolation.",
+    )
     def init_cmd(
         non_interactive: bool,
         data_dir: pathlib.Path | None,
@@ -1312,6 +1344,8 @@ def register_init_command(main_group: click.Group) -> click.Command:
         org_public_key_path: str | None,
         no_doctor_check: bool,
         skip_mcp_install: bool,
+        claude_code_path: pathlib.Path | None,
+        cursor_path: pathlib.Path | None,
     ) -> None:
         """Bootstrap iam-jit on a fresh machine via guided interview.
 
@@ -1530,6 +1564,12 @@ def register_init_command(main_group: click.Group) -> click.Command:
             mcp_install_results = _run_harness_mcp_installs(
                 harness=result.harness,
                 bouncers=result.bouncers,
+                claude_code_path=(
+                    str(claude_code_path) if claude_code_path is not None else None
+                ),
+                cursor_path=(
+                    str(cursor_path) if cursor_path is not None else None
+                ),
             )
             _print_mcp_install_summary(mcp_install_results)
 

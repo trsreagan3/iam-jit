@@ -665,3 +665,240 @@ class TestRunHarnessMcpInstalls:
         assert len(results) == 1
         assert not results[0].ok
         assert "manual" in results[0].detail.lower() or "paste" in results[0].detail.lower() or "snippet" in results[0].detail.lower()
+
+    def test_cursor_path_override_plumbed_through(self) -> None:
+        """cursor_path is forwarded as --path to install-cursor for both
+        iam-jit and every enabled bouncer."""
+        with patch("subprocess.run", return_value=_ok_proc()) as mock_run:
+            results = cli_init._run_harness_mcp_installs(
+                harness="cursor",
+                bouncers=("ibounce",),
+                cursor_path="/tmp/workspace/.cursor/mcp.json",
+            )
+
+        assert len(results) == 2
+        assert all(r.ok for r in results), [r.detail for r in results]
+
+        for c in mock_run.call_args_list:
+            cmd = c[0][0]
+            assert "install-cursor" in cmd
+            assert "--path" in cmd
+            path_idx = cmd.index("--path")
+            assert cmd[path_idx + 1] == "/tmp/workspace/.cursor/mcp.json"
+
+
+# ---------------------------------------------------------------------------
+# Group F — #659: --claude-code-path and --cursor-path CLI flags
+# ---------------------------------------------------------------------------
+
+
+class TestPathOverrideFlags:
+    """#659: --claude-code-path and --cursor-path are accepted by `init`
+    and forwarded correctly to _run_harness_mcp_installs."""
+
+    def test_claude_code_path_flag_accepted_with_skip(
+        self,
+        isolated_data_dir: pathlib.Path,
+        tmp_path: pathlib.Path,
+    ) -> None:
+        """--claude-code-path + --skip-mcp-install does NOT crash on
+        option parsing — the flag is accepted even when install is skipped."""
+        fixture = tmp_path / "fixture.json"
+        fixture.write_text(json.dumps({}))
+
+        with patch("subprocess.run") as mock_run:
+            result = _runner().invoke(
+                main,
+                [
+                    "init", "--non-interactive",
+                    "--data-dir", str(isolated_data_dir),
+                    "--harness", "claude-code",
+                    "--claude-code-path", str(fixture),
+                    "--skip-mcp-install",
+                    "--no-doctor-check",
+                ],
+                catch_exceptions=False,
+            )
+
+        assert result.exit_code == 0, result.output
+        # skip-mcp-install prevents any subprocess call.
+        mock_run.assert_not_called()
+        # Config was still written.
+        assert (isolated_data_dir / "iam-jit.yaml").exists()
+
+    def test_claude_code_path_flag_writes_to_fixture_not_home(
+        self,
+        isolated_data_dir: pathlib.Path,
+        tmp_path: pathlib.Path,
+    ) -> None:
+        """--claude-code-path <fixture> routes the install subprocess call
+        to the fixture path, NOT to ~/.claude.json."""
+        fixture = tmp_path / "custom-claude.json"
+        fixture.write_text(json.dumps({}))
+
+        captured_cmds: list[list[str]] = []
+
+        def _capture(cmd: list[str], **kwargs: Any) -> subprocess.CompletedProcess:  # type: ignore[type-arg]
+            captured_cmds.append(cmd)
+            return _ok_proc()
+
+        with patch("subprocess.run", side_effect=_capture):
+            result = _runner().invoke(
+                main,
+                [
+                    "init", "--non-interactive",
+                    "--data-dir", str(isolated_data_dir),
+                    "--harness", "claude-code",
+                    "--bouncers", "ibounce",
+                    "--claude-code-path", str(fixture),
+                    "--no-doctor-check",
+                ],
+                catch_exceptions=False,
+            )
+
+        assert result.exit_code == 0, result.output
+        assert len(captured_cmds) == 2, f"Expected 2 calls; got {captured_cmds}"
+
+        for cmd in captured_cmds:
+            assert "--path" in cmd
+            path_idx = cmd.index("--path")
+            assert cmd[path_idx + 1] == str(fixture), (
+                f"Expected --path {fixture}; got {cmd[path_idx + 1]}"
+            )
+            # Must NOT contain the real ~/.claude.json
+            assert ".claude.json" not in cmd[path_idx + 1] or str(fixture) == cmd[path_idx + 1], (
+                f"Install must target fixture, not real ~/.claude.json: {cmd}"
+            )
+
+    def test_claude_code_path_flag_default_behavior_unchanged(
+        self,
+        isolated_data_dir: pathlib.Path,
+    ) -> None:
+        """Omitting --claude-code-path preserves the default ~/.claude.json
+        target (no regression from #651 behavior)."""
+        with patch("subprocess.run", return_value=_ok_proc()) as mock_run:
+            result = _runner().invoke(
+                main,
+                [
+                    "init", "--non-interactive",
+                    "--data-dir", str(isolated_data_dir),
+                    "--harness", "claude-code",
+                    "--bouncers", "ibounce",
+                    "--no-doctor-check",
+                ],
+                catch_exceptions=False,
+            )
+
+        assert result.exit_code == 0, result.output
+
+        for c in mock_run.call_args_list:
+            cmd = c[0][0]
+            assert "--path" in cmd
+            path_idx = cmd.index("--path")
+            passed_path = cmd[path_idx + 1]
+            assert passed_path.endswith(".claude.json"), (
+                f"Default must end with .claude.json; got {passed_path}"
+            )
+
+    def test_cursor_path_flag_accepted_with_skip(
+        self,
+        isolated_data_dir: pathlib.Path,
+        tmp_path: pathlib.Path,
+    ) -> None:
+        """--cursor-path + --skip-mcp-install does NOT crash on option
+        parsing — the flag is accepted even when install is skipped."""
+        fixture = tmp_path / "workspace" / ".cursor" / "mcp.json"
+        fixture.parent.mkdir(parents=True, exist_ok=True)
+        fixture.write_text(json.dumps({}))
+
+        with patch("subprocess.run") as mock_run:
+            result = _runner().invoke(
+                main,
+                [
+                    "init", "--non-interactive",
+                    "--data-dir", str(isolated_data_dir),
+                    "--harness", "cursor",
+                    "--cursor-path", str(fixture),
+                    "--skip-mcp-install",
+                    "--no-doctor-check",
+                ],
+                catch_exceptions=False,
+            )
+
+        assert result.exit_code == 0, result.output
+        mock_run.assert_not_called()
+        assert (isolated_data_dir / "iam-jit.yaml").exists()
+
+    def test_cursor_path_flag_routes_to_fixture(
+        self,
+        isolated_data_dir: pathlib.Path,
+        tmp_path: pathlib.Path,
+    ) -> None:
+        """--cursor-path <fixture> routes the install subprocess call
+        to the fixture path, NOT to ~/.cursor/mcp.json."""
+        fixture = tmp_path / "myproject" / ".cursor" / "mcp.json"
+        fixture.parent.mkdir(parents=True, exist_ok=True)
+        fixture.write_text(json.dumps({}))
+
+        captured_cmds: list[list[str]] = []
+
+        def _capture(cmd: list[str], **kwargs: Any) -> subprocess.CompletedProcess:  # type: ignore[type-arg]
+            captured_cmds.append(cmd)
+            return _ok_proc()
+
+        with patch("subprocess.run", side_effect=_capture):
+            result = _runner().invoke(
+                main,
+                [
+                    "init", "--non-interactive",
+                    "--data-dir", str(isolated_data_dir),
+                    "--harness", "cursor",
+                    "--bouncers", "ibounce",
+                    "--cursor-path", str(fixture),
+                    "--no-doctor-check",
+                ],
+                catch_exceptions=False,
+            )
+
+        assert result.exit_code == 0, result.output
+        assert len(captured_cmds) == 2, f"Expected 2 calls; got {captured_cmds}"
+
+        for cmd in captured_cmds:
+            assert "install-cursor" in cmd
+            assert "--path" in cmd
+            path_idx = cmd.index("--path")
+            assert cmd[path_idx + 1] == str(fixture), (
+                f"Expected --path {fixture}; got {cmd[path_idx + 1]}"
+            )
+
+    def test_cursor_path_flag_default_behavior_unchanged(
+        self,
+        isolated_data_dir: pathlib.Path,
+    ) -> None:
+        """Omitting --cursor-path preserves the default ~/.cursor/mcp.json
+        target (no regression)."""
+        with patch("subprocess.run", return_value=_ok_proc()) as mock_run:
+            result = _runner().invoke(
+                main,
+                [
+                    "init", "--non-interactive",
+                    "--data-dir", str(isolated_data_dir),
+                    "--harness", "cursor",
+                    "--bouncers", "ibounce",
+                    "--no-doctor-check",
+                ],
+                catch_exceptions=False,
+            )
+
+        assert result.exit_code == 0, result.output
+
+        for c in mock_run.call_args_list:
+            cmd = c[0][0]
+            assert "--path" in cmd
+            path_idx = cmd.index("--path")
+            passed_path = cmd[path_idx + 1]
+            assert passed_path.endswith(
+                ".cursor/mcp.json"
+            ) or passed_path.endswith(".cursor\\mcp.json"), (
+                f"Default must end with .cursor/mcp.json; got {passed_path}"
+            )
