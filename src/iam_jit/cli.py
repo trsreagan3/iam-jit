@@ -313,7 +313,22 @@ def agent_grant() -> None:
     default=None,
     help="Local data directory. Default: ~/.iam-jit/",
 )
-def serve(local: bool, host: str, port: int, data_dir: pathlib.Path | None) -> None:
+@click.option(
+    "--no-doctor-check",
+    is_flag=True,
+    default=False,
+    help="#626 — Skip the pre-serve install-verification pass. By "
+         "default, `serve --local` runs `doctor install-check` BEFORE "
+         "binding the port + surfaces FAIL/WARN rows. Suppress for "
+         "deterministic scripted runs.",
+)
+def serve(
+    local: bool,
+    host: str,
+    port: int,
+    data_dir: pathlib.Path | None,
+    no_doctor_check: bool,
+) -> None:
     """Run iam-jit as a local process.
 
     `iam-jit serve --local` is the recommended entry point for
@@ -338,6 +353,17 @@ def serve(local: bool, host: str, port: int, data_dir: pathlib.Path | None) -> N
             err=True,
         )
         sys.exit(1)
+
+    # #626 Phase 2 — pre-serve install verification. Runs install-check
+    # BEFORE binding the port so the operator sees gaps (missing
+    # binaries, unwired AWS_ENDPOINT_URL) immediately instead of
+    # discovering 19 hours later that decisions_count=2 because nothing
+    # was routed through. Per [[ibounce-honest-positioning]] we do NOT
+    # block the serve startup on FAIL rows — operator may know their
+    # situation. We just surface, and serve continues.
+    if not no_doctor_check:
+        from .cli_init import _print_post_init_install_check
+        _print_post_init_install_check(suppress=False)
 
     from .local_server import run
 
@@ -488,11 +514,20 @@ def _print_preflight_warning(
          "fail-CLOSED with exit 2 when prior state is detected "
          "(per [[creates-never-mutates]] + [[ibounce-honest-positioning]]).",
 )
+@click.option(
+    "--no-doctor-check",
+    is_flag=True,
+    default=False,
+    help="#626 — Skip the post-init-solo install-verification pass. By "
+         "default, init-solo runs `doctor install-check` at the end + "
+         "surfaces FAIL rows. Suppress for deterministic scripted runs.",
+)
 def init_solo(
     data_dir: pathlib.Path | None,
     port: int,
     print_mcp_config: bool,
     reuse_existing: bool,
+    no_doctor_check: bool,
 ) -> None:
     """One-command setup for solo-dev / agent-safety mode.
 
@@ -561,6 +596,14 @@ def init_solo(
     click.echo("     The agent will route AWS access requests through")
     click.echo("     iam-jit (scoped, time-bound, audited).")
     click.echo("")
+
+    # #626 Phase 2 — install-check at end of init-solo. Same shape as
+    # the `iam-jit init` standard flow per [[ibounce-honest-positioning]]:
+    # operator's first chance to see whether the install will actually
+    # protect them. Best-effort; init-solo's exit code stays unchanged.
+    if not no_doctor_check:
+        from .cli_init import _print_post_init_install_check
+        _print_post_init_install_check(suppress=False)
 
 
 def _print_mcp_snippets(cfg) -> None:  # type: ignore[no-untyped-def]

@@ -506,6 +506,87 @@ def _print_summary(
 
 
 # ---------------------------------------------------------------------------
+# #626 Phase 2 — install-verification at end-of-init.
+#
+# Per founder dogfood 2026-05-26: the original failure mode was that
+# init succeeded silently while the install was actually broken (no
+# binaries on PATH; AWS_ENDPOINT_URL never wired). Phase 2 closes the
+# loop by running `doctor install-check` at the end of init and
+# surfacing any FAIL rows + paste-ready remediation BEFORE the
+# operator walks away thinking they're protected.
+#
+# We render a CONDENSED verdict (not the full 8-section dump) — the
+# operator can always run `iam-jit doctor install-check` for the full
+# report. Init's exit code is NOT changed by install-check verdicts
+# (init succeeded at config-write; install-check is post-write
+# informational) per [[ibounce-honest-positioning]]: name the gap, but
+# don't pretend init failed when it didn't.
+# ---------------------------------------------------------------------------
+
+
+def _print_post_init_install_check(*, suppress: bool = False) -> None:
+    """Render a condensed install-check verdict at end-of-init.
+
+    Always best-effort: any failure inside install-check itself
+    degrades silently (logs an INFO-level note) so init doesn't appear
+    to fail just because the doctor probe couldn't run. The operator
+    can always re-run `iam-jit doctor install-check` for a full report.
+
+    When ``suppress`` is True, this is a no-op — used by --managed and
+    tests that need init's output to stay deterministic.
+    """
+    if suppress:
+        return
+    try:
+        from .cli_doctor_install_check import run_install_check
+    except Exception:
+        return
+    try:
+        sections = run_install_check(run_self_test=True)
+    except Exception:
+        return
+
+    # Collect FAIL + WARN rows for the condensed render.
+    from .cli_doctor_install_check import _SEV_ERR, _SEV_WARN
+
+    fails: list[tuple[str, str, str]] = []  # (section, label, fix)
+    warns: list[tuple[str, str, str]] = []
+    for s in sections:
+        for r in s.rows:
+            if r.severity >= _SEV_ERR:
+                fails.append((s.title, r.label, r.fix))
+            elif r.severity == _SEV_WARN:
+                warns.append((s.title, r.label, r.fix))
+
+    click.echo()
+    click.secho("install-check:", bold=True)
+    if not fails and not warns:
+        click.secho(
+            "  every required surface is on PATH, running, and wired.",
+            fg="green",
+        )
+        return
+    if fails:
+        click.secho(
+            f"  {len(fails)} FAIL row(s) — install will NOT protect until "
+            "fixed:",
+            fg="red",
+        )
+        for sect, label, fix in fails:
+            click.echo(f"    - [{sect}] {label}")
+            if fix:
+                click.echo(f"        Fix: {fix}")
+    if warns:
+        click.secho(f"  {len(warns)} WARN row(s):", fg="yellow")
+        for sect, label, fix in warns:
+            click.echo(f"    - [{sect}] {label}")
+    click.echo()
+    click.echo(
+        "  Run `iam-jit doctor install-check` for the full 8-section report."
+    )
+
+
+# ---------------------------------------------------------------------------
 # #490 §A90 — Managed-mode helpers (SSRF gate + Ed25519 verify + fetch)
 # ---------------------------------------------------------------------------
 
@@ -924,6 +1005,15 @@ def register_init_command(main_group: click.Group) -> click.Command:
              "then $XDG_CONFIG_HOME/iam-jit/org.pub, then "
              "~/.iam-jit/org.pub. Per #490 §A90.",
     )
+    @click.option(
+        "--no-doctor-check",
+        is_flag=True,
+        default=False,
+        help="#626 — Skip the post-init install-verification pass. By "
+             "default, init runs `doctor install-check` at the end + "
+             "surfaces any FAIL rows. Suppress for deterministic "
+             "scripted runs / tests.",
+    )
     def init_cmd(
         non_interactive: bool,
         data_dir: pathlib.Path | None,
@@ -937,6 +1027,7 @@ def register_init_command(main_group: click.Group) -> click.Command:
         managed: bool,
         org_policy_url: str | None,
         org_public_key_path: str | None,
+        no_doctor_check: bool,
     ) -> None:
         """Bootstrap iam-jit on a fresh machine via guided interview.
 
@@ -1005,6 +1096,8 @@ def register_init_command(main_group: click.Group) -> click.Command:
                     "`iam-jit doctor apply-config` manually.",
                     fg="yellow",
                 )
+            # #626 Phase 2 — install-check at end of managed-mode init.
+            _print_post_init_install_check(suppress=no_doctor_check)
             return
 
         # ------------------------------------------------------------------
@@ -1144,6 +1237,14 @@ def register_init_command(main_group: click.Group) -> click.Command:
 
         # Step 8 — summary
         _print_summary(result=result, config_path=config_path)
+
+        # #626 Phase 2 — install-check at end of standard init flow.
+        # Renders condensed verdict (PATH gaps + env-wire gaps + Go-side
+        # status). Does NOT change init's exit code; init succeeded at
+        # config-write. Per [[ibounce-honest-positioning]] this is the
+        # operator's first-and-best chance to see "is my install
+        # actually going to work?" before they walk away.
+        _print_post_init_install_check(suppress=no_doctor_check)
 
     return init_cmd
 
