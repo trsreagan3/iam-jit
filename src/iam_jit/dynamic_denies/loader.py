@@ -101,6 +101,20 @@ _VALID_BOUNCER_NAMES: frozenset[str] = frozenset({
     "gbounce",
 })
 
+# Provenance values accepted in each rule's ``source`` field.
+# Exported as a module-level constant so tests can monkeypatch it for the
+# sabotage check (per [[install-ux-gap-2026-05-26]] discipline) and so
+# future provenance categories require a single-line addition here.
+# #645 CRIT: "threat-feed" was missing — loader rejected rules written by
+# the threat-feed applier, causing silent revert to last-good snapshot.
+VALID_SOURCES: frozenset[str] = frozenset({
+    "cli",
+    "mcp",
+    "org-distributed",
+    "imported",
+    "threat-feed",
+})
+
 
 def resolve_default_path() -> str:
     """Resolve the loader's default file path, honouring
@@ -522,10 +536,10 @@ def _build_rule(raw: dict[str, Any], *, idx: int, path: str) -> Rule:
     applies_to_recommender = bool(raw.get("applies_to_recommender", True))
 
     source = str(raw.get("source") or "cli")
-    if source not in ("cli", "mcp", "org-distributed", "imported"):
+    if source not in VALID_SOURCES:
         raise DynamicDenyLoadError(
             f"{path}: denies[{idx}] ({rid}) `source` {source!r} is not a "
-            f"recognised provenance (expected cli/mcp/org-distributed/imported)",
+            f"recognised provenance (expected one of: {'/'.join(sorted(VALID_SOURCES))})",
             stage="structure", path=path,
         )
 

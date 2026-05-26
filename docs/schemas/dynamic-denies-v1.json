@@ -87,9 +87,9 @@
           },
           "source": {
             "type": "string",
-            "enum": ["cli", "mcp", "org-distributed", "imported"],
+            "enum": ["cli", "mcp", "org-distributed", "imported", "threat-feed"],
             "default": "cli",
-            "description": "Provenance — how the rule landed. `org-distributed` rules cannot be loosened by personal denies per the design doc's `Conflict resolution` section."
+            "description": "Provenance — how the rule landed. `org-distributed` rules cannot be loosened by personal denies per the design doc's `Conflict resolution` section. `threat-feed` rules are auto-applied by the threat-feed applier (#407-#411 / #645)."
           },
           "org_distributed_url": {
             "type": ["string", "null"],
