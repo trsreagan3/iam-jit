@@ -6,7 +6,7 @@ import sys
 import click
 
 from . import __version__
-from .schema import load_request, scaffold_request, validate_request
+from .schema import load_request, validate_request
 
 
 @click.group()
@@ -15,49 +15,20 @@ def main() -> None:
     """iam-jit — author, validate, and (later) provision time-bound IAM roles."""
 
 
-@main.command()
-@click.option("--description", "-d", required=True, help="Plain-English task description.")
-@click.option("--account", "-a", required=True, multiple=True, help="Target account ID.")
-@click.option(
-    "--duration-hours",
-    "-h",
-    type=int,
-    default=24,
-    show_default=True,
-    help="How long the grant should last from approval.",
-)
-@click.option(
-    "--write",
-    "write_access",
-    is_flag=True,
-    default=False,
-    help="Request read-write access. Default is read-only (much faster to approve).",
-)
-@click.option(
-    "--out",
-    "-o",
-    type=click.Path(dir_okay=False, writable=True, path_type=pathlib.Path),
-    help="Where to write the request YAML. Default: stdout.",
-)
-def init(
-    description: str,
-    account: tuple[str, ...],
-    duration_hours: int,
-    write_access: bool,
-    out: pathlib.Path | None,
-) -> None:
-    """Scaffold a new role-request YAML from a description."""
-    yaml_text = scaffold_request(
-        description=description,
-        accounts=list(account),
-        duration_hours=duration_hours,
-        access_type="read-write" if write_access else "read-only",
-    )
-    if out:
-        out.write_text(yaml_text)
-        click.echo(f"Wrote {out}", err=True)
-    else:
-        click.echo(yaml_text)
+# NOTE: the older `iam-jit init` shape was a thin scaffolder that took
+# --description / --account / --write and emitted a role-request YAML.
+# It has been REPLACED by the #489 interactive bootstrap registered
+# below via `register_init_command(main)`. The replacement is registered
+# AFTER this file's command decorators run, so Click's add_command
+# semantics overwrite the old definition cleanly.
+#
+# For operators who want the old scaffolder behavior (rare; mostly
+# pre-launch test infra), the underlying primitive
+# `iam_jit.schema.scaffold_request` is unchanged and can be invoked
+# from Python directly. We deleted the CLI shim because (a) two
+# distinct `iam-jit init` shapes is confusing + (b) the dead code
+# made readers second-guess which one was canonical (#626 audit
+# 2026-05-26).
 
 
 @main.command()
@@ -1964,6 +1935,15 @@ from .cli_doctor_install_check import (  # noqa: E402
     register_install_check_command,
 )
 register_install_check_command(doctor)
+
+
+# #626 Phase 3 — `iam-jit shellinit`. Emits paste-ready shell-export
+# block for running bouncers (AWS_ENDPOINT_URL etc.). The install-
+# check FAIL hints point at this command, and operators are expected
+# to `eval "$(iam-jit shellinit)"` once per shell session. Per
+# [[creates-never-mutates]] never writes to shell rc files.
+from .cli_shellinit import register_shellinit_command  # noqa: E402
+register_shellinit_command(main)
 
 
 # #489 + #532 CRIT (§A89 LAUNCH-BLOCKER + UC-30) — `iam-jit init`
