@@ -73,6 +73,7 @@ import dataclasses
 import json
 import os
 import pathlib
+import subprocess
 import sys
 import urllib.error
 import urllib.parse
@@ -494,9 +495,21 @@ def _any_bouncer_running() -> bool:
 
 
 def _print_summary(
-    *, result: _InterviewResult, config_path: pathlib.Path,
+    *,
+    result: _InterviewResult,
+    config_path: pathlib.Path,
+    mcp_install_results: list[_McpInstallResult] | None = None,
 ) -> None:
-    """Final ASCII summary the operator sees + the agent parses."""
+    """Final ASCII summary the operator sees + the agent parses.
+
+    ``mcp_install_results`` (from ``_run_harness_mcp_installs``) drives
+    the harness restart hint at the bottom of Next steps:
+      - When at least one server was installed successfully: names the
+        count so the operator knows what to expect after restart.
+      - When all failed or the list is absent: falls back to the
+        original "wire manually" text.
+      - When harness is "none": always shows "iam-jit mcp show-config".
+    """
     click.echo()
     click.secho("iam-jit init: summary", fg="cyan", bold=True)
     click.echo(f"  shape:       {result.shape}")
@@ -533,9 +546,22 @@ def _print_summary(
     )
     step += 1
     if result.harness != "none":
-        click.echo(
-            f"  {step}. Restart {result.harness} so it re-reads MCP config."
-        )
+        # Determine whether install actually succeeded for any server.
+        installed = [r for r in (mcp_install_results or []) if r.ok]
+        if installed:
+            count = len(installed)
+            names = ", ".join(r.label for r in installed)
+            click.echo(
+                f"  {step}. Restart {result.harness} so it picks up "
+                f"the {count} MCP server(s) we just registered "
+                f"({names})."
+            )
+        else:
+            # No auto-install succeeded (skipped / all failed / codex / devin).
+            click.echo(
+                f"  {step}. Wire MCP manually: iam-jit mcp show-config  "
+                f"(harness: {result.harness})"
+            )
     else:
         click.echo(
             f"  {step}. Wire MCP into your agent harness: "
@@ -631,6 +657,204 @@ def _print_post_init_install_check(*, suppress: bool = False) -> None:
     click.echo(
         "  Run `iam-jit doctor install-check` for the full 8-section report."
     )
+
+
+# ---------------------------------------------------------------------------
+# #651 CRIT — MCP install helper (closes the advertised-but-never-wired gap)
+#
+# Per founder dogfood 2026-05-26: `iam-jit init --harness=claude-code`
+# printed "Restart claude-code so it re-reads MCP config" but NEVER
+# actually called `iam-jit mcp install-claude-code` or the bouncer
+# install equivalents. The operator got a false "all set" signal.
+#
+# Design decisions:
+#   - iam-jit install always passes --path ~/.claude.json explicitly to
+#     dodge #652 (install-claude-code wrongly defaults to Claude Desktop
+#     path on macOS). The workaround is safe because ~/.claude.json is
+#     the canonical Claude Code agent config path.
+#   - Bouncer installs are invoked via subprocess (not in-process Click
+#     runner) so we exercise the real binary + don't couple init to
+#     internal bouncer-cli wiring. Go-backed bouncers (kbounce/dbounce/
+#     gbounce) are handled the same way — subprocess exits non-zero if
+#     the binary isn't on PATH, which surfaces as a WARN row.
+#   - Each install is independent: one failure MUST NOT abort the others
+#     (fail-graceful per [[creates-never-mutates]] + [[ibounce-honest-
+#     positioning]]). Init exits 0 as long as the config was written.
+#   - The WARN rows propagate a count so _print_summary can switch the
+#     "Restart harness" instruction between "X servers registered" vs
+#     the old manual text.
+# ---------------------------------------------------------------------------
+
+
+@dataclasses.dataclass(frozen=True)
+class _McpInstallResult:
+    """Outcome of a single harness MCP install invocation."""
+    label: str         # human-readable ("iam-jit", "ibounce", …)
+    ok: bool           # True iff the install command exited 0
+    detail: str        # short message for WARN row or success note
+
+
+def _run_harness_mcp_installs(
+    *,
+    harness: str,
+    bouncers: tuple[str, ...],
+    claude_code_path: str | None = None,
+) -> list[_McpInstallResult]:
+    """Invoke the correct install subcommand(s) for *harness* × *bouncers*.
+
+    For ``claude-code``:
+      1. ``iam-jit mcp install-claude-code --path ~/.claude.json``
+      2. For each Python-backed bouncer in *bouncers*:
+         ``<bouncer> mcp install-claude-code --path ~/.claude.json``
+         (Go-backed bouncers — kbounce / dbounce / gbounce — use the
+         same path convention if they're on PATH; a missing binary
+         surfaces as a WARN row, not a crash.)
+
+    For ``cursor``:
+      Same shape with ``install-cursor`` (no explicit path needed —
+      ibounce auto-detects ~/.cursor/mcp.json).
+
+    For ``codex``:
+      Codex config path is unstable; print the snippet + a WARN that
+      the operator must paste it manually. No filesystem write.
+
+    For ``devin``:
+      Devin has no auto-install path; print the recipe + WARN to paste.
+
+    For ``none`` (and anything else):
+      Returns an empty list — caller skips the install block.
+
+    Per [[creates-never-mutates]] every subprocess failure is caught +
+    returned as a failed ``_McpInstallResult`` — NEVER raises + NEVER
+    silently swallows. The caller surfaces them as WARN rows.
+
+    The ``claude_code_path`` parameter lets tests override the target
+    path without touching the real ~/.claude.json. Production code
+    always passes ``str(pathlib.Path.home() / ".claude.json")``.
+    """
+    results: list[_McpInstallResult] = []
+
+    if harness == "none":
+        return results
+
+    # Harnesses that need snippet-only (no auto-write)
+    if harness in ("codex", "devin"):
+        try:
+            from .cli import _mcp_server_config_dict
+            snippet = json.dumps(_mcp_server_config_dict(), indent=2)
+        except Exception as e:
+            snippet = f"(could not generate snippet: {e})"
+        click.echo(
+            f"\n[mcp-install] {harness}: no auto-install path — paste "
+            "the snippet below into your harness MCP config:"
+        )
+        click.echo(snippet)
+        results.append(_McpInstallResult(
+            label="iam-jit",
+            ok=False,  # not installed automatically
+            detail=(
+                f"{harness} requires manual MCP config wiring; "
+                "snippet printed above"
+            ),
+        ))
+        return results
+
+    # claude-code and cursor: auto-install via subcommand.
+    install_sub = (
+        "install-claude-code" if harness == "claude-code" else "install-cursor"
+    )
+
+    # 1. iam-jit mcp install-<harness>
+    iam_jit_cmd = ["iam-jit", "mcp", install_sub]
+    if harness == "claude-code":
+        path = claude_code_path or str(pathlib.Path.home() / ".claude.json")
+        iam_jit_cmd += ["--path", path]
+
+    try:
+        proc = subprocess.run(
+            iam_jit_cmd,
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+        ok = proc.returncode == 0
+        detail = proc.stdout.strip() or proc.stderr.strip() or "(no output)"
+        results.append(_McpInstallResult(label="iam-jit", ok=ok, detail=detail))
+    except FileNotFoundError:
+        results.append(_McpInstallResult(
+            label="iam-jit",
+            ok=False,
+            detail="iam-jit binary not found on PATH; MCP not installed",
+        ))
+    except Exception as e:
+        results.append(_McpInstallResult(
+            label="iam-jit",
+            ok=False,
+            detail=f"iam-jit mcp {install_sub} failed: {e}",
+        ))
+
+    # 2. <bouncer> mcp install-<harness> for each enabled bouncer.
+    for bouncer in bouncers:
+        bouncer_cmd = [bouncer, "mcp", install_sub]
+        if harness == "claude-code":
+            bouncer_cmd += ["--path", path]
+
+        try:
+            proc = subprocess.run(
+                bouncer_cmd,
+                capture_output=True,
+                text=True,
+                timeout=30,
+            )
+            ok = proc.returncode == 0
+            detail = proc.stdout.strip() or proc.stderr.strip() or "(no output)"
+            results.append(_McpInstallResult(label=bouncer, ok=ok, detail=detail))
+        except FileNotFoundError:
+            results.append(_McpInstallResult(
+                label=bouncer,
+                ok=False,
+                detail=f"{bouncer} binary not found on PATH; MCP not installed",
+            ))
+        except Exception as e:
+            results.append(_McpInstallResult(
+                label=bouncer,
+                ok=False,
+                detail=f"{bouncer} mcp {install_sub} failed: {e}",
+            ))
+
+    return results
+
+
+def _print_mcp_install_summary(
+    results: list[_McpInstallResult],
+) -> None:
+    """Render WARN rows for every failed MCP install.
+
+    Per [[ibounce-honest-positioning]]: every gap is named, never
+    swallowed. Successes get a quiet confirmation. The operator's
+    terminal shows exactly which servers wired and which didn't.
+    """
+    if not results:
+        return
+    ok_labels = [r.label for r in results if r.ok]
+    fail_labels = [r.label for r in results if not r.ok]
+
+    if ok_labels:
+        click.secho(
+            f"[mcp-install] registered: {', '.join(ok_labels)}",
+            fg="green",
+        )
+    for r in results:
+        if not r.ok:
+            click.secho(
+                f"[mcp-install] WARN: {r.label} — {r.detail}",
+                fg="yellow",
+            )
+    if fail_labels:
+        click.echo(
+            "  Run `iam-jit mcp show-config` + paste the snippet "
+            "into your harness config manually for any WARN items above."
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -1063,6 +1287,16 @@ def register_init_command(main_group: click.Group) -> click.Command:
              "surfaces any FAIL rows. Suppress for deterministic "
              "scripted runs / tests.",
     )
+    @click.option(
+        "--skip-mcp-install",
+        is_flag=True,
+        default=False,
+        help="#651 — Skip the automatic MCP harness wiring step. By "
+             "default, init calls `iam-jit mcp install-<harness>` + "
+             "`<bouncer> mcp install-<harness>` for every enabled bouncer "
+             "after writing the config. Pass this flag in CI / scripted "
+             "callers that manage harness config separately.",
+    )
     def init_cmd(
         non_interactive: bool,
         data_dir: pathlib.Path | None,
@@ -1077,6 +1311,7 @@ def register_init_command(main_group: click.Group) -> click.Command:
         org_policy_url: str | None,
         org_public_key_path: str | None,
         no_doctor_check: bool,
+        skip_mcp_install: bool,
     ) -> None:
         """Bootstrap iam-jit on a fresh machine via guided interview.
 
@@ -1284,8 +1519,26 @@ def register_init_command(main_group: click.Group) -> click.Command:
                     fg="yellow",
                 )
 
+        # Step 7.5 — MCP harness wiring (#651 CRIT)
+        # Actually wire the MCP config now — not just print a hint.
+        # Per [[creates-never-mutates]] every failure surfaces as a WARN;
+        # init never crashes on a subprocess error. --skip-mcp-install
+        # lets CI / scripted callers opt out while still getting the
+        # config file.
+        mcp_install_results: list[_McpInstallResult] = []
+        if not skip_mcp_install and result.harness != "none":
+            mcp_install_results = _run_harness_mcp_installs(
+                harness=result.harness,
+                bouncers=result.bouncers,
+            )
+            _print_mcp_install_summary(mcp_install_results)
+
         # Step 8 — summary
-        _print_summary(result=result, config_path=config_path)
+        _print_summary(
+            result=result,
+            config_path=config_path,
+            mcp_install_results=mcp_install_results,
+        )
 
         # #626 Phase 2 — install-check at end of standard init flow.
         # Renders condensed verdict (PATH gaps + env-wire gaps + Go-side
@@ -1300,8 +1553,11 @@ def register_init_command(main_group: click.Group) -> click.Command:
 
 __all__ = [
     "ManagedPolicyError",
+    "_McpInstallResult",
     "_fetch_managed_policy",
+    "_print_mcp_install_summary",
     "_resolve_org_public_key",
+    "_run_harness_mcp_installs",
     "_ssrf_gate_url",
     "_verify_ed25519_signature",
     "register_init_command",
