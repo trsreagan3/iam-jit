@@ -1946,6 +1946,16 @@ from .cli_posture import register_posture_command  # noqa: E402
 register_posture_command(main)
 
 
+# #683 — `iam-jit attach` / `iam-jit detach`: the universal, no-restart,
+# no-sudo setup step that routes a running session's AWS calls through
+# ibounce by writing endpoint_url into ~/.aws/config (read per-invocation
+# by the AWS SDK). Permission-minimal + harness-agnostic per
+# [[permission-minimal-install]] + [[no-sudo-userspace-install]]. The
+# `iam_jit_attach` MCP tool wraps this same backend (attach_aws_config).
+from .cli_attach import register_attach_command  # noqa: E402
+register_attach_command(main)
+
+
 # #400 — register `iam-jit doctor apply-config` ambient-declaration applier.
 # Sibling shipped to the `iam_jit_setup_from_config` MCP tool per
 # [[cross-product-agent-parity]]: operator-side CLI + agent-side MCP share
