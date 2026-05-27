@@ -648,6 +648,22 @@ _BOUNCER_INSTALL_PATH_ROOTS = (
     pathlib.Path("/opt/iam-jit/bin"),
     pathlib.Path("/usr/local/bin"),
     pathlib.Path.home() / ".local" / "bin",
+    # #678: pipx-managed installs. `pipx install iam-jit` places a
+    # symlink at ~/.local/bin/ibounce → ~/.local/pipx/venvs/iam-jit/bin/ibounce.
+    # When _path_under_known_install_root resolves the symlink (via
+    # pathlib.Path.resolve()), it follows through to the pipx-managed
+    # venv path — NOT the ~/.local/bin symlink. Without this entry,
+    # the resolved path fails the install-root check even though the
+    # binary IS legitimately ours. Adding ~/.local/pipx/venvs covers
+    # any venv name under that directory (iam-jit, iam-jit-uat-654-verify,
+    # iam-jit-test-xyz, etc.) because _path_under_known_install_root
+    # uses prefix matching on the resolved path.
+    #
+    # Safety: the three-factor gate (path + flag-signature + user)
+    # remains intact — a foreign binary at ~/.local/pipx/venvs/other/bin/
+    # still requires a bouncer-specific flag signature (Factor 2) and
+    # same-user ownership (Factor 3) before classification succeeds.
+    pathlib.Path.home() / ".local" / "pipx" / "venvs",
 )
 
 

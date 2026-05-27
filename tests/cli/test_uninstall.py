@@ -2484,6 +2484,205 @@ def test_621_argv1_flag_does_not_count_as_script_path(
 
 
 # ---------------------------------------------------------------------------
+# #678 — pipx-installed binary recognition.
+#
+# `pipx install iam-jit` places a symlink at:
+#   ~/.local/bin/ibounce → ~/.local/pipx/venvs/iam-jit/bin/ibounce
+#
+# _path_under_known_install_root() follows symlinks via pathlib.Path.resolve(),
+# so the resolved path is the pipx venv binary, NOT the symlink. Without
+# ~/.local/pipx/venvs in _BOUNCER_INSTALL_PATH_ROOTS, Factor 1 fails and
+# the bouncer is classified as foreign — blocking clean non-forced uninstall.
+#
+# The canonical macOS install shape (per #649) is pipx-managed, so this
+# was a pre-existing failure on every dogfood machine.
+#
+# Positive test: pipx-resolved path classifies as ibounce.
+# Negative test: a NON-bouncer binary under a pipx venv does NOT classify
+#   (binary name is what gates it — not path alone).
+# ---------------------------------------------------------------------------
+
+
+def test_678_pipx_venv_ibounce_recognized_as_install_root(
+    isolated_iam_jit_home: pathlib.Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """#678: a pipx-installed ibounce at
+    ``~/.local/pipx/venvs/iam-jit/bin/ibounce`` (the RESOLVED path
+    from the ``~/.local/bin/ibounce`` symlink) must be recognized as
+    a legitimate install root.
+
+    This is the canonical macOS dogfood shape: pipx creates the venv
+    and places a symlink in ~/.local/bin/. When _path_under_known_install_root
+    calls p.resolve(), it follows the symlink and must find the resolved
+    path under a known root.
+
+    Factor 1: ~/.local/pipx/venvs/iam-jit/bin/ibounce is under
+              ~/.local/pipx/venvs (newly-added root).
+    Factor 2: ' run' in _BOUNCER_FLAG_SIGNATURES['ibounce'].
+    Factor 3: same-user.
+    """
+    _seed_install(isolated_iam_jit_home)
+
+    # The RESOLVED path (what pathlib.Path.resolve() returns after following
+    # the ~/.local/bin/ibounce → ... symlink on this machine).
+    pipx_venv_ibounce = (
+        pathlib.Path.home() / ".local" / "pipx" / "venvs" / "iam-jit" / "bin" / "ibounce"
+    )
+
+    pid = 67801
+    _seed_unknown_port_owner(
+        monkeypatch,
+        port=8767,
+        pid=pid,
+        cmdline=(
+            f"/opt/homebrew/bin/python3 {pipx_venv_ibounce} run"
+        ),
+        exe_path=pipx_venv_ibounce,
+        owner_uid=os.geteuid(),
+    )
+
+    # Observable: ~/.local/pipx/venvs appears in _get_known_bouncer_paths().
+    pipx_venvs_root = pathlib.Path.home() / ".local" / "pipx" / "venvs"
+    paths_str = [str(p) for p in cu._get_known_bouncer_paths()]
+    assert str(pipx_venvs_root) in paths_str, (
+        f"#678: ~/.local/pipx/venvs must be in install-path roots; "
+        f"got {paths_str}"
+    )
+
+    # Observable: _path_under_known_install_root recognizes the pipx binary.
+    assert cu._path_under_known_install_root(pipx_venv_ibounce), (
+        f"#678: {pipx_venv_ibounce} must be recognized under a known "
+        f"install root"
+    )
+
+    inv = cu._inventory_installed_state()
+    # Observable: classified as ibounce, NOT as unknown_port_owner.
+    assert "ibounce" in inv["running_bouncers"], (
+        f"#678: pipx-installed ibounce at {pipx_venv_ibounce} must classify; "
+        f"running_bouncers={inv['running_bouncers']} "
+        f"unknown={inv['unknown_port_owners']}"
+    )
+    assert pid in inv["running_bouncers"]["ibounce"], (
+        f"#678: pid={pid} must be in running_bouncers['ibounce']"
+    )
+    unknown_pids = [u["pid"] for u in inv["unknown_port_owners"]]
+    assert pid not in unknown_pids, (
+        f"#678: correctly-classified pid={pid} must NOT be in unknown_port_owners"
+    )
+
+
+def test_678_pipx_venv_arbitrary_venv_name_recognized(
+    isolated_iam_jit_home: pathlib.Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """#678: the pipx venv name varies (iam-jit, iam-jit-uat-654-verify,
+    iam-jit-test-xyz, etc.). The pattern ``~/.local/pipx/venvs`` (prefix
+    matching) must cover any venv name, not just 'iam-jit'.
+
+    This test uses a UAT-flavored venv name to verify prefix matching works
+    for arbitrary venv names as pipx may create them.
+    """
+    _seed_install(isolated_iam_jit_home)
+
+    # Simulated UAT venv with a different venv name.
+    uat_venv_ibounce = (
+        pathlib.Path.home()
+        / ".local" / "pipx" / "venvs" / "iam-jit-uat-654-verify" / "bin" / "ibounce"
+    )
+
+    pid = 67802
+    _seed_unknown_port_owner(
+        monkeypatch,
+        port=8767,
+        pid=pid,
+        cmdline=f"/opt/homebrew/bin/python3 {uat_venv_ibounce} run",
+        exe_path=uat_venv_ibounce,
+        owner_uid=os.geteuid(),
+    )
+
+    # Observable: prefix matching accepts the UAT venv path.
+    assert cu._path_under_known_install_root(uat_venv_ibounce), (
+        f"#678: pipx UAT venv path {uat_venv_ibounce} must be recognized; "
+        f"the pattern must cover any venv name under ~/.local/pipx/venvs/"
+    )
+
+    inv = cu._inventory_installed_state()
+    assert "ibounce" in inv["running_bouncers"], (
+        f"#678: pipx UAT-venv ibounce must classify; "
+        f"running_bouncers={inv['running_bouncers']}"
+    )
+    assert pid in inv["running_bouncers"]["ibounce"]
+
+
+def test_678_non_bouncer_binary_in_pipx_venv_not_classified(
+    isolated_iam_jit_home: pathlib.Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """#678 NEGATIVE: a NON-bouncer binary at ~/.local/pipx/venvs/iam-jit/bin/
+    with NO bouncer flag signatures must NOT be classified as any bouncer.
+
+    The pipx venv root is now in _BOUNCER_INSTALL_PATH_ROOTS, so Factor 1
+    (path check) passes. However, Factor 2 (flag-signature check) requires
+    a bouncer-specific flag signature — a binary with only non-bouncer flags
+    fails Factor 2 regardless of where it lives.
+
+    This proves the three-factor gate remains intact after the #678 fix:
+    path alone is insufficient for classification. The flag-signature is
+    still the discriminant for the binary's role.
+
+    Note: the cmdline deliberately contains NO bouncer flag signature
+    (' run', ' serve', ' mcp', '--mode', '--proxy-port', etc.) to ensure
+    Factor 2 fails cleanly. A cmdline containing ' run' would match ibounce's
+    signature (this is expected behavior — ' run' is a valid ibounce signal
+    once path+user checks pass; per [[creates-never-mutates]] this is the
+    intended three-factor gate).
+    """
+    _seed_install(isolated_iam_jit_home)
+
+    # Non-bouncer binary at a pipx venv path with no bouncer flags.
+    # Using '--help' as the only argv — a bouncer would never be
+    # long-running on --help, so this has no bouncer flag signatures.
+    pipx_random = (
+        pathlib.Path.home()
+        / ".local" / "pipx" / "venvs" / "iam-jit" / "bin" / "random-thing"
+    )
+
+    pid = 67803
+    my_uid = os.geteuid()
+
+    # Observable: path check PASSES (the new root covers the pipx tree).
+    assert cu._path_under_known_install_root(pipx_random), (
+        f"#678 negative pre-condition: path check must pass for pipx binary; "
+        f"got False for {pipx_random}"
+    )
+
+    # Cmdline with NO bouncer flag signature — Factor 2 must fail.
+    no_sig_cmdline = f"/opt/homebrew/bin/python3 {pipx_random} --help"
+    with (
+        mock.patch.object(
+            cu, "_resolve_executable_path",
+            return_value=pipx_random,
+        ),
+        mock.patch.object(cu, "_pid_owner_uid", return_value=my_uid),
+    ):
+        kind, failed = cu._classify_bouncer_pid_multifactor(pid, no_sig_cmdline)
+
+    assert kind is None, (
+        f"#678 negative: 'random-thing --help' at a pipx venv path must NOT "
+        f"classify as any bouncer; got kind={kind!r}. "
+        f"The flag-signature gate (Factor 2) must reject cmdlines with no "
+        f"bouncer-specific signature."
+    )
+    assert any(
+        "flag" in f or "signature" in f for f in failed
+    ), (
+        f"#678 negative: expected a flag-signature failure in failed checks; "
+        f"got failed={failed}"
+    )
+
+
+# ---------------------------------------------------------------------------
 # #615 — UAT-Lifecycle 2026-05-25 (HIGH-1): _lsof_pids_on_port must
 # detect IPv4-only loopback binds (the default ``lsof -iTCP:PORT``
 # invocation was IPv6-biased on some lsof versions and silently missed
