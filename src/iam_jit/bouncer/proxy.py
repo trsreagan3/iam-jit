@@ -4015,6 +4015,14 @@ async def serve(config: ProxyConfig, *, store: BouncerStore) -> None:
             "status": status_str,
             "mode": config.mode.value,
             "default_policy": config.default_policy.value,
+            # #686 — honest enforcement signal. `default_policy: deny` is the
+            # advisory VERDICT policy, not an enforcement action: in the
+            # default `cooperative` mode every call is forwarded (DENY is
+            # logged but never blocked), and `plan-capture` never reaches AWS
+            # at all. Only `transparent` actually blocks a DENY (403). Without
+            # this an operator reads `default_policy: deny` and wrongly
+            # believes traffic is being blocked ([[ibounce-honest-positioning]]).
+            "enforcing": config.mode.value == "transparent",
             "active_profile": active_profile.name if active_profile else "",
             "decisions_count": decision_count,
             "pause": pause_payload,

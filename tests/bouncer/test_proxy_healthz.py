@@ -65,6 +65,9 @@ async def test_healthz_returns_200_with_status_payload(tmp_path) -> None:
         assert body["status"] == "ok"
         assert body["mode"] == "cooperative"
         assert body["default_policy"] == "deny"
+        # #686 — cooperative forwards every call (DENY is advisory), so the
+        # honest enforcing signal is False even with default_policy=deny.
+        assert body["enforcing"] is False
         assert body["active_profile"] == ""
         assert body["decisions_count"] == 0
     finally:
@@ -131,6 +134,8 @@ async def test_healthz_reports_active_profile_name(tmp_path) -> None:
                 body = await resp.json()
         assert body["active_profile"] == "safe-default"
         assert body["mode"] == "transparent"
+        # #686 — transparent is the one mode that actually blocks a DENY.
+        assert body["enforcing"] is True
     finally:
         task.cancel()
         try:
