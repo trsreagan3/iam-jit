@@ -199,6 +199,14 @@ class DiskPressureState:
     """Total bytes of archive files (rotated only; not the active
     log) as of last check."""
 
+    object_storage_writer: Any | None = None
+    """#501 fix: optional ObjectStorageWriter instance for the
+    archive-and-purge mode. When set, archives are shipped to the
+    configured object-storage sink BEFORE local drop. When None and
+    mode is archive-and-purge, the mode refuses to drop + emits a
+    CRIT log warning + falls back to pause-requests behavior (safer
+    default — never silently delete data when no upload path exists)."""
+
     def status_label(self) -> str:
         """Human-readable status for /healthz + posture output.
         Adds the 'emergency' tier on top of rotation.py's ok/degraded/
@@ -299,6 +307,62 @@ def _drop_oldest_archives(
         except OSError:
             continue
     return removed
+
+
+def _ship_archives_to_object_storage(
+    archives: list[pathlib.Path],
+    writer: Any,
+) -> tuple[list[pathlib.Path], list[pathlib.Path]]:
+    """Attempt to ship each archive in ``archives`` to the object-storage
+    sink ``writer`` (an ObjectStorageWriter instance). Returns a 2-tuple of
+    (shipped, failed) path lists.
+
+    Each archive is read as raw bytes, wrapped in a single OCSF-envelope
+    admin-action event, and flushed via writer.write() + writer.flush().
+    This is the #501 fix: archive-and-purge mode calls this BEFORE
+    _drop_oldest_archives so the operator's sink receives the data
+    before local deletion.
+
+    Fail-soft: a single archive upload failure doesn't abort the rest
+    of the list — each archive is independent. The caller decides
+    whether to drop archives that failed shipping (current policy: do
+    NOT drop on upload failure to avoid silent data loss; the caller
+    skips failed archives from the drop list).
+    """
+    shipped: list[pathlib.Path] = []
+    failed: list[pathlib.Path] = []
+    for archive in archives:
+        try:
+            # Read the archive as raw bytes and emit as a single
+            # admin-action event carrying the archive content. This
+            # preserves the full OCSF event stream in the object-storage
+            # bucket at the cost of double-encoding the gzip payload as
+            # a base64 string inside JSON. Operators who want the raw
+            # NDJSON layout use the dedicated #317 S3 sink rotation path;
+            # this path is specifically for the disk-pressure emergency
+            # "get data off disk before drop" use case.
+            import base64
+            raw = archive.read_bytes()
+            event = {
+                "class_uid": 6003,
+                "activity_name": "disk_pressure.archive_and_purge_ship",
+                "unmapped": {
+                    "iam_jit": {
+                        "archive_filename": archive.name,
+                        "archive_bytes_base64": base64.b64encode(raw).decode("ascii"),
+                    },
+                },
+            }
+            writer.write(event)
+            writer.flush()
+            shipped.append(archive)
+        except Exception as e:  # pragma: no cover — fail-soft
+            logger.warning(
+                "archive-and-purge: failed to ship %s to object-storage: %s",
+                archive.name, e,
+            )
+            failed.append(archive)
+    return shipped, failed
 
 
 def _compute_status(
@@ -422,27 +486,78 @@ def evaluate_and_react(
                 state.log_dir,
             )
         elif state.mode == DISK_PRESSURE_MODE_ARCHIVE_AND_PURGE:
-            # Hybrid: same drop path as rotate-aggressively; the
-            # distinction is the admin-action hint that operators
-            # wiring the #317 object-storage sink should pick up the
-            # archives BEFORE they're dropped. We don't directly call
-            # the object_storage upload here — that sink runs
-            # independently on its own rotation cadence and operators
-            # who want guaranteed pre-purge upload size their bucket
-            # rotation aggressively.
-            removed = _drop_oldest_archives(
-                state.log_dir,
-                target_free_pct=max(100 - state.warn_pct, 5),
-                statvfs=statvfs,
-            )
-            state.last_action_taken = (
-                f"archive-and-purge: dropped {len(removed)} oldest "
-                f"archive(s) (operator-configured object-storage sink "
-                f"should ship before next tick) at {snap.used_pct:.1f}% used"
-            )
-            state.archive_count, state.archive_size_bytes = _count_archives(
-                state.log_dir,
-            )
+            # #501 fix: archive-and-purge now ACTUALLY ships archives to
+            # the object-storage sink before dropping locals. If no sink
+            # is configured, refuse to drop + emit CRIT + fall back to
+            # pause-requests behavior (safer — never silently delete data
+            # when there is no upload path).
+            if state.object_storage_writer is None:
+                # No sink configured: refuse to drop. Flip refuse_requests
+                # so the proxy surfaces a 503 with an explanatory body
+                # telling the operator to configure a sink or switch modes.
+                state.refuse_requests = True
+                state.last_action_taken = (
+                    f"archive-and-purge: CRIT — no object-storage sink "
+                    f"configured; refusing to drop local archives. "
+                    f"Configure --audit-object-storage-* flags to enable "
+                    f"shipping, or switch to rotate-aggressively / "
+                    f"pause-requests mode. Disk at {snap.used_pct:.1f}% used."
+                )
+                logger.critical(
+                    "disk_pressure archive-and-purge: no object_storage_writer "
+                    "configured; falling back to pause-requests behavior at "
+                    "%.1f%% used. Configure an object-storage sink or change "
+                    "disk_pressure_mode to rotate-aggressively or pause-requests.",
+                    snap.used_pct,
+                )
+            else:
+                # Collect the oldest archive candidates (same set that
+                # _drop_oldest_archives would remove).
+                d = pathlib.Path(state.log_dir)
+                candidates: list[pathlib.Path] = []
+                try:
+                    for child in d.iterdir():
+                        n_name = child.name
+                        if n_name.startswith("audit-") and (
+                            n_name.endswith(".jsonl.gz")
+                            or n_name.endswith(".db.gz")
+                            or n_name.endswith(".db")
+                        ):
+                            candidates.append(child)
+                except OSError:
+                    candidates = []
+                candidates.sort(
+                    key=lambda c: c.stat().st_mtime if c.exists() else 0,
+                )
+                # Ship BEFORE drop.
+                shipped, failed = _ship_archives_to_object_storage(
+                    candidates, state.object_storage_writer,
+                )
+                # Only drop archives that were successfully shipped.
+                # Never drop archives that failed upload (avoid silent
+                # data loss). Drop from oldest first.
+                shipped_set = set(shipped)
+                removed: list[pathlib.Path] = []
+                for archive in candidates:
+                    if archive not in shipped_set:
+                        continue
+                    try:
+                        archive.unlink()
+                        removed.append(archive)
+                    except OSError as e:
+                        logger.warning(
+                            "archive-and-purge: drop failed for %s: %s",
+                            archive.name, e,
+                        )
+                state.last_action_taken = (
+                    f"archive-and-purge: shipped {len(shipped)} archive(s) "
+                    f"to object-storage, dropped {len(removed)} locally "
+                    f"({len(failed)} failed to ship + were kept) "
+                    f"at {snap.used_pct:.1f}% used"
+                )
+                state.archive_count, state.archive_size_bytes = _count_archives(
+                    state.log_dir,
+                )
     else:
         state.last_action_taken = None
     return state
@@ -572,6 +687,7 @@ __all__ = [
     "_count_archives",
     "_drop_oldest_archives",
     "_resolve_log_dir",
+    "_ship_archives_to_object_storage",
     "evaluate_and_react",
     "healthz_audit_log_block",
     "normalize_mode",

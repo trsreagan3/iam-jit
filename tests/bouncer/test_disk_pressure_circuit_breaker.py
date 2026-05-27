@@ -301,16 +301,18 @@ def test_disk_pressure_mode_rotate_aggressively_drops_oldest_when_critical(
 def test_disk_pressure_mode_archive_and_purge_ships_to_s3_when_critical(
     tmp_path: pathlib.Path,
 ) -> None:
-    """Per §A63 spec assertion 3: archive-and-purge drops oldest +
-    emits operator hint that the #317 object-storage sink should ship
-    before the next tick. The hint surfaces via last_action_taken;
-    the actual S3 upload is decoupled (operator wires
-    --audit-object-storage-* independently)."""
+    """Per §A63 spec assertion 3 + #501 fix: archive-and-purge with a
+    configured object-storage sink SHIPS each archive before dropping it
+    locally. The hint in last_action_taken now reflects the shipping
+    count (not a manual-action hint). With no sink configured the mode
+    falls back to pause-requests behavior (tested separately)."""
     _populate_archives(tmp_path, 4)
+    writer = _FakeObjectStorageWriter()
     state = DiskPressureState(
         mode=DISK_PRESSURE_MODE_ARCHIVE_AND_PURGE,
         log_dir=str(tmp_path),
         warn_pct=85, crit_pct=95, emergency_pct=98,
+        object_storage_writer=writer,
     )
     out = disk_pressure_evaluate_and_react(
         state,
@@ -319,7 +321,9 @@ def test_disk_pressure_mode_archive_and_purge_ships_to_s3_when_critical(
     assert out.current_status == "critical"
     assert out.refuse_requests is False
     assert "archive-and-purge" in (out.last_action_taken or "")
-    assert "object-storage sink" in (out.last_action_taken or "")
+    assert "shipped" in (out.last_action_taken or "")
+    # Writer received events for each archive.
+    assert len(writer.written) == 4
 
 
 # ---------------------------------------------------------------------------
@@ -814,3 +818,133 @@ def test_log_retention_md_still_documents_stop_on_disk_critical() -> None:
     doc = pathlib.Path(__file__).parents[2] / "docs" / "LOG-RETENTION.md"
     content = doc.read_text()
     assert "--stop-on-disk-critical" in content
+
+
+# ---------------------------------------------------------------------------
+# #501 — archive-and-purge ships to S3 BEFORE local drop
+# ---------------------------------------------------------------------------
+
+
+class _FakeObjectStorageWriter:
+    """Minimal stub for ObjectStorageWriter used by #501 tests.
+    Captures write() + flush() calls so tests can assert the order
+    (ship → drop) and the payload contents."""
+
+    def __init__(self) -> None:
+        self.written: list[dict] = []
+        self.flushes: int = 0
+        self.started: bool = True  # pre-started for simplicity
+
+    def write(self, event: dict) -> None:
+        self.written.append(event)
+
+    def flush(self) -> None:
+        self.flushes += 1
+
+
+def test_archive_and_purge_ships_to_s3_before_drop(
+    tmp_path: pathlib.Path,
+) -> None:
+    """#501 positive: archive-and-purge with a configured
+    object_storage_writer ships each archive to the sink BEFORE
+    dropping it locally. After the tick, shipped archives are gone
+    from disk AND the writer captured their contents."""
+    _populate_archives(tmp_path, 3)
+    writer = _FakeObjectStorageWriter()
+    state = DiskPressureState(
+        mode=DISK_PRESSURE_MODE_ARCHIVE_AND_PURGE,
+        log_dir=str(tmp_path),
+        warn_pct=85, crit_pct=95, emergency_pct=98,
+        object_storage_writer=writer,
+    )
+    out = disk_pressure_evaluate_and_react(
+        state,
+        statvfs=_statvfs_at_pct(97.0),
+    )
+    assert out.current_status == "critical"
+    assert out.refuse_requests is False, (
+        "archive-and-purge with configured sink must NOT refuse requests"
+    )
+    # Writer received one write per archive + one flush per archive.
+    assert len(writer.written) == 3, (
+        f"expected 3 writes (one per archive), got {len(writer.written)}"
+    )
+    assert writer.flushes == 3
+    # Each written event carries the archive filename.
+    for w in writer.written:
+        assert "archive_filename" in w.get("unmapped", {}).get("iam_jit", {})
+        assert "archive_bytes_base64" in w["unmapped"]["iam_jit"]
+    # Archives dropped locally after successful shipping.
+    remaining_count, _ = _count_archives(str(tmp_path))
+    assert remaining_count == 0, (
+        f"shipped archives should be dropped locally; {remaining_count} remain"
+    )
+    # last_action_taken reflects shipping.
+    assert "shipped" in (out.last_action_taken or "")
+    assert "object-storage" in (out.last_action_taken or "")
+
+
+def test_archive_and_purge_refuses_when_no_sink_configured(
+    tmp_path: pathlib.Path,
+) -> None:
+    """#501 negative: archive-and-purge with NO object_storage_writer
+    configured must REFUSE to drop local archives (safer default).
+    The mode falls back to pause-requests behavior (refuse_requests=True)
+    and emits a CRIT log. Local archives are NOT dropped."""
+    _populate_archives(tmp_path, 3)
+    state = DiskPressureState(
+        mode=DISK_PRESSURE_MODE_ARCHIVE_AND_PURGE,
+        log_dir=str(tmp_path),
+        warn_pct=85, crit_pct=95, emergency_pct=98,
+        object_storage_writer=None,  # explicitly no sink
+    )
+    import logging
+    with _log_capture(
+        "iam_jit.bouncer.audit_export.disk_pressure", logging.CRITICAL,
+    ) as captured:
+        out = disk_pressure_evaluate_and_react(
+            state,
+            statvfs=_statvfs_at_pct(97.0),
+        )
+    # Must refuse requests when no sink is configured — safer default.
+    assert out.refuse_requests is True, (
+        "archive-and-purge with no sink must fall back to refuse_requests=True"
+    )
+    # Archives must NOT be dropped.
+    remaining_count, _ = _count_archives(str(tmp_path))
+    assert remaining_count == 3, (
+        f"no-sink mode must NOT drop local archives; {3 - remaining_count} were dropped"
+    )
+    # CRIT log must have fired.
+    assert any("no object_storage_writer" in r.getMessage() for r in captured), (
+        "expected a CRITICAL log about missing object_storage_writer"
+    )
+    # last_action_taken explains the situation.
+    assert "no object-storage sink" in (out.last_action_taken or "").lower() or \
+           "CRIT" in (out.last_action_taken or "")
+
+
+import contextlib
+
+@contextlib.contextmanager
+def _log_capture(logger_name: str, level: int):
+    """Context manager that captures log records at ``level`` and above
+    from ``logger_name`` for assertion in tests."""
+    import logging
+    records: list[logging.LogRecord] = []
+
+    class _Handler(logging.Handler):
+        def emit(self, record: logging.LogRecord) -> None:
+            records.append(record)
+
+    h = _Handler()
+    h.setLevel(level)
+    log = logging.getLogger(logger_name)
+    orig_level = log.level
+    log.addHandler(h)
+    log.setLevel(min(orig_level, level) if orig_level else level)
+    try:
+        yield records
+    finally:
+        log.removeHandler(h)
+        log.setLevel(orig_level)

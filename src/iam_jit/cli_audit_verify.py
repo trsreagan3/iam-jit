@@ -567,19 +567,63 @@ def register_audit_retention_command(audit_group: click.Group) -> click.Command:
             from .bouncer.audit_export import default_retention_policy
             policy = default_retention_policy()
         if dry_run:
-            # Snapshot without actually mutating — we still call
-            # apply_retention against a copy concept by tagging it
-            # explicitly in output. The implementation does mutate so
-            # for a true dry-run we'd need a separate planner; for
-            # the v1 surface we just refuse to act unless --no-dry-run.
-            click.echo(
-                "DRY-RUN: would apply policy "
-                f"(compliance={policy.compliance}, hot<={policy.hot_days}, "
-                f"warm<={policy.warm_days}, cold<={policy.cold_days}, "
-                f"purge={policy.purge_after_days}, "
-                f"gdpr_pii_purge={policy.gdpr_pii_purge}) "
-                f"to log_dir={resolved_dir}. Re-run with --no-dry-run to mutate."
-            )
+            # #502 fix: compute the planned transitions WITHOUT mutating
+            # the filesystem, then print a per-file table so operators
+            # can preview the retention plan before committing.
+            from .bouncer.audit_export import plan_retention, PlannedTransition
+            planned = plan_retention(resolved_dir, policy)
+            if as_json:
+                click.echo(json.dumps({
+                    "dry_run": True,
+                    "log_dir": resolved_dir,
+                    "policy": {
+                        "compliance": policy.compliance,
+                        "hot_days": policy.hot_days,
+                        "warm_days": policy.warm_days,
+                        "cold_days": policy.cold_days,
+                        "purge_after_days": policy.purge_after_days,
+                        "gdpr_pii_purge": policy.gdpr_pii_purge,
+                    },
+                    "planned": [p.to_dict() for p in planned],
+                }, indent=2, sort_keys=True))
+            else:
+                click.echo(
+                    f"DRY-RUN: {policy.compliance} policy against "
+                    f"log_dir={resolved_dir} "
+                    f"(hot<={policy.hot_days}d, warm<={policy.warm_days}d, "
+                    f"cold<={policy.cold_days}d, "
+                    f"purge={policy.purge_after_days}, "
+                    f"gdpr_pii_purge={policy.gdpr_pii_purge})"
+                )
+                click.echo(
+                    "Re-run with --no-dry-run to apply.\n"
+                )
+                if not planned:
+                    click.echo("  (no rotated archives found in log_dir)")
+                else:
+                    # Column widths: file basename + fixed-width columns.
+                    col_file = max(
+                        len("file"),
+                        *(len(pathlib.Path(p.path).name) for p in planned),
+                    )
+                    header = (
+                        f"{'file':<{col_file}}  "
+                        f"{'current_tier':<13}  "
+                        f"{'planned_tier':<13}  "
+                        f"{'age_days':>9}  "
+                        f"{'action'}"
+                    )
+                    click.echo(header)
+                    click.echo("-" * len(header))
+                    for p in planned:
+                        fname = pathlib.Path(p.path).name
+                        click.echo(
+                            f"{fname:<{col_file}}  "
+                            f"{p.current_tier:<13}  "
+                            f"{p.planned_tier:<13}  "
+                            f"{p.age_days:>9.1f}  "
+                            f"{p.action}"
+                        )
             sys.exit(0)
         result = apply_retention(resolved_dir, policy)
         report = {

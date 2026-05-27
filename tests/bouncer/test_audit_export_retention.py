@@ -29,6 +29,7 @@ from iam_jit.bouncer.audit_export import (
     FRAMEWORK_HIPAA,
     FRAMEWORK_PCI,
     FRAMEWORK_SOX,
+    PlannedTransition,
     REDACTION_PLACEHOLDER,
     RetentionPolicy,
     TIER_COLD,
@@ -37,6 +38,7 @@ from iam_jit.bouncer.audit_export import (
     WARM_PREFIX,
     apply_retention,
     default_retention_policy,
+    plan_retention,
     redact_event_pii,
     retention_policy_for_framework,
     retention_policy_from_declaration,
@@ -340,3 +342,177 @@ def test_gdpr_pii_scrub_at_hot_to_warm_transition(tmp_path):
         scrubbed = json.loads(f.read())
     assert scrubbed["unmapped"]["iam_jit"]["key"] != "AKIAIOSFODNN7EXAMPLE"
     assert REDACTION_PLACEHOLDER.format(kind="aws_access_key_id") in scrubbed["unmapped"]["iam_jit"]["key"]
+
+
+# ---------------------------------------------------------------------------
+# #502 — dry-run plan_retention shows planned transitions per file
+# ---------------------------------------------------------------------------
+
+
+def test_plan_retention_dry_run_shows_all_transitions(tmp_path):
+    """#502: plan_retention returns a PlannedTransition per file that
+    reflects what apply_retention WOULD do without touching the
+    filesystem. The 3-file fixture spans all three tier-transition
+    scenarios so the table output covers every action label."""
+    policy = retention_policy_for_framework(
+        FRAMEWORK_CUSTOM,
+        hot_days=10,
+        warm_days=30,
+        cold_days=100,
+        purge_after_days=None,
+        gdpr_pii_purge=False,
+    )
+    # File 1: fresh hot (age=5d, < hot_days=10) — no-op.
+    fresh_hot = _make_archive(
+        tmp_path / "audit-2026-05-20-000000.jsonl.gz",
+        mtime_age_days=5,
+    )
+    # File 2: stale hot (age=15d, > hot_days=10) — compress-to-warm.
+    stale_hot = _make_archive(
+        tmp_path / "audit-2026-05-10-000000.jsonl.gz",
+        mtime_age_days=15,
+    )
+    # File 3: warm archive (age=40d, > warm_days=30) — move-to-cold-storage.
+    warm_arch = _make_archive(
+        tmp_path / "warm-2026-04-10-000000.jsonl.gz",
+        mtime_age_days=40,
+    )
+
+    planned = plan_retention(tmp_path, policy)
+
+    # All 3 files should appear.
+    assert len(planned) == 3
+    by_name = {pathlib.Path(p.path).name: p for p in planned}
+
+    fresh_name = fresh_hot.name
+    stale_name = stale_hot.name
+    warm_name = warm_arch.name
+
+    assert fresh_name in by_name
+    assert by_name[fresh_name].current_tier == TIER_HOT
+    assert by_name[fresh_name].planned_tier == TIER_HOT
+    assert by_name[fresh_name].action == "no-op"
+
+    assert stale_name in by_name
+    assert by_name[stale_name].current_tier == TIER_HOT
+    assert by_name[stale_name].planned_tier == TIER_WARM
+    assert by_name[stale_name].action == "compress-to-warm"
+
+    assert warm_name in by_name
+    assert by_name[warm_name].current_tier == TIER_WARM
+    assert by_name[warm_name].planned_tier == TIER_COLD
+    assert by_name[warm_name].action == "move-to-cold-storage"
+
+    # Filesystem NOT mutated — originals still exist, no warm/cold files.
+    assert fresh_hot.exists()
+    assert stale_hot.exists()
+    assert warm_arch.exists()
+    assert not list(tmp_path.glob("cold-*.jsonl.gz"))
+
+
+def test_plan_retention_dry_run_no_files_returns_empty(tmp_path):
+    """plan_retention against an empty or non-archive dir returns []."""
+    policy = retention_policy_for_framework(FRAMEWORK_PCI)
+    # Put a non-archive file so dir isn't empty.
+    (tmp_path / "audit.jsonl").write_text("active log\n")
+    planned = plan_retention(tmp_path, policy)
+    assert planned == []
+
+
+def test_plan_retention_dry_run_purge_labeled(tmp_path):
+    """Files past purge_after_days appear with action='purge' in the
+    dry-run plan. The filesystem is still not touched."""
+    policy = retention_policy_for_framework(
+        FRAMEWORK_CUSTOM,
+        hot_days=10,
+        warm_days=20,
+        cold_days=30,
+        purge_after_days=60,
+        gdpr_pii_purge=False,
+    )
+    cold_old = _make_archive(
+        tmp_path / "cold-2026-01-01-000000.jsonl.gz",
+        mtime_age_days=90,
+    )
+    planned = plan_retention(tmp_path, policy)
+    assert len(planned) == 1
+    assert planned[0].action == "purge"
+    assert planned[0].planned_tier == "purge"
+    # Filesystem NOT mutated.
+    assert cold_old.exists()
+
+
+# ---------------------------------------------------------------------------
+# #503 — multi-pass hot→cold in a single apply_retention call
+# ---------------------------------------------------------------------------
+
+
+def test_apply_retention_single_pass_hot_to_cold(tmp_path):
+    """#503: a hot file aged past warm_days (and into cold territory)
+    reaches TIER_COLD in a single apply_retention call without an
+    intermediate warm-tier rename step. Previously two calls were
+    required (first hot→warm, then warm→cold)."""
+    policy = retention_policy_for_framework(
+        FRAMEWORK_CUSTOM,
+        hot_days=10,
+        warm_days=30,
+        cold_days=100,
+        purge_after_days=None,
+        gdpr_pii_purge=False,
+    )
+    # Hot file aged 40d — past warm_days (30) so should land in cold
+    # after a single apply call.
+    hot_arch = _make_archive(
+        tmp_path / "audit-2026-04-10-000000.jsonl.gz",
+        mtime_age_days=40,
+    )
+    result = apply_retention(tmp_path, policy)
+
+    # Should have exactly ONE transition: hot → cold (not hot → warm).
+    assert len(result.transitions) == 1
+    t = result.transitions[0]
+    assert t.from_tier == TIER_HOT
+    assert t.to_tier == TIER_COLD
+    assert pathlib.Path(t.path).name.startswith(COLD_PREFIX)
+
+    # Original hot file gone; cold-prefixed file exists.
+    assert not hot_arch.exists()
+    cold_files = list(tmp_path.glob("cold-*.jsonl.gz"))
+    assert len(cold_files) == 1
+
+    # The resulting cold file is in cold_eligible.
+    assert str(cold_files[0]) in result.cold_eligible
+
+    # No intermediate warm file created.
+    warm_files = list(tmp_path.glob("warm-*.jsonl.gz"))
+    assert len(warm_files) == 0
+
+
+def test_apply_retention_single_pass_still_transitions_hot_to_warm_when_not_cold(
+    tmp_path,
+):
+    """#503 regression guard: a hot file aged into warm (not past cold)
+    still lands at warm (not cold) in a single pass."""
+    policy = retention_policy_for_framework(
+        FRAMEWORK_CUSTOM,
+        hot_days=10,
+        warm_days=60,
+        cold_days=100,
+        purge_after_days=None,
+        gdpr_pii_purge=False,
+    )
+    # Hot file aged 20d — past hot_days (10) but NOT past warm_days (60).
+    hot_arch = _make_archive(
+        tmp_path / "audit-2026-05-05-000000.jsonl.gz",
+        mtime_age_days=20,
+    )
+    result = apply_retention(tmp_path, policy)
+
+    assert len(result.transitions) == 1
+    t = result.transitions[0]
+    assert t.from_tier == TIER_HOT
+    assert t.to_tier == TIER_WARM
+    assert pathlib.Path(t.path).name.startswith(WARM_PREFIX)
+    assert not hot_arch.exists()
+    assert list(tmp_path.glob("warm-*.jsonl.gz"))
+    assert not list(tmp_path.glob("cold-*.jsonl.gz"))

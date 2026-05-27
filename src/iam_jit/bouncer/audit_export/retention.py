@@ -391,18 +391,151 @@ def _tier_of(path: pathlib.Path) -> str:
 
 
 def _age_days(path: pathlib.Path, now: float) -> float:
-    """Age in days from mtime."""
+    """Age in days from mtime.
+
+    Rounded to 6 decimal places to avoid floating-point drift when
+    the caller sets mtime via ``os.utime`` and re-reads it via
+    ``stat().st_mtime``. Without rounding, a file set to exactly N*86400
+    seconds ago would return N.000000000XYZ days and compare as
+    strictly-greater-than N, incorrectly triggering the next tier
+    transition boundary.
+    """
     try:
         mtime = path.stat().st_mtime
     except OSError:
         return 0.0
-    return (now - mtime) / 86400.0
+    return round((now - mtime) / 86400.0, 6)
 
 
 def _atomic_rename(src: pathlib.Path, dst: pathlib.Path) -> None:
     """Atomic move within the same filesystem; safe under POSIX."""
     dst.parent.mkdir(parents=True, exist_ok=True)
     os.rename(str(src), str(dst))
+
+
+def _target_tier(age: float, policy: RetentionPolicy) -> str:
+    """Compute the FINAL target tier for a file of ``age`` days under
+    ``policy``. Uses cumulative thresholds: a hot file aged past
+    warm_days goes directly to cold in a single pass (skipping the
+    intermediate warm rename). This is the #503 fix — apply_retention
+    used to stop at the FIRST hop, requiring operators to run the
+    command twice to reach cold from hot.
+
+    Returns one of TIER_HOT, TIER_WARM, TIER_COLD.
+    """
+    if age > policy.warm_days and policy.cold_days > policy.warm_days:
+        return TIER_COLD
+    if age > policy.hot_days and policy.warm_days > policy.hot_days:
+        return TIER_WARM
+    return TIER_HOT
+
+
+@dataclasses.dataclass(frozen=True)
+class PlannedTransition:
+    """One file's planned tier transition for the dry-run planner.
+
+    Unlike :class:`TierTransition` (which records what happened after
+    the filesystem mutation), ``PlannedTransition`` records what WOULD
+    happen without touching the filesystem. Used by
+    :func:`plan_retention` (#502 fix) and surfaced by the
+    ``iam-jit audit retention apply --dry-run`` table.
+    """
+
+    path: str
+    current_tier: str
+    planned_tier: str
+    age_days: float
+    action: str
+    """Short human-readable description: 'no-op', 'compress-to-warm',
+    'move-to-cold-storage', 'purge', 'already-cold'."""
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "path": self.path,
+            "current_tier": self.current_tier,
+            "planned_tier": self.planned_tier,
+            "age_days": round(self.age_days, 2),
+            "action": self.action,
+        }
+
+
+def _plan_action(
+    current_tier: str,
+    target_tier: str,
+    *,
+    purge: bool,
+    gdpr_pii_purge: bool,
+) -> str:
+    """Derive the human-readable action label for the dry-run table."""
+    if purge:
+        return "purge"
+    if current_tier == target_tier:
+        if current_tier == TIER_COLD:
+            return "already-cold"
+        return "no-op"
+    if target_tier == TIER_WARM:
+        return "compress-to-warm-pii-scrub" if gdpr_pii_purge else "compress-to-warm"
+    if target_tier == TIER_COLD:
+        return "move-to-cold-storage"
+    return "no-op"
+
+
+def plan_retention(
+    log_dir: str | os.PathLike,
+    policy: RetentionPolicy,
+    *,
+    now: float | None = None,
+) -> list[PlannedTransition]:
+    """Compute the planned tier transitions for each rotated archive in
+    ``log_dir`` WITHOUT mutating the filesystem. This is the #502 fix:
+    ``apply --dry-run`` now calls this function to print a per-file
+    table showing what WOULD happen.
+
+    Returns a list of :class:`PlannedTransition` in sorted filename
+    order (same iteration order as :func:`apply_retention`).
+    """
+    n = now if now is not None else time.time()
+    d = pathlib.Path(log_dir)
+    if not d.is_dir():
+        return []
+    planned: list[PlannedTransition] = []
+    for child in sorted(d.iterdir()):
+        name = child.name
+        if not (
+            (name.startswith("audit-") and name.endswith(".jsonl.gz"))
+            or (name.startswith(WARM_PREFIX) and name.endswith(".jsonl.gz"))
+            or (name.startswith(COLD_PREFIX) and name.endswith(".jsonl.gz"))
+        ):
+            continue
+        current_tier = _tier_of(child)
+        age = _age_days(child, n)
+        purge = (
+            policy.purge_after_days is not None
+            and age >= policy.purge_after_days
+        )
+        if purge:
+            planned.append(PlannedTransition(
+                path=str(child),
+                current_tier=current_tier,
+                planned_tier="purge",
+                age_days=age,
+                action="purge",
+            ))
+            continue
+        target = _target_tier(age, policy)
+        action = _plan_action(
+            current_tier, target,
+            purge=False,
+            gdpr_pii_purge=policy.gdpr_pii_purge,
+        )
+        planned.append(PlannedTransition(
+            path=str(child),
+            current_tier=current_tier,
+            planned_tier=target,
+            age_days=age,
+            action=action,
+        ))
+    return planned
 
 
 def apply_retention(
@@ -429,6 +562,11 @@ def apply_retention(
     deleted) — the caller's S3 writer is responsible for upload.
     This module never destroys data the operator hasn't told it
     to destroy.
+
+    #503 fix: a single pass now computes the FINAL target tier per
+    file (based on age vs all tier thresholds) and applies the full
+    chain in one pass. A hot file aged past the warm threshold goes
+    directly to cold without requiring a second apply run.
     """
     n = now if now is not None else time.time()
     d = pathlib.Path(log_dir)
@@ -449,7 +587,7 @@ def apply_retention(
             or (name.startswith(COLD_PREFIX) and name.endswith(".jsonl.gz"))
         ):
             continue
-        tier = _tier_of(child)
+        current_tier = _tier_of(child)
         age = _age_days(child, n)
         # First: purge check (highest priority + only destructive
         # action). Two-key: must have purge_after_days set AND must
@@ -466,32 +604,58 @@ def apply_retention(
             except OSError as e:
                 logger.warning("retention purge failed for %s: %s", child, e)
             continue
-        # Tier transition cascade based on CUMULATIVE age thresholds:
-        # hot if age <= hot_days, warm if age <= warm_days, cold
-        # otherwise. The tier-prefix on the filename signals current
-        # tier; we transition by renaming with the new prefix.
-        if tier == TIER_HOT and age > policy.hot_days and policy.warm_days > policy.hot_days:
-            new_name = WARM_PREFIX + name[len("audit-"):]
-            dst = child.parent / new_name
-            try:
-                # Optional PII scrub when transitioning to warm under
-                # the GDPR policy.
-                if policy.gdpr_pii_purge:
-                    _scrub_archive_pii(child, dst, policy)
-                else:
-                    _atomic_rename(child, dst)
-                transitions.append(TierTransition(
-                    path=str(dst),
-                    from_tier=TIER_HOT,
-                    to_tier=TIER_WARM,
-                    age_days=age,
-                ))
-            except OSError as e:
-                logger.warning("retention hot→warm failed for %s: %s", child, e)
-        elif tier == TIER_WARM and age > policy.warm_days and policy.cold_days > policy.warm_days:
+        # Compute the FINAL target tier in one shot (#503 fix: single-pass
+        # multi-hop). A hot file aged past warm_days goes directly to cold
+        # without requiring a second apply run.
+        target_tier = _target_tier(age, policy)
+        if current_tier == target_tier:
+            # No transition needed; cold-tier files are still eligible.
+            if current_tier == TIER_COLD:
+                cold_eligible.append(str(child))
+            continue
+        # --- hot → warm (possibly via scrub), or hot/warm → cold ---
+        if current_tier == TIER_HOT:
+            # Strip the "audit-" prefix to get the bare timestamp stem.
+            stem = name[len("audit-"):]
+            if target_tier == TIER_WARM:
+                new_name = WARM_PREFIX + stem
+                dst = child.parent / new_name
+                try:
+                    if policy.gdpr_pii_purge:
+                        _scrub_archive_pii(child, dst, policy)
+                    else:
+                        _atomic_rename(child, dst)
+                    transitions.append(TierTransition(
+                        path=str(dst),
+                        from_tier=TIER_HOT,
+                        to_tier=TIER_WARM,
+                        age_days=age,
+                    ))
+                except OSError as e:
+                    logger.warning("retention hot→warm failed for %s: %s", child, e)
+            else:
+                # target is COLD: go directly hot → cold in one rename.
+                new_name = COLD_PREFIX + stem
+                dst = child.parent / new_name
+                try:
+                    if policy.gdpr_pii_purge:
+                        _scrub_archive_pii(child, dst, policy)
+                    else:
+                        _atomic_rename(child, dst)
+                    transitions.append(TierTransition(
+                        path=str(dst),
+                        from_tier=TIER_HOT,
+                        to_tier=TIER_COLD,
+                        age_days=age,
+                    ))
+                    cold_eligible.append(str(dst))
+                except OSError as e:
+                    logger.warning("retention hot→cold failed for %s: %s", child, e)
+        elif current_tier == TIER_WARM and target_tier == TIER_COLD:
             # warm → cold: rename only; the cold-tier filename signals
             # eligibility for S3 archival.
-            new_name = COLD_PREFIX + name[len(WARM_PREFIX):]
+            stem = name[len(WARM_PREFIX):]
+            new_name = COLD_PREFIX + stem
             dst = child.parent / new_name
             try:
                 _atomic_rename(child, dst)
@@ -504,10 +668,6 @@ def apply_retention(
                 cold_eligible.append(str(dst))
             except OSError as e:
                 logger.warning("retention warm→cold failed for %s: %s", child, e)
-        elif tier == TIER_COLD:
-            # Cold-tier files are always eligible for S3 archival
-            # (the S3 writer dedupes on bucket-side filename).
-            cold_eligible.append(str(child))
     return RetentionApplyResult(
         transitions=transitions,
         purged=purged,
@@ -587,6 +747,7 @@ __all__ = [
     "FRAMEWORK_PCI",
     "FRAMEWORK_SOX",
     "KNOWN_FRAMEWORKS",
+    "PlannedTransition",
     "REDACTION_PLACEHOLDER",
     "RetentionApplyResult",
     "RetentionPolicy",
@@ -597,6 +758,7 @@ __all__ = [
     "WARM_PREFIX",
     "apply_retention",
     "default_policy",
+    "plan_retention",
     "policy_for_framework",
     "policy_from_declaration",
     "redact_event_pii",
