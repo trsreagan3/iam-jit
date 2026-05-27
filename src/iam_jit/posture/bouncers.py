@@ -33,7 +33,9 @@ total on loopback).
 
 from __future__ import annotations
 
+import json
 import os
+import pathlib
 import re
 import socket
 from contextlib import closing
@@ -61,6 +63,81 @@ GBOUNCE_DEFAULT_WIRE_PORT = 8080
 GBOUNCE_DEFAULT_MGMT_PORT = 8769
 GBOUNCE_ENV_HTTP_PROXY = "HTTP_PROXY"
 GBOUNCE_ENV_HTTPS_PROXY = "HTTPS_PROXY"
+
+# ---- autopilot.status.json port hints -----------------------------------
+#
+# #514 — canary-port deployments: when the operator ran a bouncer on a
+# non-default port (e.g. ``ibounce run --port 9876``), the default-port
+# probe misses it. ``autopilot.status.json`` records the actual port each
+# bouncer was started on. Read that file FIRST and augment the probe set.
+#
+# Same pattern as #617 MED-2 in cli_uninstall.py (``_read_autopilot_ports``
+# there). Kept as a separate, lighter copy here because:
+#   * cli_uninstall is not importable in all environments (heavy deps).
+#   * posture needs only the port-hint slice, not the full inventory.
+#
+# Honor ``IAM_JIT_DATA_DIR`` for fixture isolation in tests (same env var
+# the rest of iam-jit uses for the data-directory root).
+
+_IAM_JIT_DATA_DIR_ENV = "IAM_JIT_DATA_DIR"
+_AUTOPILOT_STATUS_FILENAME = "autopilot.status.json"
+
+
+def _autopilot_data_dir() -> pathlib.Path:
+    """Return the iam-jit data directory, honoring ``IAM_JIT_DATA_DIR``."""
+    raw = os.environ.get(_IAM_JIT_DATA_DIR_ENV, "").strip()
+    if raw:
+        return pathlib.Path(raw).expanduser()
+    return pathlib.Path.home() / ".iam-jit"
+
+
+def _read_autopilot_port_hints() -> dict[str, list[int]]:
+    """Return per-bouncer port hints from ``autopilot.status.json``.
+
+    #514 fix: Reads ``~/.iam-jit/autopilot.status.json`` (or the path
+    under ``IAM_JIT_DATA_DIR``) and extracts the ``port`` field from each
+    bouncer block that autopilot recorded as running. These ports are
+    ADDITIVE — they supplement the default-port probe so canary-port
+    deployments are discovered without breaking the no-autopilot fallback.
+
+    Returns ``{bouncer_kind: [port, ...]}`` — empty dict when the file
+    doesn't exist, can't be parsed, or contains no useful port data.
+    Per [[ibounce-honest-positioning]]: parse failure is non-fatal and
+    silently falls back to default-port probing.
+    """
+    status_path = _autopilot_data_dir() / _AUTOPILOT_STATUS_FILENAME
+    if not status_path.exists():
+        return {}
+    try:
+        raw = status_path.read_text(encoding="utf-8", errors="replace")
+        data = json.loads(raw)
+    except (OSError, json.JSONDecodeError):
+        return {}
+
+    bouncers_block = data.get("bouncers")
+    if not isinstance(bouncers_block, dict):
+        return {}
+
+    result: dict[str, list[int]] = {}
+    for name, block in bouncers_block.items():
+        if not isinstance(block, dict):
+            continue
+        # Skip bouncers autopilot explicitly marks as not running.
+        # Per [[safety-mode-lean-permissive]]: treat missing ``running``
+        # as "unknown — still worth checking".
+        if block.get("running") is False:
+            continue
+        port_val = block.get("port")
+        if port_val is None:
+            continue
+        try:
+            port = int(port_val)
+        except (ValueError, TypeError):
+            continue
+        if port <= 0 or port > 65535:
+            continue
+        result.setdefault(name, []).append(port)
+    return result
 
 
 # ---- Helpers ------------------------------------------------------------
@@ -169,9 +246,34 @@ def detect_ibounce() -> dict[str, Any]:
     they're importable (i.e. when posture is invoked inside the
     iam-jit Python venv). Failure to import is non-fatal — fields
     fall back to "unknown".
+
+    #514 — canary-port support: when ``autopilot.status.json`` records
+    ibounce running on a non-default port we probe THAT port first so
+    the bouncer is not missed. Default-port probe always runs as a
+    fallback (handles the no-autopilot case).
     """
+    # #514: gather any autopilot-hinted ports for ibounce.  Probe hints
+    # FIRST (they are the authoritative declaration from the daemon that
+    # started the bouncer), then fall back to the default if no hint is
+    # live.  dict.fromkeys preserves insertion order + deduplicates so if
+    # autopilot recorded the default port we don't probe it twice.
+    ap_hints = _read_autopilot_port_hints()
+    ibounce_ports: list[int] = list(
+        dict.fromkeys(ap_hints.get("ibounce", []) + [IBOUNCE_DEFAULT_PORT])
+    )
+
+    # Probe each candidate port; use the first live one.
     port = IBOUNCE_DEFAULT_PORT
-    running = _loopback_port_open(port)
+    running = False
+    for _p in ibounce_ports:
+        if _loopback_port_open(_p):
+            port = _p
+            running = True
+            break
+    if not running:
+        # Keep the default so block["port"] is always meaningful.
+        port = IBOUNCE_DEFAULT_PORT
+
     block: dict[str, Any] = {
         "running": running,
         "port": port,
@@ -352,9 +454,22 @@ def detect_ibounce() -> dict[str, Any]:
 def detect_kbounce() -> dict[str, Any]:
     """Detect kbounce's posture. Returns the same shape as
     ``detect_ibounce`` minus the in-process mode/profile (which we
-    can't read from a different Python process — Go binary)."""
+    can't read from a different Python process — Go binary).
+
+    #514 — canary-port support: autopilot-hinted ports are probed
+    alongside the default so non-default kbounce deployments are found.
+    """
+    ap_hints = _read_autopilot_port_hints()
+    kbounce_ports: list[int] = list(
+        dict.fromkeys(ap_hints.get("kbounce", []) + [KBOUNCE_DEFAULT_PORT])
+    )
     port = KBOUNCE_DEFAULT_PORT
-    running = _loopback_port_open(port)
+    running = False
+    for _p in kbounce_ports:
+        if _loopback_port_open(_p):
+            port = _p
+            running = True
+            break
     block: dict[str, Any] = {
         "running": running,
         "port": port,
@@ -385,10 +500,24 @@ def detect_kbounce() -> dict[str, Any]:
 
 def detect_dbounce() -> dict[str, Any]:
     """Detect dbounce's posture via PGHOST + PGPORT env vars + a
-    loopback probe to the management port."""
+    loopback probe to the management port.
+
+    #514 — canary-port support: autopilot-hinted ports are probed
+    alongside the default so non-default dbounce wire/mgmt deployments
+    are found.
+    """
+    ap_hints = _read_autopilot_port_hints()
+    # dbounce records its wire port in the ``port`` field.  Probe
+    # autopilot hints first; default wire + mgmt ports as fallback.
+    dbounce_ports: list[int] = list(
+        dict.fromkeys(
+            ap_hints.get("dbounce", [])
+            + [DBOUNCE_DEFAULT_WIRE_PORT, DBOUNCE_DEFAULT_MGMT_PORT]
+        )
+    )
     wire_port = DBOUNCE_DEFAULT_WIRE_PORT
     mgmt_port = DBOUNCE_DEFAULT_MGMT_PORT
-    running = _loopback_port_open(mgmt_port) or _loopback_port_open(wire_port)
+    running = any(_loopback_port_open(_p) for _p in dbounce_ports)
     block: dict[str, Any] = {
         "running": running,
         "port": wire_port,
@@ -425,10 +554,22 @@ def detect_dbounce() -> dict[str, Any]:
 
 def detect_gbounce() -> dict[str, Any]:
     """Detect gbounce via HTTP_PROXY / HTTPS_PROXY + loopback probe
-    to the management port (since /healthz lives there)."""
+    to the management port (since /healthz lives there).
+
+    #514 — canary-port support: autopilot-hinted ports are probed
+    alongside the default so non-default gbounce wire/mgmt deployments
+    are found.
+    """
+    ap_hints = _read_autopilot_port_hints()
+    gbounce_ports: list[int] = list(
+        dict.fromkeys(
+            ap_hints.get("gbounce", [])
+            + [GBOUNCE_DEFAULT_WIRE_PORT, GBOUNCE_DEFAULT_MGMT_PORT]
+        )
+    )
     wire_port = GBOUNCE_DEFAULT_WIRE_PORT
     mgmt_port = GBOUNCE_DEFAULT_MGMT_PORT
-    running = _loopback_port_open(mgmt_port) or _loopback_port_open(wire_port)
+    running = any(_loopback_port_open(_p) for _p in gbounce_ports)
     block: dict[str, Any] = {
         "running": running,
         "port": wire_port,

@@ -377,6 +377,11 @@ _anomaly_last_alert_at_unix: float | None = None
 # heartbeat-gap flag; either-or causes the 503 (per spec).
 _audit_export_degraded_lock = threading.Lock()
 _audit_export_degraded_detected: bool = False
+# #516 — /posture endpoint needs to report when this serve() process
+# started. Set once at the top of serve(); read by the /posture handler.
+# None when serve() has not yet started (e.g. in tests that call
+# evaluate_request() directly without going through serve()).
+_serve_started_at: str | None = None
 
 
 def mark_audit_export_degraded() -> None:
@@ -3619,6 +3624,15 @@ async def serve(config: ProxyConfig, *, store: BouncerStore) -> None:
             "Install it: pip install 'aiohttp>=3.9'"
         ) from e
 
+    # #516 — record startup time for the /posture self-report endpoint.
+    global _serve_started_at
+    import datetime as _dt_mod
+    _serve_started_at = (
+        _dt_mod.datetime.now(_dt_mod.timezone.utc)
+        .isoformat()
+        .replace("+00:00", "Z")
+    )
+
     # Pooled session reused for all outbound forwards. Slice 5 will
     # tune the connector + add streaming response handling for
     # large objects (S3 GetObject of multi-GB files).
@@ -4210,6 +4224,65 @@ async def serve(config: ProxyConfig, *, store: BouncerStore) -> None:
         "POST", "/admin/profile/reload",
         profile_reload_handler,
     )
+
+    # #516 — GET /posture — this-bouncer self-report JSON. Returns a
+    # lightweight summary (kind, mode, profile, port, pid, decisions_count,
+    # started_at, version, healthz_summary) for the cross-bouncer posture
+    # orchestrator + any agent that wants to introspect the running bouncer
+    # without parsing the full /healthz blob. READ-ONLY; no auth (loopback
+    # only; matches /healthz). Registered BEFORE the catch-all.
+    async def posture_handler(request):
+        import os as _os
+        from iam_jit import __version__ as _ver
+        _ap = getattr(config, "active_profile", None)
+        _profile_name = getattr(_ap, "name", "") if _ap is not None else ""
+        try:
+            _decisions = store.count_decisions()
+        except Exception:
+            _decisions = 0
+        # Shallow healthz summary: status + key counts without the full blob.
+        _hz_status = "ok"
+        try:
+            _hz_status = "ok"
+            if is_audit_export_degraded():
+                _hz_status = "degraded"
+        except Exception:
+            _hz_status = "unknown"
+        return web.json_response({
+            "kind": "ibounce",
+            "mode": config.mode.value,
+            "default_mode": config.default_mode,
+            "active_profile": _profile_name,
+            "port": config.port,
+            "pid": _os.getpid(),
+            "decisions_count": _decisions,
+            "started_at": _serve_started_at,
+            "version": _ver,
+            "healthz_summary": {"status": _hz_status},
+        })
+
+    app.router.add_route("GET", "/posture", posture_handler)
+
+    # #516 — GET /ui — alias for the live activity-stream page (registered
+    # at GET / by register_audit_events_ui_route above). AWS SDK calls
+    # never arrive with path /ui; this alias is BROWSER-ONLY — we always
+    # serve the HTML regardless of Accept header (the alias is unambiguous:
+    # no AWS service uses /ui as a path). Registered BEFORE the catch-all.
+    async def ui_alias_handler(request):
+        if request.method != "GET":
+            return web.json_response(
+                {"error": "only GET is supported"}, status=405,
+            )
+        from .audit_export.events_ui import render_audit_events_ui
+        body = render_audit_events_ui(bouncer_name="ibounce")
+        return web.Response(
+            body=body,
+            content_type="text/html",
+            charset="utf-8",
+        )
+
+    app.router.add_route("GET", "/ui", ui_alias_handler)
+
     app.router.add_route("*", "/{tail:.*}", handler)
 
     # #252 Slice 1 — bring up the audit-export channels (if any).
