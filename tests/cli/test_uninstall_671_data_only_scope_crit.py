@@ -31,6 +31,7 @@ from __future__ import annotations
 
 import os
 import pathlib
+import socket
 import subprocess
 from unittest import mock
 
@@ -615,3 +616,181 @@ def test_671_live_bouncer_proceeds_with_allow_flag(
     )
     # data_only_scope still True — the flag is just a halt ack.
     assert result["data_only_scope"] is True
+
+
+# ---------------------------------------------------------------------------
+# Test 10 — #676 Integration: fixture --data-dir uninstall completes
+# cleanly (exit 0, data-dir removed, machine-wide paths preserved)
+# when no live bouncers are present on default ports.
+#
+# Skips cleanly if ports 8767/8080/8769 are bound (dogfood machine
+# with live bouncers), following the IAM_JIT_DOGFOOD_REFUSE_DESTRUCTIVE
+# pattern.
+# ---------------------------------------------------------------------------
+
+_LIVE_BOUNCER_PORTS = (8767, 8080, 8769)
+
+
+def _port_is_bound(port: int) -> bool:
+    """Return True if port is already in use on 127.0.0.1."""
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+        s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        try:
+            s.bind(("127.0.0.1", port))
+            return False
+        except OSError:
+            return True
+
+
+def test_676_fixture_data_dir_uninstall_integration(
+    tmp_path: pathlib.Path,
+) -> None:
+    """#676 — Integration test: fixture --data-dir uninstall completes
+    cleanly on a machine with no live bouncers.
+
+    Uses ``subprocess.run`` with an isolated ``HOME=/tmp/uat-fixture-NNN``
+    to prove the real CLI path (not just the in-process API) handles
+    the fixture data-dir scenario without halting at U-7.
+
+    Assertions:
+      - exit code 0 (no halt, data-dir cleanly removed)
+      - fixture data-dir is GONE after
+      - machine-wide ~/.local/bin/ is UNCHANGED
+      - machine-wide ~/.claude.json is UNCHANGED (if it exists)
+
+    Skips if any of the default bouncer ports (8767, 8080, 8769) are
+    bound, which means this is a dogfood machine with live bouncers and
+    the U-7 halt would fire for a legitimate reason.
+    """
+    # --- skip guard: live bouncers present ----------------------------------
+    bound = [p for p in _LIVE_BOUNCER_PORTS if _port_is_bound(p)]
+    if bound:
+        pytest.skip(
+            f"test requires no live bouncers on default ports; "
+            f"ports currently bound: {bound}. "
+            f"Run on a clean machine or stop live bouncers first."
+        )
+
+    # --- isolated HOME setup ------------------------------------------------
+    isolated_home = tmp_path / "uat-fixture-home"
+    isolated_home.mkdir()
+
+    # Create the fixture data-dir under isolated HOME so it looks like
+    # ~/.iam-jit on a real install.
+    fixture_data_dir = isolated_home / ".iam-jit-fixture"
+    _seed_install(fixture_data_dir)
+
+    # Capture machine-wide paths BEFORE the run so we can compare after.
+    real_local_bin = pathlib.Path.home() / ".local" / "bin"
+    local_bin_before: set[str] = set()
+    if real_local_bin.exists():
+        local_bin_before = {p.name for p in real_local_bin.iterdir()}
+
+    real_claude_json = pathlib.Path.home() / ".claude.json"
+    claude_json_before: str | None = None
+    if real_claude_json.exists():
+        claude_json_before = real_claude_json.read_text()
+
+    # --- run the CLI via subprocess with isolated HOME ----------------------
+    import sys as _sys
+    result = subprocess.run(
+        [
+            _sys.executable, "-m", "iam_jit.cli",
+            "uninstall",
+            "--yes",
+            "--data-dir", str(fixture_data_dir),
+            "--keep-mcp-entries",  # don't touch ~/.claude.json
+        ],
+        capture_output=True,
+        text=True,
+        timeout=60,
+        env={
+            **os.environ,
+            "HOME": str(isolated_home),
+            # Ensure no dogfood belt fires — we intentionally want the
+            # uninstall to proceed.
+            cu.IAM_JIT_DOGFOOD_REFUSE_DESTRUCTIVE_ENV: "",
+        },
+    )
+
+    # --- assertions ---------------------------------------------------------
+    assert result.returncode == 0, (
+        f"#676: fixture --data-dir uninstall halted unexpectedly. "
+        f"exit={result.returncode}\n"
+        f"stdout:\n{result.stdout}\n"
+        f"stderr:\n{result.stderr}"
+    )
+
+    # fixture data-dir must be gone (or at least the seed artifacts).
+    assert not (fixture_data_dir / "audit.jsonl").exists(), (
+        f"#676: fixture data-dir audit.jsonl should be removed after "
+        f"clean uninstall; fixture_data_dir={fixture_data_dir}"
+    )
+    assert not (fixture_data_dir / "bouncer" / "state.db").exists(), (
+        f"#676: fixture data-dir state.db should be removed after clean uninstall"
+    )
+
+    # machine-wide ~/.local/bin/ must be UNCHANGED.
+    if real_local_bin.exists():
+        local_bin_after = {p.name for p in real_local_bin.iterdir()}
+        assert local_bin_before == local_bin_after, (
+            f"#676: fixture uninstall mutated machine-wide ~/.local/bin/. "
+            f"before={local_bin_before} after={local_bin_after}"
+        )
+
+    # machine-wide ~/.claude.json must be UNCHANGED (if it existed).
+    if claude_json_before is not None:
+        claude_json_after = real_claude_json.read_text()
+        assert claude_json_before == claude_json_after, (
+            f"#676: fixture uninstall mutated machine-wide ~/.claude.json"
+        )
+
+
+# ---------------------------------------------------------------------------
+# Test 11 — #677 Unit: path-prefix containment does NOT false-positive
+# on /tmp/testing-other-tool when scoped_data_dir is /tmp/test
+# ---------------------------------------------------------------------------
+
+
+def test_677_path_prefix_containment_no_false_positive() -> None:
+    """#677 — raw string containment false-positive regression.
+
+    Before the fix, ``_step_stop_bouncers`` used::
+
+        if scoped_data_dir and scoped_data_dir in (cmdline or ""):
+
+    which would match the cmdline token ``/tmp/testing-other-tool/script.py``
+    for scoped_data_dir ``/tmp/test`` because the substring appears in
+    the longer path.
+
+    After the fix (path-prefix containment via
+    ``_cmdline_references_data_dir``), this MUST return False.
+    """
+    # The false-positive scenario from the brief.
+    scoped_data_dir = "/tmp/test"
+    cmdline_token = "/tmp/testing-other-tool/script.py"
+
+    result = cu._cmdline_references_data_dir(scoped_data_dir, cmdline_token)
+    assert result is False, (
+        f"#677 false-positive: _cmdline_references_data_dir("
+        f"{scoped_data_dir!r}, {cmdline_token!r}) returned True; "
+        f"expected False (path-prefix check must use separator-aware "
+        f"comparison, not raw substring)"
+    )
+
+
+def test_677_path_prefix_containment_true_positive() -> None:
+    """#677 — complement: a cmdline token that genuinely lives UNDER
+    scoped_data_dir MUST still return True (no regression on the
+    wanted-match path).
+    """
+    scoped_data_dir = "/tmp/test"
+    # A token that is actually below the data-dir.
+    cmdline_token = "/tmp/test/venv/bin/ibounce"
+
+    result = cu._cmdline_references_data_dir(scoped_data_dir, cmdline_token)
+    assert result is True, (
+        f"#677 true-positive missed: _cmdline_references_data_dir("
+        f"{scoped_data_dir!r}, {cmdline_token!r}) returned False; "
+        f"expected True (token is under scoped_data_dir)"
+    )

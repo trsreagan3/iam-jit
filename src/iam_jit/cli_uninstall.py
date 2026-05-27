@@ -1880,6 +1880,43 @@ def _check_halt_conditions(
 # ---------------------------------------------------------------------------
 
 
+def _cmdline_references_data_dir(scoped_data_dir: str, cmdline: str) -> bool:
+    """#677 — path-prefix containment check.
+
+    Returns True iff at least one whitespace-delimited token in
+    ``cmdline`` is at-or-below ``scoped_data_dir`` in the filesystem
+    hierarchy.
+
+    Uses ``pathlib.Path.resolve()`` on both sides so symlinks collapse,
+    and checks the OS separator so ``/tmp/test`` does NOT match
+    ``/tmp/testing-other-tool/script.py``.
+
+    If ``scoped_data_dir`` is empty or either side cannot be resolved,
+    returns False (conservative: do not match on uncertain state).
+    """
+    if not scoped_data_dir or not cmdline:
+        return False
+    try:
+        base = pathlib.Path(scoped_data_dir).resolve()
+    except (OSError, RuntimeError):
+        return False
+    # Append sep so a prefix test via str().startswith() works cleanly
+    # without false-positives: "/tmp/test/" is not a prefix of
+    # "/tmp/testing/x" whereas "/tmp/testing/" is.
+    base_str = str(base) + (os.sep if not str(base).endswith(os.sep) else "")
+    for token in cmdline.split():
+        try:
+            tok_resolved = str(pathlib.Path(token).resolve())
+        except (OSError, RuntimeError):
+            continue
+        # The token itself OR any of its parents must match base:
+        # e.g. token=/tmp/test/venv/bin/ibounce → resolved starts with
+        # /tmp/test/ → True.
+        if tok_resolved.startswith(base_str) or tok_resolved == str(base):
+            return True
+    return False
+
+
 def _step_stop_bouncers(
     inventory: dict[str, Any],
     *,
@@ -1929,10 +1966,19 @@ def _step_stop_bouncers(
         dropped: list[int] = []
         for name, pid in target_pids:
             cmdline = _read_cmdline(pid)
-            # Conservative match: the data-dir path (or its basename)
-            # must appear in the cmdline / cwd reference. If we can't
-            # read the cmdline, DROP (do not destroy uncertain state).
-            if scoped_data_dir and scoped_data_dir in (cmdline or ""):
+            # #677 — use path-prefix containment instead of raw string
+            # containment.  Raw substring matching has a false-positive
+            # edge case: scoped_data_dir="/tmp/test" would match a
+            # cmdline token "/tmp/testing-other-tool/script.py" because
+            # the prefix is a substring of the longer string.
+            # Fix: resolve both sides and check that the resolved
+            # scoped_data_dir is a proper path-prefix of at least one
+            # cmdline token (i.e. the token is at-or-below the data-dir
+            # in the directory hierarchy), using the OS separator so
+            # "/tmp/test" does NOT prefix-match "/tmp/testing".
+            if scoped_data_dir and _cmdline_references_data_dir(
+                scoped_data_dir, cmdline or ""
+            ):
                 kept.append((name, pid))
             else:
                 dropped.append(pid)
