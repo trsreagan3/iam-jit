@@ -224,6 +224,68 @@ def test_login_case_insensitive_disabled_user_no_link(
     )
 
 
+# ---- #675: narrow exception types in case-insensitive fallback ----
+
+
+def test_login_case_insensitive_file_not_found_returns_no_link(
+    mixed_case_client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """#675: FileNotFoundError from user_store.list() → no link, no warning logged."""
+    from iam_jit.users_store import FileUserStore
+
+    monkeypatch.setattr(FileUserStore, "list", lambda *a, **kw: (_ for _ in ()).throw(FileNotFoundError("users.yaml")))
+    resp = mixed_case_client.post(
+        "/login",
+        data={"email": "devuser@test-host.local"},
+        follow_redirects=False,
+    )
+    assert resp.status_code == 200
+    assert "auth/magic-callback" not in resp.text
+
+
+def test_login_case_insensitive_permission_error_returns_no_link(
+    mixed_case_client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """#675: PermissionError from user_store.list() → no link, no warning logged."""
+    from iam_jit.users_store import FileUserStore
+
+    monkeypatch.setattr(FileUserStore, "list", lambda *a, **kw: (_ for _ in ()).throw(PermissionError("permission denied")))
+    resp = mixed_case_client.post(
+        "/login",
+        data={"email": "devuser@test-host.local"},
+        follow_redirects=False,
+    )
+    assert resp.status_code == 200
+    assert "auth/magic-callback" not in resp.text
+
+
+def test_login_case_insensitive_unexpected_error_logs_warning(
+    mixed_case_client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """#675: unexpected exception from user_store.list() → no link, WARNING logged."""
+    import logging
+
+    from iam_jit.users_store import FileUserStore
+
+    monkeypatch.setattr(FileUserStore, "list", lambda *a, **kw: (_ for _ in ()).throw(RuntimeError("disk full")))
+    with caplog.at_level(logging.WARNING, logger="iam_jit.login"):
+        resp = mixed_case_client.post(
+            "/login",
+            data={"email": "devuser@test-host.local"},
+            follow_redirects=False,
+        )
+    assert resp.status_code == 200
+    assert "auth/magic-callback" not in resp.text
+    warning_messages = [r.message for r in caplog.records if r.levelno == logging.WARNING]
+    assert any("disk full" in str(m) for m in warning_messages), (
+        f"expected a warning mentioning the error reason; got: {warning_messages}"
+    )
+
+
 def test_logout_clears_cookie(as_admin: TestClient) -> None:
     resp = as_admin.get("/logout", follow_redirects=False)
     assert resp.status_code == 303

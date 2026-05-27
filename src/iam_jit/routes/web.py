@@ -382,7 +382,15 @@ def login_submit(
                 u for u in user_store.list(include_disabled=True)
                 if u.id.lower() == folded
             ]
-        except Exception:
+        except (FileNotFoundError, PermissionError):
+            # users.yaml absent or unreadable — treat as no users found.
+            candidates = []
+        except Exception as _exc:
+            import logging
+
+            logging.getLogger("iam_jit.login").warning(
+                "unexpected error during case-insensitive user lookup: %s", _exc
+            )
             candidates = []
         if len(candidates) == 1:
             user = candidates[0]
