@@ -323,9 +323,17 @@ SHELL_RC_FILES: tuple[pathlib.Path, ...] = (
 # Patterns that indicate a stale iam-jit shellinit line.
 # We look for the shellinit eval pattern + direct env var exports.
 _SHELLINIT_PATTERNS = (
+    # Canonical shellinit invocation: `eval "$(iam-jit shellinit)"`.
+    # Both the hyphenated CLI name and the underscore module name are
+    # matched. This is the ONLY shell-rc line iam-jit itself writes; no
+    # other iam-jit fragment is ours to detect here.
+    #
+    # #673 LOW: do NOT match bare "IAM_JIT_" — that would false-flag
+    # operator-set env vars like `IAM_JIT_DOGFOOD_REFUSE_DESTRUCTIVE=1`,
+    # `IAM_JIT_DATA_DIR=...`, etc. that are the operator's own config and
+    # must NOT be reported as stale iam-jit shell initialisation artifacts.
     "iam-jit shellinit",
     "iam_jit shellinit",
-    "IAM_JIT_",
     "HTTPS_PROXY=http://127.0.0.1:74",  # ibounce legacy proxy
     "AWS_ENDPOINT_URL.*iam.jit",
 )
@@ -724,10 +732,14 @@ _BOUNCER_FLAG_SIGNATURES: dict[str, tuple[str, ...]] = {
         # include the legacy module name for older installs.
         "iam_jit.bouncer_cli",
         "iam_jit_bouncer",
-        # #666 CRIT: bare subcommand patterns for default-launch
-        # (`ibounce run`, `ibounce serve`, `ibounce mcp`).
-        # Leading space enforces word-boundary (prevents matching
-        # within longer tokens like `--upstream-runner`).
+        # #666 CRIT: bare subcommand patterns for default-launch.
+        # " run" matches ibounce run (top-level).
+        # " serve" matches ibounce run (top-level) AND ibounce mcp serve
+        #   (MCP sub-subcommand, the stdio launch shape).
+        # " mcp" matches ibounce mcp serve and any future ibounce mcp *
+        #   sub-subcommands.
+        # Leading space enforces word-boundary (prevents matching within
+        # longer tokens like `--upstream-runner` or `--dry-run`).
         " run",
         " serve",
         " mcp",
@@ -735,8 +747,10 @@ _BOUNCER_FLAG_SIGNATURES: dict[str, tuple[str, ...]] = {
     "kbounce": (
         "--apiserver-url",
         "--rbac-mode",
-        # #666: kbounce ships `kbounce run` and `kbounce serve` as its
-        # primary launch subcommands (verified in kbouncer/internal/cli/cli.go).
+        # #666: matches kbounce run (top-level) AND kbounce mcp serve
+        # (MCP sub-subcommand, the stdio launch shape). Leading space
+        # is a word-boundary guard — prevents matching within longer
+        # tokens like `--upstream-runner`.
         " run",
         " serve",
     ),
@@ -744,7 +758,8 @@ _BOUNCER_FLAG_SIGNATURES: dict[str, tuple[str, ...]] = {
         "--apiserver-url",
         "--rbac-mode",
         # #666: kbouncer is a deprecation shim for kbounce; same
-        # subcommand surface.
+        # subcommand surface: matches kbounce run (top-level) AND
+        # kbouncer mcp serve (MCP sub-subcommand, stdio launch shape).
         " run",
         " serve",
     ),
@@ -3499,11 +3514,22 @@ def register_uninstall_command(main_group: click.Group) -> click.Command:
             _print_result_summary(result)
 
         # Exit code semantics:
-        #   0 — ok / dry_run
-        #   1 — incomplete (post-check found leftover state)
-        #   2 — halted (operator must re-run with --force)
+        #   0  — ok / dry_run
+        #   1  — incomplete (post-check found leftover state)
+        #   2  — halted (U-1/U-2/U-3/U-5: operator must re-run with --force)
+        #   78 — halted by configuration guard (U-6/U-7/U-8: these halts
+        #        require their own long-form acknowledgement flag and are NOT
+        #        bypassable by --force). EX_CONFIG per BSD sysexits(3).
+        #        #672: explicit non-zero so CI/scripts that check exit code
+        #        don't misread a dogfood-belt refusal as success.
         status = result.get("status")
         if status == "halted":
+            # Distinguish EX_CONFIG (78) for the U-6/U-7/U-8 belt halts
+            # (configuration guard, not operator-bypassed) from the
+            # standard halt-needs-force exit (2) for U-1/U-2/U-3/U-5.
+            run_halt_ids = {h["id"] for h in (result.get("halts") or [])}
+            if run_halt_ids & {"U-6", "U-7", "U-8"}:
+                raise SystemExit(78)  # EX_CONFIG — configuration guard
             raise SystemExit(2)
         if status == "incomplete":
             raise SystemExit(1)

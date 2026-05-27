@@ -414,9 +414,9 @@ def test_671_full_machine_cleanup_without_ack_refuses(
             "--full-machine-cleanup",
         ],
     )
-    # U-8 halt -> exit code 2.
-    assert cli_result.exit_code == 2, (
-        f"--full-machine-cleanup without ack must refuse; got exit "
+    # U-8 halt -> exit code 78 (EX_CONFIG — configuration guard, #672).
+    assert cli_result.exit_code == 78, (
+        f"--full-machine-cleanup without ack must refuse with EX_CONFIG (78); got exit "
         f"{cli_result.exit_code}\noutput: {cli_result.output}"
     )
     assert "U-8" in cli_result.output or "yes-i-want-to-clean" in cli_result.output
@@ -494,8 +494,9 @@ def test_671_dogfood_safety_belt_refuses_without_long_ack(
 
     runner = CliRunner()
     cli_result = runner.invoke(main, ["uninstall", "--yes"])
-    assert cli_result.exit_code == 2, (
-        f"dogfood-belt: default uninstall must REFUSE without long ack; "
+    # U-6 halt -> exit code 78 (EX_CONFIG — configuration guard, #672).
+    assert cli_result.exit_code == 78, (
+        f"dogfood-belt: default uninstall must REFUSE with EX_CONFIG (78) without long ack; "
         f"got exit {cli_result.exit_code}\noutput: {cli_result.output}"
     )
     assert "U-6" in cli_result.output or "dogfood" in cli_result.output.lower()
@@ -572,9 +573,9 @@ def test_671_live_bouncer_on_default_port_refuses_without_ack(
         main,
         ["uninstall", "--yes", "--data-dir", str(fixture_home)],
     )
-    # U-7 -> exit code 2.
-    assert cli_result.exit_code == 2, (
-        f"U-7 (live bouncer + non-default --data-dir) must refuse; "
+    # U-7 -> exit code 78 (EX_CONFIG — configuration guard, #672).
+    assert cli_result.exit_code == 78, (
+        f"U-7 (live bouncer + non-default --data-dir) must refuse with EX_CONFIG (78); "
         f"got exit {cli_result.exit_code}\noutput: {cli_result.output}"
     )
     assert "U-7" in cli_result.output or "live" in cli_result.output.lower()

@@ -367,3 +367,160 @@ def test_666_run_pattern_has_leading_space_word_boundary() -> None:
                     f"'--upstream-runner'. Use ' run' (with leading space) "
                     f"for word-boundary safety."
                 )
+
+
+# ---------------------------------------------------------------------------
+# #668 LOW — explicit tests for `<bouncer> mcp serve` two-token pattern
+#
+# The " serve" signature in _BOUNCER_FLAG_SIGNATURES matches BOTH the
+# `<bouncer> run` top-level subcommand AND the MCP stdio launch shape
+# `<bouncer> mcp serve`. Without these tests, a future refactor could
+# remove the " serve" signature as "dead code" (since " run" already covers
+# the top-level launch). These tests lock the MCP stdio intent.
+# ---------------------------------------------------------------------------
+
+
+def test_668_ibounce_mcp_serve_classified_as_ibounce() -> None:
+    """#668: `<python> /path/ibounce mcp serve` must classify as 'ibounce'.
+
+    The MCP stdio launch shape (`ibounce mcp serve`) is the canonical way
+    Claude Code and other MCP clients invoke ibounce. The " serve" signature
+    (with leading space) matches the " serve" token in this cmdline.
+
+    Factor 1: script path under ~/.iam-jit/venv/bin (known install root).
+    Factor 2: " serve" in ibounce's _BOUNCER_FLAG_SIGNATURES.
+    Factor 3: same-user.
+    """
+    script_path = _venv_bin("ibounce")
+    cmdline = f"/usr/bin/python3 {script_path} mcp serve"
+    pid = 55001
+    my_uid = _my_uid()
+
+    with (
+        mock.patch.object(
+            cu, "_resolve_executable_path",
+            return_value=pathlib.Path("/usr/bin/python3"),
+        ),
+        mock.patch.object(cu, "_pid_owner_uid", return_value=my_uid),
+    ):
+        kind, failed = cu._classify_bouncer_pid_multifactor(pid, cmdline)
+
+    assert kind == "ibounce", (
+        f"#668: ibounce mcp serve must classify as 'ibounce'; "
+        f"got kind={kind!r}, failed={failed}. "
+        f"Cmdline: {cmdline!r}"
+    )
+
+
+def test_668_kbounce_mcp_serve_classified_as_kbounce() -> None:
+    """#668: `<path>/kbounce mcp serve` must classify as 'kbounce'.
+
+    kbounce ships `kbounce mcp serve` as its MCP stdio launch sub-subcommand.
+    The " serve" signature covers both `kbounce serve` (hypothetical top-level)
+    AND `kbounce mcp serve` (real MCP shape). This test locks the latter intent
+    so a future cleanup cannot remove " serve" as "dead code".
+    """
+    script_path = pathlib.Path.home() / "go" / "bin" / "kbounce"
+    cmdline = f"{script_path} mcp serve"
+    pid = 55002
+    my_uid = _my_uid()
+
+    with (
+        mock.patch.object(
+            cu, "_resolve_executable_path",
+            return_value=script_path,
+        ),
+        mock.patch.object(cu, "_pid_owner_uid", return_value=my_uid),
+    ):
+        kind, failed = cu._classify_bouncer_pid_multifactor(pid, cmdline)
+
+    assert kind == "kbounce", (
+        f"#668: kbounce mcp serve must classify as 'kbounce'; "
+        f"got kind={kind!r}, failed={failed}"
+    )
+
+
+def test_668_dbounce_mcp_serve_classified_as_dbounce() -> None:
+    """#668: `<path>/dbounce mcp serve` must classify as 'dbounce'.
+
+    dbounce ships `dbounce mcp serve` as its MCP stdio launch sub-subcommand.
+    The " mcp" signature in dbounce's _BOUNCER_FLAG_SIGNATURES covers this shape.
+    """
+    script_path = pathlib.Path.home() / "go" / "bin" / "dbounce"
+    cmdline = f"{script_path} mcp serve"
+    pid = 55003
+    my_uid = _my_uid()
+
+    with (
+        mock.patch.object(
+            cu, "_resolve_executable_path",
+            return_value=script_path,
+        ),
+        mock.patch.object(cu, "_pid_owner_uid", return_value=my_uid),
+    ):
+        kind, failed = cu._classify_bouncer_pid_multifactor(pid, cmdline)
+
+    assert kind == "dbounce", (
+        f"#668: dbounce mcp serve must classify as 'dbounce'; "
+        f"got kind={kind!r}, failed={failed}"
+    )
+
+
+def test_668_gbounce_mcp_serve_classified_as_gbounce() -> None:
+    """#668: `<path>/gbounce mcp serve` must classify as 'gbounce'.
+
+    gbounce ships `gbounce mcp serve` as its MCP stdio launch sub-subcommand.
+    The " mcp" signature in gbounce's _BOUNCER_FLAG_SIGNATURES covers this shape.
+    """
+    script_path = pathlib.Path.home() / "go" / "bin" / "gbounce"
+    cmdline = f"{script_path} mcp serve"
+    pid = 55004
+    my_uid = _my_uid()
+
+    with (
+        mock.patch.object(
+            cu, "_resolve_executable_path",
+            return_value=script_path,
+        ),
+        mock.patch.object(cu, "_pid_owner_uid", return_value=my_uid),
+    ):
+        kind, failed = cu._classify_bouncer_pid_multifactor(pid, cmdline)
+
+    assert kind == "gbounce", (
+        f"#668: gbounce mcp serve must classify as 'gbounce'; "
+        f"got kind={kind!r}, failed={failed}"
+    )
+
+
+def test_668_signatures_contain_serve_for_ibounce_kbounce_kbouncer() -> None:
+    """#668 structural: _BOUNCER_FLAG_SIGNATURES must contain ' serve' for
+    ibounce, kbounce, and kbouncer — these bouncers ship `mcp serve` as
+    their MCP stdio launch sub-subcommand, which requires the ' serve' token
+    to be present in the signature list.
+
+    Locking this prevents accidental removal of ' serve' when a reviewer
+    sees ' run' already covers the top-level subcommand and concludes
+    ' serve' is dead code.
+    """
+    for kind in ("ibounce", "kbounce", "kbouncer"):
+        sigs = cu._BOUNCER_FLAG_SIGNATURES.get(kind, ())
+        assert " serve" in sigs, (
+            f"#668: _BOUNCER_FLAG_SIGNATURES['{kind}'] must contain ' serve' "
+            f"to match the `{kind} mcp serve` MCP stdio launch shape; "
+            f"got sigs={sigs}"
+        )
+
+
+def test_668_signatures_contain_mcp_for_ibounce_dbounce_gbounce() -> None:
+    """#668 structural: _BOUNCER_FLAG_SIGNATURES must contain ' mcp' for
+    ibounce, dbounce, and gbounce — these bouncers use `mcp serve` as their
+    MCP stdio launch sub-subcommand and the ' mcp' token provides an
+    additional match path.
+    """
+    for kind in ("ibounce", "dbounce", "gbounce"):
+        sigs = cu._BOUNCER_FLAG_SIGNATURES.get(kind, ())
+        assert " mcp" in sigs, (
+            f"#668: _BOUNCER_FLAG_SIGNATURES['{kind}'] must contain ' mcp' "
+            f"to match the `{kind} mcp serve` MCP stdio launch shape; "
+            f"got sigs={sigs}"
+        )
