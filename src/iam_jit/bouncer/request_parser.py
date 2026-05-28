@@ -241,6 +241,13 @@ def _resolve_action_and_resource(
         return _s3_action_and_resource(method=method, host=host, path=path, query=query)
     if service == "lambda":
         return _lambda_action_and_resource(method=method, path=path)
+    # #698 MED-4: API Gateway is REST-shaped without X-Amz-Target/Action
+    # but maps cleanly to canonical IAM actions via (method, path-pattern).
+    # `apigateway` (v1, REST APIs) + `apigatewayv2` (HTTP/WebSocket APIs)
+    # share enough surface to reuse one dispatcher; v2-specific endpoints
+    # are handled inside via path-prefix heuristics.
+    if service in ("apigateway", "apigatewayv2", "execute-api"):
+        return _apigateway_action_and_resource(method=method, path=path)
 
     # 4. Generic REST fallback
     return method.upper() or "Unknown", _generic_resource_hint(host, path)
@@ -546,3 +553,191 @@ def _lambda_action_and_resource(*, method: str, path: str) -> tuple[str, str | N
     else:
         action = m or "Unknown"
     return action, name
+
+
+# ---------------------------------------------------------------------------
+# #698 MED-4 — API Gateway dispatcher
+#
+# API Gateway uses REST without an X-Amz-Target header + without
+# Action=foo in the query. Pre-#698 every call fell through to the
+# generic-REST fallback which surfaced the action as the HTTP method
+# (GET/POST/PUT/DELETE) — useless for downstream policy matchers that
+# need canonical IAM action names (apigateway:CreateRestApi etc.).
+#
+# Coverage = ~20 most-common operations from the apigateway management
+# API (v1 / REST APIs) + apigatewayv2 (HTTP/WebSocket APIs). Source =
+# botocore service-model `apigateway/2015-07-09/service-2.json` +
+# `apigatewayv2/2018-11-29/service-2.json` operation `http.requestUri`
+# fields. Each entry verified against the actual REST path pattern.
+#
+# Resource hint: the path tail (rest-api-id / function-id / etc.) so
+# the audit row carries the affected entity even when we can't
+# synthesize a full ARN. Falls back to None when the path has no
+# entity (e.g. `/restapis` lists ALL APIs).
+# ---------------------------------------------------------------------------
+
+
+def _apigateway_action_and_resource(
+    *, method: str, path: str,
+) -> tuple[str, str | None]:
+    """Map (HTTP method, API Gateway path pattern) → canonical IAM action.
+
+    Path patterns are matched against the most common entity types:
+    restapis, resources, methods, integrations, deployments, stages,
+    apis (v2), routes, integrations (v2). Less common operations fall
+    through to the {Method}{Entity} fallback (e.g. `POST /vpclinks` →
+    `CreateVpclinks` — still better than `POST` alone)."""
+    m = (method or "").upper()
+    parts = (path or "").strip("/").split("/")
+    if not parts or parts == [""]:
+        # Bare host hit — shouldn't happen for apigateway but bail safe.
+        return m or "Unknown", None
+
+    head = parts[0].lower()
+    # Resource hint: typically the entity id at parts[1].
+    entity_id = parts[1] if len(parts) >= 2 else None
+
+    # apigateway v1 (REST API management plane)
+    # /restapis                                  → ListRestApis / CreateRestApi
+    # /restapis/{id}                             → GetRestApi / UpdateRestApi / DeleteRestApi
+    # /restapis/{id}/resources                   → GetResources / CreateResource
+    # /restapis/{id}/resources/{rid}             → GetResource / UpdateResource / DeleteResource
+    # /restapis/{id}/resources/{rid}/methods/{m} → PutMethod / GetMethod / DeleteMethod
+    # /restapis/{id}/resources/{rid}/methods/{m}/integration → PutIntegration / GetIntegration / DeleteIntegration
+    # /restapis/{id}/deployments                 → CreateDeployment / GetDeployments
+    # /restapis/{id}/stages                      → CreateStage / GetStages
+    # /restapis/{id}/stages/{name}               → GetStage / UpdateStage / DeleteStage
+    if head == "restapis":
+        # Drill into the path tail to pick the right action.
+        n = len(parts)
+        if n == 1:
+            action = "GetRestApis" if m == "GET" else (
+                "CreateRestApi" if m == "POST" else (m or "Unknown")
+            )
+            return action, None
+        # n >= 2 → entity-scoped
+        if n == 2:
+            action = {
+                "GET": "GetRestApi",
+                "POST": "ImportRestApi",
+                "PATCH": "UpdateRestApi",
+                "PUT": "PutRestApi",
+                "DELETE": "DeleteRestApi",
+            }.get(m, m or "Unknown")
+            return action, entity_id
+        # n >= 3 → sub-resource at parts[2]
+        sub = parts[2].lower()
+        if sub == "resources":
+            if n == 3:
+                action = "GetResources" if m == "GET" else (
+                    "CreateResource" if m == "POST" else (m or "Unknown")
+                )
+            elif n == 4:
+                action = {
+                    "GET": "GetResource",
+                    "POST": "CreateResource",
+                    "PATCH": "UpdateResource",
+                    "DELETE": "DeleteResource",
+                }.get(m, m or "Unknown")
+            elif n >= 6 and parts[4].lower() == "methods":
+                # /restapis/{id}/resources/{rid}/methods/{verb}[/integration]
+                if n == 6:
+                    action = {
+                        "GET": "GetMethod",
+                        "PUT": "PutMethod",
+                        "DELETE": "DeleteMethod",
+                        "PATCH": "UpdateMethod",
+                    }.get(m, m or "Unknown")
+                elif n >= 7 and parts[6].lower() == "integration":
+                    action = {
+                        "GET": "GetIntegration",
+                        "PUT": "PutIntegration",
+                        "DELETE": "DeleteIntegration",
+                        "PATCH": "UpdateIntegration",
+                    }.get(m, m or "Unknown")
+                else:
+                    action = m or "Unknown"
+            else:
+                action = m or "Unknown"
+            return action, entity_id
+        if sub == "deployments":
+            if n == 3:
+                action = "GetDeployments" if m == "GET" else (
+                    "CreateDeployment" if m == "POST" else (m or "Unknown")
+                )
+            else:
+                action = {
+                    "GET": "GetDeployment",
+                    "PATCH": "UpdateDeployment",
+                    "DELETE": "DeleteDeployment",
+                }.get(m, m or "Unknown")
+            return action, entity_id
+        if sub == "stages":
+            if n == 3:
+                action = "GetStages" if m == "GET" else (
+                    "CreateStage" if m == "POST" else (m or "Unknown")
+                )
+            else:
+                action = {
+                    "GET": "GetStage",
+                    "PATCH": "UpdateStage",
+                    "DELETE": "DeleteStage",
+                }.get(m, m or "Unknown")
+            return action, entity_id
+        # Sub-resource we don't have a curated map for — emit a useful
+        # composite so the audit row stays grep-friendly.
+        return f"{m.title()}{sub.title()}", entity_id
+
+    # apigatewayv2 (HTTP / WebSocket APIs)
+    # /v2/apis                                   → GetApis / CreateApi
+    # /v2/apis/{id}                              → GetApi / UpdateApi / DeleteApi
+    # /v2/apis/{id}/routes                       → GetRoutes / CreateRoute
+    # /v2/apis/{id}/routes/{rid}                 → GetRoute / UpdateRoute / DeleteRoute
+    # /v2/apis/{id}/integrations                 → GetIntegrations / CreateIntegration
+    if head == "v2" and len(parts) >= 2 and parts[1].lower() == "apis":
+        n = len(parts)
+        # entity_id for v2 is at parts[2] (api id), not parts[1].
+        api_id = parts[2] if n >= 3 else None
+        if n == 2:
+            action = "GetApis" if m == "GET" else (
+                "CreateApi" if m == "POST" else (m or "Unknown")
+            )
+            return action, None
+        if n == 3:
+            action = {
+                "GET": "GetApi",
+                "PATCH": "UpdateApi",
+                "DELETE": "DeleteApi",
+            }.get(m, m or "Unknown")
+            return action, api_id
+        sub = parts[3].lower()
+        if sub == "routes":
+            if n == 4:
+                action = "GetRoutes" if m == "GET" else (
+                    "CreateRoute" if m == "POST" else (m or "Unknown")
+                )
+            else:
+                action = {
+                    "GET": "GetRoute",
+                    "PATCH": "UpdateRoute",
+                    "DELETE": "DeleteRoute",
+                }.get(m, m or "Unknown")
+            return action, api_id
+        if sub == "integrations":
+            if n == 4:
+                action = "GetIntegrations" if m == "GET" else (
+                    "CreateIntegration" if m == "POST" else (m or "Unknown")
+                )
+            else:
+                action = {
+                    "GET": "GetIntegration",
+                    "PATCH": "UpdateIntegration",
+                    "DELETE": "DeleteIntegration",
+                }.get(m, m or "Unknown")
+            return action, api_id
+        return f"{m.title()}{sub.title()}", api_id
+
+    # Top-level resource we don't have a curated map for — fallback to
+    # {Method}{Entity} composite. Better than bare HTTP verb.
+    composite = f"{m.title()}{head.title()}"
+    return composite, entity_id

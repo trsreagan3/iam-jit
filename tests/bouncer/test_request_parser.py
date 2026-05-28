@@ -390,3 +390,109 @@ def test_parse_request_to_dict_round_trip() -> None:
     assert d["region"] == "us-east-1"
     assert d["raw_method"] == "GET"
     assert d["raw_path"] == "/b/k"
+
+
+# ---------------------------------------------------------------------------
+# #698 MED-4 — API Gateway (v1 + v2) action+resource extraction. Pre-#698
+# every apigateway call fell through to the generic-REST fallback, which
+# emitted the bare HTTP method as the action (GET/POST/...). Useless for
+# downstream policy matchers that need apigateway:CreateRestApi etc.
+# ---------------------------------------------------------------------------
+
+
+def _apigateway_parse(method: str, path: str, service: str = "apigateway"):
+    return parse_request(
+        method=method,
+        host=f"{service}.us-east-1.amazonaws.com",
+        path=path,
+        headers={"Authorization": _sigv4(service, "us-east-1")},
+    )
+
+
+@pytest.mark.parametrize("method,path,expected_action,expected_resource", [
+    # apigateway v1 — REST APIs management plane
+    ("GET", "/restapis", "GetRestApis", None),
+    ("POST", "/restapis", "CreateRestApi", None),
+    ("GET", "/restapis/abc123", "GetRestApi", "abc123"),
+    ("PATCH", "/restapis/abc123", "UpdateRestApi", "abc123"),
+    ("DELETE", "/restapis/abc123", "DeleteRestApi", "abc123"),
+    ("PUT", "/restapis/abc123", "PutRestApi", "abc123"),
+    # Resources
+    ("GET", "/restapis/abc123/resources", "GetResources", "abc123"),
+    ("POST", "/restapis/abc123/resources", "CreateResource", "abc123"),
+    ("GET", "/restapis/abc123/resources/rid1", "GetResource", "abc123"),
+    ("DELETE", "/restapis/abc123/resources/rid1", "DeleteResource", "abc123"),
+    # Methods
+    ("PUT", "/restapis/abc123/resources/rid1/methods/GET", "PutMethod", "abc123"),
+    ("GET", "/restapis/abc123/resources/rid1/methods/GET", "GetMethod", "abc123"),
+    ("DELETE", "/restapis/abc123/resources/rid1/methods/GET", "DeleteMethod", "abc123"),
+    # Integrations (under methods)
+    ("PUT", "/restapis/abc123/resources/rid1/methods/GET/integration",
+     "PutIntegration", "abc123"),
+    ("GET", "/restapis/abc123/resources/rid1/methods/GET/integration",
+     "GetIntegration", "abc123"),
+    # Deployments
+    ("POST", "/restapis/abc123/deployments", "CreateDeployment", "abc123"),
+    ("GET", "/restapis/abc123/deployments", "GetDeployments", "abc123"),
+    ("GET", "/restapis/abc123/deployments/dep1", "GetDeployment", "abc123"),
+    # Stages
+    ("POST", "/restapis/abc123/stages", "CreateStage", "abc123"),
+    ("GET", "/restapis/abc123/stages/prod", "GetStage", "abc123"),
+])
+def test_apigateway_v1_action_extraction(
+    method: str, path: str, expected_action: str,
+    expected_resource: str | None,
+) -> None:
+    out = _apigateway_parse(method, path)
+    assert out is not None, f"parser returned None for {method} {path}"
+    assert out.action == expected_action, (
+        f"{method} {path} → got {out.action}, expected {expected_action}"
+    )
+    assert out.resource_hint == expected_resource, (
+        f"{method} {path} → got resource {out.resource_hint!r}, "
+        f"expected {expected_resource!r}"
+    )
+
+
+@pytest.mark.parametrize("method,path,expected_action,expected_resource", [
+    # apigatewayv2 — HTTP / WebSocket APIs
+    ("GET", "/v2/apis", "GetApis", None),
+    ("POST", "/v2/apis", "CreateApi", None),
+    ("GET", "/v2/apis/api1", "GetApi", "api1"),
+    ("PATCH", "/v2/apis/api1", "UpdateApi", "api1"),
+    ("DELETE", "/v2/apis/api1", "DeleteApi", "api1"),
+    # Routes
+    ("GET", "/v2/apis/api1/routes", "GetRoutes", "api1"),
+    ("POST", "/v2/apis/api1/routes", "CreateRoute", "api1"),
+    ("GET", "/v2/apis/api1/routes/r1", "GetRoute", "api1"),
+    ("DELETE", "/v2/apis/api1/routes/r1", "DeleteRoute", "api1"),
+    # Integrations
+    ("GET", "/v2/apis/api1/integrations", "GetIntegrations", "api1"),
+    ("POST", "/v2/apis/api1/integrations", "CreateIntegration", "api1"),
+    ("GET", "/v2/apis/api1/integrations/i1", "GetIntegration", "api1"),
+])
+def test_apigateway_v2_action_extraction(
+    method: str, path: str, expected_action: str,
+    expected_resource: str | None,
+) -> None:
+    out = _apigateway_parse(method, path, service="apigatewayv2")
+    assert out is not None
+    assert out.action == expected_action
+    assert out.resource_hint == expected_resource
+
+
+def test_apigateway_unknown_subresource_falls_back_to_composite() -> None:
+    """Sub-resources we don't have a curated map for (e.g. /vpclinks)
+    produce a composite '{Method}{Entity}' action — useful for audit
+    even though it's not the canonical IAM action name."""
+    out = _apigateway_parse("POST", "/vpclinks")
+    assert out is not None
+    assert out.action == "PostVpclinks"
+
+
+def test_apigateway_bare_root_falls_back_safely() -> None:
+    """A bare `/` against the apigateway endpoint shouldn't crash;
+    fallback to the HTTP method."""
+    out = _apigateway_parse("GET", "/")
+    assert out is not None
+    assert out.action == "GET"
