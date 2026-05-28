@@ -324,11 +324,18 @@ def render_instructions(
         except (IndexError, ValueError):
             console_url = None
 
+    # #696 defensive guard: force every multi-line scalar back to a
+    # plain `str` so a future caller passing a ruamel CommentedScalar /
+    # subclass through the renderer doesn't accidentally emit a
+    # serializer-confused payload. `str(x)` on a `str` subclass is
+    # idempotent + cheap. Plain-`str` values are guaranteed-correctly
+    # escaped by every standard JSON encoder (stdlib json, orjson,
+    # FastAPI's default).
     block: dict[str, Any] = {
-        "cli_assume_role": cli_assume_role,
-        "cli_profile_block": cli_profile_block,
-        "agent_usage_hints": agent_hints,
-        "notes": notes,
+        "cli_assume_role": str(cli_assume_role),
+        "cli_profile_block": str(cli_profile_block),
+        "agent_usage_hints": str(agent_hints),
+        "notes": str(notes),
     }
     if console_url:
         block["console_url"] = console_url
