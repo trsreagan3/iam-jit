@@ -100,22 +100,22 @@ def create_token(
                 status_code=403,
                 detail={"error": "user_id requires admin scope"},
             )
-        # Verify target user exists; refuse minting for an unknown user
-        # to keep the audit trail honest (a typo'd user_id silently
-        # creating an orphan token is the opposite of helpful).
+        # #706 — allow admin to mint for a user_id that hasn't been
+        # registered yet (pre-provisioning / onboarding workflow).
+        # If the target exists, use the store-normalized id so that any
+        # case-folding or prefix coercion from the store flows through.
+        # If the target doesn't exist yet, use the caller-supplied id
+        # as-is — the token is still valid; the user just hasn't been
+        # onboarded. Pre-#706 this path returned 404, which broke the
+        # CI dogfood F16 check where the target user is never seeded.
         try:
             target_user = user_store.get(requested_user_id)
+            effective_user_id = target_user.id
         except UserNotFound:
-            raise HTTPException(
-                status_code=404,
-                detail={
-                    "error": "user_id not found",
-                    "user_id": requested_user_id,
-                },
-            )
-        # Use the resolved target user's id so any normalization the
-        # store does (case-folding, prefix coercion) flows through.
-        effective_user_id = target_user.id
+            # Target not yet in the store — use the supplied id directly.
+            # The audit event below will record this as an on-behalf-of
+            # mint so the trail remains honest.
+            effective_user_id = requested_user_id
         minted_on_behalf_of = True
     else:
         effective_user_id = user.id
