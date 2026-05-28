@@ -43,6 +43,26 @@ _MFA_SALT = "oidc-mfa"
 _DEFAULT_MAX_AGE_SECONDS = 5 * 60  # 5 min
 _DEFAULT_HIGH_RISK_SCORE = 7
 
+# #695 — Solo-deployment-mode raises the default MFA floor.
+#
+# In solo mode there is no second-actor approval path AND no TOTP CLI
+# yet (TOTP shipping is queued as a v1.1 follow-up — see the dogfood
+# audit for #695). Without a higher floor, every self-approve at score
+# 7+ silently fails the MFA gate because the operator has no way to
+# satisfy it — effective ceiling drops to ~5, well below the documented
+# "self-approve up to 7" Pro-tier line. Raising to 9 keeps the gate
+# meaningful (a true 9 or 10 still requires deliberate operator action)
+# while letting 5/6/7-tier reductions auto-approve as advertised.
+#
+# Operators who DO have a fresh-MFA story in solo mode (e.g. an external
+# IdP that re-prompts MFA on the iam-jit OIDC flow) can opt back into
+# the stricter floor by setting IAM_JIT_MFA_STEP_UP_AT_SCORE=7 explicitly.
+#
+# Per [[safety-mode-lean-permissive]]: when an operator-facing gate has
+# no fulfillment path the right default is "lean permissive" — a
+# block-happy gate that can never satisfy itself just gets uninstalled.
+_DEFAULT_HIGH_RISK_SCORE_SOLO = 9
+
 
 @dataclasses.dataclass(frozen=True)
 class MFAVerification:
@@ -138,18 +158,47 @@ def is_high_risk(score: int) -> bool:
     return score >= floor
 
 
+def _is_solo_deployment_mode() -> bool:
+    """True if `IAM_JIT_DEPLOYMENT_MODE=solo`. Cached on the env so the
+    test suite can flip with monkeypatch.setenv without restarting."""
+    return (
+        (os.environ.get("IAM_JIT_DEPLOYMENT_MODE") or "")
+        .strip()
+        .lower()
+        == "solo"
+    )
+
+
 def _high_risk_score_floor() -> int:
     """Return the score-floor at or above which MFA freshness is
     required. Clamped to [1, 10] so an env value like 999 (which
     would silently disable the gate) or 0 / negative (which would
     require MFA on EVERY grant, blocking all read-only ops) cannot
     misconfigure the gate. WB12-03 closure.
+
+    #695: in solo deployment mode the default floor rises from 7 to 9
+    because solo has no second-actor + no TOTP CLI yet, so a 7-floor
+    silently caps self-approve at ~5 and breaks the documented
+    Pro-tier "self-approve up to 7" flow. The explicit env var still
+    wins (operator can re-tighten to 7 if they DO have a fresh-MFA
+    story for solo mode).
     """
     raw = (os.environ.get("IAM_JIT_MFA_STEP_UP_AT_SCORE") or "").strip()
-    try:
-        v = int(raw) if raw else _DEFAULT_HIGH_RISK_SCORE
-    except ValueError:
-        v = _DEFAULT_HIGH_RISK_SCORE
+    if raw:
+        try:
+            v = int(raw)
+        except ValueError:
+            v = (
+                _DEFAULT_HIGH_RISK_SCORE_SOLO
+                if _is_solo_deployment_mode()
+                else _DEFAULT_HIGH_RISK_SCORE
+            )
+    else:
+        v = (
+            _DEFAULT_HIGH_RISK_SCORE_SOLO
+            if _is_solo_deployment_mode()
+            else _DEFAULT_HIGH_RISK_SCORE
+        )
     # Risk scores are 1-10 per the scoring engine. Anything outside
     # that range is nonsense and is clamped to the defaults' safe
     # interpretation: too-high values clamp DOWN to 10 (the most

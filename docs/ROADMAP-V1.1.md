@@ -47,6 +47,37 @@ JIT/scoring story extend to GitOps-style IaC pipelines.
 useful in practice (terraform `--proxy` doesn't ship with TLS-
 skip-verify the way kubectl does). Scheduling-bound to #2.
 
+### 4. TOTP CLI MFA path for solo deployment mode (#695)
+
+**What:** Today `iam-jit serve --local` (solo deployment mode) has
+no fresh-MFA fulfillment path — no OIDC/IdP loop AND no TOTP CLI
+for the operator to satisfy `mfa_required_for_high_risk`. The v1.0
+dogfood (#695) found the documented "self-approve up to 7" Pro-tier
+flow silently caps at ~5 because every self-approve at 7+ fails
+the MFA gate the operator can't satisfy. v1.0 ships a permissive
+workaround: solo-mode default floor rises from 7 to 9 (env override
+still wins). v1.1 adds a real TOTP CLI path so solo operators can
+satisfy the gate at score 7-8 deliberately + keep the floor at 7.
+
+**Shape:**
+  - `iam-jit mfa enroll`: generate a TOTP secret + QR code, store it
+    under `~/.iam-jit/mfa.totp` (Ed25519-signed, chmod 600).
+  - `iam-jit mfa challenge <code>`: mint a fresh MFA cookie
+    equivalent (signed timestamp) when the 6-digit TOTP code
+    verifies. Cookie binds to the operator's user-id.
+  - `iam-jit mfa step-up <code>`: auto-prompted by submit when a
+    high-risk grant is in flight; same as challenge with a hint
+    in the submit response.
+  - Solo-mode default floor returns to 7 once TOTP ships.
+
+**Why deferred:** TOTP enrollment + challenge UX is its own product
+slice (storage, secret-rotation, lost-device recovery, backup codes).
+The v1.0 permissive floor closes the dogfood gap without
+compromising security — solo mode never had a fresh-MFA path to
+begin with, so the gate at 9 is honest about what it can actually
+enforce. Per [[safety-mode-lean-permissive]]: a gate that can never
+satisfy itself just gets uninstalled.
+
 ## Bar for legitimate deferral
 
 The earlier draft of this doc deferred ~5 features ("plan-capture

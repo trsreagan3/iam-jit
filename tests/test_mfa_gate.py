@@ -212,6 +212,76 @@ def test_step_up_max_age_seconds_clamp_boundaries(
 
 
 # ---------------------------------------------------------------------------
+# #695 — Solo deployment mode raises the default MFA floor to 9 so the
+# documented "self-approve up to 7" Pro-tier flow isn't silently capped
+# at ~5 by an MFA gate the solo operator has no way to satisfy. See the
+# docstring on _DEFAULT_HIGH_RISK_SCORE_SOLO + [[safety-mode-lean-permissive]].
+# ---------------------------------------------------------------------------
+
+
+def test_solo_mode_default_floor_is_9(monkeypatch: pytest.MonkeyPatch) -> None:
+    """In solo deployment mode (no second-actor + no TOTP path yet), the
+    default MFA floor must rise to 9 so self-approve at 5/6/7 isn't
+    silently capped by the MFA gate."""
+    monkeypatch.setenv("IAM_JIT_DEPLOYMENT_MODE", "solo")
+    monkeypatch.delenv("IAM_JIT_MFA_STEP_UP_AT_SCORE", raising=False)
+    assert mfa_gate._high_risk_score_floor() == 9
+    # Scores 5/6/7/8 must NOT trigger MFA in solo mode.
+    assert mfa_gate.is_high_risk(7) is False
+    assert mfa_gate.is_high_risk(8) is False
+    # Score 9/10 still triggers — true high-risk grants are gated.
+    assert mfa_gate.is_high_risk(9) is True
+    assert mfa_gate.is_high_risk(10) is True
+
+
+def test_solo_mode_explicit_env_still_wins(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An operator who DOES have a fresh-MFA story in solo mode can
+    re-tighten by setting IAM_JIT_MFA_STEP_UP_AT_SCORE explicitly. The
+    env override beats the solo default."""
+    monkeypatch.setenv("IAM_JIT_DEPLOYMENT_MODE", "solo")
+    monkeypatch.setenv("IAM_JIT_MFA_STEP_UP_AT_SCORE", "7")
+    assert mfa_gate._high_risk_score_floor() == 7
+    assert mfa_gate.is_high_risk(7) is True
+
+
+def test_non_solo_mode_default_floor_still_7(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Multi-tenant / team deployments keep the original 7 default
+    because they DO have second-actor + IdP MFA paths."""
+    monkeypatch.setenv("IAM_JIT_DEPLOYMENT_MODE", "team")
+    monkeypatch.delenv("IAM_JIT_MFA_STEP_UP_AT_SCORE", raising=False)
+    assert mfa_gate._high_risk_score_floor() == 7
+    assert mfa_gate.is_high_risk(7) is True
+
+
+def test_solo_mode_invalid_env_falls_back_to_solo_default(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Invalid env values in solo mode fall back to the solo default
+    (9), not the non-solo default (7)."""
+    monkeypatch.setenv("IAM_JIT_DEPLOYMENT_MODE", "solo")
+    monkeypatch.setenv("IAM_JIT_MFA_STEP_UP_AT_SCORE", "garbage")
+    assert mfa_gate._high_risk_score_floor() == 9
+
+
+def test_is_solo_deployment_mode_helper(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Solo-mode detection is case-insensitive + whitespace-tolerant."""
+    monkeypatch.setenv("IAM_JIT_DEPLOYMENT_MODE", "SOLO")
+    assert mfa_gate._is_solo_deployment_mode() is True
+    monkeypatch.setenv("IAM_JIT_DEPLOYMENT_MODE", "  solo  ")
+    assert mfa_gate._is_solo_deployment_mode() is True
+    monkeypatch.setenv("IAM_JIT_DEPLOYMENT_MODE", "team")
+    assert mfa_gate._is_solo_deployment_mode() is False
+    monkeypatch.delenv("IAM_JIT_DEPLOYMENT_MODE", raising=False)
+    assert mfa_gate._is_solo_deployment_mode() is False
+
+
+# ---------------------------------------------------------------------------
 # Phase-1 closure: evaluate_for_route — cookie + bearer-token-issuance
 # resolution chain per [[mfa-compliance-strategy]] PCI §8.6.
 # ---------------------------------------------------------------------------
