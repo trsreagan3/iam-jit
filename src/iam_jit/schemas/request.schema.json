@@ -220,6 +220,20 @@
           "maxLength": 2048,
           "pattern": "^https?://",
           "description": "URL of the change/incident/access ticket authorizing this request. Format-validated only; iam-jit does not call out to verify the ticket exists. Whether this is required is set per-deployment via IAM_JIT_REQUIRE_TICKET."
+        },
+        "tags": {
+          "type": "object",
+          "description": "Operator-supplied IAM tags to merge onto the provisioned role. Useful for cost-allocation (cost-center=...), compliance (data-classification=...), and any other tag-based query the operator's account already relies on. iam-jit's own tags (managed-by, request-id, expires-at, etc.) take precedence on key collisions — operators CANNOT mask the audit-trail tags. AWS limits: keys <= 128 chars, values <= 256 chars (iam-jit clamps; doesn't reject). Allowed chars in keys (AWS tag-key rule): letters, digits, spaces, and _ . : / = + - @.",
+          "additionalProperties": {
+            "type": "string",
+            "maxLength": 256
+          },
+          "propertyNames": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 128,
+            "pattern": "^[A-Za-z0-9 _.:/=+\\-@]+$"
+          }
         }
       }
     },
@@ -261,6 +275,11 @@
               "type": "array",
               "items": { "type": "string" },
               "description": "AWS CLI commands equivalent to the boto3 calls that were executed. Auditability + manual-replay fallback."
+            },
+            "embedded_dynamic_denies": {
+              "type": "array",
+              "items": { "type": "string", "pattern": "^dd_[0-9A-HJKMNP-TV-Z]{26}$" },
+              "description": "#324f — dynamic-deny rule ids (dd_<ULID>) whose explicit Deny statements were embedded into the issued role's inline policy. Empty when no rules were active or the recommender Deny-injection was disabled. Cross-references docs/DYNAMIC-DENY-RULES.md → Defense-in-depth model."
             },
             "assume_instructions": {
               "type": "object",
