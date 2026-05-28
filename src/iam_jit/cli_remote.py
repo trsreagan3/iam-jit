@@ -303,6 +303,39 @@ def cancel(
         _emit(resp.json())
 
 
+@remote.command("revoke")
+@_url_opt
+@_token_opt
+@click.argument("request_id")
+@click.option(
+    "--reason", required=True,
+    help="Required audit-trail explanation (>=4 chars) for why the "
+         "active grant is being pulled before expiry.",
+)
+def revoke(
+    url: str | None, token: str | None,
+    request_id: str, reason: str,
+) -> None:
+    """Admin-only revoke of an active grant.
+
+    Tears down the provisioned IAM role + transitions the request to
+    `revoked`. The reason is required by the server for the audit trail
+    — ops/compliance needs to distinguish revoke-for-cause from
+    revoke-by-accident. Requires an admin/approver token.
+
+    #698 MED-2: mirrors `iam-jit remote cancel` but for the
+    POST /api/v1/requests/{id}/revoke endpoint that pre-#698 had no
+    CLI surface (only HTTP / UI).
+    """
+    with _client(url, token) as c:
+        resp = c.post(
+            f"/api/v1/requests/{request_id}/revoke",
+            json={"reason": reason},
+        )
+        _bail(resp)
+        _emit(resp.json())
+
+
 @remote.command("respond")
 @_url_opt
 @_token_opt
