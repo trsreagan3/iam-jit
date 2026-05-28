@@ -193,33 +193,28 @@ def submit(
     with _client(url, token) as c:
         resp = c.post("/api/v1/requests", json=payload)
         _bail(resp)
-        _emit(resp.json())
-
-
-@remote.command("chat")
-def chat() -> None:
-    """REMOVED in iam-jit 0.4.0 — the conversational intake endpoint
-    (/api/v1/intake/turn) was deleted in Stage 4 of [[no-nl-synthesis]].
-
-    Replacement workflow: the agent uses the MCP tools
-    (list_templates / get_template / score_iam_policy / submit_policy)
-    to author + submit a policy with codebase context, OR the human
-    pastes raw JSON via `iam-jit remote submit` (still works) or the
-    web UI's paste page. See docs/AGENTS.md.
-    """
-    import click
-    click.secho(
-        "iam-jit remote chat has been removed in 0.4.0.",
-        fg="yellow", err=True,
-    )
-    click.echo(
-        "The conversational intake API was deleted in Stage 4 of the "
-        "NL-synthesis deprecation. Use the MCP tools (list_templates / "
-        "get_template / score_iam_policy / submit_policy) or "
-        "`iam-jit remote submit` with raw JSON instead. See docs/AGENTS.md.",
-        err=True,
-    )
-    raise click.exceptions.Exit(2)
+        body = resp.json()
+        _emit(body)
+        # #694 — surface a verify hint when the response carries a
+        # provisioned role ARN. Operators dogfooding the flow kept
+        # reaching for `aws iam simulate-principal-policy` and getting
+        # implicitDeny for every action (the TTL gate needs an
+        # aws:CurrentTime context entry). `iam-jit verify-role`
+        # injects that entry automatically.
+        try:
+            role_arn = (
+                ((body or {}).get("request") or {})
+                .get("status", {})
+                .get("provisioned", {})
+                .get("role_arn")
+            )
+        except Exception:
+            role_arn = None
+        if role_arn:
+            click.echo(
+                f"verify: iam-jit verify-role {role_arn}",
+                err=True,
+            )
 
 
 @remote.command("status")

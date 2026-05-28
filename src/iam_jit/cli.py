@@ -2040,6 +2040,17 @@ from .cli_logs import register_logs_command  # noqa: E402
 register_logs_command(main)
 
 
+# #694 — register `iam-jit verify-role <role-arn>`. Closes the dogfood
+# gap where `aws iam simulate-principal-policy` returned implicitDeny
+# for every action on an iam-jit-issued role because the TTL gate
+# (NumericLessThan aws:CurrentTime <expiry>) couldn't evaluate without
+# an aws:CurrentTime context entry. This CLI injects the context
+# entry automatically + (when no --action is given) enumerates every
+# action from the role's attached + inline policies.
+from .cli_verify_role import register_verify_role_command  # noqa: E402
+register_verify_role_command(main)
+
+
 # #420 / §A59 — register `iam-jit resource-map` synthesiser helper.
 # Phase E of [[bouncer-informs-agent-informs-iam-jit]]: applies a
 # declared resource mapping (staging→prod, etc.) to a permission set
