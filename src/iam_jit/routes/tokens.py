@@ -18,8 +18,8 @@ from fastapi import APIRouter, Depends, HTTPException, Request, status
 
 from ..api_tokens_store import APITokenNotFound, APITokenRecord, APITokenStore
 from ..auth import issue_api_token
-from ..middleware import current_user, get_api_tokens_store
-from ..users_store import User
+from ..middleware import current_user, get_api_tokens_store, get_user_store
+from ..users_store import User, UserNotFound, UserStore
 
 router = APIRouter(prefix="/api/v1/tokens", tags=["tokens"])
 
@@ -69,20 +69,68 @@ def create_token(
     request: Request,
     payload: dict[str, Any] | None,
     user: Annotated[User, Depends(current_user)],
+    user_store: Annotated[UserStore, Depends(get_user_store)],
 ) -> dict[str, Any]:
     store = _store_or_500(request)
-    label = (payload or {}).get("label")
+    payload = payload or {}
+    label = payload.get("label")
     if label is not None and not isinstance(label, str):
         raise HTTPException(status_code=400, detail="label must be a string")
+
+    # #697 — honor `user_id` field for admins (mint-on-behalf-of). The
+    # pre-#697 shape silently dropped the field + minted for the
+    # authenticated session user, which per
+    # [[ibounce-honest-positioning]] is silent-degradation: an admin
+    # tooling chain that THINKS it minted for user B but actually
+    # minted for itself is harder to debug than a clean 403. Now:
+    #   - caller has admin scope + user_id specified → mint for that
+    #     user_id (after verifying the target exists in the user store)
+    #   - caller lacks admin scope + user_id specified → 403 with a
+    #     structured `{"error": "user_id requires admin scope"}` body
+    #   - user_id omitted → mint for the session user (legacy shape)
+    requested_user_id = payload.get("user_id")
+    if requested_user_id is not None and not isinstance(requested_user_id, str):
+        raise HTTPException(
+            status_code=400, detail="user_id must be a string",
+        )
+    minted_on_behalf_of = False
+    if requested_user_id and requested_user_id != user.id:
+        if not user.is_admin:
+            raise HTTPException(
+                status_code=403,
+                detail={"error": "user_id requires admin scope"},
+            )
+        # Verify target user exists; refuse minting for an unknown user
+        # to keep the audit trail honest (a typo'd user_id silently
+        # creating an orphan token is the opposite of helpful).
+        try:
+            target_user = user_store.get(requested_user_id)
+        except UserNotFound:
+            raise HTTPException(
+                status_code=404,
+                detail={
+                    "error": "user_id not found",
+                    "user_id": requested_user_id,
+                },
+            )
+        # Use the resolved target user's id so any normalization the
+        # store does (case-folding, prefix coercion) flows through.
+        effective_user_id = target_user.id
+        minted_on_behalf_of = True
+    else:
+        effective_user_id = user.id
 
     # BB2-05 closure: per-user soft cap on active tokens. Operators
     # who genuinely need more can raise IAM_JIT_API_TOKEN_CAP_PER_USER.
     # The list_for_user → cap check → put sequence is wrapped in a
     # per-user lock to close the round-3 WB TOCTOU race (within a
-    # single Lambda instance).
+    # single Lambda instance). #697: the cap applies to the EFFECTIVE
+    # user (the token's owner), not the actor — otherwise an admin
+    # minting tokens for many users would race their own per-actor
+    # lock instead of the per-owner lock the cap relies on.
     cap = _per_user_cap()
-    with _per_user_lock(user.id):
-        existing = store.list_for_user(user.id)
+    with _per_user_lock(effective_user_id):
+        existing = store.list_for_user(effective_user_id)
         if len(existing) >= cap:
             raise HTTPException(
                 status_code=status.HTTP_429_TOO_MANY_REQUESTS,
@@ -93,7 +141,7 @@ def create_token(
                 ),
             )
 
-        issued = issue_api_token(user.id, label=label)
+        issued = issue_api_token(effective_user_id, label=label)
 
         # Phase-1 MFA-at-issuance propagation (per
         # [[mfa-compliance-strategy]] PCI §8.6): if the human
@@ -136,6 +184,33 @@ def create_token(
             mfa_at_issuance=mfa_at_issuance,
         )
         store.put(record)
+
+    # #697 — admin mint-on-behalf-of emits an OCSF class 6003 admin-action
+    # event so the audit chain shows clearly that user A's session minted
+    # a token whose owner is user B. Fires AFTER the token is durable so
+    # we never claim "admin minted" for a token that didn't land. Failures
+    # in the audit channel never block the response (the helper logs +
+    # swallows per its docstring).
+    if minted_on_behalf_of:
+        try:
+            from ..audit_admin_action import emit_iam_jit_admin_action
+            emit_iam_jit_admin_action(
+                kind="token.mint_on_behalf_of",
+                actor=user.id,
+                target_kind="user",
+                target_id=effective_user_id,
+                source="api",
+                extra={
+                    "token_hash": issued.hash,
+                    "label": issued.label,
+                    "mfa_at_issuance": mfa_at_issuance,
+                },
+            )
+        except Exception:
+            # Per the helper's contract this should never reach here,
+            # but belt-and-suspenders — token mint already succeeded.
+            pass
+
     return {
         "token": issued.raw,  # shown once
         "token_hash": issued.hash,
