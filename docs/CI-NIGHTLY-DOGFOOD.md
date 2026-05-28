@@ -140,14 +140,46 @@ The script is **deterministic Python**, not an LLM agent. CI runs are debuggable
 
 These are post-v1.0 expansions, not v1.0 blockers.
 
+## Running locally
+
+The dogfood is plain Python; no Docker required. From the repo root:
+
+```bash
+# Bootstrap-only — no AWS calls. F1..F8 + F19 verified; F9..F18 SKIP.
+# Safe on any machine with the venv installed.
+.venv/bin/python tests/integration/dogfood_real_aws.py --dry-run
+
+# Full run against the founder's account. F1..F19 all exercised.
+AWS_PROFILE=<your-profile> \
+AWS_DEFAULT_REGION=us-east-1 \
+IAM_JIT_CI_ACCOUNT_ID=590519617224 \
+IAM_JIT_CI_RUN_ID=local-$(date +%s) \
+.venv/bin/python tests/integration/dogfood_real_aws.py
+
+# Or via pytest (skipped by default; -m integration unlocks):
+.venv/bin/python -m pytest tests/integration/dogfood_real_aws_test.py -m integration
+```
+
+**Port collision risk on dev boxes**: the script binds `127.0.0.1:18765`
+(serve) + `127.0.0.1:18767` (ibounce). If those are already in use the
+script aborts with a clear error before touching AWS. In CI both ports
+are fresh, so no collision; locally, kill any prior `iam-jit serve`
+(`lsof -ti :18765 | xargs kill`) before re-running.
+
+**Add `--keep-state`** to retain the temp data dir on exit (useful for
+debugging a failing F-check by inspecting the audit DB the script wrote).
+
 ## Done definition
 
 This spec is "done" when:
 
 1. ✅ This doc exists (you are reading it).
-2. ⬜ `tests/integration/dogfood_real_aws.py` runs end-to-end locally against the founder's account.
-3. ⬜ `.github/workflows/dogfood-nightly.yml` exists + passes a manual dispatch.
-4. ⬜ `.github/workflows/dogfood-orphan-sweeper.yml` exists + has had one successful sweep.
-5. ⬜ The 19 fail conditions are all asserted and verified to fire (induce a regression locally, watch CI catch it).
+2. ✅ `tests/integration/dogfood_real_aws.py` exists + runs `--dry-run` end-to-end locally (F1..F8 + F19 verified).
+3. ✅ `.github/workflows/dogfood-nightly.yml` exists with OIDC + 30-min timeout + cron + push + dispatch triggers.
+4. ✅ `.github/workflows/dogfood-orphan-sweeper.yml` exists with 4-hour cron + dispatch + OIDC sweep.
+5. ⬜ The 19 fail conditions are all asserted in the script + verified to fire on first real CI run (founder action: dispatch + induce one regression as smoke test).
+
+The dogfood script asserts F1..F19 in order; see the F-checklist at
+the bottom of every run for which checks PASSED / FAILED / SKIPPED.
 
 #691 + #699 surfaced 19 production bugs over two manual passes. The job of this contract is to make pass #3 onward catch them at commit time.
