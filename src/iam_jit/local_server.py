@@ -48,6 +48,7 @@ import logging
 import os
 import pathlib
 import socket
+import sys
 from typing import Any
 
 logger = logging.getLogger("iam_jit.local_server")
@@ -193,36 +194,68 @@ users:
     return user_id
 
 
-def _seed_local_accounts(config: LocalServerConfig) -> None:
+class LocalServeAccountResolutionError(RuntimeError):
+    """Raised when `serve --local` cannot resolve an account id and no
+    --account-id override was provided. The caller surfaces a clean
+    error + non-zero exit code instead of silently seeding the
+    000000000000 placeholder (#698 MED-1).
+    """
+
+
+def _seed_local_accounts(
+    config: LocalServerConfig,
+    *,
+    account_id_override: str | None = None,
+) -> None:
     """Ensure the accounts.yaml file exists with the user's current
-    AWS account auto-detected from the default credential chain."""
+    AWS account.
+
+    Resolution order:
+      1. `account_id_override` — from `serve --local --account-id <id>`
+      2. boto3 default chain → `sts:GetCallerIdentity`
+      3. RAISE `LocalServeAccountResolutionError` — pre-#698 this
+         silently seeded "000000000000" which meant grants were
+         provisioned against a non-existent account + every operation
+         silently failed somewhere downstream. Now we fail-loud.
+    """
     if config.accounts_yaml.exists():
         return
 
-    # Use boto3 + STS to ask "who am I?" against the user's
-    # current AWS credentials. Captures the account_id without
-    # any standing config.
-    account_id = "000000000000"
-    placeholder_used = False
-    try:
-        import boto3
-        sts = boto3.client("sts")
-        ident = sts.get_caller_identity()
-        account_id = str(ident.get("Account") or account_id)
-    except Exception as e:
-        logger.warning(
-            "Could not resolve AWS account from default credentials: %s. "
-            "Accounts file will use a placeholder (%s). Edit "
-            "%s to point at your real account before issuing grants.",
-            e, account_id, config.accounts_yaml,
-        )
-        placeholder_used = True
-    if account_id == "000000000000":
-        # WB11-13: explicit warning when the placeholder is in
-        # effect — even when boto3 succeeds but returns the
-        # placeholder shape (unusual but defensive). The string
-        # makes it grep-friendly in the seeded yaml.
-        placeholder_used = True
+    if account_id_override:
+        # Operator-supplied id wins. Trust the operator's claim; an
+        # incorrect id surfaces immediately on first grant attempt.
+        if not (account_id_override.isdigit() and len(account_id_override) == 12):
+            raise LocalServeAccountResolutionError(
+                f"--account-id {account_id_override!r} is malformed; "
+                "must be exactly 12 digits (AWS account ID format)."
+            )
+        account_id = account_id_override
+        placeholder_used = False
+    else:
+        # Use boto3 + STS to ask "who am I?" against the user's
+        # current AWS credentials. Captures the account_id without
+        # any standing config.
+        account_id = ""
+        try:
+            import boto3
+            sts = boto3.client("sts")
+            ident = sts.get_caller_identity()
+            account_id = str(ident.get("Account") or "")
+        except Exception as e:
+            raise LocalServeAccountResolutionError(
+                f"could not resolve AWS account from default credentials: {e}. "
+                "Pass --account-id <12-digit-id> to serve --local, or "
+                "configure AWS credentials (aws configure / AWS_PROFILE / "
+                "instance metadata) before retrying."
+            ) from e
+        if not account_id or account_id == "000000000000":
+            raise LocalServeAccountResolutionError(
+                f"sts:GetCallerIdentity returned an unusable account id "
+                f"({account_id!r}). Pass --account-id <12-digit-id> "
+                "to serve --local explicitly, or fix the AWS credentials "
+                "the boto3 default chain is finding."
+            )
+        placeholder_used = False
 
     placeholder_marker = (
         " # PLACEHOLDER: edit before issuing grants"
@@ -425,6 +458,7 @@ def run(
     host: str = _DEFAULT_HOST,
     port: int = _DEFAULT_PORT,
     data_dir: pathlib.Path | None = None,
+    account_id: str | None = None,
 ) -> int:
     """Start iam-jit in local mode. Blocks until interrupted.
 
@@ -442,7 +476,15 @@ def run(
 
     _ensure_data_dir(config)
     admin_user_id = _seed_local_user(config)
-    _seed_local_accounts(config)
+    # #698 MED-1: fail-loud when neither --account-id nor live AWS
+    # credentials resolve an account. Pre-#698 the placeholder
+    # 000000000000 silently landed in accounts.yaml + every grant
+    # quietly failed against the non-existent account downstream.
+    try:
+        _seed_local_accounts(config, account_id_override=account_id)
+    except LocalServeAccountResolutionError as e:
+        print(f"\nERROR: {e}", file=sys.stderr)
+        return 2
     _set_local_env_defaults(config, admin_user_id)
     raw_token = _ensure_local_cli_token(config, admin_user_id=admin_user_id)
 

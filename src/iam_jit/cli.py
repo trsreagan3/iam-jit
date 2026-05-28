@@ -293,12 +293,22 @@ def agent_grant() -> None:
          "binding the port + surfaces FAIL/WARN rows. Suppress for "
          "deterministic scripted runs.",
 )
+@click.option(
+    "--account-id",
+    default=None,
+    help="#698 — Override the AWS account id used to seed local "
+         "accounts.yaml. Required when boto3's default credential chain "
+         "can't resolve sts:GetCallerIdentity (no creds, offline, etc.). "
+         "Without this flag AND no live creds, `serve --local` exits "
+         "loudly instead of silently seeding the 000000000000 placeholder.",
+)
 def serve(
     local: bool,
     host: str,
     port: int,
     data_dir: pathlib.Path | None,
     no_doctor_check: bool,
+    account_id: str | None,
 ) -> None:
     """Run iam-jit as a local process.
 
@@ -338,7 +348,9 @@ def serve(
 
     from .local_server import run
 
-    sys.exit(run(host=host, port=port, data_dir=data_dir))
+    sys.exit(run(
+        host=host, port=port, data_dir=data_dir, account_id=account_id,
+    ))
 
 
 # ---------------------------------------------------------------------------
@@ -493,12 +505,22 @@ def _print_preflight_warning(
          "default, init-solo runs `doctor install-check` at the end + "
          "surfaces FAIL rows. Suppress for deterministic scripted runs.",
 )
+@click.option(
+    "--account-id",
+    default=None,
+    help="#698 — Override the AWS account id used to seed accounts.yaml. "
+         "Required when boto3's default credential chain can't resolve "
+         "sts:GetCallerIdentity (no creds, offline, etc.). Without this "
+         "flag AND no live creds, init-solo exits loudly instead of "
+         "silently seeding the 000000000000 placeholder.",
+)
 def init_solo(
     data_dir: pathlib.Path | None,
     port: int,
     print_mcp_config: bool,
     reuse_existing: bool,
     no_doctor_check: bool,
+    account_id: str | None,
 ) -> None:
     """One-command setup for solo-dev / agent-safety mode.
 
@@ -542,7 +564,13 @@ def init_solo(
 
     local_server._ensure_data_dir(cfg)
     admin_user_id = local_server._seed_local_user(cfg)
-    local_server._seed_local_accounts(cfg)
+    try:
+        local_server._seed_local_accounts(
+            cfg, account_id_override=account_id,
+        )
+    except local_server.LocalServeAccountResolutionError as e:
+        click.echo(f"\nERROR: {e}", err=True)
+        sys.exit(2)
     local_server._set_local_env_defaults(cfg, admin_user_id)
     raw_token = local_server._ensure_local_cli_token(
         cfg, admin_user_id=admin_user_id,

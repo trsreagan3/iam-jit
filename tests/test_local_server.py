@@ -190,12 +190,15 @@ def test_seed_local_user_permissions_owner_only(
 # ---------------------------------------------------------------------------
 
 
-def test_seed_local_accounts_creates_yaml_with_placeholder_when_no_aws(
+def test_seed_local_accounts_raises_when_no_aws_and_no_override(
     tmp_data_dir: pathlib.Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """If boto3 can't resolve credentials, fall back to a placeholder
-    account ID. The user can edit accounts.yaml later."""
+    """#698 MED-1: when boto3 can't resolve creds AND no --account-id
+    override is given, fail loud. Pre-#698 this silently seeded the
+    000000000000 placeholder which surfaced as a confusing downstream
+    failure on the first grant attempt — operator's mental model
+    'serve --local just works' broke without a useful error."""
     cfg = local_server.LocalServerConfig(data_dir=tmp_data_dir)
     local_server._ensure_data_dir(cfg)
 
@@ -204,11 +207,65 @@ def test_seed_local_accounts_creates_yaml_with_placeholder_when_no_aws(
         raise Exception("no AWS credentials configured")
 
     monkeypatch.setattr("boto3.client", _fail)
-    local_server._seed_local_accounts(cfg)
+    with pytest.raises(local_server.LocalServeAccountResolutionError) as exc:
+        local_server._seed_local_accounts(cfg)
+    assert "--account-id" in str(exc.value)
+    assert not cfg.accounts_yaml.exists()
+
+
+def test_seed_local_accounts_honors_account_id_override(
+    tmp_data_dir: pathlib.Path,
+) -> None:
+    """#698 MED-1: --account-id <id> wins over the boto3 path. Operator
+    can run serve --local without live AWS creds (e.g. for dev /
+    test / demo) by providing the id explicitly."""
+    cfg = local_server.LocalServerConfig(data_dir=tmp_data_dir)
+    local_server._ensure_data_dir(cfg)
+    local_server._seed_local_accounts(
+        cfg, account_id_override="060392206767",
+    )
     assert cfg.accounts_yaml.exists()
     content = cfg.accounts_yaml.read_text()
-    assert "000000000000" in content  # placeholder
-    assert 'alias: "local"' in content
+    assert "060392206767" in content
+    assert "000000000000" not in content
+
+
+def test_seed_local_accounts_rejects_malformed_account_id(
+    tmp_data_dir: pathlib.Path,
+) -> None:
+    """--account-id must be exactly 12 digits. Anything else gets
+    a clean error instead of being passed through into accounts.yaml
+    where it would surface as an inscrutable IAM/STS error later."""
+    cfg = local_server.LocalServerConfig(data_dir=tmp_data_dir)
+    local_server._ensure_data_dir(cfg)
+    with pytest.raises(local_server.LocalServeAccountResolutionError):
+        local_server._seed_local_accounts(
+            cfg, account_id_override="not-an-id",
+        )
+    with pytest.raises(local_server.LocalServeAccountResolutionError):
+        local_server._seed_local_accounts(
+            cfg, account_id_override="123",
+        )
+
+
+def test_seed_local_accounts_raises_when_sts_returns_placeholder(
+    tmp_data_dir: pathlib.Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """#698 MED-1: if STS unexpectedly returns the placeholder shape,
+    refuse to use it. Placeholder in accounts.yaml = silent downstream
+    failures; loud refusal is the correct safety posture."""
+    cfg = local_server.LocalServerConfig(data_dir=tmp_data_dir)
+    local_server._ensure_data_dir(cfg)
+
+    class _FakeSTS:
+        def get_caller_identity(self):
+            return {"Account": "000000000000"}
+
+    monkeypatch.setattr("boto3.client", lambda svc: _FakeSTS())
+    with pytest.raises(local_server.LocalServeAccountResolutionError):
+        local_server._seed_local_accounts(cfg)
+    assert not cfg.accounts_yaml.exists()
 
 
 def test_seed_local_accounts_uses_sts_account_id_when_available(
@@ -497,22 +554,12 @@ def test_resolve_admin_email_sanitises_poisoned_user(
     assert email.endswith(".local")
 
 
-# WB11-13 regression: when no AWS credentials are present, the seeded
-# accounts.yaml must include a PLACEHOLDER warning so the user can't
-# accidentally ship grants targeting "000000000000".
-def test_seed_accounts_yaml_marks_placeholder_visibly(
-    tmp_data_dir: pathlib.Path, monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    cfg = local_server.LocalServerConfig(data_dir=tmp_data_dir)
-    local_server._ensure_data_dir(cfg)
-
-    def _fail(*a, **k):
-        raise Exception("no creds")
-    monkeypatch.setattr("boto3.client", _fail)
-    local_server._seed_local_accounts(cfg)
-    content = cfg.accounts_yaml.read_text()
-    assert "000000000000" in content
-    assert "PLACEHOLDER" in content, (
-        "Placeholder account_id must be visibly flagged so users "
-        "don't accidentally ship grants against the placeholder."
-    )
+# WB11-13 SUPERSEDED by #698 MED-1: instead of seeding a marked-up
+# placeholder when no AWS credentials resolve, `serve --local` now
+# fails LOUD. The placeholder behavior was an attractive nuisance —
+# operators didn't notice the marker + shipped grants against
+# 000000000000 anyway. Fail-loud forces the operator to either fix
+# their credentials chain or pass --account-id explicitly. See
+# test_seed_local_accounts_raises_when_no_aws_and_no_override (above)
+# + test_seed_local_accounts_honors_account_id_override for the
+# successor invariants.
