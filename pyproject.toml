@@ -131,11 +131,22 @@ where = ["src"]
 # files and `iam-jit` fails on first import (request validation,
 # user-store load, account discovery). Caught during the TestPyPI
 # dry-run on 2026-05-16.
+#
+# #692 (2026-05-28 dogfood agent #691): infrastructure/cloudformation/
+# also must ship — onboarding.py imports the CFN template at module-
+# import time via _resources.find("infrastructure","cloudformation",
+# "destination-account-roles.yaml"). Without this glob, the file is
+# stripped from the wheel and `iam-jit serve --local` raises
+# FileNotFoundError at import in any pip-installed venv. The file is
+# mirrored from the canonical repo-root location into
+# src/iam_jit/infrastructure/ by scripts/sync-lambda-data.sh.
 "iam_jit" = [
   "schemas/*.json",
   "templates/*.html",
   "templates/**/*.html",
   "static/**/*",
+  "infrastructure/**/*.yaml",
+  "infrastructure/**/*.md",
   "py.typed",
 ]
 
