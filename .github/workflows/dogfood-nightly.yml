@@ -1,0 +1,92 @@
+name: dogfood-nightly
+
+# Nightly CI dogfood — see docs/CI-NIGHTLY-DOGFOOD.md for the contract.
+# Catches regressions that took the manual #691 + #699 dogfood passes
+# 19 findings each to surface.
+
+on:
+  schedule:
+    # 02:00 UTC nightly. Low cost; doesn't compete with US work hours.
+    - cron: "0 2 * * *"
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+# OIDC for AWS — no long-lived keys in repo secrets.
+permissions:
+  id-token: write
+  contents: read
+
+jobs:
+  dogfood:
+    runs-on: ubuntu-latest
+    # 30-min hard outer fence; the dogfood script itself runs per-stack
+    # time-boxed checks well under this.
+    timeout-minutes: 30
+
+    env:
+      AWS_DEFAULT_REGION: us-east-1
+      # The script reads these to tag every created resource. GitHub
+      # injects GITHUB_RUN_ID by default; we forward it.
+      IAM_JIT_CI_RUN_ID: ${{ github.run_id }}
+      IAM_JIT_CI_ACCOUNT_ID: "590519617224"
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python 3.12
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install iam-jit from the checkout
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e .[dev]
+
+      - name: Set up Go (for gbounce build)
+        uses: actions/setup-go@v5
+        with:
+          go-version: "1.22"
+
+      - name: Install gbounce from its public release
+        # gbounce lives in a separate repo (github.com/trsreagan3/gbounce).
+        # `go install` pulls the published tag without needing a second
+        # checkout step. The dogfood script only needs the binary on
+        # PATH; if the install fails the script logs it and continues
+        # (gbounce isn't load-bearing for any F-check today, but the
+        # spec requires it be present).
+        run: |
+          set -e
+          go install github.com/trsreagan3/gbounce/cmd/gbounce@latest || \
+            echo "::warning::gbounce install failed; F-checks that need it will FAIL"
+          # Surface PATH so the dogfood script's shutil.which finds it.
+          echo "$(go env GOPATH)/bin" >> "$GITHUB_PATH"
+
+      - name: Configure AWS credentials via OIDC
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: arn:aws:iam::590519617224:role/iam-jit-ci-nightly
+          aws-region: us-east-1
+          role-session-name: gh-dogfood-${{ github.run_id }}
+
+      - name: Run the nightly dogfood
+        id: dogfood
+        run: |
+          python tests/integration/dogfood_real_aws.py
+
+      - name: Slack notify on failure
+        # Only fire if the dogfood step failed AND a webhook is set.
+        if: failure() && env.SLACK_DOGFOOD_WEBHOOK != ''
+        env:
+          SLACK_DOGFOOD_WEBHOOK: ${{ secrets.SLACK_DOGFOOD_WEBHOOK }}
+        run: |
+          set -e
+          payload=$(cat <<EOF
+          {
+            "text": ":rotating_light: iam-jit nightly dogfood FAILED — run ${{ github.run_id }}\n${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+          }
+          EOF
+          )
+          curl -sS -X POST -H 'Content-Type: application/json' \
+            --data "$payload" "$SLACK_DOGFOOD_WEBHOOK" || true

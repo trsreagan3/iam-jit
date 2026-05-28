@@ -1,0 +1,67 @@
+name: dogfood-orphan-sweeper
+
+# Companion to dogfood-nightly. Runs every 4 hours, sweeps any
+# AWS resource tagged Project=iam-jit-ci-nightly that's older than
+# 6 hours, and alarms if it had work to do (per-run teardown
+# leaking is itself a bug).
+#
+# Spec: docs/CI-NIGHTLY-DOGFOOD.md → "Cleanup contract → Orphan sweeper".
+
+on:
+  schedule:
+    - cron: "0 */4 * * *"
+  workflow_dispatch:
+
+permissions:
+  id-token: write
+  contents: read
+
+jobs:
+  sweep:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    env:
+      AWS_DEFAULT_REGION: us-east-1
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python 3.12
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install boto3 only
+        # No iam-jit install needed — the sweeper is pure boto3.
+        # Keeps the sweep fast + the surface tiny.
+        run: |
+          python -m pip install --upgrade pip
+          pip install "boto3>=1.34"
+
+      - name: Configure AWS credentials via OIDC
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: arn:aws:iam::590519617224:role/iam-jit-ci-nightly
+          aws-region: us-east-1
+          role-session-name: gh-sweep-${{ github.run_id }}
+
+      - name: Run the orphan sweeper
+        id: sweep
+        run: |
+          python tests/integration/dogfood_orphan_sweeper.py
+
+      - name: Slack notify on alarm
+        # Sweeper exits non-zero ONLY when it had to clean up.
+        if: failure() && env.SLACK_DOGFOOD_WEBHOOK != ''
+        env:
+          SLACK_DOGFOOD_WEBHOOK: ${{ secrets.SLACK_DOGFOOD_WEBHOOK }}
+        run: |
+          set -e
+          payload=$(cat <<EOF
+          {
+            "text": ":warning: iam-jit dogfood orphan sweeper cleaned up leaked AWS resources — run ${{ github.run_id }}\nA per-run teardown leaked; investigate.\n${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+          }
+          EOF
+          )
+          curl -sS -X POST -H 'Content-Type: application/json' \
+            --data "$payload" "$SLACK_DOGFOOD_WEBHOOK" || true
