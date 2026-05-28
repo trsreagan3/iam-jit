@@ -302,13 +302,14 @@ async def test_manual_write_pending_then_reject_transitions_to_rejected(tmp_path
             decision="reject", decided_by="bob",
         )
 
-        # Subsequent write gets the rejection synthetic
+        # Subsequent write gets the rejection synthetic. IAM is an
+        # XML-protocol service so per #693 the body is an XML
+        # <ErrorResponse> envelope (JSON body would crash botocore's
+        # parser mid-script for XML callers).
         status, body, headers = await _send_iam_create_role(proxy_port)
         assert status == 400  # rejection synthetic uses 400
-        payload = json.loads(body)
-        assert payload["Error"]["Code"] == "PlanCaptureWritesRejected"
-        assert payload["Error"]["Service"] == "iam"
-        assert payload["Error"]["Action"] == "CreateRole"
+        text = body.decode("utf-8")
+        assert "<Code>PlanCaptureWritesRejected</Code>" in text
         assert headers.get("x-iam-jit-bouncer-plan-phase") == "writes_rejected"
 
         # And the plan-call row records the writes_rejected verdict
@@ -370,11 +371,12 @@ async def test_reject_first_write_transitions_straight_to_rejected(tmp_path):
         await _send_s3_get(proxy_port)
         assert store.get_plan_session_phase(session_id)["phase"] == "read_only"
 
-        # First write triggers the auto-reject
+        # First write triggers the auto-reject. IAM is XML-protocol so
+        # #693 emits an <ErrorResponse> XML body, not JSON.
         status, body, headers = await _send_iam_create_role(proxy_port)
         assert status == 400  # rejection synthetic
-        payload = json.loads(body)
-        assert payload["Error"]["Code"] == "PlanCaptureWritesRejected"
+        text = body.decode("utf-8")
+        assert "<Code>PlanCaptureWritesRejected</Code>" in text
         assert headers.get("x-iam-jit-bouncer-plan-phase") == "writes_rejected"
 
         phase = store.get_plan_session_phase(session_id)

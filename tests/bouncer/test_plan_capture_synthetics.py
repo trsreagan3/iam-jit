@@ -118,6 +118,101 @@ def test_unsupported_response_carries_marker_header() -> None:
 
 
 # ---------------------------------------------------------------------------
+# #693 — XML-protocol services get XML <ErrorResponse> envelopes so
+# boto3's response parser doesn't crash with ResponseParserError.
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("service,action", [
+    ("ec2", "AllocateAddress"),
+    ("s3", "PutBucketTagging"),
+    ("sqs", "CreateQueue"),
+    ("sns", "Publish"),
+    ("rds", "CreateDBInstance"),
+    ("cloudformation", "CreateStack"),
+    ("elasticache", "CreateCacheCluster"),
+])
+def test_unsupported_op_xml_envelope_for_xml_protocol_services(
+    service: str, action: str,
+) -> None:
+    """XML-protocol services MUST get an XML <ErrorResponse> envelope —
+    otherwise boto3's parser raises ResponseParserError mid-script. The
+    body must include <Error><Code>PlanCaptureUnsupportedOperation</Code>
+    so botocore surfaces a typed ClientError the agent can catch."""
+    synth = synthesize_response(
+        service=service, action=action,
+        host=f"{service}.us-east-1.amazonaws.com",
+        path="/", body=b"", query={},
+    )
+    assert synth.status == 400
+    assert "xml" in synth.headers.get("content-type", "").lower()
+    text = synth.body.decode("utf-8")
+    assert text.startswith("<?xml")
+    assert "<ErrorResponse" in text
+    assert "<Code>PlanCaptureUnsupportedOperation</Code>" in text
+    assert f"<RequestId>plan-capture-" in text
+    # XML body MUST be JSON-rejected (proves XML, not accidental JSON).
+    with pytest.raises(json.JSONDecodeError):
+        json.loads(text)
+    assert synth.would_have_returned["kind"] == UNSUPPORTED_OP_SHAPE
+
+
+def test_unsupported_op_xml_body_parses_via_botocore() -> None:
+    """End-to-end proof: feed the XML body through botocore's response
+    parser the way a real SDK call does, and assert it surfaces a
+    ClientError with the expected Code — never a ResponseParserError."""
+    pytest.importorskip("botocore")
+    from botocore.parsers import create_parser
+
+    synth = synthesize_response(
+        service="ec2", action="AllocateAddress",
+        host="ec2.us-east-1.amazonaws.com",
+        path="/", body=b"", query={},
+    )
+    parser = create_parser("ec2")
+    parsed = parser.parse(
+        {
+            "status_code": synth.status,
+            "headers": synth.headers,
+            "body": synth.body,
+            "context": {"operation_name": "AllocateAddress"},
+        },
+        None,
+    )
+    # botocore parses an error into {"Error": {...}, "ResponseMetadata": {...}}.
+    assert "Error" in parsed
+    assert parsed["Error"]["Code"] == "PlanCaptureUnsupportedOperation"
+
+
+def test_unsupported_op_json_envelope_preserved_for_json_protocol() -> None:
+    """JSON-protocol services (DynamoDB, Lambda, Bedrock, ...) must still
+    get the original JSON envelope — the XML fix is XML-only."""
+    synth = synthesize_response(
+        service="dynamodb", action="PutItem",
+        host="dynamodb.us-east-1.amazonaws.com",
+        path="/", body=b"", query={},
+    )
+    assert "json" in synth.headers.get("content-type", "").lower()
+    payload = json.loads(synth.body)
+    assert payload["Error"]["Code"] == "PlanCaptureUnsupportedOperation"
+
+
+def test_writes_rejected_xml_envelope_for_xml_protocol_services() -> None:
+    """The writes-rejected synthetic must also emit XML for XML-protocol
+    services — agents calling ec2:RunInstances in a rejected session
+    should see a typed ClientError, not a parser crash."""
+    from iam_jit.bouncer.plan_capture.synthetics import (
+        build_writes_rejected_response,
+    )
+    synth = build_writes_rejected_response(service="ec2", action="RunInstances")
+    assert synth.status == 400
+    assert "xml" in synth.headers.get("content-type", "").lower()
+    text = synth.body.decode("utf-8")
+    assert "<Code>PlanCaptureWritesRejected</Code>" in text
+    assert synth.headers.get("x-iam-jit-bouncer-plan-capture-writes-rejected") == "true"
+
+
+# ---------------------------------------------------------------------------
 # Per-service shape spot-checks
 # ---------------------------------------------------------------------------
 

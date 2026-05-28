@@ -68,6 +68,84 @@ def _synthetic_request_id() -> str:
     return f"{_REQUEST_ID_PREFIX}-{uuid.uuid4().hex[:24]}"
 
 
+# #693 — AWS services whose REST wire protocol is XML (query API or
+# REST-XML). When plan-capture returns a synthetic ERROR for one of
+# these, the body MUST be an XML <ErrorResponse> envelope or boto3's
+# response parser raises ResponseParserError mid-script. JSON-protocol
+# services (DynamoDB, IAM-via-JSON, Lambda, Bedrock, ...) keep the
+# existing JSON error envelope.
+#
+# Source: each entry verified against botocore's service-model
+# `protocol` field in `botocore/data/<service>/<api-version>/service-2.json`.
+# Set covers query, ec2, and rest-xml services that an agent flow is
+# realistically going to hit through ibounce. Extend as new services
+# are observed.
+_XML_PROTOCOL_SERVICES: frozenset[str] = frozenset({
+    # rest-xml
+    "s3",
+    "cloudfront",
+    "route53",
+    # ec2 protocol
+    "ec2",
+    # query protocol
+    "sqs",
+    "sns",
+    "rds",
+    "cloudformation",
+    "elasticache",
+    "iam",
+    "sts",
+    "autoscaling",
+    "elasticloadbalancing",
+    "redshift",
+    "sdb",
+    "ses",
+    "monitoring",  # CloudWatch
+    "elasticbeanstalk",
+    "docdb",
+    "neptune",
+    "importexport",
+    "fms",
+})
+
+
+def _service_uses_xml_protocol(service: str) -> bool:
+    """True if the given AWS service's wire protocol is XML-based
+    (query, ec2, or rest-xml). XML-protocol callers MUST receive XML
+    error envelopes — JSON bodies trigger ResponseParserError in
+    botocore mid-script. See #693."""
+    return (service or "").lower() in _XML_PROTOCOL_SERVICES
+
+
+def _build_xml_error_envelope(
+    *, code: str, message: str, request_id: str,
+) -> bytes:
+    """Build a botocore-parseable <ErrorResponse> XML body. Matches the
+    shape AWS query/rest-xml services return on 4xx, so boto3 surfaces
+    it as a `ClientError(error_code=<code>)` — never a parser crash.
+
+    Escapes XML-sensitive characters in the message to keep the body
+    well-formed when service/action names contain `&` / `<` / `>`.
+    """
+    safe_message = (
+        message.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+    )
+    safe_code = (
+        code.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+    )
+    return (
+        f'<?xml version="1.0" encoding="UTF-8"?>'
+        f'<ErrorResponse xmlns="https://iam-jit.local/doc/plan-capture/">'
+        f'<Error>'
+        f'<Type>Sender</Type>'
+        f'<Code>{safe_code}</Code>'
+        f'<Message>{safe_message}</Message>'
+        f'</Error>'
+        f'<RequestId>{request_id}</RequestId>'
+        f'</ErrorResponse>'
+    ).encode("utf-8")
+
+
 @dataclasses.dataclass(frozen=True)
 class PlanCaptureSynthetic:
     """One synthetic SDK-shaped response.
@@ -94,37 +172,63 @@ def _build_unsupported_response(
     """The shape returned for any (service, action) not in the
     registry. Includes a `__plan_capture` flag so consumers
     (logs, test assertions) can distinguish unsupported from any
-    real AWS 400."""
+    real AWS 400.
+
+    #693: XML-protocol services (S3, EC2, SQS, SNS, RDS, CFN, ...) get
+    an XML <ErrorResponse> envelope so boto3 parses it as a typed
+    ClientError(Code=PlanCaptureUnsupportedOperation). JSON-protocol
+    services get the original JSON envelope. Either way the audit row
+    (would_have_returned) carries the same structured payload."""
+    rid = _synthetic_request_id()
+    code = "PlanCaptureUnsupportedOperation"
+    message = (
+        f"ibounce plan-capture mode does not have a synthetic shape "
+        f"for {service}:{action}. The call was NOT forwarded to AWS "
+        f"(plan-capture never forwards). Switch to --mode cooperative "
+        f"to forward + audit, or --mode transparent to forward + gate."
+    )
+    would_have_returned = {
+        "kind": "unsupported",
+        "service": service,
+        "action": action,
+        "note": "plan-capture has no synthetic shape for this op",
+    }
+    marker_headers = {
+        "x-iam-jit-bouncer-plan-capture-unsupported": "true",
+    }
+    if _service_uses_xml_protocol(service):
+        body = _build_xml_error_envelope(
+            code=code, message=message, request_id=rid,
+        )
+        headers = {
+            "content-type": "text/xml",
+            "x-amzn-requestid": rid,
+            **marker_headers,
+        }
+        return PlanCaptureSynthetic(
+            status=400, headers=headers, body=body,
+            would_have_returned=would_have_returned,
+        )
     payload = {
         "__plan_capture": True,
         "Error": {
-            "Code": "PlanCaptureUnsupportedOperation",
-            "Message": (
-                f"ibounce plan-capture mode does not have a synthetic shape "
-                f"for {service}:{action}. The call was NOT forwarded to AWS "
-                f"(plan-capture never forwards). Switch to --mode cooperative "
-                f"to forward + audit, or --mode transparent to forward + gate."
-            ),
+            "Code": code,
+            "Message": message,
             "Service": service,
             "Action": action,
         },
-        "RequestId": _synthetic_request_id(),
+        "RequestId": rid,
     }
     body = json.dumps(payload).encode("utf-8")
     return PlanCaptureSynthetic(
         status=400,
         headers={
             "content-type": "application/x-amz-json-1.1",
-            "x-amzn-requestid": payload["RequestId"],
-            "x-iam-jit-bouncer-plan-capture-unsupported": "true",
+            "x-amzn-requestid": rid,
+            **marker_headers,
         },
         body=body,
-        would_have_returned={
-            "kind": "unsupported",
-            "service": service,
-            "action": action,
-            "note": "plan-capture has no synthetic shape for this op",
-        },
+        would_have_returned=would_have_returned,
     )
 
 
@@ -164,43 +268,66 @@ def build_writes_rejected_response(
     Per [[creates-never-mutates]]: this response is still a SYNTHETIC.
     Nothing reaches AWS regardless of the operator's decision.
     """
+    rid = _synthetic_request_id()
+    code = "PlanCaptureWritesRejected"
+    message = (
+        f"ibounce plan-capture: operator REJECTED write calls in "
+        f"this session. {service}:{action} was NOT forwarded to "
+        f"AWS (plan-capture never forwards). Re-run with "
+        f"--write-switch-notify=manual + answer 'approve' on "
+        f"the plan-write prompt to allow writes, or switch to "
+        f"--mode transparent / cooperative if you want the call "
+        f"to execute against AWS."
+    )
+    would_have_returned = {
+        "kind": WRITES_REJECTED_SHAPE,
+        "service": service,
+        "action": action,
+        "note": (
+            "plan-capture session is in writes_rejected phase; the "
+            "operator's reject answer (or --write-switch-notify=reject) "
+            "blocked this write at the proxy"
+        ),
+    }
+    marker_headers = {
+        "x-iam-jit-bouncer-plan-capture-writes-rejected": "true",
+    }
+    # #693: XML-protocol services need an XML <ErrorResponse> envelope
+    # or boto3's parser raises ResponseParserError before the agent
+    # sees the typed ClientError.
+    if _service_uses_xml_protocol(service):
+        body = _build_xml_error_envelope(
+            code=code, message=message, request_id=rid,
+        )
+        headers = {
+            "content-type": "text/xml",
+            "x-amzn-requestid": rid,
+            **marker_headers,
+        }
+        return PlanCaptureSynthetic(
+            status=400, headers=headers, body=body,
+            would_have_returned=would_have_returned,
+        )
     payload = {
         "__plan_capture": True,
         "Error": {
-            "Code": "PlanCaptureWritesRejected",
-            "Message": (
-                f"ibounce plan-capture: operator REJECTED write calls in "
-                f"this session. {service}:{action} was NOT forwarded to "
-                f"AWS (plan-capture never forwards). Re-run with "
-                f"--write-switch-notify=manual + answer 'approve' on "
-                f"the plan-write prompt to allow writes, or switch to "
-                f"--mode transparent / cooperative if you want the call "
-                f"to execute against AWS."
-            ),
+            "Code": code,
+            "Message": message,
             "Service": service,
             "Action": action,
         },
-        "RequestId": _synthetic_request_id(),
+        "RequestId": rid,
     }
     body = json.dumps(payload).encode("utf-8")
     return PlanCaptureSynthetic(
         status=400,
         headers={
             "content-type": "application/x-amz-json-1.1",
-            "x-amzn-requestid": payload["RequestId"],
-            "x-iam-jit-bouncer-plan-capture-writes-rejected": "true",
+            "x-amzn-requestid": rid,
+            **marker_headers,
         },
         body=body,
-        would_have_returned={
-            "kind": WRITES_REJECTED_SHAPE,
-            "service": service,
-            "action": action,
-            "note": (
-                "plan-capture session is in writes_rejected phase; the "
-                "operator's reject answer (or --write-switch-notify=reject) "
-                "blocked this write at the proxy"
-            ),
-        },
+        would_have_returned=would_have_returned,
     )
 
 
