@@ -745,3 +745,109 @@ def test_solo_self_approve_still_emits_audit(
     assert details.get("self_approve_evaluated") is True
     assert details.get("self_approve_eligible") is True
     assert details.get("self_approve_reason") == "self_approved"
+
+
+# ---------------------------------------------------------------------------
+# #704 regression — admin-approve workflow produces role_arn
+#
+# CI dogfood stacks 2 + 3 include IAM-touching actions (iam:PutRolePolicy,
+# iam:AttachRolePolicy) which correctly hit the service-blocklist floor and
+# land in `pending` (designed behaviour, not a regression). The CI must NOT
+# disable platform safety floors. Instead the CI approves via the production
+# POST /api/v1/requests/{id}/approve endpoint (a different user — the
+# self-approval ban requires submitter != approver). After approval the
+# provisioned block MUST carry role_arn so F10-F18 checks succeed.
+# [[scorer-is-ground-truth]] [[safety-mode-lean-permissive]]
+# ---------------------------------------------------------------------------
+
+
+def test_iam_containing_request_approved_via_admin_approve_provides_role_arn(
+    as_dev: TestClient,
+    as_approver: TestClient,
+) -> None:
+    """#704 regression (production-shape): an IAM-touching policy correctly
+    lands in `pending` under default floors (iam is in the hard-floor
+    blocklist). An approver (different user) calls the approve endpoint.
+    The approve response MUST carry
+    response["request"]["status"]["provisioned"]["role_arn"] — not None.
+
+    This is the shape the CI dogfood uses after the 2026-05-28 rework:
+    submit (as admin) → pending → admin-approve (different user) →
+    provisioned with role_arn.  No floor overrides anywhere.
+    """
+    # Policy mirrors dogfood stack 3 (S3 + IAM actions on Resource: *).
+    # iam:PutRolePolicy + iam:AttachRolePolicy are in the hard-floor
+    # never_auto_approve_services — the request MUST land in pending.
+    payload = {
+        "apiVersion": "iam-jit.dev/v1alpha1",
+        "kind": "RoleRequest",
+        "metadata": {"requester": {"name": "Dev", "email": "dev@example.com"}},
+        "spec": {
+            "description": "dogfood-style IAM + S3 stack request (admin-approve path)",
+            "access_type": "read-write",
+            "accounts": [{"account_id": "590519617224"}],
+            "duration": {"duration_hours": 1},
+            "policy": {
+                "Version": "2012-10-17",
+                "Statement": [
+                    {
+                        "Effect": "Allow",
+                        "Action": [
+                            "s3:CreateBucket",
+                            "s3:PutBucketPolicy",
+                            "iam:CreateRole",
+                            "iam:PutRolePolicy",
+                            "iam:AttachRolePolicy",
+                        ],
+                        "Resource": "*",
+                    }
+                ],
+            },
+        },
+    }
+
+    # Submit as dev — will land in pending (IAM floor blocks self-approve).
+    resp = as_dev.post("/api/v1/requests", json=payload)
+    assert resp.status_code == 201, resp.text
+    submit_body = resp.json()
+    request_id = submit_body["request"]["metadata"]["id"]
+
+    # Confirm the request is in pending — this is the correct behaviour.
+    submit_state = submit_body["request"]["status"]["state"]
+    assert submit_state == "pending", (
+        f"IAM-touching policy should land in pending under default floors; "
+        f"got state={submit_state!r}. If this changed, check the default "
+        f"never_auto_approve_services floor."
+    )
+
+    # Approve via a DIFFERENT user (as_approver != as_dev — no self-approval).
+    # This mirrors what the CI dogfood does with its dedicated approver user.
+    approve_resp = as_approver.post(
+        f"/api/v1/requests/{request_id}/approve",
+        json={"comment": "dogfood-style admin approve (#704)"},
+    )
+    assert approve_resp.status_code == 200, approve_resp.text
+    body = approve_resp.json()
+
+    # After approval the provisioner runs synchronously (route-test stub).
+    state = body["request"]["status"]["state"]
+    assert state == "active", (
+        f"after approve, expected state=active; got {state!r}; "
+        f"status={body['request']['status']}"
+    )
+
+    # The provisioned block MUST carry role_arn — this is what the
+    # dogfood script's _resolve_role_arn() reads via _admin_approve_request.
+    provisioned = body["request"]["status"].get("provisioned")
+    assert provisioned is not None, (
+        f"provisioned block missing after approve — state={state!r}; "
+        f"status={body['request']['status']}"
+    )
+    role_arn = provisioned.get("role_arn")
+    assert role_arn is not None, (
+        f"role_arn missing from provisioned block — #704 regression: "
+        f"provisioned={provisioned}"
+    )
+    assert "590519617224" in role_arn, (
+        f"role_arn does not contain expected account_id: {role_arn!r}"
+    )
