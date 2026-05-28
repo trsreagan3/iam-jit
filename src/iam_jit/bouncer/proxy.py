@@ -247,6 +247,7 @@ from typing import TYPE_CHECKING, Any
 from .decisions import DecisionRecord, DefaultPolicy, Mode, decide
 from .request_parser import parse_request
 from .rules import RuleSet
+from .upstream_resolver import resolve_forward_target as _resolve_forward_target
 
 if TYPE_CHECKING:
     from .store import BouncerStore
@@ -1138,8 +1139,16 @@ class ProxyConfig:
     signature validation is the standard LocalStack flow. The
     CRIT-32-01 outbound-host allowlist still gates the override
     target (loopback / .amazonaws.com / operator-supplied
-    EXTRA_HOSTS). Default None = forward to the signed Host
-    (existing real-AWS behaviour)."""
+    EXTRA_HOSTS). Default None = derive the canonical AWS endpoint
+    from the SigV4 credential scope (#687)."""
+    aws_endpoint_resolver: Any = None
+    """#687 — optional DI hook for tests: a callable
+    ``(service, region) -> hostname | None`` overriding the production
+    botocore-backed canonical-endpoint resolver. Tests inject a fake
+    that points at a local fake-AWS aiohttp server so the no-override
+    forward path (the path real users hit via ``iam-jit attach``) gets
+    exercised end-to-end without dialling real AWS. Default ``None`` =
+    production botocore endpoint catalog."""
     active_profile: Any = None
     """Slice 7: the resolved Profile object whose denies act as a
     hard floor above task/global rules. None or `Profile(name='full-user')`
@@ -2636,6 +2645,68 @@ def _is_allowed_forward_host(host: str) -> bool:
     return False
 
 
+def _resolve_upstream_target_or_fail(*, config, host_header, obs):
+    """#687 — pick the host:port ``_forward_to_aws`` will dial.
+
+    Returns the resolved upstream string, or ``None`` when the SDK
+    was pointed at ibounce itself (the canonical ``iam-jit attach``
+    setup) AND the SigV4 credential scope didn't map to a known AWS
+    endpoint — the caller surfaces that as a structured 502 instead
+    of recursing into its own listener (which used to happen
+    pre-#687 and produced
+    ``Cannot connect to host 127.0.0.1:8767 [SSL: WRONG_VERSION_NUMBER]``).
+    """
+    return _resolve_forward_target(
+        override=config.forward_host_override,
+        host_header=host_header or "",
+        listen_host=config.host,
+        listen_port=config.port,
+        service=obs.parsed_service,
+        region=obs.parsed_region,
+        endpoint_resolver=config.aws_endpoint_resolver,
+    )
+
+
+def _upstream_resolution_failed_response(obs, host_header):
+    """#687 — honest 502 when the SDK pointed at us but we can't
+    derive the canonical AWS endpoint from the SigV4 credential
+    scope. Mirrors the existing UPSTREAM_FORWARD_FAILED shape so
+    agent-side ``iam_jit_handle_deny`` classifies it consistently.
+
+    The pre-#687 behaviour was to dial our own listener (recursion +
+    SSL error). This response is strictly more useful: an honest
+    "we couldn't resolve where to send your call" with the parsed
+    service/region so an operator can confirm or override via
+    ``--upstream``.
+    """
+    from aiohttp import web  # local import — other call sites do the same
+    return web.json_response(
+        {
+            "error": "ibounce cannot resolve upstream AWS endpoint",
+            "code": "UPSTREAM_RESOLUTION_FAILED",
+            "recommended_action": "configure_upstream",
+            "decision_reason": (
+                "the SDK pointed at ibounce itself "
+                f"(Host: {host_header!r}) but the parsed SigV4 "
+                f"service/region ({obs.parsed_service!r}/"
+                f"{obs.parsed_region!r}) didn't map to a known AWS "
+                "endpoint. Either the service is unrecognised by "
+                "botocore's endpoint catalog, or your SDK isn't "
+                "signing with a valid AWS service. Workaround: pass "
+                "`ibounce run --upstream https://<service>.<region>.amazonaws.com`."
+            ),
+            "service": obs.parsed_service,
+            "region": obs.parsed_region,
+            "attempted_host": host_header,
+        },
+        status=502,
+        headers={
+            "x-iam-jit-bouncer-verdict": "error",
+            "x-iam-jit-bouncer-refusal": "upstream-resolution-failed",
+        },
+    )
+
+
 _HOP_HEADERS = frozenset({
     "connection",
     "keep-alive",
@@ -3198,8 +3269,17 @@ async def _forward_after_sync_allow(
         )
     # #300 — operator-supplied upstream host override (e.g.
     # `--upstream http://127.0.0.1:4566` for LocalStack). When unset,
-    # forward to the SigV4-signed Host header (real-AWS behaviour).
-    forward_target_host = config.forward_host_override or host_header
+    # resolve the canonical AWS endpoint from the SigV4 credential
+    # scope — pre-#687 we fell back to the inbound Host header, which
+    # recurses when the SDK is wired via `iam-jit attach`
+    # (endpoint_url=http://127.0.0.1:8767 → Host: self).
+    forward_target_host = _resolve_upstream_target_or_fail(
+        config=config,
+        host_header=host_header,
+        obs=obs,
+    )
+    if forward_target_host is None:
+        return _upstream_resolution_failed_response(obs, host_header)
     try:
         status, resp_headers, resp_body = await _forward_to_aws(
             method=request.method,
@@ -3549,8 +3629,17 @@ async def _handle_request(request, *, store, config: ProxyConfig, session):
     # Pass as list-of-tuples instead so multi-values round-trip.
     # #300 — operator-supplied upstream host override (e.g.
     # `--upstream http://127.0.0.1:4566` for LocalStack). When unset,
-    # forward to the SigV4-signed Host header (real-AWS behaviour).
-    forward_target_host = config.forward_host_override or host_header
+    # resolve the canonical AWS endpoint from the SigV4 credential
+    # scope — pre-#687 we fell back to the inbound Host header, which
+    # recurses when the SDK is wired via `iam-jit attach`
+    # (endpoint_url=http://127.0.0.1:8767 → Host: self).
+    forward_target_host = _resolve_upstream_target_or_fail(
+        config=config,
+        host_header=host_header,
+        obs=obs,
+    )
+    if forward_target_host is None:
+        return _upstream_resolution_failed_response(obs, host_header)
     try:
         status, resp_headers, resp_body = await _forward_to_aws(
             method=request.method,
