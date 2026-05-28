@@ -1,0 +1,269 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://iam-jit.dev/schemas/ocsf-iam-jit-audit-event.v1.json",
+  "title": "iam-jit OCSF v1.1.0 class 6003 (API Activity) audit event",
+  "description": "Cross-product audit-event schema. Every audit-export event from ibounce + kbounce + dbounce conforms to OCSF (Open Cybersecurity Schema Framework) v1.1.0 class 6003 \"API Activity\". This schema captures the COMMON SUBSET — the fields every Bounce product emits identically. Per-product extension fields land under `unmapped.iam_jit.ext` and are NOT constrained here (per [[cross-product-agent-parity]] + [[ocsf-audit-schema]]).\n\nThe authoritative event-builder lives at src/iam_jit/bouncer/audit_export/event.py (ibounce, Python) and internal/audit/event.go (kbounce, dbounce — Go). Each call site emits the OCSF event identically; only `metadata.product.name`, `unmapped.iam_jit.ext`, and the `activity_id` classifier vary per product.\n\nWhy class 6003? It's the closest OCSF class for proxy decisions about service-API calls. AWS SDK requests, K8s API requests, and SQL statements all fit. status_id mapping (per [[ibounce-honest-positioning]]): ALLOW→1, DENY enforced=true→2, DENY enforced=false→1 (cooperative-mode advisory; status_detail carries the deny reason), BYPASS (pause-active)→1.\n\nSchema discipline: additionalProperties:true at every level — OCSF spec growth + per-product `unmapped.iam_jit.ext` extensions are explicitly allowed. Validators that reject unknown fields will see false positives on legitimate events.",
+  "type": "object",
+  "additionalProperties": true,
+  "required": [
+    "metadata",
+    "time",
+    "class_uid",
+    "class_name",
+    "category_uid",
+    "category_name",
+    "activity_id",
+    "activity_name",
+    "type_uid",
+    "type_name",
+    "severity_id",
+    "severity",
+    "status_id",
+    "status",
+    "actor",
+    "api",
+    "resources",
+    "unmapped"
+  ],
+  "properties": {
+    "metadata": {
+      "type": "object",
+      "additionalProperties": true,
+      "required": ["version", "product"],
+      "properties": {
+        "version": {
+          "type": "string",
+          "description": "OCSF schema version. Currently \"1.1.0\" across the suite.",
+          "enum": ["1.1.0"]
+        },
+        "product": {
+          "type": "object",
+          "additionalProperties": true,
+          "required": ["name", "vendor_name"],
+          "properties": {
+            "name": {
+              "type": "string",
+              "description": "Per-product name. One of: ibounce, kbounce, dbounce.",
+              "enum": ["ibounce", "kbounce", "dbounce"]
+            },
+            "vendor_name": {
+              "type": "string",
+              "description": "Shared vendor across the suite — exactly \"iam-jit\" so a SIEM dashboard scoped to metadata.product.vendor_name == \"iam-jit\" catches every event.",
+              "const": "iam-jit"
+            },
+            "version": {
+              "type": "string",
+              "description": "Per-product binary version (e.g. \"1.0.0\")."
+            }
+          }
+        }
+      }
+    },
+    "time": {
+      "type": "integer",
+      "minimum": 0,
+      "description": "Event time in Unix milliseconds (canonical OCSF representation)."
+    },
+    "class_uid": {
+      "type": "integer",
+      "const": 6003,
+      "description": "OCSF class id. Locked to 6003 (API Activity) for every iam-jit event."
+    },
+    "class_name": {
+      "type": "string",
+      "const": "API Activity"
+    },
+    "category_uid": {
+      "type": "integer",
+      "const": 6
+    },
+    "category_name": {
+      "type": "string",
+      "const": "Application Activity"
+    },
+    "activity_id": {
+      "type": "integer",
+      "description": "OCSF activity_id. 0=Unknown, 1=Create, 2=Read, 3=Update, 4=Delete, 99=Other. Per [[ocsf-audit-schema]]: derived from the service-verb classifier (policy_sentry on AWS, K8s verb on kbounce, SQL type on dbounce). Synthetic AUDIT_DROPPED / ADMIN_ACTION events use 99.",
+      "enum": [0, 1, 2, 3, 4, 99]
+    },
+    "activity_name": {
+      "type": "string"
+    },
+    "type_uid": {
+      "type": "integer",
+      "description": "OCSF type_uid = class_uid * 100 + activity_id. For class 6003: 600300 (Unknown), 600301 (Create), 600302 (Read), 600303 (Update), 600304 (Delete), 600399 (Other).",
+      "minimum": 600300,
+      "maximum": 600399
+    },
+    "type_name": {
+      "type": "string"
+    },
+    "severity_id": {
+      "type": "integer",
+      "description": "OCSF severity_id. Per [[security-team-positioning-safety-not-surveillance]]: default 1 (Informational) for every routine decision. Slice 2 alerts (AUDIT_DROPPED, anomaly_detected) override per the spec table.",
+      "minimum": 0,
+      "maximum": 6
+    },
+    "severity": {
+      "type": "string",
+      "enum": ["Unknown", "Informational", "Low", "Medium", "High", "Critical", "Fatal"]
+    },
+    "status_id": {
+      "type": "integer",
+      "description": "OCSF status_id. 1=Success, 2=Failure, 99=Other. Per [[ibounce-honest-positioning]]: cooperative-mode advisory deny lands as Success-with-detail so SIEM Failure dashboards stay accurate.",
+      "enum": [0, 1, 2, 99]
+    },
+    "status": {
+      "type": "string",
+      "enum": ["Unknown", "Success", "Failure", "Other"]
+    },
+    "status_detail": {
+      "type": "string",
+      "description": "Free-text human-readable reason. Carries the deny reason for advisory denies + the pause-bypass note. Per [[security-team-positioning-safety-not-surveillance]]: neutral language."
+    },
+    "actor": {
+      "type": "object",
+      "additionalProperties": true,
+      "required": ["user"],
+      "properties": {
+        "user": {
+          "type": "object",
+          "additionalProperties": true,
+          "required": ["name", "uid"],
+          "properties": {
+            "name": {"type": "string"},
+            "uid": {"type": "string"}
+          }
+        },
+        "session": {
+          "type": "object",
+          "additionalProperties": true,
+          "properties": {
+            "uid": {"type": "string"}
+          }
+        }
+      }
+    },
+    "api": {
+      "type": "object",
+      "additionalProperties": true,
+      "required": ["operation", "service", "request"],
+      "properties": {
+        "operation": {
+          "type": "string",
+          "description": "Per-product operation name. ibounce: \"<service>:<action>\" (e.g. \"s3:GetObject\"); kbounce: \"<verb> <resource>\"; dbounce: SQL statement type."
+        },
+        "service": {
+          "type": "object",
+          "additionalProperties": true,
+          "required": ["name"],
+          "properties": {
+            "name": {"type": "string"}
+          }
+        },
+        "request": {
+          "type": "object",
+          "additionalProperties": true,
+          "required": ["uid"],
+          "properties": {
+            "uid": {
+              "type": "string",
+              "description": "Per-decision unique id. Stringified decision_id."
+            }
+          }
+        }
+      }
+    },
+    "resources": {
+      "type": "array",
+      "description": "OCSF resources[] — one entry per resource the request targets. Empty array when no resource is parseable (e.g. /healthz hits, account-scope AWS calls). Per [[ocsf-audit-schema]]: prefer empty array over synthesised names.",
+      "items": {
+        "type": "object",
+        "additionalProperties": true,
+        "properties": {
+          "name": {"type": "string"},
+          "uid": {"type": "string"},
+          "type": {"type": "string"}
+        }
+      }
+    },
+    "src_endpoint": {
+      "type": "object",
+      "additionalProperties": true,
+      "description": "Source endpoint metadata. May be empty when no src info is available (e.g. local-loopback bouncers).",
+      "properties": {
+        "ip": {"type": "string"},
+        "port": {"type": "integer"},
+        "hostname": {"type": "string"}
+      }
+    },
+    "dst_endpoint": {
+      "type": "object",
+      "additionalProperties": true,
+      "description": "Destination endpoint metadata. ibounce: AWS service host. kbounce: K8s API host. dbounce: database host.",
+      "properties": {
+        "ip": {"type": "string"},
+        "port": {"type": "integer"},
+        "hostname": {"type": "string"}
+      }
+    },
+    "unmapped": {
+      "type": "object",
+      "additionalProperties": true,
+      "required": ["iam_jit"],
+      "description": "OCSF unmapped container. The `iam_jit` sub-key carries every iam-jit-specific field that has no OCSF home.",
+      "properties": {
+        "iam_jit": {
+          "type": "object",
+          "additionalProperties": true,
+          "description": "iam-jit extension block. The named fields below are the cross-product common subset. Per-product fields land under `ext` (e.g. ibounce ext.aws_region, kbounce ext.namespace, dbounce ext.dialect).",
+          "properties": {
+            "mode": {
+              "type": "string",
+              "description": "The bouncer mode the decision was evaluated under. ibounce: cooperative|transparent. kbounce: enforce|advisory. dbounce: enforce|advisory."
+            },
+            "profile": {
+              "type": ["string", "null"],
+              "description": "Name of the active profile when the decision fired. null when no profile was selected (rare; default-profile fall-through)."
+            },
+            "verdict": {
+              "type": "string",
+              "description": "Raw bouncer verdict before OCSF status_id mapping. One of: ALLOW, DENY, BYPASS, PROMPT (sync-deny), or a future verdict the schema doesn't yet pin."
+            },
+            "decision_id": {
+              "type": "integer",
+              "description": "Monotonic per-process decision counter. Stable for the life of one bouncer process."
+            },
+            "enforced": {
+              "type": "boolean",
+              "description": "Whether the verdict actually altered upstream behavior. False for advisory denies (cooperative-mode flagged but did NOT block)."
+            },
+            "ext": {
+              "type": "object",
+              "additionalProperties": true,
+              "description": "Per-product extension dict. Unconstrained — each Bounce product adds its native fields here (ibounce: aws_region, sigv4_credential_kid; kbounce: namespace, resource_kind; dbounce: dialect, statement_kind)."
+            },
+            "event_type": {
+              "type": "string",
+              "description": "Set for synthetic events (AUDIT_DROPPED, ADMIN_ACTION). Absent for normal decision events."
+            },
+            "admin_action": {
+              "type": "object",
+              "additionalProperties": true,
+              "description": "Present only when unmapped.iam_jit.event_type == \"ADMIN_ACTION\". See admin-action-event.schema.json for the constrained sub-shape."
+            },
+            "dropped_count": {
+              "type": "integer",
+              "description": "Present only when unmapped.iam_jit.event_type == \"AUDIT_DROPPED\". Count of decision events the bounded queue dropped."
+            },
+            "agent": {
+              "type": "object",
+              "additionalProperties": true,
+              "description": "Optional agent-identity block per [[agent-identity-in-audit]]. Present when an agent identity could be resolved from MCP clientinfo, User-Agent, or process tree."
+            }
+          }
+        }
+      }
+    }
+  }
+}

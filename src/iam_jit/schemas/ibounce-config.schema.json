@@ -1,0 +1,145 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://iam-jit.dev/schemas/ibounce-config.v1.json",
+  "title": "ibounce config bundle (v1.0)",
+  "description": "Cross-product Tier-1 hygiene: backup / restore / migration shape produced by `ibounce config export` and consumed by `ibounce config import`. Sibling Bounce products (kbounce, dbounce) ship the same skeleton under their own `product` magic; the `product` field is the load-bearing guard against cross-product imports.",
+  "type": "object",
+  "additionalProperties": true,
+  "required": [
+    "schema_version",
+    "product",
+    "ibounce_version",
+    "exported_at",
+    "source_hostname_hash",
+    "profiles",
+    "rules"
+  ],
+  "properties": {
+    "schema_version": {
+      "type": "string",
+      "enum": ["1.0"]
+    },
+    "product": {
+      "type": "string",
+      "enum": ["ibounce"]
+    },
+    "ibounce_version": { "type": "string" },
+    "exported_at": {
+      "type": "string",
+      "description": "RFC3339 UTC timestamp the export was produced."
+    },
+    "source_hostname_hash": {
+      "type": "string",
+      "description": "sha256[:12] of the source host's hostname. Stable but non-revealing."
+    },
+    "profiles": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["active", "items"],
+      "properties": {
+        "active": { "type": "string" },
+        "items": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/profile" }
+        }
+      }
+    },
+    "rules": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/rule" }
+    },
+    "tasks": {
+      "type": "array",
+      "description": "Informational only — tasks are NEVER replayed on import.",
+      "items": { "type": "object" }
+    },
+    "presets": {
+      "type": "array",
+      "description": "Applied-preset history; informational only.",
+      "items": { "type": "object" }
+    },
+    "audit_webhook": {
+      "type": "object",
+      "properties": {
+        "log_path": { "type": "string" },
+        "webhook_url": { "type": "string" },
+        "webhook_token": { "type": "string" },
+        "redaction_hint": { "type": "string" },
+        "env_keys_present": {
+          "type": "array",
+          "items": { "type": "string" }
+        }
+      }
+    },
+    "alert_rules": {
+      "type": "object",
+      "properties": {
+        "path": { "type": "string" },
+        "content": { "type": ["object", "null"] },
+        "note": { "type": "string" }
+      }
+    },
+    "mcp_install_history": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["client", "path"],
+        "properties": {
+          "client": { "type": "string" },
+          "path": { "type": "string" }
+        }
+      }
+    },
+    "license": {
+      "type": "object",
+      "properties": {
+        "license_id": { "type": "string" },
+        "expires_at": { "type": "string" },
+        "content": {
+          "type": "null",
+          "description": "Always null; license payloads ship via #279 SQLite backup."
+        }
+      }
+    }
+  },
+  "$defs": {
+    "profile": {
+      "type": "object",
+      "required": ["name"],
+      "additionalProperties": true,
+      "properties": {
+        "name": { "type": "string" },
+        "description": { "type": "string" },
+        "deny_keywords": { "type": "array", "items": { "type": "string" } },
+        "keyword_targets": { "type": "array", "items": { "type": "string" } },
+        "keyword_match": { "type": "string" },
+        "only_account_ids": { "type": "array", "items": { "type": "string" } },
+        "deny_verbs": { "type": "array", "items": { "type": "string" } },
+        "exceptions": { "type": "array", "items": { "type": "string" } },
+        "allow_rules": { "type": "array", "items": { "type": "object" } },
+        "allow_baseline": { "type": "string" },
+        "deny_actions": { "type": "array", "items": { "type": "string" } },
+        "deny_actions_with_condition": {
+          "type": "array",
+          "items": { "type": "object" }
+        },
+        "source": { "type": "string" }
+      }
+    },
+    "rule": {
+      "type": "object",
+      "required": ["pattern", "effect"],
+      "additionalProperties": true,
+      "properties": {
+        "id": { "type": ["integer", "null"] },
+        "pattern": { "type": "string" },
+        "effect": { "type": "string", "enum": ["allow", "deny"] },
+        "arn_scope": { "type": ["string", "null"] },
+        "region_scope": { "type": ["string", "null"] },
+        "note": { "type": ["string", "null"] },
+        "origin": { "type": "string" },
+        "expires_at": { "type": ["string", "null"] }
+      }
+    }
+  }
+}
