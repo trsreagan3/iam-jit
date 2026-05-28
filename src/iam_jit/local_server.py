@@ -459,10 +459,14 @@ def run(
     port: int = _DEFAULT_PORT,
     data_dir: pathlib.Path | None = None,
     account_id: str | None = None,
+    reconcile_interval_seconds: int = 60,
 ) -> int:
     """Start iam-jit in local mode. Blocks until interrupted.
 
     Returns process exit code.
+
+    `reconcile_interval_seconds` controls the orphan-request
+    reconciler cadence (#698 LOW-2). Set to 0 to disable.
     """
     _validate_local_bind(host)
     config = LocalServerConfig(
@@ -518,6 +522,40 @@ def run(
     print(f"")
     print(f"To stop: Ctrl+C")
     print(f"")
+
+    # #698 LOW-2: spawn the orphan-request reconciler as an asyncio
+    # background task via FastAPI's startup hook so it lives inside
+    # uvicorn's event loop and is cancelled cleanly on shutdown.
+    if reconcile_interval_seconds > 0:
+        from . import lifecycle as _lifecycle
+        from . import provision as _provision
+        from . import reconciler as _reconciler
+
+        @app.on_event("startup")
+        async def _start_reconciler() -> None:
+            app.state.reconciler_stop_event = __import__("asyncio").Event()
+            app.state.reconciler_task = __import__("asyncio").create_task(
+                _reconciler.reconcile_loop(
+                    store=app.state.request_store,
+                    accounts_store=app.state.accounts_store,
+                    provision_mod=_provision,
+                    lifecycle=_lifecycle,
+                    interval_seconds=reconcile_interval_seconds,
+                    stop_event=app.state.reconciler_stop_event,
+                )
+            )
+
+        @app.on_event("shutdown")
+        async def _stop_reconciler() -> None:
+            stop_evt = getattr(app.state, "reconciler_stop_event", None)
+            task = getattr(app.state, "reconciler_task", None)
+            if stop_evt is not None:
+                stop_evt.set()
+            if task is not None:
+                try:
+                    await __import__("asyncio").wait_for(task, timeout=5)
+                except Exception:
+                    task.cancel()
 
     import uvicorn
     uvicorn.run(app, host=host, port=port, log_level="info")

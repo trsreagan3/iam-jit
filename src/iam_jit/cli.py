@@ -302,6 +302,16 @@ def agent_grant() -> None:
          "Without this flag AND no live creds, `serve --local` exits "
          "loudly instead of silently seeding the 000000000000 placeholder.",
 )
+@click.option(
+    "--reconcile-interval-seconds",
+    type=int,
+    default=60,
+    show_default=True,
+    help="#698 LOW-2 — Cadence for the orphan-request reconciler that "
+         "walks every active request, calls iam:GetRole, and transitions "
+         "to `revoked` when the IAM role was deleted out-of-band (via "
+         "AWS console / terraform / aws-cli). Set to 0 to disable.",
+)
 def serve(
     local: bool,
     host: str,
@@ -309,6 +319,7 @@ def serve(
     data_dir: pathlib.Path | None,
     no_doctor_check: bool,
     account_id: str | None,
+    reconcile_interval_seconds: int,
 ) -> None:
     """Run iam-jit as a local process.
 
@@ -350,6 +361,7 @@ def serve(
 
     sys.exit(run(
         host=host, port=port, data_dir=data_dir, account_id=account_id,
+        reconcile_interval_seconds=reconcile_interval_seconds,
     ))
 
 
