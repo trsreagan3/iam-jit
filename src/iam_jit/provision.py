@@ -500,6 +500,7 @@ def _build_tags(
     expires_at: str,
     provisioned_at: str,
     access_type: str,
+    operator_tags: dict[str, str] | None = None,
 ) -> dict[str, str]:
     """Tag every role with audit-friendly fields.
 
@@ -521,10 +522,32 @@ def _build_tags(
       # Roles past their expiry that haven't been cleaned up yet:
       aws iam list-roles --path-prefix /iam-jit/ \\
         --query "Roles[?Tags[?Key=='expires-at' && Value < '$(date -u +%FT%TZ)']]"
+
+    #698 MED-5: `operator_tags` are merged into the tag set FIRST, then
+    iam-jit's standard tags overwrite any collisions. Rationale: an
+    operator-supplied `managed-by=corp-foo` MUST NOT mask iam-jit's
+    audit trail — `managed-by=iam-jit` is the cross-deployment query
+    invariant. Operators get all OTHER keys verbatim (cost-allocation
+    `cost-center=...`, compliance `data-classification=...`, etc.).
     """
     from . import __version__
 
-    tags: dict[str, str] = {
+    # Layer 1: operator tags (lowest precedence). Filtered to AWS-tag
+    # constraints (Key <=128 chars, Value <=256 chars) but otherwise
+    # passed verbatim. We assume the route-level validator already
+    # rejected obviously-malformed dicts; this is just clamping.
+    merged: dict[str, str] = {}
+    if operator_tags:
+        for k, v in operator_tags.items():
+            if not isinstance(k, str) or not isinstance(v, str):
+                continue
+            if not k:
+                continue
+            merged[k[:128]] = v[:256]
+
+    # Layer 2: iam-jit's own tags (highest precedence — overwrite
+    # operator's value on key collision).
+    iam_jit_tags: dict[str, str] = {
         "managed-by": "iam-jit",
         "iam-jit-deployment": _deployment_name(),
         "iam-jit-version": __version__,
@@ -535,9 +558,10 @@ def _build_tags(
         "access-type": access_type or "read-only",
     }
     if approver_id:
-        tags["approver"] = approver_id
+        iam_jit_tags["approver"] = approver_id
+    merged.update(iam_jit_tags)
     # AWS tag values are limited to 256 chars; clamp defensively.
-    return {k: v[:256] for k, v in tags.items() if v}
+    return {k: v[:256] for k, v in merged.items() if v}
 
 
 @dataclass(frozen=True)
@@ -634,6 +658,9 @@ def preview(
 
     requester_id = (metadata.get("requester") or {}).get("email") or "unknown"
     approver_id = _last_approver(request)
+    # #698 MED-5: operator-supplied tags from spec.tags. iam-jit's own
+    # tags take precedence on collision (see _build_tags docstring).
+    operator_tags = spec.get("tags") if isinstance(spec.get("tags"), dict) else None
     tags = _build_tags(
         request_id=request_id,
         requester_email=requester_id,
@@ -641,6 +668,7 @@ def preview(
         expires_at=expires_at,
         provisioned_at="<not-yet-provisioned>",
         access_type=spec.get("access_type") or "read-only",
+        operator_tags=operator_tags,
     )
     cli_replay = _build_cli_replay(
         role_name=role_name,
@@ -748,6 +776,9 @@ def provision(
     requester_id = (metadata.get("requester") or {}).get("email") or "unknown"
     approver_id = _last_approver(request)
     provisioned_at = _isoformat_z(_dt.datetime.now(_dt.UTC))
+    # #698 MED-5: operator-supplied tags from spec.tags. iam-jit's own
+    # tags take precedence on collision (see _build_tags docstring).
+    operator_tags = spec.get("tags") if isinstance(spec.get("tags"), dict) else None
     tags = _build_tags(
         request_id=request_id,
         requester_email=requester_id,
@@ -755,6 +786,7 @@ def provision(
         expires_at=expires_at,
         provisioned_at=provisioned_at,
         access_type=spec.get("access_type") or "read-only",
+        operator_tags=operator_tags,
     )
 
     try:
