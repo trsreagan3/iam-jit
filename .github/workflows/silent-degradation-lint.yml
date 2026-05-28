@@ -1,0 +1,52 @@
+name: silent-degradation-lint
+
+# Ratchet: blocks NEW silent-degradation patterns from entering the codebase.
+# Existing baseline findings (tools/silent_degradation_linter/baseline.json)
+# are allowed. Only NEW findings beyond the baseline fail this check.
+#
+# Rules enforced:
+#   SD-1  bare except: pass (swallowed errors)
+#   SD-2  declared parameter never used in function body
+#   SD-4  positive return inside except block (caller can't detect failure)
+#
+# See docs/SILENT-DEGRADATION-LINTER.md for suppression and baseline-update workflow.
+
+on:
+  pull_request:
+    paths:
+      - "src/**"
+      - "tests/**"
+      - "tools/silent_degradation_linter/**"
+  push:
+    branches: [main]
+
+jobs:
+  lint:
+    name: Silent-Degradation Lint (SD-1, SD-2, SD-4)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e .[dev]
+
+      - name: Run silent-degradation ratchet
+        run: |
+          # Run only the ratchet test (fast, stdlib-only, no AWS calls)
+          PYTHONPATH=tools pytest tests/test_silent_degradation_clean.py \
+            -v \
+            --tb=short \
+            -p no:asyncio
+
+      - name: Report findings as annotations (on failure)
+        if: failure()
+        run: |
+          PYTHONPATH=tools python -m silent_degradation_linter \
+            --format=github \
+            || true
