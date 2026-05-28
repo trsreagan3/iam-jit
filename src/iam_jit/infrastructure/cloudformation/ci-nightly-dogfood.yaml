@@ -1,0 +1,330 @@
+AWSTemplateFormatVersion: '2010-09-09'
+
+Description: |
+  iam-jit CI nightly dogfood bootstrap (#700) — GitHub OIDC + IAM role.
+
+  Deploys the IAM role that .github/workflows/dogfood-nightly.yml +
+  dogfood-orphan-sweeper.yml assume via GitHub OIDC. One stack, idempotent,
+  reversible (`aws cloudformation delete-stack ...`).
+
+  Permissions are the minimum required for the 19 fail conditions in
+  docs/CI-NIGHTLY-DOGFOOD.md — every Allow statement is justified by a
+  specific F-row. Resource ARNs are scoped wherever possible (iam-jit/*,
+  iam-jit-grant-*); cross-cutting reads (Describe/List) are intentionally
+  scoped to "*" because AWS doesn't accept resource-level constraints
+  on most read APIs.
+
+  Re-run the deploy command (or `aws cloudformation update-stack`) to
+  pick up template changes. Stack name is referenced in the deploy
+  script + the workflow's OIDC role-to-assume.
+
+Parameters:
+  GitHubOrg:
+    Type: String
+    Default: trsreagan3
+    Description: GitHub org/user that owns the iam-jit repo.
+
+  GitHubRepo:
+    Type: String
+    Default: iam-jit
+    Description: GitHub repo name (without org prefix).
+
+  ExistingOidcProviderArn:
+    Type: String
+    Default: ""
+    Description: |
+      ARN of an existing GitHub OIDC provider in this account.
+      Leave empty to create one. AWS only permits ONE OIDC provider
+      per issuer URL per account; the deploy script discovers and
+      passes this automatically.
+
+  RoleName:
+    Type: String
+    Default: iam-jit-ci-nightly
+    Description: |
+      IAM role name the workflow assumes. The workflow's
+      `role-to-assume: arn:aws:iam::<account>:role/iam-jit-ci-nightly`
+      MUST match this — change both together if you customize.
+
+  BudgetEmail:
+    Type: String
+    Default: trsreagan3@gmail.com
+    Description: |
+      Email for the $10/day cost-guard budget alarm. Defaults to the
+      repo owner's public git identity. Override at deploy time with
+      --parameter-overrides BudgetEmail=ops@example.com.
+
+Conditions:
+  CreateOidcProvider: !Equals [!Ref ExistingOidcProviderArn, ""]
+
+Resources:
+
+  # ----- GitHub OIDC provider (only created if not already present) -----
+  #
+  # AWS allows exactly ONE OIDC provider per issuer URL per account. The
+  # deploy script probes via `aws iam list-open-id-connect-providers` and
+  # passes any existing ARN as ExistingOidcProviderArn — this conditional
+  # prevents the stack from failing with "OIDC provider already exists"
+  # when the account already has GitHub OIDC wired in for other workflows.
+  GitHubOidcProvider:
+    Type: AWS::IAM::OIDCProvider
+    Condition: CreateOidcProvider
+    Properties:
+      Url: https://token.actions.githubusercontent.com
+      ClientIdList:
+        - sts.amazonaws.com
+      # GitHub's OIDC root CA thumbprints. AWS only validates these
+      # on legacy clients; modern AWS STS validates the cert chain
+      # directly. Documented at:
+      # https://docs.github.com/en/actions/deployment/security-hardening-your-deployments/configuring-openid-connect-in-amazon-web-services
+      ThumbprintList:
+        - 6938fd4d98bab03faadb97b34396831e3780aea1
+        - 1c58a3a8518e8759bf075b76b750d4f2df264fcd
+      Tags:
+        - Key: Project
+          Value: iam-jit-ci-nightly
+        - Key: ManagedBy
+          Value: !Sub cloudformation:${AWS::StackName}
+
+  # ----- IAM role the workflow assumes via OIDC -----
+  CiNightlyRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Ref RoleName
+      Description: |
+        Assumed by .github/workflows/dogfood-nightly.yml +
+        dogfood-orphan-sweeper.yml via GitHub OIDC. See
+        docs/CI-NIGHTLY-DOGFOOD.md for the contract; the role's
+        permissions are the minimum required by the 19 F-conditions.
+      Tags:
+        - Key: Project
+          Value: iam-jit-ci-nightly
+        - Key: ManagedBy
+          Value: !Sub cloudformation:${AWS::StackName}
+      # Trust policy: GitHub OIDC, scoped to the iam-jit repo. The
+      # StringLike `sub` claim allows:
+      #   - main branch:    repo:<org>/<repo>:ref:refs/heads/main
+      #   - PR runs:        repo:<org>/<repo>:pull_request
+      #   - manual dispatch: same scope (workflow_dispatch tokens carry
+      #     the ref:refs/heads/<branch> shape, so refs/heads/main matches).
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Sid: GitHubOidcFromIamJitRepo
+            Effect: Allow
+            Principal:
+              Federated: !If
+                - CreateOidcProvider
+                - !Ref GitHubOidcProvider
+                - !Ref ExistingOidcProviderArn
+            Action: sts:AssumeRoleWithWebIdentity
+            Condition:
+              StringEquals:
+                token.actions.githubusercontent.com:aud: sts.amazonaws.com
+              StringLike:
+                token.actions.githubusercontent.com:sub:
+                  - !Sub repo:${GitHubOrg}/${GitHubRepo}:ref:refs/heads/main
+                  - !Sub repo:${GitHubOrg}/${GitHubRepo}:pull_request
+                  - !Sub repo:${GitHubOrg}/${GitHubRepo}:ref:refs/tags/*
+      Policies:
+        - PolicyName: iam-jit-ci-nightly-permissions
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+
+              # ---- IAM: provisioning of test grant roles ----
+              # iam-jit creates short-lived roles named `iam-jit-grant-<id>`
+              # (under /iam-jit/ path or top-level) per the
+              # [[create-not-assume-pattern]]. The workflow needs to
+              # provision + delete + inspect these. Scoped by ARN pattern
+              # so the CI role CANNOT touch other IAM roles in the account.
+              - Sid: ManageIamJitGrantRoles
+                Effect: Allow
+                Action:
+                  - iam:CreateRole
+                  - iam:DeleteRole
+                  - iam:PutRolePolicy
+                  - iam:DeleteRolePolicy
+                  - iam:GetRole
+                  - iam:GetRolePolicy
+                  - iam:ListRolePolicies
+                  - iam:ListAttachedRolePolicies
+                  - iam:TagRole
+                  - iam:UntagRole
+                  - iam:ListRoleTags
+                Resource:
+                  - !Sub arn:${AWS::Partition}:iam::${AWS::AccountId}:role/iam-jit/*
+                  - !Sub arn:${AWS::Partition}:iam::${AWS::AccountId}:role/iam-jit-grant-*
+                  - !Sub arn:${AWS::Partition}:iam::${AWS::AccountId}:role/iam-jit-local-provisioner
+
+              # F11: SimulatePrincipalPolicy authorization checks. AWS
+              # doesn't accept resource-level scoping on simulate APIs.
+              - Sid: SimulatePolicyForVerifyRole
+                Effect: Allow
+                Action:
+                  - iam:SimulatePrincipalPolicy
+                  - iam:SimulateCustomPolicy
+                Resource: "*"
+
+              # F12: accuracy cross-check — assume the iam-jit-provisioned
+              # role and call a read-only Describe with it. Scoped to the
+              # grant-role ARN pattern so the CI role can't assume into
+              # arbitrary roles in the account.
+              - Sid: AssumeGrantRolesForAccuracyProbe
+                Effect: Allow
+                Action: sts:AssumeRole
+                Resource:
+                  - !Sub arn:${AWS::Partition}:iam::${AWS::AccountId}:role/iam-jit/iam-jit-grant-*
+                  - !Sub arn:${AWS::Partition}:iam::${AWS::AccountId}:role/iam-jit-grant-*
+
+              - Sid: WhoAmI
+                Effect: Allow
+                Action: sts:GetCallerIdentity
+                Resource: "*"
+
+              # F19 + sweeper: orphan detection by tag. resourcegroupstaggingapi
+              # only supports Resource: "*" — no per-tag/per-arn scoping.
+              - Sid: TagSearchForOrphanSweep
+                Effect: Allow
+                Action:
+                  - tag:GetResources
+                Resource: "*"
+
+              # ---- Read-only Describes for plan-capture verification (F8) ----
+              # The dogfood scripts SimulatePolicy these actions, then probe
+              # them with the assumed grant role (F12). The role itself needs
+              # to call them too for the apigateway audit-name check (F14)
+              # and the negative test cleanup paths.
+
+              # Stack 1 (VPC + EC2)
+              - Sid: ReadOnlyEc2ForStack1
+                Effect: Allow
+                Action:
+                  - ec2:DescribeVpcs
+                  - ec2:DescribeSubnets
+                  - ec2:DescribeAvailabilityZones
+                  - ec2:DescribeImages
+                  - ec2:DescribeInstances
+                  - ec2:DescribeRouteTables
+                  - ec2:DescribeInternetGateways
+                  - ec2:DescribeSecurityGroups
+                  - ec2:DescribeRegions
+                Resource: "*"
+
+              # Stack 2 (Lambda + API Gateway)
+              - Sid: ReadOnlyLambdaForStack2
+                Effect: Allow
+                Action:
+                  - lambda:ListFunctions
+                  - lambda:GetFunction
+                  - lambda:ListLayers
+                Resource: "*"
+
+              - Sid: ReadOnlyApiGatewayForStack2
+                Effect: Allow
+                Action:
+                  - apigateway:GET
+                Resource: "*"
+
+              # Stack 3 (S3 + IAM)
+              - Sid: ReadOnlyS3ForStack3
+                Effect: Allow
+                Action:
+                  - s3:ListAllMyBuckets
+                  - s3:GetBucketLocation
+                  - s3:GetBucketTagging
+                Resource: "*"
+
+              # DynamoDB — exercised by SimulatePolicy in T1 multi-service
+              # (from UAT-C). Read-only only; no PutItem / DeleteItem.
+              - Sid: ReadOnlyDynamoDbForMultiServiceProbe
+                Effect: Allow
+                Action:
+                  - dynamodb:ListTables
+                  - dynamodb:DescribeTable
+                Resource: "*"
+
+              # ---- CloudWatch Logs (for the workflow's own debug output) ----
+              - Sid: WriteOwnCloudWatchLogs
+                Effect: Allow
+                Action:
+                  - logs:CreateLogStream
+                  - logs:PutLogEvents
+                Resource:
+                  - !Sub arn:${AWS::Partition}:logs:${AWS::Region}:${AWS::AccountId}:log-group:/aws/iam-jit-ci-nightly:*
+
+  # ----- Optional: account-wide $10/day cost guard (kill-switch alarm) -----
+  #
+  # The dogfood is designed to be $0 (plan-capture + SimulatePolicy +
+  # read-only Describes), but an accidental Create* call could leak cost.
+  # This budget is a kill-switch — it triggers an SNS alarm at $10/day so
+  # the founder gets notified BEFORE a runaway burns the account.
+  #
+  # NOTE: AWS Budgets requires the AccountAlias / Cost Explorer to be
+  # enabled in the account; if your account hasn't enabled them, this
+  # resource will fail with InvalidParameterException. In that case,
+  # remove this resource block (the IAM role + OIDC are independent +
+  # still useful without the budget).
+  CostGuardBudget:
+    Type: AWS::Budgets::Budget
+    Properties:
+      Budget:
+        BudgetName: iam-jit-ci-nightly-cost-guard
+        BudgetType: COST
+        TimeUnit: DAILY
+        BudgetLimit:
+          Amount: 10
+          Unit: USD
+        CostTypes:
+          IncludeSubscription: true
+          IncludeTax: true
+          IncludeRefund: false
+          IncludeCredit: false
+          IncludeUpfront: true
+          IncludeRecurring: true
+          IncludeOtherSubscription: true
+          IncludeSupport: false
+          IncludeDiscount: true
+      NotificationsWithSubscribers:
+        - Notification:
+            NotificationType: ACTUAL
+            ComparisonOperator: GREATER_THAN
+            Threshold: 100
+            ThresholdType: PERCENTAGE
+          Subscribers:
+            - SubscriptionType: EMAIL
+              # Replace via `--parameter-overrides BudgetEmail=...` if you
+              # want notifications to a different address. The deploy
+              # script reads the IAM user's tag `notification-email` if
+              # set, else defaults to a generic alias.
+              Address: !Ref BudgetEmail
+
+Outputs:
+  RoleArn:
+    Description: ARN of the IAM role the workflow assumes via OIDC.
+    Value: !GetAtt CiNightlyRole.Arn
+    Export:
+      Name: !Sub ${AWS::StackName}-RoleArn
+
+  OidcProviderArn:
+    Description: |
+      ARN of the GitHub OIDC provider (created or existing).
+    Value: !If
+      - CreateOidcProvider
+      - !Ref GitHubOidcProvider
+      - !Ref ExistingOidcProviderArn
+    Export:
+      Name: !Sub ${AWS::StackName}-OidcProviderArn
+
+  RoleName:
+    Description: Role name the workflow assumes (matches workflow YAML).
+    Value: !Ref CiNightlyRole
+
+  WorkflowAssumeRoleSnippet:
+    Description: |
+      Drop-in snippet for the workflow's aws-actions/configure-aws-credentials step.
+    Value: !Sub |
+      - uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${CiNightlyRole.Arn}
+          aws-region: us-east-1

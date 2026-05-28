@@ -21,10 +21,15 @@ PKG_DIR="${REPO_ROOT}/src/iam_jit"
 mkdir -p "${PKG_DIR}/schemas"
 cp -f "${REPO_ROOT}/schemas/"*.json "${PKG_DIR}/schemas/"
 
-# CFN template used by onboarding.py
+# CFN templates. `destination-account-roles.yaml` is loaded at runtime
+# by onboarding.py; other templates (e.g. `ci-nightly-dogfood.yaml`
+# from #700 / #703) are CI-only and don't need to ship in the wheel,
+# but mirroring them keeps the test_packaged_data_in_sync.py drift
+# guard (#699) honest without per-file allowlists. ~8KB / file cost
+# in the wheel is negligible vs the maintenance footgun of explicit
+# allowlists that future devs forget to update.
 mkdir -p "${PKG_DIR}/infrastructure/cloudformation"
-cp -f \
-  "${REPO_ROOT}/infrastructure/cloudformation/destination-account-roles.yaml" \
+cp -f "${REPO_ROOT}/infrastructure/cloudformation/"*.yaml \
   "${PKG_DIR}/infrastructure/cloudformation/"
 
 echo "synced data files into ${PKG_DIR}"

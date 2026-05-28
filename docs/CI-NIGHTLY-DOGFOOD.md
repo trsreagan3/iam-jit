@@ -83,20 +83,39 @@ Every resource the dogfood creates is tagged with **three** tags, all required:
 - For each result: if `CreatedAt` > 6 hours ago, delete it.
 - Sweeper fires Slack alarm if it had work to do (means a per-run teardown leaked — should be investigated, even if the sweep cleaned up).
 
-## AWS setup (one-time, founder action)
+## AWS setup (one-time, founder action — automated)
 
-1. Create an IAM role in account `590519617224` named `iam-jit-ci-nightly` with:
-   - Trust policy: GitHub OIDC for `repo:trsreagan3/iam-jit:ref:refs/heads/main` + `repo:trsreagan3/iam-jit:pull_request`.
-   - Permissions: 
-     - `iam:CreateRole`, `iam:DeleteRole`, `iam:PutRolePolicy`, `iam:DeleteRolePolicy`, `iam:GetRole`, `iam:ListRolePolicies`, `iam:ListAttachedRolePolicies`, `iam:GetRolePolicy`, `iam:TagRole`, `iam:UntagRole`, `iam:ListRoleTags`, `iam:SimulatePrincipalPolicy` — for the iam-jit provisioning + verification flow.
-     - `sts:AssumeRole` (for the accuracy cross-check on iam-jit-created roles).
-     - `tag:GetResources` (for the orphan sweep).
-     - Various read-only Describe/List for the captured plans (scope to the services the stacks use: ec2/lambda/apigateway/s3/dynamodb).
-   - All gated by Condition `aws:RequestTag/Project=iam-jit-ci-nightly` where applicable.
-2. Set up CloudWatch budget alarm on tag `Project=iam-jit-ci-nightly` at `$5/day` → Slack/email.
-3. (Optional) Slack webhook for failure notifications → repo secret `SLACK_DOGFOOD_WEBHOOK`.
+One command, idempotent + reversible:
+
+```bash
+AWS_PROFILE=iam-jit AWS_REGION=us-east-1 scripts/deploy-ci-dogfood-iam.sh
+```
+
+The script deploys [`infrastructure/cloudformation/ci-nightly-dogfood.yaml`](../infrastructure/cloudformation/ci-nightly-dogfood.yaml), which provisions:
+
+- **IAM role** `iam-jit-ci-nightly` in the deploying account, with a trust policy scoped to GitHub OIDC for `repo:trsreagan3/iam-jit:ref:refs/heads/main`, `repo:trsreagan3/iam-jit:pull_request`, and `repo:trsreagan3/iam-jit:ref:refs/tags/*`.
+- **Inline permissions** — the minimum required by the 19 F-conditions:
+  - `iam:CreateRole/DeleteRole/PutRolePolicy/DeleteRolePolicy/GetRole/GetRolePolicy/ListRolePolicies/ListAttachedRolePolicies/TagRole/UntagRole/ListRoleTags` scoped by ARN pattern to `iam-jit/*`, `iam-jit-grant-*`, and `iam-jit-local-provisioner` — for the iam-jit provisioning + verification flow.
+  - `iam:SimulatePrincipalPolicy` + `iam:SimulateCustomPolicy` (F11 authorization checks).
+  - `sts:AssumeRole` scoped to the same grant-role ARN patterns (F12 accuracy cross-check) + `sts:GetCallerIdentity`.
+  - `tag:GetResources` (F19 + sweeper).
+  - Read-only Describe/List for the services the stacks use: `ec2:Describe*`, `lambda:ListFunctions/GetFunction/ListLayers`, `apigateway:GET`, `s3:ListAllMyBuckets/GetBucketLocation/GetBucketTagging`, `dynamodb:ListTables/DescribeTable`.
+- **GitHub OIDC provider** — created if not already present; reused if the script's pre-flight check finds an existing one (AWS permits exactly one per issuer URL per account).
+- **AWS Budget** `iam-jit-ci-nightly-cost-guard` — $10/day kill-switch with email notification at 100% threshold.
+
+The script:
+1. Validates `aws sts get-caller-identity` succeeds + prints the account ID before any change lands.
+2. Probes existing OIDC providers + passes the discovered ARN to CFN so re-runs don't fail with "OIDC provider already exists."
+3. Runs `aws cloudformation deploy --no-fail-on-empty-changeset` (idempotent).
+4. Verifies the role exists post-deploy + warns if the workflow YAML's `role-to-assume` doesn't match the deployed ARN.
+
+Reverse with `aws cloudformation delete-stack --stack-name iam-jit-ci-nightly --region us-east-1`.
 
 The workflow uses GitHub OIDC; **no long-lived AWS keys in repo secrets**.
+
+### Optional: Slack failure notifications
+
+Add `SLACK_DOGFOOD_WEBHOOK` to repo secrets if you want the workflow to post failures to Slack. Without it, the workflow still fails the build — Slack is for low-latency notification, not gating.
 
 ## Schedule
 
