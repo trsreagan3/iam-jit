@@ -70,6 +70,40 @@ Before running uninstall:
 
 ## The 10-step uninstall sequence
 
+### Step 0 — revoke active grants BEFORE removing the provisioner (#698 MED-3)
+
+If `iam-jit serve --local` (or a deployed iam-jit) issued any active grants
+against your account AND you plan to delete the `iam-jit-local-provisioner`
+role as part of the uninstall, **revoke the grants FIRST**.
+
+Why: each grant is a separate short-lived IAM role created by the provisioner.
+Once the provisioner role is gone, iam-jit can't tear down the grant roles
+(no STS:AssumeRole + DeleteRole/DeleteRolePolicy + DetachRolePolicy chain).
+The grant roles ORPHAN — they sit in IAM until their TTL gate expires (which
+only blocks USE, doesn't delete the role itself) or until you manually clean
+them up with `aws iam delete-role`. CloudTrail keeps showing the orphans
+as your account's resources; SOC 2 + IAM-Access-Analyzer scans flag them.
+
+Clean ordering:
+
+```bash
+# 1. List currently-active grants.
+iam-jit remote list --state active
+
+# 2. Revoke each one with a reason for the audit trail.
+iam-jit remote revoke <request-id> --reason "uninstall cleanup"
+
+# 3. Verify no grants are still active.
+iam-jit remote list --state active   # should be empty
+
+# 4. THEN proceed with Step 1 below.
+```
+
+Per `[[creates-never-mutates]]` the revoke calls iam-jit's own teardown path,
+which is the only place that knows how to find + delete the grant roles.
+Skipping Step 0 + deleting the provisioner directly leaves orphan IAM roles
+in your account.
+
 ### Step 1 — SIGTERM any running bouncer processes
 
 ```bash

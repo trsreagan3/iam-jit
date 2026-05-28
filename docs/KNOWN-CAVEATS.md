@@ -431,6 +431,33 @@ Workaround: operators who want determinism set `--preferred-backend ollama` (loc
 
 Tracked under the v1.1 roadmap, NOT a launch blocker. Logged per `[[ibounce-honest-positioning]]` so an operator evaluating dynamic-denies for dbounce knows the boundary up-front.
 
+## B19. ibounce: `iam-jit attach` writes a port-pinned endpoint_url (#698 LOW-1)
+
+**Symptom:** Operator runs `iam-jit attach --endpoint http://127.0.0.1:7401`
+which writes `endpoint_url = http://127.0.0.1:7401` into the AWS config
+profile. Operator later restarts ibounce on a DIFFERENT port (e.g. `--port 7402`
+because 7401 was in use). Boto3 still hits the OLD port → connection-refused
+or the call goes to nothing → silent agent-flow failure.
+
+**Why:** `attach` writes the endpoint pinned to the port the operator passed.
+There is no "detect ibounce port on the fly" path; aws-config is static.
+
+**Fix when this bites you:**
+```bash
+iam-jit detach                          # removes the endpoint_url line
+iam-jit attach --endpoint http://127.0.0.1:<new-port>
+```
+
+Always pair an ibounce port change with a detach/re-attach. The two CLIs
+ship in the same release exactly because they're meant to be used together.
+
+Tracked v1.1+ candidates:
+- `iam-jit attach --auto-detect` — find ibounce by pid file, follow port changes.
+- `ibounce serve --pidfile <path>` + `iam-jit attach --follow-pidfile` — let
+  attach re-read the port from the pidfile on each AWS SDK invocation.
+
+Neither is launch-blocking; the pair is one shell command away today.
+
 ---
 
 # Discoverability surfaces
