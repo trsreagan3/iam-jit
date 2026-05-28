@@ -170,12 +170,18 @@ Resources:
               # role and call a read-only Describe with it. Scoped to the
               # grant-role ARN pattern so the CI role can't assume into
               # arbitrary roles in the account.
+              #
+              # Also includes the LocalProvisionerRole so iam-jit serve
+              # --local can assume it during provisioning. (#704: the
+              # provisioner role must exist AND be assumable by the CI
+              # runner for F10-F18 to produce a provisioned role ARN.)
               - Sid: AssumeGrantRolesForAccuracyProbe
                 Effect: Allow
                 Action: sts:AssumeRole
                 Resource:
                   - !Sub arn:${AWS::Partition}:iam::${AWS::AccountId}:role/iam-jit/iam-jit-grant-*
                   - !Sub arn:${AWS::Partition}:iam::${AWS::AccountId}:role/iam-jit-grant-*
+                  - !GetAtt LocalProvisionerRole.Arn
 
               - Sid: WhoAmI
                 Effect: Allow
@@ -252,6 +258,74 @@ Resources:
                   - logs:PutLogEvents
                 Resource:
                   - !Sub arn:${AWS::Partition}:logs:${AWS::Region}:${AWS::AccountId}:log-group:/aws/iam-jit-ci-nightly:*
+
+  # ----- LocalProvisionerRole: assumed by iam-jit serve --local during CI -----
+  #
+  # `iam-jit serve --local` auto-generates accounts.yaml with
+  # provisioner_role_arn: arn:aws:iam::<account>:role/iam-jit-local-provisioner
+  # The server assumes this role (via sts:AssumeRole) to create/delete
+  # per-grant IAM roles.  Without this role the assumption fails and every
+  # provisioning attempt lands in `provisioning_failed` with no role_arn in
+  # the submit response — the root cause of the F10-F18 cascade (#704).
+  #
+  # Trust: the CI nightly runner (CiNightlyRole) assumes this role with the
+  # fixed ExternalId that local_server.py seeds into accounts.yaml.
+  # Permissions: minimum IAM surface needed to create/delete iam-jit grant
+  # roles, scoped by the /iam-jit/ path prefix.
+  LocalProvisionerRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: iam-jit-local-provisioner
+      Description: |
+        Assumed by iam-jit serve --local (running as CiNightlyRole) to
+        provision and revoke time-bound grant roles during the CI dogfood.
+        Scoped to /iam-jit/ path so it cannot touch roles outside iam-jit's
+        namespace. Trust is locked to CiNightlyRole + the fixed ExternalId
+        that local_server.py seeds into accounts.yaml at first run.
+      Tags:
+        - Key: Project
+          Value: iam-jit-ci-nightly
+        - Key: ManagedBy
+          Value: !Sub cloudformation:${AWS::StackName}
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Sid: AllowCiNightlyRoleToAssume
+            Effect: Allow
+            Principal:
+              AWS: !GetAtt CiNightlyRole.Arn
+            Action: sts:AssumeRole
+            Condition:
+              # local_server.py seeds provisioner_external_id as
+              # "iam-jit-local-<account_id>" — the provision.py
+              # _assume_provisioner_role() call passes this ExternalId.
+              StringLike:
+                sts:ExternalId: !Sub "iam-jit-local-${AWS::AccountId}"
+      Policies:
+        - PolicyName: iam-jit-local-provisioner-policy
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Sid: ManageGrantRoles
+                Effect: Allow
+                Action:
+                  - iam:CreateRole
+                  - iam:DeleteRole
+                  - iam:PutRolePolicy
+                  - iam:DeleteRolePolicy
+                  - iam:GetRole
+                  - iam:GetRolePolicy
+                  - iam:ListRolePolicies
+                  - iam:ListAttachedRolePolicies
+                  - iam:TagRole
+                  - iam:UntagRole
+                  - iam:ListRoleTags
+                  - iam:AttachRolePolicy
+                  - iam:DetachRolePolicy
+                  - iam:UpdateAssumeRolePolicy
+                Resource:
+                  - !Sub arn:${AWS::Partition}:iam::${AWS::AccountId}:role/iam-jit/*
+                  - !Sub arn:${AWS::Partition}:iam::${AWS::AccountId}:role/iam-jit-grant-*
 
   # ----- Optional: account-wide $10/day cost guard (kill-switch alarm) -----
   #
