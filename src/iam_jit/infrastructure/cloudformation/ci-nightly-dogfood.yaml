@@ -54,8 +54,21 @@ Parameters:
       repo owner's public git identity. Override at deploy time with
       --parameter-overrides BudgetEmail=ops@example.com.
 
+  OperatorPrincipalArn:
+    Type: String
+    Default: ""
+    Description: |
+      Optional IAM principal ARN (user or role) that should ALSO be
+      able to assume LocalProvisionerRole — for operators who use
+      `iam-jit serve --local` from their own workstation outside CI.
+      Leave empty for CI-only deployments. Example:
+        arn:aws:iam::123456789012:user/alice
+      The same ExternalId condition (iam-jit-local-<account>) applies
+      to both the CI role and this operator principal.
+
 Conditions:
   CreateOidcProvider: !Equals [!Ref ExistingOidcProviderArn, ""]
+  HasOperatorPrincipal: !Not [!Equals [!Ref OperatorPrincipalArn, ""]]
 
 Resources:
 
@@ -307,6 +320,21 @@ Resources:
               # _assume_provisioner_role() call passes this ExternalId.
               StringLike:
                 sts:ExternalId: !Sub "iam-jit-local-${AWS::AccountId}"
+          # Optional second trust statement for operator local-dev use —
+          # populated only when OperatorPrincipalArn parameter is set.
+          # The !If returns AWS::NoValue (drops the statement) when the
+          # parameter is empty, keeping the trust policy CI-only.
+          - !If
+            - HasOperatorPrincipal
+            - Sid: AllowOperatorToAssume
+              Effect: Allow
+              Principal:
+                AWS: !Ref OperatorPrincipalArn
+              Action: sts:AssumeRole
+              Condition:
+                StringEquals:
+                  sts:ExternalId: !Sub "iam-jit-local-${AWS::AccountId}"
+            - !Ref AWS::NoValue
       Policies:
         - PolicyName: iam-jit-local-provisioner-policy
           PolicyDocument:
