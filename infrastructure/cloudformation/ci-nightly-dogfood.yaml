@@ -181,7 +181,13 @@ Resources:
                 Resource:
                   - !Sub arn:${AWS::Partition}:iam::${AWS::AccountId}:role/iam-jit/iam-jit-grant-*
                   - !Sub arn:${AWS::Partition}:iam::${AWS::AccountId}:role/iam-jit-grant-*
-                  - !GetAtt LocalProvisionerRole.Arn
+                  # NOTE: constructed ARN (not !GetAtt) intentionally — !GetAtt
+                  # creates a circular dependency with LocalProvisionerRole's
+                  # trust policy (which !GetAtt's CiNightlyRole.Arn). The role
+                  # name is hardcoded `iam-jit-local-provisioner` in
+                  # LocalProvisionerRole.Properties.RoleName below, so this
+                  # constructed ARN is always correct.
+                  - !Sub arn:${AWS::Partition}:iam::${AWS::AccountId}:role/iam-jit-local-provisioner
 
               - Sid: WhoAmI
                 Effect: Allow
