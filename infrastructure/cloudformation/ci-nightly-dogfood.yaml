@@ -293,6 +293,14 @@ Resources:
   # roles, scoped by the /iam-jit/ path prefix.
   LocalProvisionerRole:
     Type: AWS::IAM::Role
+    # DeletionPolicy: Retain is required for CFN IMPORT (the only way to
+    # bring a pre-existing role under stack management without deleting
+    # + recreating it). Keeping Retain post-import is intentional too —
+    # if the stack is deleted, we leave the role intact so an operator's
+    # local serve --local workflow doesn't break. Re-create on demand by
+    # deleting the role manually + re-deploying.
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
     Properties:
       RoleName: iam-jit-local-provisioner
       Description: |
