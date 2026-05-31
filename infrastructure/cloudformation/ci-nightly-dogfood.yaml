@@ -54,21 +54,8 @@ Parameters:
       repo owner's public git identity. Override at deploy time with
       --parameter-overrides BudgetEmail=ops@example.com.
 
-  OperatorPrincipalArn:
-    Type: String
-    Default: ""
-    Description: |
-      Optional IAM principal ARN (user or role) that should ALSO be
-      able to assume LocalProvisionerRole — for operators who use
-      `iam-jit serve --local` from their own workstation outside CI.
-      Leave empty for CI-only deployments. Example:
-        arn:aws:iam::123456789012:user/alice
-      The same ExternalId condition (iam-jit-local-<account>) applies
-      to both the CI role and this operator principal.
-
 Conditions:
   CreateOidcProvider: !Equals [!Ref ExistingOidcProviderArn, ""]
-  HasOperatorPrincipal: !Not [!Equals [!Ref OperatorPrincipalArn, ""]]
 
 Resources:
 
@@ -278,96 +265,27 @@ Resources:
                 Resource:
                   - !Sub arn:${AWS::Partition}:logs:${AWS::Region}:${AWS::AccountId}:log-group:/aws/iam-jit-ci-nightly:*
 
-  # ----- LocalProvisionerRole: assumed by iam-jit serve --local during CI -----
+  # ----- NOTE: `iam-jit-local-provisioner` is NOT managed by this stack -----
   #
-  # `iam-jit serve --local` auto-generates accounts.yaml with
-  # provisioner_role_arn: arn:aws:iam::<account>:role/iam-jit-local-provisioner
-  # The server assumes this role (via sts:AssumeRole) to create/delete
-  # per-grant IAM roles.  Without this role the assumption fails and every
-  # provisioning attempt lands in `provisioning_failed` with no role_arn in
-  # the submit response — the root cause of the F10-F18 cascade (#704).
+  # `iam-jit serve --local` auto-creates the IAM role
+  # `iam-jit-local-provisioner` on first run (in setup.py /
+  # local_server.py). The role lifecycle is owned by `serve --local`,
+  # NOT by this CFN stack — the role typically pre-exists the stack
+  # because operators run `serve --local` locally for dev/UAT before
+  # ever wiring up the CI nightly dogfood.
   #
-  # Trust: the CI nightly runner (CiNightlyRole) assumes this role with the
-  # fixed ExternalId that local_server.py seeds into accounts.yaml.
-  # Permissions: minimum IAM surface needed to create/delete iam-jit grant
-  # roles, scoped by the /iam-jit/ path prefix.
-  LocalProvisionerRole:
-    Type: AWS::IAM::Role
-    # DeletionPolicy: Retain is required for CFN IMPORT (the only way to
-    # bring a pre-existing role under stack management without deleting
-    # + recreating it). Keeping Retain post-import is intentional too —
-    # if the stack is deleted, we leave the role intact so an operator's
-    # local serve --local workflow doesn't break. Re-create on demand by
-    # deleting the role manually + re-deploying.
-    DeletionPolicy: Retain
-    UpdateReplacePolicy: Retain
-    Properties:
-      RoleName: iam-jit-local-provisioner
-      Description: |
-        Assumed by iam-jit serve --local (running as CiNightlyRole) to
-        provision and revoke time-bound grant roles during the CI dogfood.
-        Scoped to /iam-jit/ path so it cannot touch roles outside iam-jit's
-        namespace. Trust is locked to CiNightlyRole + the fixed ExternalId
-        that local_server.py seeds into accounts.yaml at first run.
-      Tags:
-        - Key: Project
-          Value: iam-jit-ci-nightly
-        - Key: ManagedBy
-          Value: !Sub cloudformation:${AWS::StackName}
-      AssumeRolePolicyDocument:
-        Version: '2012-10-17'
-        Statement:
-          - Sid: AllowCiNightlyRoleToAssume
-            Effect: Allow
-            Principal:
-              AWS: !GetAtt CiNightlyRole.Arn
-            Action: sts:AssumeRole
-            Condition:
-              # local_server.py seeds provisioner_external_id as
-              # "iam-jit-local-<account_id>" — the provision.py
-              # _assume_provisioner_role() call passes this ExternalId.
-              StringLike:
-                sts:ExternalId: !Sub "iam-jit-local-${AWS::AccountId}"
-          # Optional second trust statement for operator local-dev use —
-          # populated only when OperatorPrincipalArn parameter is set.
-          # The !If returns AWS::NoValue (drops the statement) when the
-          # parameter is empty, keeping the trust policy CI-only.
-          - !If
-            - HasOperatorPrincipal
-            - Sid: AllowOperatorToAssume
-              Effect: Allow
-              Principal:
-                AWS: !Ref OperatorPrincipalArn
-              Action: sts:AssumeRole
-              Condition:
-                StringEquals:
-                  sts:ExternalId: !Sub "iam-jit-local-${AWS::AccountId}"
-            - !Ref AWS::NoValue
-      Policies:
-        - PolicyName: iam-jit-local-provisioner-policy
-          PolicyDocument:
-            Version: '2012-10-17'
-            Statement:
-              - Sid: ManageGrantRoles
-                Effect: Allow
-                Action:
-                  - iam:CreateRole
-                  - iam:DeleteRole
-                  - iam:PutRolePolicy
-                  - iam:DeleteRolePolicy
-                  - iam:GetRole
-                  - iam:GetRolePolicy
-                  - iam:ListRolePolicies
-                  - iam:ListAttachedRolePolicies
-                  - iam:TagRole
-                  - iam:UntagRole
-                  - iam:ListRoleTags
-                  - iam:AttachRolePolicy
-                  - iam:DetachRolePolicy
-                  - iam:UpdateAssumeRolePolicy
-                Resource:
-                  - !Sub arn:${AWS::Partition}:iam::${AWS::AccountId}:role/iam-jit/*
-                  - !Sub arn:${AWS::Partition}:iam::${AWS::AccountId}:role/iam-jit-grant-*
+  # This stack does NOT create LocalProvisionerRole. It just grants the
+  # CI runner (CiNightlyRole) permission to assume it (see the
+  # AssumeGrantRolesForAccuracyProbe statement above), referencing the
+  # role by its constructed ARN.
+  #
+  # OPERATOR ACTION REQUIRED (one-off):
+  # The pre-existing role's trust policy needs CiNightlyRole added as
+  # a second allowed principal (with the iam-jit-local-<account>
+  # ExternalId condition). The deploy script automates this via
+  # `aws iam update-assume-role-policy` post-deploy. If you skip that
+  # step, F10-F18 will fail because the CI runner can't assume the
+  # provisioner.
 
   # ----- Optional: account-wide $10/day cost guard (kill-switch alarm) -----
   #

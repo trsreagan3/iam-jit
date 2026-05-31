@@ -40,10 +40,6 @@ GH_ORG="${GH_ORG:-trsreagan3}"
 GH_REPO="${GH_REPO:-iam-jit}"
 ROLE_NAME="${ROLE_NAME:-iam-jit-ci-nightly}"
 BUDGET_EMAIL="${BUDGET_EMAIL:-trsreagan3@gmail.com}"
-# Optional operator IAM principal that should ALSO be able to assume
-# LocalProvisionerRole (for operators who use serve --local from their
-# own workstation outside CI). Leave empty for CI-only.
-OPERATOR_PRINCIPAL_ARN="${OPERATOR_PRINCIPAL_ARN:-}"
 AWS_REGION="${AWS_REGION:-us-east-1}"
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -131,7 +127,6 @@ aws cloudformation deploy \
     "RoleName=${ROLE_NAME}" \
     "BudgetEmail=${BUDGET_EMAIL}" \
     "ExistingOidcProviderArn=${EXISTING_OIDC_ARN}" \
-    "OperatorPrincipalArn=${OPERATOR_PRINCIPAL_ARN}" \
   || {
     echo
     echo "ERROR: deploy failed. Last 20 stack events:" >&2
