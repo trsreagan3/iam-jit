@@ -4093,6 +4093,35 @@ async def serve(config: ProxyConfig, *, store: BouncerStore) -> None:
         # when audit logging is disabled OR --audit-chain is off OR the
         # writer's chain block reports unconfigured.
         chain_initialized_bool = audit_chain_initialized()
+        # #711 — top-level audit_warning field. Non-null when decisions are
+        # being made but no audit channel is configured (the silent-
+        # degradation state). SOC parsers + cross-bouncer posture query can
+        # branch on this single field without digging into the audit_export
+        # sub-object.  None when audit is correctly configured OR when mode
+        # is "off" (no decisions made).
+        # A decision IS persisted when audit_export.configured=True OR when
+        # a webhook is configured OR when Security Lake / object-storage is
+        # configured. We use the already-computed audit_export_section as
+        # the authoritative source: configured=True means the JSONL writer
+        # is active.
+        _audit_export_configured = (
+            audit_export_section.get("configured", False)
+            or audit_export_section.get("webhook_configured", False)
+            or (_audit_security_lake_writer is not None)
+            or (_audit_object_storage_writer is not None)
+        )
+        _mode_makes_decisions = config.mode.value != "off"
+        if (
+            not _audit_export_configured
+            and _mode_makes_decisions
+            and decision_count > 0
+        ):
+            audit_warning_str: str | None = (
+                f"decisions_count={decision_count} but audit_export not "
+                "configured; events not persisted"
+            )
+        else:
+            audit_warning_str = None
         return web.json_response({
             # #433 — bouncer_kind identifier so apply-config /
             # cross-product tooling can disambiguate "port is in use
@@ -4125,6 +4154,12 @@ async def serve(config: ProxyConfig, *, store: BouncerStore) -> None:
             "llm_budget": llm_budget_block,
             "degraded_capabilities": degraded_capabilities_block,
             "chain_initialized": chain_initialized_bool,
+            # #711 — top-level audit_warning. Non-null = silent-degradation
+            # detected. Always present (null when healthy) so consumers
+            # can unconditionally read this field. Per
+            # [[ibounce-honest-positioning]] null is the honest "healthy"
+            # signal, not a missing field.
+            "audit_warning": audit_warning_str,
         }, status=http_status_code)
 
     # #324a — POST /admin/dynamic-denies/reload triggers an immediate

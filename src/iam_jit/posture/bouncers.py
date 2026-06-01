@@ -407,6 +407,27 @@ def detect_ibounce() -> dict[str, Any]:
             anomaly_detection = None
     block["anomaly_detection"] = anomaly_detection
 
+    # #711 — audit-export silent-degradation guard. Read audit_warning
+    # from /healthz (non-null when decisions_count > 0 AND audit_export
+    # is not configured). Always present (None = healthy) so posture
+    # consumers can branch on a single field.
+    audit_warning: str | None = None
+    if running:
+        try:
+            import json as _json
+            import urllib.error as _ue
+            import urllib.request as _ur
+            _req = _ur.Request(
+                f"http://127.0.0.1:{port}/healthz",
+                method="GET",
+            )
+            with _ur.urlopen(_req, timeout=1.0) as _resp:
+                _payload = _json.loads(_resp.read().decode("utf-8"))
+                audit_warning = _payload.get("audit_warning")
+        except (_ue.URLError, OSError, ValueError, TimeoutError):
+            audit_warning = None
+    block["audit_warning"] = audit_warning
+
     # Env-var wiring + misconfig check.
     endpoint = os.environ.get(IBOUNCE_AWS_ENDPOINT_ENV, "").strip()
     endpoint_port = _parse_url_for_loopback_port(endpoint)

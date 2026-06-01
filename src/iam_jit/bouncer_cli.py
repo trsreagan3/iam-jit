@@ -5303,6 +5303,52 @@ def run_cmd(
                 f"consecutive misses)",
                 err=True,
             )
+        # #711 — audit-export silent-degradation guard: when no audit
+        # channel is configured AND the mode is not `off` (i.e. decisions
+        # WILL be made), warn loudly that events will be lost on restart.
+        # Per [[ibounce-honest-positioning]]: "ok"/"GREEN" are claims; if
+        # decisions are being made but not persisted the operator MUST
+        # know at startup time, not hours later during a forensics
+        # investigation.
+        # Condition: no JSONL log + no webhook + no Security Lake + no
+        # object-storage AND mode != off. `off` is the explicit "passthrough
+        # with no decisions" mode; warning there would be misleading.
+        _audit_export_not_configured = not any([
+            audit_log_path,
+            audit_webhook_url,
+            security_lake_bucket,
+            audit_object_storage_bucket,
+        ])
+        # env-var fallback covers IBOUNCE_AUDIT_LOG_PATH (the suggested
+        # configure-after-start path shown in the warning message itself).
+        if not _audit_export_not_configured:
+            pass  # already configured
+        else:
+            _env_audit_path = os.environ.get(
+                "IBOUNCE_AUDIT_LOG_PATH", ""
+            ).strip()
+            if _env_audit_path:
+                _audit_export_not_configured = False
+        if _audit_export_not_configured and mode != "off":
+            click.echo(
+                "WARNING: ibounce is processing decisions but NO audit log "
+                "is configured.",
+                err=True,
+            )
+            click.echo(
+                "  Decisions will be lost on restart. To configure "
+                "persistent audit:",
+                err=True,
+            )
+            click.echo(
+                "    ibounce run --audit-log-path ~/.iam-jit/audit.jsonl",
+                err=True,
+            )
+            click.echo(
+                "  Or set env: "
+                "IBOUNCE_AUDIT_LOG_PATH=~/.iam-jit/audit.jsonl",
+                err=True,
+            )
         # #324a — dynamic-deny banner line. Quiet when the watcher is
         # disabled OR when the file is missing AND empty (the common
         # case for a fresh install). Surfaces:
