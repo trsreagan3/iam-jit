@@ -205,28 +205,47 @@ def test_purge_older_than_skips_recent_archives(tmp_path: pathlib.Path):
 
 
 def test_disk_status_ok(tmp_path: pathlib.Path):
-    # 50% used → ok at default thresholds (warn=85, crit=95).
-    status = disk_status(tmp_path, statvfs=(100, 50, 50))
+    # 50% used → ok at default thresholds (warn=96, crit=98).
+    # Pass warn_free_bytes=0, crit_free_bytes=0 so the absolute-free
+    # check is disabled for this percentage-only test (the statvfs tuple
+    # uses a tiny total of 100 bytes, so free=50 bytes would otherwise
+    # trigger the default 1 GiB warn-free-bytes floor).
+    status = disk_status(
+        tmp_path, statvfs=(100, 50, 50),
+        warn_free_bytes=0, crit_free_bytes=0,
+    )
     assert status.status == "ok"
     assert status.used_pct == 50.0
 
 
 def test_disk_status_degraded_at_warn(tmp_path: pathlib.Path):
-    status = disk_status(tmp_path, statvfs=(100, 90, 10), warn_pct=85, crit_pct=95)
+    status = disk_status(
+        tmp_path, statvfs=(100, 90, 10),
+        warn_pct=85, crit_pct=95,
+        warn_free_bytes=0, crit_free_bytes=0,
+    )
     assert status.status == "degraded"
     assert "85%" in status.reason or "warn" in status.reason
 
 
 def test_disk_status_critical_at_crit(tmp_path: pathlib.Path):
-    status = disk_status(tmp_path, statvfs=(100, 98, 2), warn_pct=85, crit_pct=95)
+    status = disk_status(
+        tmp_path, statvfs=(100, 98, 2),
+        warn_pct=85, crit_pct=95,
+        warn_free_bytes=0, crit_free_bytes=0,
+    )
     assert status.status == "critical"
     assert "95%" in status.reason or "critical" in status.reason
 
 
 def test_disk_status_to_dict_shape(tmp_path: pathlib.Path):
-    status = disk_status(tmp_path, statvfs=(100, 50, 50))
+    status = disk_status(
+        tmp_path, statvfs=(100, 50, 50),
+        warn_free_bytes=0, crit_free_bytes=0,
+    )
     d = status.to_dict()
-    assert set(d.keys()) == {"status", "reason", "used_pct", "path"}
+    # free_bytes is only present when not None.
+    assert {"status", "reason", "used_pct", "path"}.issubset(d.keys())
 
 
 # ---------------------------------------------------------------------------

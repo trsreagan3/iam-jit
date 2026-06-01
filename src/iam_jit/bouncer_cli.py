@@ -4097,8 +4097,43 @@ def _parse_duration(raw: str) -> int:
     envvar="IBOUNCE_DISK_PRESSURE_EMERGENCY_PCT",
     help="#424 / §A63 — disk-usage % AT-OR-ABOVE which /healthz "
          "audit_log.status transitions critical -> emergency. Default "
-         "98. All modes treat emergency the same: surface in /healthz "
+         "99. All modes treat emergency the same: surface in /healthz "
          "+ emit OCSF admin-action transition event.",
+)
+@click.option(
+    "--disk-pressure-warn-free-bytes",
+    "disk_pressure_warn_free_bytes",
+    type=click.INT,
+    default=None,
+    envvar="IBOUNCE_DISK_PRESSURE_WARN_FREE_BYTES",
+    help="#461 — absolute free-space floor (bytes) for the warn threshold. "
+         "Status transitions to 'degraded' when free bytes on the "
+         "audit-log filesystem drop to or below this value. "
+         "Default 1073741824 (1 GiB). 0 disables the absolute-free check "
+         "for the warn tier.",
+)
+@click.option(
+    "--disk-pressure-crit-free-bytes",
+    "disk_pressure_crit_free_bytes",
+    type=click.INT,
+    default=None,
+    envvar="IBOUNCE_DISK_PRESSURE_CRIT_FREE_BYTES",
+    help="#461 — absolute free-space floor (bytes) for the critical "
+         "threshold. Status transitions to 'critical' when free bytes "
+         "drop to or below this value. "
+         "Default 524288000 (512 MiB). 0 disables the absolute-free check "
+         "for the critical tier.",
+)
+@click.option(
+    "--ignore-disk-pressure",
+    "ignore_disk_pressure",
+    is_flag=True,
+    default=False,
+    envvar="IBOUNCE_IGNORE_DISK_PRESSURE",
+    help="#461 — disable disk-pressure checks entirely. "
+         "ibounce will start with a stderr warning; /healthz shows "
+         "status='ignored'. Only use this in development environments "
+         "where disk-full protection is not required.",
 )
 @click.option(
     "--record-sessions-dir",
@@ -4504,6 +4539,9 @@ def run_cmd(
     disk_pressure_warn_pct: int | None,
     disk_pressure_crit_pct: int | None,
     disk_pressure_emergency_pct: int | None,
+    disk_pressure_warn_free_bytes: int | None,
+    disk_pressure_crit_free_bytes: int | None,
+    ignore_disk_pressure: bool,
     record_sessions_dir: str | None,
     audit_webhook_url: str | None,
     audit_webhook_token: str | None,
@@ -5067,6 +5105,9 @@ def run_cmd(
         disk_pressure_warn_pct=disk_pressure_warn_pct,
         disk_pressure_crit_pct=disk_pressure_crit_pct,
         disk_pressure_emergency_pct=disk_pressure_emergency_pct,
+        disk_pressure_warn_free_bytes=disk_pressure_warn_free_bytes,
+        disk_pressure_crit_free_bytes=disk_pressure_crit_free_bytes,
+        ignore_disk_pressure=ignore_disk_pressure,
         record_sessions_dir=record_sessions_dir,
         audit_webhook_url=audit_webhook_url,
         audit_webhook_token=audit_webhook_token,

@@ -57,8 +57,15 @@ from typing import Any, Iterable
 DEFAULT_MAX_SIZE_MB = 100
 DEFAULT_MAX_AGE_DAYS = 7
 DEFAULT_DB_RETENTION_DAYS = 30
-DEFAULT_DISK_WARN_PCT = 85
-DEFAULT_DISK_CRIT_PCT = 95
+DEFAULT_DISK_WARN_PCT = 96
+DEFAULT_DISK_CRIT_PCT = 98
+# Absolute-free-space floors — checked alongside the percentage thresholds.
+# A volume is "degraded" when EITHER used_pct >= warn_pct OR free_bytes <=
+# warn_free_bytes; "critical" when EITHER used_pct >= crit_pct OR
+# free_bytes <= crit_free_bytes. This prevents false alarms on large drives
+# (e.g. 89% used on a 228 GiB volume with 23 GiB free is "ok").
+DEFAULT_DISK_WARN_FREE_BYTES: int = 1073741824   # 1 GiB
+DEFAULT_DISK_CRIT_FREE_BYTES: int = 524288000    # 512 MiB
 
 # Rotated-file naming. Suffix `.jsonl.gz` lets the standard `gunzip`
 # / `zcat` pipeline ingest the archives without bouncer-specific
@@ -78,21 +85,27 @@ class DiskStatus:
     `status` is one of "ok", "degraded", "critical". `reason` carries
     a short human-readable string for the operator dashboard. The
     raw `used_pct` is included so monitors can chart trends without
-    re-stat'ing the filesystem themselves.
+    re-stat'ing the filesystem themselves. `free_bytes` is the raw
+    free-space count from the filesystem; None when not available
+    (e.g. when a synthetic statvfs tuple omits the free-bytes value).
     """
 
     status: str
     reason: str
     used_pct: float
     path: str
+    free_bytes: int | None = None
 
     def to_dict(self) -> dict:
-        return {
+        d: dict = {
             "status": self.status,
             "reason": self.reason,
             "used_pct": round(self.used_pct, 2),
             "path": self.path,
         }
+        if self.free_bytes is not None:
+            d["free_bytes"] = self.free_bytes
+        return d
 
 
 def should_rotate_by_size(path: str | os.PathLike, max_mb: int) -> bool:
@@ -378,18 +391,98 @@ def verify_integrity(log_dir: str | os.PathLike) -> IntegrityResult:
     return IntegrityResult(files_checked=checked, failures=failures)
 
 
+def _classify_disk_status(
+    used_pct: float,
+    free_bytes: int | None,
+    *,
+    warn_pct: int,
+    crit_pct: int,
+    warn_free_bytes: int,
+    crit_free_bytes: int,
+    path: str,
+) -> DiskStatus:
+    """Core dual-threshold classification logic.
+
+    Status is "critical" when EITHER:
+      * used_pct >= crit_pct, OR
+      * free_bytes <= crit_free_bytes (and crit_free_bytes > 0).
+
+    Status is "degraded" when EITHER:
+      * used_pct >= warn_pct, OR
+      * free_bytes <= warn_free_bytes (and warn_free_bytes > 0).
+
+    Otherwise "ok".  Percentage threshold is checked first so the
+    reason string always mentions the binding constraint.
+    """
+    if used_pct >= crit_pct:
+        return DiskStatus(
+            status="critical",
+            reason=f"disk usage {used_pct:.1f}% >= critical threshold {crit_pct}%",
+            used_pct=used_pct,
+            path=path,
+            free_bytes=free_bytes,
+        )
+    if crit_free_bytes > 0 and free_bytes is not None and free_bytes <= crit_free_bytes:
+        return DiskStatus(
+            status="critical",
+            reason=(
+                f"disk free {free_bytes // (1024 * 1024)} MiB "
+                f"<= critical free-space floor {crit_free_bytes // (1024 * 1024)} MiB"
+            ),
+            used_pct=used_pct,
+            path=path,
+            free_bytes=free_bytes,
+        )
+    if used_pct >= warn_pct:
+        return DiskStatus(
+            status="degraded",
+            reason=f"disk usage {used_pct:.1f}% >= warn threshold {warn_pct}%",
+            used_pct=used_pct,
+            path=path,
+            free_bytes=free_bytes,
+        )
+    if warn_free_bytes > 0 and free_bytes is not None and free_bytes <= warn_free_bytes:
+        return DiskStatus(
+            status="degraded",
+            reason=(
+                f"disk free {free_bytes // (1024 * 1024)} MiB "
+                f"<= warn free-space floor {warn_free_bytes // (1024 * 1024)} MiB"
+            ),
+            used_pct=used_pct,
+            path=path,
+            free_bytes=free_bytes,
+        )
+    return DiskStatus(
+        status="ok",
+        reason="disk usage within thresholds",
+        used_pct=used_pct,
+        path=path,
+        free_bytes=free_bytes,
+    )
+
+
 def disk_status(
     path: str | os.PathLike,
     *,
     warn_pct: int = DEFAULT_DISK_WARN_PCT,
     crit_pct: int = DEFAULT_DISK_CRIT_PCT,
+    warn_free_bytes: int = DEFAULT_DISK_WARN_FREE_BYTES,
+    crit_free_bytes: int = DEFAULT_DISK_CRIT_FREE_BYTES,
     statvfs: Iterable | None = None,
 ) -> DiskStatus:
     """Inspect the filesystem hosting `path`; return a DiskStatus.
 
+    Uses dual-threshold logic: status transitions when EITHER the
+    percentage threshold OR the absolute-free-space floor is crossed.
+    This prevents false alarms on large volumes (e.g. 89% used on a
+    228 GiB volume with 23 GiB free correctly returns "ok").
+
     `statvfs` is an injection seam for tests (pass a 3-tuple of
     `(total, used, free)` bytes). In production we use
     `shutil.disk_usage` which is portable across Linux + macOS.
+
+    Pass `warn_free_bytes=0, crit_free_bytes=0` to disable the
+    absolute-free-space check (percentage-only, legacy behavior).
     """
     p = pathlib.Path(path)
     target = p if p.exists() else p.parent
@@ -414,24 +507,13 @@ def disk_status(
             path=str(target),
         )
     used_pct = 100.0 * used / total
-    if used_pct >= crit_pct:
-        return DiskStatus(
-            status="critical",
-            reason=f"disk usage {used_pct:.1f}% >= critical threshold {crit_pct}%",
-            used_pct=used_pct,
-            path=str(target),
-        )
-    if used_pct >= warn_pct:
-        return DiskStatus(
-            status="degraded",
-            reason=f"disk usage {used_pct:.1f}% >= warn threshold {warn_pct}%",
-            used_pct=used_pct,
-            path=str(target),
-        )
-    return DiskStatus(
-        status="ok",
-        reason="disk usage within thresholds",
-        used_pct=used_pct,
+    return _classify_disk_status(
+        used_pct,
+        int(free),
+        warn_pct=warn_pct,
+        crit_pct=crit_pct,
+        warn_free_bytes=warn_free_bytes,
+        crit_free_bytes=crit_free_bytes,
         path=str(target),
     )
 
@@ -511,7 +593,9 @@ def purge_by_policy(
 
 __all__ = [
     "DEFAULT_DB_RETENTION_DAYS",
+    "DEFAULT_DISK_CRIT_FREE_BYTES",
     "DEFAULT_DISK_CRIT_PCT",
+    "DEFAULT_DISK_WARN_FREE_BYTES",
     "DEFAULT_DISK_WARN_PCT",
     "DEFAULT_MAX_AGE_DAYS",
     "DEFAULT_MAX_SIZE_MB",
@@ -519,6 +603,7 @@ __all__ = [
     "IntegrityResult",
     "ROTATED_DB_PATTERN",
     "ROTATED_JSONL_PATTERN",
+    "_classify_disk_status",
     "archive_logs",
     "disk_status",
     "purge_by_policy",

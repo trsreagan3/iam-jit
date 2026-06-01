@@ -88,10 +88,14 @@ async def _wait_for_listen(host: str, port: int, *, retries: int = 50) -> None:
     raise RuntimeError(f"nothing listening on {host}:{port}")
 
 
-def _statvfs_at_pct(used_pct: float) -> tuple[int, int, int]:
+def _statvfs_at_pct(used_pct: float, total: int = 1_099_511_627_776) -> tuple[int, int, int]:
     """Build a statvfs 3-tuple (total, used, free) that yields the
-    desired used_pct under :func:`disk_status`."""
-    total = 1_000_000
+    desired used_pct under :func:`disk_status`.
+
+    Default total is 1 TiB so that even at 99% usage, free_bytes is
+    ~11 GiB — well above the default 1 GiB warn-free-bytes floor.
+    Tests that exercise the absolute-free threshold directly should
+    pass a small total or call _classify_disk_status directly."""
     used = int(total * used_pct / 100.0)
     return (total, used, total - used)
 
@@ -490,16 +494,22 @@ async def test_healthz_includes_audit_log_block(tmp_path: pathlib.Path) -> None:
     snapshot so the test is stable regardless of the CI/dev-machine
     disk fill level.  Without the patch the initial probe fires against
     the real filesystem; on machines at or above the default crit_pct
-    (95 %) the probe sets refuse_requests=True and the assertion fails.
+    (98 %) the probe sets refuse_requests=True and the assertion fails.
     The contract under test is the /healthz block shape, not real-disk
     behaviour — real-disk reactions are covered by the mode-behaviour
     tests above which use the statvfs injection seam directly.
     """
     import collections
+    # Use a realistic large volume (228 GiB) at 50% usage so that:
+    # - used_pct (50%) is well below the new default warn threshold (96%)
+    # - free_bytes (114 GiB) is well above the default warn-free floor (1 GiB)
+    # The old 1 MB total produced free=500 KB which triggered the crit-free
+    # floor (512 MiB) after the #461 dual-threshold upgrade.
+    _1_gib = 1073741824
     _safe_usage = collections.namedtuple("usage", ["total", "used", "free"])(
-        total=1_000_000,
-        used=500_000,
-        free=500_000,
+        total=228 * _1_gib,
+        used=114 * _1_gib,
+        free=114 * _1_gib,
     )
     audit_log_path = tmp_path / "audit" / "ibounce.jsonl"
     audit_log_path.parent.mkdir(parents=True, exist_ok=True)
@@ -532,11 +542,15 @@ async def test_healthz_includes_audit_log_block(tmp_path: pathlib.Path) -> None:
             block = body["audit_log"]
             assert block["status"] in ("ok", "degraded", "critical", "emergency")
             assert block["disk_pressure_mode"] == DISK_PRESSURE_MODE_PAUSE_REQUESTS
-            assert block["warn_pct"] == 85
-            assert block["crit_pct"] == 95
-            assert block["emergency_pct"] == 98
+            assert block["warn_pct"] == 96
+            assert block["crit_pct"] == 98
+            assert block["emergency_pct"] == 99
             assert block["path"] is not None
             assert block["refuse_requests"] is False
+            # #461 new fields.
+            assert "warn_threshold_bytes" in block
+            assert "crit_threshold_bytes" in block
+            assert block.get("ignore_disk_pressure") is False
         finally:
             task.cancel()
             try:
@@ -818,6 +832,157 @@ def test_log_retention_md_still_documents_stop_on_disk_critical() -> None:
     doc = pathlib.Path(__file__).parents[2] / "docs" / "LOG-RETENTION.md"
     content = doc.read_text()
     assert "--stop-on-disk-critical" in content
+
+
+# ---------------------------------------------------------------------------
+# #461 — dual-threshold matrix + --ignore-disk-pressure
+# ---------------------------------------------------------------------------
+
+
+def test_threshold_matrix_23gb_free_on_228gb_is_ok() -> None:
+    """Primary regression: 89.86% used on a 228 GiB volume with 23 GiB
+    free must be "ok" under the new dual-threshold defaults."""
+    from iam_jit.bouncer.audit_export.rotation import (
+        DEFAULT_DISK_CRIT_FREE_BYTES,
+        DEFAULT_DISK_CRIT_PCT,
+        DEFAULT_DISK_WARN_FREE_BYTES,
+        DEFAULT_DISK_WARN_PCT,
+        _classify_disk_status,
+    )
+    total = 228 * 1024 * 1024 * 1024
+    free = 23 * 1024 * 1024 * 1024
+    used = total - free
+    used_pct = 100.0 * used / total
+    result = _classify_disk_status(
+        used_pct, free,
+        warn_pct=DEFAULT_DISK_WARN_PCT,
+        crit_pct=DEFAULT_DISK_CRIT_PCT,
+        warn_free_bytes=DEFAULT_DISK_WARN_FREE_BYTES,
+        crit_free_bytes=DEFAULT_DISK_CRIT_FREE_BYTES,
+        path="/tmp",
+    )
+    assert result.status == "ok", (
+        f"23 GiB free on 228 GiB ({used_pct:.1f}% used) = {result.status!r}; "
+        f"want 'ok' (regression for disk-pressure false alarm)"
+    )
+
+
+def test_threshold_matrix_500mb_free_is_critical() -> None:
+    """500 MiB free on any volume must be "critical" (below 512 MiB
+    crit-free floor) even when pct-used is negligible."""
+    from iam_jit.bouncer.audit_export.rotation import (
+        DEFAULT_DISK_CRIT_FREE_BYTES,
+        DEFAULT_DISK_CRIT_PCT,
+        DEFAULT_DISK_WARN_FREE_BYTES,
+        DEFAULT_DISK_WARN_PCT,
+        _classify_disk_status,
+    )
+    free = 500 * 1024 * 1024
+    result = _classify_disk_status(
+        0.21, free,
+        warn_pct=DEFAULT_DISK_WARN_PCT,
+        crit_pct=DEFAULT_DISK_CRIT_PCT,
+        warn_free_bytes=DEFAULT_DISK_WARN_FREE_BYTES,
+        crit_free_bytes=DEFAULT_DISK_CRIT_FREE_BYTES,
+        path="/tmp",
+    )
+    assert result.status == "critical", (
+        f"500 MiB free = {result.status!r}; want 'critical'"
+    )
+
+
+def test_threshold_matrix_95pct_12gb_free_is_ok() -> None:
+    """95% used with 12 GiB free (> 1 GiB warn floor) is 'ok'."""
+    from iam_jit.bouncer.audit_export.rotation import (
+        DEFAULT_DISK_CRIT_FREE_BYTES,
+        DEFAULT_DISK_CRIT_PCT,
+        DEFAULT_DISK_WARN_FREE_BYTES,
+        DEFAULT_DISK_WARN_PCT,
+        _classify_disk_status,
+    )
+    free = 12 * 1024 * 1024 * 1024
+    result = _classify_disk_status(
+        95.0, free,
+        warn_pct=DEFAULT_DISK_WARN_PCT,
+        crit_pct=DEFAULT_DISK_CRIT_PCT,
+        warn_free_bytes=DEFAULT_DISK_WARN_FREE_BYTES,
+        crit_free_bytes=DEFAULT_DISK_CRIT_FREE_BYTES,
+        path="/tmp",
+    )
+    assert result.status == "ok", (
+        f"95% used, 12 GiB free = {result.status!r}; want 'ok'"
+    )
+
+
+def test_threshold_matrix_97pct_7gb_free_is_degraded() -> None:
+    """97% used (above 96% warn threshold) with 7 GiB free is 'degraded'."""
+    from iam_jit.bouncer.audit_export.rotation import (
+        DEFAULT_DISK_CRIT_FREE_BYTES,
+        DEFAULT_DISK_CRIT_PCT,
+        DEFAULT_DISK_WARN_FREE_BYTES,
+        DEFAULT_DISK_WARN_PCT,
+        _classify_disk_status,
+    )
+    free = 7 * 1024 * 1024 * 1024
+    result = _classify_disk_status(
+        97.0, free,
+        warn_pct=DEFAULT_DISK_WARN_PCT,
+        crit_pct=DEFAULT_DISK_CRIT_PCT,
+        warn_free_bytes=DEFAULT_DISK_WARN_FREE_BYTES,
+        crit_free_bytes=DEFAULT_DISK_CRIT_FREE_BYTES,
+        path="/tmp",
+    )
+    assert result.status == "degraded", (
+        f"97% used, 7 GiB free = {result.status!r}; want 'degraded'"
+    )
+
+
+def test_threshold_matrix_98pct_5gb_free_is_critical() -> None:
+    """98% used (at the crit threshold) is 'critical' regardless of free."""
+    from iam_jit.bouncer.audit_export.rotation import (
+        DEFAULT_DISK_CRIT_FREE_BYTES,
+        DEFAULT_DISK_CRIT_PCT,
+        DEFAULT_DISK_WARN_FREE_BYTES,
+        DEFAULT_DISK_WARN_PCT,
+        _classify_disk_status,
+    )
+    free = 5 * 1024 * 1024 * 1024
+    result = _classify_disk_status(
+        98.0, free,
+        warn_pct=DEFAULT_DISK_WARN_PCT,
+        crit_pct=DEFAULT_DISK_CRIT_PCT,
+        warn_free_bytes=DEFAULT_DISK_WARN_FREE_BYTES,
+        crit_free_bytes=DEFAULT_DISK_CRIT_FREE_BYTES,
+        path="/tmp",
+    )
+    assert result.status == "critical", (
+        f"98% used = {result.status!r}; want 'critical'"
+    )
+
+
+def test_ignore_disk_pressure_returns_ignored_at_any_level(
+    tmp_path: pathlib.Path,
+) -> None:
+    """--ignore-disk-pressure: evaluate_and_react always returns
+    status='ignored' and refuse_requests=False at any disk level."""
+    state = DiskPressureState(
+        mode=DISK_PRESSURE_MODE_PAUSE_REQUESTS,
+        log_dir=str(tmp_path),
+        ignore_disk_pressure=True,
+    )
+    for pct in (0.0, 89.9, 96.0, 98.5, 99.5):
+        disk_pressure_evaluate_and_react(
+            state, statvfs=_statvfs_at_pct(pct),
+        )
+        assert state.current_status == "ignored", (
+            f"at {pct}% with ignore=True: status={state.current_status!r}; want 'ignored'"
+        )
+        assert state.refuse_requests is False, (
+            f"at {pct}% with ignore=True: refuse_requests should be False"
+        )
+    block = healthz_audit_log_block(state)
+    assert block["ignore_disk_pressure"] is True
+    assert block["status"] == "ignored"
 
 
 # ---------------------------------------------------------------------------
