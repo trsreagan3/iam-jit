@@ -81,6 +81,25 @@ echo
 # for other workflows), the CFN stack would fail with "OIDC provider
 # already exists." We probe and pass the existing ARN via
 # ExistingOidcProviderArn so the CFN Condition skips creation.
+#
+# OWNERSHIP CHECK (fixes #709 chicken-and-egg):
+#   If the existing OIDC provider is OWNED BY THIS STACK we must NOT pass
+#   it as ExistingOidcProviderArn, because doing so flips the CFN condition
+#   CreateOidcProvider to false — CFN interprets "no longer in template" as
+#   DELETE, removing the provider it was managing.  We detect this by asking
+#   CloudFormation whether GitHubOidcProvider in our stack resolves to the
+#   same ARN we found.  Three scenarios:
+#
+#     (a) Fresh deploy (no stack yet):
+#         probe returns nothing → EXISTING_OIDC_ARN="" → CFN creates ✓
+#
+#     (b) Re-deploy where stack OWNS the existing OIDC:
+#         probe returns ARN; ownership check matches → EXISTING_OIDC_ARN=""
+#         → CFN keeps managing it ✓
+#
+#     (c) Deploy where OIDC pre-exists from a DIFFERENT stack/external source:
+#         probe returns ARN; ownership check finds no match → EXISTING_OIDC_ARN
+#         passed through → CFN skips creation, reuses external ✓
 echo "==> Checking for existing GitHub OIDC provider..."
 OIDC_PROVIDERS="$(aws iam list-open-id-connect-providers --output json 2>&1)" || {
   echo "ERROR: list-open-id-connect-providers failed: ${OIDC_PROVIDERS}" >&2
@@ -97,8 +116,34 @@ for p in data.get("OpenIDConnectProviderList", []):
 
 if [[ -n "${EXISTING_OIDC_ARN}" ]]; then
   echo "    Found: ${EXISTING_OIDC_ARN}"
-  echo "    (CFN will reuse this instead of creating a new one.)"
+
+  # Check whether this OIDC provider is managed by OUR stack (scenario b).
+  # describe-stack-resources returns the PhysicalResourceId for the logical
+  # resource GitHubOidcProvider if (and only if) the stack exists and the
+  # resource is in it. Errors (stack not found, resource not found) are
+  # suppressed — they all resolve to "not owned by us."
+  STACK_OIDC="$(aws cloudformation describe-stack-resources \
+    --stack-name "${STACK_NAME}" \
+    --logical-resource-id GitHubOidcProvider \
+    --region "${AWS_REGION}" \
+    --query 'StackResources[0].PhysicalResourceId' \
+    --output text 2>/dev/null || echo "")"
+
+  if [[ -n "${STACK_OIDC}" && "${STACK_OIDC}" == "${EXISTING_OIDC_ARN}" ]]; then
+    # Scenario (b): the existing OIDC is owned by this stack.
+    # Passing the ARN would cause CFN to delete the resource on re-deploy.
+    # Clear it so CFN's CreateOidcProvider condition stays true (stack keeps
+    # managing the provider).
+    EXISTING_OIDC_ARN=""
+    echo "    Owned by stack '${STACK_NAME}' — keeping CFN ownership (ExistingOidcProviderArn cleared)."
+    echo "    (CFN will continue managing the existing provider, not delete-and-recreate it.)"
+  else
+    # Scenario (c): external/different-stack OIDC. Pass ARN so CFN skips
+    # creation and reuses it.
+    echo "    Not owned by stack '${STACK_NAME}' — passing ARN to CFN (CFN will reuse, not create)."
+  fi
 else
+  # Scenario (a): no existing provider.
   echo "    None found — CFN will create one."
 fi
 echo
