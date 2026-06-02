@@ -86,6 +86,12 @@ _BOUNCER_KIND_VALIDATION_FIELDS: dict[str, tuple[str, bool]] = {
 }
 
 
+# ADOPT-2 / #716 — framework ids for the `iam_jit_compliance_map` tool
+# schema's `enum`. Imported from the compliance module so the tool
+# schema and the CLI stay in lockstep (one source of truth).
+from .compliance.mapping import FRAMEWORK_IDS as _COMPLIANCE_FRAMEWORK_IDS
+
+
 # Tool definition the agent will discover via the `tools/list` MCP call.
 # The `inputSchema` follows JSON Schema; MCP hosts (Claude Code/Desktop)
 # use it to validate before invoking the tool.
@@ -4030,6 +4036,100 @@ TOOLS.extend([
 ])
 
 
+# ADOPT-2 / #716 — `iam_jit_compliance_map` MCP tool. Map a session's
+# observed bouncer/IAM activity to compliance-framework controls. Reuses
+# the SAME cross-bouncer fan-out (`fetch_session_events_via_fanout`) as
+# `iam_jit_agent_diff` / `iam_jit_role_usage` / `iam_jit_audit_export_abom`;
+# the overlay is a pure projection over the merged event stream.
+# Differentiator vs HTTP-only competitors (Pipelock): works across AWS
+# IAM + K8s + SQL + HTTP. Read-only — NOT a certification.
+TOOLS.extend([
+    {
+        "name": "iam_jit_compliance_map",
+        "description": (
+            "Map a session's observed bouncer/IAM activity to "
+            "compliance-framework controls. Returns (a) an `overlay` — "
+            "each decision event tagged with the `compliance_tags` it "
+            "touches (e.g. `OWASP-AGENTIC-T01`, `MITRE-T1078`, "
+            "`NIST-AC-6`, `SOC2-CC6.1`, `EU-AI-ACT-ART12`) — and (b) a "
+            "per-framework `coverage` report (which controls the "
+            "session exercised, event counts, and an honest "
+            "partial-coverage note per framework). Frameworks + cited "
+            "versions: OWASP Agentic AI Top 10 (2026), MITRE ATT&CK "
+            "(Enterprise), NIST SP 800-53 Rev. 5, SOC 2 TSC (2017 rev. "
+            "2022), EU AI Act (Regulation (EU) 2024/1689). The "
+            "differentiator vs HTTP-only competitors: this spans AWS "
+            "IAM + Kubernetes + SQL + HTTP, not just HTTP. Per "
+            "[[ibounce-honest-positioning]] this is NOT a certification "
+            "— it is evidence of which controls the OBSERVED activity "
+            "touched; empty/partial sessions are flagged "
+            "(`is_partial` + `partial_reasons`) and a `disclaimer` is "
+            "always present. Read-only — no state change."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "required": ["session"],
+            "properties": {
+                "session": {
+                    "type": "string",
+                    "description": (
+                        "Agent session id (matches "
+                        "`unmapped.iam_jit.agent.session_id` in the "
+                        "bouncer's OCSF log)."
+                    ),
+                },
+                "framework": {
+                    "type": "string",
+                    "enum": list(_COMPLIANCE_FRAMEWORK_IDS),
+                    "description": (
+                        "Restrict the overlay + report to one "
+                        "framework. Omit for all five."
+                    ),
+                },
+                "bouncer": {
+                    "type": "string",
+                    "description": (
+                        "Optional single bouncer to query "
+                        "(`ibounce`/`kbounce`/`dbounce`/`gbounce` or "
+                        "`name=URL`). Omit to fan out to ALL four "
+                        "default bouncers so the overlay is "
+                        "cross-product (AWS + K8s + SQL + HTTP)."
+                    ),
+                },
+                "since": {
+                    "type": "string",
+                    "default": "1h",
+                    "description": (
+                        "Lookback window (5m / 1h / 2d) or ISO 8601 "
+                        "lower bound."
+                    ),
+                },
+                "until": {
+                    "type": "string",
+                    "description": (
+                        "Optional upper bound. ISO 8601 or short-form."
+                    ),
+                },
+                "limit": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "maximum": 10000,
+                    "default": 1000,
+                    "description": "Per-bouncer event cap.",
+                },
+                "audit_events_token": {
+                    "type": "string",
+                    "description": (
+                        "Bearer token for /audit/events when bound "
+                        "off-loopback."
+                    ),
+                },
+            },
+        },
+    },
+])
+
+
 # Bounce-suite rename (2026-05-17): every `bouncer_*` MCP tool gets
 # an `ibounce_*` alias in v1.0. Both names dispatch to the same
 # handler; the `bouncer_*` originals carry a `(DEPRECATED ...)` note
@@ -6641,6 +6741,12 @@ def _handle_request(req: dict[str, Any]) -> dict[str, Any] | None:
             # the cross-bouncer fan-out; pure projection over the
             # merged event stream. Read-only.
             result_payload = _iam_jit_audit_export_abom_for_mcp(args)
+        elif tool_name == "iam_jit_compliance_map":
+            # ADOPT-2 / #716 — map a session's observed activity to
+            # compliance-framework controls (overlay + per-framework
+            # coverage report). Reuses the cross-bouncer fan-out; pure
+            # projection. Read-only — NOT a certification.
+            result_payload = _iam_jit_compliance_map_for_mcp(args)
         elif tool_name == "iam_jit_resource_map":
             # #420 / §A59 — apply a declared resource mapping
             # (staging→prod etc.) to a permission set.
@@ -7682,6 +7788,96 @@ def _iam_jit_audit_export_abom_for_mcp(
     }
 
 
+def _iam_jit_compliance_map_for_mcp(
+    args: dict[str, Any],
+) -> dict[str, Any]:
+    """MCP backend for ``iam_jit_compliance_map``.
+
+    Fans out to the bouncer(s) via the SAME helper agent-diff /
+    role-usage / ABOM use (:func:`fetch_session_events_via_fanout`),
+    then projects the merged stream into a compliance overlay +
+    per-framework coverage report with the pure
+    :func:`iam_jit.compliance.build_overlay` builder.
+
+    Omitting ``bouncer`` fans out to all four defaults so the overlay
+    is cross-product (AWS + K8s + SQL + HTTP). Per
+    [[ibounce-honest-positioning]] partial data is surfaced in
+    ``is_partial`` + ``partial_reasons``; this is NOT a certification.
+    Read-only.
+    """
+    from .agent_diff import fetch_session_events_via_fanout
+    from .compliance import build_overlay
+    from .compliance.mapping import FRAMEWORKS
+
+    session = args.get("session")
+    if not isinstance(session, str) or not session.strip():
+        return {
+            "status": "error",
+            "code": "missing_session",
+            "message": "`session` is required and must be a string",
+        }
+    session = session.strip()
+
+    framework = args.get("framework")
+    if framework is not None:
+        if not isinstance(framework, str) or framework.lower() not in FRAMEWORKS:
+            return {
+                "status": "error",
+                "code": "invalid_framework",
+                "message": (
+                    "`framework` must be one of "
+                    f"{list(FRAMEWORKS.keys())}"
+                ),
+            }
+        framework = framework.lower()
+
+    since = args.get("since") or "1h"
+    until = args.get("until")
+    bouncer = args.get("bouncer")
+    # Omitted bouncer => fan out to all four defaults so the overlay is
+    # cross-product (an agent session can span AWS + K8s + SQL + HTTP).
+    bouncers = (str(bouncer),) if bouncer else ()
+
+    limit_raw = args.get("limit", 1000)
+    try:
+        limit = int(limit_raw)
+    except (TypeError, ValueError):
+        limit = 1000
+    limit = max(1, min(limit, 10000))
+    audit_events_token = args.get("audit_events_token")
+
+    try:
+        events, notes_by_bouncer = fetch_session_events_via_fanout(
+            session_id=session,
+            bouncers=bouncers,
+            since=str(since),
+            until=str(until) if until else None,
+            limit=limit,
+            audit_events_token=(
+                str(audit_events_token) if audit_events_token else None
+            ),
+        )
+    except Exception as e:  # pragma: no cover — defensive
+        return {
+            "status": "error",
+            "code": "fetch_failed",
+            "message": str(e),
+        }
+
+    notes = [
+        f"{b}: {err}"
+        for b, err in sorted(notes_by_bouncer.items())
+        if err
+    ]
+    result = build_overlay(
+        session_id=session,
+        events=events,
+        framework=framework,
+        notes=tuple(notes),
+    )
+    payload = result.as_dict()
+    payload["status"] = "ok"
+    return payload
 
 
 def _iam_jit_resource_map_for_mcp(
