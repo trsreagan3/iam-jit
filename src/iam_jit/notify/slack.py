@@ -151,6 +151,21 @@ def from_env(env: dict[str, str] | None = None) -> SlackNotifyConfig | None:
     bot_channel = (src.get(ENV_BOT_CHANNEL) or "").strip() or None
     review_url = (src.get(ENV_PUBLIC_URL) or "").strip() or None
 
+    # Defensive: the webhook URL is operator-supplied and POSTed to
+    # directly. A misconfigured non-https scheme (e.g. file:// or an
+    # internal http:// host) is a self-inflicted SSRF / data-exfil angle,
+    # so reject anything that is not https:// — treat it as unconfigured
+    # rather than POST to it. We name the problem at WARNING but NEVER
+    # echo the URL value (it routinely embeds the webhook secret).
+    if webhook is not None and not webhook.lower().startswith("https://"):
+        logger.warning(
+            "%s is set but is not an https:// URL; ignoring it "
+            "(Slack incoming webhooks are always https). The webhook "
+            "value is not logged.",
+            ENV_WEBHOOK_URL,
+        )
+        webhook = None
+
     has_webhook = bool(webhook)
     has_bot = bool(bot_token and bot_channel)
     if not has_webhook and not has_bot:

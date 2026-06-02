@@ -78,6 +78,37 @@ def test_bot_token_alone_is_not_configured(monkeypatch):
     assert notify_slack.configured() is False
 
 
+def test_non_https_webhook_rejected_no_post(monkeypatch, caplog):
+    # Defensive: an operator-supplied webhook with a non-https scheme
+    # (file:// / internal http://) is a self-inflicted SSRF angle. It
+    # must be treated as unconfigured (no transport) and never POSTed.
+    posts: list = []
+    monkeypatch.setattr(notify_slack, "_post_webhook", lambda *a, **k: posts.append(a))
+    monkeypatch.setattr(notify_slack, "_post_bot", lambda *a, **k: posts.append(a))
+    monkeypatch.delenv(notify_slack.ENV_BOT_TOKEN, raising=False)
+    monkeypatch.delenv(notify_slack.ENV_BOT_CHANNEL, raising=False)
+
+    for bad in (
+        "http://hooks.slack.com/X",
+        "file:///etc/passwd",
+        "http://169.254.169.254/latest/meta-data/",
+    ):
+        monkeypatch.setenv(notify_slack.ENV_WEBHOOK_URL, bad)
+        # Treated as unconfigured: no usable transport resolved.
+        assert notify_slack.from_env() is None
+        assert notify_slack.configured() is False
+        # And nothing is posted on the deny path.
+        with caplog.at_level("WARNING", logger="iam_jit.notify.slack"):
+            attempted = notify_slack.notify_deny(_sd())
+        assert attempted is False
+        assert posts == []
+        # The WARNING names the problem (the env var) but NOT the value.
+        warned = " ".join(r.getMessage() for r in caplog.records)
+        assert notify_slack.ENV_WEBHOOK_URL in warned
+        assert bad not in warned
+        caplog.clear()
+
+
 # ---------------------------------------------------------------------------
 # Payload shape + neutral language + no secret leak
 # ---------------------------------------------------------------------------
