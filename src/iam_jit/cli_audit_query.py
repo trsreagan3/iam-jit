@@ -867,7 +867,7 @@ def register_audit_query_group(parent_group: click.Group) -> click.Group:
     @click.option(
         "--format", "fmt",
         type=click.Choice(
-            ["jsonl", "ocsf-bundle", "csv", "summary"],
+            ["jsonl", "ocsf-bundle", "csv", "summary", "cyclonedx"],
             case_sensitive=False,
         ),
         default="jsonl",
@@ -877,8 +877,22 @@ def register_audit_query_group(parent_group: click.Group) -> click.Group:
              "events from all bouncers (cross-product correlation in a "
              "single SIEM-ingestible artifact). `csv` = tabular with "
              "the per-bouncer column. `summary` = per-bouncer + total "
-             "counts (no event bodies). `--json` is a convenience alias "
-             "for `--format jsonl` (#496).",
+             "counts (no event bodies). `cyclonedx` = a CycloneDX 1.6 "
+             "Agent Bill of Materials (ABOM) enumerating the IAM "
+             "roles / AWS resources / K8s namespaces / databases / "
+             "HTTP endpoints / MCP tools the session touched; requires "
+             "--session (ADOPT-1 / #715). `--json` is a convenience "
+             "alias for `--format jsonl` (#496).",
+    )
+    @click.option(
+        "--session", "session_id",
+        default=None,
+        metavar="SID",
+        help="ADOPT-1 / #715 — agent session id. Shorthand for "
+             "`--filter agent.session_id=SID` (expands to the canonical "
+             "`unmapped.iam_jit.agent.session_id` path before "
+             "forwarding). REQUIRED for `--format cyclonedx`, which "
+             "emits a per-session CycloneDX 1.6 ABOM.",
     )
     @click.option(
         "--json", "json_alias",
@@ -966,6 +980,7 @@ def register_audit_query_group(parent_group: click.Group) -> click.Group:
         kind: str | None,
         limit: int,
         fmt: str,
+        session_id: str | None,
         json_alias: bool,
         audit_events_token: str | None,
         timeout: float,
@@ -1003,6 +1018,22 @@ def register_audit_query_group(parent_group: click.Group) -> click.Group:
         """
         if limit < 1 or limit > 10_000:
             raise click.BadParameter("--limit must be in 1..10000")
+
+        # ADOPT-1 / #715 — `--format cyclonedx` is per-session by
+        # construction (an ABOM describes ONE agent session), so
+        # `--session` is required for it and forbidden-but-harmless
+        # otherwise. `--session SID` is shorthand for the canonical
+        # session filter; we add it to filter_exprs here so the
+        # server-side fan-out narrows to the session before merging.
+        if fmt == "cyclonedx" and not (session_id and session_id.strip()):
+            raise click.UsageError(
+                "--format cyclonedx requires --session SID (the ABOM "
+                "is a per-session Agent Bill of Materials).",
+            )
+        if session_id and session_id.strip():
+            filter_exprs = filter_exprs + (
+                f"agent.session_id={session_id.strip()}",
+            )
 
         # #620 — `--kind X` is shorthand for
         # `--filter unmapped.iam_jit.kind=X`.  The expansion has to
@@ -1200,6 +1231,35 @@ def register_audit_query_group(parent_group: click.Group) -> click.Group:
             _write_output(
                 output_path,
                 json.dumps(extracted.as_dict(), indent=2) + "\n",
+            )
+            return
+
+        if fmt == "cyclonedx":
+            # ADOPT-1 / #715 — project the merged per-session event
+            # stream into a CycloneDX 1.6 ABOM. The fan-out + merge
+            # above is the SAME plumbing the agent-diff / extract paths
+            # use; the builder is a pure projection over `merged`.
+            from .abom import build_abom
+
+            abom_notes = tuple(
+                f"{r.bouncer} skipped ({r.error})"
+                for r in results if r.error
+            )
+            result = build_abom(
+                session_id=str(session_id).strip(),
+                events=merged,
+                requested_window={"from": since or "", "to": until or ""},
+                notes=abom_notes,
+                bouncers_queried=[b.name for b in bouncers],
+            )
+            if result.is_partial:
+                # Honest operator signal on stderr (stdout stays a
+                # clean ABOM doc for piping into a validator).
+                for reason in result.partial_reasons:
+                    click.echo(f"note: partial ABOM — {reason}", err=True)
+            _write_output(
+                output_path,
+                json.dumps(result.document, indent=2) + "\n",
             )
             return
 
