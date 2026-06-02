@@ -15,6 +15,98 @@ you through, with the merge handled for you. See
 [`SECURITY-POSTURE.md`](SECURITY-POSTURE.md) for what the MCP
 server does over the wire.
 
+---
+
+## Claude Code (`install-claude-code`)
+
+`iam-jit mcp install-claude-code` is the canonical one-command path
+for Claude Code operators. It does two things atomically:
+
+1. **Writes `~/.claude.json`** (or the detected Claude Code MCP
+   config path) — adds the `mcpServers.iam-jit` entry. Existing
+   entries for other servers are preserved; the iam-jit entry is
+   created or overwritten.
+
+2. **Writes a bouncer env block into `~/.claude/settings.json`** —
+   adds `AWS_ENDPOINT_URL`, `HTTP_PROXY`, and `HTTPS_PROXY` for
+   whichever bouncers (ibounce / gbounce) are currently running on
+   localhost. This is the critical step that routes Claude Code's
+   AWS SDK calls through ibounce automatically in every future
+   session.
+
+```bash
+iam-jit mcp install-claude-code
+```
+
+### What gets written to `~/.claude/settings.json`
+
+```json
+{
+  "env": {
+    "AWS_ENDPOINT_URL": "http://127.0.0.1:8767",
+    "HTTP_PROXY": "http://127.0.0.1:8768",
+    "HTTPS_PROXY": "http://127.0.0.1:8768"
+  }
+}
+```
+
+The exact values depend on which bouncers are running when you run
+the install command. If no bouncer is running, no env block is
+written; start ibounce/gbounce first, then re-run.
+
+### Why a restart is required
+
+Claude Code reads `~/.claude/settings.json` at session start.
+Existing tool subprocesses (already-running `claude` windows) do
+NOT pick up new env vars — they loaded the env at process start and
+it is fixed for that session lifetime. To get the bouncer wiring:
+
+1. Run `iam-jit mcp install-claude-code` (writes the env block).
+2. **Restart Claude Code** (`claude` in a new terminal, or
+   re-open the Claude Code window).
+3. The new session inherits `AWS_ENDPOINT_URL` and routes calls
+   through ibounce automatically.
+
+### Immediate wiring without a restart (`iam-jit attach`)
+
+If you can't restart your Claude Code session, use:
+
+```bash
+iam-jit attach
+```
+
+`iam-jit attach` wires the current session's env vars directly
+(suitable for shell-driven agents), so the running session sees the
+bouncer endpoints immediately. See `iam-jit attach --help` for the
+full surface.
+
+### Version requirement
+
+The env-block write (`--settings-path`, `--no-env-block` flags)
+requires **iam-jit v1.0.0 + PR #23** or later. If your installed
+binary pre-dates this, `iam-jit mcp install-claude-code` will
+silently skip the env-block write.
+
+To check your binary is current:
+
+```bash
+iam-jit mcp install-claude-code --help | grep settings-path
+```
+
+If `--settings-path` appears, you're on the right version. If not,
+upgrade:
+
+```bash
+pipx upgrade iam-jit                     # if installed via pipx
+pip install --user --upgrade git+https://github.com/trsreagan3/iam-jit.git
+pip install --upgrade -e /path/to/iam-roles  # editable install
+```
+
+`iam-jit doctor install-check` also checks for the stale-binary
+condition and surfaces a WARN row with paste-ready upgrade commands.
+
+---
+
 The canonical snippet:
 
 ```json
@@ -385,4 +477,4 @@ network), see [`SECURITY-POSTURE.md`](SECURITY-POSTURE.md).
 
 ---
 
-Last reviewed: 2026-05-17.
+Last reviewed: 2026-06-02.

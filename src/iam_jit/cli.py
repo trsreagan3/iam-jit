@@ -1453,6 +1453,17 @@ def mcp_install_claude_code(
     `iam-jit mcp show-config` and paste the snippet into your
     client's MCP config.
     """
+    # #737 — stale-binary detection: warn BEFORE doing anything if the
+    # PATH binary is missing PR #23 flags.  When running from the venv /
+    # editable install the probe still executes the PATH-resolved binary
+    # (via shutil.which) so we catch the gap the operator would hit if
+    # they ran the installed binary directly.  Silent when up-to-date.
+    try:
+        from .cli_doctor_install_check import warn_if_stale_binary
+        warn_if_stale_binary(context="mcp install-claude-code")
+    except Exception:  # pragma: no cover — never crash on the guard itself
+        pass
+
     target = pathlib.Path(explicit_path) if explicit_path else _pick_claude_code_default()
     snippet = _mcp_server_config_dict()
 

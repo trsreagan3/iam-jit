@@ -1632,6 +1632,20 @@ def register_init_command(main_group: click.Group) -> click.Command:
         # init never crashes on a subprocess error. --skip-mcp-install
         # lets CI / scripted callers opt out while still getting the
         # config file.
+        #
+        # #737 — stale-binary check: if the claude-code harness is being
+        # wired, warn BEFORE calling install subcommands so the operator
+        # knows the installed binary may be missing PR #23 env-block code.
+        if (
+            not skip_mcp_install
+            and result.harness == "claude-code"
+        ):
+            try:
+                from .cli_doctor_install_check import warn_if_stale_binary
+                warn_if_stale_binary(context="init --harness=claude-code")
+            except Exception:
+                pass  # never crash init on the guard
+
         mcp_install_results: list[_McpInstallResult] = []
         if not skip_mcp_install and result.harness != "none":
             mcp_install_results = _run_harness_mcp_installs(
