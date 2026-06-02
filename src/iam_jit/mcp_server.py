@@ -3895,6 +3895,91 @@ TOOLS.extend([
 ])
 
 
+# ADOPT-1 / #715 — `iam_jit_audit_export_abom` MCP tool. Emit a
+# per-session CycloneDX 1.6 Agent Bill of Materials. Reuses the SAME
+# cross-bouncer fan-out (`fetch_session_events_via_fanout`) as
+# `iam_jit_agent_diff` + `bounce_extract_permissions_from_audit`; the
+# ABOM builder is a pure projection over the merged event stream.
+# Read-only. Compliance buyers want a standard-format artifact listing
+# what the agent touched this session.
+TOOLS.extend([
+    {
+        "name": "iam_jit_audit_export_abom",
+        "description": (
+            "Export a per-session CycloneDX 1.6 Agent Bill of "
+            "Materials (ABOM). Enumerates the components one agent "
+            "session touched as observed in the audit log: IAM "
+            "role(s)/profile(s) + AWS resource ARNs + K8s namespaces + databases as `components[]` (type `data`); the network "
+            "services it CALLED — AWS service APIs, HTTP endpoints, MCP tools — as `services[]` (CycloneDX 1.6 forbids `service` as a `component.type`). "
+            "Output is a schema-valid CycloneDX 1.6 JSON doc "
+            "(`bomFormat`/`specVersion`/`serialNumber`/`metadata`/"
+            "`components`/`services`) ingestible by Dependency-Track or "
+            "cyclonedx-cli. iam-jit specifics live under the "
+            "`iam-jit:*` property namespace. Per "
+            "[[ibounce-honest-positioning]] the ABOM reflects ONLY "
+            "observed activity — partial data (empty session, "
+            "unreachable bouncers, short window) is flagged in "
+            "`metadata.properties` (`iam-jit:observed.complete` + "
+            "`iam-jit:observed.disclaimer`), never hidden. Read-only "
+            "— no state change."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "required": ["session"],
+            "properties": {
+                "session": {
+                    "type": "string",
+                    "description": (
+                        "Agent session id (matches "
+                        "`unmapped.iam_jit.agent.session_id` in the "
+                        "bouncer's OCSF log)."
+                    ),
+                },
+                "bouncer": {
+                    "type": "string",
+                    "description": (
+                        "Optional single bouncer to query "
+                        "(`ibounce`/`kbounce`/`dbounce`/`gbounce` or "
+                        "`name=URL`). Omit to fan out to ALL four "
+                        "default bouncers so the ABOM is cross-product "
+                        "(an agent session can span AWS + K8s + DB + "
+                        "HTTP)."
+                    ),
+                },
+                "since": {
+                    "type": "string",
+                    "default": "1h",
+                    "description": (
+                        "Lookback window (5m / 1h / 2d) or ISO 8601 "
+                        "lower bound."
+                    ),
+                },
+                "until": {
+                    "type": "string",
+                    "description": (
+                        "Optional upper bound. ISO 8601 or short-form."
+                    ),
+                },
+                "limit": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "maximum": 10000,
+                    "default": 1000,
+                    "description": "Per-bouncer event cap.",
+                },
+                "audit_events_token": {
+                    "type": "string",
+                    "description": (
+                        "Bearer token for /audit/events when bound "
+                        "off-loopback."
+                    ),
+                },
+            },
+        },
+    },
+])
+
+
 # Bounce-suite rename (2026-05-17): every `bouncer_*` MCP tool gets
 # an `ibounce_*` alias in v1.0. Both names dispatch to the same
 # handler; the `bouncer_*` originals carry a `(DEPRECATED ...)` note
@@ -6429,6 +6514,11 @@ def _handle_request(req: dict[str, Any]) -> dict[str, Any] | None:
             # — here's the narrowed role". Read-only; recommends a
             # narrowed policy, never mutates the issued role.
             result_payload = _iam_jit_role_usage_for_mcp(args)
+        elif tool_name == "iam_jit_audit_export_abom":
+            # ADOPT-1 / #715 — per-session CycloneDX 1.6 ABOM. Reuses
+            # the cross-bouncer fan-out; pure projection over the
+            # merged event stream. Read-only.
+            result_payload = _iam_jit_audit_export_abom_for_mcp(args)
         elif tool_name == "iam_jit_resource_map":
             # #420 / §A59 — apply a declared resource mapping
             # (staging→prod etc.) to a permission set.
@@ -7382,6 +7472,94 @@ def _iam_jit_role_usage_for_mcp(
     payload = usage.as_dict()
     payload["status"] = "ok"
     return payload
+
+
+def _iam_jit_audit_export_abom_for_mcp(
+    args: dict[str, Any],
+) -> dict[str, Any]:
+    """MCP backend for ``iam_jit_audit_export_abom``.
+
+    Fans out to the bouncer(s) via the SAME helper agent-diff uses
+    (:func:`fetch_session_events_via_fanout`), then projects the
+    merged stream into a CycloneDX 1.6 ABOM with the pure
+    :func:`iam_jit.abom.build_abom` builder.
+
+    Per [[ibounce-honest-positioning]] partial data (empty session,
+    unreachable bouncers) is surfaced in the returned payload's
+    ``partial`` block AND inside the ABOM doc's
+    ``metadata.properties``; an unreachable bouncer is a note, never a
+    fatal. Read-only.
+    """
+    from .abom import build_abom
+    from .agent_diff import fetch_session_events_via_fanout
+
+    session = args.get("session")
+    if not isinstance(session, str) or not session.strip():
+        return {
+            "status": "error",
+            "code": "missing_session",
+            "message": "`session` is required and must be a string",
+        }
+    session = session.strip()
+
+    since = args.get("since") or "1h"
+    until = args.get("until")
+    bouncer = args.get("bouncer")
+    # Omitted bouncer => fan out to all four defaults so the ABOM is
+    # cross-product (an agent session can span AWS + K8s + DB + HTTP).
+    bouncers = (str(bouncer),) if bouncer else ()
+
+    limit_raw = args.get("limit", 1000)
+    try:
+        limit = int(limit_raw)
+    except (TypeError, ValueError):
+        limit = 1000
+    limit = max(1, min(limit, 10000))
+    audit_events_token = args.get("audit_events_token")
+
+    try:
+        events, notes_by_bouncer = fetch_session_events_via_fanout(
+            session_id=session,
+            bouncers=bouncers,
+            since=str(since),
+            until=str(until) if until else None,
+            limit=limit,
+            audit_events_token=(
+                str(audit_events_token) if audit_events_token else None
+            ),
+        )
+    except Exception as e:  # pragma: no cover — defensive
+        return {
+            "status": "error",
+            "code": "fetch_failed",
+            "message": str(e),
+        }
+
+    notes = [
+        f"{b}: {err}"
+        for b, err in sorted(notes_by_bouncer.items())
+        if err
+    ]
+    result = build_abom(
+        session_id=session,
+        events=events,
+        requested_window={"from": str(since), "to": str(until) if until else ""},
+        notes=tuple(notes),
+        bouncers_queried=sorted(notes_by_bouncer),
+    )
+
+    return {
+        "status": "ok",
+        "abom": result.document,
+        "events_analyzed": result.events_analyzed,
+        "component_count": result.component_count,
+        "partial": {
+            "is_partial": result.is_partial,
+            "reasons": list(result.partial_reasons),
+        },
+    }
+
+
 
 
 def _iam_jit_resource_map_for_mcp(
