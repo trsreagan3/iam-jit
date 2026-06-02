@@ -45,6 +45,7 @@ from __future__ import annotations
 
 import collections
 import dataclasses
+import logging
 import threading
 import time
 from collections.abc import Callable
@@ -57,6 +58,8 @@ from ..bouncer.audit_export.event import (
 )
 from .config import CircuitBreakerConfig
 from .cost_estimator import estimate_call_cost_usd
+
+logger = logging.getLogger(__name__)
 
 
 # ---------------------------------------------------------------------------
@@ -351,13 +354,24 @@ class CostCircuitBreaker:
             try:
                 self._emit(event)
             except Exception:
-                pass
+                # Fail-soft per security audit: a broken audit transport must
+                # never wedge the proxy hot path. But a
+                # COST_CIRCUIT_TRIPPED is a "stop the bleeding" signal —
+                # losing it must NOT be silent. We swallow the transport
+                # error (fail-soft) but WARN so the operator sees the gap.
+                logger.warning(
+                    "cost-circuit COST_CIRCUIT_TRIPPED audit event was NOT "
+                    "delivered (transport raised); breaker still tripped for "
+                    "session=%r dimension=%s",
+                    session_id or "", dimension or "calls",
+                    exc_info=True,
+                )
 
         should_deny = tripped and self.config.mode == "block"
         msg = ""
         if tripped:
             msg = self._friendly_message(
-                session_id=session_id, dimension=dimension,
+                dimension=dimension,
                 calls=calls, est_usd=est_usd,
             )
         return TripState(
@@ -450,7 +464,6 @@ class CostCircuitBreaker:
     def _friendly_message(
         self,
         *,
-        session_id: str | None,
         dimension: str | None,
         calls: int,
         est_usd: float,

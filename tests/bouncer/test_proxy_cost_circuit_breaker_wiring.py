@@ -120,7 +120,7 @@ def restore_breaker():
 
 @pytest.mark.asyncio
 async def test_block_mode_trips_and_tightens_allow_to_deny(
-    tmp_path, restore_breaker,
+    tmp_path, restore_breaker,  # noqa: SD-2 pytest fixture used for its teardown side effect (resets the process-singleton breaker); matched by exact arg name so it cannot be _-prefixed
 ):
     log_dir = tmp_path / "logs"
     log_dir.mkdir()
@@ -199,13 +199,13 @@ async def test_block_mode_trips_and_tightens_allow_to_deny(
         server_task.cancel()
         try:
             await server_task
-        except asyncio.CancelledError:
+        except asyncio.CancelledError:  # noqa: SD-1 expected: the test cancel()'d the serve() task itself, so CancelledError is the success confirmation of teardown
             pass
         store.close()
 
 
 @pytest.mark.asyncio
-async def test_default_off_breaker_not_installed(tmp_path, restore_breaker):
+async def test_default_off_breaker_not_installed(tmp_path, restore_breaker):  # noqa: SD-2 pytest fixture used for its teardown side effect (resets the process-singleton breaker); matched by exact arg name so it cannot be _-prefixed
     store = BouncerStore(db_path=str(tmp_path / "b.db"))
     proxy_port = _free_port()
     config = ProxyConfig(
@@ -239,6 +239,6 @@ async def test_default_off_breaker_not_installed(tmp_path, restore_breaker):
         server_task.cancel()
         try:
             await server_task
-        except asyncio.CancelledError:
+        except asyncio.CancelledError:  # noqa: SD-1 expected: the test cancel()'d the serve() task itself, so CancelledError is the success confirmation of teardown
             pass
         store.close()

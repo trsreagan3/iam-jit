@@ -3968,7 +3968,7 @@ async def serve(config: ProxyConfig, *, store: BouncerStore) -> None:
             request, store=store, config=config, session=session,
         )
 
-    async def healthz_handler(request):
+    async def healthz_handler(_request):
         # Liveness probe. Bypasses proxy evaluation entirely (never
         # parses as a request, never writes to the audit log) so
         # monitor traffic doesn't pollute the operator's "what just
@@ -4003,8 +4003,14 @@ async def serve(config: ProxyConfig, *, store: BouncerStore) -> None:
                     "ends_at": active_pause["ends_at"],
                     "reason": reason,
                 }
-        except Exception:
-            pass
+        except Exception as e:
+            # HIGH-32-05: a probe-time pause lookup failure is itself a
+            # signal the operator can't see the pause table. Bump the
+            # same counter the hot path uses (flips status to degraded
+            # below) + log, rather than reporting a clean /healthz that
+            # hides the broken lookup.
+            _bump_pause_lookup_error_counter()
+            logger.warning("bouncer-proxy /healthz pause-lookup failed: %s", e)
         pause_errs = _pause_lookup_error_count()
         if pause_errs > 0 and status_str == "ok":
             # HIGH-32-05 mitigation: a non-zero count means the proxy
@@ -4308,7 +4314,7 @@ async def serve(config: ProxyConfig, *, store: BouncerStore) -> None:
     # `{"reloaded": true, "rules_count": N, "rules_applied_to_ibounce": M}`
     # response byte-for-byte (with `ibounce` substituted for `gbounce`
     # in the field name).
-    async def dynamic_denies_reload_handler(request):
+    async def dynamic_denies_reload_handler(_request):
         if dynamic_deny_watcher is None:
             return web.json_response(
                 {
@@ -4423,7 +4429,7 @@ async def serve(config: ProxyConfig, *, store: BouncerStore) -> None:
     # endpoint). The session-profile-override mechanism (from #253) is
     # the in-process channel; this endpoint is the cross-process bridge
     # so a separate CLI shell can install an allow rule + see it land.
-    async def profile_reload_handler(request):
+    async def profile_reload_handler(_request):
         from .profiles import (
             load_profiles,
             resolve_active_profile,
@@ -4499,7 +4505,7 @@ async def serve(config: ProxyConfig, *, store: BouncerStore) -> None:
     # orchestrator + any agent that wants to introspect the running bouncer
     # without parsing the full /healthz blob. READ-ONLY; no auth (loopback
     # only; matches /healthz). Registered BEFORE the catch-all.
-    async def posture_handler(request):
+    async def posture_handler(_request):
         import os as _os
         from iam_jit import __version__ as _ver
         _ap = getattr(config, "active_profile", None)
@@ -5188,7 +5194,7 @@ async def serve(config: ProxyConfig, *, store: BouncerStore) -> None:
                 register_cost_circuit_breaker as _cb_clear,
             )
             _cb_clear(None)
-        except Exception:
+        except Exception:  # noqa: SD-1 best-effort stale-singleton clear during breaker-install failure; if the import itself failed there is nothing to clear, and the outer handler's logger.warning below already surfaces that the breaker is NOT WIRED
             pass
         logger.warning(
             "cost_circuit_breaker: CONFIGURED but NOT WIRED — reason: %s "
@@ -5230,7 +5236,7 @@ async def serve(config: ProxyConfig, *, store: BouncerStore) -> None:
                         "ibounce rule-expiry sweeper tick failed: %s", e,
                     )
         except asyncio.CancelledError:
-            return
+            return  # noqa: SD-4 clean exit of a fire-and-forget background loop on shutdown cancel; this task's return value is never awaited for a result, so there is no caller to mislead
 
     rule_expiry_task = asyncio.create_task(
         _rule_expiry_sweeper_loop(), name="ibounce-rule-expiry-sweeper",
@@ -5278,7 +5284,7 @@ async def serve(config: ProxyConfig, *, store: BouncerStore) -> None:
                         "ibounce disk-pressure tick failed: %s", e,
                     )
         except asyncio.CancelledError:
-            return
+            return  # noqa: SD-4 clean exit of a fire-and-forget background loop on shutdown cancel; this task's return value is never awaited for a result, so there is no caller to mislead
 
     disk_pressure_task: asyncio.Task | None = None
     if active_disk_pressure_state() is not None:
@@ -5368,7 +5374,7 @@ async def serve(config: ProxyConfig, *, store: BouncerStore) -> None:
                             row.get("id"), e,
                         )
         except asyncio.CancelledError:
-            return
+            return  # noqa: SD-4 clean exit of a fire-and-forget background loop on shutdown cancel; this task's return value is never awaited for a result, so there is no caller to mislead
 
     pending_audit_drain_task = asyncio.create_task(
         _pending_audit_events_drain_loop(),
@@ -5460,7 +5466,7 @@ async def serve(config: ProxyConfig, *, store: BouncerStore) -> None:
             for _sig in _installed_signals:
                 try:
                     loop.remove_signal_handler(_sig)
-                except (NotImplementedError, RuntimeError, ValueError):
+                except (NotImplementedError, RuntimeError, ValueError):  # noqa: SD-1 best-effort teardown: removing an already-gone/never-installed signal handler (or on a platform without loop signals) is semantically a no-op; nothing to surface
                     pass
         await session.close()
         await runner.cleanup()
@@ -5555,7 +5561,7 @@ async def serve(config: ProxyConfig, *, store: BouncerStore) -> None:
             rule_expiry_task.cancel()
             try:
                 await rule_expiry_task
-            except asyncio.CancelledError:
+            except asyncio.CancelledError:  # noqa: SD-1 expected: we cancel()'d this task ourselves, so CancelledError is the success confirmation; a genuine teardown error is a non-CancelledError and IS logged on the next except
                 pass
             except Exception as e:
                 logger.warning("rule-expiry sweeper teardown failed: %s", e)
@@ -5569,7 +5575,7 @@ async def serve(config: ProxyConfig, *, store: BouncerStore) -> None:
             pending_audit_drain_task.cancel()
             try:
                 await pending_audit_drain_task
-            except asyncio.CancelledError:
+            except asyncio.CancelledError:  # noqa: SD-1 expected: we cancel()'d this task ourselves, so CancelledError is the success confirmation; a genuine teardown error is a non-CancelledError and IS logged on the next except
                 pass
             except Exception as e:
                 logger.warning(
@@ -5586,7 +5592,7 @@ async def serve(config: ProxyConfig, *, store: BouncerStore) -> None:
                 disk_pressure_task.cancel()
                 try:
                     await disk_pressure_task
-                except asyncio.CancelledError:
+                except asyncio.CancelledError:  # noqa: SD-1 expected: we cancel()'d this task ourselves, so CancelledError is the success confirmation; a genuine teardown error is a non-CancelledError and IS logged on the next except
                     pass
                 except Exception as e:
                     logger.warning(
