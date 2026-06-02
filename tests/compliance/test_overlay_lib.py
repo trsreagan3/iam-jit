@@ -192,6 +192,24 @@ def test_anomalous_event_touches_monitoring_controls():
     assert "anomaly-monitoring" in cats
 
 
+def test_single_anomalous_event_fires_t1110_and_rationale_is_honest():
+    # The T1110 trigger fires on a SINGLE anomaly-flagged event (no
+    # repetition required) — even on an ALLOW. Its rationale must match
+    # that trigger: it must NOT promise "repeated" attempts, since the
+    # overlay tags individual flagged events and does not correlate
+    # repetition. (UAT honesty fix.)
+    from iam_jit.compliance.mapping import CONTROLS
+
+    # One lone anomalous allow is enough to fire T1110.
+    e = _ev("ec2:RunInstances", verdict="allow", anomalous=True)
+    tags, _ = tags_for_event(e)
+    assert "MITRE-T1110" in tags
+
+    rationale = CONTROLS["MITRE-T1110"].rationale.lower()
+    assert "repeated" not in rationale, rationale
+    assert "single" in rationale, rationale
+
+
 def test_mfa_gated_grant_touches_cc66():
     e = _ev("sts:AssumeRole", mfa=True)
     tags, cats = tags_for_event(e)

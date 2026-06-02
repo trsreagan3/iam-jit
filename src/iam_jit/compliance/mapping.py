@@ -173,9 +173,11 @@ CONTROLS: dict[str, ControlRef] = {
     ),
     "MITRE-T1110": _c(
         "mitre", "MITRE-T1110", "Brute Force",
-        "Repeated denied attempts against a gated action (the "
-        "boundary-probe pattern) are observable in the audit stream as "
-        "candidate brute-force / enumeration behaviour.",
+        "An anomaly-flagged event the bouncer surfaced (a single "
+        "boundary-probe / out-of-pattern access) is recorded as "
+        "candidate brute-force / enumeration behaviour. This overlay "
+        "tags the individual flagged event; it does not itself correlate "
+        "repetition across events.",
     ),
     # --- NIST SP 800-53 Rev. 5 ---
     "NIST-AC-2": _c(
@@ -473,8 +475,9 @@ PARTIAL_COVERAGE_NOTES: dict[str, str] = {
     "mitre": (
         "Maps techniques whose on-the-wire shape a bouncer sees "
         "(Valid Accounts, Account Manipulation, Abuse Elevation, Data "
-        "from Cloud Storage, Data Destruction, repeated-deny brute "
-        "force). It is NOT a full ATT&CK coverage matrix; many "
+        "from Cloud Storage, Data Destruction, anomaly-flagged "
+        "boundary-probe events). It is NOT a full ATT&CK coverage "
+        "matrix; many "
         "techniques (initial access, C2, lateral movement off-path) "
         "leave no signal in this audit stream."
     ),
