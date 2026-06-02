@@ -79,19 +79,37 @@ def _apply_presence_gate(req: dict[str, Any], *, actor: User) -> None:
 
     session_id = _request_bouncer_session_id(req)
     decision = presence_mod.presence_gate(session_id)
-    if not decision.verdict.is_off_the_leash:
+    # Two reasons the gate can refuse / want surfacing:
+    #   1. an OFF_THE_LEASH gap (the original #726 signal), or
+    #   2. (#55) a present-but-UNVERIFIED beat the enforce gate refuses
+    #      to trust under the hardened posture (role-binding on).
+    # Anything that is neither off-the-leash nor a refusal is a clean
+    # allow and needs no audit/event.
+    if not decision.verdict.is_off_the_leash and decision.allow:
         return
-    # Off the leash: surface the signal regardless of enforce mode.
+    # Off the leash or a refused unverified beat: surface the signal
+    # regardless of enforce mode.
     verdict = decision.verdict
-    try:
-        ocsf = presence_mod.make_off_the_leash_event(verdict)
-    except Exception:  # pragma: no cover — never let alerting break issuance
+    # The OCSF presence-gap event only makes sense for a genuine gap.
+    # A present-but-unverified refusal (#55) is a trust decision, not a
+    # silence gap — use the decision reason for the audit summary so the
+    # log isn't misleading.
+    if verdict.is_off_the_leash:
+        try:
+            ocsf = presence_mod.make_off_the_leash_event(verdict)
+        except Exception:  # pragma: no cover — never let alerting break issuance
+            ocsf = {}
+        summary = verdict.to_dict()["message"]
+        kind = "bouncer.presence_gap"
+    else:
         ocsf = {}
+        summary = decision.reason
+        kind = "bouncer.presence_unverified"
     try:
         audit_mod.emit(
             actor=getattr(actor, "email", "") or getattr(actor, "id", "") or "system",
-            kind="bouncer.presence_gap",
-            summary=verdict.to_dict()["message"],
+            kind=kind,
+            summary=summary,
             details={
                 "request_id": (req.get("metadata") or {}).get("id") or "",
                 "session_id": session_id,

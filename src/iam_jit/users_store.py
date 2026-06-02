@@ -57,6 +57,23 @@ class User:
     def is_requester(self) -> bool:
         return "requester" in self.roles or self.is_approver
 
+    @property
+    def is_bouncer(self) -> bool:
+        """A principal provisioned as a bouncer identity (#55 / BUILD-5).
+
+        The `bouncer` role marks a credential that a *bouncer* process
+        holds — distinct from the agent/requester token the gated agent
+        carries. The off-the-leash presence check-in is bound to this
+        identity so a plain agent token cannot forge a presence beat.
+
+        Deliberately NOT implied by admin: a bouncer credential is a
+        narrow, single-purpose machine identity. An admin who must also
+        check in (e.g. in tests / manual ops) carries the `bouncer` role
+        explicitly. This keeps the bouncer surface a least-privilege
+        grant rather than something every admin token can do by default.
+        """
+        return "bouncer" in self.roles
+
 
 class UserNotFound(Exception):
     """Raised when a lookup id doesn't match any user."""

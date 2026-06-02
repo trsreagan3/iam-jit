@@ -25,38 +25,59 @@ surface on the iam-jit (role-issuer) side:
     distinct from off-the-leash (we have no evidence the bouncer was
     ever in the path, so "it went silent" is the wrong story).
 
-!! HONESTY / THREAT-MODEL LIMITATION — READ BEFORE ENABLING ENFORCE !!
+!! IDENTITY BINDING (#55 / BUILD-5) — READ BEFORE ENABLING ENFORCE !!
 
-A check-in is a SELF-ASSERTED CLAIM by the caller, NOT a fact iam-jit
-can independently verify. The check-in endpoint accepts ANY
-authenticated principal checking in for ANY client-supplied
-`session_id`; there is no binding between the calling identity and the
-session it claims (the bouncer does not authenticate as a distinct
-identity). Concretely, this means:
+A check-in's trustworthiness depends on WHO sent it. #55 binds a beat
+to a DISTINCT bouncer identity so a plain agent token can no longer
+forge a *trusted* presence beat:
 
-  * A motivated or prompt-injected agent that ALSO holds a valid API
-    token can FORGE a presence beat for its OWN session_id, flipping
-    its verdict from OFF_THE_LEASH back to PRESENT, and so EVADE the
-    signal — exactly the actor this is meant to catch.
-  * Enforce mode (`IAM_JIT_REQUIRE_BOUNCER_PRESENCE=1`) is likewise
-    sidesteppable: a request that simply OMITS `bouncer_session_id`
-    is treated as NEVER_SEEN, which is never blocked (see
-    `presence_gate`), so the gate adds no friction to a caller that
-    declines to identify its session.
+  * A bouncer authenticates with its own credential and must hold the
+    `bouncer` role (a narrow machine identity, NOT implied by admin).
+    A beat from such a principal is recorded as VERIFIED and is
+    attributed to that principal (`verifier_principal`).
+  * When the operator sets `IAM_JIT_REQUIRE_BOUNCER_ROLE=1`, the
+    check-in route REQUIRES the `bouncer` role: a plain agent /
+    requester / approver / admin token is rejected with HTTP 403 and
+    so CANNOT write any beat at all. The forge path is closed at the
+    door.
+  * Once the role is required, the enforce gate
+    (`IAM_JIT_REQUIRE_BOUNCER_PRESENCE=1`) only TRUSTS a verified beat:
+    a session that looks present but whose latest beat is UNVERIFIED
+    does NOT clear an off-the-leash verdict (belt-and-suspenders for
+    any pre-existing unverified beat, since new non-bouncer beats are
+    rejected at the door).
 
-What this signal DOES buy you: it reliably catches ACCIDENTAL and
-misconfiguration off-leash — an agent that crashed, a bouncer process
-that died, a routing/proxy misconfig that silently dropped the bouncer
-out of the path — and other NON-MALICIOUS cases where a previously
-checking-in session simply goes quiet. That is real, useful coverage.
-What it does NOT buy you is protection against a deliberate,
-adversarial bypass: do not enable enforce mode believing it closes the
-Agent-as-a-Proxy hole against a hostile or injected agent. The robust
-fix requires the BOUNCER to authenticate to iam-jit as a DISTINCT
-identity (a credential the gated agent does not hold) so a check-in
-becomes attributable rather than self-asserted; that is an
-architectural change tracked as a follow-up and is intentionally NOT
-implemented here.
+Back-compat: `IAM_JIT_REQUIRE_BOUNCER_ROLE` defaults OFF. With it off,
+the route still accepts any authenticated caller (so deployments that
+have not yet provisioned a `bouncer` principal keep working), those
+beats are recorded UNVERIFIED, and enforce mode behaves EXACTLY as it
+did before #55 (it trusts any beat). Operators who want the hard
+guarantee set BOTH `IAM_JIT_REQUIRE_BOUNCER_ROLE=1` (close the door +
+distrust unverified beats) and `IAM_JIT_REQUIRE_BOUNCER_PRESENCE=1`
+(refuse issuance on a gap). The two flags are orthogonal: role-binding
+hardens WHO may assert presence; presence-enforce decides whether a gap
+blocks issuance.
+
+RESIDUAL TRUST (honest): the binding raises the bar from "any token"
+to "a credential provisioned as a bouncer." It does NOT prove the
+bouncer is physically in the agent's data path — a compromised bouncer
+credential, or a bouncer that checks in while NOT actually proxying,
+can still assert presence. Per-beat cryptographic signing over the
+gated session (option (c) in #55) and out-of-band path attestation
+remain stronger follow-ups. What #55 closes is the cheap forge: an
+ordinary agent/requester token can no longer mint a trusted beat.
+
+What this signal still DOES buy you regardless: it reliably catches
+ACCIDENTAL and misconfiguration off-leash — an agent that crashed, a
+bouncer process that died, a routing/proxy misconfig that silently
+dropped the bouncer out of the path — and other NON-MALICIOUS cases
+where a previously checking-in session simply goes quiet.
+
+Enforce mode is still sidesteppable by OMITTING `bouncer_session_id`
+on the role request (treated as NEVER_SEEN, never blocked, so un-wired
+deployments don't break). That residual is unchanged by #55: closing
+it would require iam-jit to know a request's session out-of-band, not
+trust the request to declare it.
 
 Honest framing per [[ibounce-honest-positioning]]: a presence gap is
 a SIGNAL, not "BYPASS DETECTED". The agent may legitimately be idle
@@ -110,6 +131,9 @@ DEFAULT_PRESENCE_TTL_SECONDS = 300
 # posture so an operator who sets nothing gets advisory-only signals.
 _ENV_TTL = "IAM_JIT_BOUNCER_PRESENCE_TTL_SECONDS"
 _ENV_REQUIRE = "IAM_JIT_REQUIRE_BOUNCER_PRESENCE"
+# #55 — when set, the check-in route requires the `bouncer` role so a
+# plain agent token cannot forge a beat. Default OFF for back-compat.
+_ENV_REQUIRE_ROLE = "IAM_JIT_REQUIRE_BOUNCER_ROLE"
 
 _TRUE_VALUES = {"1", "true", "yes", "on"}
 
@@ -140,6 +164,18 @@ def require_bouncer_presence() -> bool:
     the wrong default. Opt in with `IAM_JIT_REQUIRE_BOUNCER_PRESENCE=1`.
     """
     return (os.environ.get(_ENV_REQUIRE) or "").strip().lower() in _TRUE_VALUES
+
+
+def require_bouncer_role() -> bool:
+    """#55 — whether the check-in route REQUIRES the `bouncer` role.
+
+    Default OFF for back-compat: deployments that have not provisioned a
+    bouncer identity keep working (their beats are recorded UNVERIFIED).
+    Opt in with `IAM_JIT_REQUIRE_BOUNCER_ROLE=1` so only a principal
+    holding the `bouncer` role can check in — a plain agent token is
+    rejected with 403 and cannot forge a beat at all.
+    """
+    return (os.environ.get(_ENV_REQUIRE_ROLE) or "").strip().lower() in _TRUE_VALUES
 
 
 # ---------------------------------------------------------------------------
@@ -175,6 +211,15 @@ class PresenceVerdict:
     state: PresenceState
     last_check_in_seconds_ago: int | None
     ttl_seconds: int
+    # #55 — was the last beat for this session VERIFIED, i.e. attributed
+    # to a principal holding the `bouncer` role? A legacy / back-compat
+    # beat (recorded without a bouncer principal) is UNVERIFIED. Enforce
+    # mode only trusts a verified beat. None == no beat on record.
+    verified: bool | None = None
+    # The bouncer principal id that last checked in for this session, or
+    # None for an unverified / never-seen session. Never surfaced on the
+    # recon-safe /healthz block (only the admin-gated status route).
+    verifier_principal: str | None = None
 
     @property
     def is_present(self) -> bool:
@@ -190,6 +235,8 @@ class PresenceVerdict:
             "state": self.state.value,
             "last_check_in_seconds_ago": self.last_check_in_seconds_ago,
             "ttl_seconds": self.ttl_seconds,
+            "verified": self.verified,
+            "verifier_principal": self.verifier_principal,
             # Honest, neutral one-liner the UI / CLI / MCP can show
             # verbatim. Never an accusation.
             "message": _verdict_message(self),
@@ -224,10 +271,12 @@ def _verdict_message(v: "PresenceVerdict") -> str:
     return (
         f"bouncer last checked in {ago} (> {v.ttl_seconds}s ttl) for "
         f"session {v.session_id!r}; verify the agent is still routed "
-        f"through the bouncer — this is a self-asserted signal, not "
-        f"proof of bypass. iam-jit cannot independently verify the "
-        f"bouncer is in path, and a check-in can be forged by a caller "
-        f"that holds a token (see presence.py for the threat model)."
+        f"through the bouncer — this is a signal, not proof of bypass. "
+        f"iam-jit cannot independently verify the bouncer is physically "
+        f"in path; with IAM_JIT_REQUIRE_BOUNCER_ROLE a beat is bound to a "
+        f"distinct bouncer identity, but a compromised bouncer credential "
+        f"can still assert presence (see presence.py for the threat "
+        f"model)."
     )
 
 
@@ -245,8 +294,10 @@ def _verdict_message(v: "PresenceVerdict") -> str:
 # ---------------------------------------------------------------------------
 
 _lock = threading.Lock()
-# session_id -> (last_check_in_unix, idle_flag)
-_check_ins: dict[str, tuple[float, bool]] = {}
+# session_id -> (last_check_in_unix, idle_flag, verifier_principal)
+# verifier_principal is the id of the `bouncer`-role principal that
+# checked in, or None for a legacy / unverified (back-compat) beat.
+_check_ins: dict[str, tuple[float, bool, str | None]] = {}
 
 
 def reset_for_tests() -> None:
@@ -259,6 +310,7 @@ def record_check_in(
     session_id: str,
     *,
     idle: bool = False,
+    verifier_principal: str | None = None,
     now: float | None = None,
 ) -> None:
     """Record that a bouncer proved presence for `session_id`.
@@ -269,12 +321,20 @@ def record_check_in(
     `idle=True` is the bouncer explicitly saying "I'm in the path but
     have nothing to gate right now" — that keeps the session out of
     OFF_THE_LEASH (we distinguish idle from gone).
+
+    `verifier_principal` (#55) is the id of the `bouncer`-role principal
+    whose authenticated request carried this beat. When set, the beat is
+    VERIFIED (attributed to a distinct bouncer identity). When None — the
+    legacy / back-compat path where the check-in route is not gated on
+    the bouncer role — the beat is UNVERIFIED and the enforce gate will
+    NOT trust it to clear an off-the-leash verdict.
     """
     if not session_id:
         return
     ts = time.time() if now is None else now
+    principal = (verifier_principal or "").strip() or None
     with _lock:
-        _check_ins[session_id] = (ts, bool(idle))
+        _check_ins[session_id] = (ts, bool(idle), principal)
 
 
 def forget_session(session_id: str) -> None:
@@ -309,8 +369,10 @@ def evaluate_session(
             state=PresenceState.NEVER_SEEN,
             last_check_in_seconds_ago=None,
             ttl_seconds=ttl,
+            verified=None,
+            verifier_principal=None,
         )
-    last, idle = entry
+    last, idle, verifier_principal = entry
     # Clamp a backwards clock-jump to 0 so we never report a negative
     # age (matches heartbeat_status()).
     ago = max(0, int(nowt - last))
@@ -327,6 +389,10 @@ def evaluate_session(
         state=state,
         last_check_in_seconds_ago=ago,
         ttl_seconds=ttl,
+        # #55 — a beat is verified iff it was attributed to a bouncer
+        # principal. The gate uses this to decide trust under enforce.
+        verified=verifier_principal is not None,
+        verifier_principal=verifier_principal,
     )
 
 
@@ -395,6 +461,8 @@ def presence_gate(
             state=PresenceState.NEVER_SEEN,
             last_check_in_seconds_ago=None,
             ttl_seconds=presence_ttl_seconds() if ttl_seconds is None else ttl_seconds,
+            verified=None,
+            verifier_principal=None,
         )
         return PresenceGateDecision(
             allow=True,
@@ -423,6 +491,39 @@ def presence_gate(
             reason=(
                 "presence gap detected (advisory); issuance proceeds. "
                 "set IAM_JIT_REQUIRE_BOUNCER_PRESENCE=1 to enforce."
+            ),
+        )
+    # #55 — when the operator has opted into bouncer-identity binding
+    # (IAM_JIT_REQUIRE_BOUNCER_ROLE=1), enforce mode only TRUSTS a
+    # VERIFIED beat (one attributed to a `bouncer`-role principal). A
+    # session that looks present but whose latest beat is UNVERIFIED is
+    # NOT trusted to confirm presence — refuse, so a stale/self-asserted
+    # beat can't un-stick the gate. (Once the role is required, the route
+    # rejects non-bouncer check-ins at the door, so this is belt-and-
+    # suspenders for any pre-existing unverified beat.)
+    #
+    # Back-compat: when the role is NOT required, enforce mode behaves
+    # exactly as before #55 — it trusts any beat. Existing enforce-mode
+    # deployments that have not provisioned a bouncer identity are
+    # unaffected; they harden by setting IAM_JIT_REQUIRE_BOUNCER_ROLE=1.
+    if (
+        enforced
+        and require_bouncer_role()
+        and verdict.is_present
+        and verdict.verified is False
+    ):
+        return PresenceGateDecision(
+            allow=False,
+            enforced=True,
+            verdict=verdict,
+            reason=(
+                "IAM_JIT_REQUIRE_BOUNCER_PRESENCE is set and the most "
+                f"recent check-in for session {session_id!r} is UNVERIFIED "
+                "(not attributed to a principal holding the `bouncer` "
+                "role); refusing new role-issuance. Set "
+                "IAM_JIT_REQUIRE_BOUNCER_ROLE=1 and have the bouncer "
+                "authenticate as a bouncer identity so its presence beats "
+                "are trusted."
             ),
         )
     return PresenceGateDecision(
@@ -522,12 +623,19 @@ def make_off_the_leash_event(verdict: PresenceVerdict) -> dict[str, Any]:
                 # Explicit honesty marker so consumers never read this
                 # as a confirmed bypass.
                 "signal_not_proof": True,
-                # The presence signal is SELF-ASSERTED: iam-jit cannot
-                # independently verify the bouncer is in path, and a
-                # check-in is forgeable by any caller holding a token.
-                # Catches accidental / misconfig off-leash, NOT a
-                # deliberate adversarial bypass. See presence.py.
-                "self_asserted": True,
+                # #55 — was the last beat attributed to a distinct
+                # `bouncer`-role identity? `verified=False` means an
+                # ordinary token could have self-asserted it (legacy /
+                # back-compat path); `verified=True` raises the bar but
+                # still does not prove the bouncer is physically in path
+                # (a compromised bouncer credential can assert presence).
+                "verified": verdict.verified,
+                # iam-jit cannot independently verify the bouncer is in
+                # path. Catches accidental / misconfig off-leash; the
+                # identity binding (#55) closes the cheap forge by an
+                # ordinary agent token but not a compromised bouncer
+                # credential. See presence.py.
+                "self_asserted": verdict.verified is not True,
             },
         },
     }
@@ -553,6 +661,9 @@ def presence_status(
     off = [v for v in verdicts if v.is_off_the_leash]
     return {
         "enforced": require_bouncer_presence(),
+        # #55 — whether the check-in route requires the `bouncer` role.
+        # A boolean (recon-safe) so /healthz can surface it.
+        "role_required": require_bouncer_role(),
         "ttl_seconds": presence_ttl_seconds() if ttl_seconds is None else ttl_seconds,
         "tracked_sessions": len(verdicts),
         "off_the_leash_count": len(off),

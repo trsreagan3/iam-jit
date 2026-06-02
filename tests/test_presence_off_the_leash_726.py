@@ -126,6 +126,21 @@ def test_ocsf_event_shape_and_honesty():
     assert ext["session_id"] == "sess-o"
     assert ext["presence_state"] == "off_the_leash"
     assert "signal, not proof" in ev["status_detail"]
+    # #55 — an unverified beat is flagged self_asserted; verified=False.
+    assert ext["verified"] is False
+    assert ext["self_asserted"] is True
+
+
+def test_ocsf_event_marks_verified_beat_55():
+    """#55 — a beat from a bouncer identity is marked verified (and so
+    NOT self_asserted) in the OCSF event."""
+    now = 1000.0
+    p.record_check_in("sess-v", verifier_principal="iam:bouncer", now=now)
+    v = p.evaluate_session("sess-v", ttl_seconds=300, now=now + 400)
+    ev = p.make_off_the_leash_event(v)
+    ext = ev["unmapped"]["iam_jit"]
+    assert ext["verified"] is True
+    assert ext["self_asserted"] is False
 
 
 # ---------------------------------------------------------------------------
@@ -223,9 +238,13 @@ def test_healthz_carries_presence_block(client):
     assert bp is not None
     assert bp["off_the_leash_detected"] is False
     assert "off_the_leash_count" in bp
+    # #55 — recon-safe boolean: is the check-in route bound to a
+    # distinct bouncer identity?
+    assert "role_required" in bp
     # Recon-safe: no per-session detail leaks on the unauthenticated
-    # liveness endpoint.
+    # liveness endpoint (no session ids, no verifier_principal).
     assert "sessions" not in bp
+    assert "verifier_principal" not in bp
 
 
 def test_check_in_and_status_routes(make_client):
@@ -248,53 +267,137 @@ def test_check_in_requires_session_id(make_client):
     assert r.status_code == 400
 
 
+def test_check_in_route_rejects_non_bouncer_when_role_required_55(
+    make_client, monkeypatch
+):
+    """#55 — with IAM_JIT_REQUIRE_BOUNCER_ROLE=1, an ordinary token
+    (the actor the signal is meant to catch) is rejected 403 at the
+    door: it cannot forge a beat at all."""
+    monkeypatch.setenv("IAM_JIT_REQUIRE_BOUNCER_ROLE", "1")
+    p.reset_for_tests()
+    # A requester (a plain agent token) is NOT a bouncer.
+    dev = make_client("email:dev@example.com")
+    r = dev.post("/api/v1/presence/check-in", json={"session_id": "victim"})
+    assert r.status_code == 403, r.text
+    assert "bouncer role required" in r.json()["detail"]
+    # Nothing was recorded — the forge is closed at the door.
+    assert p.evaluate_session("victim").state is p.PresenceState.NEVER_SEEN
+    # Admin is ALSO rejected — bouncer is a distinct, narrow identity,
+    # not implied by admin.
+    admin = make_client("email:admin@example.com")
+    r = admin.post("/api/v1/presence/check-in", json={"session_id": "victim"})
+    assert r.status_code == 403, r.text
+
+
+def test_check_in_route_bouncer_records_verified_beat_55(
+    make_client, monkeypatch
+):
+    """#55 — a legitimate bouncer-credentialed check-in works and the
+    beat is recorded VERIFIED, attributed to the bouncer principal."""
+    monkeypatch.setenv("IAM_JIT_REQUIRE_BOUNCER_ROLE", "1")
+    p.reset_for_tests()
+    bouncer = make_client("email:bouncer@example.com")
+    r = bouncer.post("/api/v1/presence/check-in", json={"session_id": "wired"})
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body["recorded"] is True
+    assert body["presence"]["verified"] is True
+    assert body["presence"]["verifier_principal"] == "email:bouncer@example.com"
+    v = p.evaluate_session("wired")
+    assert v.verified is True
+
+
+def test_check_in_route_back_compat_unverified_when_role_not_required_55(
+    make_client, monkeypatch
+):
+    """#55 back-compat: with the role NOT required, any authenticated
+    caller may still check in (deployments without a bouncer identity
+    keep working), but a non-bouncer beat is recorded UNVERIFIED."""
+    monkeypatch.delenv("IAM_JIT_REQUIRE_BOUNCER_ROLE", raising=False)
+    p.reset_for_tests()
+    admin = make_client("email:admin@example.com")
+    r = admin.post("/api/v1/presence/check-in", json={"session_id": "legacy"})
+    assert r.status_code == 200, r.text
+    assert r.json()["presence"]["verified"] is False
+
+
 def test_status_requires_admin(make_client):
     dev = make_client("email:dev@example.com")
     r = dev.get("/api/v1/presence/status")
     assert r.status_code in (401, 403)
 
 
-def test_forged_check_in_flips_off_the_leash_to_present_KNOWN_LIMITATION():
-    """PINS the documented honesty limitation (#726 HIGH finding).
+def test_unverified_forged_beat_not_trusted_by_enforce_gate_55(monkeypatch):
+    """#55 — the forge no longer un-sticks the enforce gate.
 
-    A check-in is a SELF-ASSERTED claim: the check-in endpoint accepts
-    ANY authenticated principal checking in for ANY client-supplied
-    session_id, with NO binding between the calling identity and the
-    session it claims. There is therefore nothing stopping the very
-    agent the signal is meant to catch from FORGING a presence beat for
-    a session it does not "own" — flipping that session's verdict from
-    OFF_THE_LEASH straight back to PRESENT and so evading the signal.
+    Before #55: an UNVERIFIED beat (one a plain agent token could
+    self-assert, with no caller<->identity binding) would flip an
+    OFF_THE_LEASH verdict back to PRESENT and so evade enforce mode.
 
-    This is a KNOWN / DOCUMENTED LIMITATION, not a bug to fix here: the
-    module docstring, the CLI `presence` group help, and the OCSF event
-    (`self_asserted` / `signal_not_proof`) all disclose it, and the
-    robust fix (the bouncer authenticating as a DISTINCT identity) is a
-    tracked architectural follow-up. This test locks the documented
-    behaviour to the documentation: if the forge ever STOPS working
-    (i.e. identity-binding lands), this test must be updated alongside
-    the docs that promise the limitation. Until then it must hold.
+    After #55, when the operator opts into identity binding
+    (IAM_JIT_REQUIRE_BOUNCER_ROLE=1), the enforce gate only TRUSTS a
+    VERIFIED beat (one attributed to a `bouncer`-role principal). A
+    forged/unverified beat still records mechanically (back-compat),
+    but the gate refuses to issue a role on the strength of it — the
+    forge is defeated where it mattered (the enforce decision).
     """
+    monkeypatch.setenv("IAM_JIT_REQUIRE_BOUNCER_PRESENCE", "1")
+    monkeypatch.setenv("IAM_JIT_REQUIRE_BOUNCER_ROLE", "1")
     now = 1000.0
     ttl = 300
-    # A session that was checking in and then went silent: off the leash.
-    p.record_check_in("victim-session", now=now)
-    gone = p.evaluate_session("victim-session", ttl_seconds=ttl, now=now + 400)
-    assert gone.state is p.PresenceState.OFF_THE_LEASH
 
-    # Now a *forged* beat: an attacker (or the off-leash agent itself)
-    # that merely holds a token records a check-in for a session it does
-    # NOT own. record_check_in() is exactly what the /check-in route
-    # calls for any authenticated caller — there is no caller<->session
-    # binding to stop this.
+    # A session that was checking in (verified, by the real bouncer) and
+    # then went silent: off the leash.
+    p.record_check_in("victim-session", verifier_principal="iam:bouncer", now=now)
+    gone = p.presence_gate("victim-session", ttl_seconds=ttl, now=now + 400)
+    assert gone.verdict.state is p.PresenceState.OFF_THE_LEASH
+    assert gone.allow is False  # enforce refuses the gap
+
+    # Now a *forged* beat with NO bouncer identity (the legacy path an
+    # off-leash agent token could reach). It records mechanically...
     p.record_check_in("victim-session", now=now + 400)
+    v = p.evaluate_session("victim-session", ttl_seconds=ttl, now=now + 401)
+    assert v.state is p.PresenceState.PRESENT
+    assert v.verified is False  # but it is UNVERIFIED
 
-    # The forged beat is accepted and the verdict flips back to PRESENT,
-    # evading the signal. This is the documented limitation.
-    after_forge = p.evaluate_session(
-        "victim-session", ttl_seconds=ttl, now=now + 401
-    )
-    assert after_forge.state is p.PresenceState.PRESENT
-    assert after_forge.is_present and not after_forge.is_off_the_leash
+    # ...and the enforce gate does NOT trust the unverified beat: it
+    # still refuses issuance. The forge no longer evades enforcement.
+    dec = p.presence_gate("victim-session", ttl_seconds=ttl, now=now + 401)
+    assert dec.allow is False
+    assert dec.enforced is True
+    assert "UNVERIFIED" in dec.reason
+
+
+def test_verified_bouncer_beat_is_trusted_by_enforce_gate_55(monkeypatch):
+    """#55 — a legitimate bouncer-credentialed beat IS trusted.
+
+    The flip side of the forge test: a beat attributed to a
+    `bouncer`-role principal is VERIFIED and clears the enforce gate.
+    """
+    monkeypatch.setenv("IAM_JIT_REQUIRE_BOUNCER_PRESENCE", "1")
+    monkeypatch.setenv("IAM_JIT_REQUIRE_BOUNCER_ROLE", "1")
+    now = 1000.0
+    p.record_check_in("real", verifier_principal="iam:bouncer", now=now)
+    v = p.evaluate_session("real", ttl_seconds=300, now=now + 50)
+    assert v.verified is True
+    assert v.verifier_principal == "iam:bouncer"
+    dec = p.presence_gate("real", ttl_seconds=300, now=now + 50)
+    assert dec.allow is True
+
+
+def test_back_compat_enforce_trusts_any_beat_when_role_not_required(monkeypatch):
+    """#55 back-compat: with the role NOT required, enforce mode behaves
+    exactly as before — it trusts an unverified beat. Existing
+    enforce-mode deployments that never provisioned a bouncer identity
+    are unaffected until they opt into IAM_JIT_REQUIRE_BOUNCER_ROLE."""
+    monkeypatch.setenv("IAM_JIT_REQUIRE_BOUNCER_PRESENCE", "1")
+    monkeypatch.delenv("IAM_JIT_REQUIRE_BOUNCER_ROLE", raising=False)
+    now = 1000.0
+    p.record_check_in("legacy", now=now)  # unverified
+    v = p.evaluate_session("legacy", ttl_seconds=300, now=now + 50)
+    assert v.verified is False
+    dec = p.presence_gate("legacy", ttl_seconds=300, now=now + 50)
+    assert dec.allow is True  # trusted (back-compat)
 
 
 def test_enforce_mode_sidesteppable_by_omitting_session_id_KNOWN_LIMITATION(
@@ -524,3 +627,48 @@ def test_approve_enforce_mode_no_session_id_not_blocked(e2e_app, monkeypatch):
     ).json()["request"]["metadata"]["id"]
     resp = approver.post(f"/api/v1/requests/{rid}/approve")
     assert resp.status_code == 200, resp.text
+
+
+def test_approve_hardened_mode_refuses_unverified_present_55(e2e_app, monkeypatch):
+    """#55 e2e — forge-now-rejected through the approve route.
+
+    Hardened mode (BOTH role-required + presence-enforce). A session
+    whose latest beat is UNVERIFIED (the forge path an ordinary agent
+    token could reach) is refused issuance with HTTP 409 even though it
+    looks 'present' — the gate only trusts a beat bound to a bouncer
+    identity."""
+    monkeypatch.setenv("IAM_JIT_REQUIRE_BOUNCER_PRESENCE", "1")
+    monkeypatch.setenv("IAM_JIT_REQUIRE_BOUNCER_ROLE", "1")
+    monkeypatch.setenv("IAM_JIT_BOUNCER_PRESENCE_TTL_SECONDS", "300")
+    import time as _t
+    # A fresh but UNVERIFIED beat (no bouncer principal) — what a forged
+    # self-asserted beat looks like.
+    p.record_check_in("agent-forged", now=_t.time())
+
+    dev = e2e_app("email:dev@example.com")
+    approver = e2e_app("email:approver@example.com")
+    rid = dev.post(
+        "/api/v1/requests", json=_e2e_payload(session_id="agent-forged")
+    ).json()["request"]["metadata"]["id"]
+    resp = approver.post(f"/api/v1/requests/{rid}/approve")
+    assert resp.status_code == 409, resp.text
+    assert "UNVERIFIED" in resp.json()["detail"]
+
+
+def test_approve_hardened_mode_allows_verified_bouncer_55(e2e_app, monkeypatch):
+    """#55 e2e — a VERIFIED bouncer beat clears the hardened gate."""
+    monkeypatch.setenv("IAM_JIT_REQUIRE_BOUNCER_PRESENCE", "1")
+    monkeypatch.setenv("IAM_JIT_REQUIRE_BOUNCER_ROLE", "1")
+    monkeypatch.setenv("IAM_JIT_BOUNCER_PRESENCE_TTL_SECONDS", "300")
+    import time as _t
+    p.record_check_in(
+        "agent-verified", verifier_principal="email:bouncer@example.com", now=_t.time()
+    )
+    dev = e2e_app("email:dev@example.com")
+    approver = e2e_app("email:approver@example.com")
+    rid = dev.post(
+        "/api/v1/requests", json=_e2e_payload(session_id="agent-verified")
+    ).json()["request"]["metadata"]["id"]
+    resp = approver.post(f"/api/v1/requests/{rid}/approve")
+    assert resp.status_code == 200, resp.text
+    assert resp.json()["request"]["status"]["state"] == "active"

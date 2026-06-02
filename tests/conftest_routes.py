@@ -38,6 +38,9 @@ users:
   - id: email:dev2@example.com
     display_name: Dev2
     roles: [requester]
+  - id: email:bouncer@example.com
+    display_name: Bouncer
+    roles: [bouncer]
   - id: email:disabled@example.com
     display_name: Disabled
     roles: [requester]
