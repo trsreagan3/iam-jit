@@ -105,9 +105,11 @@ The script deploys [`infrastructure/cloudformation/ci-nightly-dogfood.yaml`](../
 
 The script:
 1. Validates `aws sts get-caller-identity` succeeds + prints the account ID before any change lands.
-2. Probes existing OIDC providers + passes the discovered ARN to CFN so re-runs don't fail with "OIDC provider already exists."
+2. Probes existing OIDC providers + applies a **stack-ownership check** (#709): if the found OIDC ARN is already managed by THIS stack, the script clears `ExistingOidcProviderArn` before calling CFN (keeping CFN ownership).  Only passes the ARN to CFN when the provider is owned by a different stack or created externally.  See `tests/integration/SCRIPT-DEPLOY-OIDC-SCENARIOS.md` for the full scenario matrix.
 3. Runs `aws cloudformation deploy --no-fail-on-empty-changeset` (idempotent).
 4. Verifies the role exists post-deploy + warns if the workflow YAML's `role-to-assume` doesn't match the deployed ARN.
+
+> **Re-deploy safety (fixed in #709):** It is safe to re-run this script at any time. Before the fix, re-deploying when the OIDC provider was CFN-managed would silently delete it (causing the next CI run to fail). The ownership check prevents this: a re-deploy where the stack owns the OIDC keeps CFN in control and makes no destructive changes.
 
 Reverse with `aws cloudformation delete-stack --stack-name iam-jit-ci-nightly --region us-east-1`.
 
