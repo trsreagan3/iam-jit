@@ -5678,6 +5678,7 @@ def mcp_group() -> None:
       install-claude-code  — write the snippet into Claude Code's config
       install-cursor       — write the snippet into Cursor's config
       install-codex        — print the snippet + the manual-install location
+      install-devin        — print the Devin wiring recipe (cloud agent)
       list-tools           — list every MCP tool ibounce exposes
     """
 
@@ -5701,7 +5702,48 @@ def mcp_serve_cmd() -> None:
     sys.exit(mcp_main())
 
 
-def _ibounce_mcp_config_dict(*, agent_name_default: str = "claude-code") -> dict[str, Any]:
+def _build_bouncer_env_vars_for_mcp() -> dict[str, str]:
+    """Return env-var dict for running bouncers (AWS_ENDPOINT_URL, HTTP_PROXY).
+
+    Reads live posture state via capture_posture(). Returns only vars for
+    bouncers that are actually running. If no bouncers are running, returns
+    an empty dict. Never raises — best-effort. Returns {} on any error.
+
+    This mirrors _build_bouncer_env_vars() in cli.py but lives here so
+    bouncer_cli.py stays import-cycle-free from cli.py.
+
+    Per [[ibounce-honest-positioning]]: only emit vars for bouncers that
+    are actually verified running. Never emit a URL for a stopped bouncer.
+    """
+    try:
+        from .posture import capture_posture
+        snap = capture_posture()
+    except Exception:
+        return {}
+
+    env: dict[str, str] = {}
+    bouncers = snap.get("bouncers", {})
+
+    ibounce = bouncers.get("ibounce", {})
+    if ibounce.get("running") and not ibounce.get("misconfig"):
+        port = ibounce.get("port", 8767)
+        env["AWS_ENDPOINT_URL"] = f"http://127.0.0.1:{port}"
+
+    gbounce = bouncers.get("gbounce", {})
+    if gbounce.get("running") and not gbounce.get("misconfig"):
+        wire_port = gbounce.get("wire_port") or 8080
+        proxy = f"http://127.0.0.1:{wire_port}"
+        env["HTTP_PROXY"] = proxy
+        env["HTTPS_PROXY"] = proxy
+
+    return env
+
+
+def _ibounce_mcp_config_dict(
+    *,
+    agent_name_default: str = "claude-code",
+    extra_env: "dict[str, str] | None" = None,
+) -> dict[str, Any]:
     """Canonical MCP config snippet for ibounce. Centralized so
     show-config + every install-* command emit IDENTICAL JSON.
 
@@ -5716,25 +5758,34 @@ def _ibounce_mcp_config_dict(*, agent_name_default: str = "claude-code") -> dict
     and the env var serves as the carry-channel into the agent's HTTP
     headers. ibounce itself never reads these env vars — they're a
     hint to the AGENT runtime, not a configuration ibounce consumes.
+
+    ``extra_env`` (#743) — for harnesses (Cursor, Codex) that inherit
+    env vars exclusively from the MCP server's ``env`` block (not from a
+    separate settings.json the harness merges at startup), pass the live
+    bouncer routing vars here. They are merged AFTER the header-injection
+    hints so operator-supplied values always win over our defaults.
     """
+    env_block: dict[str, str] = {
+        # #308 — header-injection hints. The agent's MCP
+        # host inherits these into the child process; the
+        # agent's HTTP client stamps them as
+        # X-Agent-Name + X-Agent-Session-Id on every
+        # outbound call back through the Bouncers'
+        # HTTP-shaped surfaces (gbounce; ibounce's
+        # AWS-API proxy mode). See
+        # docs/AGENT-ATTRIBUTION.md for the per-runtime
+        # patterns + the validation rules.
+        "IBOUNCE_AGENT_NAME": agent_name_default,
+        "IBOUNCE_AGENT_SESSION_ID": "",
+    }
+    if extra_env:
+        env_block.update(extra_env)
     return {
         "mcpServers": {
             "ibounce": {
                 "command": "ibounce",
                 "args": ["mcp", "serve"],
-                "env": {
-                    # #308 — header-injection hints. The agent's MCP
-                    # host inherits these into the child process; the
-                    # agent's HTTP client stamps them as
-                    # X-Agent-Name + X-Agent-Session-Id on every
-                    # outbound call back through the Bouncers'
-                    # HTTP-shaped surfaces (gbounce; ibounce's
-                    # AWS-API proxy mode). See
-                    # docs/AGENT-ATTRIBUTION.md for the per-runtime
-                    # patterns + the validation rules.
-                    "IBOUNCE_AGENT_NAME": agent_name_default,
-                    "IBOUNCE_AGENT_SESSION_ID": "",
-                },
+                "env": env_block,
             },
         },
     }
@@ -5781,6 +5832,7 @@ def _merge_ibounce_entry(
     *,
     force: bool,
     agent_name_default: str = "claude-code",
+    extra_env: "dict[str, str] | None" = None,
 ) -> tuple[bool, str | None]:
     """Read the existing JSON config (if any), preserve all other keys
     + other `mcpServers` entries, and add/update the `ibounce` entry.
@@ -5792,6 +5844,12 @@ def _merge_ibounce_entry(
     ``X-Agent-Name`` header on outbound HTTP traffic. Defaults to
     ``claude-code``; ``install-cursor`` + ``install-codex`` pass
     ``cursor`` + ``openai-codex`` respectively.
+
+    ``extra_env`` (#743) — for harnesses that inherit env vars only
+    from the MCP server ``env`` block (Cursor, Codex), pass the live
+    bouncer routing vars (AWS_ENDPOINT_URL, HTTP_PROXY, HTTPS_PROXY)
+    here so they land in the written config. Merged into the env block
+    AFTER the header-injection hints.
     """
     import pathlib as _pathlib
 
@@ -5832,7 +5890,10 @@ def _merge_ibounce_entry(
         ):
             return False, "declined overwrite (pass --force to skip this prompt)"
 
-    snippet = _ibounce_mcp_config_dict(agent_name_default=agent_name_default)
+    snippet = _ibounce_mcp_config_dict(
+        agent_name_default=agent_name_default,
+        extra_env=extra_env,
+    )
     mcp_servers["ibounce"] = snippet["mcpServers"]["ibounce"]
 
     try:
@@ -5890,6 +5951,7 @@ def mcp_show_config_cmd(shape: str) -> None:
     click.echo("  - Claude Code:  ibounce mcp install-claude-code")
     click.echo("  - Cursor:       ibounce mcp install-cursor")
     click.echo("  - Codex MCP:    ibounce mcp install-codex")
+    click.echo("  - Devin:        ibounce mcp install-devin  (prints recipe; cloud agent)")
     click.echo(
         "  - Other clients: copy the snippet above into your MCP "
         "config (location is client-specific)."
@@ -6030,12 +6092,37 @@ def _candidate_cursor_paths() -> list["os.PathLike[str]"]:
     default=False,
     help="Overwrite an existing `ibounce` entry without prompting.",
 )
-def mcp_install_cursor_cmd(explicit_path: str | None, force: bool) -> None:
+@click.option(
+    "--no-env-block",
+    is_flag=True,
+    default=False,
+    help="#743 — Skip writing the bouncer routing vars "
+         "(AWS_ENDPOINT_URL, HTTP_PROXY, HTTPS_PROXY) into the Cursor "
+         "MCP server env block. Use when you manage env vars separately "
+         "or no bouncers are running yet.",
+)
+def mcp_install_cursor_cmd(
+    explicit_path: str | None,
+    force: bool,
+    no_env_block: bool,
+) -> None:
     """Wire ibounce into Cursor's MCP config.
 
     Default path: ~/.cursor/mcp.json (user-level). For workspace
     scope, pass --path <project>/.cursor/mcp.json. Atomic write +
     other servers preserved.
+
+    Unlike Claude Code (which has a separate settings.json for process-
+    level env vars), Cursor inherits env vars for tool subprocesses
+    exclusively from the MCP server's ``env`` block in mcp.json. This
+    command therefore writes AWS_ENDPOINT_URL, HTTP_PROXY, and
+    HTTPS_PROXY directly into the ``mcpServers.ibounce.env`` block so
+    Cursor's tool subprocesses route through the running bouncers.
+
+    Per [[ibounce-honest-positioning]]: routing vars are only written
+    when the corresponding bouncer is actually running at install time.
+    If no bouncer is running, the env vars are omitted and a warning is
+    emitted — start ibounce/gbounce first, then re-run this command.
 
     After install, restart Cursor; then check the MCP tab in Cursor
     settings to confirm the ibounce server is listed.
@@ -6046,10 +6133,34 @@ def mcp_install_cursor_cmd(explicit_path: str | None, force: bool) -> None:
         target = _pick_existing_or_default(_candidate_cursor_paths())
 
     click.echo(f"target: {target}")
+
+    # #743 — detect live bouncers and include routing env vars in the
+    # Cursor MCP server env block. Cursor has no separate settings.json;
+    # env vars for tool subprocesses come solely from the server's env block.
+    bouncer_env: dict[str, str] = {}
+    if not no_env_block:
+        bouncer_env = _build_bouncer_env_vars_for_mcp()
+        if bouncer_env:
+            click.echo(
+                "  detected running bouncer(s); wiring routing env vars into "
+                "Cursor MCP server env block: "
+                + ", ".join(bouncer_env.keys())
+            )
+        else:
+            click.secho(
+                "  [warn] no running bouncers detected — routing env vars "
+                "(AWS_ENDPOINT_URL, HTTP_PROXY) NOT written. "
+                "Start ibounce/gbounce then re-run to wire them.",
+                fg="yellow",
+            )
+
     # #308 — Cursor's runtime stamps X-Agent-Name="cursor" via the
     # IBOUNCE_AGENT_NAME env var on the spawned MCP server process.
     overwriting, err = _merge_ibounce_entry(
-        target, force=force, agent_name_default="cursor",
+        target,
+        force=force,
+        agent_name_default="cursor",
+        extra_env=bouncer_env if bouncer_env else None,
     )
     if err is not None:
         click.secho(f"ERROR: {err}", fg="red", err=True)
@@ -6062,6 +6173,12 @@ def mcp_install_cursor_cmd(explicit_path: str | None, force: bool) -> None:
         "the ibounce server is listed. The agent config invokes: "
         "`ibounce mcp serve`."
     )
+    if bouncer_env:
+        click.echo(
+            "\nIMPORTANT: The CURRENT Cursor session does NOT pick up new "
+            "env vars in mcp.json — only NEW sessions do. Restart Cursor "
+            "for the bouncer routing to take effect."
+        )
 
 
 @mcp_group.command("install-codex")
@@ -6081,7 +6198,20 @@ def mcp_install_cursor_cmd(explicit_path: str | None, force: bool) -> None:
     help="Overwrite an existing `ibounce` entry without prompting "
          "(only meaningful with --path).",
 )
-def mcp_install_codex_cmd(explicit_path: str | None, force: bool) -> None:
+@click.option(
+    "--no-env-block",
+    is_flag=True,
+    default=False,
+    help="#743 — Skip writing the bouncer routing vars "
+         "(AWS_ENDPOINT_URL, HTTP_PROXY, HTTPS_PROXY) into the emitted "
+         "snippet / written config. Use when you manage env vars "
+         "separately or no bouncers are running yet.",
+)
+def mcp_install_codex_cmd(
+    explicit_path: str | None,
+    force: bool,
+    no_env_block: bool,
+) -> None:
     """Print the snippet + the manual-install location for Codex MCP.
 
     Codex MCP's config-file location has shifted across releases and
@@ -6092,12 +6222,38 @@ def mcp_install_codex_cmd(explicit_path: str | None, force: bool) -> None:
     If you know your Codex MCP config path, pass `--path PATH` and
     ibounce will perform the atomic merge for you (same semantics as
     install-claude-code / install-cursor).
+
+    Per [[ibounce-honest-positioning]] (#743): when bouncers are running,
+    the emitted snippet includes AWS_ENDPOINT_URL / HTTP_PROXY /
+    HTTPS_PROXY in the MCP server env block so Codex tool subprocesses
+    route through the bouncer automatically. Pass --no-env-block to
+    suppress this.
     """
+    # #743 — detect live bouncers; include routing env vars in the snippet /
+    # written config so Codex tool subprocesses route through the bouncer.
+    bouncer_env: dict[str, str] = {}
+    if not no_env_block:
+        bouncer_env = _build_bouncer_env_vars_for_mcp()
+
     if explicit_path:
         click.echo(f"target: {explicit_path}")
+        if bouncer_env:
+            click.echo(
+                "  detected running bouncer(s); wiring routing env vars: "
+                + ", ".join(bouncer_env.keys())
+            )
+        elif not no_env_block:
+            click.secho(
+                "  [warn] no running bouncers detected — routing env vars "
+                "NOT written. Start ibounce/gbounce then re-run.",
+                fg="yellow",
+            )
         # #308 — Codex stamps X-Agent-Name="openai-codex".
         overwriting, err = _merge_ibounce_entry(
-            explicit_path, force=force, agent_name_default="openai-codex",
+            explicit_path,
+            force=force,
+            agent_name_default="openai-codex",
+            extra_env=bouncer_env if bouncer_env else None,
         )
         if err is not None:
             click.secho(f"ERROR: {err}", fg="red", err=True)
@@ -6111,21 +6267,107 @@ def mcp_install_codex_cmd(explicit_path: str | None, force: bool) -> None:
             "Verify: restart Codex; consult your Codex client docs "
             "for MCP-tool discovery."
         )
+        if bouncer_env:
+            click.echo(
+                "\nIMPORTANT: The CURRENT Codex session does NOT pick up new "
+                "env vars — only NEW sessions do. Restart Codex for the "
+                "bouncer routing to take effect."
+            )
         return
 
-    cfg = _ibounce_mcp_config_dict(agent_name_default="openai-codex")
+    cfg = _ibounce_mcp_config_dict(
+        agent_name_default="openai-codex",
+        extra_env=bouncer_env if bouncer_env else None,
+    )
     click.echo("Codex MCP config locations vary by release; ibounce does")
     click.echo("not auto-detect (refusing to risk clobbering an unrelated")
     click.echo("file). Paste the snippet below into your Codex MCP config:")
     click.echo("")
     click.echo(json.dumps(cfg, indent=2))
     click.echo("")
+    if not bouncer_env and not no_env_block:
+        click.secho(
+            "[warn] no running bouncers detected — routing env vars "
+            "(AWS_ENDPOINT_URL, HTTP_PROXY) not included in snippet above. "
+            "Start ibounce/gbounce then re-run to get the full snippet.",
+            fg="yellow",
+        )
+        click.echo("")
     click.echo(
         "If you know the exact path, re-run with `ibounce mcp "
         "install-codex --path PATH` and ibounce will perform the same "
         "atomic merge as install-claude-code / install-cursor."
     )
 
+
+
+
+@mcp_group.command("install-devin")
+def mcp_install_devin_cmd() -> None:
+    """Print the Devin bouncer-wiring recipe (no local config to write).
+
+    Devin is a cloud-hosted agent — it runs in Cognition's sandboxed
+    environment, not on the operator's local machine. There is no local
+    config file for ibounce to write into. Per [[ibounce-honest-positioning]]
+    we surface this limitation clearly rather than silently degrading.
+
+    The recipe below explains the two supported wiring paths for Devin:
+
+    PATH A — MCP server in Devin task settings (when Devin supports MCP):
+      Add the ibounce server entry to your Devin project's MCP config via
+      the Devin UI. Use the snippet from `ibounce mcp show-config`. Devin's
+      MCP support is evolving; check Devin's current docs for the canonical
+      config location.
+
+    PATH B — Pre-session operator setup (today's supported path):
+      Before starting a Devin session, the operator (or a CI step) runs
+      `iam-jit doctor apply-config` on the machine Devin can reach. The
+      bouncers run on a host-accessible port; the operator sets
+      AWS_ENDPOINT_URL + HTTP_PROXY in Devin's task environment variables
+      so Devin's AWS SDK calls route through the bouncer.
+
+    See docs/HARNESS-RECIPES/devin.md for the full recipe and the
+    networking requirements for container-style Devin deployments.
+    """
+    click.echo("Devin is a cloud-hosted agent — no local config to write.")
+    click.echo("")
+    click.echo("PATH A: MCP server (when Devin's MCP support is enabled)")
+    click.echo("  1. In the Devin UI, go to Settings > MCP Servers.")
+    click.echo("  2. Add the snippet from `ibounce mcp show-config`.")
+    click.echo("  3. Set these env vars in your Devin task environment:")
+
+    bouncer_env = _build_bouncer_env_vars_for_mcp()
+    if bouncer_env:
+        for k, v in bouncer_env.items():
+            click.echo(f"       {k}={v}")
+    else:
+        click.echo("       AWS_ENDPOINT_URL=http://<bouncer-host>:8767")
+        click.echo("       HTTP_PROXY=http://<bouncer-host>:8768")
+        click.echo("       HTTPS_PROXY=http://<bouncer-host>:8768")
+        click.secho(
+            "  [note] no running bouncers detected locally — substitute "
+            "your bouncer host + port above.",
+            fg="yellow",
+        )
+    click.echo("")
+    click.echo("PATH B: Pre-session operator setup (supported today)")
+    click.echo("  1. On a host Devin can reach, run:")
+    click.echo("       iam-jit doctor apply-config")
+    click.echo("  2. In the Devin UI, set task env vars:")
+    if bouncer_env:
+        for k, v in bouncer_env.items():
+            click.echo(f"       {k}={v}")
+    else:
+        click.echo("       AWS_ENDPOINT_URL=http://<bouncer-host>:8767")
+        click.echo("       HTTP_PROXY=http://<bouncer-host>:8768")
+        click.echo("       HTTPS_PROXY=http://<bouncer-host>:8768")
+    click.echo("")
+    click.echo(
+        "Full recipe: docs/HARNESS-RECIPES/devin.md\n"
+        "Limitation: Devin runs in Cognition's cloud sandbox; bouncers "
+        "must be on a host Devin can reach over the network. A bouncer "
+        "on 127.0.0.1 is NOT visible to Devin's sandbox."
+    )
 
 @mcp_group.command("list-tools")
 @click.option(

@@ -132,27 +132,83 @@ path below.
 
 ---
 
-## Cursor
+## Cursor (`install-cursor`)
 
+`ibounce mcp install-cursor` is the one-command path for Cursor operators.
 Cursor reads its MCP config from `~/.cursor/mcp.json` (user-level,
 applies to every workspace) or `<project>/.cursor/mcp.json`
 (workspace-level, applies only inside that project root).
-
-Recommended path: use the shipped command.
 
 ```bash
 ibounce mcp install-cursor      # writes ~/.cursor/mcp.json
 kbounce mcp install-cursor      # idem for kbounce
 ```
 
-Both perform an atomic merge: any existing `mcpServers` entries are
-preserved, and the install fails closed (no partial write) if the
-existing file is not valid JSON. Pass `--path
-<project>/.cursor/mcp.json` to target the workspace level instead.
+### What gets written to `~/.cursor/mcp.json`
 
-Hand-edit form, if you'd rather not run the installer — drop the
-canonical snippet above into `~/.cursor/mcp.json`. Merge with any
-existing `mcpServers` object; do not overwrite the file.
+Unlike Claude Code (which has a separate `~/.claude/settings.json` for
+process-level env vars), Cursor inherits env vars for tool subprocesses
+exclusively from the MCP server's `env` block in `mcp.json`. The installer
+therefore writes `AWS_ENDPOINT_URL`, `HTTP_PROXY`, and `HTTPS_PROXY`
+**directly into the `mcpServers.ibounce.env` block** alongside the
+attribution hints:
+
+```json
+{
+  "mcpServers": {
+    "ibounce": {
+      "command": "ibounce",
+      "args": ["mcp", "serve"],
+      "env": {
+        "IBOUNCE_AGENT_NAME": "cursor",
+        "IBOUNCE_AGENT_SESSION_ID": "",
+        "AWS_ENDPOINT_URL": "http://127.0.0.1:8767",
+        "HTTP_PROXY": "http://127.0.0.1:8080",
+        "HTTPS_PROXY": "http://127.0.0.1:8080"
+      }
+    }
+  }
+}
+```
+
+The exact port values depend on which bouncers are running when you run
+the install command. If no bouncer is running when you install, no routing
+vars are written and a warning is emitted — start ibounce/gbounce first,
+then re-run.
+
+### Why ibounce's MCP env block carries the routing vars
+
+Claude Code has `~/.claude/settings.json` where it merges an `env` block
+into every subprocess it spawns — so routing vars written there cascade
+automatically to all tool calls. Cursor does not have this separate
+settings file; the MCP server's `env` block is the only per-server
+env-injection point. Writing the routing vars here ensures that the
+subprocess the MCP server spawns (and any tools that subprocess calls)
+inherit `AWS_ENDPOINT_URL` automatically.
+
+### Workspace-level install
+
+Pass `--path <project>/.cursor/mcp.json` to install at the workspace
+level instead of the user level. Workspace config applies only within
+that project root. The atomic-merge and env-block write semantics are
+identical.
+
+### Why a restart is required
+
+Cursor reads `~/.cursor/mcp.json` at session start. Existing sessions do
+NOT pick up new env vars — they loaded the env at process start and it is
+fixed for that session. To get the bouncer wiring:
+
+1. Run `ibounce mcp install-cursor` (writes the MCP config).
+2. **Restart Cursor** (close and re-open).
+3. The new session reads the updated MCP config and spawns the ibounce
+   MCP server with the routing env vars.
+
+### Skip the env block
+
+Pass `--no-env-block` to write the MCP server entry without routing vars.
+Useful when you manage env vars separately (e.g. via your system profile
+or a `.envrc`).
 
 **Verify:** restart Cursor; open Settings → MCP; both `ibounce`
 and `kbounce` should appear as connected servers. Then ask the
@@ -162,59 +218,142 @@ agent to call a low-impact tool — for example,
 
 ---
 
-## Devin
+## Codex (OpenAI Codex CLI) (`install-codex`)
 
-Devin's MCP config surface has evolved across releases; consult
-Devin's current docs for the canonical config-file location. The
-snippet shape is identical to Cursor — the standard `mcpServers`
-JSON above.
+`ibounce mcp install-codex` handles two cases:
 
-If Devin's documented location is a JSON file, you can typically
-point `ibounce mcp install-cursor --path <devin-config>` at it; the
-installer is path-agnostic and performs the same atomic merge.
-
-**Verify:** restart the Devin session; ask the agent to list its
-available MCP tools. The `ibounce_*` and `kbounce_*` tools should
-appear (use `ibounce mcp list-tools` or `kbounce mcp list-tools`
-locally to see the canonical tool set the agent should see).
-
----
-
-## Codex (OpenAI Codex CLI)
-
-Codex MCP stores its config in TOML at `~/.codex/config.toml`,
-**not** JSON. The Bounce installers will not edit TOML in place by
-default (third-party TOML editing risks corrupting unrelated keys
-the operator cares about), so `install-codex` prints a
-copy-pasteable snippet plus the target path.
+**Case A — JSON config (most operators):** pass `--path` to a JSON MCP
+config file and ibounce performs the same atomic merge as `install-cursor`,
+including the bouncer routing vars in the server's `env` block.
 
 ```bash
-ibounce mcp install-codex       # prints TOML snippet + target path
-kbounce mcp install-codex       # same shape for kbounce
+ibounce mcp install-codex --path ~/.codex/mcp.json
 ```
 
-Paste the printed snippet into your `~/.codex/config.toml`. The
-expected shape (Codex uses `[mcp_servers.<name>]`, plural with
-underscore):
+**Case B — no path (TOML / unknown location):** `install-codex` without
+`--path` prints a copy-pasteable JSON snippet and the manual-install
+instructions. The snippet includes the routing env vars when bouncers
+are running.
+
+```bash
+ibounce mcp install-codex       # prints snippet + instructions
+```
+
+### What the written/printed snippet includes
+
+When bouncers are running, the `env` block in the snippet carries the
+routing vars (parity with Cursor):
+
+```json
+{
+  "mcpServers": {
+    "ibounce": {
+      "command": "ibounce",
+      "args": ["mcp", "serve"],
+      "env": {
+        "IBOUNCE_AGENT_NAME": "openai-codex",
+        "IBOUNCE_AGENT_SESSION_ID": "",
+        "AWS_ENDPOINT_URL": "http://127.0.0.1:8767",
+        "HTTP_PROXY": "http://127.0.0.1:8080",
+        "HTTPS_PROXY": "http://127.0.0.1:8080"
+      }
+    }
+  }
+}
+```
+
+If no bouncer is running, the routing vars are omitted and a warning is
+emitted — start ibounce/gbounce first, then re-run.
+
+### TOML note
+
+The Codex CLI stores its config in TOML at `~/.codex/config.toml`. The
+Bounce installers do not edit TOML in place (third-party TOML editing
+risks corrupting unrelated keys). If your Codex install uses TOML, paste
+the snippet from `install-codex` by hand and add an `env` block manually:
 
 ```toml
 [mcp_servers.ibounce]
 command = "ibounce"
 args = ["mcp", "serve"]
 
-[mcp_servers.kbounce]
-command = "kbounce"
-args = ["mcp", "serve"]
+[mcp_servers.ibounce.env]
+IBOUNCE_AGENT_NAME = "openai-codex"
+IBOUNCE_AGENT_SESSION_ID = ""
+AWS_ENDPOINT_URL = "http://127.0.0.1:8767"
+HTTP_PROXY = "http://127.0.0.1:8080"
+HTTPS_PROXY = "http://127.0.0.1:8080"
 ```
 
-If you keep a separate JSON-shaped MCP config (e.g. some operators
-maintain a `~/.codex/mcp.json`), the JSON install path works:
-`ibounce mcp install-codex --path ~/.codex/mcp.json --force`. That
-performs the same atomic JSON merge as `install-cursor` /
-`install-claude-code`.
+### Skip the env block
+
+Pass `--no-env-block` to suppress routing vars in the written/printed
+output. Useful when you manage env vars separately.
 
 **Verify:** restart Codex; the MCP server list in your Codex
 client should include `ibounce` and `kbounce`.
+
+---
+
+## Devin (`install-devin`)
+
+Devin is a **cloud-hosted agent** (Cognition's sandbox). There is no
+local config file for ibounce to write into. Per
+`[[ibounce-honest-positioning]]` the installer surfaces this limitation
+clearly and prints a recipe instead:
+
+```bash
+ibounce mcp install-devin       # prints PATH A + PATH B recipe
+```
+
+### PATH A: MCP server (when Devin supports MCP)
+
+Devin's MCP config is configured via the Devin UI (Settings > MCP
+Servers or equivalent). Add the snippet from `ibounce mcp show-config`.
+Then set these env vars in your Devin task environment (Devin UI > task
+env vars or repo config):
+
+```
+AWS_ENDPOINT_URL=http://<bouncer-host>:8767
+HTTP_PROXY=http://<bouncer-host>:8080
+HTTPS_PROXY=http://<bouncer-host>:8080
+```
+
+`ibounce mcp install-devin` will print the actual port values when it
+detects running bouncers locally.
+
+### PATH B: Pre-session operator setup (today's supported path)
+
+Before starting a Devin session:
+
+1. On a host Devin can reach (NOT `127.0.0.1` — Devin runs in a cloud
+   sandbox and cannot see your local loopback):
+   ```bash
+   iam-jit doctor apply-config
+   ```
+2. In the Devin UI, set these task env vars to point at that host:
+   ```
+   AWS_ENDPOINT_URL=http://<bouncer-host>:8767
+   HTTP_PROXY=http://<bouncer-host>:8080
+   HTTPS_PROXY=http://<bouncer-host>:8080
+   ```
+
+### Networking limitation
+
+Devin runs in Cognition's cloud sandbox. A bouncer on `127.0.0.1` is
+**NOT visible** to Devin's sandbox — you must run the bouncers on a
+host accessible from the Devin sandbox (e.g. a cloud VM, or a
+container on a shared network). This is an honest limitation, not a
+bug: ibounce never requires root or a transparent proxy; operator-set
+task env vars are the correct injection point for cloud agents.
+
+**Verify:** ask the Devin agent to call `ibounce_list_rules` via MCP.
+If the tool is visible, the MCP server is wired correctly. If you're
+using PATH B (env-only), verify by checking the ibounce `decisions_count`
+on your bouncer host after a Devin AWS SDK call.
+
+See `docs/HARNESS-RECIPES/devin.md` for the full recipe including the
+`bouncer-informs-agent-informs-iam-jit` pattern for cloud agents.
 
 ---
 
