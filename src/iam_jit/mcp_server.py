@@ -3684,6 +3684,121 @@ TOOLS.extend([
 ])
 
 
+# #722 / BUILD-1 — `iam_jit_agent_diff` MCP tool. Differential audit:
+# compare two agent sessions captured in the cross-bouncer audit log.
+# Highest single competitive differentiation per the firewall-landscape
+# PDF: lets the agent surface "which session is tighter" with
+# structured evidence (permission / decision / behavioral / risk
+# deltas + a narrowed IAM policy). Read-only.
+TOOLS.extend([
+    {
+        "name": "iam_jit_agent_diff",
+        "description": (
+            "Differential audit between two agent sessions. Returns a "
+            "structured diff: `{sessions, permission_delta, "
+            "decision_delta, behavioral_delta, risk_delta, narrowing, "
+            "notes}`. Use this to answer 'which agent's behaviour "
+            "should I write the production role for'. Pairs with "
+            "`bounce_extract_permissions_from_audit` + "
+            "`iam_jit_request_role_from_synthesis`: extract one "
+            "session's permission set, then diff against a second "
+            "session, then submit the narrowed-policy intersection "
+            "(or union) as the synthesis request. Per "
+            "[[ibounce-honest-positioning]] empty deltas surface as "
+            "empty arrays + a `cannot_narrow_reason` string, never as "
+            "invented filler. Per [[recommender-context-boundary]] "
+            "only AWS state + audit events are consumed — no "
+            "codebase context, no LLM. Read-only — no state change."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "required": ["session_a", "session_b"],
+            "properties": {
+                "session_a": {
+                    "type": "string",
+                    "description": (
+                        "First session id (matches "
+                        "`unmapped.iam_jit.agent.session_id` in the "
+                        "bouncer's OCSF log)."
+                    ),
+                },
+                "session_b": {
+                    "type": "string",
+                    "description": (
+                        "Second session id (same shape as `session_a`)."
+                    ),
+                },
+                "bouncer": {
+                    "type": "string",
+                    "default": "ibounce",
+                    "description": (
+                        "Which bouncer's /audit/events to query. One "
+                        "of `ibounce`, `kbounce`, `dbounce`, `gbounce`, "
+                        "OR `name=URL` for off-default mgmt ports."
+                    ),
+                },
+                "since": {
+                    "type": "string",
+                    "default": "1h",
+                    "description": (
+                        "Lookback window (5m / 1h / 2d) or ISO 8601 "
+                        "lower bound."
+                    ),
+                },
+                "until": {
+                    "type": "string",
+                    "description": (
+                        "Optional upper bound. ISO 8601 or short-form."
+                    ),
+                },
+                "scope": {
+                    "type": "string",
+                    "enum": [
+                        "permissions", "decisions", "behavioral",
+                        "risk", "all",
+                    ],
+                    "default": "all",
+                    "description": (
+                        "Which sub-deltas to surface. `all` is the "
+                        "agent default; scope-narrowing is for "
+                        "specialised follow-up queries."
+                    ),
+                },
+                "narrow": {
+                    "type": "string",
+                    "enum": [
+                        "intersection", "union", "left", "right",
+                    ],
+                    "default": "intersection",
+                    "description": (
+                        "Strategy for the narrowed-policy block. "
+                        "`intersection` is the operator-default tight "
+                        "policy (actions both sides touched); `union` "
+                        "admits either side's behaviour."
+                    ),
+                },
+                "limit": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "maximum": 10000,
+                    "default": 1000,
+                    "description": (
+                        "Per-bouncer event cap per session."
+                    ),
+                },
+                "audit_events_token": {
+                    "type": "string",
+                    "description": (
+                        "Bearer token for /audit/events when bound "
+                        "off-loopback."
+                    ),
+                },
+            },
+        },
+    },
+])
+
+
 # Bounce-suite rename (2026-05-17): every `bouncer_*` MCP tool gets
 # an `ibounce_*` alias in v1.0. Both names dispatch to the same
 # handler; the `bouncer_*` originals carry a `(DEPRECATED ...)` note
@@ -6208,6 +6323,11 @@ def _handle_request(req: dict[str, Any]) -> dict[str, Any] | None:
             # window of bouncer audit events. Phase E of
             # [[bouncer-informs-agent-informs-iam-jit]].
             result_payload = _bounce_extract_permissions_from_audit_for_mcp(args)
+        elif tool_name == "iam_jit_agent_diff":
+            # #722 / BUILD-1 — differential audit between two agent
+            # sessions. Read-only structured diff + narrowed IAM policy
+            # ready for operator review.
+            result_payload = _iam_jit_agent_diff_for_mcp(args)
         elif tool_name == "iam_jit_resource_map":
             # #420 / §A59 — apply a declared resource mapping
             # (staging→prod etc.) to a permission set.
@@ -6935,6 +7055,147 @@ def _bounce_extract_permissions_from_audit_for_mcp(
             "message": str(e),
         }
     payload = extracted.as_dict()
+    payload["status"] = "ok"
+    return payload
+
+
+def _iam_jit_agent_diff_for_mcp(
+    args: dict[str, Any],
+) -> dict[str, Any]:
+    """MCP backend for ``iam_jit_agent_diff``.
+
+    Single-bouncer default (matches
+    ``bounce_extract_permissions_from_audit``). Per-bouncer fetch
+    errors land in the diff's ``notes`` field rather than raising;
+    the agent then sees ``events_analyzed: 0`` for the affected side
+    + can re-ask.
+
+    Per [[ibounce-honest-positioning]] empty deltas are real empty
+    arrays; the narrowing block's ``cannot_narrow_reason`` is set
+    honestly. Per [[scorer-is-ground-truth]] no scoring re-tuning
+    happens here — the diff just exposes what the audit stream
+    already says.
+    """
+    from .agent_diff import (
+        compute_agent_diff,
+        fetch_session_events_via_fanout,
+    )
+
+    session_a = args.get("session_a")
+    session_b = args.get("session_b")
+    if not isinstance(session_a, str) or not session_a.strip():
+        return {
+            "status": "error",
+            "code": "missing_session_a",
+            "message": "`session_a` is required and must be a string",
+        }
+    if not isinstance(session_b, str) or not session_b.strip():
+        return {
+            "status": "error",
+            "code": "missing_session_b",
+            "message": "`session_b` is required and must be a string",
+        }
+
+    bouncer = args.get("bouncer") or "ibounce"
+    since = args.get("since") or "1h"
+    until = args.get("until")
+    scope = (args.get("scope") or "all").lower()
+    narrow = (args.get("narrow") or "intersection").lower()
+    if narrow not in ("intersection", "union", "left", "right"):
+        return {
+            "status": "error",
+            "code": "invalid_narrow",
+            "message": (
+                f"`narrow` must be one of intersection/union/left/right; "
+                f"got {narrow!r}"
+            ),
+        }
+    if scope not in (
+        "permissions", "decisions", "behavioral", "risk", "all",
+    ):
+        return {
+            "status": "error",
+            "code": "invalid_scope",
+            "message": (
+                f"`scope` must be one of permissions/decisions/"
+                f"behavioral/risk/all; got {scope!r}"
+            ),
+        }
+    limit_raw = args.get("limit", 1000)
+    try:
+        limit = int(limit_raw)
+    except (TypeError, ValueError):
+        limit = 1000
+    if limit < 1:
+        limit = 1
+    if limit > 10000:
+        limit = 10000
+    audit_events_token = args.get("audit_events_token")
+
+    try:
+        events_a, notes_a = fetch_session_events_via_fanout(
+            session_id=session_a,
+            bouncers=(str(bouncer),),
+            since=str(since),
+            until=str(until) if until else None,
+            limit=limit,
+            audit_events_token=(
+                str(audit_events_token) if audit_events_token else None
+            ),
+        )
+        events_b, notes_b = fetch_session_events_via_fanout(
+            session_id=session_b,
+            bouncers=(str(bouncer),),
+            since=str(since),
+            until=str(until) if until else None,
+            limit=limit,
+            audit_events_token=(
+                str(audit_events_token) if audit_events_token else None
+            ),
+        )
+    except Exception as e:  # pragma: no cover — defensive
+        return {
+            "status": "error",
+            "code": "fetch_failed",
+            "message": str(e),
+        }
+
+    notes: list[str] = []
+    for b, err in sorted(notes_a.items()):
+        if err:
+            notes.append(f"session_a/{b}: {err}")
+    for b, err in sorted(notes_b.items()):
+        if err:
+            notes.append(f"session_b/{b}: {err}")
+
+    diff = compute_agent_diff(
+        session_a_id=session_a,
+        events_a=events_a,
+        session_b_id=session_b,
+        events_b=events_b,
+        narrow=narrow,
+        time_window_a={"from": str(since), "to": str(until) if until else ""},
+        time_window_b={"from": str(since), "to": str(until) if until else ""},
+        notes=tuple(notes),
+    )
+    payload = diff.as_dict()
+
+    # Scope filtering — drop sub-deltas the caller didn't ask for.
+    if scope != "all":
+        key_map = {
+            "permissions": "permission_delta",
+            "decisions": "decision_delta",
+            "behavioral": "behavioral_delta",
+            "risk": "risk_delta",
+        }
+        keep = key_map[scope]
+        for k in (
+            "permission_delta", "decision_delta",
+            "behavioral_delta", "risk_delta",
+        ):
+            if k != keep:
+                payload.pop(k, None)
+
     payload["status"] = "ok"
     return payload
 
