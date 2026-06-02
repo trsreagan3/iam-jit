@@ -161,9 +161,12 @@ def test_cli_cyclonedx_cross_product_session(monkeypatch) -> None:
     assert doc["specVersion"] == "1.6"
     assert doc["serialNumber"].startswith("urn:uuid:")
 
+    # CycloneDX 1.6: data artifacts live in components[], network
+    # services (aws_service / http_endpoint / mcp_tool) in services[].
+    entities = list(doc.get("components", [])) + list(doc.get("services", []))
     kinds = {
         p["value"]
-        for c in doc["components"]
+        for c in entities
         for p in c["properties"]
         if p["name"] == "iam-jit:component.kind"
     }
@@ -171,6 +174,17 @@ def test_cli_cyclonedx_cross_product_session(monkeypatch) -> None:
     # DB + HTTP endpoint all present in ONE ABOM.
     assert {"iam_role", "aws_service", "aws_resource",
             "k8s_namespace", "database", "http_endpoint"} <= kinds
+    # Service-ish kinds must NOT appear as components (spec-correctness).
+    comp_kinds = {
+        p["value"]
+        for c in doc["components"]
+        for p in c["properties"]
+        if p["name"] == "iam-jit:component.kind"
+    }
+    assert not ({"aws_service", "http_endpoint", "mcp_tool"} & comp_kinds)
+    # And every component carries a legal CycloneDX 1.6 component.type.
+    for c in doc["components"]:
+        assert c["type"] != "service"
 
     meta = {p["name"]: p["value"] for p in doc["metadata"]["properties"]}
     assert meta["iam-jit:session.id"] == sess

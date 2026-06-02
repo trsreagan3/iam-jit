@@ -85,6 +85,22 @@ def _props_map(props: list[dict[str, str]]) -> dict[str, str]:
     return {p["name"]: p["value"] for p in props}
 
 
+def _entities(doc: dict) -> list[dict]:
+    """All enumerated entities: components[] + services[]. The ABOM
+    splits service-ish kinds into the top-level services[] array per
+    CycloneDX 1.6 (where "service" is not a legal component.type)."""
+    return list(doc.get("components", [])) + list(doc.get("services", []))
+
+
+def _all_kinds(doc: dict) -> set[str]:
+    return {
+        p["value"]
+        for e in _entities(doc)
+        for p in e["properties"]
+        if p["name"] == f"{ABOM_PROPERTY_NS}:component.kind"
+    }
+
+
 # ---------------------------------------------------------------------------
 # CycloneDX 1.6 shape
 # ---------------------------------------------------------------------------
@@ -126,10 +142,92 @@ def test_property_namespace_prefixes_all_iam_jit_props():
     # Every metadata property under our namespace.
     for p in r.document["metadata"]["properties"]:
         assert p["name"].startswith(f"{ABOM_PROPERTY_NS}:")
-    # Component properties too.
-    for c in r.document["components"]:
-        for p in c.get("properties", []):
+    # Component AND service properties too.
+    for e in _entities(r.document):
+        for p in e.get("properties", []):
             assert p["name"].startswith(f"{ABOM_PROPERTY_NS}:")
+
+
+# ---------------------------------------------------------------------------
+# REAL CycloneDX 1.6 schema validation
+#
+# This is the test that the original PR was MISSING — the old code
+# emitted component.type="service", which is NOT a legal CycloneDX 1.6
+# component.type enum value, so Dependency-Track / cyclonedx-cli would
+# reject the doc. We validate against the OFFICIAL CycloneDX 1.6 JSON
+# schema bundled with cyclonedx-python-lib
+# (cyclonedx/schema/_res/bom-1.6.SNAPSHOT.schema.json), the same lib the
+# UAT agent used, so the validation is against the real spec, not a
+# hand-rolled approximation.
+# ---------------------------------------------------------------------------
+
+
+def _official_cyclonedx_16_schema() -> dict:
+    """Load the official CycloneDX 1.6 JSON schema shipped inside
+    cyclonedx-python-lib. Skips the test (rather than silently passing)
+    if the lib / schema is not installed."""
+    import importlib.util
+    import os
+
+    jsonschema = pytest.importorskip("jsonschema")
+    _ = jsonschema  # used by callers; imported here to gate the skip
+    spec = importlib.util.find_spec("cyclonedx")
+    if spec is None or not spec.submodule_search_locations:
+        pytest.skip("cyclonedx-python-lib not installed")
+    pkg_dir = spec.submodule_search_locations[0]
+    schema_path = os.path.join(
+        pkg_dir, "schema", "_res", "bom-1.6.SNAPSHOT.schema.json"
+    )
+    if not os.path.exists(schema_path):
+        pytest.skip(f"bundled CycloneDX 1.6 schema not found at {schema_path}")
+    with open(schema_path, encoding="utf-8") as fh:
+        return json.load(fh)
+
+
+def test_abom_validates_against_official_cyclonedx_16_schema():
+    import jsonschema
+
+    schema = _official_cyclonedx_16_schema()
+    # Build an ABOM exercising ALL 8 kinds (5 data components + 3
+    # services), so every code path that emits an entity is validated.
+    evs = [
+        _ev(
+            service="s3",
+            operation="GetObject",
+            resources=["arn:aws:s3:::b/k"],
+            role_arn="arn:aws:iam::1:role/r",
+            profile="safe-default",
+            verdict="allow",
+        ),
+        _ev(bouncer="kbounce", namespace="prod", cluster="eks-1", verdict="allow"),
+        _ev(bouncer="dbounce", database="orders", host="pg.int", operation="SELECT"),
+        _ev(bouncer="gbounce", host="api.stripe.com", http_method="POST"),
+        _ev(mcp_tool="iam_jit_request_role"),
+    ]
+    r = build_abom(session_id="schema-check", events=evs)
+    assert _all_kinds(r.document) == {
+        "iam_role", "iam_profile", "aws_service", "aws_resource",
+        "k8s_namespace", "database", "http_endpoint", "mcp_tool",
+    }
+    # Zero schema errors — this is what failed before the services[] fix.
+    errors = sorted(
+        jsonschema.Draft7Validator(schema).iter_errors(r.document),
+        key=lambda e: list(e.absolute_path),
+    )
+    assert errors == [], "\n".join(
+        f"{list(e.absolute_path)}: {e.message}" for e in errors
+    )
+
+
+def test_empty_abom_validates_against_official_cyclonedx_16_schema():
+    import jsonschema
+
+    schema = _official_cyclonedx_16_schema()
+    r = build_abom(session_id="empty", events=[])
+    errors = list(jsonschema.Draft7Validator(schema).iter_errors(r.document))
+    assert errors == [], "\n".join(
+        f"{list(e.absolute_path)}: {e.message}" for e in errors
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -153,12 +251,9 @@ def test_all_component_types_extracted():
         _ev(mcp_tool="iam_jit_request_role"),
     ]
     r = build_abom(session_id="s", events=evs)
-    kinds = {
-        p["value"]
-        for c in r.document["components"]
-        for p in c["properties"]
-        if p["name"] == f"{ABOM_PROPERTY_NS}:component.kind"
-    }
+    # Kinds are split across components[] (data artifacts) and
+    # services[] (network services the agent called) per CycloneDX 1.6.
+    kinds = _all_kinds(r.document)
     assert kinds == {
         "iam_role",
         "iam_profile",
@@ -171,7 +266,10 @@ def test_all_component_types_extracted():
     }
 
 
-def test_component_types_use_cyclonedx_semantics():
+def test_service_kinds_emitted_in_services_array_not_components():
+    # CycloneDX 1.6: "service" is NOT a legal component.type enum value.
+    # AWS service APIs / HTTP endpoints / MCP tools the agent CALLS must
+    # live in the top-level services[] array, never as components.
     evs = [
         _ev(service="s3", operation="GetObject", resources=["arn:aws:s3:::b/k"],
             role_arn="arn:aws:iam::1:role/r"),
@@ -179,16 +277,38 @@ def test_component_types_use_cyclonedx_semantics():
         _ev(mcp_tool="t"),
     ]
     r = build_abom(session_id="s", events=evs)
-    by_kind = {}
+    # Every component carries a legal CycloneDX 1.6 component.type and
+    # NONE is the illegal "service".
+    legal_types = {
+        "application", "framework", "library", "container", "platform",
+        "operating-system", "device", "device-driver", "firmware",
+        "file", "machine-learning-model", "data", "cryptographic-asset",
+    }
+    comp_kind = {}
     for c in r.document["components"]:
-        kind = _props_map(c["properties"])[f"{ABOM_PROPERTY_NS}:component.kind"]
-        by_kind[kind] = c["type"]
-    # Credentials/config/resources => data; things the agent calls => service.
-    assert by_kind["iam_role"] == "data"
-    assert by_kind["aws_resource"] == "data"
-    assert by_kind["aws_service"] == "service"
-    assert by_kind["http_endpoint"] == "service"
-    assert by_kind["mcp_tool"] == "service"
+        assert c["type"] in legal_types
+        assert c["type"] != "service"
+        comp_kind[_props_map(c["properties"])[f"{ABOM_PROPERTY_NS}:component.kind"]] = (
+            c["type"]
+        )
+    # Data artifacts stay components with type=data.
+    assert comp_kind["iam_role"] == "data"
+    assert comp_kind["aws_resource"] == "data"
+    # Service-ish kinds are NOT components at all.
+    assert "aws_service" not in comp_kind
+    assert "http_endpoint" not in comp_kind
+    assert "mcp_tool" not in comp_kind
+    # They ARE in services[]; service entries have NO "type" key
+    # (#/definitions/service has additionalProperties:false) and carry
+    # the same iam-jit:* properties.
+    svc_kinds = {}
+    for s in r.document["services"]:
+        assert "type" not in s
+        assert "name" in s and "bom-ref" in s
+        svc_kinds[
+            _props_map(s["properties"])[f"{ABOM_PROPERTY_NS}:component.kind"]
+        ] = s
+    assert set(svc_kinds) == {"aws_service", "http_endpoint", "mcp_tool"}
 
 
 def test_repeated_component_aggregates_counts_and_verdicts():
@@ -198,13 +318,14 @@ def test_repeated_component_aggregates_counts_and_verdicts():
         _ev(service="s3", operation="GetObject", verdict="allow"),
     ]
     r = build_abom(session_id="s", events=evs)
+    # aws_service lives in services[] now (CycloneDX 1.6 spec-correct).
     svc = [
-        c for c in r.document["components"]
+        c for c in r.document.get("services", [])
         if c["name"] == "s3"
         and _props_map(c["properties"])[f"{ABOM_PROPERTY_NS}:component.kind"]
         == "aws_service"
     ]
-    assert len(svc) == 1  # one aggregated component, not three
+    assert len(svc) == 1  # one aggregated service, not three
     mp = _props_map(svc[0]["properties"])
     assert mp[f"{ABOM_PROPERTY_NS}:observed.event_count"] == "3"
     assert mp[f"{ABOM_PROPERTY_NS}:observed.allow_count"] == "2"
@@ -228,10 +349,7 @@ def test_only_arn_resources_become_aws_resource_components():
 def test_db_host_does_not_double_count_as_http_endpoint():
     evs = [_ev(bouncer="dbounce", database="orders", host="pg.int")]
     r = build_abom(session_id="s", events=evs)
-    kinds = [
-        _props_map(c["properties"])[f"{ABOM_PROPERTY_NS}:component.kind"]
-        for c in r.document["components"]
-    ]
+    kinds = _all_kinds(r.document)
     assert "database" in kinds
     assert "http_endpoint" not in kinds
 
@@ -243,9 +361,10 @@ def test_bom_refs_unique_and_deterministic():
     ]
     r1 = build_abom(session_id="s", events=evs, generated_at="2026-01-01T00:00:00Z")
     r2 = build_abom(session_id="s", events=evs, generated_at="2026-01-01T00:00:00Z")
-    refs1 = [c["bom-ref"] for c in r1.document["components"]]
+    # bom-ref uniqueness is document-wide (components[] + services[]).
+    refs1 = [e["bom-ref"] for e in _entities(r1.document)]
     assert len(refs1) == len(set(refs1))  # unique
-    refs2 = [c["bom-ref"] for c in r2.document["components"]]
+    refs2 = [e["bom-ref"] for e in _entities(r2.document)]
     assert refs1 == refs2  # deterministic across runs
 
 

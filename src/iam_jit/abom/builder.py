@@ -208,6 +208,12 @@ class AbomResult:
     """The CycloneDX 1.6 JSON document (ready for json.dumps)."""
 
     component_count: int
+    """Total entities enumerated = ``components[]`` + ``services[]``.
+
+    Named ``component_count`` for backwards compatibility; it counts
+    every distinct thing the session touched regardless of which
+    CycloneDX array it landed in (data components vs network services).
+    """
     events_analyzed: int
     is_partial: bool
     partial_reasons: tuple[str, ...]
@@ -228,21 +234,12 @@ def _bom_ref(kind: str, key: str) -> str:
     return f"{kind}:{h}"
 
 
-def _component(
-    *,
-    ctype: str,
-    name: str,
-    bom_ref: str,
-    iam_jit_kind: str,
-    agg: _Agg,
-) -> dict[str, typing.Any]:
-    """Build one CycloneDX component dict.
+def _agg_props(iam_jit_kind: str, agg: _Agg) -> list[dict[str, str]]:
+    """Shared ``iam-jit:*`` property list for a component OR service.
 
-    Non-software components use CycloneDX ``type`` values per spec
-    semantics: AWS resources / DBs / K8s namespaces are ``data``,
-    HTTP endpoints + MCP tools the agent *called* are ``service``,
-    and the IAM role/profile the session ran under is ``data`` (it is
-    a credential/config artifact, not a service the agent calls).
+    Identical for both representations — the only difference between a
+    ``data`` component and a ``services[]`` entry is the envelope, not
+    the observed-activity properties.
     """
     props: list[dict[str, str]] = [
         _prop("component.kind", iam_jit_kind),
@@ -263,13 +260,62 @@ def _component(
         )
     for k, v in sorted(agg.extra.items()):
         props.append(_prop(k, v))
+    return props
+
+
+def _component(
+    *,
+    ctype: str,
+    name: str,
+    bom_ref: str,
+    iam_jit_kind: str,
+    agg: _Agg,
+) -> dict[str, typing.Any]:
+    """Build one CycloneDX ``component`` dict.
+
+    Components here are credential/config/resource artifacts the agent
+    session touched: the IAM role/profile it ran under, AWS resource
+    ARNs, K8s namespaces, and databases. Per CycloneDX 1.6 these are
+    NOT software and have no native ``type``; we use ``data`` (a legal
+    ``component.type`` enum value) and disambiguate the iam-jit notion
+    via ``iam-jit:component.kind``.
+
+    Things the agent *calls over a network* — AWS service APIs, HTTP
+    endpoints, MCP tools — are NOT components: CycloneDX models those
+    in the top-level ``services[]`` array (see :func:`_service`), since
+    ``service`` is deliberately absent from the ``component.type`` enum.
+    """
     comp: dict[str, typing.Any] = {
         "type": ctype,
         "bom-ref": bom_ref,
         "name": name,
-        "properties": props,
+        "properties": _agg_props(iam_jit_kind, agg),
     }
     return comp
+
+
+def _service(
+    *,
+    name: str,
+    bom_ref: str,
+    iam_jit_kind: str,
+    agg: _Agg,
+) -> dict[str, typing.Any]:
+    """Build one CycloneDX 1.6 ``service`` dict (top-level ``services[]``).
+
+    Per the CycloneDX 1.6 ``#/definitions/service`` schema, a service
+    entry has NO ``type`` field (``additionalProperties: false``); the
+    only required key is ``name``. We carry the same ``iam-jit:*``
+    observed-activity properties as the data components so an
+    iam-jit-aware reader sees identical signal regardless of envelope,
+    while a generic consumer (Dependency-Track / cyclonedx-cli) treats
+    these as the network services the agent invoked.
+    """
+    return {
+        "bom-ref": bom_ref,
+        "name": name,
+        "properties": _agg_props(iam_jit_kind, agg),
+    }
 
 
 def _aggregate(
@@ -366,18 +412,27 @@ def _aggregate(
     return groups
 
 
-# Map iam-jit component kind -> (CycloneDX type, ref-prefix). Per
-# CycloneDX 1.6 semantics: credentials/config/resources are ``data``;
-# things the agent *calls* (endpoints, MCP tools) are ``service``.
+# Map iam-jit kind -> (CycloneDX envelope, ref-prefix). The envelope
+# is either a legal ``component.type`` enum value ("data") for
+# credential/config/resource artifacts, or the sentinel
+# ``_SERVICE_ENVELOPE`` for the three network-service kinds (AWS
+# service APIs, HTTP endpoints, MCP tools). CycloneDX 1.6 deliberately
+# omits "service" from the ``component.type`` enum — services belong in
+# the top-level ``services[]`` array (#/definitions/service) — so those
+# three kinds are emitted there, NOT as components. (This is the bug
+# the original map carried: it set component.type="service", which is
+# not schema-valid and made Dependency-Track / cyclonedx-cli reject the
+# doc.)
+_SERVICE_ENVELOPE = "__service__"
 _KIND_TO_CYCLONEDX: dict[str, tuple[str, str]] = {
     "iam_role": ("data", "iam-role"),
     "iam_profile": ("data", "iam-profile"),
-    "aws_service": ("service", "aws-service"),
+    "aws_service": (_SERVICE_ENVELOPE, "aws-service"),
     "aws_resource": ("data", "aws-resource"),
     "k8s_namespace": ("data", "k8s-namespace"),
     "database": ("data", "database"),
-    "http_endpoint": ("service", "http-endpoint"),
-    "mcp_tool": ("service", "mcp-tool"),
+    "http_endpoint": (_SERVICE_ENVELOPE, "http-endpoint"),
+    "mcp_tool": (_SERVICE_ENVELOPE, "mcp-tool"),
 }
 
 
@@ -428,20 +483,38 @@ def build_abom(
     groups = _aggregate(events)
 
     components: list[dict[str, typing.Any]] = []
+    services: list[dict[str, typing.Any]] = []
     # Deterministic order: by kind (stable map order) then by name.
-    for kind, (ctype, ref_prefix) in _KIND_TO_CYCLONEDX.items():
+    for kind, (envelope, ref_prefix) in _KIND_TO_CYCLONEDX.items():
         bucket = groups.get(kind, {})
         for key in sorted(bucket):
             agg = bucket[key]
-            components.append(
-                _component(
-                    ctype=ctype,
-                    name=key,
-                    bom_ref=_bom_ref(ref_prefix, key),
-                    iam_jit_kind=kind,
-                    agg=agg,
+            bom_ref = _bom_ref(ref_prefix, key)
+            if envelope == _SERVICE_ENVELOPE:
+                services.append(
+                    _service(
+                        name=key,
+                        bom_ref=bom_ref,
+                        iam_jit_kind=kind,
+                        agg=agg,
+                    )
                 )
-            )
+            else:
+                components.append(
+                    _component(
+                        ctype=envelope,
+                        name=key,
+                        bom_ref=bom_ref,
+                        iam_jit_kind=kind,
+                        agg=agg,
+                    )
+                )
+
+    # Operator-facing count = everything enumerated, regardless of which
+    # CycloneDX array it lands in (components vs services). This keeps
+    # the "how many things did this session touch" number honest and
+    # stable across the spec-correctness refactor.
+    entity_count = len(components) + len(services)
 
     events_analyzed = sum(1 for ev in events if isinstance(ev, dict))
 
@@ -488,7 +561,7 @@ def build_abom(
     meta_props: list[dict[str, str]] = [
         _prop("session.id", session_id),
         _prop("observed.events_analyzed", str(events_analyzed)),
-        _prop("observed.component_count", str(len(components))),
+        _prop("observed.component_count", str(entity_count)),
         _prop("observed.complete", "false" if is_partial else "true"),
     ]
     if requested_window:
@@ -556,10 +629,15 @@ def build_abom(
         },
         "components": components,
     }
+    # Only emit ``services`` when non-empty: an empty list is legal
+    # under the schema but the array is optional, and omitting it keeps
+    # the empty-session ABOM minimal.
+    if services:
+        document["services"] = services
 
     return AbomResult(
         document=document,
-        component_count=len(components),
+        component_count=entity_count,
         events_analyzed=events_analyzed,
         is_partial=is_partial,
         partial_reasons=tuple(partial_reasons),

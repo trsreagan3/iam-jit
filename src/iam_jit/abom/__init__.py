@@ -9,6 +9,14 @@ queried, the external HTTP endpoints it hit, and the MCP tools it
 invoked. Compliance buyers want a single, standard-format artifact
 that says "here is everything this agent did this session".
 
+Per the CycloneDX 1.6 schema, credential/config/resource artifacts
+(IAM role/profile, AWS resource ARN, K8s namespace, database) are
+``components[]`` with ``type: "data"``, while the network services
+the agent *called* (AWS service APIs, HTTP endpoints, MCP tools) are
+proper ``services[]`` entries — ``service`` is intentionally NOT a
+legal ``component.type`` enum value, so emitting it there would make
+Dependency-Track / cyclonedx-cli reject the doc.
+
 Plumbing reuse (NOT a reinvention)
 -----------------------------------
 The per-session events come from the SAME cross-bouncer fan-out the
