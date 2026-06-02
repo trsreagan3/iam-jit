@@ -2469,5 +2469,18 @@ from .cli_compliance_map import register_compliance_map_command  # noqa: E402
 register_compliance_map_command(main)
 
 
+# ADOPT-5 / #719 — register `iam-jit cedar {export,import}`. Translate a
+# policy between AWS IAM JSON and Cedar (AWS Bedrock AgentCore / Verified
+# Permissions) so customers move policy between Bounce and AgentCore
+# without rewriting. Per [[cedar-positioning]] this is INTEROP /
+# portability — iam-jit is NOT Cedar and does not compete with it. Per
+# [[ibounce-honest-positioning]] untranslatable constructs (NotAction,
+# embedded wildcards, exotic condition operators) produce a VISIBLE
+# marker + note, never a silently-wrong policy. Read-only — never
+# touches AWS.
+from .cli_cedar import register_cedar_group  # noqa: E402
+register_cedar_group(main)
+
+
 if __name__ == "__main__":
     main()
