@@ -175,6 +175,10 @@ class TestInstallStoryGap:
     surface, not traffic routing.
     """
 
+    @pytest.mark.skipif(
+        not pathlib.Path(_IAM_JIT_VENV).exists(),
+        reason="venv binary not present (CI uses tox; .venv only on dev machines)",
+    )
     def test_venv_binary_has_settings_path_flag(self) -> None:
         """The repo venv binary must have --settings-path (PR #23 feature)."""
         proc = subprocess.run(
