@@ -66,7 +66,9 @@ import time
 from typing import Any, Callable
 
 from .rotation import (
+    DEFAULT_DISK_CRIT_FREE_BYTES,
     DEFAULT_DISK_CRIT_PCT,
+    DEFAULT_DISK_WARN_FREE_BYTES,
     DEFAULT_DISK_WARN_PCT,
     DiskStatus,
     disk_status,
@@ -113,8 +115,9 @@ DISK_PRESSURE_CHECK_INTERVAL_SECONDS = 60
 # /healthz to surface a distinct status string + by the admin-action
 # emit to escalate severity. ALL modes treat emergency the same way:
 # log + emit + signal in /healthz; no mode is permitted to "ignore"
-# emergency.
-DEFAULT_DISK_EMERGENCY_PCT = 98
+# emergency. Must be strictly greater than DEFAULT_DISK_CRIT_PCT so
+# that 98.5% maps to "critical" not "emergency".
+DEFAULT_DISK_EMERGENCY_PCT = 99
 
 # Admin-action kind emitted on state transitions. Lands in
 # unmapped.iam_jit.admin_action.kind + activity_name per
@@ -171,6 +174,23 @@ class DiskPressureState:
     warn_pct: int = DEFAULT_DISK_WARN_PCT
     crit_pct: int = DEFAULT_DISK_CRIT_PCT
     emergency_pct: int = DEFAULT_DISK_EMERGENCY_PCT
+
+    warn_free_bytes: int = DEFAULT_DISK_WARN_FREE_BYTES
+    """Absolute-free-space floor for the warn threshold. Status transitions
+    to "degraded" when free_bytes <= this value (and warn_free_bytes > 0).
+    0 disables the absolute-free check for the warn tier."""
+
+    crit_free_bytes: int = DEFAULT_DISK_CRIT_FREE_BYTES
+    """Absolute-free-space floor for the critical threshold. Status
+    transitions to "critical" when free_bytes <= this value (and
+    crit_free_bytes > 0). 0 disables the absolute-free check for the
+    critical tier."""
+
+    ignore_disk_pressure: bool = False
+    """When True, the disk-pressure check is disabled entirely.
+    EvaluateAndReact always returns status="ignored" + refuse_requests=False.
+    A startup warning is emitted when this flag is set. Surfaced on /healthz
+    as status="ignored" so monitoring is never silently bypassed."""
 
     log_dir: str | None = None
     """Directory containing audit.jsonl + rotated archives. None when
@@ -425,6 +445,13 @@ def evaluate_and_react(
     and the smoke tests invoke it directly. No half-reaction paths.
     """
     state.last_check_unix = now if now is not None else time.time()
+    if state.ignore_disk_pressure:
+        # Operator explicitly opted out of disk-pressure protection.
+        # Always report "ignored" + never refuse requests. /healthz
+        # exposes this status so monitoring is never silently bypassed.
+        state.current_status = "ignored"
+        state.refuse_requests = False
+        return state
     if not state.log_dir:
         # Nothing to monitor. Leave state at ok + refuse_requests off.
         state.current_status = "ok"
@@ -434,6 +461,8 @@ def evaluate_and_react(
         state.log_dir,
         warn_pct=state.warn_pct,
         crit_pct=state.crit_pct,
+        warn_free_bytes=state.warn_free_bytes,
+        crit_free_bytes=state.crit_free_bytes,
         statvfs=statvfs,
     )
     state.last_observed = snap
@@ -634,13 +663,20 @@ def healthz_audit_log_block(state: DiskPressureState) -> dict[str, Any]:
         disk_free_pct = round(100.0 - state.last_observed.used_pct, 2)
         used_pct = round(state.last_observed.used_pct, 2)
         path = state.last_observed.path
+    disk_free_bytes: int | None = (
+        state.last_observed.free_bytes if state.last_observed else None
+    )
     return {
         "status": state.status_label(),
         "disk_free_pct": disk_free_pct,
+        "disk_free_bytes": disk_free_bytes,
         "used_pct": used_pct,
         "warn_pct": state.warn_pct,
         "crit_pct": state.crit_pct,
         "emergency_pct": state.emergency_pct,
+        "warn_threshold_bytes": state.warn_free_bytes,
+        "crit_threshold_bytes": state.crit_free_bytes,
+        "ignore_disk_pressure": state.ignore_disk_pressure,
         "path": path,
         "disk_pressure_mode": state.mode,
         "refuse_requests": state.refuse_requests,

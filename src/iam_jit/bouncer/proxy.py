@@ -1484,20 +1484,38 @@ class ProxyConfig:
     disk_pressure_warn_pct: int | None = None
     """#424 / §A63 — disk-usage % AT-OR-ABOVE which /healthz status
     transitions ok -> degraded. None = use rotation.py
-    DEFAULT_DISK_WARN_PCT (85). 0 disables the warn signal entirely."""
+    DEFAULT_DISK_WARN_PCT (96). 0 disables the warn signal entirely."""
 
     disk_pressure_crit_pct: int | None = None
     """#424 / §A63 — disk-usage % AT-OR-ABOVE which /healthz status
     transitions degraded -> critical. None = use rotation.py
-    DEFAULT_DISK_CRIT_PCT (95). pause-requests mode flips
+    DEFAULT_DISK_CRIT_PCT (98). pause-requests mode flips
     refuse_requests at this boundary."""
 
     disk_pressure_emergency_pct: int | None = None
     """#424 / §A63 — disk-usage % AT-OR-ABOVE which /healthz status
     transitions critical -> emergency. None = use disk_pressure
-    DEFAULT_DISK_EMERGENCY_PCT (98). All modes treat emergency the
+    DEFAULT_DISK_EMERGENCY_PCT (99). All modes treat emergency the
     same: surface in /healthz + emit admin-action transition; the
     mode-specific reaction is the same as critical."""
+
+    disk_pressure_warn_free_bytes: int | None = None
+    """#461 — absolute-free-space floor for the warn threshold. Status
+    transitions to "degraded" when free bytes on the audit-log filesystem
+    drop to or below this value. None = use rotation.py
+    DEFAULT_DISK_WARN_FREE_BYTES (1 GiB). 0 disables the absolute-free
+    check for the warn tier."""
+
+    disk_pressure_crit_free_bytes: int | None = None
+    """#461 — absolute-free-space floor for the critical threshold. Status
+    transitions to "critical" when free bytes drop to or below this value.
+    None = use rotation.py DEFAULT_DISK_CRIT_FREE_BYTES (512 MiB). 0
+    disables the absolute-free check for the critical tier."""
+
+    ignore_disk_pressure: bool = False
+    """#461 — when True, disk-pressure checks are disabled entirely.
+    The bouncer starts with a stderr warning; /healthz shows status="ignored"
+    so monitoring is never silently bypassed."""
     audit_webhook_url: str | None = None
     """HTTPS URL of the operator's audit collector. None disables
     the channel. SSRF-gated at start (RFC1918 / loopback /
@@ -4614,6 +4632,10 @@ async def serve(config: ProxyConfig, *, store: BouncerStore) -> None:
             normalize_disk_pressure_mode,
         )
         from .audit_export.disk_pressure import _resolve_log_dir
+        from .audit_export.rotation import (
+            DEFAULT_DISK_CRIT_FREE_BYTES as _DP_CRIT_FREE,
+            DEFAULT_DISK_WARN_FREE_BYTES as _DP_WARN_FREE,
+        )
         _dp_log_dir = _resolve_log_dir(config.audit_log_path)
         _dp_warn = (
             _DP_WARN if config.disk_pressure_warn_pct is None
@@ -4627,6 +4649,23 @@ async def serve(config: ProxyConfig, *, store: BouncerStore) -> None:
             _DP_EMERG if config.disk_pressure_emergency_pct is None
             else config.disk_pressure_emergency_pct
         )
+        _dp_warn_free = (
+            _DP_WARN_FREE if config.disk_pressure_warn_free_bytes is None
+            else config.disk_pressure_warn_free_bytes
+        )
+        _dp_crit_free = (
+            _DP_CRIT_FREE if config.disk_pressure_crit_free_bytes is None
+            else config.disk_pressure_crit_free_bytes
+        )
+        _dp_ignore = bool(getattr(config, "ignore_disk_pressure", False))
+        if _dp_ignore:
+            import sys as _sys
+            print(
+                "WARNING: disk-pressure check DISABLED via --ignore-disk-pressure. "
+                "Audit-log disk-full protection is off. /healthz will show "
+                "status='ignored'. Only use this flag in development.",
+                file=_sys.stderr,
+            )
         try:
             _dp_mode = normalize_disk_pressure_mode(config.disk_pressure_mode)
         except ValueError as _dp_err:
@@ -4644,6 +4683,9 @@ async def serve(config: ProxyConfig, *, store: BouncerStore) -> None:
             warn_pct=_dp_warn,
             crit_pct=_dp_crit,
             emergency_pct=_dp_emerg,
+            warn_free_bytes=_dp_warn_free,
+            crit_free_bytes=_dp_crit_free,
+            ignore_disk_pressure=_dp_ignore,
         )
         register_disk_pressure_state(disk_pressure_state)
         logger.info(
