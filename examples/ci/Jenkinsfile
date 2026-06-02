@@ -1,0 +1,392 @@
+// examples/ci/Jenkinsfile
+//
+// Reference Jenkins Declarative Pipeline — iam-jit + ibounce bouncer
+// protection for AI agent runs that make AWS API calls.
+//
+// Status: Recipe written + manually walked through (NOT tenant-validated).
+// Compatible per Jenkins Declarative Pipeline documented syntax (Jenkins 2.387+).
+//
+// Usage:
+//   Copy this file to your repo root (or any path) and point a Jenkins
+//   Pipeline job at it via "Pipeline script from SCM".
+//   Adjust: AWS credentials binding, agent run step, mode, and port.
+//
+// AWS OIDC:
+//   Jenkins supports AWS Web Identity federation via the "withAWS" step
+//   (aws-credentials plugin) or via a direct "withCredentials" binding.
+//   See §OIDC CONFIG below. Never store long-lived access keys in
+//   Jenkins credentials if OIDC is available in your environment.
+//
+// Per [[uat-tests-setup-end-to-end]]: the decisions_count assertion step
+// is REQUIRED — builds must fail if traffic did not route through ibounce.
+//
+// Refs:
+//   https://www.jenkins.io/doc/book/pipeline/syntax/
+//   https://plugins.jenkins.io/aws-credentials/
+//   https://www.jenkins.io/doc/pipeline/steps/credentials-binding/
+
+pipeline {
+
+    // ── Agent ────────────────────────────────────────────────────────────────
+    // Run on any Linux agent with internet access.
+    // For Docker-based execution, replace with:
+    //   agent { docker { image 'ubuntu:22.04' } }
+    agent { label 'linux' }
+
+    // ── Options ──────────────────────────────────────────────────────────────
+    options {
+        // Fail the build if it runs for more than 30 minutes.
+        timeout(time: 30, unit: 'MINUTES')
+        // Keep the last 10 builds (audit logs are stored as artifacts).
+        buildDiscarder(logRotator(numToKeepStr: '10'))
+        // Colour ANSI output in build log.
+        ansiColor('xterm')
+        timestamps()
+    }
+
+    // ── Parameters ───────────────────────────────────────────────────────────
+    parameters {
+        string(
+            name: 'IAM_JIT_VERSION',
+            defaultValue: 'latest',
+            description: 'iam-jit pip version. Use "latest" or pin to e.g. "1.0.3".'
+        )
+        choice(
+            name: 'IAM_JIT_MODE',
+            choices: ['discovery', 'cooperative', 'strict'],
+            description: '''\
+discovery   — observe + log only; zero denies (safe default)
+cooperative — agent receives deny rationale; may retry scoped
+strict      — maximalist deny; use for prod / regulated envs'''
+        )
+        string(
+            name: 'IBOUNCE_PORT',
+            defaultValue: '8767',
+            description: 'Port ibounce listens on. Change if 8767 is in use.'
+        )
+    }
+
+    // ── Environment ──────────────────────────────────────────────────────────
+    environment {
+        // Go binary dir added to PATH so go install'd bouncers are reachable.
+        GOPATH   = "${WORKSPACE}/.go"
+        GO_LOCAL = '/usr/local/go/bin'
+        AUDIT_LOG = "${WORKSPACE}/iam-jit-audit.jsonl"
+
+        // Translate iam-jit mode names to ibounce native mode names.
+        // (handled in the start-ibounce shell function below)
+    }
+
+    stages {
+
+        // ── Stage 1: Setup runtimes ────────────────────────────────────────
+        stage('Setup: Python + Go') {
+            steps {
+                sh '''#!/usr/bin/env bash
+                    set -euo pipefail
+
+                    # ── Python 3.12+ ──────────────────────────────────────
+                    if python3 --version 2>/dev/null | grep -qE 'Python 3\\.(1[2-9]|[2-9][0-9])'; then
+                        echo "Python 3.12+ already available: $(python3 --version)"
+                    else
+                        echo "Installing Python 3.12 ..."
+                        sudo apt-get update -qq
+                        sudo apt-get install -y python3.12 python3.12-venv python3-pip
+                    fi
+
+                    # ── Go 1.22+ ──────────────────────────────────────────
+                    if /usr/local/go/bin/go version 2>/dev/null | grep -qE "go1\\.(2[2-9]|[3-9][0-9])"; then
+                        echo "Go 1.22+ already available: $(/usr/local/go/bin/go version)"
+                    else
+                        GO_VERSION="1.22.5"
+                        echo "Installing Go ${GO_VERSION} ..."
+                        wget -q "https://go.dev/dl/go${GO_VERSION}.linux-amd64.tar.gz" \\
+                            -O /tmp/go.tar.gz
+                        sudo tar -C /usr/local -xzf /tmp/go.tar.gz
+                        rm /tmp/go.tar.gz
+                    fi
+                    export PATH="${GO_LOCAL}:${GOPATH}/bin:${PATH}"
+                    go version
+                '''
+            }
+        }
+
+        // ── Stage 2: Install iam-jit ───────────────────────────────────────
+        stage('Install iam-jit') {
+            steps {
+                sh '''#!/usr/bin/env bash
+                    set -euo pipefail
+                    export PATH="${GO_LOCAL}:${GOPATH}/bin:${PATH}"
+
+                    VERSION="${IAM_JIT_VERSION}"
+                    if [ "$VERSION" = "latest" ]; then
+                        pip_spec="iam-jit"
+                    else
+                        pip_spec="iam-jit==${VERSION}"
+                    fi
+
+                    echo "Installing ${pip_spec} ..."
+                    # Try PyPI first; fall back to GitHub source.
+                    if ! pip install --quiet "${pip_spec}" 2>/dev/null; then
+                        echo "PyPI install failed; falling back to GitHub source ..."
+                        pip install --quiet \\
+                            "git+https://github.com/trsreagan3/iam-jit.git@main#egg=iam-jit"
+                    fi
+
+                    # Fail loud — per [[ibounce-honest-positioning]] no silent degradation.
+                    if ! command -v iam-jit &>/dev/null; then
+                        echo "ERROR: iam-jit binary not found on PATH after pip install."
+                        exit 1
+                    fi
+                    echo "iam-jit installed: $(iam-jit --version 2>/dev/null || echo unknown)"
+
+                    # Verify ibounce entry-point shipped with pip package.
+                    if ! command -v ibounce &>/dev/null; then
+                        echo "ERROR: ibounce not found on PATH after iam-jit install."
+                        exit 1
+                    fi
+                    echo "ibounce OK: $(ibounce --version 2>/dev/null || echo version-unknown)"
+                '''
+            }
+        }
+
+        // ── Stage 3: Install Go bouncers (optional) ───────────────────────
+        // Remove this stage if you only need ibounce (AWS audit).
+        stage('Install Go bouncers') {
+            steps {
+                sh '''#!/usr/bin/env bash
+                    set -euo pipefail
+                    export PATH="${GO_LOCAL}:${GOPATH}/bin:${PATH}"
+                    mkdir -p "${GOPATH}"
+
+                    for pkg in \\
+                        "github.com/trsreagan3/kbouncer/cmd/kbouncer@latest" \\
+                        "github.com/trsreagan3/dbounce/cmd/dbounce@latest" \\
+                        "github.com/trsreagan3/gbounce/cmd/gbounce@latest"
+                    do
+                        echo "go install ${pkg} ..."
+                        go install "${pkg}" 2>&1 \\
+                            && echo "  installed: $(basename $(echo $pkg | cut -d@ -f1))" \\
+                            || echo "  WARNING: install failed (non-blocking)"
+                    done
+                '''
+            }
+        }
+
+        // ── Stage 4: iam-jit init ──────────────────────────────────────────
+        stage('iam-jit init') {
+            steps {
+                sh '''#!/usr/bin/env bash
+                    set -euo pipefail
+                    export PATH="${GO_LOCAL}:${GOPATH}/bin:${PATH}"
+
+                    iam-jit init \\
+                        --non-interactive \\
+                        --harness=none \\
+                        --mode="${IAM_JIT_MODE}" \\
+                        --bouncers=ibounce \\
+                        --shape=local-solo \\
+                        --skip-mcp-install \\
+                        --no-doctor-check \\
+                        --overwrite \\
+                        2>&1 || {
+                            rc=$?
+                            echo "ERROR: iam-jit init exited ${rc}. Install aborted."
+                            exit $rc
+                        }
+                    echo "iam-jit init completed."
+                '''
+            }
+        }
+
+        // ── Stage 5: Start ibounce ────────────────────────────────────────
+        stage('Start ibounce') {
+            steps {
+                sh '''#!/usr/bin/env bash
+                    set -euo pipefail
+                    export PATH="${GO_LOCAL}:${GOPATH}/bin:${PATH}"
+
+                    touch "${AUDIT_LOG}"
+
+                    # Translate mode names.
+                    case "${IAM_JIT_MODE}" in
+                        discovery)   IBOUNCE_MODE="cooperative" ;;
+                        cooperative) IBOUNCE_MODE="cooperative" ;;
+                        strict)      IBOUNCE_MODE="transparent" ;;
+                        *)           IBOUNCE_MODE="cooperative" ;;
+                    esac
+
+                    echo "Starting ibounce on :${IBOUNCE_PORT} (mode=${IBOUNCE_MODE}) ..."
+                    ibounce run \\
+                        --port "${IBOUNCE_PORT}" \\
+                        --mode "${IBOUNCE_MODE}" \\
+                        --audit-log-path "${AUDIT_LOG}" \\
+                        > "${WORKSPACE}/ibounce.log" 2>&1 &
+                    echo $! > "${WORKSPACE}/ibounce.pid"
+                    echo "ibounce PID=$(cat ${WORKSPACE}/ibounce.pid)"
+
+                    # Wait up to 15s.
+                    max_wait=15; waited=0
+                    while [ $waited -lt $max_wait ]; do
+                        if curl -sf "http://127.0.0.1:${IBOUNCE_PORT}/healthz" >/dev/null 2>&1; then
+                            echo "ibounce is up."
+                            break
+                        fi
+                        sleep 1; waited=$((waited + 1))
+                    done
+                    if [ $waited -ge $max_wait ]; then
+                        echo "ERROR: ibounce did not respond within ${max_wait}s."
+                        cat "${WORKSPACE}/ibounce.log" || true
+                        exit 1
+                    fi
+
+                    # Capture baseline decisions_count.
+                    BASELINE=$(curl -sf "http://127.0.0.1:${IBOUNCE_PORT}/healthz" \\
+                        | python3 -c "import sys,json; print(json.load(sys.stdin).get('decisions_count',0))")
+                    echo "baseline decisions_count=${BASELINE}"
+                    echo "${BASELINE}" > "${WORKSPACE}/ibounce-baseline.txt"
+
+                    # Export env vars for downstream stages via a sourced file.
+                    cat > "${WORKSPACE}/ibounce-env.sh" <<EOF
+export AWS_ENDPOINT_URL=http://127.0.0.1:${IBOUNCE_PORT}
+export IAM_JIT_AUDIT_LOG=${AUDIT_LOG}
+export IBOUNCE_BASELINE=${BASELINE}
+export IBOUNCE_PORT=${IBOUNCE_PORT}
+EOF
+                    echo "ibounce env vars written to ibounce-env.sh"
+                '''
+            }
+        }
+
+        // ── Stage 6: Configure AWS credentials ────────────────────────────
+        //
+        // OIDC CONFIG — choose one option:
+        //
+        // Option A: AWS OIDC via withAWS step (aws-credentials plugin ≥ 1.71):
+        //   Requires the "AWS Assume Role Binding" credential type or the
+        //   "withAWS" DSL from the aws-credentials plugin.
+        //
+        // Option B: withCredentials + AWS Web Identity:
+        //   Store the OIDC provider thumbprint + role ARN in Jenkins credentials
+        //   and use the AWS CLI to exchange the token for temporary credentials.
+        //
+        // Both options are shown as comments below. Uncomment the one that
+        // matches your Jenkins credential setup.
+        //
+        stage('Configure AWS credentials') {
+            steps {
+                // ── Option A: withAWS (preferred) ────────────────────────
+                // withAWS(role: env.AWS_ROLE_ARN, region: 'us-east-1') {
+                //     sh 'aws sts get-caller-identity'
+                // }
+                //
+                // ── Option B: withCredentials + manual STS call ──────────
+                // withCredentials([
+                //     string(credentialsId: 'aws-role-arn', variable: 'AWS_ROLE_ARN'),
+                //     string(credentialsId: 'aws-oidc-token', variable: 'OIDC_TOKEN')
+                // ]) {
+                //     sh '''#!/usr/bin/env bash
+                //         aws sts assume-role-with-web-identity \
+                //             --role-arn "${AWS_ROLE_ARN}" \
+                //             --role-session-name "jenkins-${BUILD_NUMBER}" \
+                //             --web-identity-token "${OIDC_TOKEN}" \
+                //             --duration-seconds 3600 \
+                //             > /tmp/aws-creds.json
+                //         export AWS_ACCESS_KEY_ID=$(jq -r .Credentials.AccessKeyId /tmp/aws-creds.json)
+                //         export AWS_SECRET_ACCESS_KEY=$(jq -r .Credentials.SecretAccessKey /tmp/aws-creds.json)
+                //         export AWS_SESSION_TOKEN=$(jq -r .Credentials.SessionToken /tmp/aws-creds.json)
+                //     '''
+                // }
+                echo 'AWS credential configuration: uncomment one option above.'
+            }
+        }
+
+        // ── Stage 7: Run agent ─────────────────────────────────────────────
+        stage('Run agent') {
+            steps {
+                sh '''#!/usr/bin/env bash
+                    set -euo pipefail
+                    export PATH="${GO_LOCAL}:${GOPATH}/bin:${PATH}"
+
+                    # Source ibounce env vars (AWS_ENDPOINT_URL, etc.)
+                    source "${WORKSPACE}/ibounce-env.sh"
+                    echo "AWS_ENDPOINT_URL=${AWS_ENDPOINT_URL}"
+
+                    # Replace this with your actual agent entrypoint, e.g.:
+                    #   python -m my_package.agent --task "summarize s3://my-bucket/report.txt"
+                    aws sts get-caller-identity --output json 2>&1 || true
+                '''
+            }
+        }
+
+        // ── Stage 8: Assert decisions_count ticked ─────────────────────────
+        stage('Assert ibounce audited traffic') {
+            steps {
+                sh '''#!/usr/bin/env bash
+                    set -euo pipefail
+                    source "${WORKSPACE}/ibounce-env.sh"
+
+                    AFTER=$(curl -sf "http://127.0.0.1:${IBOUNCE_PORT}/healthz" \\
+                        | python3 -c "import sys,json; print(json.load(sys.stdin).get('decisions_count',0))")
+                    DELTA=$((AFTER - IBOUNCE_BASELINE))
+                    echo "decisions_count: baseline=${IBOUNCE_BASELINE}  after=${AFTER}  delta=${DELTA}"
+
+                    if [ "${DELTA}" -le 0 ]; then
+                        echo "ERROR: decisions_count did not tick."
+                        echo "  AWS traffic may not be routing through ibounce."
+                        echo "  Check that AWS_ENDPOINT_URL=${AWS_ENDPOINT_URL} is set."
+                        echo "--- ibounce log ---"
+                        cat "${WORKSPACE}/ibounce.log" || true
+                        exit 1
+                    fi
+                    echo "PASS: decisions_count delta=${DELTA} (ibounce audited real traffic)."
+                '''
+            }
+        }
+
+        // ── Stage 9: Posture snapshot (informational) ─────────────────────
+        stage('Posture snapshot') {
+            steps {
+                sh '''#!/usr/bin/env bash
+                    export PATH="${GO_LOCAL}:${GOPATH}/bin:${PATH}"
+                    iam-jit posture --json 2>/dev/null \\
+                        | python3 -m json.tool \\
+                        || iam-jit posture 2>&1 \\
+                        || echo "(posture unavailable)"
+                '''
+            }
+        }
+    }
+
+    // ── Post actions ─────────────────────────────────────────────────────────
+    post {
+        always {
+            // Archive audit log + ibounce log for every build.
+            archiveArtifacts(
+                artifacts: 'iam-jit-audit.jsonl,ibounce.log',
+                allowEmptyArchive: true
+            )
+            // JUnit-compatible test report (when iam-jit --format junit is used):
+            // junit 'junit-report.xml'
+            echo 'Build complete. Audit logs archived.'
+        }
+        failure {
+            sh '''#!/usr/bin/env bash
+                echo "=== ibounce log on failure ==="
+                cat "${WORKSPACE}/ibounce.log" 2>/dev/null || echo "(log not found)"
+                echo "=== Last 5 audit entries ==="
+                tail -5 "${AUDIT_LOG:-${WORKSPACE}/iam-jit-audit.jsonl}" 2>/dev/null || true
+            '''
+        }
+        cleanup {
+            // Kill ibounce so the agent process doesn't linger between builds.
+            sh '''#!/usr/bin/env bash
+                if [ -f "${WORKSPACE}/ibounce.pid" ]; then
+                    pid=$(cat "${WORKSPACE}/ibounce.pid")
+                    echo "Stopping ibounce PID=${pid} ..."
+                    kill "${pid}" 2>/dev/null || true
+                fi
+            '''
+        }
+    }
+}

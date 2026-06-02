@@ -14,6 +14,9 @@ For wiring the MCP surface into non-Claude-Code clients, see
 For adding ibounce to a Docker-based Claude Code (or any agent) setup, see
 [`DOCKER-CLAUDE-INTEGRATION.md`](DOCKER-CLAUDE-INTEGRATION.md).
 
+For adding ibounce to CI/CD pipelines (GitLab CI, CircleCI, Jenkins, Buildkite,
+GitHub Actions), see [`CI-RECIPES.md`](CI-RECIPES.md).
+
 ---
 
 ## 1. Summary

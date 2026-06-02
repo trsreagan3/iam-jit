@@ -1,0 +1,287 @@
+# examples/ci/buildkite-pipeline.yml
+#
+# Reference Buildkite pipeline — iam-jit + ibounce bouncer protection
+# for AI agent runs that make AWS API calls.
+#
+# Status: Recipe written + manually walked through (NOT tenant-validated).
+# Compatible per Buildkite's documented pipeline.yml shape (Buildkite Agent 3+).
+#
+# Usage:
+#   1. Upload this file as your pipeline definition (or paste steps in the UI).
+#   2. Add agent tags to route to the right agent pool (see "agents:" below).
+#   3. Set environment variables in your pipeline or agent environment:
+#        IAM_JIT_VERSION   — pip version, default "latest"
+#        IAM_JIT_MODE      — discovery | cooperative | strict, default "discovery"
+#        IBOUNCE_PORT      — default 8767
+#        AWS_ROLE_ARN      — ARN for OIDC-based AWS assume-role (see §OIDC)
+#        AWS_DEFAULT_REGION — default "us-east-1"
+#
+# Per [[uat-tests-setup-end-to-end]]: the decisions_count assertion step
+# is REQUIRED — builds must fail if traffic did not route through ibounce.
+#
+# Agent requirements:
+#   - Linux (x86-64 or arm64)
+#   - Python 3.12+ or apt-installable
+#   - Go 1.22+ or network access to download
+#   - curl, wget, jq on PATH
+#
+# OIDC notes (Buildkite):
+#   Buildkite agents can vend OIDC tokens via the buildkite-agent oidc command
+#   (Buildkite Agent 3.71+). Use this to exchange a token for AWS temporary
+#   credentials. See: https://buildkite.com/docs/agent/v3/cli-oidc
+#
+# Refs:
+#   https://buildkite.com/docs/pipelines/defining-steps
+#   https://buildkite.com/docs/agent/v3/cli-oidc
+#   https://buildkite.com/docs/pipelines/environment-variables
+
+env:
+  # Default values; override in your pipeline or agent environment.
+  IAM_JIT_VERSION: "${IAM_JIT_VERSION:-latest}"
+  IAM_JIT_MODE: "${IAM_JIT_MODE:-discovery}"
+  IBOUNCE_PORT: "${IBOUNCE_PORT:-8767}"
+  GOPATH: "${BUILDKITE_BUILD_CHECKOUT_PATH}/.go"
+  IAM_JIT_AUDIT_LOG: "${BUILDKITE_BUILD_CHECKOUT_PATH}/iam-jit-audit.jsonl"
+
+steps:
+
+  # ── Step 1: Install Python 3.12+ + Go 1.22+ ──────────────────────────────
+  - label: ":python: :golang: Setup runtimes"
+    key: setup-runtimes
+    agents:
+      queue: default
+      # Add agent tags here to route to a specific agent pool, e.g.:
+      # os: linux
+      # arch: amd64
+    commands:
+      - |
+        #!/usr/bin/env bash
+        set -euo pipefail
+
+        # ── Python 3.12+ ───────────────────────────────────────────────────
+        if python3 --version 2>/dev/null | grep -qE 'Python 3\.(1[2-9]|[2-9][0-9])'; then
+          echo "Python 3.12+ already available: $(python3 --version)"
+        else
+          echo "Installing Python 3.12 ..."
+          sudo apt-get update -qq
+          sudo apt-get install -y python3.12 python3.12-venv python3-pip
+        fi
+
+        # ── Go 1.22+ ───────────────────────────────────────────────────────
+        GO_LOCAL=/usr/local/go/bin
+        if ${GO_LOCAL}/go version 2>/dev/null | grep -qE "go1\.(2[2-9]|[3-9][0-9])"; then
+          echo "Go 1.22+ already available: $(${GO_LOCAL}/go version)"
+        else
+          GO_VERSION="1.22.5"
+          echo "Installing Go ${GO_VERSION} ..."
+          wget -q "https://go.dev/dl/go${GO_VERSION}.linux-amd64.tar.gz" \
+            -O /tmp/go.tar.gz
+          sudo tar -C /usr/local -xzf /tmp/go.tar.gz
+          rm /tmp/go.tar.gz
+        fi
+        export PATH="${GO_LOCAL}:${GOPATH}/bin:${PATH}"
+        go version
+
+  # ── Step 2: Install iam-jit + bouncers ────────────────────────────────────
+  - label: ":shield: Install iam-jit + ibounce"
+    key: install-iam-jit
+    depends_on: setup-runtimes
+    agents:
+      queue: default
+    commands:
+      - |
+        #!/usr/bin/env bash
+        set -euo pipefail
+        export PATH="/usr/local/go/bin:${GOPATH}/bin:${PATH}"
+        mkdir -p "${GOPATH}"
+
+        # ── iam-jit pip install ────────────────────────────────────────────
+        if [ "${IAM_JIT_VERSION}" = "latest" ]; then
+          pip_spec="iam-jit"
+        else
+          pip_spec="iam-jit==${IAM_JIT_VERSION}"
+        fi
+        echo "Installing ${pip_spec} ..."
+        if ! pip install --quiet "${pip_spec}" 2>/dev/null; then
+          echo "PyPI install failed; falling back to GitHub source ..."
+          pip install --quiet \
+            "git+https://github.com/trsreagan3/iam-jit.git@main#egg=iam-jit"
+        fi
+        # Fail loud — per [[ibounce-honest-positioning]] no silent degradation.
+        if ! command -v iam-jit &>/dev/null; then
+          echo "ERROR: iam-jit binary not found on PATH after pip install."
+          exit 1
+        fi
+        echo "iam-jit: $(iam-jit --version 2>/dev/null || echo unknown)"
+
+        # ibounce ships as Python entry-point inside iam-jit.
+        if ! command -v ibounce &>/dev/null; then
+          echo "ERROR: ibounce not found on PATH after iam-jit install."
+          exit 1
+        fi
+        echo "ibounce: $(ibounce --version 2>/dev/null || echo version-unknown)"
+
+        # ── Optional: install Go bouncers ─────────────────────────────────
+        # Remove the lines below if you only need ibounce (AWS audit only).
+        for pkg in \
+          "github.com/trsreagan3/kbouncer/cmd/kbouncer@latest" \
+          "github.com/trsreagan3/dbounce/cmd/dbounce@latest" \
+          "github.com/trsreagan3/gbounce/cmd/gbounce@latest"
+        do
+          echo "go install ${pkg} ..."
+          go install "${pkg}" 2>&1 \
+            && echo "  installed $(basename $(echo ${pkg} | cut -d@ -f1))" \
+            || echo "  WARNING: install failed (non-blocking)"
+        done
+
+  # ── Step 3: iam-jit init ──────────────────────────────────────────────────
+  - label: ":gear: iam-jit init"
+    key: iam-jit-init
+    depends_on: install-iam-jit
+    agents:
+      queue: default
+    commands:
+      - |
+        #!/usr/bin/env bash
+        set -euo pipefail
+        export PATH="/usr/local/go/bin:${GOPATH}/bin:${PATH}"
+
+        iam-jit init \
+          --non-interactive \
+          --harness=none \
+          --mode="${IAM_JIT_MODE}" \
+          --bouncers=ibounce \
+          --shape=local-solo \
+          --skip-mcp-install \
+          --no-doctor-check \
+          --overwrite \
+          2>&1 || {
+            rc=$?
+            echo "ERROR: iam-jit init exited ${rc}. Install aborted."
+            exit $rc
+          }
+        echo "iam-jit init completed."
+
+  # ── Step 4: Agent run (start ibounce + run agent + assert audit) ──────────
+  #
+  # This step runs in a single shell so ibounce (background process) persists
+  # across sub-commands. Buildkite runs each "commands:" entry via bash -c,
+  # so we use a single inline script rather than separate list items.
+  - label: ":robot_face: Agent run (ibounce-audited)"
+    key: agent-run
+    depends_on: iam-jit-init
+    agents:
+      queue: default
+    commands:
+      - |
+        #!/usr/bin/env bash
+        set -euo pipefail
+        export PATH="/usr/local/go/bin:${GOPATH}/bin:${PATH}"
+
+        # ── 1. Configure AWS credentials ─────────────────────────────────
+        #
+        # OIDC via Buildkite Agent (Agent 3.71+):
+        #
+        # OIDC_TOKEN=$(buildkite-agent oidc request-token \
+        #   --audience sts.amazonaws.com)
+        # CREDS=$(aws sts assume-role-with-web-identity \
+        #   --role-arn "${AWS_ROLE_ARN}" \
+        #   --role-session-name "buildkite-${BUILDKITE_BUILD_NUMBER}" \
+        #   --web-identity-token "${OIDC_TOKEN}" \
+        #   --duration-seconds 3600)
+        # export AWS_ACCESS_KEY_ID=$(echo "${CREDS}" | jq -r .Credentials.AccessKeyId)
+        # export AWS_SECRET_ACCESS_KEY=$(echo "${CREDS}" | jq -r .Credentials.SecretAccessKey)
+        # export AWS_SESSION_TOKEN=$(echo "${CREDS}" | jq -r .Credentials.SessionToken)
+        # export AWS_DEFAULT_REGION="${AWS_DEFAULT_REGION:-us-east-1}"
+        #
+        # Alternatively, export AWS_ACCESS_KEY_ID / AWS_SECRET_ACCESS_KEY
+        # in the Buildkite pipeline environment variables (Settings → Environment).
+        echo "AWS credentials: configure above or set in pipeline environment."
+
+        # ── 2. Start ibounce ─────────────────────────────────────────────
+        touch "${IAM_JIT_AUDIT_LOG}"
+
+        case "${IAM_JIT_MODE}" in
+          discovery)   IBOUNCE_MODE="cooperative" ;;
+          cooperative) IBOUNCE_MODE="cooperative" ;;
+          strict)      IBOUNCE_MODE="transparent" ;;
+          *)           IBOUNCE_MODE="cooperative" ;;
+        esac
+
+        echo "Starting ibounce on :${IBOUNCE_PORT} (mode=${IBOUNCE_MODE}) ..."
+        ibounce run \
+          --port "${IBOUNCE_PORT}" \
+          --mode "${IBOUNCE_MODE}" \
+          --audit-log-path "${IAM_JIT_AUDIT_LOG}" \
+          > "${BUILDKITE_BUILD_CHECKOUT_PATH}/ibounce.log" 2>&1 &
+        IBOUNCE_PID=$!
+        echo "ibounce PID=${IBOUNCE_PID}"
+
+        # Wait up to 15s for ibounce to come up.
+        max_wait=15; waited=0
+        while [ $waited -lt $max_wait ]; do
+          if curl -sf "http://127.0.0.1:${IBOUNCE_PORT}/healthz" >/dev/null 2>&1; then
+            echo "ibounce is up."
+            break
+          fi
+          sleep 1; waited=$((waited + 1))
+        done
+        if [ $waited -ge $max_wait ]; then
+          echo "ERROR: ibounce did not respond on :${IBOUNCE_PORT} within ${max_wait}s."
+          cat "${BUILDKITE_BUILD_CHECKOUT_PATH}/ibounce.log" || true
+          exit 1
+        fi
+
+        # Capture baseline decisions_count.
+        BASELINE=$(curl -sf "http://127.0.0.1:${IBOUNCE_PORT}/healthz" \
+          | python3 -c "import sys,json; print(json.load(sys.stdin).get('decisions_count',0))")
+        echo "ibounce baseline decisions_count=${BASELINE}"
+
+        # Wire AWS_ENDPOINT_URL so boto3 / aws CLI routes through ibounce.
+        export AWS_ENDPOINT_URL="http://127.0.0.1:${IBOUNCE_PORT}"
+        echo "AWS_ENDPOINT_URL=${AWS_ENDPOINT_URL}"
+
+        # ── 3. Run your agent ─────────────────────────────────────────────
+        # Replace this with your actual agent entrypoint, e.g.:
+        #   python -m my_package.agent --task "summarize s3://my-bucket/report.txt"
+        aws sts get-caller-identity --output json 2>&1 || true
+
+        # ── 4. Assert decisions_count ticked ─────────────────────────────
+        AFTER=$(curl -sf "http://127.0.0.1:${IBOUNCE_PORT}/healthz" \
+          | python3 -c "import sys,json; print(json.load(sys.stdin).get('decisions_count',0))")
+        DELTA=$((AFTER - BASELINE))
+        echo "decisions_count: baseline=${BASELINE}  after=${AFTER}  delta=${DELTA}"
+
+        if [ "${DELTA}" -le 0 ]; then
+          echo "ERROR: decisions_count did not tick."
+          echo "  AWS traffic may not be routing through ibounce."
+          echo "  Check that AWS_ENDPOINT_URL=${AWS_ENDPOINT_URL} is set."
+          echo "--- ibounce log ---"
+          cat "${BUILDKITE_BUILD_CHECKOUT_PATH}/ibounce.log" || true
+          exit 1
+        fi
+        echo "PASS: decisions_count delta=${DELTA} (ibounce audited real traffic)."
+
+        # ── 5. Stop ibounce cleanly ───────────────────────────────────────
+        kill "${IBOUNCE_PID}" 2>/dev/null || true
+
+    artifact_paths:
+      - "iam-jit-audit.jsonl"
+      - "ibounce.log"
+
+  # ── Step 5: Posture snapshot ──────────────────────────────────────────────
+  - label: ":mag: iam-jit posture"
+    key: posture-snapshot
+    depends_on: agent-run
+    # Run even if agent-run failed, for diagnostic output.
+    allow_dependency_failure: true
+    agents:
+      queue: default
+    commands:
+      - |
+        #!/usr/bin/env bash
+        export PATH="/usr/local/go/bin:${GOPATH}/bin:${PATH}"
+        iam-jit posture --json 2>/dev/null \
+          | python3 -m json.tool \
+          || iam-jit posture 2>&1 \
+          || echo "(posture unavailable)"
