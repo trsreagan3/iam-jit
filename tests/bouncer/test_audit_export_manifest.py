@@ -97,9 +97,11 @@ def test_signed_manifest_ed25519_verifies_externally(tmp_path, keypair_dir):
     files = list_manifests(log_dir)
     assert len(files) == 1
     loaded = load_manifest_file(files[0])
-    # Verify with the manifest's embedded key.
-    ok, reason = verify_manifest(loaded)
+    # Verify with the manifest's embedded key (auto_pin_local=False so
+    # the keypair_dir local key doesn't auto-pin and cloud the trust level).
+    ok, reason, key_trust = verify_manifest(loaded, auto_pin_local=False)
     assert ok, reason
+    assert key_trust == "embedded_unpinned"
     # Verify with the pub key from disk (pinned out-of-band).
     pub_pem = (keypair_dir / "manifest-ed25519.pub").read_bytes()
     pub = serialization.load_pem_public_key(pub_pem)
@@ -109,8 +111,11 @@ def test_signed_manifest_ed25519_verifies_externally(tmp_path, keypair_dir):
     )
     import base64
     pinned_b64 = base64.urlsafe_b64encode(raw).decode("ascii").rstrip("=")
-    ok2, reason2 = verify_manifest(loaded, public_key_override_b64=pinned_b64)
+    ok2, reason2, key_trust2 = verify_manifest(
+        loaded, public_key_override_b64=pinned_b64,
+    )
     assert ok2, reason2
+    assert key_trust2 == "pinned"
     # Tamper with the manifest: the verifier MUST detect it.
     tampered = manifest.__class__(
         schema_version=loaded.schema_version,
@@ -123,7 +128,7 @@ def test_signed_manifest_ed25519_verifies_externally(tmp_path, keypair_dir):
         signature_b64=loaded.signature_b64,
         public_key_b64=loaded.public_key_b64,
     )
-    ok3, reason3 = verify_manifest(tampered)
+    ok3, reason3, _ = verify_manifest(tampered, auto_pin_local=False)
     assert not ok3
     assert reason3 is not None and "tampered" in reason3
 

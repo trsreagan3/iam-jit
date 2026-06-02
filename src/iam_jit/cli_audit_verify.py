@@ -33,6 +33,10 @@ from typing import Any
 import click
 
 from .bouncer.audit_export import (
+    MANIFEST_EMBEDDED_UNPINNED_CAVEAT,
+    MANIFEST_KEY_TRUST_EMBEDDED_UNPINNED,
+    MANIFEST_KEY_TRUST_LOCAL,
+    MANIFEST_KEY_TRUST_PINNED,
     chain_state_path,
     list_manifests,
     load_manifest_file,
@@ -170,9 +174,13 @@ def register_audit_verify_command(audit_group: click.Group) -> click.Command:
         "--public-key",
         "public_key_b64",
         default=None,
-        help="Override the public key embedded in each manifest. "
-             "Use when verifying against a pinned out-of-band key "
-             "(strictest posture). URL-safe base64 (no padding).",
+        help="Pin the expected signing public key (URL-safe base64, no "
+             "padding) to verify manifests against — establishes ISSUER "
+             "trust. When omitted, the verifier auto-pins to the local "
+             "on-disk manifest key (~/.iam-jit/audit-keys) if present; "
+             "if neither is available it falls back to each manifest's "
+             "OWN embedded key, which proves only that SOMEONE signed it, "
+             "NOT that iam-jit did (key_trust=embedded_unpinned).",
     )
     @click.option(
         "--json", "as_json",
@@ -269,6 +277,10 @@ def register_audit_verify_command(audit_group: click.Group) -> click.Command:
             state_file_missing=state_file_missing,
         )
         manifest_findings: list[dict[str, Any]] = []
+        # Manifests that verified ok but with embedded_unpinned key
+        # trust — signature is well-formed but issuer is NOT verified.
+        # Surfaced separately so operators can act without blocking CI.
+        manifest_unpinned_warnings: list[dict[str, Any]] = []
         manifests_checked = 0
         if not skip_manifests:
             for mpath in list_manifests(resolved_dir):
@@ -281,15 +293,32 @@ def register_audit_verify_command(audit_group: click.Group) -> click.Command:
                         "reason": f"load failed: {e}",
                     })
                     continue
-                ok, reason = verify_manifest(
+                ok, reason, key_trust = verify_manifest(
                     m, public_key_override_b64=public_key_b64,
                 )
                 manifests_checked += 1
+                issuer_unverified = (
+                    key_trust == MANIFEST_KEY_TRUST_EMBEDDED_UNPINNED
+                )
                 if not ok:
                     manifest_findings.append({
                         "manifest": str(mpath),
                         "ok": False,
                         "reason": reason or "unknown",
+                        "key_trust": key_trust,
+                        "issuer_unverified": issuer_unverified,
+                        "seq_start": m.seq_start,
+                        "seq_end": m.seq_end,
+                    })
+                elif issuer_unverified:
+                    # Signature ok, but verified only against the
+                    # manifest's own embedded key — issuer unverified.
+                    # Does NOT fail the overall ok; surfaces as a
+                    # warning so operators can promote to local/pinned.
+                    manifest_unpinned_warnings.append({
+                        "manifest": str(mpath),
+                        "key_trust": key_trust,
+                        "caveat": MANIFEST_EMBEDDED_UNPINNED_CAVEAT,
                         "seq_start": m.seq_start,
                         "seq_end": m.seq_end,
                     })
@@ -323,6 +352,7 @@ def register_audit_verify_command(audit_group: click.Group) -> click.Command:
                 "chain": chain_dict,
                 "manifests_checked": manifests_checked,
                 "manifest_findings": manifest_findings,
+                "manifest_unpinned_warnings": manifest_unpinned_warnings,
                 "ok": False,
                 "nothing_checked": True,
                 "warning": warn_reason,
@@ -352,6 +382,7 @@ def register_audit_verify_command(audit_group: click.Group) -> click.Command:
             "chain": chain_dict,
             "manifests_checked": manifests_checked,
             "manifest_findings": manifest_findings,
+            "manifest_unpinned_warnings": manifest_unpinned_warnings,
             "ok": chain_result.ok and not manifest_findings,
             "nothing_checked": False,
         }
@@ -725,9 +756,30 @@ def _emit_human_report(report: dict[str, Any]) -> None:
                 f" (seq {f.get('seq_start')}..{f.get('seq_end')})"
                 if "seq_start" in f else ""
             )
-            click.echo(
-                f"    - {f['manifest']}{seq_info}: {f['reason']}"
+            trust_note = (
+                f" [key_trust={f.get('key_trust')}]"
+                if f.get("key_trust") else ""
             )
+            click.echo(
+                f"    - {f['manifest']}{seq_info}{trust_note}: "
+                f"{f.get('reason', 'unknown')}"
+            )
+    unpinned = report.get("manifest_unpinned_warnings", [])
+    if unpinned:
+        click.echo(
+            f"  manifest issuer warnings: {len(unpinned)} manifest(s) "
+            "verified with key_trust=embedded_unpinned"
+        )
+        for w in unpinned:
+            seq_info = (
+                f" (seq {w.get('seq_start')}..{w.get('seq_end')})"
+                if "seq_start" in w else ""
+            )
+            click.echo(f"    - {w['manifest']}{seq_info}: {w['caveat']}")
+        click.echo(
+            "  WARN: pin the expected key (--public-key) or run on the "
+            "signing host to establish issuer trust (key_trust=local)"
+        )
     if report["ok"]:
         click.echo("RESULT: ok — chain verified clean + all manifests valid")
     else:
