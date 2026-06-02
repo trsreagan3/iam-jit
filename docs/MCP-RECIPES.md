@@ -44,8 +44,8 @@ iam-jit mcp install-claude-code
 {
   "env": {
     "AWS_ENDPOINT_URL": "http://127.0.0.1:8767",
-    "HTTP_PROXY": "http://127.0.0.1:8768",
-    "HTTPS_PROXY": "http://127.0.0.1:8768"
+    "HTTP_PROXY": "http://127.0.0.1:8080",
+    "HTTPS_PROXY": "http://127.0.0.1:8080"
   }
 }
 ```

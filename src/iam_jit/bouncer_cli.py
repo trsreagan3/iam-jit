@@ -6342,8 +6342,8 @@ def mcp_install_devin_cmd() -> None:
             click.echo(f"       {k}={v}")
     else:
         click.echo("       AWS_ENDPOINT_URL=http://<bouncer-host>:8767")
-        click.echo("       HTTP_PROXY=http://<bouncer-host>:8768")
-        click.echo("       HTTPS_PROXY=http://<bouncer-host>:8768")
+        click.echo("       HTTP_PROXY=http://<bouncer-host>:8080")
+        click.echo("       HTTPS_PROXY=http://<bouncer-host>:8080")
         click.secho(
             "  [note] no running bouncers detected locally — substitute "
             "your bouncer host + port above.",
@@ -6359,8 +6359,8 @@ def mcp_install_devin_cmd() -> None:
             click.echo(f"       {k}={v}")
     else:
         click.echo("       AWS_ENDPOINT_URL=http://<bouncer-host>:8767")
-        click.echo("       HTTP_PROXY=http://<bouncer-host>:8768")
-        click.echo("       HTTPS_PROXY=http://<bouncer-host>:8768")
+        click.echo("       HTTP_PROXY=http://<bouncer-host>:8080")
+        click.echo("       HTTPS_PROXY=http://<bouncer-host>:8080")
     click.echo("")
     click.echo(
         "Full recipe: docs/HARNESS-RECIPES/devin.md\n"

@@ -17,9 +17,36 @@ Open corpus, open methodology, open commit history.
 
 ---
 
-## Install
+## Install + add to your agent
 
-### macOS — Homebrew Python (most common dev setup)
+Two steps, both copy-paste. **(1)** install the tool, **(2)** wire it into
+your agent. The wiring commands are **identical across every bouncer** — pick
+your bouncer, the shape never changes.
+
+### 1. Install
+
+Lead with the no-toolchain paths. "From source" is last (it needs git + a
+build step).
+
+**One-line installer (any OS — no toolchain needed):**
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/trsreagan3/iam-jit/main/install.sh | sh
+```
+
+Installs `iam-jit` + `ibounce`. Add Go bouncers in the same run with
+`IAM_JIT_BOUNCERS=ibounce,kbounce,dbounce,gbounce` (see [G8](#go-bouncers-kbounce--dbounce--gbounce) below).
+
+**Homebrew tap (macOS + Linux — recommended for the Go bouncers):**
+
+```bash
+brew tap trsreagan3/tap
+brew install trsreagan3/tap/iam-jit     # iam-jit + ibounce + iam-risk-score
+```
+
+See [docs/INSTALL-HOMEBREW.md](docs/INSTALL-HOMEBREW.md) for the Go bouncers + version pinning.
+
+**macOS — Homebrew Python (most common dev setup):**
 
 ```bash
 brew install pipx
@@ -28,9 +55,7 @@ pipx install git+https://github.com/trsreagan3/iam-jit.git
 
 > **Why pipx?** macOS's Homebrew Python enforces [PEP 668](https://peps.python.org/pep-0668/), which blocks `pip install --user` with an "externally-managed-environment" error. `pipx` manages an isolated venv per tool and is the path PEP 668 itself recommends. The `iam-jit` binary lands in `~/.local/bin/` (automatically on `PATH` after `brew install pipx`).
 
-> **Note:** Will switch to `pipx install iam-jit` once we publish to PyPI (#235).
-
-### Linux — Ubuntu / Debian
+**Linux / Windows / generic Python — `pip install --user`:**
 
 ```bash
 pip install --upgrade pip      # PEP 660 editable needs pip >= 22.3 (#548)
@@ -39,20 +64,65 @@ pip install --user git+https://github.com/trsreagan3/iam-jit.git
 # export PATH="$HOME/.local/bin:$PATH"
 ```
 
-> **Note:** Will switch to `pip install --user iam-jit` once we publish to PyPI (#235).
+> **Note:** the `pipx`/`pip` commands will switch to `pipx install iam-jit` / `pip install --user iam-jit` once we publish to PyPI (#235).
 
-### Windows / generic Python
+**From source (last resort — needs git + build):** see [docs/GETTING-STARTED.md](docs/GETTING-STARTED.md).
+
+After any install, verify your environment:
 
 ```bash
-pip install --user git+https://github.com/trsreagan3/iam-jit.git
+iam-jit doctor install-check        # confirms PATH, console scripts, MCP install support
 ```
 
-> **Note:** Will switch to `pip install --user iam-jit` once we publish to PyPI (#235).
+### 2. Add to your agent / Claude session
+
+Two ways to wire a bouncer into an agent. **MCP mode is recommended** — one
+command writes the config; the **identical** subcommand exists for every agent
+and every bouncer.
+
+**MCP mode (recommended):**
+
+```bash
+ibounce mcp install-claude-code     # Claude Code
+ibounce mcp install-cursor          # Cursor
+ibounce mcp install-codex           # Codex (prints snippet + config path)
+ibounce mcp install-devin           # Devin (prints cloud-agent wiring recipe)
+```
+
+`kbounce` exposes the same `mcp install-*` subcommands for the Kubernetes gate.
+For any other MCP client, see [docs/MCP-RECIPES.md](docs/MCP-RECIPES.md).
+
+**Transparent proxy mode (one env var):** point the agent's AWS SDK at the
+running ibounce proxy — no MCP host required.
+
+```bash
+export AWS_ENDPOINT_URL=http://127.0.0.1:8767     # ibounce
+```
+
+After starting the bouncer you can let the CLI emit the right exports for
+whatever is running: `eval "$(iam-jit shellinit)"`.
+
+**Each bouncer wires through a different protocol** (AWS SDK, HTTPS proxy,
+kubeconfig, SQL conn-string). The exact value for each is in
+**[docs/WIRING-AN-AGENT.md](docs/WIRING-AN-AGENT.md)** (per-protocol table +
+[canonical port table](docs/WIRING-AN-AGENT.md#canonical-port-table)).
+
+**In Docker (Claude-in-container):** see
+[docs/DOCKER-CLAUDE-INTEGRATION.md](docs/DOCKER-CLAUDE-INTEGRATION.md) — in-container
++ sidecar patterns for ibounce and the Go bouncers.
 
 ### Go bouncers (kbounce / dbounce / gbounce)
 
 Optional — only needed if you use K8s, database, or generic-HTTP interception.
-Requires Go ≥ 1.26 (auto-fetched via GOTOOLCHAIN on Go 1.21+; older runtimes need toolchain access or a fresh Go install — see [go.dev/dl](https://go.dev/dl/)).
+
+**macOS / Linux — Homebrew tap (no Go toolchain needed):**
+
+```bash
+brew tap trsreagan3/tap
+brew install trsreagan3/tap/kbounce trsreagan3/tap/dbounce trsreagan3/tap/gbounce
+```
+
+**With a Go toolchain (Go ≥ 1.26; auto-fetched via GOTOOLCHAIN on Go 1.21+; older runtimes need toolchain access or a fresh Go install — see [go.dev/dl](https://go.dev/dl/)):**
 
 ```bash
 go install github.com/trsreagan3/kbouncer/cmd/kbounce@latest
@@ -87,8 +157,9 @@ All four share the same deterministic scoring engine. Open source under Apache 2
 ## Read this next
 
 - **[docs/FEATURES.md](docs/FEATURES.md)** — full feature catalog (every product, every shipping flag, the v1.0 platform-features cluster, what's NOT in iam-jit and why)
-- **[docs/GETTING-STARTED.md](docs/GETTING-STARTED.md)** — self-host MVP deploy walkthrough (git clone to working endpoint in ~5 minutes)
-- **[docs/DOCKER-CLAUDE-INTEGRATION.md](docs/DOCKER-CLAUDE-INTEGRATION.md)** — add ibounce to a Claude-in-Docker setup (Pattern A: in-container; Pattern B: sidecar)
+- **[docs/GETTING-STARTED.md](docs/GETTING-STARTED.md)** — install (pipx / one-liner / Homebrew) + self-host MVP deploy walkthrough (git clone to working endpoint in ~5 minutes)
+- **[docs/WIRING-AN-AGENT.md](docs/WIRING-AN-AGENT.md)** — wire any agent through any bouncer (per-protocol table + canonical port table for ibounce / gbounce / kbounce / dbounce)
+- **[docs/DOCKER-CLAUDE-INTEGRATION.md](docs/DOCKER-CLAUDE-INTEGRATION.md)** — add any bouncer to a Claude-in-container setup (in-container, sidecar, + the Go bouncers)
 - **[docs/GITHUB-ACTION-RECIPE.md](docs/GITHUB-ACTION-RECIPE.md)** — first-class GitHub Actions recipe (`trsreagan3/iam-jit-action@v1`)
 - **[docs/CI-RECIPES.md](docs/CI-RECIPES.md)** — reference recipes for GitLab CI, CircleCI, Jenkins, and Buildkite
 - **[docs/README.md](docs/README.md)** — TOC for the ~100 markdown files in `docs/`; tells you which to read by role (operator / developer / reviewer)
