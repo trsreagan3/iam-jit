@@ -3771,7 +3771,8 @@ def _parse_duration(raw: str) -> int:
 @click.option(
     "--mode",
     type=click.Choice(
-        ["cooperative", "transparent", "plan-capture"], case_sensitive=False,
+        ["cooperative", "transparent", "plan-capture", "ghost"],
+        case_sensitive=False,
     ),
     default="cooperative",
     show_default=True,
@@ -3782,10 +3783,17 @@ def _parse_duration(raw: str) -> int:
          "synthetic SDK-shaped success — NEVER forwarded to AWS, "
          "so the operator gets a recorded call graph the agent "
          "intended to make ('terraform plan' for any AWS-touching "
-         "agent task). Pick cooperative for solo-dev iteration "
-         "speed; transparent for locked-down environments; "
-         "plan-capture to preview an agent flow before any state "
-         "change. Switch later by restarting with the other flag.",
+         "agent task). ghost (#728, a.k.a. shadow): READS forward "
+         "to real AWS (agent sees real state) but WRITES are NEVER "
+         "forwarded — they're captured as a would-mutate diff + "
+         "returned-with-synthetic so the agent keeps going; review "
+         "with `ibounce shadow diff SID`. The safest dry-run of an "
+         "agent against real infra (zero blast radius). Pick "
+         "cooperative for solo-dev iteration speed; transparent for "
+         "locked-down environments; plan-capture to preview an agent "
+         "flow before any state change; ghost to run an agent against "
+         "PROD read-only with writes captured. Switch later by "
+         "restarting with the other flag.",
 )
 @click.option(
     "--plan-session-id",
@@ -3795,6 +3803,16 @@ def _parse_duration(raw: str) -> int:
          "with --mode plan-capture. Omit to mint a fresh "
          "`plan-YYYYMMDDTHHMMSSZ-...` id at startup (the recommended "
          "default — every serve() invocation gets its own session).",
+)
+@click.option(
+    "--ghost-session-id",
+    "ghost_session_id",
+    default=None,
+    help="#728 ghost-run / shadow session id to APPEND captured writes "
+         "to. Only meaningful with --mode ghost. Omit to mint a fresh "
+         "`shadow-YYYYMMDDTHHMMSSZ-...` id at startup (recommended — "
+         "every serve() invocation gets its own session). Review later "
+         "with `ibounce shadow diff <id>`.",
 )
 @click.option(
     "--write-switch-notify",
@@ -4531,6 +4549,7 @@ def run_cmd(
     sync_prompt_timeout: int,
     sync_prompt_default: str,
     mode: str, plan_session_id: str | None,
+    ghost_session_id: str | None,
     write_switch_notify: str,
     default_policy: str,
     profile_name: str | None,
@@ -5123,6 +5142,7 @@ def run_cmd(
         sync_prompt_timeout_seconds=sync_prompt_timeout,
         sync_prompt_default_decision=sync_prompt_default.lower(),
         plan_session_id=plan_session_id,
+        ghost_session_id=ghost_session_id,
         plan_write_switch_notify=write_switch_notify.lower(),
         audit_log_path=audit_log_path,
         audit_log_fsync=audit_log_fsync,
@@ -5243,6 +5263,32 @@ def run_cmd(
                           "PlanCaptureWritesRejected synthetic error",
             }[write_switch_notify.lower()]
             + ")",
+            err=True,
+        )
+
+    # #728 ghost-run / shadow: surface the session id up-front so the
+    # operator can find the captured-write diff later via
+    # `ibounce shadow diff <id>`. serve() installs the in-process slot;
+    # we resolve the id BEFORE serve() starts so the echoed value
+    # matches what gets persisted.
+    if ProxyMode(mode.lower()) == ProxyMode.GHOST:
+        from .ghost_run import (
+            new_session_id as _ghost_new_sid,
+            set_session_id as _ghost_set_sid,
+        )
+        if ghost_session_id:
+            _ghost_set_sid(ghost_session_id)
+            resolved_gid = ghost_session_id
+        else:
+            resolved_gid = _ghost_new_sid()
+        click.echo(
+            f"ghost-run (shadow) session: {resolved_gid}  "
+            f"(review: ibounce shadow diff {resolved_gid})",
+            err=True,
+        )
+        click.echo(
+            "  READS forward to real AWS; WRITES are captured "
+            "(NOT executed) as a would-mutate diff.",
             err=True,
         )
 
@@ -5709,6 +5755,181 @@ def plan_export_cmd(
         click.echo(f"wrote {output_path}", err=True)
     else:
         click.echo(blob)
+
+
+# ---------------------------------------------------------------------------
+# `ibounce shadow ...` — ghost-run / agent-shadow review surface (#728).
+# Sessions are populated by `ibounce serve --mode ghost`: READS forward
+# to real AWS, WRITES are captured as a would-mutate diff under
+# ~/.iam-jit/ghost-runs/SID/ and NEVER executed. These subcommands are a
+# read-only review surface (per [[creates-never-mutates]]); `apply` is an
+# explicit, operator-driven escape hatch that emits the intended call for
+# manual execution — it does NOT itself mutate AWS.
+# ---------------------------------------------------------------------------
+
+
+@main.group("shadow")
+def shadow_group() -> None:
+    """Inspect ghost-run (agent-shadow) captured-write transcripts.
+
+    Ghost mode (#728) runs an agent against REAL infrastructure with
+    zero blast radius:
+
+        ibounce serve --mode ghost
+
+    READS forward to real AWS so the agent sees real state; WRITES are
+    NEVER forwarded — they're captured as a structured would-mutate
+    diff + the agent gets a synthetic non-error response so it keeps
+    going. These subcommands review "everything the agent would have
+    changed."
+
+    Subcommands:
+      list   — list recorded ghost-run sessions (newest first)
+      diff   — show every captured would-be mutation for one session
+      apply  — surface ONE captured action for manual execution
+               (does NOT mutate AWS itself)
+    """
+
+
+@shadow_group.command("list")
+@click.option("--json", "as_json", is_flag=True, default=False,
+              help="Emit JSON instead of the human table.")
+def shadow_list_cmd(as_json: bool) -> None:
+    """List recorded ghost-run sessions with per-session roll-ups."""
+    from .ghost_run import GhostRunStore
+    rows = GhostRunStore().list_sessions()
+    if as_json:
+        click.echo(json.dumps(rows, indent=2))
+        return
+    if not rows:
+        click.echo(
+            "no ghost-run sessions recorded yet. "
+            "Start one: ibounce serve --mode ghost",
+            err=True,
+        )
+        return
+    for r in rows:
+        n = r["captured_writes"]
+        n_str = "CORRUPT" if n < 0 else str(n)
+        click.echo(
+            f"{r['session_id']}  "
+            f"started={r['started_at']}  by={r['started_by']}  "
+            f"captured-writes={n_str}  "
+            f"upstream={r['upstream'] or '(real AWS)'}"
+        )
+
+
+@shadow_group.command("diff")
+@click.argument("session_id")
+@click.option("--json", "as_json", is_flag=True, default=False,
+              help="Emit JSON instead of the human table.")
+def shadow_diff_cmd(session_id: str, as_json: bool) -> None:
+    """Show every captured would-be mutation for one ghost-run session.
+
+    This is the core review surface: "here's everything the agent
+    would have changed" — none of which was executed against AWS.
+    """
+    from .ghost_run import GhostRunError, GhostRunStore
+    try:
+        payload = GhostRunStore().diff(session_id)
+    except GhostRunError as e:
+        click.secho(f"ghost-run diff failed: {e}", fg="red", err=True)
+        sys.exit(2)
+    if not payload["meta"] and not payload["actions"]:
+        click.secho(
+            f"no ghost-run session with id {session_id!r}. "
+            f"Run `ibounce shadow list` to see available ids.",
+            fg="red", err=True,
+        )
+        sys.exit(2)
+    if as_json:
+        click.echo(json.dumps(payload, indent=2))
+        return
+    meta = payload["meta"]
+    click.echo(f"ghost-run session: {session_id}")
+    click.echo(
+        f"  started={meta.get('started_at', '')}  "
+        f"by={meta.get('started_by', '')}  "
+        f"upstream={meta.get('upstream') or '(real AWS)'}"
+    )
+    click.echo(
+        f"  captured-writes={payload['captured_writes']} "
+        f"(NONE executed against AWS)"
+    )
+    if not payload["actions"]:
+        click.echo("  (no writes captured — agent made no mutating calls)")
+        return
+    click.echo("would-mutate (captured, NOT executed):")
+    for a in payload["actions"]:
+        click.echo(
+            f"  {a['action_id']}  {a['ts']}  "
+            f"{a['method']:6s} {a['service']}:{a['action']}  "
+            f"target={a['target'] or '-'}"
+        )
+
+
+@shadow_group.command("apply")
+@click.argument("session_id")
+@click.option("--action", "action_id", required=True,
+              help="The captured action id (e.g. act-0003) to surface "
+                   "for manual execution. See `ibounce shadow diff SID`.")
+@click.option("--json", "as_json", is_flag=True, default=False,
+              help="Emit JSON instead of the human summary.")
+def shadow_apply_cmd(
+    session_id: str, action_id: str, as_json: bool,
+) -> None:
+    """Surface ONE captured action for manual execution.
+
+    Per [[creates-never-mutates]] this command does NOT itself mutate
+    AWS — ghost mode's whole value is zero blast radius, and `apply`
+    keeps that property by handing the operator the captured intended
+    call (service/action/target/params) to run deliberately + by hand.
+    The synthetic response that was returned to the agent is FAKE; any
+    resource id in it does not exist, so re-running the call yourself is
+    the only way to actually create the resource.
+    """
+    from .ghost_run import GhostRunError, GhostRunStore
+    try:
+        rec = GhostRunStore().get_action(session_id, action_id)
+    except GhostRunError as e:
+        click.secho(f"ghost-run apply failed: {e}", fg="red", err=True)
+        sys.exit(2)
+    if rec is None:
+        click.secho(
+            f"no action {action_id!r} in ghost-run session "
+            f"{session_id!r}. Run `ibounce shadow diff {session_id}`.",
+            fg="red", err=True,
+        )
+        sys.exit(2)
+    summary = {
+        "session_id": session_id,
+        "action_id": rec.action_id,
+        "service": rec.service,
+        "action": rec.action,
+        "method": rec.method,
+        "region": rec.region,
+        "target": rec.target,
+        "params": rec.params,
+        "note": (
+            "This was CAPTURED, not executed. ibounce did NOT and will "
+            "NOT mutate AWS. Run this call yourself (e.g. via the AWS "
+            "CLI / SDK) to actually apply it."
+        ),
+    }
+    if as_json:
+        click.echo(json.dumps(summary, indent=2))
+        return
+    click.echo(f"captured action {rec.action_id} (session {session_id}):")
+    click.echo(f"  call:   {rec.service}:{rec.action}  ({rec.method})")
+    click.echo(f"  region: {rec.region or '-'}")
+    click.echo(f"  target: {rec.target or '-'}")
+    if rec.params:
+        click.echo(f"  params: {json.dumps(rec.params)}")
+    click.secho(
+        "  NOTE: ibounce captured this; it did NOT execute it. "
+        "Run the call yourself to apply it.",
+        fg="yellow",
+    )
 
 
 # ---------------------------------------------------------------------------

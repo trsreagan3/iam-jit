@@ -1574,6 +1574,56 @@ TOOLS = [
         },
     },
     {
+        "name": "bouncer_ghost_session_list",
+        "description": (
+            "#728 — list recorded ghost-run (agent-shadow) sessions, "
+            "newest first. Ghost mode (`ibounce serve --mode ghost`) "
+            "runs an agent against REAL infrastructure with zero blast "
+            "radius: READS forward to real AWS so the agent sees real "
+            "state, but WRITES are NEVER forwarded — they're captured "
+            "as a structured would-mutate diff + the agent gets a "
+            "synthetic non-error response so it keeps going. This tool "
+            "lets an agent/operator introspect which ghost-run "
+            "transcripts exist + how many writes each captured. "
+            "DETERMINISTIC — reads the on-disk ghost-run store, no LLM, "
+            "no AWS calls. Per [[creates-never-mutates]] + "
+            "[[ibounce-honest-positioning]]: captured writes were NOT "
+            "executed; synthetic responses are fabricated."
+        ),
+        "inputSchema": {"type": "object", "properties": {}},
+    },
+    {
+        "name": "bouncer_ghost_session_diff",
+        "description": (
+            "#728 — return the full would-mutate diff for one ghost-run "
+            "session: every WRITE the agent attempted (service, action, "
+            "target, params) that was CAPTURED but NOT executed against "
+            "AWS, plus per-service / per-action roll-ups. This is the "
+            "'here's everything the agent would have changed' review "
+            "surface. DETERMINISTIC — reads the on-disk ghost-run store, "
+            "no LLM, no AWS calls. Pass `session_id` (from "
+            "`bouncer_ghost_session_list` or `ibounce shadow list`); "
+            "omit to use the session the proxy is CURRENTLY writing "
+            "into (or an error when ghost mode isn't running in this "
+            "process). Per [[ibounce-honest-positioning]] every action "
+            "carries a `honesty` note: synthetic responses are fake + "
+            "nothing was mutated."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "session_id": {
+                    "type": "string",
+                    "description": (
+                        "Ghost-run session id (e.g. "
+                        "'shadow-20260602T141221Z-a3b4c5'). Omit to use "
+                        "the proxy's currently-active ghost session."
+                    ),
+                },
+            },
+        },
+    },
+    {
         "name": "bouncer_tail_decisions",
         "description": (
             "Inspect the bouncer's decision audit log (every call "
@@ -4966,6 +5016,74 @@ def _bouncer_plan_pending_write_prompt_for_mcp(
         store.close()
 
 
+def _bouncer_ghost_session_list_for_mcp(
+    args: dict[str, Any],  # noqa: SD-2 MCP dispatch handlers share a uniform (args) signature; this tool takes no input fields so `args` is intentionally unused
+) -> dict[str, Any]:
+    """#728 — list recorded ghost-run (agent-shadow) sessions.
+
+    DETERMINISTIC: reads the on-disk ghost-run store. No LLM, no AWS.
+    Per [[creates-never-mutates]]: captured writes were NEVER executed.
+    """
+    from .ghost_run import GhostRunStore
+
+    rows = GhostRunStore().list_sessions()
+    return {
+        "sessions": rows,
+        "count": len(rows),
+        "honesty": (
+            "Ghost mode forwards READS to real AWS but CAPTURES writes "
+            "without executing them. captured_writes counts intended "
+            "(not executed) mutations."
+        ),
+    }
+
+
+def _bouncer_ghost_session_diff_for_mcp(
+    args: dict[str, Any],
+) -> dict[str, Any]:
+    """#728 — return the full would-mutate diff for one ghost-run
+    session.
+
+    Session-id resolution mirrors the plan-capture MCP tools:
+      1. explicit `session_id` arg
+      2. `ghost_run.current_session_id()` (the in-process slot set by
+         `ibounce serve --mode ghost`)
+
+    DETERMINISTIC: reads the on-disk ghost-run store. No LLM, no AWS.
+    Per [[ibounce-honest-positioning]] each captured action carries a
+    `honesty` note: synthetic responses are fabricated + nothing was
+    mutated. READ-ONLY — agents introspect but cannot apply.
+    """
+    from . import ghost_run as _ghost
+
+    session_id = args.get("session_id")
+    if session_id is not None and not isinstance(session_id, str):
+        return {"error": "session_id must be a string if provided"}
+    if session_id is None:
+        session_id = _ghost.current_session_id()
+    if not session_id:
+        return {
+            "error": (
+                "no session_id supplied AND no ghost-run session is "
+                "active in this process. Start one via `ibounce serve "
+                "--mode ghost` or pass an explicit session_id (see "
+                "`ibounce shadow list`)."
+            ),
+        }
+    try:
+        payload = _ghost.diff(session_id)
+    except _ghost.GhostRunError as e:
+        return {"error": f"ghost-run diff failed: {e}"}
+    if not payload["meta"] and not payload["actions"]:
+        return {
+            "error": (
+                f"no ghost-run session with id {session_id!r}; run "
+                f"`ibounce shadow list` to see available ids"
+            ),
+        }
+    return payload
+
+
 def _bouncer_pending_sync_prompts_for_mcp(
     args: dict[str, Any],
 ) -> dict[str, Any]:
@@ -6368,6 +6486,10 @@ def _handle_request(req: dict[str, Any]) -> dict[str, Any] | None:
             result_payload = _bouncer_plan_session_summary_for_mcp(args)
         elif tool_name == "bouncer_plan_pending_write_prompt":
             result_payload = _bouncer_plan_pending_write_prompt_for_mcp(args)
+        elif tool_name == "bouncer_ghost_session_list":
+            result_payload = _bouncer_ghost_session_list_for_mcp(args)
+        elif tool_name == "bouncer_ghost_session_diff":
+            result_payload = _bouncer_ghost_session_diff_for_mcp(args)
         elif tool_name == "bouncer_audit_export_status":
             result_payload = _bouncer_audit_export_status_for_mcp(args)
         elif tool_name == "list_audit_webhook_presets":
