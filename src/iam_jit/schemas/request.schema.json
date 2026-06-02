@@ -31,6 +31,11 @@
           }
         },
         "created_at": { "type": "string", "format": "date-time" },
+        "bouncer_session_id": {
+          "type": "string",
+          "maxLength": 200,
+          "description": "#726 / BUILD-5 — optional agent/bouncer session id. When set, iam-jit's role-issuance presence gate (off-the-leash detection) verifies the bouncer for this session has checked in within IAM_JIT_BOUNCER_PRESENCE_TTL_SECONDS. Absent = presence gate not applicable for this request."
+        },
         "compatibility": {
           "type": "object",
           "additionalProperties": false,

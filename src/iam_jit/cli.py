@@ -918,6 +918,91 @@ def tail_cmd(
         click.echo(format_event_summary(ev))
 
 
+@main.group("presence")
+def presence_group() -> None:
+    """Bouncer-presence verification — "off the leash" detection (#726).
+
+    The Agent-as-a-Proxy bypass: an agent can route AROUND a
+    cooperative bouncer (operate "off the leash") while the operator
+    still believes traffic is being gated. iam-jit verifies presence by
+    recording bouncer check-ins per agent session; a session whose
+    bouncer was checking in and then goes silent past the TTL is
+    flagged.
+
+    Honest framing per [[ibounce-honest-positioning]]: a gap is a
+    SIGNAL to verify routing, NOT proof of bypass (the agent may be
+    idle). Advisory by default; set IAM_JIT_REQUIRE_BOUNCER_PRESENCE=1
+    to make iam-jit refuse role-issuance on a gap.
+    """
+
+
+@presence_group.command("status")
+@click.option(
+    "--api-url",
+    default=None,
+    help="iam-jit API URL. Default: http://127.0.0.1:8765",
+)
+@click.option(
+    "--token",
+    default=None,
+    help="Bearer token. Default: contents of ~/.iam-jit/cli-token.",
+)
+@click.option("--json", "as_json", is_flag=True, default=False,
+              help="Emit the raw JSON status object.")
+def presence_status_cmd(api_url: str | None, token: str | None, as_json: bool) -> None:
+    """Show bouncer-presence verification across tracked agent sessions.
+
+    Queries the running iam-jit server's admin-gated
+    GET /api/v1/presence/status and prints which sessions are present
+    vs off the leash.
+    """
+    import httpx as _httpx
+
+    base = (api_url or os.environ.get("IAM_JIT_API_URL")
+            or "http://127.0.0.1:8765").rstrip("/")
+    tok = token
+    if not tok:
+        tok_file = pathlib.Path.home() / ".iam-jit" / "cli-token"
+        if tok_file.exists():
+            tok = tok_file.read_text(encoding="utf-8").strip()
+    headers = {"Authorization": f"Bearer {tok}"} if tok else {}
+    try:
+        resp = _httpx.get(f"{base}/api/v1/presence/status",
+                          headers=headers, timeout=10.0)
+    except Exception as e:
+        click.echo(f"could not reach iam-jit at {base}: {e}", err=True)
+        sys.exit(3)
+    if resp.status_code == 401 or resp.status_code == 403:
+        click.echo(
+            f"auth failed ({resp.status_code}); presence status is "
+            "admin-gated. Pass --token or set up ~/.iam-jit/cli-token.",
+            err=True,
+        )
+        sys.exit(2)
+    if resp.status_code != 200:
+        click.echo(f"unexpected status {resp.status_code}: {resp.text}", err=True)
+        sys.exit(3)
+    data = resp.json()
+    if as_json:
+        click.echo(json.dumps(data, indent=2))
+        return
+    enforced = data.get("enforced")
+    click.echo(
+        f"bouncer presence: ttl={data.get('ttl_seconds')}s "
+        f"enforced={enforced} tracked={data.get('tracked_sessions')} "
+        f"off_the_leash={data.get('off_the_leash_count')}"
+    )
+    if not enforced and data.get("off_the_leash_count"):
+        click.echo(
+            "(advisory mode — set IAM_JIT_REQUIRE_BOUNCER_PRESENCE=1 to "
+            "refuse role-issuance on a gap)"
+        )
+    for s in data.get("sessions", []):
+        click.echo(f"  [{s.get('state')}] {s.get('message')}")
+    if not data.get("sessions"):
+        click.echo("  (no bouncer check-ins on record yet)")
+
+
 @main.group("allowlist")
 def allowlist_group() -> None:
     """Manage the compatibility allowlist (#166 Slice 2).

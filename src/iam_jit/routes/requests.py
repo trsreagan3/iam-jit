@@ -51,6 +51,63 @@ from ..users_store import User
 router = APIRouter(prefix="/api/v1/requests", tags=["requests"])
 
 
+def _request_bouncer_session_id(req: dict[str, Any]) -> str:
+    """#726 — the bouncer/agent session id this request belongs to.
+
+    Optional `metadata.bouncer_session_id`. Absent (the common case
+    for deployments that haven't wired the bouncer into iam-jit's
+    presence channel) → empty string, which the presence gate treats
+    as not-applicable (never blocks)."""
+    md = req.get("metadata") or {}
+    sid = md.get("bouncer_session_id")
+    return str(sid) if sid else ""
+
+
+def _apply_presence_gate(req: dict[str, Any], *, actor: User) -> None:
+    """#726 / BUILD-5 — bouncer-presence verification at role-issuance.
+
+    Evaluates whether the bouncer for this request's agent session is
+    still present. On an off-the-leash gap: emits the OCSF presence-gap
+    event + an iam-jit audit entry (neutral language, signal-not-proof),
+    and — only when IAM_JIT_REQUIRE_BOUNCER_PRESENCE is enabled —
+    refuses issuance with HTTP 409.
+
+    Per [[safety-mode-lean-permissive]] the default is advisory: the
+    signal is surfaced but issuance proceeds.
+    """
+    from .. import presence as presence_mod
+
+    session_id = _request_bouncer_session_id(req)
+    decision = presence_mod.presence_gate(session_id)
+    if not decision.verdict.is_off_the_leash:
+        return
+    # Off the leash: surface the signal regardless of enforce mode.
+    verdict = decision.verdict
+    try:
+        ocsf = presence_mod.make_off_the_leash_event(verdict)
+    except Exception:  # pragma: no cover — never let alerting break issuance
+        ocsf = {}
+    try:
+        audit_mod.emit(
+            actor=getattr(actor, "email", "") or getattr(actor, "id", "") or "system",
+            kind="bouncer.presence_gap",
+            summary=verdict.to_dict()["message"],
+            details={
+                "request_id": (req.get("metadata") or {}).get("id") or "",
+                "session_id": session_id,
+                "enforced": decision.enforced,
+                "issuance_allowed": decision.allow,
+                "presence": verdict.to_dict(),
+                "ocsf": ocsf,
+                "signal_not_proof": True,
+            },
+        )
+    except Exception:  # noqa: SD-1 — audit emit is best-effort; a logging-sink failure must never break role-issuance (fail-soft, matches the prompt-injection audit pattern above)
+        pass
+    if not decision.allow:
+        raise HTTPException(status_code=409, detail=decision.reason)
+
+
 # ---- Submission ----
 
 
@@ -1047,6 +1104,12 @@ def _transition_endpoint(action: str, *, role: str):
             lifecycle.add_comment(req, author=actor, message=body["comment"])
 
         if action == "approve":
+            # #726 / BUILD-5 — "off the leash" presence gate. Before we
+            # issue a role, verify the bouncer for this request's agent
+            # session is still checking in. Advisory by default (surface
+            # the signal, don't block); refuses issuance only when the
+            # operator opted into IAM_JIT_REQUIRE_BOUNCER_PRESENCE.
+            _apply_presence_gate(req, actor=actor)
             try:
                 _attempt_provisioning_helper(
                     req,
