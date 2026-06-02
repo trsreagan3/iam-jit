@@ -1,0 +1,245 @@
+name: publish-docker-bundle
+
+# Publish the unified iam-jit-bundle container image to GHCR.
+#
+# Image: ghcr.io/trsreagan3/iam-jit:<tag>
+# Contents: iam-jit Python CLI + ibounce + kbounce + dbounce + gbounce
+#
+# Per [[automatic-bootstrap-must-just-work-everywhere]]: this image is
+# the canonical "just works" packaging for CI/CD, Docker-based installs,
+# and cloud runners where running pip + go install during bootstrap is
+# not acceptable.
+#
+# Triggers:
+#   - push of tag "v*"      → :vX.Y.Z + :X.Y.Z + :X.Y + :X + :latest
+#   - push to main          → :main + :sha-<short>
+#   - manual workflow_dispatch (rebuild without a tag)
+#
+# The smoke job builds a single-arch (linux/amd64) image first, runs
+# binary smoke checks + `iam-jit init --no-prompt --harness=claude-code`
+# inside the container, and only then triggers the multi-arch publish.
+#
+# The build context is assembled at job startup by checking out all four
+# repos (iam-roles, kbouncer, dbounce, gbounce) side by side under a
+# temporary workspace, then building with `docker build --build-context`
+# so the Dockerfile can COPY from each bouncer's source tree.
+#
+# Per [[ibounce-honest-positioning]] + [[self-host-zero-billing-dependency]]:
+# the published image carries the same binaries as the direct-install
+# paths; no extra features, no telemetry, no license call-back.
+
+on:
+  push:
+    branches: [main]
+    tags: ["v*"]
+  workflow_dispatch:
+
+# GHCR push needs packages:write. contents:read is required by
+# actions/checkout. id-token, actions:write, pull-requests, issues
+# remain at default-deny.
+permissions:
+  contents: read
+  packages: write
+
+env:
+  IMAGE_NAME: ghcr.io/trsreagan3/iam-jit
+
+jobs:
+  # -----------------------------------------------------------------------
+  # smoke — single-arch build + entrypoint verification
+  # -----------------------------------------------------------------------
+  smoke:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout iam-roles
+        uses: actions/checkout@v4
+        with:
+          path: iam-roles
+
+      - name: Checkout kbouncer
+        uses: actions/checkout@v4
+        with:
+          repository: trsreagan3/kbouncer
+          path: kbouncer
+
+      - name: Checkout dbounce
+        uses: actions/checkout@v4
+        with:
+          repository: trsreagan3/dbounce
+          path: dbounce
+
+      - name: Checkout gbounce
+        uses: actions/checkout@v4
+        with:
+          repository: trsreagan3/gbounce
+          path: gbounce
+
+      - name: Set up Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Derive version metadata
+        id: ver
+        run: |
+          SHORT_SHA="$(git -C iam-roles rev-parse --short HEAD)"
+          echo "commit=${SHORT_SHA}" >> "$GITHUB_OUTPUT"
+          echo "build_time=$(date -u +%Y-%m-%dT%H:%M:%SZ)" >> "$GITHUB_OUTPUT"
+          # Extract semver from tag (v1.2.3 → 1.2.3) or use branch name.
+          if [[ "${GITHUB_REF}" == refs/tags/v* ]]; then
+            echo "version=${GITHUB_REF_NAME#v}" >> "$GITHUB_OUTPUT"
+          else
+            echo "version=0.0.0-dev" >> "$GITHUB_OUTPUT"
+          fi
+
+      # Build with explicit --build-context entries so the Dockerfile's
+      # COPY kbouncer/ / COPY gbounce/ / COPY dbounce/ resolve to the
+      # side-by-side checkouts, not paths inside the iam-roles tree.
+      - name: Build (load into local docker, linux/amd64)
+        uses: docker/build-push-action@v6
+        with:
+          context: iam-roles
+          file: iam-roles/infrastructure/docker/Dockerfile.iam-jit-bundle
+          build-contexts: |
+            kbouncer=kbouncer
+            gbounce=gbounce
+            dbounce=dbounce
+          platforms: linux/amd64
+          push: false
+          load: true
+          tags: iam-jit-bundle:smoke
+          build-args: |
+            VERSION=${{ steps.ver.outputs.version }}
+            COMMIT=${{ steps.ver.outputs.commit }}
+            BUILD_TIME=${{ steps.ver.outputs.build_time }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      # Verify each binary answers --version so we know the entrypoint
+      # wiring is correct for every product.
+      - name: Verify iam-jit --version
+        run: docker run --rm iam-jit-bundle:smoke --version
+
+      - name: Verify ibounce --version
+        run: docker run --rm --entrypoint ibounce iam-jit-bundle:smoke --version
+
+      - name: Verify kbounce --version
+        run: docker run --rm --entrypoint kbounce iam-jit-bundle:smoke --version
+
+      - name: Verify dbounce --version
+        run: docker run --rm --entrypoint dbounce iam-jit-bundle:smoke --version
+
+      - name: Verify gbounce --version
+        run: docker run --rm --entrypoint gbounce iam-jit-bundle:smoke --version
+
+      # Non-interactive init smoke: per [[uat-tests-setup-end-to-end]] the
+      # setup process IS the product. We verify that `iam-jit init` exits 0
+      # in a headless container without AWS credentials (the command
+      # gracefully skips account detection when no creds are present and
+      # writes a placeholder config). This is the canonical CI install-path.
+      - name: Smoke init --no-prompt --harness=claude-code
+        run: |
+          docker run --rm \
+            -v /tmp/iam-jit-smoke:/var/lib/iam-jit \
+            -e IAM_JIT_DATA_DIR=/var/lib/iam-jit \
+            iam-jit-bundle:smoke \
+            init --no-prompt --harness=claude-code
+          # Verify the config file was actually written.
+          test -f /tmp/iam-jit-smoke/iam-jit.yaml \
+            && echo "config written: OK" \
+            || { echo "FAIL: config not written"; exit 1; }
+
+      - name: Report image size
+        run: |
+          docker images iam-jit-bundle:smoke \
+            --format '{{.Repository}}:{{.Tag}}  size={{.Size}}'
+
+  # -----------------------------------------------------------------------
+  # publish — multi-arch build + push to GHCR (gated on smoke)
+  # -----------------------------------------------------------------------
+  publish:
+    needs: smoke
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout iam-roles
+        uses: actions/checkout@v4
+        with:
+          path: iam-roles
+
+      - name: Checkout kbouncer
+        uses: actions/checkout@v4
+        with:
+          repository: trsreagan3/kbouncer
+          path: kbouncer
+
+      - name: Checkout dbounce
+        uses: actions/checkout@v4
+        with:
+          repository: trsreagan3/dbounce
+          path: dbounce
+
+      - name: Checkout gbounce
+        uses: actions/checkout@v4
+        with:
+          repository: trsreagan3/gbounce
+          path: gbounce
+
+      - name: Set up QEMU (for cross-arch emulation)
+        uses: docker/setup-qemu-action@v3
+
+      - name: Set up Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Derive version metadata
+        id: ver
+        run: |
+          SHORT_SHA="$(git -C iam-roles rev-parse --short HEAD)"
+          echo "commit=${SHORT_SHA}" >> "$GITHUB_OUTPUT"
+          echo "build_time=$(date -u +%Y-%m-%dT%H:%M:%SZ)" >> "$GITHUB_OUTPUT"
+          if [[ "${GITHUB_REF}" == refs/tags/v* ]]; then
+            echo "version=${GITHUB_REF_NAME#v}" >> "$GITHUB_OUTPUT"
+          else
+            echo "version=0.0.0-dev" >> "$GITHUB_OUTPUT"
+          fi
+
+      # Derive image tags:
+      #   tag v1.2.3  → :v1.2.3 :1.2.3 :1.2 :1 :latest
+      #   branch main → :main :sha-<short>
+      - name: Derive image tags
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.IMAGE_NAME }}
+          tags: |
+            type=ref,event=branch
+            type=ref,event=tag
+            type=semver,pattern={{version}}
+            type=semver,pattern={{major}}.{{minor}}
+            type=semver,pattern={{major}}
+            type=raw,value=latest,enable=${{ startsWith(github.ref, 'refs/tags/v') }}
+            type=sha,format=short
+
+      - name: Build and push (linux/amd64 + linux/arm64)
+        uses: docker/build-push-action@v6
+        with:
+          context: iam-roles
+          file: iam-roles/infrastructure/docker/Dockerfile.iam-jit-bundle
+          build-contexts: |
+            kbouncer=kbouncer
+            gbounce=gbounce
+            dbounce=dbounce
+          platforms: linux/amd64,linux/arm64
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          build-args: |
+            VERSION=${{ steps.ver.outputs.version }}
+            COMMIT=${{ steps.ver.outputs.commit }}
+            BUILD_TIME=${{ steps.ver.outputs.build_time }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max

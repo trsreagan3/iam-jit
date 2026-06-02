@@ -11,6 +11,10 @@ model + disclosure policy) and [`SECURITY-SLA.md`](SECURITY-SLA.md)
 For wiring the MCP surface into non-Claude-Code clients, see
 [`MCP-RECIPES.md`](MCP-RECIPES.md).
 
+For the unified Docker bundle (`ghcr.io/trsreagan3/iam-jit`) that ships
+all five components (iam-jit + ibounce + kbounce + dbounce + gbounce) in
+one image, see [`DOCKER-BUNDLE.md`](DOCKER-BUNDLE.md).
+
 ---
 
 ## 1. Summary

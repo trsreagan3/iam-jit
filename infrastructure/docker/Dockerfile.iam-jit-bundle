@@ -1,0 +1,260 @@
+# syntax=docker/dockerfile:1.7
+#
+# iam-jit-bundle — unified image shipping iam-jit (Python) + all 4 Bounce-suite
+# binaries: ibounce (Python), kbounce (Go), dbounce (Go), gbounce (Go).
+#
+# Per [[automatic-bootstrap-must-just-work-everywhere]]: this image is the
+# canonical "just works" Docker packaging for CI/CD pipelines, cloud runners,
+# and any environment where running `pip install` + 3× `go install` during
+# bootstrap is not acceptable.
+#
+# Per [[self-host-zero-billing-dependency]]: zero phone-home at runtime.
+# Per [[ibounce-honest-positioning]]: same binaries as direct-install paths;
+# no extra features, no telemetry, no hidden behaviour.
+# Per [[permission-minimal-install]]: runtime user is UID 1000 (non-root).
+# Per [[creates-never-mutates]]: the entrypoint is `iam-jit`; it never
+# modifies existing state unless --overwrite is passed explicitly.
+#
+# Build stages:
+#   go-builder-kbounce  — static CGO-free kbounce binary
+#   go-builder-gbounce  — static CGO-free gbounce binary
+#   go-builder-dbounce  — static CGO+musl dbounce binary (pg_query_go requires CGO)
+#   py-builder          — wheels for iam-jit (includes ibounce)
+#   runtime             — python:3.12-slim-bookworm + all binaries, UID 1000
+#
+# Build args (all optional — fall back to "docker" / "none" / timestamp):
+#   VERSION     semantic version, e.g. "1.0.0"
+#   COMMIT      git short SHA, e.g. "061adf5"
+#   BUILD_TIME  RFC3339 timestamp
+#   PYTHON_IMAGE  override the Python base (default python:3.12-slim-bookworm)
+#
+# Usage:
+#   # Build locally (single-arch, no push):
+#   docker build -f infrastructure/docker/Dockerfile.iam-jit-bundle \
+#     --build-arg VERSION=1.0.0 -t iam-jit-bundle:local .
+#
+#   # Run init non-interactively (CI-safe, no TTY required):
+#   docker run --rm iam-jit-bundle:local init --no-prompt --harness=claude-code
+#
+#   # Run with AWS credentials forwarded:
+#   docker run --rm \
+#     -e AWS_ACCESS_KEY_ID -e AWS_SECRET_ACCESS_KEY -e AWS_DEFAULT_REGION \
+#     -v /var/lib/iam-jit:/var/lib/iam-jit \
+#     iam-jit-bundle:local serve --local
+
+ARG PYTHON_IMAGE=python:3.12-slim-bookworm
+
+# ---------------------------------------------------------------------------
+# Stage: go-builder-kbounce
+# Compiles kbounce from the kbouncer repo source tree.
+# CGO disabled → fully static binary, no musl dependency.
+# ---------------------------------------------------------------------------
+FROM golang:1.26-alpine AS go-builder-kbounce
+
+RUN apk add --no-cache git ca-certificates
+
+WORKDIR /build
+
+# Copy kbouncer source. The build context root is the iam-roles repo;
+# the Go repos are siblings and must be in the build context.
+# In CI, the workflow mounts the sibling repos (see publish workflow).
+COPY kbouncer/go.mod kbouncer/go.sum ./
+RUN go mod download
+
+COPY kbouncer/ .
+
+ARG VERSION=docker
+ARG COMMIT=none
+ARG BUILD_TIME=unknown
+ARG TARGETOS
+ARG TARGETARCH
+
+RUN CGO_ENABLED=0 GOOS=${TARGETOS} GOARCH=${TARGETARCH} \
+    go build \
+        -trimpath \
+        -ldflags "-s -w \
+            -X github.com/trsreagan3/kbouncer/internal/cli.version=${VERSION} \
+            -X github.com/trsreagan3/kbouncer/internal/cli.commit=${COMMIT} \
+            -X github.com/trsreagan3/kbouncer/internal/cli.buildTime=${BUILD_TIME}" \
+        -o /out/kbounce \
+        ./cmd/kbounce
+
+# ---------------------------------------------------------------------------
+# Stage: go-builder-gbounce
+# Compiles gbounce from the gbounce repo source tree.
+# CGO disabled → fully static binary.
+# ---------------------------------------------------------------------------
+FROM golang:1.26-alpine AS go-builder-gbounce
+
+RUN apk add --no-cache git ca-certificates
+
+WORKDIR /build
+
+COPY gbounce/go.mod gbounce/go.sum ./
+RUN go mod download
+
+COPY gbounce/ .
+
+ARG VERSION=docker
+ARG COMMIT=none
+ARG BUILD_TIME=unknown
+ARG TARGETOS
+ARG TARGETARCH
+
+RUN CGO_ENABLED=0 GOOS=${TARGETOS} GOARCH=${TARGETARCH} \
+    go build \
+        -trimpath \
+        -ldflags "-s -w \
+            -X github.com/trsreagan3/gbounce/internal/cli.version=${VERSION} \
+            -X github.com/trsreagan3/gbounce/internal/cli.commit=${COMMIT} \
+            -X github.com/trsreagan3/gbounce/internal/cli.buildTime=${BUILD_TIME}" \
+        -o /out/gbounce \
+        ./cmd/gbounce
+
+# ---------------------------------------------------------------------------
+# Stage: go-builder-dbounce
+# Compiles dbounce from the dbounce repo source tree.
+# CGO ENABLED — pg_query_go wraps libpg_query (C). Links statically
+# against musl so the binary runs on the distroless/debian runtime layer.
+# ---------------------------------------------------------------------------
+FROM golang:1.25-alpine AS go-builder-dbounce
+
+RUN apk add --no-cache git ca-certificates build-base musl-dev
+
+WORKDIR /build
+
+COPY dbounce/go.mod dbounce/go.sum ./
+RUN go mod download
+
+COPY dbounce/ .
+
+ARG VERSION=docker
+ARG COMMIT=none
+ARG BUILD_TIME=unknown
+ARG TARGETOS
+ARG TARGETARCH
+
+RUN CGO_ENABLED=1 GOOS=${TARGETOS} GOARCH=${TARGETARCH} \
+    go build \
+        -trimpath \
+        -ldflags "-s -w -extldflags '-static' \
+            -X github.com/trsreagan3/dbounce/internal/cli.version=${VERSION} \
+            -X github.com/trsreagan3/dbounce/internal/cli.commit=${COMMIT} \
+            -X github.com/trsreagan3/dbounce/internal/cli.buildTime=${BUILD_TIME}" \
+        -o /out/dbounce \
+        ./cmd/dbounce
+
+# ---------------------------------------------------------------------------
+# Stage: py-builder
+# Builds pre-compiled wheels for iam-jit (which includes ibounce as a
+# console-script entry point). Wheels go into /wheels so the runtime
+# stage can `pip install --no-index --find-links` without a network hit.
+# ---------------------------------------------------------------------------
+FROM ${PYTHON_IMAGE} AS py-builder
+
+ENV PIP_DISABLE_PIP_VERSION_CHECK=1 \
+    PIP_NO_CACHE_DIR=1 \
+    PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1
+
+WORKDIR /src
+
+# Only copy what pip needs so unrelated file changes don't bust the cache.
+COPY pyproject.toml README.md ./
+COPY src ./src
+
+RUN python -m pip install --upgrade pip wheel build \
+ && python -m pip wheel --wheel-dir /wheels .
+
+# ---------------------------------------------------------------------------
+# Stage: runtime
+# Final image: python:3.12-slim-bookworm + installed iam-jit + Go binaries.
+# Runs as non-root UID 1000 (well inside the 0-65535 UID space; below
+# the distroless nonroot UID 65532 used by the individual Go images).
+# Writable state goes to /var/lib/iam-jit (volume-mountable; all other
+# filesystem paths are read-only-fs-friendly).
+# ---------------------------------------------------------------------------
+FROM ${PYTHON_IMAGE} AS runtime
+
+ENV PIP_DISABLE_PIP_VERSION_CHECK=1 \
+    PIP_NO_CACHE_DIR=1 \
+    PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1 \
+    HOME=/home/iamjit \
+    # Respect the XDG convention for the data dir so `iam-jit init`
+    # and `ibounce init` use /var/lib/iam-jit when running as this user.
+    IAM_JIT_DATA_DIR=/var/lib/iam-jit \
+    IBOUNCE_DATA_DIR=/var/lib/iam-jit/ibounce \
+    KBOUNCE_DATA_DIR=/var/lib/iam-jit/kbounce \
+    DBOUNCE_DATA_DIR=/var/lib/iam-jit/dbounce \
+    GBOUNCE_DATA_DIR=/var/lib/iam-jit/gbounce
+
+# Runtime user — UID/GID 1000 (most common non-root default; avoids
+# colliding with the host user that bind-mounts /var/lib/iam-jit).
+RUN groupadd --system --gid 1000 iamjit \
+ && useradd  --system --uid 1000 --gid iamjit \
+              --home-dir /home/iamjit --create-home \
+              --shell /usr/sbin/nologin iamjit \
+ # Writable data directory — bind-mount this volume to persist state.
+ && mkdir -p /var/lib/iam-jit \
+             /var/lib/iam-jit/ibounce \
+             /var/lib/iam-jit/kbounce \
+             /var/lib/iam-jit/dbounce \
+             /var/lib/iam-jit/gbounce \
+ && chown -R iamjit:iamjit /var/lib/iam-jit
+
+# Install iam-jit from pre-built wheels (no network at install time).
+# Strips __pycache__ + bundled test dirs from site-packages after install
+# to keep the runtime layer lean.
+COPY --from=py-builder /wheels /tmp/wheels
+RUN python -m pip install --no-index --find-links /tmp/wheels iam-jit \
+ && rm -rf /tmp/wheels /root/.cache \
+ && find /usr/local/lib/python3.12/site-packages \
+        \( -type d -a \( -name '__pycache__' -o -name 'tests' -o -name 'test' \) \) \
+        -prune -exec rm -rf '{}' +
+
+# Copy Go binaries from their builder stages. Each binary is placed in
+# /usr/local/bin/ which is already on PATH in the python:3.12-slim image.
+COPY --from=go-builder-kbounce /out/kbounce  /usr/local/bin/kbounce
+COPY --from=go-builder-gbounce /out/gbounce  /usr/local/bin/gbounce
+COPY --from=go-builder-dbounce /out/dbounce  /usr/local/bin/dbounce
+
+# Verify all binaries are callable before switching to the non-root user.
+# This catches missing-symbol / wrong-arch issues at build time rather
+# than at operator runtime.
+RUN iam-jit    --version \
+ && ibounce    --version \
+ && kbounce    --version \
+ && dbounce    --version \
+ && gbounce    --version
+
+# Drop privileges for all subsequent layers and at runtime.
+USER iamjit
+WORKDIR /home/iamjit
+
+# Ports (advisory — binary still binds loopback unless operator passes
+# --host 0.0.0.0 --i-know-this-binds-externally or equivalent):
+#   8767 — ibounce proxy / management
+#   8766 — kbounce management
+#   5433 — dbounce SQL wire
+#   8768 — dbounce management
+#   8080 — gbounce proxy
+#   8769 — gbounce management
+EXPOSE 8767 8766 5433 8768 8080 8769
+
+# Healthcheck: `iam-jit --version` exercises Python + click + package
+# import path without any network call (no-phone-home preserved).
+HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \
+    CMD iam-jit --version || exit 1
+
+LABEL org.opencontainers.image.source="https://github.com/trsreagan3/iam-jit" \
+      org.opencontainers.image.licenses="Apache-2.0" \
+      org.opencontainers.image.title="iam-jit-bundle" \
+      org.opencontainers.image.description="iam-jit + ibounce + kbounce + dbounce + gbounce in one image"
+
+# Default entrypoint is `iam-jit` — the primary CLI surface.
+# Operators who want a bouncer-only container should use the per-bouncer
+# images (Dockerfile in each bouncer's own repo) instead of overriding
+# the entrypoint here.
+ENTRYPOINT ["iam-jit"]
+CMD ["--help"]

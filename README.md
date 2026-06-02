@@ -49,7 +49,29 @@ pip install --user git+https://github.com/trsreagan3/iam-jit.git
 
 > **Note:** Will switch to `pip install --user iam-jit` once we publish to PyPI (#235).
 
-### Go bouncers (kbounce / dbounce / gbounce)
+### Docker — unified bundle image (CI / cloud runners / any platform)
+
+All five components in one image. No pip, no Go toolchain required at runtime.
+
+```bash
+# Non-interactive init (CI-safe, no TTY required):
+docker run --rm \
+  -v ~/.iam-jit:/var/lib/iam-jit \
+  -e IAM_JIT_DATA_DIR=/var/lib/iam-jit \
+  ghcr.io/trsreagan3/iam-jit:latest \
+  init --no-prompt --harness=claude-code
+
+# Check all five binaries:
+docker run --rm ghcr.io/trsreagan3/iam-jit:latest --version
+docker run --rm --entrypoint ibounce  ghcr.io/trsreagan3/iam-jit:latest --version
+docker run --rm --entrypoint kbounce  ghcr.io/trsreagan3/iam-jit:latest --version
+docker run --rm --entrypoint dbounce  ghcr.io/trsreagan3/iam-jit:latest --version
+docker run --rm --entrypoint gbounce  ghcr.io/trsreagan3/iam-jit:latest --version
+```
+
+Multi-arch: `linux/amd64` + `linux/arm64`. Full operator guide: [docs/DOCKER-BUNDLE.md](docs/DOCKER-BUNDLE.md).
+
+### Go bouncers (kbounce / dbounce / gbounce) — direct install
 
 Optional — only needed if you use K8s, database, or generic-HTTP interception.
 Requires Go ≥ 1.26 (auto-fetched via GOTOOLCHAIN on Go 1.21+; older runtimes need toolchain access or a fresh Go install — see [go.dev/dl](https://go.dev/dl/)).
