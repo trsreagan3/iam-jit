@@ -524,3 +524,102 @@ def test_cli_verify_receipt_json_output(
     assert payload["key_trust"] == "local"
     assert payload["issuer_unverified"] is False
     assert "RECORD" in payload["proves"]
+
+
+# --------------------------------------------------------------------------
+# Fix 2 — agent_session must be IN the signed payload + verify-receipt
+# still passes after the field is populated.
+#
+# Root cause: proxy.py was reading "x-iam-jit-agent-session-id" (wrong
+# header name) instead of "x-agent-session-id" (the canonical
+# X-Agent-Session-Id header, per agent_context.AGENT_SESSION_ID_FIELD).
+# Result: agent_session was ALWAYS "" in the denial receipt even when the
+# agent sent a valid session id — a forensic gap in the signed payload.
+#
+# The fix propagates agent_session correctly from the request header into
+# sign_deny(). These tests confirm:
+#   (a) sign_deny() with a session id populates receipt.agent_session
+#   (b) the signed payload includes agent_session (signing_payload())
+#   (c) verify_receipt() still passes end-to-end with the field populated
+#   (d) tampering the agent_session field AFTER signing FAILS verification
+# --------------------------------------------------------------------------
+
+
+def test_agent_session_propagated_into_signed_payload(
+    signer: ReceiptSigner,
+) -> None:
+    """sign_deny(agent_session=...) must land in signing_payload() so it
+    is tamper-protected by the Ed25519 signature."""
+    session_id = "sid-abc123"
+    r = signer.sign_deny(
+        deny_id="deny-001",
+        action="iam:CreateRole",
+        reason="profile-deny",
+        agent_session=session_id,
+        resource="arn:aws:iam::123456789012:role/x",
+    )
+    assert r is not None, "sign_deny must succeed"
+
+    # (a) receipt.agent_session is the value we passed in.
+    assert r.agent_session == session_id, (
+        f"agent_session on receipt must equal the input session id; "
+        f"got {r.agent_session!r}"
+    )
+
+    # (b) agent_session is inside signing_payload() — tamper-protected.
+    import json as _json
+    payload_dict = _json.loads(r.signing_payload().decode("utf-8"))
+    assert "agent_session" in payload_dict, (
+        "agent_session must be a key in signing_payload() so it is "
+        "covered by the Ed25519 signature; absent means the field is "
+        "not tamper-protected"
+    )
+    assert payload_dict["agent_session"] == session_id
+
+
+def test_verify_receipt_passes_with_agent_session_populated(
+    signer: ReceiptSigner,
+) -> None:
+    """verify_receipt() must return OK on a receipt whose agent_session is
+    non-empty — confirming that populating the field does not break the
+    signing-payload canonicalization."""
+    r = signer.sign_deny(
+        deny_id="deny-002",
+        action="s3:DeleteObject",
+        reason="deny-classifier",
+        agent_session="session-from-header-xyz",
+        resource="arn:aws:s3:::prod-bucket/key",
+    )
+    assert r is not None
+    assert r.agent_session == "session-from-header-xyz"
+
+    ok, reason, key_trust = verify_receipt(r, auto_pin_local=False)
+    assert ok, (
+        f"verify_receipt must pass on a receipt with populated agent_session; "
+        f"reason={reason!r}"
+    )
+    assert reason is None
+
+
+def test_tampering_agent_session_fails_verify(
+    signer: ReceiptSigner,
+) -> None:
+    """Mutating agent_session AFTER signing must fail verification — proving
+    the field is inside the signed payload, not appended outside it."""
+    r = signer.sign_deny(
+        deny_id="deny-003",
+        action="ec2:TerminateInstances",
+        reason="explicit-deny",
+        agent_session="legit-session-id",
+    )
+    assert r is not None
+
+    # Tamper: change the session id to something else after signing.
+    tampered = dataclasses.replace(r, agent_session="attacker-injected-id")
+
+    ok, reason, _ = verify_receipt(tampered, auto_pin_local=False)
+    assert not ok, (
+        "tampering agent_session must invalidate the Ed25519 signature — "
+        "the field must be inside signing_payload(), not appended outside"
+    )
+    assert reason is not None

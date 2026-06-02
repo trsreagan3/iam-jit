@@ -447,5 +447,84 @@ def test_session_id_in_metadata():
     assert mp[f"{ABOM_PROPERTY_NS}:session.id"] == "my-sid"
 
 
+# ---------------------------------------------------------------------------
+# Fix 3 — proxy host must NOT appear as a service in the ABOM
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "proxy_host",
+    [
+        "127.0.0.1:18951",
+        "127.0.0.1",
+        "localhost:18951",
+        "localhost",
+        "::1",
+        "::1:18951",
+        "127.100.200.1:9999",
+    ],
+)
+def test_proxy_loopback_host_is_excluded_from_services(proxy_host: str) -> None:
+    """Events whose dst_endpoint.hostname is the proxy's own loopback
+    address must NOT produce an http_endpoint service entry.
+
+    Root cause: ibounce events from plan-capture / ghost-run synthetics
+    carry the proxy's own listen address (127.0.0.1:<port>) in
+    dst_endpoint.hostname. Before the fix, every such event emitted a
+    ``services[]`` entry naming the proxy's own socket as if it were an
+    external upstream dependency — a classification error.
+    """
+    ev = {
+        "_bouncer": "ibounce",
+        "time": 1737590400000,
+        "dst_endpoint": {"hostname": proxy_host},
+        "unmapped": {"iam_jit": {"verdict": "allow", "agent": {"session_id": "s"}}},
+    }
+    r = build_abom(session_id="s", events=[ev])
+    service_names = [svc["name"] for svc in r.document.get("services", [])]
+    assert proxy_host not in service_names, (
+        f"proxy loopback host {proxy_host!r} must not appear as a service "
+        f"in the ABOM; services={service_names}"
+    )
+    # No http_endpoint kind either.
+    kinds = {
+        p["value"]
+        for svc in r.document.get("services", [])
+        for p in svc.get("properties", [])
+        if p["name"] == f"{ABOM_PROPERTY_NS}:component.kind"
+        and svc["name"] == proxy_host
+    }
+    assert not kinds, f"proxy host {proxy_host!r} must not appear under any kind"
+
+
+def test_real_aws_service_host_still_becomes_service_entry() -> None:
+    """Genuine AWS service destinations must still appear as service
+    entries — the loopback filter must not be over-broad."""
+    aws_host = "s3.us-east-1.amazonaws.com"
+    ev = _ev(host=aws_host)
+    r = build_abom(session_id="s", events=[ev])
+    service_names = [svc["name"] for svc in r.document.get("services", [])]
+    assert aws_host in service_names, (
+        f"genuine AWS endpoint {aws_host!r} must appear in services[]; "
+        f"got {service_names}"
+    )
+
+
+def test_mixed_proxy_and_aws_hosts_only_aws_in_services() -> None:
+    """When a session has both proxy-local events and real AWS events,
+    only the AWS endpoints appear in services[]."""
+    proxy_ev = {
+        "_bouncer": "ibounce",
+        "time": 1737590400000,
+        "dst_endpoint": {"hostname": "127.0.0.1:18951"},
+        "unmapped": {"iam_jit": {"verdict": "allow", "agent": {"session_id": "s"}}},
+    }
+    aws_ev = _ev(host="ec2.eu-west-1.amazonaws.com")
+    r = build_abom(session_id="s", events=[proxy_ev, aws_ev])
+    service_names = {svc["name"] for svc in r.document.get("services", [])}
+    assert "127.0.0.1:18951" not in service_names
+    assert "ec2.eu-west-1.amazonaws.com" in service_names
+
+
 if __name__ == "__main__":  # pragma: no cover
     raise SystemExit(pytest.main([__file__, "-q"]))

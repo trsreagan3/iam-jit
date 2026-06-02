@@ -245,3 +245,99 @@ def test_baseline_known_agents_lists_distinct_identities(
         store.observe(agent_identity=ai, action="s3:GetObject")
     agents = store.known_agents()
     assert set(agents) == {"claude:1", "claude:2", "cursor:1"}
+
+
+# ---------------------------------------------------------------------------
+# Fix 1 — CLI "false cold-start" regression test
+# (BaselineStore.summary_for returns real data without calling start())
+# ---------------------------------------------------------------------------
+
+
+def test_cli_dry_run_reads_real_baseline_without_start(
+    tmp_path: pathlib.Path,
+) -> None:
+    """Regression test for the CLI false-cold-start bug.
+
+    Root cause: summary_for() short-circuited with an empty baseline
+    when _conn was None (i.e. start() had never been called). The CLI
+    dry-run path constructs a FRESH store instance (no start()) and
+    calls summary_for() directly, so EVERY check reported
+    baseline_observations=0 / cold_start_fallback_used=True even
+    against a fully populated on-disk baseline.
+
+    Fix: _ensure_open() lazily opens the connection on demand so the
+    CLI read path sees the real on-disk rows without the caller needing
+    to remember start(). The proxy path (which calls start() at boot) is
+    unaffected — _ensure_open() is a no-op when _conn is already open.
+
+    Test shape:
+      1. Populate a DB via one store instance (calls start()).
+      2. Open a SECOND, FRESH store on the SAME DB FILE — do NOT call
+         start() on it.
+      3. Call summary_for() directly.
+      4. Assert non-zero observations + no spurious cold-start.
+    """
+    db_path = str(tmp_path / "anomaly-baseline.db")
+
+    # ---- Step 1: populate via a properly started store ----
+    writer = BaselineStore(path=db_path, flush_interval_seconds=0.01)
+    writer.start()
+    try:
+        for _ in range(169):
+            writer.observe(
+                agent_identity="claude-code:abc",
+                action="s3:GetObject",
+                resource="arn:aws:s3:::prod-bucket",
+            )
+        # Force the flush so everything lands on disk before we read.
+        writer.stop(drain=True)
+    except Exception:
+        writer.stop(drain=False)
+        raise
+
+    # ---- Step 2: fresh reader — do NOT call start() ----
+    reader = BaselineStore(path=db_path)
+    # Deliberately skip reader.start() — this is the CLI dry-run shape.
+
+    # ---- Step 3: read via summary_for ----
+    summary = reader.summary_for(
+        "claude-code:abc", "s3:GetObject", "arn:aws:s3:::prod-bucket"
+    )
+
+    # ---- Step 4: assert real data, no spurious cold-start ----
+    assert summary.total_observations_rolling == 169, (
+        f"CLI dry-run must see the 169 on-disk rows; got "
+        f"{summary.total_observations_rolling} (the false-cold-start bug "
+        f"returns 0 here)"
+    )
+    assert summary.total_observations_rolling > 0, (
+        "summary_for() on an un-started store must not short-circuit to 0"
+    )
+    assert "action_frequency" in summary.dimensions, (
+        "populated baseline must have at least action_frequency dimension"
+    )
+
+
+def test_known_agents_without_start_returns_real_data(
+    tmp_path: pathlib.Path,
+) -> None:
+    """known_agents() must also use _ensure_open() so CLI callers that
+    skip start() see the real agent list from disk."""
+    db_path = str(tmp_path / "anomaly-baseline.db")
+
+    writer = BaselineStore(path=db_path, flush_interval_seconds=0.01)
+    writer.start()
+    try:
+        for agent in ("agent-a", "agent-b"):
+            writer.observe(agent_identity=agent, action="ec2:DescribeInstances")
+        writer.stop(drain=True)
+    except Exception:
+        writer.stop(drain=False)
+        raise
+
+    reader = BaselineStore(path=db_path)
+    # No start() — mirrors CLI usage.
+    agents = reader.known_agents()
+    assert set(agents) == {"agent-a", "agent-b"}, (
+        f"known_agents() without start() must read from disk; got {agents}"
+    )

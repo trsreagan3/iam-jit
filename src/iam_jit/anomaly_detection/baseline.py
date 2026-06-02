@@ -494,6 +494,51 @@ class BaselineStore:
             )
 
     # ------------------------------------------------------------------
+    # Internal helpers
+    # ------------------------------------------------------------------
+
+    def _ensure_open(self) -> None:
+        """Open the SQLite connection on demand when not already open.
+
+        Called by every read path so both the proxy (which calls
+        ``start()`` at process boot) and the CLI dry-run path (which
+        constructs a fresh store and calls ``summary_for`` directly,
+        without ``start()``) get the real on-disk data instead of an
+        empty short-circuit.
+
+        Idempotent: if ``_conn`` is already open this is a no-op
+        (mirrors the ``start()`` guard ``if self._conn is not None:
+        return``). The worker thread is NOT spawned here; this is the
+        read-only fast path — no background flush needed for a CLI
+        dry-run that never calls ``observe()``.
+        """
+        if self._conn is not None:
+            return
+        # Resolve and mkdir the parent directory (same logic as start()).
+        if not self._in_memory:
+            resolved = str(pathlib.Path(self.path).expanduser())
+            # Don't create the directory for a read — if the DB doesn't
+            # exist yet, sqlite3.connect will create an empty file, and
+            # the DDL below will produce empty tables (zero rows) which
+            # is the correct answer: "no baseline yet".
+            parent = pathlib.Path(resolved).parent
+            parent.mkdir(parents=True, exist_ok=True)
+            self.path = resolved
+        self._conn = sqlite3.connect(
+            self.path,
+            check_same_thread=False,
+            isolation_level=None,
+        )
+        self._conn.execute("PRAGMA journal_mode=WAL")
+        self._conn.execute("PRAGMA synchronous=NORMAL")
+        for stmt in _DDL:
+            self._conn.execute(stmt)
+        self._conn.execute(
+            "INSERT OR REPLACE INTO meta(key, value) VALUES('schema_version', ?)",
+            (str(_SCHEMA_VERSION),),
+        )
+
+    # ------------------------------------------------------------------
     # Read path
     # ------------------------------------------------------------------
 
@@ -511,19 +556,19 @@ class BaselineStore:
         on the proxy hot-path (single-digit ms even for a baseline
         with millions of rows because the rolling-window prune keeps
         the table compact).
+
+        Read-path callers (including the CLI dry-run) do NOT need to
+        call ``start()`` first — ``_ensure_open`` lazily opens the
+        connection on demand so the real on-disk baseline is visible
+        without the background flush worker. The proxy path still calls
+        ``start()`` at boot; ``_ensure_open`` is a no-op for it.
         """
+        # Lazily open the connection so the CLI read path sees the real
+        # on-disk data even when start() was never called.
+        self._ensure_open()
         # Force a flush of any in-flight observations so callers
         # observing then querying immediately see their own writes.
         self._flush_locked()
-        if self._conn is None:
-            return BaselineSummary(
-                agent_identity=agent_identity,
-                action=action,
-                resource_pattern=canonical_resource_pattern(resource),
-                total_observations_rolling=0,
-                total_observations_decayed=0.0,
-                dimensions={},
-            )
         pat = canonical_resource_pattern(resource)
         ts_now = int(now if now is not None else self._clock())
 
@@ -630,8 +675,7 @@ class BaselineStore:
     def known_agents(self) -> list[str]:
         """Return distinct agent identities tracked so far. Debugging
         helper for the CLI; cheap on any reasonable baseline."""
-        if self._conn is None:
-            return []
+        self._ensure_open()
         self._flush_locked()
         rows = self._conn.execute(
             "SELECT DISTINCT agent_identity FROM anomaly_baseline_per_agent"

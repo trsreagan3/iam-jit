@@ -255,7 +255,7 @@ async def _drive_get_deny(tmp_path) -> tuple[dict, int]:
                     "authorization": _sigv4_auth(
                         service="s3", region="us-east-1",
                     ),
-                    "x-iam-jit-agent-session-id": "sess-test-pending",
+                    "X-Agent-Session-Id": "sess-test-pending",
                 },
             ) as resp:
                 body = await resp.json()
