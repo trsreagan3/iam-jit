@@ -197,11 +197,11 @@ def _load_all_actions() -> list[str] | None:
     try:
         from policy_sentry.querying.all import get_all_actions
     except Exception:
-        return None
+        return None  # noqa: SD-4 optional-dep absent; expand_granted falls back to literal_glob_count and compute_role_usage emits the "policy_sentry not installed" caveat (surfaced in RoleUsageResult.caveats)
     try:
         actions = get_all_actions()
     except Exception:
-        return None
+        return None  # noqa: SD-4 corpus query failed at runtime; same fail-soft as absent dep — surfaced via literal_glob_count caveat in RoleUsageResult.caveats
     if not actions:
         return None
     return sorted(actions)
