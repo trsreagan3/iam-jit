@@ -615,6 +615,103 @@ def iam_jit_inspect_response_for_injection(
 
 
 @mcp.tool()
+def iam_jit_validate_tool_call(
+    body: str,
+    mode: str = "warn",
+    allowlist_patterns: list[str] | None = None,
+    min_confidence_for_deny: float = 0.7,
+    schema_corpus_path: str = "",
+) -> dict[str, Any]:
+    """Validate a tool-call request body against a known-tool corpus (#729).
+
+    Agent-callable pre-flight: BEFORE the harness emits a tool call,
+    pass the planned request body through this tool. If the validator
+    flags a hallucinated tool name (one the upstream doesn't actually
+    offer), a placeholder credential, or a schema-mismatched argument
+    set, the agent should self-correct rather than emit the bad call.
+
+    Recognized shapes (auto-detected from the body):
+      - MCP `tools/call` and direct method invocations
+      - OpenAI tool_calls / function_call (Chat Completions API)
+      - Anthropic tool_use content blocks (Messages API)
+
+    Args:
+      body: the tool-call request body as a JSON string.
+      mode: action mode — "warn" (pass + add warning), "strip" (replace
+        hallucinated entries with a redaction marker), "deny" (block when
+        confidence >= threshold).
+      allowlist_patterns: regexes; matches suppress detection (e.g.,
+        operator-known custom tools).
+      min_confidence_for_deny: deny-mode confidence floor (default 0.7).
+      schema_corpus_path: optional path to a YAML / JSON corpus override
+        file. When empty, the baked-in MCP + OpenAI + Anthropic standard
+        corpus is used.
+
+    Returns a dict with:
+      detected (bool), indicators (list of {rule, shape, tool_name,
+      severity, source, reason}), confidence (0.0-1.0), suggested_action,
+      decided_action (after profile reconciliation), modified_body
+      (set iff decided_action == 'strip'), low_confidence_explanation
+      (set iff confidence < 0.5), extracted_calls (list of [shape, name]
+      pairs the validator looked at).
+
+    PURE-LOCAL: this tool does NOT call the iam-jit HTTP API. The
+    validator runs in-process inside the MCP server.
+
+    Honesty bar (per iam-jit-honest-positioning): every indicator
+    carries the rule + WHY it fired; the "~95% catch rate" PDF claim
+    is INTENTIONALLY NOT in this docstring because we haven't yet
+    calibrated against a real corpus — a follow-up task is filed.
+    """
+    from iam_jit.tool_call_validator import (
+        ProfileConfig,
+        apply_strip as _apply_strip_tcv,
+        decide_action as _decide_action_tcv,
+        validate as _validate_tcv,
+    )
+    from iam_jit.tool_call_validator.corpus import load_corpus
+
+    allowlist = tuple(allowlist_patterns or ())
+    corpus = load_corpus(schema_corpus_path) if schema_corpus_path else None
+    result = _validate_tcv(
+        body,
+        schema_corpus=corpus,
+        allowlist_patterns=allowlist,
+    )
+    profile = ProfileConfig(
+        enabled=True,
+        action=mode if mode in ("warn", "strip", "deny", "allow") else "warn",  # type: ignore[arg-type]
+        allowlist_patterns=allowlist,
+        min_confidence_for_deny=min_confidence_for_deny,
+    )
+    decided = _decide_action_tcv(result, profile)
+    response: dict[str, Any] = {
+        "detected": result.detected,
+        "indicators": [
+            {
+                "rule": i.rule,
+                "shape": i.shape,
+                "tool_name": i.tool_name,
+                "severity": i.severity,
+                "source": i.source,
+                "reason": i.reason,
+            }
+            for i in result.indicators
+        ],
+        "confidence": result.confidence,
+        "suggested_action": result.suggested_action,
+        "decided_action": decided,
+        "body_truncated": result.body_truncated,
+        "skipped_reason": result.skipped_reason,
+        "low_confidence_explanation": result.low_confidence_explanation,
+        "extracted_calls": [list(c) for c in result.extracted_calls],
+    }
+    if decided == "strip":
+        response["modified_body"] = _apply_strip_tcv(body, result)
+    return response
+
+
+@mcp.tool()
 def analyze_policy(
     policy: dict[str, Any],
     description: str = "",

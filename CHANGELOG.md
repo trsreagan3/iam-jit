@@ -112,6 +112,45 @@ within the same release.
 
 ### Added
 
+- **#729 / BUILD-8 — hallucinated-tool-call validator** (2026-06-02) —
+  New `iam_jit.tool_call_validator` Python lib + `iam_jit_validate_tool_call`
+  MCP tool that inspect outbound agent tool-call request bodies (MCP
+  `tools/call`, OpenAI `tool_calls` / `function_call`, Anthropic
+  `tool_use`) against a known-tool schema corpus and report calls
+  whose name + arguments don't match. Per the competitive-firewall
+  landscape PDF this catch surface is the single highest-individual
+  rate of the differentiators it profiles; the "95% catch" headline is
+  INTENTIONALLY NOT in code or marketing until calibrated against a real
+  corpus (follow-up task filed). Validator surfaces five rules:
+  `hallucinated-tool-name`, `missing-required-arg`, `unexpected-arg`,
+  `placeholder-credential` (e.g., `"YOUR_API_KEY"`), and
+  `naming-style-mix` (snake_case + camelCase mix — a documented
+  hallucination tell). Every indicator carries `rule` + `shape` +
+  `tool_name` + `severity` + `source` + a human-readable `reason` per
+  [[ibounce-honest-positioning]]; confidence weighting is documented +
+  per [[scorer-is-ground-truth]] MUST NOT be tuned post-hoc. The
+  baked-in corpus covers MCP standard methods + OpenAI built-in tools
+  (`web_search`, `code_interpreter`, `file_search`,
+  `image_generation`) + Anthropic built-in tools (`computer`,
+  `text_editor`, `bash`, `web_search`); every entry CITES its source
+  doc page. Operator override via `schema_corpus_path` is supported
+  in the Python lib + MCP tool. Module:
+  `src/iam_jit/tool_call_validator/`; MCP tool:
+  `iam_jit_validate_tool_call` in `mcp-server/iam_jit_mcp.py`. Design
+  memo: `docs/HALLUCINATED-TOOL-CALL-DESIGN.md`; operator guide:
+  `docs/HALLUCINATED-TOOL-CALL-USAGE.md`. Test coverage: 30 unit-test
+  cases + 3 MCP round-trip cases covering valid MCP/OpenAI/Anthropic
+  shapes, hallucinated names across all three shapes, missing-required
+  + extra-arg + placeholder + naming-mix heuristics, allowlist
+  suppression, profile-config wiring, `apply_strip` JSON-aware
+  redaction, body-truncation guard, non-JSON skip, and operator-
+  corpus override. Pairs with #730 (indirect-prompt-injection
+  response scanner / BUILD-9) — together they form the request-and-
+  response inspection cluster. Go port + gbounce MITM wire-up land
+  in `gbounce/internal/toolcallvalidator/`. Per
+  [[deliberate-feature-completion]] this slice ships fully (lib + MCP
+  + Go port + gbounce wire-up); calibration corpus follow-up is filed
+  but does not block the v1.0 launch.
 - **#722 / BUILD-1 — `iam-jit agent-diff` differential audit** (2026-06-02) —
   New CLI subcommand + `iam_jit_agent_diff` MCP tool that compares two
   agent sessions from the cross-bouncer audit log and surfaces a
