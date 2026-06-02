@@ -64,7 +64,8 @@ gbounce --version
 ibounce is distributed as a Python package — no .deb yet (planned post-v1.0).
 
 ```bash
-pip install iam-jit
+# Until iam-jit lands on PyPI (#235), install from source:
+pip install git+https://github.com/trsreagan3/iam-jit.git
 
 ibounce --version
 iam-jit --version
