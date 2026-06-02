@@ -1,0 +1,141 @@
+# syntax=docker/dockerfile:1.7
+#
+# Dockerfile.sidecar — iam-jit bouncer sidecar for "Claude in Docker" setups.
+#
+# PURPOSE: this image runs ALONGSIDE a Claude container (or any agent container)
+# as a docker-compose sidecar. It exposes ibounce + gbounce on their standard
+# ports so the agent container can proxy AWS + HTTPS calls through them.
+#
+# This is NOT a "run iam-jit" image. The entrypoint is a supervisor that starts
+# ibounce (and optionally gbounce) as long-running daemons. iam-jit init runs
+# once at container start to write config, then steps aside.
+#
+# Per [[ibounce-honest-positioning]]: no silent degradation — if ibounce fails
+# to bind, the container exits non-zero (docker-compose restarts it, compose
+# health-check fails, and the claude service depends_on waits).
+#
+# Per [[permission-minimal-install]]: runtime user UID 10001 (non-root). The
+# container does NOT need --privileged or any Linux capabilities.
+#
+# Per [[self-host-zero-billing-dependency]]: zero phone-home.
+#
+# Build args:
+#   PYTHON_IMAGE   override the base (default python:3.12-slim-bookworm)
+#   IAM_JIT_REPO   GitHub slug (default trsreagan3/iam-jit)
+#   IAM_JIT_REF    git ref (default main)
+#   BOUNCERS       space-separated list of bouncers to run (default: ibounce)
+#                  Valid values: ibounce gbounce
+#
+# Ports:
+#   8767  ibounce AWS proxy + management (/healthz)
+#   8769  gbounce management (/healthz)
+#   8080  gbounce HTTPS proxy
+#
+# Volumes:
+#   /var/lib/iam-jit   persistent audit logs + config; bind-mount for durability
+#
+# Usage (standalone smoke-test):
+#   docker build -f infrastructure/docker/Dockerfile.sidecar -t iam-jit-sidecar:local .
+#   docker run --rm -p 8767:8767 iam-jit-sidecar:local
+#   curl http://localhost:8767/healthz
+#
+# Usage (docker-compose):
+#   See examples/docker/docker-compose.claude-sidecar.yml
+
+ARG PYTHON_IMAGE=python:3.12-slim-bookworm
+ARG IAM_JIT_REPO=trsreagan3/iam-jit
+ARG IAM_JIT_REF=main
+
+# ---------------------------------------------------------------------------
+# Stage 1: builder — pre-compile wheels so runtime has no network dependency
+# ---------------------------------------------------------------------------
+FROM ${PYTHON_IMAGE} AS builder
+
+ARG IAM_JIT_REPO
+ARG IAM_JIT_REF
+
+ENV PIP_DISABLE_PIP_VERSION_CHECK=1 \
+    PIP_NO_CACHE_DIR=1 \
+    PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1
+
+WORKDIR /src
+
+# Install build dependencies (git needed for pip install from VCS).
+# curl + ca-certificates for healthcheck in runtime stage.
+RUN apt-get update -qq \
+ && apt-get install -y --no-install-recommends git ca-certificates \
+ && rm -rf /var/lib/apt/lists/*
+
+# Build wheels for iam-jit (includes ibounce entry-point).
+# We pip wheel from source so the runtime stage can install offline.
+RUN python -m pip install --upgrade pip wheel \
+ && python -m pip wheel \
+        --wheel-dir /wheels \
+        "git+https://github.com/${IAM_JIT_REPO}.git@${IAM_JIT_REF}"
+
+# ---------------------------------------------------------------------------
+# Stage 2: runtime — minimal image with installed iam-jit + supervisor
+# ---------------------------------------------------------------------------
+FROM ${PYTHON_IMAGE} AS runtime
+
+ENV PIP_DISABLE_PIP_VERSION_CHECK=1 \
+    PIP_NO_CACHE_DIR=1 \
+    PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1 \
+    # Where iam-jit + bouncers write config + audit logs.
+    IAM_JIT_DATA_DIR=/var/lib/iam-jit \
+    IBOUNCE_DATA_DIR=/var/lib/iam-jit/ibounce \
+    GBOUNCE_DATA_DIR=/var/lib/iam-jit/gbounce \
+    HOME=/home/bouncer \
+    # Bouncers to start (space-separated; supervisor reads this).
+    BOUNCERS=ibounce
+
+# Install curl (healthcheck), ca-certificates (HTTPS upstream).
+# procps gives us `kill` for supervisor signal forwarding.
+RUN apt-get update -qq \
+ && apt-get install -y --no-install-recommends curl ca-certificates procps \
+ && rm -rf /var/lib/apt/lists/*
+
+# Runtime user — non-root UID 10001. Not in the standard 0-65535 host range
+# to avoid collisions with bind-mounted directories owned by the host user.
+RUN groupadd --system --gid 10001 bouncer \
+ && useradd  --system --uid 10001 --gid bouncer \
+              --home-dir /home/bouncer --create-home \
+              --shell /usr/sbin/nologin bouncer \
+ # Persistent data directory — bind-mount this in docker-compose for durability.
+ && mkdir -p /var/lib/iam-jit/ibounce \
+             /var/lib/iam-jit/gbounce \
+ && chown -R bouncer:bouncer /var/lib/iam-jit
+
+# Install iam-jit from pre-built wheels. No network access at install time.
+COPY --from=builder /wheels /tmp/wheels
+RUN python -m pip install --no-index --find-links /tmp/wheels iam-jit \
+ && rm -rf /tmp/wheels /root/.cache \
+ # Verify both entry-points are callable before switching to non-root.
+ && iam-jit --version \
+ && ibounce --version
+
+# Copy the supervisor script.
+COPY --chown=bouncer:bouncer infrastructure/docker/sidecar-entrypoint.sh /usr/local/bin/sidecar-entrypoint
+RUN chmod +x /usr/local/bin/sidecar-entrypoint
+
+USER bouncer
+WORKDIR /home/bouncer
+
+# Advisory port declarations — ibounce binds on 0.0.0.0:8767 when started
+# with --host 0.0.0.0 (the sidecar entrypoint passes this flag).
+# gbounce proxy on 8080, management on 8769.
+EXPOSE 8767 8769 8080
+
+# Healthcheck: ibounce /healthz must respond within 5s.
+# Per [[ibounce-honest-positioning]]: silent failure = hard failure.
+HEALTHCHECK --interval=15s --timeout=5s --start-period=20s --retries=3 \
+    CMD curl -sf http://localhost:8767/healthz >/dev/null || exit 1
+
+LABEL org.opencontainers.image.source="https://github.com/trsreagan3/iam-jit" \
+      org.opencontainers.image.licenses="Apache-2.0" \
+      org.opencontainers.image.title="iam-jit-sidecar" \
+      org.opencontainers.image.description="iam-jit bouncer sidecar for Claude-in-Docker setups (ibounce + gbounce)"
+
+ENTRYPOINT ["/usr/local/bin/sidecar-entrypoint"]
