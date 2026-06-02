@@ -279,6 +279,15 @@ class BaselineStore:
 
         self._queue: deque[tuple[int, str, str, str, int, str]] = deque()
         self._queue_lock = threading.Lock()
+        # Dedicated lock guarding the check-then-open on self._conn.
+        # MUST be separate from _queue_lock: writer paths (observe /
+        # _flush_locked) hold _queue_lock; if they ever called a path
+        # that tried to acquire _open_lock we would deadlock. Using a
+        # separate lock eliminates that class of risk entirely. The
+        # double-checked locking pattern (check _conn outside lock,
+        # re-check inside) avoids the lock for the common fast path
+        # where the DB is already open.
+        self._open_lock = threading.Lock()
         self._stop_event = threading.Event()
         self._worker: threading.Thread | None = None
         self._conn: sqlite3.Connection | None = None
@@ -292,33 +301,52 @@ class BaselineStore:
     # ------------------------------------------------------------------
 
     def start(self) -> None:
-        """Open the SQLite connection + spawn the flush worker."""
+        """Open the SQLite connection + spawn the flush worker.
+
+        Thread-safe: protected by ``_open_lock`` with double-checked
+        locking so concurrent callers (e.g. 16-thread stress at startup)
+        produce exactly ONE open + ONE worker.
+        """
+        # Fast-path: already open (common case — check WITHOUT the lock
+        # so we pay zero lock overhead after the first call).
         if self._conn is not None:
             return
-        if not self._in_memory:
-            parent = pathlib.Path(self.path).expanduser().parent
-            parent.mkdir(parents=True, exist_ok=True)
-            self.path = str(pathlib.Path(self.path).expanduser())
-        self._conn = sqlite3.connect(
-            self.path,
-            check_same_thread=False,
-            isolation_level=None,  # autocommit; we batch in worker
-        )
-        self._conn.execute("PRAGMA journal_mode=WAL")
-        self._conn.execute("PRAGMA synchronous=NORMAL")
-        for stmt in _DDL:
-            self._conn.execute(stmt)
-        self._conn.execute(
-            "INSERT OR REPLACE INTO meta(key, value) VALUES('schema_version', ?)",
-            (str(_SCHEMA_VERSION),),
-        )
-        self._stop_event.clear()
-        self._worker = threading.Thread(
-            target=self._worker_loop,
-            name="anomaly-baseline-flush",
-            daemon=True,
-        )
-        self._worker.start()
+        with self._open_lock:
+            # Re-check inside the lock: another thread may have completed
+            # the open while we were waiting (double-checked locking).
+            if self._conn is not None:
+                return
+            if not self._in_memory:
+                parent = pathlib.Path(self.path).expanduser().parent
+                parent.mkdir(parents=True, exist_ok=True)
+                self.path = str(pathlib.Path(self.path).expanduser())
+            # Build + initialise the connection in a LOCAL variable first.
+            # Only assign to self._conn AFTER all DDL is committed so the
+            # fast-path check (`if self._conn is not None`) in another
+            # thread never sees a half-initialised connection (tables not
+            # yet created).
+            _new_conn = sqlite3.connect(
+                self.path,
+                check_same_thread=False,
+                isolation_level=None,  # autocommit; we batch in worker
+            )
+            _new_conn.execute("PRAGMA journal_mode=WAL")
+            _new_conn.execute("PRAGMA synchronous=NORMAL")
+            for stmt in _DDL:
+                _new_conn.execute(stmt)
+            _new_conn.execute(
+                "INSERT OR REPLACE INTO meta(key, value) VALUES('schema_version', ?)",
+                (str(_SCHEMA_VERSION),),
+            )
+            # Publish the fully-initialised connection atomically.
+            self._conn = _new_conn
+            self._stop_event.clear()
+            self._worker = threading.Thread(
+                target=self._worker_loop,
+                name="anomaly-baseline-flush",
+                daemon=True,
+            )
+            self._worker.start()
 
     def stop(self, *, drain: bool = True) -> None:
         """Stop the worker + close the connection. ``drain=True`` flushes
@@ -511,32 +539,46 @@ class BaselineStore:
         return``). The worker thread is NOT spawned here; this is the
         read-only fast path — no background flush needed for a CLI
         dry-run that never calls ``observe()``.
+
+        Thread-safe: protected by ``_open_lock`` with double-checked
+        locking. See ``start()`` for the locking rationale.
         """
+        # Fast-path: already open (check WITHOUT the lock).
         if self._conn is not None:
             return
-        # Resolve and mkdir the parent directory (same logic as start()).
-        if not self._in_memory:
-            resolved = str(pathlib.Path(self.path).expanduser())
-            # Don't create the directory for a read — if the DB doesn't
-            # exist yet, sqlite3.connect will create an empty file, and
-            # the DDL below will produce empty tables (zero rows) which
-            # is the correct answer: "no baseline yet".
-            parent = pathlib.Path(resolved).parent
-            parent.mkdir(parents=True, exist_ok=True)
-            self.path = resolved
-        self._conn = sqlite3.connect(
-            self.path,
-            check_same_thread=False,
-            isolation_level=None,
-        )
-        self._conn.execute("PRAGMA journal_mode=WAL")
-        self._conn.execute("PRAGMA synchronous=NORMAL")
-        for stmt in _DDL:
-            self._conn.execute(stmt)
-        self._conn.execute(
-            "INSERT OR REPLACE INTO meta(key, value) VALUES('schema_version', ?)",
-            (str(_SCHEMA_VERSION),),
-        )
+        with self._open_lock:
+            # Re-check inside the lock (double-checked locking).
+            if self._conn is not None:
+                return
+            # Resolve and mkdir the parent directory (same logic as start()).
+            if not self._in_memory:
+                resolved = str(pathlib.Path(self.path).expanduser())
+                # Don't create the directory for a read — if the DB doesn't
+                # exist yet, sqlite3.connect will create an empty file, and
+                # the DDL below will produce empty tables (zero rows) which
+                # is the correct answer: "no baseline yet".
+                parent = pathlib.Path(resolved).parent
+                parent.mkdir(parents=True, exist_ok=True)
+                self.path = resolved
+            # Build + initialise the connection in a LOCAL variable first.
+            # Only assign to self._conn AFTER all DDL is committed — same
+            # rationale as start(): the fast-path check must never see a
+            # half-initialised connection.
+            _new_conn = sqlite3.connect(
+                self.path,
+                check_same_thread=False,
+                isolation_level=None,
+            )
+            _new_conn.execute("PRAGMA journal_mode=WAL")
+            _new_conn.execute("PRAGMA synchronous=NORMAL")
+            for stmt in _DDL:
+                _new_conn.execute(stmt)
+            _new_conn.execute(
+                "INSERT OR REPLACE INTO meta(key, value) VALUES('schema_version', ?)",
+                (str(_SCHEMA_VERSION),),
+            )
+            # Publish the fully-initialised connection atomically.
+            self._conn = _new_conn
 
     # ------------------------------------------------------------------
     # Read path

@@ -281,6 +281,76 @@ def load_declaration(
 # ---------------------------------------------------------------------------
 
 
+def _check_common_key_mistakes(
+    declaration: dict[str, Any],
+) -> list[dict[str, Any]]:
+    """Return actionable error dicts for well-known operator mistakes
+    BEFORE jsonschema runs.  These bypass the generic "Additional
+    properties are not allowed" message with concrete, operator-language
+    guidance per [[ibounce-honest-positioning]].
+
+    Currently catches:
+      * ``iam_jit`` (underscore) instead of ``iam-jit`` (hyphen)
+      * top-level block present but ``enabled`` key missing
+    """
+    errors: list[dict[str, Any]] = []
+    # Underscore vs hyphen in the top-level key.
+    if "iam_jit" in declaration and "iam-jit" not in declaration:
+        errors.append({
+            "path": "/",
+            "message": (
+                "top-level key must be 'iam-jit' (hyphen), "
+                "got 'iam_jit' (underscore). "
+                "Rename the key: `iam-jit:` in your YAML."
+            ),
+            "schema_path": "properties/iam-jit",
+        })
+        return errors  # Nothing else is meaningful until the key is right.
+
+    # Missing required `enabled` under `iam-jit`.
+    iam_jit_block = declaration.get("iam-jit")
+    if isinstance(iam_jit_block, dict) and "enabled" not in iam_jit_block:
+        errors.append({
+            "path": "iam-jit",
+            "message": (
+                "'iam-jit.enabled' is required but missing. "
+                "Add `enabled: true` (or `enabled: false`) under the "
+                "`iam-jit:` key."
+            ),
+            "schema_path": "properties/iam-jit/required",
+        })
+    return errors
+
+
+def _enrich_schema_error(err: Any) -> str:
+    """Return a more actionable message for common jsonschema errors.
+
+    Falls back to ``err.message`` unchanged when no enrichment applies.
+    Per [[ibounce-honest-positioning]]: never swap the message for
+    something that omits the real problem — always include the original
+    context.
+    """
+    msg = err.message
+    # Intercept the generic "X was unexpected" additional-properties message
+    # when the unexpected key is the underscore form.
+    if "iam_jit" in msg and "not allowed" in msg.lower():
+        return (
+            "top-level key must be 'iam-jit' (hyphen), "
+            "got 'iam_jit' (underscore). "
+            "Rename the key: `iam-jit:` in your YAML. "
+            f"(original: {msg})"
+        )
+    # "enabled" missing — surface the field path explicitly.
+    if "'enabled' is a required property" in msg:
+        path = "/".join(str(p) for p in err.absolute_path) or "iam-jit"
+        return (
+            f"'{path}.enabled' is required but missing. "
+            "Add `enabled: true` (or `enabled: false`) to fix. "
+            f"(original: {msg})"
+        )
+    return msg
+
+
 def validate_declaration(
     declaration: dict[str, Any],
     *,
@@ -314,13 +384,26 @@ def validate_declaration(
         # we still want the loader to be usable in tests / debugging.
         return declaration
 
+    # ---- Common-mistake fast-path: surface actionable hints BEFORE the
+    # generic jsonschema message so the operator sees a concrete fix, not
+    # "Additional properties are not allowed".
+    _early_errors: list[dict[str, Any]] = _check_common_key_mistakes(declaration)
+    if _early_errors:
+        raise ConfigLoadError(
+            f"declaration has a configuration error: "
+            f"{_early_errors[0]['message']}",
+            source=source,
+            code="schema_validation_error",
+            details={"errors": _early_errors},
+        )
+
     validator = jsonschema.Draft202012Validator(IAM_JIT_CONFIG_SCHEMA)
     errors = sorted(validator.iter_errors(declaration), key=lambda e: e.path)
     if errors:
         formatted = [
             {
                 "path": "/".join(str(p) for p in err.absolute_path) or "/",
-                "message": err.message,
+                "message": _enrich_schema_error(err),
                 "schema_path": "/".join(str(p) for p in err.schema_path),
             }
             for err in errors

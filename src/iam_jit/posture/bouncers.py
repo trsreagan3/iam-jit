@@ -81,6 +81,8 @@ GBOUNCE_ENV_HTTPS_PROXY = "HTTPS_PROXY"
 
 _IAM_JIT_DATA_DIR_ENV = "IAM_JIT_DATA_DIR"
 _AUTOPILOT_STATUS_FILENAME = "autopilot.status.json"
+# Written by serve() at bind time; removed on clean shutdown.
+_IBOUNCE_RUNNING_FILENAME = "ibounce-running.json"
 
 
 def _autopilot_data_dir() -> pathlib.Path:
@@ -164,6 +166,34 @@ def _loopback_port_open(port: int, host: str = "127.0.0.1", timeout: float = 0.2
 
 
 _LOOPBACK_HOSTS = {"127.0.0.1", "localhost", "::1", "[::1]"}
+
+
+def _read_ibounce_running_port() -> int | None:
+    """Return the port from ``ibounce-running.json`` if present and live.
+
+    This file is written by ``serve()`` immediately after binding + deleted
+    in the ``finally`` block, so its presence means ibounce is (or was very
+    recently) running on that port.  TCP-probe the port before returning it —
+    if ibounce crashed without cleanup the stale file would give a wrong
+    answer.  Returns ``None`` on any parse / probe failure.
+    """
+    hint_path = _autopilot_data_dir() / _IBOUNCE_RUNNING_FILENAME
+    if not hint_path.exists():
+        return None
+    port: int | None = None
+    try:
+        data = json.loads(hint_path.read_text(encoding="utf-8", errors="replace"))
+        raw_port = int(data.get("port", 0))
+        if 0 < raw_port <= 65535:
+            port = raw_port
+    except (OSError, json.JSONDecodeError, ValueError, TypeError):  # noqa: SD-1 — parse failure is the expected "no valid hint" path; caller checks port is None and falls back to autopilot / TCP probe
+        pass
+    if port is None:
+        return None
+    # Validate the hint is still live before trusting it.
+    if not _loopback_port_open(port):
+        return None
+    return port
 
 
 def _parse_url_for_loopback_port(url: str) -> int | None:
@@ -252,33 +282,55 @@ def detect_ibounce() -> dict[str, Any]:
     the bouncer is not missed. Default-port probe always runs as a
     fallback (handles the no-autopilot case).
     """
-    # #514: gather any autopilot-hinted ports for ibounce.  Probe hints
-    # FIRST (they are the authoritative declaration from the daemon that
-    # started the bouncer), then fall back to the default if no hint is
-    # live.  dict.fromkeys preserves insertion order + deduplicates so if
-    # autopilot recorded the default port we don't probe it twice.
-    ap_hints = _read_autopilot_port_hints()
-    ibounce_ports: list[int] = list(
-        dict.fromkeys(ap_hints.get("ibounce", []) + [IBOUNCE_DEFAULT_PORT])
-    )
+    # Highest-priority port hint: ibounce-running.json written by
+    # serve() immediately after binding. Supersedes autopilot + default
+    # so `ibounce run --port 9876` (without autopilot / AWS_ENDPOINT_URL)
+    # is reported correctly in `ibounce posture`.  The helper TCP-probes
+    # the hinted port before returning it so a stale file never produces
+    # a false "RUNNING" report.
+    running_port = _read_ibounce_running_port()
+    if running_port is not None:
+        block: dict[str, Any] = {
+            "running": True,
+            "port": running_port,
+            "default_port": IBOUNCE_DEFAULT_PORT,
+        }
+        # Skip the autopilot + TCP probe chain — we already verified
+        # the port is live.  Fall through to the in-process introspection
+        # + env-var checks below.
+    else:
+        # #514: gather any autopilot-hinted ports for ibounce.  Probe hints
+        # FIRST (they are the authoritative declaration from the daemon that
+        # started the bouncer), then fall back to the default if no hint is
+        # live.  dict.fromkeys preserves insertion order + deduplicates so if
+        # autopilot recorded the default port we don't probe it twice.
+        ap_hints = _read_autopilot_port_hints()
+        ibounce_ports: list[int] = list(
+            dict.fromkeys(ap_hints.get("ibounce", []) + [IBOUNCE_DEFAULT_PORT])
+        )
 
-    # Probe each candidate port; use the first live one.
-    port = IBOUNCE_DEFAULT_PORT
-    running = False
-    for _p in ibounce_ports:
-        if _loopback_port_open(_p):
-            port = _p
-            running = True
-            break
-    if not running:
-        # Keep the default so block["port"] is always meaningful.
+        # Probe each candidate port; use the first live one.
         port = IBOUNCE_DEFAULT_PORT
+        running = False
+        for _p in ibounce_ports:
+            if _loopback_port_open(_p):
+                port = _p
+                running = True
+                break
+        if not running:
+            # Keep the default so block["port"] is always meaningful.
+            port = IBOUNCE_DEFAULT_PORT
 
-    block: dict[str, Any] = {
-        "running": running,
-        "port": port,
-        "default_port": IBOUNCE_DEFAULT_PORT,
-    }
+        block = {
+            "running": running,
+            "port": port,
+            "default_port": IBOUNCE_DEFAULT_PORT,
+        }
+
+    # Unpack for the rest of this function which references `running` and
+    # `port` directly (both branches set `block`, so this is always safe).
+    running = block["running"]
+    port = block["port"]
 
     # In-process introspection: import the same helpers the MCP tools
     # use. Cheap (no IO beyond reading env vars + YAML).

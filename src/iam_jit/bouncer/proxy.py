@@ -6198,6 +6198,32 @@ async def serve(config: ProxyConfig, *, store: BouncerStore) -> None:
         config.host, config.port,
     )
 
+    # Write a lightweight port-hint file so `ibounce posture` (which
+    # runs as a SEPARATE process) can report the ACTUAL running port
+    # when the operator started ibounce on a non-default port without
+    # autopilot or AWS_ENDPOINT_URL.  Fail-soft: a broken data directory
+    # must never crash a running proxy.  Cleaned up in the finally block
+    # below so the hint disappears the moment the proxy stops.
+    _port_hint_path: "pathlib.Path | None" = None
+    try:
+        import json as _json_mod
+        import pathlib as _pathlib_mod
+        _data_dir_raw = os.environ.get("IAM_JIT_DATA_DIR", "").strip()
+        _data_dir = (
+            _pathlib_mod.Path(_data_dir_raw).expanduser()
+            if _data_dir_raw
+            else _pathlib_mod.Path.home() / ".iam-jit"
+        )
+        _data_dir.mkdir(parents=True, exist_ok=True)
+        _port_hint_path = _data_dir / "ibounce-running.json"
+        _port_hint_path.write_text(
+            _json_mod.dumps({"port": config.port, "host": config.host}),
+            encoding="utf-8",
+        )
+    except Exception as _hint_err:
+        logger.debug("could not write ibounce port-hint file: %s", _hint_err)
+        _port_hint_path = None
+
     # §A30 / #359 — SIGTERM graceful-shutdown hookup. Without this,
     # SIGTERM (the signal `systemctl stop`, `docker stop`, and k8s
     # pod termination send) kills the process without running the
@@ -6407,3 +6433,13 @@ async def serve(config: ProxyConfig, *, store: BouncerStore) -> None:
                 _uninst_err,
             )
         register_anomaly_detection_marker(None)
+        # Remove the port-hint file so `ibounce posture` doesn't report
+        # a stale port after the proxy stops.
+        if _port_hint_path is not None:
+            try:
+                _port_hint_path.unlink(missing_ok=True)
+            except Exception as _hint_cleanup_err:
+                logger.debug(
+                    "could not remove ibounce port-hint file: %s",
+                    _hint_cleanup_err,
+                )
