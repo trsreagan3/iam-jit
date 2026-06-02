@@ -5252,6 +5252,41 @@ def run_cmd(
                 fg="yellow", err=True,
             )
 
+    # #724 / BUILD-3 — bouncer chaining opt-in. Declarative-only (no CLI
+    # flag): the `iam-jit.bouncer_chaining` block from .iam-jit.yaml.
+    # Default None = disabled. Validation + default-application happen in
+    # proxy.py serve() via bouncer_chaining.load_config so a bad value
+    # surfaces in one place. Mirrors the cost_circuit_breaker discovery
+    # shape above.
+    _bouncer_chaining_block: dict | None = None
+    try:
+        from .ambient_config.loader import (
+            ConfigLoadError as _BCConfigLoadError,
+            discover_declaration_source as _bc_discover,
+            load_declaration_from_path as _bc_load,
+        )
+        _bc_discovered = _bc_discover()
+        if _bc_discovered is not None:
+            try:
+                _bc_decl = _bc_load(_bc_discovered.path)
+                _bc_ij = _bc_decl.get("iam-jit") or {}
+                _bc_blk = _bc_ij.get("bouncer_chaining")
+                if isinstance(_bc_blk, dict):
+                    _bouncer_chaining_block = _bc_blk
+            except _BCConfigLoadError as _bc_decl_err:
+                click.secho(
+                    f"warning: declarative config at "
+                    f"{_bc_discovered.path} failed to parse for "
+                    f"bouncer_chaining opt-in: {_bc_decl_err}",
+                    fg="yellow", err=True,
+                )
+    except Exception as _bc_amb_err:  # pragma: no cover — defensive
+        click.secho(
+            f"warning: ambient-config discovery unavailable for "
+            f"bouncer_chaining opt-in: {_bc_amb_err}",
+            fg="yellow", err=True,
+        )
+
     config = ProxyConfig(
         host=host,
         port=port,
@@ -5363,6 +5398,7 @@ def run_cmd(
         dynamic_denies_enabled=not disable_dynamic_denies,
         dynamic_denies_path=dynamic_denies_path,
         cost_circuit_breaker=_cost_circuit_breaker_block,
+        bouncer_chaining=_bouncer_chaining_block,
     )
 
     # #132 plan-capture: surface the session id (operator-supplied or

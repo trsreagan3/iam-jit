@@ -1827,6 +1827,18 @@ class ProxyConfig:
     default). Loaded from `.iam-jit.yaml` ambient config or the CLI
     `--cost-circuit-breaker-rule` JSON string."""
 
+    # #724 / BUILD-3 — bouncer chaining (cross-protocol defense-in-depth).
+    # OFF by default per [[v1-scope-bar]] + [[independence-as-security-
+    # property]]: chaining must be OPT-IN and must NOT create a hard
+    # runtime dependency or a bypass. When enabled, serve() installs a
+    # ChainTightener that reads the shared same-host signal store + the
+    # declarative chain rules at ~/.iam-jit/chains/ so a PII signal from
+    # dbounce can TIGHTEN (never loosen) this bouncer's HTTP egress for
+    # the same agent session. See src/iam_jit/bouncer_chaining/.
+    bouncer_chaining: dict | None = None
+    """Parsed `bouncer_chaining` config block (None = disabled default).
+    Loaded from `.iam-jit.yaml` ambient config."""
+
 
 @dataclasses.dataclass
 class RequestObservation:
@@ -2665,6 +2677,133 @@ def evaluate_request(
         logger.warning("cost-circuit-breaker observe failed: %s", _cb_err)
         _cost_breaker_deny_source = None
 
+    # #724 / BUILD-3 — bouncer chaining (cross-protocol defense-in-depth).
+    # If another bouncer (e.g. dbounce) raised a session-scoped signal
+    # (e.g. PII observed in a SQL result), a declarative chain rule can
+    # TIGHTEN this bouncer's HTTP egress for the SAME agent session —
+    # blocking exfil-shaped egress via a DIFFERENT protocol than the one
+    # that saw the data. Mirrors the anomaly + cost-breaker tighten
+    # shapes above: ALLOW->DENY only, re-emit a CHAIN_TIGHTENED audit
+    # event attributing the SOURCE bouncer, fail-soft so a down signal
+    # channel never stops the proxy.
+    #
+    # Invariants the security review scrutinises (all structural):
+    #   * TIGHTENING-ONLY — only fires when the floor verdict was NOT
+    #     already a deny; the tightener can only move ALLOW->DENY, never
+    #     loosen. A forged/replayed signal is at worst a self-DoS on the
+    #     attacker's own exfil path.
+    #   * INDEPENDENCE / FAIL-SOFT — a missing/corrupt/unavailable signal
+    #     store yields a no-op (the tightener catches its own errors);
+    #     the bouncer then decides standalone against its own policy.
+    #   * DEFAULT-OFF — active_chain_tightener() is None unless the
+    #     operator opted in, so this is a single None-check no-op for
+    #     everyone who hasn't enabled chaining.
+    _chain_deny_source: str | None = None
+    try:
+        from ..bouncer_chaining import active_chain_tightener
+        _tightener = active_chain_tightener()
+        if _tightener is not None and record.decision.value != "deny":
+            # is_write follows the proxy convention: unknown counts as
+            # write (so an unclassifiable egress is treated as exfil-
+            # shaped and tightened when a PII signal is active).
+            from .plan_capture.classifier import (
+                classify_action as _chain_classify_action,
+            )
+            _chain_action_class = (
+                _chain_classify_action(parsed.service, parsed.action)
+                if (parsed.service and parsed.action) else "unknown"
+            )
+            _chain_is_write = _chain_action_class != "read"
+            _chain_res = _tightener.evaluate(
+                session_id=header_agent_session_id,
+                is_write=_chain_is_write,
+            )
+            if _chain_res.fired:
+                # Emit the CHAIN_TIGHTENED audit event in BOTH block +
+                # alert mode (alert mode records that a chain WOULD have
+                # tightened). enforced reflects whether the verdict
+                # actually changed.
+                _chain_enforced = (
+                    _chain_res.tighten
+                    and effective_mode == ProxyMode.TRANSPARENT
+                )
+                try:
+                    from ..bouncer_chaining import make_chain_tightened_event
+                    _emit_audit_event(make_chain_tightened_event(
+                        session_id=header_agent_session_id or "",
+                        source_bouncer=_chain_res.source_bouncer or "",
+                        trigger_kind=_chain_res.trigger_kind or "",
+                        action_bouncer=_chain_res.action_bouncer or "ibounce",
+                        action_verb=_chain_res.action_verb or "tighten_egress",
+                        mode=_chain_res.mode,
+                        enforced=_chain_enforced,
+                        ttl_seconds=_chain_res.ttl_seconds,
+                        service=parsed.service,
+                        action=parsed.action,
+                        host=host,
+                        agent_name=header_agent_name,
+                    ))
+                except Exception as _chain_emit_err:
+                    logger.warning(
+                        "audit-export emit (chain-tightened) failed: %s",
+                        _chain_emit_err,
+                    )
+            if _chain_res.tighten and record.decision.value != "deny":
+                from .decisions import Decision as _ChainDecision
+                record = dataclasses.replace(
+                    record,
+                    decision=_ChainDecision.DENY,
+                    reason=(
+                        _chain_res.operator_message
+                        or "bouncer chaining: egress tightened by a "
+                        "cross-bouncer signal"
+                    ),
+                )
+                _chain_deny_source = "bouncer_chaining"
+                # Re-emit a decision audit row reflecting the FINAL
+                # tightened state (operator-facing surface MUST match
+                # observable reality per [[ibounce-honest-positioning]]),
+                # carrying decision_source=bouncer_chaining + the source
+                # attribution so a reviewer can correlate the chain.
+                try:
+                    from .audit_export import audit_event_from_decision
+                    _emit_audit_event(audit_event_from_decision(
+                        decision_id=decision_id,
+                        mode=effective_mode.value,
+                        profile=(
+                            active_profile.name
+                            if active_profile is not None else None
+                        ),
+                        verdict="deny",
+                        reason=record.reason,
+                        service=parsed.service,
+                        action=parsed.action,
+                        arn=resolved_arn,
+                        region=parsed.region,
+                        host=host,
+                        upstream=None,
+                        enforced=(effective_mode == ProxyMode.TRANSPARENT),
+                        extra={
+                            "decision_source": "bouncer_chaining",
+                            "chain_source_bouncer": _chain_res.source_bouncer,
+                            "chain_trigger_kind": _chain_res.trigger_kind,
+                        },
+                        user_agent=user_agent,
+                        header_agent_name=header_agent_name,
+                        header_agent_session_id=header_agent_session_id,
+                        agent_header_rejections=agent_header_rejections,
+                    ))
+                except Exception as _chain_dec_err:
+                    logger.warning(
+                        "audit-export emit (chain-tighten-decision) "
+                        "failed: %s", _chain_dec_err,
+                    )
+    except Exception as _chain_err:
+        # Independence guarantee: a chaining-hook crash MUST NOT break
+        # the proxy hot path. Log loud + continue standalone.
+        logger.warning("bouncer-chaining hook failed: %s", _chain_err)
+        _chain_deny_source = None
+
     # #270 Slice 2 — admin-fallback synthetic. Fires when a request
     # would have been DENIED in transparent mode but a pause window
     # is open, so the proxy demoted it to COOPERATIVE + the call
@@ -2750,7 +2889,11 @@ def evaluate_request(
         parsed=parsed, record=record, mode=effective_mode,
         decision_id=decision_id,
         active_pause_id=active_pause["id"] if active_pause is not None else None,
-        deny_source=_cost_breaker_deny_source or _anomaly_deny_source,
+        deny_source=(
+            _chain_deny_source
+            or _cost_breaker_deny_source
+            or _anomaly_deny_source
+        ),
     )
 
 
@@ -5770,6 +5913,67 @@ async def serve(config: ProxyConfig, *, store: BouncerStore) -> None:
             "cost_circuit_breaker: CONFIGURED but NOT WIRED — reason: %s "
             "(the breaker will NOT gate requests until this is resolved)",
             _cb_install_err,
+        )
+
+    # #724 / BUILD-3 — bouncer chaining (cross-protocol defense-in-depth).
+    # Install the cross-bouncer ChainTightener when the operator opted in
+    # via `iam-jit.bouncer_chaining.enabled: true`. OFF by default per
+    # [[v1-scope-bar]] + [[independence-as-security-property]]. Same
+    # fail-soft posture as the cost breaker: a config / load error here
+    # MUST NOT stop the bouncer — warn loudly + leave chaining
+    # uninstalled (the proxy hot path then short-circuits on the None
+    # singleton + decides standalone). Chaining is purely additive
+    # (tightening-only); a NOT-WIRED chaining feature degrades to "this
+    # bouncer enforces its own policy, no cross-bouncer tightening" —
+    # which is exactly the independent-by-design baseline.
+    try:
+        from ..bouncer_chaining import (
+            ChainTightener as _ChainTightener,
+            SignalStore as _ChainSignalStore,
+            load_chain_rules as _load_chain_rules,
+            load_config as _load_chaining_config,
+            register_chain_tightener,
+        )
+        _chain_cfg = _load_chaining_config(config.bouncer_chaining)
+        if _chain_cfg.enabled:
+            _chain_rules = _load_chain_rules(_chain_cfg.chains_dir)
+            _chain_store = _ChainSignalStore(_chain_cfg.signal_db)
+            _tightener_inst = _ChainTightener(
+                store=_chain_store,
+                rules=_chain_rules,
+                mode=_chain_cfg.mode,
+            )
+            register_chain_tightener(_tightener_inst)
+            logger.info(
+                "bouncer_chaining: enabled (mode=%s egress_rules=%d "
+                "total_rules=%d signal_db=%s)",
+                _chain_cfg.mode, _tightener_inst.egress_rule_count,
+                len(_chain_rules), _chain_store.db_path,
+            )
+            if _tightener_inst.egress_rule_count == 0:
+                logger.warning(
+                    "bouncer_chaining: enabled but NO egress-tightening "
+                    "chain rules loaded from %s — no cross-bouncer "
+                    "tightening will fire until you add a rule (e.g. "
+                    "{trigger: dbounce.pii_detected, action: "
+                    "ibounce.tighten_egress}).",
+                    _chain_cfg.chains_dir or "~/.iam-jit/chains",
+                )
+        else:
+            register_chain_tightener(None)
+    except Exception as _chain_install_err:
+        try:
+            from ..bouncer_chaining import (
+                register_chain_tightener as _chain_clear,
+            )
+            _chain_clear(None)
+        except Exception:  # noqa: SD-1 best-effort stale-singleton clear during chaining-install failure; if the import itself failed there is nothing to clear, and the logger.warning below already surfaces that chaining is NOT WIRED
+            pass
+        logger.warning(
+            "bouncer_chaining: CONFIGURED but NOT WIRED — reason: %s "
+            "(no cross-bouncer tightening until resolved; the bouncer "
+            "still enforces its own policy standalone)",
+            _chain_install_err,
         )
 
     # #253 — rule-expiry sweeper. 30s tick. The list_active_rules

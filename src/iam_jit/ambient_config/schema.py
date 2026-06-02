@@ -234,6 +234,15 @@ _INLINE_SCHEMA: dict[str, Any] = {
                 "cost_circuit_breaker": {
                     "$ref": "#/$defs/cost_circuit_breaker_block",
                 },
+                # #724 / BUILD-3 — bouncer chaining (cross-protocol
+                # defense-in-depth). Lets one bouncer's session-scoped
+                # observation TIGHTEN another's posture for the same
+                # agent session via a shared same-host signal store +
+                # declarative chain rules. OFF by default; fail-soft +
+                # tightening-only. See src/iam_jit/bouncer_chaining/.
+                "bouncer_chaining": {
+                    "$ref": "#/$defs/bouncer_chaining_block",
+                },
             },
         }
     },
@@ -560,6 +569,43 @@ _INLINE_SCHEMA: dict[str, Any] = {
                     "type": "number",
                     "minimum": 0,
                     "default": 50.0,
+                },
+            },
+        },
+        "bouncer_chaining_block": {
+            "type": "object",
+            "additionalProperties": False,
+            "description": (
+                "#724 / BUILD-3 — bouncer chaining (cross-protocol "
+                "defense-in-depth). When enabled, this bouncer reads "
+                "session-scoped signals other bouncers wrote to a shared "
+                "same-host signal store + applies the declarative chain "
+                "rules at ~/.iam-jit/chains/ to TIGHTEN (never loosen) "
+                "its own posture for the same agent session. OFF by "
+                "default. Fail-soft + tightening-only by construction."
+            ),
+            "properties": {
+                "enabled": {"type": "boolean", "default": False},
+                "mode": {
+                    "type": "string",
+                    "enum": ["block", "alert"],
+                    "default": "block",
+                },
+                "chains_dir": {
+                    "type": "string",
+                    "description": (
+                        "Optional override for the chain-rules directory "
+                        "(default ~/.iam-jit/chains)."
+                    ),
+                },
+                "signal_db": {
+                    "type": "string",
+                    "description": (
+                        "Optional override for the shared signal-store "
+                        "SQLite path (default ~/.iam-jit/chaining/"
+                        "signals.db). All bouncers on the host MUST "
+                        "resolve the same path."
+                    ),
                 },
             },
         },
