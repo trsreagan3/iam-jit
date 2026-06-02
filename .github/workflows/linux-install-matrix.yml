@@ -1,0 +1,194 @@
+# #740 — Linux install-bootstrap matrix CI.
+#
+# Runs the full install chain (pip install → ibounce init → ibounce run →
+# boto3 STS call → decisions_count tick → iam-jit init) on Ubuntu 22.04,
+# Debian 12, and Fedora 40. Each platform runs in its own job so failures
+# are isolated and the matrix continues even if one platform fails.
+#
+# Per [[automatic-bootstrap-must-just-work-everywhere]]: bootstrapping must
+# work consistently across Docker containers, CI pipelines, local Linux.
+#
+# Per [[ibounce-honest-positioning]]: no silent degradation — a failure
+# on any platform fails the job clearly with the full container output.
+#
+# Nightly schedule: 02:00 UTC (quiet period; avoids peak PyPI traffic).
+# Also runs on push to main and on PRs that touch install-path code.
+
+name: Linux install matrix
+
+on:
+  schedule:
+    - cron: "0 2 * * *"   # nightly 02:00 UTC
+  push:
+    branches:
+      - main
+    paths:
+      - "src/iam_jit/__init__.py"
+      - "src/iam_jit/bouncer/store.py"
+      - "src/iam_jit/bouncer_cli.py"
+      - "src/iam_jit/cli_init.py"
+      - "src/iam_jit/cli.py"
+      - "pyproject.toml"
+      - "tests/integration/test_linux_install_e2e.py"
+      - ".github/workflows/linux-install-matrix.yml"
+  pull_request:
+    branches:
+      - main
+    paths:
+      - "src/iam_jit/__init__.py"
+      - "src/iam_jit/bouncer/store.py"
+      - "src/iam_jit/bouncer_cli.py"
+      - "src/iam_jit/cli_init.py"
+      - "src/iam_jit/cli.py"
+      - "pyproject.toml"
+      - "tests/integration/test_linux_install_e2e.py"
+      - ".github/workflows/linux-install-matrix.yml"
+  workflow_dispatch:  # allow manual trigger for UAT
+
+jobs:
+  linux-install:
+    name: "${{ matrix.platform.name }}"
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    strategy:
+      fail-fast: false  # run all platforms even if one fails
+      matrix:
+        platform:
+          - name: "Ubuntu 22.04"
+            image: "ubuntu:22.04"
+            pre_install: |
+              apt-get update -qq
+              apt-get install -qq -y python3 python3-pip python3-venv
+              python3 -m venv /opt/venv
+            path_prefix: "export PATH=/opt/venv/bin:$PATH &&"
+
+          - name: "Debian 12 (bookworm)"
+            image: "python:3.12-slim-bookworm"
+            pre_install: ""
+            path_prefix: ""
+
+          - name: "Fedora 40"
+            image: "fedora:40"
+            pre_install: |
+              dnf install -y -q python3 python3-pip
+              python3 -m venv /opt/venv
+            path_prefix: "export PATH=/opt/venv/bin:$PATH &&"
+
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v4
+        with:
+          path: workspace
+
+      - name: Run install-bootstrap in container (${{ matrix.platform.name }})
+        run: |
+          docker run --rm \
+            -v "${{ github.workspace }}/workspace:/workspace" \
+            "${{ matrix.platform.image }}" \
+            sh -c '
+              set -e
+              echo "=== ${{ matrix.platform.name }} ==="
+
+              # Pre-install (set up Python / venv if needed)
+              ${{ matrix.platform.pre_install }}
+
+              # PEP 668 fix + install from repo
+              ${{ matrix.platform.path_prefix }} python3 -m pip install --upgrade pip --quiet 2>&1 | tail -1
+              ${{ matrix.platform.path_prefix }} pip install /workspace --quiet 2>&1 | tail -1
+
+              # Verify binary
+              ${{ matrix.platform.path_prefix }} python3 --version
+              ${{ matrix.platform.path_prefix }} iam-jit --version | head -1
+
+              # ibounce init + run
+              ${{ matrix.platform.path_prefix }} ibounce init 2>&1 | head -3
+              ${{ matrix.platform.path_prefix }} ibounce run --port 8767 --mode cooperative > /tmp/ibounce.log 2>&1 &
+              IPID=$!
+              sleep 3
+
+              # decisions_count before
+              DC1=$(${{ matrix.platform.path_prefix }} python3 -c "
+          import urllib.request, json
+          resp = urllib.request.urlopen('"'"'http://127.0.0.1:8767/healthz'"'"', timeout=5)
+          data = json.loads(resp.read())
+          print(data['"'"'decisions_count'"'"'])
+          " 2>&1)
+              echo "decisions_before=$DC1"
+
+              # boto3 STS call with fake creds
+              ${{ matrix.platform.path_prefix }} python3 -c "
+          import os, boto3
+          os.environ['"'"'AWS_ACCESS_KEY_ID'"'"'] = '"'"'AKIAFAKEKEY000001'"'"'
+          os.environ['"'"'AWS_SECRET_ACCESS_KEY'"'"'] = '"'"'FakeSecretKey1234567890abcdef'"'"'
+          os.environ['"'"'AWS_DEFAULT_REGION'"'"'] = '"'"'us-east-1'"'"'
+          try:
+              sts = boto3.client('"'"'sts'"'"', endpoint_url='"'"'http://127.0.0.1:8767'"'"', region_name='"'"'us-east-1'"'"')
+              sts.get_caller_identity()
+              print('"'"'STS_OK'"'"')
+          except Exception as e:
+              print('"'"'STS_FAIL:'"'"', type(e).__name__)
+          " 2>&1
+
+              # decisions_count after
+              DC2=$(${{ matrix.platform.path_prefix }} python3 -c "
+          import urllib.request, json
+          resp = urllib.request.urlopen('"'"'http://127.0.0.1:8767/healthz'"'"', timeout=5)
+          data = json.loads(resp.read())
+          print(data['"'"'decisions_count'"'"'])
+          " 2>&1)
+              echo "decisions_after=$DC2"
+
+              # iam-jit init non-interactive
+              ${{ matrix.platform.path_prefix }} iam-jit init \
+                --non-interactive \
+                --no-doctor-check \
+                --skip-mcp-install \
+                --bouncers ibounce \
+                --data-dir /tmp/iam-jit-data \
+                --overwrite 2>&1 | grep -E "\[ok\] wrote|Error" | head -3
+
+              # Verify config written
+              if ${{ matrix.platform.path_prefix }} ls /tmp/iam-jit-data/iam-jit.yaml > /dev/null 2>&1; then
+                echo "config_written=OK"
+              else
+                echo "config_written=FAIL"
+                exit 1
+              fi
+
+              kill $IPID 2>/dev/null || true
+
+              # decisions_count must have ticked
+              if [ "$DC2" -gt "$DC1" ] 2>/dev/null; then
+                echo "RESULT: PASS"
+              else
+                echo "RESULT: FAIL decisions_count did not tick (before=$DC1 after=$DC2)"
+                exit 1
+              fi
+            '
+
+      - name: Verify datetime.UTC compat on Python 3.10 (${{ matrix.platform.name }})
+        run: |
+          docker run --rm \
+            -v "${{ github.workspace }}/workspace:/workspace" \
+            "${{ matrix.platform.image }}" \
+            sh -c '
+              set -e
+              ${{ matrix.platform.pre_install }}
+              ${{ matrix.platform.path_prefix }} python3 -m pip install --upgrade pip --quiet 2>&1 | tail -1
+              ${{ matrix.platform.path_prefix }} pip install /workspace --quiet 2>&1 | tail -1
+              ${{ matrix.platform.path_prefix }} python3 -c "
+          import iam_jit
+          import datetime as _dt, sys
+          has_utc = hasattr(_dt, '"'"'UTC'"'"')
+          is_correct = has_utc and _dt.UTC is _dt.timezone.utc
+          print(f'"'"'python={sys.version_info[:2]} has_utc={has_utc} is_correct={is_correct}'"'"')
+          if not has_utc:
+              print('"'"'COMPAT_FAIL: datetime.UTC not found'"'"')
+              sys.exit(1)
+          if not is_correct:
+              print('"'"'COMPAT_FAIL: datetime.UTC is not timezone.utc'"'"')
+              sys.exit(1)
+          print('"'"'COMPAT_PASS'"'"')
+          "
+            '
