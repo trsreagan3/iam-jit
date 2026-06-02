@@ -856,6 +856,7 @@
     "SD-2:tests/integration/profile_generate_cli_integration_test.py:144",
     "SD-2:tests/integration/profile_generate_cli_integration_test.py:344",
     "SD-2:tests/integration/profile_upgrade_doctor_test.py:227",
+    "SD-2:tests/integration/test_full_install_matrix_verification_2026_06_02.py:777",
     "SD-2:tests/integration/test_harness_parity_cursor_codex_devin.py:468",
     "SD-2:tests/integration/test_harness_parity_cursor_codex_devin.py:500",
     "SD-2:tests/integration/test_harness_parity_cursor_codex_devin.py:617",
@@ -1486,5 +1487,5 @@
     "SD-4:tests/integration/uc20_setup_from_config_e2e_test.py:151",
     "SD-4:tests/test_audit_query_surfaces_serve_events_620.py:166"
   ],
-  "count": 1485
+  "count": 1486
 }
