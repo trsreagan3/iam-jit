@@ -694,6 +694,79 @@ class _McpInstallResult:
     detail: str        # short message for WARN row or success note
 
 
+def _write_claude_code_env_for_init(*, interactive: bool) -> None:
+    """#683/#681 — Write bouncer env vars into ~/.claude/settings.json.
+
+    Called from the `init --harness=claude-code` path (Step 7.6). Delegates
+    to `cli._write_claude_code_env_block` + `cli._build_bouncer_env_vars` so
+    there is a single implementation with no duplicated logic.
+
+    Per [[ibounce-honest-positioning]]: surfaces the restart-required message
+    when env vars are written. Per [[creates-never-mutates]]: never removes
+    pre-existing env keys the operator set.
+    """
+    try:
+        from .cli import (
+            _build_bouncer_env_vars,
+            _claude_code_settings_path,
+            _emit_restart_required_message,
+            _write_claude_code_env_block,
+        )
+    except ImportError as exc:
+        # Only swallow the expected failure shape (helper module not present).
+        # Any other Exception propagates so the caller surfaces the real bug
+        # rather than silently skipping the env-block write.
+        # Per [[ibounce-honest-positioning]] — never silence honest failures.
+        _log_decision(
+            "env_block_skipped",
+            f"could not import env-block helpers: {exc}",
+            interactive=interactive,
+        )
+        return
+
+    settings_p = _claude_code_settings_path()
+    env_vars = _build_bouncer_env_vars()
+    result = _write_claude_code_env_block(settings_p, env_vars)
+    status = result.get("status", "unknown")
+
+    if status == "written":
+        click.secho(
+            f"[env-wired] bouncer env vars written to {settings_p}",
+            fg="green",
+        )
+        vars_written = result.get("vars_written") or []
+        if isinstance(vars_written, list) and vars_written:
+            _emit_restart_required_message(
+                settings_path=settings_p,
+                vars_written=[str(v) for v in vars_written],
+            )
+    elif status == "no_change":
+        _log_decision(
+            "env_block_no_change",
+            f"already up-to-date in {settings_p}",
+            interactive=interactive,
+        )
+    elif status == "no_running_bouncers":
+        click.secho(
+            "[env-wire] WARN: no running bouncers detected — "
+            "env block NOT written to Claude Code settings. "
+            "Start ibounce/gbounce then re-run `iam-jit mcp install-claude-code`.",
+            fg="yellow",
+        )
+    elif status == "error":
+        click.secho(
+            f"[env-wire] WARN: could not write env block: "
+            f"{result.get('error', 'unknown error')}",
+            fg="yellow",
+        )
+    else:
+        _log_decision(
+            "env_block_status",
+            f"unexpected status: {status!r}",
+            interactive=interactive,
+        )
+
+
 def _run_harness_mcp_installs(
     *,
     harness: str,
@@ -1572,6 +1645,18 @@ def register_init_command(main_group: click.Group) -> click.Command:
                 ),
             )
             _print_mcp_install_summary(mcp_install_results)
+
+        # Step 7.6 — #683/#681 bouncer env-block wire for claude-code harness.
+        # Write AWS_ENDPOINT_URL / HTTP_PROXY into ~/.claude/settings.json so
+        # NEW Claude Code sessions automatically route traffic through running
+        # bouncers. Per [[no-sudo-userspace-install]]: no root required.
+        # Per [[ibounce-honest-positioning]]: always surface restart-required
+        # when we write — the current session does NOT inherit the new env.
+        if (
+            not skip_mcp_install
+            and result.harness == "claude-code"
+        ):
+            _write_claude_code_env_for_init(interactive=interactive)
 
         # Step 8 — summary
         _print_summary(

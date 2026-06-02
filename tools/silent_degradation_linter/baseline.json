@@ -1386,6 +1386,7 @@
     "SD-4:src/iam_jit/cli_init.py:447",
     "SD-4:src/iam_jit/cli_init.py:616",
     "SD-4:src/iam_jit/cli_init.py:620",
+    "SD-4:src/iam_jit/cli_init.py:725",
     "SD-4:src/iam_jit/cli_profile_allow.py:46",
     "SD-4:src/iam_jit/cli_profile_allow.py:714",
     "SD-4:src/iam_jit/cli_profile_generate.py:451",
@@ -1475,5 +1476,5 @@
     "SD-4:tests/integration/uc20_setup_from_config_e2e_test.py:151",
     "SD-4:tests/test_audit_query_surfaces_serve_events_620.py:166"
   ],
-  "count": 1474
+  "count": 1475
 }
