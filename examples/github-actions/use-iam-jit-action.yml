@@ -1,0 +1,143 @@
+# examples/github-actions/use-iam-jit-action.yml
+#
+# Reference consumer workflow for trsreagan3/iam-jit-action@v1.
+#
+# Copy this file to .github/workflows/ in your repo and adjust:
+#   - The trigger (on:) to match your CI events
+#   - The bouncers list (ibounce is usually enough for pure AWS work)
+#   - The mode (discovery → cooperative → strict as you gain confidence)
+#   - Your agent run step (replace "python my_agent.py")
+#
+# Per [[uat-tests-setup-end-to-end]]: always include the decisions_count
+# assertion at the end so CI fails if traffic was NOT routed through
+# ibounce (e.g. AWS_ENDPOINT_URL got unset somewhere).
+
+name: Agent CI — with iam-jit bouncer protection
+
+on:
+  push:
+    branches: [main, 'feat/**']
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+jobs:
+  # ── Linux agent run ────────────────────────────────────────────────────────
+  agent-run:
+    name: Agent run (audited by iam-jit)
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      # Add id-token: write if you use OIDC-based AWS auth.
+
+    steps:
+      # ── 1. Checkout your repo ──────────────────────────────────────────
+      - uses: actions/checkout@v4
+
+      # ── 2. Install iam-jit + start ibounce ────────────────────────────
+      #
+      # After this step:
+      #   - AWS_ENDPOINT_URL is set to http://127.0.0.1:8767
+      #   - HTTPS_PROXY is set to http://127.0.0.1:8080 (if gbounce enabled)
+      #   - IAM_JIT_AUDIT_LOG points at a JSONL file in $RUNNER_TEMP
+      - name: Install iam-jit + wire bouncer
+        id: iam-jit
+        uses: trsreagan3/iam-jit-action@v1
+        with:
+          # Pin to a specific release for reproducible CI:
+          #   version: '1.0.3'
+          version: 'latest'
+
+          # ibounce gates AWS calls. Add kbouncer/dbounce/gbounce for
+          # K8s / SQL / generic HTTPS gating.
+          bouncers: 'ibounce'
+
+          # discovery: observe + log only (zero denies). Safe default.
+          # cooperative: agent sees deny rationale + may retry scoped.
+          # strict: maximalist deny — use when protection > velocity.
+          mode: 'discovery'
+
+          # harness: 'none' is correct for pure CI (no MCP config needed).
+          # Use 'claude-code' if this runner also runs an interactive Claude
+          # Code session that should inherit bouncer env vars.
+          harness: 'none'
+
+      # ── 3. Confirm ibounce is healthy ──────────────────────────────────
+      - name: Smoke-test ibounce health
+        run: |
+          port="${{ steps.iam-jit.outputs.bouncer-port }}"
+          curl -sf "http://127.0.0.1:${port}/healthz" \
+            | python3 -c "
+          import sys, json
+          d = json.load(sys.stdin)
+          assert d.get('status') == 'ok', f'ibounce status != ok: {d}'
+          print(f'ibounce OK  mode={d.get(\"mode\")}  decisions_count={d.get(\"decisions_count\",0)}')
+          "
+
+      # ── 4. Set up AWS credentials ──────────────────────────────────────
+      # Use OIDC or a read-only IAM role. ibounce will audit every call.
+      # Recommended: aws-actions/configure-aws-credentials with OIDC.
+      #
+      # Example (replace with your account + role ARN):
+      # - uses: aws-actions/configure-aws-credentials@v4
+      #   with:
+      #     role-to-assume: arn:aws:iam::123456789012:role/ci-read-only
+      #     aws-region: us-east-1
+
+      # ── 5. Run your agent ──────────────────────────────────────────────
+      # AWS_ENDPOINT_URL is already set; every boto3 / aws CLI call is
+      # audited by ibounce. No code change required in the agent.
+      - name: Run agent
+        run: |
+          echo "AWS_ENDPOINT_URL=$AWS_ENDPOINT_URL"
+          # Replace this with your actual agent entrypoint, e.g.:
+          #   python -m my_package.agent --task "summarize s3://my-bucket/report.txt"
+          aws sts get-caller-identity --output json 2>&1 || true
+
+      # ── 6. Assert ibounce audited real traffic ─────────────────────────
+      #
+      # Per [[uat-tests-setup-end-to-end]]: CI MUST assert the OUTCOME
+      # (decisions_count ticked), not just that --version works.
+      # This step fails if AWS_ENDPOINT_URL was not inherited or ibounce
+      # dropped the request.
+      - name: Assert decisions_count ticked
+        run: |
+          port="${{ steps.iam-jit.outputs.bouncer-port }}"
+          baseline="${{ steps.iam-jit.outputs.decisions-count-baseline }}"
+
+          after="$(
+            curl -sf "http://127.0.0.1:${port}/healthz" \
+            | python3 -c "import sys,json; print(json.load(sys.stdin).get('decisions_count',0))"
+          )"
+
+          delta=$((after - baseline))
+          echo "decisions_count: baseline=$baseline  after=$after  delta=$delta"
+
+          if [ "$delta" -le 0 ]; then
+            echo "::error::decisions_count did not tick. AWS traffic may not be routing through ibounce."
+            echo "  Check that AWS_ENDPOINT_URL=$AWS_ENDPOINT_URL is set in the agent step."
+            echo "  ibounce log:"
+            cat "$RUNNER_TEMP/ibounce.log" 2>/dev/null || echo "(log not found)"
+            exit 1
+          fi
+
+          echo "PASS: decisions_count Δ=$delta (ibounce audited real traffic)."
+
+      # ── 7. Upload audit log as artifact ───────────────────────────────
+      - name: Upload audit log
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: iam-jit-audit-log
+          path: ${{ steps.iam-jit.outputs.audit-log-path }}
+          retention-days: 14
+          if-no-files-found: warn
+
+      # ── 8. (Optional) Print posture snapshot ─────────────────────────
+      - name: Print iam-jit posture
+        if: always()
+        run: |
+          iam-jit posture --json 2>/dev/null \
+            | python3 -m json.tool \
+            || iam-jit posture 2>&1 \
+            || echo "(posture unavailable)"
