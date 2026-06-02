@@ -81,7 +81,7 @@ async def _drive_deny_with_session_id(
                     "host": "s3.amazonaws.com",
                     "authorization": _sigv4_auth(service="s3", region="us-east-1"),
                     # Both canonical header forms; proxy normalizes to lowercase.
-                    "x-iam-jit-agent-session-id": agent_session_id,
+                    "X-Agent-Session-Id": agent_session_id,
                 },
             ) as resp:
                 body = await resp.json()
