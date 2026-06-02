@@ -1681,6 +1681,21 @@ class ProxyConfig:
     then falls back to `~/.iam-jit/dynamic-denies.yaml`. Explicit
     path overrides both."""
 
+    # #725 — cost circuit breaker (security primitive). OFF by default
+    # per [[v1-scope-bar]] + [[safety-mode-lean-permissive]]; when
+    # enabled the thresholds are generous so a legitimate busy session
+    # never trips by surprise. The config dict mirrors the ambient
+    # `iam-jit.cost_circuit_breaker` block + the CLI
+    # `--cost-circuit-breaker-rule` JSON; serve() loads + validates it
+    # via circuit_breaker.load_config. Distinct from the LLM-budget
+    # modules (those guard iam-jit's OWN scoring spend; this guards the
+    # PROXIED agent's runaway blast radius). See
+    # src/iam_jit/circuit_breaker/__init__.py.
+    cost_circuit_breaker: dict | None = None
+    """Parsed `cost_circuit_breaker` config block (None = disabled
+    default). Loaded from `.iam-jit.yaml` ambient config or the CLI
+    `--cost-circuit-breaker-rule` JSON string."""
+
 
 @dataclasses.dataclass
 class RequestObservation:
@@ -2433,6 +2448,92 @@ def evaluate_request(
     else:
         _anomaly_deny_source = None
 
+    # #725 — cost circuit breaker. Treat a session's runaway cost/call
+    # RATE as a real-time security signal (PDF §A-Compete). Observe
+    # EVERY decision (the rate is what matters, independent of verdict)
+    # so the window reflects true upstream pressure; when the breaker
+    # has TRIPPED for this session + is in block mode + the floor said
+    # ALLOW, tighten ALLOW→DENY (strictly more restrictive, mirrors the
+    # anomaly-hook tighten above). The breaker emits its own
+    # COST_CIRCUIT_TRIPPED OCSF event on the crossing call via its
+    # configured emitter; here we additionally re-emit a decision audit
+    # row carrying decision_source=cost_circuit_breaker when we tighten,
+    # so the audit row reflects the FINAL state per
+    # [[ibounce-honest-positioning]]. Fail-soft: a breaker crash MUST
+    # NOT break the proxy hot path.
+    _cost_breaker_deny_source: str | None = None
+    try:
+        from ..circuit_breaker import active_cost_circuit_breaker
+        _breaker = active_cost_circuit_breaker()
+        if _breaker is not None:
+            _trip = _breaker.observe(
+                # #725 security fix: key ONLY on the already-validated
+                # X-Agent-* attribution headers. The raw User-Agent is
+                # attacker-controlled + unbounded, so using it as a key
+                # let an unauthenticated client rotate it per request to
+                # mint unbounded distinct session windows (memory DoS).
+                # Unattributed calls fall into the breaker's shared
+                # `__unattributed__` bucket — still rate-limited as one
+                # session, just not per-client-distinguished.
+                session_id=(
+                    header_agent_session_id
+                    or header_agent_name
+                    or None
+                ),
+                service=parsed.service,
+                action=parsed.action,
+            )
+            if _trip.should_deny and record.decision.value != "deny":
+                from .decisions import Decision as _CBDecision
+                record = dataclasses.replace(
+                    record,
+                    decision=_CBDecision.DENY,
+                    reason=(
+                        _trip.operator_message
+                        or "cost circuit breaker: session rate looks like a runaway"
+                    ),
+                )
+                _cost_breaker_deny_source = "cost_circuit_breaker"
+                try:
+                    from .audit_export import audit_event_from_decision
+                    _emit_audit_event(audit_event_from_decision(
+                        decision_id=decision_id,
+                        mode=effective_mode.value,
+                        profile=(
+                            active_profile.name
+                            if active_profile is not None else None
+                        ),
+                        verdict="deny",
+                        reason=record.reason,
+                        service=parsed.service,
+                        action=parsed.action,
+                        arn=resolved_arn,
+                        region=parsed.region,
+                        host=host,
+                        upstream=None,
+                        enforced=(effective_mode == ProxyMode.TRANSPARENT),
+                        extra={
+                            "decision_source": "cost_circuit_breaker",
+                            "cost_trip_dimension": _trip.dimension,
+                            "cost_calls_in_window": _trip.calls_in_window,
+                            "cost_estimated_usd_in_window": (
+                                _trip.estimated_usd_in_window
+                            ),
+                        },
+                        user_agent=user_agent,
+                        header_agent_name=header_agent_name,
+                        header_agent_session_id=header_agent_session_id,
+                        agent_header_rejections=agent_header_rejections,
+                    ))
+                except Exception as _cb_emit_err:
+                    logger.warning(
+                        "audit-export emit (cost-breaker-tighten) failed: %s",
+                        _cb_emit_err,
+                    )
+    except Exception as _cb_err:
+        logger.warning("cost-circuit-breaker observe failed: %s", _cb_err)
+        _cost_breaker_deny_source = None
+
     # #270 Slice 2 — admin-fallback synthetic. Fires when a request
     # would have been DENIED in transparent mode but a pause window
     # is open, so the proxy demoted it to COOPERATIVE + the call
@@ -2518,7 +2619,7 @@ def evaluate_request(
         parsed=parsed, record=record, mode=effective_mode,
         decision_id=decision_id,
         active_pause_id=active_pause["id"] if active_pause is not None else None,
-        deny_source=_anomaly_deny_source,
+        deny_source=_cost_breaker_deny_source or _anomaly_deny_source,
     )
 
 
@@ -3867,7 +3968,7 @@ async def serve(config: ProxyConfig, *, store: BouncerStore) -> None:
             request, store=store, config=config, session=session,
         )
 
-    async def healthz_handler(request):
+    async def healthz_handler(_request):
         # Liveness probe. Bypasses proxy evaluation entirely (never
         # parses as a request, never writes to the audit log) so
         # monitor traffic doesn't pollute the operator's "what just
@@ -3902,8 +4003,14 @@ async def serve(config: ProxyConfig, *, store: BouncerStore) -> None:
                     "ends_at": active_pause["ends_at"],
                     "reason": reason,
                 }
-        except Exception:
-            pass
+        except Exception as e:
+            # HIGH-32-05: a probe-time pause lookup failure is itself a
+            # signal the operator can't see the pause table. Bump the
+            # same counter the hot path uses (flips status to degraded
+            # below) + log, rather than reporting a clean /healthz that
+            # hides the broken lookup.
+            _bump_pause_lookup_error_counter()
+            logger.warning("bouncer-proxy /healthz pause-lookup failed: %s", e)
         pause_errs = _pause_lookup_error_count()
         if pause_errs > 0 and status_str == "ok":
             # HIGH-32-05 mitigation: a non-zero count means the proxy
@@ -4087,6 +4194,22 @@ async def serve(config: ProxyConfig, *, store: BouncerStore) -> None:
             llm_budget_block = spend_snapshot()
         except Exception:  # pragma: no cover
             llm_budget_block = {"enabled": False}
+        # #725 — cost-circuit-breaker surface. Always present (reports
+        # {"enabled": false} when no breaker is installed) so monitors +
+        # cross-bouncer posture queries branch on a single field. The
+        # USD dimension carries usd_is_estimated:true per
+        # [[ibounce-honest-positioning]] so operators never mistake the
+        # figure for a billed amount. Distinct from llm_budget (that's
+        # iam-jit's OWN scoring spend; this is the PROXIED agent's
+        # runaway blast radius).
+        try:
+            from ..circuit_breaker import active_cost_circuit_breaker
+            _cb = active_cost_circuit_breaker()
+            cost_circuit_breaker_block = (
+                _cb.status() if _cb is not None else {"enabled": False}
+            )
+        except Exception:  # pragma: no cover
+            cost_circuit_breaker_block = {"enabled": False}
         # MRR-2 R2 — generic silent-degradation visibility. Distinct
         # from ``llm_skips`` (which is the EXPECTED local-dev shape):
         # ``degraded_capabilities`` surfaces sites that actually
@@ -4170,6 +4293,7 @@ async def serve(config: ProxyConfig, *, store: BouncerStore) -> None:
             "anomaly_detection": anomaly_detection_block,
             "llm_skips": llm_skips_block,
             "llm_budget": llm_budget_block,
+            "cost_circuit_breaker": cost_circuit_breaker_block,
             "degraded_capabilities": degraded_capabilities_block,
             "chain_initialized": chain_initialized_bool,
             # #711 — top-level audit_warning. Non-null = silent-degradation
@@ -4190,7 +4314,7 @@ async def serve(config: ProxyConfig, *, store: BouncerStore) -> None:
     # `{"reloaded": true, "rules_count": N, "rules_applied_to_ibounce": M}`
     # response byte-for-byte (with `ibounce` substituted for `gbounce`
     # in the field name).
-    async def dynamic_denies_reload_handler(request):
+    async def dynamic_denies_reload_handler(_request):
         if dynamic_deny_watcher is None:
             return web.json_response(
                 {
@@ -4305,7 +4429,7 @@ async def serve(config: ProxyConfig, *, store: BouncerStore) -> None:
     # endpoint). The session-profile-override mechanism (from #253) is
     # the in-process channel; this endpoint is the cross-process bridge
     # so a separate CLI shell can install an allow rule + see it land.
-    async def profile_reload_handler(request):
+    async def profile_reload_handler(_request):
         from .profiles import (
             load_profiles,
             resolve_active_profile,
@@ -4381,7 +4505,7 @@ async def serve(config: ProxyConfig, *, store: BouncerStore) -> None:
     # orchestrator + any agent that wants to introspect the running bouncer
     # without parsing the full /healthz blob. READ-ONLY; no auth (loopback
     # only; matches /healthz). Registered BEFORE the catch-all.
-    async def posture_handler(request):
+    async def posture_handler(_request):
         import os as _os
         from iam_jit import __version__ as _ver
         _ap = getattr(config, "active_profile", None)
@@ -5028,6 +5152,56 @@ async def serve(config: ProxyConfig, *, store: BouncerStore) -> None:
         bool(config.bulk_answer_mcp_token),
     )
 
+    # #725 — cost circuit breaker. OFF by default; install the
+    # process-singleton only when the operator declared
+    # `cost_circuit_breaker.enabled: true`. The breaker emits its
+    # COST_CIRCUIT_TRIPPED OCSF synthetic through the SAME
+    # `_emit_audit_event_raw` transport every other detector uses, so
+    # JSONL / webhook / routes / Security Lake / object-storage all see
+    # it for free. Misconfig (e.g. enabled-but-no-cap) surfaces as a
+    # loud warning + the breaker stays uninstalled (marker reports the
+    # disabled state honestly on /healthz) rather than silently
+    # half-arming. Per [[ibounce-honest-positioning]].
+    try:
+        from ..circuit_breaker import (
+            CostCircuitBreaker as _CostCircuitBreaker,
+            load_config as _load_cb_config,
+            register_cost_circuit_breaker,
+        )
+        _cb_cfg = _load_cb_config(config.cost_circuit_breaker)
+        if _cb_cfg.enabled:
+            register_cost_circuit_breaker(
+                _CostCircuitBreaker(_cb_cfg, emit=_emit_audit_event_raw)
+            )
+            logger.info(
+                "cost_circuit_breaker: enabled (mode=%s window=%ds "
+                "max_calls=%s max_usd=%s [estimate] cool_down=%ds)",
+                _cb_cfg.mode, _cb_cfg.window_seconds,
+                _cb_cfg.max_calls_per_window, _cb_cfg.max_usd_per_window,
+                _cb_cfg.cool_down_seconds,
+            )
+        else:
+            register_cost_circuit_breaker(None)
+    except Exception as _cb_install_err:
+        # Default-off feature: a config error here must not stop the
+        # bouncer. Warn loudly + leave the breaker uninstalled. CLEAR
+        # any stale singleton a prior serve() may have installed so a
+        # re-invoked serve() with a now-broken config doesn't keep
+        # gating against the old breaker. Guard the clear itself in case
+        # the import is what failed (register_* may be unbound).
+        try:
+            from ..circuit_breaker import (
+                register_cost_circuit_breaker as _cb_clear,
+            )
+            _cb_clear(None)
+        except Exception:  # noqa: SD-1 best-effort stale-singleton clear during breaker-install failure; if the import itself failed there is nothing to clear, and the outer handler's logger.warning below already surfaces that the breaker is NOT WIRED
+            pass
+        logger.warning(
+            "cost_circuit_breaker: CONFIGURED but NOT WIRED — reason: %s "
+            "(the breaker will NOT gate requests until this is resolved)",
+            _cb_install_err,
+        )
+
     # #253 — rule-expiry sweeper. 30s tick. The list_active_rules
     # filter at evaluate_request time already hides expired rules from
     # the active RuleSet; this sweeper exists to emit the per-rule
@@ -5062,7 +5236,7 @@ async def serve(config: ProxyConfig, *, store: BouncerStore) -> None:
                         "ibounce rule-expiry sweeper tick failed: %s", e,
                     )
         except asyncio.CancelledError:
-            return
+            return  # noqa: SD-4 clean exit of a fire-and-forget background loop on shutdown cancel; this task's return value is never awaited for a result, so there is no caller to mislead
 
     rule_expiry_task = asyncio.create_task(
         _rule_expiry_sweeper_loop(), name="ibounce-rule-expiry-sweeper",
@@ -5110,7 +5284,7 @@ async def serve(config: ProxyConfig, *, store: BouncerStore) -> None:
                         "ibounce disk-pressure tick failed: %s", e,
                     )
         except asyncio.CancelledError:
-            return
+            return  # noqa: SD-4 clean exit of a fire-and-forget background loop on shutdown cancel; this task's return value is never awaited for a result, so there is no caller to mislead
 
     disk_pressure_task: asyncio.Task | None = None
     if active_disk_pressure_state() is not None:
@@ -5200,7 +5374,7 @@ async def serve(config: ProxyConfig, *, store: BouncerStore) -> None:
                             row.get("id"), e,
                         )
         except asyncio.CancelledError:
-            return
+            return  # noqa: SD-4 clean exit of a fire-and-forget background loop on shutdown cancel; this task's return value is never awaited for a result, so there is no caller to mislead
 
     pending_audit_drain_task = asyncio.create_task(
         _pending_audit_events_drain_loop(),
@@ -5292,7 +5466,7 @@ async def serve(config: ProxyConfig, *, store: BouncerStore) -> None:
             for _sig in _installed_signals:
                 try:
                     loop.remove_signal_handler(_sig)
-                except (NotImplementedError, RuntimeError, ValueError):
+                except (NotImplementedError, RuntimeError, ValueError):  # noqa: SD-1 best-effort teardown: removing an already-gone/never-installed signal handler (or on a platform without loop signals) is semantically a no-op; nothing to surface
                     pass
         await session.close()
         await runner.cleanup()
@@ -5387,7 +5561,7 @@ async def serve(config: ProxyConfig, *, store: BouncerStore) -> None:
             rule_expiry_task.cancel()
             try:
                 await rule_expiry_task
-            except asyncio.CancelledError:
+            except asyncio.CancelledError:  # noqa: SD-1 expected: we cancel()'d this task ourselves, so CancelledError is the success confirmation; a genuine teardown error is a non-CancelledError and IS logged on the next except
                 pass
             except Exception as e:
                 logger.warning("rule-expiry sweeper teardown failed: %s", e)
@@ -5401,7 +5575,7 @@ async def serve(config: ProxyConfig, *, store: BouncerStore) -> None:
             pending_audit_drain_task.cancel()
             try:
                 await pending_audit_drain_task
-            except asyncio.CancelledError:
+            except asyncio.CancelledError:  # noqa: SD-1 expected: we cancel()'d this task ourselves, so CancelledError is the success confirmation; a genuine teardown error is a non-CancelledError and IS logged on the next except
                 pass
             except Exception as e:
                 logger.warning(
@@ -5418,7 +5592,7 @@ async def serve(config: ProxyConfig, *, store: BouncerStore) -> None:
                 disk_pressure_task.cancel()
                 try:
                     await disk_pressure_task
-                except asyncio.CancelledError:
+                except asyncio.CancelledError:  # noqa: SD-1 expected: we cancel()'d this task ourselves, so CancelledError is the success confirmation; a genuine teardown error is a non-CancelledError and IS logged on the next except
                     pass
                 except Exception as e:
                     logger.warning(

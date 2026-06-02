@@ -116,6 +116,10 @@
         "anomaly_detection": {
           "$ref": "#/$defs/anomaly_detection_block",
           "description": "Phase H (#468-#471 §A76-§A79) — per-agent behavioral baseline + anomaly detector. Per [[anomaly-detection-mode-phase-h]] this is an ADDITIVE operator wedge: opt in to track each agent's baseline + flag actions that are either known-malicious (composes with #404 deny-classifier + #407 threat-feed) or N-sigma away from the agent's historical pattern. Two response modes: `block` (returns structured deny + emits OCSF anomaly_detected) or `alert` (lets through + emits). Per [[independence-as-security-property]] the baseline stays LOCAL; never sent anywhere. Per [[scorer-is-ground-truth]] the detector is ADVISORY — deterministic deny floor wins on conflict."
+        },
+        "cost_circuit_breaker": {
+          "$ref": "#/$defs/cost_circuit_breaker_block",
+          "description": "#725 — cost circuit breaker as a security primitive. Treats a session's runaway cost/call RATE as a real-time security signal + trips a breaker that denies (block) / flags (alert) further gated calls until the rate settles. OFF by default; generous thresholds when enabled. Distinct from iam-jit's own LLM-budget controls. See src/iam_jit/circuit_breaker/."
         }
       }
     }
@@ -423,6 +427,40 @@
           "type": "boolean",
           "default": true,
           "description": "F.2 — when the baseline is too small, fall back to the #404 deny-classifier + Phase C threat-feed catalog so the operator gets adversarial-pattern detection from day-1. Set false to honor `insufficient_data` strictly."
+        }
+      }
+    },
+    "cost_circuit_breaker_block": {
+      "type": "object",
+      "additionalProperties": false,
+      "description": "#725 — cost circuit breaker (security primitive). Trips when a session's gated-call count OR estimated upstream USD cost crosses a cap within a sliding window, then denies (block) / flags (alert) further calls until the rate settles. USD is an ESTIMATE from a coarse per-call rate card. OFF by default.",
+      "properties": {
+        "enabled": {
+          "type": "boolean",
+          "default": false
+        },
+        "mode": {
+          "type": "string",
+          "enum": ["block", "alert"],
+          "default": "block"
+        },
+        "window": {
+          "type": ["string", "integer"],
+          "default": "1h"
+        },
+        "cool_down": {
+          "type": ["string", "integer"],
+          "default": "5m"
+        },
+        "max_calls_per_window": {
+          "type": "integer",
+          "minimum": 0,
+          "default": 5000
+        },
+        "max_usd_per_window": {
+          "type": "number",
+          "minimum": 0,
+          "default": 50.0
         }
       }
     }
