@@ -2577,5 +2577,20 @@ from .cli_cedar import register_cedar_group  # noqa: E402
 register_cedar_group(main)
 
 
+# ADOPT-7 / #721 — register `iam-jit pii {scan,validate}`. Define
+# org-specific custom PII entities DECLARATIVELY (entity name +
+# regex/deny-list + context words + score) in a YAML/JSON config that
+# compiles 1:1 into Presidio PatternRecognizer / deny-list recognizers —
+# NO server-side LLM / NL parsing (per [[no-nl-synthesis]] +
+# [[bouncer-zero-llm-when-agent-in-loop]]). Extends the bouncer's
+# existing credential/PII redaction path (audit_export.retention) via an
+# optional extra_redactor hook rather than a parallel system. Optional
+# dependency (`pip install 'iam-jit[pii]'`): clean no-op + pip hint when
+# presidio-analyzer is absent. Honest about regex false-pos/neg per
+# [[ibounce-honest-positioning]].
+from .cli_pii import register_pii_group  # noqa: E402
+register_pii_group(main)
+
+
 if __name__ == "__main__":
     main()

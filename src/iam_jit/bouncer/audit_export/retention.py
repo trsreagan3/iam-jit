@@ -79,7 +79,7 @@ import pathlib
 import re
 import shutil
 import time
-from typing import Any
+from typing import Any, Callable
 
 logger = logging.getLogger(__name__)
 
@@ -288,6 +288,8 @@ def default_policy() -> RetentionPolicy:
 def redact_event_pii(
     event: dict[str, Any],
     policy: RetentionPolicy,
+    *,
+    extra_redactor: "Callable[[str], str] | None" = None,
 ) -> dict[str, Any]:
     """Walk ``event`` recursively, replacing values matching the
     policy's redact_patterns with placeholders.
@@ -297,43 +299,60 @@ def redact_event_pii(
     is responsible for checking this; we expose the function
     unconditionally so tests can exercise both paths.
 
+    ``extra_redactor`` (ADOPT-7 / #721): an OPTIONAL string->string
+    callable applied to every string value AFTER the built-in
+    credential/PII patterns. This is the extension point for the custom
+    PII detector layer (``iam_jit.pii.redact_text`` bound to an
+    operator's declarative custom-entities config) — it runs over the
+    SAME in-place walk rather than re-traversing the event in a parallel
+    system. The callable must be total + side-effect-free over strings;
+    any exception it raises propagates to the caller (the audit-log
+    worker catches + logs it, then carries on with the partially-redacted
+    event per [[ibounce-honest-positioning]]).
+
     Per ``[[creates-never-mutates]]`` redaction is shape-preserving:
     we don't drop fields or restructure the event, only rewrite
     string values that match a credential/PII pattern.
     """
     if not policy.gdpr_pii_purge:
         return event
-    _redact_in_place(event, policy.redact_patterns)
+    _redact_in_place(event, policy.redact_patterns, extra_redactor)
     return event
+
+
+def _redact_str(
+    value: str,
+    patterns: tuple[tuple[str, re.Pattern[str]], ...],
+    extra_redactor: "Callable[[str], str] | None",
+) -> str:
+    """Apply the built-in patterns then the optional custom-entity
+    redactor to one string value."""
+    new_v = value
+    for kind, regex in patterns:
+        new_v = regex.sub(REDACTION_PLACEHOLDER.format(kind=kind), new_v)
+    if extra_redactor is not None:
+        new_v = extra_redactor(new_v)
+    return new_v
 
 
 def _redact_in_place(
     obj: Any,
     patterns: tuple[tuple[str, re.Pattern[str]], ...],
+    extra_redactor: "Callable[[str], str] | None" = None,
 ) -> None:
     """Recursive walk + in-place rewrite."""
     if isinstance(obj, dict):
         for k, v in list(obj.items()):
             if isinstance(v, str):
-                new_v = v
-                for kind, regex in patterns:
-                    new_v = regex.sub(
-                        REDACTION_PLACEHOLDER.format(kind=kind), new_v,
-                    )
-                obj[k] = new_v
+                obj[k] = _redact_str(v, patterns, extra_redactor)
             else:
-                _redact_in_place(v, patterns)
+                _redact_in_place(v, patterns, extra_redactor)
     elif isinstance(obj, list):
         for i, v in enumerate(obj):
             if isinstance(v, str):
-                new_v = v
-                for kind, regex in patterns:
-                    new_v = regex.sub(
-                        REDACTION_PLACEHOLDER.format(kind=kind), new_v,
-                    )
-                obj[i] = new_v
+                obj[i] = _redact_str(v, patterns, extra_redactor)
             else:
-                _redact_in_place(v, patterns)
+                _redact_in_place(v, patterns, extra_redactor)
 
 
 # ---------------------------------------------------------------------------

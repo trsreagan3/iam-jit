@@ -79,6 +79,14 @@ security-lake = ["pyarrow>=14"]
 # --otel-endpoint pip-install the extra. The feature is a clean no-op
 # (with a clear pip hint) when these are absent.
 otel = ["opentelemetry-sdk>=1.20", "opentelemetry-exporter-otlp>=1.20"]
+# ADOPT-7 / #721 — custom PII detectors. presidio-analyzer powers the
+# PatternRecognizer / deny-list custom-recognizer layer. Kept out of the
+# base install (it pulls a transitive graph); operators who define
+# custom PII entities pip-install the extra. The feature is a clean
+# no-op (with a clear pip hint) when presidio-analyzer is absent. We use
+# ONLY standalone PatternRecognizer / deny-list recognizers, so no spaCy
+# model download is required.
+pii = ["presidio-analyzer>=2.2"]
 test = [
   "pytest>=8",
   "pytest-asyncio>=0.23",
