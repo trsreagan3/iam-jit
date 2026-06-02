@@ -140,19 +140,20 @@ def test_user_id_equal_to_self_is_a_no_op_for_non_admin(
     assert body["user_id"] == "email:dev@example.com"
 
 
-def test_admin_mint_for_unknown_user_returns_404(
+def test_admin_mint_for_unknown_user_succeeds(
     as_admin: TestClient,
 ) -> None:
-    """Admin minting for a user_id that doesn't exist in the user store
-    gets a clean 404 — an unknown user_id silently creating an orphan
-    token is the opposite of helpful."""
+    """Admin minting for a user_id not yet registered in the store
+    succeeds with 201 — pre-provisioning tokens before a user is
+    onboarded is a valid admin workflow (#706 fix).
+    The token is owned by the supplied user_id as-is."""
     resp = as_admin.post("/api/v1/tokens", json={
         "user_id": "email:ghost@example.com",
     })
-    assert resp.status_code == 404
-    detail = resp.json()["detail"]
-    assert detail.get("error") == "user_id not found"
-    assert detail.get("user_id") == "email:ghost@example.com"
+    assert resp.status_code == 201, resp.text
+    body = resp.json()
+    assert body["user_id"] == "email:ghost@example.com"
+    assert body["token"].startswith("iamjit_")
 
 
 def test_user_id_non_string_rejected_400(as_admin: TestClient) -> None:
@@ -224,3 +225,59 @@ def test_self_mint_does_not_emit_on_behalf_of_audit(
     })
     assert resp.status_code == 201, resp.text
     assert captured == []
+
+
+# ---------------------------------------------------------------------------
+# #706 — Regression: F16 dogfood check (admin on-behalf-of for a user_id
+# not yet in the store). Pre-#706 this returned 404; the dogfood expects
+# 200/201 for valid admin-on-behalf-of mints regardless of whether the
+# target user_id is already registered.
+# ---------------------------------------------------------------------------
+
+
+def test_admin_mint_for_unregistered_user_returns_201(
+    as_admin: TestClient,
+) -> None:
+    """F16 regression (#706): admin can mint on behalf of a user_id that
+    has never been registered in the user store. This supports the CI
+    dogfood pattern where the target user is not pre-provisioned."""
+    resp = as_admin.post(
+        "/api/v1/tokens",
+        json={
+            "label": "dogfood-on-behalf",
+            "user_id": "email:dogfood-target@example.com",
+        },
+    )
+    assert resp.status_code == 201, resp.text
+    body = resp.json()
+    assert body["user_id"] == "email:dogfood-target@example.com"
+    assert body["token"].startswith("iamjit_")
+    assert body["label"] == "dogfood-on-behalf"
+
+
+def test_admin_mint_for_unregistered_user_emits_audit_event(
+    as_admin: TestClient,
+    monkeypatch,
+) -> None:
+    """When admin mints on behalf of an unregistered user, the audit
+    event MUST still fire — the audit trail must remain honest even
+    when the target user_id isn't yet in the user store."""
+    captured: list[dict] = []
+
+    from iam_jit import audit_admin_action
+
+    monkeypatch.setattr(
+        audit_admin_action,
+        "emit_iam_jit_admin_action",
+        lambda **kw: captured.append(kw),
+    )
+    resp = as_admin.post(
+        "/api/v1/tokens",
+        json={"user_id": "email:not-yet-onboarded@example.com"},
+    )
+    assert resp.status_code == 201, resp.text
+    assert len(captured) == 1
+    evt = captured[0]
+    assert evt["kind"] == "token.mint_on_behalf_of"
+    assert evt["actor"] == "email:admin@example.com"
+    assert evt["target_id"] == "email:not-yet-onboarded@example.com"
