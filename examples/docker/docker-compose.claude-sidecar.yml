@@ -1,0 +1,141 @@
+# docker-compose.claude-sidecar.yml — Pattern B: Sidecar deployment
+#
+# PURPOSE: run iam-jit bouncers as a separate sidecar container alongside
+# your existing Claude-in-Docker setup. The Claude container routes AWS +
+# HTTPS traffic through the sidecar via environment variables — no changes
+# to the Claude image required.
+#
+# Per [[ibounce-honest-positioning]]: the claude service depends_on the
+# sidecar being healthy before starting. If the sidecar crashes, Claude
+# stops getting audited — docker-compose restarts the sidecar automatically.
+#
+# Usage:
+#   # Build the sidecar image (first time or after changes)
+#   docker-compose -f examples/docker/docker-compose.claude-sidecar.yml build
+#
+#   # Start the stack
+#   docker-compose -f examples/docker/docker-compose.claude-sidecar.yml up
+#
+#   # Check bouncer health
+#   curl http://localhost:8767/healthz | python3 -m json.tool
+#
+#   # Stream audit log
+#   docker-compose -f examples/docker/docker-compose.claude-sidecar.yml \
+#     exec iam-jit-bouncer cat /var/lib/iam-jit/ibounce/audit.jsonl
+#
+# Environment variables (set in .env or export before docker-compose up):
+#   AWS_ACCESS_KEY_ID        forwarded to claude service
+#   AWS_SECRET_ACCESS_KEY    forwarded to claude service
+#   AWS_SESSION_TOKEN        forwarded to claude service (optional)
+#   AWS_DEFAULT_REGION       forwarded to claude service (default: us-east-1)
+#   ANTHROPIC_API_KEY        forwarded to claude service (if running Claude API)
+#   IBOUNCE_MODE             bouncer mode: discovery|cooperative|strict (default: discovery)
+
+name: claude-with-bouncers
+
+services:
+
+  # ---------------------------------------------------------------------------
+  # iam-jit-bouncer — the sidecar that audits every AWS call Claude makes
+  # ---------------------------------------------------------------------------
+  iam-jit-bouncer:
+    build:
+      context: ../..        # repo root (iam-roles/)
+      dockerfile: infrastructure/docker/Dockerfile.sidecar
+      args:
+        # Pin to a specific ref for reproducible CI builds.
+        IAM_JIT_REF: main
+        BOUNCERS: ibounce
+    image: iam-jit-sidecar:local
+
+    environment:
+      # Bouncers to start inside the sidecar (space-separated).
+      BOUNCERS: ibounce
+      # Mode: cooperative (audit-only, always forwards) or transparent (block on deny).
+      # Per [[discovery-first-default]]: cooperative is the default (observe first, then tighten).
+      IBOUNCE_MODE: "${IBOUNCE_MODE:-cooperative}"
+      IAM_JIT_DATA_DIR: /var/lib/iam-jit
+
+    volumes:
+      # Bind-mount the audit log directory so logs survive container restarts.
+      # The directory will be created on the host if it doesn't exist.
+      - ./audit-logs:/var/lib/iam-jit
+
+    healthcheck:
+      test: ["CMD", "curl", "-sf", "http://localhost:8767/healthz"]
+      interval: 15s
+      timeout: 5s
+      start_period: 20s
+      retries: 3
+
+    # Keep the sidecar running even if it crashes.
+    restart: unless-stopped
+
+    # Advisory port mappings — expose to host for `iam-jit audit-query` CLI.
+    ports:
+      - "8767:8767"   # ibounce AWS proxy + management
+
+    networks:
+      - bouncer-net
+
+  # ---------------------------------------------------------------------------
+  # claude — YOUR Claude-in-Docker container.
+  #
+  # Replace the image line with your actual Claude image.
+  # This example uses python:3.12-slim-bookworm as a public stand-in.
+  # ---------------------------------------------------------------------------
+  claude:
+    # Replace with your actual Claude image:
+    #   image: anthropics/claude-code:latest
+    #   image: my-org/claude-runner:latest
+    image: python:3.12-slim-bookworm
+
+    environment:
+      # Route ALL AWS SDK calls through the ibounce sidecar.
+      # boto3 / AWS CLI / any SDK that respects AWS_ENDPOINT_URL will be
+      # intercepted and audited automatically.
+      AWS_ENDPOINT_URL: http://iam-jit-bouncer:8767
+
+      # HTTPS_PROXY routes generic HTTPS calls through gbounce (if enabled).
+      # Uncomment if you add gbounce to BOUNCERS above.
+      # HTTPS_PROXY: http://iam-jit-bouncer:8080
+
+      # Forward AWS credentials from the host environment.
+      AWS_ACCESS_KEY_ID: "${AWS_ACCESS_KEY_ID:-}"
+      AWS_SECRET_ACCESS_KEY: "${AWS_SECRET_ACCESS_KEY:-}"
+      AWS_SESSION_TOKEN: "${AWS_SESSION_TOKEN:-}"
+      AWS_DEFAULT_REGION: "${AWS_DEFAULT_REGION:-us-east-1}"
+
+      # Forward Anthropic API key if using Claude API directly.
+      ANTHROPIC_API_KEY: "${ANTHROPIC_API_KEY:-}"
+
+    # Wait for the bouncer to be healthy before starting Claude.
+    # This prevents the claude container from making AWS calls before
+    # ibounce is ready to audit them.
+    depends_on:
+      iam-jit-bouncer:
+        condition: service_healthy
+
+    networks:
+      - bouncer-net
+
+    # Keep the claude container alive for interactive use.
+    # For batch/CI use: remove stdin_open/tty and set command to your job.
+    stdin_open: true
+    tty: true
+
+    # Mount your workspace into the container.
+    # volumes:
+    #   - .:/workspace
+    # working_dir: /workspace
+
+    # Override command with your agent entrypoint:
+    # command: claude "Write a Lambda function that lists S3 buckets"
+    command: bash
+
+# ---------------------------------------------------------------------------
+# Shared network — the claude service reaches the bouncer by service name
+# ---------------------------------------------------------------------------
+networks:
+  bouncer-net:
+    driver: bridge

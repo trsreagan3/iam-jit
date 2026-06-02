@@ -1,0 +1,147 @@
+name: publish-sidecar-image
+
+# Publish the iam-jit-sidecar container image to GHCR.
+#
+# The sidecar is the "Claude-in-Docker Pattern B" component: it runs alongside
+# any Claude container and gates every AWS call that container makes through
+# ibounce.  Operators pull it with:
+#   docker pull ghcr.io/trsreagan3/iam-jit-sidecar:latest
+#
+# Triggers:
+#   - push to main         -> ghcr.io/trsreagan3/iam-jit-sidecar:main + :sha-<short>
+#   - tag v*               -> ghcr.io/trsreagan3/iam-jit-sidecar:vX.Y.Z + :latest
+#   - manual workflow_dispatch (smoke-rebuild without a tag)
+#
+# Pipeline shape:
+#   smoke job  — single-arch build, runs `ibounce --version` + `/healthz`
+#                smoke-test to confirm entrypoint wiring + health is correct.
+#   publish job — multi-arch (amd64 + arm64) build + push to GHCR,
+#                 gated on smoke passing.
+#
+# Per [[ibounce-honest-positioning]] + [[self-host-zero-billing-dependency]]:
+#   - The published image is the same binary as `pip install iam-jit`.
+#   - No phone-home, no billing dependency.
+#   - Failing smoke → publish is blocked (never ship a broken sidecar image).
+#
+# See also: docs/DOCKER-CLAUDE-INTEGRATION.md
+
+on:
+  push:
+    branches: [main]
+    tags: ["v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  packages: write
+
+env:
+  IMAGE_NAME: ghcr.io/trsreagan3/iam-jit-sidecar
+
+jobs:
+  # ---------------------------------------------------------------------------
+  # smoke — build single-arch, verify entrypoint + healthz
+  # ---------------------------------------------------------------------------
+  smoke:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Build (linux/amd64 only, loaded into local docker)
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: infrastructure/docker/Dockerfile.sidecar
+          platforms: linux/amd64
+          push: false
+          load: true
+          tags: iam-jit-sidecar:smoke
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Verify ibounce --version
+        run: docker run --rm iam-jit-sidecar:smoke iam-jit --version
+
+      - name: Verify iam-jit --version
+        run: docker run --rm iam-jit-sidecar:smoke ibounce --version
+
+      - name: Smoke-test healthz (start sidecar, wait for /healthz, assert decisions_count=0)
+        run: |
+          # Start the sidecar detached.
+          docker run -d --name smoke-sidecar -p 18767:8767 iam-jit-sidecar:smoke
+
+          # Poll /healthz until it responds OK (max 30s).
+          ok=0
+          for i in $(seq 1 30); do
+            if curl -sf http://localhost:18767/healthz >/dev/null 2>&1; then
+              ok=1
+              break
+            fi
+            sleep 1
+          done
+
+          if [ "$ok" -ne 1 ]; then
+            docker logs smoke-sidecar
+            echo "FAIL: sidecar healthz did not respond within 30s"
+            docker rm -f smoke-sidecar
+            exit 1
+          fi
+
+          # Assert the response is valid JSON with decisions_count present.
+          DECISIONS=$(curl -sf http://localhost:18767/healthz | python3 -c \
+            "import sys, json; d=json.load(sys.stdin); print(d['decisions_count'])")
+          echo "decisions_count=$DECISIONS"
+
+          docker rm -f smoke-sidecar
+
+      - name: Report image size
+        run: docker images iam-jit-sidecar:smoke --format '{{.Repository}}:{{.Tag}} {{.Size}}'
+
+  # ---------------------------------------------------------------------------
+  # publish — multi-arch + push to GHCR (gated on smoke passing)
+  # ---------------------------------------------------------------------------
+  publish:
+    needs: smoke
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up QEMU (cross-arch emulation)
+        uses: docker/setup-qemu-action@v3
+
+      - name: Set up Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Derive image tags
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.IMAGE_NAME }}
+          tags: |
+            type=ref,event=branch
+            type=ref,event=tag
+            type=semver,pattern={{version}}
+            type=raw,value=latest,enable=${{ startsWith(github.ref, 'refs/tags/v') }}
+            type=sha,format=short
+
+      - name: Build and push (linux/amd64 + linux/arm64)
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: infrastructure/docker/Dockerfile.sidecar
+          platforms: linux/amd64,linux/arm64
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
