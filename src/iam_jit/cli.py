@@ -2423,6 +2423,18 @@ from .cli_agent_diff import register_agent_diff_command  # noqa: E402
 register_agent_diff_command(main)
 
 
+# #727 / BUILD-6 — register `iam-jit role-usage`. Session-scoped
+# "Used N of M permissions — here's the narrowed role": diff the
+# issued role's granted policy against the permissions actually used
+# (from the bouncer's OCSF audit log) + propose a narrowed policy.
+# Differentiation 5/5 per the firewall-landscape PDF — closes the
+# recommend → grant → observe loop. Read-only; reuses the agent-diff
+# fan-out fetch + the SAME used-set aggregation. Recommends, never
+# mutates (per [[creates-never-mutates]]).
+from .cli_role_usage import register_role_usage_command  # noqa: E402
+register_role_usage_command(main)
+
+
 # #491 / §A91 LAUNCH-BLOCKER — `iam-jit org-policy {sign,verify}`.
 # IT-side counterpart to #490's engineer-side `init --managed`. Sign
 # an org-policy YAML + verify before publish. Reuses Ed25519 primitives

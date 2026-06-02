@@ -3799,6 +3799,102 @@ TOOLS.extend([
 ])
 
 
+# #727 / BUILD-6 — `iam_jit_role_usage` MCP tool. Session-scoped
+# "Used N of M permissions — here's the narrowed role". Compares the
+# issued role's granted policy against the permissions the agent
+# ACTUALLY used (from the bouncer's OCSF audit log keyed by session
+# id), then proposes a narrowed policy containing only what was used.
+# Differentiation 5/5 per the firewall-landscape PDF: closes the
+# recommend → grant → observe loop (Apono shows usage but doesn't
+# propose a tighter policy). Read-only — RECOMMENDS, never mutates the
+# issued role (per [[creates-never-mutates]]).
+TOOLS.extend([
+    {
+        "name": "iam_jit_role_usage",
+        "description": (
+            "Session-scoped role-usage analysis: 'Used N of M "
+            "permissions — here's the narrowed role'. Pass the issued "
+            "role's `granted_policy` (the inline IAM policy doc "
+            "iam-jit created for the session) + the `session` id; the "
+            "tool reads the permissions ACTUALLY used off the "
+            "bouncer's OCSF audit log (same stream as `iam-jit audit "
+            "query` / `iam_jit_agent_diff`) and returns `{granted_"
+            "count, used_count, used_actions, unused_permissions, "
+            "used_outside_grant, narrowed, caveats}`. The `narrowed` "
+            "block is a real Version:2012-10-17 policy containing only "
+            "used actions (or empty + `cannot_narrow_reason`). Pairs "
+            "with `iam_jit_request_role_from_synthesis`: take the "
+            "narrowed policy and submit it as the next session's "
+            "request. Per [[ibounce-honest-positioning]] the narrowed "
+            "policy is a FLOOR based on observed usage — `caveats` "
+            "spells out the limits (read-only sessions, short windows, "
+            "audit gaps); never a completeness guarantee. Per "
+            "[[creates-never-mutates]] read-only — recommends, never "
+            "mutates the issued role."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "required": ["session", "granted_policy"],
+            "properties": {
+                "session": {
+                    "type": "string",
+                    "description": (
+                        "Session id to analyze (matches "
+                        "`unmapped.iam_jit.agent.session_id` in the "
+                        "bouncer's OCSF log)."
+                    ),
+                },
+                "granted_policy": {
+                    "type": "object",
+                    "description": (
+                        "The issued role's inline IAM policy document "
+                        "(Version + Statement). The granted set is "
+                        "derived from its Allow statements."
+                    ),
+                },
+                "bouncer": {
+                    "type": "string",
+                    "default": "ibounce",
+                    "description": (
+                        "Which bouncer's /audit/events to query. One "
+                        "of `ibounce`, `kbounce`, `dbounce`, `gbounce`, "
+                        "OR `name=URL` for off-default mgmt ports."
+                    ),
+                },
+                "since": {
+                    "type": "string",
+                    "default": "1h",
+                    "description": (
+                        "Lookback window (5m / 1h / 2d) or ISO 8601 "
+                        "lower bound."
+                    ),
+                },
+                "until": {
+                    "type": "string",
+                    "description": (
+                        "Optional upper bound. ISO 8601 or short-form."
+                    ),
+                },
+                "limit": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "maximum": 10000,
+                    "default": 1000,
+                    "description": "Per-bouncer event cap for the session.",
+                },
+                "audit_events_token": {
+                    "type": "string",
+                    "description": (
+                        "Bearer token for /audit/events when bound "
+                        "off-loopback."
+                    ),
+                },
+            },
+        },
+    },
+])
+
+
 # Bounce-suite rename (2026-05-17): every `bouncer_*` MCP tool gets
 # an `ibounce_*` alias in v1.0. Both names dispatch to the same
 # handler; the `bouncer_*` originals carry a `(DEPRECATED ...)` note
@@ -6328,6 +6424,11 @@ def _handle_request(req: dict[str, Any]) -> dict[str, Any] | None:
             # sessions. Read-only structured diff + narrowed IAM policy
             # ready for operator review.
             result_payload = _iam_jit_agent_diff_for_mcp(args)
+        elif tool_name == "iam_jit_role_usage":
+            # #727 / BUILD-6 — session-scoped "Used N of M permissions
+            # — here's the narrowed role". Read-only; recommends a
+            # narrowed policy, never mutates the issued role.
+            result_payload = _iam_jit_role_usage_for_mcp(args)
         elif tool_name == "iam_jit_resource_map":
             # #420 / §A59 — apply a declared resource mapping
             # (staging→prod etc.) to a permission set.
@@ -7196,6 +7297,89 @@ def _iam_jit_agent_diff_for_mcp(
             if k != keep:
                 payload.pop(k, None)
 
+    payload["status"] = "ok"
+    return payload
+
+
+def _iam_jit_role_usage_for_mcp(
+    args: dict[str, Any],
+) -> dict[str, Any]:
+    """MCP backend for ``iam_jit_role_usage``.
+
+    Single-bouncer default (matches ``iam_jit_agent_diff``). Reads the
+    session's audit events via the SAME fan-out fetch agent-diff uses,
+    diffs them against the passed ``granted_policy``, and returns the
+    "Used N of M" report + narrowed-policy artifact.
+
+    Per [[ibounce-honest-positioning]] the ``caveats`` array spells out
+    the floor-not-guarantee limits; per [[creates-never-mutates]] this
+    is read-only — it never mutates the issued role.
+    """
+    from .agent_diff import fetch_session_events_via_fanout
+    from .role_usage import compute_role_usage
+
+    session_id = args.get("session")
+    if not isinstance(session_id, str) or not session_id.strip():
+        return {
+            "status": "error",
+            "code": "missing_session",
+            "message": "`session` is required and must be a string",
+        }
+    granted_policy = args.get("granted_policy")
+    if not isinstance(granted_policy, dict):
+        return {
+            "status": "error",
+            "code": "missing_granted_policy",
+            "message": (
+                "`granted_policy` is required and must be an IAM policy "
+                "document object (Version + Statement)"
+            ),
+        }
+
+    bouncer = args.get("bouncer") or "ibounce"
+    since = args.get("since") or "1h"
+    until = args.get("until")
+    limit_raw = args.get("limit", 1000)
+    try:
+        limit = int(limit_raw)
+    except (TypeError, ValueError):
+        limit = 1000
+    if limit < 1:
+        limit = 1
+    if limit > 10000:
+        limit = 10000
+    audit_events_token = args.get("audit_events_token")
+
+    try:
+        events, notes_by_bouncer = fetch_session_events_via_fanout(
+            session_id=session_id,
+            bouncers=(str(bouncer),),
+            since=str(since),
+            until=str(until) if until else None,
+            limit=limit,
+            audit_events_token=(
+                str(audit_events_token) if audit_events_token else None
+            ),
+        )
+    except Exception as e:  # pragma: no cover — defensive
+        return {
+            "status": "error",
+            "code": "fetch_failed",
+            "message": str(e),
+        }
+
+    notes: list[str] = []
+    for b, err in sorted(notes_by_bouncer.items()):
+        if err:
+            notes.append(f"{b}: {err}")
+
+    usage = compute_role_usage(
+        session_id=session_id,
+        granted_policy=granted_policy,
+        events=events,
+        notes=tuple(notes),
+    )
+    payload = usage.as_dict()
     payload["status"] = "ok"
     return payload
 
