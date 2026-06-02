@@ -38,6 +38,9 @@ def healthz() -> dict:
         ps = _presence.presence_status()
         bouncer_presence = {
             "enforced": ps["enforced"],
+            # #55 — whether the check-in route requires a distinct
+            # `bouncer` identity. Recon-safe boolean.
+            "role_required": ps["role_required"],
             "ttl_seconds": ps["ttl_seconds"],
             "tracked_sessions": ps["tracked_sessions"],
             "off_the_leash_count": ps["off_the_leash_count"],

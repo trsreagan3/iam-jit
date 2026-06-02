@@ -343,3 +343,34 @@ def require_admin(
     if not user.is_admin:
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="admin role required")
     return user
+
+
+def require_bouncer(
+    user: Annotated[User, Depends(current_user)],
+) -> User:
+    """#55 / BUILD-5 — require the caller to hold the `bouncer` role.
+
+    Gates the off-the-leash presence check-in so a presence beat is
+    attributable to a DISTINCT bouncer identity, not self-asserted by
+    whatever agent/requester token happens to be authenticated. A plain
+    agent token (the actor this signal is meant to catch) is rejected
+    with 403, so it can no longer forge a verified presence beat for its
+    own session.
+
+    Default-off for back-compat: this dependency is only wired onto the
+    check-in route when the operator opts in via
+    `IAM_JIT_REQUIRE_BOUNCER_ROLE=1` (see routes/presence.py). When the
+    opt-in is off, the route falls back to `current_user` so existing
+    deployments that have not provisioned a bouncer identity keep
+    working — but in that mode a check-in is recorded as UNVERIFIED and
+    the enforce gate refuses to trust it (see presence.py)."""
+    if not user.is_bouncer:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail=(
+                "bouncer role required: presence check-in must come from "
+                "a principal provisioned as a bouncer identity "
+                "(IAM_JIT_REQUIRE_BOUNCER_ROLE is enabled)."
+            ),
+        )
+    return user

@@ -35,7 +35,8 @@
             "uniqueItems": true,
             "items": {
               "type": "string",
-              "enum": ["requester", "approver", "admin"]
+              "enum": ["requester", "approver", "admin", "bouncer"],
+              "description": "requester/approver/admin gate the human-facing request lifecycle. 'bouncer' (#55) is a narrow machine identity: a credential held by a bouncer process so it can prove presence via POST /api/v1/presence/check-in. Bound to the off-the-leash signal so a plain agent token cannot forge a check-in. Not implied by admin — grant it explicitly to a dedicated bouncer principal."
             }
           },
           "enabled": {

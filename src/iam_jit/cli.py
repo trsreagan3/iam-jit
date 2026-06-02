@@ -934,15 +934,25 @@ def presence_group() -> None:
     idle). Advisory by default; set IAM_JIT_REQUIRE_BOUNCER_PRESENCE=1
     to make iam-jit refuse role-issuance on a gap.
 
-    LIMITATION: a check-in is a SELF-ASSERTED claim — iam-jit cannot
-    independently verify the bouncer is in path. Any caller holding a
-    token can FORGE a check-in for its own session_id (or omit the
-    session_id) to evade the signal. This reliably catches ACCIDENTAL
-    / misconfiguration off-leash (agent crash, bouncer dies, routing
-    misconfig), but does NOT stop a deliberate or prompt-injected
-    agent. Closing that hole needs the bouncer to authenticate as a
-    distinct identity (tracked follow-up); do not enable enforce mode
-    believing it stops an adversarial bypass.
+    IDENTITY BINDING (#55): the check-in is bound to the calling
+    principal. Set IAM_JIT_REQUIRE_BOUNCER_ROLE=1 to require the caller
+    to hold the `bouncer` role (a distinct machine identity), so a plain
+    agent/requester token can no longer forge a check-in — it is
+    rejected 403 at the door. The enforce gate only TRUSTS a beat
+    attributed to a bouncer principal, so even in the default
+    back-compat posture an agent token cannot un-stick the gate by
+    self-asserting presence.
+
+    RESIDUAL TRUST (honest): iam-jit still cannot prove the bouncer is
+    physically in the agent's data path. A compromised bouncer
+    credential, or a bouncer that checks in while not actually proxying,
+    can still assert presence; per-beat signing + out-of-band path
+    attestation are stronger follow-ups. Enforce mode also remains
+    sidesteppable by OMITTING bouncer_session_id on the role request
+    (NEVER_SEEN is never blocked, so un-wired deployments don't break).
+    The signal reliably catches ACCIDENTAL / misconfiguration off-leash
+    (agent crash, bouncer dies, routing misconfig) and now resists the
+    cheap forge by an ordinary agent token.
     """
 
 

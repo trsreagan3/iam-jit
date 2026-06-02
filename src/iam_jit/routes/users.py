@@ -279,7 +279,9 @@ def _user_from_payload(payload: dict[str, Any]) -> User:
         raise HTTPException(status_code=400, detail="id must start with 'email:' or 'iam:'")
     if not isinstance(roles, list) or not roles:
         raise HTTPException(status_code=400, detail="roles must be a non-empty list")
-    valid_roles = {"requester", "approver", "admin"}
+    # #55 — `bouncer` is a narrow machine identity (presence check-in).
+    # Admins may provision a dedicated bouncer principal via this API.
+    valid_roles = {"requester", "approver", "admin", "bouncer"}
     for r in roles:
         if r not in valid_roles:
             raise HTTPException(status_code=400, detail=f"invalid role: {r!r}")
