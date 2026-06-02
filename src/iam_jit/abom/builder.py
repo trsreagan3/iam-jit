@@ -15,6 +15,7 @@ from __future__ import annotations
 import dataclasses
 import datetime as _dt
 import hashlib
+import re
 import typing
 import uuid
 
@@ -318,6 +319,32 @@ def _service(
     }
 
 
+_LOOPBACK_RE = re.compile(
+    r"^(127\.\d+\.\d+\.\d+|localhost|::1)(:\d+)?$",
+    re.IGNORECASE,
+)
+
+
+def _is_proxy_own_host(host: str) -> bool:
+    """Return True when ``host`` is a loopback address (the bouncer's own
+    listen socket), so it is NOT emitted as an upstream service in the ABOM.
+
+    ibounce listens on ``127.0.0.1:<port>`` by default. When an agent
+    sends a request to the proxy itself (e.g. a plan-capture or ghost-run
+    synthetic) the ``dst_endpoint.hostname`` in the resulting audit event
+    carries the proxy's OWN listen host — not a real upstream AWS service.
+    Emitting that as a ``services[]`` entry would misclassify the proxy's
+    own socket as an external dependency. The filter covers:
+      - ``127.x.x.x``  (IPv4 loopback range)
+      - ``localhost``   (canonical loopback hostname, case-insensitive)
+      - ``::1``         (IPv6 loopback)
+    each optionally suffixed by ``:<port>``. Genuine upstream AWS service
+    hostnames (``s3.us-east-1.amazonaws.com``, ``ec2.eu-west-1.amazonaws.com``,
+    etc.) never match these patterns.
+    """
+    return bool(_LOOPBACK_RE.match(host.strip()))
+
+
 def _aggregate(
     events: typing.Sequence[dict[str, typing.Any]],
 ) -> dict[str, dict[str, _Agg]]:
@@ -398,8 +425,11 @@ def _aggregate(
         # HTTP endpoint: a destination host that is NOT also a DB
         # service name (gbounce L7 egress). A bare hostname with no
         # database field is treated as an external endpoint.
+        # Exclude loopback addresses (127.x.x.x / localhost / ::1) —
+        # those are the bouncer's OWN listen socket, not an upstream
+        # service. See _is_proxy_own_host().
         host = _first_str(ev, _HOST_PATHS)
-        if host and not db:
+        if host and not db and not _is_proxy_own_host(host):
             agg = _bump("http_endpoint", host, ev)
             method = _first_str(ev, ("http_request.http_method",))
             if method:

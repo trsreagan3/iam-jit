@@ -23,6 +23,31 @@ Industry-research additions (per #488):
 
 Ensemble: ``combined_score = max(z_score_anomaly, classifier_score)``.
 Threat-feed entries marked HIGH+ severity bump the score upward.
+
+DIVISION OF LABOR — anomaly detection vs. circuit breaker
+----------------------------------------------------------
+These two subsystems handle DIFFERENT threat shapes:
+
+  * **Circuit breaker** (`iam_jit.circuit_breaker`) fires on HIGH VOLUME
+    of any action — familiar or not. It counts cost/requests over a
+    rolling window and trips when a threshold is breached. "This agent
+    made 10 000 s3:GetObject calls in 60 s" is a circuit-breaker event.
+
+  * **Anomaly detection** (this module) fires on NOVEL or RARE actions —
+    actions that deviate from the per-agent baseline by z-score. "This
+    agent never touches iam:CreateRole and just did" is an anomaly-
+    detection event. High VOLUME of a FAMILIAR action scores as NORMAL
+    here (a frequently observed action has a high baseline mean, so the
+    z-score stays low).
+
+Both signals are intentional and complementary:
+    volume of familiar actions  →  circuit breaker
+    novel / rare actions        →  anomaly detection
+
+Operators seeing 0 anomaly alerts under high-volume familiar traffic is
+correct behaviour — not a bug. The circuit breaker is the right tool
+for rate-of-familiar-action concerns; check `iam-jit status --json`
+→ `circuit_breaker` for that signal.
 """
 
 from __future__ import annotations

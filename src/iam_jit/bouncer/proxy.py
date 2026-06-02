@@ -4195,9 +4195,14 @@ async def _handle_request(request, *, store, config: ProxyConfig, session):
         # avoid re-parsing the SigV4 envelope on the deny hot-path; the
         # session id is informational on the 403 body — the agent can
         # always cross-reference via `iam_jit_handle_deny`).
+        # NOTE: the canonical header is X-Agent-Session-Id (lower-cased
+        # to "x-agent-session-id") per [[cross-product-agent-parity]]
+        # and agent_context.py AGENT_SESSION_ID_FIELD. The previous
+        # "x-iam-jit-agent-session-id" lookup was incorrect and always
+        # returned "" — causing denial receipts to emit agent_session=""
+        # even when the agent sent a valid X-Agent-Session-Id header.
         agent_session_id_hint = (
-            request.headers.get("x-iam-jit-agent-session-id", "")
-            or request.headers.get("x-iam-jit-agent-session", "")
+            request.headers.get("x-agent-session-id", "")
             or ""
         )
         _deny_action_label = (

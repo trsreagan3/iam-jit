@@ -107,7 +107,7 @@ async def test_deny_403_carries_signed_receipt_then_replay_rejected_after_restar
                         service="s3", region="us-east-1"
                     ),
                     "x-amz-date": "20260603T000000Z",
-                    "x-iam-jit-agent-session-id": "sess-xyz",
+                    "X-Agent-Session-Id": "sess-xyz",
                 },
             ) as resp:
                 assert resp.status == 403, await resp.text()

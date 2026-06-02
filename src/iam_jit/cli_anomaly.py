@@ -53,6 +53,21 @@ def register_anomaly_group(main_group: click.Group) -> click.Group:
         surface is for operator inspection + dry-run scoring; the
         bouncer wires the detector into the request path when
         `enabled: true`.
+
+        DIVISION OF LABOR — anomaly detection vs. circuit breaker:
+
+        \b
+          * Circuit breaker  — fires on HIGH VOLUME of any action
+            (familiar or not). "10 000 s3:GetObject in 60 s" trips the
+            breaker. Check `iam-jit status --json` -> circuit_breaker.
+          * Anomaly detection — fires on NOVEL / RARE actions vs. the
+            per-agent baseline (z-score). High volume of a FAMILIAR
+            action scores as NORMAL here (high baseline mean → low
+            z-score). "Agent never touched iam:CreateRole and just did"
+            is an anomaly-detection hit.
+
+        Seeing zero anomaly alerts under high-volume familiar traffic is
+        CORRECT — the circuit breaker owns that signal.
         """
 
     @anomaly_group.command("status")
