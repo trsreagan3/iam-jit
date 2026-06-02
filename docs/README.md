@@ -51,6 +51,7 @@ You're deploying or running iam-jit + bouncers in your environment.
 | [`POSTURE.md`](POSTURE.md) | `iam-jit posture` CLI — which mode is running where |
 | [`DIAGNOSTICS.md`](DIAGNOSTICS.md) | `iam-jit doctor` flows + interpretation |
 | [`IBOUNCE.md`](IBOUNCE.md) | ibounce CLI reference + per-task scopes + audit chain |
+| [`WIRING-AN-AGENT.md`](WIRING-AN-AGENT.md) | Wire any agent through any bouncer — per-protocol table + canonical port table |
 | [`DYNAMIC-DENY-RULES.md`](DYNAMIC-DENY-RULES.md) | Cross-product `iam-jit deny add` fan-out |
 | [`PROFILE-GENERATION.md`](PROFILE-GENERATION.md) | Generate bounce profiles from observed audit events |
 | [`PROFILE-UPGRADE.md`](PROFILE-UPGRADE.md) | `ibounce profile doctor` post-upgrade flow |

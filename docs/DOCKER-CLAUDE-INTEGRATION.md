@@ -1,8 +1,13 @@
 # Claude-in-Docker Integration Guide
 
-Operator guide for adding iam-jit + ibounce to a Docker-based Claude Code
-(or any AI-agent) setup.  Covers both deployment patterns, env-var passthrough,
-audit-log volume mounts, and the tradeoff between patterns.
+Operator guide for adding iam-jit + the Bounce suite to a Docker-based Claude
+Code (or any AI-agent) setup.  Covers both ibounce deployment patterns
+(in-container + sidecar), the Go-bouncer sidecars (gbounce / kbounce /
+dbounce), env-var passthrough, audit-log volume mounts, and the tradeoff
+between patterns.
+
+For the protocol + port that each bouncer wires through, see
+[`WIRING-AN-AGENT.md`](WIRING-AN-AGENT.md).
 
 ---
 
@@ -269,6 +274,139 @@ transparent mode with sensible default alert rules.
 
 ---
 
+## Adding the Go bouncers (gbounce / kbounce / dbounce) as sidecars
+
+The patterns above install **ibounce** (Python, ships inside the iam-jit
+wheel). The Go bouncers — **gbounce** (HTTP), **kbounce** (K8s), **dbounce**
+(SQL) — ship as their own static binaries and publish their own GHCR images.
+Add each one as a **sidecar** next to your Claude container using the same
+shape as Pattern B: a service with a `/healthz` healthcheck, a `depends_on`
+gate so Claude waits for it, and the bouncer's protocol env var on the Claude
+container.
+
+Each Go bouncer wires through a different env var — see
+[`WIRING-AN-AGENT.md`](WIRING-AN-AGENT.md) for the full per-protocol table and
+the canonical port table. Defaults used below:
+
+| Bouncer | Sidecar image | Wire port | Mgmt port | Claude-side env var |
+|---------|---------------|-----------|-----------|---------------------|
+| gbounce | `ghcr.io/trsreagan3/gbounce:latest` | 8080 | 8769 | `HTTP_PROXY` + `HTTPS_PROXY` = `http://gbounce:8080` |
+| kbounce | `ghcr.io/trsreagan3/kbounce:latest` | 8766 | 8766 | `KUBECONFIG` (config whose cluster `server: http://kbounce:8766`) |
+| dbounce | `ghcr.io/trsreagan3/dbounce:latest` | 5433 | 8768 | DB host `dbounce`, port `5433` (or `PGHOST`/`PGPORT`) |
+
+> **GHCR availability:** the Go-bouncer images exist on GHCR but some tags are
+> not yet anonymously pullable pending the v1.0.0 release (see
+> `docs/SMOKE-TEST-RESULTS-2026-05-19.md`). If `docker pull` returns 401,
+> build from the bouncer's repo Dockerfile, or `brew install trsreagan3/tap/<bouncer>`
+> on the host and run the binary directly. Per [[ibounce-honest-positioning]].
+
+### Compose snippet — gbounce sidecar (HTTP gating)
+
+```yaml
+services:
+
+  gbounce:
+    image: ghcr.io/trsreagan3/gbounce:latest
+    command: ["run", "--port", "8080", "--mgmt-port", "8769"]
+    volumes:
+      - ./audit-logs:/var/lib/iam-jit
+    healthcheck:
+      test: ["CMD", "curl", "-sf", "http://localhost:8769/healthz"]   # mgmt port
+      interval: 15s
+      timeout: 5s
+      start_period: 20s
+    restart: unless-stopped
+
+  claude:
+    image: python:3.12-slim-bookworm   # replace with your Claude image
+    environment:
+      HTTP_PROXY: http://gbounce:8080
+      HTTPS_PROXY: http://gbounce:8080
+      ANTHROPIC_API_KEY: "${ANTHROPIC_API_KEY:-}"
+    depends_on:
+      gbounce:
+        condition: service_healthy
+```
+
+> gbounce's `/healthz` lives on the **management** port (8769), not the wire
+> port (8080). Probe the mgmt port in the healthcheck.
+
+### Compose snippet — kbounce sidecar (Kubernetes gating)
+
+```yaml
+services:
+
+  kbounce:
+    image: ghcr.io/trsreagan3/kbounce:latest
+    command: ["run", "--port", "8766", "--kubeconfig", "/root/.kube/config"]
+    volumes:
+      - ~/.kube/config:/root/.kube/config:ro
+      - ./audit-logs:/var/lib/iam-jit
+      - ./kbounce-routed:/out        # kbounce writes its routed kubeconfig here
+    healthcheck:
+      test: ["CMD", "curl", "-sf", "http://localhost:8766/healthz"]
+      interval: 15s
+      timeout: 5s
+      start_period: 20s
+    restart: unless-stopped
+
+  claude:
+    image: python:3.12-slim-bookworm   # replace with your Claude image
+    environment:
+      KUBECONFIG: /kube/kbounce-routed-config
+    volumes:
+      - ./kbounce-routed:/kube:ro      # the routed config points at http://kbounce:8766
+    depends_on:
+      kbounce:
+        condition: service_healthy
+```
+
+> The routed kubeconfig's cluster `server` must be `http://kbounce:8766` (the
+> sidecar's service name + port), not `127.0.0.1`. kbounce's `init-tls` helper
+> (in the `kbouncer` repo) generates the CA / routed config — `kbounce --help`
+> shows the exact subcommand in your installed version.
+
+### Compose snippet — dbounce sidecar (SQL gating)
+
+```yaml
+services:
+
+  dbounce:
+    image: ghcr.io/trsreagan3/dbounce:latest
+    command: ["run", "--port", "5433", "--mgmt-port", "8768"]
+    environment:
+      DBOUNCE_UPSTREAM: "postgres:5432"   # the real database
+    volumes:
+      - ./audit-logs:/var/lib/iam-jit
+    healthcheck:
+      test: ["CMD", "curl", "-sf", "http://localhost:8768/healthz"]   # mgmt port
+      interval: 15s
+      timeout: 5s
+      start_period: 20s
+    restart: unless-stopped
+
+  claude:
+    image: python:3.12-slim-bookworm   # replace with your Claude image
+    environment:
+      PGHOST: dbounce
+      PGPORT: "5433"
+    depends_on:
+      dbounce:
+        condition: service_healthy
+```
+
+> dbounce's `/healthz` is on the **management** port (8768); the SQL wire is on
+> 5433. Point the agent's DB client (or `DATABASE_URL` /
+> `postgresql://user@dbounce:5433/db`) at the sidecar's wire port.
+
+You can run several bouncers as sidecars in one stack — each is independent.
+Add one `depends_on` block per bouncer to the `claude` service and set all the
+relevant env vars together. The exact `run` flags above (`--port`,
+`--mgmt-port`, `--kubeconfig`, `--upstream`) come from each bouncer's own
+`run --help`; confirm against your installed version.
+
+---
+
 ## Published sidecar image
 
 A pre-built sidecar image is published to GitHub Container Registry on every
@@ -318,5 +456,6 @@ iam-jit audit query --url http://localhost:8767
 - [`infrastructure/docker/sidecar-entrypoint.sh`](../infrastructure/docker/sidecar-entrypoint.sh) — sidecar supervisor
 - [`infrastructure/docker/start-with-bouncers.sh`](../infrastructure/docker/start-with-bouncers.sh) — Pattern A entrypoint
 - [`tests/integration/test_claude_in_docker_e2e.py`](../tests/integration/test_claude_in_docker_e2e.py) — E2E verification
+- [`docs/WIRING-AN-AGENT.md`](WIRING-AN-AGENT.md) — per-protocol wiring + canonical port table (all bouncers)
 - [`docs/DEPLOYMENT.md`](DEPLOYMENT.md) — full deployment guide
 - [`docs/SECURITY-POSTURE.md`](SECURITY-POSTURE.md) — trust model

@@ -1,15 +1,83 @@
 # Getting started
 
-This doc walks you from "git clone" to a working deploy in 5 minutes
-(MVP path), then shows what to layer on top for a production launch.
+This doc covers two paths:
 
-If you only want the offline CLI (`pip install git+https://github.com/trsreagan3/iam-jit.git` — the scorer
-ships as the `iam-risk-score` console script inside the `iam-jit`
-wheel; there is no separate `iam-risk-score` PyPI package; will switch
-to `pip install iam-jit` once published to PyPI, #235), stop
-reading — that's already covered in the main [README](../README.md).
-This doc is for the **self-hosted deploy** of the full iam-jit stack
-(scoring API + provisioning workflow).
+1. **Install the CLI** (`iam-jit` + `ibounce`) — the canonical install for the
+   local tools, with verification. Start here.
+2. **Self-hosted deploy** of the full iam-jit stack (scoring API + provisioning
+   workflow) — "git clone" to a working deploy in ~5 minutes (MVP path), then
+   what to layer on for a production launch.
+
+If you only want the offline scorer, the `iam-risk-score` console script ships
+inside the `iam-jit` wheel (no separate PyPI package) — installing the CLI
+below gives it to you.
+
+---
+
+## Install the CLI (canonical)
+
+The local tools (`iam-jit`, `ibounce`, `iam-risk-score`) install from one
+wheel. **pipx is the canonical install** — it isolates the tool in its own
+venv and is the path PEP 668 (the "externally-managed-environment" error on
+modern macOS / Debian) recommends.
+
+```bash
+# macOS / Linux — canonical (pipx):
+brew install pipx 2>/dev/null || pip install --user pipx
+pipx install git+https://github.com/trsreagan3/iam-jit.git
+```
+
+Alternatives:
+
+```bash
+# Homebrew tap (no Python toolchain juggling):
+brew tap trsreagan3/tap && brew install trsreagan3/tap/iam-jit
+
+# One-line installer (any OS; also installs the Go bouncers via IAM_JIT_BOUNCERS):
+curl -fsSL https://raw.githubusercontent.com/trsreagan3/iam-jit/main/install.sh | sh
+
+# pip --user (Linux / Windows / generic Python):
+pip install --upgrade pip      # PEP 660 editable needs pip >= 22.3 (#548)
+pip install --user git+https://github.com/trsreagan3/iam-jit.git
+```
+
+> Will switch to `pipx install iam-jit` / `pip install --user iam-jit` once
+> published to PyPI (#235). See [INSTALL-HOMEBREW.md](INSTALL-HOMEBREW.md) for
+> the tap and the Go bouncers (kbounce / dbounce / gbounce).
+
+### Verify the install
+
+```bash
+iam-jit doctor install-check    # checks PATH, console scripts, and that
+                                # `mcp install-*` is supported by this binary
+```
+
+`doctor install-check` is the fast way to catch a stale or shadowed binary
+(e.g. an old `~/.local/bin/iam-jit` ahead of a fresh pipx install on PATH).
+
+### Get the env vars for your running bouncers
+
+Once a bouncer is running (`ibounce init && ibounce run`), let the CLI emit the
+exact `export` lines for whatever is up — no need to memorize ports:
+
+```bash
+eval "$(iam-jit shellinit)"     # emits AWS_ENDPOINT_URL / HTTP_PROXY / etc.
+                                # only for bouncers that are actually running
+iam-jit posture                 # show what's running + how traffic is routed
+```
+
+`shellinit` never writes to your shell rc files; it just prints the block so
+you can `eval` it (per [[creates-never-mutates]]). To wire an agent through a
+bouncer, see [WIRING-AN-AGENT.md](WIRING-AN-AGENT.md); to write the agent's MCP
+config automatically, see [MCP-RECIPES.md](MCP-RECIPES.md).
+
+---
+
+## Self-hosted deploy
+
+The rest of this doc is the **self-hosted deploy** of the full iam-jit stack
+(scoring API + provisioning workflow). The CLI install above is a prerequisite
+(or use the repo venv below).
 
 ---
 

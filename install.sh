@@ -222,8 +222,22 @@ install_go_binary() {
 if should_install_go_bouncers; then
     log "Step 3/4: Installing Go bouncers..."
 
+    # On macOS, prefer the Homebrew tap for the Go bouncers — no Go toolchain
+    # needed, and it's the install path we document. Only fall through to
+    # `go install` if brew isn't available.
+    if [ "$OS_ID" = "macos" ] && command -v brew >/dev/null 2>&1; then
+        log "macOS detected — installing Go bouncers via Homebrew tap (no Go toolchain needed)..."
+        brew tap trsreagan3/tap >/dev/null 2>&1 || true
+        _contains "$IAM_JIT_BOUNCERS" "kbounce" && brew install trsreagan3/tap/kbounce || true
+        _contains "$IAM_JIT_BOUNCERS" "dbounce" && brew install trsreagan3/tap/dbounce || true
+        _contains "$IAM_JIT_BOUNCERS" "gbounce" && brew install trsreagan3/tap/gbounce || true
+        # Mark done so we skip the `go install` path below.
+        IAM_JIT_SKIP_GO=1
+        log "  (Go bouncers handled via Homebrew tap; skipping go install.)"
+    fi
+
     # Ensure Go is available
-    if ! command -v go >/dev/null 2>&1; then
+    if [ "$IAM_JIT_SKIP_GO" = "0" ] && ! command -v go >/dev/null 2>&1; then
         log "Go not found — installing..."
         case "$OS_ID" in
             ubuntu|debian|linuxmint|pop)
@@ -241,8 +255,15 @@ if should_install_go_bouncers; then
             fedora|rhel|rocky|alma|centos)
                 dnf install -y golang 2>/dev/null || yum install -y golang
                 ;;
+            macos)
+                warn "Go not found and Homebrew not available. Install the Go bouncers with:"
+                warn "  brew tap trsreagan3/tap && brew install trsreagan3/tap/{kbounce,dbounce,gbounce}"
+                warn "  (or install Go from https://go.dev/dl/ and re-run with the same IAM_JIT_BOUNCERS)."
+                IAM_JIT_SKIP_GO=1
+                ;;
             *)
                 warn "Cannot auto-install Go on '$OS_ID'. Skipping Go bouncers."
+                warn "  Install Go from https://go.dev/dl/ then re-run with IAM_JIT_BOUNCERS=${IAM_JIT_BOUNCERS}."
                 IAM_JIT_SKIP_GO=1
                 ;;
         esac
@@ -273,6 +294,10 @@ if should_install_go_bouncers; then
     fi
 else
     log "Step 3/4: Skipping Go bouncers (IAM_JIT_BOUNCERS=${IAM_JIT_BOUNCERS})."
+    log "  To add the K8s / SQL / HTTP gates, re-run with e.g.:"
+    log "    curl -fsSL .../install.sh | IAM_JIT_BOUNCERS=ibounce,kbounce,dbounce,gbounce sh"
+    log "  (kbounce=Kubernetes, dbounce=SQL, gbounce=generic HTTP). On macOS the"
+    log "  installer uses the Homebrew tap; otherwise a Go toolchain is used."
 fi
 
 # ---------------------------------------------------------------------------
@@ -299,8 +324,15 @@ fi
 log "Install complete."
 log ""
 log "Next steps:"
-log "  1. Run 'ibounce init && ibounce run' to start the AWS gate."
-log "  2. Set AWS_ENDPOINT_URL=http://127.0.0.1:8767 in your agent env."
-log "  3. Check 'iam-jit posture' to verify your setup."
+log "  1. Verify the install:   iam-jit doctor install-check"
+log "  2. Start the AWS gate:   ibounce init && ibounce run"
+log "  3. Wire your agent (pick one):"
+log "       MCP (recommended):  ibounce mcp install-claude-code   (+ install-cursor / install-codex / install-devin)"
+log "       Transparent proxy:  export AWS_ENDPOINT_URL=http://127.0.0.1:8767"
+log "       Or auto-emit envs:  eval \"\$(iam-jit shellinit)\""
+log "  4. Verify routing:       iam-jit posture"
 log ""
-log "Docs: https://github.com/${IAM_JIT_REPO}/blob/main/docs/DOCKER-CLAUDE-INTEGRATION.md"
+log "Add more bouncers:  re-run with IAM_JIT_BOUNCERS=ibounce,kbounce,dbounce,gbounce"
+log ""
+log "Wiring per protocol: https://github.com/${IAM_JIT_REPO}/blob/main/docs/WIRING-AN-AGENT.md"
+log "Docs (Docker):       https://github.com/${IAM_JIT_REPO}/blob/main/docs/DOCKER-CLAUDE-INTEGRATION.md"
