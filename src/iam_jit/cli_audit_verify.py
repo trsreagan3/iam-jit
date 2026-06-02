@@ -386,9 +386,25 @@ def register_audit_verify_receipt_command(
         "--public-key",
         "public_key_b64",
         default=None,
-        help="Override the public key embedded in the receipt. Use when "
-             "verifying against a pinned out-of-band key (strictest "
-             "posture). URL-safe base64 (no padding).",
+        help="Pin the expected signing public key (URL-safe base64, no "
+             "padding) to verify against — establishes ISSUER trust. "
+             "When omitted, the verifier auto-pins to the local on-disk "
+             "denial-receipt key (~/.iam-jit/audit-keys) if present; if "
+             "neither is available it falls back to the receipt's OWN "
+             "embedded key, which proves only that SOMEONE signed it, "
+             "NOT that iam-jit did (key_trust=embedded_unpinned).",
+    )
+    @click.option(
+        "--key-dir",
+        "key_dir",
+        type=click.Path(file_okay=False, dir_okay=True, path_type=pathlib.Path),
+        default=None,
+        help="Directory holding the local denial-receipt public key "
+             "(denial-receipt-ed25519.pub). Defaults to "
+             "~/.iam-jit/audit-keys. When --public-key is NOT given and "
+             "this directory holds the local key, the verifier auto-pins "
+             "to THAT key (key_trust=local) instead of trusting the "
+             "receipt's own embedded key.",
     )
     @click.option(
         "--nonce-db",
@@ -417,6 +433,7 @@ def register_audit_verify_receipt_command(
     def verify_receipt_cmd(
         receipt_file: pathlib.Path,
         public_key_b64: str | None,
+        key_dir: pathlib.Path | None,
         nonce_db: pathlib.Path | None,
         no_consume: bool,
         as_json: bool,
@@ -436,6 +453,12 @@ def register_audit_verify_receipt_command(
           * 2 — bad arguments / unreadable receipt.
         """
         from .receipts import DenialReceipt, open_nonce_store, verify_receipt
+        from .receipts.signer import (
+            EMBEDDED_UNPINNED_CAVEAT,
+            KEY_TRUST_EMBEDDED_UNPINNED,
+            KEY_TRUST_LOCAL,
+            KEY_TRUST_PINNED,
+        )
 
         try:
             raw = json.loads(receipt_file.read_text(encoding="utf-8"))
@@ -448,9 +471,12 @@ def register_audit_verify_receipt_command(
             click.echo(f"audit verify-receipt: malformed receipt: {e}", err=True)
             sys.exit(2)
 
-        sig_ok, sig_reason = verify_receipt(
-            receipt, public_key_override_b64=public_key_b64,
+        sig_ok, sig_reason, key_trust = verify_receipt(
+            receipt,
+            public_key_override_b64=public_key_b64,
+            keypair_dir=str(key_dir) if key_dir is not None else None,
         )
+        issuer_unverified = key_trust == KEY_TRUST_EMBEDDED_UNPINNED
 
         nonce_status = "not_checked"
         nonce_reason: str | None = None
@@ -499,13 +525,24 @@ def register_audit_verify_receipt_command(
             "public_key_fingerprint": receipt.public_key_fingerprint,
             "signature_ok": sig_ok,
             "signature_reason": sig_reason,
+            "key_trust": key_trust,
+            "issuer_unverified": issuer_unverified,
             "nonce_status": nonce_status,
             "nonce_reason": nonce_reason,
             "ok": overall_ok,
             "proves": (
-                "iam-jit's RECORD that it denied this action at this time "
-                "for this reason; NOT that the agent could not act through "
-                "another channel"
+                (
+                    EMBEDDED_UNPINNED_CAVEAT + ". Even then, a valid receipt "
+                    "proves only iam-jit's RECORD that it denied this action "
+                    "at this time for this reason; NOT that the agent could "
+                    "not act through another channel"
+                )
+                if issuer_unverified
+                else (
+                    "iam-jit's RECORD that it denied this action at this time "
+                    "for this reason; NOT that the agent could not act through "
+                    "another channel"
+                )
             ),
         }
         if as_json:
@@ -523,6 +560,16 @@ def register_audit_verify_receipt_command(
                 click.echo("  signature: OK (Ed25519 verifies)")
             else:
                 click.echo(f"  signature: FAILED — {sig_reason}")
+            if key_trust == KEY_TRUST_PINNED:
+                click.echo("  key trust: PINNED (verified against your "
+                           "--public-key)")
+            elif key_trust == KEY_TRUST_LOCAL:
+                click.echo("  key trust: LOCAL (verified against this host's "
+                           "on-disk denial-receipt key)")
+            else:
+                click.echo(
+                    "  key trust: EMBEDDED (UNPINNED) — " + EMBEDDED_UNPINNED_CAVEAT
+                )
             if nonce_status != "not_checked":
                 if nonce_status == "fresh":
                     click.echo("  nonce:     FRESH (first presentation)")
@@ -532,10 +579,16 @@ def register_audit_verify_receipt_command(
                     click.echo(f"  nonce:     UNRECOGNISED — {nonce_reason}")
                 else:
                     click.echo(f"  nonce:     ERROR — {nonce_reason}")
-            click.echo(
-                "  proves:    iam-jit's RECORD of this deny (not that the "
-                "agent could not act elsewhere)"
-            )
+            if issuer_unverified:
+                click.echo(
+                    "  proves:    that SOMEONE signed this receipt — the "
+                    "ISSUER is NOT verified. " + EMBEDDED_UNPINNED_CAVEAT
+                )
+            else:
+                click.echo(
+                    "  proves:    iam-jit's RECORD of this deny (not that the "
+                    "agent could not act elsewhere)"
+                )
             click.echo(
                 f"RESULT: {'ok' if overall_ok else 'FAILED'}"
             )
@@ -866,4 +919,5 @@ def register_audit_retention_command(audit_group: click.Group) -> click.Command:
 __all__ = [
     "register_audit_retention_command",
     "register_audit_verify_command",
+    "register_audit_verify_receipt_command",
 ]

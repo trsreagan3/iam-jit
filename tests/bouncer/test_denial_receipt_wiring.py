@@ -134,8 +134,13 @@ async def test_deny_403_carries_signed_receipt_then_replay_rejected_after_restar
 
     assert receipt_dict is not None
     receipt = DenialReceipt.from_dict(receipt_dict)
-    ok, reason = verify_receipt(receipt)
+    ok, reason, key_trust = verify_receipt(
+        receipt, keypair_dir=str(tmp_path / "keys"),
+    )
     assert ok, f"receipt from live 403 must verify: {reason}"
+    # The signing keypair lives on this host (tmp_path/keys) so the
+    # verifier auto-pins to the LOCAL key — issuer trust established.
+    assert key_trust == "local", key_trust
 
     # The nonce must have been persisted to the on-disk SQLite store.
     assert nonce_db.is_file(), "persistent nonce store must exist on disk"

@@ -1711,15 +1711,23 @@ TOOLS = [
             "#731 / BUILD-10 — verify an Ed25519-signed denial receipt "
             "offline (no network). Pass the `receipt` object you got from "
             "a 403 deny response's `denial_receipt` field. Returns "
-            "`signature_ok` (does the Ed25519 signature match the payload "
-            "+ embedded/pinned key?) plus the receipt's decoded fields. "
-            "HONEST FRAMING: a valid receipt proves iam-jit's RECORD that "
-            "it denied this action at this time for this reason — it does "
-            "NOT prove the agent couldn't act through another channel. "
-            "For REPLAY detection (a receipt nonce presented twice, even "
-            "across a bouncer restart) use the operator CLI `iam-jit audit "
-            "verify-receipt --nonce-db ...` against the persistent nonce "
-            "store. Read-only; no side effects."
+            "`signature_ok` (is the Ed25519 signature well-formed against "
+            "the verifying key?) plus `key_trust` and the receipt's decoded "
+            "fields. CRITICAL — `signature_ok` alone does NOT prove iam-jit "
+            "issued the receipt: a forged receipt carries the attacker's "
+            "own keypair and self-verifies. ALWAYS check `key_trust`: "
+            "`pinned` (you passed `public_key_b64`) or `local` (auto-pinned "
+            "to this host's on-disk key) establish ISSUER trust; "
+            "`embedded_unpinned` means only that SOMEONE signed it — the "
+            "issuer is NOT verified, so pin the expected key via "
+            "`public_key_b64` or verify on the signing host. "
+            "HONEST FRAMING: even a trusted+valid receipt proves iam-jit's "
+            "RECORD that it denied this action at this time for this reason "
+            "— it does NOT prove the agent couldn't act through another "
+            "channel. For REPLAY detection (a receipt nonce presented twice, "
+            "even across a bouncer restart) use the operator CLI `iam-jit "
+            "audit verify-receipt --nonce-db ...` against the persistent "
+            "nonce store. Read-only; no side effects."
         ),
         "inputSchema": {
             "type": "object",
@@ -1733,7 +1741,13 @@ TOOLS = [
                     "type": "string",
                     "description": "Optional out-of-band pinned public key "
                                    "(URL-safe base64, no padding) to verify "
-                                   "against instead of the embedded key.",
+                                   "against — establishes ISSUER trust "
+                                   "(key_trust=pinned). When omitted the "
+                                   "verifier auto-pins to this host's local "
+                                   "key if present (key_trust=local), else "
+                                   "falls back to the receipt's embedded key "
+                                   "(key_trust=embedded_unpinned, issuer NOT "
+                                   "verified).",
                 },
             },
             "required": ["receipt"],
@@ -5677,6 +5691,10 @@ def _verify_denial_receipt_for_mcp(
     elsewhere.
     """
     from .receipts import DenialReceipt, verify_receipt
+    from .receipts.signer import (
+        EMBEDDED_UNPINNED_CAVEAT,
+        KEY_TRUST_EMBEDDED_UNPINNED,
+    )
 
     receipt_obj = args.get("receipt")
     pinned = (args.get("public_key_b64") or "").strip() or None
@@ -5694,11 +5712,16 @@ def _verify_denial_receipt_for_mcp(
             "error": "malformed_receipt",
             "message": str(e),
         }
-    sig_ok, sig_reason = verify_receipt(receipt, public_key_override_b64=pinned)
+    sig_ok, sig_reason, key_trust = verify_receipt(
+        receipt, public_key_override_b64=pinned,
+    )
+    issuer_unverified = key_trust == KEY_TRUST_EMBEDDED_UNPINNED
     return {
         "ok": sig_ok,
         "signature_ok": sig_ok,
         "signature_reason": sig_reason,
+        "key_trust": key_trust,
+        "issuer_unverified": issuer_unverified,
         "deny_id": receipt.deny_id,
         "action": receipt.action,
         "resource": receipt.resource,
@@ -5708,8 +5731,17 @@ def _verify_denial_receipt_for_mcp(
         "verdict": receipt.verdict,
         "public_key_fingerprint": receipt.public_key_fingerprint,
         "proves": (
-            "iam-jit's RECORD that it denied this action at this time for "
-            "this reason; NOT that the agent could not act elsewhere"
+            (
+                EMBEDDED_UNPINNED_CAVEAT + ". Even then, a valid receipt "
+                "proves only iam-jit's RECORD that it denied this action "
+                "at this time for this reason; NOT that the agent could "
+                "not act elsewhere"
+            )
+            if issuer_unverified
+            else (
+                "iam-jit's RECORD that it denied this action at this time "
+                "for this reason; NOT that the agent could not act elsewhere"
+            )
         ),
         "replay_check_hint": (
             "for replay detection across restarts, run `iam-jit audit "

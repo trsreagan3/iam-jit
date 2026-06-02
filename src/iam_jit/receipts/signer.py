@@ -53,6 +53,7 @@ import datetime as _dt
 import hashlib
 import logging
 import os
+import pathlib
 import secrets
 from typing import Any
 
@@ -346,59 +347,180 @@ class ReceiptSigner:
         }
 
 
+# key_trust values surfaced by :func:`verify_receipt`. They answer the
+# question "WHOSE key did we verify against?" — orthogonal to whether
+# the signature itself was well-formed.
+#   * "pinned"            — caller passed an explicit out-of-band key
+#                           (``public_key_override_b64``). Strongest:
+#                           the operator asserted the expected issuer.
+#   * "local"             — no explicit pin, but the local on-disk
+#                           ``denial-receipt-ed25519.pub`` existed and we
+#                           auto-pinned to IT (the common same-host
+#                           verify case: you're verifying on the box that
+#                           signed). Issuer trust = "this host's key".
+#   * "embedded_unpinned" — no pin AND no local key; we fell back to the
+#                           receipt's OWN embedded key. The signature may
+#                           be well-formed, but a forged receipt carries
+#                           a forged keypair — the ISSUER IS NOT VERIFIED.
+KEY_TRUST_PINNED = "pinned"
+KEY_TRUST_LOCAL = "local"
+KEY_TRUST_EMBEDDED_UNPINNED = "embedded_unpinned"
+
+# Human-facing caveat appended whenever trust is embedded_unpinned. Both
+# the CLI and MCP surfaces reuse this exact string so the honest framing
+# is identical everywhere.
+EMBEDDED_UNPINNED_CAVEAT = (
+    "signature is well-formed but the ISSUER is NOT verified — pin the "
+    "expected key (--public-key) or verify on the signing host to "
+    "establish issuer trust"
+)
+
+
+def _load_local_public_key_b64(
+    *,
+    keypair_dir: str | os.PathLike | None = None,
+    keypair_name: str = DEFAULT_RECEIPT_KEY_NAME,
+) -> str | None:
+    """Return the URL-safe-base64 raw public key of the LOCAL on-disk
+    receipt-signing key, or ``None`` if no local key exists.
+
+    This is the auto-pin source for the common same-host verify case:
+    the operator verifies a receipt on the very host that signed it, so
+    the on-disk ``denial-receipt-ed25519.pub`` is the authoritative
+    issuer key — strictly better than trusting the receipt's own
+    embedded key. We READ ONLY; we never generate a key here (generating
+    would defeat the point — a missing key must surface as
+    ``embedded_unpinned``, not silently mint a new trust anchor).
+    """
+    from ..bouncer.audit_export.manifest import (
+        DEFAULT_KEYPAIR_DIR,
+        PUBLIC_KEY_SUFFIX,
+    )
+    d = pathlib.Path(
+        os.path.expanduser(str(keypair_dir if keypair_dir is not None else DEFAULT_KEYPAIR_DIR))
+    )
+    pub_path = d / f"{keypair_name}{PUBLIC_KEY_SUFFIX}"
+    if not pub_path.is_file():
+        return None
+    try:
+        from cryptography.hazmat.primitives import serialization
+
+        pub = serialization.load_pem_public_key(pub_path.read_bytes())
+        if not isinstance(pub, Ed25519PublicKey):
+            return None
+        raw = pub.public_bytes(
+            encoding=serialization.Encoding.Raw,
+            format=serialization.PublicFormat.Raw,
+        )
+        return _b64u(raw)
+    except Exception as e:  # noqa: BLE001 — a corrupt local key falls back
+        logger.warning(
+            "local receipt public key at %s unreadable; falling back to "
+            "embedded key (issuer unverified): %s", pub_path, e,
+        )
+        return None
+
+
 def verify_receipt(
     receipt: DenialReceipt,
     *,
     public_key_override_b64: str | None = None,
-) -> tuple[bool, str | None]:
+    keypair_dir: str | os.PathLike | None = None,
+    keypair_name: str = DEFAULT_RECEIPT_KEY_NAME,
+    auto_pin_local: bool = True,
+) -> tuple[bool, str | None, str]:
     """Verify the Ed25519 signature on ``receipt`` (signature only —
     replay detection is the caller's separate nonce-store check).
 
-    By default uses the embedded public key. Operators with stricter
-    posture pass ``public_key_override_b64`` (pinned out-of-band).
+    TRUST ESTABLISHMENT (the security-load-bearing part — NOT a crypto
+    change). A well-formed signature only proves SOMEONE signed the
+    payload; it does not prove iam-jit signed it, because a forged
+    receipt carries the attacker's OWN public key. We therefore choose
+    the verifying key in this priority order and report which we used
+    via the returned ``key_trust``:
 
-    Returns ``(ok, reason)``; ``reason`` is None on success. Mirrors
-    :func:`iam_jit.bouncer.audit_export.manifest.verify_manifest`.
+      1. ``public_key_override_b64`` — explicit out-of-band pin →
+         ``key_trust="pinned"`` (strongest).
+      2. else, if ``auto_pin_local`` and the local on-disk
+         ``denial-receipt-ed25519.pub`` exists → auto-pin to THAT key →
+         ``key_trust="local"`` (closes the gap for the common case of
+         verifying on the signing host).
+      3. else, the receipt's OWN embedded key →
+         ``key_trust="embedded_unpinned"``. The signature may verify but
+         the ISSUER IS NOT VERIFIED; callers MUST surface
+         :data:`EMBEDDED_UNPINNED_CAVEAT`.
+
+    Returns ``(ok, reason, key_trust)``; ``reason`` is None on success.
     """
     if receipt.verdict != RECEIPT_VERDICT:
         return False, (
             f"receipt verdict is {receipt.verdict!r}, not "
             f"{RECEIPT_VERDICT!r} — only deny receipts are valid"
+        ), KEY_TRUST_EMBEDDED_UNPINNED
+    if public_key_override_b64:
+        pub_b64 = public_key_override_b64
+        key_trust = KEY_TRUST_PINNED
+    else:
+        local_b64 = (
+            _load_local_public_key_b64(
+                keypair_dir=keypair_dir, keypair_name=keypair_name,
+            )
+            if auto_pin_local
+            else None
         )
-    pub_b64 = public_key_override_b64 or receipt.public_key_b64
+        if local_b64 is not None:
+            pub_b64 = local_b64
+            key_trust = KEY_TRUST_LOCAL
+        else:
+            pub_b64 = receipt.public_key_b64
+            key_trust = KEY_TRUST_EMBEDDED_UNPINNED
     try:
         pub_bytes = _b64u_decode(pub_b64)
     except Exception as e:  # noqa: BLE001
-        return False, f"public key base64 decode failed: {e}"
+        return False, f"public key base64 decode failed: {e}", key_trust
     if len(pub_bytes) != 32:
         return False, (
             f"public key length {len(pub_bytes)} != 32 (Ed25519 raw key "
             "must be exactly 32 bytes)"
-        )
+        ), key_trust
     try:
         pub = Ed25519PublicKey.from_public_bytes(pub_bytes)
     except Exception as e:  # noqa: BLE001
-        return False, f"public key parse failed: {e}"
+        return False, f"public key parse failed: {e}", key_trust
     try:
         sig_bytes = _b64u_decode(receipt.signature_b64)
     except Exception as e:  # noqa: BLE001
-        return False, f"signature base64 decode failed: {e}"
+        return False, f"signature base64 decode failed: {e}", key_trust
     try:
         pub.verify(sig_bytes, receipt.signing_payload())
     except InvalidSignature:
+        # When we auto-pinned to the local key, a mismatch is the
+        # forged-issuer case: the receipt was signed by a DIFFERENT key
+        # than this host's. Make that explicit.
+        if key_trust == KEY_TRUST_LOCAL:
+            return False, (
+                "signature does not match payload under the LOCAL signing "
+                "key — receipt was tampered with or signed by a different "
+                "(possibly forged) key than this host's "
+                "denial-receipt-ed25519"
+            ), key_trust
         return False, (
             "signature does not match payload — receipt was tampered with "
             "or signed by a different key"
-        )
+        ), key_trust
     except Exception as e:  # noqa: BLE001
-        return False, f"signature verification raised: {e}"
-    return True, None
+        return False, f"signature verification raised: {e}", key_trust
+    return True, None, key_trust
 
 
 __all__ = [
     "DEFAULT_RECEIPT_KEY_NAME",
     "RECEIPT_SCHEMA_VERSION",
     "RECEIPT_VERDICT",
+    "KEY_TRUST_PINNED",
+    "KEY_TRUST_LOCAL",
+    "KEY_TRUST_EMBEDDED_UNPINNED",
+    "EMBEDDED_UNPINNED_CAVEAT",
     "DenialReceipt",
     "ReceiptSigner",
     "verify_receipt",
