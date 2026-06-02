@@ -238,6 +238,84 @@ def _build_unsupported_response(
 # single import to reference rather than parsing the dataclass.
 UNSUPPORTED_OP_SHAPE = "unsupported"
 
+# Sentinel for the generic ghost-mode 200 fallback (see
+# `build_generic_success_response`). Lets call-sites + tests detect a
+# generically-synthesized op without parsing the protocol body.
+GENERIC_SUCCESS_SHAPE = "generic_success"
+
+
+def build_generic_success_response(
+    *, service: str, action: str,
+) -> "PlanCaptureSynthetic":
+    """A GENERIC 200-shaped synthetic success for an unregistered write.
+
+    Used by GHOST mode (#728) for any (service, action) the synthetic
+    registry doesn't cover: rather than handing the agent a 400
+    `PlanCaptureUnsupportedOperation` (which boto3 raises as a
+    `ClientError` that can halt the agent), we return a protocol-
+    appropriate minimal 200 body so the agent's flow continues. The
+    write is still NEVER forwarded and still captured — this only
+    changes the SHAPE the agent sees, not the safety invariant.
+
+    Protocol-appropriate minimal body:
+      * XML-protocol services (query / ec2 / rest-xml) get an empty,
+        botocore-parseable XML envelope so the SDK doesn't raise a
+        ResponseParserError mid-script (#693).
+      * JSON-protocol services get an empty JSON object ``{}`` — every
+        JSON-RPC AWS SDK accepts an empty struct as a successful op
+        with all-optional output members absent.
+
+    Per [[ibounce-honest-positioning]] the body is obviously empty /
+    fabricated; the ghost honesty headers (added by the proxy) make the
+    synthesis detectable. ``would_have_returned`` carries a structured
+    ``kind=generic_success`` marker so audit + diff review can tell this
+    apart from a registered synthetic.
+    """
+    rid = _synthetic_request_id()
+    would_have_returned = {
+        "kind": GENERIC_SUCCESS_SHAPE,
+        "service": service,
+        "action": action,
+        "note": (
+            "ghost mode: no registered synthetic shape; returned a "
+            "generic empty 200 so the agent proceeds (NOT forwarded)"
+        ),
+    }
+    marker_headers = {
+        "x-iam-jit-bouncer-plan-capture-generic-success": "true",
+    }
+    if _service_uses_xml_protocol(service):
+        # Minimal well-formed XML envelope botocore can parse for an
+        # arbitrary query/rest-xml op without raising.
+        body = (
+            f'<?xml version="1.0" encoding="UTF-8"?>'
+            f'<{action}Response '
+            f'xmlns="https://iam-jit.local/doc/ghost-run/">'
+            f'<ResponseMetadata><RequestId>{rid}</RequestId>'
+            f'</ResponseMetadata>'
+            f'</{action}Response>'
+        ).encode("utf-8")
+        headers = {
+            "content-type": "text/xml",
+            "x-amzn-requestid": rid,
+            **marker_headers,
+        }
+        return PlanCaptureSynthetic(
+            status=200, headers=headers, body=body,
+            would_have_returned=would_have_returned,
+        )
+    body = b"{}"
+    return PlanCaptureSynthetic(
+        status=200,
+        headers={
+            "content-type": "application/x-amz-json-1.1",
+            "x-amzn-requestid": rid,
+            **marker_headers,
+        },
+        body=body,
+        would_have_returned=would_have_returned,
+    )
+
 # #145 — sentinel for the writes-rejected synthetic shape. The proxy
 # calls `build_writes_rejected_response` when the session phase is
 # `writes_rejected` (either via --write-switch-notify=reject, or via

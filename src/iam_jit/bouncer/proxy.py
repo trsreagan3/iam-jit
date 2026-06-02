@@ -1114,6 +1114,21 @@ class ProxyMode(str, enum.Enum):
     differently. Per [[creates-never-mutates]]: synthetic
     responses are FAKE; we never touch AWS in this mode."""
 
+    GHOST = "ghost"
+    """Ghost-run / agent-shadow mode (#728). READ operations are
+    FORWARDED to real AWS (the agent sees real state); WRITE /
+    mutating operations are NEVER forwarded — they are CAPTURED as a
+    structured would-mutate record into ~/.iam-jit/ghost-runs/SID/ and
+    the agent gets a synthesized non-error response so it keeps going.
+    The operator reviews "everything the agent would have changed" via
+    ``ibounce shadow diff SID`` with zero blast radius — the safest
+    dry-run of an agent against real infra. Differs from PLAN_CAPTURE
+    (which fakes EVERY call, IaC-shaped) by letting reads through, and
+    from TRANSPARENT (which 403s denied writes) by capturing + faking
+    writes so the agent's flow continues. Per [[creates-never-mutates]]
+    + [[ibounce-honest-positioning]]: the write responses are FAKE +
+    flagged as such; we never mutate AWS in this mode."""
+
 
 @dataclasses.dataclass(frozen=True)
 class ProxyConfig:
@@ -1246,6 +1261,14 @@ class ProxyConfig:
     didn't get an explicit --plan-session-id and the serve() entry
     point will mint one at startup." Only consulted when
     `mode == ProxyMode.PLAN_CAPTURE`."""
+    ghost_session_id: str | None = None
+    """#728 ghost-run / shadow mode: session id every CAPTURED write
+    is bound to for the lifetime of this serve() invocation. None
+    means "not in ghost mode" OR "no explicit --ghost-session-id was
+    passed and serve() will mint one at startup." Only consulted when
+    `mode == ProxyMode.GHOST`. The captured would-mutate records land
+    under ~/.iam-jit/ghost-runs/<session_id>/ (flat-file store; never
+    forwarded to AWS)."""
     plan_write_switch_notify: str = "manual"
     """#145 plan-capture read->write switch UX. Configures what
     happens on the FIRST write call in a plan-capture session
@@ -3166,6 +3189,268 @@ async def _plan_capture_response(
     return web.Response(body=synth.body, status=synth.status, headers=out_headers)
 
 
+def _ghost_resolve_session_id(config: "ProxyConfig") -> str:
+    """Resolve the ghost-run session id for a captured write.
+
+    Mirrors the plan-capture resolution order:
+      1. ``ProxyConfig.ghost_session_id`` (operator's flag)
+      2. the in-process ghost slot installed at serve() startup
+      3. literal ``"shadow-default"`` — only hit when a caller pokes
+         the handler outside the serve() lifecycle (e.g. unit tests).
+    """
+    from .. import ghost_run as _ghost
+
+    return (
+        config.ghost_session_id
+        or _ghost.current_session_id()
+        or "shadow-default"
+    )
+
+
+# SECURITY MED-1 (#728): key-name fragments that mark a field as
+# secret-bearing in a captured write body. Substring + suffix matching
+# is case-insensitive (mirrors the diagnostics redactor style in
+# `iam_jit.bouncer.diagnostics._SENSITIVE_KEY_FRAGMENTS` + dbounce's
+# SQL redactor): `SecretString`, `MasterUserPassword`, `LoginProfile`
+# `Password`, `ClientSecret`, KMS `Plaintext`, `*Token`, `PrivateKey`
+# all match. The redactor keeps the KEY (so the operator still sees
+# WHAT field was set) but replaces the VALUE with `[REDACTED:<key>]`
+# so a ghost transcript can't smuggle secrets verbatim to disk —
+# closing the gap between this code's honesty docstring and behavior.
+_GHOST_SENSITIVE_KEY_FRAGMENTS: tuple[str, ...] = (
+    "password",
+    "passwd",
+    "secret",
+    "token",
+    "plaintext",       # kms:Encrypt/GenerateDataKey Plaintext
+    "privatekey",
+    "private_key",
+    "masteruserpassword",
+    "clientsecret",
+    "client_secret",
+    "credential",
+    "passphrase",
+)
+
+
+def _ghost_key_is_sensitive(key: str) -> bool:
+    """True if a (case-insensitive) field name names a secret-bearing
+    value that must be redacted before persistence."""
+    lk = str(key).lower()
+    return any(frag in lk for frag in _GHOST_SENSITIVE_KEY_FRAGMENTS)
+
+
+def _ghost_redact_sensitive(value: Any, *, key: str | None = None) -> Any:
+    """Recursively redact secret-bearing values in a parsed write body.
+
+    Keeps key names + structure intact; replaces any value whose KEY
+    matches the sensitive denylist with ``[REDACTED:<key>]``. Walks
+    nested dicts + lists so e.g. an RDS ``MasterUserPassword`` or a
+    secretsmanager ``SecretString`` is scrubbed no matter how deep.
+    """
+    if key is not None and _ghost_key_is_sensitive(key):
+        return f"[REDACTED:{key}]"
+    if isinstance(value, dict):
+        return {
+            k: _ghost_redact_sensitive(v, key=k) for k, v in value.items()
+        }
+    if isinstance(value, list):
+        # No key to match on list items; recurse to catch nested dicts
+        # (e.g. a list of {Key, Value} tag-like structures).
+        return [_ghost_redact_sensitive(v, key=None) for v in value]
+    return value
+
+
+def _ghost_extract_params(
+    *, body: bytes, query: dict[str, str],
+) -> dict[str, Any]:
+    """Best-effort, bounded capture of the request params for the
+    ghost diff record.
+
+    Honesty + safety: we never persist raw SigV4 credentials (those
+    live in the Authorization header, not the body/query). We capture
+    the query string + a bounded JSON parse of the body so the operator
+    can see WHAT the agent intended to mutate. If the body isn't small
+    JSON we record a typed preview rather than the raw bytes so the
+    transcript can't bloat or smuggle secrets verbatim.
+
+    SECURITY MED-1 (#728): before persisting, secret-bearing fields
+    (``SecretString``, ``Password`` / ``MasterUserPassword``, KMS
+    ``Plaintext``, ``ClientSecret``, ``*Token``, ``PrivateKey`` ...) are
+    redacted to ``[REDACTED:<key>]`` — both in the persisted record AND
+    in the diff output that reads it back. Non-sensitive fields are
+    preserved verbatim so the operator still sees the intended mutation.
+    """
+    import json
+
+    params: dict[str, Any] = {}
+    if query:
+        params["query"] = _ghost_redact_sensitive(dict(query))
+    if body:
+        # Bound the body we'll consider for structured capture. Large
+        # bodies (uploads) get a length-only marker.
+        if len(body) <= 64 * 1024:
+            try:
+                parsed = json.loads(body.decode("utf-8"))
+                if isinstance(parsed, dict):
+                    params["body"] = _ghost_redact_sensitive(parsed)
+                else:
+                    params["body_preview"] = {
+                        "type": type(parsed).__name__,
+                    }
+            except (ValueError, UnicodeDecodeError):
+                params["body_preview"] = {
+                    "non_json": True,
+                    "length_bytes": len(body),
+                }
+        else:
+            params["body_preview"] = {
+                "oversized": True,
+                "length_bytes": len(body),
+            }
+    return params
+
+
+async def _ghost_capture_write_response(
+    *,
+    request,
+    body: bytes,
+    obs: "RequestObservation",
+    config: "ProxyConfig",
+):
+    """Handle ONE write call in ghost / shadow mode (#728).
+
+    The ghost-run transcript lives in its own filesystem store
+    (~/.iam-jit/ghost-runs/), NOT the shared BouncerStore, so this
+    handler does not take a `store` argument.
+
+    Invariants:
+      * NEVER forwards to AWS — this function has no forward path at
+        all, which is the load-bearing safety property of ghost mode.
+      * Captures a structured would-mutate record into the on-disk
+        ghost-run store (~/.iam-jit/ghost-runs/SID/actions.jsonl).
+      * Returns a SYNTHESIZED non-error response (reusing the
+        plan-capture synthetic registry) so the agent's flow continues.
+      * Emits an OCSF audit event (neutral language) marking the write
+        as ghost-captured.
+
+    Reads are NOT routed here — they fall through to the normal forward
+    path in _handle_request, so the agent sees real AWS state.
+    """
+    from aiohttp import web
+
+    from . import plan_capture as _pc
+    from .. import ghost_run as _ghost
+
+    service = obs.parsed_service or ""
+    action = obs.parsed_action or ""
+    host_header = request.headers.get("host", "")
+
+    session_id = _ghost_resolve_session_id(config)
+
+    # Reuse the plan-capture synthetic registry so the agent gets a
+    # protocol-shaped response it can keep working with. Per
+    # [[ibounce-honest-positioning]] the synthetic is FAKE; the
+    # plan-capture synthetics already use obviously-fabricated ids
+    # (e.g. "plancapture..." ETags) so a downstream consumer isn't
+    # silently corrupted into believing a real resource exists.
+    #
+    # UAT HIGH fix: the registry only covers ~15 ops. For ANY other
+    # write (iam:DeleteRole, Delete*/Update*/Detach*, unknown actions)
+    # `synthesize_response` returns the 400
+    # `PlanCaptureUnsupportedOperation` shape — which boto3 raises as a
+    # ClientError that can HALT the agent, defeating ghost mode's whole
+    # "the agent keeps going" value. So in ghost mode, when the op has
+    # no registered synthetic, fall back to a GENERIC 200-shaped
+    # synthetic success instead. The write is STILL captured + STILL
+    # never forwarded (this function has no forward path) — only the
+    # shape the agent sees changes.
+    if _pc.is_supported(service, action):
+        synth = _pc.synthesize_response(
+            service=service,
+            action=action,
+            host=host_header,
+            path=request.path_qs,
+            body=body,
+            query=dict(request.query),
+        )
+    else:
+        synth = _pc.build_generic_success_response(
+            service=service, action=action,
+        )
+
+    # Persist the would-mutate record. Failure to persist is
+    # high-priority but MUST NOT cause us to forward the write (the
+    # whole point is never-forward); we log + still return the
+    # synthetic so the invariant holds.
+    captured_action_id = ""
+    try:
+        rec = _ghost.GhostRunStore().capture(
+            session_id,
+            method=request.method,
+            service=service,
+            action=action,
+            access_type=(obs.decision_verdict and "write") or "write",
+            region=obs.parsed_region,
+            target=obs.parsed_arn,
+            params=_ghost_extract_params(
+                body=body, query=dict(request.query),
+            ),
+            synthetic_response=synth.would_have_returned,
+        )
+        captured_action_id = rec.action_id
+    except Exception as e:
+        logger.warning("ghost-run capture failed (write NOT forwarded): %s", e)
+
+    # OCSF audit event for the ghost-captured write. Neutral language
+    # per the spec: this is a captured intended-mutation, not a deny.
+    try:
+        from .audit_export import audit_event_from_decision
+
+        _emit_audit_event(audit_event_from_decision(
+            decision_id=0,
+            mode=ProxyMode.GHOST.value,
+            profile=(
+                config.active_profile.name
+                if config.active_profile is not None else None
+            ),
+            verdict="ghost_captured",
+            reason=(
+                f"ghost-run: {service}:{action} captured as a would-mutate "
+                f"record (NOT forwarded to AWS)"
+            ),
+            service=service,
+            action=action,
+            arn=obs.parsed_arn,
+            region=obs.parsed_region,
+            host=host_header,
+            upstream=None,
+            enforced=False,
+            extra={
+                "ghost_run": {
+                    "session_id": session_id,
+                    "action_id": captured_action_id,
+                    "captured": True,
+                    "forwarded_to_aws": False,
+                },
+            },
+        ))
+    except Exception as e:
+        logger.warning("ghost-run audit-event emit failed: %s", e)
+
+    out_headers = dict(synth.headers)
+    out_headers["x-iam-jit-bouncer-mode"] = ProxyMode.GHOST.value
+    out_headers["x-iam-jit-bouncer-verdict"] = "ghost_captured"
+    out_headers["x-iam-jit-bouncer-ghost-session"] = session_id
+    out_headers["x-iam-jit-bouncer-ghost-captured"] = "true"
+    out_headers["x-iam-jit-bouncer-ghost-forwarded"] = "false"
+    if captured_action_id:
+        out_headers["x-iam-jit-bouncer-ghost-action-id"] = captured_action_id
+    return web.Response(
+        body=synth.body, status=synth.status, headers=out_headers,
+    )
+
+
 # #250 — cross-process poll cadence (seconds). The proxy races the
 # in-process asyncio.Event against a DB poll on this interval so that
 # answers from a DIFFERENT process (the typical `ibounce serve` +
@@ -3551,6 +3836,38 @@ async def _handle_request(request, *, store, config: ProxyConfig, session):
             request=request, body=body, obs=obs,
             store=store, config=config,
         )
+
+    # #728 ghost-run / shadow short-circuit. Runs BEFORE the
+    # obs.enforced 403 branch + BEFORE the forwarding allowlist for
+    # WRITE calls only. The load-bearing invariant: in ghost mode a
+    # WRITE is NEVER forwarded — it is captured + synthesized. READS
+    # fall through to the normal forward path below so the agent sees
+    # real AWS state (that's what makes a ghost run useful vs
+    # plan-capture, which fakes everything). Per [[creates-never-mutates]]:
+    # the synthesized write responses never reach AWS. classify_action
+    # treats unknown-to-classifier ops as write (is_write semantics),
+    # which is the safe direction here — an unclassifiable op is
+    # captured rather than risk-forwarded as a possible mutation.
+    if config.mode == ProxyMode.GHOST:
+        from .plan_capture import is_write as _ghost_is_write
+
+        _svc = obs.parsed_service or ""
+        _act = obs.parsed_action or ""
+        # Only classified READS are forwarded. A request we can't
+        # classify at all (no service/action) is treated as a write
+        # (captured, not forwarded) so a malformed mutating call can't
+        # slip through the read fast-path and hit AWS.
+        _is_ghost_write = (
+            (not _svc or not _act) or _ghost_is_write(_svc, _act)
+        )
+        if _is_ghost_write:
+            return await _ghost_capture_write_response(
+                request=request, body=body, obs=obs, config=config,
+            )
+        # else: READ → fall through to the normal forward path so the
+        # agent gets real AWS data. obs.enforced is False for reads in
+        # ghost mode (ghost isn't TRANSPARENT), so we skip the 403
+        # branch and land on the forwarding allowlist + _forward_to_aws.
 
     if obs.enforced:
         # #203 — synchronous deny-prompt path. Only fires when:
@@ -3961,6 +4278,42 @@ async def serve(config: ProxyConfig, *, store: BouncerStore) -> None:
             "(every call is parsed + audited + returned-with-synthetic; "
             "nothing forwards to AWS)",
             resolved_session_id, config.plan_write_switch_notify,
+        )
+
+    # #728 ghost-run / shadow: install the in-process session slot so
+    # every CAPTURED write records into the same logical transcript +
+    # eagerly create the on-disk session dir so `ibounce shadow diff`
+    # shows the session even if zero writes land. Reads still forward
+    # to AWS; only writes are captured. Only fires in GHOST mode.
+    if config.mode == ProxyMode.GHOST:
+        from .. import ghost_run as _ghost_pkg
+
+        resolved_ghost_sid = (
+            config.ghost_session_id
+            or _ghost_pkg.current_session_id()
+        )
+        if resolved_ghost_sid:
+            _ghost_pkg.set_session_id(resolved_ghost_sid)
+        else:
+            resolved_ghost_sid = _ghost_pkg.new_session_id()
+        try:
+            _ghost_pkg.GhostRunStore().ensure_session(
+                resolved_ghost_sid,
+                started_by=os.environ.get("USER", "local"),
+                upstream=config.forward_host_override,
+                read_only=True,
+                note="ibounce serve --mode ghost",
+            )
+        except Exception as e:
+            logger.warning(
+                "ghost-run serve: failed to create session dir: %s", e,
+            )
+        logger.info(
+            "ghost-run (shadow) mode active; session_id=%s "
+            "(READS forward to real AWS; WRITES are captured as a "
+            "would-mutate diff + returned-with-synthetic; writes NEVER "
+            "forward to AWS)",
+            resolved_ghost_sid,
         )
 
     async def handler(request):
