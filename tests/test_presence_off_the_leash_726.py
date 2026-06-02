@@ -254,6 +254,79 @@ def test_status_requires_admin(make_client):
     assert r.status_code in (401, 403)
 
 
+def test_forged_check_in_flips_off_the_leash_to_present_KNOWN_LIMITATION():
+    """PINS the documented honesty limitation (#726 HIGH finding).
+
+    A check-in is a SELF-ASSERTED claim: the check-in endpoint accepts
+    ANY authenticated principal checking in for ANY client-supplied
+    session_id, with NO binding between the calling identity and the
+    session it claims. There is therefore nothing stopping the very
+    agent the signal is meant to catch from FORGING a presence beat for
+    a session it does not "own" — flipping that session's verdict from
+    OFF_THE_LEASH straight back to PRESENT and so evading the signal.
+
+    This is a KNOWN / DOCUMENTED LIMITATION, not a bug to fix here: the
+    module docstring, the CLI `presence` group help, and the OCSF event
+    (`self_asserted` / `signal_not_proof`) all disclose it, and the
+    robust fix (the bouncer authenticating as a DISTINCT identity) is a
+    tracked architectural follow-up. This test locks the documented
+    behaviour to the documentation: if the forge ever STOPS working
+    (i.e. identity-binding lands), this test must be updated alongside
+    the docs that promise the limitation. Until then it must hold.
+    """
+    now = 1000.0
+    ttl = 300
+    # A session that was checking in and then went silent: off the leash.
+    p.record_check_in("victim-session", now=now)
+    gone = p.evaluate_session("victim-session", ttl_seconds=ttl, now=now + 400)
+    assert gone.state is p.PresenceState.OFF_THE_LEASH
+
+    # Now a *forged* beat: an attacker (or the off-leash agent itself)
+    # that merely holds a token records a check-in for a session it does
+    # NOT own. record_check_in() is exactly what the /check-in route
+    # calls for any authenticated caller — there is no caller<->session
+    # binding to stop this.
+    p.record_check_in("victim-session", now=now + 400)
+
+    # The forged beat is accepted and the verdict flips back to PRESENT,
+    # evading the signal. This is the documented limitation.
+    after_forge = p.evaluate_session(
+        "victim-session", ttl_seconds=ttl, now=now + 401
+    )
+    assert after_forge.state is p.PresenceState.PRESENT
+    assert after_forge.is_present and not after_forge.is_off_the_leash
+
+
+def test_enforce_mode_sidesteppable_by_omitting_session_id_KNOWN_LIMITATION(
+    monkeypatch,
+):
+    """PINS the second half of the #726 HIGH: enforce mode is evadable
+    by simply NOT identifying a session.
+
+    With IAM_JIT_REQUIRE_BOUNCER_PRESENCE=1 set, an OFF_THE_LEASH
+    session is refused issuance — BUT a caller that supplies no
+    session_id is treated as NEVER_SEEN and always allowed. So a
+    motivated agent closes the gate on itself only if it chooses to
+    identify its (silent) session; omitting it sidesteps enforcement.
+    DOCUMENTED limitation; locked here alongside the docs.
+    """
+    monkeypatch.setenv("IAM_JIT_REQUIRE_BOUNCER_PRESENCE", "1")
+    assert p.require_bouncer_presence() is True
+
+    # Off-the-leash + identified -> enforce mode blocks. (sanity anchor)
+    now = 1000.0
+    p.record_check_in("honest-session", now=now)
+    blocked = p.presence_gate(
+        "honest-session", ttl_seconds=300, now=now + 400
+    )
+    assert blocked.allow is False and blocked.enforced is True
+
+    # ...but omit the session id and the same enforce mode lets it
+    # straight through (NEVER_SEEN is never blocked). The bypass.
+    sidestep = p.presence_gate(None, ttl_seconds=300, now=now + 400)
+    assert sidestep.allow is True
+
+
 def test_mcp_presence_status_tool():
     from iam_jit import mcp_server
 

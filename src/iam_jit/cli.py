@@ -933,6 +933,16 @@ def presence_group() -> None:
     SIGNAL to verify routing, NOT proof of bypass (the agent may be
     idle). Advisory by default; set IAM_JIT_REQUIRE_BOUNCER_PRESENCE=1
     to make iam-jit refuse role-issuance on a gap.
+
+    LIMITATION: a check-in is a SELF-ASSERTED claim — iam-jit cannot
+    independently verify the bouncer is in path. Any caller holding a
+    token can FORGE a check-in for its own session_id (or omit the
+    session_id) to evade the signal. This reliably catches ACCIDENTAL
+    / misconfiguration off-leash (agent crash, bouncer dies, routing
+    misconfig), but does NOT stop a deliberate or prompt-injected
+    agent. Closing that hole needs the bouncer to authenticate as a
+    distinct identity (tracked follow-up); do not enable enforce mode
+    believing it stops an adversarial bypass.
     """
 
 

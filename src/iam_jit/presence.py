@@ -9,8 +9,8 @@ the bouncer is gating every call. The bouncer's own /healthz says
 *agent* is actually flowing through it.
 
 BUILD-5 turns the passive heartbeat gap-detector
-(`bouncer.audit_export.heartbeat`, #264) into ACTIVE presence
-verification on the iam-jit (role-issuer) side:
+(`bouncer.audit_export.heartbeat`, #264) into a presence-tracking
+surface on the iam-jit (role-issuer) side:
 
   * A bouncer "checks in" with iam-jit (a presence beat) every time
     it proves it is in an agent's path — e.g. on mgmt-port sign-in or
@@ -24,6 +24,39 @@ verification on the iam-jit (role-issuer) side:
   * If a session never checked in at all it is `NEVER_SEEN` — that's
     distinct from off-the-leash (we have no evidence the bouncer was
     ever in the path, so "it went silent" is the wrong story).
+
+!! HONESTY / THREAT-MODEL LIMITATION — READ BEFORE ENABLING ENFORCE !!
+
+A check-in is a SELF-ASSERTED CLAIM by the caller, NOT a fact iam-jit
+can independently verify. The check-in endpoint accepts ANY
+authenticated principal checking in for ANY client-supplied
+`session_id`; there is no binding between the calling identity and the
+session it claims (the bouncer does not authenticate as a distinct
+identity). Concretely, this means:
+
+  * A motivated or prompt-injected agent that ALSO holds a valid API
+    token can FORGE a presence beat for its OWN session_id, flipping
+    its verdict from OFF_THE_LEASH back to PRESENT, and so EVADE the
+    signal — exactly the actor this is meant to catch.
+  * Enforce mode (`IAM_JIT_REQUIRE_BOUNCER_PRESENCE=1`) is likewise
+    sidesteppable: a request that simply OMITS `bouncer_session_id`
+    is treated as NEVER_SEEN, which is never blocked (see
+    `presence_gate`), so the gate adds no friction to a caller that
+    declines to identify its session.
+
+What this signal DOES buy you: it reliably catches ACCIDENTAL and
+misconfiguration off-leash — an agent that crashed, a bouncer process
+that died, a routing/proxy misconfig that silently dropped the bouncer
+out of the path — and other NON-MALICIOUS cases where a previously
+checking-in session simply goes quiet. That is real, useful coverage.
+What it does NOT buy you is protection against a deliberate,
+adversarial bypass: do not enable enforce mode believing it closes the
+Agent-as-a-Proxy hole against a hostile or injected agent. The robust
+fix requires the BOUNCER to authenticate to iam-jit as a DISTINCT
+identity (a credential the gated agent does not hold) so a check-in
+becomes attributable rather than self-asserted; that is an
+architectural change tracked as a follow-up and is intentionally NOT
+implemented here.
 
 Honest framing per [[ibounce-honest-positioning]]: a presence gap is
 a SIGNAL, not "BYPASS DETECTED". The agent may legitimately be idle
@@ -191,7 +224,10 @@ def _verdict_message(v: "PresenceVerdict") -> str:
     return (
         f"bouncer last checked in {ago} (> {v.ttl_seconds}s ttl) for "
         f"session {v.session_id!r}; verify the agent is still routed "
-        f"through the bouncer — this is a signal, not proof of bypass."
+        f"through the bouncer — this is a self-asserted signal, not "
+        f"proof of bypass. iam-jit cannot independently verify the "
+        f"bouncer is in path, and a check-in can be forged by a caller "
+        f"that holds a token (see presence.py for the threat model)."
     )
 
 
@@ -486,6 +522,12 @@ def make_off_the_leash_event(verdict: PresenceVerdict) -> dict[str, Any]:
                 # Explicit honesty marker so consumers never read this
                 # as a confirmed bypass.
                 "signal_not_proof": True,
+                # The presence signal is SELF-ASSERTED: iam-jit cannot
+                # independently verify the bouncer is in path, and a
+                # check-in is forgeable by any caller holding a token.
+                # Catches accidental / misconfig off-leash, NOT a
+                # deliberate adversarial bypass. See presence.py.
+                "self_asserted": True,
             },
         },
     }
