@@ -403,7 +403,7 @@ class AutopilotSupervisor:
     config_source: str
     sweep_interval_s: float = _DEFAULT_SWEEP_INTERVAL_S
     improve_interval_s: float = _DEFAULT_IMPROVE_INTERVAL_S
-    notify_denies: str = "stderr"  # stderr | webhook | none
+    notify_denies: str = "stderr"  # stderr | webhook | slack | none
     # §A93 / #509 Phase 2 — opt-in to the synchronous bouncer-side LLM
     # for improve cycles. Default OFF per
     # [[bouncer-zero-llm-when-agent-in-loop]]: local-dev / agent-in-loop
@@ -1122,7 +1122,29 @@ class AutopilotSupervisor:
                 self._notify_stderr(structured)
             elif self.notify_denies == "webhook":
                 self._notify_webhook(structured)
+            elif self.notify_denies == "slack":
+                self._notify_slack(structured)
             # `none` is unreachable (we gate on != "none" in run_once)
+
+    def _notify_slack(self, sd: Any) -> None:
+        """Post a neutral Slack deny notification via the
+        :mod:`iam_jit.notify.slack` channel (ADOPT-8 / #732).
+
+        Default-off + fail-soft are handled inside ``notify_deny``:
+        when no Slack transport is configured it is a silent no-op;
+        when configured but unreachable it logs a WARNING and returns
+        WITHOUT raising. We import lazily + guard so a missing optional
+        path can never take down the supervisor sweep.
+        """
+        _slack = None
+        try:
+            from ..notify import slack as _slack_mod
+
+            _slack = _slack_mod
+        except Exception as e:  # pragma: no cover - import guard
+            logger.debug("slack notify channel unavailable: %s", e)
+        if _slack is not None:
+            _slack.notify_deny(sd)
 
     def _notify_stderr(self, sd: Any) -> None:
         """Write a one-line caught-framing summary to stderr per
@@ -1738,9 +1760,13 @@ def register_autopilot_command(parent_group: click.Group) -> click.Group:
     )
     @click.option(
         "--notify-denies",
-        type=click.Choice(["stderr", "webhook", "none"]),
+        type=click.Choice(["stderr", "webhook", "slack", "none"]),
         default="stderr",
-        help="Where to surface denies caught by bouncers.",
+        help=(
+            "Where to surface denies caught by bouncers. 'slack' posts a "
+            "neutral notification + how-to-approve hint via "
+            "IAM_JIT_NOTIFY_SLACK_WEBHOOK (default-off when unset)."
+        ),
     )
     @click.option(
         "--max-ticks",
