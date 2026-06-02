@@ -75,10 +75,29 @@ def stub_all_binaries(
     bindir.mkdir()
     for name in ("iam-jit", "ibounce", "kbounce", "dbounce", "gbounce"):
         p = bindir / name
-        p.write_text(
-            "#!/bin/sh\n"
-            f'echo "{name} 1.0.0-stub"\n',
-        )
+        # For iam-jit specifically, the stub must claim to expose --settings-path
+        # in its `mcp install-claude-code --help` output so the post-PR-#25
+        # stale-binary check stays silent for the all-green test. Every other
+        # invocation just prints a version string.
+        if name == "iam-jit":
+            p.write_text(
+                "#!/bin/sh\n"
+                'case "$*" in\n'
+                '  *"mcp install-claude-code"*"--help"*)\n'
+                '    echo "Usage: iam-jit mcp install-claude-code [OPTIONS]"\n'
+                '    echo "  --settings-path PATH"\n'
+                '    echo "  --no-env-block"\n'
+                '    ;;\n'
+                '  *)\n'
+                f'    echo "{name} 1.0.0-stub"\n'
+                '    ;;\n'
+                'esac\n',
+            )
+        else:
+            p.write_text(
+                "#!/bin/sh\n"
+                f'echo "{name} 1.0.0-stub"\n',
+            )
         p.chmod(0o755)
     monkeypatch.setenv(
         "PATH",
