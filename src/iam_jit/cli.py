@@ -2447,5 +2447,18 @@ from .cli_org_policy import register_org_policy_group  # noqa: E402
 register_org_policy_group(main)
 
 
+# ADOPT-2 / #716 — register `iam-jit compliance-map`. Map a session's
+# observed bouncer/IAM activity to compliance-framework controls
+# (OWASP Agentic Top 10 2026, MITRE ATT&CK, NIST 800-53 Rev5, SOC 2
+# TSC, EU AI Act) — producing a per-event overlay (`compliance_tags`)
+# + a per-framework coverage report. Differentiator vs HTTP-only
+# competitors (Pipelock): works across AWS IAM + K8s + SQL + HTTP.
+# Read-only; reuses the SAME cross-bouncer fan-out as agent-diff /
+# role-usage / ABOM. NOT a certification — honest per-framework gaps
+# per [[ibounce-honest-positioning]].
+from .cli_compliance_map import register_compliance_map_command  # noqa: E402
+register_compliance_map_command(main)
+
+
 if __name__ == "__main__":
     main()
