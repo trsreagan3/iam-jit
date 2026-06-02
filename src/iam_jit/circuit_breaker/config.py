@@ -26,6 +26,12 @@ the generous threshold is what keeps it from being block-happy.
 At least one of ``max_calls_per_window`` / ``max_usd_per_window`` must
 resolve to a positive cap; a config with ``enabled: true`` but both
 caps unset/zero is rejected (it would be a silent no-op breaker).
+
+Cap semantics: the breaker trips when ``calls >= max_calls_per_window``
+(likewise for the USD cap). The ``max_calls_per_window``-th gated call
+within the window is the one that TRIPS the breaker — that call is
+allowed, and in ``block`` mode the *next* gated call for the session is
+the first one denied. (Not "the (N+1)th call trips.")
 """
 
 from __future__ import annotations

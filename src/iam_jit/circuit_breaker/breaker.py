@@ -5,11 +5,25 @@ Per-session sliding-window accumulator over two dimensions:
   * gated-call COUNT (exact)
   * estimated USD COST (coarse — see :mod:`.cost_estimator`)
 
-When a session's count OR cost crosses its configured cap inside the
+When a session's count OR cost reaches its configured cap inside the
 window, the breaker TRIPS for that session: subsequent gated calls are
 DENIED (block mode) or alerted-but-allowed (alert mode), an OCSF
 ``COST_CIRCUIT_TRIPPED`` event fires once, and the trip auto-resets
 after ``cool_down`` of inactivity (or on an explicit reset).
+
+Cap semantics: the breaker trips at ``calls >= max_calls_per_window``
+(likewise ``est_usd >= max_usd_per_window``). I.e. the cap-th gated
+call is the one that TRIPS — it is allowed, and the breaker is then
+OPEN so the *next* gated call is the first that gets denied (block
+mode). Not "(N+1)th": the operator's mental model should be "the
+max_calls_per_window-th call trips the breaker."
+
+Memory is bounded: the per-session window map is an LRU capped at
+``_MAX_TRACKED_SESSIONS`` distinct keys (oldest-touched evicted), and
+empty windows whose ``last_activity`` is older than
+``window + cool_down`` are garbage-collected on every ``observe`` /
+``status``. A client rotating an unbounded number of distinct session
+keys can therefore never grow this map without bound.
 
 Structure deliberately mirrors :mod:`iam_jit.bouncer.burst` (sliding
 window + OCSF emit + process-singleton register/observe + /healthz
@@ -75,6 +89,13 @@ _PRODUCT_NAME = "ibounce"
 _PRODUCT_VENDOR_NAME = "iam-jit"
 
 EVENT_TYPE_COST_CIRCUIT_TRIPPED = "COST_CIRCUIT_TRIPPED"
+
+# Hard cap on the number of distinct per-session windows retained at
+# once. An LRU bound (oldest-touched evicted) so a client rotating
+# session keys — e.g. a rotating User-Agent — can NEVER exhaust memory.
+# 10k windows * a small deque each is a few MB worst case; far above
+# the count of real concurrent sessions any single proxy sees.
+_MAX_TRACKED_SESSIONS = 10_000
 
 
 def make_cost_circuit_tripped_event(
@@ -225,7 +246,12 @@ class CostCircuitBreaker:
         self.config = config
         self._emit = emit
         self._lock = threading.Lock()
-        self._sessions: dict[str, _SessionWindow] = {}
+        # OrderedDict so we can evict the least-recently-touched window
+        # when the map hits _MAX_TRACKED_SESSIONS — a hard LRU bound on
+        # memory regardless of how many distinct session keys arrive.
+        self._sessions: collections.OrderedDict[str, _SessionWindow] = (
+            collections.OrderedDict()
+        )
         # How many distinct sessions have tripped since process start
         # (surfaced on /healthz so monitors can alert on it).
         self._trips_total = 0
@@ -259,10 +285,23 @@ class CostCircuitBreaker:
         fired = False
         dimension: str | None = None
         with self._lock:
+            # GC empty/stale windows first so a flood of one-shot keys
+            # doesn't accumulate; keeps the map small under churn.
+            self._gc_stale_locked(now=now)
+
             win = self._sessions.get(sid)
             if win is None:
                 win = _SessionWindow()
                 self._sessions[sid] = win
+            else:
+                # Touch LRU recency so a still-active session isn't the
+                # one we evict under pressure.
+                self._sessions.move_to_end(sid)
+
+            # Enforce the LRU bound. Never evict the window we just
+            # touched (it's at the end); pop from the front (oldest).
+            while len(self._sessions) > _MAX_TRACKED_SESSIONS:
+                self._sessions.popitem(last=False)
 
             # Auto-reset a tripped session after cool_down of inactivity.
             if (
@@ -352,6 +391,8 @@ class CostCircuitBreaker:
             return {"enabled": False}
         now = time.time()
         with self._lock:
+            # Drop empty/stale windows so /healthz also bounds the map.
+            self._gc_stale_locked(now=now)
             tripped_sessions = []
             active_sessions = 0
             for sid, win in self._sessions.items():
@@ -382,6 +423,29 @@ class CostCircuitBreaker:
         cutoff = now - self.config.window_seconds
         while win.entries and win.entries[0][0] < cutoff:
             win.entries.popleft()
+
+    def _gc_stale_locked(self, *, now: float) -> None:
+        """Remove whole windows that carry no live state and haven't
+        seen activity within ``window + cool_down``. Such a window can
+        no longer trip (its entries are all evicted) and is not in a
+        cool-down hold, so retaining it only wastes memory. Caller holds
+        ``self._lock``.
+
+        This is what makes memory bounded under key churn: a client that
+        rotates session keys leaves behind windows that go empty after
+        ``window`` seconds and are reaped here on the next observe/status.
+        """
+        stale_after = self.config.window_seconds + self.config.cool_down_seconds
+        cutoff = now - stale_after
+        to_drop: list[str] = []
+        for sid, win in self._sessions.items():
+            # Prune expired entries so an idle-but-not-yet-GC'd window
+            # reports its true (likely empty) state.
+            self._evict_locked(win, now=now)
+            if not win.entries and win.tripped_at is None and win.last_activity < cutoff:
+                to_drop.append(sid)
+        for sid in to_drop:
+            self._sessions.pop(sid, None)
 
     def _friendly_message(
         self,

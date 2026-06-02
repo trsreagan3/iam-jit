@@ -2467,10 +2467,17 @@ def evaluate_request(
         _breaker = active_cost_circuit_breaker()
         if _breaker is not None:
             _trip = _breaker.observe(
+                # #725 security fix: key ONLY on the already-validated
+                # X-Agent-* attribution headers. The raw User-Agent is
+                # attacker-controlled + unbounded, so using it as a key
+                # let an unauthenticated client rotate it per request to
+                # mint unbounded distinct session windows (memory DoS).
+                # Unattributed calls fall into the breaker's shared
+                # `__unattributed__` bucket — still rate-limited as one
+                # session, just not per-client-distinguished.
                 session_id=(
                     header_agent_session_id
                     or header_agent_name
-                    or user_agent
                     or None
                 ),
                 service=parsed.service,
@@ -5171,8 +5178,18 @@ async def serve(config: ProxyConfig, *, store: BouncerStore) -> None:
             register_cost_circuit_breaker(None)
     except Exception as _cb_install_err:
         # Default-off feature: a config error here must not stop the
-        # bouncer. Warn loudly + leave the breaker uninstalled.
-        register_cost_circuit_breaker = None  # type: ignore[assignment]
+        # bouncer. Warn loudly + leave the breaker uninstalled. CLEAR
+        # any stale singleton a prior serve() may have installed so a
+        # re-invoked serve() with a now-broken config doesn't keep
+        # gating against the old breaker. Guard the clear itself in case
+        # the import is what failed (register_* may be unbound).
+        try:
+            from ..circuit_breaker import (
+                register_cost_circuit_breaker as _cb_clear,
+            )
+            _cb_clear(None)
+        except Exception:
+            pass
         logger.warning(
             "cost_circuit_breaker: CONFIGURED but NOT WIRED — reason: %s "
             "(the breaker will NOT gate requests until this is resolved)",

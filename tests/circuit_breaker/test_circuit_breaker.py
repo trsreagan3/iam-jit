@@ -313,3 +313,76 @@ def test_event_uses_neutral_language():
         assert word not in detail, f"forbidden word {word!r} in {detail!r}"
     # USD figures are always labelled estimates.
     assert ev["unmapped"]["iam_jit"]["ext"]["estimated_usd_is_estimate"] is True
+
+
+# ---------------------------------------------------------------------------
+# bounded memory — #725 HIGH security fix (memory-exhaustion DoS)
+# ---------------------------------------------------------------------------
+
+
+def test_sessions_map_is_lru_bounded_under_many_distinct_keys():
+    # A client rotating session keys (e.g. a rotating User-Agent) must
+    # NOT be able to grow the per-session window map without bound. Feed
+    # 50k distinct keys spread within one window so NONE go stale (so the
+    # ONLY thing keeping memory bounded is the LRU cap, not GC) and assert
+    # the map never exceeds the hard cap.
+    from iam_jit.circuit_breaker.breaker import _MAX_TRACKED_SESSIONS
+
+    cfg = CircuitBreakerConfig(
+        enabled=True, window_seconds=10_000, cool_down_seconds=300,
+        max_calls_per_window=5000, max_usd_per_window=None,
+    )
+    cb = CostCircuitBreaker(cfg)
+    for i in range(50_000):
+        # All within the (huge) window, so none are GC-eligible — pure
+        # LRU pressure.
+        cb.observe(session_id=f"ua-{i}", service="sts", action="X", now=float(i))
+    assert len(cb._sessions) <= _MAX_TRACKED_SESSIONS
+    # And it actually reached the cap (proves the keys really were distinct
+    # and the bound is what's holding it, not some other accident).
+    assert len(cb._sessions) == _MAX_TRACKED_SESSIONS
+
+
+def test_empty_stale_windows_are_garbage_collected():
+    # A burst of one-shot keys, then time advances past window+cool_down:
+    # those empty windows must be reaped on the next observe/status so the
+    # map shrinks back toward only live sessions.
+    cfg = CircuitBreakerConfig(
+        enabled=True, window_seconds=10, cool_down_seconds=5,
+        max_calls_per_window=5000, max_usd_per_window=None,
+    )
+    cb = CostCircuitBreaker(cfg)
+    for i in range(1000):
+        cb.observe(session_id=f"oneshot-{i}", service="sts", action="X", now=0.0)
+    assert len(cb._sessions) == 1000
+    # Advance well past window + cool_down (10 + 5 = 15s) and touch one
+    # live session; the GC pass on observe reaps the 1000 stale windows.
+    cb.observe(session_id="live", service="sts", action="X", now=100.0)
+    assert len(cb._sessions) == 1, "stale empty windows were not GC'd"
+    assert "live" in cb._sessions
+    # status() also triggers a GC pass (it uses wall-clock time, far in
+    # the future of these synthetic timestamps, so it reaps everything) —
+    # the map must stay bounded, never grow.
+    st = cb.status()
+    assert st["enabled"] is True
+    assert len(cb._sessions) <= 1
+
+
+def test_tripped_window_not_gcd_during_cool_down():
+    # A window that is currently TRIPPED must survive GC until cool_down
+    # elapses, otherwise an attacker could erase the trip by going idle
+    # for exactly `window` seconds. It's only reapable once tripped_at
+    # clears (which happens via the cool_down auto-reset path).
+    cfg = CircuitBreakerConfig(
+        enabled=True, window_seconds=10, cool_down_seconds=300,
+        max_calls_per_window=2, max_usd_per_window=None,
+    )
+    cb = CostCircuitBreaker(cfg)
+    cb.observe(session_id="s1", service="sts", action="X", now=0.0)
+    st = cb.observe(session_id="s1", service="sts", action="X", now=1.0)
+    assert st.tripped is True
+    # Past window (10s) but well within cool_down (300s): entries evict to
+    # empty, but the window stays because it's still tripped.
+    cb.observe(session_id="other", service="sts", action="X", now=50.0)
+    assert "s1" in cb._sessions
+    assert cb._sessions["s1"].tripped_at is not None
