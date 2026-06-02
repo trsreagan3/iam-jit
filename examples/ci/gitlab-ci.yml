@@ -1,0 +1,296 @@
+# examples/ci/gitlab-ci.yml
+#
+# Reference GitLab CI pipeline — iam-jit + ibounce bouncer protection
+# for AI agent runs that make AWS API calls.
+#
+# Status: Recipe written + manually walked through (NOT tenant-validated).
+# Compatible per GitLab CI's documented YAML shape (GitLab 16/17+).
+#
+# Usage:
+#   Copy this file (or the relevant job) into your .gitlab-ci.yml.
+#   Adjust the variables block, the AWS credential setup, and your
+#   agent run step (replace "aws sts get-caller-identity").
+#
+# Per [[uat-tests-setup-end-to-end]]: the decisions_count assertion step
+# is REQUIRED — CI must fail if traffic did not route through ibounce.
+#
+# OIDC variables documented below:
+#   CI_JOB_JWT_V2   — OIDC token for AWS Web Identity auth (GitLab 15.7+).
+#                     Use with aws-actions pattern: configure AWS_ROLE_ARN
+#                     + AWS_WEB_IDENTITY_TOKEN_FILE env vars (see §OIDC below).
+#
+# Refs:
+#   https://docs.gitlab.com/ci/yaml/
+#   https://docs.gitlab.com/ci/cloud_services/aws/
+#   https://docs.gitlab.com/ci/variables/predefined_variables.html
+
+# ── Global configuration ──────────────────────────────────────────────────────
+
+default:
+  image: ubuntu:22.04
+  # Retry once on runner-level failures (network, runner restart).
+  retry:
+    max: 1
+    when:
+      - runner_system_failure
+      - stuck_or_timeout_failure
+
+variables:
+  # iam-jit version to install. Pin to a specific version for reproducibility:
+  #   IAM_JIT_VERSION: "1.0.3"
+  IAM_JIT_VERSION: "latest"
+
+  # Bouncer enforcement mode:
+  #   discovery   — observe + log only; zero denies (safe default for new pipelines)
+  #   cooperative — agent receives deny rationale and may retry with narrower scope
+  #   strict      — maximalist deny; use for production or regulated environments
+  IAM_JIT_MODE: "discovery"
+
+  # ibounce port (default 8767). Change only if this port is in use.
+  IBOUNCE_PORT: "8767"
+
+  # Audit log path. Defaults to $CI_PROJECT_DIR/iam-jit-audit.jsonl.
+  # Overrride by setting IAM_JIT_AUDIT_LOG in your variables block.
+  IAM_JIT_AUDIT_LOG: "${CI_PROJECT_DIR}/iam-jit-audit.jsonl"
+
+  # Go binary path — added to PATH so kbouncer/dbounce/gbounce are reachable.
+  GOPATH: "${CI_PROJECT_DIR}/.go"
+
+  # ── AWS OIDC (GitLab 15.7+ with id_tokens) ──────────────────────────────
+  # Uncomment the block below and set AWS_ROLE_ARN in your CI/CD variables
+  # to enable OIDC-based AWS authentication (no long-lived keys).
+  #
+  # AWS_ROLE_ARN: "arn:aws:iam::123456789012:role/gitlab-ci-read-only"
+  # AWS_DEFAULT_REGION: "us-east-1"
+
+# ── Stages ────────────────────────────────────────────────────────────────────
+
+stages:
+  - setup
+  - agent-run
+  - audit
+
+# ── Anchors (reusable script fragments) ──────────────────────────────────────
+
+.install_system_deps: &install_system_deps
+  - apt-get update -qq
+  - apt-get install -y -qq curl python3.12 python3.12-venv python3-pip wget 2>/dev/null
+      || apt-get install -y -qq curl python3 python3-venv python3-pip wget
+  - python3 --version
+
+.install_go: &install_go
+  - |
+    GO_VERSION="1.22.5"
+    if ! command -v go &>/dev/null || ! go version | grep -q "go1\.2[2-9]"; then
+      echo "Installing Go ${GO_VERSION} ..."
+      wget -q "https://go.dev/dl/go${GO_VERSION}.linux-amd64.tar.gz" -O /tmp/go.tar.gz
+      tar -C /usr/local -xzf /tmp/go.tar.gz
+      rm /tmp/go.tar.gz
+    fi
+    export PATH="/usr/local/go/bin:${GOPATH}/bin:${PATH}"
+    go version
+
+.install_iam_jit: &install_iam_jit
+  - |
+    export PATH="/usr/local/go/bin:${GOPATH}/bin:${PATH}"
+    echo "Installing iam-jit (version=${IAM_JIT_VERSION}) ..."
+    if [ "${IAM_JIT_VERSION}" = "latest" ]; then
+      pip_spec="iam-jit"
+    else
+      pip_spec="iam-jit==${IAM_JIT_VERSION}"
+    fi
+    # Try PyPI first; fall back to GitHub source if not yet published.
+    if ! pip install --quiet "${pip_spec}" 2>/dev/null; then
+      echo "PyPI install failed; falling back to GitHub source ..."
+      pip install --quiet \
+        "git+https://github.com/trsreagan3/iam-jit.git@main#egg=iam-jit"
+    fi
+    # Fail loud — per [[ibounce-honest-positioning]] no silent degradation.
+    if ! command -v iam-jit &>/dev/null; then
+      echo "ERROR: iam-jit binary not found on PATH after pip install."
+      echo "  Check pip's scripts dir is on PATH."
+      exit 1
+    fi
+    iam-jit --version
+
+.install_ibounce: &install_ibounce
+  - |
+    export PATH="/usr/local/go/bin:${GOPATH}/bin:${PATH}"
+    # ibounce ships as a Python entry-point inside the iam-jit pip package.
+    if ! command -v ibounce &>/dev/null; then
+      echo "ERROR: ibounce not found on PATH after iam-jit install."
+      exit 1
+    fi
+    echo "ibounce OK: $(ibounce --version 2>/dev/null || echo version-unknown)"
+
+.start_ibounce: &start_ibounce
+  - |
+    export PATH="/usr/local/go/bin:${GOPATH}/bin:${PATH}"
+    touch "${IAM_JIT_AUDIT_LOG}"
+    echo "Starting ibounce on :${IBOUNCE_PORT} (mode=${IAM_JIT_MODE}) ..."
+    ibounce run \
+      --port "${IBOUNCE_PORT}" \
+      --mode "${IAM_JIT_MODE}" \
+      --audit-log-path "${IAM_JIT_AUDIT_LOG}" \
+      >/tmp/ibounce.log 2>&1 &
+    IBOUNCE_PID=$!
+    echo "ibounce PID=${IBOUNCE_PID}"
+    # Wait up to 15s for ibounce to come up.
+    max_wait=15; waited=0
+    while [ $waited -lt $max_wait ]; do
+      if curl -sf "http://127.0.0.1:${IBOUNCE_PORT}/healthz" >/dev/null 2>&1; then
+        echo "ibounce is up."
+        break
+      fi
+      sleep 1; waited=$((waited + 1))
+    done
+    if [ $waited -ge $max_wait ]; then
+      echo "ERROR: ibounce did not respond on :${IBOUNCE_PORT} within ${max_wait}s."
+      echo "--- ibounce log ---"
+      cat /tmp/ibounce.log || true
+      exit 1
+    fi
+    # Export baseline decisions_count for assertion later.
+    BASELINE=$(curl -sf "http://127.0.0.1:${IBOUNCE_PORT}/healthz" \
+      | python3 -c "import sys,json; print(json.load(sys.stdin).get('decisions_count',0))")
+    echo "IBOUNCE_BASELINE=${BASELINE}" >> build.env
+    echo "ibounce baseline decisions_count=${BASELINE}"
+    # Wire AWS_ENDPOINT_URL so boto3 / aws CLI routes through ibounce.
+    echo "AWS_ENDPOINT_URL=http://127.0.0.1:${IBOUNCE_PORT}" >> build.env
+
+# ── Job: install-and-verify ──────────────────────────────────────────────────
+
+install-and-verify:
+  stage: setup
+  before_script:
+    - *install_system_deps
+    - *install_go
+  script:
+    - *install_iam_jit
+    - *install_ibounce
+    - echo "Setup complete."
+  # Pass installed binaries to subsequent jobs via cache.
+  cache:
+    key: iam-jit-${CI_COMMIT_REF_SLUG}
+    paths:
+      - .go/
+      - $HOME/.local/
+
+# ── Job: agent-run (main job) ────────────────────────────────────────────────
+#
+# This is the job that runs your AI agent under ibounce protection.
+# Replace "aws sts get-caller-identity" with your actual agent entrypoint.
+
+agent-run:
+  stage: agent-run
+  # ── OIDC-based AWS auth (GitLab 15.7+) ─────────────────────────────────
+  # Uncomment this block to exchange CI_JOB_JWT_V2 for AWS credentials
+  # via Web Identity federation — no long-lived access keys in CI/CD vars.
+  #
+  # id_tokens:
+  #   AWS_OIDC_TOKEN:
+  #     aud: sts.amazonaws.com
+  #
+  # Before the script runs, configure AWS credentials:
+  # before_script:
+  #   - aws sts assume-role-with-web-identity
+  #       --role-arn "${AWS_ROLE_ARN}"
+  #       --role-session-name "gitlab-ci-${CI_JOB_ID}"
+  #       --web-identity-token "${AWS_OIDC_TOKEN}"
+  #       --duration-seconds 3600
+  #       > /tmp/aws-creds.json
+  #   - export AWS_ACCESS_KEY_ID=$(jq -r .Credentials.AccessKeyId /tmp/aws-creds.json)
+  #   - export AWS_SECRET_ACCESS_KEY=$(jq -r .Credentials.SecretAccessKey /tmp/aws-creds.json)
+  #   - export AWS_SESSION_TOKEN=$(jq -r .Credentials.SessionToken /tmp/aws-creds.json)
+  #
+  # For CI_JOB_JWT_V2 (legacy approach pre-15.7):
+  #   AWS_WEB_IDENTITY_TOKEN_FILE=/tmp/web-identity-token
+  #   - echo "${CI_JOB_JWT_V2}" > "${AWS_WEB_IDENTITY_TOKEN_FILE}"
+  #   Then pass --web-identity-token-file to aws sts assume-role-with-web-identity.
+  before_script:
+    - *install_system_deps
+    - *install_go
+    - *install_iam_jit
+    - *install_ibounce
+  script:
+    - export PATH="/usr/local/go/bin:${GOPATH}/bin:${PATH}"
+    # ── 1. Init iam-jit ─────────────────────────────────────────────────
+    - |
+      iam-jit init \
+        --non-interactive \
+        --harness=none \
+        --mode="${IAM_JIT_MODE}" \
+        --bouncers=ibounce \
+        --shape=local-solo \
+        --skip-mcp-install \
+        --no-doctor-check \
+        --overwrite \
+        2>&1 || {
+          rc=$?
+          echo "ERROR: iam-jit init exited ${rc}. Install aborted."
+          exit $rc
+        }
+    # ── 2. Start ibounce ────────────────────────────────────────────────
+    - *start_ibounce
+    # ── 3. Load env vars exported by start step ─────────────────────────
+    - source build.env
+    - export AWS_ENDPOINT_URL
+    - echo "AWS_ENDPOINT_URL=${AWS_ENDPOINT_URL}"
+    # ── 4. Run your agent ───────────────────────────────────────────────
+    # Replace this with your actual agent entrypoint:
+    #   python -m my_package.agent --task "summarize s3://my-bucket/report.txt"
+    - aws sts get-caller-identity --output json 2>&1 || true
+    # ── 5. Assert decisions_count ticked ────────────────────────────────
+    - |
+      AFTER=$(curl -sf "http://127.0.0.1:${IBOUNCE_PORT}/healthz" \
+        | python3 -c "import sys,json; print(json.load(sys.stdin).get('decisions_count',0))")
+      DELTA=$((AFTER - IBOUNCE_BASELINE))
+      echo "decisions_count: baseline=${IBOUNCE_BASELINE}  after=${AFTER}  delta=${DELTA}"
+      if [ "${DELTA}" -le 0 ]; then
+        echo "ERROR: decisions_count did not tick. AWS traffic may not be"
+        echo "  routing through ibounce. Check AWS_ENDPOINT_URL is set."
+        echo "--- ibounce log ---"
+        cat /tmp/ibounce.log || true
+        exit 1
+      fi
+      echo "PASS: decisions_count delta=${DELTA} (ibounce audited real traffic)."
+  artifacts:
+    name: "iam-jit-audit-${CI_JOB_ID}"
+    when: always
+    expire_in: 14 days
+    paths:
+      - "${IAM_JIT_AUDIT_LOG}"
+      - /tmp/ibounce.log
+    # GitLab security dashboard integration: expose audit as JUnit report.
+    # (Replace with --format sarif upload when iam-jit adds SARIF output.)
+    # reports:
+    #   junit: junit-report.xml
+
+# ── Job: audit-summary ───────────────────────────────────────────────────────
+
+audit-summary:
+  stage: audit
+  script:
+    - |
+      if [ -f "${IAM_JIT_AUDIT_LOG}" ]; then
+        echo "=== iam-jit Audit Summary ==="
+        echo "Log: ${IAM_JIT_AUDIT_LOG}"
+        echo "Entries: $(wc -l < "${IAM_JIT_AUDIT_LOG}")"
+        echo "Last 10 decisions:"
+        tail -10 "${IAM_JIT_AUDIT_LOG}" \
+          | python3 -c "
+import sys, json
+for line in sys.stdin:
+    try:
+        d = json.loads(line)
+        print(f'  {d.get(\"timestamp\",\"?\")} | {d.get(\"action\",\"?\")} | {d.get(\"verdict\",\"?\")}')
+    except Exception:
+        print(f'  (unparseable) {line.rstrip()}')
+" || true
+      else
+        echo "Audit log not found at ${IAM_JIT_AUDIT_LOG}."
+      fi
+  artifacts:
+    when: always
+    paths:
+      - "${IAM_JIT_AUDIT_LOG}"

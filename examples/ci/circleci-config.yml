@@ -1,0 +1,355 @@
+# examples/ci/circleci-config.yml
+#
+# Reference CircleCI pipeline — iam-jit + ibounce bouncer protection
+# for AI agent runs that make AWS API calls.
+#
+# Status: Recipe written + manually walked through (NOT tenant-validated).
+# Compatible per CircleCI's documented config.yml shape (CircleCI 2.1+).
+#
+# Usage:
+#   Copy this file to .circleci/config.yml in your repo and adjust:
+#   - The executor image (default: ubuntu-2204:current)
+#   - Your AWS OIDC role ARN (context variable AWS_ROLE_ARN)
+#   - Your agent run step (replace "aws sts get-caller-identity")
+#   - The bouncers and mode to match your enforcement policy
+#
+# Per [[uat-tests-setup-end-to-end]]: the decisions_count assertion step
+# is REQUIRED — CI must fail if traffic did not route through ibounce.
+#
+# OIDC notes (CircleCI):
+#   CircleCI generates OIDC tokens via the oidc_token_file parameter on
+#   run steps (CircleCI Cloud + self-hosted 3.x). Use with:
+#     aws sts assume-role-with-web-identity \
+#       --role-arn "$AWS_ROLE_ARN" \
+#       --web-identity-token "$(cat $CIRCLE_OIDC_TOKEN_FILE)"
+#   See: https://circleci.com/docs/openid-connect-tokens/
+#
+# Refs:
+#   https://circleci.com/docs/configuration-reference/
+#   https://circleci.com/docs/openid-connect-tokens/
+
+version: 2.1
+
+# ── Orbs ──────────────────────────────────────────────────────────────────────
+# aws-cli orb for credential setup; remove if you configure AWS manually.
+orbs:
+  aws-cli: circleci/aws-cli@4.1
+
+# ── Parameters ───────────────────────────────────────────────────────────────
+parameters:
+  iam-jit-version:
+    type: string
+    default: "latest"
+    description: >
+      iam-jit version to install via pip. Use 'latest' to pull the most
+      recent release from PyPI, or pin to a specific version (e.g. '1.0.3').
+
+  bouncer-mode:
+    type: string
+    default: "discovery"
+    description: >
+      Enforcement mode for ibounce:
+        discovery   — observe + log only; zero denies (safe for new pipelines)
+        cooperative — agent receives deny rationale and may retry scoped
+        strict      — maximalist deny; use for production / regulated envs
+
+  ibounce-port:
+    type: integer
+    default: 8767
+    description: TCP port ibounce listens on.
+
+# ── Commands (reusable steps) ─────────────────────────────────────────────────
+commands:
+
+  install-python-312:
+    description: "Ensure Python 3.12+ is available on the executor."
+    steps:
+      - run:
+          name: Install Python 3.12
+          command: |
+            if python3 --version 2>/dev/null | grep -qE 'Python 3\.(1[2-9]|[2-9][0-9])'; then
+              echo "Python 3.12+ already available."
+              python3 --version
+            else
+              sudo apt-get update -qq
+              sudo apt-get install -y python3.12 python3.12-venv python3-pip
+            fi
+
+  install-go-122:
+    description: "Ensure Go 1.22+ is available on the executor."
+    steps:
+      - run:
+          name: Install Go 1.22
+          command: |
+            if go version 2>/dev/null | grep -qE 'go1\.(2[2-9]|[3-9][0-9])'; then
+              echo "Go 1.22+ already available."
+              go version
+            else
+              GO_VERSION="1.22.5"
+              echo "Installing Go ${GO_VERSION} ..."
+              wget -q "https://go.dev/dl/go${GO_VERSION}.linux-amd64.tar.gz" \
+                -O /tmp/go.tar.gz
+              sudo tar -C /usr/local -xzf /tmp/go.tar.gz
+              rm /tmp/go.tar.gz
+              echo 'export PATH="/usr/local/go/bin:$HOME/go/bin:$PATH"' \
+                >> "$BASH_ENV"
+              source "$BASH_ENV"
+              go version
+            fi
+
+  install-iam-jit:
+    description: "Install iam-jit via pip (PyPI or GitHub source fallback)."
+    parameters:
+      version:
+        type: string
+        default: "latest"
+    steps:
+      - run:
+          name: Install iam-jit
+          command: |
+            VERSION="<< parameters.version >>"
+            if [ "$VERSION" = "latest" ]; then
+              pip_spec="iam-jit"
+            else
+              pip_spec="iam-jit==${VERSION}"
+            fi
+            echo "Installing ${pip_spec} ..."
+            # Try PyPI first; fall back to GitHub source if not yet published.
+            if ! pip install --quiet "${pip_spec}" 2>/dev/null; then
+              echo "PyPI install failed; falling back to GitHub source ..."
+              pip install --quiet \
+                "git+https://github.com/trsreagan3/iam-jit.git@main#egg=iam-jit"
+            fi
+            # Fail loud — per [[ibounce-honest-positioning]] no silent degradation.
+            if ! command -v iam-jit &>/dev/null; then
+              echo "ERROR: iam-jit binary not found on PATH after pip install."
+              exit 1
+            fi
+            echo "iam-jit installed: $(iam-jit --version 2>/dev/null || echo unknown)"
+
+  install-go-bouncers:
+    description: "Install Go-backed bouncers (kbouncer, dbounce, gbounce) via go install."
+    steps:
+      - run:
+          name: Install Go bouncers
+          command: |
+            export PATH="/usr/local/go/bin:$HOME/go/bin:$PATH"
+            echo "Installing Go-backed bouncers ..."
+            declare -A PKGS=(
+              [kbouncer]="github.com/trsreagan3/kbouncer/cmd/kbouncer@latest"
+              [dbounce]="github.com/trsreagan3/dbounce/cmd/dbounce@latest"
+              [gbounce]="github.com/trsreagan3/gbounce/cmd/gbounce@latest"
+            )
+            for name in "${!PKGS[@]}"; do
+              pkg="${PKGS[$name]}"
+              echo "  go install ${pkg} ..."
+              go install "${pkg}" 2>&1 \
+                && echo "  ${name}: installed" \
+                || echo "  WARNING: ${name} install failed (non-blocking)"
+            done
+
+  start-ibounce:
+    description: "Start ibounce in background; export AWS_ENDPOINT_URL to BASH_ENV."
+    parameters:
+      port:
+        type: integer
+        default: 8767
+      mode:
+        type: string
+        default: "discovery"
+      audit-log:
+        type: string
+        default: "/tmp/iam-jit-audit.jsonl"
+    steps:
+      - run:
+          name: Start ibounce
+          command: |
+            # ibounce ships as a Python entry-point inside iam-jit pip package.
+            if ! command -v ibounce &>/dev/null; then
+              echo "ERROR: ibounce not found on PATH after iam-jit install."
+              exit 1
+            fi
+            touch "<< parameters.audit-log >>"
+            echo "Starting ibounce on :<< parameters.port >> (mode=<< parameters.mode >>) ..."
+            ibounce run \
+              --port "<< parameters.port >>" \
+              --mode "<< parameters.mode >>" \
+              --audit-log-path "<< parameters.audit-log >>" \
+              > /tmp/ibounce.log 2>&1 &
+            echo "ibounce PID=$!"
+            # Wait up to 15s for ibounce to come up.
+            max_wait=15; waited=0
+            while [ $waited -lt $max_wait ]; do
+              if curl -sf "http://127.0.0.1:<< parameters.port >>/healthz" >/dev/null 2>&1; then
+                echo "ibounce is up."
+                break
+              fi
+              sleep 1; waited=$((waited + 1))
+            done
+            if [ $waited -ge $max_wait ]; then
+              echo "ERROR: ibounce did not respond on :<< parameters.port >> within ${max_wait}s."
+              cat /tmp/ibounce.log || true
+              exit 1
+            fi
+            # Capture baseline decisions_count and export env vars via BASH_ENV.
+            BASELINE=$(curl -sf "http://127.0.0.1:<< parameters.port >>/healthz" \
+              | python3 -c "import sys,json; print(json.load(sys.stdin).get('decisions_count',0))")
+            echo "baseline decisions_count=${BASELINE}"
+            {
+              echo "export AWS_ENDPOINT_URL=http://127.0.0.1:<< parameters.port >>"
+              echo "export IAM_JIT_AUDIT_LOG=<< parameters.audit-log >>"
+              echo "export IBOUNCE_BASELINE=${BASELINE}"
+              echo "export IBOUNCE_PORT=<< parameters.port >>"
+            } >> "$BASH_ENV"
+
+  assert-decisions-ticked:
+    description: >
+      Assert that ibounce decisions_count increased since the baseline.
+      Fails the build if no traffic was routed through ibounce.
+    parameters:
+      port:
+        type: integer
+        default: 8767
+    steps:
+      - run:
+          name: Assert decisions_count ticked
+          command: |
+            source "$BASH_ENV" 2>/dev/null || true
+            AFTER=$(curl -sf "http://127.0.0.1:<< parameters.port >>/healthz" \
+              | python3 -c "import sys,json; print(json.load(sys.stdin).get('decisions_count',0))")
+            DELTA=$((AFTER - IBOUNCE_BASELINE))
+            echo "decisions_count: baseline=${IBOUNCE_BASELINE}  after=${AFTER}  delta=${DELTA}"
+            if [ "${DELTA}" -le 0 ]; then
+              echo "ERROR: decisions_count did not tick."
+              echo "  AWS traffic may not be routing through ibounce."
+              echo "  Check that AWS_ENDPOINT_URL=${AWS_ENDPOINT_URL} is set in the agent step."
+              echo "--- ibounce log ---"
+              cat /tmp/ibounce.log || true
+              exit 1
+            fi
+            echo "PASS: decisions_count delta=${DELTA} (ibounce audited real traffic)."
+
+# ── Executors ─────────────────────────────────────────────────────────────────
+executors:
+  ubuntu-agent:
+    machine:
+      image: ubuntu-2204:current
+    resource_class: medium
+
+# ── Jobs ──────────────────────────────────────────────────────────────────────
+jobs:
+
+  # ── agent-run: install iam-jit, start ibounce, run agent, assert audit ───
+  agent-run:
+    executor: ubuntu-agent
+    environment:
+      IAM_JIT_AUDIT_LOG: /tmp/iam-jit-audit.jsonl
+
+    steps:
+      # 1. Checkout
+      - checkout
+
+      # 2. Install runtimes
+      - install-python-312
+      - install-go-122
+
+      # 3. Install iam-jit + bouncers
+      - install-iam-jit:
+          version: << pipeline.parameters.iam-jit-version >>
+      # Optional: install Go bouncers (kbouncer, dbounce, gbounce).
+      # Remove if you only need ibounce (AWS audit only).
+      # - install-go-bouncers
+
+      # 4. Configure AWS credentials via OIDC
+      #
+      # Option A — CircleCI OIDC (recommended; no long-lived keys):
+      #   Set AWS_ROLE_ARN in your CircleCI context, then:
+      #
+      # - run:
+      #     name: Configure AWS (OIDC)
+      #     command: |
+      #       aws sts assume-role-with-web-identity \
+      #         --role-arn "${AWS_ROLE_ARN}" \
+      #         --role-session-name "circleci-${CIRCLE_BUILD_NUM}" \
+      #         --web-identity-token "${CIRCLE_OIDC_TOKEN}" \
+      #         --duration-seconds 3600 \
+      #         > /tmp/aws-creds.json
+      #       {
+      #         echo "export AWS_ACCESS_KEY_ID=$(jq -r .Credentials.AccessKeyId /tmp/aws-creds.json)"
+      #         echo "export AWS_SECRET_ACCESS_KEY=$(jq -r .Credentials.SecretAccessKey /tmp/aws-creds.json)"
+      #         echo "export AWS_SESSION_TOKEN=$(jq -r .Credentials.SessionToken /tmp/aws-creds.json)"
+      #         echo "export AWS_DEFAULT_REGION=${AWS_DEFAULT_REGION:-us-east-1}"
+      #       } >> "$BASH_ENV"
+      #
+      # Option B — aws-cli orb with environment context (access key + secret):
+      # - aws-cli/setup:
+      #     role-arn: ${AWS_ROLE_ARN}
+      #     region: us-east-1
+
+      # 5. Init iam-jit
+      - run:
+          name: iam-jit init
+          command: |
+            export PATH="/usr/local/go/bin:$HOME/go/bin:$PATH"
+            iam-jit init \
+              --non-interactive \
+              --harness=none \
+              --mode="${IAM_JIT_MODE:-discovery}" \
+              --bouncers=ibounce \
+              --shape=local-solo \
+              --skip-mcp-install \
+              --no-doctor-check \
+              --overwrite \
+              2>&1 || {
+                rc=$?
+                echo "ERROR: iam-jit init exited ${rc}. Install aborted."
+                exit $rc
+              }
+
+      # 6. Start ibounce (wires AWS_ENDPOINT_URL + captures baseline)
+      - start-ibounce:
+          port: << pipeline.parameters.ibounce-port >>
+          mode: << pipeline.parameters.bouncer-mode >>
+          audit-log: /tmp/iam-jit-audit.jsonl
+
+      # 7. Run your agent
+      #    AWS_ENDPOINT_URL is in $BASH_ENV — sourced by the runner before each step.
+      - run:
+          name: Run agent
+          command: |
+            source "$BASH_ENV" 2>/dev/null || true
+            echo "AWS_ENDPOINT_URL=${AWS_ENDPOINT_URL}"
+            # Replace with your actual agent entrypoint, e.g.:
+            #   python -m my_package.agent --task "summarize s3://my-bucket/report.txt"
+            aws sts get-caller-identity --output json 2>&1 || true
+
+      # 8. Assert ibounce saw real traffic
+      - assert-decisions-ticked:
+          port: << pipeline.parameters.ibounce-port >>
+
+      # 9. Store audit log as artifact
+      - store_artifacts:
+          path: /tmp/iam-jit-audit.jsonl
+          destination: iam-jit/audit-log.jsonl
+      - store_artifacts:
+          path: /tmp/ibounce.log
+          destination: iam-jit/ibounce.log
+
+      # 10. Posture snapshot (informational)
+      - run:
+          name: Print iam-jit posture
+          when: always
+          command: |
+            iam-jit posture --json 2>/dev/null \
+              | python3 -m json.tool \
+              || iam-jit posture 2>&1 \
+              || echo "(posture unavailable)"
+
+# ── Workflows ─────────────────────────────────────────────────────────────────
+workflows:
+  agent-ci:
+    jobs:
+      - agent-run:
+          # Wire in a CircleCI context that holds AWS_ROLE_ARN (or access keys).
+          # context:
+          #   - aws-oidc-context

@@ -89,6 +89,8 @@ All four share the same deterministic scoring engine. Open source under Apache 2
 - **[docs/FEATURES.md](docs/FEATURES.md)** — full feature catalog (every product, every shipping flag, the v1.0 platform-features cluster, what's NOT in iam-jit and why)
 - **[docs/GETTING-STARTED.md](docs/GETTING-STARTED.md)** — self-host MVP deploy walkthrough (git clone to working endpoint in ~5 minutes)
 - **[docs/DOCKER-CLAUDE-INTEGRATION.md](docs/DOCKER-CLAUDE-INTEGRATION.md)** — add ibounce to a Claude-in-Docker setup (Pattern A: in-container; Pattern B: sidecar)
+- **[docs/GITHUB-ACTION-RECIPE.md](docs/GITHUB-ACTION-RECIPE.md)** — first-class GitHub Actions recipe (`trsreagan3/iam-jit-action@v1`)
+- **[docs/CI-RECIPES.md](docs/CI-RECIPES.md)** — reference recipes for GitLab CI, CircleCI, Jenkins, and Buildkite
 - **[docs/README.md](docs/README.md)** — TOC for the ~100 markdown files in `docs/`; tells you which to read by role (operator / developer / reviewer)
 - **[docs/SECURITY-POSTURE.md](docs/SECURITY-POSTURE.md)** — trust model + threat model
 - **[docs/KNOWN-CAVEATS.md](docs/KNOWN-CAVEATS.md)** — read before install
