@@ -90,6 +90,65 @@ _VALID_MODES = ("discovery", "cooperative", "strict")
 _VALID_BOUNCERS = ("ibounce", "kbouncer", "dbounce", "gbounce")
 _VALID_HARNESSES = ("claude-code", "cursor", "codex", "devin", "none")
 
+# ---------------------------------------------------------------------------
+# #744 — Stable exit-code contract. CI parsers switch on these codes; they
+# MUST NOT parse stderr text. Doc at docs/CI-INIT-EXIT-CODES.md.
+# ---------------------------------------------------------------------------
+
+EXIT_OK = 0
+EXIT_INVALID_ARGS = 2      # Click's conventional bad-argument exit code
+EXIT_CONFLICT = 10         # existing setup detected; use --overwrite
+EXIT_BOUNCER_FAIL = 11     # bouncer could not be started
+EXIT_HARNESS_FAIL = 12     # harness config write failed
+EXIT_NETWORK_FAIL = 13     # network / install failure (managed-mode, etc.)
+
+
+def _emit_json_error(
+    *,
+    code: str,
+    message: str,
+    exit_code: int,
+    context=None,
+):
+    """Write a structured JSON error envelope to stderr + call sys.exit.
+
+    Per [[ibounce-honest-positioning]]: ALWAYS emits structured errors on
+    failure so CI parsers can switch on ``error_code`` without parsing
+    human text. This function ALWAYS exits — it does not return.
+    """
+    import json as _json
+    import sys as _sys
+    payload = {"status": "error", "error_code": code, "message": message}
+    if context:
+        payload.update(context)
+    print(_json.dumps(payload), file=_sys.stderr, flush=True)
+    _sys.exit(exit_code)
+
+
+def _build_json_result(
+    *,
+    result,
+    config_path,
+    bouncers_started=None,
+    env_vars_set=None,
+    warnings=None,
+    errors=None,
+    version="1.0.0",
+):
+    """Build the --format json success envelope (schema in docs/CI-FRIENDLY-MODE.md)."""
+    return {
+        "status": "ok",
+        "version": version,
+        "harness": result.harness if result else "none",
+        "bouncers_started": bouncers_started or [],
+        "config_path": str(config_path) if config_path else None,
+        "env_vars_set": env_vars_set or {},
+        "warnings": warnings or [],
+        "errors": errors or [],
+    }
+
+
+
 
 # ---------------------------------------------------------------------------
 # Data shape — the in-memory interview result. Tests assert against the
@@ -389,6 +448,14 @@ def _validate_or_refuse(declaration: dict[str, Any]) -> None:
         )
 
 
+class _ConfigConflictError(click.ClickException):
+    """Raised when an existing config is found without --overwrite.
+
+    Maps to exit code 10 (EXIT_CONFLICT) per #744 exit-code discipline.
+    """
+    exit_code = EXIT_CONFLICT
+
+
 def _write_config_atomic(
     *,
     config_path: pathlib.Path,
@@ -416,7 +483,7 @@ def _write_config_atomic(
         ):
             pass
         else:
-            raise click.ClickException(
+            raise _ConfigConflictError(
                 f"refusing to overwrite existing {config_path} "
                 "(per [[creates-never-mutates]]). Pass --overwrite to "
                 "replace it, or move the existing file aside."
@@ -1276,6 +1343,28 @@ def register_init_command(main_group: click.Group) -> click.Command:
              "not a TTY (agents, CI, piped input).",
     )
     @click.option(
+        "--quiet",
+        is_flag=True,
+        default=False,
+        envvar="IAM_JIT_INIT_QUIET",
+        help="#744 — Suppress human-facing stdout banners on success. "
+             "Structured JSON errors ALWAYS go to stderr on failure "
+             "(per [[ibounce-honest-positioning]]). Also enabled by "
+             "$IAM_JIT_INIT_QUIET=1. Composes with --non-interactive "
+             "and --format json.",
+    )
+    @click.option(
+        "--format",
+        "output_format",
+        type=click.Choice(["text", "json"]),
+        default="text",
+        envvar="IAM_JIT_INIT_FORMAT",
+        help="#744 — Output format. 'json' writes the init result summary "
+             "to stdout as machine-parsable JSON (schema in "
+             "docs/CI-FRIENDLY-MODE.md). 'text' (default) is "
+             "human-readable. Also read from $IAM_JIT_INIT_FORMAT.",
+    )
+    @click.option(
         "--data-dir",
         type=click.Path(file_okay=False, path_type=pathlib.Path),
         default=None,
@@ -1404,6 +1493,8 @@ def register_init_command(main_group: click.Group) -> click.Command:
     )
     def init_cmd(
         non_interactive: bool,
+        quiet: bool,
+        output_format: str,
         data_dir: pathlib.Path | None,
         shape: str | None,
         mode: str | None,
@@ -1444,6 +1535,12 @@ def register_init_command(main_group: click.Group) -> click.Command:
         # ------------------------------------------------------------------
         if managed:
             if not org_policy_url:
+                if output_format == "json" or quiet:
+                    _emit_json_error(
+                        code="INIT_MISSING_ORG_POLICY",
+                        message="--managed requires --org-policy URL.",
+                        exit_code=EXIT_INVALID_ARGS,
+                    )
                 raise click.UsageError(
                     "--managed requires --org-policy URL. "
                     "Provide the HTTPS URL to the IT-curated org-policy.yaml "
@@ -1452,9 +1549,18 @@ def register_init_command(main_group: click.Group) -> click.Command:
 
             # Fetch + SSRF-gate + verify signature — raises ManagedPolicyError
             # on ANY failure. Zero partial state written before this returns.
-            policy_yaml = _fetch_managed_policy(
-                org_policy_url, org_public_key_path,
-            )
+            try:
+                policy_yaml = _fetch_managed_policy(
+                    org_policy_url, org_public_key_path,
+                )
+            except ManagedPolicyError as exc:
+                if output_format == "json" or quiet:
+                    _emit_json_error(
+                        code="INIT_MANAGED_FETCH_FAILED",
+                        message=str(exc),
+                        exit_code=EXIT_NETWORK_FAIL,
+                    )
+                raise
 
             resolved_data_dir = (
                 data_dir if data_dir is not None else _default_data_dir()
@@ -1468,27 +1574,44 @@ def register_init_command(main_group: click.Group) -> click.Command:
                 )
                 return
 
-            _write_config_atomic(
-                config_path=config_path,
-                body=policy_yaml,
-                interactive=False,  # --managed is always non-interactive
-                overwrite=overwrite,
-            )
+            try:
+                _write_config_atomic(
+                    config_path=config_path,
+                    body=policy_yaml,
+                    interactive=False,  # --managed is always non-interactive
+                    overwrite=overwrite,
+                )
+            except _ConfigConflictError as exc:
+                _emit_json_error(
+                    code="INIT_CONFIG_CONFLICT",
+                    message=str(exc.format_message()),
+                    exit_code=EXIT_CONFLICT,
+                    context={"config_path": str(config_path)},
+                )
 
-            click.echo(
-                f"[managed] org-policy verified + written to {config_path}"
-            )
+            if not quiet:
+                click.echo(
+                    f"[managed] org-policy verified + written to {config_path}"
+                )
 
             rc = _run_doctor_apply(config_path)
-            if rc != 0:
+            if rc != 0 and not quiet:
                 click.secho(
                     f"\n[warn] doctor apply-config exited {rc}; "
                     "config written but not applied. Re-run "
                     "`iam-jit doctor apply-config` manually.",
                     fg="yellow",
                 )
-            # #626 Phase 2 — install-check at end of managed-mode init.
-            _print_post_init_install_check(suppress=no_doctor_check)
+            # #626 Phase 2 — install-check; suppress in quiet/json mode.
+            if output_format != "json" and not quiet:
+                _print_post_init_install_check(suppress=no_doctor_check)
+            if output_format == "json":
+                import json as _json
+                payload = _build_json_result(
+                    result=None,
+                    config_path=config_path,
+                )
+                click.echo(_json.dumps(payload))
             return
 
         # ------------------------------------------------------------------
@@ -1517,12 +1640,27 @@ def register_init_command(main_group: click.Group) -> click.Command:
             )
             bad = [b for b in parsed if b not in _VALID_BOUNCERS]
             if bad:
+                if output_format == "json" or quiet:
+                    _emit_json_error(
+                        code="INIT_INVALID_BOUNCERS",
+                        message=(
+                            f"unknown bouncer(s) {bad!r}; "
+                            f"valid: {', '.join(_VALID_BOUNCERS)}"
+                        ),
+                        exit_code=EXIT_INVALID_ARGS,
+                    )
                 raise click.BadParameter(
                     f"unknown bouncer(s) {bad!r}; "
                     f"valid: {', '.join(_VALID_BOUNCERS)}",
                     param_hint="--bouncers",
                 )
             if not parsed:
+                if output_format == "json" or quiet:
+                    _emit_json_error(
+                        code="INIT_MISSING_BOUNCERS",
+                        message="must list at least one bouncer",
+                        exit_code=EXIT_INVALID_ARGS,
+                    )
                 raise click.BadParameter(
                     "must list at least one bouncer",
                     param_hint="--bouncers",
@@ -1597,16 +1735,25 @@ def register_init_command(main_group: click.Group) -> click.Command:
             data_dir=resolved_data_dir, interactive=interactive,
         )
 
-        _write_config_atomic(
-            config_path=config_path,
-            body=rendered,
-            interactive=interactive,
-            overwrite=overwrite,
-        )
+        try:
+            _write_config_atomic(
+                config_path=config_path,
+                body=rendered,
+                interactive=interactive,
+                overwrite=overwrite,
+            )
+        except _ConfigConflictError as exc:
+            _emit_json_error(
+                code="INIT_CONFIG_CONFLICT",
+                message=str(exc.format_message()),
+                exit_code=EXIT_CONFLICT,
+                context={"config_path": str(config_path)},
+            )
 
-        click.secho(
-            f"\n[ok] wrote {config_path}", fg="green",
-        )
+        if not quiet and output_format != "json":
+            click.secho(
+                f"\n[ok] wrote {config_path}", fg="green",
+            )
 
         # Step 7 — offer doctor apply
         should_apply = apply_now
@@ -1619,7 +1766,7 @@ def register_init_command(main_group: click.Group) -> click.Command:
 
         if should_apply:
             rc = _run_doctor_apply(config_path)
-            if rc != 0:
+            if rc != 0 and not quiet:
                 click.secho(
                     f"\n[warn] doctor apply-config exited {rc}; "
                     "config written but not applied.",
@@ -1641,6 +1788,9 @@ def register_init_command(main_group: click.Group) -> click.Command:
         # [[lightweight-frictionless-principle]].
 
         mcp_install_results: list[_McpInstallResult] = []
+        _json_warnings: list[str] = []
+        _json_env_vars: dict[str, str] = {}
+
         if not skip_mcp_install and result.harness != "none":
             mcp_install_results = _run_harness_mcp_installs(
                 harness=result.harness,
@@ -1652,7 +1802,11 @@ def register_init_command(main_group: click.Group) -> click.Command:
                     str(cursor_path) if cursor_path is not None else None
                 ),
             )
-            _print_mcp_install_summary(mcp_install_results)
+            if not quiet:
+                _print_mcp_install_summary(mcp_install_results)
+            for r in mcp_install_results:
+                if not r.ok:
+                    _json_warnings.append(f"mcp-install/{r.label}: {r.detail}")
 
         # Step 7.6 — #683/#681 bouncer env-block wire for claude-code harness.
         # Write AWS_ENDPOINT_URL / HTTP_PROXY into ~/.claude/settings.json so
@@ -1664,27 +1818,64 @@ def register_init_command(main_group: click.Group) -> click.Command:
             not skip_mcp_install
             and result.harness == "claude-code"
         ):
-            _write_claude_code_env_for_init(interactive=interactive)
+            if not quiet:
+                _write_claude_code_env_for_init(interactive=interactive)
+            else:
+                try:
+                    from .cli import (
+                        _build_bouncer_env_vars,
+                        _claude_code_settings_path,
+                        _write_claude_code_env_block,
+                    )
+                    settings_p = _claude_code_settings_path()
+                    env_vars = _build_bouncer_env_vars()
+                    write_result = _write_claude_code_env_block(settings_p, env_vars)
+                    if write_result.get("status") == "written":
+                        vars_written = write_result.get("vars_written") or []
+                        _json_env_vars = {str(k): "" for k in vars_written}
+                except Exception as _e:
+                    _json_warnings.append(f"env-block-write: {_e}")
 
-        # Step 8 — summary
-        _print_summary(
-            result=result,
-            config_path=config_path,
-            mcp_install_results=mcp_install_results,
-        )
+        # Step 8 — summary (text mode only; JSON envelope emitted below)
+        if not quiet and output_format != "json":
+            _print_summary(
+                result=result,
+                config_path=config_path,
+                mcp_install_results=mcp_install_results,
+            )
 
-        # #626 Phase 2 — install-check at end of standard init flow.
-        # Renders condensed verdict (PATH gaps + env-wire gaps + Go-side
-        # status). Does NOT change init's exit code; init succeeded at
-        # config-write. Per [[ibounce-honest-positioning]] this is the
-        # operator's first-and-best chance to see "is my install
-        # actually going to work?" before they walk away.
-        _print_post_init_install_check(suppress=no_doctor_check)
+        # #626 Phase 2 — install-check. Skip in json/quiet mode.
+        if output_format != "json" and not quiet:
+            _print_post_init_install_check(suppress=no_doctor_check)
+
+        # #744 — JSON output envelope. MUST be the last line on stdout.
+        if output_format == "json":
+            import json as _json
+            payload = _build_json_result(
+                result=result,
+                config_path=config_path,
+                bouncers_started=list(result.bouncers),
+                env_vars_set=_json_env_vars,
+                warnings=_json_warnings,
+            )
+            click.echo(_json.dumps(payload))
 
     return init_cmd
 
 
 __all__ = [
+    # #744 — exit-code constants
+    "EXIT_OK",
+    "EXIT_INVALID_ARGS",
+    "EXIT_CONFLICT",
+    "EXIT_BOUNCER_FAIL",
+    "EXIT_HARNESS_FAIL",
+    "EXIT_NETWORK_FAIL",
+    # #744 — CI helpers
+    "_build_json_result",
+    "_ConfigConflictError",
+    "_emit_json_error",
+    # existing surface
     "ManagedPolicyError",
     "_McpInstallResult",
     "_fetch_managed_policy",
