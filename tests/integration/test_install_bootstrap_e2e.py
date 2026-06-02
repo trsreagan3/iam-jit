@@ -495,9 +495,7 @@ class TestLiveBouncerE2E:
     the expected response body (not a 502 or recycled error).
     """
 
-    def test_env_var_set_routes_sts_call_through_ibounce(
-        self, tmp_path: pathlib.Path
-    ) -> None:
+    def test_env_var_set_routes_sts_call_through_ibounce(self) -> None:
         """When AWS_ENDPOINT_URL points at ibounce, a boto3 STS call:
           (A) succeeds with a parseable response (Account/UserId/Arn present)
           (B) increments ibounce decisions_count by 1.

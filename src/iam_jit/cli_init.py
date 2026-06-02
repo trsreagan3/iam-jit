@@ -712,7 +712,11 @@ def _write_claude_code_env_for_init(*, interactive: bool) -> None:
             _emit_restart_required_message,
             _write_claude_code_env_block,
         )
-    except Exception as exc:
+    except ImportError as exc:
+        # Only swallow the expected failure shape (helper module not present).
+        # Any other Exception propagates so the caller surfaces the real bug
+        # rather than silently skipping the env-block write.
+        # Per [[ibounce-honest-positioning]] — never silence honest failures.
         _log_decision(
             "env_block_skipped",
             f"could not import env-block helpers: {exc}",
