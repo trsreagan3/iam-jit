@@ -364,6 +364,263 @@ def register_audit_verify_command(audit_group: click.Group) -> click.Command:
     return verify_cmd
 
 
+def register_audit_verify_receipt_command(
+    audit_group: click.Group,
+) -> click.Command:
+    """Register `iam-jit audit verify-receipt <FILE>` — #731 / BUILD-10.
+
+    Offline verifier (no network) for an Ed25519-signed denial receipt.
+    Checks the signature; optionally checks nonce freshness against the
+    bouncer's persistent nonce store so a REPLAYED receipt (a nonce
+    presented twice) is detected even across a bouncer restart.
+
+    Returns the registered command so tests can invoke it directly.
+    """
+
+    @audit_group.command("verify-receipt")
+    @click.argument(
+        "receipt_file",
+        type=click.Path(exists=True, dir_okay=False, path_type=pathlib.Path),
+    )
+    @click.option(
+        "--public-key",
+        "public_key_b64",
+        default=None,
+        help="Pin the expected signing public key (URL-safe base64, no "
+             "padding) to verify against — establishes ISSUER trust. "
+             "When omitted, the verifier auto-pins to the local on-disk "
+             "denial-receipt key (~/.iam-jit/audit-keys) if present; if "
+             "neither is available it falls back to the receipt's OWN "
+             "embedded key, which proves only that SOMEONE signed it, "
+             "NOT that iam-jit did (key_trust=embedded_unpinned).",
+    )
+    @click.option(
+        "--key-dir",
+        "key_dir",
+        type=click.Path(file_okay=False, dir_okay=True, path_type=pathlib.Path),
+        default=None,
+        help="Directory holding the local denial-receipt public key "
+             "(denial-receipt-ed25519.pub). Defaults to "
+             "~/.iam-jit/audit-keys. When --public-key is NOT given and "
+             "this directory holds the local key, the verifier auto-pins "
+             "to THAT key (key_trust=local) instead of trusting the "
+             "receipt's own embedded key.",
+    )
+    @click.option(
+        "--nonce-db",
+        type=click.Path(dir_okay=False, path_type=pathlib.Path),
+        default=None,
+        help="Path to the bouncer's persistent nonce store "
+             "(denial-receipt-nonces.sqlite3). When given, the receipt's "
+             "nonce is checked for freshness: an already-consumed nonce "
+             "is reported as a REPLAY; a never-minted nonce as "
+             "unrecognised. Omit to verify the signature only.",
+    )
+    @click.option(
+        "--no-consume",
+        is_flag=True,
+        default=False,
+        help="With --nonce-db, do NOT mark the nonce consumed (read-only "
+             "freshness peek). Default: verifying consumes the nonce so "
+             "the NEXT verify of the same receipt is flagged as a replay.",
+    )
+    @click.option(
+        "--json", "as_json",
+        is_flag=True,
+        default=False,
+        help="Emit structured JSON instead of human-readable output.",
+    )
+    def verify_receipt_cmd(
+        receipt_file: pathlib.Path,
+        public_key_b64: str | None,
+        key_dir: pathlib.Path | None,
+        nonce_db: pathlib.Path | None,
+        no_consume: bool,
+        as_json: bool,
+    ) -> None:
+        """Verify an Ed25519-signed denial receipt offline.
+
+        HONEST FRAMING: a valid receipt proves iam-jit's RECORD that it
+        denied this action at this time for this reason. It does NOT
+        prove the agent was unable to act through another channel, nor
+        (for a cooperative-mode deny) enforcement at the wire.
+
+        Exit codes:
+          * 0 — signature verifies AND (if --nonce-db) nonce is fresh.
+          * 1 — signature invalid / tampered, OR nonce is a replay /
+                unrecognised. Per [[ibounce-honest-positioning]] any
+                replay or unrecognised-nonce is a LOUD failure.
+          * 2 — bad arguments / unreadable receipt.
+        """
+        from .receipts import DenialReceipt, open_nonce_store, verify_receipt
+        from .receipts.signer import (
+            EMBEDDED_UNPINNED_CAVEAT,
+            KEY_TRUST_EMBEDDED_UNPINNED,
+            KEY_TRUST_LOCAL,
+            KEY_TRUST_PINNED,
+        )
+
+        try:
+            raw = json.loads(receipt_file.read_text(encoding="utf-8"))
+        except Exception as e:  # noqa: BLE001
+            click.echo(f"audit verify-receipt: cannot read {receipt_file}: {e}", err=True)
+            sys.exit(2)
+        try:
+            receipt = DenialReceipt.from_dict(raw)
+        except Exception as e:  # noqa: BLE001
+            click.echo(f"audit verify-receipt: malformed receipt: {e}", err=True)
+            sys.exit(2)
+
+        sig_ok, sig_reason, key_trust = verify_receipt(
+            receipt,
+            public_key_override_b64=public_key_b64,
+            keypair_dir=str(key_dir) if key_dir is not None else None,
+        )
+        issuer_unverified = key_trust == KEY_TRUST_EMBEDDED_UNPINNED
+
+        nonce_status = "not_checked"
+        nonce_reason: str | None = None
+        if nonce_db is not None:
+            try:
+                store = open_nonce_store(str(nonce_db))
+                if no_consume:
+                    # Read-only peek: a check_and_consume would mutate; do
+                    # a raw lookup instead. SqliteNonceStore exposes the
+                    # consume via check_and_consume only, so for the
+                    # read-only peek we re-open and inspect via a direct
+                    # query helper.
+                    check = _peek_nonce(store, receipt.nonce)
+                else:
+                    check = store.check_and_consume(receipt.nonce)
+                if not check.known:
+                    nonce_status = "unrecognised"
+                    nonce_reason = (
+                        "nonce was never minted by this bouncer (or was "
+                        "evicted from the store) — cannot confirm freshness"
+                    )
+                elif check.replay:
+                    nonce_status = "replay"
+                    nonce_reason = (
+                        f"nonce already consumed (consume_count="
+                        f"{check.consume_count}) — this is a REPLAYED receipt"
+                    )
+                else:
+                    nonce_status = "fresh"
+            except Exception as e:  # noqa: BLE001
+                nonce_status = "error"
+                nonce_reason = f"nonce store check failed: {e}"
+
+        overall_ok = sig_ok and nonce_status in ("fresh", "not_checked")
+
+        report = {
+            "receipt_file": str(receipt_file),
+            "deny_id": receipt.deny_id,
+            "action": receipt.action,
+            "resource": receipt.resource,
+            "reason": receipt.reason,
+            "agent_session": receipt.agent_session,
+            "timestamp": receipt.timestamp,
+            "verdict": receipt.verdict,
+            "nonce": receipt.nonce,
+            "public_key_fingerprint": receipt.public_key_fingerprint,
+            "signature_ok": sig_ok,
+            "signature_reason": sig_reason,
+            "key_trust": key_trust,
+            "issuer_unverified": issuer_unverified,
+            "nonce_status": nonce_status,
+            "nonce_reason": nonce_reason,
+            "ok": overall_ok,
+            "proves": (
+                (
+                    EMBEDDED_UNPINNED_CAVEAT + ". Even then, a valid receipt "
+                    "proves only iam-jit's RECORD that it denied this action "
+                    "at this time for this reason; NOT that the agent could "
+                    "not act through another channel"
+                )
+                if issuer_unverified
+                else (
+                    "iam-jit's RECORD that it denied this action at this time "
+                    "for this reason; NOT that the agent could not act through "
+                    "another channel"
+                )
+            ),
+        }
+        if as_json:
+            click.echo(json.dumps(report, indent=2, sort_keys=True))
+        else:
+            click.echo(f"iam-jit audit verify-receipt — {receipt_file}")
+            click.echo(f"  deny_id:   {receipt.deny_id}")
+            click.echo(f"  action:    {receipt.action}")
+            click.echo(f"  resource:  {receipt.resource or '(none)'}")
+            click.echo(f"  reason:    {receipt.reason}")
+            click.echo(f"  session:   {receipt.agent_session or '(none)'}")
+            click.echo(f"  timestamp: {receipt.timestamp}")
+            click.echo(f"  key fp:    {receipt.public_key_fingerprint}")
+            if sig_ok:
+                click.echo("  signature: OK (Ed25519 verifies)")
+            else:
+                click.echo(f"  signature: FAILED — {sig_reason}")
+            if key_trust == KEY_TRUST_PINNED:
+                click.echo("  key trust: PINNED (verified against your "
+                           "--public-key)")
+            elif key_trust == KEY_TRUST_LOCAL:
+                click.echo("  key trust: LOCAL (verified against this host's "
+                           "on-disk denial-receipt key)")
+            else:
+                click.echo(
+                    "  key trust: EMBEDDED (UNPINNED) — " + EMBEDDED_UNPINNED_CAVEAT
+                )
+            if nonce_status != "not_checked":
+                if nonce_status == "fresh":
+                    click.echo("  nonce:     FRESH (first presentation)")
+                elif nonce_status == "replay":
+                    click.echo(f"  nonce:     REPLAY — {nonce_reason}")
+                elif nonce_status == "unrecognised":
+                    click.echo(f"  nonce:     UNRECOGNISED — {nonce_reason}")
+                else:
+                    click.echo(f"  nonce:     ERROR — {nonce_reason}")
+            if issuer_unverified:
+                click.echo(
+                    "  proves:    that SOMEONE signed this receipt — the "
+                    "ISSUER is NOT verified. " + EMBEDDED_UNPINNED_CAVEAT
+                )
+            else:
+                click.echo(
+                    "  proves:    iam-jit's RECORD of this deny (not that the "
+                    "agent could not act elsewhere)"
+                )
+            click.echo(
+                f"RESULT: {'ok' if overall_ok else 'FAILED'}"
+            )
+        sys.exit(0 if overall_ok else 1)
+
+    return verify_receipt_cmd
+
+
+def _peek_nonce(store: Any, nonce: str) -> Any:
+    """Read-only freshness peek for --no-consume. Inspects the store
+    without mutating consume state. Falls back to a (mutating)
+    check_and_consume only if the store exposes no read path."""
+    from .receipts.nonce_store import NonceCheck, SqliteNonceStore
+    if isinstance(store, SqliteNonceStore):
+        with store._lock:  # noqa: SLF001 — sibling module, read-only peek
+            row = store._conn.execute(  # noqa: SLF001
+                "SELECT minted_ts, consume_count FROM denial_receipt_nonces "
+                "WHERE nonce = ?",
+                (nonce,),
+            ).fetchone()
+        if row is None:
+            return NonceCheck(nonce=nonce, known=False, replay=False, consume_count=0)
+        prior = int(row["consume_count"])
+        return NonceCheck(
+            nonce=nonce, known=True, replay=prior > 0,
+            consume_count=prior, minted_ts=row["minted_ts"] or None,
+        )
+    # Non-sqlite (in-memory) store: no non-mutating path; do the
+    # consume but it's a peek over a volatile store anyway.
+    return store.check_and_consume(nonce)
+
+
 def _emit_explain_report(
     *,
     resolved_dir: str,
@@ -662,4 +919,5 @@ def register_audit_retention_command(audit_group: click.Group) -> click.Command:
 __all__ = [
     "register_audit_retention_command",
     "register_audit_verify_command",
+    "register_audit_verify_receipt_command",
 ]

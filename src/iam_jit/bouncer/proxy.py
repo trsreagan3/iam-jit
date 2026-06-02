@@ -473,6 +473,28 @@ def register_audit_log_writer(writer: Any | None) -> None:
     _audit_log_writer = writer
 
 
+# #731 / BUILD-10 — Ed25519 denial-receipt signer. Set by serve() at
+# startup when receipts are enabled (default ON when an audit key dir
+# is usable). None when receipts are off. The deny hot-path reads this
+# via _active_receipt_signer() and, when present, attaches a signed
+# receipt to the 403 body. Per the fail-soft contract a signing error
+# NEVER changes the deny verdict — see ReceiptSigner.sign_deny.
+_receipt_signer: Any | None = None
+
+
+def register_receipt_signer(signer: Any | None) -> None:
+    """Install the denial-receipt signer. Pass None to clear (receipts
+    off). Public so serve() + tests can wire it."""
+    global _receipt_signer
+    _receipt_signer = signer
+
+
+def _active_receipt_signer() -> Any | None:
+    """Return the installed denial-receipt signer, or None when
+    receipts are disabled."""
+    return _receipt_signer
+
+
 def audit_chain_initialized() -> bool:
     """§A102+ / MRR-5 M2 — return True iff the audit hash-chain is
     initialised + ready to stamp events. False covers both
@@ -1417,6 +1439,39 @@ class ProxyConfig:
     signer uses. None = `~/.iam-jit/audit-keys/` (the shipped default,
     auto-generated on first use). Operator-tunable via
     `--audit-manifest-keypair-dir DIR`."""
+
+    # #731 / BUILD-10 — cryptographically-receipted denials. On a DENY
+    # the proxy mints an Ed25519-signed receipt (reusing the #427
+    # manifest crypto) + records its nonce in a persistent (restart-
+    # surviving) SQLite store so replays are detectable. Receipts ride
+    # the 403 body's `denial_receipt` field + are verified offline with
+    # `iam-jit audit verify-receipt`.
+    #
+    # Per [[v1-scope-bar]]: receipts are cheap + valuable so they are ON
+    # BY DEFAULT — but ONLY when an audit log dir exists to anchor the
+    # nonce store + keypair. Per the fail-soft contract a signing or
+    # nonce-store error NEVER changes the deny verdict (see
+    # ReceiptSigner.sign_deny). Operators disable via
+    # `--no-deny-receipts`.
+    deny_receipts_enabled: bool = True
+    """#731 — when True (default) + an audit log dir is resolvable, the
+    proxy attaches a signed denial receipt to every transparent-mode
+    403. The keypair lives under `~/.iam-jit/audit-keys/` (shared dir
+    with the manifest signer, distinct key name). Honest framing: a
+    receipt proves iam-jit's RECORD of the deny, not that the agent
+    couldn't act elsewhere."""
+
+    deny_receipt_keypair_dir: str | None = None
+    """#731 — directory holding the Ed25519 keypair the receipt signer
+    uses. None = `~/.iam-jit/audit-keys/` (shared default with the
+    manifest signer; the receipt key has a distinct name so the two
+    identities are separable)."""
+
+    deny_receipt_nonce_max_entries: int | None = None
+    """#731 — LRU cap on the persistent nonce store. None = the shipped
+    default (100k). Oldest-minted nonces are evicted past the cap;
+    evicted nonces verify their signature fine but report
+    unrecognised-nonce on a replay check."""
 
     audit_retention_framework: str | None = None
     """#500 / §A66c — compliance retention framework name. None = no
@@ -4002,13 +4057,14 @@ async def _handle_request(request, *, store, config: ProxyConfig, session):
             or request.headers.get("x-iam-jit-agent-session", "")
             or ""
         )
+        _deny_action_label = (
+            f"{obs.parsed_service}:{obs.parsed_action}"
+            if obs.parsed_service and obs.parsed_action
+            else (obs.parsed_action or "")
+        )
         structured = build_structured_deny(
             bouncer="ibounce",
-            action=(
-                f"{obs.parsed_service}:{obs.parsed_action}"
-                if obs.parsed_service and obs.parsed_action
-                else (obs.parsed_action or "")
-            ),
+            action=_deny_action_label,
             resource=obs.parsed_arn or "",
             deny_reason=decision_reason_with_caveat,
             deny_source=_map_proxy_deny_source(obs.deny_source),
@@ -4017,6 +4073,34 @@ async def _handle_request(request, *, store, config: ProxyConfig, session):
             when=_dt.datetime.now(_dt.timezone.utc)
                 .replace(microsecond=0).isoformat().replace("+00:00", "Z"),
         )
+        # #731 / BUILD-10 — attach an Ed25519-signed denial receipt when
+        # the receipt signer is enabled. FAIL-SOFT: a None return (any
+        # signing/nonce-store error) leaves the 403 unchanged; the deny
+        # still fires. The receipt's deny_id == structured.deny_event_id
+        # so the 403 body, the audit row, and the receipt share one
+        # correlation handle (#443). Honest framing: the receipt proves
+        # iam-jit's RECORD of this deny, not that the agent couldn't act
+        # elsewhere — see iam_jit.receipts.signer.
+        _receipt_payload = None
+        _rcpt_signer = _active_receipt_signer()
+        if _rcpt_signer is not None:
+            try:
+                _receipt = _rcpt_signer.sign_deny(
+                    deny_id=structured.deny_event_id,
+                    action=_deny_action_label,
+                    reason=decision_reason_with_caveat,
+                    agent_session=agent_session_id_hint,
+                    resource=obs.parsed_arn or "",
+                )
+                if _receipt is not None:
+                    _receipt_payload = _receipt.to_dict()
+            except Exception as _rcpt_err:  # noqa: BLE001 — fail-soft
+                # Belt-and-braces: sign_deny is already fail-soft, but a
+                # deny must NEVER fail to fire because of receipt work.
+                logger.warning(
+                    "denial-receipt attach failed (deny still issued): %s",
+                    _rcpt_err,
+                )
         return web.json_response(
             {
                 # Legacy ibounce-shape (kept for wire-protocol
@@ -4046,6 +4130,10 @@ async def _handle_request(request, *, store, config: ProxyConfig, session):
                 # the request headers. Was populated in StructuredDenyResponse
                 # but dropped during serialization.
                 "agent_session_id": structured.agent_session_id,
+                # #731 / BUILD-10 — Ed25519-signed denial receipt (or
+                # null when receipts are off / signing failed fail-soft).
+                # Verify offline with `iam-jit audit verify-receipt`.
+                "denial_receipt": _receipt_payload,
             },
             status=403,
             # Wire-protocol response headers retain the
@@ -5176,6 +5264,52 @@ async def serve(config: ProxyConfig, *, store: BouncerStore) -> None:
             config.audit_sign_manifests,
             config.audit_retention_framework or "(off)",
         )
+        # #731 / BUILD-10 — denial-receipt signer. ON BY DEFAULT now
+        # that an audit log dir (`_log_dir`) exists to anchor the
+        # persistent nonce store + the keypair. Per the fail-soft
+        # contract, a construction failure here (e.g. unwritable
+        # keypair dir or nonce db) is logged + leaves receipts OFF — it
+        # NEVER aborts serve() or changes deny behaviour.
+        if config.deny_receipts_enabled:
+            try:
+                from ..receipts import (
+                    DEFAULT_NONCE_DB_NAME,
+                    ReceiptSigner,
+                    open_nonce_store,
+                )
+                _nonce_db = _ospath.join(_log_dir, DEFAULT_NONCE_DB_NAME)
+                _nonce_store = open_nonce_store(
+                    _nonce_db,
+                    **(
+                        {"max_entries": config.deny_receipt_nonce_max_entries}
+                        if config.deny_receipt_nonce_max_entries is not None
+                        else {}
+                    ),
+                )
+                _receipt_signer = ReceiptSigner(
+                    bouncer_product="ibounce",
+                    nonce_store=_nonce_store,
+                    **(
+                        {"keypair_dir": config.deny_receipt_keypair_dir}
+                        if config.deny_receipt_keypair_dir
+                        else {}
+                    ),
+                )
+                register_receipt_signer(_receipt_signer)
+                logger.info(
+                    "denial-receipt signing enabled: nonce_db=%s "
+                    "keypair_dir=%s public_key_fingerprint=%s",
+                    _nonce_db,
+                    config.deny_receipt_keypair_dir or "~/.iam-jit/audit-keys",
+                    _receipt_signer.public_key_fingerprint,
+                )
+            except Exception as _rcpt_setup_err:  # noqa: BLE001 — fail-soft
+                register_receipt_signer(None)
+                logger.warning(
+                    "denial-receipt signer setup failed; denies will fire "
+                    "WITHOUT receipts (deny behaviour unchanged): %s",
+                    _rcpt_setup_err,
+                )
         # #424 / §A63 — disk-pressure circuit-breaker state setup.
         # Only initialised when there's an audit-log dir to monitor;
         # all-other-disabled deployments skip the periodic loop
