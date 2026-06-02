@@ -188,13 +188,20 @@ def _is_interactive(non_interactive_flag: bool) -> bool:
 
 
 def _log_decision(label: str, value: Any, *, interactive: bool) -> None:
-    """Non-interactive paths surface every defaulted decision to stdout
-    so an agent / CI consumer can audit the choices. Interactive paths
-    don't need this because the operator answered each prompt.
+    """Non-interactive paths surface every defaulted decision so an agent
+    / CI consumer can audit the choices. Interactive paths don't need
+    this because the operator answered each prompt.
+
+    #749 (PR #34 Cell 10 finding): emit to ``stderr`` not ``stdout`` so
+    the lines don't contaminate the ``--format json`` contract added by
+    PR #33 (#744). CI consumers piping ``iam-jit init ... | jq`` were
+    hitting parse errors because these decision-log lines preceded the
+    JSON envelope. Stderr is the conventional channel for observability
+    output that should NEVER be parsed as part of the program's result.
     """
     if interactive:
         return
-    click.echo(f"[init] {label}: {value}")
+    click.echo(f"[init] {label}: {value}", err=True)
 
 
 def _default_data_dir() -> pathlib.Path:

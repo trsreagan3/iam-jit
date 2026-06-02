@@ -89,6 +89,31 @@ requires_docker = pytest.mark.skipif(
 )
 
 
+def _ibounce_running() -> bool:
+    """Probe whether an ibounce instance is reachable on the standard host port.
+
+    Several Cell-1/7/8 tests verify that `install-*` subcommands wire routing
+    env vars (AWS_ENDPOINT_URL etc.) into harness config files. The routing
+    vars are sourced from a live bouncer's /healthz; without a bouncer the
+    install commands honestly emit an empty env block. CI runners don't have
+    a bouncer running by default, so those tests must skip gracefully.
+    """
+    import urllib.request
+    try:
+        with urllib.request.urlopen("http://localhost:8767/healthz", timeout=1) as r:
+            return r.status == 200
+    except Exception:
+        return False
+
+
+_IBOUNCE_UP = _ibounce_running()
+
+requires_running_bouncer = pytest.mark.skipif(
+    not _IBOUNCE_UP,
+    reason="No ibounce reachable on localhost:8767 — install-* env-block tests need a live bouncer to probe for routing vars",
+)
+
+
 def _run_iam_jit(*args: str, env: dict[str, str] | None = None, timeout: int = 60) -> subprocess.CompletedProcess[str]:
     """Run the repo's venv iam-jit binary with arguments. Captures stdout/stderr separately."""
     merged = os.environ.copy()
@@ -116,6 +141,7 @@ class TestCell01_InitClaudeCodeEnvBlock:
     files are modified per [[creates-never-mutates]].
     """
 
+    @requires_running_bouncer
     def test_install_claude_code_writes_env_block(self, tmp_path: pathlib.Path) -> None:
         settings_path = tmp_path / "settings.json"
         settings_path.write_text(json.dumps({"existingKey": "preserved"}))
@@ -362,6 +388,7 @@ class TestCell07_InstallCursorEnvBlock:
     bypasses ibounce entirely.
     """
 
+    @requires_running_bouncer
     def test_cursor_install_writes_routing_env_vars(self, tmp_path: pathlib.Path) -> None:
         mcp_path = tmp_path / "mcp.json"
         ibounce_bin = str(_VENV_BIN / "ibounce") if (_VENV_BIN / "ibounce").exists() else "ibounce"
@@ -435,6 +462,7 @@ class TestCell07_InstallCursorEnvBlock:
 class TestCell08_InstallCodexEnvBlock:
     """install-codex --path must write the same routing env vars."""
 
+    @requires_running_bouncer
     def test_codex_install_writes_routing_env_vars(self, tmp_path: pathlib.Path) -> None:
         codex_path = tmp_path / "config.toml"
         ibounce_bin = str(_VENV_BIN / "ibounce") if (_VENV_BIN / "ibounce").exists() else "ibounce"
