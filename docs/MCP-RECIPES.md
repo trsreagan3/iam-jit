@@ -448,6 +448,40 @@ v1.0. The headline catalog operators + agents should know:
 | `bounce_extract_permissions_from_audit` | Extract observed permissions from audit trail (input to profile generation) |
 | `bounce_digest_recent` | "Your bouncer caught X this week" weekly-digest synthesis |
 
+### Natural-language resource discovery (#444 — Sysdig-Sage pattern)
+
+The discovery entry point. An agent translates a free-text operator
+question ("show me failed S3 PutObject in the last hour", "all events
+from agent session X", "prod bucket writes today") into the structured
+arguments below, then calls the tool. iam-jit fans the structured query
+out across **all four bouncers plus iam-jit-serve** and merges the
+result.
+
+| Tool | Purpose |
+|---|---|
+| `iam_jit_audit_search` | Cross-bouncer NL→structured audit search; returns OCSF events / per-bouncer summary counts / one `ocsf-bundle` finding / (with `extract_permissions`) a #419 permission-set ready for `iam_jit_request_role_from_synthesis` |
+
+**Where the "NL" happens.** Per
+`[[bouncer-zero-llm-when-agent-in-loop]]` this tool does **not** call an
+LLM. The *calling agent* does the NL→structured translation with its own
+LLM, guided by the worked examples embedded in the tool's MCP
+description, then invokes `iam_jit_audit_search` with structured fields
+(`since`, `action`, `outcome`, `resource_arn_glob`, `agent_session_id`,
+`bouncer`, `format`). This is the same Sysdig-Sage / OpalQuery shape the
+competitors ship, but with the LLM credential burden kept on the agent
+side, not on iam-jit (`[[no-nl-synthesis]]`).
+
+This is deliberately the *only* NL discovery surface. There is **no**
+`iam-jit posture --ask` / `inventory --ask` / `deny --ask` CLI flag:
+`posture` (#383) is intentionally structured-output (it answers a
+fixed question — "which mode am I in?" — that needs no translation),
+and putting an LLM inside the CLI/MCP server would violate the
+zero-LLM-on-our-side property. NL questions about denies, inventory,
+or posture-over-time are all answered by an agent composing
+`iam_jit_audit_search` + `iam_jit_posture` + `bounce_denies_recent`,
+not by a server-side LLM. See the ADOPT-12 finding in
+[`MCP-TOOL-PARITY.md`](MCP-TOOL-PARITY.md).
+
 ### Bouncer-informs-iam-jit chain (Phase E)
 
 Per `[[bouncer-informs-agent-informs-iam-jit]]`:
