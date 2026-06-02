@@ -37,6 +37,7 @@ from ..middleware import (
     get_api_tokens_store,
     get_request_store,
     get_user_store,
+    require_admin,
     require_approver,
 )
 from ..store import NotFoundError, RequestStore
@@ -784,6 +785,113 @@ def all_requests_page(request: Request) -> Response:
         user=user,
         extra={"requests": items},
     )
+
+
+# ---- #723 / BUILD-2 — agent flight recorder (scrubbable replay UI) ----
+
+# The strict CSP for the flight-recorder page. The replay UI uses one
+# inline <script> (the scrub/render logic) + inline <style>, so this
+# route needs 'unsafe-inline' in script-src — the global middleware
+# baseline locks script-src to 'self' only, which would block the
+# page's inline script. The middleware sets CSP via `setdefault`, so
+# this explicit header wins. Everything else stays same-origin-only;
+# the page makes ONE same-origin fetch to /flight-recorder/timeline.
+_FLIGHT_RECORDER_CSP = (
+    "default-src 'self'; "
+    "script-src 'self' 'unsafe-inline'; "
+    "style-src 'self' 'unsafe-inline'; "
+    "img-src 'self' data:; "
+    "connect-src 'self'; "
+    "frame-ancestors 'none'; "
+    "base-uri 'none'; "
+    "form-action 'none'"
+)
+
+
+@router.get("/flight-recorder", response_class=HTMLResponse)
+def flight_recorder_page(
+    _: Annotated[Any, Depends(require_admin)],
+) -> Response:
+    """Serve the self-contained scrubbable replay UI (#723).
+
+    Read-only viewer. The page contains NO session id and NO secret;
+    the operator types the session id (or opens the page with
+    ``?session=SID``) and the JS fetches the timeline from
+    ``/flight-recorder/timeline`` same-origin.
+
+    AUTHZ (IDOR closure): gated on ``require_admin`` — the SAME
+    authorization the sibling JSON audit-events route
+    (``routes/audit_events.py``) uses, with the same rationale: the
+    cross-bouncer timeline this UI fetches surfaces other principals'
+    identities + resources across every bouncer, so audit-log
+    contents may leak data. A session id is NOT a capability secret,
+    so a logged-in low-priv ``requester`` must not be able to read an
+    arbitrary session's timeline. Anonymous → 401, non-admin → 403
+    (both raised by the dependency); only admins reach this body."""
+    from ..flight_recorder_ui import render_flight_recorder_ui
+
+    return HTMLResponse(
+        content=render_flight_recorder_ui(),
+        headers={"Content-Security-Policy": _FLIGHT_RECORDER_CSP},
+    )
+
+
+@router.get("/flight-recorder/timeline")
+def flight_recorder_timeline(
+    request: Request,
+    _: Annotated[Any, Depends(require_admin)],
+) -> Response:
+    """Return the cross-bouncer correlation timeline JSON for one
+    session (#723). Reuses the SAME cross-bouncer fan-out the CLI uses
+    (:func:`fetch_session_events_via_fanout`) + the pure-function
+    timeline assembler, so the web surface and the CLI produce the
+    identical timeline shape. Read-only.
+
+    AUTHZ (IDOR closure): gated on ``require_admin`` — identical to the
+    sibling JSON audit-events route (``routes/audit_events.py``), which
+    serves the SAME cross-bouncer OCSF data and is gated admin-only
+    because "audit-log contents may leak data". A session id is NOT a
+    capability secret; without this gate any logged-in low-priv
+    ``requester`` could read an arbitrary session's full cross-bouncer
+    timeline (other principals' identities + resources). Anonymous →
+    401, non-admin → 403 (both raised by the dependency).
+
+    The honesty / coverage block (unreachable + zero-event bouncers,
+    partial flag, gaps) travels in the payload so the UI can surface
+    it — never a silent empty result."""
+    from ..agent_diff import fetch_session_events_via_fanout
+    from ..flight_recorder import assemble_timeline
+
+    session_id = (request.query_params.get("session") or "").strip()
+    if not session_id:
+        raise HTTPException(
+            status_code=400,
+            detail="missing required query parameter: session",
+        )
+    since = (request.query_params.get("since") or "1h").strip() or "1h"
+    until = (request.query_params.get("until") or "").strip() or None
+    # The browser never holds the off-loopback /audit/events bearer
+    # token; the iam-jit server reads it from the same env var the rest
+    # of the fan-out call sites use so the server-to-bouncer hop is
+    # authenticated without ever embedding the secret in the page.
+    audit_token = os.environ.get("IAM_JIT_AUDIT_EVENTS_TOKEN") or None
+
+    events, notes_by_bouncer = fetch_session_events_via_fanout(
+        session_id=session_id,
+        since=since,
+        until=until,
+        audit_events_token=audit_token,
+    )
+    payload = assemble_timeline(
+        session_id=session_id,
+        events=events,
+        notes_by_bouncer=notes_by_bouncer,
+        since=since,
+        until=until,
+    )
+    from fastapi.responses import JSONResponse
+
+    return JSONResponse(content=payload)
 
 
 # ---- New request ----

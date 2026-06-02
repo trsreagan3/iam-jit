@@ -2545,6 +2545,13 @@ register_agent_diff_command(main)
 from .cli_role_usage import register_role_usage_command  # noqa: E402
 register_role_usage_command(main)
 
+# #723 / BUILD-2 — `iam-jit flight-recorder` stitches one agent session
+# across all bouncers into an ordered cross-protocol timeline (the data
+# behind the scrubbable replay UI). Reuses the SAME cross-bouncer fan-out
+# fetch as agent-diff / role-usage. Read-only; honest coverage block.
+from .cli_flight_recorder import register_flight_recorder_command  # noqa: E402
+register_flight_recorder_command(main)
+
 
 # #491 / §A91 LAUNCH-BLOCKER — `iam-jit org-policy {sign,verify}`.
 # IT-side counterpart to #490's engineer-side `init --managed`. Sign
