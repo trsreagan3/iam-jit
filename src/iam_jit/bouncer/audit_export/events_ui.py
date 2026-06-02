@@ -87,15 +87,71 @@ logger = logging.getLogger(__name__)
 BOUNCER_NAME = "ibounce"
 
 
+# _AUDIT_FILTER_MATCH_JS is the single source of truth for the live
+# client-side freeform-filter matcher. It is injected into the page
+# (replacing the ``{{FILTER_JS}}`` token) AND executed verbatim by the
+# node-driven test in tests/bouncer/test_audit_events_ui.py, so the
+# filter grammar can never silently rot again (the old tests only
+# string-matched the HTML and never ran the JS). Grammar mirrors
+# gbounce's ``auditFilterMatchJS``:
+#
+#     ""            -> matches everything
+#     field=value   -> case-insensitive substring on that column
+#     field~regex   -> case-insensitive regex on that column
+#     anything else -> case-insensitive substring across all columns
+#
+# Recognised fields: time, severity, type (event_type/et), actor,
+# op (operation), verdict (v). An unknown field name falls back to a
+# whole-string substring match so a typo never hides every row.
+_AUDIT_FILTER_MATCH_JS = r"""
+  function auditFilterFieldList(f) {
+    return [f.time, f.severity, f.type, f.actor, f.op, f.verdict];
+  }
+  function auditFilterMatch(f, query) {
+    f = f || {};
+    var q = (query == null ? "" : String(query)).trim();
+    if (!q) { return true; }
+    var m = /^([A-Za-z_]+)\s*([=~])\s*([\s\S]*)$/.exec(q);
+    if (m) {
+      var aliases = {
+        time: "time", severity: "severity", sev: "severity",
+        type: "type", event_type: "type", et: "type",
+        actor: "actor", op: "op", operation: "op",
+        verdict: "verdict", v: "verdict"
+      };
+      var key = aliases[m[1].toLowerCase()];
+      if (key) {
+        var hay = String(f[key] == null ? "" : f[key]);
+        var val = m[3];
+        if (m[2] === "=") {
+          return hay.toLowerCase().indexOf(val.trim().toLowerCase()) !== -1;
+        }
+        try { return new RegExp(val, "i").test(hay); }
+        catch (e) { return false; }
+      }
+    }
+    var all = auditFilterFieldList(f).map(function (v) {
+      return v == null ? "" : String(v);
+    }).join(" ␟ ").toLowerCase();
+    return all.indexOf(q.toLowerCase()) !== -1;
+  }
+"""
+
+
 def render_audit_events_ui(*, bouncer_name: str = BOUNCER_NAME) -> str:
     """Return the rendered HTML page for GET /.
 
     ``bouncer_name`` is HTML-escaped before substitution so an
     operator who runs ibounce under an exotic instance name can't
     inject script via the rendered title.
+
+    The trusted ``{{FILTER_JS}}`` block is substituted FIRST so an
+    escaped product name can never smuggle a ``{{FILTER_JS}}`` token of
+    its own into the page.
     """
+    out = _TEMPLATE.replace("{{FILTER_JS}}", _AUDIT_FILTER_MATCH_JS)
     safe = _html.escape(bouncer_name)
-    return _TEMPLATE.replace("{{BOUNCER_NAME}}", safe)
+    return out.replace("{{BOUNCER_NAME}}", safe)
 
 
 # The HTML template is kept inline as a single triple-quoted constant
@@ -394,6 +450,7 @@ footer {
 <script>
 "use strict";
 (function () {
+{{FILTER_JS}}
   var POLL_MS = 2000;
   // #425 / §A64: 10K hard cap on rendered rows (virtualized FIFO).
   // The "shown" counter surfaces how many we kept vs how many we saw
@@ -565,6 +622,16 @@ footer {
     span.textContent = v.label;
     tdv.appendChild(span);
     tr.appendChild(tdv);
+    // Stash the event + the freeform-matcher field set on the row so
+    // every filter can re-evaluate the already-rendered row live,
+    // without re-fetching from the server (the bug this fixes: the old
+    // code only changed what the NEXT poll fetched, leaving stale rows
+    // on screen).
+    tr._ev = ev;
+    tr._fields = {
+      time: cells[0], severity: cells[1], type: cells[2],
+      actor: cells[3], op: cells[4], verdict: v.label
+    };
     return tr;
   }
 
@@ -575,12 +642,10 @@ footer {
     events.forEach(function (ev) {
       var id = eventId(ev);
       if (seenIds[id]) return;
-      // Client-side filter: action/resource regex + reason regex.
-      // The session_id + verdict are already enforced server-side
-      // via filter= params, but the action/reason controls use a
-      // multi-field OR semantic the server's AND-only grammar
-      // can't express cleanly — we keep them client-side.
-      if (!passesClientFilters(ev)) return;
+      // ALL row-level filters are now client-side + live (see
+      // applyClientFilters). We render every fetched row and let the
+      // filter toggle its visibility, so broadening a filter reveals
+      // rows that were already fetched instead of leaving stale ones.
       seenIds[id] = true;
       var tms = eventTimeMs(ev);
       if (tms > lastTimeMs) lastTimeMs = tms;
@@ -594,7 +659,9 @@ footer {
     while (elBody.children.length > MAX_ROWS) {
       elBody.removeChild(elBody.firstChild);
     }
-    updateShownCount();
+    // Re-run the active filters over the (now larger) rendered set so
+    // newly appended rows obey whatever filter is currently typed.
+    applyClientFilters();
     window.scrollTo(0, document.body.scrollHeight);
   }
 
@@ -622,19 +689,79 @@ footer {
     return "";
   }
 
-  function passesClientFilters(ev) {
+  function extractSessionId(ev) {
+    var u = ev && ev.unmapped && ev.unmapped.iam_jit || {};
+    if (u.agent && u.agent.session_id) return String(u.agent.session_id);
+    if (u.session_id) return String(u.session_id);
+    return "";
+  }
+
+  // passesAllFilters is the single client-side gate for one event. It
+  // combines EVERY row-level control so the rendered table reacts to
+  // every filter live, independent of the poll cursor:
+  //   * freeform input  -> the shared auditFilterMatch grammar
+  //   * session input    -> substring on agent.session_id
+  //   * verdict toggle   -> allow / deny / both
+  //   * action input     -> regex over operation OR first resource uid
+  //   * reason input     -> regex over the decision reason
+  // (Time-range stays a server-side FETCH WINDOW; see buildQueryParams.)
+  function passesAllFilters(ev, fields) {
+    fields = fields || {};
+    // Freeform matcher (shared with the node-executed test).
+    if (!auditFilterMatch(fields, (elFilter.value || ""))) return false;
+    // Session id substring.
+    var sess = (elFilterSession.value || "").trim();
+    if (sess) {
+      var sid = extractSessionId(ev);
+      if (sid.toLowerCase().indexOf(sess.toLowerCase()) === -1) return false;
+    }
+    // Verdict toggle (allow / deny / both).
+    if (verdictMode === "allow" || verdictMode === "deny") {
+      var v = classifyVerdict(ev).cls;
+      if (v !== verdictMode) return false;
+    }
+    // Action / resource regex over operation OR first resource uid.
     var actionRe = compileRegex((elFilterAction.value || "").trim());
     if (actionRe) {
       var op = extractOperation(ev);
       var resUid = extractResourceUid(ev);
       if (!actionRe.test(op) && !actionRe.test(resUid)) return false;
     }
+    // Reason regex.
     var reasonRe = compileRegex((elFilterReason.value || "").trim());
     if (reasonRe) {
-      var reason = extractReason(ev);
-      if (!reasonRe.test(reason)) return false;
+      if (!reasonRe.test(extractReason(ev))) return false;
     }
     return true;
+  }
+
+  // applyClientFilters iterates ALL rendered rows, toggles each row's
+  // visibility through passesAllFilters, and updates the "shown"
+  // counter. Filtering is purely client-side over the rendered set —
+  // it never depends on the poll cursor, so changing any control
+  // narrows/broadens the visible table immediately.
+  function applyClientFilters() {
+    var rows = elBody.children;
+    var shown = 0;
+    for (var i = 0; i < rows.length; i++) {
+      var tr = rows[i];
+      if (!tr._fields) { continue; } // empty / cleared placeholder row
+      if (passesAllFilters(tr._ev, tr._fields)) {
+        tr.style.display = "";
+        shown += 1;
+      } else {
+        tr.style.display = "none";
+      }
+    }
+    var anyFilter = !!(
+      (elFilter.value || "").trim() ||
+      (elFilterSession.value || "").trim() ||
+      (elFilterAction.value || "").trim() ||
+      (elFilterReason.value || "").trim() ||
+      verdictMode
+    );
+    elFilter.classList.toggle("active", !!(elFilter.value || "").trim());
+    if (elCountShown) elCountShown.textContent = String(anyFilter ? shown : rows.length);
   }
 
   function parseNdjson(text) {
@@ -672,9 +799,19 @@ footer {
 
   function buildQueryParams(opts) {
     // Shared server-side parameter builder for poll + export. opts:
-    //   { limit, format, livePoll }
+    //   { limit, format, livePoll, serverFilter }
     // livePoll=true uses the polling cursor (since=<lastTimeMs+1>);
     // livePoll=false uses the range-window since.
+    //
+    // serverFilter splits the two callers apart and is the heart of
+    // this fix. The LIVE POLL (serverFilter=false) deliberately does
+    // NOT push the row-level filters (freeform / session / verdict) to
+    // the server: those are applied client-side by applyClientFilters
+    // so broadening a filter immediately reveals already-fetched rows
+    // instead of waiting for a re-fetch (the bug). EXPORT
+    // (serverFilter=true) DOES push them so the downloaded file
+    // matches the operator's filtered view. The time-range `since`
+    // is the one legitimate fetch window and is sent for BOTH.
     var qs = [];
     qs.push("limit=" + (opts.limit || 200));
     if (opts.format) qs.push("format=" + encodeURIComponent(opts.format));
@@ -686,29 +823,35 @@ footer {
       var rangeIso = computeRangeSinceIso();
       if (rangeIso) qs.push("since=" + encodeURIComponent(rangeIso));
     }
-    // Server-side filter slot 1: the freeform input.
-    var f = (elFilter.value || "").trim();
-    if (f) qs.push("filter=" + encodeURIComponent(f));
-    // Server-side filter slot 2: session id shortcut.
-    var sess = (elFilterSession.value || "").trim();
-    if (sess) {
-      qs.push("filter=" + encodeURIComponent(
-        "unmapped.iam_jit.agent.session_id=" + sess,
-      ));
-    }
-    // Server-side filter slot 3: verdict.
-    if (verdictMode === "allow") {
-      qs.push("filter=" + encodeURIComponent("verdict=ALLOW"));
-    } else if (verdictMode === "deny") {
-      qs.push("filter=" + encodeURIComponent("verdict=DENY"));
+    if (opts.serverFilter) {
+      // Server-side filter slot 1: the freeform input.
+      var f = (elFilter.value || "").trim();
+      if (f) qs.push("filter=" + encodeURIComponent(f));
+      // Server-side filter slot 2: session id shortcut.
+      var sess = (elFilterSession.value || "").trim();
+      if (sess) {
+        qs.push("filter=" + encodeURIComponent(
+          "unmapped.iam_jit.agent.session_id=" + sess,
+        ));
+      }
+      // Server-side filter slot 3: verdict.
+      if (verdictMode === "allow") {
+        qs.push("filter=" + encodeURIComponent("verdict=ALLOW"));
+      } else if (verdictMode === "deny") {
+        qs.push("filter=" + encodeURIComponent("verdict=DENY"));
+      }
     }
     return qs.join("&");
   }
 
   function buildUrl() {
+    // Live poll: time-range fetch window only. The row-level filters
+    // (freeform / session / verdict) are applied client-side, never
+    // pushed to the server, so they re-filter rendered rows live.
     return "/audit/events?" + buildQueryParams({
       limit: 200,
       livePoll: true,
+      serverFilter: false,
     });
   }
 
@@ -775,22 +918,19 @@ footer {
     tr.appendChild(td);
     elBody.appendChild(tr);
   });
-  elFilter.addEventListener("change", function () {
-    // Force a re-fetch from the same since cursor; rows we already
-    // rendered stay on screen, but new poll uses the new filter.
-    poll();
-  });
+  // Bind EVERY row-level filter to the LIVE input so it re-filters the
+  // already-rendered rows immediately (no forced re-fetch). This is the
+  // fix: the old code only changed what the NEXT poll fetched, leaving
+  // stale rows on screen.
+  elFilter.addEventListener("input", applyClientFilters);
 
-  // #425 / §A64 — wire the new filter inputs. Server-side filters
-  // (session, verdict, range) re-fetch; client-side filters
-  // (action/reason regex) re-run on the existing buffer next poll.
-  function wireRefetch(el) {
+  function wireLiveFilter(el) {
     if (!el) return;
-    el.addEventListener("change", function () { poll(); });
+    el.addEventListener("input", applyClientFilters);
   }
-  wireRefetch(elFilterSession);
-  wireRefetch(elFilterAction);
-  wireRefetch(elFilterReason);
+  wireLiveFilter(elFilterSession);
+  wireLiveFilter(elFilterAction);
+  wireLiveFilter(elFilterReason);
 
   // Time-range buttons. Multi-selection guard: exactly one active.
   var rangeButtons = document.querySelectorAll(".range-btn[data-range]");
@@ -854,7 +994,8 @@ footer {
       verdictButtons.forEach(function (other) {
         other.classList.toggle("active", other === b);
       });
-      poll();
+      // Verdict is now a live client-side filter, not a re-fetch.
+      applyClientFilters();
     });
   });
 
@@ -868,6 +1009,7 @@ footer {
       limit: EXPORT_LIMIT,
       format: format,
       livePoll: false,
+      serverFilter: true,
     });
     var req = new XMLHttpRequest();
     req.open("GET", url, true);
