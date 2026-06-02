@@ -1205,6 +1205,189 @@ def _pick_claude_code_default() -> pathlib.Path:
     return _candidate_claude_code_paths()[0]
 
 
+# ---------------------------------------------------------------------------
+# #683/#681 — Claude Code env-block writer
+#
+# Claude Code (the CLI) reads ~/.claude/settings.json at process-start and
+# injects the "env" block into every tool subprocess it spawns. This is the
+# ONLY non-restart way to get AWS_ENDPOINT_URL / HTTP_PROXY into agent tool
+# calls without a transparent proxy (which would need sudo per
+# [[no-sudo-userspace-install]]).
+#
+# The write happens at install-claude-code time (and at `iam-jit init
+# --harness=claude-code` time). The current session does NOT pick up the
+# new env vars until a NEW Claude Code session starts — we surface this
+# honestly per [[ibounce-honest-positioning]].
+# ---------------------------------------------------------------------------
+
+
+def _claude_code_settings_path() -> pathlib.Path:
+    """Canonical global Claude Code settings path: ~/.claude/settings.json.
+
+    This is the per-user settings file (as distinct from project-level
+    .claude/settings.json). Claude Code injects the "env" block from this
+    file into every tool subprocess it launches. Writing here is the
+    permission-minimal way to wire bouncer env vars into future Claude Code
+    sessions without sudo or a transparent proxy.
+
+    Per [[no-sudo-userspace-install]] + [[permission-minimal-install]].
+    """
+    return pathlib.Path.home() / ".claude" / "settings.json"
+
+
+def _build_bouncer_env_vars() -> dict[str, str]:
+    """Return env-var dict for running bouncers (AWS_ENDPOINT_URL, HTTP_PROXY).
+
+    Reads live posture state via capture_posture(). Returns only vars for
+    bouncers that are actually running. If no bouncers are running, returns
+    an empty dict (the caller decides how to handle this).
+
+    Never raises — best-effort. Returns {} on any error.
+
+    Per [[ibounce-honest-positioning]]: only emit vars for bouncers we can
+    actually verify are running. Never emit a URL for a stopped bouncer.
+    """
+    try:
+        from .posture import capture_posture
+        snap = capture_posture()
+    except Exception:
+        return {}
+
+    env: dict[str, str] = {}
+    bouncers = snap.get("bouncers", {})
+
+    ibounce = bouncers.get("ibounce", {})
+    if ibounce.get("running") and not ibounce.get("misconfig"):
+        port = ibounce.get("port", 8767)
+        env["AWS_ENDPOINT_URL"] = f"http://127.0.0.1:{port}"
+
+    gbounce = bouncers.get("gbounce", {})
+    if gbounce.get("running") and not gbounce.get("misconfig"):
+        wire_port = gbounce.get("wire_port") or 8080
+        proxy = f"http://127.0.0.1:{wire_port}"
+        env["HTTP_PROXY"] = proxy
+        env["HTTPS_PROXY"] = proxy
+
+    return env
+
+
+def _write_claude_code_env_block(
+    settings_path: pathlib.Path,
+    env_vars: dict[str, str],
+) -> dict[str, object]:
+    """Merge *env_vars* into the "env" block of the Claude Code settings JSON.
+
+    Design:
+    - Reads the existing JSON (or starts from {} if file absent).
+    - Merges env_vars into settings["env"] (adds or updates; never removes
+      keys iam-jit did not add — per [[creates-never-mutates]]).
+    - Writes atomically (tmp → rename).
+    - Returns a structured result dict with "status" + "path" + "vars_written".
+
+    Per [[creates-never-mutates]]: we only add/update our bouncer vars.
+      We NEVER remove any pre-existing env key the operator set.
+    Per [[ibounce-honest-positioning]]: if env_vars is empty we return
+      status="no_running_bouncers" and write NOTHING — never emit a dead URL.
+    Per [[no-sudo-userspace-install]]: no elevated privileges required.
+
+    Returns dict with keys:
+      status: "written" | "no_change" | "no_running_bouncers" | "error"
+      path: str — the settings file path
+      vars_written: list[str] — keys we actually wrote/updated
+      error: str — present only when status="error"
+    """
+    if not env_vars:
+        return {
+            "status": "no_running_bouncers",
+            "path": str(settings_path),
+            "vars_written": [],
+        }
+
+    # Load existing settings (or start fresh).
+    existing: dict[str, object] = {}
+    if settings_path.exists():
+        try:
+            raw = settings_path.read_text(encoding="utf-8")
+            parsed = json.loads(raw)
+            if isinstance(parsed, dict):
+                existing = parsed
+        except Exception as exc:
+            return {
+                "status": "error",
+                "path": str(settings_path),
+                "vars_written": [],
+                "error": f"could not parse {settings_path}: {exc}",
+            }
+
+    # Merge into the "env" block.
+    current_env = existing.get("env")
+    if not isinstance(current_env, dict):
+        current_env = {}
+    existing["env"] = current_env
+
+    vars_written: list[str] = []
+    changed = False
+    for key, val in env_vars.items():
+        if current_env.get(key) != val:
+            current_env[key] = val
+            vars_written.append(key)
+            changed = True
+
+    if not changed:
+        return {
+            "status": "no_change",
+            "path": str(settings_path),
+            "vars_written": [],
+        }
+
+    # Atomic write: parent mkdir → tmp → os.replace.
+    try:
+        settings_path.parent.mkdir(parents=True, exist_ok=True)
+        tmp = settings_path.with_suffix(".json.iam-jit-tmp")
+        tmp.write_text(json.dumps(existing, indent=2) + "\n", encoding="utf-8")
+        os.replace(tmp, settings_path)
+    except Exception as exc:
+        return {
+            "status": "error",
+            "path": str(settings_path),
+            "vars_written": [],
+            "error": f"write failed: {exc}",
+        }
+
+    return {
+        "status": "written",
+        "path": str(settings_path),
+        "vars_written": vars_written,
+    }
+
+
+def _emit_restart_required_message(
+    *,
+    settings_path: pathlib.Path,
+    vars_written: list[str],
+) -> None:
+    """Emit the honest session-restart notice per [[ibounce-honest-positioning]].
+
+    The current Claude Code session does NOT inherit env vars written to
+    settings.json — only NEW sessions do. Surface this clearly so the
+    operator (or agent's human overseer) knows protection isn't active yet.
+    """
+    import sys as _sys
+    print(
+        "\n[env-wired] Bouncer env vars written to Claude Code settings:\n"
+        + "\n".join(f"  {k}" for k in vars_written)
+        + f"\n  File: {settings_path}"
+        + "\n\n"
+        "IMPORTANT: The CURRENT Claude Code session does NOT pick up these\n"
+        "env vars. Start a NEW Claude Code session for them to take effect.\n"
+        "Restart command: `claude` (or re-open your Claude Code window).\n"
+        "\n"
+        "Until restart, AWS calls in this session bypass the bouncer.\n"
+        "For immediate in-session wiring (no restart) use: iam-jit attach",
+        file=_sys.stderr,
+    )
+
+
 @mcp_group.command("install-claude-code")
 @click.option(
     "--path",
@@ -1228,10 +1411,28 @@ def _pick_claude_code_default() -> pathlib.Path:
     default=False,
     help="Just print the JSON snippet + the target path; don't write.",
 )
+@click.option(
+    "--settings-path",
+    "settings_path_override",
+    type=click.Path(dir_okay=False),
+    default=None,
+    help="#683 — Override the Claude Code settings.json path for env-block "
+         "writing (default: ~/.claude/settings.json). Used for UAT isolation.",
+)
+@click.option(
+    "--no-env-block",
+    is_flag=True,
+    default=False,
+    help="#683 — Skip writing the bouncer env vars (AWS_ENDPOINT_URL, "
+         "HTTP_PROXY) to ~/.claude/settings.json. Use when you manage env "
+         "vars separately (e.g. CI / scripted callers).",
+)
 def mcp_install_claude_code(
     explicit_path: str | None,
     dry_run: bool,
     print_only: bool,
+    settings_path_override: str | None,
+    no_env_block: bool,
 ) -> None:
     """Install iam-jit as an MCP server in Claude Code config (Claude Desktop as fallback).
 
@@ -1241,7 +1442,12 @@ def mcp_install_claude_code(
     (or updates) the `mcpServers.iam-jit` entry. Existing entries for
     other servers are preserved. Existing iam-jit entries are OVERWRITTEN.
 
-    After running, restart Claude Code so it re-reads the config.
+    Also writes the bouncer env vars (AWS_ENDPOINT_URL, HTTP_PROXY) into
+    ~/.claude/settings.json so NEW Claude Code sessions automatically route
+    traffic through the running bouncers. Per [[ibounce-honest-positioning]]
+    this command always warns that the CURRENT session needs a restart.
+
+    After running, restart Claude Code so it re-reads both config files.
 
     For other MCP clients (Cursor, Codex MCP, Devin, custom), use
     `iam-jit mcp show-config` and paste the snippet into your
@@ -1255,6 +1461,25 @@ def mcp_install_claude_code(
         click.echo("")
         click.echo("would write / merge:")
         click.echo(json.dumps(snippet, indent=2))
+        if not no_env_block:
+            settings_p = (
+                pathlib.Path(settings_path_override)
+                if settings_path_override
+                else _claude_code_settings_path()
+            )
+            env_vars = _build_bouncer_env_vars()
+            click.echo("")
+            click.echo(f"would write env block to: {settings_p}")
+            if env_vars:
+                click.echo(
+                    "env vars: "
+                    + ", ".join(f"{k}={v}" for k, v in env_vars.items())
+                )
+            else:
+                click.echo(
+                    "env vars: (none — no running bouncers detected; "
+                    "start ibounce/gbounce first)"
+                )
         if dry_run:
             click.echo("")
             click.echo("(dry run; no changes made)")
@@ -1298,6 +1523,46 @@ def mcp_install_claude_code(
         click.secho(f"✓ updated existing iam-jit MCP entry at {target}", fg="green")
     else:
         click.secho(f"✓ added iam-jit MCP server to {target}", fg="green")
+
+    # #683/#681 — Write bouncer env vars to ~/.claude/settings.json so NEW
+    # sessions automatically route traffic through the bouncers.
+    if not no_env_block:
+        settings_p = (
+            pathlib.Path(settings_path_override)
+            if settings_path_override
+            else _claude_code_settings_path()
+        )
+        env_vars = _build_bouncer_env_vars()
+        env_result = _write_claude_code_env_block(settings_p, env_vars)
+        env_status = env_result.get("status", "unknown")
+        if env_status == "written":
+            click.secho(
+                f"✓ wired bouncer env vars into {settings_p}",
+                fg="green",
+            )
+            vars_written = env_result.get("vars_written") or []
+            if isinstance(vars_written, list) and vars_written:
+                _emit_restart_required_message(
+                    settings_path=settings_p,
+                    vars_written=[str(v) for v in vars_written],
+                )
+        elif env_status == "no_change":
+            click.echo(
+                f"  env block already up-to-date in {settings_p}"
+            )
+        elif env_status == "no_running_bouncers":
+            click.secho(
+                "  [warn] no running bouncers detected — env block NOT written. "
+                "Start ibounce/gbounce then re-run this command.",
+                fg="yellow",
+            )
+        elif env_status == "error":
+            click.secho(
+                f"  [warn] could not write env block: "
+                f"{env_result.get('error', 'unknown error')}",
+                fg="yellow",
+            )
+
     click.echo(
         "  Restart Claude Code so it re-reads the config. "
         "If you don't see iam-jit's tools after restart, run "
