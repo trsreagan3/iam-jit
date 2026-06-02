@@ -2257,6 +2257,15 @@ from .cli_posture import register_posture_command  # noqa: E402
 register_posture_command(main)
 
 
+# ADOPT-3 / #717 — register `iam-jit inventory`: enumerate the agent's
+# MCP/A2A attack surface (configured MCP servers + tools, wired bouncers
+# + ports, discoverable A2A endpoints). Backed by iam_jit.inventory which
+# is the SAME module the `iam_jit_inventory` MCP tool calls — schema
+# parity by construction. Reuses posture's bouncer discovery + sanitizer.
+from .cli_inventory import register_inventory_command  # noqa: E402
+register_inventory_command(main)
+
+
 # #683 — `iam-jit attach` / `iam-jit detach`: the universal, no-restart,
 # no-sudo setup step that routes a running session's AWS calls through
 # ibounce by writing endpoint_url into ~/.aws/config (read per-invocation

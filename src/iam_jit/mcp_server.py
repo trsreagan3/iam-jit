@@ -2358,6 +2358,41 @@ TOOLS.extend([
 
 
 # ---------------------------------------------------------------------------
+# ADOPT-3 / #717 — `iam_jit_inventory` MCP attack-surface inventory tool.
+# ---------------------------------------------------------------------------
+# Mirrors the `iam-jit inventory` CLI per [[cross-product-agent-parity]].
+# Lets an agent (or a reconnaissance tool consuming the JSON) enumerate
+# its own MCP/A2A attack surface: configured MCP servers + tools, wired
+# bouncers + ports, discoverable A2A endpoints. READ-ONLY; no token
+# VALUE is ever returned (only whether a server carries auth).
+TOOLS.extend([
+    {
+        "name": "iam_jit_inventory",
+        "description": (
+            "Enumerate the agent's MCP/A2A attack surface — 'everything "
+            "this agent can reach / be reached through'. Returns: the "
+            "configured MCP servers (and, for iam-jit's own server, its "
+            "tool list; for others a 'not enumerable from static config' "
+            "marker), the bouncers wired in + their loopback ports/"
+            "endpoints (reuses `iam_jit_posture`'s bouncer discovery), "
+            "and any A2A / agent-reachable endpoints. Each entry carries "
+            "risk-relevant metadata (loopback-only? authed?). READ-ONLY: "
+            "takes no arguments, mutates nothing, makes no AWS calls. Per "
+            "[[ibounce-honest-positioning]] unknowns are marked 'unknown' "
+            "rather than fabricated, and NO token VALUE is ever returned "
+            "(only whether a server carries an auth secret + which field "
+            "names hold it). Schema version 1.0; output mirrors "
+            "`iam-jit inventory --format json`."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {},
+        },
+    },
+])
+
+
+# ---------------------------------------------------------------------------
 # #397 / #398 — ambient-autonomous-protection: setup-from-config MCP tool.
 # ---------------------------------------------------------------------------
 # Per [[ambient-autonomous-protection]]: operator writes ONE declaration
@@ -6696,6 +6731,11 @@ def _handle_request(req: dict[str, Any]) -> dict[str, Any] | None:
                 "block": detect_ibounce(),
                 "iam_jit_identity": detect_iam_jit_role(),
             })
+        elif tool_name == "iam_jit_inventory":
+            # ADOPT-3 / #717 — MCP/A2A attack-surface inventory. Same
+            # backend the `iam-jit inventory` CLI calls (schema parity).
+            from .inventory.collect import inventory_for_mcp
+            result_payload = inventory_for_mcp(args)
         elif tool_name == "iam_jit_setup_from_config":
             # #397 / #398 — ambient-autonomous-protection setup applier.
             from .cli_apply_config import apply_config_for_mcp
