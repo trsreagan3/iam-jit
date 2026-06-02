@@ -531,6 +531,90 @@ def get_assume_instructions(request_id: str) -> dict[str, Any]:
 
 
 @mcp.tool()
+def iam_jit_inspect_response_for_injection(
+    body: str,
+    content_type: str | None = None,
+    mode: str = "warn",
+    allowlist_patterns: list[str] | None = None,
+    min_confidence_for_deny: float = 0.7,
+) -> dict[str, Any]:
+    """Scan a tool response body for indirect prompt injection (#730).
+
+    Defense-in-depth: even when the bouncer (gbounce/ibounce/dbounce/
+    kbouncer) is offline or not in MITM mode, the agent harness can
+    call this BEFORE feeding any tool-call response into LLM context.
+    Catches indirect-prompt-injection payloads (hidden HTML comments,
+    forged tool-result envelopes, role-confusion smuggling) — the top
+    OWASP Agentic 2026 risk.
+
+    Args:
+      body: the response body text to scan.
+      content_type: optional Content-Type for short-circuiting binary
+        payloads (image/* etc.).
+      mode: action mode — "warn" (pass + add warning), "strip" (redact
+        matching regions), "deny" (block when confidence >= threshold).
+      allowlist_patterns: regexes that suppress detection in known-
+        clean contexts.
+      min_confidence_for_deny: deny-mode confidence floor (default 0.7).
+
+    Returns a dict with:
+      detected (bool), indicators (list of {rule, snippet, layer,
+      severity, source}), confidence (0.0-1.0), suggested_action,
+      decided_action (after profile reconciliation), modified_body
+      (set iff decided_action == 'strip'), and low_confidence_explanation
+      (set iff confidence < 0.5).
+
+    PURE-LOCAL: this tool does NOT call the iam-jit HTTP API. The
+    scanner runs in-process inside the MCP server.
+    """
+    # Lazy import — keeps the MCP server able to start even if the
+    # iam_jit package isn't importable for some reason (the rest of
+    # the MCP tools talk HTTP and don't need the lib loaded).
+    from iam_jit.injection_scanner import (
+        ProfileConfig,
+        apply_strip,
+        decide_action,
+        scan_response_body,
+    )
+
+    allowlist = tuple(allowlist_patterns or ())
+    result = scan_response_body(
+        body,
+        content_type=content_type,
+        allowlist_patterns=allowlist,
+    )
+    profile = ProfileConfig(
+        enabled=True,
+        action=mode if mode in ("warn", "strip", "deny", "allow") else "warn",  # type: ignore[arg-type]
+        allowlist_patterns=allowlist,
+        min_confidence_for_deny=min_confidence_for_deny,
+    )
+    decided = decide_action(result, profile)
+    response: dict[str, Any] = {
+        "detected": result.detected,
+        "indicators": [
+            {
+                "rule": i.rule,
+                "snippet": i.snippet,
+                "layer": i.layer,
+                "severity": i.severity,
+                "source": i.source,
+            }
+            for i in result.indicators
+        ],
+        "confidence": result.confidence,
+        "suggested_action": result.suggested_action,
+        "decided_action": decided,
+        "body_truncated": result.body_truncated,
+        "skipped_reason": result.skipped_reason,
+        "low_confidence_explanation": result.low_confidence_explanation,
+    }
+    if decided == "strip":
+        response["modified_body"] = apply_strip(body, result)
+    return response
+
+
+@mcp.tool()
 def analyze_policy(
     policy: dict[str, Any],
     description: str = "",
