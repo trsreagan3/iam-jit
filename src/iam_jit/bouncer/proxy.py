@@ -338,6 +338,14 @@ _audit_object_storage_writer: Any | None = None
 # file at `{dir}/{agent.session_id}.ndjson`. Events without a resolvable
 # session_id are silently dropped by the recorder itself.
 _session_recorder: Any | None = None
+# #720 / ADOPT-6 — OpenTelemetry GenAI-span exporter. Default OFF; the
+# operator opts in via `--otel-endpoint URL` (or IAM_JIT_OTEL_* / the
+# standard OTEL_EXPORTER_OTLP_ENDPOINT env vars). When wired, every
+# event the bouncer emits is additionally mapped to a `gen_ai.*` span
+# and exported via OTLP so it shows up in Datadog/Honeycomb/Grafana.
+# The exporter's own BatchSpanProcessor does the off-thread send; the
+# `export` call is fire-and-forget + fail-soft.
+_otel_span_exporter: Any | None = None
 # #424 / §A63 — disk-pressure circuit-breaker live state. Populated by
 # serve() at startup (when audit_log_path is set so there's a
 # directory to monitor) + ticked every
@@ -539,6 +547,14 @@ def register_session_recorder(recorder: Any | None) -> None:
     _session_recorder = recorder
 
 
+def register_otel_span_exporter(exporter: Any | None) -> None:
+    """#720 — install the OpenTelemetry GenAI-span exporter. Pass None
+    to clear. The exporter must already be `exporter.start()`-ed before
+    registration so the first event's span emit doesn't no-op."""
+    global _otel_span_exporter
+    _otel_span_exporter = exporter
+
+
 def register_disk_pressure_state(state: Any | None) -> None:
     """#424 / §A63 — install the disk-pressure state holder. Pass None
     to clear. /healthz + _handle_request read this via the
@@ -625,6 +641,16 @@ def _emit_audit_event_raw(event: dict) -> None:
             _session_recorder.record(event)
         except Exception as e:
             logger.warning("session recorder enqueue failed: %s", e)
+    # #720 / ADOPT-6 — OpenTelemetry GenAI-span export. Maps the event
+    # to a `gen_ai.*` span + hands it to the exporter's BatchSpanProcessor
+    # (off-thread, batched send). `export` is fail-soft + never blocks;
+    # the belt-and-braces try here matches every other emitter so an
+    # exporter bug never raises into the proxy hot path.
+    if _otel_span_exporter is not None:
+        try:
+            _otel_span_exporter.export(event)
+        except Exception as e:
+            logger.warning("otel span exporter enqueue failed: %s", e)
 
 
 def _emit_audit_event(event: dict) -> None:
@@ -1668,6 +1694,33 @@ class ProxyConfig:
     audit_object_storage_rotation_minutes: int = 5
     audit_object_storage_max_size_mb: int = 16
     audit_object_storage_instance_id: str | None = None
+
+    # #720 / ADOPT-6 — OpenTelemetry GenAI-span export. All OFF by
+    # default per [[v1-scope-bar]]. When `otel_endpoint` is set (OR the
+    # standard OTEL_EXPORTER_OTLP_ENDPOINT env var, which the underlying
+    # SDK exporter reads when otel_endpoint is None but otel_enabled is
+    # True), every bouncer decision is additionally mapped to a `gen_ai.*`
+    # span + exported via OTLP. Requires the optional [otel] extra; a
+    # clear "needs the [otel] extra" error fires at serve() time when the
+    # libs are absent (never a silent no-op, never a crash). Per
+    # [[no-hosted-saas]] iam-jit-the-company NEVER receives this traffic;
+    # the operator's own collector endpoint only.
+    otel_enabled: bool = False
+    """Master switch — True when the operator passed --otel-endpoint OR
+    --otel-from-env. False = the exporter is never constructed (zero
+    extra import cost)."""
+    otel_endpoint: str | None = None
+    """Explicit OTLP collector endpoint. None + otel_enabled=True means
+    'read OTEL_EXPORTER_OTLP_ENDPOINT from the environment' (the SDK
+    exporter's own default)."""
+    otel_protocol: str = "http/protobuf"
+    """OTLP transport: 'http/protobuf' (default, broadest reach) or
+    'grpc'."""
+    otel_headers: dict | None = None
+    """Optional OTLP headers (e.g. {'x-honeycomb-team': '...'}). None =
+    rely on OTEL_EXPORTER_OTLP_HEADERS env var if the operator set one."""
+    otel_service_name: str = "ibounce"
+    """OTel resource service.name for the emitted spans."""
 
     audit_events_token: str | None = None
     """#271 — bearer token required on GET /audit/events when the
@@ -4928,6 +4981,36 @@ async def serve(config: ProxyConfig, *, store: BouncerStore) -> None:
     session_recorder = None
     audit_security_lake_writer = None
     audit_object_storage_writer = None
+    otel_span_exporter = None  # #720 / ADOPT-6 — OTel GenAI-span export.
+    # #720 / ADOPT-6 — OpenTelemetry GenAI-span exporter. Default OFF;
+    # only constructed when the operator opted in (--otel-endpoint /
+    # --otel-from-env). Construction fails LOUD if the optional [otel]
+    # extra isn't installed (the operator explicitly asked for it, so a
+    # silent no-op would be dishonest per [[ibounce-honest-positioning]]).
+    # Once started, every emit is fire-and-forget + fail-soft.
+    if config.otel_enabled:
+        from .audit_export import OTelDependencyError, OTelSpanExporter
+        try:
+            otel_span_exporter = OTelSpanExporter(
+                endpoint=config.otel_endpoint,
+                protocol=config.otel_protocol,
+                headers=config.otel_headers,
+                service_name=config.otel_service_name,
+            )
+            otel_span_exporter.start()
+        except OTelDependencyError:
+            # Fatal at serve() time — operator asked for OTel export +
+            # we can't honor it. Refusing with the clear pip-hint message
+            # is safer than a silent no-op.
+            raise
+        register_otel_span_exporter(otel_span_exporter)
+        logger.info(
+            "OpenTelemetry GenAI-span export enabled: endpoint=%s protocol=%s "
+            "service=%s",
+            config.otel_endpoint or "(OTEL_EXPORTER_OTLP_ENDPOINT env)",
+            config.otel_protocol,
+            config.otel_service_name,
+        )
     # #285 — per-session NDJSON recording. Default OFF; only initialised
     # when the operator passed `--record-sessions-dir`. start() is
     # synchronous (matches the recorder's synchronous record() path).
@@ -5905,6 +5988,16 @@ async def serve(config: ProxyConfig, *, store: BouncerStore) -> None:
             except Exception as e:
                 logger.warning("session recorder stop failed: %s", e)
             register_session_recorder(None)
+        # #720 / ADOPT-6 — OTel exporter teardown force-flushes the batch
+        # span processor (drains queued spans) + shuts down the OTLP
+        # transport synchronously so a clean shutdown doesn't drop
+        # in-flight spans. Fail-soft like every other teardown.
+        if otel_span_exporter is not None:
+            try:
+                otel_span_exporter.stop()
+            except Exception as e:
+                logger.warning("otel span exporter stop failed: %s", e)
+            register_otel_span_exporter(None)
         # #253 — rule-expiry sweeper + burst detector teardown. Cancel
         # the sweeper task FIRST so it doesn't try to write to a torn-
         # down audit channel on its way out. Then clear the burst-

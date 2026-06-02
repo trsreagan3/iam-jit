@@ -4166,6 +4166,57 @@ def _parse_duration(raw: str) -> int:
          "identity + operation details so it ships opt-in.",
 )
 @click.option(
+    "--otel-endpoint",
+    "otel_endpoint",
+    default=None,
+    envvar="IAM_JIT_OTEL_ENDPOINT",
+    help="#720 / ADOPT-6 — export every bouncer decision as an "
+         "OpenTelemetry GenAI span (gen_ai.* semantic conventions) to "
+         "this OTLP collector endpoint. Spans show up in "
+         "Datadog/Honeycomb/Grafana automatically alongside your agent's "
+         "own GenAI traces. Requires the optional [otel] extra "
+         "(pip install 'iam-jit[otel]'). Per [[no-hosted-saas]] "
+         "iam-jit-the-company NEVER receives this traffic; your collector "
+         "only. Setting this enables OTel export. Default off.",
+)
+@click.option(
+    "--otel-from-env",
+    "otel_from_env",
+    is_flag=True, default=False,
+    help="#720 — enable OTel GenAI-span export using the standard OTel "
+         "environment variables (OTEL_EXPORTER_OTLP_ENDPOINT, "
+         "OTEL_EXPORTER_OTLP_HEADERS, ...) for the endpoint + headers "
+         "instead of --otel-endpoint. Use when your environment is "
+         "already configured for OpenTelemetry.",
+)
+@click.option(
+    "--otel-protocol",
+    "otel_protocol",
+    type=click.Choice(["http/protobuf", "grpc"], case_sensitive=False),
+    default="http/protobuf", show_default=True,
+    envvar="IAM_JIT_OTEL_PROTOCOL",
+    help="#720 — OTLP transport. `http/protobuf` (default, broadest "
+         "reach) or `grpc`.",
+)
+@click.option(
+    "--otel-header",
+    "otel_headers",
+    multiple=True,
+    metavar="KEY=VALUE",
+    help="#720 — extra OTLP header (repeatable), e.g. "
+         "`--otel-header x-honeycomb-team=YOUR_KEY`. Omit to rely on "
+         "OTEL_EXPORTER_OTLP_HEADERS if your environment sets it. Header "
+         "values are NEVER logged.",
+)
+@click.option(
+    "--otel-service-name",
+    "otel_service_name",
+    default="ibounce", show_default=True,
+    envvar="IAM_JIT_OTEL_SERVICE_NAME",
+    help="#720 — OTel resource service.name for the emitted spans. "
+         "Filter your trace store by this to catch every bouncer span.",
+)
+@click.option(
     "--audit-webhook-url",
     "audit_webhook_url",
     default=None,
@@ -4578,6 +4629,11 @@ def run_cmd(
     disk_pressure_crit_free_bytes: int | None,
     ignore_disk_pressure: bool,
     record_sessions_dir: str | None,
+    otel_endpoint: str | None,
+    otel_from_env: bool,
+    otel_protocol: str,
+    otel_headers: tuple[str, ...],
+    otel_service_name: str,
     audit_webhook_url: str | None,
     audit_webhook_token: str | None,
     audit_webhook_batch_size: int,
@@ -4812,6 +4868,37 @@ def run_cmd(
             fg="red", err=True,
         )
         sys.exit(2)
+
+    # #720 / ADOPT-6 — resolve OTel GenAI-span export config. Enabled
+    # when the operator passed --otel-endpoint OR --otel-from-env. The
+    # repeatable --otel-header KEY=VALUE flags parse into a dict. The
+    # dependency check + endpoint validation happen at serve() time (the
+    # exporter constructor raises OTelDependencyError with a pip hint);
+    # we surface a friendly CLI message here too so the operator sees it
+    # at parse time rather than deep in startup.
+    otel_enabled = bool(otel_endpoint) or bool(otel_from_env)
+    otel_headers_dict: dict[str, str] | None = None
+    if otel_headers:
+        otel_headers_dict = {}
+        for raw in otel_headers:
+            if "=" not in raw:
+                click.secho(
+                    f"--otel-header must be KEY=VALUE (got {raw!r})",
+                    fg="red", err=True,
+                )
+                sys.exit(2)
+            k, _, v = raw.partition("=")
+            otel_headers_dict[k.strip()] = v.strip()
+    if otel_enabled:
+        from .bouncer.audit_export import OTelDependencyError, otel_available
+        if not otel_available():
+            click.secho(
+                "OpenTelemetry export requires the optional [otel] extra. "
+                "Install it: pip install 'iam-jit[otel]' "
+                "(opentelemetry-sdk + opentelemetry-exporter-otlp).",
+                fg="red", err=True,
+            )
+            sys.exit(2)
 
     # #252 — license + SSRF gates fire HERE (at CLI parse), not in
     # serve(), so the operator sees the error immediately rather than
@@ -5199,6 +5286,11 @@ def run_cmd(
         disk_pressure_crit_free_bytes=disk_pressure_crit_free_bytes,
         ignore_disk_pressure=ignore_disk_pressure,
         record_sessions_dir=record_sessions_dir,
+        otel_enabled=otel_enabled,
+        otel_endpoint=otel_endpoint,
+        otel_protocol=otel_protocol.lower(),
+        otel_headers=otel_headers_dict,
+        otel_service_name=otel_service_name,
         audit_webhook_url=audit_webhook_url,
         audit_webhook_token=audit_webhook_token,
         audit_webhook_batch_size=audit_webhook_batch_size,
@@ -5401,6 +5493,17 @@ def run_cmd(
                 f"session recorder: {record_sessions_dir} "
                 f"(one .ndjson per agent session; replay via "
                 f"`iam-jit session replay`)",
+                err=True,
+            )
+        # #720 / ADOPT-6 — surface OTel GenAI-span export in the banner.
+        # Default OFF; only mention when opted in. Never echo header
+        # values (they may carry a Honeycomb/Datadog API key).
+        if otel_enabled:
+            click.echo(
+                f"OpenTelemetry GenAI-span export: "
+                f"endpoint={otel_endpoint or '(OTEL_EXPORTER_OTLP_ENDPOINT env)'} "
+                f"(protocol={otel_protocol}, service={otel_service_name}; "
+                f"bouncer decisions as gen_ai.* spans)",
                 err=True,
             )
         if audit_webhook_url:

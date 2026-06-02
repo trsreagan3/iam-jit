@@ -306,6 +306,15 @@ from .webhook import (
     WebhookPusher,
     validate_webhook_url,
 )
+from .otel import (
+    DEFAULT_OTLP_PROTOCOL as OTEL_DEFAULT_OTLP_PROTOCOL,
+    DEFAULT_SERVICE_NAME as OTEL_DEFAULT_SERVICE_NAME,
+    GENAI_SEMCONV_VERSION,
+    OTelDependencyError,
+    OTelSpanExporter,
+    event_to_span_fields,
+    otel_available,
+)
 
 __all__ = [
     "ADMIN_ACTION_ALERT_RULE_EDIT",
@@ -408,6 +417,14 @@ __all__ = [
     "WebhookDestination",
     "WebhookLicenseError",
     "WebhookPusher",
+    # #720 / ADOPT-6 — OpenTelemetry GenAI-span exporter.
+    "GENAI_SEMCONV_VERSION",
+    "OTEL_DEFAULT_OTLP_PROTOCOL",
+    "OTEL_DEFAULT_SERVICE_NAME",
+    "OTelDependencyError",
+    "OTelSpanExporter",
+    "event_to_span_fields",
+    "otel_available",
     "active_agent_session",
     "archive_logs",
     "disk_status",
