@@ -3207,6 +3207,60 @@ def _ghost_resolve_session_id(config: "ProxyConfig") -> str:
     )
 
 
+# SECURITY MED-1 (#728): key-name fragments that mark a field as
+# secret-bearing in a captured write body. Substring + suffix matching
+# is case-insensitive (mirrors the diagnostics redactor style in
+# `iam_jit.bouncer.diagnostics._SENSITIVE_KEY_FRAGMENTS` + dbounce's
+# SQL redactor): `SecretString`, `MasterUserPassword`, `LoginProfile`
+# `Password`, `ClientSecret`, KMS `Plaintext`, `*Token`, `PrivateKey`
+# all match. The redactor keeps the KEY (so the operator still sees
+# WHAT field was set) but replaces the VALUE with `[REDACTED:<key>]`
+# so a ghost transcript can't smuggle secrets verbatim to disk —
+# closing the gap between this code's honesty docstring and behavior.
+_GHOST_SENSITIVE_KEY_FRAGMENTS: tuple[str, ...] = (
+    "password",
+    "passwd",
+    "secret",
+    "token",
+    "plaintext",       # kms:Encrypt/GenerateDataKey Plaintext
+    "privatekey",
+    "private_key",
+    "masteruserpassword",
+    "clientsecret",
+    "client_secret",
+    "credential",
+    "passphrase",
+)
+
+
+def _ghost_key_is_sensitive(key: str) -> bool:
+    """True if a (case-insensitive) field name names a secret-bearing
+    value that must be redacted before persistence."""
+    lk = str(key).lower()
+    return any(frag in lk for frag in _GHOST_SENSITIVE_KEY_FRAGMENTS)
+
+
+def _ghost_redact_sensitive(value: Any, *, key: str | None = None) -> Any:
+    """Recursively redact secret-bearing values in a parsed write body.
+
+    Keeps key names + structure intact; replaces any value whose KEY
+    matches the sensitive denylist with ``[REDACTED:<key>]``. Walks
+    nested dicts + lists so e.g. an RDS ``MasterUserPassword`` or a
+    secretsmanager ``SecretString`` is scrubbed no matter how deep.
+    """
+    if key is not None and _ghost_key_is_sensitive(key):
+        return f"[REDACTED:{key}]"
+    if isinstance(value, dict):
+        return {
+            k: _ghost_redact_sensitive(v, key=k) for k, v in value.items()
+        }
+    if isinstance(value, list):
+        # No key to match on list items; recurse to catch nested dicts
+        # (e.g. a list of {Key, Value} tag-like structures).
+        return [_ghost_redact_sensitive(v, key=None) for v in value]
+    return value
+
+
 def _ghost_extract_params(
     *, body: bytes, query: dict[str, str],
 ) -> dict[str, Any]:
@@ -3219,12 +3273,19 @@ def _ghost_extract_params(
     can see WHAT the agent intended to mutate. If the body isn't small
     JSON we record a typed preview rather than the raw bytes so the
     transcript can't bloat or smuggle secrets verbatim.
+
+    SECURITY MED-1 (#728): before persisting, secret-bearing fields
+    (``SecretString``, ``Password`` / ``MasterUserPassword``, KMS
+    ``Plaintext``, ``ClientSecret``, ``*Token``, ``PrivateKey`` ...) are
+    redacted to ``[REDACTED:<key>]`` — both in the persisted record AND
+    in the diff output that reads it back. Non-sensitive fields are
+    preserved verbatim so the operator still sees the intended mutation.
     """
     import json
 
     params: dict[str, Any] = {}
     if query:
-        params["query"] = dict(query)
+        params["query"] = _ghost_redact_sensitive(dict(query))
     if body:
         # Bound the body we'll consider for structured capture. Large
         # bodies (uploads) get a length-only marker.
@@ -3232,7 +3293,7 @@ def _ghost_extract_params(
             try:
                 parsed = json.loads(body.decode("utf-8"))
                 if isinstance(parsed, dict):
-                    params["body"] = parsed
+                    params["body"] = _ghost_redact_sensitive(parsed)
                 else:
                     params["body_preview"] = {
                         "type": type(parsed).__name__,
@@ -3293,14 +3354,30 @@ async def _ghost_capture_write_response(
     # plan-capture synthetics already use obviously-fabricated ids
     # (e.g. "plancapture..." ETags) so a downstream consumer isn't
     # silently corrupted into believing a real resource exists.
-    synth = _pc.synthesize_response(
-        service=service,
-        action=action,
-        host=host_header,
-        path=request.path_qs,
-        body=body,
-        query=dict(request.query),
-    )
+    #
+    # UAT HIGH fix: the registry only covers ~15 ops. For ANY other
+    # write (iam:DeleteRole, Delete*/Update*/Detach*, unknown actions)
+    # `synthesize_response` returns the 400
+    # `PlanCaptureUnsupportedOperation` shape — which boto3 raises as a
+    # ClientError that can HALT the agent, defeating ghost mode's whole
+    # "the agent keeps going" value. So in ghost mode, when the op has
+    # no registered synthetic, fall back to a GENERIC 200-shaped
+    # synthetic success instead. The write is STILL captured + STILL
+    # never forwarded (this function has no forward path) — only the
+    # shape the agent sees changes.
+    if _pc.is_supported(service, action):
+        synth = _pc.synthesize_response(
+            service=service,
+            action=action,
+            host=host_header,
+            path=request.path_qs,
+            body=body,
+            query=dict(request.query),
+        )
+    else:
+        synth = _pc.build_generic_success_response(
+            service=service, action=action,
+        )
 
     # Persist the would-mutate record. Failure to persist is
     # high-priority but MUST NOT cause us to forward the write (the

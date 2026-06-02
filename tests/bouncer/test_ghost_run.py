@@ -436,3 +436,220 @@ def test_mcp_ghost_tools(monkeypatch, tmp_path):
     names = {t["name"] for t in TOOLS}
     assert "bouncer_ghost_session_list" in names
     assert "bouncer_ghost_session_diff" in names
+
+
+# ---------------------------------------------------------------------------
+# UAT HIGH fix: unregistered writes return a synthetic 200 (not 400) in
+# ghost mode, so the agent keeps going. Still captured + never forwarded.
+# ---------------------------------------------------------------------------
+async def _run_ghost_one_write(
+    tmp_path, monkeypatch, *, service, body, content_type,
+):
+    """Start a ghost-mode proxy + fake-AWS, send ONE write call,
+    return (fake_aws, write_status, write_headers, write_body)."""
+    monkeypatch.setenv("IAM_JIT_GHOST_RUNS_DIR", str(tmp_path / "ghost"))
+    ghost_run.reset_session_for_tests()
+    ghost_run.set_session_id("shadow-unreg-001")
+
+    from iam_jit.bouncer import proxy as _proxy_mod
+    monkeypatch.setattr(_proxy_mod, "_emit_audit_event", lambda e: None)
+
+    fake_aws = _FakeAWS()
+    await fake_aws.start()
+    store = BouncerStore(db_path=str(tmp_path / "b.db"))
+    store.add_rule(
+        ProxyRule(pattern="*", effect=Effect.ALLOW, arn_scope=None,
+                  region_scope=None, note="allow all", origin="manual"),
+        actor="test",
+    )
+    proxy_port = _free_port()
+
+    def fake_endpoint_resolver(service, region):  # noqa: SD-2 test stub: DI signature must match (service, region); both params are intentionally ignored — every call routes to the one fake-AWS backend
+        return f"127.0.0.1:{fake_aws.port}"
+
+    config = ProxyConfig(
+        host="127.0.0.1", port=proxy_port, mode=ProxyMode.GHOST,
+        default_policy=DefaultPolicy.ALLOW, forward_scheme="http",
+        forward_host_override=None,
+        aws_endpoint_resolver=fake_endpoint_resolver,
+        ghost_session_id="shadow-unreg-001",
+    )
+    server_task = asyncio.create_task(serve(config, store=store))
+    try:
+        await _wait_for_listen("127.0.0.1", proxy_port)
+        import aiohttp
+        signed_host = f"127.0.0.1:{proxy_port}"
+        async with aiohttp.ClientSession() as session:
+            async with session.post(
+                f"http://127.0.0.1:{proxy_port}/",
+                headers={"host": signed_host,
+                         "authorization": _sigv4(service),
+                         "content-type": content_type,
+                         "x-amz-date": "20260602T000000Z"},
+                data=body,
+            ) as r:
+                write_status = r.status
+                write_body = await r.read()
+                write_headers = dict(r.headers)
+    finally:
+        server_task.cancel()
+        try:
+            await server_task
+        except asyncio.CancelledError:  # noqa: SD-1 expected: we cancelled the serve() task ourselves; swallowing its own CancelledError is the standard asyncio teardown idiom
+            pass
+        store.close()
+        await fake_aws.stop()
+    return fake_aws, write_status, write_headers, write_body
+
+
+@pytest.mark.asyncio
+async def test_ghost_unregistered_write_returns_200_not_400(
+    tmp_path, monkeypatch,
+):
+    """UAT HIGH: an unregistered write (iam:DeleteRole — not in the
+    synthetic registry) must return a GENERIC 200 in ghost mode so the
+    agent keeps going, NOT the 400 PlanCaptureUnsupportedOperation that
+    halts boto3. Still captured + still NOT forwarded."""
+    fake_aws, status, headers, _ = await _run_ghost_one_write(
+        tmp_path, monkeypatch, service="iam",
+        body=b"Action=DeleteRole&RoleName=ghosttest&Version=2010-05-08",
+        content_type="application/x-www-form-urlencoded",
+    )
+    # (1) 200, NOT 400. The agent isn't halted.
+    assert status == 200, (
+        f"unregistered ghost write returned {status}; expected a generic "
+        f"200 so the agent keeps going (UAT HIGH regression)"
+    )
+    # (2) Ghost honesty headers preserved on the generic synthetic.
+    assert headers.get("x-iam-jit-bouncer-mode") == "ghost"
+    assert headers.get("x-iam-jit-bouncer-ghost-captured") == "true"
+    assert headers.get("x-iam-jit-bouncer-ghost-forwarded") == "false"
+    # (3) SAFETY INVARIANT: the write never reached AWS.
+    assert not any(b"DeleteRole" in r["body"]
+                   for r in fake_aws.received_requests), (
+        "GHOST INVARIANT VIOLATED: an unregistered write reached AWS"
+    )
+    # (4) Still captured to the on-disk diff.
+    diff = ghost_run.GhostRunStore().diff("shadow-unreg-001")
+    assert diff["captured_writes"] == 1
+    assert diff["actions"][0]["action"] == "DeleteRole"
+
+
+@pytest.mark.asyncio
+async def test_ghost_unknown_action_returns_200_not_400(
+    tmp_path, monkeypatch,
+):
+    """UAT HIGH: a totally unknown/garbage action also gets a generic
+    200 (captured, not forwarded) rather than a halting 400."""
+    fake_aws, status, headers, _ = await _run_ghost_one_write(
+        tmp_path, monkeypatch, service="madeupservice",
+        body=b'{"Frobnicate": "thing"}',
+        content_type="application/x-amz-json-1.1",
+    )
+    assert status == 200, status
+    assert headers.get("x-iam-jit-bouncer-ghost-forwarded") == "false"
+    assert fake_aws.received_requests == [], (
+        "GHOST INVARIANT VIOLATED: an unknown-action write reached AWS"
+    )
+    diff = ghost_run.GhostRunStore().diff("shadow-unreg-001")
+    assert diff["captured_writes"] == 1
+
+
+def test_generic_success_helper_shape():
+    """Unit: build_generic_success_response yields a 200 with a
+    generic_success marker for both XML + JSON protocols."""
+    from iam_jit.bouncer.plan_capture import (
+        GENERIC_SUCCESS_SHAPE,
+        build_generic_success_response,
+    )
+    # JSON-protocol service -> empty JSON object body, 200.
+    js = build_generic_success_response(
+        service="secretsmanager", action="DeleteSecret",
+    )
+    assert js.status == 200
+    assert js.body == b"{}"
+    assert js.would_have_returned["kind"] == GENERIC_SUCCESS_SHAPE
+    # XML-protocol service (iam uses the query protocol) -> well-formed
+    # XML envelope, 200, so boto3 doesn't ResponseParserError mid-script.
+    xs = build_generic_success_response(
+        service="ec2", action="TerminateInstances",
+    )
+    assert xs.status == 200
+    assert xs.body.startswith(b"<?xml")
+    assert b"TerminateInstancesResponse" in xs.body
+
+
+# ---------------------------------------------------------------------------
+# SECURITY MED-1 fix: secret-bearing fields are redacted before the
+# captured write body is persisted (and in the diff that reads it back).
+# ---------------------------------------------------------------------------
+def test_ghost_extract_params_redacts_secrets():
+    """Unit: _ghost_extract_params scrubs SecretString / Password /
+    Plaintext / *Token while keeping non-sensitive fields."""
+    from iam_jit.bouncer.proxy import _ghost_extract_params
+
+    body = json.dumps({
+        "Name": "prod/db",
+        "SecretString": "hunter2-super-secret",
+        "Description": "rotate me",
+        "Nested": {
+            "MasterUserPassword": "rds-root-pw",
+            "ClientToken": "abc123",
+            "Region": "us-east-1",
+        },
+        "Tags": [{"Key": "env", "Value": "prod"}],
+    }).encode("utf-8")
+    params = _ghost_extract_params(body=body, query={})
+    b = params["body"]
+    # Sensitive values redacted, key names + structure preserved.
+    assert b["SecretString"] == "[REDACTED:SecretString]"
+    assert b["Nested"]["MasterUserPassword"] == "[REDACTED:MasterUserPassword]"
+    assert b["Nested"]["ClientToken"] == "[REDACTED:ClientToken]"
+    # Non-sensitive fields untouched.
+    assert b["Name"] == "prod/db"
+    assert b["Description"] == "rotate me"
+    assert b["Nested"]["Region"] == "us-east-1"
+    assert b["Tags"] == [{"Key": "env", "Value": "prod"}]
+
+
+def test_ghost_put_secret_value_redacted_in_persisted_record(
+    tmp_path, monkeypatch,
+):
+    """SECURITY MED-1: a captured secretsmanager:PutSecretValue body has
+    its SecretString redacted in BOTH the persisted actions.jsonl record
+    AND the diff output, while non-sensitive fields remain."""
+    from iam_jit.bouncer.proxy import _ghost_extract_params
+
+    monkeypatch.setenv("IAM_JIT_GHOST_RUNS_DIR", str(tmp_path / "ghost"))
+    sid = "shadow-secret-001"
+    store = ghost_run.GhostRunStore()
+    store.ensure_session(sid, started_by="tester")
+
+    raw = json.dumps({
+        "Name": "prod/db/master",
+        "SecretString": "p@ssw0rd-LEAK-ME",
+    }).encode("utf-8")
+    store.capture(
+        sid, method="POST", service="secretsmanager",
+        action="PutSecretValue", access_type="write",
+        region="us-east-1", target="arn:aws:secretsmanager:::secret/x",
+        params=_ghost_extract_params(body=raw, query={}),
+        synthetic_response={},
+    )
+
+    # Persisted on disk: secret must NOT appear verbatim.
+    actions_path = (
+        ghost_run.session_dir(sid) / "actions.jsonl"
+    )
+    on_disk = actions_path.read_text(encoding="utf-8")
+    assert "p@ssw0rd-LEAK-ME" not in on_disk, (
+        "SECURITY MED-1 REGRESSION: SecretString persisted verbatim"
+    )
+    assert "[REDACTED:SecretString]" in on_disk
+
+    # Diff output (what operators + the MCP tool render): redacted too,
+    # non-sensitive SecretId still visible.
+    diff = store.diff(sid)
+    captured_body = diff["actions"][0]["params"]["body"]
+    assert captured_body["SecretString"] == "[REDACTED:SecretString]"
+    assert captured_body["Name"] == "prod/db/master"

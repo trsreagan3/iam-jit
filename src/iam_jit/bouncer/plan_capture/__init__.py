@@ -50,19 +50,23 @@ from .sessions import (
 )
 from .synthetics import (
     PlanCaptureSynthetic,
+    GENERIC_SUCCESS_SHAPE,
     UNSUPPORTED_OP_SHAPE,
     SUPPORTED_OPERATIONS,
     WRITES_REJECTED_SHAPE,
+    build_generic_success_response,
     build_writes_rejected_response,
     is_supported,
     synthesize_response,
 )
 
 __all__ = [
+    "GENERIC_SUCCESS_SHAPE",
     "PlanCaptureSynthetic",
     "SUPPORTED_OPERATIONS",
     "UNSUPPORTED_OP_SHAPE",
     "WRITES_REJECTED_SHAPE",
+    "build_generic_success_response",
     "build_writes_rejected_response",
     "classify_action",
     "current_session_id",
