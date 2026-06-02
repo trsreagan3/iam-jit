@@ -20,6 +20,8 @@ import builtins
 
 import pytest
 
+pytest.importorskip("opentelemetry", reason="requires the optional [otel] extra")
+
 from iam_jit.bouncer.audit_export import (
     GENAI_SEMCONV_VERSION,
     OTelDependencyError,
