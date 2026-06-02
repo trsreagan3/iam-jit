@@ -537,50 +537,73 @@ class TestInstallDevinCli:
         assert "PATH B" in result.output
         assert "cloud" in result.output.lower()
 
-    def test_install_devin_shows_detected_bouncer_ports(
-        self, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        """When bouncers running, install-devin shows their actual ports."""
+    def test_install_devin_devin_host_flag_bakes_in_address(self) -> None:
+        """--devin-host bakes a concrete reachable address into the recipe.
+
+        The loopback-detection path was removed (127.0.0.1 is NOT reachable
+        from Devin's cloud sandbox). Operators must pass --devin-host HOST
+        to get a concrete address into the recipe.
+        Per [[cross-product-agent-parity]]: mirrors gbounce/kbounce/dbounce's
+        --devin-host semantics.
+        """
         from click.testing import CliRunner
-        import iam_jit.bouncer_cli as bouncer_mod
-
-        monkeypatch.setattr(
-            bouncer_mod,
-            "_build_bouncer_env_vars_for_mcp",
-            lambda: {
-                "AWS_ENDPOINT_URL": "http://127.0.0.1:8767",
-                "HTTP_PROXY": "http://127.0.0.1:8080",
-                "HTTPS_PROXY": "http://127.0.0.1:8080",
-            },
-        )
-
         from iam_jit.bouncer_cli import mcp_install_devin_cmd
+
         runner = CliRunner()
-        result = runner.invoke(mcp_install_devin_cmd, [], catch_exceptions=False)
+        result = runner.invoke(
+            mcp_install_devin_cmd,
+            ["--devin-host", "10.0.1.5"],
+            catch_exceptions=False,
+        )
 
         assert result.exit_code == 0, result.output
-        assert "8767" in result.output
-        assert "8080" in result.output
+        assert "10.0.1.5:8767" in result.output
+        assert "10.0.1.5:8080" in result.output
+        # Placeholder must NOT appear when a concrete host is given.
+        assert "<bouncer-host>" not in result.output
+        # When a concrete host is given, the substitute note must NOT appear.
+        # (CliRunner mixes stdout+stderr by default; the note goes to stderr
+        # so it will appear in result.output in this mode — check it's absent.)
+        assert "--devin-host" not in result.output
 
-    def test_install_devin_shows_placeholder_when_no_bouncers(
-        self, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        """When no bouncers running, install-devin shows <bouncer-host> placeholder."""
+    def test_install_devin_shows_placeholder_when_no_devin_host(self) -> None:
+        """Without --devin-host, install-devin shows <bouncer-host> placeholder."""
         from click.testing import CliRunner
-        import iam_jit.bouncer_cli as bouncer_mod
-
-        monkeypatch.setattr(
-            bouncer_mod,
-            "_build_bouncer_env_vars_for_mcp",
-            lambda: {},
-        )
-
         from iam_jit.bouncer_cli import mcp_install_devin_cmd
+
         runner = CliRunner()
         result = runner.invoke(mcp_install_devin_cmd, [], catch_exceptions=False)
 
         assert result.exit_code == 0, result.output
         assert "<bouncer-host>" in result.output
+        # Substitute note goes to stderr (which CliRunner mixes into output
+        # by default), so it appears in result.output.
+        assert "--devin-host" in result.output, (
+            "output must hint at --devin-host when no concrete host is given"
+        )
+
+    def test_install_devin_never_emits_loopback_in_recipe(self) -> None:
+        """install-devin NEVER emits 127.0.0.1 in the recipe env vars.
+
+        A loopback address is NOT reachable from Devin's cloud sandbox.
+        The recipe must only emit <bouncer-host> placeholder or a
+        concrete address the operator passed via --devin-host.
+        Per [[permission-minimal-install]] + [[automatic-bootstrap-must-just-work-everywhere]].
+        """
+        from click.testing import CliRunner
+        from iam_jit.bouncer_cli import mcp_install_devin_cmd
+
+        runner = CliRunner()
+        result = runner.invoke(mcp_install_devin_cmd, [], catch_exceptions=False)
+        assert result.exit_code == 0, result.output
+        # 127.0.0.1 may appear in the "NOT visible to Devin's sandbox" sentence,
+        # but must NOT appear in any AWS_ENDPOINT_URL / HTTP_PROXY = ... line.
+        for line in result.output.splitlines():
+            stripped = line.strip()
+            if "=" in stripped and ("ENDPOINT_URL" in stripped or "PROXY" in stripped):
+                assert "127.0.0.1" not in stripped, (
+                    f"Recipe env var line must not emit loopback address: {stripped!r}"
+                )
 
     def test_install_devin_honest_limitation_notice(self) -> None:
         """install-devin surfaces the sandbox-visibility limitation honestly."""
