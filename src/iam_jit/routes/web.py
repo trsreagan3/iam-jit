@@ -37,6 +37,7 @@ from ..middleware import (
     get_api_tokens_store,
     get_request_store,
     get_user_store,
+    require_admin,
     require_approver,
 )
 from ..store import NotFoundError, RequestStore
@@ -808,18 +809,27 @@ _FLIGHT_RECORDER_CSP = (
 
 
 @router.get("/flight-recorder", response_class=HTMLResponse)
-def flight_recorder_page(request: Request) -> Response:
+def flight_recorder_page(
+    _: Annotated[Any, Depends(require_admin)],
+) -> Response:
     """Serve the self-contained scrubbable replay UI (#723).
 
     Read-only viewer. The page contains NO session id and NO secret;
     the operator types the session id (or opens the page with
     ``?session=SID``) and the JS fetches the timeline from
-    ``/flight-recorder/timeline`` same-origin."""
+    ``/flight-recorder/timeline`` same-origin.
+
+    AUTHZ (IDOR closure): gated on ``require_admin`` — the SAME
+    authorization the sibling JSON audit-events route
+    (``routes/audit_events.py``) uses, with the same rationale: the
+    cross-bouncer timeline this UI fetches surfaces other principals'
+    identities + resources across every bouncer, so audit-log
+    contents may leak data. A session id is NOT a capability secret,
+    so a logged-in low-priv ``requester`` must not be able to read an
+    arbitrary session's timeline. Anonymous → 401, non-admin → 403
+    (both raised by the dependency); only admins reach this body."""
     from ..flight_recorder_ui import render_flight_recorder_ui
 
-    user = _try_current_user(request)
-    if user is None:
-        return RedirectResponse(url="/login", status_code=303)
     return HTMLResponse(
         content=render_flight_recorder_ui(),
         headers={"Content-Security-Policy": _FLIGHT_RECORDER_CSP},
@@ -827,22 +837,30 @@ def flight_recorder_page(request: Request) -> Response:
 
 
 @router.get("/flight-recorder/timeline")
-def flight_recorder_timeline(request: Request) -> Response:
+def flight_recorder_timeline(
+    request: Request,
+    _: Annotated[Any, Depends(require_admin)],
+) -> Response:
     """Return the cross-bouncer correlation timeline JSON for one
     session (#723). Reuses the SAME cross-bouncer fan-out the CLI uses
     (:func:`fetch_session_events_via_fanout`) + the pure-function
     timeline assembler, so the web surface and the CLI produce the
     identical timeline shape. Read-only.
 
+    AUTHZ (IDOR closure): gated on ``require_admin`` — identical to the
+    sibling JSON audit-events route (``routes/audit_events.py``), which
+    serves the SAME cross-bouncer OCSF data and is gated admin-only
+    because "audit-log contents may leak data". A session id is NOT a
+    capability secret; without this gate any logged-in low-priv
+    ``requester`` could read an arbitrary session's full cross-bouncer
+    timeline (other principals' identities + resources). Anonymous →
+    401, non-admin → 403 (both raised by the dependency).
+
     The honesty / coverage block (unreachable + zero-event bouncers,
     partial flag, gaps) travels in the payload so the UI can surface
     it — never a silent empty result."""
     from ..agent_diff import fetch_session_events_via_fanout
     from ..flight_recorder import assemble_timeline
-
-    user = _try_current_user(request)
-    if user is None:
-        raise HTTPException(status_code=401, detail="authentication required")
 
     session_id = (request.query_params.get("session") or "").strip()
     if not session_id:

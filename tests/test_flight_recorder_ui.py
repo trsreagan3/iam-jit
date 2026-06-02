@@ -300,17 +300,53 @@ def _client():
     return TestClient(app, raise_server_exceptions=False)
 
 
-def test_route_serves_page_with_strict_csp(monkeypatch):
-    # Stub auth so the page renders (route redirects anon to /login).
-    from iam_jit.routes import web as web_mod
+def _admin_user():
+    from iam_jit.users_store import User
 
-    class _U:
-        id = "u1"
-        roles = ["admin"]
-        is_approver = True
+    return User(id="u1", roles=("admin", "approver", "requester"), enabled=True)
 
-    monkeypatch.setattr(web_mod, "_try_current_user", lambda req: _U())
+
+def _requester_user():
+    """A low-priv, NON-admin authenticated user — the IDOR threat
+    actor. ``is_admin`` is False; ``require_admin`` must reject."""
+    from iam_jit.users_store import User
+
+    return User(id="u2", roles=("requester",), enabled=True)
+
+
+def _override_identity(app, user):
+    """Inject ``user`` as the authenticated identity by overriding the
+    ``current_user`` SUB-dependency only. The REAL ``require_admin``
+    still runs its ``is_admin`` role check against ``user`` — so a
+    non-admin user genuinely produces the route's 403. (Overriding
+    ``require_admin`` itself would bypass the very check under test.)"""
+    from iam_jit import middleware as _mw
+
+    app.dependency_overrides[_mw.current_user] = lambda: user
+    return app
+
+
+def _override_anon(app):
+    """Simulate an unauthenticated request: ``current_user`` raises the
+    real 401 it raises when no valid session cookie is present, so the
+    require_admin-gated routes reject anon with 401."""
+    from fastapi import HTTPException, status
+    from iam_jit import middleware as _mw
+
+    def _raise_401():
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="authentication required",
+        )
+
+    app.dependency_overrides[_mw.current_user] = _raise_401
+    return app
+
+
+def test_route_serves_page_with_strict_csp():
+    # Admin (passes require_admin) → page renders.
     client = _client()
+    _override_identity(client.app, _admin_user())
     resp = client.get("/flight-recorder")
     assert resp.status_code == 200, resp.text
     assert resp.headers.get("content-type", "").startswith("text/html")
@@ -324,23 +360,46 @@ def test_route_serves_page_with_strict_csp(monkeypatch):
     assert "'unsafe-inline'" in csp
 
 
-def test_route_anon_redirects_to_login():
+def test_route_anon_rejected():
+    # IDOR closure: anonymous (no session) → 401 from current_user
+    # under require_admin. No timeline page leaks.
     client = _client()
+    _override_anon(client.app)
     resp = client.get("/flight-recorder", follow_redirects=False)
-    assert resp.status_code in (302, 303, 307)
-    assert resp.headers.get("location", "").endswith("/login")
+    assert resp.status_code == 401
 
 
-def test_timeline_route_requires_session(monkeypatch):
-    from iam_jit.routes import web as web_mod
-
-    class _U:
-        id = "u1"
-        roles = ["admin"]
-        is_approver = True
-
-    monkeypatch.setattr(web_mod, "_try_current_user", lambda req: _U())
+def test_page_route_non_admin_requester_forbidden():
+    # IDOR closure: a logged-in, low-priv requester must NOT be able to
+    # load the cross-bouncer replay UI → 403 from the real require_admin.
     client = _client()
+    _override_identity(client.app, _requester_user())
+    resp = client.get("/flight-recorder")
+    assert resp.status_code == 403, resp.text
+
+
+def test_timeline_route_non_admin_requester_forbidden():
+    # IDOR closure (PRIMARY): a logged-in, low-priv requester GETting an
+    # arbitrary session's timeline must be rejected BEFORE any fan-out.
+    # Session ids are not capability secrets — this is the cross-session
+    # read the gate exists to stop. 403 from the real require_admin.
+    client = _client()
+    _override_identity(client.app, _requester_user())
+    resp = client.get("/flight-recorder/timeline?session=victim-session")
+    assert resp.status_code == 403, resp.text
+
+
+def test_timeline_route_anon_rejected():
+    # Anonymous timeline read → 401, no session leak.
+    client = _client()
+    _override_anon(client.app)
+    resp = client.get("/flight-recorder/timeline?session=victim-session")
+    assert resp.status_code == 401
+
+
+def test_timeline_route_requires_session():
+    client = _client()
+    _override_identity(client.app, _admin_user())
     resp = client.get("/flight-recorder/timeline")
     assert resp.status_code == 400
 
@@ -349,14 +408,6 @@ def test_timeline_route_returns_timeline_json(monkeypatch):
     """The timeline route reuses the fan-out; stub it so the test runs
     without live bouncers + assert the assembled shape comes back."""
     from iam_jit import agent_diff as ad_mod
-    from iam_jit.routes import web as web_mod
-
-    class _U:
-        id = "u1"
-        roles = ["admin"]
-        is_approver = True
-
-    monkeypatch.setattr(web_mod, "_try_current_user", lambda req: _U())
 
     def _fake_fanout(*, session_id, since=None, until=None,  # noqa: SD-2 stub mirrors the real fetch_session_events_via_fanout signature so the route's call site is exercised verbatim; the window args are intentionally unused by the canned response
                      audit_events_token=None, **kw):
@@ -373,6 +424,7 @@ def test_timeline_route_returns_timeline_json(monkeypatch):
 
     monkeypatch.setattr(ad_mod, "fetch_session_events_via_fanout", _fake_fanout)
     client = _client()
+    _override_identity(client.app, _admin_user())
     resp = client.get("/flight-recorder/timeline?session=S1")
     assert resp.status_code == 200, resp.text
     tl = resp.json()
