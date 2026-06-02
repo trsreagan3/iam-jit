@@ -224,6 +224,16 @@ _INLINE_SCHEMA: dict[str, Any] = {
                 "anomaly_detection": {
                     "$ref": "#/$defs/anomaly_detection_block",
                 },
+                # #725 — cost circuit breaker as a security primitive.
+                # Treats a session's runaway cost/call RATE as a real-
+                # time security signal + trips a breaker that denies
+                # further gated calls until the rate settles. OFF by
+                # default; generous thresholds when enabled. Distinct
+                # from iam-jit's own LLM-budget controls. See
+                # src/iam_jit/circuit_breaker/.
+                "cost_circuit_breaker": {
+                    "$ref": "#/$defs/cost_circuit_breaker_block",
+                },
             },
         }
     },
@@ -512,6 +522,44 @@ _INLINE_SCHEMA: dict[str, Any] = {
                 "cold_start_fallback": {
                     "type": "boolean",
                     "default": True,
+                },
+            },
+        },
+        "cost_circuit_breaker_block": {
+            "type": "object",
+            "additionalProperties": False,
+            "description": (
+                "#725 — cost circuit breaker (security primitive). "
+                "Trips when a session's gated-call count OR estimated "
+                "upstream USD cost crosses a cap within a sliding "
+                "window, then denies (block) / flags (alert) further "
+                "calls until the rate settles. USD is an ESTIMATE from "
+                "a coarse per-call rate card. OFF by default."
+            ),
+            "properties": {
+                "enabled": {"type": "boolean", "default": False},
+                "mode": {
+                    "type": "string",
+                    "enum": ["block", "alert"],
+                    "default": "block",
+                },
+                "window": {
+                    "type": ["string", "integer"],
+                    "default": "1h",
+                },
+                "cool_down": {
+                    "type": ["string", "integer"],
+                    "default": "5m",
+                },
+                "max_calls_per_window": {
+                    "type": "integer",
+                    "minimum": 0,
+                    "default": 5000,
+                },
+                "max_usd_per_window": {
+                    "type": "number",
+                    "minimum": 0,
+                    "default": 50.0,
                 },
             },
         },

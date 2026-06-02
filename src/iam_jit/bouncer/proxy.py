@@ -1681,6 +1681,21 @@ class ProxyConfig:
     then falls back to `~/.iam-jit/dynamic-denies.yaml`. Explicit
     path overrides both."""
 
+    # #725 — cost circuit breaker (security primitive). OFF by default
+    # per [[v1-scope-bar]] + [[safety-mode-lean-permissive]]; when
+    # enabled the thresholds are generous so a legitimate busy session
+    # never trips by surprise. The config dict mirrors the ambient
+    # `iam-jit.cost_circuit_breaker` block + the CLI
+    # `--cost-circuit-breaker-rule` JSON; serve() loads + validates it
+    # via circuit_breaker.load_config. Distinct from the LLM-budget
+    # modules (those guard iam-jit's OWN scoring spend; this guards the
+    # PROXIED agent's runaway blast radius). See
+    # src/iam_jit/circuit_breaker/__init__.py.
+    cost_circuit_breaker: dict | None = None
+    """Parsed `cost_circuit_breaker` config block (None = disabled
+    default). Loaded from `.iam-jit.yaml` ambient config or the CLI
+    `--cost-circuit-breaker-rule` JSON string."""
+
 
 @dataclasses.dataclass
 class RequestObservation:
@@ -2433,6 +2448,85 @@ def evaluate_request(
     else:
         _anomaly_deny_source = None
 
+    # #725 — cost circuit breaker. Treat a session's runaway cost/call
+    # RATE as a real-time security signal (PDF §A-Compete). Observe
+    # EVERY decision (the rate is what matters, independent of verdict)
+    # so the window reflects true upstream pressure; when the breaker
+    # has TRIPPED for this session + is in block mode + the floor said
+    # ALLOW, tighten ALLOW→DENY (strictly more restrictive, mirrors the
+    # anomaly-hook tighten above). The breaker emits its own
+    # COST_CIRCUIT_TRIPPED OCSF event on the crossing call via its
+    # configured emitter; here we additionally re-emit a decision audit
+    # row carrying decision_source=cost_circuit_breaker when we tighten,
+    # so the audit row reflects the FINAL state per
+    # [[ibounce-honest-positioning]]. Fail-soft: a breaker crash MUST
+    # NOT break the proxy hot path.
+    _cost_breaker_deny_source: str | None = None
+    try:
+        from ..circuit_breaker import active_cost_circuit_breaker
+        _breaker = active_cost_circuit_breaker()
+        if _breaker is not None:
+            _trip = _breaker.observe(
+                session_id=(
+                    header_agent_session_id
+                    or header_agent_name
+                    or user_agent
+                    or None
+                ),
+                service=parsed.service,
+                action=parsed.action,
+            )
+            if _trip.should_deny and record.decision.value != "deny":
+                from .decisions import Decision as _CBDecision
+                record = dataclasses.replace(
+                    record,
+                    decision=_CBDecision.DENY,
+                    reason=(
+                        _trip.operator_message
+                        or "cost circuit breaker: session rate looks like a runaway"
+                    ),
+                )
+                _cost_breaker_deny_source = "cost_circuit_breaker"
+                try:
+                    from .audit_export import audit_event_from_decision
+                    _emit_audit_event(audit_event_from_decision(
+                        decision_id=decision_id,
+                        mode=effective_mode.value,
+                        profile=(
+                            active_profile.name
+                            if active_profile is not None else None
+                        ),
+                        verdict="deny",
+                        reason=record.reason,
+                        service=parsed.service,
+                        action=parsed.action,
+                        arn=resolved_arn,
+                        region=parsed.region,
+                        host=host,
+                        upstream=None,
+                        enforced=(effective_mode == ProxyMode.TRANSPARENT),
+                        extra={
+                            "decision_source": "cost_circuit_breaker",
+                            "cost_trip_dimension": _trip.dimension,
+                            "cost_calls_in_window": _trip.calls_in_window,
+                            "cost_estimated_usd_in_window": (
+                                _trip.estimated_usd_in_window
+                            ),
+                        },
+                        user_agent=user_agent,
+                        header_agent_name=header_agent_name,
+                        header_agent_session_id=header_agent_session_id,
+                        agent_header_rejections=agent_header_rejections,
+                    ))
+                except Exception as _cb_emit_err:
+                    logger.warning(
+                        "audit-export emit (cost-breaker-tighten) failed: %s",
+                        _cb_emit_err,
+                    )
+    except Exception as _cb_err:
+        logger.warning("cost-circuit-breaker observe failed: %s", _cb_err)
+        _cost_breaker_deny_source = None
+
     # #270 Slice 2 — admin-fallback synthetic. Fires when a request
     # would have been DENIED in transparent mode but a pause window
     # is open, so the proxy demoted it to COOPERATIVE + the call
@@ -2518,7 +2612,7 @@ def evaluate_request(
         parsed=parsed, record=record, mode=effective_mode,
         decision_id=decision_id,
         active_pause_id=active_pause["id"] if active_pause is not None else None,
-        deny_source=_anomaly_deny_source,
+        deny_source=_cost_breaker_deny_source or _anomaly_deny_source,
     )
 
 
@@ -4087,6 +4181,22 @@ async def serve(config: ProxyConfig, *, store: BouncerStore) -> None:
             llm_budget_block = spend_snapshot()
         except Exception:  # pragma: no cover
             llm_budget_block = {"enabled": False}
+        # #725 — cost-circuit-breaker surface. Always present (reports
+        # {"enabled": false} when no breaker is installed) so monitors +
+        # cross-bouncer posture queries branch on a single field. The
+        # USD dimension carries usd_is_estimated:true per
+        # [[ibounce-honest-positioning]] so operators never mistake the
+        # figure for a billed amount. Distinct from llm_budget (that's
+        # iam-jit's OWN scoring spend; this is the PROXIED agent's
+        # runaway blast radius).
+        try:
+            from ..circuit_breaker import active_cost_circuit_breaker
+            _cb = active_cost_circuit_breaker()
+            cost_circuit_breaker_block = (
+                _cb.status() if _cb is not None else {"enabled": False}
+            )
+        except Exception:  # pragma: no cover
+            cost_circuit_breaker_block = {"enabled": False}
         # MRR-2 R2 — generic silent-degradation visibility. Distinct
         # from ``llm_skips`` (which is the EXPECTED local-dev shape):
         # ``degraded_capabilities`` surfaces sites that actually
@@ -4170,6 +4280,7 @@ async def serve(config: ProxyConfig, *, store: BouncerStore) -> None:
             "anomaly_detection": anomaly_detection_block,
             "llm_skips": llm_skips_block,
             "llm_budget": llm_budget_block,
+            "cost_circuit_breaker": cost_circuit_breaker_block,
             "degraded_capabilities": degraded_capabilities_block,
             "chain_initialized": chain_initialized_bool,
             # #711 — top-level audit_warning. Non-null = silent-degradation
@@ -5027,6 +5138,46 @@ async def serve(config: ProxyConfig, *, store: BouncerStore) -> None:
         config.burst_window_seconds,
         bool(config.bulk_answer_mcp_token),
     )
+
+    # #725 — cost circuit breaker. OFF by default; install the
+    # process-singleton only when the operator declared
+    # `cost_circuit_breaker.enabled: true`. The breaker emits its
+    # COST_CIRCUIT_TRIPPED OCSF synthetic through the SAME
+    # `_emit_audit_event_raw` transport every other detector uses, so
+    # JSONL / webhook / routes / Security Lake / object-storage all see
+    # it for free. Misconfig (e.g. enabled-but-no-cap) surfaces as a
+    # loud warning + the breaker stays uninstalled (marker reports the
+    # disabled state honestly on /healthz) rather than silently
+    # half-arming. Per [[ibounce-honest-positioning]].
+    try:
+        from ..circuit_breaker import (
+            CostCircuitBreaker as _CostCircuitBreaker,
+            load_config as _load_cb_config,
+            register_cost_circuit_breaker,
+        )
+        _cb_cfg = _load_cb_config(config.cost_circuit_breaker)
+        if _cb_cfg.enabled:
+            register_cost_circuit_breaker(
+                _CostCircuitBreaker(_cb_cfg, emit=_emit_audit_event_raw)
+            )
+            logger.info(
+                "cost_circuit_breaker: enabled (mode=%s window=%ds "
+                "max_calls=%s max_usd=%s [estimate] cool_down=%ds)",
+                _cb_cfg.mode, _cb_cfg.window_seconds,
+                _cb_cfg.max_calls_per_window, _cb_cfg.max_usd_per_window,
+                _cb_cfg.cool_down_seconds,
+            )
+        else:
+            register_cost_circuit_breaker(None)
+    except Exception as _cb_install_err:
+        # Default-off feature: a config error here must not stop the
+        # bouncer. Warn loudly + leave the breaker uninstalled.
+        register_cost_circuit_breaker = None  # type: ignore[assignment]
+        logger.warning(
+            "cost_circuit_breaker: CONFIGURED but NOT WIRED — reason: %s "
+            "(the breaker will NOT gate requests until this is resolved)",
+            _cb_install_err,
+        )
 
     # #253 — rule-expiry sweeper. 30s tick. The list_active_rules
     # filter at evaluate_request time already hides expired rules from

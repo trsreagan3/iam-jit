@@ -4504,6 +4504,22 @@ def _parse_duration(raw: str) -> int:
          "applies any rules in the file (no-op when the file is "
          "absent).",
 )
+@click.option(
+    "--cost-circuit-breaker-rule",
+    "cost_circuit_breaker_rule",
+    default=None,
+    envvar="IBOUNCE_COST_CIRCUIT_BREAKER_RULE",
+    help="#725 — cost circuit breaker (security primitive). JSON object "
+         "matching the `iam-jit.cost_circuit_breaker` block, e.g. "
+         "'{\"enabled\": true, \"max_calls_per_window\": 5000, "
+         "\"max_usd_per_window\": 50, \"window\": \"1h\"}'. Trips when a "
+         "session's gated-call count OR estimated upstream USD cost "
+         "crosses a cap within the window, then DENIES (mode=block) or "
+         "FLAGS (mode=alert) further calls until the rate settles. USD "
+         "is an ESTIMATE from a coarse per-call rate card. OFF by "
+         "default; equivalent declarative block lives in .iam-jit.yaml. "
+         "Distinct from iam-jit's own LLM-budget controls.",
+)
 @click.option("--db", type=click.Path(dir_okay=False), default=None)
 @click.pass_context
 def run_cmd(
@@ -4573,6 +4589,7 @@ def run_cmd(
     deployment_preset: str | None,
     dynamic_denies_path: str | None,
     disable_dynamic_denies: bool,
+    cost_circuit_breaker_rule: str | None,
     db: str | None,
 ) -> None:
     """Start the HTTP proxy server.
@@ -5038,6 +5055,59 @@ def run_cmd(
     if anomaly_detection_only_shorthand and anomaly_detection_mode is None:
         anomaly_detection_mode = "detection-only"
 
+    # #725 — resolve the cost-circuit-breaker config. Precedence: CLI
+    # `--cost-circuit-breaker-rule` JSON wins (explicit operator
+    # intent); otherwise the declarative `iam-jit.cost_circuit_breaker`
+    # block from .iam-jit.yaml. Default None = disabled. Validation +
+    # default-application happen in proxy.py serve() via
+    # circuit_breaker.load_config so a bad value surfaces in one place;
+    # here we only parse the JSON shape + a CLI-syntax error refuses to
+    # start (matches the rest of the CLI's parse-time discipline).
+    _cost_circuit_breaker_block: dict | None = None
+    if cost_circuit_breaker_rule:
+        import json as _json
+        try:
+            _parsed_rule = _json.loads(cost_circuit_breaker_rule)
+        except Exception as _rule_err:
+            raise click.UsageError(
+                f"--cost-circuit-breaker-rule is not valid JSON: "
+                f"{_rule_err}"
+            ) from _rule_err
+        if not isinstance(_parsed_rule, dict):
+            raise click.UsageError(
+                "--cost-circuit-breaker-rule must be a JSON object "
+                "(e.g. '{\"enabled\": true, \"max_calls_per_window\": 5000}')"
+            )
+        _cost_circuit_breaker_block = _parsed_rule
+    else:
+        try:
+            from .ambient_config.loader import (
+                ConfigLoadError as _CBConfigLoadError,
+                discover_declaration_source as _cb_discover,
+                load_declaration_from_path as _cb_load,
+            )
+            _cb_discovered = _cb_discover()
+            if _cb_discovered is not None:
+                try:
+                    _cb_decl = _cb_load(_cb_discovered.path)
+                    _cb_ij = _cb_decl.get("iam-jit") or {}
+                    _cb_blk = _cb_ij.get("cost_circuit_breaker")
+                    if isinstance(_cb_blk, dict):
+                        _cost_circuit_breaker_block = _cb_blk
+                except _CBConfigLoadError as _cb_decl_err:
+                    click.secho(
+                        f"warning: declarative config at "
+                        f"{_cb_discovered.path} failed to parse for "
+                        f"cost_circuit_breaker opt-in: {_cb_decl_err}",
+                        fg="yellow", err=True,
+                    )
+        except Exception as _cb_amb_err:  # pragma: no cover — defensive
+            click.secho(
+                f"warning: ambient-config discovery unavailable for "
+                f"cost_circuit_breaker opt-in: {_cb_amb_err}",
+                fg="yellow", err=True,
+            )
+
     config = ProxyConfig(
         host=host,
         port=port,
@@ -5138,6 +5208,7 @@ def run_cmd(
         audit_events_token=audit_events_token,
         dynamic_denies_enabled=not disable_dynamic_denies,
         dynamic_denies_path=dynamic_denies_path,
+        cost_circuit_breaker=_cost_circuit_breaker_block,
     )
 
     # #132 plan-capture: surface the session id (operator-supplied or
