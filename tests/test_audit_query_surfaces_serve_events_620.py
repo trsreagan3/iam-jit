@@ -368,7 +368,12 @@ def test_audit_query_serve_unreachable_surfaces_honestly(
         "--format", "summary",
         "--timeout", "1.0",
     )
-    assert result.exit_code == 0, result.output
+    # #628: when ALL surfaces are unreachable (CI: no bouncers running)
+    # the CLI exits 1; when some bouncers happen to be reachable (dev
+    # machine) it exits 0.  Both are valid — the load-bearing check is
+    # whether iam-jit-serve is NAMED + FLAGGED in the output, not whether
+    # any coincidental local bouncer was up.
+    assert result.exit_code in (0, 1), result.output
     combined = (result.output or "") + (getattr(result, "stderr", "") or "")
     # State verification: the surface is named + flagged unreachable.
     assert "iam-jit-serve" in combined, combined
@@ -546,10 +551,16 @@ def test_sabotage_serve_fanout_is_load_bearing(
     finally:
         os.environ.pop("IAM_JIT_URL", None)
 
-    assert result.exit_code == 0, result.output
+    # #628: with serve sabotaged away and no local bouncers running (CI),
+    # all surfaces error → exit 1.  On a dev machine with running bouncers
+    # some may be reachable → exit 0.  The load-bearing sabotage proof is
+    # that the cap event is absent from the output (len(lines) == 0 below),
+    # not the exit code itself.
+    assert result.exit_code in (0, 1), result.output
     lines = [
         line for line in (result.stdout or result.output).split("\n")
         if line.strip() and not line.startswith("note: ")
+        and not line.startswith("error: ")
     ]
     # State verification: sabotaging the resolver makes the cap event
     # disappear from the query result.  This proves

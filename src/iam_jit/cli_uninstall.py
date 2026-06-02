@@ -574,13 +574,34 @@ def _lsof_pids_on_port(port: int) -> list[int]:
 def _read_cmdline(pid: int) -> str:
     """Best-effort cmdline read for ``pid``.
 
-    Uses ``ps -p PID -o command=`` which works identically on macOS +
-    Linux (vs. ``/proc/PID/cmdline`` which is Linux-only). Returns the
-    empty string on any failure (PID gone, ps unavailable). Used by
-    :func:`_infer_bouncer_kind_from_cmdline` to validate that a
+    Linux fast-path: reads ``/proc/<pid>/cmdline`` which is NUL-
+    separated and never truncated (unlike ``ps -o command=`` which
+    caps at the terminal width / kernel ARG_MAX display limit). This
+    matters for the multi-factor classifier on GitHub Actions runners
+    where the Python interpreter path + tmpdir + flags can exceed 80
+    columns and ``ps`` silently truncates the cmdline before the
+    bouncer-distinctive flags appear.
+
+    macOS / fallback: uses ``ps -p PID -o command=`` which works
+    identically on macOS + Linux as a secondary source. Returns the
+    empty string on any failure (PID gone, ps unavailable).
+
+    Used by :func:`_infer_bouncer_kind_from_cmdline` to validate that a
     port-owning PID is actually a bouncer process before adding it to
     the uninstall plan.
     """
+    # Linux fast-path: /proc/<pid>/cmdline is NUL-separated + full.
+    proc_cmdline = pathlib.Path(f"/proc/{int(pid)}/cmdline")
+    if proc_cmdline.exists():
+        try:
+            raw = proc_cmdline.read_bytes()
+            # NUL-separated argv; join with spaces for the classifier.
+            return raw.rstrip(b"\x00").replace(b"\x00", b" ").decode(
+                "utf-8", errors="replace"
+            ).strip()
+        except OSError:
+            pass  # fall through to ps
+
     ps = shutil.which("ps")
     if ps is None:
         return ""

@@ -138,7 +138,10 @@ def test_init_solo_runs_install_check_at_end(
     runner = CliRunner()
     result = runner.invoke(
         main,
-        ["init-solo", "--data-dir", str(data_dir)],
+        # --account-id bypasses boto3 STS which is mocked out in _no_boto3.
+        # Without it, init-solo exits 2 on "no aws creds" before ever
+        # reaching the install-check block (#698 MED-1 strict resolution).
+        ["init-solo", "--data-dir", str(data_dir), "--account-id", "123456789012"],
         catch_exceptions=False,
     )
     assert result.exit_code == 0, result.output
@@ -159,7 +162,9 @@ def test_init_solo_no_doctor_check_suppresses_install_check(
     runner = CliRunner()
     result = runner.invoke(
         main,
-        ["init-solo", "--no-doctor-check", "--data-dir", str(data_dir)],
+        # --account-id bypasses boto3 STS which is mocked out in _no_boto3.
+        ["init-solo", "--no-doctor-check", "--data-dir", str(data_dir),
+         "--account-id", "123456789012"],
         catch_exceptions=False,
     )
     assert result.exit_code == 0, result.output

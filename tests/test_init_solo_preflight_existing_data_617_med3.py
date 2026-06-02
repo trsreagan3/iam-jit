@@ -71,7 +71,12 @@ def test_fresh_dir_init_solo_succeeds_with_no_preflight_warning(
     assert not isolated_data_dir.exists()
 
     result = _runner().invoke(
-        main, ["init-solo", "--data-dir", str(isolated_data_dir)],
+        main,
+        # --account-id bypasses boto3 STS which is mocked out in _no_boto3.
+        # Without it, init-solo exits 2 on "no aws creds" before seeding
+        # the data dir (#698 MED-1 strict resolution).
+        ["init-solo", "--data-dir", str(isolated_data_dir),
+         "--account-id", "123456789012"],
     )
 
     assert result.exit_code == 0, (result.stdout, result.stderr)
