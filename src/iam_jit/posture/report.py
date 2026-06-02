@@ -130,6 +130,22 @@ def _fmt_bouncers_block(bouncers: dict[str, Any]) -> list[str]:
             lines.append(f"    Env: {b['env_var_pointing_here']}")
         if b.get("misconfig"):
             lines.append(f"    MISCONFIG: {b['misconfig']}")
+        # #711 — audit-export silent-degradation guard. Surface as a
+        # RED flag when decisions have been made but no audit channel
+        # is configured. Per [[ibounce-honest-positioning]]: this state
+        # means every decision so far is forensically invisible post-
+        # restart; it deserves operator attention immediately.
+        _audit_warn = b.get("audit_warning")
+        if _audit_warn:
+            # Extract decisions_count from the warning message for a
+            # cleaner rendered line.
+            import re as _re
+            _m = _re.search(r"decisions_count=(\d+)", _audit_warn)
+            _dc = _m.group(1) if _m else "?"
+            lines.append(
+                f"    AUDIT: {_dc} decisions made, 0 persisted "
+                f"— configure audit-log-path"
+            )
         # #424 / §A63 — surface disk-pressure state per bouncer when
         # /healthz (or in-process state) provided it. Always present
         # in the snapshot when the bouncer is running; framed per

@@ -161,5 +161,6 @@ markers = [
   "integration: tests that require Docker-hosted services (LocalStack, Ollama)",
   "e2e: end-to-end tests that exercise the full stack via docker-compose",
   "slow: tests that intentionally exercise expensive paths (e.g. fsync per write)",
+  "live: tests that require live bouncer processes on localhost (ibounce :8767, gbounce :8769)",
 ]
 asyncio_mode = "auto"

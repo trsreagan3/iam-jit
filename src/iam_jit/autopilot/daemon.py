@@ -933,6 +933,12 @@ class AutopilotSupervisor:
                     # Per [[install-ux-gap-2026-05-26]]: catch this during
                     # ongoing operation, not just at install time.
                     _check_no_traffic_warn(name, healthz, self.alerts)
+                    # #711 — audit-export silent-degradation check: if the
+                    # bouncer has processed decisions but no audit channel is
+                    # configured, the operator believes they are audited but
+                    # aren't. Emit per-tick so operators monitoring the alerts
+                    # channel see the gap without having to run posture manually.
+                    _check_audit_export_warn(name, healthz, self.alerts)
             else:
                 # Not running — try to restart (subject to throttle).
                 if state.alert_emitted:
@@ -2025,6 +2031,48 @@ def _check_no_traffic_warn(
         pass
 
 
+def _check_audit_export_warn(
+    bouncer_name: str,
+    healthz: dict[str, Any],
+    alerts: list[Any],
+) -> None:
+    """#711 — emit an audit-export-not-configured alert when a bouncer
+    has processed decisions but no persistent audit channel is wired.
+
+    Reads the ``audit_warning`` field that /healthz now surfaces (non-
+    null = silent-degradation state). Does NOT auto-fix — the operator
+    must add ``--audit-log-path`` themselves (per [[creates-never-mutates]]
+    we don't reach into a running process to reconfigure it).
+
+    Emits once per tick (not once per session) so the alerts channel
+    keeps signalling until the operator resolves the gap.  Per
+    [[ibounce-honest-positioning]]: an operator monitoring the alerts
+    channel MUST see this continuously until it is fixed.
+
+    Best-effort: any parse error is silently ignored so a malformed
+    healthz doesn't crash the supervisor tick.
+    """
+    try:
+        audit_warning = healthz.get("audit_warning")
+        if not audit_warning:
+            return
+        decisions = int(healthz.get("decisions_count") or 0)
+        alerts.append({
+            "severity": "warn",
+            "category": "audit_export_not_configured",
+            "bouncer": bouncer_name,
+            "message": (
+                f"{bouncer_name}: {decisions} decisions processed but "
+                "audit_export not configured — events not persisted. "
+                "Add --audit-log-path ~/.iam-jit/audit.jsonl to the "
+                f"{bouncer_name} run command to persist audit events."
+            ),
+            "timestamp": _now_iso(),
+        })
+    except Exception:  # pragma: no cover  # noqa: SD-1 best-effort supervisor helper; a parse failure must not crash the tick
+        pass
+
+
 # ---------------------------------------------------------------------------
 # #453 (§A49b) — per-bouncer /healthz polling + cross-bouncer denies count
 # ---------------------------------------------------------------------------
@@ -2047,6 +2095,10 @@ _HEALTHZ_PROJECTED_FIELDS = (
     "default_policy",
     "active_profile",
     "decisions_count",
+    # #711 — audit-export silent-degradation field. Non-null when
+    # decisions_count > 0 AND audit_export not configured. Read by
+    # _check_audit_export_warn on each poll tick.
+    "audit_warning",
 )
 
 
