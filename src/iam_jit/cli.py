@@ -2413,6 +2413,16 @@ from .cli_uninstall import register_uninstall_command  # noqa: E402
 register_uninstall_command(main)
 
 
+# #722 / BUILD-1 — register `iam-jit agent-diff` differential audit.
+# Highest single competitive differentiation per the firewall-landscape
+# PDF: surfaces session-to-session diff so the operator can pick the
+# tighter agent. Read-only; composes on top of the per-bouncer
+# /audit/events surface used by `iam-jit audit query`. Mirrors the
+# `iam_jit_agent_diff` MCP tool per [[cross-product-agent-parity]].
+from .cli_agent_diff import register_agent_diff_command  # noqa: E402
+register_agent_diff_command(main)
+
+
 # #491 / §A91 LAUNCH-BLOCKER — `iam-jit org-policy {sign,verify}`.
 # IT-side counterpart to #490's engineer-side `init --managed`. Sign
 # an org-policy YAML + verify before publish. Reuses Ed25519 primitives

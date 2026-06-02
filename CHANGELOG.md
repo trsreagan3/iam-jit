@@ -112,6 +112,32 @@ within the same release.
 
 ### Added
 
+- **#722 / BUILD-1 — `iam-jit agent-diff` differential audit** (2026-06-02) —
+  New CLI subcommand + `iam_jit_agent_diff` MCP tool that compares two
+  agent sessions from the cross-bouncer audit log and surfaces a
+  structured diff: permission delta (only-in-a / only-in-b /
+  intersection with per-side resources + counts), decision-pattern
+  delta (allow/deny rates + reasons), behavioral fingerprint delta
+  (call counts, distinct actions/principals/resources/hosts), risk
+  delta (max + mean anomaly score per side; honest `reason` field
+  when no pre-scored events are present), and a narrowed IAM policy
+  (`intersection` / `union` / `left` / `right` strategies). The
+  narrowed policy is always a real `Version: 2012-10-17` document or
+  an honestly-empty placeholder with `cannot_narrow_reason` set —
+  never a wishful sketch. Per the competitive-firewall landscape PDF
+  this is iam-jit's headline single differentiation: no competitor
+  (Apono / Pipelock / NanoClaw) publishes session-to-session diff.
+  Pairs with role-effectiveness grading (#393) — pick the agent
+  whose audit-derived role is tightest. Module:
+  `src/iam_jit/agent_diff/`; CLI: `src/iam_jit/cli_agent_diff.py`;
+  MCP: `iam_jit_agent_diff` + `_iam_jit_agent_diff_for_mcp` in
+  `mcp_server.py`. Design memo: `docs/AGENT-DIFF-DESIGN.md`;
+  operator guide: `docs/AGENT-DIFF-USAGE.md`. Test coverage: 20
+  unit-test + 9 integration-test cases covering identical /
+  disjoint / resource-scope-difference / risk-meaningful scenarios
+  + format + MCP parity. Read-only per `[[creates-never-mutates]]`;
+  no LLM, no inference per `[[no-nl-synthesis]]` +
+  `[[recommender-context-boundary]]`.
 - **#343 / §A24 — Pre-launch claims-vs-functionality audit fix sweep** (2026-05-23) —
   Closes 5 quick wins surfaced by the 2026-05-23 claims-vs-functionality
   audit:
