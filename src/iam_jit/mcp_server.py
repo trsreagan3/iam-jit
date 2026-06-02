@@ -1680,6 +1680,32 @@ TOOLS = [
         },
     },
     {
+        "name": "bouncer_presence_status",
+        "description": (
+            "#726 / BUILD-5 — 'off the leash' detection. Returns "
+            "bouncer-presence verification across all tracked agent "
+            "sessions: which sessions are PRESENT (the bouncer checked "
+            "in within the TTL — default 300s) vs OFF_THE_LEASH (the "
+            "bouncer WAS checking in for this session and has now gone "
+            "silent past the TTL). Honest framing per "
+            "[[ibounce-honest-positioning]]: off-the-leash is a SIGNAL "
+            "to verify the agent is still routed through the bouncer, "
+            "NOT proof of bypass — the agent may simply be idle. Fields: "
+            "`enforced` (bool; whether IAM_JIT_REQUIRE_BOUNCER_PRESENCE "
+            "makes iam-jit refuse role-issuance on a gap, default false "
+            "= advisory), `ttl_seconds` (int), `tracked_sessions` (int), "
+            "`off_the_leash_count` (int), `off_the_leash_detected` "
+            "(bool; the load-bearing field a monitor polls), and "
+            "`sessions` (per-session verdicts with a neutral-language "
+            "`message`). Read-only; safe for agents to poll; no side "
+            "effects."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {},
+        },
+    },
+    {
         "name": "list_audit_webhook_presets",
         "description": (
             "#259 — return the cross-product list of audit-webhook "
@@ -5584,6 +5610,21 @@ def _bouncer_audit_export_status_for_mcp(
     return audit_export_status()
 
 
+def _bouncer_presence_status_for_mcp(  # noqa: SD-2 — `args` accepted for MCP tool-handler schema parity; this read-only tool takes no inputs
+    args: dict[str, Any],
+) -> dict[str, Any]:
+    """#726 / BUILD-5 — agent-facing 'off the leash' status. Returns
+    bouncer-presence verification across tracked agent sessions.
+
+    Per [[ibounce-honest-positioning]]: off_the_leash is a SIGNAL not
+    proof; each session verdict carries a neutral-language `message`.
+    Read-only; the args dict is accepted for schema parity + ignored.
+    """
+    from . import presence as presence_mod
+
+    return presence_mod.presence_status()
+
+
 def _list_audit_webhook_presets_for_mcp(
     args: dict[str, Any],
 ) -> dict[str, Any]:
@@ -6702,6 +6743,8 @@ def _handle_request(req: dict[str, Any]) -> dict[str, Any] | None:
             result_payload = _bouncer_ghost_session_diff_for_mcp(args)
         elif tool_name == "bouncer_audit_export_status":
             result_payload = _bouncer_audit_export_status_for_mcp(args)
+        elif tool_name == "bouncer_presence_status":
+            result_payload = _bouncer_presence_status_for_mcp(args)
         elif tool_name == "list_audit_webhook_presets":
             result_payload = _list_audit_webhook_presets_for_mcp(args)
         elif tool_name == "bouncer_pending_sync_prompts":

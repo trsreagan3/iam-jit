@@ -38,6 +38,7 @@ from .routes.auth import router as auth_router
 # submit via the existing request-creation endpoint + MCP submit_policy.
 from .routes.health import router as health_router
 from .routes.policy import router as policy_router
+from .routes.presence import router as presence_router
 from .routes.reports import router as reports_router
 from .routes.requests import router as requests_router
 from .routes.tokens import router as tokens_router
@@ -597,6 +598,9 @@ def create_app(
     app.include_router(policy_router)
     app.include_router(accounts_router)
     app.include_router(admin_router)
+    # #726 / BUILD-5 — bouncer-presence check-in + status ("off the
+    # leash" detection).
+    app.include_router(presence_router)
     # #620 — `/audit/events` on iam-jit serve mirrors the bouncer wire
     # shape so `iam-jit audit query` can fan-out to serve as one more
     # surface (closes the doc-lie from #613's OUTSTANDING-REQUEST-CAP
