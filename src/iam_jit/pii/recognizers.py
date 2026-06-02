@@ -34,9 +34,21 @@ NER. We never claim otherwise.
 from __future__ import annotations
 
 import dataclasses
+import logging
 import re
 
 from .config import CustomPiiConfig
+
+_log = logging.getLogger(__name__)
+
+# ReDoS / DoS input-size cap (defense-in-depth). Presidio's ``regex``
+# engine already defeats classic catastrophic backtracking, but an
+# operator-authored pattern run over a pathologically large value could
+# still stall the (async) audit-redaction worker. Strings longer than
+# this are SKIPPED (returned unchanged, with a logged note) before any
+# recognizer touches them, capping the worst case. 256 KiB is far larger
+# than any realistic audit string value while bounding scan cost.
+MAX_SCAN_BYTES = 256 * 1024
 
 # Surfaced on every scan result + printed by the CLI. Per
 # [[ibounce-honest-positioning]].
@@ -286,9 +298,28 @@ def scan_text(
     Raises :class:`PresidioUnavailableError` when the extra is absent;
     the caller decides whether to no-op or surface it.
     """
+    entity_names = config.entity_names
+
+    # ReDoS / DoS guard: skip oversized input BEFORE compiling/running any
+    # recognizer regex over it. Returns the text unchanged (no matches) so
+    # the redaction path leaves it as-is rather than stalling. The built-in
+    # credential/PII patterns in the retention path are unaffected (this
+    # caps only the custom-entity layer).
+    if len(text.encode("utf-8", errors="ignore")) > MAX_SCAN_BYTES:
+        _log.warning(
+            "custom-PII scan skipped: input is %d bytes (> %d-byte cap); "
+            "value left unscanned by the custom layer to bound scan cost",
+            len(text.encode("utf-8", errors="ignore")),
+            MAX_SCAN_BYTES,
+        )
+        return PiiScanResult(
+            matches=(),
+            redacted=text,
+            entity_names=entity_names,
+        )
+
     recognizers = build_recognizers(config)
     context_by_entity = _context_words_for(config)
-    entity_names = config.entity_names
 
     raw: list[PiiMatch] = []
     for rec in recognizers:

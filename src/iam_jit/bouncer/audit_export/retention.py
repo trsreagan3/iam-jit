@@ -83,6 +83,23 @@ from typing import Any, Callable
 
 logger = logging.getLogger(__name__)
 
+
+def _custom_pii_redactor() -> "Callable[[str], str] | None":
+    """Lazily fetch the cached custom-PII redactor (ADOPT-7 / #721) for
+    the offline scrub path (hot->warm GDPR transitions).
+
+    Fail-soft + default-off: returns ``None`` (unchanged redaction) when
+    ``IAM_JIT_CUSTOM_PII_CONFIG`` is unset, presidio is absent, the config
+    is broken, or the optional pii package can't be imported. Never raises
+    — a misconfigured custom layer must not break the archive scrub.
+    """
+    try:
+        from iam_jit.pii.bouncer_hook import get_audit_extra_redactor
+    except Exception:  # noqa: BLE001 — pii package optional; never break scrub
+        return None  # noqa: SD-4 — intentional fail-soft: optional pii dep absent => no custom layer
+    return get_audit_extra_redactor()
+
+
 # ---------------------------------------------------------------------------
 # Framework constants + defaults
 # ---------------------------------------------------------------------------
@@ -723,7 +740,9 @@ def _scrub_archive_pii(
                 # mangling a partial-write recovery candidate.
                 fout.write(line)
                 continue
-            redact_event_pii(event, policy)
+            redact_event_pii(
+                event, policy, extra_redactor=_custom_pii_redactor()
+            )
             fout.write(json.dumps(event, ensure_ascii=False) + "\n")
     src.unlink()
 

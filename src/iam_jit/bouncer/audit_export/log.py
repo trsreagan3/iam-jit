@@ -47,6 +47,21 @@ logger = logging.getLogger(__name__)
 _DEFAULT_LOG_QUEUE_MAXSIZE = 10_000
 
 
+def _get_custom_pii_redactor():
+    """Lazily fetch the cached custom-PII audit redactor (ADOPT-7 / #721).
+
+    Fail-soft + default-off: returns ``None`` (unchanged redaction) when
+    the feature is inactive OR if the optional pii package can't even be
+    imported. ``get_audit_extra_redactor`` is itself fail-soft and caches,
+    so this stays cheap on the hot path.
+    """
+    try:
+        from iam_jit.pii.bouncer_hook import get_audit_extra_redactor
+    except Exception:  # noqa: BLE001 — pii package optional; never break writes
+        return None  # noqa: SD-4 — intentional fail-soft: optional pii dep absent => no custom layer
+    return get_audit_extra_redactor()
+
+
 class AuditLogWriter:
     """Async JSONL audit-log writer.
 
@@ -272,7 +287,18 @@ class AuditLogWriter:
                 if self._retention_policy is not None:
                     try:
                         from .retention import redact_event_pii
-                        redact_event_pii(event, self._retention_policy)
+                        # ADOPT-7 / #721 — additively apply the operator's
+                        # custom-PII entities (if IAM_JIT_CUSTOM_PII_CONFIG
+                        # is set + redaction enabled). Default-off + fail-
+                        # soft: get_audit_extra_redactor never raises and
+                        # returns None when the feature is inactive, so the
+                        # built-in credential/PII redaction is unchanged.
+                        extra = _get_custom_pii_redactor()
+                        redact_event_pii(
+                            event,
+                            self._retention_policy,
+                            extra_redactor=extra,
+                        )
                     except Exception as e:
                         # Redaction failure: log + carry on with the
                         # ORIGINAL event. Per [[ibounce-honest-
