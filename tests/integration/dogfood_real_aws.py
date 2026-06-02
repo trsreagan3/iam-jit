@@ -314,6 +314,74 @@ def _wait_for_port(host: str, port: int, timeout_s: float = 30.0) -> bool:
     return False
 
 
+_DOGFOOD_APPROVER_ID = "email:dogfood-approver@ci.local"
+
+
+def _preseed_users_yaml(data_dir: Path) -> None:
+    """Write users.yaml into data_dir BEFORE starting serve --local.
+
+    FileUserStore is read-only at runtime, so the approver user must
+    exist in the YAML file before the server boots.  We also include
+    the local admin (computed via the same logic as _seed_local_user
+    in local_server.py) so the auto-seeding step on serve startup
+    finds the file already present and skips rewriting it.
+
+    This fixes #708: POST /api/v1/users returned HTTP 409
+    "FileUserStore is read-only at runtime" when _setup_dogfood_approver
+    tried to create the approver user after the server was running.
+    """
+    # Replicate the admin-email derivation from local_server.py
+    # LocalServerConfig.resolve_admin_email() so the admin user in the
+    # pre-seeded file matches exactly what serve --local will look up.
+    try:
+        from iam_jit.local_server import LocalServerConfig
+        admin_email = LocalServerConfig(data_dir=data_dir).resolve_admin_email()
+    except Exception:
+        import getpass
+        try:
+            user = getpass.getuser()
+        except Exception:
+            user = os.environ.get("USER") or "local"
+        try:
+            host = socket.gethostname()
+        except Exception:
+            host = "localhost"
+        import re
+        _safe = re.compile(r"[^A-Za-z0-9._-]")
+        user = _safe.sub("", user) or "local"
+        host = _safe.sub("", host) or "localhost"
+        host = host.rstrip(".").removesuffix(".local")
+        admin_email = f"{user}@{host}.local".lower()
+
+    admin_id = f"email:{admin_email}"
+    users_yaml = data_dir / "users.yaml"
+    contents = (
+        "# iam-jit local-mode users file.\n"
+        "# Pre-seeded by dogfood_real_aws.py before serve --local starts.\n"
+        "# Admin user + dogfood approver must both be present here because\n"
+        "# FileUserStore is read-only at runtime (#708 fix).\n"
+        "schema_version: 1\n"
+        "auth_mode: local\n"
+        "users:\n"
+        f"  - id: {admin_id}\n"
+        f"    display_name: \"Local admin ({admin_email})\"\n"
+        "    roles: [admin, approver, requester]\n"
+        "    enabled: true\n"
+        "    notes: \"Pre-seeded by dogfood_real_aws.py for CI\"\n"
+        f"  - id: {_DOGFOOD_APPROVER_ID}\n"
+        "    display_name: \"Dogfood CI Approver\"\n"
+        "    roles: [approver]\n"
+        "    enabled: true\n"
+        "    notes: \"Pre-seeded by dogfood_real_aws.py; safe to delete.\"\n"
+    )
+    data_dir.mkdir(parents=True, exist_ok=True)
+    users_yaml.write_text(contents)
+    try:
+        users_yaml.chmod(0o600)
+    except Exception:
+        pass
+
+
 def _start_local_serve(
     *, data_dir: Path, account_id: str, region: str,
     iam_jit_bin: str,
@@ -331,7 +399,10 @@ def _start_local_serve(
     workflow (_admin_approve_request) rather than by disabling floors.
     [[scorer-is-ground-truth]] [[safety-mode-lean-permissive]]
     """
-    data_dir.mkdir(parents=True, exist_ok=True)
+    # Pre-seed users.yaml with the dogfood approver BEFORE starting serve.
+    # FileUserStore is read-only at runtime; the approver must be in the
+    # file or POST /api/v1/users will 409 (#708).
+    _preseed_users_yaml(data_dir)
     env = dict(os.environ)
     env["AWS_DEFAULT_REGION"] = region
     env["IAM_JIT_DATA_DIR"] = str(data_dir)
@@ -371,9 +442,14 @@ def _start_local_serve(
 def _setup_dogfood_approver(
     *, iam_jit_url: str, admin_token: str,
 ) -> str:
-    """Create a dedicated approver user and mint a token for them.
+    """Mint a bearer token for the pre-seeded dogfood approver user.
 
-    Returns the raw bearer token for `email:dogfood-approver@ci.local`.
+    Returns the raw bearer token for _DOGFOOD_APPROVER_ID.
+
+    The approver user is written into users.yaml by _preseed_users_yaml
+    BEFORE serve --local starts.  FileUserStore is read-only at runtime,
+    so we cannot create users via the API (#708).  We only need to mint
+    the token here via the admin-on-behalf-of path.
 
     This second-user is necessary because the production approval
     endpoint enforces self-approval prevention: the admin who submits
@@ -384,48 +460,34 @@ def _setup_dogfood_approver(
     """
     import httpx as _httpx
 
-    approver_id = "email:dogfood-approver@ci.local"
+    approver_id = _DOGFOOD_APPROVER_ID
     with _httpx.Client(
         base_url=iam_jit_url,
         headers={"Authorization": f"Bearer {admin_token}"},
         timeout=15.0,
     ) as c:
-        # Create the approver user (idempotent — PUT-like behaviour).
-        resp = c.post(
-            "/api/v1/users",
-            json={
-                "id": approver_id,
-                "roles": ["approver"],
-                "display_name": "Dogfood CI Approver",
-                "notes": "Auto-created by dogfood_real_aws.py; safe to delete.",
-            },
-        )
-        if resp.status_code not in (200, 201):
-            raise RuntimeError(
-                f"could not create dogfood approver user: "
-                f"HTTP {resp.status_code} {resp.text[:200]}"
-            )
         # Mint a token for the approver on behalf of them (admin-only
         # endpoint; the raw value is returned exactly once).
-        resp2 = c.post(
+        # The user already exists in users.yaml (pre-seeded before boot).
+        resp = c.post(
             "/api/v1/tokens",
             json={
                 "label": "dogfood-approver-token",
                 "user_id": approver_id,
             },
         )
-        if resp2.status_code not in (200, 201):
+        if resp.status_code not in (200, 201):
             raise RuntimeError(
                 f"could not mint approver token: "
-                f"HTTP {resp2.status_code} {resp2.text[:200]}"
+                f"HTTP {resp.status_code} {resp.text[:200]}"
             )
-        raw = resp2.json().get("raw_token") or resp2.json().get("token")
+        raw = resp.json().get("raw_token") or resp.json().get("token")
         if not raw:
             raise RuntimeError(
                 f"approver token mint returned no raw_token/token field: "
-                f"{resp2.json()}"
+                f"{resp.json()}"
             )
-    print(f"  approver user created: {approver_id}")
+    print(f"  approver token minted for: {approver_id}")
     return raw
 
 
