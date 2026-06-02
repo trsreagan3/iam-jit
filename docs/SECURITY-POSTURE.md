@@ -11,6 +11,9 @@ model + disclosure policy) and [`SECURITY-SLA.md`](SECURITY-SLA.md)
 For wiring the MCP surface into non-Claude-Code clients, see
 [`MCP-RECIPES.md`](MCP-RECIPES.md).
 
+For adding ibounce to a Docker-based Claude Code (or any agent) setup, see
+[`DOCKER-CLAUDE-INTEGRATION.md`](DOCKER-CLAUDE-INTEGRATION.md).
+
 ---
 
 ## 1. Summary

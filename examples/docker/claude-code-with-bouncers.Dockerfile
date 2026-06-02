@@ -104,7 +104,7 @@ HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \
 # actual agent command. This shell wrapper demonstrates how to start
 # ibounce before the main process.
 
-COPY examples/docker/start-with-bouncers.sh /usr/local/bin/start-with-bouncers
+COPY infrastructure/docker/start-with-bouncers.sh /usr/local/bin/start-with-bouncers
 RUN chmod +x /usr/local/bin/start-with-bouncers
 # Also copy the sidecar entrypoint for reference / reuse.
 COPY infrastructure/docker/sidecar-entrypoint.sh /usr/local/bin/sidecar-entrypoint
