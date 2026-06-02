@@ -509,6 +509,140 @@ def _check_versions(section: _Section) -> None:
 
 
 # ---------------------------------------------------------------------------
+# Stale-binary detection (#737)
+#
+# The stale-binary state: operator has an older pipx/pip-installed `iam-jit`
+# binary that pre-dates PR #23 (the install-bootstrap fix). The binary on
+# PATH is missing --settings-path and --no-env-block on `mcp install-claude-code`.
+# Running `iam-jit mcp install-claude-code` from that binary silently skips
+# the env-block write — the operator gets old behavior.
+#
+# Detection signal: probe `iam-jit mcp install-claude-code --help` (from a
+# subprocess, so we exec the PATH binary, not ourselves) and check for
+# "--settings-path" in the output. If absent, the binary is stale.
+#
+# Per [[ibounce-honest-positioning]]: surface the gap honestly; never hide it.
+# Per [[lightweight-frictionless-principle]]: emit NOTHING when versions match.
+# ---------------------------------------------------------------------------
+
+_STALE_BINARY_FLAG = "--settings-path"
+_STALE_BINARY_MIN_VERSION_NOTE = "v1.0.0 + PR #23"
+
+
+def _probe_binary_has_settings_path(binary: str = "iam-jit") -> tuple[bool, str]:
+    """Probe whether the on-PATH *binary* supports ``--settings-path``
+    on ``mcp install-claude-code``.
+
+    Returns ``(has_flag, detail)`` where ``has_flag`` is True when the
+    binary is up-to-date (silent path), False when stale (warn path).
+    ``detail`` explains the probe outcome for the WARN row.
+
+    Never raises — every failure mode returns ``(True, ...)`` (assume
+    up-to-date) to avoid false-positive noise when the probe itself
+    can't run.  Per [[ibounce-honest-positioning]] we name uncertainty
+    rather than assuming the worst.
+    """
+    if not shutil.which(binary):
+        return (True, "binary not on PATH — skipped stale-check")
+
+    try:
+        proc = subprocess.run(  # noqa: S603
+            [binary, "mcp", "install-claude-code", "--help"],
+            capture_output=True,
+            text=True,
+            timeout=5.0,
+            check=False,
+        )
+    except (subprocess.TimeoutExpired, OSError) as exc:
+        # Can't probe — assume current to avoid false positives.
+        return (True, f"help probe timed out / failed: {exc!s}")
+
+    combined = proc.stdout + proc.stderr
+    if _STALE_BINARY_FLAG in combined:
+        return (True, "binary has --settings-path (up-to-date)")
+
+    # Flag absent — the binary is stale.
+    detail = (
+        "iam-jit mcp install-claude-code is missing --settings-path and "
+        "--no-env-block. The installed binary pre-dates PR #23: it will "
+        "NOT write the bouncer env vars (AWS_ENDPOINT_URL) into "
+        "~/.claude/settings.json."
+    )
+    return (False, detail)
+
+
+def check_stale_binary(section: _Section) -> None:
+    """Doctor stale-binary check (Section 2b).
+
+    Probes the on-PATH ``iam-jit`` binary for the PR #23 flags.  A WARN
+    row appears when the binary is stale; a silent OK row when current.
+
+    Called from ``run_install_check`` and also exposed as a standalone
+    helper so ``iam-jit init`` + ``iam-jit mcp install-claude-code`` can
+    call it without running the full 8-section doctor.
+    """
+    has_flag, detail = _probe_binary_has_settings_path("iam-jit")
+    if has_flag:
+        section.add(
+            label="iam-jit binary is current (has --settings-path)",
+            severity=_SEV_OK,
+            detail=detail,
+        )
+    else:
+        section.add(
+            label="STALE iam-jit binary — missing PR #23 flags",
+            severity=_SEV_WARN,
+            detail=detail,
+            fix=(
+                "Upgrade the installed binary so the new install-bootstrap "
+                f"features ({_STALE_BINARY_MIN_VERSION_NOTE}) take effect:\n"
+                "        pipx upgrade iam-jit          # if installed via pipx\n"
+                "        pip install --user --upgrade git+https://github.com/"
+                "trsreagan3/iam-jit.git  # if installed via pip --user\n"
+                "        pip install --upgrade -e /path/to/iam-roles  "
+                "# if installed editable\n"
+                "\n"
+                "    After upgrade, re-run: iam-jit init --harness=claude-code"
+            ),
+        )
+
+
+def warn_if_stale_binary(*, context: str = "mcp install-claude-code") -> None:
+    """Emit a plain-text stderr warning when the on-PATH binary is stale.
+
+    Called at the START of ``iam-jit mcp install-claude-code`` and from
+    ``iam-jit init`` (Step 7.5) BEFORE any env-block write attempt.
+    Silent when the binary is current (per [[lightweight-frictionless-
+    principle]]).
+
+    ``context`` names the calling command for the remediation hint so
+    the operator knows what to re-run after upgrading.
+    """
+    has_flag, _detail = _probe_binary_has_settings_path("iam-jit")
+    if has_flag:
+        return  # Silent — binary is current.
+
+    import sys as _sys
+
+    print(
+        "\n"
+        "[stale-binary-warning] Your installed iam-jit binary is MISSING\n"
+        f"--settings-path and --no-env-block (added in {_STALE_BINARY_MIN_VERSION_NOTE}).\n"
+        "\n"
+        "The env-block write (AWS_ENDPOINT_URL into ~/.claude/settings.json)\n"
+        "will NOT happen until you upgrade:\n"
+        "\n"
+        "    pipx upgrade iam-jit                             # pipx install\n"
+        "    pip install --user --upgrade git+https://github.com/trsreagan3/iam-jit.git"
+        "  # pip --user\n"
+        "    pip install --upgrade -e /path/to/iam-roles      # editable install\n"
+        "\n"
+        f"After upgrade, re-run: iam-jit {context}\n",
+        file=_sys.stderr,
+    )
+
+
+# ---------------------------------------------------------------------------
 # Section 3: Running bouncer detection
 #
 # Reuses posture.capture_posture so we don't reimplement bouncer
@@ -975,6 +1109,8 @@ def run_install_check(
 
     s2 = _Section(num=2, total=8, title="Binary versions")
     _check_versions(s2)
+    # #737 — stale-binary detection: probes the PATH binary for PR #23 flags.
+    check_stale_binary(s2)
     sections.append(s2)
 
     s3 = _Section(num=3, total=8, title="Running bouncer detection")
@@ -1169,4 +1305,7 @@ __all__ = [
     "register_install_check_command",
     "run_install_check",
     "_python_install_hint",
+    "check_stale_binary",
+    "warn_if_stale_binary",
+    "_probe_binary_has_settings_path",
 ]

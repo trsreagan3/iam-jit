@@ -1453,6 +1453,12 @@ def mcp_install_claude_code(
     `iam-jit mcp show-config` and paste the snippet into your
     client's MCP config.
     """
+    # #737 — stale-binary detection lives in `iam-jit doctor install-check`
+    # only.  The install hot-path stays lightweight per
+    # [[lightweight-frictionless-principle]] — operators paying for the
+    # extra subprocess probe on every install would slow the common case
+    # to catch a rare one.  Operators who suspect a stale binary run
+    # `iam-jit doctor install-check` to get the warning.
     target = pathlib.Path(explicit_path) if explicit_path else _pick_claude_code_default()
     snippet = _mcp_server_config_dict()
 

@@ -1632,6 +1632,14 @@ def register_init_command(main_group: click.Group) -> click.Command:
         # init never crashes on a subprocess error. --skip-mcp-install
         # lets CI / scripted callers opt out while still getting the
         # config file.
+        #
+        # #737 — stale-binary check lives in `iam-jit doctor install-check`
+        # only, NOT in the init hot path.  Reasons: (1) probe subprocess on
+        # every init breaks the mock-counting tests in test_init_mcp_install_651
+        # + slows the common case, and (2) operators who suspect a stale
+        # binary already reach for doctor.  See
+        # [[lightweight-frictionless-principle]].
+
         mcp_install_results: list[_McpInstallResult] = []
         if not skip_mcp_install and result.harness != "none":
             mcp_install_results = _run_harness_mcp_installs(
