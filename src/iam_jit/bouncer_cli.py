@@ -3977,6 +3977,41 @@ def _parse_duration(raw: str) -> int:
          "file at 0o600). Ignored when --audit-sign-manifests is OFF.",
 )
 @click.option(
+    "--deny-receipts/--no-deny-receipts",
+    "deny_receipts_enabled",
+    default=True,
+    envvar="IBOUNCE_DENY_RECEIPTS",
+    help="#731 / BUILD-10 — attach an Ed25519-signed denial receipt to "
+         "every transparent-mode 403 + record its nonce in a persistent "
+         "(restart-surviving) store so replays are detectable. Verify "
+         "offline with `iam-jit audit verify-receipt`. ON BY DEFAULT when "
+         "an --audit-log-path exists (the receipt keypair + nonce store "
+         "anchor there). FAIL-SOFT: a signing error never changes the "
+         "deny. A receipt proves iam-jit's RECORD of the deny, not that "
+         "the agent couldn't act elsewhere. --no-deny-receipts disables.",
+)
+@click.option(
+    "--deny-receipt-keypair-dir",
+    "deny_receipt_keypair_dir",
+    type=click.Path(file_okay=False),
+    default=None,
+    envvar="IBOUNCE_DENY_RECEIPT_KEYPAIR_DIR",
+    help="#731 — directory holding the Ed25519 keypair used to sign "
+         "denial receipts. None = ~/.iam-jit/audit-keys/ (shared dir with "
+         "the manifest signer; distinct key name so identities are "
+         "separable). Ignored when --no-deny-receipts.",
+)
+@click.option(
+    "--deny-receipt-nonce-max-entries",
+    "deny_receipt_nonce_max_entries",
+    type=click.IntRange(1, 100_000_000),
+    default=None,
+    envvar="IBOUNCE_DENY_RECEIPT_NONCE_MAX_ENTRIES",
+    help="#731 — LRU cap on the persistent denial-receipt nonce store. "
+         "None = shipped default (100k). Oldest-minted nonces evict past "
+         "the cap.",
+)
+@click.option(
     "--audit-retention-framework",
     "audit_retention_framework",
     type=click.Choice(
@@ -4615,6 +4650,9 @@ def run_cmd(
     audit_sign_manifests: bool,
     audit_manifest_interval_events: int | None,
     audit_manifest_keypair_dir: str | None,
+    deny_receipts_enabled: bool,
+    deny_receipt_keypair_dir: str | None,
+    deny_receipt_nonce_max_entries: int | None,
     audit_retention_framework: str | None,
     anomaly_detection_mode: str | None,
     anomaly_sensitivity: str,
@@ -5246,6 +5284,10 @@ def run_cmd(
         audit_sign_manifests=audit_sign_manifests,
         audit_manifest_interval_events=audit_manifest_interval_events,
         audit_manifest_keypair_dir=audit_manifest_keypair_dir,
+        # #731 / BUILD-10 — denial-receipt knobs.
+        deny_receipts_enabled=deny_receipts_enabled,
+        deny_receipt_keypair_dir=deny_receipt_keypair_dir,
+        deny_receipt_nonce_max_entries=deny_receipt_nonce_max_entries,
         audit_retention_framework=audit_retention_framework,
         # #494 / §A66b — per-field retention overrides from declaration.
         # Only propagated when the declaration block supplied them; None

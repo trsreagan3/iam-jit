@@ -2302,8 +2302,15 @@ register_audit_stream_command(audit_group)
 from .cli_audit_verify import (  # noqa: E402
     register_audit_retention_command,
     register_audit_verify_command,
+    register_audit_verify_receipt_command,
 )
 register_audit_verify_command(audit_group)
+# #731 / BUILD-10 — register `iam-jit audit verify-receipt <FILE>`: the
+# offline Ed25519 denial-receipt verifier (signature + persistent-nonce
+# replay check). Mounts on the same `audit` group as `verify` so the
+# operator's mental model is "verify attests the chain; verify-receipt
+# attests a single deny".
+register_audit_verify_receipt_command(audit_group)
 # #428 / §A67 — register `iam-jit audit retention apply` for the
 # offline tier-mover + purge surface. Lives next to `verify` so the
 # operator's mental model is "audit retention apply + audit verify

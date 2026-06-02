@@ -1706,6 +1706,40 @@ TOOLS = [
         },
     },
     {
+        "name": "verify_denial_receipt",
+        "description": (
+            "#731 / BUILD-10 — verify an Ed25519-signed denial receipt "
+            "offline (no network). Pass the `receipt` object you got from "
+            "a 403 deny response's `denial_receipt` field. Returns "
+            "`signature_ok` (does the Ed25519 signature match the payload "
+            "+ embedded/pinned key?) plus the receipt's decoded fields. "
+            "HONEST FRAMING: a valid receipt proves iam-jit's RECORD that "
+            "it denied this action at this time for this reason — it does "
+            "NOT prove the agent couldn't act through another channel. "
+            "For REPLAY detection (a receipt nonce presented twice, even "
+            "across a bouncer restart) use the operator CLI `iam-jit audit "
+            "verify-receipt --nonce-db ...` against the persistent nonce "
+            "store. Read-only; no side effects."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "receipt": {
+                    "type": "object",
+                    "description": "The denial receipt JSON object (the "
+                                   "`denial_receipt` field from a 403 body).",
+                },
+                "public_key_b64": {
+                    "type": "string",
+                    "description": "Optional out-of-band pinned public key "
+                                   "(URL-safe base64, no padding) to verify "
+                                   "against instead of the embedded key.",
+                },
+            },
+            "required": ["receipt"],
+        },
+    },
+    {
         "name": "list_audit_webhook_presets",
         "description": (
             "#259 — return the cross-product list of audit-webhook "
@@ -5625,6 +5659,66 @@ def _bouncer_presence_status_for_mcp(  # noqa: SD-2 — `args` accepted for MCP 
     return presence_mod.presence_status()
 
 
+def _verify_denial_receipt_for_mcp(
+    args: dict[str, Any],
+) -> dict[str, Any]:
+    """#731 / BUILD-10 — verify an Ed25519-signed denial receipt.
+
+    Mirrors the offline `iam-jit audit verify-receipt` CLI for the
+    agent/audit-harness surface. Accepts the receipt as a JSON object
+    (the `denial_receipt` field from a 403 body). Verifies the
+    signature; optionally pins a public key. Does NOT touch the nonce
+    store (replay detection is an operator/auditor concern run against
+    the durable store via the CLI) — this surface is the signature +
+    honest-framing check.
+
+    Read-only, no side effects. Honest framing: a valid receipt proves
+    iam-jit's RECORD of the deny, not that the agent couldn't act
+    elsewhere.
+    """
+    from .receipts import DenialReceipt, verify_receipt
+
+    receipt_obj = args.get("receipt")
+    pinned = (args.get("public_key_b64") or "").strip() or None
+    if not isinstance(receipt_obj, dict):
+        return {
+            "ok": False,
+            "error": "invalid_args",
+            "message": "`receipt` must be the receipt JSON object",
+        }
+    try:
+        receipt = DenialReceipt.from_dict(receipt_obj)
+    except Exception as e:  # noqa: BLE001
+        return {
+            "ok": False,
+            "error": "malformed_receipt",
+            "message": str(e),
+        }
+    sig_ok, sig_reason = verify_receipt(receipt, public_key_override_b64=pinned)
+    return {
+        "ok": sig_ok,
+        "signature_ok": sig_ok,
+        "signature_reason": sig_reason,
+        "deny_id": receipt.deny_id,
+        "action": receipt.action,
+        "resource": receipt.resource,
+        "reason": receipt.reason,
+        "agent_session": receipt.agent_session,
+        "timestamp": receipt.timestamp,
+        "verdict": receipt.verdict,
+        "public_key_fingerprint": receipt.public_key_fingerprint,
+        "proves": (
+            "iam-jit's RECORD that it denied this action at this time for "
+            "this reason; NOT that the agent could not act elsewhere"
+        ),
+        "replay_check_hint": (
+            "for replay detection across restarts, run `iam-jit audit "
+            "verify-receipt <file> --nonce-db <state-dir>/"
+            "denial-receipt-nonces.sqlite3`"
+        ),
+    }
+
+
 def _list_audit_webhook_presets_for_mcp(
     args: dict[str, Any],
 ) -> dict[str, Any]:
@@ -6745,6 +6839,8 @@ def _handle_request(req: dict[str, Any]) -> dict[str, Any] | None:
             result_payload = _bouncer_audit_export_status_for_mcp(args)
         elif tool_name == "bouncer_presence_status":
             result_payload = _bouncer_presence_status_for_mcp(args)
+        elif tool_name == "verify_denial_receipt":
+            result_payload = _verify_denial_receipt_for_mcp(args)
         elif tool_name == "list_audit_webhook_presets":
             result_payload = _list_audit_webhook_presets_for_mcp(args)
         elif tool_name == "bouncer_pending_sync_prompts":
