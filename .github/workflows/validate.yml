@@ -10,6 +10,7 @@ on:
       - "tests/**"
       - "examples/**"
       - "pyproject.toml"
+      - ".github/workflows/validate.yml"
   push:
     branches: [main]
 
@@ -48,3 +49,41 @@ jobs:
           for f in "${requests[@]}"; do
             iam-jit validate "$f"
           done
+
+  optional-extras:
+    # ADOPT-6 (#720) + ADOPT-7 (#721) — run the OTel-exporter and custom-PII
+    # test files with the optional [otel] and [pii] extras installed so they
+    # exercise real code instead of skipping via pytest.importorskip.
+    #
+    # Kept as a SEPARATE job from `schema` so the heavy transitive installs
+    # (opentelemetry-sdk + grpcio + protobuf + presidio-analyzer) don't slow
+    # the core matrix. The [dev] extras are included so shared fixtures and
+    # the full test helper set are available.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: python -m pip install --upgrade pip
+      - run: pip install -e ".[dev,otel,pii]"
+      # Run only the test files that guard on the optional extras so we get
+      # fast, targeted feedback without re-running the full suite here.
+      #
+      # OTel (ADOPT-6): tests/bouncer/test_audit_export_otel.py
+      # PII  (ADOPT-7): tests/test_pii_scan_presidio.py
+      #                 tests/test_pii_redaction_path_presidio.py
+      #                 tests/test_pii_bouncer_wiring.py
+      #                 tests/test_pii_custom_detectors.py
+      #                 tests/test_pii_cli_presidio.py
+      #                 tests/test_pii_redos_cap.py
+      - name: Run optional-extras tests (otel + pii)
+        run: |
+          pytest -q \
+            tests/bouncer/test_audit_export_otel.py \
+            tests/test_pii_scan_presidio.py \
+            tests/test_pii_redaction_path_presidio.py \
+            tests/test_pii_bouncer_wiring.py \
+            tests/test_pii_custom_detectors.py \
+            tests/test_pii_cli_presidio.py \
+            tests/test_pii_redos_cap.py
