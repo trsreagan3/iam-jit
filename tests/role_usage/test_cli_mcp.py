@@ -110,6 +110,36 @@ def test_cli_role_usage_table(tmp_path, monkeypatch):
     assert "Caveats" in result.output
 
 
+def test_cli_role_usage_malformed_json(tmp_path, monkeypatch):
+    # Non-parseable granted policy must fail with a clean ClickException
+    # (non-zero exit, friendly message), never a raw JSONDecodeError
+    # traceback.
+    import iam_jit.cli_role_usage as cli_mod
+
+    monkeypatch.setattr(
+        cli_mod, "fetch_session_events_via_fanout", _fake_fanout,
+    )
+    policy_file = tmp_path / "granted.json"
+    policy_file.write_text("{ not valid json ]")
+
+    runner = CliRunner()
+    result = runner.invoke(
+        cli_mod.role_usage_command,
+        [
+            "--session", "SID-BAD",
+            "--granted-policy", str(policy_file),
+            "--format", "json",
+        ],
+    )
+    assert result.exit_code != 0
+    assert "not valid JSON" in result.output
+    # No raw traceback leaked.
+    assert "Traceback" not in result.output
+    assert result.exception is None or isinstance(
+        result.exception, SystemExit
+    )
+
+
 def test_mcp_role_usage_backend(monkeypatch):
     import iam_jit.agent_diff as agent_diff_mod
     import iam_jit.mcp_server as mcp

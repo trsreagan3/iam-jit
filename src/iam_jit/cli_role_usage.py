@@ -50,7 +50,12 @@ def _parse_bouncer_list(values: tuple[str, ...]) -> tuple[str, ...]:
 def _load_granted_policy(path: str) -> dict[str, typing.Any]:
     """Load + minimally validate the issued role's inline policy."""
     with open(path, encoding="utf-8") as fh:
-        doc = json.load(fh)
+        try:
+            doc = json.load(fh)
+        except json.JSONDecodeError as e:
+            raise click.ClickException(
+                f"granted policy in {path!r} is not valid JSON: {e}"
+            )
     if not isinstance(doc, dict):
         raise click.ClickException(
             f"granted policy in {path!r} must be a JSON object "
