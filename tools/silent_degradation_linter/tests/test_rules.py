@@ -193,6 +193,6 @@ class TestFindingKey:
 
     def test_as_dict_has_all_fields(self):
         from silent_degradation_linter.lint import Finding
-        f = Finding("SD-4", "x.py", 1, 0, "msg", "snippet", "context")
+        f = Finding("SD-4", "x.py", 1, 0, "msg", "snippet", "context", "scope")
         d = f.as_dict()
-        assert set(d.keys()) == {"rule", "path", "line", "col", "message", "snippet", "context"}
+        assert set(d.keys()) == {"rule", "path", "line", "col", "message", "snippet", "context", "scope"}

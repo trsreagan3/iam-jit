@@ -55,6 +55,12 @@ def _normalize_code(text: str) -> str:
     return re.sub(r"\s+", " ", text).strip()
 
 
+# Sentinel scope for findings that have no enclosing function/class (i.e. live
+# at module level).  Stable string so module-level findings still hash
+# deterministically; they're rare and the path+context still distinguishes most.
+_MODULE_SCOPE = "<module>"
+
+
 @dataclass
 class Finding:
     rule: str          # e.g. "SD-1"
@@ -64,22 +70,31 @@ class Finding:
     message: str
     snippet: str = ""  # matched source line text (stripped) — informational
     context: str = ""  # normalized context window — part of the content key
+    scope: str = _MODULE_SCOPE  # enclosing def/class qualified name — part of key
 
     def signature(self) -> str:
         """Content/context signature for this finding.
 
         Stable across line-number shifts (the raw line number is NOT part of
         the signature), yet specific to the *code* that produced the finding:
-        the rule, the file path, the human message (which encodes the
-        load-bearing identity such as the SD-2 parameter name), and a
-        whitespace-normalized window of surrounding source.
+        the rule, the file path, the qualified name of the nearest enclosing
+        function/class (so the SAME boilerplate in DIFFERENT functions is
+        DISTINCT), the human message (which encodes the load-bearing identity
+        such as the SD-2 parameter name), and a whitespace-normalized window of
+        surrounding source.
 
-        A finding that merely moves down the file keeps the same signature.
-        A genuinely-new pattern in new/changed code produces a new signature.
+        A finding that merely moves down the file (within the same enclosing
+        scope) keeps the same signature.  A genuinely-new pattern in
+        new/changed code — including byte-identical boilerplate in a *different*
+        function — produces a new signature.  The enclosing scope is what
+        defeats slot-freeing: deleting one occurrence of a high-count baselined
+        signature and adding a new identical swallow in another function no
+        longer collides, because the two live in different scopes.
         """
         material = "\x1f".join((
             self.rule,
             self.path,
+            self.scope,
             _normalize_code(self.message),
             self.context,
         ))
@@ -130,6 +145,55 @@ def _build_context(lines: list[str], lineno: int, radius: int = _CONTEXT_RADIUS)
     window = [_normalize_code(lines[i]) for i in range(start, end)]
     window = [w for w in window if w]
     return "\n".join(window)
+
+
+# ---------------------------------------------------------------------------
+# Helpers: enclosing-scope (qualified def/class name) resolution
+# ---------------------------------------------------------------------------
+
+_SCOPE_NODES = (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)
+
+
+def _build_scope_map(tree: ast.AST, total_lines: int) -> dict[int, str]:
+    """Map every 1-based source line to the qualified name of its nearest
+    enclosing function/class.
+
+    Lines not inside any def/class map to ``_MODULE_SCOPE``.  Qualified names
+    nest with ``.`` (e.g. ``MyClass.my_method``).  When scopes nest, the
+    INNERMOST (longest end-line, smallest span) wins — we resolve this by
+    assigning each line the qualified name of the deepest scope whose body
+    spans it, processing outer-to-inner so inner assignments overwrite outer.
+
+    A finding's scope is therefore the name of the function/class it physically
+    lives inside, which makes byte-identical boilerplate in two different
+    functions hash to two different signatures.
+    """
+    line_to_scope: dict[int, str] = {}
+
+    def walk(node: ast.AST, prefix: str) -> None:
+        for child in ast.iter_child_nodes(node):
+            if isinstance(child, _SCOPE_NODES):
+                qual = f"{prefix}.{child.name}" if prefix else child.name
+                start = getattr(child, "lineno", None)
+                end = getattr(child, "end_lineno", None)
+                if start is not None:
+                    if end is None:
+                        end = start
+                    # Assign this scope to every line it spans; because we
+                    # recurse AFTER assigning, the inner (deeper) scope's
+                    # assignment overwrites the outer one for shared lines.
+                    for ln in range(start, min(end, total_lines) + 1):
+                        line_to_scope[ln] = qual
+                    walk(child, qual)
+            else:
+                walk(child, prefix)
+
+    walk(tree, "")
+    return line_to_scope
+
+
+def _scope_for_line(scope_map: dict[int, str], lineno: int) -> str:
+    return scope_map.get(lineno, _MODULE_SCOPE)
 
 
 # ---------------------------------------------------------------------------
@@ -403,6 +467,7 @@ def scan_file(
 
     lines = _source_lines(source)
     rel_path = str(path.relative_to(repo_root)) if path.is_absolute() else str(path)
+    scope_map = _build_scope_map(tree, len(lines))
 
     findings: list[Finding] = []
 
@@ -414,7 +479,8 @@ def scan_file(
             if _has_noqa(lines[lineno - 1] if lineno <= len(lines) else "", "SD-1"):
                 continue
             ctx = _build_context(lines, lineno)
-            findings.append(Finding("SD-1", rel_path, lineno, col, msg, line_text, ctx))
+            scope = _scope_for_line(scope_map, lineno)
+            findings.append(Finding("SD-1", rel_path, lineno, col, msg, line_text, ctx, scope))
 
     if "SD-2" in rules:
         v2 = SD2Visitor(lines)
@@ -424,7 +490,8 @@ def scan_file(
             if _has_noqa(lines[lineno - 1] if lineno <= len(lines) else "", "SD-2"):
                 continue
             ctx = _build_context(lines, lineno)
-            findings.append(Finding("SD-2", rel_path, lineno, col, msg, line_text, ctx))
+            scope = _scope_for_line(scope_map, lineno)
+            findings.append(Finding("SD-2", rel_path, lineno, col, msg, line_text, ctx, scope))
 
     if "SD-4" in rules:
         v4 = SD4Visitor(lines)
@@ -433,7 +500,8 @@ def scan_file(
             # noqa already checked inside SD4Visitor per-return-line
             line_text = lines[lineno - 1].strip() if lineno <= len(lines) else ""
             ctx = _build_context(lines, lineno)
-            findings.append(Finding("SD-4", rel_path, lineno, col, msg, line_text, ctx))
+            scope = _scope_for_line(scope_map, lineno)
+            findings.append(Finding("SD-4", rel_path, lineno, col, msg, line_text, ctx, scope))
 
     return findings
 
