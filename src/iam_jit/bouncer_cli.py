@@ -6776,7 +6776,22 @@ def mcp_install_codex_cmd(
 
 
 @mcp_group.command("install-devin")
-def mcp_install_devin_cmd() -> None:
+@click.option(
+    "--devin-host",
+    "devin_host",
+    default="",
+    metavar="HOST",
+    help=(
+        "Reachable ibounce HOST to bake into the recipe's "
+        "AWS_ENDPOINT_URL / HTTP_PROXY lines (e.g. '10.0.1.5'). "
+        "Overrides any locally-detected bouncer address. "
+        "When empty the recipe uses a <bouncer-host> placeholder "
+        "and prints a substitute note on stderr. "
+        "Mirrors --devin-host on gbounce / kbounce / dbounce "
+        "per [[cross-product-agent-parity]]."
+    ),
+)
+def mcp_install_devin_cmd(devin_host: str) -> None:
     """Print the Devin bouncer-wiring recipe (no local config to write).
 
     Devin is a cloud-hosted agent — it runs in Cognition's sandboxed
@@ -6795,13 +6810,33 @@ def mcp_install_devin_cmd() -> None:
     PATH B — Pre-session operator setup (today's supported path):
       Before starting a Devin session, the operator (or a CI step) runs
       `iam-jit doctor apply-config` on the machine Devin can reach. The
-      bouncers run on a host-accessible port; the operator sets
-      AWS_ENDPOINT_URL + HTTP_PROXY in Devin's task environment variables
-      so Devin's AWS SDK calls route through the bouncer.
+      bouncers run on a host-accessible port (NOT 127.0.0.1); the operator
+      sets AWS_ENDPOINT_URL + HTTP_PROXY in Devin's task environment
+      variables so Devin's AWS SDK calls route through the bouncer.
+
+    Pass --devin-host HOST to bake a concrete reachable address into the
+    recipe (default: <bouncer-host> placeholder + a substitute note on
+    stderr). A bouncer on 127.0.0.1 is NOT visible to Devin's sandbox.
 
     See docs/HARNESS-RECIPES/devin.md for the full recipe and the
     networking requirements for container-style Devin deployments.
     """
+    # If --devin-host was supplied, use it unconditionally and skip local
+    # bouncer detection (a local loopback address is NOT reachable from
+    # Devin's sandbox — the whole point of this command).
+    if devin_host:
+        bouncer_env: dict = {
+            "AWS_ENDPOINT_URL": f"http://{devin_host}:8767",
+            "HTTP_PROXY": f"http://{devin_host}:8080",
+            "HTTPS_PROXY": f"http://{devin_host}:8080",
+        }
+        note_substitute = False
+    else:
+        # No explicit host — fall back to placeholders; never emit a
+        # loopback address (127.0.0.1 is NOT reachable from Devin's sandbox).
+        bouncer_env = {}
+        note_substitute = True
+
     click.echo("Devin is a cloud-hosted agent — no local config to write.")
     click.echo("")
     click.echo("PATH A: MCP server (when Devin's MCP support is enabled)")
@@ -6809,7 +6844,6 @@ def mcp_install_devin_cmd() -> None:
     click.echo("  2. Add the snippet from `ibounce mcp show-config`.")
     click.echo("  3. Set these env vars in your Devin task environment:")
 
-    bouncer_env = _build_bouncer_env_vars_for_mcp()
     if bouncer_env:
         for k, v in bouncer_env.items():
             click.echo(f"       {k}={v}")
@@ -6817,14 +6851,12 @@ def mcp_install_devin_cmd() -> None:
         click.echo("       AWS_ENDPOINT_URL=http://<bouncer-host>:8767")
         click.echo("       HTTP_PROXY=http://<bouncer-host>:8080")
         click.echo("       HTTPS_PROXY=http://<bouncer-host>:8080")
-        click.secho(
-            "  [note] no running bouncers detected locally — substitute "
-            "your bouncer host + port above.",
-            fg="yellow",
-        )
+
     click.echo("")
     click.echo("PATH B: Pre-session operator setup (supported today)")
-    click.echo("  1. On a host Devin can reach, run:")
+    click.echo("  1. On a host Devin can reach (NOT 127.0.0.1 — Devin")
+    click.echo("     runs in a cloud sandbox and cannot see your local loopback),")
+    click.echo("     run:")
     click.echo("       iam-jit doctor apply-config")
     click.echo("  2. In the Devin UI, set task env vars:")
     if bouncer_env:
@@ -6841,6 +6873,12 @@ def mcp_install_devin_cmd() -> None:
         "must be on a host Devin can reach over the network. A bouncer "
         "on 127.0.0.1 is NOT visible to Devin's sandbox."
     )
+    if note_substitute:
+        click.echo(
+            "  [note] pass --devin-host HOST to bake a concrete reachable "
+            "address into the recipe (e.g. --devin-host 10.0.1.5).",
+            err=True,
+        )
 
 @mcp_group.command("list-tools")
 @click.option(
