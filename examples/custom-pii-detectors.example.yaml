@@ -1,0 +1,53 @@
+# ADOPT-7 / #721 — example custom-PII detector config.
+#
+# Define org-specific PII entities DECLARATIVELY. Each entity compiles
+# directly into a Presidio recognizer (PatternRecognizer for `patterns`,
+# a deny-list recognizer for `deny_list`). There is NO server-side LLM /
+# NL parsing — you write the regex / literal terms / keywords; iam-jit
+# builds recognizers from exactly those fields.
+#
+# Usage:
+#   pip install 'iam-jit[pii]'
+#   iam-jit pii validate -c examples/custom-pii-detectors.example.yaml
+#   iam-jit pii scan -c examples/custom-pii-detectors.example.yaml \
+#       --text "badge EMP-12345 on Project Bluefin, acct 12345678"
+#
+# HONESTY: regex/keyword detection has false positives (over-redaction)
+# AND false negatives (missed PII). Tune your patterns + verify on real
+# samples. This is operator-defined pattern matching, NOT ML-grade NER.
+
+schema_version: 1
+
+entities:
+  # Employee badge IDs: the literal prefix EMP- followed by 5 digits.
+  - name: EMP_BADGE
+    description: "employee badge ID (EMP- + 5 digits)"
+    patterns:
+      - "EMP-\\d{5}"
+    context:
+      - badge
+      - employee
+    score: 0.85
+
+  # Internal project codenames: a fixed deny-list of literal terms.
+  # Deny-list matches are exact (case-insensitive) and scored 1.0.
+  - name: PROJECT_CODE
+    description: "internal project codenames"
+    deny_list:
+      - "Project Bluefin"
+      - "Codename Redshift"
+      - "Operation Falcon"
+
+  # Customer-account numbers: an 8-digit number. On its own this is a
+  # weak signal (score low) — the `context` words boost confidence when
+  # the word "account"/"customer" appears nearby, so a bare 8-digit
+  # number elsewhere is less likely to over-redact.
+  - name: CUSTOMER_ACCT
+    description: "8-digit customer account number"
+    patterns:
+      - "\\b\\d{8}\\b"
+    context:
+      - account
+      - customer
+      - acct
+    score: 0.35
