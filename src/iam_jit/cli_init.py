@@ -1633,18 +1633,12 @@ def register_init_command(main_group: click.Group) -> click.Command:
         # lets CI / scripted callers opt out while still getting the
         # config file.
         #
-        # #737 — stale-binary check: if the claude-code harness is being
-        # wired, warn BEFORE calling install subcommands so the operator
-        # knows the installed binary may be missing PR #23 env-block code.
-        if (
-            not skip_mcp_install
-            and result.harness == "claude-code"
-        ):
-            try:
-                from .cli_doctor_install_check import warn_if_stale_binary
-                warn_if_stale_binary(context="init --harness=claude-code")
-            except Exception:
-                pass  # never crash init on the guard
+        # #737 — stale-binary check lives in `iam-jit doctor install-check`
+        # only, NOT in the init hot path.  Reasons: (1) probe subprocess on
+        # every init breaks the mock-counting tests in test_init_mcp_install_651
+        # + slows the common case, and (2) operators who suspect a stale
+        # binary already reach for doctor.  See
+        # [[lightweight-frictionless-principle]].
 
         mcp_install_results: list[_McpInstallResult] = []
         if not skip_mcp_install and result.harness != "none":
