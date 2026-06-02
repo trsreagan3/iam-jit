@@ -340,6 +340,8 @@
     "SD-1:tests/test_appsec_audit_round6_bb.py:729",
     "SD-1:tests/test_audit_query_surfaces_serve_events_620.py:188",
     "SD-1:tests/test_cli_canary_monitor.py:150",
+    "SD-1:tests/test_soak_invariants.py:76",
+    "SD-1:tests/test_soak_invariants.py:90",
     "SD-2:src/iam_jit/ambient_config/setup.py:116",
     "SD-2:src/iam_jit/anomaly_detection/detector.py:322",
     "SD-2:src/iam_jit/bouncer/audit_export/alerts.py:1017",
@@ -1271,6 +1273,8 @@
     "SD-2:tests/test_slack_bot_request_changes.py:548",
     "SD-2:tests/test_slack_bot_request_changes.py:592",
     "SD-2:tests/test_slack_bot_request_changes.py:592",
+    "SD-2:tests/test_soak_invariants.py:361",
+    "SD-2:tests/test_soak_invariants.py:397",
     "SD-2:tests/test_uat_web_admin_612_bounded.py:129",
     "SD-2:tests/test_uat_web_admin_612_bounded.py:145",
     "SD-2:tests/test_uat_web_admin_612_bounded.py:263",
@@ -1472,5 +1476,5 @@
     "SD-4:tests/integration/uc20_setup_from_config_e2e_test.py:151",
     "SD-4:tests/test_audit_query_surfaces_serve_events_620.py:166"
   ],
-  "count": 1471
+  "count": 1475
 }
