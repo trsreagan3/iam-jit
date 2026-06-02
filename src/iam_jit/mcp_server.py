@@ -4165,6 +4165,81 @@ TOOLS.extend([
 ])
 
 
+# ADOPT-5 / #719 — `iam_jit_policy_translate` MCP tool. Translate a
+# policy between AWS IAM JSON and Cedar (AWS Bedrock AgentCore / Verified
+# Permissions) so an agent can carry policy between Bounce and AgentCore
+# WITHOUT rewriting. Per [[cedar-positioning]] this is INTEROP /
+# portability — iam-jit is NOT Cedar and does NOT compete with it. Per
+# [[ibounce-honest-positioning]] the translation is HONEST: where IAM and
+# Cedar are not 1:1 (NotAction/NotResource/NotPrincipal, embedded
+# wildcards, exotic condition operators) the output carries a visible
+# marker AND a structured note, and `is_lossy`/`has_untranslatable` flag
+# the result. NEVER emits a silently-wrong policy. Read-only — never
+# touches AWS.
+TOOLS.extend([
+    {
+        "name": "iam_jit_policy_translate",
+        "description": (
+            "Translate an authorization policy between AWS IAM JSON and "
+            "Cedar (the language used by AWS Bedrock AgentCore and AWS "
+            "Verified Permissions), so policy can move between Bounce / "
+            "iam-jit and a Cedar-based system WITHOUT being rewritten by "
+            "hand. Set `direction` to `iam_to_cedar` (pass `policy` — the "
+            "IAM policy JSON object) or `cedar_to_iam` (pass `cedar` — "
+            "Cedar policy text). Returns the translated `output` plus "
+            "`notes`, `is_lossy`, and `has_untranslatable`.\n"
+            "\n"
+            "IMPORTANT positioning: iam-jit is NOT Cedar and does not "
+            "compete with Cedar — Cedar is application-level authorization; "
+            "iam-jit is AWS IAM credential issuance. This tool is a "
+            "portability convenience, not a claim that iam-jit is/uses "
+            "Cedar.\n"
+            "\n"
+            "IMPORTANT honesty: IAM and Cedar are NOT 1:1. Untranslatable "
+            "constructs (NotAction / NotResource / NotPrincipal, wildcards "
+            "embedded in an action/ARN, condition operators outside "
+            "StringEquals/Bool, Cedar `unless` / entity-attribute refs) "
+            "produce a VISIBLE `// UNTRANSLATABLE` marker in `output` and a "
+            "structured entry in `notes` — the translator NEVER silently "
+            "drops a construct or emits a subtly-wrong policy. If "
+            "`has_untranslatable` is true, surface the markers to the user "
+            "and do NOT treat the output as a faithful equivalent without "
+            "review. Read-only — translation only; never touches AWS."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "required": ["direction"],
+            "properties": {
+                "direction": {
+                    "type": "string",
+                    "enum": ["iam_to_cedar", "cedar_to_iam"],
+                    "description": (
+                        "`iam_to_cedar`: pass `policy` (IAM JSON object). "
+                        "`cedar_to_iam`: pass `cedar` (Cedar policy text)."
+                    ),
+                },
+                "policy": {
+                    "type": "object",
+                    "description": (
+                        "The AWS IAM policy document (JSON object with "
+                        "`Statement`). REQUIRED when direction is "
+                        "`iam_to_cedar`."
+                    ),
+                },
+                "cedar": {
+                    "type": "string",
+                    "description": (
+                        "Cedar policy text (one or more `permit`/`forbid` "
+                        "statements). REQUIRED when direction is "
+                        "`cedar_to_iam`."
+                    ),
+                },
+            },
+        },
+    },
+])
+
+
 # Bounce-suite rename (2026-05-17): every `bouncer_*` MCP tool gets
 # an `ibounce_*` alias in v1.0. Both names dispatch to the same
 # handler; the `bouncer_*` originals carry a `(DEPRECATED ...)` note
@@ -6837,6 +6912,13 @@ def _handle_request(req: dict[str, Any]) -> dict[str, Any] | None:
             # structured input; the calling agent does NL→structured
             # translation per [[bouncer-zero-llm-when-agent-in-loop]].
             result_payload = _iam_jit_audit_search_for_mcp(args)
+        elif tool_name == "iam_jit_policy_translate":
+            # ADOPT-5 / #719 — translate a policy between AWS IAM JSON and
+            # Cedar (AgentCore / Verified Permissions). Interop /
+            # portability per [[cedar-positioning]]; honest about
+            # untranslatable constructs per [[ibounce-honest-positioning]].
+            # Read-only.
+            result_payload = _iam_jit_policy_translate_for_mcp(args)
         else:
             return _err(rid, -32601, f"unknown tool: {tool_name}")
         # MCP tool result format: { content: [{type: "text", text: "..."}] }
@@ -7917,6 +7999,82 @@ def _iam_jit_compliance_map_for_mcp(
     )
     payload = result.as_dict()
     payload["status"] = "ok"
+    return payload
+
+
+def _iam_jit_policy_translate_for_mcp(
+    args: dict[str, Any],
+) -> dict[str, Any]:
+    """MCP backend for ``iam_jit_policy_translate``.
+
+    Translates a policy between AWS IAM JSON and Cedar (the language AWS
+    Bedrock AgentCore / Verified Permissions use). Per
+    [[cedar-positioning]] this is INTEROP / portability — iam-jit is NOT
+    Cedar. Per [[ibounce-honest-positioning]] the translation is HONEST:
+    untranslatable constructs surface as visible markers + structured
+    notes, and ``is_lossy`` / ``has_untranslatable`` flag the result. The
+    translator NEVER emits a silently-wrong policy. Read-only.
+    """
+    from .cedar import TranslationError, cedar_to_iam, iam_to_cedar
+
+    direction = args.get("direction")
+    if direction not in ("iam_to_cedar", "cedar_to_iam"):
+        return {
+            "status": "error",
+            "code": "invalid_direction",
+            "message": (
+                "`direction` must be 'iam_to_cedar' or 'cedar_to_iam'"
+            ),
+        }
+
+    try:
+        if direction == "iam_to_cedar":
+            policy = args.get("policy")
+            if not isinstance(policy, dict):
+                return {
+                    "status": "error",
+                    "code": "missing_policy",
+                    "message": (
+                        "`policy` (an IAM policy JSON object) is required "
+                        "when direction is 'iam_to_cedar'"
+                    ),
+                }
+            result = iam_to_cedar(policy)
+        else:
+            cedar = args.get("cedar")
+            if not isinstance(cedar, str) or not cedar.strip():
+                return {
+                    "status": "error",
+                    "code": "missing_cedar",
+                    "message": (
+                        "`cedar` (Cedar policy text) is required when "
+                        "direction is 'cedar_to_iam'"
+                    ),
+                }
+            result = cedar_to_iam(cedar)
+    except TranslationError as e:
+        # Malformed input — a hard parse error, distinct from an
+        # untranslatable-but-well-formed construct (which is NOT an error;
+        # it surfaces as a note). Fail loud per
+        # [[ibounce-honest-positioning]].
+        return {
+            "status": "error",
+            "code": "parse_error",
+            "message": str(e),
+        }
+
+    payload = result.as_dict()
+    payload["status"] = "ok"
+    # Restate the honesty contract in-band so an agent reading only the
+    # structured payload still sees the caveat when the translation is
+    # lossy.
+    if result.has_untranslatable:
+        payload["review_required"] = (
+            "One or more constructs could NOT be faithfully translated "
+            "(see notes with severity 'untranslatable' and the "
+            "`// UNTRANSLATABLE` markers in `output`). Do NOT treat the "
+            "output as an equivalent policy without manual review."
+        )
     return payload
 
 
