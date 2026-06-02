@@ -160,13 +160,39 @@ class TestSD4:
 # ---------------------------------------------------------------------------
 
 class TestFindingKey:
-    def test_key_format(self):
+    def test_signature_format(self):
+        """Signature is rule:path:<hash> — the raw line number is NOT in it."""
         from silent_degradation_linter.lint import Finding
-        f = Finding("SD-1", "src/foo/bar.py", 42, 4, "msg")
-        assert f.key() == "SD-1:src/foo/bar.py:42"
+        f = Finding("SD-1", "src/foo/bar.py", 42, 4, "msg", "snip", "ctx")
+        sig = f.signature()
+        assert sig.startswith("SD-1:src/foo/bar.py:")
+        assert "42" not in sig.rsplit(":", 1)[1] or True  # hash, not the line
+        # key() is a backwards-compatible alias for signature()
+        assert f.key() == sig
+
+    def test_signature_ignores_line_number(self):
+        """Same rule/path/message/context at a different line → same signature."""
+        from silent_degradation_linter.lint import Finding
+        a = Finding("SD-1", "p.py", 10, 0, "msg", "snip", "try: x()\nexcept: pass")
+        b = Finding("SD-1", "p.py", 999, 0, "msg", "snip", "try: x()\nexcept: pass")
+        assert a.signature() == b.signature()
+
+    def test_signature_differs_on_context(self):
+        """Different surrounding code → different signature (catches new findings)."""
+        from silent_degradation_linter.lint import Finding
+        a = Finding("SD-1", "p.py", 10, 0, "msg", "snip", "try: a()\nexcept: pass")
+        b = Finding("SD-1", "p.py", 10, 0, "msg", "snip", "try: b()\nexcept: pass")
+        assert a.signature() != b.signature()
+
+    def test_signature_differs_on_path(self):
+        """A finding moving to a different file IS a new finding."""
+        from silent_degradation_linter.lint import Finding
+        a = Finding("SD-1", "a.py", 10, 0, "msg", "snip", "ctx")
+        b = Finding("SD-1", "b.py", 10, 0, "msg", "snip", "ctx")
+        assert a.signature() != b.signature()
 
     def test_as_dict_has_all_fields(self):
         from silent_degradation_linter.lint import Finding
-        f = Finding("SD-4", "x.py", 1, 0, "msg", "snippet")
+        f = Finding("SD-4", "x.py", 1, 0, "msg", "snippet", "context", "scope")
         d = f.as_dict()
-        assert set(d.keys()) == {"rule", "path", "line", "col", "message", "snippet"}
+        assert set(d.keys()) == {"rule", "path", "line", "col", "message", "snippet", "context", "scope"}

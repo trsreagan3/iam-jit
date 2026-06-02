@@ -20,31 +20,92 @@ from __future__ import annotations
 
 import ast
 import fnmatch
+import hashlib
 import json
 import re
 import tokenize
 import io
+from collections import Counter
 from dataclasses import dataclass, field, asdict
 from pathlib import Path
 from typing import Sequence
+
+
+# Number of source lines of context captured on each side of the matched
+# line to build the stable content signature.  Small enough to stay specific
+# to the finding, large enough to disambiguate otherwise-identical matched
+# lines that live in genuinely different surrounding code.
+_CONTEXT_RADIUS = 2
+
+# Baseline schema version.  v1 = line-keyed (legacy); v2 = content-keyed.
+BASELINE_SCHEMA = 2
 
 
 # ---------------------------------------------------------------------------
 # Data types
 # ---------------------------------------------------------------------------
 
+def _normalize_code(text: str) -> str:
+    """Collapse all runs of whitespace to a single space and strip.
+
+    Makes the signature insensitive to indentation / reflow / trailing
+    whitespace so a re-indented or re-wrapped (but textually identical)
+    finding maps to the same signature.
+    """
+    return re.sub(r"\s+", " ", text).strip()
+
+
+# Sentinel scope for findings that have no enclosing function/class (i.e. live
+# at module level).  Stable string so module-level findings still hash
+# deterministically; they're rare and the path+context still distinguishes most.
+_MODULE_SCOPE = "<module>"
+
+
 @dataclass
 class Finding:
     rule: str          # e.g. "SD-1"
     path: str          # relative or absolute path
-    line: int
+    line: int          # 1-based line of the matched node (informational only)
     col: int
     message: str
-    snippet: str = ""  # source line text (stripped)
+    snippet: str = ""  # matched source line text (stripped) — informational
+    context: str = ""  # normalized context window — part of the content key
+    scope: str = _MODULE_SCOPE  # enclosing def/class qualified name — part of key
 
+    def signature(self) -> str:
+        """Content/context signature for this finding.
+
+        Stable across line-number shifts (the raw line number is NOT part of
+        the signature), yet specific to the *code* that produced the finding:
+        the rule, the file path, the qualified name of the nearest enclosing
+        function/class (so the SAME boilerplate in DIFFERENT functions is
+        DISTINCT), the human message (which encodes the load-bearing identity
+        such as the SD-2 parameter name), and a whitespace-normalized window of
+        surrounding source.
+
+        A finding that merely moves down the file (within the same enclosing
+        scope) keeps the same signature.  A genuinely-new pattern in
+        new/changed code — including byte-identical boilerplate in a *different*
+        function — produces a new signature.  The enclosing scope is what
+        defeats slot-freeing: deleting one occurrence of a high-count baselined
+        signature and adding a new identical swallow in another function no
+        longer collides, because the two live in different scopes.
+        """
+        material = "\x1f".join((
+            self.rule,
+            self.path,
+            self.scope,
+            _normalize_code(self.message),
+            self.context,
+        ))
+        digest = hashlib.sha256(material.encode("utf-8")).hexdigest()[:16]
+        return f"{self.rule}:{self.path}:{digest}"
+
+    # Backwards-compatible alias.  Historically ``key()`` returned the
+    # line-keyed identity; it now returns the content signature so any
+    # remaining callers transparently get the stable key.
     def key(self) -> str:
-        """Stable key for baseline matching."""
-        return f"{self.rule}:{self.path}:{self.line}"
+        return self.signature()
 
     def as_dict(self) -> dict:
         return asdict(self)
@@ -67,6 +128,72 @@ def _has_noqa(line_text: str, rule: str) -> bool:
 
 def _source_lines(source: str) -> list[str]:
     return source.splitlines()
+
+
+def _build_context(lines: list[str], lineno: int, radius: int = _CONTEXT_RADIUS) -> str:
+    """Return a whitespace-normalized window of code around *lineno* (1-based).
+
+    The window spans ``[lineno - radius, lineno + radius]`` clamped to the
+    file.  Each line is whitespace-normalized and the lines are joined with a
+    newline so the signature reflects the *code shape* around the finding,
+    not its absolute position.  Blank/normalized-empty lines are dropped so
+    that inserting blank lines above a finding (the canonical line-shift case)
+    does not perturb the signature.
+    """
+    start = max(0, lineno - 1 - radius)
+    end = min(len(lines), lineno + radius)
+    window = [_normalize_code(lines[i]) for i in range(start, end)]
+    window = [w for w in window if w]
+    return "\n".join(window)
+
+
+# ---------------------------------------------------------------------------
+# Helpers: enclosing-scope (qualified def/class name) resolution
+# ---------------------------------------------------------------------------
+
+_SCOPE_NODES = (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)
+
+
+def _build_scope_map(tree: ast.AST, total_lines: int) -> dict[int, str]:
+    """Map every 1-based source line to the qualified name of its nearest
+    enclosing function/class.
+
+    Lines not inside any def/class map to ``_MODULE_SCOPE``.  Qualified names
+    nest with ``.`` (e.g. ``MyClass.my_method``).  When scopes nest, the
+    INNERMOST (longest end-line, smallest span) wins — we resolve this by
+    assigning each line the qualified name of the deepest scope whose body
+    spans it, processing outer-to-inner so inner assignments overwrite outer.
+
+    A finding's scope is therefore the name of the function/class it physically
+    lives inside, which makes byte-identical boilerplate in two different
+    functions hash to two different signatures.
+    """
+    line_to_scope: dict[int, str] = {}
+
+    def walk(node: ast.AST, prefix: str) -> None:
+        for child in ast.iter_child_nodes(node):
+            if isinstance(child, _SCOPE_NODES):
+                qual = f"{prefix}.{child.name}" if prefix else child.name
+                start = getattr(child, "lineno", None)
+                end = getattr(child, "end_lineno", None)
+                if start is not None:
+                    if end is None:
+                        end = start
+                    # Assign this scope to every line it spans; because we
+                    # recurse AFTER assigning, the inner (deeper) scope's
+                    # assignment overwrites the outer one for shared lines.
+                    for ln in range(start, min(end, total_lines) + 1):
+                        line_to_scope[ln] = qual
+                    walk(child, qual)
+            else:
+                walk(child, prefix)
+
+    walk(tree, "")
+    return line_to_scope
+
+
+def _scope_for_line(scope_map: dict[int, str], lineno: int) -> str:
+    return scope_map.get(lineno, _MODULE_SCOPE)
 
 
 # ---------------------------------------------------------------------------
@@ -340,6 +467,7 @@ def scan_file(
 
     lines = _source_lines(source)
     rel_path = str(path.relative_to(repo_root)) if path.is_absolute() else str(path)
+    scope_map = _build_scope_map(tree, len(lines))
 
     findings: list[Finding] = []
 
@@ -350,7 +478,9 @@ def scan_file(
             line_text = lines[lineno - 1].strip() if lineno <= len(lines) else ""
             if _has_noqa(lines[lineno - 1] if lineno <= len(lines) else "", "SD-1"):
                 continue
-            findings.append(Finding("SD-1", rel_path, lineno, col, msg, line_text))
+            ctx = _build_context(lines, lineno)
+            scope = _scope_for_line(scope_map, lineno)
+            findings.append(Finding("SD-1", rel_path, lineno, col, msg, line_text, ctx, scope))
 
     if "SD-2" in rules:
         v2 = SD2Visitor(lines)
@@ -359,7 +489,9 @@ def scan_file(
             line_text = lines[lineno - 1].strip() if lineno <= len(lines) else ""
             if _has_noqa(lines[lineno - 1] if lineno <= len(lines) else "", "SD-2"):
                 continue
-            findings.append(Finding("SD-2", rel_path, lineno, col, msg, line_text))
+            ctx = _build_context(lines, lineno)
+            scope = _scope_for_line(scope_map, lineno)
+            findings.append(Finding("SD-2", rel_path, lineno, col, msg, line_text, ctx, scope))
 
     if "SD-4" in rules:
         v4 = SD4Visitor(lines)
@@ -367,7 +499,9 @@ def scan_file(
         for lineno, col, msg in v4.findings:
             # noqa already checked inside SD4Visitor per-return-line
             line_text = lines[lineno - 1].strip() if lineno <= len(lines) else ""
-            findings.append(Finding("SD-4", rel_path, lineno, col, msg, line_text))
+            ctx = _build_context(lines, lineno)
+            scope = _scope_for_line(scope_map, lineno)
+            findings.append(Finding("SD-4", rel_path, lineno, col, msg, line_text, ctx, scope))
 
     return findings
 
@@ -404,24 +538,110 @@ def scan_paths(
 # Baseline support
 # ---------------------------------------------------------------------------
 
-def load_baseline(baseline_path: Path) -> set[str]:
-    """Return set of finding keys from a baseline JSON file."""
+# Sentinel meaning "the baseline file did not exist". Distinct from an empty
+# baseline (a real baseline that pins zero findings) so a missing file does not
+# silently turn every finding into "new".
+_MISSING_BASELINE = object()
+
+
+def _is_legacy_baseline(data: dict) -> bool:
+    """A v1 (line-keyed) baseline stores ``findings`` as a flat list of
+    ``RULE:path:LINE`` strings and has no ``schema`` field (or schema < 2)."""
+    if int(data.get("schema", 1)) >= 2:
+        return False
+    findings = data.get("findings")
+    return isinstance(findings, list)
+
+
+def load_baseline(baseline_path: Path) -> Counter | object:
+    """Return a multiset (``Counter``) of content signatures from a baseline.
+
+    Returns the ``_MISSING_BASELINE`` sentinel if the file does not exist.
+
+    Supports both schemas:
+      * v2 (content-keyed): ``{"schema": 2, "findings": {signature: count}}``
+      * v1 (legacy line-keyed): ``{"findings": ["RULE:path:LINE", ...]}`` —
+        loaded as a best-effort fallback so an un-migrated tree still runs,
+        but note that v1 keys will NOT match v2 signatures.  The expected
+        path is to migrate via ``--baseline-update``.
+    """
     if not baseline_path.exists():
-        return set()
+        return _MISSING_BASELINE
     data = json.loads(baseline_path.read_text())
-    return set(data.get("findings", []))
+
+    if _is_legacy_baseline(data):
+        # Legacy line-keyed baseline: keep the raw keys as a degenerate
+        # multiset. These will not match the new content signatures, which is
+        # intentional — a v1 baseline must be regenerated with the v2 schema.
+        return Counter(data.get("findings", []))
+
+    findings = data.get("findings", {})
+    counter: Counter = Counter()
+    for sig, count in findings.items():
+        counter[sig] = int(count)
+    return counter
+
+
+def baseline_counts(findings: list[Finding]) -> Counter:
+    """Multiset of content signatures for *findings*."""
+    return Counter(f.signature() for f in findings)
 
 
 def save_baseline(baseline_path: Path, findings: list[Finding]) -> None:
-    keys = sorted(f.key() for f in findings)
+    """Write the content-keyed (v2) baseline.
+
+    The baseline pins a *multiset* of content signatures: each signature maps
+    to the number of times that exact finding occurs in the tree.  Recording
+    the count is what lets the ratchet detect "a NEW identical finding was
+    added" (count goes up) while tolerating line-number shifts (count stays
+    the same, signature unchanged).
+    """
+    counts = baseline_counts(findings)
+    # Sorted for stable diffs.
+    ordered = {sig: counts[sig] for sig in sorted(counts)}
     baseline_path.write_text(
-        json.dumps({"findings": keys, "count": len(keys)}, indent=2) + "\n"
+        json.dumps(
+            {"schema": BASELINE_SCHEMA, "findings": ordered, "count": sum(counts.values())},
+            indent=2,
+        )
+        + "\n"
     )
 
 
-def new_findings(findings: list[Finding], baseline: set[str]) -> list[Finding]:
-    """Return only findings whose key is not in baseline."""
-    return [f for f in findings if f.key() not in baseline]
+def new_findings(findings: list[Finding], baseline: Counter | object) -> list[Finding]:
+    """Return the findings that exceed what the baseline pins.
+
+    Multiset semantics: for each content signature, the baseline allows up to
+    ``baseline[sig]`` occurrences.  If the current tree has more occurrences of
+    that signature than the baseline pins, the surplus occurrences are
+    reported as NEW.  This is the property that:
+
+      * a line-shifted existing finding is NOT new (same signature, count
+        unchanged);
+      * a genuinely-new pattern in new/changed code IS new (signature absent
+        from the baseline, surplus = its full count);
+      * adding a SECOND copy of an already-baselined finding IS new (count
+        exceeds the pinned count);
+      * removing one of two identical findings is tolerated (count drops; the
+        ratchet only fails on *new* debt, never on debt reduction).
+
+    A ``_MISSING_BASELINE`` sentinel (no baseline file) means "nothing is
+    pinned" → every finding is new.
+    """
+    if baseline is _MISSING_BASELINE:
+        return list(findings)
+
+    allowed = Counter(baseline)  # copy we can decrement
+    surplus: list[Finding] = []
+    # Process deterministically (by line) so which occurrence is reported as
+    # "new" is stable across runs.
+    for f in sorted(findings, key=lambda x: (x.path, x.line, x.col)):
+        sig = f.signature()
+        if allowed.get(sig, 0) > 0:
+            allowed[sig] -= 1  # consume one pinned slot
+        else:
+            surplus.append(f)
+    return surplus
 
 
 # ---------------------------------------------------------------------------

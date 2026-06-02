@@ -131,14 +131,70 @@ tests/dogfood/*  dogfood tests use intentional swallow patterns
 
 ## Baseline
 
-The baseline file `tools/silent_degradation_linter/baseline.json` lists
-finding keys (`SD-N:path:line`) that existed when the ratchet was
-initialized. These do **not** fail CI.
+The baseline file `tools/silent_degradation_linter/baseline.json` pins the
+silent-degradation findings that existed when the ratchet was initialized.
+These do **not** fail CI — only findings *beyond* the baseline do.
+
+### Content-keyed signatures (schema v2)
+
+Findings are keyed by a **stable content/context signature**, not by line
+number. The signature is:
+
+```
+SD-N:<path>:<sha256(rule ⨁ path ⨁ normalized_message ⨁ normalized_context)>
+```
+
+where `normalized_context` is a small window (±2 lines) of the surrounding
+source, whitespace-normalized, with blank lines dropped. The raw line number
+is recorded only as informational metadata (in `--format=json`/`pretty`
+output) and is **not** part of the identity.
+
+**Why this matters:** previously findings were keyed `SD-N:path:LINE`, so any
+unrelated edit that shifted line numbers made every downstream finding read as
+"new" — every PR rebase required a `--baseline-update` re-pin. With
+content-keying:
+
+- A finding that merely **moves** (blank lines inserted above it, an unrelated
+  edit elsewhere in the file) keeps the same signature → **not** flagged. This
+  is the rebase false-positive that the line-keyed scheme produced.
+- A **genuinely-new** silent-degradation in new/changed code produces a new
+  signature (its surrounding context differs, or it is in a new location) →
+  **still flagged**. Detection of real new debt is *not* weakened.
+- A finding that **moves to a different file** has a different `path` in its
+  signature → correctly treated as new (a finding in a new location is a new
+  finding).
+
+### Duplicate handling (multiset counts)
+
+Identical findings in identical surrounding code legitimately collide on one
+signature (e.g. the same `except Exception: pass` repeated in a file). The
+baseline therefore pins each signature to a **count** (a multiset), and the
+ratchet compares counts:
+
+```json
+{
+  "schema": 2,
+  "findings": {
+    "SD-1:src/iam_jit/audit.py:621beafb74497c85": 1,
+    "SD-2:tests/x_test.py:9b2c…": 4
+  },
+  "count": 1479
+}
+```
+
+- Adding a **second** copy of an already-baselined finding pushes its count
+  above what is pinned → the surplus occurrence is flagged as new.
+- **Removing** one of two identical findings drops the count → tolerated (the
+  ratchet only fails on *new* debt, never on debt reduction).
 
 ### Updating the baseline (accepting new debt)
 
 Only update the baseline after a **deliberate decision** to accept the
-existing findings as permanent debt.
+existing findings as permanent debt. `--baseline-update` rewrites
+`baseline.json` from the **current tree** in the v2 content-keyed schema:
+every present finding's signature is recorded with its occurrence count. It is
+safe to re-run after any code change; because keys are content-based, a pure
+line-shift produces an **identical** baseline file (no churn).
 
 ```bash
 # Review all findings first:
@@ -217,14 +273,14 @@ The workflow:
 
 ---
 
-## Baseline Count (as of v1 init)
+## Baseline Count
 
-| Rule | Existing findings |
-|------|------------------|
-| SD-1 | 312              |
-| SD-2 | 961              |
-| SD-4 | 156              |
-| **Total** | **1429**    |
+The baseline pins a multiset of content signatures totalling the current
+debt. These represent pre-existing debt: they are not blocked by CI — only
+*new* findings beyond this baseline will fail the ratchet. To see the live
+breakdown by rule:
 
-These represent pre-existing debt. They are not blocked by CI — only *new*
-findings beyond this baseline will fail the ratchet.
+```bash
+PYTHONPATH=tools python -m silent_degradation_linter --no-baseline --format=json \
+  | python -c "import json,sys,collections; print(collections.Counter(f['rule'] for f in json.load(sys.stdin)))"
+```
