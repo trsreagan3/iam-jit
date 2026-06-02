@@ -191,6 +191,7 @@ understand "what's true today," do NOT start here.
 - [`SMOKE-TEST-RESULTS-2026-05-19.md`](SMOKE-TEST-RESULTS-2026-05-19.md)
 - [`LINUX-SUPPORT-AUDIT-2026-05-24.md`](LINUX-SUPPORT-AUDIT-2026-05-24.md)
 - [`COMPETITIVE-PI-ANOMALY-2026-05-24.md`](COMPETITIVE-PI-ANOMALY-2026-05-24.md)
+- [`COMPARISONS/kong-capability-tokens.md`](COMPARISONS/kong-capability-tokens.md) — Kong AI Gateway (Capability Token + AIIC) vs. iam-jit positioning
 
 ### Use-case + error-path audits (MRR series)
 
