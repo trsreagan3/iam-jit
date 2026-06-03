@@ -370,3 +370,29 @@ def test_every_rule_control_is_in_catalog():
     for rule in MAPPING_RULES:
         for c in rule.controls:
             assert c in CONTROLS, (rule.rule_id, c)
+
+
+def test_coverage_enumerates_untouched_controls_by_name():
+    """UAT: auditors must see WHICH controls were gaps, not just a count."""
+    events = [_ev("iam:AttachRolePolicy", verdict="deny")]
+    res = build_overlay(session_id="s", events=events, framework="nist")
+    cov = res.coverage[0]
+    # touched + not_touched accounts for the whole catalog.
+    assert cov.controls_touched_count + len(cov.controls_not_touched) == \
+        cov.controls_in_catalog
+    # Untouched controls are named (id + title), not just counted.
+    if cov.controls_not_touched:
+        nt = cov.controls_not_touched[0]
+        assert nt["control"] and nt["title"]
+    # No overlap between touched + not_touched control ids.
+    touched_ids = {c.control for c in cov.controls_touched}
+    nt_ids = {c["control"] for c in cov.controls_not_touched}
+    assert touched_ids.isdisjoint(nt_ids)
+    # as_dict surfaces the new field.
+    assert "controls_not_touched" in cov.as_dict()
+
+
+def test_disclaimer_uses_evidence_on_ramp_phrasing():
+    res = build_overlay(session_id="s", events=[], framework="soc2")
+    assert "evidence on-ramp" in res.disclaimer.lower()
+    assert "not a" in res.disclaimer.lower() and "certification" in res.disclaimer.lower()

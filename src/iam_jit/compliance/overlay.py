@@ -241,6 +241,10 @@ class FrameworkCoverage:
     controls_touched_count: int
     controls_in_catalog: int
     partial_coverage_note: str
+    # Catalog controls the session did NOT exercise — enumerated by id+title
+    # so an auditor sees the GAPS by name, not just a count (UAT finding: a
+    # ratio like "3 of 5 touched" hid which two controls were the gaps).
+    controls_not_touched: tuple[dict[str, str], ...] = ()
 
     def as_dict(self) -> dict[str, typing.Any]:
         return {
@@ -250,6 +254,7 @@ class FrameworkCoverage:
             "controls_touched": [c.as_dict() for c in self.controls_touched],
             "controls_touched_count": self.controls_touched_count,
             "controls_in_catalog": self.controls_in_catalog,
+            "controls_not_touched": [dict(c) for c in self.controls_not_touched],
             "partial_coverage_note": self.partial_coverage_note,
         }
 
@@ -285,8 +290,9 @@ class ComplianceOverlay:
 _DISCLAIMER = (
     "This overlay maps ONLY the agent activity observed in the iam-jit "
     "audit log for this session+window to the framework controls that "
-    "activity TOUCHES. It is evidence of technical-control exercise, "
-    "NOT a compliance certification and NOT a proof of completeness. "
+    "activity TOUCHES. It is a compliance EVIDENCE ON-RAMP, NOT a "
+    "certification — evidence of technical-control exercise, NOT a "
+    "compliance certification and NOT a proof of completeness. "
     "iam-jit-the-company holds no third-party attestations at v1.0 "
     "(see docs/compliance/COMPLIANCE-MAPPING.md). Audit gaps, short "
     "windows, or unreachable bouncers can omit real activity; "
@@ -362,9 +368,11 @@ def build_overlay(
     for fw in target_frameworks:
         catalog = mapping.controls_for_framework(fw)
         touched: list[ControlCoverage] = []
+        not_touched: list[dict[str, str]] = []
         for ref in catalog:
             cnt = control_counts.get(ref.control, 0)
             if cnt <= 0:
+                not_touched.append({"control": ref.control, "title": ref.title})
                 continue
             touched.append(
                 ControlCoverage(
@@ -384,6 +392,7 @@ def build_overlay(
                 controls_touched=tuple(touched),
                 controls_touched_count=len(touched),
                 controls_in_catalog=len(catalog),
+                controls_not_touched=tuple(not_touched),
                 partial_coverage_note=mapping.PARTIAL_COVERAGE_NOTES.get(fw, ""),
             )
         )
