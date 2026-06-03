@@ -318,6 +318,32 @@ def test_narrow_resource_missing_falls_back_to_star_and_notes() -> None:
     assert any("ec2:DescribeRegions" in n for n in nr.notes)
 
 
+def test_narrow_drops_non_arn_hostname_resource() -> None:
+    """UAT: the narrowed policy must never emit a non-ARN value (e.g. a dst
+    hostname captured for an account-scope action) in an IAM Resource field —
+    AWS rejects that. It must be normalized to '*' with an honest note."""
+    # Account-scope action with only a dst hostname captured (no ARN).
+    a = [_ev("s3:ListAllMyBuckets", host="s3.amazonaws.com")]
+    nr = build_narrowing_policy(a, [], strategy="left")
+    stmt = nr.policy["Statement"][0]
+    # No hostname leaked into Resource; scoped to '*'.
+    assert stmt["Resource"] == ["*"]
+    assert all(r == "*" or r.startswith("arn:") for r in stmt["Resource"])
+    assert any("not ARNs" in n and "s3.amazonaws.com" in n for n in nr.notes)
+
+
+def test_narrow_keeps_real_arn_drops_hostname_when_mixed() -> None:
+    """A real ARN is kept; a co-captured non-ARN value is dropped + noted."""
+    a = [
+        _ev("s3:GetObject", resource="arn:aws:s3:::bucket/key"),
+        _ev("s3:GetObject", host="s3.amazonaws.com"),  # non-ARN, same action
+    ]
+    nr = build_narrowing_policy(a, [], strategy="left")
+    stmt = nr.policy["Statement"][0]
+    assert stmt["Resource"] == ["arn:aws:s3:::bucket/key"]
+    assert all(r.startswith("arn:") for r in stmt["Resource"])
+
+
 def test_narrow_rejects_unknown_strategy() -> None:
     import pytest
     with pytest.raises(ValueError):
