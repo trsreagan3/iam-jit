@@ -310,7 +310,41 @@ def register_audit_verify_command(audit_group: click.Group) -> click.Command:
                         "seq_start": m.seq_start,
                         "seq_end": m.seq_end,
                     })
-                elif issuer_unverified:
+                    continue
+                # Signature is valid — now cross-check the manifest's head_hash
+                # against the ACTUAL chain row at seq_end. This is the check
+                # that catches TAIL TRUNCATION: a plain chain walk verifies
+                # clean against a shortened log, but a previously-signed
+                # manifest pins the head at a higher seq. Skip when a `since`
+                # filter is active (the chain map is partial then, so an
+                # earlier seq_end would false-positive).
+                if since_unix is None:
+                    chain_hash = chain_result.seq_to_hash.get(m.seq_end)
+                    trunc_reason: str | None = None
+                    if chain_hash is None:
+                        trunc_reason = (
+                            f"manifest pins seq_end={m.seq_end} but the chain "
+                            f"has NO row at that seq — TAIL TRUNCATION or "
+                            f"missing events (chain head_seq="
+                            f"{chain_result.head_seq})"
+                        )
+                    elif chain_hash != m.head_hash:
+                        trunc_reason = (
+                            f"manifest head_hash != chain row hash at seq_end="
+                            f"{m.seq_end} — the log was edited at/under that seq"
+                        )
+                    if trunc_reason is not None:
+                        manifest_findings.append({
+                            "manifest": str(mpath),
+                            "ok": False,
+                            "reason": trunc_reason,
+                            "key_trust": key_trust,
+                            "issuer_unverified": issuer_unverified,
+                            "seq_start": m.seq_start,
+                            "seq_end": m.seq_end,
+                        })
+                        continue
+                if issuer_unverified:
                     # Signature ok, but verified only against the
                     # manifest's own embedded key — issuer unverified.
                     # Does NOT fail the overall ok; surfaces as a
