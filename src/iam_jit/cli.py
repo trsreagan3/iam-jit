@@ -1453,7 +1453,11 @@ def _write_claude_code_env_block(
         if key in ("NO_PROXY", "no_proxy"):
             from .proxy_exclusions import merge_no_proxy
 
-            prior = current_env.get(key)
+            # Read the prior value from EITHER case so an operator who set only
+            # NO_PROXY (upper) still has it preserved in no_proxy (lower) too.
+            prior = current_env.get("NO_PROXY")
+            if not isinstance(prior, str):
+                prior = current_env.get("no_proxy")
             val = merge_no_proxy(prior if isinstance(prior, str) else None)
         if current_env.get(key) != val:
             current_env[key] = val
@@ -1560,8 +1564,10 @@ def _strip_bouncer_env_block(settings_path: pathlib.Path) -> dict[str, object]:
     """Remove only iam-jit's loopback-bouncer env vars from settings.json.
 
     Operator-set values (a real AWS endpoint, a real kubeconfig, a real
-    PGHOST) are left untouched. NO_PROXY/no_proxy are left in place: they are
-    inert without a proxy and may carry operator-supplied hosts.
+    PGHOST) are left untouched. For NO_PROXY/no_proxy we strip only the
+    harness hosts WE added (anthropic.com etc.) and keep any operator hosts —
+    dropping the key entirely if nothing operator-set remains, so a clean
+    on->off round-trip leaves no residue.
 
     Returns {"status": "removed"|"no_change"|"not_found"|"error", ...}.
     """
@@ -1593,6 +1599,22 @@ def _strip_bouncer_env_block(settings_path: pathlib.Path) -> dict[str, object]:
             continue
         if _value_is_bouncer_wiring(key, env_block[key]):
             del env_block[key]
+            removed.append(key)
+
+    # Clean up the NO_PROXY carve-out we added: strip OUR harness hosts, keep
+    # any operator hosts, drop the key entirely if nothing operator-set remains.
+    from .proxy_exclusions import strip_harness_no_proxy
+
+    for key in ("NO_PROXY", "no_proxy"):
+        cur = env_block.get(key)
+        if not isinstance(cur, str):
+            continue
+        remaining = strip_harness_no_proxy(cur)
+        if remaining is None:
+            del env_block[key]
+            removed.append(key)
+        elif remaining != cur:
+            env_block[key] = remaining
             removed.append(key)
 
     if not removed:
@@ -1693,13 +1715,34 @@ def bouncers_on(settings_path_override: str | None) -> None:
 
     if bouncers_disabled():
         click.secho(
-            f"warning: {IAM_JIT_DISABLE_BOUNCERS_ENV} is set — the kill-switch "
-            "env var overrides this. Unset it first, or wiring stays inert.",
+            f"{IAM_JIT_DISABLE_BOUNCERS_ENV} is set — bouncer wiring is disabled "
+            "(kill-switch ON). Unset it first to wire bouncers; nothing written.",
             fg="yellow", err=True,
         )
+        return
     settings_p = (pathlib.Path(settings_path_override)
                   if settings_path_override else _claude_code_settings_path())
     env_vars = _build_bouncer_env_vars()
+    # Warn before clobbering an operator's own (non-loopback) value for a key
+    # we wire — e.g. a real VPC AWS_ENDPOINT_URL. We still proceed (wiring is
+    # the point), but never silently.
+    if env_vars and settings_p.exists():
+        try:
+            _ex = json.loads(settings_p.read_text(encoding="utf-8"))
+            _ex_env = _ex.get("env") if isinstance(_ex, dict) else {}
+        except Exception:
+            _ex_env = {}
+        for _k in env_vars:
+            if _k in ("NO_PROXY", "no_proxy"):
+                continue
+            _old = (_ex_env or {}).get(_k)
+            if isinstance(_old, str) and _old and not _value_is_bouncer_wiring(_k, _old):
+                click.secho(
+                    f"warning: overwriting your existing {_k}={_old!r} with the "
+                    "bouncer value. Your original is NOT auto-restored by "
+                    "`bouncers off` — note it down if you need it.",
+                    fg="yellow", err=True,
+                )
     result = _write_claude_code_env_block(settings_p, env_vars)
     status = result.get("status")
     if status in ("written",):
@@ -1747,6 +1790,19 @@ def bouncers_status(settings_path_override: str | None) -> None:
         except Exception:
             pass
     click.echo(f"wired in {settings_p}: " + (", ".join(wired) if wired else "(none)"))
+
+    # Running procs (as the docstring promises).
+    running: list[str] = []
+    try:
+        from .posture import capture_posture
+
+        for name, b in (capture_posture().get("bouncers") or {}).items():
+            if b.get("running"):
+                port = b.get("wire_port") or b.get("port") or "?"
+                running.append(f"{name}(:{port})")
+    except Exception:
+        pass
+    click.echo("running: " + (", ".join(running) if running else "(none)"))
 
 
 @mcp_group.command("install-claude-code")

@@ -347,7 +347,7 @@ class TestBouncerKillSwitch:
                         "AWS_ENDPOINT_URL": "http://127.0.0.1:8767",  # ours
                         "HTTPS_PROXY": "http://127.0.0.1:8080",  # ours
                         "PGHOST": "db.prod.internal",  # operator's — keep
-                        "NO_PROXY": "corp.internal,anthropic.com",  # leave inert
+                        "NO_PROXY": "corp.internal,anthropic.com",  # harness host stripped
                     }
                 }
             )
@@ -355,14 +355,92 @@ class TestBouncerKillSwitch:
         )
         result = _strip_bouncer_env_block(settings)
         assert result["status"] == "removed"
-        assert set(result["vars_removed"]) == {"AWS_ENDPOINT_URL", "HTTPS_PROXY"}
+        # NO_PROXY is also touched (our harness host stripped, operator host kept).
+        assert {"AWS_ENDPOINT_URL", "HTTPS_PROXY", "NO_PROXY"} <= set(result["vars_removed"])
 
         env = json.loads(settings.read_text())["env"]
         assert "AWS_ENDPOINT_URL" not in env
         assert "HTTPS_PROXY" not in env
         assert env["MY_REAL_AWS"] == "x"  # operator value preserved
         assert env["PGHOST"] == "db.prod.internal"  # operator value preserved
-        assert env["NO_PROXY"] == "corp.internal,anthropic.com"  # left in place
+        # anthropic.com (ours) stripped; corp.internal (operator's) preserved.
+        assert env["NO_PROXY"] == "corp.internal"
+
+    def test_on_off_round_trip_leaves_no_no_proxy_residue(
+        self, tmp_path: pathlib.Path
+    ) -> None:
+        """BUG1 regression: on->off on a clean file must not leave NO_PROXY behind."""
+        from iam_jit.cli import _strip_bouncer_env_block, _write_claude_code_env_block
+        from iam_jit.proxy_exclusions import merge_no_proxy
+
+        settings = tmp_path / "settings.json"
+        # Simulate `on` writing the full gbounce wiring (incl. NO_PROXY).
+        np = merge_no_proxy()
+        _write_claude_code_env_block(
+            settings,
+            {
+                "AWS_ENDPOINT_URL": "http://127.0.0.1:8767",
+                "HTTP_PROXY": "http://127.0.0.1:8080",
+                "HTTPS_PROXY": "http://127.0.0.1:8080",
+                "NO_PROXY": np,
+                "no_proxy": np,
+            },
+        )
+        _strip_bouncer_env_block(settings)
+        env = json.loads(settings.read_text()).get("env", {})
+        # Nothing iam-jit added should remain.
+        assert env == {}, f"residue after on->off: {env}"
+
+    def test_off_preserves_operator_no_proxy_strips_only_ours(
+        self, tmp_path: pathlib.Path
+    ) -> None:
+        from iam_jit.cli import _strip_bouncer_env_block
+        from iam_jit.proxy_exclusions import merge_no_proxy
+
+        settings = tmp_path / "settings.json"
+        settings.write_text(
+            json.dumps(
+                {
+                    "env": {
+                        "HTTPS_PROXY": "http://127.0.0.1:8080",
+                        "NO_PROXY": merge_no_proxy("corp.internal,vpn.example"),
+                    }
+                }
+            )
+            + "\n"
+        )
+        _strip_bouncer_env_block(settings)
+        env = json.loads(settings.read_text())["env"]
+        assert "HTTPS_PROXY" not in env
+        # Operator hosts kept, harness hosts (anthropic/loopback) gone.
+        assert set(env["NO_PROXY"].split(",")) == {"corp.internal", "vpn.example"}
+
+    def test_writer_cross_case_no_proxy_union(self, tmp_path: pathlib.Path) -> None:
+        """B1 regression: operator set only NO_PROXY (upper); no_proxy (lower)
+        must also carry their value, not just our harness hosts."""
+        from iam_jit.cli import _write_claude_code_env_block
+
+        settings = tmp_path / "settings.json"
+        settings.write_text(json.dumps({"env": {"NO_PROXY": "corp.internal"}}) + "\n")
+        _write_claude_code_env_block(
+            settings,
+            {"HTTPS_PROXY": "http://127.0.0.1:8080",
+             "NO_PROXY": "anthropic.com", "no_proxy": "anthropic.com"},
+        )
+        env = json.loads(settings.read_text())["env"]
+        assert "corp.internal" in env["NO_PROXY"].split(",")
+        assert "corp.internal" in env["no_proxy"].split(","), (
+            "lower-case no_proxy must also carry the operator's value"
+        )
+
+    def test_strip_harness_no_proxy_helper(self) -> None:
+        from iam_jit.proxy_exclusions import merge_no_proxy, strip_harness_no_proxy
+
+        # Only harness hosts -> None (drop the key).
+        assert strip_harness_no_proxy(merge_no_proxy()) is None
+        # Operator host survives.
+        assert strip_harness_no_proxy(merge_no_proxy("corp.x")) == "corp.x"
+        assert strip_harness_no_proxy(None) is None
 
     def test_off_no_change_when_nothing_wired(self, tmp_path: pathlib.Path) -> None:
         from iam_jit.cli import _strip_bouncer_env_block

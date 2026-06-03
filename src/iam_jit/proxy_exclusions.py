@@ -60,3 +60,18 @@ def merge_no_proxy(existing: str | None = None) -> str:
             out.append(host)
 
     return ",".join(out)
+
+
+def strip_harness_no_proxy(value: str | None) -> str | None:
+    """Inverse of merge_no_proxy: remove the harness hosts WE added, keeping
+    any operator-supplied hosts. Returns the remaining value, or None if
+    nothing operator-supplied is left (so the caller can drop the key).
+
+    Used by `iam-jit bouncers off` so un-wiring leaves a clean state without
+    clobbering an operator's own NO_PROXY entries.
+    """
+    if not value:
+        return None
+    harness = set(HARNESS_NO_PROXY_HOSTS)
+    kept = [p.strip() for p in value.split(",") if p.strip() and p.strip() not in harness]
+    return ",".join(kept) if kept else None
