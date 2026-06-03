@@ -165,6 +165,30 @@ def _loopback_port_open(port: int, host: str = "127.0.0.1", timeout: float = 0.2
         return True
 
 
+def _fetch_healthz(port: int, timeout: float = 1.0) -> dict[str, Any] | None:
+    """GET /healthz from a running bouncer and return the parsed payload.
+
+    This is the AUTHORITATIVE source for the running proxy's live state
+    (mode, enforcing, active_profile, pause, anomaly_detection). Posture must
+    prefer this over in-process `resolve_active_mode()` — a separate `ibounce
+    posture` process resolves the mode IT would use (default cooperative), not
+    the mode the RUNNING proxy is enforcing, which made `posture` mis-report
+    "cooperative" while the proxy was "transparent". Never raises.
+    """
+    try:
+        import urllib.error
+        import urllib.request
+
+        req = urllib.request.Request(
+            f"http://127.0.0.1:{port}/healthz", method="GET"
+        )
+        with urllib.request.urlopen(req, timeout=timeout) as resp:  # noqa: S310
+            payload = json.loads(resp.read().decode("utf-8"))
+            return payload if isinstance(payload, dict) else None
+    except (urllib.error.URLError, OSError, ValueError, TimeoutError):
+        return None
+
+
 _LOOPBACK_HOSTS = {"127.0.0.1", "localhost", "::1", "[::1]"}
 
 
@@ -332,8 +356,15 @@ def detect_ibounce() -> dict[str, Any]:
     running = block["running"]
     port = block["port"]
 
+    # AUTHORITATIVE: when the proxy is running, its /healthz reports the LIVE
+    # mode / profile / pause / anomaly state. Prefer it over in-process
+    # resolution (which reflects what THIS posture process would do, not the
+    # running proxy). Single fetch, reused below for disk-pressure too.
+    healthz: dict[str, Any] | None = _fetch_healthz(port) if running else None
+
     # In-process introspection: import the same helpers the MCP tools
-    # use. Cheap (no IO beyond reading env vars + YAML).
+    # use. Cheap (no IO beyond reading env vars + YAML). Used only as a
+    # fallback when /healthz is unavailable.
     mode_info: dict[str, Any] | None = None
     profile_info: dict[str, Any] | None = None
     try:
@@ -359,15 +390,36 @@ def detect_ibounce() -> dict[str, Any]:
     except Exception:
         profile_info = None
 
-    block["mode"] = mode_info["mode"] if mode_info else "unknown"
-    block["mode_source"] = (
-        mode_info["source"] if mode_info else "unknown"
-    )
-    if profile_info:
+    # Mode: /healthz (live, authoritative) wins over in-process resolution.
+    if healthz and healthz.get("mode"):
+        block["mode"] = healthz["mode"]
+        block["mode_source"] = "healthz"
+        # The proxy's own enforcing flag is the ground truth.
+        if "enforcing" in healthz:
+            block["enforcing"] = healthz["enforcing"]
+    else:
+        block["mode"] = mode_info["mode"] if mode_info else "unknown"
+        block["mode_source"] = (
+            mode_info["source"] if mode_info else "unknown"
+        )
+    # Active profile: prefer the running proxy's reported profile.
+    if healthz and healthz.get("active_profile"):
+        block["active_profile"] = healthz["active_profile"]
+        if profile_info:
+            block["profile_summary"] = profile_info
+    elif profile_info:
         block["active_profile"] = profile_info["name"]
         block["profile_summary"] = profile_info
     else:
         block["active_profile"] = "unknown"
+    # Honest-state: surface pause + cost-breaker state from the running proxy
+    # so `posture` never reports them absent while they are ACTIVE. (Anomaly
+    # is handled in the dedicated section below.)
+    if healthz is not None:
+        if healthz.get("pause") is not None:
+            block["pause"] = healthz["pause"]
+        if healthz.get("cost_circuit_breaker") is not None:
+            block["cost_circuit_breaker"] = healthz["cost_circuit_breaker"]
 
     # #424 / §A63 — disk-pressure surface. In-process read works ONLY
     # when posture is invoked from inside a running ibounce serve()
@@ -386,23 +438,9 @@ def detect_ibounce() -> dict[str, Any]:
             disk_pressure = healthz_audit_log_block(_dp)
     except Exception:
         disk_pressure = None
-    if disk_pressure is None and running:
-        # Out-of-process probe via /healthz. Short timeout — posture
-        # is interactive; we don't want to hang the operator if the
-        # bouncer is unresponsive.
-        try:
-            import json
-            import urllib.error
-            import urllib.request
-            req = urllib.request.Request(
-                f"http://127.0.0.1:{port}/healthz",
-                method="GET",
-            )
-            with urllib.request.urlopen(req, timeout=1.0) as resp:
-                payload = json.loads(resp.read().decode("utf-8"))
-                disk_pressure = payload.get("audit_log")
-        except (urllib.error.URLError, OSError, ValueError, TimeoutError):
-            disk_pressure = None
+    if disk_pressure is None and healthz is not None:
+        # Reuse the single /healthz fetch performed above (no second probe).
+        disk_pressure = healthz.get("audit_log")
     if disk_pressure is not None:
         block["disk_pressure"] = disk_pressure
         # Surface a single-line operator-facing recommendation when
@@ -443,20 +481,9 @@ def detect_ibounce() -> dict[str, Any]:
         anomaly_detection = active_anomaly_detection_marker()
     except Exception:
         anomaly_detection = None
-    if anomaly_detection is None and running:
-        try:
-            import json
-            import urllib.error
-            import urllib.request
-            req = urllib.request.Request(
-                f"http://127.0.0.1:{port}/healthz",
-                method="GET",
-            )
-            with urllib.request.urlopen(req, timeout=1.0) as resp:
-                payload = json.loads(resp.read().decode("utf-8"))
-                anomaly_detection = payload.get("anomaly_detection")
-        except (urllib.error.URLError, OSError, ValueError, TimeoutError):
-            anomaly_detection = None
+    if anomaly_detection is None and healthz is not None:
+        # Reuse the single /healthz fetch performed above.
+        anomaly_detection = healthz.get("anomaly_detection")
     block["anomaly_detection"] = anomaly_detection
 
     # #711 — audit-export silent-degradation guard. Read audit_warning
@@ -652,6 +679,24 @@ def detect_gbounce() -> dict[str, Any]:
         "mode": "unknown",
         "active_profile": "unknown",
     }
+    # Honest-state: gbounce's /healthz (on the mgmt port) reports the LIVE mode
+    # (discovery / mitm / block) + deny/MITM counts. Read it so posture never
+    # says "Mode: unknown" for a running gbounce. Probe the hinted mgmt ports
+    # then the default; first one that answers /healthz wins.
+    if running:
+        for _mp in dict.fromkeys(
+            ap_hints.get("gbounce", []) + [GBOUNCE_DEFAULT_MGMT_PORT]
+        ):
+            _hz = _fetch_healthz(_mp)
+            if _hz and _hz.get("mode"):
+                block["mgmt_port"] = _mp
+                block["mode"] = _hz["mode"]
+                block["mode_source"] = "healthz"
+                if _hz.get("deny_hosts_count") is not None:
+                    block["deny_hosts_count"] = _hz["deny_hosts_count"]
+                if _hz.get("mitm_enabled") is not None:
+                    block["mitm_enabled"] = _hz["mitm_enabled"]
+                break
     block["env_var_pointing_here"] = None
     block["misconfig"] = None
     for env_name in (GBOUNCE_ENV_HTTP_PROXY, GBOUNCE_ENV_HTTPS_PROXY):
