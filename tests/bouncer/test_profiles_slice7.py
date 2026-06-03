@@ -127,6 +127,33 @@ def test_load_profiles_rejects_bad_keyword_match_mode(tmp_path, monkeypatch) -> 
         load_profiles()
 
 
+def test_load_profiles_skips_malformed_entry_without_bricking(
+    tmp_path, monkeypatch
+) -> None:
+    """Regression: a corrupt profiles.yaml (the exact shape a bad
+    `recommend --save-as-profile` wrote — profile fields directly under
+    `profiles:`) must NOT crash the proxy. Skip the bad entry, keep defaults."""
+    import warnings
+
+    bad = tmp_path / "profiles.yaml"
+    # profiles: {description: <str>, allow_rules: <list>}  — entries not objects
+    bad.write_text(
+        "profiles:\n"
+        '  description: "captured from session"\n'
+        "  allow_rules:\n"
+        "  - pattern: s3:ListAllMyBuckets\n"
+    )
+    monkeypatch.setenv("IAM_JIT_BOUNCER_PROFILES_FILE", str(bad))
+    with warnings.catch_warnings(record=True) as w:
+        warnings.simplefilter("always")
+        profiles = load_profiles()  # must NOT raise
+    # Built-in defaults still present (proxy stays usable).
+    assert "safe-default" in profiles
+    assert "full-user" in profiles
+    # The malformed entries were skipped with a warning.
+    assert any("malformed" in str(x.message) for x in w)
+
+
 def test_write_default_profiles_idempotent(tmp_path, monkeypatch) -> None:
     target = tmp_path / "profiles.yaml"
     monkeypatch.setenv("IAM_JIT_BOUNCER_PROFILES_FILE", str(target))

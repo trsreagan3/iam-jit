@@ -313,7 +313,21 @@ def load_profiles(path: str | pathlib.Path | None = None) -> dict[str, Profile]:
     user_profiles: dict[str, Profile] = {}
     for name, body in raw.items():
         if not isinstance(body, dict):
-            raise ValueError(f"profile {name!r} must be a YAML object")
+            # An entry whose body is a scalar/list (NOT a profile object) must
+            # NOT brick the proxy at startup. Historically a bad
+            # `recommend --save-as-profile` write produced exactly this shape
+            # (`profiles: {description: <str>, allow_rules: <list>}`), which
+            # crashed `ibounce run` with no escape hatch. Warn + skip the
+            # malformed entry and keep serving with the built-in defaults.
+            import warnings as _warnings
+
+            _warnings.warn(
+                f"profile {name!r} in {resolved} is malformed (not a YAML "
+                f"object) — skipping it. Repair the file or run "
+                f"`ibounce profile install-defaults` to reset.",
+                stacklevel=2,
+            )
+            continue
         user_profiles[name] = _profile_from_dict(name, body)
 
     # Per GH #6: start with the full DEFAULT_PROFILES set so callers
