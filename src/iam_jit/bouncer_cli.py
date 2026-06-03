@@ -1529,9 +1529,54 @@ def effective_scope_cmd(owner: str | None, db: str | None, as_json: bool) -> Non
     if db:
         os.environ["IAM_JIT_BOUNCER_DB"] = db
     scope = get_effective_scope(owner=owner)
+
+    # "What's gating you RIGHT NOW" must include the running proxy's live
+    # enforcement state — mode, profile, and (critically) whether a pause is
+    # suspending enforcement. Without this, effective-scope reported identical
+    # output during an active pause as at full enforcement, misleading the
+    # caller about their actual protection level. Read it from the running
+    # proxy's /healthz via the posture detector (authoritative).
+    proxy_state: dict[str, object] = {}
+    try:
+        from .posture.bouncers import detect_ibounce
+
+        _ib = detect_ibounce()
+        if _ib.get("running"):
+            proxy_state = {
+                "running": True,
+                "mode": _ib.get("mode"),
+                "enforcing": _ib.get("enforcing"),
+                "active_profile": _ib.get("active_profile"),
+                "pause": _ib.get("pause"),
+            }
+        else:
+            proxy_state = {"running": False}
+    except Exception:
+        proxy_state = {}
+
     if as_json:
-        click.echo(json.dumps(scope.to_dict(), indent=2))
+        out = scope.to_dict()
+        out["proxy"] = proxy_state
+        click.echo(json.dumps(out, indent=2))
         return
+
+    # Live proxy state first — it's the headline "are you actually protected".
+    if proxy_state.get("running"):
+        _pause = proxy_state.get("pause")
+        _mode = proxy_state.get("mode")
+        if _pause:
+            click.secho(
+                f"proxy mode:        {_mode}  ⚠️  PAUSED (enforcement suspended"
+                f"{' until ' + str(_pause.get('ends_at')) if isinstance(_pause, dict) and _pause.get('ends_at') else ''})",
+                fg="yellow",
+            )
+        else:
+            click.echo(f"proxy mode:        {_mode}"
+                       f"{' (enforcing)' if proxy_state.get('enforcing') else ''}")
+        click.echo(f"active profile:    {proxy_state.get('active_profile')}")
+    elif proxy_state.get("running") is False:
+        click.echo("proxy:             not running")
+
     if not scope.has_active_task:
         click.echo("(no active task — at baseline)")
         click.echo(f"global rules: {scope.global_rule_count}")

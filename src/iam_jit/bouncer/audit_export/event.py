@@ -507,6 +507,12 @@ def audit_event_from_decision(
     # in OCSF terms.
     if extra:
         ext.update(extra)
+    # Machine-readable pause linkage in the EXPORTED event (not just the SQLite
+    # decisions.pause_id column). Without this a SIEM ingesting the JSONL could
+    # only infer a pause from the status_detail text — it could not correlate
+    # decisions to a specific pause window by id. (NUC-F UAT finding.)
+    if active_pause_id is not None:
+        ext["pause_id"] = active_pause_id
 
     # #320 / §A18: structured rejection breadcrumb. Single dict shape
     # when one header failed; list shape when both failed. Cross-

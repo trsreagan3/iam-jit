@@ -460,3 +460,23 @@ def test_cli_effective_scope_json(tmp_path) -> None:
     parsed = json.loads(result.output)
     assert "has_active_task" in parsed
     assert "global_rule_count" in parsed
+
+
+def test_effective_scope_surfaces_live_proxy_state(monkeypatch) -> None:
+    """NUC-F regression: `effective-scope` ('what's gating me RIGHT NOW')
+    must surface the running proxy's mode/profile/pause — during a pause it
+    previously looked identical to full enforcement."""
+    import iam_jit.posture.bouncers as pb
+
+    monkeypatch.setattr(
+        pb, "detect_ibounce",
+        lambda: {"running": True, "mode": "transparent", "enforcing": True,
+                 "active_profile": "safe-default",
+                 "pause": {"pause_id": 3, "ends_at": "2026-06-03T10:00:00Z"}},
+    )
+    res = CliRunner().invoke(main, ["effective-scope", "--json"], catch_exceptions=False)
+    assert res.exit_code == 0, res.output
+    out = json.loads(res.output)
+    assert out["proxy"]["mode"] == "transparent"
+    assert out["proxy"]["active_profile"] == "safe-default"
+    assert out["proxy"]["pause"]["pause_id"] == 3

@@ -261,3 +261,27 @@ async def test_evaluate_request_never_raises_on_log_writer_failure(
         "audit" in r.message.lower() or "disk on fire" in r.message
         for r in caplog.records
     )
+
+
+def test_audit_event_surfaces_pause_id_in_ext() -> None:
+    """NUC-F regression: a decision made during a pause must carry a
+    machine-readable pause_id in the EXPORTED OCSF event (unmapped.iam_jit.ext),
+    not just in the SQLite decisions column. SIEMs correlate by id."""
+    from iam_jit.bouncer.audit_export.event import audit_event_from_decision
+
+    ev = audit_event_from_decision(
+        decision_id=42, mode="cooperative", profile="full-user",
+        verdict="allow", reason="pause-bypass", service="sts",
+        action="GetCallerIdentity", arn=None, region="us-east-1",
+        host="sts.amazonaws.com", active_pause_id=7,
+    )
+    ext = ev["unmapped"]["iam_jit"]["ext"]
+    assert ext["pause_id"] == 7
+
+    # No pause → no pause_id key (keep ext small).
+    ev2 = audit_event_from_decision(
+        decision_id=43, mode="cooperative", profile="full-user",
+        verdict="allow", reason="", service="sts", action="GetCallerIdentity",
+        arn=None, region="us-east-1", host="sts.amazonaws.com",
+    )
+    assert "pause_id" not in ev2["unmapped"]["iam_jit"]["ext"]
