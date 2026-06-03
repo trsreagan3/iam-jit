@@ -172,6 +172,106 @@ def _run_fresh_subprocess(
 # ---------------------------------------------------------------------------
 
 
+class TestHarnessNoProxyCarveOut:
+    """Regression tests for the 2026-06-03 lockup: wiring gbounce's
+    HTTP(S)_PROXY must ALSO emit a NO_PROXY carve-out for the harness's own
+    control-plane (api.anthropic.com) + loopback, or a bouncer outage bricks
+    the agent itself even after the upstream API recovers.
+    """
+
+    def test_merge_no_proxy_includes_harness_hosts(self) -> None:
+        from iam_jit.proxy_exclusions import merge_no_proxy
+
+        val = merge_no_proxy()
+        for host in ("anthropic.com", ".anthropic.com", "localhost", "127.0.0.1"):
+            assert host in val.split(","), f"{host} missing from {val!r}"
+
+    def test_merge_no_proxy_preserves_and_dedupes_existing(self) -> None:
+        from iam_jit.proxy_exclusions import merge_no_proxy
+
+        # Operator already had a custom host + one we'd add anyway.
+        val = merge_no_proxy("internal.corp, anthropic.com")
+        parts = val.split(",")
+        # Operator host kept and kept first (order-preserving).
+        assert parts[0] == "internal.corp"
+        # No duplicate anthropic.com even though it was in both sources.
+        assert parts.count("anthropic.com") == 1
+        # Harness defaults still present.
+        assert "localhost" in parts
+
+    def test_build_env_sets_no_proxy_when_gbounce_proxy_set(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        import iam_jit.posture as posture_mod
+        from iam_jit.cli import _build_bouncer_env_vars
+
+        monkeypatch.setattr(
+            posture_mod,
+            "capture_posture",
+            lambda *a, **k: {
+                "bouncers": {
+                    "gbounce": {"running": True, "wire_port": 8080},
+                }
+            },
+        )
+        env = _build_bouncer_env_vars()
+        assert env["HTTPS_PROXY"] == "http://127.0.0.1:8080"
+        # The carve-out MUST be present alongside the proxy (both cases).
+        assert "anthropic.com" in env["NO_PROXY"]
+        assert "anthropic.com" in env["no_proxy"]
+
+    def test_build_env_no_proxy_carveout_absent_without_gbounce(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """ibounce-only wiring (AWS_ENDPOINT_URL) is already safe — it never
+        touches the harness's Anthropic traffic — so no NO_PROXY is needed."""
+        import iam_jit.posture as posture_mod
+        from iam_jit.cli import _build_bouncer_env_vars
+
+        monkeypatch.setattr(
+            posture_mod,
+            "capture_posture",
+            lambda *a, **k: {
+                "bouncers": {"ibounce": {"running": True, "port": 8767}}
+            },
+        )
+        env = _build_bouncer_env_vars()
+        assert env["AWS_ENDPOINT_URL"] == "http://127.0.0.1:8767"
+        assert "NO_PROXY" not in env
+        assert "HTTPS_PROXY" not in env
+
+    def test_writer_unions_no_proxy_with_existing_operator_value(
+        self, tmp_path: pathlib.Path
+    ) -> None:
+        """If the operator already set NO_PROXY in settings.json, the write
+        unions (never clobbers) it with the harness carve-out."""
+        from iam_jit.cli import _write_claude_code_env_block
+
+        settings = tmp_path / "settings.json"
+        settings.write_text(
+            json.dumps({"env": {"NO_PROXY": "internal.corp"}}) + "\n"
+        )
+        _write_claude_code_env_block(
+            settings,
+            {"HTTPS_PROXY": "http://127.0.0.1:8080", "NO_PROXY": "anthropic.com"},
+        )
+        data = json.loads(settings.read_text())
+        parts = data["env"]["NO_PROXY"].split(",")
+        assert "internal.corp" in parts  # operator value preserved
+        assert "anthropic.com" in parts  # harness carve-out present
+
+    def test_shellinit_emits_no_proxy_for_gbounce(self) -> None:
+        from iam_jit.cli_shellinit import render_shellinit
+
+        out = render_shellinit(
+            {"bouncers": {"gbounce": {"running": True, "wire_port": 8080}}},
+            shell="bash",
+        )
+        assert "HTTPS_PROXY" in out
+        assert "NO_PROXY" in out
+        assert "anthropic.com" in out
+
+
 class TestEnvBlockWriter:
     """Unit tests for _write_claude_code_env_block + helpers.
 

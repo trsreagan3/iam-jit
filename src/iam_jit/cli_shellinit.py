@@ -232,6 +232,17 @@ def render_shellinit(
         proxy_url = f"http://127.0.0.1:{wire_port}"
         lines.append(_export_line(shell, "HTTP_PROXY", proxy_url))
         lines.append(_export_line(shell, "HTTPS_PROXY", proxy_url))
+        # Carve the harness's own control-plane (e.g. Claude Code -> Anthropic)
+        # + loopback OUT of the proxy. Without this, routing the agent's whole
+        # environment through gbounce also routes the harness's own LLM/API
+        # traffic — so a gbounce outage bricks the agent itself, even after the
+        # upstream API recovers (the export is static). See proxy_exclusions.
+        from .proxy_exclusions import merge_no_proxy
+
+        no_proxy = merge_no_proxy()
+        lines.append(_comment(shell, "keep the harness's own API traffic direct (never via the bouncer):"))
+        lines.append(_export_line(shell, "NO_PROXY", no_proxy))
+        lines.append(_export_line(shell, "no_proxy", no_proxy))
     else:
         lines.append(
             _comment(shell, "(no HTTP_PROXY export — gbounce not running)"),

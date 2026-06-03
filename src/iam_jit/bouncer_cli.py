@@ -6208,6 +6208,14 @@ def _build_bouncer_env_vars_for_mcp() -> dict[str, str]:
         proxy = f"http://127.0.0.1:{wire_port}"
         env["HTTP_PROXY"] = proxy
         env["HTTPS_PROXY"] = proxy
+        # Keep the harness's own control-plane (Claude Code -> Anthropic) +
+        # loopback OUT of the proxy so a gbounce outage can't brick the agent
+        # itself. See proxy_exclusions for the full rationale.
+        from .proxy_exclusions import merge_no_proxy
+
+        no_proxy = merge_no_proxy()
+        env["NO_PROXY"] = no_proxy
+        env["no_proxy"] = no_proxy
 
     return env
 

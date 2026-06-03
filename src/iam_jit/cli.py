@@ -1372,6 +1372,15 @@ def _build_bouncer_env_vars() -> dict[str, str]:
         proxy = f"http://127.0.0.1:{wire_port}"
         env["HTTP_PROXY"] = proxy
         env["HTTPS_PROXY"] = proxy
+        # Carve the harness's own control-plane (Claude Code -> Anthropic) +
+        # loopback out of the proxy. Without this, a gbounce outage bricks the
+        # agent itself — even after the upstream API recovers — because the
+        # proxy env is static. See proxy_exclusions for the full rationale.
+        from .proxy_exclusions import merge_no_proxy
+
+        no_proxy = merge_no_proxy()
+        env["NO_PROXY"] = no_proxy
+        env["no_proxy"] = no_proxy
 
     return env
 
@@ -1433,6 +1442,13 @@ def _write_claude_code_env_block(
     vars_written: list[str] = []
     changed = False
     for key, val in env_vars.items():
+        # NO_PROXY is additive, not a replacement: union our harness carve-out
+        # with whatever the operator already had so we never drop their hosts.
+        if key in ("NO_PROXY", "no_proxy"):
+            from .proxy_exclusions import merge_no_proxy
+
+            prior = current_env.get(key)
+            val = merge_no_proxy(prior if isinstance(prior, str) else None)
         if current_env.get(key) != val:
             current_env[key] = val
             vars_written.append(key)
