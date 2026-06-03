@@ -5098,6 +5098,40 @@ def run_cmd(
         click.secho(f"profile error: {e}", fg="red", err=True)
         sys.exit(2)
 
+    # Footgun fix (UC3 UAT): an allow-baseline profile (e.g. safe-default) is a
+    # DENY-FLOOR — it denies anything NOT in its readonly baseline, but it does
+    # not actively GRANT the baseline reads at the rule-engine layer. So with
+    # the default `--default-policy deny`, baseline reads fall through to
+    # default-deny and get blocked — the opposite of the profile's advertised
+    # "reads allowed; writes denied". The profile is designed for
+    # default-policy=allow (writes are still denied by the profile floor). When
+    # such a profile is active in transparent mode and the operator did NOT
+    # explicitly choose a default-policy, default it to allow so the bouncer
+    # behaves as documented, and say so loudly.
+    if (
+        getattr(active_profile, "allow_baseline", None)
+        and mode.lower() == "transparent"
+        and default_policy.lower() == "deny"
+    ):
+        try:
+            from click.core import ParameterSource as _PS
+
+            _dp_src = click.get_current_context().get_parameter_source(
+                "default_policy"
+            )
+            _explicit = _dp_src not in (None, _PS.DEFAULT, _PS.DEFAULT_MAP)
+        except Exception:
+            _explicit = False
+        if not _explicit:
+            default_policy = "allow"
+            click.secho(
+                f"note: profile {active_profile.name!r} has a readonly "
+                "allow-baseline; defaulting --default-policy to 'allow' so "
+                "baseline READS are forwarded while WRITES stay denied by the "
+                "profile floor. Pass --default-policy deny to override.",
+                fg="cyan", err=True,
+            )
+
     # #500 / §A66c — declarative-config fallback for Phase F audit-chain
     # + retention. CLI flag wins (operator explicit intent); otherwise we
     # consult a discovered `.iam-jit.yaml` (or fenced codeblock in

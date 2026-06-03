@@ -424,6 +424,38 @@ def test_profile_deny_beats_global_allow_via_evaluate_request(tmp_path) -> None:
     store.close()
 
 
+def test_safe_default_with_allow_policy_forwards_reads_denies_writes(tmp_path) -> None:
+    """UC3 footgun semantics: safe-default is a deny-FLOOR. With
+    default_policy=allow (which `ibounce run` now auto-selects for an
+    allow-baseline profile in transparent mode), baseline READS are forwarded
+    while WRITES are denied by the profile. (Pre-fix, default_policy=deny
+    silently blocked reads too.)"""
+    store = BouncerStore(db_path=str(tmp_path / "b.db"))
+    safe = load_profiles()["safe-default"]
+    common = dict(
+        host="s3.us-east-1.amazonaws.com", body=None, query=None, store=store,
+        mode=ProxyMode.TRANSPARENT, default_policy=DefaultPolicy.ALLOW,
+        active_profile=safe,
+    )
+    # READ (GetObject) → allowed/forwarded (in the readonly baseline).
+    read_obs = evaluate_request(
+        method="GET", path="/my-bucket/data.csv",
+        headers={"host": "s3.us-east-1.amazonaws.com",
+                 "authorization": _sigv4(service="s3", region="us-east-1")},
+        **common,
+    )
+    assert read_obs.decision_verdict == "allow", read_obs.decision_reason
+    # WRITE (DeleteBucket) → denied by the profile floor regardless of allow.
+    write_obs = evaluate_request(
+        method="DELETE", path="/my-bucket",
+        headers={"host": "s3.us-east-1.amazonaws.com",
+                 "authorization": _sigv4(service="s3", region="us-east-1")},
+        **common,
+    )
+    assert write_obs.decision_verdict == "deny", write_obs.decision_reason
+    store.close()
+
+
 def test_profile_full_user_preserves_existing_behavior(tmp_path) -> None:
     """With profile='full-user' (was 'none' pre-rename), the existing
     rule engine drives the verdict — Slice 1/2 behavior unchanged."""
