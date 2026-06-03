@@ -73,6 +73,25 @@ def _detect_shell_from_env() -> str:
     return "bash"
 
 
+# Master kill-switch (prevention side). When this env var is truthy, the
+# wiring layer emits NO live bouncer exports — `shellinit`, the settings.json
+# env-block writer, and the MCP env all become inert. This is the "off the
+# leash" lever: one var disables ALL bouncer interception for new sessions.
+# (For an ALREADY-wired, already-running session use `iam-jit bouncers off`,
+# which strips the baked env from settings.json — a static env var can't
+# retroactively un-route a live process.)
+IAM_JIT_DISABLE_BOUNCERS_ENV = "IAM_JIT_DISABLE_BOUNCERS"
+
+_TRUTHY = {"1", "true", "yes", "on"}
+
+
+def bouncers_disabled() -> bool:
+    """True iff the master kill-switch env var is set to a truthy value."""
+    import os as _os
+
+    return _os.environ.get(IAM_JIT_DISABLE_BOUNCERS_ENV, "").strip().lower() in _TRUTHY
+
+
 def _export_line(shell: str, name: str, value: str) -> str:
     """Format a single env-export line for the given shell."""
     tmpl, _ = _SHELL_SYNTAX[shell]
@@ -104,6 +123,23 @@ def render_shellinit(
         # Defensive: caller validated, but keep render_shellinit
         # callable from tests with arbitrary input.
         raise ValueError(f"unknown shell: {shell!r}")
+
+    if bouncers_disabled():
+        # Master kill-switch set: emit an inert comment block so `eval` is a
+        # no-op. Never emit a live export while interception is disabled.
+        return (
+            _comment(
+                shell,
+                f"iam-jit bouncers DISABLED ({IAM_JIT_DISABLE_BOUNCERS_ENV} is "
+                "set) — no interception wired.",
+            )
+            + "\n"
+            + _comment(
+                shell,
+                f"Unset {IAM_JIT_DISABLE_BOUNCERS_ENV} (and re-run) to re-enable.",
+            )
+            + "\n"
+        )
 
     bouncers = snapshot.get("bouncers", {})
 

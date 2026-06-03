@@ -6188,6 +6188,12 @@ def _build_bouncer_env_vars_for_mcp() -> dict[str, str]:
     Per [[ibounce-honest-positioning]]: only emit vars for bouncers that
     are actually verified running. Never emit a URL for a stopped bouncer.
     """
+    # Master kill-switch: when IAM_JIT_DISABLE_BOUNCERS is set, wire nothing.
+    from .cli_shellinit import bouncers_disabled
+
+    if bouncers_disabled():
+        return {}
+
     try:
         from .posture import capture_posture
         snap = capture_posture()

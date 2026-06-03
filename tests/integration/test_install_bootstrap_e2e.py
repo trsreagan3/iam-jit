@@ -272,6 +272,135 @@ class TestHarnessNoProxyCarveOut:
         assert "anthropic.com" in out
 
 
+class TestBouncerKillSwitch:
+    """`iam-jit bouncers off/on/status` + IAM_JIT_DISABLE_BOUNCERS master switch.
+
+    The operator-facing recovery lever for the lockup class: one command/var
+    disables all bouncer interception. `off` must strip only iam-jit's own
+    loopback wiring — never operator-set endpoints/kubeconfig/DB hosts.
+    """
+
+    def test_disabled_flag_parses_truthy_values(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from iam_jit.cli_shellinit import bouncers_disabled
+
+        for truthy in ("1", "true", "TRUE", "yes", "on"):
+            monkeypatch.setenv("IAM_JIT_DISABLE_BOUNCERS", truthy)
+            assert bouncers_disabled() is True, truthy
+        for falsy in ("", "0", "false", "off", "no"):
+            monkeypatch.setenv("IAM_JIT_DISABLE_BOUNCERS", falsy)
+            assert bouncers_disabled() is False, falsy
+
+    def test_build_env_returns_empty_when_disabled(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Master switch wins even with bouncers running."""
+        import iam_jit.posture as posture_mod
+        from iam_jit.cli import _build_bouncer_env_vars
+
+        monkeypatch.setenv("IAM_JIT_DISABLE_BOUNCERS", "1")
+        monkeypatch.setattr(
+            posture_mod,
+            "capture_posture",
+            lambda *a, **k: {"bouncers": {"ibounce": {"running": True, "port": 8767}}},
+        )
+        assert _build_bouncer_env_vars() == {}
+
+    def test_shellinit_inert_when_disabled(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from iam_jit.cli_shellinit import render_shellinit
+
+        monkeypatch.setenv("IAM_JIT_DISABLE_BOUNCERS", "1")
+        out = render_shellinit(
+            {"bouncers": {"gbounce": {"running": True, "wire_port": 8080}}},
+            shell="bash",
+        )
+        assert "export" not in out  # no live exports
+        assert "DISABLED" in out
+
+    def test_value_is_bouncer_wiring_discriminates(self) -> None:
+        from iam_jit.cli import _value_is_bouncer_wiring
+
+        # Loopback wiring → ours.
+        assert _value_is_bouncer_wiring("HTTPS_PROXY", "http://127.0.0.1:8080")
+        assert _value_is_bouncer_wiring("AWS_ENDPOINT_URL", "http://localhost:8767")
+        assert _value_is_bouncer_wiring("PGHOST", "127.0.0.1")
+        assert _value_is_bouncer_wiring("KUBECONFIG", "/home/u/.iam-jit/kbounce.yaml")
+        # Operator-set values → NOT ours (must be preserved).
+        assert not _value_is_bouncer_wiring("AWS_ENDPOINT_URL", "https://real.amazonaws.com")
+        assert not _value_is_bouncer_wiring("PGHOST", "db.prod.internal")
+        assert not _value_is_bouncer_wiring("KUBECONFIG", "/home/u/.kube/config")
+
+    def test_off_strips_only_loopback_wiring_preserves_operator(
+        self, tmp_path: pathlib.Path
+    ) -> None:
+        from iam_jit.cli import _strip_bouncer_env_block
+
+        settings = tmp_path / "settings.json"
+        settings.write_text(
+            json.dumps(
+                {
+                    "env": {
+                        "MY_REAL_AWS": "x",
+                        "AWS_ENDPOINT_URL": "http://127.0.0.1:8767",  # ours
+                        "HTTPS_PROXY": "http://127.0.0.1:8080",  # ours
+                        "PGHOST": "db.prod.internal",  # operator's — keep
+                        "NO_PROXY": "corp.internal,anthropic.com",  # leave inert
+                    }
+                }
+            )
+            + "\n"
+        )
+        result = _strip_bouncer_env_block(settings)
+        assert result["status"] == "removed"
+        assert set(result["vars_removed"]) == {"AWS_ENDPOINT_URL", "HTTPS_PROXY"}
+
+        env = json.loads(settings.read_text())["env"]
+        assert "AWS_ENDPOINT_URL" not in env
+        assert "HTTPS_PROXY" not in env
+        assert env["MY_REAL_AWS"] == "x"  # operator value preserved
+        assert env["PGHOST"] == "db.prod.internal"  # operator value preserved
+        assert env["NO_PROXY"] == "corp.internal,anthropic.com"  # left in place
+
+    def test_off_no_change_when_nothing_wired(self, tmp_path: pathlib.Path) -> None:
+        from iam_jit.cli import _strip_bouncer_env_block
+
+        settings = tmp_path / "settings.json"
+        settings.write_text(json.dumps({"env": {"OPERATOR": "value"}}) + "\n")
+        result = _strip_bouncer_env_block(settings)
+        assert result["status"] == "no_change"
+        assert json.loads(settings.read_text())["env"] == {"OPERATOR": "value"}
+
+    def test_off_not_found_when_no_settings(self, tmp_path: pathlib.Path) -> None:
+        from iam_jit.cli import _strip_bouncer_env_block
+
+        result = _strip_bouncer_env_block(tmp_path / "nope.json")
+        assert result["status"] == "not_found"
+
+    def test_cli_bouncers_off_end_to_end(self, tmp_path: pathlib.Path) -> None:
+        from click.testing import CliRunner
+        from iam_jit.cli import main
+
+        settings = tmp_path / "settings.json"
+        settings.write_text(
+            json.dumps({"env": {"HTTP_PROXY": "http://127.0.0.1:8080", "KEEP": "me"}})
+            + "\n"
+        )
+        runner = CliRunner()
+        result = runner.invoke(
+            main,
+            ["bouncers", "off", "--settings-path", str(settings)],
+            catch_exceptions=False,
+        )
+        assert result.exit_code == 0, result.output
+        assert "un-wired" in result.output
+        env = json.loads(settings.read_text())["env"]
+        assert "HTTP_PROXY" not in env
+        assert env["KEEP"] == "me"
+
+
 class TestEnvBlockWriter:
     """Unit tests for _write_claude_code_env_block + helpers.
 
