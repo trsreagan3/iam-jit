@@ -338,6 +338,17 @@ Tracking: every BUG entry has a task number (e.g., #299). v1.0 release gate: eve
 - **Verification:** All 4 repos now satisfy `ls LICENSE NOTICE` + `grep "^## License" README.md` + `grep "Copyright 2026 trsreagan3" LICENSE`
 - **Tasks closed:** #342
 
+## A25. Bouncer proxy wiring could brick the agent harness (no NO_PROXY carve-out) — `STATUS: FIXED 2026-06-03`
+- **Severity:** CRITICAL (launch-blocker — a wired bouncer could make the agent's own LLM unreachable, with no in-product recovery)
+- **Surfaced by:** real founder incident 2026-06-03 — an Anthropic API outage left Claude Code unable to recover until `~/.claude/settings.json` was deleted by hand.
+- **Symptom (historical):** wiring gbounce set a **blanket** `HTTP_PROXY`/`HTTPS_PROXY` (loopback) with **no `NO_PROXY` exclusion**. Claude Code (Node) honors `HTTPS_PROXY`, so the harness's OWN control-plane traffic (→ `api.anthropic.com`) routed through the bouncer. When the bouncer was down (or the upstream API had an outage), every request failed — and because the proxy env is **static** (read once at process start, never re-validated), the lockup persisted *even after the upstream recovered*. The only recovery was deleting `settings.json`.
+- **Fix (3 parts):**
+  1. **NO_PROXY carve-out (#69):** whenever `HTTP(S)_PROXY` is wired, also emit `NO_PROXY`/`no_proxy` covering `anthropic.com`, `.anthropic.com` + loopback. The harness lifeline stays direct by default; the bouncer still observes/gates all of the agent's *action* traffic. New shared module `proxy_exclusions.py` (`merge_no_proxy()` unions with any operator value).
+  2. **Master kill-switch (#70):** `iam-jit bouncers off` strips iam-jit's loopback env vars from `settings.json` in one shot (then restart; `--stop` also kills the processes); `on` re-wires; `status` shows state. `IAM_JIT_DISABLE_BOUNCERS=1` makes the wiring layer emit nothing for new sessions. `off` removes only loopback-bouncer values — operator-set endpoints/kubeconfig/DB hosts are preserved.
+  3. **Doctor detection:** `iam-jit doctor install-check` §4 now flags `settings.json` env that points at a loopback bouncer **with nothing listening** (the lockup shape) as ERROR, with the `iam-jit bouncers off` recovery recipe.
+- **Recovery recipe (if you ever hit this):** `iam-jit bouncers off` → restart the session (`claude --continue` to resume). Or set `IAM_JIT_DISABLE_BOUNCERS=1` before starting a new session.
+- **Note:** the contributing `nohup: setsid:` errors in the host logs were from an ad-hoc manual background-start (`setsid` doesn't exist on macOS); the product's own recipes (`ibounce run &`, canary `Popen(start_new_session=True)`) are macOS-correct — no code change needed there.
+
 ---
 
 # §B — DOCUMENTED LIMITS (NOT launch-blocking)

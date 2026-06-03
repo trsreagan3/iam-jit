@@ -697,11 +697,77 @@ def _check_running_bouncers(section: _Section, snapshot: dict[str, Any]) -> None
 # ---------------------------------------------------------------------------
 
 
+_LOOPBACK_PROBE_HOSTS = ("127.0.0.1", "localhost", "::1", "[::1]")
+
+
+def _check_wired_to_dead_bouncer(section: _Section) -> None:
+    """Detect the LOCKUP case: ~/.claude/settings.json wires a loopback
+    bouncer endpoint, but nothing is listening there.
+
+    This is the inverse of the "running but unwired" check above and the
+    exact shape of the 2026-06-03 harness lockup: a static proxy env that
+    points at a dead local listener keeps failing every request (even after
+    the upstream API recovers), because the env is never re-validated. We
+    surface it as ERROR with the one-command recovery.
+    """
+    import json
+    from urllib.parse import urlparse
+
+    settings_path = pathlib.Path.home() / ".claude" / "settings.json"
+    if not settings_path.exists():
+        return
+    try:
+        data = json.loads(settings_path.read_text(encoding="utf-8"))
+        env_block = data.get("env") if isinstance(data, dict) else None
+    except Exception:
+        return
+    if not isinstance(env_block, dict):
+        return
+
+    from .cli_uninstall import _port_bound
+
+    # (env-key, value) pairs that should point at a live loopback listener.
+    probes: list[tuple[str, int]] = []
+    for key in ("AWS_ENDPOINT_URL", "HTTP_PROXY", "HTTPS_PROXY"):
+        val = env_block.get(key)
+        if not isinstance(val, str):
+            continue
+        parsed = urlparse(val)
+        if parsed.hostname in ("127.0.0.1", "localhost", "::1") and parsed.port:
+            probes.append((key, parsed.port))
+    # dbounce: PGHOST loopback + PGPORT.
+    if env_block.get("PGHOST") in _LOOPBACK_PROBE_HOSTS:
+        try:
+            probes.append(("PGHOST/PGPORT", int(env_block.get("PGPORT") or 5433)))
+        except (TypeError, ValueError):
+            pass
+
+    for label_key, port in probes:
+        if _port_bound(port):
+            continue
+        section.add(
+            label=f"{label_key} wired to DEAD listener (:{port})",
+            severity=_SEV_ERR,
+            detail=(
+                "settings.json routes traffic to a bouncer that isn't "
+                "listening — this can brick agent (and harness) traffic until "
+                "un-wired, even after the upstream API recovers"
+            ),
+            fix=(
+                "Start the bouncer, OR recover with `iam-jit bouncers off` "
+                "then restart the session (`claude --continue` to resume)."
+            ),
+        )
+
+
 def _check_env_wiring(section: _Section, snapshot: dict[str, Any]) -> None:
     """One row per running bouncer asserting the env var that routes
     SDK traffic to it is set + points HERE. A bouncer running with no
     env-var wire is the founder's failure case — surface ERROR not
     WARN (the install is silently un-protecting).
+
+    Also runs the inverse check (``_check_wired_to_dead_bouncer``): env
+    wired to a loopback bouncer that ISN'T listening — the lockup shape.
     """
     bouncers = snapshot.get("bouncers", {})
     any_running = False
@@ -761,6 +827,9 @@ def _check_env_wiring(section: _Section, snapshot: dict[str, Any]) -> None:
             severity=_SEV_INFO,
             detail="skipped (no bouncers running; see [3/8])",
         )
+
+    # Inverse check: env wired to a loopback bouncer that isn't listening.
+    _check_wired_to_dead_bouncer(section)
 
 
 # ---------------------------------------------------------------------------
