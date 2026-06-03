@@ -1886,6 +1886,12 @@ class RequestObservation:
     pattern within the rule that matched the request's resource ARN.
     Separate field from `dynamic_deny_rule_id` so the audit event can
     surface both `which rule` + `which of its targets`."""
+    resource_hint: str | None = None
+    """Best-effort resource identifier (bucket name, role name, etc.)
+    parsed from the URL path / form body when there's no full ARN. The
+    ghost-run diff uses this so a captured would-mutate names WHICH
+    resource (e.g. the bucket that DeleteBucket targeted), not just the
+    action — `parsed_arn` is None for most S3/IAM ops."""
 
 
 # ---------------------------------------------------------------------------
@@ -1987,6 +1993,7 @@ def _build_observation(
         parsed_action=parsed.action if parsed else None,
         parsed_region=parsed.region if parsed else None,
         parsed_arn=getattr(parsed, "arn", None) if parsed else None,
+        resource_hint=getattr(parsed, "resource_hint", None) if parsed else None,
         decision_verdict=record.decision.value,
         decision_reason=record.reason,
         mode_at_decision=mode.value,
@@ -3643,7 +3650,10 @@ async def _ghost_capture_write_response(
             action=action,
             access_type=(obs.decision_verdict and "write") or "write",
             region=obs.parsed_region,
-            target=obs.parsed_arn,
+            # Name WHICH resource the would-mutate targeted: full ARN when we
+            # have one, else the best-effort resource hint (bucket/role name
+            # from the URL/body). Without this the diff showed target=null.
+            target=obs.parsed_arn or obs.resource_hint,
             params=_ghost_extract_params(
                 body=body, query=dict(request.query),
             ),
