@@ -976,10 +976,9 @@ class TestWiredToDeadBouncer:
         assert section.rows == []
         assert called == []  # never probed a non-loopback host
 
-    def test_no_settings_file_is_graceful(
-        self, tmp_path: pathlib.Path
-    ) -> None:
-        # _pinned_home points HOME at fake-home with no .claude/settings.json.
+    def test_no_settings_file_is_graceful(self) -> None:
+        # _pinned_home (autouse) points HOME at fake-home with no
+        # .claude/settings.json, so no tmp_path param is needed here.
         section = dic._Section(num=4, total=8, title="Env-var wiring")
         dic._check_wired_to_dead_bouncer(section)  # must not raise
         assert section.rows == []

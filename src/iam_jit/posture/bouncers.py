@@ -186,7 +186,7 @@ def _fetch_healthz(port: int, timeout: float = 1.0) -> dict[str, Any] | None:
             payload = json.loads(resp.read().decode("utf-8"))
             return payload if isinstance(payload, dict) else None
     except (urllib.error.URLError, OSError, ValueError, TimeoutError):
-        return None
+        return None  # noqa: SD-4 None IS the documented "healthz unavailable" signal — callers fall back to in-process resolution / mark mode unknown; posture must never raise on an unreachable/slow proxy
 
 
 _LOOPBACK_HOSTS = {"127.0.0.1", "localhost", "::1", "[::1]"}

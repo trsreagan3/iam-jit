@@ -720,7 +720,7 @@ def _check_wired_to_dead_bouncer(section: _Section) -> None:
         data = json.loads(settings_path.read_text(encoding="utf-8"))
         env_block = data.get("env") if isinstance(data, dict) else None
     except Exception:
-        return
+        return  # noqa: SD-4 unreadable/non-JSON settings.json = "no wiring we can verify"; this is an ADVISORY add-on to doctor §4, so emitting no rows is the honest no-op (other sections still report)
     if not isinstance(env_block, dict):
         return
 
@@ -739,7 +739,7 @@ def _check_wired_to_dead_bouncer(section: _Section) -> None:
     if env_block.get("PGHOST") in _LOOPBACK_PROBE_HOSTS:
         try:
             probes.append(("PGHOST/PGPORT", int(env_block.get("PGPORT") or 5433)))
-        except (TypeError, ValueError):
+        except (TypeError, ValueError):  # noqa: SD-1 a non-numeric PGPORT just means we can't probe the dbounce port — skip it; the other (AWS/HTTP) loopback probes still run
             pass
 
     for label_key, port in probes:

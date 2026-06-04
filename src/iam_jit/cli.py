@@ -1697,7 +1697,7 @@ def bouncers_off(settings_path_override: str | None, stop_procs: bool) -> None:
                     try:
                         os.kill(pid, _signal.SIGTERM)
                         stopped.append(f"{name}(pid {pid})")
-                    except Exception:
+                    except Exception:  # noqa: SD-1 best-effort stop; a kill failure (already-dead / perms) just omits the pid from the reported "stopped" list — never aborts the unwire
                         pass
         if stopped:
             click.secho("✓ stopped: " + ", ".join(stopped), fg="green")
@@ -1787,7 +1787,7 @@ def bouncers_status(settings_path_override: str | None) -> None:
             if isinstance(env_block, dict):
                 wired = [k for k in _BOUNCER_ENV_KEYS
                          if _value_is_bouncer_wiring(k, env_block.get(k))]
-        except Exception:
+        except Exception:  # noqa: SD-1 status is a best-effort read-only report; an unreadable/parse-failed settings.json just yields "(none)" wired (the operator still sees the kill-switch + running lines)
             pass
     click.echo(f"wired in {settings_p}: " + (", ".join(wired) if wired else "(none)"))
 
@@ -1800,7 +1800,7 @@ def bouncers_status(settings_path_override: str | None) -> None:
             if b.get("running"):
                 port = b.get("wire_port") or b.get("port") or "?"
                 running.append(f"{name}(:{port})")
-    except Exception:
+    except Exception:  # noqa: SD-1 best-effort posture probe for the status display; a posture failure just yields "(none)" running, never aborts the command
         pass
     click.echo("running: " + (", ".join(running) if running else "(none)"))
 
