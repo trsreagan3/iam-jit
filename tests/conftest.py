@@ -57,6 +57,12 @@ def mock_aws_env(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("AWS_SECRET_ACCESS_KEY", "testing")
     monkeypatch.setenv("AWS_SESSION_TOKEN", "testing")
     monkeypatch.setenv("AWS_DEFAULT_REGION", "us-east-1")
+    # Critical for moto-backed tests: if the developer has ibounce wired
+    # (AWS_ENDPOINT_URL=http://127.0.0.1:8767 — the normal dogfood state),
+    # boto3 routes to the live proxy instead of moto's in-memory mock and the
+    # test fails confusingly. Clear it so moto always intercepts. (UAT HIGH:
+    # 36 tests failed silently in the wired-ibounce dev state.)
+    monkeypatch.delenv("AWS_ENDPOINT_URL", raising=False)
 
 
 @pytest.fixture
