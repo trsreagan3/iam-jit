@@ -112,6 +112,22 @@ def _user_from_dict(d: dict[str, Any]) -> User:
     )
 
 
+def normalize_user_id(user_id: str) -> str:
+    """Normalize a user id for case-insensitive matching.
+
+    ``email:`` ids compare case-insensitively — email addresses + hostnames
+    are case-insensitive, and the token-mint path lowercases the local
+    hostname while ``users.yaml`` may be seeded with the OS's mixed-case
+    hostname (e.g. ``reagans-MacBook-Air.local``). An exact-match lookup then
+    spuriously 404s the local admin and bricks the whole grant flow on a fresh
+    ``serve --local``. ``iam:<arn>`` ids are left untouched — ARN resource
+    paths are case-sensitive.
+    """
+    if user_id.startswith("email:"):
+        return "email:" + user_id[len("email:"):].lower()
+    return user_id
+
+
 class FileUserStore:
     """Read-only-at-runtime store backed by a YAML file.
 
@@ -185,7 +201,7 @@ class FileUserStore:
         users: dict[str, User] = {}
         for entry in data.get("users") or []:
             user = _user_from_dict(entry)
-            users[user.id] = user
+            users[normalize_user_id(user.id)] = user
         self._cache = users
         self._cache_at = now
         self._cache_etag = etag
@@ -205,9 +221,10 @@ class FileUserStore:
     def get(self, user_id: str) -> User:
         self._maybe_reload()
         assert self._cache is not None
-        if user_id not in self._cache:
+        key = normalize_user_id(user_id)
+        if key not in self._cache:
             raise UserNotFound(user_id)
-        return self._cache[user_id]
+        return self._cache[key]
 
     def list(self, *, include_disabled: bool = False) -> list[User]:
         self._maybe_reload()
@@ -253,7 +270,7 @@ class DynamoDBUserStore:
     @staticmethod
     def _to_item(user: User) -> dict[str, Any]:
         item: dict[str, Any] = {
-            "user_id": user.id,
+            "user_id": normalize_user_id(user.id),
             "roles": list(user.roles),
             "enabled": user.enabled,
         }
@@ -278,7 +295,7 @@ class DynamoDBUserStore:
         )
 
     def get(self, user_id: str) -> User:
-        resp = self.table.get_item(Key={"user_id": user_id})
+        resp = self.table.get_item(Key={"user_id": normalize_user_id(user_id)})
         item = resp.get("Item")
         if item is None:
             raise UserNotFound(user_id)
@@ -317,7 +334,7 @@ class DynamoDBUserStore:
         existing: dict | None = None
         existing_known = False
         try:
-            existing = self.table.get_item(Key={"user_id": user.id}).get("Item")
+            existing = self.table.get_item(Key={"user_id": normalize_user_id(user.id)}).get("Item")
             existing_known = True
         except Exception as e:
             # If this is a transient DDB-side failure (throttling /
@@ -370,4 +387,4 @@ class DynamoDBUserStore:
         return count
 
     def delete(self, user_id: str) -> None:
-        self.table.delete_item(Key={"user_id": user_id})
+        self.table.delete_item(Key={"user_id": normalize_user_id(user_id)})

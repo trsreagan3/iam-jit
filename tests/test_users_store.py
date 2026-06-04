@@ -111,3 +111,46 @@ def test_user_role_helpers() -> None:
     assert requester.is_requester and not requester.is_approver and not requester.is_admin
     assert approver.is_requester and approver.is_approver and not approver.is_admin
     assert admin.is_requester and admin.is_approver and admin.is_admin
+
+
+# --- regression: hostname/email case-insensitivity (E2E dogfood 2026-06-05) ---
+# A fresh `serve --local` on a mixed-case-hostname mac seeds users.yaml with
+# email:user@Host.local but mints tokens for email:user@host.local (lowercased),
+# which used to 403 every grant request. user-ids for emails must match
+# case-insensitively; iam: ARNs must NOT be altered.
+
+_MIXED_CASE_YAML = """\
+schema_version: 1
+auth_mode: local
+users:
+  - id: email:reagan@reagans-MacBook-Air.local
+    display_name: Local admin
+    roles: [admin, approver, requester]
+  - id: iam:arn:aws:iam::590519617224:role/Some-MixedCase-Role
+    display_name: A role principal
+    roles: [requester]
+"""
+
+
+def test_normalize_user_id_lowercases_email_not_arn() -> None:
+    from iam_jit.users_store import normalize_user_id
+    assert normalize_user_id("email:reagan@reagans-MacBook-Air.local") == "email:reagan@reagans-macbook-air.local"
+    # ARN ids are case-sensitive — must be left untouched.
+    arn = "iam:arn:aws:iam::590519617224:role/Some-MixedCase-Role"
+    assert normalize_user_id(arn) == arn
+
+
+def test_file_store_email_lookup_is_case_insensitive(tmp_path: pathlib.Path) -> None:
+    p = tmp_path / "users.yaml"
+    p.write_text(_MIXED_CASE_YAML)
+    store = FileUserStore(str(p))
+    # seeded mixed-case; looked up with the lowercased token id -> must resolve.
+    u = store.get("email:reagan@reagans-macbook-air.local")
+    assert u.is_admin
+    # original casing still resolves too.
+    assert store.get("email:reagan@reagans-MacBook-Air.local").is_admin
+    # ARN id preserved exactly (case-sensitive).
+    assert store.get("iam:arn:aws:iam::590519617224:role/Some-MixedCase-Role").is_requester
+    # a genuinely-unknown user still raises.
+    with pytest.raises(UserNotFound):
+        store.get("email:nobody@example.com")
