@@ -653,3 +653,64 @@ def test_ghost_put_secret_value_redacted_in_persisted_record(
     captured_body = diff["actions"][0]["params"]["body"]
     assert captured_body["SecretString"] == "[REDACTED:SecretString]"
     assert captured_body["Name"] == "prod/db/master"
+
+
+# ---------------------------------------------------------------------------
+# Ghost-run diff: target naming (UAT NUC-A) + visualization renderers.
+# ---------------------------------------------------------------------------
+
+
+def test_observation_carries_resource_hint_for_s3(tmp_path):
+    """NUC-A fix: the observation must carry resource_hint so the ghost diff
+    can name WHICH resource (parsed_arn is None for most S3/IAM ops)."""
+    from iam_jit.bouncer.proxy import evaluate_request
+    store = BouncerStore(db_path=str(tmp_path / "b.db"))
+    obs = evaluate_request(
+        method="DELETE", host="s3.us-east-1.amazonaws.com", path="/prod-data",
+        headers={"host": "s3.us-east-1.amazonaws.com",
+                 "authorization": _sigv4("s3")},
+        body=None, query=None, store=store,
+        mode=ProxyMode.GHOST, default_policy=DefaultPolicy.DENY,
+    )
+    # parsed_arn or resource_hint must name the bucket (not None).
+    assert (obs.parsed_arn or obs.resource_hint), (
+        "neither parsed_arn nor resource_hint set — diff target would be null"
+    )
+    assert "prod-data" in (obs.parsed_arn or obs.resource_hint)
+    store.close()
+
+
+def test_ghost_action_kind_classifies_blast_radius():
+    from iam_jit.bouncer_cli import _ghost_action_kind
+    assert _ghost_action_kind("DeleteBucket") == "destructive"
+    assert _ghost_action_kind("TerminateInstances") == "destructive"
+    assert _ghost_action_kind("CreateRole") == "create"
+    assert _ghost_action_kind("PutObject") == "create"
+    assert _ghost_action_kind("UpdateFunctionCode") == "modify"
+
+
+def test_ghost_diff_summary_and_html_render():
+    from iam_jit.bouncer_cli import _ghost_diff_html, _ghost_diff_summary
+    actions = [
+        {"action": "DeleteBucket", "service": "s3",
+         "target": "arn:aws:s3:::prod-data", "ts": "T", "method": "DELETE",
+         "action_id": "a1"},
+        {"action": "CreateRole", "service": "iam", "target": "admin",
+         "ts": "T", "method": "POST", "action_id": "a2"},
+    ]
+    assert _ghost_diff_summary(actions) == {
+        "destructive": 1, "create": 1, "modify": 0,
+    }
+    html = _ghost_diff_html(
+        "sess", {"meta": {"started_at": "T"}, "captured_writes": 2,
+                 "actions": actions},
+    )
+    # Honest banner + the actual target resource must appear in the viz.
+    assert "NONE executed against AWS" in html
+    assert "prod-data" in html and "DeleteBucket" in html
+    assert "destructive" in html and "create" in html
+    # No raw target → renders an em-dash, never "None".
+    html_empty = _ghost_diff_html(
+        "s2", {"meta": {}, "captured_writes": 0, "actions": []},
+    )
+    assert "no mutating calls captured" in html_empty

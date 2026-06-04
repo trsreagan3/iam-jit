@@ -6079,11 +6079,99 @@ def shadow_list_cmd(as_json: bool) -> None:
         )
 
 
+# AWS action-verb → blast-radius class, for the ghost-diff visualization.
+def _ghost_action_kind(action: str) -> str:
+    """Classify an AWS action by its leading verb so the diff can show
+    blast radius at a glance: destructive (red) / create (green) /
+    modify (yellow)."""
+    a = action or ""
+    if a.startswith((
+        "Delete", "Terminate", "Remove", "Revoke", "Disable", "Detach",
+        "Destroy", "Purge", "Deregister", "Cancel", "Reboot", "Stop",
+    )):
+        return "destructive"
+    if a.startswith((
+        "Create", "Put", "Run", "Add", "Allocate", "Launch", "Start",
+        "Attach", "Enable", "Register", "Associate", "Import", "Copy",
+    )):
+        return "create"
+    return "modify"
+
+
+def _ghost_diff_summary(actions: list[dict[str, Any]]) -> dict[str, int]:
+    """Roll up captured writes by blast-radius kind."""
+    out = {"destructive": 0, "create": 0, "modify": 0}
+    for a in actions:
+        out[_ghost_action_kind(a.get("action", ""))] += 1
+    return out
+
+
+def _ghost_diff_html(session_id: str, payload: dict[str, Any]) -> str:
+    """Render a self-contained HTML visualization of a ghost-run diff —
+    "everything the agent WOULD have changed, none executed". Built for
+    the CSO / compliance-buyer audience: blast radius at a glance, shareable
+    as a single file (inline CSS, no external assets)."""
+    import html as _h
+
+    meta = payload.get("meta") or {}
+    actions = payload.get("actions") or []
+    summ = _ghost_diff_summary(actions)
+    _color = {"destructive": "#c0392b", "create": "#1e8449", "modify": "#b7791f"}
+    rows = []
+    for a in actions:
+        kind = _ghost_action_kind(a.get("action", ""))
+        rows.append(
+            f'<tr><td><span class="badge" style="background:{_color[kind]}">'
+            f'{_h.escape(kind)}</span></td>'
+            f'<td class="mono">{_h.escape(str(a.get("service","")))}:'
+            f'{_h.escape(str(a.get("action","")))}</td>'
+            f'<td class="mono">{_h.escape(str(a.get("target") or "—"))}</td>'
+            f'<td class="mono dim">{_h.escape(str(a.get("ts","")))}</td></tr>'
+        )
+    chips = "".join(
+        f'<span class="chip" style="border-color:{_color[k]};color:{_color[k]}">'
+        f'{summ[k]} {k}</span>'
+        for k in ("destructive", "create", "modify") if summ[k]
+    ) or '<span class="chip dim">no mutating calls captured</span>'
+    return f"""<!DOCTYPE html>
+<html lang="en"><head><meta charset="utf-8">
+<title>ghost-run diff — {_h.escape(session_id)}</title>
+<style>
+ body{{font:14px/1.5 -apple-system,Segoe UI,Roboto,sans-serif;margin:2rem auto;max-width:900px;color:#222}}
+ h1{{font-size:1.3rem;margin:0 0 .2rem}} .sub{{color:#666;margin:0 0 1rem}}
+ .banner{{background:#eef6ff;border:1px solid #b3d4fc;border-radius:6px;padding:.6rem .9rem;margin:1rem 0}}
+ .banner b{{color:#1e8449}}
+ .chips{{margin:1rem 0}} .chip{{display:inline-block;border:1.5px solid #999;border-radius:999px;padding:.15rem .7rem;margin-right:.5rem;font-weight:600}}
+ table{{border-collapse:collapse;width:100%;margin-top:.5rem}}
+ th,td{{text-align:left;padding:.45rem .6rem;border-bottom:1px solid #eee;vertical-align:top}}
+ th{{font-size:.8rem;text-transform:uppercase;color:#888;letter-spacing:.04em}}
+ .badge{{color:#fff;border-radius:4px;padding:.1rem .5rem;font-size:.78rem;font-weight:700}}
+ .mono{{font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:.85rem}} .dim{{color:#999}}
+</style></head><body>
+<h1>Ghost-run diff &mdash; what this agent <em>would</em> have changed</h1>
+<p class="sub">session <span class="mono">{_h.escape(session_id)}</span> &middot;
+ started {_h.escape(str(meta.get("started_at","")))} &middot;
+ upstream {_h.escape(str(meta.get("upstream") or "(real AWS)"))}</p>
+<div class="banner"><b>{payload.get("captured_writes", len(actions))} would-be mutations captured &mdash;
+ <b>NONE executed against AWS</b></b>. Reads were served from real infrastructure; writes were
+ recorded as this diff with zero blast radius.</div>
+<div class="chips">{chips}</div>
+<table><thead><tr><th>blast radius</th><th>action</th><th>target resource</th><th>captured at</th></tr></thead>
+<tbody>{''.join(rows) or '<tr><td colspan=4 class="dim">no mutating calls captured</td></tr>'}</tbody></table>
+</body></html>
+"""
+
+
 @shadow_group.command("diff")
 @click.argument("session_id")
 @click.option("--json", "as_json", is_flag=True, default=False,
               help="Emit JSON instead of the human table.")
-def shadow_diff_cmd(session_id: str, as_json: bool) -> None:
+@click.option("--html", "html_out", type=click.Path(dir_okay=False), default=None,
+              metavar="PATH",
+              help="Write a self-contained HTML visualization of the diff to "
+                   "PATH (a shareable 'what the agent would have changed' "
+                   "page; use '-' for stdout).")
+def shadow_diff_cmd(session_id: str, as_json: bool, html_out: str | None) -> None:
     """Show every captured would-be mutation for one ghost-run session.
 
     This is the core review surface: "here's everything the agent
@@ -6102,6 +6190,15 @@ def shadow_diff_cmd(session_id: str, as_json: bool) -> None:
             fg="red", err=True,
         )
         sys.exit(2)
+    if html_out is not None:
+        page = _ghost_diff_html(session_id, payload)
+        if html_out == "-":
+            click.echo(page)
+        else:
+            pathlib.Path(html_out).write_text(page, encoding="utf-8")
+            click.secho(f"✓ wrote ghost-run diff visualization to {html_out}",
+                        fg="green")
+        return
     if as_json:
         click.echo(json.dumps(payload, indent=2))
         return
@@ -6119,12 +6216,21 @@ def shadow_diff_cmd(session_id: str, as_json: bool) -> None:
     if not payload["actions"]:
         click.echo("  (no writes captured — agent made no mutating calls)")
         return
+    # Blast-radius summary first — the "at a glance" line.
+    summ = _ghost_diff_summary(payload["actions"])
+    _fg = {"destructive": "red", "create": "green", "modify": "yellow"}
+    parts = [click.style(f"{summ[k]} {k}", fg=_fg[k])
+             for k in ("destructive", "create", "modify") if summ[k]]
+    if parts:
+        click.echo("  blast radius: " + "  ".join(parts))
     click.echo("would-mutate (captured, NOT executed):")
     for a in payload["actions"]:
+        kind = _ghost_action_kind(a.get("action", ""))
         click.echo(
             f"  {a['action_id']}  {a['ts']}  "
-            f"{a['method']:6s} {a['service']}:{a['action']}  "
-            f"target={a['target'] or '-'}"
+            + click.style(f"{a['method']:6s} {a['service']}:{a['action']}",
+                          fg=_fg[kind])
+            + f"  target={a['target'] or '-'}"
         )
 
 
