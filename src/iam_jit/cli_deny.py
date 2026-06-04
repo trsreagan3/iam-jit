@@ -261,6 +261,27 @@ def _do_add(
 ) -> int:
     """Execute `iam-jit deny add` + render output. Returns an exit code."""
 
+    # `action:`-prefixed targets are NOT dynamic-deny targets — dynamic-deny
+    # gates resource ARNs (and namespace:/rds: shapes), not AWS action names.
+    # Previously a `--bouncer` override forced such a rule through and the
+    # bouncer silently dropped it (it didn't look like an ARN) → the operator
+    # got exit 0 + "applied" for a no-op rule. Fail loudly + point at the
+    # right tool. (UC6 UAT finding.)
+    action_targets = [
+        t for t in targets if t.strip().lower().startswith("action:")
+    ]
+    if action_targets:
+        click.echo(
+            "deny add: action-level targets are not supported by dynamic-deny "
+            f"(it gates resource ARNs, not actions): {', '.join(action_targets)}\n"
+            "  To deny by AWS action name, use:\n"
+            "      ibounce rules add <service>:<Action> --effect deny\n"
+            "  Dynamic-deny targets look like an ARN / namespace:<ns> / "
+            "rds:<resource> pattern.",
+            err=True,
+        )
+        return 2
+
     url_overrides, override_errors = _parse_bouncer_url_overrides(
         bouncer_url_overrides,
     )

@@ -215,6 +215,24 @@ def test_deny_add_writes_yaml_and_fans_out(
         assert mode == 0o600, f"file mode is {oct(mode)}; must be 0o600"
 
 
+def test_deny_add_rejects_action_target_even_with_bouncer_override(
+    tmp_yaml_path: Path,
+) -> None:
+    """UC6 regression: an action:-prefixed target is NOT a dynamic-deny target.
+    Previously `--bouncer ibounce` forced it through to a silent no-op; now it
+    fails loudly (exit 2) and points at `ibounce rules add`. No YAML written."""
+    runner = CliRunner()
+    result = runner.invoke(main, [
+        "deny", "add",
+        "--target", "action:sts:GetCallerIdentity",
+        "--bouncer", "ibounce",
+    ])
+    assert result.exit_code == 2, result.output
+    assert "not supported by dynamic-deny" in result.output
+    assert "ibounce rules add" in result.output
+    assert not tmp_yaml_path.exists(), "no rule should be written for a bad target"
+
+
 def test_deny_add_json_shape(
     tmp_yaml_path: Path,
     quiet_fanout: list[str],
