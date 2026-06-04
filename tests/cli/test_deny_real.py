@@ -217,7 +217,6 @@ def test_deny_add_writes_yaml_and_fans_out(
 
 def test_deny_add_rejects_action_target_even_with_bouncer_override(
     tmp_yaml_path: Path,
-    quiet_fanout: list[str],
 ) -> None:
     """UC6 regression: an action:-prefixed target is NOT a dynamic-deny target.
     Previously `--bouncer ibounce` forced it through to a silent no-op; now it
