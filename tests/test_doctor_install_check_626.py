@@ -914,3 +914,71 @@ def test_hint_apple_silicon_homebrew_still_works_after_655_fix(
         f"Apple Silicon Homebrew must still emit pipx hint after #655 fix.\n"
         f"Got: {hint!r}"
     )
+
+
+# ---------------------------------------------------------------------------
+# Dead-proxy-env detection (the 2026-06-03 lockup shape): settings.json wires
+# a loopback bouncer endpoint, but nothing is listening there.
+# ---------------------------------------------------------------------------
+
+
+class TestWiredToDeadBouncer:
+    def _write_settings(self, home: pathlib.Path, env: dict[str, str]) -> None:
+        claude = home / ".claude"
+        claude.mkdir(parents=True, exist_ok=True)
+        (claude / "settings.json").write_text(json.dumps({"env": env}) + "\n")
+
+    def test_dead_proxy_env_flagged_as_error(
+        self, tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        self._write_settings(
+            tmp_path / "fake-home", {"HTTPS_PROXY": "http://127.0.0.1:9"}
+        )
+        monkeypatch.setattr(
+            "iam_jit.cli_uninstall._port_bound", lambda *a, **k: False
+        )
+        section = dic._Section(num=4, total=8, title="Env-var wiring")
+        dic._check_wired_to_dead_bouncer(section)
+        assert len(section.rows) == 1
+        row = section.rows[0]
+        assert row.severity == dic._SEV_ERR
+        assert "DEAD" in row.label
+        assert "bouncers off" in row.fix  # the one-command recovery
+
+    def test_live_proxy_env_no_row(
+        self, tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        self._write_settings(
+            tmp_path / "fake-home", {"AWS_ENDPOINT_URL": "http://127.0.0.1:8767"}
+        )
+        monkeypatch.setattr(
+            "iam_jit.cli_uninstall._port_bound", lambda *a, **k: True
+        )
+        section = dic._Section(num=4, total=8, title="Env-var wiring")
+        dic._check_wired_to_dead_bouncer(section)
+        assert section.rows == []
+
+    def test_operator_remote_endpoint_not_probed(
+        self, tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A real (non-loopback) endpoint is none of our business — never flagged."""
+        self._write_settings(
+            tmp_path / "fake-home",
+            {"AWS_ENDPOINT_URL": "https://s3.us-east-1.amazonaws.com"},
+        )
+        called: list[int] = []
+        monkeypatch.setattr(
+            "iam_jit.cli_uninstall._port_bound",
+            lambda port, *a, **k: called.append(port) or False,
+        )
+        section = dic._Section(num=4, total=8, title="Env-var wiring")
+        dic._check_wired_to_dead_bouncer(section)
+        assert section.rows == []
+        assert called == []  # never probed a non-loopback host
+
+    def test_no_settings_file_is_graceful(self) -> None:
+        # _pinned_home (autouse) points HOME at fake-home with no
+        # .claude/settings.json, so no tmp_path param is needed here.
+        section = dic._Section(num=4, total=8, title="Env-var wiring")
+        dic._check_wired_to_dead_bouncer(section)  # must not raise
+        assert section.rows == []

@@ -73,6 +73,25 @@ def _detect_shell_from_env() -> str:
     return "bash"
 
 
+# Master kill-switch (prevention side). When this env var is truthy, the
+# wiring layer emits NO live bouncer exports — `shellinit`, the settings.json
+# env-block writer, and the MCP env all become inert. This is the "off the
+# leash" lever: one var disables ALL bouncer interception for new sessions.
+# (For an ALREADY-wired, already-running session use `iam-jit bouncers off`,
+# which strips the baked env from settings.json — a static env var can't
+# retroactively un-route a live process.)
+IAM_JIT_DISABLE_BOUNCERS_ENV = "IAM_JIT_DISABLE_BOUNCERS"
+
+_TRUTHY = {"1", "true", "yes", "on"}
+
+
+def bouncers_disabled() -> bool:
+    """True iff the master kill-switch env var is set to a truthy value."""
+    import os as _os
+
+    return _os.environ.get(IAM_JIT_DISABLE_BOUNCERS_ENV, "").strip().lower() in _TRUTHY
+
+
 def _export_line(shell: str, name: str, value: str) -> str:
     """Format a single env-export line for the given shell."""
     tmpl, _ = _SHELL_SYNTAX[shell]
@@ -104,6 +123,23 @@ def render_shellinit(
         # Defensive: caller validated, but keep render_shellinit
         # callable from tests with arbitrary input.
         raise ValueError(f"unknown shell: {shell!r}")
+
+    if bouncers_disabled():
+        # Master kill-switch set: emit an inert comment block so `eval` is a
+        # no-op. Never emit a live export while interception is disabled.
+        return (
+            _comment(
+                shell,
+                f"iam-jit bouncers DISABLED ({IAM_JIT_DISABLE_BOUNCERS_ENV} is "
+                "set) — no interception wired.",
+            )
+            + "\n"
+            + _comment(
+                shell,
+                f"Unset {IAM_JIT_DISABLE_BOUNCERS_ENV} (and re-run) to re-enable.",
+            )
+            + "\n"
+        )
 
     bouncers = snapshot.get("bouncers", {})
 
@@ -232,6 +268,17 @@ def render_shellinit(
         proxy_url = f"http://127.0.0.1:{wire_port}"
         lines.append(_export_line(shell, "HTTP_PROXY", proxy_url))
         lines.append(_export_line(shell, "HTTPS_PROXY", proxy_url))
+        # Carve the harness's own control-plane (e.g. Claude Code -> Anthropic)
+        # + loopback OUT of the proxy. Without this, routing the agent's whole
+        # environment through gbounce also routes the harness's own LLM/API
+        # traffic — so a gbounce outage bricks the agent itself, even after the
+        # upstream API recovers (the export is static). See proxy_exclusions.
+        from .proxy_exclusions import merge_no_proxy
+
+        no_proxy = merge_no_proxy()
+        lines.append(_comment(shell, "keep the harness's own API traffic direct (never via the bouncer):"))
+        lines.append(_export_line(shell, "NO_PROXY", no_proxy))
+        lines.append(_export_line(shell, "no_proxy", no_proxy))
     else:
         lines.append(
             _comment(shell, "(no HTTP_PROXY export — gbounce not running)"),

@@ -1352,6 +1352,12 @@ def _build_bouncer_env_vars() -> dict[str, str]:
     Per [[ibounce-honest-positioning]]: only emit vars for bouncers we can
     actually verify are running. Never emit a URL for a stopped bouncer.
     """
+    # Master kill-switch: when IAM_JIT_DISABLE_BOUNCERS is set, wire nothing.
+    from .cli_shellinit import bouncers_disabled
+
+    if bouncers_disabled():
+        return {}
+
     try:
         from .posture import capture_posture
         snap = capture_posture()
@@ -1372,6 +1378,15 @@ def _build_bouncer_env_vars() -> dict[str, str]:
         proxy = f"http://127.0.0.1:{wire_port}"
         env["HTTP_PROXY"] = proxy
         env["HTTPS_PROXY"] = proxy
+        # Carve the harness's own control-plane (Claude Code -> Anthropic) +
+        # loopback out of the proxy. Without this, a gbounce outage bricks the
+        # agent itself — even after the upstream API recovers — because the
+        # proxy env is static. See proxy_exclusions for the full rationale.
+        from .proxy_exclusions import merge_no_proxy
+
+        no_proxy = merge_no_proxy()
+        env["NO_PROXY"] = no_proxy
+        env["no_proxy"] = no_proxy
 
     return env
 
@@ -1433,6 +1448,17 @@ def _write_claude_code_env_block(
     vars_written: list[str] = []
     changed = False
     for key, val in env_vars.items():
+        # NO_PROXY is additive, not a replacement: union our harness carve-out
+        # with whatever the operator already had so we never drop their hosts.
+        if key in ("NO_PROXY", "no_proxy"):
+            from .proxy_exclusions import merge_no_proxy
+
+            # Read the prior value from EITHER case so an operator who set only
+            # NO_PROXY (upper) still has it preserved in no_proxy (lower) too.
+            prior = current_env.get("NO_PROXY")
+            if not isinstance(prior, str):
+                prior = current_env.get("no_proxy")
+            val = merge_no_proxy(prior if isinstance(prior, str) else None)
         if current_env.get(key) != val:
             current_env[key] = val
             vars_written.append(key)
@@ -1491,6 +1517,292 @@ def _emit_restart_required_message(
         "For immediate in-session wiring (no restart) use: iam-jit attach",
         file=_sys.stderr,
     )
+
+
+# ---------------------------------------------------------------------------
+# Master kill-switch: `iam-jit bouncers off / on / status`
+#
+# One command to disable ALL bouncer interception at once — the operator-facing
+# recovery lever for the lockup class where a wired-but-dead bouncer (or an
+# upstream API outage) bricks the agent. `off` strips the baked env vars from
+# ~/.claude/settings.json (a static env var can't retroactively un-route a live
+# process — editing the source of truth + a restart is the reliable kill).
+# ---------------------------------------------------------------------------
+
+_LOOPBACK_HOSTS = {"127.0.0.1", "localhost", "::1"}
+
+# Env keys iam-jit may wire to point at a local bouncer.
+_BOUNCER_ENV_KEYS = (
+    "AWS_ENDPOINT_URL",
+    "HTTP_PROXY",
+    "HTTPS_PROXY",
+    "KUBECONFIG",
+    "PGHOST",
+    "PGPORT",
+)
+
+
+def _value_is_bouncer_wiring(key: str, value: object) -> bool:
+    """True iff *value* for *key* looks like iam-jit's own loopback bouncer
+    wiring (vs an operator-set endpoint / kubeconfig / DB host we must NOT
+    touch — per [[creates-never-mutates]])."""
+    v = value.strip() if isinstance(value, str) else ""
+    if not v:
+        return False
+    if key in ("AWS_ENDPOINT_URL", "HTTP_PROXY", "HTTPS_PROXY"):
+        return v.startswith(
+            ("http://127.0.0.1:", "http://localhost:", "http://[::1]:")
+        )
+    if key == "PGHOST":
+        return v in _LOOPBACK_HOSTS
+    if key == "KUBECONFIG":
+        return ("kbounce" in v) or (".iam-jit" in v)
+    return False
+
+
+def _strip_bouncer_env_block(settings_path: pathlib.Path) -> dict[str, object]:
+    """Remove only iam-jit's loopback-bouncer env vars from settings.json.
+
+    Operator-set values (a real AWS endpoint, a real kubeconfig, a real
+    PGHOST) are left untouched. For NO_PROXY/no_proxy we strip only the
+    harness hosts WE added (anthropic.com etc.) and keep any operator hosts —
+    dropping the key entirely if nothing operator-set remains, so a clean
+    on->off round-trip leaves no residue.
+
+    Returns {"status": "removed"|"no_change"|"not_found"|"error", ...}.
+    """
+    if not settings_path.exists():
+        return {"status": "not_found", "path": str(settings_path), "vars_removed": []}
+    try:
+        existing = json.loads(settings_path.read_text(encoding="utf-8"))
+        if not isinstance(existing, dict):
+            return {"status": "error", "path": str(settings_path),
+                    "vars_removed": [], "error": "settings.json is not an object"}
+    except Exception as exc:
+        return {"status": "error", "path": str(settings_path),
+                "vars_removed": [], "error": f"could not parse: {exc}"}
+
+    env_block = existing.get("env")
+    if not isinstance(env_block, dict):
+        return {"status": "no_change", "path": str(settings_path), "vars_removed": []}
+
+    removed: list[str] = []
+    # PGPORT only goes when PGHOST does (they're a pair).
+    strip_pgport = _value_is_bouncer_wiring("PGHOST", env_block.get("PGHOST"))
+    for key in _BOUNCER_ENV_KEYS:
+        if key not in env_block:
+            continue
+        if key == "PGPORT":
+            if strip_pgport:
+                del env_block[key]
+                removed.append(key)
+            continue
+        if _value_is_bouncer_wiring(key, env_block[key]):
+            del env_block[key]
+            removed.append(key)
+
+    # Clean up the NO_PROXY carve-out we added: strip OUR harness hosts, keep
+    # any operator hosts, drop the key entirely if nothing operator-set remains.
+    from .proxy_exclusions import strip_harness_no_proxy
+
+    for key in ("NO_PROXY", "no_proxy"):
+        cur = env_block.get(key)
+        if not isinstance(cur, str):
+            continue
+        remaining = strip_harness_no_proxy(cur)
+        if remaining is None:
+            del env_block[key]
+            removed.append(key)
+        elif remaining != cur:
+            env_block[key] = remaining
+            removed.append(key)
+
+    if not removed:
+        return {"status": "no_change", "path": str(settings_path), "vars_removed": []}
+
+    try:
+        tmp = settings_path.with_suffix(".json.iam-jit-tmp")
+        tmp.write_text(json.dumps(existing, indent=2) + "\n", encoding="utf-8")
+        os.replace(tmp, settings_path)
+    except Exception as exc:
+        return {"status": "error", "path": str(settings_path),
+                "vars_removed": [], "error": f"write failed: {exc}"}
+
+    return {"status": "removed", "path": str(settings_path), "vars_removed": removed}
+
+
+@main.group("bouncers")
+def bouncers_group() -> None:
+    """Enable / disable ALL bouncer interception with one command.
+
+    The operator-facing kill-switch + recovery lever. If an agent can't reach
+    its API and bouncers are wired, run `iam-jit bouncers off` then restart the
+    session — that strips the wiring from ~/.claude/settings.json so the agent
+    talks to its API directly again.
+    """
+
+
+@bouncers_group.command("off")
+@click.option("--settings-path", "settings_path_override",
+              type=click.Path(dir_okay=False), default=None,
+              help="Override the settings.json path (default: ~/.claude/settings.json).")
+@click.option("--stop", "stop_procs", is_flag=True, default=False,
+              help="Also stop the running bouncer processes (kill listeners on their ports).")
+def bouncers_off(settings_path_override: str | None, stop_procs: bool) -> None:
+    """Un-wire ALL bouncers: strip iam-jit's loopback env vars from settings.json.
+
+    Only removes values that point at a local bouncer — operator-set endpoints
+    / kubeconfig / DB hosts are left untouched.
+    """
+    settings_p = (pathlib.Path(settings_path_override)
+                  if settings_path_override else _claude_code_settings_path())
+    result = _strip_bouncer_env_block(settings_p)
+    status = result.get("status")
+    if status == "removed":
+        click.secho(
+            f"✓ un-wired bouncer env from {result['path']}: "
+            + ", ".join(result["vars_removed"]),
+            fg="green",
+        )
+        click.echo(
+            "Restart the session (`claude`, or `claude --continue` to resume) "
+            "so it stops routing through the bouncers."
+        )
+    elif status == "no_change":
+        click.echo("No iam-jit bouncer env vars found in settings — nothing to remove.")
+    elif status == "not_found":
+        click.echo(f"No settings file at {result['path']} — nothing wired.")
+    else:
+        click.secho(f"error: {result.get('error')}", fg="red", err=True)
+        sys.exit(1)
+
+    if stop_procs:
+        from .cli_uninstall import _lsof_pids_on_port
+        import signal as _signal
+
+        from .posture import capture_posture
+        try:
+            snap = capture_posture()
+        except Exception:
+            snap = {}
+        stopped: list[str] = []
+        for name, b in (snap.get("bouncers") or {}).items():
+            if not b.get("running"):
+                continue
+            for port_key in ("wire_port", "port"):
+                port = b.get(port_key)
+                if not port:
+                    continue
+                for pid in _lsof_pids_on_port(int(port)):
+                    try:
+                        os.kill(pid, _signal.SIGTERM)
+                        stopped.append(f"{name}(pid {pid})")
+                    except Exception:  # noqa: SD-1 best-effort stop; a kill failure (already-dead / perms) just omits the pid from the reported "stopped" list — never aborts the unwire
+                        pass
+        if stopped:
+            click.secho("✓ stopped: " + ", ".join(stopped), fg="green")
+        else:
+            click.echo("No running bouncer processes detected to stop.")
+
+
+@bouncers_group.command("on")
+@click.option("--settings-path", "settings_path_override",
+              type=click.Path(dir_okay=False), default=None,
+              help="Override the settings.json path (default: ~/.claude/settings.json).")
+def bouncers_on(settings_path_override: str | None) -> None:
+    """Re-wire ALL running bouncers into settings.json (inverse of `off`)."""
+    from .cli_shellinit import IAM_JIT_DISABLE_BOUNCERS_ENV, bouncers_disabled
+
+    if bouncers_disabled():
+        click.secho(
+            f"{IAM_JIT_DISABLE_BOUNCERS_ENV} is set — bouncer wiring is disabled "
+            "(kill-switch ON). Unset it first to wire bouncers; nothing written.",
+            fg="yellow", err=True,
+        )
+        return
+    settings_p = (pathlib.Path(settings_path_override)
+                  if settings_path_override else _claude_code_settings_path())
+    env_vars = _build_bouncer_env_vars()
+    # Warn before clobbering an operator's own (non-loopback) value for a key
+    # we wire — e.g. a real VPC AWS_ENDPOINT_URL. We still proceed (wiring is
+    # the point), but never silently.
+    if env_vars and settings_p.exists():
+        try:
+            _ex = json.loads(settings_p.read_text(encoding="utf-8"))
+            _ex_env = _ex.get("env") if isinstance(_ex, dict) else {}
+        except Exception:
+            _ex_env = {}
+        for _k in env_vars:
+            if _k in ("NO_PROXY", "no_proxy"):
+                continue
+            _old = (_ex_env or {}).get(_k)
+            if isinstance(_old, str) and _old and not _value_is_bouncer_wiring(_k, _old):
+                click.secho(
+                    f"warning: overwriting your existing {_k}={_old!r} with the "
+                    "bouncer value. Your original is NOT auto-restored by "
+                    "`bouncers off` — note it down if you need it.",
+                    fg="yellow", err=True,
+                )
+    result = _write_claude_code_env_block(settings_p, env_vars)
+    status = result.get("status")
+    if status in ("written",):
+        click.secho(
+            f"✓ wired {result['path']}: " + ", ".join(result.get("vars_written") or []),
+            fg="green",
+        )
+        _emit_restart_required_message(
+            settings_path=settings_p, vars_written=result.get("vars_written") or []
+        )
+    elif status == "no_change":
+        click.echo("Bouncer env already wired — no change.")
+    elif status == "no_running_bouncers":
+        click.echo("No running bouncers detected — start ibounce/gbounce first, then re-run.")
+    else:
+        click.secho(f"error: {result.get('error')}", fg="red", err=True)
+        sys.exit(1)
+
+
+@bouncers_group.command("status")
+@click.option("--settings-path", "settings_path_override",
+              type=click.Path(dir_okay=False), default=None)
+def bouncers_status(settings_path_override: str | None) -> None:
+    """Show the kill-switch state: env-var override, wired vars, running procs."""
+    from .cli_shellinit import IAM_JIT_DISABLE_BOUNCERS_ENV, bouncers_disabled
+
+    settings_p = (pathlib.Path(settings_path_override)
+                  if settings_path_override else _claude_code_settings_path())
+    if bouncers_disabled():
+        click.secho(
+            f"kill-switch: ON ({IAM_JIT_DISABLE_BOUNCERS_ENV} set) — new sessions "
+            "wire NOTHING.", fg="yellow",
+        )
+    else:
+        click.echo(f"kill-switch: off ({IAM_JIT_DISABLE_BOUNCERS_ENV} not set)")
+
+    wired: list[str] = []
+    if settings_p.exists():
+        try:
+            data = json.loads(settings_p.read_text(encoding="utf-8"))
+            env_block = data.get("env") if isinstance(data, dict) else None
+            if isinstance(env_block, dict):
+                wired = [k for k in _BOUNCER_ENV_KEYS
+                         if _value_is_bouncer_wiring(k, env_block.get(k))]
+        except Exception:  # noqa: SD-1 status is a best-effort read-only report; an unreadable/parse-failed settings.json just yields "(none)" wired (the operator still sees the kill-switch + running lines)
+            pass
+    click.echo(f"wired in {settings_p}: " + (", ".join(wired) if wired else "(none)"))
+
+    # Running procs (as the docstring promises).
+    running: list[str] = []
+    try:
+        from .posture import capture_posture
+
+        for name, b in (capture_posture().get("bouncers") or {}).items():
+            if b.get("running"):
+                port = b.get("wire_port") or b.get("port") or "?"
+                running.append(f"{name}(:{port})")
+    except Exception:  # noqa: SD-1 best-effort posture probe for the status display; a posture failure just yields "(none)" running, never aborts the command
+        pass
+    click.echo("running: " + (", ".join(running) if running else "(none)"))
 
 
 @mcp_group.command("install-claude-code")

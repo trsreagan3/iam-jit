@@ -127,6 +127,33 @@ def test_load_profiles_rejects_bad_keyword_match_mode(tmp_path, monkeypatch) -> 
         load_profiles()
 
 
+def test_load_profiles_skips_malformed_entry_without_bricking(
+    tmp_path, monkeypatch
+) -> None:
+    """Regression: a corrupt profiles.yaml (the exact shape a bad
+    `recommend --save-as-profile` wrote — profile fields directly under
+    `profiles:`) must NOT crash the proxy. Skip the bad entry, keep defaults."""
+    import warnings
+
+    bad = tmp_path / "profiles.yaml"
+    # profiles: {description: <str>, allow_rules: <list>}  — entries not objects
+    bad.write_text(
+        "profiles:\n"
+        '  description: "captured from session"\n'
+        "  allow_rules:\n"
+        "  - pattern: s3:ListAllMyBuckets\n"
+    )
+    monkeypatch.setenv("IAM_JIT_BOUNCER_PROFILES_FILE", str(bad))
+    with warnings.catch_warnings(record=True) as w:
+        warnings.simplefilter("always")
+        profiles = load_profiles()  # must NOT raise
+    # Built-in defaults still present (proxy stays usable).
+    assert "safe-default" in profiles
+    assert "full-user" in profiles
+    # The malformed entries were skipped with a warning.
+    assert any("malformed" in str(x.message) for x in w)
+
+
 def test_write_default_profiles_idempotent(tmp_path, monkeypatch) -> None:
     target = tmp_path / "profiles.yaml"
     monkeypatch.setenv("IAM_JIT_BOUNCER_PROFILES_FILE", str(target))
@@ -394,6 +421,38 @@ def test_profile_deny_beats_global_allow_via_evaluate_request(tmp_path) -> None:
     assert obs.decision_verdict == "deny"
     assert "profile" in obs.decision_reason
     assert "prod" in obs.decision_reason
+    store.close()
+
+
+def test_safe_default_with_allow_policy_forwards_reads_denies_writes(tmp_path) -> None:
+    """UC3 footgun semantics: safe-default is a deny-FLOOR. With
+    default_policy=allow (which `ibounce run` now auto-selects for an
+    allow-baseline profile in transparent mode), baseline READS are forwarded
+    while WRITES are denied by the profile. (Pre-fix, default_policy=deny
+    silently blocked reads too.)"""
+    store = BouncerStore(db_path=str(tmp_path / "b.db"))
+    safe = load_profiles()["safe-default"]
+    common = dict(
+        host="s3.us-east-1.amazonaws.com", body=None, query=None, store=store,
+        mode=ProxyMode.TRANSPARENT, default_policy=DefaultPolicy.ALLOW,
+        active_profile=safe,
+    )
+    # READ (GetObject) → allowed/forwarded (in the readonly baseline).
+    read_obs = evaluate_request(
+        method="GET", path="/my-bucket/data.csv",
+        headers={"host": "s3.us-east-1.amazonaws.com",
+                 "authorization": _sigv4(service="s3", region="us-east-1")},
+        **common,
+    )
+    assert read_obs.decision_verdict == "allow", read_obs.decision_reason
+    # WRITE (DeleteBucket) → denied by the profile floor regardless of allow.
+    write_obs = evaluate_request(
+        method="DELETE", path="/my-bucket",
+        headers={"host": "s3.us-east-1.amazonaws.com",
+                 "authorization": _sigv4(service="s3", region="us-east-1")},
+        **common,
+    )
+    assert write_obs.decision_verdict == "deny", write_obs.decision_reason
     store.close()
 
 

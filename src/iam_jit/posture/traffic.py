@@ -126,7 +126,7 @@ def summarize_traffic(bouncers: dict[str, Any]) -> dict[str, Any]:
             name="gbounce",
             bouncer=bouncers.get("gbounce", {}),
             traffic_class="HTTP",
-            direct_advice="To intercept: `gbounce run` + `HTTP_PROXY=http://127.0.0.1:8080`.",
+            direct_advice="To intercept: `gbounce run` + `HTTP_PROXY=http://127.0.0.1:8080` (also set `NO_PROXY=anthropic.com,.anthropic.com,localhost` so the harness's own API traffic stays direct).",
         ),
     }
 

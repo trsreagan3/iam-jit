@@ -1529,9 +1529,54 @@ def effective_scope_cmd(owner: str | None, db: str | None, as_json: bool) -> Non
     if db:
         os.environ["IAM_JIT_BOUNCER_DB"] = db
     scope = get_effective_scope(owner=owner)
+
+    # "What's gating you RIGHT NOW" must include the running proxy's live
+    # enforcement state — mode, profile, and (critically) whether a pause is
+    # suspending enforcement. Without this, effective-scope reported identical
+    # output during an active pause as at full enforcement, misleading the
+    # caller about their actual protection level. Read it from the running
+    # proxy's /healthz via the posture detector (authoritative).
+    proxy_state: dict[str, object] = {}
+    try:
+        from .posture.bouncers import detect_ibounce
+
+        _ib = detect_ibounce()
+        if _ib.get("running"):
+            proxy_state = {
+                "running": True,
+                "mode": _ib.get("mode"),
+                "enforcing": _ib.get("enforcing"),
+                "active_profile": _ib.get("active_profile"),
+                "pause": _ib.get("pause"),
+            }
+        else:
+            proxy_state = {"running": False}
+    except Exception:
+        proxy_state = {}
+
     if as_json:
-        click.echo(json.dumps(scope.to_dict(), indent=2))
+        out = scope.to_dict()
+        out["proxy"] = proxy_state
+        click.echo(json.dumps(out, indent=2))
         return
+
+    # Live proxy state first — it's the headline "are you actually protected".
+    if proxy_state.get("running"):
+        _pause = proxy_state.get("pause")
+        _mode = proxy_state.get("mode")
+        if _pause:
+            click.secho(
+                f"proxy mode:        {_mode}  ⚠️  PAUSED (enforcement suspended"
+                f"{' until ' + str(_pause.get('ends_at')) if isinstance(_pause, dict) and _pause.get('ends_at') else ''})",
+                fg="yellow",
+            )
+        else:
+            click.echo(f"proxy mode:        {_mode}"
+                       f"{' (enforcing)' if proxy_state.get('enforcing') else ''}")
+        click.echo(f"active profile:    {proxy_state.get('active_profile')}")
+    elif proxy_state.get("running") is False:
+        click.echo("proxy:             not running")
+
     if not scope.has_active_task:
         click.echo("(no active task — at baseline)")
         click.echo(f"global rules: {scope.global_rule_count}")
@@ -5053,6 +5098,40 @@ def run_cmd(
         click.secho(f"profile error: {e}", fg="red", err=True)
         sys.exit(2)
 
+    # Footgun fix (UC3 UAT): an allow-baseline profile (e.g. safe-default) is a
+    # DENY-FLOOR — it denies anything NOT in its readonly baseline, but it does
+    # not actively GRANT the baseline reads at the rule-engine layer. So with
+    # the default `--default-policy deny`, baseline reads fall through to
+    # default-deny and get blocked — the opposite of the profile's advertised
+    # "reads allowed; writes denied". The profile is designed for
+    # default-policy=allow (writes are still denied by the profile floor). When
+    # such a profile is active in transparent mode and the operator did NOT
+    # explicitly choose a default-policy, default it to allow so the bouncer
+    # behaves as documented, and say so loudly.
+    if (
+        getattr(active_profile, "allow_baseline", None)
+        and mode.lower() == "transparent"
+        and default_policy.lower() == "deny"
+    ):
+        try:
+            from click.core import ParameterSource as _PS
+
+            _dp_src = click.get_current_context().get_parameter_source(
+                "default_policy"
+            )
+            _explicit = _dp_src not in (None, _PS.DEFAULT, _PS.DEFAULT_MAP)
+        except Exception:
+            _explicit = False
+        if not _explicit:
+            default_policy = "allow"
+            click.secho(
+                f"note: profile {active_profile.name!r} has a readonly "
+                "allow-baseline; defaulting --default-policy to 'allow' so "
+                "baseline READS are forwarded while WRITES stay denied by the "
+                "profile floor. Pass --default-policy deny to override.",
+                fg="cyan", err=True,
+            )
+
     # #500 / §A66c — declarative-config fallback for Phase F audit-chain
     # + retention. CLI flag wins (operator explicit intent); otherwise we
     # consult a discovered `.iam-jit.yaml` (or fenced codeblock in
@@ -6188,6 +6267,12 @@ def _build_bouncer_env_vars_for_mcp() -> dict[str, str]:
     Per [[ibounce-honest-positioning]]: only emit vars for bouncers that
     are actually verified running. Never emit a URL for a stopped bouncer.
     """
+    # Master kill-switch: when IAM_JIT_DISABLE_BOUNCERS is set, wire nothing.
+    from .cli_shellinit import bouncers_disabled
+
+    if bouncers_disabled():
+        return {}
+
     try:
         from .posture import capture_posture
         snap = capture_posture()
@@ -6208,6 +6293,14 @@ def _build_bouncer_env_vars_for_mcp() -> dict[str, str]:
         proxy = f"http://127.0.0.1:{wire_port}"
         env["HTTP_PROXY"] = proxy
         env["HTTPS_PROXY"] = proxy
+        # Keep the harness's own control-plane (Claude Code -> Anthropic) +
+        # loopback OUT of the proxy so a gbounce outage can't brick the agent
+        # itself. See proxy_exclusions for the full rationale.
+        from .proxy_exclusions import merge_no_proxy
+
+        no_proxy = merge_no_proxy()
+        env["NO_PROXY"] = no_proxy
+        env["no_proxy"] = no_proxy
 
     return env
 
