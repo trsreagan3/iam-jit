@@ -729,14 +729,23 @@ def test_resolve_active_mode_no_mode_env_returns_default(monkeypatch) -> None:
 def test_posture_reports_mode_source_from_declaration_not_default(
     monkeypatch,
 ) -> None:
-    """End-to-end: when ambient-config-equivalent env is set, the
-    posture snapshot's per-bouncer mode_source reads 'declaration'."""
+    """When ambient-config-equivalent env is set AND no running proxy's
+    /healthz is available, the posture snapshot's per-bouncer mode_source
+    reads 'declaration' (the in-process resolution path).
+
+    NOTE: since the honest-state fix, a RUNNING proxy's /healthz is the
+    authoritative mode source (mode_source='healthz') — so this test mocks
+    _fetch_healthz to None to deterministically exercise the in-process
+    fallback regardless of whether a live ibounce happens to be on :8767.
+    """
+    import iam_jit.posture.bouncers as _pb
     from iam_jit.posture.bouncers import detect_ibounce
 
+    monkeypatch.setattr(_pb, "_fetch_healthz", lambda *a, **k: None)
     monkeypatch.setenv("IAM_JIT_BOUNCER_MODE", "cooperative")
     monkeypatch.setenv("IAM_JIT_MODE_SOURCE", "declaration")
     block = detect_ibounce()
-    # mode + mode_source surfaced from resolve_active_mode.
+    # mode + mode_source surfaced from resolve_active_mode (in-process).
     assert block.get("mode") == "cooperative"
     assert block.get("mode_source") == "declaration"
 
