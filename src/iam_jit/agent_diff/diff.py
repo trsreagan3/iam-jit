@@ -601,20 +601,37 @@ def build_narrowing_policy(
             res_set = set(agg_a[action]["resources"])
         else:
             res_set = set(agg_b[action]["resources"])
-        # Resources may be empty when an event had no named resource.
-        # Surface "*" honestly so the policy is well-formed; flag the
-        # action in notes so the operator knows resource-scope was
-        # observed broadly.
-        if not res_set:
-            res_set = {"*"}
+        # IAM Resource fields accept ONLY ARNs or "*". Observed resources can
+        # include non-ARN values — e.g. a dst hostname ("s3.amazonaws.com")
+        # captured for account-scope actions like s3:ListAllMyBuckets that have
+        # no resource ARN. Emitting those verbatim produces a policy AWS
+        # rejects. Keep only valid values; drop the rest with an honest note;
+        # scope "*" when nothing valid remains.
+        valid_res = {r for r in res_set if r == "*" or r.startswith("arn:")}
+        dropped = res_set - valid_res
+        if not valid_res:
+            valid_res = {"*"}
+            if dropped:
+                notes.append(
+                    f"{action}: observed resource(s) {sorted(dropped)} are not "
+                    "ARNs (account-scope action or host-only capture); resource "
+                    "scoped as '*'"
+                )
+            else:
+                notes.append(
+                    f"{action}: no specific resource observed in either "
+                    "session; resource scoped as '*'"
+                )
+        elif dropped:
             notes.append(
-                f"{action}: no specific resource observed in either "
-                "session; resource scoped as '*'"
+                f"{action}: dropped non-ARN resource value(s) {sorted(dropped)} "
+                "(not valid in an IAM Resource field); kept "
+                f"{sorted(valid_res)}"
             )
         statements.append({
             "Effect": "Allow",
             "Action": [action],
-            "Resource": sorted(res_set),
+            "Resource": sorted(valid_res),
         })
 
     cannot_narrow_reason: str | None = None
