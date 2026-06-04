@@ -162,6 +162,42 @@ def test_audit_verify_detects_bad_manifest_signature(tmp_path, audit_verify_cmd)
     assert "manifest failures" in result.output
 
 
+def test_audit_verify_detects_tail_truncation_via_manifest(tmp_path, audit_verify_cmd):
+    """CRITICAL (UAT): a signed manifest pins the chain head at seq_end. If the
+    JSONL is TAIL-TRUNCATED below that seq, a plain chain walk verifies clean,
+    but the manifest cross-check must catch the missing head → exit 1."""
+    root, _ = audit_verify_cmd
+    log_dir = tmp_path / "logs"
+    log_dir.mkdir()
+    keypair_dir = tmp_path / "keys"
+    state = ChainState(log_dir=str(log_dir))
+    signer = ManifestSigner(
+        log_dir=str(log_dir), interval=100, keypair_dir=str(keypair_dir),
+    )
+    # Three chained events (seq 0,1,2).
+    events = []
+    for i in range(3):
+        e = _ocsf_event(i)
+        stamp_chain_event(e, state)
+        events.append(e)
+    with (log_dir / "audit.jsonl").open("w") as f:
+        for e in events:
+            f.write(json.dumps(e) + "\n")
+    # Manifest pins the head at seq_end=2.
+    signer.emit(state)
+    # Sanity: clean verify passes.
+    pre = CliRunner().invoke(root, ["audit", "verify", "--log-dir", str(log_dir)])
+    assert pre.exit_code == 0, pre.output
+    # TRUNCATE the tail: drop seq 2 (the manifest's seq_end).
+    with (log_dir / "audit.jsonl").open("w") as f:
+        for e in events[:2]:
+            f.write(json.dumps(e) + "\n")
+    result = CliRunner().invoke(root, ["audit", "verify", "--log-dir", str(log_dir)])
+    assert result.exit_code == 1, result.output
+    assert "manifest failures" in result.output
+    assert "TRUNCATION" in result.output.upper()
+
+
 def test_audit_retention_apply_dry_run_default(tmp_path, audit_verify_cmd):
     """`iam-jit audit retention apply` defaults to dry-run; the
     resolved policy is printed but no mutation happens."""

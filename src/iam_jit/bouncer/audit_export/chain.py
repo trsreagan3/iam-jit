@@ -336,6 +336,12 @@ class VerifyResult:
     head_hash: str | None
     inconsistencies: list[ChainInconsistency]
     state_file_missing_at_start: bool
+    # Map of chain seq -> recomputed row hash for every event seen. Lets
+    # callers (the manifest verifier) cross-check a signed manifest's
+    # head_hash against the actual chain row at its seq_end — the check that
+    # actually catches TAIL TRUNCATION (a plain chain walk verifies clean
+    # against a shortened log). Not serialized in to_dict (can be large).
+    seq_to_hash: dict[int, str] = dataclasses.field(default_factory=dict)
 
     @property
     def ok(self) -> bool:
@@ -448,6 +454,7 @@ def verify_jsonl(
     findings: list[ChainInconsistency] = []
     prev_hash: str | None = None
     expected_seq = 0
+    seq_to_hash: dict[int, str] = {}
     for path, line_iter in _iter_event_sources(
         log_dir, since_unix=since_unix,
     ):
@@ -530,12 +537,14 @@ def verify_jsonl(
             prev_hash = row_hash
             head_seq = seq
             head_hash = row_hash
+            seq_to_hash[seq] = row_hash
             expected_seq = seq + 1
     return VerifyResult(
         files_checked=files_checked,
         events_checked=events_checked,
         head_seq=head_seq,
         head_hash=head_hash,
+        seq_to_hash=seq_to_hash,
         inconsistencies=findings,
         state_file_missing_at_start=bool(state_file_missing),
     )
