@@ -1,13 +1,22 @@
 # Bouncer Chaining (#724 / BUILD-3) — Design + Go porting contract
 
-> **Status:** Python (ibounce) side SHIPPED. The shared signal-store
-> wire format, the declarative chain-rule grammar, and the ibounce
-> producer/consumer + tightening hook are live and tested. The Go
-> bouncers (gbounce / kbounce / dbounce) adopt the **same on-disk wire
-> format** via the porting contract below — that is a documented
-> follow-up, not implemented here. This document is the canonical
-> contract those implementations converge against; **do not diverge
-> from the wire shapes below without updating this doc first.**
+> **Status (v1.0 — honest scope):** the shared signal-store wire
+> format, the declarative chain-rule grammar, and the **ibounce
+> CONSUMER (tightening hook)** are live and tested — given an active
+> session-scoped signal in the shared store, ibounce tightens
+> ALLOW→DENY on a matching subsequent request. The signal **PRODUCER**
+> is library-only: `SignalStore.emit_signal()` exists but is **not yet
+> wired to any automatic detection** — ibounce does NOT auto-detect PII
+> in HTTP responses, and **no Go bouncer (gbounce / kbounce / dbounce)
+> writes signals yet**. So the canonical cross-protocol chain ("dbounce
+> sees PII in SQL → ibounce blocks HTTP egress") does **NOT** run
+> end-to-end at v1.0 — today a signal must be written by an external
+> agent/script (or a future Go bouncer per the porting contract below).
+> Do NOT market full cross-protocol chaining as shipped; market the
+> ibounce consumer + the shared signal protocol. The Go bouncers adopt
+> the **same on-disk wire format** via the porting contract below — a
+> documented follow-up, not implemented here. **Do not diverge from the
+> wire shapes below without updating this doc first.**
 
 ## TL;DR
 
