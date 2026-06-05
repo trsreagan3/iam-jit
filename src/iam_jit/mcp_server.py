@@ -97,6 +97,36 @@ from .compliance.mapping import FRAMEWORK_IDS as _COMPLIANCE_FRAMEWORK_IDS
 # use it to validate before invoking the tool.
 TOOLS = [
     {
+        "name": "github_scope_self_for_task",
+        "description": (
+            "Agent self-scoping for GitHub (standalone; no bouncer required). "
+            "Declare the org + the repositories + permissions THIS task needs; a "
+            "low-risk scope mints a short-TTL GitHub App token scoped to exactly "
+            "those repos (GitHub enforces it server-side, so a compromised agent "
+            "cannot touch other repos), while a high-risk / over-broad scope "
+            "returns 'needs_approval' and mints NOTHING. Least-privilege by "
+            "default: never request all repos, or contents/workflows/"
+            "administration:write, unless the task truly needs it."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "required": ["org", "description", "repositories", "permissions"],
+            "properties": {
+                "org": {"type": "string", "description": "GitHub org the iam-jit App is installed on."},
+                "description": {"type": "string", "description": "What the task is (audit-logged)."},
+                "repositories": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": "Repo names this task needs (NOT 'all' — name them).",
+                },
+                "permissions": {
+                    "type": "object",
+                    "description": "{permission: 'read'|'write'}, e.g. {\"pull_requests\": \"write\"}.",
+                },
+            },
+        },
+    },
+    {
         "name": "generate_iam_policy",
         "description": (
             "REMOVED in iam-jit 0.4.0 (tombstone). Calling this tool "
@@ -5954,6 +5984,61 @@ def _bouncer_recommend_mode_for_task_for_mcp(args: dict[str, Any]) -> dict[str, 
     }
 
 
+def _github_scope_self_for_task_for_mcp(args: dict[str, Any]) -> dict[str, Any]:
+    """GitHub agent self-scoping (standalone; no bouncer). Validates input +
+    delegates to github_scope.scope_github_task: a low-risk scope mints a
+    short-TTL token scoped to exactly the named repos; a high-risk scope returns
+    needs_approval and mints NOTHING. See docs/design/github-jit-tokens.md."""
+    from .github_installations import default_registry_path
+    from .github_scope import scope_github_task
+
+    org = args.get("org")
+    if not isinstance(org, str) or not org.strip():
+        return {"error": "org is required (the GitHub org the App is installed on)"}
+    description = args.get("description")
+    if not isinstance(description, str) or not description.strip():
+        return {"error": "description is required and must be a non-empty string"}
+    repositories = args.get("repositories")
+    if (
+        not isinstance(repositories, list)
+        or not repositories
+        or not all(isinstance(r, str) and r.strip() for r in repositories)
+    ):
+        return {"error": "repositories is required and must be a non-empty list of repo names (not 'all')"}
+    permissions = args.get("permissions")
+    if not isinstance(permissions, dict) or not permissions:
+        return {"error": "permissions is required and must be a non-empty {name: level} map"}
+
+    try:
+        d = scope_github_task(
+            installations_path=default_registry_path(),
+            org=org,
+            description=description,
+            repositories=repositories,
+            permissions=permissions,
+        )
+    except Exception as e:  # installation not found / key unreadable / GitHub error
+        return {"error": f"github scope failed: {e}"}
+
+    out: dict[str, Any] = {
+        "decision": d.decision,
+        "risk_score": d.review.risk_score,
+        "band": d.review.band,
+        "risk_factors": list(d.review.risk_factors),
+        "repositories": list(d.repositories),
+        "permissions": d.permissions,
+    }
+    if d.decision == "issued":
+        out["token"] = d.token
+        out["expires_at"] = d.expires_at
+    else:
+        out["next"] = (
+            "scope scored too high to auto-approve; narrow the repos/permissions "
+            "or request human approval"
+        )
+    return out
+
+
 def _scope_self_for_task_for_mcp(args: dict[str, Any]) -> dict[str, Any]:
     """Slice E composer. Validates input + delegates to
     bouncer.self_scoping.scope_self_for_task; returns the unified
@@ -6891,6 +6976,8 @@ def _handle_request(req: dict[str, Any]) -> dict[str, Any] | None:
             result_payload = _bouncer_apply_recommendation_for_mcp(args)
         elif tool_name == "iam_jit_scope_self_for_task":
             result_payload = _scope_self_for_task_for_mcp(args)
+        elif tool_name == "github_scope_self_for_task":
+            result_payload = _github_scope_self_for_task_for_mcp(args)
         elif tool_name == "bouncer_effective_scope":
             result_payload = _effective_scope_for_mcp(args)
         elif tool_name == "check_iam_jit_compatibility":
