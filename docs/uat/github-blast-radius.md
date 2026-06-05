@@ -12,7 +12,24 @@ broad, standing GitHub token and infected every PR of every repo it could
 reach. A scoped, ≤1h, revocable token shrinks that to "one repo, one
 permission, one hour."
 
-## One-time setup (a throwaway test org)
+## Fast path: the manifest helper (two clicks)
+
+`scripts/setup_github_app.py` automates App creation via GitHub's
+App-manifest flow — it opens the browser, you click **Create GitHub App**
+then **Install** (selecting ≥2 repos), and it captures the App id + private
+key + installation id, writes the iam-jit registry, and prints the
+`IAM_JIT_GH_UAT_*` env block ready to paste:
+
+```sh
+python scripts/setup_github_app.py --org trsreagan3
+```
+
+A personal account works as well as an org (Apps can be owned by either).
+Prefer two throwaway repos for the install. Then run the UAT (below). The
+rest of this doc is the manual equivalent if you'd rather click through the
+GitHub UI yourself.
+
+## One-time setup (manual — a throwaway test org)
 
 1. Create a test GitHub org (or use an existing sandbox). Create two empty
    repos in it, e.g. `iam-jit-uat-a` (in-scope) and `iam-jit-uat-b`
