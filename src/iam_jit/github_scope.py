@@ -112,6 +112,49 @@ class GitHubScopeDecision:
     expires_at: str | None = None
 
 
+def mint_github_token(
+    *,
+    installations_path: str,
+    org: str,
+    repositories: list[str],
+    permissions: dict[str, str],
+    http: httpx.Client | None = None,
+    now: Callable[[], int] | None = None,
+):
+    """Resolve the installation and mint a scoped token — NO scoring gate.
+
+    Used by the auto-approve path (after `analyze_github_scope` cleared it) and
+    by the serve lifecycle's human-approval path (after an admin approved a
+    high-risk request). Returns the `GitHubScopedToken`. The caller owns the
+    gating decision; this only mints."""
+    inst = get_installation(installations_path, org)
+    prov = provisioner_for(inst, http=http, now=now)
+    try:
+        return prov.mint_scoped_token(repositories=repositories, permissions=permissions)
+    finally:
+        prov.close()
+
+
+def revoke_github_token(
+    *,
+    installations_path: str,
+    org: str,
+    token: str,
+    http: httpx.Client | None = None,
+    now: Callable[[], int] | None = None,
+) -> None:
+    """Revoke (DELETE) a previously-minted installation token early. Idempotent
+    (an already-expired/invalid token is treated as revoked). Used by the serve
+    lifecycle's revoke endpoint so an admin can kill an active grant before its
+    ≤1h TTL elapses."""
+    inst = get_installation(installations_path, org)
+    prov = provisioner_for(inst, http=http, now=now)
+    try:
+        prov.revoke(token)
+    finally:
+        prov.close()
+
+
 def scope_github_task(
     *,
     installations_path: str,
@@ -136,12 +179,14 @@ def scope_github_task(
             repositories=tuple(repositories),
             permissions=dict(permissions),
         )
-    inst = get_installation(installations_path, org)
-    prov = provisioner_for(inst, http=http, now=now)
-    try:
-        tok = prov.mint_scoped_token(repositories=repositories, permissions=permissions)
-    finally:
-        prov.close()
+    tok = mint_github_token(
+        installations_path=installations_path,
+        org=org,
+        repositories=repositories,
+        permissions=permissions,
+        http=http,
+        now=now,
+    )
     return GitHubScopeDecision(
         decision="issued",
         review=review,

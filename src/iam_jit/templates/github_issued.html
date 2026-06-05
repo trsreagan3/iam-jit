@@ -1,0 +1,36 @@
+{% extends "base.html" %}
+{% from "partials/risk_score.html" import risk_badge %}
+{% block title %}GitHub token — iam-jit{% endblock %}
+{% block content %}
+<section>
+  {% if token %}
+  <h1>Token issued</h1>
+  <p class="muted">
+    Scope {{ risk_badge(req.risk_score) }} {{ req.band }} —
+    {{ req.repositories | join(", ") }} ·
+    {% for k, v in req.permissions.items() %}{{ k }}:{{ v }}{% if not loop.last %}, {% endif %}{% endfor %}.
+    Expires <strong>{{ req.expires_at or "≤1h" }}</strong>.
+  </p>
+  <div class="flash flash-warn">
+    This token is shown <strong>once</strong>. Copy it now — iam-jit does not
+    display it again. It expires automatically; you can also revoke it early
+    from the <a href="/github">GitHub dashboard</a>.
+  </div>
+  <pre class="token-once"><code>{{ token }}</code></pre>
+  {% else %}
+  <h1>Approval required</h1>
+  <p class="muted">
+    This scope {{ risk_badge(req.risk_score) }} <strong>{{ req.band }}</strong>
+    risk — {{ req.risk_factors | join("; ") }}. No token was minted. An admin
+    must approve it from the <a href="/github">queue</a> before a token is
+    issued.
+  </p>
+  <table class="requests">
+    <tr><th>org</th><td>{{ req.org }}</td></tr>
+    <tr><th>repositories</th><td>{{ req.repositories | join(", ") }}</td></tr>
+    <tr><th>permissions</th><td>{% for k, v in req.permissions.items() %}{{ k }}:{{ v }}{% if not loop.last %}, {% endif %}{% endfor %}</td></tr>
+  </table>
+  {% endif %}
+  <p><a href="/github">← back to GitHub dashboard</a></p>
+</section>
+{% endblock %}
