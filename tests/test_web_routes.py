@@ -231,9 +231,15 @@ def test_login_case_insensitive_file_not_found_returns_no_link(
     mixed_case_client: TestClient,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """#675: FileNotFoundError from user_store.list() → no link, no warning logged."""
-    from iam_jit.users_store import FileUserStore
+    """#675: FileNotFoundError from user_store.list() → no link, no warning logged.
 
+    normalize_user_id made FileUserStore.get() case-insensitive, so the
+    mixed-case user now resolves at get() before the #670 list()-based fallback
+    runs. To still exercise that fallback's exception handling we force get()
+    to UserNotFound — the exact state the fallback was built for."""
+    from iam_jit.users_store import FileUserStore, UserNotFound
+
+    monkeypatch.setattr(FileUserStore, "get", lambda *a, **kw: (_ for _ in ()).throw(UserNotFound("x")))
     monkeypatch.setattr(FileUserStore, "list", lambda *a, **kw: (_ for _ in ()).throw(FileNotFoundError("users.yaml")))
     resp = mixed_case_client.post(
         "/login",
@@ -249,8 +255,9 @@ def test_login_case_insensitive_permission_error_returns_no_link(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """#675: PermissionError from user_store.list() → no link, no warning logged."""
-    from iam_jit.users_store import FileUserStore
+    from iam_jit.users_store import FileUserStore, UserNotFound
 
+    monkeypatch.setattr(FileUserStore, "get", lambda *a, **kw: (_ for _ in ()).throw(UserNotFound("x")))
     monkeypatch.setattr(FileUserStore, "list", lambda *a, **kw: (_ for _ in ()).throw(PermissionError("permission denied")))
     resp = mixed_case_client.post(
         "/login",
@@ -269,8 +276,9 @@ def test_login_case_insensitive_unexpected_error_logs_warning(
     """#675: unexpected exception from user_store.list() → no link, WARNING logged."""
     import logging
 
-    from iam_jit.users_store import FileUserStore
+    from iam_jit.users_store import FileUserStore, UserNotFound
 
+    monkeypatch.setattr(FileUserStore, "get", lambda *a, **kw: (_ for _ in ()).throw(UserNotFound("x")))
     monkeypatch.setattr(FileUserStore, "list", lambda *a, **kw: (_ for _ in ()).throw(RuntimeError("disk full")))
     with caplog.at_level(logging.WARNING, logger="iam_jit.login"):
         resp = mixed_case_client.post(
