@@ -35,15 +35,18 @@ router = APIRouter(include_in_schema=False)
 
 def _service(request: Request) -> GitHubRequestService:
     """Return the request service. Tests inject `app.state.github_service`
-    (hermetic httpx + fixed clock); production builds a default talking to the
-    real GitHub API with the configured installation registry."""
+    (hermetic httpx + fixed clock); production lazily builds one default
+    service (cached on app.state so the httpx.Client is reused, not leaked per
+    request) talking to the real GitHub API with the configured registry."""
     svc = getattr(request.app.state, "github_service", None)
     if svc is not None:
         return svc
-    return GitHubRequestService(
+    svc = GitHubRequestService(
         installations_path=default_registry_path(),
         http=httpx.Client(timeout=15.0),
     )
+    request.app.state.github_service = svc
+    return svc
 
 
 def _render(request: Request, name: str, *, status_code: int = 200, **extra: Any) -> Response:
