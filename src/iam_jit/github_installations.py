@@ -70,6 +70,14 @@ def _from_dict(d: dict[str, Any]) -> GitHubInstallation:
     )
 
 
+def default_registry_path() -> str:
+    """$IAM_JIT_GITHUB_INSTALLATIONS, else ~/.iam-jit/github-installations.yaml."""
+    env = os.getenv("IAM_JIT_GITHUB_INSTALLATIONS")
+    if env:
+        return env
+    return str(pathlib.Path.home() / ".iam-jit" / "github-installations.yaml")
+
+
 def load_installations(path: str | os.PathLike[str]) -> list[GitHubInstallation]:
     """Load the installation registry. A missing file is an empty registry
     (not an error) — same shape as the users/accounts stores on first run."""
@@ -83,6 +91,49 @@ def load_installations(path: str | os.PathLike[str]) -> list[GitHubInstallation]
             f"got apiVersion={data.get('apiVersion')!r} kind={data.get('kind')!r}"
         )
     return [_from_dict(e) for e in (data.get("installations") or [])]
+
+
+def _to_dict(inst: GitHubInstallation) -> dict[str, Any]:
+    d: dict[str, Any] = {
+        "org": inst.org,
+        "app_id": inst.app_id,
+        "installation_id": inst.installation_id,
+        "private_key_path": inst.private_key_path,
+        "enabled": inst.enabled,
+    }
+    if inst.alias:
+        d["alias"] = inst.alias
+    if inst.api_base and inst.api_base != "https://api.github.com":
+        d["api_base"] = inst.api_base
+    return d
+
+
+def write_installations(
+    path: str | os.PathLike[str], installations: list[GitHubInstallation]
+) -> None:
+    """Atomically write the registry (temp file + rename, 0600 — it references
+    key paths, so keep it owner-only)."""
+    p = pathlib.Path(path)
+    p.parent.mkdir(parents=True, exist_ok=True)
+    doc = {
+        "apiVersion": _API_VERSION,
+        "kind": _KIND,
+        "installations": [_to_dict(i) for i in installations],
+    }
+    import io
+
+    buf = io.StringIO()
+    _yaml.dump(doc, buf)
+    tmp = p.with_suffix(p.suffix + ".tmp")
+    tmp.write_text(buf.getvalue())
+    os.chmod(tmp, 0o600)
+    os.replace(tmp, p)
+
+
+def add_installation(path: str | os.PathLike[str], inst: GitHubInstallation) -> None:
+    """Upsert an installation by org (replaces an existing same-org entry)."""
+    existing = [i for i in load_installations(path) if i.org.lower() != inst.org.lower()]
+    write_installations(path, [*existing, inst])
 
 
 def get_installation(path: str | os.PathLike[str], org_or_alias: str) -> GitHubInstallation:

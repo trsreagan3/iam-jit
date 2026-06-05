@@ -15,6 +15,65 @@ def main() -> None:
     """iam-jit — author, validate, and (later) provision time-bound IAM roles."""
 
 
+@main.group("github")
+def github() -> None:
+    """Manage GitHub App installations for JIT scoped GitHub tokens (standalone;
+    no bouncer required)."""
+
+
+@github.command("connect")
+@click.option("--org", required=True, help="GitHub org the App is installed on")
+@click.option("--app-id", required=True, help="GitHub App id")
+@click.option("--installation-id", required=True, help="App installation id for the org")
+@click.option(
+    "--private-key-path",
+    required=True,
+    type=click.Path(exists=True, dir_okay=False),
+    help="Path to the App private-key PEM (kept 0600; never inlined into config)",
+)
+@click.option("--alias", default=None, help="Optional alias for the installation")
+@click.option("--registry", default=None, help="Registry path (default ~/.iam-jit/github-installations.yaml)")
+def github_connect(org, app_id, installation_id, private_key_path, alias, registry) -> None:
+    """Register an installed iam-jit GitHub App — the one-time bootstrap (the
+    GitHub analog of the AWS provisioner-role setup)."""
+    from .github_installations import (
+        GitHubInstallation,
+        add_installation,
+        default_registry_path,
+    )
+
+    path = registry or default_registry_path()
+    add_installation(
+        path,
+        GitHubInstallation(
+            org=org,
+            app_id=str(app_id),
+            installation_id=str(installation_id),
+            private_key_path=private_key_path,
+            alias=alias,
+        ),
+    )
+    click.echo(f"connected GitHub org '{org}' (registry: {path})")
+
+
+@github.command("list")
+@click.option("--registry", default=None, help="Registry path")
+def github_list(registry) -> None:
+    """List registered GitHub App installations."""
+    from .github_installations import default_registry_path, load_installations
+
+    path = registry or default_registry_path()
+    insts = load_installations(path)
+    if not insts:
+        click.echo("no GitHub installations registered")
+        return
+    for i in insts:
+        line = f"{i.org}\tapp={i.app_id}\tinstallation={i.installation_id}\tenabled={i.enabled}"
+        if i.alias:
+            line += f"\talias={i.alias}"
+        click.echo(line)
+
+
 # NOTE: the older `iam-jit init` shape was a thin scaffolder that took
 # --description / --account / --write and emitted a role-request YAML.
 # It has been REPLACED by the #489 interactive bootstrap registered

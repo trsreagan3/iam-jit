@@ -113,3 +113,42 @@ def test_provisioner_for_disabled_installation_refuses(tmp_path: pathlib.Path) -
     inst = get_installation(reg, "other-org")  # enabled: false
     with pytest.raises(GitHubInstallationError, match="disabled"):
         provisioner_for(inst)
+
+
+# --- registry write + connect CLI (Phase 1 onboarding) ---
+
+from iam_jit.github_installations import GitHubInstallation, add_installation, write_installations
+
+
+def test_write_and_add_upsert(tmp_path: pathlib.Path) -> None:
+    reg = str(tmp_path / "gh.yaml")
+    write_installations(reg, [GitHubInstallation("acme", "1", "9", "/k/acme.pem")])
+    assert [i.org for i in load_installations(reg)] == ["acme"]
+    # add a second org
+    add_installation(reg, GitHubInstallation("beta", "2", "8", "/k/beta.pem"))
+    assert sorted(i.org for i in load_installations(reg)) == ["acme", "beta"]
+    # upsert acme (same org replaces, not duplicates)
+    add_installation(reg, GitHubInstallation("acme", "1", "9", "/k/acme.pem", alias="prod"))
+    insts = load_installations(reg)
+    assert len(insts) == 2
+    assert get_installation(reg, "prod").org == "acme"
+    # written file is owner-only (0600)
+    assert (pathlib.Path(reg).stat().st_mode & 0o077) == 0
+
+
+def test_github_connect_and_list_cli(tmp_path: pathlib.Path) -> None:
+    from click.testing import CliRunner
+    from iam_jit.cli import main
+
+    keyp = tmp_path / "app.pem"
+    keyp.write_text("-----BEGIN PRIVATE KEY-----\nfake\n-----END PRIVATE KEY-----\n")
+    reg = str(tmp_path / "gh.yaml")
+    r = CliRunner()
+    res = r.invoke(main, ["github", "connect", "--org", "acme", "--app-id", "123",
+                          "--installation-id", "99", "--private-key-path", str(keyp),
+                          "--alias", "prod", "--registry", reg])
+    assert res.exit_code == 0, res.output
+    assert "connected GitHub org 'acme'" in res.output
+    res2 = r.invoke(main, ["github", "list", "--registry", reg])
+    assert res2.exit_code == 0
+    assert "acme" in res2.output and "installation=99" in res2.output
