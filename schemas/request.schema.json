@@ -1,13 +1,13 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://iam-jit.dev/schemas/request.v1alpha1.json",
-  "title": "RoleRequest",
+  "title": "AccessRequest",
   "type": "object",
   "required": ["apiVersion", "kind", "metadata", "spec"],
   "additionalProperties": false,
   "properties": {
     "apiVersion": { "const": "iam-jit.dev/v1alpha1" },
-    "kind": { "const": "RoleRequest" },
+    "kind": { "enum": ["RoleRequest", "GitHubTokenRequest"] },
     "metadata": {
       "type": "object",
       "required": ["requester"],
@@ -80,167 +80,7 @@
     },
     "spec": {
       "type": "object",
-      "required": ["accounts", "duration"],
-      "additionalProperties": false,
-      "anyOf": [
-        { "required": ["task_intent"] },
-        { "required": ["policy"], "properties": { "policy": { "type": "object" } } }
-      ],
-      "allOf": [
-        {
-          "if": { "properties": { "access_type": { "const": "read-write" } }, "required": ["access_type"] },
-          "then": { "required": ["description"] }
-        }
-      ],
-      "properties": {
-        "description": {
-          "anyOf": [
-            { "type": "string", "minLength": 0, "maxLength": 4000 },
-            { "type": "null" }
-          ],
-          "description": "Why the access is needed. Required for read-write requests; optional for read-only (the policy itself is self-describing)."
-        },
-        "access_type": {
-          "type": "string",
-          "enum": ["read-only", "read-write"],
-          "description": "Quick coarse-grained mode. read-only restricts actions to read/list. Default: read-only."
-        },
-        "task_intent": {
-          "type": "object",
-          "required": ["services", "actions"],
-          "additionalProperties": false,
-          "properties": {
-            "services": {
-              "type": "array",
-              "minItems": 1,
-              "items": { "type": "string", "pattern": "^[a-z0-9-]+$" }
-            },
-            "actions": {
-              "type": "array",
-              "minItems": 1,
-              "uniqueItems": true,
-              "items": { "enum": ["read", "list", "write", "tagging", "permissions-management"] }
-            }
-          }
-        },
-        "accounts": {
-          "type": "array",
-          "minItems": 1,
-          "items": {
-            "type": "object",
-            "required": ["account_id"],
-            "additionalProperties": false,
-            "properties": {
-              "account_id": { "type": "string", "pattern": "^[0-9]{12}$" },
-              "alias": { "type": "string" },
-              "regions": {
-                "type": "array",
-                "items": { "type": "string", "pattern": "^[a-z]{2}-[a-z]+-[0-9]+$" }
-              }
-            }
-          }
-        },
-        "duration": {
-          "type": "object",
-          "additionalProperties": false,
-          "oneOf": [
-            { "required": ["not_after"] },
-            { "required": ["duration_hours"] }
-          ],
-          "properties": {
-            "not_after": { "type": "string", "format": "date-time" },
-            "duration_hours": { "type": "integer", "minimum": 1, "maximum": 8760 }
-          }
-        },
-        "resource_constraints": {
-          "type": "array",
-          "items": {
-            "type": "object",
-            "required": ["service", "arn_patterns"],
-            "additionalProperties": false,
-            "properties": {
-              "service": { "type": "string", "pattern": "^[a-z0-9-]+$" },
-              "arn_patterns": {
-                "type": "array",
-                "minItems": 1,
-                "items": { "type": "string", "pattern": "^arn:aws[a-z-]*:" }
-              }
-            }
-          }
-        },
-        "policy": {
-          "oneOf": [
-            { "type": "null" },
-            {
-              "type": "object",
-              "required": ["Version", "Statement"],
-              "properties": {
-                "Version": { "type": "string" },
-                "Statement": {
-                  "type": "array",
-                  "minItems": 1,
-                  "items": {
-                    "type": "object",
-                    "required": ["Effect"],
-                    "properties": {
-                      "Effect": { "enum": ["Allow", "Deny"] },
-                      "Sid": { "type": "string" },
-                      "Action": {},
-                      "NotAction": {},
-                      "Resource": {},
-                      "NotResource": {},
-                      "Principal": {},
-                      "NotPrincipal": {},
-                      "Condition": { "type": "object" }
-                    }
-                  }
-                }
-              }
-            }
-          ]
-        },
-        "provisioning": {
-          "type": "object",
-          "required": ["mode"],
-          "additionalProperties": false,
-          "properties": {
-            "mode": { "enum": ["identity_center", "classic_iam"] },
-            "permission_set_name": { "type": "string" },
-            "role_name": { "type": "string" }
-          }
-        },
-        "assume_by": {
-          "type": "object",
-          "additionalProperties": false,
-          "description": "Who will assume the provisioned role. If omitted, the requester's principal is used. Override this when the role will be assumed from a different identity than the one submitting the request (e.g. a CI runner role).",
-          "properties": {
-            "principal_arn": { "type": "string", "pattern": "^(arn:aws[a-z-]*:|email:|iam:)" },
-            "session_name": { "type": "string", "minLength": 1, "maxLength": 64 }
-          }
-        },
-        "ticket": {
-          "type": "string",
-          "format": "uri",
-          "minLength": 8,
-          "maxLength": 2048,
-          "pattern": "^https?://",
-          "description": "URL of the change/incident/access ticket authorizing this request. Format-validated only; iam-jit does not call out to verify the ticket exists. Whether this is required is set per-deployment via IAM_JIT_REQUIRE_TICKET."
-        },
-        "tags": {
-          "type": "object",
-          "description": "Operator-supplied IAM tags to merge onto the provisioned role. Useful for cost-allocation (cost-center=...), compliance (data-classification=...), and any other tag-based query the operator's account already relies on. iam-jit's own tags (managed-by, request-id, expires-at, etc.) take precedence on key collisions — operators CANNOT mask the audit-trail tags. AWS limits: keys <= 128 chars, values <= 256 chars (iam-jit clamps; doesn't reject). Allowed chars in keys (AWS tag-key rule): letters, digits, spaces, and _ . : / = + - @.",
-          "additionalProperties": {
-            "type": "string",
-            "maxLength": 256
-          },
-          "propertyNames": {
-            "type": "string",
-            "minLength": 1,
-            "maxLength": 128,
-            "pattern": "^[A-Za-z0-9 _.:/=+\\-@]+$"
-          }
-        }
-      }
+      "description": "Kind-specific request body. Constrained by the kind-conditional allOf below: RoleRequest -> AWS spec (accounts/duration/policy/task_intent); GitHubTokenRequest -> spec.github (org/repositories/access/duration_minutes)."
     },
     "status": {
       "type": "object",
@@ -308,10 +148,241 @@
                   }
                 }
               }
+            },
+            "github": {
+              "type": "object",
+              "additionalProperties": false,
+              "description": "Filled in when a GitHubTokenRequest reaches state=active. The minted token is NEVER stored here (it is shown once to the requester); only non-secret grant metadata.",
+              "properties": {
+                "org": { "type": "string" },
+                "repositories": { "type": "array", "items": { "type": "string" } },
+                "access": { "enum": ["read", "write"] },
+                "expires_at": { "type": "string", "format": "date-time" },
+                "token_active": { "type": "boolean" },
+                "installation_id": { "type": "string" }
+              }
             }
           }
         }
       }
     }
-  }
+  },
+  "allOf": [
+    {
+      "if": { "properties": { "kind": { "const": "RoleRequest" } }, "required": ["kind"] },
+      "then": {
+        "properties": {
+          "spec": {
+            "type": "object",
+            "required": ["accounts", "duration"],
+            "additionalProperties": false,
+            "anyOf": [
+              { "required": ["task_intent"] },
+              { "required": ["policy"], "properties": { "policy": { "type": "object" } } }
+            ],
+            "allOf": [
+              {
+                "if": { "properties": { "access_type": { "const": "read-write" } }, "required": ["access_type"] },
+                "then": { "required": ["description"] }
+              }
+            ],
+            "properties": {
+              "description": {
+                "anyOf": [
+                  { "type": "string", "minLength": 0, "maxLength": 4000 },
+                  { "type": "null" }
+                ],
+                "description": "Why the access is needed. Required for read-write requests; optional for read-only (the policy itself is self-describing)."
+              },
+              "access_type": {
+                "type": "string",
+                "enum": ["read-only", "read-write"],
+                "description": "Quick coarse-grained mode. read-only restricts actions to read/list. Default: read-only."
+              },
+              "task_intent": {
+                "type": "object",
+                "required": ["services", "actions"],
+                "additionalProperties": false,
+                "properties": {
+                  "services": {
+                    "type": "array",
+                    "minItems": 1,
+                    "items": { "type": "string", "pattern": "^[a-z0-9-]+$" }
+                  },
+                  "actions": {
+                    "type": "array",
+                    "minItems": 1,
+                    "uniqueItems": true,
+                    "items": { "enum": ["read", "list", "write", "tagging", "permissions-management"] }
+                  }
+                }
+              },
+              "accounts": {
+                "type": "array",
+                "minItems": 1,
+                "items": {
+                  "type": "object",
+                  "required": ["account_id"],
+                  "additionalProperties": false,
+                  "properties": {
+                    "account_id": { "type": "string", "pattern": "^[0-9]{12}$" },
+                    "alias": { "type": "string" },
+                    "regions": {
+                      "type": "array",
+                      "items": { "type": "string", "pattern": "^[a-z]{2}-[a-z]+-[0-9]+$" }
+                    }
+                  }
+                }
+              },
+              "duration": {
+                "type": "object",
+                "additionalProperties": false,
+                "oneOf": [
+                  { "required": ["not_after"] },
+                  { "required": ["duration_hours"] }
+                ],
+                "properties": {
+                  "not_after": { "type": "string", "format": "date-time" },
+                  "duration_hours": { "type": "integer", "minimum": 1, "maximum": 8760 }
+                }
+              },
+              "resource_constraints": {
+                "type": "array",
+                "items": {
+                  "type": "object",
+                  "required": ["service", "arn_patterns"],
+                  "additionalProperties": false,
+                  "properties": {
+                    "service": { "type": "string", "pattern": "^[a-z0-9-]+$" },
+                    "arn_patterns": {
+                      "type": "array",
+                      "minItems": 1,
+                      "items": { "type": "string", "pattern": "^arn:aws[a-z-]*:" }
+                    }
+                  }
+                }
+              },
+              "policy": {
+                "oneOf": [
+                  { "type": "null" },
+                  {
+                    "type": "object",
+                    "required": ["Version", "Statement"],
+                    "properties": {
+                      "Version": { "type": "string" },
+                      "Statement": {
+                        "type": "array",
+                        "minItems": 1,
+                        "items": {
+                          "type": "object",
+                          "required": ["Effect"],
+                          "properties": {
+                            "Effect": { "enum": ["Allow", "Deny"] },
+                            "Sid": { "type": "string" },
+                            "Action": {},
+                            "NotAction": {},
+                            "Resource": {},
+                            "NotResource": {},
+                            "Principal": {},
+                            "NotPrincipal": {},
+                            "Condition": { "type": "object" }
+                          }
+                        }
+                      }
+                    }
+                  }
+                ]
+              },
+              "provisioning": {
+                "type": "object",
+                "required": ["mode"],
+                "additionalProperties": false,
+                "properties": {
+                  "mode": { "enum": ["identity_center", "classic_iam"] },
+                  "permission_set_name": { "type": "string" },
+                  "role_name": { "type": "string" }
+                }
+              },
+              "assume_by": {
+                "type": "object",
+                "additionalProperties": false,
+                "description": "Who will assume the provisioned role. If omitted, the requester's principal is used. Override this when the role will be assumed from a different identity than the one submitting the request (e.g. a CI runner role).",
+                "properties": {
+                  "principal_arn": { "type": "string", "pattern": "^(arn:aws[a-z-]*:|email:|iam:)" },
+                  "session_name": { "type": "string", "minLength": 1, "maxLength": 64 }
+                }
+              },
+              "ticket": {
+                "type": "string",
+                "format": "uri",
+                "minLength": 8,
+                "maxLength": 2048,
+                "pattern": "^https?://",
+                "description": "URL of the change/incident/access ticket authorizing this request. Format-validated only; iam-jit does not call out to verify the ticket exists. Whether this is required is set per-deployment via IAM_JIT_REQUIRE_TICKET."
+              },
+              "tags": {
+                "type": "object",
+                "description": "Operator-supplied IAM tags to merge onto the provisioned role. Useful for cost-allocation (cost-center=...), compliance (data-classification=...), and any other tag-based query the operator's account already relies on. iam-jit's own tags (managed-by, request-id, expires-at, etc.) take precedence on key collisions — operators CANNOT mask the audit-trail tags. AWS limits: keys <= 128 chars, values <= 256 chars (iam-jit clamps; doesn't reject). Allowed chars in keys (AWS tag-key rule): letters, digits, spaces, and _ . : / = + - @.",
+                "additionalProperties": {
+                  "type": "string",
+                  "maxLength": 256
+                },
+                "propertyNames": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 128,
+                  "pattern": "^[A-Za-z0-9 _.:/=+\\-@]+$"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    {
+      "if": { "properties": { "kind": { "const": "GitHubTokenRequest" } }, "required": ["kind"] },
+      "then": {
+        "properties": {
+          "spec": {
+            "type": "object",
+            "required": ["github"],
+            "additionalProperties": false,
+            "properties": {
+              "description": {
+                "anyOf": [
+                  { "type": "string", "minLength": 0, "maxLength": 4000 },
+                  { "type": "null" }
+                ],
+                "description": "Why the GitHub access is needed (free text shown to the approver)."
+              },
+              "ticket": {
+                "type": "string",
+                "format": "uri",
+                "minLength": 8,
+                "maxLength": 2048,
+                "pattern": "^https?://"
+              },
+              "github": {
+                "type": "object",
+                "required": ["org", "repositories", "access"],
+                "additionalProperties": false,
+                "description": "GitHub scoped-token request. access is the coarse read/write level (mapped to a fixed GitHub permission preset at mint time). duration_minutes caps at 60 (GitHub installation tokens are hard-capped at 1h; sub-hour is honored by an early revoke via the expiry sweep).",
+                "properties": {
+                  "org": { "type": "string", "minLength": 1, "maxLength": 100 },
+                  "repositories": {
+                    "type": "array",
+                    "minItems": 1,
+                    "maxItems": 100,
+                    "items": { "type": "string", "minLength": 1, "maxLength": 100 }
+                  },
+                  "access": { "enum": ["read", "write"] },
+                  "duration_minutes": { "type": "integer", "minimum": 1, "maximum": 60 }
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  ]
 }

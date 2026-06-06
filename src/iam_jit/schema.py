@@ -104,3 +104,39 @@ def scaffold_request(
         },
     }
     return dump_request(request)
+
+
+def scaffold_github_request(
+    *,
+    org: str,
+    repositories: list[str],
+    access: str,
+    duration_minutes: int = 60,
+    description: str | None = None,
+    requester_name: str = "FILL_IN",
+    requester_email: str = "FILL_IN@example.com",
+) -> dict[str, Any]:
+    """Build a GitHubTokenRequest dict (validated by request.schema.json's
+    GitHubTokenRequest branch). `access` is the coarse read|write level mapped
+    to a GitHub permission preset at mint time; `duration_minutes` caps at 60
+    (GitHub's 1h ceiling) — sub-hour is enforced via an early revoke."""
+    now = _dt.datetime.now(_dt.UTC)
+    github: dict[str, Any] = {
+        "org": org,
+        "repositories": list(repositories),
+        "access": access,
+    }
+    if duration_minutes:
+        github["duration_minutes"] = int(duration_minutes)
+    spec: dict[str, Any] = {"github": github}
+    if description is not None:
+        spec["description"] = description
+    return {
+        "apiVersion": "iam-jit.dev/v1alpha1",
+        "kind": "GitHubTokenRequest",
+        "metadata": {
+            "requester": {"name": requester_name, "email": requester_email},
+            "created_at": now.strftime("%Y-%m-%dT%H:%M:%SZ"),
+        },
+        "spec": spec,
+    }
