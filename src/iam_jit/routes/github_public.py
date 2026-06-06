@@ -62,9 +62,11 @@ def _build_permissions(raw_form) -> dict[str, str]:
 def _submit_common(
     *, store: RequestStore, org: str, repositories: str, permissions: dict[str, str],
     duration_minutes: int, description: str, requester_name: str, requester_email: str,
+    requester_key: str = "",
 ) -> tuple[dict | None, list[str]]:
-    """Build + validate + persist an anonymous GitHubTokenRequest (always
-    pending — anonymous submits never auto-approve). Returns (req, errors)."""
+    """Build + validate + persist an anonymous GitHubTokenRequest. Stays pending
+    unless the optional auto-approve policy clears it (read-only, or a prior
+    saved approval matched by requester_key). Returns (req, errors)."""
     if not permissions:
         return None, ["pick at least one permission (or add one in the advanced field)."]
     try:
@@ -81,6 +83,8 @@ def _submit_common(
         requester_name=(requester_name or "anonymous").strip() or "anonymous",
         requester_email=(requester_email or "anonymous@requester.local").strip(),
     )
+    if (requester_key or "").strip():
+        req["spec"]["github"]["requester_key"] = requester_key.strip()
     req["metadata"]["id"] = "ghr-" + uuid.uuid4().hex[:12]
     errors = schema.validate_request(req)
     if errors:
@@ -92,12 +96,17 @@ def _submit_common(
     # summarize()/lists. The claim URL is {request_id}.{secret}.
     claim_secret = _secrets.token_urlsafe(24)
     req.setdefault("status", {})["_claim_secret"] = claim_secret
+    # Optional auto-approve (off by default): a read-only request may auto-issue
+    # if an admin enabled it; otherwise it stays pending for human review.
+    from .. import github_autoapprove
+    issued, _reason = github_autoapprove.maybe_auto_issue(req)
     store.put(req["metadata"]["id"], req)
-    try:
-        from .. import approval_notifier
-        approval_notifier.notify_approvers_for_new_request(req)
-    except Exception:  # noqa: BLE001 — notifier failure must not block submit
-        pass
+    if not issued:
+        try:
+            from .. import approval_notifier
+            approval_notifier.notify_approvers_for_new_request(req)
+        except Exception:  # noqa: BLE001 — notifier failure must not block submit
+            pass
     return req, []
 
 
@@ -137,6 +146,11 @@ def _public_view(req: dict) -> dict[str, Any]:
     if out["state"] == "active":
         out["expires_at"] = gh.get("expires_at")
         out["token"] = status.get("_secret_github_token")  # shown while active
+    # A durable requester key issued by a "remember" approval — present it on
+    # future requests to auto-issue without waiting for a human.
+    rk = status.get("_issued_requester_key")
+    if rk:
+        out["requester_key"] = rk
     return out
 
 
@@ -157,6 +171,7 @@ async def github_public_submit(request: Request) -> Response:
         permissions=permissions, duration_minutes=_safe_int(raw.get("duration_minutes"), 60),
         description=raw.get("description") or "",
         requester_name=raw.get("requester_name") or "", requester_email=raw.get("requester_email") or "",
+        requester_key=raw.get("requester_key") or "",
     )
     if errors:
         form = {k: raw.get(k) for k in ("org", "repositories", "duration_minutes",
@@ -197,6 +212,7 @@ async def github_public_api_submit(request: Request) -> Response:
         description=body.get("description") or "",
         requester_name=body.get("requester_name") or "agent",
         requester_email=body.get("requester_email") or "agent@requester.local",
+        requester_key=body.get("requester_key") or "",
     )
     if errors:
         return JSONResponse({"error": "invalid request", "details": errors}, status_code=400)

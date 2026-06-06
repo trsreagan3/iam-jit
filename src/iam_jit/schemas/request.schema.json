@@ -390,7 +390,12 @@
                       "statuses", "vulnerability_alerts", "workflows"
                     ] }
                   },
-                  "duration_minutes": { "type": "integer", "minimum": 1, "maximum": 60 }
+                  "duration_minutes": { "type": "integer", "minimum": 1, "maximum": 60 },
+                  "requester_key": {
+                    "type": "string",
+                    "maxLength": 128,
+                    "description": "Optional durable requester identity (rk_...) issued on a prior 'save approval'. Presenting it lets a future request match a saved approval for auto-issue. Off-by-default; bears no privilege itself."
+                  }
                 }
               }
             }

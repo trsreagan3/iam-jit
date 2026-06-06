@@ -302,6 +302,13 @@
         <input type="checkbox" name="override_blocking_issues" value="1" />
         Override blocking issues (request will likely transition to provisioning_failed)
       </label>
+      {% if is_github %}
+      <label class="muted small">
+        <input type="checkbox" name="remember" value="1" />
+        Remember this requester for these repos — future matching requests
+        auto-issue a fresh ≤1h token (no standing token held)
+      </label>
+      {% endif %}
       <button type="submit" class="primary">Approve</button>
     </form>
     <form method="post" action="/requests/{{ req.metadata.id }}/reject" class="inline">

@@ -1571,18 +1571,11 @@ async def new_github_submit(request: Request) -> Response:
 
     lifecycle.init_status(req, owner=user)
     # No risk scorer for GitHub (the requested GitHub permissions ARE the
-    # functionality). Auto-approve is governed by the optional admin policy
-    # (read-only may auto-approve; any write needs a human / prior history);
-    # absent that, the request lands in the approver queue.
-    from .. import auto_approve_evaluator
-    accounts_store = getattr(request.app.state, "accounts_store", None)
-    try:
-        auto_approve_evaluator.evaluate_and_apply_for_new_request(
-            request=req, user=user, accounts_store=accounts_store,
-            cookie_value=request.cookies.get("iam_jit_session_mfa"),
-        )
-    except Exception:  # noqa: BLE001 — a gate hiccup must never block submission
-        pass
+    # functionality). The optional admin policy governs auto-approve (read-only
+    # may auto-issue; any write needs a human / prior history); absent that, it
+    # lands in the approver queue.
+    from .. import github_autoapprove
+    github_autoapprove.maybe_auto_issue(req)
     request_store.put(req["metadata"]["id"], req)
     if req.get("status", {}).get("state") == "pending":
         from .. import approval_notifier
@@ -1702,6 +1695,7 @@ def _action(action: str, role: str):
         reason: Annotated[str | None, Form()] = None,
         suggestions: Annotated[str | None, Form()] = None,
         override_blocking_issues: Annotated[str | None, Form()] = None,
+        remember: Annotated[str | None, Form()] = None,
     ) -> Response:
         user = _try_current_user(request)
         if user is None:
@@ -1823,6 +1817,24 @@ def _action(action: str, role: str):
                     f"provisioning crashed: {e}",
                     lifecycle=lifecycle,
                 )
+
+            # "Save approval for future" — remember this requester<->repos so
+            # future matching requests auto-issue (a FRESH token each time; no
+            # standing token held). Anonymous requesters get a durable requester
+            # key here, surfaced on the request so they present it next time.
+            _remember = (remember or "").strip().lower() in {"1", "true", "on", "yes"}
+            if (_remember and _is_github
+                    and lifecycle.get_state(req) == "active"):
+                try:
+                    from .. import github_autoapprove
+                    gh = req["spec"]["github"]
+                    rk = gh.get("requester_key") or github_autoapprove.mint_requester_key()
+                    gh["requester_key"] = rk
+                    github_autoapprove.SavedApprovalStore().remember(
+                        rk, gh["repositories"], gh["permissions"])
+                    req.setdefault("status", {})["_issued_requester_key"] = rk
+                except Exception:  # noqa: BLE001 — remember is best-effort
+                    pass
 
         store.put(request_id, req)
         return RedirectResponse(url=f"/requests/{request_id}", status_code=303)

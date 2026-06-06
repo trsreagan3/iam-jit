@@ -28,6 +28,14 @@
     Copy it now. The token is freshly minted and short-lived; treat it like a password.
   </div>
   <pre class="policy mono">{{ view.token }}</pre>
+  {% if view.requester_key %}
+  <div class="flash">
+    An approver saved this access for you. Use this <strong>requester key</strong>
+    on future requests for these repos to skip the wait — it auto-issues a fresh
+    ≤1h token each time (it is an identity, not a token — safe to keep):
+    <pre class="policy mono">{{ view.requester_key }}</pre>
+  </div>
+  {% endif %}
   {% else %}
   <p class="muted">Token no longer available (revoked or expired). Submit a new request if you still need access.</p>
   {% endif %}

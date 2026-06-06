@@ -104,3 +104,45 @@ def test_json_api_submit_and_poll(shared_app, client, as_admin, fake_github) -> 
 
 def test_json_api_rejects_unknown_claim(client) -> None:
     assert client.get("/api/v1/github/requests/ghr-nope.bad").status_code == 404
+
+
+def test_remember_issues_key_then_future_request_auto_issues(
+    shared_app, client, as_admin, fake_github, tmp_path, monkeypatch
+) -> None:
+    """Headline #16 loop: a write request needs approval; the operator approves
+    WITH 'remember' → a requester key is issued; a future write request for the
+    same repo that presents that key auto-issues (fresh token, no human)."""
+    import json
+    pol = tmp_path / "pol.yaml"
+    pol.write_text(json.dumps({"enabled": True}))
+    monkeypatch.setenv("IAM_JIT_GITHUB_AUTOAPPROVE", str(pol))
+    monkeypatch.setenv("IAM_JIT_GITHUB_SAVED_APPROVALS", str(tmp_path / "saved.json"))
+
+    # 1) anonymous WRITE request — stays pending (write, no prior approval)
+    loc = client.post("/github/request", data=_form(perm_contents="write"),
+                      follow_redirects=False).headers["location"]
+    rid = loc.split("/github/claim/", 1)[1].split(".", 1)[0]
+    assert shared_app.state.request_store.get(rid)["status"]["state"] == "pending"
+
+    # 2) operator approves WITH remember → active + a requester key issued
+    as_admin.post(f"/requests/{rid}/approve", data={"remember": "1"})
+    stored = shared_app.state.request_store.get(rid)
+    assert stored["status"]["state"] == "active"
+    rk = stored["status"]["_issued_requester_key"]
+    assert rk.startswith("rk_")
+
+    # 3) a NEW write request for the same repo, presenting the key, auto-issues
+    loc2 = client.post("/github/request",
+                       data=_form(perm_contents="write", requester_key=rk),
+                       follow_redirects=False).headers["location"]
+    rid2 = loc2.split("/github/claim/", 1)[1].split(".", 1)[0]
+    after = shared_app.state.request_store.get(rid2)
+    assert after["status"]["state"] == "active"  # no human needed this time
+    assert after["status"]["_secret_github_token"] == "ghs_anon_secret"
+
+    # 4) but a DIFFERENT repo with the same key still needs approval
+    loc3 = client.post("/github/request",
+                       data=_form(repositories="other", perm_contents="write", requester_key=rk),
+                       follow_redirects=False).headers["location"]
+    rid3 = loc3.split("/github/claim/", 1)[1].split(".", 1)[0]
+    assert shared_app.state.request_store.get(rid3)["status"]["state"] == "pending"

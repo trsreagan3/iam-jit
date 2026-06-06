@@ -62,6 +62,10 @@
     <label for="description">Why do you need this? <span class="muted small">(helps the approver)</span></label>
     <textarea name="description" id="description" rows="2">{{ form.description or '' }}</textarea>
 
+    <label for="requester_key">Requester key <span class="muted small">(optional — if an approver gave you an <code>rk_…</code> for these repos, paste it to skip the wait)</span></label>
+    <input type="text" name="requester_key" id="requester_key"
+           value="{{ form.requester_key or '' }}" placeholder="rk_…" />
+
     <button type="submit">Submit request</button>
   </form>
 

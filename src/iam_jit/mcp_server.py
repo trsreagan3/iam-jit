@@ -132,6 +132,10 @@ TOOLS = [
                     "type": "string",
                     "description": "Optional requester identity for the audit trail (default iam:mcp-agent).",
                 },
+                "requester_key": {
+                    "type": "string",
+                    "description": "Optional rk_... from a prior 'save approval' — present it to auto-issue for repos you've been approved for before.",
+                },
             },
         },
     },
@@ -6039,18 +6043,35 @@ def _github_scope_self_for_task_for_mcp(args: dict[str, Any]) -> dict[str, Any]:
         permissions=perms, duration_minutes=duration, description=description,
         requester_name=owner, requester_email="agent@mcp.local",
     )
+    rk = args.get("requester_key")
+    if isinstance(rk, str) and rk.strip():
+        req["spec"]["github"]["requester_key"] = rk.strip()
     req["metadata"]["id"] = "ghr-" + uuid.uuid4().hex[:12]
     errors = schema.validate_request(req)
     if errors:
         return {"error": "invalid github request", "details": errors}
 
     lifecycle.init_status(req, owner=User(id=owner, roles=("requester",)))
+    # Optional auto-approve (off by default): read-only may auto-issue; a write
+    # needs human approval / a prior saved approval keyed on requester_key.
+    from . import github_autoapprove
+    issued, _reason = github_autoapprove.maybe_auto_issue(req)
     try:
         store = _build_request_store_from_env()
         store.put(req["metadata"]["id"], req)
     except Exception as e:
         return {"error": f"could not submit github request: {e}"}
 
+    if issued:
+        gh = req["status"]["provisioned"]["github"]
+        return {
+            "decision": "issued",
+            "request_id": req["metadata"]["id"],
+            "repositories": gh["repositories"],
+            "permissions": gh["permissions"],
+            "token": req["status"].get("_secret_github_token"),
+            "expires_at": gh.get("expires_at"),
+        }
     return {
         "decision": "needs_approval",
         "request_id": req["metadata"]["id"],
