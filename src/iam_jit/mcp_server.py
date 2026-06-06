@@ -99,14 +99,15 @@ TOOLS = [
     {
         "name": "github_scope_self_for_task",
         "description": (
-            "Agent self-scoping for GitHub (standalone; no bouncer required). "
-            "Declare the org + the repositories + permissions THIS task needs; a "
-            "low-risk scope mints a short-TTL GitHub App token scoped to exactly "
-            "those repos (GitHub enforces it server-side, so a compromised agent "
-            "cannot touch other repos), while a high-risk / over-broad scope "
-            "returns 'needs_approval' and mints NOTHING. Least-privilege by "
+            "Agent self-scoping for GitHub. Declare the org + repositories + "
+            "permissions THIS task needs; iam-jit submits a GitHubTokenRequest "
+            "into the same approval queue as an AWS role request (it does NOT "
+            "mint standalone). An approver reviews it; once issued, retrieve the "
+            "scoped ≤1h GitHub App token (GitHub enforces the scope server-side, "
+            "so a compromised agent cannot touch other repos). Least-privilege by "
             "default: never request all repos, or contents/workflows/"
-            "administration:write, unless the task truly needs it."
+            "administration:write, unless the task truly needs it — reading code "
+            "is the only level that can ever auto-approve."
         ),
         "inputSchema": {
             "type": "object",
@@ -121,7 +122,15 @@ TOOLS = [
                 },
                 "permissions": {
                     "type": "object",
-                    "description": "{permission: 'read'|'write'}, e.g. {\"pull_requests\": \"write\"}.",
+                    "description": "GitHub {category: 'read'|'write'} map, e.g. {\"contents\": \"read\", \"pull_requests\": \"write\"}.",
+                },
+                "duration_minutes": {
+                    "type": "integer",
+                    "description": "Requested lifetime in minutes, 1..60 (GitHub caps at 60). Default 60.",
+                },
+                "owner": {
+                    "type": "string",
+                    "description": "Optional requester identity for the audit trail (default iam:mcp-agent).",
                 },
             },
         },
@@ -5985,12 +5994,15 @@ def _bouncer_recommend_mode_for_task_for_mcp(args: dict[str, Any]) -> dict[str, 
 
 
 def _github_scope_self_for_task_for_mcp(args: dict[str, Any]) -> dict[str, Any]:
-    """GitHub agent self-scoping (standalone; no bouncer). Validates input +
-    delegates to github_scope.scope_github_task: a low-risk scope mints a
-    short-TTL token scoped to exactly the named repos; a high-risk scope returns
-    needs_approval and mints NOTHING. See docs/design/github-jit-tokens.md."""
-    from .github_installations import default_registry_path
-    from .github_scope import scope_github_task
+    """GitHub agent self-scoping. Submits a GitHubTokenRequest into the SAME
+    iam-jit request queue/lifecycle as an AWS role request (parity with
+    iam_jit_scope_self_for_task) — it does NOT mint standalone. An approver
+    reviews it; the agent then retrieves the token once issued (poll the
+    request). See docs/design/github-jit-tokens.md."""
+    from . import lifecycle, schema
+    from .app import _build_request_store_from_env
+    from .github_scope import normalize_permissions
+    from .users_store import User
 
     org = args.get("org")
     if not isinstance(org, str) or not org.strip():
@@ -6008,35 +6020,48 @@ def _github_scope_self_for_task_for_mcp(args: dict[str, Any]) -> dict[str, Any]:
     permissions = args.get("permissions")
     if not isinstance(permissions, dict) or not permissions:
         return {"error": "permissions is required and must be a non-empty {name: level} map"}
+    duration = args.get("duration_minutes", 60)
+    if not isinstance(duration, int) or isinstance(duration, bool) or not (1 <= duration <= 60):
+        return {"error": "duration_minutes must be an integer in 1..60 (GitHub caps at 60)"}
+    owner = args.get("owner") or "iam:mcp-agent"
+    if not isinstance(owner, str):
+        return {"error": "owner must be a string if provided"}
 
     try:
-        d = scope_github_task(
-            installations_path=default_registry_path(),
-            org=org,
-            description=description,
-            repositories=repositories,
-            permissions=permissions,
-        )
-    except Exception as e:  # installation not found / key unreadable / GitHub error
-        return {"error": f"github scope failed: {e}"}
+        perms = normalize_permissions(permissions)
+    except ValueError as e:
+        return {"error": str(e)}
 
-    out: dict[str, Any] = {
-        "decision": d.decision,
-        "risk_score": d.review.risk_score,
-        "band": d.review.band,
-        "risk_factors": list(d.review.risk_factors),
-        "repositories": list(d.repositories),
-        "permissions": d.permissions,
+    import uuid
+
+    req = schema.scaffold_github_request(
+        org=org.strip(), repositories=[r.strip() for r in repositories],
+        permissions=perms, duration_minutes=duration, description=description,
+        requester_name=owner, requester_email="agent@mcp.local",
+    )
+    req["metadata"]["id"] = "ghr-" + uuid.uuid4().hex[:12]
+    errors = schema.validate_request(req)
+    if errors:
+        return {"error": "invalid github request", "details": errors}
+
+    lifecycle.init_status(req, owner=User(id=owner, roles=("requester",)))
+    try:
+        store = _build_request_store_from_env()
+        store.put(req["metadata"]["id"], req)
+    except Exception as e:
+        return {"error": f"could not submit github request: {e}"}
+
+    return {
+        "decision": "needs_approval",
+        "request_id": req["metadata"]["id"],
+        "repositories": req["spec"]["github"]["repositories"],
+        "permissions": perms,
+        "duration_minutes": duration,
+        "next": (
+            "submitted to the iam-jit approval queue. An approver reviews it; "
+            "poll the request for status and retrieve the token once it is issued."
+        ),
     }
-    if d.decision == "issued":
-        out["token"] = d.token
-        out["expires_at"] = d.expires_at
-    else:
-        out["next"] = (
-            "scope scored too high to auto-approve; narrow the repos/permissions "
-            "or request human approval"
-        )
-    return out
 
 
 def _scope_self_for_task_for_mcp(args: dict[str, Any]) -> dict[str, Any]:
