@@ -173,6 +173,55 @@ Risk model over a GitHub permission set, calibrated like the IAM scorer
 
 ---
 
+## Token granularity (and its ceiling)
+
+A mint is `POST /app/installations/{id}/access_tokens` with exactly two knobs —
+`repositories` + `permissions` — and GitHub stamps a fixed expiry. So
+granularity has three axes:
+
+**1. Repository scope — per-repo.** Name the exact repos
+(`"repositories": ["api","web"]`). The token touches *only* those; a repo
+outside the list returns **404** (not 403 — the token can't even confirm it
+exists). The list must be a subset of what the App is installed on (you can't
+scope *up*). iam-jit **refuses an empty list**, because GitHub reads "no
+repositories" as *all repos in the installation* — the exact footgun this
+feature kills. Floor: **one repo**.
+
+**2. Permission scope — per-category, read/write/admin.** Each of ~40
+categories is set independently and the token gets only what's listed
+(`metadata:read` always implied). Examples: `contents` (files/branches/commits),
+`pull_requests` (open/edit PRs, not direct code merge), `actions`/`workflows`
+(CI), `secrets`, `administration` (repo settings), `issues`, `checks`,
+`statuses`, `deployments`, `packages`, `environments`. Must be a subset of the
+App's granted **ceiling** — so an App whose max is `contents:write` can mint a
+`contents:read` token that is *provably* unable to write.
+
+**3. Time + revocation.** TTL is **fixed at ≤1h by GitHub** (not extendable —
+mint a fresh one to continue). `DELETE /installation/token` revokes instantly,
+independent of the TTL.
+
+**The hard ceiling — what you CANNOT make finer (matters for honest
+threat-modeling):**
+
+- **No path/file scoping.** `contents:write` on `api` = write **any file**, on
+  **any branch**. No "only `src/`". (Branch *protection rules* can still block
+  pushes to `main`, but that's a repo setting, not the token.)
+- **No branch scoping** in the token.
+- **No per-endpoint scoping** below a category — `pull_requests:write` is all
+  PR-write endpoints, not one.
+- **No sub-resource scoping** — it's the whole `secrets` category for the
+  in-scope repos, not "this one secret."
+- Repo scope is **per-repo, not per-resource-within-repo**.
+
+So the realistic minimum blast radius is **one repository × one permission
+category × ≤1 hour, instantly revocable** — dramatically tighter than a broad
+standing token (every repo, full access, forever), but within a single repo a
+`write` grant is repo-wide. That ceiling is exactly *why* the scorer leans on
+fewest-repos + read-by-default + scoring write/admin high + short-TTL/revoke,
+rather than pretending a permission can be sub-divided.
+
+---
+
 ## A differentiator worth designing for: "the bouncer holds the token"
 
 Optional but compelling: the agent never *sees* the token. iam-jit mints it and

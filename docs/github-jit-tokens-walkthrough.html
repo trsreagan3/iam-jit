@@ -1,0 +1,341 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<style>
+  @page {
+    size: A4;
+    margin: 16mm 15mm 18mm 15mm;
+    @bottom-center {
+      content: "iam-jit for GitHub — JIT scoped tokens";
+      font: 8pt -apple-system, "Segoe UI", sans-serif; color: #9aa3b2;
+    }
+    @bottom-right {
+      content: "page " counter(page) " / " counter(pages);
+      font: 8pt -apple-system, sans-serif; color: #9aa3b2;
+    }
+  }
+  * { box-sizing: border-box; }
+  body {
+    font: 10.5pt/1.5 -apple-system, "Segoe UI", Roboto, sans-serif;
+    color: #1c2230; margin: 0;
+  }
+  h1 { font-size: 25pt; margin: 0 0 6pt; letter-spacing: -.5pt; }
+  h2 { font-size: 15pt; margin: 0 0 10pt; color: #0b1220;
+       border-bottom: 2.5pt solid #2563eb; padding-bottom: 5pt; }
+  h3 { font-size: 11.5pt; margin: 16pt 0 6pt; color: #2563eb; }
+  p { margin: 0 0 8pt; }
+  .muted { color: #5b6473; }
+  .lede { color: #475067; font-size: 11pt; }
+  .section { page-break-before: always; }
+  code, .mono { font-family: "SF Mono", "JetBrains Mono", Menlo, Consolas, monospace; }
+
+  /* cover */
+  .cover { padding-top: 38mm; }
+  .badge { display: inline-block; background: #eef2ff; color: #3730a3;
+           border: 1pt solid #c7d2fe; border-radius: 99pt;
+           padding: 3pt 11pt; font-size: 9pt; font-weight: 600; margin-bottom: 14pt; }
+  .cover .lede { font-size: 13pt; max-width: 150mm; }
+  .cover .why { margin-top: 18pt; background: #fff7ed; border: 1pt solid #fed7aa;
+                border-radius: 8pt; padding: 12pt 14pt; max-width: 165mm; }
+  .toc { margin-top: 20pt; font-size: 10.5pt; color: #475067; }
+  .toc b { color: #0b1220; }
+
+  /* step layout */
+  .step { display: flex; gap: 11pt; margin: 0 0 14pt; page-break-inside: avoid; }
+  .num { flex: 0 0 22pt; height: 22pt; border-radius: 99pt; background: #2563eb;
+         color: #fff; font-weight: 700; font-size: 11pt; text-align: center;
+         line-height: 22pt; }
+  .step-body { flex: 1; }
+  .step-body h4 { margin: 1pt 0 4pt; font-size: 11pt; }
+
+  /* mock browser */
+  .browser { border: 1pt solid #d3d9e4; border-radius: 8pt; overflow: hidden;
+             box-shadow: 0 1pt 3pt rgba(0,0,0,.06); margin: 6pt 0 4pt; }
+  .chrome { background: #eef1f6; padding: 6pt 9pt; display: flex; align-items: center;
+            gap: 6pt; border-bottom: 1pt solid #d3d9e4; }
+  .dot { width: 8pt; height: 8pt; border-radius: 99pt; display: inline-block; }
+  .dot.r { background: #ff5f57; } .dot.y { background: #febc2e; } .dot.g { background: #28c840; }
+  .url { margin-left: 8pt; background: #fff; border: 1pt solid #dde3ec; border-radius: 5pt;
+         padding: 2pt 9pt; font-size: 8.5pt; color: #5b6473; flex: 1; }
+  .screen { padding: 11pt 13pt; background: #fff; }
+  .screen .title { font-size: 12pt; font-weight: 700; margin-bottom: 2pt; }
+  .screen .sub { color: #6b7385; font-size: 9pt; margin-bottom: 9pt; }
+
+  /* form field */
+  .field { margin: 6pt 0; }
+  .field label { display: block; font-size: 8.5pt; color: #6b7385; margin-bottom: 2pt; }
+  .field .input { border: 1pt solid #cfd6e2; border-radius: 5pt; padding: 5pt 8pt;
+                  font-size: 9.5pt; background: #fbfcfe; }
+  .btn { display: inline-block; background: #2563eb; color: #fff; border-radius: 6pt;
+         padding: 5pt 13pt; font-size: 9.5pt; font-weight: 600; }
+  .btn.gray { background: #eef1f6; color: #2b3344; border: 1pt solid #d3d9e4; }
+  .btn.danger { background: #fef2f2; color: #b91c1c; border: 1pt solid #fecaca; }
+
+  table.grid { width: 100%; border-collapse: collapse; font-size: 9pt; margin: 4pt 0; }
+  table.grid th { text-align: left; background: #f1f5fb; color: #334; padding: 5pt 8pt;
+                  border-bottom: 1.5pt solid #dde3ec; font-size: 8pt; text-transform: uppercase;
+                  letter-spacing: .3pt; }
+  table.grid td { padding: 5pt 8pt; border-bottom: 1pt solid #eef1f6; vertical-align: top; }
+
+  .risk { display: inline-block; border-radius: 99pt; padding: 1pt 8pt; font-size: 8pt;
+          font-weight: 700; }
+  .risk.low { background: #dcfce7; color: #166534; }
+  .risk.high { background: #fee2e2; color: #991b1b; }
+
+  /* terminal / json */
+  .term { background: #0f1729; color: #d6e0f5; border-radius: 8pt; padding: 11pt 13pt;
+          font-family: "SF Mono", Menlo, monospace; font-size: 8.7pt; line-height: 1.55;
+          margin: 6pt 0; white-space: pre-wrap; page-break-inside: avoid; }
+  .term .c { color: #7d8aa8; }      /* comment */
+  .term .k { color: #7ee787; }      /* key / ok */
+  .term .s { color: #ffa657; }      /* string */
+  .term .p { color: #79c0ff; }      /* prompt / call */
+  .term .x { color: #ff7b72; }      /* deny */
+
+  .note { background: #f6f8fc; border-left: 3pt solid #2563eb; border-radius: 0 6pt 6pt 0;
+          padding: 9pt 12pt; font-size: 9.5pt; color: #374151; margin: 8pt 0; }
+  .once { background: #fffbeb; border: 1pt solid #fde68a; border-radius: 6pt; padding: 9pt 12pt;
+          font-size: 9.5pt; color: #92400e; margin: 6pt 0; }
+  .tok { font-family: "SF Mono", Menlo, monospace; font-size: 9pt; background: #111827; color: #fde68a;
+         border-radius: 6pt; padding: 7pt 10pt; margin: 5pt 0; word-break: break-all; }
+
+  .pillrow { margin: 3pt 0 0; }
+  .pill { display: inline-block; background: #eef2ff; color: #3730a3; border-radius: 5pt;
+          padding: 1pt 7pt; font-size: 8.5pt; margin: 0 3pt 3pt 0; }
+  .ok { color: #166534; font-weight: 700; }
+  .no { color: #991b1b; font-weight: 700; }
+</style>
+</head>
+<body>
+
+<!-- COVER -->
+<div class="cover">
+  <span class="badge">iam-jit · GitHub JIT tokens</span>
+  <h1>Scoped, short-lived GitHub tokens</h1>
+  <p class="lede">What it looks like to issue and use a least-privilege GitHub
+  token — once as a <b>person</b> clicking through the web UI, and once as an
+  <b>agent</b> scoping itself over MCP with no human in the loop.</p>
+
+  <div class="why">
+    <b>Why this exists.</b> A malicious skill held a broad, standing GitHub
+    token and infected every PR of every repo it could reach. iam-jit replaces
+    that with a token scoped to the <b>fewest repos × one permission × ≤1 hour</b>,
+    instantly revocable — so an infected machine or agent has a far smaller blast
+    radius.
+  </div>
+
+  <div class="toc">
+    <p><b>Part 1</b> — For a person: the <code>/github</code> web UI &nbsp;·&nbsp;
+       <b>Part 2</b> — For an agent: the <code>github_scope_self_for_task</code> MCP tool &nbsp;·&nbsp;
+       <b>Part 3</b> — What the token can &amp; can't do (granularity)</p>
+  </div>
+</div>
+
+<!-- PART 1 — USER -->
+<div class="section">
+  <h2>Part 1 — For a person (the web UI)</h2>
+  <p class="lede">A developer opens iam-jit <code>serve</code> in the browser and
+  asks for exactly the access a task needs. Low-risk scopes issue instantly;
+  broad or high-impact ones wait for an admin.</p>
+
+  <div class="step">
+    <div class="num">1</div>
+    <div class="step-body">
+      <h4>One-time: an admin connects the GitHub org</h4>
+      <p class="muted">A GitHub App (the issuer) is registered once. After that,
+      iam-jit can mint scoped tokens for any connected org.</p>
+      <div class="term"><span class="p">$</span> iam-jit github connect \
+    --org acme \
+    --app-id 123456 \
+    --installation-id 98765432 \
+    --private-key-path ~/.iam-jit/acme.private-key.pem
+<span class="k">✓ connected GitHub org 'acme' (installation 98765432)</span></div>
+    </div>
+  </div>
+
+  <div class="step">
+    <div class="num">2</div>
+    <div class="step-body">
+      <h4>Request a scoped token</h4>
+      <div class="browser">
+        <div class="chrome"><span class="dot r"></span><span class="dot y"></span><span class="dot g"></span>
+          <span class="url">https://localhost:8000/github</span></div>
+        <div class="screen">
+          <div class="title">GitHub scoped tokens</div>
+          <div class="sub">Mint short-lived (≤1h), repo- and permission-scoped tokens so an infected agent has a smaller blast radius.</div>
+          <div class="field"><label>org</label><div class="input mono">acme</div></div>
+          <div class="field"><label>repositories (names only)</label><div class="input mono">web</div></div>
+          <div class="field"><label>permissions (name:level)</label><div class="input mono">pull_requests:write</div></div>
+          <div class="field"><label>description</label><div class="input">open a PR fixing the broken build on web</div></div>
+          <div style="margin-top:8pt"><span class="btn">score &amp; request</span></div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <div class="step">
+    <div class="num">3</div>
+    <div class="step-body">
+      <h4>Low risk → issued instantly, shown once</h4>
+      <p class="muted">One repo + <code>pull_requests:write</code> scores
+      <span class="risk low">low</span> → auto-approved. The token is displayed a
+      single time.</p>
+      <div class="browser">
+        <div class="chrome"><span class="dot r"></span><span class="dot y"></span><span class="dot g"></span>
+          <span class="url">https://localhost:8000/github/requests</span></div>
+        <div class="screen">
+          <div class="title">Token issued</div>
+          <div class="sub">Scope <span class="risk low">low</span> — web · pull_requests:write. Expires 2026-06-06T15:04Z.</div>
+          <div class="once"><b>Shown once.</b> Copy it now — iam-jit does not display it again. It expires automatically; you can also revoke it early from the dashboard.</div>
+          <div class="tok">ghs_9Hb2…Qx7r&nbsp;&nbsp;(installation access token)</div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <div class="step">
+    <div class="num">4</div>
+    <div class="step-body">
+      <h4>High risk → queued for an admin (mints nothing)</h4>
+      <p class="muted">A request for <code>contents:write</code> across 30 repos
+      scores <span class="risk high">high</span>. <b>No token is minted</b> — it
+      waits in the approver queue. The high-risk request never reaches GitHub
+      until a human says yes.</p>
+      <div class="browser">
+        <div class="chrome"><span class="dot r"></span><span class="dot y"></span><span class="dot g"></span>
+          <span class="url">https://localhost:8000/github</span></div>
+        <div class="screen">
+          <div class="title">Awaiting approval</div>
+          <table class="grid">
+            <tr><th>requester</th><th>repos</th><th>permissions</th><th>risk</th><th>action</th></tr>
+            <tr><td>dev@acme</td><td>30 repos</td><td class="mono">contents:write</td>
+                <td><span class="risk high">9 high</span></td>
+                <td><span class="btn">approve &amp; mint</span> <span class="btn danger">deny</span></td></tr>
+          </table>
+          <p class="muted" style="font-size:8.5pt;margin-top:6pt">why: contents:write (high-impact); 30 repos (very broad)</p>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <div class="step">
+    <div class="num">5</div>
+    <div class="step-body">
+      <h4>Active grants → revoke early</h4>
+      <p class="muted">Every issued token is listed with its expiry. An admin can
+      kill one instantly (<code>DELETE /installation/token</code>) without waiting
+      for the TTL.</p>
+      <div class="browser">
+        <div class="chrome"><span class="dot r"></span><span class="dot y"></span><span class="dot g"></span>
+          <span class="url">https://localhost:8000/github</span></div>
+        <div class="screen">
+          <div class="title">Active grants</div>
+          <table class="grid">
+            <tr><th>requester</th><th>repos</th><th>permissions</th><th>expires</th><th>action</th></tr>
+            <tr><td>dev@acme</td><td>web</td><td class="mono">pull_requests:write</td>
+                <td class="mono">15:04Z</td><td><span class="btn danger">revoke now</span></td></tr>
+          </table>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- PART 2 — AGENT -->
+<div class="section">
+  <h2>Part 2 — For an agent (MCP, no human)</h2>
+  <p class="lede">An AI agent scopes <i>itself</i>: it calls one MCP tool with the
+  repos + permissions its task needs. Low-risk → it gets a token back and works.
+  High-risk → it gets <code>needs_approval</code> and <b>no token</b> — the
+  blast-radius cap holds even for a compromised agent.</p>
+
+  <h3>The agent asks for exactly what the task needs</h3>
+  <div class="term"><span class="c">// MCP tool call</span>
+<span class="p">github_scope_self_for_task</span>({
+  <span class="k">org</span>: <span class="s">"acme"</span>,
+  <span class="k">description</span>: <span class="s">"open a PR fixing the broken build on web"</span>,
+  <span class="k">repositories</span>: [<span class="s">"web"</span>],
+  <span class="k">permissions</span>: { <span class="k">pull_requests</span>: <span class="s">"write"</span> }
+})</div>
+
+  <h3>Low risk → token returned, agent proceeds</h3>
+  <div class="term"><span class="c">// response</span>
+{
+  <span class="k">decision</span>: <span class="s">"issued"</span>,
+  <span class="k">risk_score</span>: 3, <span class="k">band</span>: <span class="s">"low"</span>,
+  <span class="k">repositories</span>: [<span class="s">"web"</span>],
+  <span class="k">permissions</span>: { <span class="k">pull_requests</span>: <span class="s">"write"</span> },
+  <span class="k">token</span>: <span class="s">"ghs_9Hb2…Qx7r"</span>,
+  <span class="k">expires_at</span>: <span class="s">"2026-06-06T15:04:00Z"</span>
+}</div>
+
+  <h3>High risk → no token; the agent is told to get a human</h3>
+  <div class="term"><span class="p">github_scope_self_for_task</span>({ org: <span class="s">"acme"</span>,
+  repositories: [<span class="s">"…30 repos…"</span>], permissions: { contents: <span class="s">"write"</span> } })
+
+<span class="c">// response — NOTHING was minted</span>
+{
+  <span class="k">decision</span>: <span class="x">"needs_approval"</span>,
+  <span class="k">risk_score</span>: 9, <span class="k">band</span>: <span class="x">"high"</span>,
+  <span class="k">risk_factors</span>: [<span class="s">"contents:write (high-impact)"</span>, <span class="s">"30 repos (very broad)"</span>]
+  <span class="c">// no token field — a compromised agent cannot self-issue broad access</span>
+}</div>
+
+  <h3>The agent uses the token — and GitHub enforces the scope</h3>
+  <p class="muted">The same blast-radius matrix the UAT proves. Every ❌ is
+  GitHub rejecting server-side, not iam-jit asking nicely.</p>
+  <div class="term"><span class="c">// token scoped to: web / pull_requests:write</span>
+<span class="p">→</span> open a PR on <span class="k">web</span> ............................ <span class="k">200 OK</span>  <span class="ok">✅ in scope</span>
+<span class="p">→</span> push <span class="k">contents</span> to web (ungranted perm) ...... <span class="x">403</span>     <span class="no">❌ denied</span>
+<span class="p">→</span> read repo <span class="k">api</span> (out of scope) ............... <span class="x">404</span>     <span class="no">❌ invisible</span>
+<span class="p">→</span> any call after <span class="k">≤1h TTL</span> ................... <span class="x">401</span>     <span class="no">❌ expired</span>
+<span class="p">→</span> any call after <span class="k">revoke</span> .................... <span class="x">401</span>     <span class="no">❌ killed</span></div>
+
+  <div class="note">A fully compromised agent can only do what the token allows —
+  one repo, one permission, for under an hour, revocable at any moment. The token
+  it never managed to over-scope is the whole point.</div>
+</div>
+
+<!-- PART 3 — GRANULARITY -->
+<div class="section">
+  <h2>Part 3 — What the token can &amp; can't do</h2>
+  <p class="lede">A mint has exactly three knobs. Knowing the ceiling matters for
+  honest threat-modeling.</p>
+
+  <h3>Three axes of granularity</h3>
+  <table class="grid">
+    <tr><th>Axis</th><th>How fine</th><th>Floor</th></tr>
+    <tr><td><b>Repositories</b></td><td>Per-repo, by name. Out-of-scope repo → 404 (can't even confirm it exists). Empty list is refused (GitHub reads it as <i>all</i> repos).</td><td>One repo</td></tr>
+    <tr><td><b>Permissions</b></td><td>~40 categories, each <span class="mono">read</span>/<span class="mono">write</span>/<span class="mono">admin</span>, independent. Must be a subset of the App's ceiling.</td><td>One category, read</td></tr>
+    <tr><td><b>Time</b></td><td>Fixed ≤1h TTL (GitHub-set). Instant <span class="mono">DELETE /installation/token</span> revoke.</td><td>Seconds (via revoke)</td></tr>
+  </table>
+
+  <h3>Common permission categories</h3>
+  <div class="pillrow">
+    <span class="pill">contents</span><span class="pill">pull_requests</span><span class="pill">issues</span>
+    <span class="pill">actions</span><span class="pill">workflows</span><span class="pill">secrets</span>
+    <span class="pill">administration</span><span class="pill">checks</span><span class="pill">statuses</span>
+    <span class="pill">deployments</span><span class="pill">packages</span><span class="pill">environments</span>
+    <span class="pill">metadata (always read)</span>
+  </div>
+
+  <h3>The hard ceiling — what you CANNOT make finer</h3>
+  <table class="grid">
+    <tr><th>You might want…</th><th>Reality</th></tr>
+    <tr><td>"write only to <span class="mono">src/</span>"</td><td><span class="no">No path/file scoping.</span> <span class="mono">contents:write</span> = any file, any branch in the in-scope repos.</td></tr>
+    <tr><td>"only push to <span class="mono">feature/*</span>"</td><td><span class="no">No branch scoping</span> in the token (branch <i>protection rules</i> are a separate repo setting).</td></tr>
+    <tr><td>"only the <i>create-PR</i> endpoint"</td><td><span class="no">No per-endpoint scoping</span> — <span class="mono">pull_requests:write</span> is all PR-write endpoints.</td></tr>
+    <tr><td>"just this one secret"</td><td><span class="no">No sub-resource scoping</span> — it's the whole <span class="mono">secrets</span> category for the in-scope repos.</td></tr>
+  </table>
+
+  <div class="note"><b>Net:</b> the realistic minimum blast radius is
+  <b>one repository × one permission category × ≤1 hour, instantly
+  revocable</b>. Within a single repo a <span class="mono">write</span> grant is
+  repo-wide — which is exactly why iam-jit's scorer leans on fewest-repos +
+  read-by-default + scoring write/admin high + short TTL, rather than pretending
+  a permission can be sub-divided.</div>
+</div>
+
+</body>
+</html>
