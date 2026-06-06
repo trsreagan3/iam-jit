@@ -29,9 +29,12 @@ def fake_github(monkeypatch):
     return captured
 
 
-def _submit(client, **over):
-    data = {"org": "acme", "repositories": "web api", "access": "write",
-            "duration_minutes": "30", "description": "ship a fix"}
+def _submit(client, perms=None, **over):
+    perms = perms or {"contents": "write", "pull_requests": "write"}
+    data = {"org": "acme", "repositories": "web api", "duration_minutes": "30",
+            "description": "ship a fix"}
+    for cat, lvl in perms.items():
+        data[f"perm_{cat}"] = lvl
     data.update(over)
     return client.post("/requests/new/github", data=data, follow_redirects=False)
 
@@ -45,10 +48,11 @@ def test_submit_lands_in_shared_queue_as_pending(shared_app, as_dev, as_admin, f
     assert stored["kind"] == "GitHubTokenRequest"
     assert stored["status"]["state"] == "pending"
     assert stored["spec"]["github"]["repositories"] == ["web", "api"]
+    assert stored["spec"]["github"]["permissions"] == {"contents": "write", "pull_requests": "write"}
     # the GitHub request shows in the same approver queue
     q = as_admin.get("/queue")
     assert q.status_code == 200
-    assert rid in q.text and "GitHub" in q.text
+    assert rid in q.text and "acme/web" in q.text and "contents:write" in q.text
 
 
 def test_detail_renders_without_aws_fields(as_dev, fake_github):
@@ -56,17 +60,17 @@ def test_detail_renders_without_aws_fields(as_dev, fake_github):
     d = as_dev.get(f"/requests/{rid}")
     assert d.status_code == 200
     assert "GitHub repo access" in d.text
-    assert "acme" in d.text and "write" in d.text
+    assert "acme" in d.text and "contents:write" in d.text
 
 
 def test_approve_mints_token_shown_once_then_revoke(shared_app, as_dev, as_admin, fake_github):
-    rid = _submit(as_dev, access="read").headers["location"].rsplit("/", 1)[-1]
+    rid = _submit(as_dev, perms={"contents": "read"}).headers["location"].rsplit("/", 1)[-1]
     # approver approves through the SAME approve endpoint as AWS
     ap = as_admin.post(f"/requests/{rid}/approve", json={})
     assert ap.status_code in (200, 303), ap.text
     stored = shared_app.state.request_store.get(rid)
     assert stored["status"]["state"] == "active"
-    assert stored["status"]["provisioned"]["github"]["access"] == "read"
+    assert stored["status"]["provisioned"]["github"]["permissions"] == {"contents": "read"}
     assert stored["status"]["_secret_github_token"] == "ghs_web_secret"
     assert fake_github["mint"]["permissions"] == {"contents": "read"}
     # token shown once on the detail page

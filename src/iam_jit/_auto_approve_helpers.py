@@ -323,10 +323,11 @@ def _attempt_github_provisioning(
         gh = spec.get("github") or {}
         org = gh["org"]
         repositories = list(gh["repositories"])
-        access = gh["access"]
         duration_minutes = int(gh.get("duration_minutes") or 60)
         duration_minutes = max(1, min(60, duration_minutes))
-        permissions = github_scope.access_to_permissions(access)
+        # permissions are the GitHub {category: read|write} map, passed straight
+        # through to the mint (no preset/level translation).
+        permissions = github_scope.normalize_permissions(gh["permissions"])
 
         path = installations_path or default_registry_path()
         if github_mint is not None:
@@ -355,7 +356,7 @@ def _attempt_github_provisioning(
             "github": {
                 "org": org,
                 "repositories": list(getattr(tok, "repositories", None) or repositories),
-                "access": access,
+                "permissions": dict(getattr(tok, "permissions", None) or permissions),
                 "expires_at": expires_at,
                 "token_active": True,
             },

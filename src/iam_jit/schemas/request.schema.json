@@ -80,7 +80,7 @@
     },
     "spec": {
       "type": "object",
-      "description": "Kind-specific request body. Constrained by the kind-conditional allOf below: RoleRequest -> AWS spec (accounts/duration/policy/task_intent); GitHubTokenRequest -> spec.github (org/repositories/access/duration_minutes)."
+      "description": "Kind-specific request body. Constrained by the kind-conditional allOf below: RoleRequest -> AWS spec (accounts/duration/policy/task_intent); GitHubTokenRequest -> spec.github (org/repositories/permissions/duration_minutes)."
     },
     "status": {
       "type": "object",
@@ -156,7 +156,10 @@
               "properties": {
                 "org": { "type": "string" },
                 "repositories": { "type": "array", "items": { "type": "string" } },
-                "access": { "enum": ["read", "write"] },
+                "permissions": {
+                  "type": "object",
+                  "additionalProperties": { "enum": ["read", "write"] }
+                },
                 "expires_at": { "type": "string", "format": "date-time" },
                 "token_active": { "type": "boolean" },
                 "installation_id": { "type": "string" }
@@ -364,9 +367,9 @@
               },
               "github": {
                 "type": "object",
-                "required": ["org", "repositories", "access"],
+                "required": ["org", "repositories", "permissions"],
                 "additionalProperties": false,
-                "description": "GitHub scoped-token request. access is the coarse read/write level (mapped to a fixed GitHub permission preset at mint time). duration_minutes caps at 60 (GitHub installation tokens are hard-capped at 1h; sub-hour is honored by an early revoke via the expiry sweep).",
+                "description": "GitHub scoped-token request. permissions is a map of GitHub permission category -> read|write, drawn from GitHub's real fine-grained repository permission catalog (NOT a fixed level enum). The map is passed straight through to the GitHub App installation-token mint. duration_minutes caps at 60 (GitHub installation tokens are hard-capped at 1h; sub-hour is honored by an early revoke via the expiry sweep).",
                 "properties": {
                   "org": { "type": "string", "minLength": 1, "maxLength": 100 },
                   "repositories": {
@@ -375,7 +378,18 @@
                     "maxItems": 100,
                     "items": { "type": "string", "minLength": 1, "maxLength": 100 }
                   },
-                  "access": { "enum": ["read", "pull_requests", "issues", "write"] },
+                  "permissions": {
+                    "type": "object",
+                    "minProperties": 1,
+                    "additionalProperties": { "enum": ["read", "write"] },
+                    "propertyNames": { "enum": [
+                      "actions", "administration", "checks", "contents", "deployments",
+                      "environments", "issues", "metadata", "packages", "pages",
+                      "pull_requests", "repository_hooks", "repository_projects",
+                      "secret_scanning_alerts", "secrets", "security_events",
+                      "statuses", "vulnerability_alerts", "workflows"
+                    ] }
+                  },
                   "duration_minutes": { "type": "integer", "minimum": 1, "maximum": 60 }
                 }
               }

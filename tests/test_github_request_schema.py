@@ -31,7 +31,8 @@ def _gh(**github):
         "apiVersion": "iam-jit.dev/v1alpha1",
         "kind": "GitHubTokenRequest",
         "metadata": {"requester": {"name": "Bot", "email": "bot@example.com"}},
-        "spec": {"github": {"org": "acme", "repositories": ["web"], "access": "write"}},
+        "spec": {"github": {"org": "acme", "repositories": ["web"],
+                            "permissions": {"contents": "write"}}},
     }
     base["spec"]["github"].update(github)
     return base
@@ -43,21 +44,25 @@ def test_aws_request_still_validates_unchanged() -> None:
 
 def test_github_request_validates() -> None:
     assert validate_request(_gh()) == []
-    assert validate_request(_gh(access="read", duration_minutes=15)) == []
+    assert validate_request(_gh(permissions={"contents": "read"}, duration_minutes=15)) == []
 
 
-def test_github_requires_org_repos_access() -> None:
+def test_github_requires_org_repos_permissions() -> None:
     assert validate_request(_gh(repositories=[])) != []  # minItems 1
+    assert validate_request(_gh(permissions={})) != []   # minProperties 1
     bad = _gh()
     del bad["spec"]["github"]["org"]
     assert validate_request(bad) != []
 
 
-def test_github_access_levels() -> None:
-    for level in ("read", "pull_requests", "issues", "write"):
-        assert validate_request(_gh(access=level)) == [], level
-    assert validate_request(_gh(access="admin")) != []
-    assert validate_request(_gh(access="contents")) != []
+def test_github_permissions_map_against_real_catalog() -> None:
+    # real GitHub categories at read|write validate
+    assert validate_request(_gh(permissions={"contents": "write", "pull_requests": "write"})) == []
+    assert validate_request(_gh(permissions={"actions": "read", "workflows": "write"})) == []
+    # unknown category rejected
+    assert validate_request(_gh(permissions={"frobnicate": "read"})) != []
+    # level must be read|write (no admin/other)
+    assert validate_request(_gh(permissions={"contents": "admin"})) != []
 
 
 def test_duration_minutes_capped_at_60() -> None:
@@ -80,7 +85,8 @@ def test_kinds_cannot_cross_contaminate() -> None:
         "apiVersion": "iam-jit.dev/v1alpha1",
         "kind": "RoleRequest",
         "metadata": {"requester": {"name": "B", "email": "b@e.com"}},
-        "spec": {"github": {"org": "acme", "repositories": ["web"], "access": "write"}},
+        "spec": {"github": {"org": "acme", "repositories": ["web"],
+                            "permissions": {"contents": "write"}}},
     }
     assert validate_request(gh_on_aws) != []
 
@@ -93,7 +99,7 @@ def test_unknown_kind_rejected() -> None:
 
 def test_scaffold_github_request_is_valid() -> None:
     req = scaffold_github_request(
-        org="acme", repositories=["web", "api"], access="write",
+        org="acme", repositories=["web", "api"], permissions={"contents": "write"},
         duration_minutes=30, description="ship a fix",
     )
     assert req["kind"] == "GitHubTokenRequest"

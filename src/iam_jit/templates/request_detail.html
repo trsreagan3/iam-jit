@@ -17,7 +17,7 @@
     <dt>Kind</dt><dd>GitHub repo access</dd>
     <dt>Organization</dt><dd>{{ req.spec.github.org }}</dd>
     <dt>Repositories</dt><dd>{% for r in req.spec.github.repositories %}<code>{{ r }}</code>{% if not loop.last %}, {% endif %}{% endfor %}</dd>
-    <dt>Access level</dt><dd><strong>{{ req.spec.github.access }}</strong></dd>
+    <dt>Permissions</dt><dd>{% for k, v in req.spec.github.permissions.items() %}<code>{{ k }}:{{ v }}</code>{% if not loop.last %}, {% endif %}{% endfor %}</dd>
     <dt>Duration</dt><dd>{{ req.spec.github.duration_minutes or 60 }} min <span class="muted small">(GitHub caps at 60)</span></dd>
     {% else %}
     <dt>Access type</dt><dd>{{ req.spec.access_type or "—" }}</dd>
@@ -45,7 +45,8 @@
   <div class="flash flash-success">
     <strong>GitHub token: ✓ issued.</strong>
     Scoped to {% for r in g.repositories %}<code>{{ r }}</code>{% if not loop.last %}, {% endif %}{% endfor %}
-    (<strong>{{ g.access }}</strong>). Expires <code>{{ g.expires_at }}</code>
+    ({% for k, v in g.permissions.items() %}<code>{{ k }}:{{ v }}</code>{% if not loop.last %}, {% endif %}{% endfor %}).
+    Expires <code>{{ g.expires_at }}</code>
     <span class="muted small">(GitHub's 1h cap is the hard backstop)</span>.
   </div>
   {% if github_token %}

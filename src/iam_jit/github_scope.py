@@ -23,45 +23,65 @@ import httpx
 
 from .github_installations import get_installation, provisioner_for
 
-# Coarse, requester-facing access LEVELS mapped DIRECTLY to GitHub permission
-# sets (no risk scorer — the level *is* the GitHub functionality). Each level
-# above `read` is a real elevation (open PRs / file issues / push code), so
-# only `read` is auto-approve-eligible by default; everything else needs prior
-# history for the requester (see auto-approve policy).
-ACCESS_PRESETS: dict[str, dict[str, str]] = {
-    "read": {"contents": "read"},
-    "pull_requests": {"contents": "read", "pull_requests": "write"},
-    "issues": {"contents": "read", "issues": "write"},
-    "write": {"contents": "write", "pull_requests": "write"},
+# The request carries GitHub permissions DIRECTLY as {category: read|write},
+# drawn from GitHub's real fine-grained repository permission catalog — there is
+# NO invented level ladder and NO risk scorer. The map is passed straight to the
+# installation-token mint. These constants drive the schema's allowed categories
+# + the web UI's checklist; agents/API may send any KNOWN category.
+KNOWN_GITHUB_PERMISSIONS: frozenset[str] = frozenset({
+    "actions", "administration", "checks", "contents", "deployments",
+    "environments", "issues", "metadata", "packages", "pages",
+    "pull_requests", "repository_hooks", "repository_projects",
+    "secret_scanning_alerts", "secrets", "security_events",
+    "statuses", "vulnerability_alerts", "workflows",
+})
+
+# The subset surfaced as a checklist in the web form (the long tail is reachable
+# via the "advanced" field / the API). Ordered for display.
+COMMON_GITHUB_PERMISSIONS: tuple[str, ...] = (
+    "contents", "pull_requests", "issues", "actions", "workflows",
+    "checks", "deployments", "statuses", "packages",
+)
+
+# One-line description of each common category (UI hint).
+PERMISSION_DESCRIPTIONS: dict[str, str] = {
+    "contents": "repo files / branches / commits (read = clone; write = push)",
+    "pull_requests": "open / comment / review PRs",
+    "issues": "open / comment issues",
+    "actions": "Actions workflow runs + artifacts",
+    "workflows": "add / update .github/workflows files",
+    "checks": "check runs / suites",
+    "deployments": "deployments + statuses",
+    "statuses": "commit statuses",
+    "packages": "GitHub Packages",
 }
 
-# Only reading code can ever auto-approve without prior history. Anything that
-# can MODIFY (PRs, issues, code) requires a prior approval for that requester.
-AUTO_APPROVE_ELIGIBLE_LEVELS: frozenset[str] = frozenset({"read"})
 
-# Human-readable description of what each level lets the holder do (UI + audit).
-ACCESS_DESCRIPTIONS: dict[str, str] = {
-    "read": "clone/read code; read PRs & issues",
-    "pull_requests": "open/comment/review pull requests (no code push)",
-    "issues": "open/comment issues",
-    "write": "push code + open pull requests",
-}
-
-
-def access_to_permissions(access: str) -> dict[str, str]:
-    """Map a coarse access level to its GitHub permission set. Raises on an
-    unknown level (the schema enum already constrains the input)."""
-    try:
-        return dict(ACCESS_PRESETS[access])
-    except KeyError as e:
-        raise ValueError(
-            f"unknown GitHub access level {access!r}; valid: {sorted(ACCESS_PRESETS)}"
-        ) from e
+def normalize_permissions(permissions: dict[str, str]) -> dict[str, str]:
+    """Validate + lowercase a {category: level} permission map. Raises ValueError
+    on an unknown category or a level other than read|write. metadata:read is
+    GitHub-implicit; we keep whatever the caller sends."""
+    if not permissions:
+        raise ValueError("at least one permission is required")
+    out: dict[str, str] = {}
+    for raw_cat, raw_level in permissions.items():
+        cat = str(raw_cat).strip().lower()
+        level = str(raw_level).strip().lower()
+        if cat not in KNOWN_GITHUB_PERMISSIONS:
+            raise ValueError(f"unknown GitHub permission category {cat!r}")
+        if level not in ("read", "write"):
+            raise ValueError(f"permission {cat!r} level must be read|write, got {level!r}")
+        out[cat] = level
+    return out
 
 
-def access_is_auto_approve_eligible(access: str) -> bool:
-    """True only for levels that may auto-approve without prior history."""
-    return access in AUTO_APPROVE_ELIGIBLE_LEVELS
+def permissions_are_read_only(permissions: dict[str, str]) -> bool:
+    """True when every requested permission is read-level. Only a read-only
+    request is ever eligible for auto-approval without prior history; anything
+    that can MODIFY (any write) requires a human or a prior saved approval."""
+    return bool(permissions) and all(
+        str(v).strip().lower() == "read" for v in permissions.values()
+    )
 
 
 # Per-permission risk on a 1–10 scale: (write_or_admin_risk, read_risk).

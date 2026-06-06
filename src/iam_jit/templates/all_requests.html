@@ -34,7 +34,7 @@
         <td>{{ r.state }}</td>
         <td>{{ r.owner }}</td>
         {% if r.kind == "GitHubTokenRequest" %}
-        <td>GitHub: <strong>{{ r.github_access }}</strong></td>
+        <td><span class="muted small">{{ r.github_perm_summary }}</span></td>
         <td>{{ r.github_org }}/{{ r.github_repos | join(", ") }}</td>
         <td>{{ r.github_duration_minutes or 60 }}m</td>
         <td><span class="muted small">—</span></td>

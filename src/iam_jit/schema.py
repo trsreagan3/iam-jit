@@ -110,21 +110,21 @@ def scaffold_github_request(
     *,
     org: str,
     repositories: list[str],
-    access: str,
+    permissions: dict[str, str],
     duration_minutes: int = 60,
     description: str | None = None,
     requester_name: str = "FILL_IN",
     requester_email: str = "FILL_IN@example.com",
 ) -> dict[str, Any]:
     """Build a GitHubTokenRequest dict (validated by request.schema.json's
-    GitHubTokenRequest branch). `access` is the coarse read|write level mapped
-    to a GitHub permission preset at mint time; `duration_minutes` caps at 60
-    (GitHub's 1h ceiling) — sub-hour is enforced via an early revoke."""
+    GitHubTokenRequest branch). `permissions` is the GitHub {category: read|write}
+    map passed straight to the token mint; `duration_minutes` caps at 60 (GitHub's
+    1h ceiling) — sub-hour is enforced via an early revoke."""
     now = _dt.datetime.now(_dt.UTC)
     github: dict[str, Any] = {
         "org": org,
         "repositories": list(repositories),
-        "access": access,
+        "permissions": dict(permissions),
     }
     if duration_minutes:
         github["duration_minutes"] = int(duration_minutes)

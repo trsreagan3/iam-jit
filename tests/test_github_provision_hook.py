@@ -9,35 +9,39 @@ from types import SimpleNamespace
 import pytest
 
 from iam_jit import _auto_approve_helpers, lifecycle
-from iam_jit.github_scope import access_to_permissions, access_is_auto_approve_eligible
+from iam_jit.github_scope import normalize_permissions, permissions_are_read_only
 
 
-def _provisioning_github_req(access: str = "write", minutes: int = 30) -> dict:
+def _provisioning_github_req(permissions=None, minutes: int = 30) -> dict:
     return {
         "apiVersion": "iam-jit.dev/v1alpha1",
         "kind": "GitHubTokenRequest",
         "metadata": {"id": "ghr-1", "requester": {"name": "Bot", "email": "b@e.com"}},
-        "spec": {"github": {"org": "acme", "repositories": ["web"], "access": access,
+        "spec": {"github": {"org": "acme", "repositories": ["web"],
+                            "permissions": permissions or {"contents": "write", "pull_requests": "write"},
                             "duration_minutes": minutes}},
         "status": {"state": "provisioning", "owner": "b@e.com"},
     }
 
 
-def test_access_presets_map_to_github_permissions() -> None:
-    assert access_to_permissions("read") == {"contents": "read"}
-    assert access_to_permissions("pull_requests") == {"contents": "read", "pull_requests": "write"}
-    assert access_to_permissions("issues") == {"contents": "read", "issues": "write"}
-    assert access_to_permissions("write") == {"contents": "write", "pull_requests": "write"}
+def test_normalize_permissions_validates_catalog() -> None:
+    assert normalize_permissions({"Contents": "WRITE"}) == {"contents": "write"}
+    import pytest
+    with pytest.raises(ValueError):
+        normalize_permissions({"frobnicate": "read"})
+    with pytest.raises(ValueError):
+        normalize_permissions({"contents": "admin"})
 
 
-def test_only_read_is_auto_approve_eligible() -> None:
-    assert access_is_auto_approve_eligible("read") is True
-    for level in ("pull_requests", "issues", "write"):
-        assert access_is_auto_approve_eligible(level) is False
+def test_only_read_only_is_auto_approve_eligible() -> None:
+    assert permissions_are_read_only({"contents": "read"}) is True
+    assert permissions_are_read_only({"contents": "read", "actions": "read"}) is True
+    assert permissions_are_read_only({"contents": "read", "pull_requests": "write"}) is False
+    assert permissions_are_read_only({}) is False
 
 
 def test_attempt_provisioning_mints_and_activates() -> None:
-    req = _provisioning_github_req(access="write")
+    req = _provisioning_github_req(permissions={"contents": "write", "pull_requests": "write"})
     captured: dict = {}
 
     def mint(*, org, repositories, permissions):
@@ -53,17 +57,18 @@ def test_attempt_provisioning_mints_and_activates() -> None:
     )
     assert lifecycle.get_state(req) == "active"
     gh = req["status"]["provisioned"]["github"]
-    assert gh["org"] == "acme" and gh["access"] == "write" and gh["token_active"] is True
+    assert gh["org"] == "acme" and gh["token_active"] is True
+    assert gh["permissions"] == {"contents": "write", "pull_requests": "write"}
     assert gh["repositories"] == ["web"]
     # the secret token is stored server-only, NOT in provisioned
     assert req["status"]["_secret_github_token"] == "ghs_secret"
     assert "token" not in gh
-    # write -> contents:write + pull_requests:write was actually requested
+    # the permission map was passed straight through to the mint (no translation)
     assert captured["permissions"] == {"contents": "write", "pull_requests": "write"}
 
 
 def test_attempt_provisioning_mint_failure_is_terminal() -> None:
-    req = _provisioning_github_req(access="read")
+    req = _provisioning_github_req(permissions={"contents": "read"})
 
     def boom(**_):
         raise RuntimeError("github 403")
@@ -78,10 +83,11 @@ def test_attempt_provisioning_mint_failure_is_terminal() -> None:
 
 
 def test_duration_capped_at_60_minutes() -> None:
-    req = _provisioning_github_req(access="read", minutes=999)
+    req = _provisioning_github_req(permissions={"contents": "read"}, minutes=999)
 
     def mint(**_):
-        return SimpleNamespace(token="t", repositories=("web",), permissions={}, expires_at="x")
+        return SimpleNamespace(token="t", repositories=("web",),
+                               permissions={"contents": "read"}, expires_at="x")
 
     _auto_approve_helpers.attempt_provisioning(
         req, accounts_store=None, provision_mod=None, assume_mod=None,

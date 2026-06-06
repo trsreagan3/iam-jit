@@ -28,20 +28,26 @@
            value="{{ form.repositories or '' }}" placeholder="web api" />
 
     <fieldset>
-      <legend>Access level</legend>
-      <label><input type="radio" name="access" value="read"
-        {% if not form.access or form.access == 'read' %}checked{% endif %} />
-        <strong>Read</strong> — clone/read code, read PRs &amp; issues</label>
-      <label><input type="radio" name="access" value="pull_requests"
-        {% if form.access == 'pull_requests' %}checked{% endif %} />
-        <strong>Pull requests</strong> — open/comment/review PRs (no code push)</label>
-      <label><input type="radio" name="access" value="issues"
-        {% if form.access == 'issues' %}checked{% endif %} />
-        <strong>Issues</strong> — open/comment issues</label>
-      <label><input type="radio" name="access" value="write"
-        {% if form.access == 'write' %}checked{% endif %} />
-        <strong>Write</strong> — push code + open PRs</label>
+      <legend>Permissions <span class="muted small">(pick per category — none / read / write)</span></legend>
+      <table class="requests">
+        <thead><tr><th>permission</th><th>none</th><th>read</th><th>write</th></tr></thead>
+        <tbody>
+          {% for p in common_permissions %}
+          {% set cur = (form.selected or {}).get(p.key) %}
+          <tr>
+            <td><strong>{{ p.key }}</strong><div class="muted small">{{ p.desc }}</div></td>
+            <td><input type="radio" name="perm_{{ p.key }}" value="none" {% if not cur %}checked{% endif %} /></td>
+            <td><input type="radio" name="perm_{{ p.key }}" value="read" {% if cur == 'read' %}checked{% endif %} /></td>
+            <td><input type="radio" name="perm_{{ p.key }}" value="write" {% if cur == 'write' %}checked{% endif %} /></td>
+          </tr>
+          {% endfor %}
+        </tbody>
+      </table>
     </fieldset>
+
+    <label for="advanced_permissions">Advanced <span class="muted small">(any other GitHub permission, e.g. <code>workflows:write, secrets:read</code>)</span></label>
+    <input type="text" name="advanced_permissions" id="advanced_permissions"
+           value="{{ form.advanced_permissions or '' }}" placeholder="workflows:write, environments:read" />
 
     <label for="duration_minutes">Duration
       <span class="muted small">(minutes, max 60 — GitHub's hard cap)</span>
@@ -56,9 +62,10 @@
   </form>
 
   <p class="disclaimer">
-    Only <strong>read</strong> may auto-approve (if your admin enabled it).
-    Anything that can modify — PRs, issues, code — is reviewed by a human unless
-    you have a prior approval on record for that repository.
+    A <strong>read-only</strong> request (every permission set to read) may
+    auto-approve if your admin enabled it. Any <strong>write</strong> permission
+    is reviewed by a human unless you have a prior approval on record for that
+    repository. The token you receive is always freshly minted and ≤1 hour.
   </p>
 </section>
 {% endblock %}

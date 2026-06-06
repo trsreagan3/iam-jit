@@ -11,7 +11,9 @@ _GH = {
     "metadata": {"id": "ghr-1", "requester": {"name": "Bot", "email": "b@e.com"}},
     "spec": {
         "description": "open a PR",
-        "github": {"org": "acme", "repositories": ["web", "api"], "access": "write", "duration_minutes": 30},
+        "github": {"org": "acme", "repositories": ["web", "api"],
+                   "permissions": {"contents": "write", "pull_requests": "write"},
+                   "duration_minutes": 30},
     },
     "status": {"state": "pending", "owner": "b@e.com"},
 }
@@ -35,7 +37,8 @@ def test_summarize_projects_github_fields() -> None:
     assert s["github_org"] == "acme"
     assert s["github_repos"] == ["web", "api"]
     assert s["github_repo_count"] == 2
-    assert s["github_access"] == "write"
+    assert s["github_permissions"] == {"contents": "write", "pull_requests": "write"}
+    assert "contents:write" in s["github_perm_summary"]
     assert s["github_duration_minutes"] == 30
 
 

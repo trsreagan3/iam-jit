@@ -1465,45 +1465,86 @@ def _parse_github_repositories(raw: str) -> list[str]:
     return [p for p in parts if p]
 
 
+def _github_form_meta() -> dict[str, Any]:
+    from .. import github_scope
+    return {
+        "common_permissions": [
+            {"key": c, "desc": github_scope.PERMISSION_DESCRIPTIONS.get(c, "")}
+            for c in github_scope.COMMON_GITHUB_PERMISSIONS
+        ],
+    }
+
+
+def _parse_advanced_permissions(raw: str) -> dict[str, str]:
+    """Parse the advanced free-text field: 'workflows:write, secrets:read'."""
+    out: dict[str, str] = {}
+    for chunk in (raw or "").replace("\n", ",").split(","):
+        chunk = chunk.strip()
+        if not chunk:
+            continue
+        name, _, level = chunk.partition(":")
+        out[name.strip().lower()] = (level.strip().lower() or "read")
+    return out
+
+
 @router.get("/requests/new/github", response_class=HTMLResponse)
 def new_github_form(request: Request) -> Response:
     user = _try_current_user(request)
     if user is None:
         return RedirectResponse(url="/login", status_code=303)
     return _render(
-        request, "new_github.html", active="new", user=user, extra={"form": {}, "errors": []}
+        request, "new_github.html", active="new", user=user,
+        extra={"form": {}, "errors": [], **_github_form_meta()},
     )
 
 
 @router.post("/requests/new/github", response_class=HTMLResponse)
-def new_github_submit(
-    request: Request,
-    org: Annotated[str, Form()],
-    repositories: Annotated[str, Form()],
-    access: Annotated[str, Form()] = "read",
-    duration_minutes: Annotated[int, Form()] = 60,
-    description: Annotated[str, Form()] = "",
-) -> Response:
+async def new_github_submit(request: Request) -> Response:
     user = _try_current_user(request)
     if user is None:
         return RedirectResponse(url="/login", status_code=303)
+    from .. import github_scope
+
+    raw = await request.form()
+    org = (raw.get("org") or "").strip()
+    repositories = raw.get("repositories") or ""
+    duration_minutes = raw.get("duration_minutes") or "60"
+    description = raw.get("description") or ""
+    advanced = raw.get("advanced_permissions") or ""
+
+    # Build the {category: level} map from the common-category radios
+    # (perm_<cat> = none|read|write) plus the advanced free-text field.
+    permissions: dict[str, str] = {}
+    for cat in github_scope.COMMON_GITHUB_PERMISSIONS:
+        lvl = (raw.get(f"perm_{cat}") or "none").strip().lower()
+        if lvl in ("read", "write"):
+            permissions[cat] = lvl
+    permissions.update(_parse_advanced_permissions(advanced))
+
     form = {
-        "org": org, "repositories": repositories, "access": access,
-        "duration_minutes": duration_minutes, "description": description,
+        "org": org, "repositories": repositories, "duration_minutes": duration_minutes,
+        "description": description, "advanced_permissions": advanced,
+        "selected": permissions,
     }
+
+    def _err(errors, status_code=200):
+        return _render(request, "new_github.html", active="new", user=user,
+                       status_code=status_code, extra={"form": form, "errors": errors,
+                                                        **_github_form_meta()})
+
     request_store: RequestStore = request.app.state.request_store
     _cap_result = _check_outstanding_cap(user, request_store)
     if _cap_result.would_exceed:
-        return _render(
-            request, "new_github.html", active="new", user=user, status_code=429,
-            extra={"form": form, "errors": [
-                f"outstanding_request_cap_exceeded: you have "
-                f"{_cap_result.outstanding_count} outstanding requests "
-                f"(cap = {_cap_result.cap}). Wait for some to complete or cancel "
-                f"existing requests at /."]},
-        )
+        return _err([f"outstanding_request_cap_exceeded: you have "
+                     f"{_cap_result.outstanding_count} outstanding requests "
+                     f"(cap = {_cap_result.cap})."], 429)
+    if not permissions:
+        return _err(["pick at least one permission (or add one in the advanced field)."], 400)
+    try:
+        permissions = github_scope.normalize_permissions(permissions)
+    except ValueError as e:
+        return _err([str(e)], 400)
 
-    repos = _parse_github_repositories(repositories)
     req = {
         "apiVersion": "iam-jit.dev/v1alpha1",
         "kind": "GitHubTokenRequest",
@@ -1517,24 +1558,22 @@ def new_github_submit(
         "spec": {
             "description": description or "",
             "github": {
-                "org": org.strip(),
-                "repositories": repos,
-                "access": access,
+                "org": org,
+                "repositories": _parse_github_repositories(repositories),
+                "permissions": permissions,
                 "duration_minutes": int(duration_minutes or 60),
             },
         },
     }
     errors = schema.validate_request(req)
     if errors:
-        return _render(
-            request, "new_github.html", active="new", user=user,
-            extra={"form": form, "errors": errors},
-        )
+        return _err(errors)
 
     lifecycle.init_status(req, owner=user)
-    # No risk scorer for GitHub (the access level IS the GitHub functionality).
-    # Auto-approve is governed by the optional admin policy; absent that, the
-    # request lands in the approver queue for human review.
+    # No risk scorer for GitHub (the requested GitHub permissions ARE the
+    # functionality). Auto-approve is governed by the optional admin policy
+    # (read-only may auto-approve; any write needs a human / prior history);
+    # absent that, the request lands in the approver queue.
     from .. import auto_approve_evaluator
     accounts_store = getattr(request.app.state, "accounts_store", None)
     try:

@@ -535,6 +535,9 @@ def summarize(request: dict[str, Any]) -> dict[str, Any]:
         "github_org": github.get("org"),
         "github_repos": list(github.get("repositories") or []),
         "github_repo_count": len(github.get("repositories") or []),
-        "github_access": github.get("access"),
+        "github_permissions": dict(github.get("permissions") or {}),
+        "github_perm_summary": ", ".join(
+            f"{k}:{v}" for k, v in sorted((github.get("permissions") or {}).items())
+        ),
         "github_duration_minutes": github.get("duration_minutes"),
     }
