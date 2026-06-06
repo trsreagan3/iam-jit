@@ -197,6 +197,8 @@ def attempt_provisioning(
     provision_mod: Any,
     assume_mod: Any,
     lifecycle: Any,
+    github_mint: Any = None,
+    installations_path: str | None = None,
 ) -> None:
     """Synchronously provision after approval / auto-approve, persist
     result/error.
@@ -221,6 +223,19 @@ def attempt_provisioning(
     caller. Passing as kwargs also makes test stubbing trivial.
     """
     logger_p = logging.getLogger("iam_jit.provisioning")
+
+    # GitHubTokenRequest rides the SAME approve→provisioning→active path as an
+    # AWS RoleRequest, but "provisioning" means minting a scoped GitHub App
+    # installation token instead of creating an IAM role. Same terminal-state
+    # guarantee (active | provisioning_failed). github_mint is injectable for
+    # hermetic tests; default mints against the configured installation registry.
+    if (req.get("kind") or "RoleRequest") == "GitHubTokenRequest":
+        _attempt_github_provisioning(
+            req, lifecycle=lifecycle, github_mint=github_mint,
+            installations_path=installations_path,
+        )
+        return
+
     try:
         result = provision_mod.provision(req, accounts_store=accounts_store)
     except provision_mod.ProvisioningError as e:
@@ -276,6 +291,85 @@ def attempt_provisioning(
         safe_mark_failed(
             req,
             f"role created but state transition failed: {e}",
+            lifecycle=lifecycle,
+        )
+
+
+def _attempt_github_provisioning(
+    req: dict[str, Any],
+    *,
+    lifecycle: Any,
+    github_mint: Any = None,
+    installations_path: str | None = None,
+) -> None:
+    """Mint a scoped GitHub App installation token for a GitHubTokenRequest.
+
+    The access level maps DIRECTLY to a GitHub permission preset (no scorer).
+    duration_minutes (<=60) is honored by setting status.provisioned.github.
+    expires_at to the requested cutoff so the existing expiry sweep early-
+    revokes; GitHub's own 1h ceiling is the backstop. The minted token is
+    stored under status._secret_github_token (server-only; redacted from
+    summarize() and every list/API view) so the operator can early-revoke;
+    it is shown to the requester exactly once via the claim flow. NEVER raises
+    (same terminal-state guarantee as the AWS path)."""
+    import datetime as _dt
+
+    logger_p = logging.getLogger("iam_jit.provisioning")
+    try:
+        from . import github_scope
+        from .github_installations import default_registry_path
+
+        spec = req.get("spec") or {}
+        gh = spec.get("github") or {}
+        org = gh["org"]
+        repositories = list(gh["repositories"])
+        access = gh["access"]
+        duration_minutes = int(gh.get("duration_minutes") or 60)
+        duration_minutes = max(1, min(60, duration_minutes))
+        permissions = github_scope.access_to_permissions(access)
+
+        path = installations_path or default_registry_path()
+        if github_mint is not None:
+            tok = github_mint(org=org, repositories=repositories, permissions=permissions)
+        else:
+            tok = github_scope.mint_github_token(
+                installations_path=path, org=org,
+                repositories=repositories, permissions=permissions,
+            )
+    except Exception as e:  # noqa: BLE001 — terminal-state guarantee
+        logger_p.warning("github token mint failed: %s", e)
+        safe_mark_failed(req, f"github token mint failed: {e}", lifecycle=lifecycle)
+        return
+
+    try:
+        now = _dt.datetime.now(_dt.UTC)
+        expires_at = (now + _dt.timedelta(minutes=duration_minutes)).strftime(
+            "%Y-%m-%dT%H:%M:%SZ"
+        )
+        provisioned = {
+            # Top-level expires_at mirrors the github cutoff so the existing
+            # dashboard-fade + expiry sweep treat a GitHub grant exactly like an
+            # AWS one (no expiry-path changes needed). GitHub's own 1h ceiling
+            # is the hard backstop if a sub-hour sweep is late.
+            "expires_at": expires_at,
+            "github": {
+                "org": org,
+                "repositories": list(getattr(tok, "repositories", None) or repositories),
+                "access": access,
+                "expires_at": expires_at,
+                "token_active": True,
+            },
+            "creation_succeeded": True,
+        }
+        lifecycle.mark_provisioned(req, provisioned=provisioned)
+        # Stash the secret token AFTER the transition (status now exists).
+        # status.additionalProperties:true allows this; summarize() never reads
+        # it and the web/API serializers redact it.
+        req.setdefault("status", {})["_secret_github_token"] = tok.token
+    except Exception as e:  # noqa: BLE001
+        logger_p.exception("post-mint github result handling failed")
+        safe_mark_failed(
+            req, f"github token minted but state transition failed: {e}",
             lifecycle=lifecycle,
         )
 

@@ -1233,6 +1233,12 @@ def revoke_active_request(
             detail=f"cannot revoke from state {state!r}; only 'active' or 'provisioning_failed' grants can be revoked",
         )
 
+    # GitHubTokenRequest: revoke the scoped installation token (DELETE
+    # /installation/token) instead of tearing down an IAM role. Same /revoke
+    # endpoint, same lifecycle transition.
+    if (req.get("kind") or "RoleRequest") == "GitHubTokenRequest":
+        return _revoke_github_request(req, request_id, store=store, actor=actor, reason=reason)
+
     import logging
 
     logger = logging.getLogger("iam_jit.provisioning")
@@ -1308,6 +1314,56 @@ def revoke_active_request(
         "inline_policies_deleted": list(result.inline_policies_deleted),
         "aws_cli_replay": list(result.aws_cli_replay),
     }
+    try:
+        lifecycle.mark_revoked(req, revoked_by=actor.id, revocation=revocation)
+    except lifecycle.IllegalTransition as e:
+        raise HTTPException(status_code=409, detail=str(e))
+    store.put(request_id, req)
+    return {"request": req, "revocation": revocation}
+
+
+def _revoke_github_request(
+    req: dict[str, Any],
+    request_id: str,
+    *,
+    store: RequestStore,
+    actor: User,
+    reason: str,
+) -> dict[str, Any]:
+    """Revoke an active GitHubTokenRequest: DELETE the installation token (if
+    still held) and transition to revoked. Idempotent at the GitHub layer
+    (an already-expired token is treated as revoked)."""
+    import logging
+
+    from .. import github_scope
+    from ..github_installations import default_registry_path
+
+    logger = logging.getLogger("iam_jit.provisioning")
+    status = req.get("status") or {}
+    gh_prov = (status.get("provisioned") or {}).get("github") or {}
+    token = status.get("_secret_github_token")
+    org = gh_prov.get("org", "")
+    if token and org:
+        try:
+            path = getattr(store, "github_installations_path", None) or default_registry_path()
+            github_scope.revoke_github_token(installations_path=path, org=org, token=token)
+        except Exception as e:  # noqa: BLE001 — idempotent best-effort
+            logger.warning("github token revoke best-effort failed (continuing): %s", e)
+
+    revocation = {
+        "github": {
+            "org": org,
+            "repositories": list(gh_prov.get("repositories") or []),
+            "access": gh_prov.get("access"),
+        },
+        "revoked_at": _now_iso_z(),
+        "revoked_by": actor.id,
+        "reason": reason,
+    }
+    # Clear the secret + flip token_active before the transition.
+    req.setdefault("status", {}).pop("_secret_github_token", None)
+    if gh_prov:
+        gh_prov["token_active"] = False
     try:
         lifecycle.mark_revoked(req, revoked_by=actor.id, revocation=revocation)
     except lifecycle.IllegalTransition as e:

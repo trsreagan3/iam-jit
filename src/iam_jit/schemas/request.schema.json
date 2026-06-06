@@ -375,7 +375,7 @@
                     "maxItems": 100,
                     "items": { "type": "string", "minLength": 1, "maxLength": 100 }
                   },
-                  "access": { "enum": ["read", "write"] },
+                  "access": { "enum": ["read", "pull_requests", "issues", "write"] },
                   "duration_minutes": { "type": "integer", "minimum": 1, "maximum": 60 }
                 }
               }

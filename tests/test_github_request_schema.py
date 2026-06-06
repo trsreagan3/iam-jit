@@ -53,9 +53,11 @@ def test_github_requires_org_repos_access() -> None:
     assert validate_request(bad) != []
 
 
-def test_github_access_is_read_or_write_only() -> None:
+def test_github_access_levels() -> None:
+    for level in ("read", "pull_requests", "issues", "write"):
+        assert validate_request(_gh(access=level)) == [], level
     assert validate_request(_gh(access="admin")) != []
-    assert validate_request(_gh(access="read")) == []
+    assert validate_request(_gh(access="contents")) != []
 
 
 def test_duration_minutes_capped_at_60() -> None:

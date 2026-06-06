@@ -23,6 +23,47 @@ import httpx
 
 from .github_installations import get_installation, provisioner_for
 
+# Coarse, requester-facing access LEVELS mapped DIRECTLY to GitHub permission
+# sets (no risk scorer — the level *is* the GitHub functionality). Each level
+# above `read` is a real elevation (open PRs / file issues / push code), so
+# only `read` is auto-approve-eligible by default; everything else needs prior
+# history for the requester (see auto-approve policy).
+ACCESS_PRESETS: dict[str, dict[str, str]] = {
+    "read": {"contents": "read"},
+    "pull_requests": {"contents": "read", "pull_requests": "write"},
+    "issues": {"contents": "read", "issues": "write"},
+    "write": {"contents": "write", "pull_requests": "write"},
+}
+
+# Only reading code can ever auto-approve without prior history. Anything that
+# can MODIFY (PRs, issues, code) requires a prior approval for that requester.
+AUTO_APPROVE_ELIGIBLE_LEVELS: frozenset[str] = frozenset({"read"})
+
+# Human-readable description of what each level lets the holder do (UI + audit).
+ACCESS_DESCRIPTIONS: dict[str, str] = {
+    "read": "clone/read code; read PRs & issues",
+    "pull_requests": "open/comment/review pull requests (no code push)",
+    "issues": "open/comment issues",
+    "write": "push code + open pull requests",
+}
+
+
+def access_to_permissions(access: str) -> dict[str, str]:
+    """Map a coarse access level to its GitHub permission set. Raises on an
+    unknown level (the schema enum already constrains the input)."""
+    try:
+        return dict(ACCESS_PRESETS[access])
+    except KeyError as e:
+        raise ValueError(
+            f"unknown GitHub access level {access!r}; valid: {sorted(ACCESS_PRESETS)}"
+        ) from e
+
+
+def access_is_auto_approve_eligible(access: str) -> bool:
+    """True only for levels that may auto-approve without prior history."""
+    return access in AUTO_APPROVE_ELIGIBLE_LEVELS
+
+
 # Per-permission risk on a 1–10 scale: (write_or_admin_risk, read_risk).
 # Write to code / CI / secrets / settings is the supply-chain vector → high.
 _PERM_RISK: dict[str, tuple[int, int]] = {
