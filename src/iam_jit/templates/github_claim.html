@@ -1,0 +1,47 @@
+{% extends "base.html" %}
+{% block title %}Your GitHub access request — iam-jit{% endblock %}
+{% block content %}
+<section class="card narrow">
+  {% if view is none %}
+  <h1>Request not found</h1>
+  <p class="muted">This link is invalid or expired. Submit a new request at
+    <a href="/github/request">/github/request</a>.</p>
+
+  {% else %}
+  <h1>Your GitHub access request</h1>
+  <p class="muted small">id: <code>{{ view.request_id }}</code> · bookmark this page to check back.</p>
+
+  <dl class="metadata">
+    <dt>State</dt><dd><span class="state state-{{ view.state }}">{{ view.state }}</span></dd>
+    <dt>Organization</dt><dd>{{ view.org }}</dd>
+    <dt>Repositories</dt><dd>{% for r in view.repositories %}<code>{{ r }}</code>{% if not loop.last %}, {% endif %}{% endfor %}</dd>
+    <dt>Permissions</dt><dd>{% for k, v in view.permissions.items() %}<code>{{ k }}:{{ v }}</code>{% if not loop.last %}, {% endif %}{% endfor %}</dd>
+  </dl>
+
+  {% if view.state == "pending" %}
+  <div class="flash">Awaiting an approver. Refresh this page to check again.</div>
+
+  {% elif view.state == "active" %}
+  <div class="flash flash-success">Approved — your token is ready. Expires <code>{{ view.expires_at }}</code>.</div>
+  {% if view.token %}
+  <div class="flash flash-warn">
+    Copy it now. The token is freshly minted and short-lived; treat it like a password.
+  </div>
+  <pre class="policy mono">{{ view.token }}</pre>
+  {% else %}
+  <p class="muted">Token no longer available (revoked or expired). Submit a new request if you still need access.</p>
+  {% endif %}
+
+  {% elif view.state == "rejected" %}
+  <div class="flash flash-error">This request was denied by an approver.</div>
+
+  {% elif view.state in ["revoked", "expired"] %}
+  <div class="flash">This grant is {{ view.state }}. Submit a new request at
+    <a href="/github/request">/github/request</a> if you still need access.</div>
+
+  {% else %}
+  <div class="flash">Status: {{ view.state }}. Refresh to check again.</div>
+  {% endif %}
+  {% endif %}
+</section>
+{% endblock %}

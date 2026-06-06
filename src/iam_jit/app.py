@@ -36,6 +36,7 @@ from .routes.auth import router as auth_router
 # Conversational LLM intake was part of the synthesis-from-prompt
 # pattern that measured joint sufficiency below the calibration bar. Replaced by raw-JSON
 # submit via the existing request-creation endpoint + MCP submit_policy.
+from .routes.github_public import router as github_public_router
 from .routes.health import router as health_router
 from .routes.policy import router as policy_router
 from .routes.presence import router as presence_router
@@ -612,6 +613,9 @@ def create_app(
     app.include_router(feedback_router)
     app.include_router(slack_router)
     app.include_router(oidc_router)
+    # Anonymous (no-login) GitHub access requests + capability-URL retrieval.
+    # No SES needed; gated by the IP-allowlist + operator approval.
+    app.include_router(github_public_router)
     app.include_router(web_router)
 
     # Serve static assets (CSS, JS) for the web UI. Templates reference

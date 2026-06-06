@@ -1,0 +1,75 @@
+{% extends "base.html" %}
+{% block title %}Request GitHub access — iam-jit{% endblock %}
+{% block content %}
+<section class="card narrow">
+  <h1>Request GitHub access</h1>
+  <p class="muted">
+    Ask for a scoped, short-lived (≤1h) GitHub token for specific repositories.
+    No login needed — submit and you'll get a private link to check back on.
+    An approver reviews every request; nothing is issued to repositories you
+    don't list.
+  </p>
+
+  {% if errors %}
+  <div class="flash flash-error">
+    <strong>Couldn't submit:</strong>
+    <ul>{% for e in errors %}<li>{{ e }}</li>{% endfor %}</ul>
+  </div>
+  {% endif %}
+
+  <form method="post" action="/github/request">
+    <label for="requester_name">Your name</label>
+    <input type="text" name="requester_name" id="requester_name" required
+           value="{{ form.requester_name or '' }}" placeholder="Alex Doe" />
+
+    <label for="requester_email">Your email <span class="muted small">(for the approver's reference)</span></label>
+    <input type="email" name="requester_email" id="requester_email"
+           value="{{ form.requester_email or '' }}" placeholder="alex@example.com" />
+
+    <label for="org">GitHub organization / owner</label>
+    <input type="text" name="org" id="org" required value="{{ form.org or '' }}" placeholder="acme" />
+
+    <label for="repositories">Repositories <span class="muted small">(names only, comma/space separated)</span></label>
+    <input type="text" name="repositories" id="repositories" required
+           value="{{ form.repositories or '' }}" placeholder="web api" />
+
+    <fieldset>
+      <legend>Permissions <span class="muted small">(pick per category — none / read / write)</span></legend>
+      <table class="requests">
+        <thead><tr><th>permission</th><th>none</th><th>read</th><th>write</th></tr></thead>
+        <tbody>
+          {% for p in common_permissions %}
+          {% set cur = (form.selected or {}).get(p.key) %}
+          <tr>
+            <td><strong>{{ p.key }}</strong><div class="muted small">{{ p.desc }}</div></td>
+            <td><input type="radio" name="perm_{{ p.key }}" value="none" {% if not cur %}checked{% endif %} /></td>
+            <td><input type="radio" name="perm_{{ p.key }}" value="read" {% if cur == 'read' %}checked{% endif %} /></td>
+            <td><input type="radio" name="perm_{{ p.key }}" value="write" {% if cur == 'write' %}checked{% endif %} /></td>
+          </tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    </fieldset>
+
+    <label for="advanced_permissions">Advanced <span class="muted small">(any other GitHub permission, e.g. <code>workflows:write</code>)</span></label>
+    <input type="text" name="advanced_permissions" id="advanced_permissions"
+           value="{{ form.advanced_permissions or '' }}" placeholder="workflows:write, environments:read" />
+
+    <label for="duration_minutes">Duration <span class="muted small">(minutes, max 60)</span></label>
+    <input type="number" name="duration_minutes" id="duration_minutes" min="1" max="60"
+           value="{{ form.duration_minutes or 60 }}" />
+
+    <label for="description">Why do you need this? <span class="muted small">(helps the approver)</span></label>
+    <textarea name="description" id="description" rows="2">{{ form.description or '' }}</textarea>
+
+    <button type="submit">Submit request</button>
+  </form>
+
+  <p class="disclaimer">
+    After submitting you'll get a private link. Keep it — that's how you check
+    status and copy your token once it's approved. The token is always freshly
+    minted and ≤1 hour; reading code may auto-approve, anything that can modify
+    is reviewed by a person.
+  </p>
+</section>
+{% endblock %}
