@@ -496,6 +496,8 @@ def to_template(request: dict[str, Any]) -> dict[str, Any]:
         "policy",
         "resource_constraints",
         "provisioning",
+        "github",  # GitHubTokenRequest spec block (only present on that kind)
+        "ticket",
     ):
         if key in spec and spec[key] is not None:
             template_spec[key] = spec[key]
@@ -513,9 +515,11 @@ def summarize(request: dict[str, Any]) -> dict[str, Any]:
     metadata = request.get("metadata") or {}
     status = request.get("status") or {}
     review = status.get("review") or {}
+    github = spec.get("github") or {}
     return {
         "id": metadata.get("id"),
         "name": metadata.get("name"),
+        "kind": request.get("kind", "RoleRequest"),
         "owner": status.get("owner"),
         "state": status.get("state") or "pending",
         "access_type": spec.get("access_type"),
@@ -527,4 +531,10 @@ def summarize(request: dict[str, Any]) -> dict[str, Any]:
         "last_updated_at": status.get("last_updated_at"),
         "risk_score": review.get("risk_score"),
         "risk_factors_summary": (review.get("risk_factors") or [])[:2],
+        # GitHubTokenRequest projection (None/empty for AWS RoleRequests).
+        "github_org": github.get("org"),
+        "github_repos": list(github.get("repositories") or []),
+        "github_repo_count": len(github.get("repositories") or []),
+        "github_access": github.get("access"),
+        "github_duration_minutes": github.get("duration_minutes"),
     }
