@@ -7,7 +7,7 @@
 
   <div class="grid2">
     <a class="card pickable" href="/requests/new/paste">
-      <h2>Paste a role</h2>
+      <h2>AWS IAM role access</h2>
       <p>Already have a policy in hand? Paste it. Schema validation
         and risk review run before submission.</p>
       <p class="tip">
@@ -15,6 +15,17 @@
         with a tool like Claude Code that can read your codebase, kubeconfigs, and
         terraform state — then paste the result here. The hosted iam-jit instance can't
         see those things by design.
+      </p>
+    </a>
+    <a class="card pickable" href="/requests/new/github">
+      <h2>GitHub repo access</h2>
+      <p>Request a scoped, short-lived (≤1h) GitHub token for specific
+        repositories. Pick the repos and the access level; an approver
+        issues a least-privilege token.</p>
+      <p class="tip">
+        <strong>Read</strong> clones code; higher levels (open PRs, file
+        issues, push code) are elevations and usually need a prior approval
+        on record.
       </p>
     </a>
   </div>

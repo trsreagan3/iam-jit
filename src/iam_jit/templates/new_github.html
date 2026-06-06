@@ -1,0 +1,64 @@
+{% extends "base.html" %}
+{% block title %}Request GitHub access — iam-jit{% endblock %}
+{% block content %}
+<section class="card narrow">
+  <h1>Request GitHub access</h1>
+  <p class="muted">
+    A scoped, short-lived (≤1h) GitHub token for specific repositories.
+    An approver reviews it before any token is minted; nothing is issued to
+    repositories you don't list.
+  </p>
+
+  {% if errors %}
+  <div class="flash flash-error">
+    <strong>Couldn't submit:</strong>
+    <ul>{% for e in errors %}<li>{{ e }}</li>{% endfor %}</ul>
+  </div>
+  {% endif %}
+
+  <form method="post" action="/requests/new/github">
+    <label for="org">GitHub organization / owner</label>
+    <input type="text" name="org" id="org" required value="{{ form.org or '' }}"
+           placeholder="acme" />
+
+    <label for="repositories">Repositories
+      <span class="muted small">(names only, comma/space separated)</span>
+    </label>
+    <input type="text" name="repositories" id="repositories" required
+           value="{{ form.repositories or '' }}" placeholder="web api" />
+
+    <fieldset>
+      <legend>Access level</legend>
+      <label><input type="radio" name="access" value="read"
+        {% if not form.access or form.access == 'read' %}checked{% endif %} />
+        <strong>Read</strong> — clone/read code, read PRs &amp; issues</label>
+      <label><input type="radio" name="access" value="pull_requests"
+        {% if form.access == 'pull_requests' %}checked{% endif %} />
+        <strong>Pull requests</strong> — open/comment/review PRs (no code push)</label>
+      <label><input type="radio" name="access" value="issues"
+        {% if form.access == 'issues' %}checked{% endif %} />
+        <strong>Issues</strong> — open/comment issues</label>
+      <label><input type="radio" name="access" value="write"
+        {% if form.access == 'write' %}checked{% endif %} />
+        <strong>Write</strong> — push code + open PRs</label>
+    </fieldset>
+
+    <label for="duration_minutes">Duration
+      <span class="muted small">(minutes, max 60 — GitHub's hard cap)</span>
+    </label>
+    <input type="number" name="duration_minutes" id="duration_minutes"
+           min="1" max="60" value="{{ form.duration_minutes or 60 }}" />
+
+    <label for="description">Why do you need this? <span class="muted small">(optional)</span></label>
+    <textarea name="description" id="description" rows="2">{{ form.description or '' }}</textarea>
+
+    <button type="submit">Submit request</button>
+  </form>
+
+  <p class="disclaimer">
+    Only <strong>read</strong> may auto-approve (if your admin enabled it).
+    Anything that can modify — PRs, issues, code — is reviewed by a human unless
+    you have a prior approval on record for that repository.
+  </p>
+</section>
+{% endblock %}

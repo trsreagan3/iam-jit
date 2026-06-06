@@ -33,10 +33,17 @@
         </td>
         <td>{{ r.state }}</td>
         <td>{{ r.owner }}</td>
+        {% if r.kind == "GitHubTokenRequest" %}
+        <td>GitHub: <strong>{{ r.github_access }}</strong></td>
+        <td>{{ r.github_org }}/{{ r.github_repos | join(", ") }}</td>
+        <td>{{ r.github_duration_minutes or 60 }}m</td>
+        <td><span class="muted small">—</span></td>
+        {% else %}
         <td>{{ r.access_type or "—" }}</td>
         <td>{{ r.accounts | join(", ") }}</td>
         <td>{{ r.duration_hours and (r.duration_hours ~ "h") or r.not_after or "—" }}</td>
         <td>{{ risk_badge(r.risk_score) }}</td>
+        {% endif %}
         <td><span class="muted small">{{ r.submitted_at }}</span></td>
       </tr>
       {% endfor %}

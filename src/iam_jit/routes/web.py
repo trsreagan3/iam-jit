@@ -1456,6 +1456,101 @@ def new_paste_submit(
     return RedirectResponse(url=f"/requests/{req['metadata']['id']}", status_code=303)
 
 
+# ---- GitHub repo access (a request KIND in the same flow) ----
+
+
+def _parse_github_repositories(raw: str) -> list[str]:
+    """Split a free-text repo list on commas/whitespace (names only)."""
+    parts = [p.strip() for chunk in (raw or "").split(",") for p in chunk.split()]
+    return [p for p in parts if p]
+
+
+@router.get("/requests/new/github", response_class=HTMLResponse)
+def new_github_form(request: Request) -> Response:
+    user = _try_current_user(request)
+    if user is None:
+        return RedirectResponse(url="/login", status_code=303)
+    return _render(
+        request, "new_github.html", active="new", user=user, extra={"form": {}, "errors": []}
+    )
+
+
+@router.post("/requests/new/github", response_class=HTMLResponse)
+def new_github_submit(
+    request: Request,
+    org: Annotated[str, Form()],
+    repositories: Annotated[str, Form()],
+    access: Annotated[str, Form()] = "read",
+    duration_minutes: Annotated[int, Form()] = 60,
+    description: Annotated[str, Form()] = "",
+) -> Response:
+    user = _try_current_user(request)
+    if user is None:
+        return RedirectResponse(url="/login", status_code=303)
+    form = {
+        "org": org, "repositories": repositories, "access": access,
+        "duration_minutes": duration_minutes, "description": description,
+    }
+    request_store: RequestStore = request.app.state.request_store
+    _cap_result = _check_outstanding_cap(user, request_store)
+    if _cap_result.would_exceed:
+        return _render(
+            request, "new_github.html", active="new", user=user, status_code=429,
+            extra={"form": form, "errors": [
+                f"outstanding_request_cap_exceeded: you have "
+                f"{_cap_result.outstanding_count} outstanding requests "
+                f"(cap = {_cap_result.cap}). Wait for some to complete or cancel "
+                f"existing requests at /."]},
+        )
+
+    repos = _parse_github_repositories(repositories)
+    req = {
+        "apiVersion": "iam-jit.dev/v1alpha1",
+        "kind": "GitHubTokenRequest",
+        "metadata": {
+            "id": _generate_id(),
+            "requester": {
+                "name": user.display_name or user.id,
+                "email": user.id.removeprefix("email:"),
+            },
+        },
+        "spec": {
+            "description": description or "",
+            "github": {
+                "org": org.strip(),
+                "repositories": repos,
+                "access": access,
+                "duration_minutes": int(duration_minutes or 60),
+            },
+        },
+    }
+    errors = schema.validate_request(req)
+    if errors:
+        return _render(
+            request, "new_github.html", active="new", user=user,
+            extra={"form": form, "errors": errors},
+        )
+
+    lifecycle.init_status(req, owner=user)
+    # No risk scorer for GitHub (the access level IS the GitHub functionality).
+    # Auto-approve is governed by the optional admin policy; absent that, the
+    # request lands in the approver queue for human review.
+    from .. import auto_approve_evaluator
+    accounts_store = getattr(request.app.state, "accounts_store", None)
+    try:
+        auto_approve_evaluator.evaluate_and_apply_for_new_request(
+            request=req, user=user, accounts_store=accounts_store,
+            cookie_value=request.cookies.get("iam_jit_session_mfa"),
+        )
+    except Exception:  # noqa: BLE001 — a gate hiccup must never block submission
+        pass
+    request_store.put(req["metadata"]["id"], req)
+    if req.get("status", {}).get("state") == "pending":
+        from .. import approval_notifier
+        approval_notifier.notify_approvers_for_new_request(req)
+    return RedirectResponse(url=f"/requests/{req['metadata']['id']}", status_code=303)
+
+
 # ---- Detail + actions ----
 
 
@@ -1499,23 +1594,38 @@ def detail_page(request_id: str, request: Request) -> Response:
         raise HTTPException(status_code=404)
     if not lifecycle.can_view(req, user):
         raise HTTPException(status_code=403)
-    policy_pretty = json.dumps((req.get("spec") or {}).get("policy") or {}, indent=2)
-    assumer_resolved = assume_mod.resolve_assumer_principal(req) is not None
-    managed_refs = _managed_policy_refs_for_request(req)
-    # Pre-approval CLI preview: show the AWS CLI commands that WOULD be
-    # executed if the request were approved right now. Only relevant for
-    # not-yet-active states; suppress for terminal states or once the
-    # role has actually been provisioned.
-    cli_preview = None
     state = lifecycle.get_state(req)
-    if state in {"pending", "needs_changes", "provisioning_failed"}:
-        try:
-            from .. import provision as provision_mod
+    is_github = (req.get("kind") or "RoleRequest") == "GitHubTokenRequest"
+    # GitHub requests have no IAM policy / assume-role / CLI-preview surface —
+    # skip every AWS-only computation (calling provision_mod.preview on a
+    # GitHub request would error). The once-issued token is read from the
+    # server-only secret field and shown here (the requester sees it via the
+    # claim URL); it is never placed in any list view.
+    github_token = None
+    if is_github:
+        policy_pretty = ""
+        assumer_resolved = True
+        managed_refs = []
+        cli_preview = None
+        if state == "active":
+            github_token = (req.get("status") or {}).get("_secret_github_token")
+    else:
+        policy_pretty = json.dumps((req.get("spec") or {}).get("policy") or {}, indent=2)
+        assumer_resolved = assume_mod.resolve_assumer_principal(req) is not None
+        managed_refs = _managed_policy_refs_for_request(req)
+        # Pre-approval CLI preview: show the AWS CLI commands that WOULD be
+        # executed if the request were approved right now. Only relevant for
+        # not-yet-active states; suppress for terminal states or once the
+        # role has actually been provisioned.
+        cli_preview = None
+        if state in {"pending", "needs_changes", "provisioning_failed"}:
+            try:
+                from .. import provision as provision_mod
 
-            accounts_store = request.app.state.accounts_store
-            cli_preview = provision_mod.preview(req, accounts_store=accounts_store)
-        except Exception:
-            cli_preview = None
+                accounts_store = request.app.state.accounts_store
+                cli_preview = provision_mod.preview(req, accounts_store=accounts_store)
+            except Exception:
+                cli_preview = None
     # #610 — surface the block-with-override flash when the web approve
     # path refused due to blocking issues (the redirect lands here with
     # `?approve_blocked=...&issues=...`). Template renders a structured
@@ -1539,6 +1649,8 @@ def detail_page(request_id: str, request: Request) -> Response:
             "cli_preview": cli_preview,
             "approve_blocked": approve_blocked,
             "approve_blocked_issues": approve_blocked_issues,
+            "is_github": is_github,
+            "github_token": github_token,
         },
     )
 
@@ -1581,7 +1693,12 @@ def _action(action: str, role: str):
         # would have failed at provisioning, and they choose between
         # fixing the issue OR opting in to "approve anyway and watch
         # it land in provisioning_failed."
-        if action == "approve":
+        _is_github = (req.get("kind") or "RoleRequest") == "GitHubTokenRequest"
+        if action == "approve" and not _is_github:
+            # GitHub requests have no IAM-role preview surface; the AWS
+            # blocking-issues gate doesn't apply (running provision.preview on a
+            # GitHub request would falsely report "no accounts/policy" and block
+            # the approval). The mint happens in attempt_provisioning below.
             try:
                 from .. import provision as provision_mod_local
                 accounts_store_for_preview = request.app.state.accounts_store
@@ -1679,6 +1796,58 @@ router.post("/requests/{request_id}/approve")(_action("approve", role="approver"
 router.post("/requests/{request_id}/reject")(_action("reject", role="approver"))
 router.post("/requests/{request_id}/request-changes")(_action("request_changes", role="approver"))
 router.post("/requests/{request_id}/cancel")(_action("cancel", role="owner"))
+
+
+@router.post("/requests/{request_id}/revoke", response_class=HTMLResponse)
+def web_revoke(
+    request_id: str,
+    request: Request,
+    reason: Annotated[str | None, Form()] = None,
+) -> Response:
+    """Browser revoke of an active grant (admin). Handles both kinds: GitHub
+    deletes the installation token; AWS tears down the IAM role. Mirrors the
+    JSON API /revoke so the detail-page button works without JS."""
+    user = _try_current_user(request)
+    if user is None:
+        return RedirectResponse(url="/login", status_code=303)
+    if not user.is_admin:
+        raise HTTPException(status_code=403)
+    store: RequestStore = request.app.state.request_store
+    try:
+        req = store.get(request_id)
+    except NotFoundError:
+        raise HTTPException(status_code=404)
+    reason = (reason or "revoked via web UI").strip() or "revoked via web UI"
+    state = lifecycle.get_state(req)
+    if state not in {"active", "provisioning_failed"}:
+        return RedirectResponse(url=f"/requests/{request_id}", status_code=303)
+
+    if (req.get("kind") or "RoleRequest") == "GitHubTokenRequest":
+        from .requests import _revoke_github_request
+        _revoke_github_request(req, request_id, store=store, actor=user, reason=reason)
+        return RedirectResponse(url=f"/requests/{request_id}", status_code=303)
+
+    from .. import provision as provision_mod_local
+    accounts_store_local = request.app.state.accounts_store
+    try:
+        result = provision_mod_local.revoke(req, accounts_store=accounts_store_local)
+    except Exception:
+        return RedirectResponse(
+            url=f"/requests/{request_id}?approve_blocked=revoke_failed", status_code=303
+        )
+    revocation = {
+        "role_arn": result.role_arn, "role_name": result.role_name,
+        "account_id": result.account_id, "revoked_at": result.revoked_at,
+        "revoked_by": user.id, "reason": reason, "role_existed": result.role_existed,
+        "inline_policies_deleted": list(result.inline_policies_deleted),
+        "aws_cli_replay": list(result.aws_cli_replay),
+    }
+    try:
+        lifecycle.mark_revoked(req, revoked_by=user.id, revocation=revocation)
+    except lifecycle.IllegalTransition:
+        pass
+    store.put(request_id, req)
+    return RedirectResponse(url=f"/requests/{request_id}", status_code=303)
 
 
 # #610 — web-form `/retry-provisioning` endpoint. The template's
