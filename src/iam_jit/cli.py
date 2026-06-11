@@ -610,7 +610,7 @@ def init_solo(
 
     cfg = local_server.LocalServerConfig(
         port=port,
-        data_dir=data_dir or local_server._DEFAULT_DATA_DIR,
+        data_dir=data_dir or local_server._resolve_default_data_dir(),
     )
 
     if print_mcp_config:

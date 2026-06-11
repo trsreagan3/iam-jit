@@ -55,6 +55,15 @@ logger = logging.getLogger("iam_jit.local_server")
 
 
 _DEFAULT_DATA_DIR = pathlib.Path.home() / ".iam-jit"
+
+
+def _resolve_default_data_dir() -> pathlib.Path:
+    """The data dir to use when --data-dir isn't passed: honor the documented
+    IAM_JIT_DATA_DIR env var (already read by doctor / uninstall / the
+    bouncers), else ~/.iam-jit. Resolved at call time so the env var isn't
+    silently ignored by `init-solo` / `serve --local` (UAT F1)."""
+    env = os.environ.get("IAM_JIT_DATA_DIR")
+    return pathlib.Path(env).expanduser() if env else _DEFAULT_DATA_DIR
 _DEFAULT_PORT = 8765
 _DEFAULT_HOST = "127.0.0.1"
 
@@ -479,7 +488,7 @@ def run(
     config = LocalServerConfig(
         host=host,
         port=port,
-        data_dir=data_dir or _DEFAULT_DATA_DIR,
+        data_dir=data_dir or _resolve_default_data_dir(),
     )
 
     print(f"iam-jit local mode")
