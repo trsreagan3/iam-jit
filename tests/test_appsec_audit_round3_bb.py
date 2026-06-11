@@ -448,29 +448,24 @@ def test_bb3_07_docs_swagger_references_broken_openapi(app):
 # BB3-08: Score endpoint rate-limit keys on peer IP — authenticated
 #         users behind shared NAT share the bucket.
 # ---------------------------------------------------------------------
-def test_bb3_09_preview_reflects_raw_user_input_in_error(app):
-    """`POST /api/v1/requests/preview` with a malformed body returns
-    200 with a `schema_errors` array. The error strings include the
-    user's raw input (e.g. `{'description': '<script>alert(1)</
-    script>'} is not valid under any of the given schemas`). The
-    Content-Type is application/json so a browser won't render the
-    <script>, but downstream consumers (markdown-rendering admin
-    log viewer, Slack webhook relay, error-tracking SaaS) might.
+def test_bb3_09_preview_does_not_reflect_raw_user_input_in_error(app):
+    """`POST /api/v1/requests/preview` with a malformed body returns 200 with a
+    `schema_errors` array. Those error strings can echo the user's raw input
+    (jsonschema includes offending values); a downstream markdown log viewer /
+    Slack relay / error-tracking SaaS might render it. FIXED (BB3-09): the
+    schema-error strings are HTML-escaped before returning, so a raw
+    `<script>` can never round-trip.
 
-    Severity: LOW (defense-in-depth; depends on downstream rendering).
-
-    Fix sketch: don't echo the user's value in the schema-error
-    string — emit `field 'description' is invalid` without the
-    value, OR escape <,>,& in error bodies."""
+    Severity: LOW (defense-in-depth). This test now pins the FIX."""
     dev = _client_as(app, "email:dev@example.com")
     payload = {"spec": {"description": "<script>alert(1)</script>"}}
     r = dev.post("/api/v1/requests/preview", json=payload)
     assert r.status_code == 200
     body_text = r.text
-    # Currently broken: the raw <script> tag round-trips.
-    assert "<script>alert(1)</script>" in body_text, (
-        f"expected raw input reflection (current broken behavior); "
-        f"body: {body_text[:500]}"
+    # Fixed: the raw <script> tag must NOT round-trip. If the value is echoed at
+    # all it is HTML-escaped (&lt;script&gt;...), which a renderer won't execute.
+    assert "<script>alert(1)</script>" not in body_text, (
+        f"raw input reflection regressed (BB3-09); body: {body_text[:500]}"
     )
 
 

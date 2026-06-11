@@ -565,8 +565,15 @@ def preview_request(
                 f"auto-approve. Details: {auto_decision.details}."
             )
 
+    # BB3-09 fix: HTML-escape the schema-error strings before returning. They
+    # can echo the user's raw input (jsonschema includes offending values), and
+    # while the JSON Content-Type stops a browser rendering it, a downstream
+    # markdown log viewer / Slack relay / error-tracking SaaS might. Escaping
+    # <,>,& neutralizes the reflected-XSS class without losing the error text.
+    import html as _html
+
     return {
-        "schema_errors": schema_errors,
+        "schema_errors": [_html.escape(str(e)) for e in schema_errors],
         "review": analysis_dict,
         "auto_approve_threshold": threshold,
         "would_auto_approve": (

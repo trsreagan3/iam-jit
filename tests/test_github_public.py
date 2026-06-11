@@ -108,6 +108,15 @@ def test_json_api_rejects_unknown_claim(client) -> None:
     assert client.get("/api/v1/github/requests/ghr-nope.bad").status_code == 404
 
 
+def test_coming_soon_when_feature_disabled(client, monkeypatch) -> None:
+    """Default self-host ships GitHub OFF ('coming soon'): the routes are gated."""
+    monkeypatch.delenv("IAM_JIT_GITHUB_ENABLED", raising=False)
+    assert client.get("/github/request").status_code == 404
+    assert client.post("/github/request", data=_form(), follow_redirects=False).status_code == 404
+    assert client.post("/api/v1/github/requests", json={"org": "a", "repositories": ["r"],
+                       "permissions": {"contents": "read"}}).status_code == 404
+
+
 def test_remember_issues_key_then_future_request_auto_issues(
     shared_app, client, as_admin, fake_github, tmp_path, monkeypatch
 ) -> None:

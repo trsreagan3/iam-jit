@@ -78,7 +78,18 @@ def _ctx(
         "health_issues": health_issues,
         "ticket_required": ticket_required,
         "ticket_hint": ticket_hint,
+        "github_enabled": github_feature_enabled(),
         **(extra or {}),
+    }
+
+
+def github_feature_enabled() -> bool:
+    """GitHub scoped-token access is gated behind IAM_JIT_GITHUB_ENABLED (default
+    OFF = 'coming soon'). The free self-host launch ships with it visible-but-
+    dimmed; an operator (e.g. the demo instance) flips it on once the live
+    GitHub-App UAT is done. Gates both the UI entry points and the routes."""
+    return (os.environ.get("IAM_JIT_GITHUB_ENABLED") or "").strip().lower() in {
+        "1", "true", "yes", "on",
     }
 
 
@@ -1492,6 +1503,8 @@ def new_github_form(request: Request) -> Response:
     user = _try_current_user(request)
     if user is None:
         return RedirectResponse(url="/login", status_code=303)
+    if not github_feature_enabled():  # coming soon — gate the entry point
+        return RedirectResponse(url="/requests/new", status_code=303)
     return _render(
         request, "new_github.html", active="new", user=user,
         extra={"form": {}, "errors": [], **_github_form_meta()},
@@ -1503,6 +1516,8 @@ async def new_github_submit(request: Request) -> Response:
     user = _try_current_user(request)
     if user is None:
         return RedirectResponse(url="/login", status_code=303)
+    if not github_feature_enabled():
+        return RedirectResponse(url="/requests/new", status_code=303)
     from .. import github_scope
 
     raw = await request.form()

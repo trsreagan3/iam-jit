@@ -28,11 +28,21 @@ from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse, Resp
 from .. import github_scope, lifecycle, schema
 from ..store import NotFoundError, RequestStore
 from ..users_store import User
-from .web import _ctx, _parse_github_repositories
+from .web import _ctx, _parse_github_repositories, github_feature_enabled
 from .web import _parse_advanced_permissions as _parse_adv
 from .web import templates as _templates  # reuse the same Jinja env
 
 router = APIRouter(include_in_schema=False)
+
+_SOON = "GitHub access requests are coming soon."
+
+
+def _soon_web() -> Response:
+    return Response(_SOON, status_code=404, media_type="text/plain")
+
+
+def _soon_api() -> Response:
+    return JSONResponse({"error": "github_access_coming_soon"}, status_code=404)
 
 
 def _form_meta() -> dict[str, Any]:
@@ -161,11 +171,15 @@ def _public_view(req: dict) -> dict[str, Any]:
 
 @router.get("/github/request", response_class=HTMLResponse)
 def github_public_form(request: Request) -> Response:
+    if not github_feature_enabled():
+        return _soon_web()
     return _render(request, "github_public.html", form={}, errors=[], **_form_meta())
 
 
 @router.post("/github/request", response_class=HTMLResponse)
 async def github_public_submit(request: Request) -> Response:
+    if not github_feature_enabled():
+        return _soon_web()
     raw = await request.form()
     store: RequestStore = request.app.state.request_store
     permissions = _build_permissions(raw)
@@ -188,6 +202,8 @@ async def github_public_submit(request: Request) -> Response:
 
 @router.get("/github/claim/{claim:path}", response_class=HTMLResponse)
 def github_public_claim(claim: str, request: Request) -> Response:
+    if not github_feature_enabled():
+        return _soon_web()
     store: RequestStore = request.app.state.request_store
     req = _load_by_claim(store, claim)
     if req is None:
@@ -200,6 +216,8 @@ def github_public_claim(claim: str, request: Request) -> Response:
 
 @router.post("/api/v1/github/requests")
 async def github_public_api_submit(request: Request) -> Response:
+    if not github_feature_enabled():
+        return _soon_api()
     try:
         body = await request.json()
     except Exception:
@@ -229,6 +247,8 @@ async def github_public_api_submit(request: Request) -> Response:
 
 @router.get("/api/v1/github/requests/{claim:path}")
 def github_public_api_status(claim: str, request: Request) -> Response:
+    if not github_feature_enabled():
+        return _soon_api()
     store: RequestStore = request.app.state.request_store
     req = _load_by_claim(store, claim)
     if req is None:

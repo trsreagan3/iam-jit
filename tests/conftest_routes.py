@@ -84,6 +84,9 @@ def client_env(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("IAM_JIT_AUTH_MODE", "local")
     monkeypatch.setenv("IAM_JIT_DEV_INSECURE_SECRET", "1")
     monkeypatch.setenv("IAM_JIT_MAGIC_LINK_SECRET", _DEV_SECRET)
+    # GitHub access is gated behind this flag (default OFF = "coming soon");
+    # route tests exercise the live feature, so enable it.
+    monkeypatch.setenv("IAM_JIT_GITHUB_ENABLED", "1")
 
 
 @pytest.fixture

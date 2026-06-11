@@ -17,17 +17,25 @@
         see those things by design.
       </p>
     </a>
+    {% if github_enabled %}
     <a class="card pickable" href="/requests/new/github">
       <h2>GitHub repo access</h2>
       <p>Request a scoped, short-lived (≤1h) GitHub token for specific
-        repositories. Pick the repos and the access level; an approver
+        repositories. Pick the repos and the permissions; an approver
         issues a least-privilege token.</p>
       <p class="tip">
-        <strong>Read</strong> clones code; higher levels (open PRs, file
+        <strong>Read</strong> clones code; higher permissions (open PRs, file
         issues, push code) are elevations and usually need a prior approval
         on record.
       </p>
     </a>
+    {% else %}
+    <div class="card" style="opacity:.45;cursor:not-allowed" title="coming soon">
+      <h2>GitHub repo access <small class="muted">— coming soon</small></h2>
+      <p>Scoped, short-lived (≤1h) GitHub tokens for specific repositories —
+        same request &amp; approval flow as AWS. Landing shortly.</p>
+    </div>
+    {% endif %}
   </div>
 
   <p class="disclaimer">
