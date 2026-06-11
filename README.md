@@ -57,16 +57,30 @@ make claim-bootstrap
 This signs you in as the bootstrap admin and narrows the network allowlist from
 `0.0.0.0/0` to your current IP. Open the Function URL in your browser — you're in.
 
-**3. Point your agent at it.** Install the CLI, then wire the MCP server so your
-agent can request scoped roles for itself:
+**3. Point your agent at it.** Install the CLI, then wire iam-jit's MCP server so
+your agent can request scoped roles for itself:
 
 ```bash
 pipx install git+https://github.com/trsreagan3/iam-jit.git   # or: curl -fsSL https://raw.githubusercontent.com/trsreagan3/iam-jit/main/install.sh | sh
-iam-jit mcp install-claude-code      # also: install-cursor / install-codex / install-devin
+iam-jit mcp install-claude-code      # writes the Claude Code MCP config
 ```
 
-For any other MCP client, `iam-jit mcp show-config` prints the raw snippet; see
+For Cursor, Codex, Devin, or any other MCP client, `iam-jit mcp show-config`
+prints the raw JSON snippet to paste into that client's config; see
 [docs/MCP-RECIPES.md](docs/MCP-RECIPES.md).
+
+So the agent can actually **submit** to your deployed instance (not just score
+locally), its MCP server entry needs two env vars — the deploy's Function URL and
+an API token:
+
+```jsonc
+// add to the "iam-jit" entry in your client's mcpServers config
+"env": { "IAM_JIT_URL": "https://<your-function-url>", "IAM_JIT_TOKEN": "<api-token>" }
+```
+
+Without them the agent can score policies but its submit calls return a no-op
+"would-submit" body. See [docs/MCP-RECIPES.md](docs/MCP-RECIPES.md) for issuing a
+token and the full per-client wiring.
 
 Full walkthrough (App config, edge protection, Bedrock, custom domain):
 **[docs/GETTING-STARTED.md](docs/GETTING-STARTED.md)** and

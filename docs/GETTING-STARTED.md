@@ -182,22 +182,30 @@ aws cloudformation describe-stacks --profile iam-jit \
   --query 'Stacks[0].Outputs' --output table
 ```
 
-Test the score endpoint:
+Confirm the instance is up:
 
 ```bash
 URL=$(aws cloudformation describe-stacks --profile iam-jit \
   --stack-name iam-jit-mvp --query 'Stacks[0].Outputs[?OutputKey==`ApiFunctionUrl`].OutputValue' \
   --output text)
 
-curl -X POST "$URL/api/v1/score" \
-  -H "Content-Type: application/json" \
-  -d '{"policy":{"Version":"2012-10-17","Statement":[{"Effect":"Allow","Action":["s3:DeleteBucket"],"Resource":["*"]}]},"access_type":"read-write"}'
+curl -s "$URL/healthz"
 ```
 
-You should see a JSON response with `"score": 7`, `"tier": "high"`, factors, and suggestions.
+You should see `{"status":"ok","version":"…"}`. Then open `$URL` in your browser
+and sign in to reach the web UI, and run `make claim-bootstrap` to claim the first
+admin + lock the network allowlist to your IP.
 
-**You're live.** The score endpoint is public; rate-limited at 30
-req/min per IP; doesn't invoke any LLM.
+**You're live.**
+
+> **Scoring a policy?** iam-jit no longer exposes a public `/api/v1/score` HTTP
+> endpoint (the hosted scoring API was dropped per [[no-hosted-saas]]). To score a
+> policy offline, use the bundled CLI — no server, no AWS needed:
+> ```bash
+> iam-risk-score my-policy.json
+> ```
+> Inside the running app, scoring happens automatically when a request is
+> previewed/submitted through the web UI, JSON API, or MCP server.
 
 ---
 

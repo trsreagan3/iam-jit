@@ -586,15 +586,23 @@ A successful response means the trust path is correct. If you get `AccessDenied`
 
 ## Step 7 — create a first user API token
 
-Once Phase 1b's API is built (the `/api/v1/tokens` endpoint), run:
+After `make claim-bootstrap` (or signing into the web UI at
+`https://<api-function-url>/` as the bootstrap admin), create an API token from
+the **Tokens** page in the UI. The raw token is shown exactly once — copy it.
+
+Programmatic equivalent — `POST /api/v1/tokens` mints a token for the
+*authenticated caller* (use an existing session cookie or token, not a
+bootstrap secret):
 
 ```bash
 curl -X POST https://<api-function-url>/api/v1/tokens \
-  -H "Authorization: Bearer <bootstrap-secret>" \
-  -d '{"user_email": "you@example.com"}'
+  -H "Authorization: Bearer <existing-token>" \
+  -H "Content-Type: application/json" \
+  -d '{"label": "claude-code"}'
 ```
 
-The response includes the API token and a sample MCP server config block to drop into `~/.claude/claude_desktop_config.json` or your editor's MCP config.
+Use the resulting token as `IAM_JIT_TOKEN` for the MCP server (with `IAM_JIT_URL`
+set to your Function URL) so an agent can submit requests to this instance.
 
 ## Step 8 — submit a test request
 
@@ -615,7 +623,7 @@ The agent calls `submit_role_request`, the response includes the request ID and 
 curl -X POST https://<api-function-url>/api/v1/requests \
   -H "Authorization: Bearer <your-token>" \
   -H "Content-Type: application/json" \
-  -d @examples/example-request.yaml.json
+  -d @examples/example-request.json
 ```
 
 ## Step 9 — approve / verify provisioning
