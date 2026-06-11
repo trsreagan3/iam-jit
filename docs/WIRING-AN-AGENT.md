@@ -1,8 +1,28 @@
 # Wiring an agent through any bouncer
 
+> **The Bounce suite is beta** — not yet recommended for production, and
+> intentionally left out of the main README. It's defense-in-depth that gates an
+> agent's *outbound* calls at runtime, alongside iam-jit's IAM scoping. This page
+> is for people who want to experiment.
+
 One page, four bouncers, one mental model: **start the bouncer, then point the
 agent's client at it.** Each bouncer intercepts a different protocol, so the
 "point the client at it" step differs — but the shape is always the same.
+
+## Install the Go bouncers (beta)
+
+`ibounce` ships with iam-jit (Python). The other three are separate Go binaries.
+With a Go toolchain (Go ≥ 1.26; auto-fetched via `GOTOOLCHAIN` on Go 1.21+):
+
+```bash
+go install github.com/trsreagan3/kbouncer/cmd/kbounce@latest
+go install github.com/trsreagan3/dbounce/cmd/dbounce@latest
+go install github.com/trsreagan3/gbounce/cmd/gbounce@latest
+```
+
+Binaries land in `$GOPATH/bin` (defaults to `$HOME/go/bin`); add that to your
+`PATH`. Homebrew tap + version pinning: [INSTALL-HOMEBREW.md](INSTALL-HOMEBREW.md).
+These are the same paste-ready commands `iam-jit doctor install-check` prints.
 
 If you only run one bouncer, you only need that one row. Most cloud-only setups
 just need ibounce (the `AWS_ENDPOINT_URL` row).
