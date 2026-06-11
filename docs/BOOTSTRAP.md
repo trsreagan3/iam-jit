@@ -220,22 +220,25 @@ GitOps-style deployments; the trade-off is that **agents cannot add
 users** (they need a writable backend). If your agents need to add
 users, use Path 1.
 
-## Path 3: Local dev (`iam-jit serve`)
+## Path 3: Local dev / solo (`iam-jit serve --local`)
+
+The fastest local path. `init-solo` bootstraps a data dir, a solo admin user,
+and an API token; `serve --local` runs it with the magic-link shown on-screen
+(no email needed). Use `--data-dir` on both to isolate this instance's state.
 
 ```bash
-# One-shot seed
-.venv/bin/iam-jit seed-admin \
-  --email you@example.com \
-  --users-file ./dev-users.yaml
+# bootstrap (needs your 12-digit AWS account id; auto-detected if aws is configured)
+iam-jit init-solo --account-id 123456789012 --data-dir ./dev-data
 
-# Now run the server pointed at the same file
-IAM_JIT_DEV_INSECURE_SECRET=1 \
-.venv/bin/iam-jit serve --users-file ./dev-users.yaml
+# run it, then open the Web UI
+iam-jit serve --local --data-dir ./dev-data
+#   -> open http://127.0.0.1:8765/ and sign in (the magic link is shown on the page)
 ```
 
-The CLI creates `dev-users.yaml` if missing and appends the admin record.
-Re-running with the same email is a no-op — you'll see "User … already in
-… — no change."
+Scoring / preview / gating / audit work with no AWS access; issuing a real IAM
+role additionally needs valid AWS credentials + a provisioner role in that
+account (otherwise requests land in `provisioning_failed`). Just want a score?
+`iam-risk-score path/to/policy.json` — zero setup.
 
 ## Path 3.5: "I just want to try it" — random-fallback bootstrap
 

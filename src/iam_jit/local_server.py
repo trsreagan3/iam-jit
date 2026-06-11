@@ -243,10 +243,17 @@ def _seed_local_accounts(
             account_id = str(ident.get("Account") or "")
         except Exception as e:
             raise LocalServeAccountResolutionError(
-                f"could not resolve AWS account from default credentials: {e}. "
-                "Pass --account-id <12-digit-id> to serve --local, or "
-                "configure AWS credentials (aws configure / AWS_PROFILE / "
-                "instance metadata) before retrying."
+                "no AWS credentials found, so the AWS account id can't be "
+                f"auto-detected ({e}).\n"
+                "  • To set up the JIT server, pass your 12-digit AWS account id:\n"
+                "        iam-jit init-solo --account-id 123456789012\n"
+                "    (find it in the AWS console top-right, or `aws sts "
+                "get-caller-identity`).\n"
+                "  • Issuing REAL IAM roles also needs working AWS credentials + a\n"
+                "    provisioner role in that account; without them, requests will\n"
+                "    score + gate fine but provisioning will fail (expected locally).\n"
+                "  • Just want to SCORE a policy with no AWS at all? Skip the server:\n"
+                "        iam-risk-score path/to/policy.json"
             ) from e
         if not account_id or account_id == "000000000000":
             raise LocalServeAccountResolutionError(
@@ -506,8 +513,26 @@ def run(
         app, raw_token=raw_token, admin_user_id=admin_user_id,
     )
 
+    # Friendly pre-bind check so a port clash gives an actionable message
+    # BEFORE the "Listening on…" banner (which would otherwise print right
+    # before uvicorn crashes with a bare Errno 48 — UAT B3).
+    import socket as _socket
+    _probe = _socket.socket(_socket.AF_INET, _socket.SOCK_STREAM)
+    _probe.setsockopt(_socket.SOL_SOCKET, _socket.SO_REUSEADDR, 1)
+    try:
+        _probe.bind((host, port))
+    except OSError:
+        print(f"ERROR: port {port} on {host} is already in use.")
+        print(f"  Another iam-jit (or another process) is likely running there.")
+        print(f"  Start on a free port:   iam-jit serve --local --port {port + 1}")
+        print(f"  or stop whatever is using {host}:{port} first.")
+        return 1
+    finally:
+        _probe.close()
+
     print(f"")
     print(f"  Listening on http://{host}:{port}")
+    print(f"  Web UI:      open http://{host}:{port}/ in your browser (sign in to submit requests)")
     print(f"")
     # WB11-04 closure: do NOT echo the raw token to stdout. The
     # token is a long-lived credential that bridges to AWS via

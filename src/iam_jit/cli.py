@@ -652,8 +652,9 @@ def init_solo(
     click.echo("")
     click.echo("Next steps:")
     click.echo("")
-    click.echo("  1. Start the server:")
+    click.echo("  1. Start the server, then open the Web UI in your browser:")
     click.echo(f"       iam-jit serve --local --port {cfg.port}")
+    click.echo(f"       # then visit http://127.0.0.1:{cfg.port}/ and sign in")
     click.echo("")
     click.echo("  2. Tell Claude Code about the iam-jit MCP server.")
     click.echo("     Add this to your Claude Code MCP config")
@@ -665,6 +666,12 @@ def init_solo(
     click.echo("  3. In Claude Code, just ask for what you need.")
     click.echo("     The agent will route AWS access requests through")
     click.echo("     iam-jit (scoped, time-bound, audited).")
+    click.echo("")
+    click.echo("  Note: scoring, preview, gating + the audit trail work with no")
+    click.echo("  AWS access. ISSUING a real IAM role additionally needs valid AWS")
+    click.echo("  credentials + a provisioner role in this account — without them a")
+    click.echo("  request will score + auto-decide but land in 'provisioning_failed'")
+    click.echo("  (expected in local demo). See docs/GETTING-STARTED.md.")
     click.echo("")
 
     # #626 Phase 2 — install-check at end of init-solo. Same shape as

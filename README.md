@@ -37,12 +37,16 @@ curl -fsSL https://raw.githubusercontent.com/trsreagan3/iam-jit/main/install.sh 
 Installs `iam-jit` + `ibounce`. Add Go bouncers in the same run with
 `IAM_JIT_BOUNCERS=ibounce,kbounce,dbounce,gbounce` (see [G8](#go-bouncers-kbounce--dbounce--gbounce) below).
 
-**Homebrew tap (macOS + Linux — recommended for the Go bouncers):**
+**Homebrew tap (macOS + Linux — for the Go bouncers):**
 
 ```bash
 brew tap trsreagan3/tap
-brew install trsreagan3/tap/iam-jit     # iam-jit + ibounce + iam-risk-score
+brew install --HEAD trsreagan3/tap/iam-jit     # iam-jit + ibounce + iam-risk-score
 ```
+
+> Use `--HEAD` until tagged releases land — the versioned formulas still carry
+> placeholder checksums (a tagged `brew install …/iam-jit` will fail a sha256
+> check). For the most reliable install today, prefer **pipx** (below).
 
 See [docs/INSTALL-HOMEBREW.md](docs/INSTALL-HOMEBREW.md) for the Go bouncers + version pinning.
 
@@ -143,12 +147,18 @@ Four products ship under the iam-jit brand. Pick the one that fits.
 
 | # | Product | One-line install | What it is |
 |---|---|---|---|
-| 1 | **iam-risk-score** | `iam-risk-score my-policy.json` | Offline 1–10 risk score for any AWS IAM policy. CLI + Python lib + GitHub Action. |
-| 2 | **ibounce** | `ibounce init && ibounce run` | Local proxy gating every AWS API call against a rule set. Defense-in-depth over IAM scoping. |
-| 3 | **iam-jit local** | `iam-jit init-solo && iam-jit serve --local` | Local-only safety layer between your agent and AWS. Zero SaaS dependency. |
+| 1 | **iam-risk-score** | `iam-risk-score my-policy.json` | Offline 1–10 risk score for any AWS IAM policy. CLI + Python lib + GitHub Action. **No AWS needed.** |
+| 2 | **ibounce** | `ibounce init && ibounce run --audit-log-path ~/.iam-jit/ibounce/audit.jsonl` | Local proxy gating every AWS API call against a rule set. Defense-in-depth over IAM scoping. |
+| 3 | **iam-jit local** | `iam-jit init-solo --account-id <YOUR_AWS_ACCT_ID> && iam-jit serve --local` | Local-only safety layer between your agent and AWS, with a web UI at `http://127.0.0.1:8765/`. Zero SaaS dependency. |
 | 4 | **iam-jit self-host** | `git clone && sam build && sam deploy --guided` | Full JIT-IAM provisioner running in your own AWS account. |
 
 All four share the same deterministic scoring engine. Open source under Apache 2.0.
+
+**First-run notes for #3 (iam-jit local):**
+- It needs your **12-digit AWS account id** (`--account-id`; auto-detected if `aws` is already configured). The account id is in the AWS console (top-right) or `aws sts get-caller-identity`.
+- After `serve --local`, **open `http://127.0.0.1:8765/` in your browser** and sign in (in local mode the magic-link is shown on-screen — no email needed).
+- **Scoring, preview, gating, and the audit trail work with no AWS access.** *Issuing* a real IAM role additionally needs valid AWS credentials + a provisioner role in that account; without them a request scores + auto-decides but lands in `provisioning_failed` (expected for a local demo). Just want scores? Use #1 (`iam-risk-score`) — zero setup.
+- Port already in use? `iam-jit serve --local --port 8766`.
 
 **No multi-tenant hosted SaaS.** iam-jit-the-company runs zero shared infrastructure. The scorer is an offline CLI + library (no hosted API). The other three products run on your laptop or in your own AWS account. See [docs/FEATURES.md](docs/FEATURES.md) for the rationale.
 
