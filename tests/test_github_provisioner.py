@@ -101,7 +101,7 @@ def test_mint_refuses_empty_permissions() -> None:
 def test_mint_surfaces_github_error() -> None:
     pem, _ = _keypair()
 
-    def handler(request: httpx.Request) -> httpx.Response:
+    def handler(_request: httpx.Request) -> httpx.Response:
         return httpx.Response(422, json={"message": "repository not accessible by integration"})
 
     p = _provisioner(handler, private_pem=pem)

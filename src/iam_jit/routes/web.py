@@ -1833,8 +1833,11 @@ def _action(action: str, role: str):
                     github_autoapprove.SavedApprovalStore().remember(
                         rk, gh["repositories"], gh["permissions"])
                     req.setdefault("status", {})["_issued_requester_key"] = rk
-                except Exception:  # noqa: BLE001 — remember is best-effort
-                    pass
+                except Exception:
+                    import logging
+                    logging.getLogger("iam_jit.github").warning(
+                        "save-approval (remember) failed for %s; grant still issued",
+                        request_id, exc_info=True)
 
         store.put(request_id, req)
         return RedirectResponse(url=f"/requests/{request_id}", status_code=303)
@@ -1895,8 +1898,10 @@ def web_revoke(
     }
     try:
         lifecycle.mark_revoked(req, revoked_by=user.id, revocation=revocation)
-    except lifecycle.IllegalTransition:
-        pass
+    except lifecycle.IllegalTransition as e:
+        import logging
+        logging.getLogger("iam_jit.provisioning").warning(
+            "web revoke: mark_revoked rejected for %s: %s", request_id, e)
     store.put(request_id, req)
     return RedirectResponse(url=f"/requests/{request_id}", status_code=303)
 

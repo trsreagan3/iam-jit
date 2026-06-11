@@ -105,8 +105,11 @@ def _submit_common(
         try:
             from .. import approval_notifier
             approval_notifier.notify_approvers_for_new_request(req)
-        except Exception:  # noqa: BLE001 — notifier failure must not block submit
-            pass
+        except Exception:
+            import logging
+            logging.getLogger("iam_jit.github").warning(
+                "approver notification failed for %s (request still queued)",
+                req["metadata"].get("id"), exc_info=True)
     return req, []
 
 
@@ -123,7 +126,7 @@ def _load_by_claim(store: RequestStore, claim: str) -> dict | None:
     try:
         req = store.get(rid)
     except NotFoundError:
-        return None
+        return None  # noqa: SD-4 — None IS the not-found signal; caller renders 404
     stored = (req.get("status") or {}).get("_claim_secret") or ""
     if not stored or not hmac.compare_digest(stored, secret):
         return None

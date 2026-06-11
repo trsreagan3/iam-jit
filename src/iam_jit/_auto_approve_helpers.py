@@ -340,7 +340,7 @@ def _attempt_github_provisioning(
     except Exception as e:  # noqa: BLE001 — terminal-state guarantee
         logger_p.warning("github token mint failed: %s", e)
         safe_mark_failed(req, f"github token mint failed: {e}", lifecycle=lifecycle)
-        return
+        return  # noqa: SD-4 — outcome is signalled via req state (provisioning_failed), not return
 
     try:
         now = _dt.datetime.now(_dt.UTC)

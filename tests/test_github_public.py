@@ -18,7 +18,7 @@ pytest_plugins = ["tests.conftest_routes"]
 def fake_github(monkeypatch):
     captured = {}
 
-    def fake_mint(*, installations_path, org, repositories, permissions, http=None, now=None):
+    def fake_mint(*, org, repositories, permissions, **_):
         captured["mint"] = {"org": org, "repos": repositories, "permissions": permissions}
         return SimpleNamespace(token="ghs_anon_secret", repositories=tuple(repositories),
                                permissions=permissions, expires_at="2099-01-01T00:00:00Z")
@@ -79,9 +79,10 @@ def test_approval_reveals_token_on_claim_page(shared_app, client, as_admin, fake
     # now the claim page shows the token once
     page = client.get(loc)
     assert page.status_code == 200 and "ghs_anon_secret" in page.text
+    assert fake_github.get("mint")  # the stubbed mint was actually invoked (no real GitHub call)
 
 
-def test_json_api_submit_and_poll(shared_app, client, as_admin, fake_github) -> None:
+def test_json_api_submit_and_poll(client, as_admin, fake_github) -> None:
     r = client.post("/api/v1/github/requests", json={
         "org": "acme", "repositories": ["web"], "permissions": {"contents": "read"},
         "duration_minutes": 20, "requester_name": "bot",
@@ -100,6 +101,7 @@ def test_json_api_submit_and_poll(shared_app, client, as_admin, fake_github) -> 
     assert s2["state"] == "active" and s2["token"] == "ghs_anon_secret"
     # the claim secret itself is never echoed back in the view
     assert "_claim_secret" not in s2
+    assert fake_github.get("mint")  # stubbed mint invoked
 
 
 def test_json_api_rejects_unknown_claim(client) -> None:
@@ -146,3 +148,4 @@ def test_remember_issues_key_then_future_request_auto_issues(
                        follow_redirects=False).headers["location"]
     rid3 = loc3.split("/github/claim/", 1)[1].split(".", 1)[0]
     assert shared_app.state.request_store.get(rid3)["status"]["state"] == "pending"
+    assert fake_github.get("mint")  # auto-issue used the stubbed mint

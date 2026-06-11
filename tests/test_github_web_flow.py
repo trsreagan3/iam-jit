@@ -16,12 +16,12 @@ pytest_plugins = ["tests.conftest_routes"]
 def fake_github(monkeypatch):
     captured = {}
 
-    def fake_mint(*, installations_path, org, repositories, permissions, http=None, now=None):
+    def fake_mint(*, org, repositories, permissions, **_):
         captured["mint"] = {"org": org, "repos": repositories, "permissions": permissions}
         return SimpleNamespace(token="ghs_web_secret", repositories=tuple(repositories),
                                permissions=permissions, expires_at="2099-01-01T00:00:00Z")
 
-    def fake_revoke(*, installations_path, org, token, http=None, now=None):
+    def fake_revoke(*, org, token, **_):
         captured["revoke"] = {"org": org, "token": token}
 
     monkeypatch.setattr("iam_jit.github_scope.mint_github_token", fake_mint)
@@ -39,7 +39,7 @@ def _submit(client, perms=None, **over):
     return client.post("/requests/new/github", data=data, follow_redirects=False)
 
 
-def test_submit_lands_in_shared_queue_as_pending(shared_app, as_dev, as_admin, fake_github):
+def test_submit_lands_in_shared_queue_as_pending(shared_app, as_dev, as_admin):
     r = _submit(as_dev)
     assert r.status_code == 303, r.text
     loc = r.headers["location"]
@@ -55,7 +55,7 @@ def test_submit_lands_in_shared_queue_as_pending(shared_app, as_dev, as_admin, f
     assert rid in q.text and "acme/web" in q.text and "contents:write" in q.text
 
 
-def test_detail_renders_without_aws_fields(as_dev, fake_github):
+def test_detail_renders_without_aws_fields(as_dev):
     rid = _submit(as_dev).headers["location"].rsplit("/", 1)[-1]
     d = as_dev.get(f"/requests/{rid}")
     assert d.status_code == 200
@@ -86,7 +86,7 @@ def test_approve_mints_token_shown_once_then_revoke(shared_app, as_dev, as_admin
     assert fake_github["revoke"]["token"] == "ghs_web_secret"
 
 
-def test_new_request_page_offers_github_option(as_dev, fake_github):
+def test_new_request_page_offers_github_option(as_dev):
     page = as_dev.get("/requests/new")
     assert page.status_code == 200
     assert "GitHub repo access" in page.text
