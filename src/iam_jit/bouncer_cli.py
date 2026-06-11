@@ -5558,6 +5558,15 @@ def run_cmd(
         # operator immediately sees the operating shape on every start.
         # Cross-product parity with kbouncer + dbounce + gbounce per
         # [[cross-product-agent-parity]].
+        # The Bounce suite is BETA — not yet recommended for production.
+        # Surface that on every start so operators aren't surprised.
+        click.secho(
+            "ibounce (beta): runtime AWS-call gate — defense-in-depth "
+            "alongside iam-jit IAM scoping. Not yet recommended for "
+            "production; see docs/WIRING-AN-AGENT.md.",
+            err=True,
+            fg="yellow",
+        )
         click.echo(
             f"ibounce proxy starting on http://{host}:{port} "
             f"(mode={mode}, default-policy={default_policy}, "

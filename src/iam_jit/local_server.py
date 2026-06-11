@@ -535,7 +535,7 @@ def run(
         print(f"  Another iam-jit (or another process) is likely running there.")
         print(f"  Start on a free port:   iam-jit serve --local --port {port + 1}")
         print(f"  or stop whatever is using {host}:{port} first.")
-        return 1
+        return 1  # noqa: SD-4 — CLI exit code: nonzero == failure, surfaced by click as the process exit status; no caller ambiguity.
     finally:
         _probe.close()
 

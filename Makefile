@@ -10,11 +10,12 @@ CFN_LINT := .venv/bin/cfn-lint
 # to wonder whether they need to fix it before continuing.
 export PYTHONWARNINGS = ignore::UserWarning:samtranslator.compat
 
-.PHONY: test recordings recordings-clean deploy-dry-run sync-lambda-data claim-bootstrap
+.PHONY: test recordings recordings-clean deploy-dry-run sam-build deploy-self-host sync-lambda-data claim-bootstrap
 
-# One-shot operator command — run immediately after deploying the
-# destination-account CFN (`infrastructure/cloudformation/destination-
-# account-roles.yaml`). Auto-claims the bootstrap admin, opens the
+# One-shot operator command — run immediately after `sam deploy`
+# (or after deploying the destination-account CFN
+# `infrastructure/cloudformation/destination-account-roles.yaml`).
+# Auto-claims the bootstrap admin, opens the
 # operator's browser signed in, and (when the magic-link is clicked)
 # narrows the ALB security group from 0.0.0.0/0 to the operator's
 # actual IP.
@@ -94,19 +95,73 @@ test-all-modes: test-noai test-llm
 	@echo "Both NoAI + LLM modes passed."
 
 # Copy schemas + destination-account CFN into src/iam_jit/ so the
-# pip-installable wheel ships them alongside the package. Idempotent.
-# (Previously this also fed the hosted Lambda bundle; the hosted
-# Lambda was dropped 2026-05-24 per [[no-hosted-saas]] restoration.
-# The script remains useful for sdist/wheel packaging.)
+# Lambda bundle (and the pip-installable wheel) ship them alongside
+# the package. Idempotent. Runs before `sam build` — the bare `sam
+# build` would produce a bundle missing schemas/ + the destination
+# CFN that the FastAPI app needs at request-validation time.
 sync-lambda-data:
 	./scripts/sync-lambda-data.sh
 
-# `sam-build` + `deploy-mvp` targets were removed on 2026-05-24
-# when the hosted iam-risk-score Lambda was dropped per
-# [[no-hosted-saas]] restoration. Self-host operators deploy the
-# destination-account roles via
-# `infrastructure/cloudformation/destination-account-roles.yaml`
-# directly; see docs/DEPLOYMENT.md for the supported install paths.
+# Wrapper around `sam build` that runs the data sync first. Always
+# use this instead of bare `sam build`. Builds the self-host iam-jit
+# Lambda stack (JIT provisioner + web UI; Mangum-wrapped FastAPI app)
+# into .aws-sam/build/. No hosted iam-risk-score endpoint — that was
+# dropped 2026-05-24 per [[no-hosted-saas]]; this deploys ONLY into
+# the operator's own AWS account (self-host, not a multi-tenant SaaS).
+sam-build: sync-lambda-data
+	SAM_CLI_TELEMETRY=0 sam build \
+	  --template-file infrastructure/sam/template.yaml \
+	  --build-dir .aws-sam/build \
+	  --use-container
+
+# One-shot self-host deploy with the required parameters auto-derived
+# from the current AWS account + a freshly-generated bootstrap setup
+# key. Override defaults via env: STACK_NAME, REGION, MVP_EMAIL.
+#
+# What this produces (all in the OPERATOR'S OWN account — self-host):
+#   - The full iam-jit Lambda + DynamoDB tables (JIT IAM provisioner)
+#   - The iam-jit web UI + JSON API, reachable at the Function URL
+#   - NO Bedrock LLM, NO CloudFront/WAF, NO custom domain — those are
+#     production-grade tiers documented in docs/GETTING-STARTED.md
+#
+# Estimated cost: ~$6-10/mo idle. The hardened launch path layers
+# `EnableEdgeProtection=true` + `LLMBackend=bedrock` on top via
+# subsequent `sam deploy` parameter updates (no rebuild needed).
+#
+# Idempotent: re-running rotates the bootstrap setup key and updates
+# the stack. The setup key is persisted to ~/.iam-jit/bootstrap-setup-key
+# (mode 600) so the operator can claim the admin afterward without
+# having to read it from shell history.
+deploy-self-host: sam-build
+	@if [ -z "$$AWS_PROFILE" ]; then echo "Set AWS_PROFILE first (e.g. iam-jit)"; exit 1; fi
+	@if [ -z "$$MVP_EMAIL" ]; then echo "Set MVP_EMAIL=your@email.com (the first-admin address)"; exit 1; fi
+	@mkdir -p ~/.iam-jit && chmod 700 ~/.iam-jit
+	@umask 077; openssl rand -hex 32 > ~/.iam-jit/bootstrap-setup-key
+	@echo "Generated bootstrap setup key (saved to ~/.iam-jit/bootstrap-setup-key)"
+	@account_id=$$(aws sts get-caller-identity --query Account --output text); \
+	bucket="iam-jit-state-$$account_id"; \
+	stack="$${STACK_NAME:-iam-jit}"; \
+	region="$${REGION:-us-east-1}"; \
+	boot_key=$$(cat ~/.iam-jit/bootstrap-setup-key); \
+	echo "Deploying stack '$$stack' in region '$$region' for account $$account_id..."; \
+	SAM_CLI_TELEMETRY=0 sam deploy \
+	  --template-file .aws-sam/build/template.yaml \
+	  --stack-name "$$stack" \
+	  --region "$$region" \
+	  --capabilities CAPABILITY_IAM CAPABILITY_NAMED_IAM \
+	  --resolve-s3 \
+	  --no-confirm-changeset \
+	  --no-fail-on-empty-changeset \
+	  --parameter-overrides \
+	    "StateBucketName=$$bucket" \
+	    "AdminBootstrapEmail=$$MVP_EMAIL" \
+	    "BootstrapSetupKey=$$boot_key" \
+	    "AllowPublicNetworkExposure=true" \
+	    "AllowedSourceCidrs=0.0.0.0/0"
+	@echo ""
+	@echo "✓ Deployed. Get the web-UI / API URL with:"
+	@echo "  aws cloudformation describe-stacks --stack-name $${STACK_NAME:-iam-jit} --query 'Stacks[0].Outputs' --output table"
+	@echo "  Then run 'make claim-bootstrap' to claim the first admin + lock the allowlist to your IP."
 
 recordings:
 	$(PY) recordings/run_all.py
@@ -139,18 +194,17 @@ test-integration:
 test-integration-clean:
 	docker compose -f docker-compose.test.yml down -v
 
-# Validate the destination-account template locally before any AWS
-# write. Catches the majority of "deploy fails at AWS" issues in
-# under 30 seconds. No AWS credentials needed.
-#
-# (The hosted SAM template was dropped 2026-05-24 — see the
-# `sync-lambda-data` comment block above.)
+# Validate both templates locally before any AWS write. Catches the
+# majority of "deploy fails at AWS" issues in under 30 seconds. No AWS
+# credentials needed.
 deploy-dry-run: sync-lambda-data
-	@echo "==> cfn-lint: destination-account template"
+	@echo "==> cfn-lint: self-host SAM template"
 	# Suppressions live in .cfnlintrc at the repo root so the Makefile
 	# and tests/test_cfn_lint.py share one config (no drift).
+	$(CFN_LINT) infrastructure/sam/template.yaml
+	@echo "==> cfn-lint: destination-account template"
 	$(CFN_LINT) infrastructure/cloudformation/destination-account-roles.yaml
 	@echo "==> structural CFN parse tests"
 	$(PYTEST) tests/test_cloudformation_templates.py tests/test_cfn_lint.py -q
 	@echo ""
-	@echo "✓ destination-account template parses + lints clean."
+	@echo "✓ Templates parse + lint clean. Safe to run sam deploy."
